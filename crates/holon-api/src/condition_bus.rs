@@ -299,6 +299,15 @@ pub enum ConditionKind {
     /// ends when a recovery-code surface exists and the user has seen a
     /// freshly rotated code.
     OwnerRecoveryCodeNotShown,
+    /// A shared doc loaded from disk or a peer holds the mount of another
+    /// share, which v1 forbids (ADR 0028 A7): it was saved before
+    /// `share_subtree` refused nesting, or came from an older peer. Holon does
+    /// not repair it. `subject` is the outer shared tree; `mount` is the inner
+    /// mount's block id.
+    ///
+    /// All-clear: none. The state lives in the stored doc until the user
+    /// unshares it, so the condition holds for the session.
+    NestedShareLoaded { mount: String },
 }
 
 /// Subject of the device-wide conditions on this bus, which have no share to
@@ -331,6 +340,7 @@ impl ConditionKind {
     pub const LOCAL_EDIT_NOT_APPLIED: &'static str = "local-edit-not-applied";
     pub const BEARER_TICKET_ENROLLMENT: &'static str = "bearer-ticket-enrollment";
     pub const OWNER_RECOVERY_CODE_NOT_SHOWN: &'static str = "owner-recovery-code-not-shown";
+    pub const NESTED_SHARE_LOADED: &'static str = "nested-share-loaded";
 
     /// The condition's stable identity, paired with the subject to form a
     /// [`ConditionKey`]. Total: every degradation is a sticky
@@ -362,6 +372,7 @@ impl ConditionKind {
             Self::LocalEditNotApplied { .. } => Self::LOCAL_EDIT_NOT_APPLIED,
             Self::BearerTicketEnrollment { .. } => Self::BEARER_TICKET_ENROLLMENT,
             Self::OwnerRecoveryCodeNotShown => Self::OWNER_RECOVERY_CODE_NOT_SHOWN,
+            Self::NestedShareLoaded { .. } => Self::NESTED_SHARE_LOADED,
         }
     }
 }

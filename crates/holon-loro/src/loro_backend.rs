@@ -622,9 +622,16 @@ fn walk_to_page(tree: &loro::LoroTree, start: loro::TreeID) -> anyhow::Result<Wa
 /// [`StableIdCache`] by every backend over that tree.
 pub type MountCache = Arc<Mutex<HashMap<String, loro::TreeID>>>;
 
+/// `stable id -> (shared tree id, TreeID)` for the loaded shared docs. A hit
+/// is checked against its doc, so an unloaded doc or a moved id drops it.
+pub type SharedIdCache = Arc<Mutex<HashMap<String, (String, loro::TreeID)>>>;
+
 /// The one live mount of `shared_tree_id` in `tree`, `None` when it has none.
-/// A hit is checked against the tree; a miss scans it once and caches every
-/// mount it finds.
+/// A hit is checked against the tree but does not re-prove uniqueness:
+/// `create_mount_node` is the only mount creator and debug-asserts there is no
+/// other, and the one merge that could add a second (own-device pairing)
+/// refuses to run while mounts exist (ADR 0033). A miss scans once and caches
+/// every mount it finds.
 fn mount_node_of(
     tree: &loro::LoroTree,
     mounts: &MountCache,
@@ -1980,6 +1987,25 @@ fn is_node_alive(tree: &loro::LoroTree, node: loro::TreeID) -> bool {
 /// Scan a raw `LoroDoc`'s block tree for the alive node whose `STABLE_ID`
 /// equals `needle`. Used to resolve a shared block's business id inside a
 /// shared subtree doc, where the id is absent from the global tree.
+/// `stable id -> TreeID` for every settled live node of `doc`; the first node
+/// in `get_nodes` order wins a duplicate id, as in `find_stable_id_in_doc`.
+fn settled_ids_in_doc(doc: &loro::LoroDoc) -> HashMap<String, loro::TreeID> {
+    let tree = doc.get_tree(TREE_NAME);
+    let mut ids = HashMap::new();
+    for node in tree.get_nodes(false) {
+        if matches!(
+            node.parent,
+            loro::TreeParentId::Deleted | loro::TreeParentId::Unexist
+        ) {
+            continue;
+        }
+        if let LiveNode::Settled(sid) = classify(&tree, node.id) {
+            ids.entry(sid).or_insert(node.id);
+        }
+    }
+    ids
+}
+
 fn find_stable_id_in_doc(doc: &loro::LoroDoc, needle: &str) -> Option<loro::TreeID> {
     let tree = doc.get_tree(TREE_NAME);
     for node in tree.get_nodes(false) {
@@ -2184,6 +2210,7 @@ pub struct LoroBackend {
     /// lazily on lookup, invalidated on delete.
     id_cache: Arc<Mutex<HashMap<String, loro::TreeID>>>,
     mount_cache: MountCache,
+    shared_id_cache: SharedIdCache,
     clock: std::sync::Arc<dyn holon_api::Clock>,
 }
 
@@ -2197,6 +2224,7 @@ impl Clone for LoroBackend {
             shared_trees: self.shared_trees.clone(),
             id_cache: self.id_cache.clone(),
             mount_cache: self.mount_cache.clone(),
+            shared_id_cache: self.shared_id_cache.clone(),
             clock: self.clock.clone(),
         }
     }
@@ -2215,6 +2243,12 @@ impl LoroBackend {
         self
     }
 
+    /// Share `cache` with every other backend over the same shared-tree store.
+    pub fn with_shared_id_cache(mut self, cache: SharedIdCache) -> Self {
+        self.shared_id_cache = cache;
+        self
+    }
+
     pub fn from_document(collab_doc: Arc<LoroDocument>) -> Self {
         Self {
             collab_doc,
@@ -2224,6 +2258,7 @@ impl LoroBackend {
             shared_trees: None,
             id_cache: Arc::new(Mutex::new(HashMap::new())),
             mount_cache: MountCache::default(),
+            shared_id_cache: SharedIdCache::default(),
             clock: std::sync::Arc::new(holon_api::SystemClock),
         }
     }
@@ -2467,6 +2502,15 @@ impl LoroBackend {
         if let Some(target) = self.resolve_layout(id) {
             return Ok(target);
         }
+        // ALLOW(entity_uri_from_raw): backend string-id resolve surface
+        let stable_id = EntityUri::from_raw(id).id().to_string();
+        if let Some(tree_id) = self.cached_global_node(&stable_id) {
+            return Ok(WriteTarget::Global(tree_id));
+        }
+        // Checked before the global scan, which a shared id always misses.
+        if let Some(target) = self.cached_shared_target(&stable_id) {
+            return Ok(target);
+        }
         if let Some(tree_id) = self.resolve_to_tree_id_sync(id) {
             let alive_global = self
                 .collab_doc
@@ -2590,6 +2634,7 @@ impl LoroBackend {
     }
 
     /// Find the shared doc whose tree holds a live node with stable id `id`.
+    /// Every doc it scans is indexed into the shared-id cache.
     fn scan_shared_for_stable_id(&self, id: &str) -> Option<WriteTarget> {
         let store = self.shared_trees.as_ref()?;
         // ALLOW(entity_uri_from_raw): backend string-id resolve surface (accepts both
@@ -2597,10 +2642,16 @@ impl LoroBackend {
         let uri = EntityUri::from_raw(id);
         let needle = uri.id();
         for shared_tree_id in store.shared_tree_ids() {
-            if let Some(doc) = store.get_shared_doc(&shared_tree_id)
-                && let Some(tree_id) = find_stable_id_in_doc(&doc, needle)
-                && is_node_alive(&doc.get_tree(TREE_NAME), tree_id)
-            {
+            let Some(doc) = store.get_shared_doc(&shared_tree_id) else {
+                continue;
+            };
+            let ids = settled_ids_in_doc(&doc);
+            let found = ids.get(needle).copied();
+            self.shared_id_cache.lock().unwrap().extend(
+                ids.into_iter()
+                    .map(|(sid, tid)| (sid, (shared_tree_id.clone(), tid))),
+            );
+            if let Some(tree_id) = found {
                 return Some(WriteTarget::Shared {
                     shared_tree_id,
                     doc,
@@ -2609,6 +2660,33 @@ impl LoroBackend {
             }
         }
         None
+    }
+
+    /// The cached shared-doc node for `stable_id`, when its doc is still
+    /// loaded and the node is alive and still carries that id. A failed check
+    /// drops the entry.
+    fn cached_shared_target(&self, stable_id: &str) -> Option<WriteTarget> {
+        let store = self.shared_trees.as_ref()?;
+        let (shared_tree_id, tree_id) = self
+            .shared_id_cache
+            .lock()
+            .unwrap()
+            .get(stable_id)
+            .cloned()?;
+        let doc = store.get_shared_doc(&shared_tree_id).filter(|doc| {
+            let tree = doc.get_tree(TREE_NAME);
+            is_node_alive(&tree, tree_id)
+                && matches!(classify(&tree, tree_id), LiveNode::Settled(sid) if sid == stable_id)
+        });
+        let Some(doc) = doc else {
+            self.shared_id_cache.lock().unwrap().remove(stable_id);
+            return None;
+        };
+        Some(WriteTarget::Shared {
+            shared_tree_id,
+            doc,
+            tree_id,
+        })
     }
 
     /// Wrap the resolved target's doc in a `LoroDocument` for writing. Both
@@ -4296,21 +4374,7 @@ impl LoroBackend {
     /// creating a node on the keystroke path — needs this shape, and the async
     /// twin above is the wrapper, not the implementation.
     pub fn find_tree_id_by_stable_id_sync(&self, stable_id: &str) -> Option<loro::TreeID> {
-        // A delete → undo(create) resurrects the SAME stable id under a NEW
-        // TreeID, so a dead hit falls through to the tree walk below.
-        let hit = self
-            .collab_doc
-            .with_read(|doc| {
-                Ok(cached_live_node(
-                    &doc.get_tree(TREE_NAME),
-                    &self.id_cache,
-                    stable_id,
-                ))
-            })
-            // ALLOW(ok): a read-lock timeout answers "not found", the same
-            // contract as the scan below.
-            .ok()
-            .flatten();
+        let hit = self.cached_global_node(stable_id);
         if hit.is_some() {
             return hit;
         }
@@ -4346,6 +4410,24 @@ impl LoroBackend {
             // that the lookup callers (resolve_to_tree_id) already treat as
             // "not found" — preserving the Option signature here is the
             // intended behavior of the resolver.
+            .ok()
+            .flatten()
+    }
+
+    /// The global stable-id cache's live node for `stable_id`. A delete →
+    /// undo(create) resurrects the SAME stable id under a NEW TreeID, so a dead
+    /// hit answers `None` and the caller falls through to a scan.
+    fn cached_global_node(&self, stable_id: &str) -> Option<loro::TreeID> {
+        self.collab_doc
+            .with_read(|doc| {
+                Ok(cached_live_node(
+                    &doc.get_tree(TREE_NAME),
+                    &self.id_cache,
+                    stable_id,
+                ))
+            })
+            // ALLOW(ok): a read-lock timeout answers "not found", the same
+            // contract as the scan in `find_tree_id_by_stable_id_sync`.
             .ok()
             .flatten()
     }
@@ -4509,6 +4591,7 @@ impl Lifecycle for LoroBackend {
             shared_trees: None,
             id_cache: Arc::new(Mutex::new(HashMap::new())),
             mount_cache: MountCache::default(),
+            shared_id_cache: SharedIdCache::default(),
             clock: std::sync::Arc::new(holon_api::SystemClock),
         })
     }

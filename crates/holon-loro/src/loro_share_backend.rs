@@ -1611,6 +1611,33 @@ fn parse_retention(s: &str) -> Result<HistoryRetention> {
 /// stores `STABLE_ID` as the bare path component of the URI (the UUID for
 /// block URIs), and this function compares on that canonical form — there is
 /// no ambiguity over "full URI vs bare id" at the call site.
+/// A [`NestedShareRefusal`] out of a write closure keeps its type for the
+/// caller; every other error stays as it was.
+fn typed_share_error(e: anyhow::Error) -> Box<dyn std::error::Error + Send + Sync> {
+    match e.downcast::<NestedShareRefusal>() {
+        Ok(refusal) => Box::new(refusal),
+        Err(e) => e.into(),
+    }
+}
+
+/// Raises [`ConditionKind::NestedShareLoaded`] when `doc` holds another
+/// share's mount. Such a doc predates the nesting refusal or comes from an
+/// older peer; it is disclosed, never repaired.
+fn disclose_nested_mount(bus: &ConditionBus, shared_tree_id: &str, doc: &LoroDoc) {
+    let Some(mount) = shared_tree::any_live_mount(doc) else {
+        return;
+    };
+    let tree = doc.get_tree(crate::loro_backend::TREE_NAME);
+    let mount = read_stable_id(&tree, mount)
+        .map(|s| block_uri_from_bare(&s))
+        .unwrap_or_else(|| format!("{mount:?}"));
+    warn!(shared_tree_id, %mount, "[share] loaded a shared doc that holds another share's mount");
+    bus.emit(Condition {
+        subject: shared_tree_id.to_string(),
+        reason: ConditionKind::NestedShareLoaded { mount },
+    });
+}
+
 fn find_tree_id_by_stable_id(doc: &LoroDoc, stable_id: &EntityUri) -> Option<TreeID> {
     let needle = stable_id.id();
     let tree = doc.get_tree(crate::loro_backend::TREE_NAME);
@@ -1889,7 +1916,7 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
                         "block {id} is already a mount node; sharing a mount is not supported"
                     )));
                 }
-                if let Some(mount) = shared_tree::first_mount_below(&tree, tid) {
+                if let Some(mount) = shared_tree::first_mount_below(&tree, tid)? {
                     return Err(anyhow::Error::new(NestedShareRefusal::ContainsShare {
                         id: id.to_string(),
                         mount: read_stable_id(&tree, mount)
@@ -1988,10 +2015,7 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
                     mount_parent_uri,
                 ))
             })
-            .map_err(|e| match e.downcast::<NestedShareRefusal>() {
-                Ok(refusal) => Box::new(refusal) as Box<dyn std::error::Error + Send + Sync>,
-                Err(e) => e.into(),
-            })?;
+            .map_err(typed_share_error)?;
 
         // Flush the global doc so the mount node survives in lockstep
         // with the shared snapshot. Failure here leaves consistent
@@ -2278,8 +2302,8 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
         // Set when the mount is parented under the "Shared with me" recipient
         // root (H7) — drives the post-lock SQL projection of that root row.
         let mut attached_to_shared_with_me = false;
-        let (mount_stable_id, mount_parent_uri) =
-            collab.with_write(WriteOrigin::ShareLifecycle, |txn| {
+        let (mount_stable_id, mount_parent_uri) = collab
+            .with_write(WriteOrigin::ShareLifecycle, |txn| {
                 let doc = txn.doc();
 
                 if let Some((existing_tid, existing_uri)) =
@@ -2305,10 +2329,15 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
                     Ok((existing_uri, parent_uri_existing))
                 } else {
                     let new_id = format!("block:{}", Uuid::new_v4());
-                    let parent_tid =
-                        find_tree_id_by_stable_id(doc, &parent_uri).ok_or_else(|| {
-                            anyhow::Error::msg(format!("parent block {parent_id} not found"))
-                        })?;
+                    let Some(parent_tid) = find_tree_id_by_stable_id(doc, &parent_uri) else {
+                        if let Some(shared_tree_id) = self.shared_tree_holding(&parent_uri) {
+                            return Err(anyhow::Error::new(NestedShareRefusal::InsideShare {
+                                id: parent_uri.to_string(),
+                                shared_tree_id,
+                            }));
+                        }
+                        anyhow::bail!("parent block {parent_id} not found");
+                    };
                     // Amendment A: the mount is a Page, so bubble the accept target
                     // to its nearest page ancestor — a no-op when the user targeted
                     // a page (the common case). The SAME resolved parent lands in
@@ -2353,7 +2382,8 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
                     };
                     Ok((new_id, mount_parent_uri))
                 }
-            })?;
+            })
+            .map_err(typed_share_error)?;
 
         // Flush the global doc so the mount node is durable.
         if let Err(e) = self.store.read().await.save_all().await {
@@ -2390,6 +2420,7 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
         self.project_descendants_to_sql(&shared_arc, &mount_stable_id, &shared_tree_id)
             .await?;
 
+        disclose_nested_mount(&self.degraded_bus, &shared_tree_id, &shared_arc);
         self.manager
             .register_arc(shared_tree_id.clone(), shared_arc.clone());
 
@@ -2745,6 +2776,7 @@ pub async fn rehydrate_shared_trees(
         }
 
         let arc = Arc::new(doc);
+        disclose_nested_mount(&backend.degraded_bus, &shared_tree_id, &arc);
         backend
             .manager
             .register_arc(shared_tree_id.clone(), arc.clone());
@@ -6963,6 +6995,103 @@ mod tests {
             OwningPage::Broken(ChainBreak::OrphanedShare {
                 shared_tree_id: st1
             })
+        );
+        b.advertiser.close_all().await;
+    }
+
+    /// ADR 0028 A7 on the recipient: accepting a share under a block that is
+    /// already inside a share is refused with the typed error.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn accept_refuses_a_parent_inside_a_share() {
+        let (a, _da) = make_backend();
+        let (b, _db) = make_backend();
+        seed_page(&a, "host", None, "Host").await;
+        seed_block(&a, "gamma", Some("host"), "Gamma").await;
+        seed_page(&b, "root-b", None, "Root B").await;
+        seed_block(&b, "bx", Some("root-b"), "bx").await;
+        seed_block(&b, "bx1", Some("bx"), "bx1").await;
+        let (_, st_b) = share_ok(&b, "block:bx").await;
+        let r = a.share_subtree("block:gamma", "none".into()).await.unwrap();
+        let j: serde_json::Value = match r.response {
+            Some(Value::String(s)) => serde_json::from_str(&s).unwrap(),
+            other => panic!("share response: {other:?}"),
+        };
+        let ticket = j["ticket"].as_str().unwrap().to_string();
+
+        let refused = b
+            .accept_shared_subtree("block:bx1", ticket)
+            .await
+            .expect_err("accepting under a block inside a share must be refused");
+        assert_eq!(
+            refused.downcast_ref::<NestedShareRefusal>(),
+            Some(&NestedShareRefusal::InsideShare {
+                id: "block:bx1".into(),
+                shared_tree_id: st_b,
+            }),
+            "{refused}"
+        );
+        a.advertiser.close_all().await;
+        b.advertiser.close_all().await;
+    }
+
+    /// A shared doc saved with another share's mount inside it (before the
+    /// nesting refusal existed) is disclosed at rehydrate, not repaired.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn rehydrating_a_nested_share_discloses_it() {
+        let (b, keychain, dir) = make_backend_with_keychain();
+        seed_page(&b, "host", None, "Host").await;
+        seed_block(&b, "gamma", Some("host"), "Gamma").await;
+        let (_, st1) = share_ok(&b, "block:gamma").await;
+        let shared = b.manager.get_doc(&st1).expect("the share's doc is loaded");
+        {
+            let tree = shared.get_tree(crate::loro_backend::TREE_NAME);
+            let root = tree.roots()[0];
+            shared_tree::create_mount_node(&tree, Some(root), "planted-inner-share", root).unwrap();
+            shared.commit();
+        }
+        b.snapshot_store.save(&st1, &shared).unwrap();
+        b.advertiser.close_all().await;
+        b.flush_all().await;
+        drop(shared);
+        drop(b);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let b = make_backend_at(dir.path(), test_credentials(keychain));
+        let mut changes = b.degraded_bus().subscribe().changes;
+        assert_eq!(rehydrate_over(&b).await, 1, "the nested share still loads");
+        let mut disclosed = Vec::new();
+        while let Ok(change) = changes.try_recv() {
+            if let Some(event) = change.raised()
+                && let ConditionKind::NestedShareLoaded { .. } = &event.reason
+            {
+                disclosed.push(event.subject.clone());
+            }
+        }
+        assert_eq!(disclosed, vec![st1]);
+        b.advertiser.close_all().await;
+    }
+
+    /// A shared id served from the shared-id cache stops resolving once its
+    /// doc unloads.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn a_cached_shared_id_drops_when_its_doc_unloads() {
+        use holon_core::OwningPage;
+        let (b, _d) = make_backend();
+        seed_page(&b, "host", None, "Host").await;
+        seed_block(&b, "gamma", Some("host"), "Gamma").await;
+        seed_block(&b, "gamma-one", Some("gamma"), "Gamma one").await;
+        let (m1, st1) = share_ok(&b, "block:gamma").await;
+        let reads = reads_of(&b, b.global_doc().await.unwrap());
+        for _ in 0..2 {
+            assert_eq!(page_id(reads.owning_page("block:gamma-one").unwrap()), m1);
+        }
+        b.manager.remove(&st1).expect("the share's doc was loaded");
+        assert_eq!(
+            reads.owning_page("block:gamma-one").unwrap(),
+            OwningPage::Absent
         );
         b.advertiser.close_all().await;
     }

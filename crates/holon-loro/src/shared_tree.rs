@@ -25,6 +25,7 @@ use loro::LoroDoc;
 use loro::LoroTree;
 use loro::LoroValue;
 use loro::TreeID;
+use loro::TreeParentId;
 use loro::ValueOrContainer;
 
 use crate::loro_backend::TREE_NAME;
@@ -353,17 +354,33 @@ pub enum NestedShareRefusal {
 }
 
 /// A mount strictly below `root`, if any.
-pub fn first_mount_below(tree: &LoroTree, root: TreeID) -> Option<TreeID> {
+/// A leaf has no children entry, so `children` answers `None` for it; only
+/// a `root` absent from the tree is an error.
+pub fn first_mount_below(tree: &LoroTree, root: TreeID) -> Result<Option<TreeID>> {
+    if !tree.contains(root) {
+        bail!("first_mount_below: {root:?} is not a node of this tree");
+    }
     let mut queue = vec![root];
     while let Some(node) = queue.pop() {
-        for child in tree.children(node).unwrap_or_default() {
+        for child in tree.children(node).into_iter().flatten() {
             if is_mount_node(tree, child) {
-                return Some(child);
+                return Ok(Some(child));
             }
             queue.push(child);
         }
     }
-    None
+    Ok(None)
+}
+
+/// A live mount anywhere in `doc`: a shared doc that holds one is a nested
+/// share (ADR 0028 A7).
+pub fn any_live_mount(doc: &LoroDoc) -> Option<TreeID> {
+    let tree = doc.get_tree(TREE_NAME);
+    tree.get_nodes(false)
+        .into_iter()
+        .filter(|n| !matches!(n.parent, TreeParentId::Deleted | TreeParentId::Unexist))
+        .map(|n| n.id)
+        .find(|&node| is_mount_node(&tree, node))
 }
 
 /// Result of a share_subtree operation: extraction + mount replacement.
@@ -519,6 +536,13 @@ pub fn create_mount_node(
     shared_tree_id: &str,
     shared_root: TreeID,
 ) -> Result<TreeID> {
+    debug_assert!(
+        !tree.get_nodes(false).iter().any(|n| {
+            !matches!(n.parent, TreeParentId::Deleted | TreeParentId::Unexist)
+                && read_mount_info(tree, n.id).is_some_and(|i| i.shared_tree_id == shared_tree_id)
+        }),
+        "shared tree {shared_tree_id} already has a live mount; the mount cache assumes one"
+    );
     let mount = tree.create(parent).context("Failed to create mount node")?;
     let meta = tree
         .get_meta(mount)

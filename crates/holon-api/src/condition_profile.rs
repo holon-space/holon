@@ -280,6 +280,15 @@ const SNAPSHOT_LOAD_FAILED: ConditionProfile = ConditionProfile::new(
     &[],
 );
 
+const NESTED_SHARE_LOADED: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Warning,
+    "Share inside a share",
+    icons::WARN,
+    ConditionPlacement::Toast,
+    AllClear::UntilRestart,
+    &[],
+);
+
 const REHYDRATION_FAILED: ConditionProfile = ConditionProfile::new(
     ConditionSeverity::Warning,
     "Rehydration failed",
@@ -501,6 +510,7 @@ impl ConditionKind {
             Self::PairingReimportDeferred { .. } => PAIRING_REIMPORT_DEFERRED,
             Self::BearerTicketEnrollment { .. } => BEARER_TICKET_ENROLLMENT,
             Self::OwnerRecoveryCodeNotShown => OWNER_RECOVERY_CODE_NOT_SHOWN,
+            Self::NestedShareLoaded { .. } => NESTED_SHARE_LOADED,
         }
     }
 }

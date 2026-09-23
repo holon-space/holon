@@ -201,6 +201,12 @@ impl ConditionKind {
                  if the keychain entry is lost, this device's shares stop being advertised until \
                  it is shared again",
             ),
+
+            Self::NestedShareLoaded { mount } => ConditionDetail::prose(format!(
+                "shared tree {subject} contains another share (mount {mount}). Holon does not \
+                 support a share inside a share, so pages in it may not resolve. To fix it, \
+                 stop sharing {subject} and share its parts one by one"
+            )),
         }
     }
 }
