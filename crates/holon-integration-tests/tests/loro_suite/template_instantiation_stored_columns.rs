@@ -132,16 +132,22 @@ fn loro_instance_carries_the_template_block_type_and_completed() {
     rt.clone().block_on(async move {
         let env = boot(rt, true).await;
         let expected = instantiate(&env).await;
-        let doc = env
+        let store = env
             .loro_doc_store()
             .expect("Loro-enabled session")
             .read()
-            .await
+            .await;
+        let global = store
             .get_doc(DocScope::Global)
             .await
             .expect("global Loro doc");
+        let layout = store
+            .get_doc(DocScope::Layout)
+            .await
+            .expect("layout Loro doc");
+        drop(store);
         let registry: Box<dyn EntityCellRegistry> =
-            Box::new(BlockCellRegistry::with_loro_doc(doc.doc()));
+            Box::new(BlockCellRegistry::with_loro(global, layout));
         let observed = expected
             .iter()
             .map(|(id, _, _)| {

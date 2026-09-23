@@ -534,8 +534,8 @@ mod tests {
 
     fn node(id: &str, parent: &str, content: &str) -> Block {
         Block {
-            id: EntityUri::from_raw(id),
-            parent_id: EntityUri::from_raw(parent),
+            id: EntityUri::parse(id).expect("test block id is a URI"),
+            parent_id: EntityUri::parse(parent).expect("test parent id is a URI"),
             content: content.to_string(),
             ..Block::default()
         }
