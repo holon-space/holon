@@ -40,7 +40,7 @@ tokio = { version = "1", default-features = false, features = ["rt", "time", "ma
 # NOTE: `encryption` is intentionally omitted — it pulls rustls→ring, whose C
 # crypto can't compile for wasm32-wasi without a wasi-sdk clang sysroot. The
 # worker runs an in-memory DB (`:memory:`), so at-rest encryption is moot.
-turso_core = { git = "https://github.com/nightscape/turso.git", rev = "bd4fef75359e048b31be0f82b79beb4b01e22abe", default-features = false, features = ["fs", "json", "uuid", "time", "series"] }
+turso_core = { git = "https://github.com/nightscape/turso.git", rev = "e616ada9451693cb0d44d96e912742693a7700f7", default-features = false, features = ["fs", "json", "uuid", "time", "series"] }
 anyhow = "1"
 # fluxdi::Module trait, needed to register EventInfraModule (the block
 # OperationProvider) during engine_init. Same git source as the root
