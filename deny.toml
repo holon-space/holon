@@ -1,6 +1,6 @@
 [graph]
 targets = []
-all-features = false
+all-features = true
 no-default-features = false
 
 [advisories]
@@ -54,7 +54,9 @@ ignore = [
 ]
 
 [licenses]
-private = { ignore = true, registries = [] }
+# Checks publish = false crates too: the GPUI fork crates are git deps with
+# publish = false, and skipping them hid GPL crates from this gate.
+private = { ignore = false }
 allow = [
     "MIT",
     "MIT-0",
@@ -76,10 +78,72 @@ allow = [
 ]
 confidence-threshold = 0.8
 
+# FSL-1.1-ALv2 is allowed for Holon's own crates only (never in `allow`), so a
+# third-party FSL crate still fails and a new Holon crate needs one line here.
+exceptions = [
+    { crate = "holon", allow = ["FSL-1.1-ALv2"] },
+    { crate = "holon-advice", allow = ["FSL-1.1-ALv2"] },
+    { crate = "holon-api", allow = ["FSL-1.1-ALv2"] },
+    { crate = "holon-app", allow = ["FSL-1.1-ALv2"] },
+    { crate = "holon-architecture-tests", allow = ["FSL-1.1-ALv2"] },
+    { crate = "holon-block-roundtrip-testing", allow = ["FSL-1.1-ALv2"] },
+    { crate = "holon-capability", allow = ["FSL-1.1-ALv2"] },
+    { crate = "holon-connections", allow = ["FSL-1.1-ALv2"] },
+    { crate = "holon-connections-testing", allow = ["FSL-1.1-ALv2"] },
+    { crate = "holon-core", allow = ["FSL-1.1-ALv2"] },
+    { crate = "holon-dioxus-web", allow = ["FSL-1.1-ALv2"] },
+    { crate = "holon-engine", allow = ["FSL-1.1-ALv2"] },
+    { crate = "holon-expr", allow = ["FSL-1.1-ALv2"] },
+    { crate = "holon-filesystem", allow = ["FSL-1.1-ALv2"] },
+    { crate = "holon-frontend", allow = ["FSL-1.1-ALv2"] },
+    { crate = "holon-gpui", allow = ["FSL-1.1-ALv2"] },
+    { crate = "holon-integration-tests", allow = ["FSL-1.1-ALv2"] },
+    { crate = "holon-kitchen", allow = ["FSL-1.1-ALv2"] },
+    { crate = "holon-layout-testing", allow = ["FSL-1.1-ALv2"] },
+    { crate = "holon-logseq-db", allow = ["FSL-1.1-ALv2"] },
+    { crate = "holon-loro", allow = ["FSL-1.1-ALv2"] },
+    { crate = "holon-loro-testing", allow = ["FSL-1.1-ALv2"] },
+    { crate = "holon-loro-wiring", allow = ["FSL-1.1-ALv2"] },
+    { crate = "holon-macros", allow = ["FSL-1.1-ALv2"] },
+    { crate = "holon-macros-test", allow = ["FSL-1.1-ALv2"] },
+    { crate = "holon-markdown", allow = ["FSL-1.1-ALv2"] },
+    { crate = "holon-mcp", allow = ["FSL-1.1-ALv2"] },
+    { crate = "holon-mcp-client", allow = ["FSL-1.1-ALv2"] },
+    { crate = "holon-mcp-mock", allow = ["FSL-1.1-ALv2"] },
+    { crate = "holon-net", allow = ["FSL-1.1-ALv2"] },
+    { crate = "holon-oracles", allow = ["FSL-1.1-ALv2"] },
+    { crate = "holon-org-format", allow = ["FSL-1.1-ALv2"] },
+    { crate = "holon-orgmode", allow = ["FSL-1.1-ALv2"] },
+    { crate = "holon-pattern", allow = ["FSL-1.1-ALv2"] },
+    { crate = "holon-pbt-core", allow = ["FSL-1.1-ALv2"] },
+    { crate = "holon-petri", allow = ["FSL-1.1-ALv2"] },
+    { crate = "holon-plugin-host", allow = ["FSL-1.1-ALv2"] },
+    { crate = "holon-profiles", allow = ["FSL-1.1-ALv2"] },
+    { crate = "holon-rows", allow = ["FSL-1.1-ALv2"] },
+    { crate = "holon-rules", allow = ["FSL-1.1-ALv2"] },
+    { crate = "holon-secrets", allow = ["FSL-1.1-ALv2"] },
+    { crate = "holon-sharing", allow = ["FSL-1.1-ALv2"] },
+    { crate = "holon-tools", allow = ["FSL-1.1-ALv2"] },
+    { crate = "holon-toon", allow = ["FSL-1.1-ALv2"] },
+    { crate = "holon-tui", allow = ["FSL-1.1-ALv2"] },
+    { crate = "holon-turso", allow = ["FSL-1.1-ALv2"] },
+    { crate = "holon-turso-testing", allow = ["FSL-1.1-ALv2"] },
+    { crate = "holon-waterui", allow = ["FSL-1.1-ALv2"] },
+    { crate = "holon-worker", allow = ["FSL-1.1-ALv2"] },
+    { crate = "symlink", allow = ["FSL-1.1-ALv2"] },
+]
+
 [[licenses.clarify]]
 name = "ring"
 expression = "MIT AND ISC AND OpenSSL"
 license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
+
+# The turso fork's hakari `workspace-hack` has no license field or file. A
+# clarify matches by name, so it also covers Holon's own (empty) hakari crate.
+[[licenses.clarify]]
+crate = "workspace-hack"
+expression = "MIT"
+license-files = []
 
 [bans]
 multiple-versions = "allow"

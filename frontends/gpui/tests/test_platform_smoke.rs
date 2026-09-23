@@ -20,8 +20,7 @@ use holon_gpui::navigation_state::NavigationState;
 use holon_integration_tests::test_environment::TestEnvironment;
 
 fn real_text_system() -> Arc<dyn PlatformTextSystem> {
-    let platform = gpui_platform::current_platform(true);
-    platform.text_system()
+    gpui_platform::current_text_system()
 }
 
 /// Cross-runtime fixed-point settle. Runs tokio between gpui pump cycles

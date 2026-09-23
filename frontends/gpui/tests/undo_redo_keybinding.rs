@@ -45,7 +45,7 @@ use holon_gpui::navigation_state::NavigationState;
 use holon_integration_tests::test_environment::TestEnvironment;
 
 fn real_text_system() -> Arc<dyn PlatformTextSystem> {
-    gpui_platform::current_platform(true).text_system()
+    gpui_platform::current_text_system()
 }
 
 /// Same cross-runtime fixed-point settle as `test_platform_smoke.rs`.

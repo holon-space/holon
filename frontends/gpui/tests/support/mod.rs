@@ -814,7 +814,13 @@ impl Render for FixtureView {
             window,
             cx,
         );
-        builders::render(&self.vm, &gctx)
+        // gpui stretches an auto-sized window root to fill the window; the
+        // flex wrapper keeps the fixture at its content size.
+        div()
+            .flex()
+            .flex_col()
+            .items_start()
+            .child(builders::render(&self.vm, &gctx))
     }
 }
 

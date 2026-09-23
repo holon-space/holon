@@ -45,7 +45,7 @@ mod pbt_harness;
 use pbt_harness::sim_windowed_replay::SimUserDriver;
 
 fn real_text_system() -> Arc<dyn PlatformTextSystem> {
-    gpui_platform::current_platform(true).text_system()
+    gpui_platform::current_text_system()
 }
 
 /// Cross-runtime fixed-point settle (the shared windowed pattern): pump until

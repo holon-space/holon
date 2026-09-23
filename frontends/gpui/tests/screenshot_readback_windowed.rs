@@ -27,7 +27,7 @@ use holon_mcp::server::InteractionCommand;
 use holon_mcp::server::InteractionEvent;
 
 fn real_text_system() -> Arc<dyn gpui::PlatformTextSystem> {
-    gpui_platform::current_platform(true).text_system()
+    gpui_platform::current_text_system()
 }
 
 fn settle(app: &mut HeadlessAppContext, bounds: &BoundsRegistry, timeout: Duration) {

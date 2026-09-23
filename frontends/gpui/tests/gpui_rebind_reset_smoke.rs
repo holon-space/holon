@@ -24,7 +24,7 @@ use holon_gpui::reset::FreshSut;
 use holon_gpui::reset::build_fresh_sut;
 
 fn real_text_system() -> Arc<dyn PlatformTextSystem> {
-    gpui_platform::current_platform(true).text_system()
+    gpui_platform::current_text_system()
 }
 
 /// Pump until the element count is stable and no `"loading"` placeholders

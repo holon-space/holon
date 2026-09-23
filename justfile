@@ -963,12 +963,16 @@ check-android:
 fmt-check:
     cargo fmt --check
 
-# Audit dependencies for vulnerabilities, license issues, and bans
+# Audit dependencies for vulnerabilities, license issues, and bans. The three
+# frontends with their own lockfile get the same license check.
 deny:
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p target/gate-logs
     cargo deny check 2>&1 | tee target/gate-logs/holon-deny.log
+    for fe in holon-worker dioxus-web waterui; do
+        cargo deny --manifest-path frontends/$fe/Cargo.toml --config deny.toml check licenses 2>&1 | tee target/gate-logs/holon-deny-$fe.log
+    done
 
 # Find unused dependencies
 machete:
@@ -997,7 +1001,7 @@ lint:
     cargo clippy {{CANON}} --all-targets -- -D warnings 2>&1 | tee target/gate-logs/holon-clippy.log || { echo "FAIL: clippy"; failed=1; }
     echo ""
     echo "=== cargo deny ==="
-    cargo deny check 2>&1 | tee target/gate-logs/holon-deny.log || { echo "FAIL: deny"; failed=1; }
+    just deny || { echo "FAIL: deny"; failed=1; }
     echo ""
     echo "=== cargo machete ==="
     cargo machete 2>&1 | tee target/gate-logs/holon-machete.log || { echo "FAIL: machete"; failed=1; }
@@ -1076,7 +1080,7 @@ analyze-deny:
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p target/gate-logs
-    cargo deny check 2>&1 | tee target/gate-logs/holon-analyze-deny.log
+    just deny 2>&1 | tee target/gate-logs/holon-analyze-deny.log
 
 # Unused dependency detection.
 analyze-machete:

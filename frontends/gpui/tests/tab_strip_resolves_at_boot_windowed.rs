@@ -42,7 +42,7 @@ use holon_integration_tests::test_environment::TestEnvironment;
 mod pbt_harness;
 
 fn real_text_system() -> Arc<dyn PlatformTextSystem> {
-    gpui_platform::current_platform(true).text_system()
+    gpui_platform::current_text_system()
 }
 
 /// Cross-runtime fixed-point settle (the shared windowed pattern): pump until

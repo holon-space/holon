@@ -70,7 +70,7 @@ use pbt_harness::sim_windowed_replay::SimUserDriver;
 use pbt_harness::windowed_wide::with_windowed_wide_sut;
 
 fn real_text_system() -> Arc<dyn PlatformTextSystem> {
-    gpui_platform::current_platform(true).text_system()
+    gpui_platform::current_text_system()
 }
 
 /// Cross-runtime fixed-point settle (the proven `gpui_window_slice` pattern):

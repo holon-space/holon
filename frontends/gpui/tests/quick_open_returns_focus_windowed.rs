@@ -61,7 +61,7 @@ use pbt_harness::sim_windowed_replay::SimUserDriver;
 const FOCUS_INVARIANT: &str = "inv-window-focus-matches-engine-focus";
 
 fn real_text_system() -> Arc<dyn gpui::PlatformTextSystem> {
-    gpui_platform::current_platform(true).text_system()
+    gpui_platform::current_text_system()
 }
 
 /// Same cross-runtime fixed-point settle the other TestPlatform tests use.

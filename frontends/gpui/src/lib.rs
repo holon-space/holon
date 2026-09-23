@@ -3314,7 +3314,7 @@ pub fn setup_interaction_pump(
                             // returned token must clear the element arena before
                             // the next draw.
                             window.refresh();
-                            window.draw(cx).clear();
+                            window.draw(cx).clear(cx);
                             Ok((true, None))
                         }
                         InteractionEvent::ScrollEntityIntoView { entity_id } => {

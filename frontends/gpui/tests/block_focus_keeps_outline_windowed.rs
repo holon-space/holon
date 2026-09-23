@@ -103,7 +103,7 @@ const MAIN_PANEL: &str = "block:default-main-panel";
 const MIN_PANEL_BOX_PX: f32 = 200.0;
 
 fn real_text_system() -> Arc<dyn PlatformTextSystem> {
-    gpui_platform::current_platform(true).text_system()
+    gpui_platform::current_text_system()
 }
 
 /// Cross-runtime fixed-point settle (the shared windowed pattern): pump until

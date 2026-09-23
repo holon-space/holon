@@ -87,7 +87,7 @@ use holon_frontend::user_driver::UserDriver;
 use pbt_harness::sim_windowed_replay::SimUserDriver;
 
 fn real_text_system() -> Arc<dyn PlatformTextSystem> {
-    gpui_platform::current_platform(true).text_system()
+    gpui_platform::current_text_system()
 }
 
 /// Cross-runtime fixed-point settle (same proven pattern as

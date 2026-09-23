@@ -1136,7 +1136,7 @@ fn spawn_focus_binding(
                             // misdelivered; the new editor's first-mount grab /
                             // focus binding picks focus up.
                             //
-                            window.blur();
+                            window.blur(cx);
                         }
                     });
                 }
@@ -1752,6 +1752,7 @@ impl Render for EditorView {
                                     ImageFormat::Bmp => "bmp",
                                     ImageFormat::Tiff => "tiff",
                                     ImageFormat::Ico => "ico",
+                                    ImageFormat::Pnm => "pnm",
                                 };
                                 match save_clipboard_image(&image.bytes, ext) {
                                     Ok(relative_path) => {
@@ -2417,7 +2418,7 @@ fn render_popup(
     // clipped off-screen and unreachable.
     deferred(
         anchored()
-            .anchor(Corner::TopLeft)
+            .anchor(Anchor::TopLeft)
             .offset(point(px(0.0), px(20.0)))
             .child(container),
     )

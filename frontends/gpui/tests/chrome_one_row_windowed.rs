@@ -76,7 +76,7 @@ const ACTIVE_MAIN_ROOT_SQL: &str = "SELECT fr.root_id FROM focus_roots fr JOIN n
                                     AND nc.region = 'main'";
 
 fn real_text_system() -> Arc<dyn PlatformTextSystem> {
-    gpui_platform::current_platform(true).text_system()
+    gpui_platform::current_text_system()
 }
 
 /// Cross-runtime fixed-point settle (the shared windowed pattern): pump until

@@ -40,7 +40,7 @@ use super::capture::FrameSink;
 use super::sim_windowed_replay::SimUserDriver;
 
 pub fn real_text_system() -> Arc<dyn PlatformTextSystem> {
-    gpui_platform::current_platform(true).text_system()
+    gpui_platform::current_text_system()
 }
 
 /// Resize a live window and return the viewport width the window reports back.

@@ -10,11 +10,11 @@ use gpui::*;
 pub fn init(cx: &mut App) {
     cx.set_inspector_renderer(Box::new(render_inspector));
 
-    cx.register_inspector_element(
+    cx.register_inspector_element(|_: &mut Window, _: &mut App| {
         |id: InspectorElementId, state: &DivInspectorState, _: &mut Window, _: &mut App| {
             render_div_inspector(&id, state)
-        },
-    );
+        }
+    });
 }
 
 fn render_inspector(

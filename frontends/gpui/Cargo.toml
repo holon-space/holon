@@ -100,11 +100,12 @@ pbt = ["dep:holon-integration-tests"]
 
 [dependencies]
 holon-loro.workspace = true
-# GPUI framework — pinned to same rev as gpui-mobile to ensure single gpui version
-gpui = { git = "https://github.com/zed-industries/zed", rev = "56104fb17e6c5849900a4c282f42d1bfea294121" }
+# GPUI framework — the upstream Zed base rev shared by all three forks; the
+# root `[patch]` redirects it to the holon-space/zed fork.
+gpui = { git = "https://github.com/zed-industries/zed", rev = "bcf6582ce3500df93a8a39366640173e6786cea6" }
 
 # Desktop-only: native platform (macOS/Linux/Windows)
-gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "56104fb17e6c5849900a4c282f42d1bfea294121", optional = true, features = [
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "bcf6582ce3500df93a8a39366640173e6786cea6", optional = true, features = [
   "font-kit",
 ] }
 
@@ -112,8 +113,8 @@ gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "56104fb1
 gpui-mobile = { git = "https://github.com/itsbalamurali/gpui-mobile", optional = true }
 
 # GPUI component library (buttons, inputs, modals, etc.)
-# Fork's holon branch is pinned to the same zed rev as gpui-mobile.
-gpui-component = { git = "https://github.com/holon-space/gpui-component", branch = "holon" }
+# Fork built on the same Zed base rev as gpui above.
+gpui-component = { git = "https://github.com/holon-space/gpui-component", rev = "a804af8d6d81a29c6dd8637641a761b72e656752" }
 
 # Holon workspace crates
 holon.workspace = true
@@ -199,7 +200,7 @@ holon-layout-testing = { path = "../../crates/holon-layout-testing" }
 holon-mcp-client.workspace = true
 holon-pbt-core = { path = "../../crates/holon-pbt-core" }
 validated = "1.0"
-gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "56104fb17e6c5849900a4c282f42d1bfea294121", features = [
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "bcf6582ce3500df93a8a39366640173e6786cea6", features = [
   "font-kit",
   "test-support",
 ] }
@@ -212,7 +213,7 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 # Test-support is the upstream feature flag that gates these; nothing in
 # release builds sees any of it. DO NOT remove — `tests/support/mod.rs` relies
 # on it via gpui::{TestAppContext, WindowOptions, WindowBounds, AppContext, …}.
-gpui = { git = "https://github.com/zed-industries/zed", rev = "56104fb17e6c5849900a4c282f42d1bfea294121", features = [
+gpui = { git = "https://github.com/zed-industries/zed", rev = "bcf6582ce3500df93a8a39366640173e6786cea6", features = [
   "test-support",
 ] }
 # Property-based tests (tests/gpui_composed_windowed_loop and friends).

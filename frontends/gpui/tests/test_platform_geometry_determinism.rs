@@ -51,7 +51,7 @@ const BOOTS: usize = 3;
 fn real_text_system() -> Arc<dyn PlatformTextSystem> {
     // `true` = TestPlatform (headless). Same `text_system()` real macOS layout
     // engine either way — only the windowing/dispatch is faked.
-    gpui_platform::current_platform(true).text_system()
+    gpui_platform::current_text_system()
 }
 
 /// Cross-runtime fixed-point settle (copied from `test_platform_smoke.rs`):

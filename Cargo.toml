@@ -349,30 +349,27 @@ debug = true
 psm = { git = "https://github.com/rust-lang/stacker", branch = "master" }
 pathfinder_simd = { git = "https://github.com/pbdeuchler/pathfinder.git", branch = "pbd/fix_simd_renames", package = "pathfinder_simd" }
 
-# Holon fork of zed — tracks the `holon` branch so we can add more ports
-# (currently: a one-line `std::mem::forget` of an extra strong Rc<AppCell>
-# inside `Application::run` on iOS so the context survives beyond the single
-# pass through UIApplicationMain's finish-launching callback). Without the
-# iOS patch, every Weak<AppCell> held by windows / async tasks dangles as
-# soon as the first run loop tick fires applicationDidBecomeActive.
-# Rebase the branch periodically onto the upstream rev used by gpui-mobile.
+# All three GPUI forks (holon-space/zed, gpui-mobile, gpui-component) sit on ONE
+# upstream Zed base rev, bcf6582ce3; each fork has a `holon` branch and
+# Holon pins its head by `rev`, so older Holon lockfiles stay buildable.
+# The zed fork carries the iOS Rc<AppCell> leak, the offscreen wgpu readback,
+# the Android-emulator wgpu DEBUG-flag strip, the list height estimate and
+# `gpui_platform::current_text_system()` for headless tests off the main thread.
 [patch."https://github.com/zed-industries/zed"]
-gpui = { git = "https://github.com/holon-space/zed.git", branch = "holon" }
-gpui_wgpu = { git = "https://github.com/holon-space/zed.git", branch = "holon" }
-gpui_macos = { git = "https://github.com/holon-space/zed.git", branch = "holon" }
-gpui_linux = { git = "https://github.com/holon-space/zed.git", branch = "holon" }
-gpui_windows = { git = "https://github.com/holon-space/zed.git", branch = "holon" }
-gpui_web = { git = "https://github.com/holon-space/zed.git", branch = "holon" }
-gpui_platform = { git = "https://github.com/holon-space/zed.git", branch = "holon" }
+gpui = { git = "https://github.com/holon-space/zed.git", rev = "66dc51dd01ed1f69699fe206ea97f71a55e6f31e", version = "=0.2.2" }
+gpui_wgpu = { git = "https://github.com/holon-space/zed.git", rev = "66dc51dd01ed1f69699fe206ea97f71a55e6f31e" }
+gpui_macos = { git = "https://github.com/holon-space/zed.git", rev = "66dc51dd01ed1f69699fe206ea97f71a55e6f31e" }
+gpui_linux = { git = "https://github.com/holon-space/zed.git", rev = "66dc51dd01ed1f69699fe206ea97f71a55e6f31e" }
+gpui_windows = { git = "https://github.com/holon-space/zed.git", rev = "66dc51dd01ed1f69699fe206ea97f71a55e6f31e" }
+gpui_web = { git = "https://github.com/holon-space/zed.git", rev = "66dc51dd01ed1f69699fe206ea97f71a55e6f31e" }
+gpui_platform = { git = "https://github.com/holon-space/zed.git", rev = "66dc51dd01ed1f69699fe206ea97f71a55e6f31e" }
+gpui_macros = { git = "https://github.com/holon-space/zed.git", rev = "66dc51dd01ed1f69699fe206ea97f71a55e6f31e" }
 
-# Holon fork of gpui-mobile — tracks the `holon` branch. Currently carries
-# a single patch: wire a real display handle into wgpu's `InstanceDescriptor`
-# on iOS so `Instance::create_surface_unsafe` actually produces a Metal
-# surface under wgpu v29. Without this the iOS `IosWindow.renderer` stays
-# `None`, every `draw()` hits the fallback, and the Metal layer shows only
-# its clear color (black screen).
+# The gpui-mobile fork wires a real display handle into wgpu's
+# `InstanceDescriptor` on iOS (without it the Metal layer shows only its clear
+# color) and ports gpui-mobile to the Zed base rev above.
 [patch."https://github.com/itsbalamurali/gpui-mobile"]
-gpui-mobile = { git = "https://github.com/holon-space/gpui-mobile.git", branch = "holon" }
+gpui-mobile = { git = "https://github.com/holon-space/gpui-mobile.git", rev = "49f07d280d5295cc0d546062eb245e670c631b2f" }
 
 # Pre-existing ed25519-dalek 3.0.0-pre.1 incompatible with pkcs8 0.11: locally
 # patched to pass KeyError::Invalid to KeyMalformed (matching 3.0.0-rc.0 fix).

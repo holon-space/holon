@@ -92,7 +92,7 @@ const AUTHORED_FLOOR: f32 = 220.0;
 const LATE_ENTRY_ID: &str = "jday-zz-late-entry";
 
 fn real_text_system() -> Arc<dyn PlatformTextSystem> {
-    gpui_platform::current_platform(true).text_system()
+    gpui_platform::current_text_system()
 }
 
 fn settle(

@@ -34,8 +34,7 @@ use holon_gpui::launch_holon_window_with_engine_and_share;
 use holon_integration_tests::test_environment::TestEnvironment;
 
 fn real_text_system() -> Arc<dyn PlatformTextSystem> {
-    let platform = gpui_platform::current_platform(true);
-    platform.text_system()
+    gpui_platform::current_text_system()
 }
 
 #[test]

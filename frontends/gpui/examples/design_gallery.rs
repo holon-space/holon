@@ -1120,6 +1120,7 @@ fn focused_card_render(card: &DeskCard, focus: bool, cx: &mut Context<GalleryVie
         offset: point(px(0.0), px(0.0)),
         blur_radius: px(48.0),
         spread_radius: px(6.0),
+        inset: false,
     }];
 
     div()

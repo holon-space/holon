@@ -92,7 +92,7 @@ const CONTROL_CHAR: &str = "Z";
 const CLICK_BOUNDS_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn real_text_system() -> Arc<dyn gpui::PlatformTextSystem> {
-    gpui_platform::current_platform(true).text_system()
+    gpui_platform::current_text_system()
 }
 
 /// Does this event reach a pump arm that DRAWS?

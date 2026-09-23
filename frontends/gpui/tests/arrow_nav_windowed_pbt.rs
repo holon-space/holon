@@ -67,7 +67,7 @@ mod pbt_harness;
 use pbt_harness::sim_windowed_replay::SimUserDriver;
 
 fn real_text_system() -> Arc<dyn gpui::PlatformTextSystem> {
-    gpui_platform::current_platform(true).text_system()
+    gpui_platform::current_text_system()
 }
 
 static ONE_WINDOWED_APP_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
