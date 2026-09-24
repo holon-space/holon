@@ -83,7 +83,6 @@ confidence-threshold = 0.8
 # third-party FSL crate still fails and a new Holon crate needs one line here.
 exceptions = [
     { crate = "holon", allow = ["FSL-1.1-ALv2"] },
-    { crate = "holon-abi-guest", allow = ["FSL-1.1-ALv2"] },
     { crate = "holon-advice", allow = ["FSL-1.1-ALv2"] },
     { crate = "holon-api", allow = ["FSL-1.1-ALv2"] },
     { crate = "holon-app", allow = ["FSL-1.1-ALv2"] },
