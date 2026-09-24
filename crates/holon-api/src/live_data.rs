@@ -497,6 +497,7 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
             + 'static,
     {
         let live = Arc::clone(self);
+        let feed = crate::latency_e2e::Feed::fresh();
         tokio::spawn(async move {
             use tokio_stream::StreamExt;
             use tracing::Instrument;
@@ -576,6 +577,7 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
                 live.apply_changes_with_origins(changes, &origins);
                 crate::latency_e2e::rows_delivered(
                     source_name,
+                    feed,
                     received_at,
                     touched.iter().map(|(id, obs)| (id.as_str(), *obs)),
                 );

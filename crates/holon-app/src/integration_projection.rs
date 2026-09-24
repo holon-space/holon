@@ -79,11 +79,16 @@ fn config_status_value(status: ConfigStatus) -> &'static str {
 pub struct IntegrationStateProjector {
     db: DbHandle,
     vm: Arc<IntegrationsSettingsVm>,
+    feed: holon_api::latency_e2e::Feed,
 }
 
 impl IntegrationStateProjector {
     pub fn new(db: DbHandle, vm: Arc<IntegrationsSettingsVm>) -> Self {
-        Self { db, vm }
+        Self {
+            db,
+            vm,
+            feed: holon_api::latency_e2e::Feed::fresh(),
+        }
     }
 
     /// What `provider`'s consent flow has to say, or `""` while it has
@@ -186,6 +191,7 @@ impl IntegrationStateProjector {
         // for its `integration:` target and expires as `e2e_expired`.
         holon_api::latency_e2e::rows_delivered(
             "integration_state",
+            self.feed,
             read_at,
             projected_ids.iter().map(|id| {
                 (

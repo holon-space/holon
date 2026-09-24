@@ -60,6 +60,7 @@ use std::time::SystemTime;
 use holon_api::latency_slo::ClockOrigin;
 use holon_api::latency_slo::E2eSample;
 use holon_api::latency_slo::OriginWindows;
+use holon_api::latency_slo::QuietBatches;
 use holon_api::latency_slo::RungVerdict;
 use holon_api::latency_slo::Superseded;
 use holon_api::latency_slo::THROUGHPUT_FLOOR_WRITES_PER_SEC;
@@ -221,7 +222,9 @@ struct LatencyFields {
     contended: Option<bool>,
     delivery_batch: Option<u64>,
     source: Option<String>,
+    feed: Option<u64>,
     superseded_ms: Option<String>,
+    quiet_batches_us: Option<String>,
 }
 
 impl LatencyFields {
@@ -233,6 +236,7 @@ impl LatencyFields {
             "origin" => self.origin = Some(value),
             "source" => self.source = Some(value),
             "superseded_ms" => self.superseded_ms = Some(value),
+            "quiet_batches_us" => self.quiet_batches_us = Some(value),
             _ => {}
         }
     }
@@ -247,6 +251,7 @@ impl Visit for LatencyFields {
             "in_flight" => self.in_flight = Some(value),
             "backlog" => self.backlog = Some(value),
             "delivery_batch" => self.delivery_batch = Some(value),
+            "feed" => self.feed = Some(value),
             _ => {}
         }
     }
@@ -317,29 +322,36 @@ impl<S: Subscriber> Layer<S> for LatencySloLayer {
                 Some(contended),
                 Some(delivery_batch),
                 Some(source),
+                Some(feed),
                 Some(target),
                 Some(superseded),
+                Some(quiet),
             ) = (
                 fields.in_flight,
                 fields.backlog,
                 fields.contended,
                 fields.delivery_batch,
                 fields.source,
+                fields.feed,
                 fields.block,
                 fields.superseded_ms,
+                fields.quiet_batches_us,
             )
             else {
                 tracing::warn!(
                     target: "holon_oracles",
                     oracle = "latency-slo",
                     "[latency-slo] an `e2e` event carried no queue depths, delivery batch, source, \
-                     block or `superseded_ms` — this sample is unscoreable and the SLO rungs are \
-                     running on partial evidence",
+                     feed, block, `superseded_ms` or `quiet_batches_us` — this sample is \
+                     unscoreable and the SLO rungs are running on partial evidence",
                 );
                 return;
             };
-            let superseded = match superseded.parse::<Superseded>() {
-                Ok(s) => s,
+            let ages = superseded
+                .parse::<Superseded>()
+                .and_then(|superseded| Ok((superseded, quiet.parse::<QuietBatches>()?)));
+            let (superseded, quiet) = match ages {
+                Ok(ages) => ages,
                 Err(e) => {
                     tracing::warn!(
                         target: "holon_oracles",
@@ -377,7 +389,9 @@ impl<S: Subscriber> Layer<S> for LatencySloLayer {
                 delivered_at: Instant::now(),
                 delivery_batch,
                 source,
+                feed,
                 superseded,
+                quiet,
             });
         } else if ms > self.slo_ms {
             // Diagnostic attribution: which pipeline stage ate the budget.
@@ -461,6 +475,8 @@ mod tests {
                     delivery_batch = i as u64,
                     source = "block",
                     superseded_ms = "",
+                    quiet_batches_us = "",
+                    feed = 1u64,
                     "holon_latency",
                 );
             }
@@ -522,6 +538,8 @@ mod tests {
                         delivery_batch = i,
                         source = "block",
                         superseded_ms = "",
+                        quiet_batches_us = "",
+                        feed = 1u64,
                         "holon_latency",
                     );
                 }
@@ -600,6 +618,8 @@ mod tests {
                         delivery_batch = i,
                         source = "block",
                         superseded_ms = "",
+                        quiet_batches_us = "",
+                        feed = 1u64,
                         "holon_latency",
                     );
                     // Real wall time — the drain rate is measured against the
@@ -612,6 +632,41 @@ mod tests {
             fired, 1,
             "a sustained slow drain must raise the THROUGHPUT banner exactly once"
         );
+    }
+
+    /// A malformed `quiet_batches_us` is refused, not read as fewer passes: the
+    /// slow paced stream that paints a banner with a well-formed field reaches
+    /// no verdict with a malformed one.
+    #[test]
+    fn an_e2e_event_with_malformed_quiet_batches_is_not_scored() {
+        let fired_with = |quiet: &'static str| {
+            violations_around("SERVICE TIME", |layer| {
+                let subscriber = tracing_subscriber::registry().with(layer);
+                tracing::subscriber::with_default(subscriber, || {
+                    for i in 0..40u64 {
+                        tracing::info!(
+                            target: "holon_latency",
+                            stage = "e2e",
+                            action = "set_field",
+                            block = "block:quiet-batches",
+                            origin = "ui",
+                            ms = 5000u64,
+                            in_flight = 1u64,
+                            backlog = 0u64,
+                            contended = false,
+                            delivery_batch = i,
+                            source = "block",
+                            superseded_ms = "",
+                            quiet_batches_us = quiet,
+                            feed = 1u64,
+                            "holon_latency",
+                        );
+                    }
+                });
+            })
+        };
+        assert_eq!(fired_with("280000 140000"), 1);
+        assert_eq!(fired_with("280000,140000"), 0);
     }
 
     /// A per-stage component (`rows`) over budget is a DIAGNOSTIC only — it
@@ -653,6 +708,8 @@ mod tests {
                         delivery_batch = i,
                         source = "block",
                         superseded_ms = "",
+                        quiet_batches_us = "",
+                        feed = 1u64,
                         "holon_latency",
                     );
                 }
@@ -699,6 +756,8 @@ mod tests {
                         delivery_batch = i,
                         source = "block",
                         superseded_ms = "",
+                        quiet_batches_us = "",
+                        feed = 1u64,
                         "holon_latency",
                     );
                 }

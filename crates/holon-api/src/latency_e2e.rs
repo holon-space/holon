@@ -74,10 +74,13 @@
 //!
 //!   `tracing::info!(target="holon_latency", stage="e2e", action, block,
 //!   origin, source, ms, in_flight, backlog, contended, superseded_ms,
-//!   delivery_batch)`
+//!   quiet_batches_us, delivery_batch, feed)`
 //!
 //!   `delivery_batch` names the `rows_delivered` call that closed the entry,
 //!   so a consumer can tell which samples one applied batch retired together.
+//!   `feed` names the [`Feed`] that applied it, and `quiet_batches_us` the
+//!   batches that feed applied since without closing a clock of this origin,
+//!   so a consumer sees every pass of every feed.
 //!
 //! # Two clocks, never one number
 //!
@@ -239,45 +242,111 @@ impl Superseded {
     }
 }
 
+/// The batches a [`Feed`] applied since its last one that closed a clock of
+/// this sample's origin, none of which closed one: their ages in whole
+/// microseconds at this close, oldest first. Each is a pass of the feed that
+/// no sample reports.
+///
+/// Emitted as the `quiet_batches_us` field, in the form of `superseded_ms`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct QuietBatches(Vec<u64>);
+
+impl QuietBatches {
+    pub fn new(ages_us: Vec<u64>) -> Self {
+        Self(ages_us)
+    }
+
+    pub fn ages_us(&self) -> &[u64] {
+        &self.0
+    }
+}
+
+fn write_ages(ages: &[u64], f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    let mut sep = "";
+    for age in ages {
+        write!(f, "{sep}{age}")?;
+        sep = " ";
+    }
+    Ok(())
+}
+
+/// Refuses anything but whole numbers separated by single spaces, so a mangled
+/// field is never read as fewer ages.
+fn parse_ages(field: &'static str, s: &str) -> Result<Vec<u64>, MalformedAges> {
+    if s.is_empty() {
+        return Ok(Vec::new());
+    }
+    s.split(' ')
+        .map(|age| age.parse::<u64>())
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| MalformedAges {
+            field,
+            value: s.to_string(),
+        })
+}
+
 impl std::fmt::Display for Superseded {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut sep = "";
-        for age in &self.0 {
-            write!(f, "{sep}{age}")?;
-            sep = " ";
-        }
-        Ok(())
+        write_ages(&self.0, f)
+    }
+}
+
+impl std::fmt::Display for QuietBatches {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write_ages(&self.0, f)
+    }
+}
+
+impl std::str::FromStr for Superseded {
+    type Err = MalformedAges;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        parse_ages("superseded_ms", s).map(Self)
+    }
+}
+
+impl std::str::FromStr for QuietBatches {
+    type Err = MalformedAges;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        parse_ages("quiet_batches_us", s).map(Self)
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MalformedSuperseded(pub String);
+pub struct MalformedAges {
+    pub field: &'static str,
+    pub value: String,
+}
 
-impl std::fmt::Display for MalformedSuperseded {
+impl std::fmt::Display for MalformedAges {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "malformed `superseded_ms` {:?} (expected whole milliseconds separated by single \
-             spaces)",
-            self.0
+            "malformed `{}` {:?} (expected whole numbers separated by single spaces)",
+            self.field, self.value
         )
     }
 }
 
-impl std::error::Error for MalformedSuperseded {}
+impl std::error::Error for MalformedAges {}
 
-impl std::str::FromStr for Superseded {
-    type Err = MalformedSuperseded;
+/// One serial consumer of deliveries: a `LiveData` subscriber or a projector.
+/// It applies its batches one after another, so they are one pass sequence.
+/// Two subscribers of one source are two feeds running side by side.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Feed(u64);
 
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s.is_empty() {
-            return Ok(Self::default());
-        }
-        s.split(' ')
-            .map(|age| age.parse::<u64>())
-            .collect::<Result<Vec<_>, _>>()
-            .map(Self)
-            .map_err(|_| MalformedSuperseded(s.to_string()))
+impl Feed {
+    /// A feed no other has named.
+    pub fn fresh() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        Self(NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+
+    /// The emitted `feed` field.
+    pub fn id(self) -> u64 {
+        self.0
     }
 }
 
@@ -379,6 +448,7 @@ struct Closed {
     /// The rows it delivered made all of them visible, so a drain rate must
     /// count them all, each at its own dispatch.
     superseded: Superseded,
+    quiet: QuietBatches,
 }
 
 /// The pending-interaction registry, **partitioned by [`ClockOrigin`]**.
@@ -410,6 +480,15 @@ struct Closed {
 struct Registry {
     ui: Vec<Pending>,
     facade: Vec<Pending>,
+    quiet: Vec<QuietLog>,
+}
+
+/// The batches one feed applied since its last one that closed a clock of one
+/// origin.
+struct QuietLog {
+    feed: Feed,
+    origin: ClockOrigin,
+    since: Vec<Instant>,
 }
 
 impl Registry {
@@ -422,6 +501,25 @@ impl Registry {
 
     fn len(&self) -> usize {
         self.ui.len() + self.facade.len()
+    }
+
+    fn quiet(&mut self, feed: Feed, origin: ClockOrigin) -> &mut Vec<Instant> {
+        let at = match self
+            .quiet
+            .iter()
+            .position(|q| q.feed == feed && q.origin == origin)
+        {
+            Some(at) => at,
+            None => {
+                self.quiet.push(QuietLog {
+                    feed,
+                    origin,
+                    since: Vec::new(),
+                });
+                self.quiet.len() - 1
+            }
+        };
+        &mut self.quiet[at].since
     }
 
     /// Every pending entry, both origins. For diagnostics and the fast-path
@@ -438,6 +536,7 @@ static PENDING_LEN: AtomicUsize = AtomicUsize::new(0);
 static PENDING: Mutex<Registry> = Mutex::new(Registry {
     ui: Vec::new(),
     facade: Vec::new(),
+    quiet: Vec::new(),
 });
 /// Per-ORIGIN capacity: one origin's burst can never evict another's entries.
 pub const MAX_PENDING: usize = 64;
@@ -802,15 +901,21 @@ fn block_row_pairs(c: &crate::Change<crate::StorageEntity>) -> Vec<(String, Opti
     }
 }
 
-/// Report the entities made visible by an applied `LiveData` batch, as
+/// Report the entities made visible by a batch `feed` applied, as
 /// `(id, Observable)` pairs (see [`touched_entities`]). Emits one `stage="e2e"`
 /// event per closed entry.
 ///
-/// `received_at` is when the subscriber took the batch off its stream. A clock
+/// `received_at` is when the feed took the batch off its stream. A clock
 /// dispatched after that cannot be what the batch carries, so it is not closed
 /// here: see [`close_received`].
+///
+/// A batch that closes no clock of an origin is reported on the feed's next
+/// closure of that origin, in `quiet_batches_us`: see [`log_quiet`]. A batch
+/// applied while nothing is pending is not: every clock a later batch closes
+/// was dispatched after it.
 pub fn rows_delivered<'a>(
     source: &'static str,
+    feed: Feed,
     received_at: Instant,
     deliveries: impl IntoIterator<Item = (&'a str, Observable)>,
 ) {
@@ -821,9 +926,6 @@ pub fn rows_delivered<'a>(
         .into_iter()
         .map(|(id, observable)| (id.to_string(), observable))
         .collect();
-    if deliveries.is_empty() {
-        return;
-    }
     let mut registry = PENDING.lock().expect("latency_e2e mutex poisoned");
     let now = Instant::now();
     // Offered to EVERY origin's slot, each closed on its own. Two interactions
@@ -842,7 +944,9 @@ pub fn rows_delivered<'a>(
         // otherwise close on this batch and report a >30s "measurement" the SLO
         // oracle would fire on.
         expired.extend(prune_expired(slot, now));
-        closed.extend(close_received(slot, &deliveries, received_at, now));
+        let mut of_origin = close_received(slot, &deliveries, received_at, now);
+        log_quiet(registry.quiet(feed, o), &mut of_origin, now);
+        closed.extend(of_origin);
     }
     PENDING_LEN.store(registry.len(), Ordering::Release);
     drop(registry);
@@ -880,9 +984,36 @@ pub fn rows_delivered<'a>(
             // uncontended sample from a queued one (D119.a rounds 2-3).
             contended = c.contended,
             superseded_ms = %c.superseded,
+            quiet_batches_us = %c.quiet,
             delivery_batch,
+            feed = feed.id(),
             "holon_latency",
         );
+    }
+}
+
+/// Log one batch of a feed against `since`, the feed's batches since its last
+/// one that closed a clock of `closed`'s origin. A batch that closed none joins
+/// the log; one that closed some reports the log on each closure and empties
+/// it.
+///
+/// A batch older than [`EXPIRY`] is dropped from the log: every clock still
+/// pending was dispatched after it, so no later pass waits on work queued at
+/// its landing.
+fn log_quiet(since: &mut Vec<Instant>, closed: &mut [Closed], now: Instant) {
+    since.retain(|&at| now.duration_since(at) < EXPIRY);
+    if closed.is_empty() {
+        since.push(now);
+        return;
+    }
+    let quiet = QuietBatches(
+        since
+            .drain(..)
+            .map(|at| now.duration_since(at).as_micros() as u64)
+            .collect(),
+    );
+    for c in closed {
+        c.quiet = quiet.clone();
     }
 }
 
@@ -1027,6 +1158,7 @@ fn close_delivered<S: AsRef<str>>(
             backlog: 0,
             contended: pending[winner].contended,
             superseded,
+            quiet: QuietBatches::default(),
         });
         // Remove the winner and all OLDER entries of the same (target, kind)
         // (superseded). A different kind on the same target is a different
@@ -1483,6 +1615,8 @@ mod tests {
         assert_eq!(pending.len(), 1, "the unexpired entry survives");
     }
 
+    const MALFORMED_AGES: [&str; 7] = [" ", "5 ", " 5", "5  7", "5,7", "x", "-1"];
+
     /// `superseded_ms` round-trips, and anything but whole milliseconds
     /// separated by single spaces is refused rather than read as fewer clocks.
     #[test]
@@ -1491,13 +1625,90 @@ mod tests {
             let s = Superseded(ages);
             assert_eq!(s.to_string().parse::<Superseded>(), Ok(s));
         }
-        for bad in [" ", "5 ", " 5", "5  7", "5,7", "x", "-1"] {
+        for bad in MALFORMED_AGES {
             assert_eq!(
                 bad.parse::<Superseded>(),
-                Err(MalformedSuperseded(bad.to_string())),
+                Err(MalformedAges {
+                    field: "superseded_ms",
+                    value: bad.to_string()
+                }),
                 "{bad:?}"
             );
         }
+    }
+
+    /// `quiet_batches_us` parses as strictly: a mangled field is refused
+    /// rather than read as fewer passes.
+    #[test]
+    fn quiet_batch_ages_parse_strictly() {
+        for ages in [vec![], vec![140_000], vec![280_310, 140_002]] {
+            let q = QuietBatches(ages);
+            assert_eq!(q.to_string().parse::<QuietBatches>(), Ok(q));
+        }
+        for bad in MALFORMED_AGES {
+            assert_eq!(
+                bad.parse::<QuietBatches>(),
+                Err(MalformedAges {
+                    field: "quiet_batches_us",
+                    value: bad.to_string()
+                }),
+                "{bad:?}"
+            );
+        }
+    }
+
+    fn closed_on(target: &str) -> Closed {
+        Closed {
+            action: "set_field".to_string(),
+            target: target.to_string(),
+            origin: ClockOrigin::Ui,
+            ms: 1,
+            in_flight: 1,
+            backlog: 0,
+            contended: false,
+            superseded: Superseded::default(),
+            quiet: QuietBatches::default(),
+        }
+    }
+
+    /// A batch whose clock an earlier batch already closed closes nothing, yet
+    /// it was a pass of its feed: the feed's next closure reports it, and every
+    /// closure of that batch reports the same passes.
+    #[test]
+    fn a_batch_that_closes_nothing_is_reported_by_the_next_closure() {
+        let base = Instant::now();
+        let at = |ms: u64| base + Duration::from_millis(ms);
+        let mut since = Vec::new();
+        let mut first = [closed_on("block:a")];
+        log_quiet(&mut since, &mut first, at(100));
+        assert_eq!(first[0].quiet, QuietBatches::default());
+        log_quiet(&mut since, &mut [], at(240));
+        log_quiet(&mut since, &mut [], at(380));
+        let mut next = [closed_on("block:a"), closed_on("block:b")];
+        log_quiet(&mut since, &mut next, at(520));
+        for c in &next {
+            assert_eq!(c.quiet, QuietBatches(vec![280_000, 140_000]));
+        }
+        let mut after = [closed_on("block:a")];
+        log_quiet(&mut since, &mut after, at(660));
+        assert_eq!(after[0].quiet, QuietBatches::default(), "reported once");
+    }
+
+    /// Every clock still pending was dispatched within [`EXPIRY`], so a batch
+    /// older than that cannot be the landing a later pass waited behind.
+    #[test]
+    fn a_quiet_batch_older_than_the_expiry_is_not_reported() {
+        let base = Instant::now();
+        let mut since = Vec::new();
+        log_quiet(&mut since, &mut [], base);
+        log_quiet(&mut since, &mut [], base + Duration::from_secs(1));
+        let mut late = [closed_on("block:a")];
+        log_quiet(
+            &mut since,
+            &mut late,
+            base + EXPIRY + Duration::from_millis(1),
+        );
+        assert_eq!(late[0].quiet, QuietBatches(vec![29_001_000]));
     }
 
     /// Tokenless ops (toggle/split/delete) correlate by newest-per-target and
@@ -1636,6 +1847,7 @@ mod tests {
         );
         rows_delivered(
             "block",
+            Feed::fresh(),
             Instant::now(),
             [("block:other", row(None)), ("block:e2e-test-a", row(None))],
         );
@@ -1649,7 +1861,12 @@ mod tests {
     #[test]
     fn global_unmatched_ids_leave_entry_pending() {
         interaction_dispatched("set_field", "block:e2e-test-b", row(None), ClockOrigin::Ui);
-        rows_delivered("block", Instant::now(), [("block:unrelated", row(None))]);
+        rows_delivered(
+            "block",
+            Feed::fresh(),
+            Instant::now(),
+            [("block:unrelated", row(None))],
+        );
         let pending = PENDING.lock().unwrap();
         assert!(pending.iter().any(|p| p.target == "block:e2e-test-b"));
     }
@@ -1826,6 +2043,7 @@ mod tests {
         );
         rows_delivered(
             FOCUS_ROOTS_SOURCE,
+            Feed::fresh(),
             Instant::now(),
             [("block:e2e-nav-test", Observable::FocusRoot)],
         );
@@ -1905,6 +2123,7 @@ mod tests {
                 // A CDC batch applied to the reactive mirror (projection-visible).
                 rows_delivered(
                     FOCUS_ROOTS_SOURCE,
+                    Feed::fresh(),
                     Instant::now(),
                     [("block:proj-visible-lock", Observable::FocusRoot)],
                 );
@@ -1953,6 +2172,7 @@ mod tests {
                 );
                 rows_delivered(
                     "blocks",
+                    Feed::fresh(),
                     Instant::now(),
                     [("block:facade-origin-lock", Observable::BlockRow(None))],
                 );

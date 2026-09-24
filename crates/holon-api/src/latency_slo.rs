@@ -33,6 +33,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 pub use crate::latency_e2e::ClockOrigin;
+pub use crate::latency_e2e::QuietBatches;
 pub use crate::latency_e2e::Superseded;
 
 /// Service-time budget. The project SLO, unchanged — what changed is which
@@ -139,14 +140,19 @@ pub struct E2eSample {
     /// batch retired share it; their `delivered_at` differ by the emit loop's
     /// own microseconds, so the instant cannot identify the batch.
     pub delivery_batch: u64,
-    /// The `LiveData` source whose delivery closed this sample. A subscriber
-    /// applies its batches one after another, and different sources run
-    /// concurrently, so passes are sequenced per source.
+    /// The `LiveData` source whose delivery closed this sample.
     pub source: String,
+    /// The feed that applied the delivery: see `latency_e2e::Feed`. A feed
+    /// applies its batches one after another, and feeds run concurrently, so
+    /// passes are sequenced per feed.
+    pub feed: u64,
     /// The older interactions on the same target this closure retired with
     /// this one. Typing on one block closes one clock per pass however many
     /// keystrokes the pass made visible.
     pub superseded: Superseded,
+    /// The feed's passes since its previous batch that closed a clock of this
+    /// origin, none of which closed one.
+    pub quiet: QuietBatches,
 }
 
 impl E2eSample {
@@ -211,29 +217,33 @@ impl E2eSample {
 /// much before its `latest_dispatch`.
 const DISPATCH_RESOLUTION: Duration = Duration::from_millis(1);
 
-/// One applied delivery batch of one source — one PASS of its subscriber — as
-/// the samples it closed describe it.
+/// One applied delivery batch of one feed — one PASS — as the samples it
+/// closed describe it. A quiet pass closed none.
 struct Pass {
     /// When it landed: its first sample's delivery.
     at: Instant,
     /// The earliest `latest_dispatch` of the clocks it closed.
-    first_dispatch: Instant,
+    first_dispatch: Option<Instant>,
     /// The latest dispatch of every interaction it retired, superseded ones
     /// included, each at its own.
     retired: Vec<Instant>,
 }
 
 impl Pass {
+    fn quiet(at: Instant) -> Self {
+        Self {
+            at,
+            first_dispatch: None,
+            retired: Vec::new(),
+        }
+    }
+
     fn deliveries(&self) -> usize {
         self.retired.len()
     }
 
-    fn earliest_retired(&self) -> Instant {
-        *self
-            .retired
-            .iter()
-            .min()
-            .expect("a pass retires the clocks its samples closed")
+    fn earliest_retired(&self) -> Option<Instant> {
+        self.retired.iter().min().copied()
     }
 }
 
@@ -258,15 +268,15 @@ fn runs(from: usize, to: usize, holds: impl Fn(usize) -> bool) -> Vec<(usize, us
     out
 }
 
-/// What the judged busy periods of one source measured.
-struct SourceDrain<'a> {
+/// What the judged busy periods of one feed measured.
+struct FeedDrain<'a> {
     source: &'a str,
     deliveries: usize,
     passes: usize,
     elapsed: Duration,
 }
 
-impl SourceDrain<'_> {
+impl FeedDrain<'_> {
     fn rate_per_sec(&self) -> f64 {
         self.deliveries as f64 / self.elapsed.as_secs_f64()
     }
@@ -274,13 +284,13 @@ impl SourceDrain<'_> {
 
 /// The throughput rung's reading of a window.
 struct Drain<'a> {
-    judged: Vec<SourceDrain<'a>>,
+    judged: Vec<FeedDrain<'a>>,
     /// The most saturated passes any busy period reached, judged or not.
     longest_busy_period: usize,
 }
 
 impl Drain<'_> {
-    fn worst(&self) -> Option<&SourceDrain<'_>> {
+    fn worst(&self) -> Option<&FeedDrain<'_>> {
         self.judged
             .iter()
             .min_by(|a, b| a.rate_per_sec().total_cmp(&b.rate_per_sec()))
@@ -468,60 +478,76 @@ impl SloWindow {
         }
     }
 
-    /// Each source's passes, ordered by when they landed. The batch — not the
-    /// sample — is the unit this rung reasons about: every closure one applied
-    /// batch made retired at the same moment.
-    fn passes_by_source(&self) -> BTreeMap<&str, Vec<Pass>> {
-        let mut by_batch: HashMap<u64, (&str, Pass)> = HashMap::new();
+    /// Each feed's source and passes, ordered by when they landed, quiet ones
+    /// included. The batch — not the sample — is the unit this rung reasons
+    /// about: every closure one applied batch made retired at the same moment.
+    fn passes_by_feed(&self) -> BTreeMap<u64, (&str, Vec<Pass>)> {
+        let mut by_batch: HashMap<u64, (u64, &str, &QuietBatches, Pass)> = HashMap::new();
         for s in &self.samples {
-            let (source, pass) = by_batch.entry(s.delivery_batch).or_insert((
+            let (feed, source, quiet, pass) = by_batch.entry(s.delivery_batch).or_insert((
+                s.feed,
                 s.source.as_str(),
+                &s.quiet,
                 Pass {
                     at: s.delivered_at,
-                    first_dispatch: s.latest_dispatch(),
+                    first_dispatch: Some(s.latest_dispatch()),
                     retired: Vec::new(),
                 },
             ));
-            assert_eq!(
-                *source, s.source,
-                "delivery batch {} names two sources — the correlator stamps one source per \
-                 `rows_delivered` call",
+            assert!(
+                (*feed, *source, *quiet) == (s.feed, s.source.as_str(), &s.quiet),
+                "delivery batch {} names two feeds, sources or quiet logs ({feed} {source} [{quiet}] \
+                 vs {} {} [{}]) — the correlator stamps one of each per `rows_delivered` call",
                 s.delivery_batch,
+                s.feed,
+                s.source,
+                s.quiet,
             );
             pass.at = pass.at.min(s.delivered_at);
-            pass.first_dispatch = pass.first_dispatch.min(s.latest_dispatch());
+            pass.first_dispatch = pass.first_dispatch.map(|f| f.min(s.latest_dispatch()));
             pass.retired.extend(s.retired_dispatches());
         }
-        let mut out: BTreeMap<&str, Vec<Pass>> = BTreeMap::new();
-        for (source, pass) in by_batch.into_values() {
-            out.entry(source).or_default().push(pass);
+        let mut out: BTreeMap<u64, (&str, Vec<Pass>)> = BTreeMap::new();
+        for (feed, source, quiet, pass) in by_batch.into_values() {
+            let (named, passes) = out.entry(feed).or_insert((source, Vec::new()));
+            assert_eq!(*named, source, "feed {feed} names two sources");
+            passes.extend(
+                quiet
+                    .ages_us()
+                    .iter()
+                    .map(|&age| Pass::quiet(pass.at - Duration::from_micros(age))),
+            );
+            passes.push(pass);
         }
-        for passes in out.values_mut() {
+        for (_, passes) in out.values_mut() {
             passes.sort_by_key(|p| p.at);
         }
         out
     }
 
-    /// The drain measurement, per source.
+    /// The drain measurement, per feed.
     ///
     /// Pass `j` is SATURATED when a write that it or a later pass retired had
-    /// certainly been dispatched by the time pass `j-1` landed: the subscriber
-    /// went straight on to pass `j`, so `at_j - at_(j-1)` is its whole
-    /// duration. A busy period is a run of saturated passes `a+1..=b`. Its
-    /// rate is `min(arrivals, capacity)`, so it shows the CAPACITY only when:
+    /// certainly been dispatched by the time pass `j-1` landed: the feed went
+    /// straight on to pass `j`, so `at_j - at_(j-1)` is its whole duration. A
+    /// busy period is a run of saturated passes `a+1..=b`. Its rate is
+    /// `min(arrivals, capacity)`, so it shows the CAPACITY only when:
     ///
     /// * its arrival rate reaches the floor. The arrival rate counts the
     ///   interactions passes `a+1..=b` retired that were certainly dispatched
     ///   in `(f_a, at_(b-1)]`, each at its own dispatch, over `at_(b-1) - f_a`.
-    ///   `f_a` is the earliest dispatch pass `a` retired: pass `a` started no
-    ///   earlier, so when every pass takes all that is queued the window spans
-    ///   at least the busy period's `at_b - at_a`, and the rate cannot fall
-    ///   below the arrival rate. A rate below the floor with arrivals at or
-    ///   above it proves the capacity is below the floor; or
-    /// * its passes leave work behind: a write a LATER pass retired was
-    ///   dispatched by `at_(j-1)`, so pass `j` could not take all of it. Such a
-    ///   pass ran at full load whatever the arrival rate. When the arrivals are
-    ///   below the floor, only runs of these passes are judged.
+    ///   `f_a` is the earliest dispatch retired by the last pass up to `a` that
+    ///   retired one: pass `a` started no earlier, so when every pass takes all
+    ///   that is queued the window spans at least the busy period's `at_b -
+    ///   at_a`, and the rate cannot fall below the arrival rate. A rate below
+    ///   the floor with arrivals at or above it proves the capacity is below
+    ///   the floor; or
+    /// * its passes leave work behind: pass `j` retired a write, and a write
+    ///   retired two or more passes after `j` was dispatched by `at_(j-1)`. A
+    ///   write commits within one pass time, so passes `j` and `j+1` together
+    ///   could not take all that was queued. A quiet pass can be a batch of
+    ///   untracked rows shorter than a commit, so it shows no load. When the
+    ///   arrivals are below the floor, only runs of these passes are judged.
     ///
     /// A judged run needs at least [`MIN_SATURATED_PASSES`] passes. Its rate
     /// is the deliveries of its passes over `at_b - at_a`.
@@ -538,21 +564,32 @@ impl SloWindow {
     fn drain(&self) -> Drain<'_> {
         let mut judged = Vec::new();
         let mut longest_busy_period = 0;
-        for (source, passes) in self.passes_by_source() {
+        for (source, passes) in self.passes_by_feed().into_values() {
             // queued_from[j]: the earliest dispatch among clocks pass j or a
             // later pass closed.
-            let mut queued_from: Vec<Instant> = passes.iter().map(|p| p.first_dispatch).collect();
+            let mut queued_from: Vec<Option<Instant>> =
+                passes.iter().map(|p| p.first_dispatch).collect();
             for j in (0..queued_from.len().saturating_sub(1)).rev() {
-                queued_from[j] = queued_from[j].min(queued_from[j + 1]);
+                queued_from[j] = match (queued_from[j], queued_from[j + 1]) {
+                    (Some(own), Some(later)) => Some(own.min(later)),
+                    (own, later) => own.or(later),
+                };
             }
-            let saturated = |j: usize| queued_from[j] <= passes[j - 1].at;
-            let leaves_work = |j: usize| {
+            let queued_by = |j: usize, landed: Instant| {
                 queued_from
-                    .get(j + 1)
-                    .is_some_and(|&later| later <= passes[j - 1].at)
+                    .get(j)
+                    .copied()
+                    .flatten()
+                    .is_some_and(|q| q <= landed)
             };
+            let saturated = |j: usize| queued_by(j, passes[j - 1].at);
+            let leaves_work =
+                |j: usize| passes[j].deliveries() > 0 && queued_by(j + 2, passes[j - 1].at);
             let arrivals_reach_floor = |a: usize, b: usize| {
-                let (first, to) = (passes[a].earliest_retired(), passes[b - 1].at);
+                let Some(first) = passes[..=a].iter().rev().find_map(Pass::earliest_retired) else {
+                    return false;
+                };
+                let to = passes[b - 1].at;
                 let arrived = passes[a + 1..=b]
                     .iter()
                     .flat_map(|p| &p.retired)
@@ -560,7 +597,7 @@ impl SloWindow {
                     .count();
                 b - 1 > a && arrived as f64 >= self.floor_per_sec * (to - first).as_secs_f64()
             };
-            let mut drain = SourceDrain {
+            let mut drain = FeedDrain {
                 source,
                 deliveries: 0,
                 passes: 0,
@@ -589,7 +626,7 @@ impl SloWindow {
             if drain.passes > 0 {
                 assert!(
                     drain.elapsed > Duration::ZERO,
-                    "source {source}: {} saturated passes landed at one instant",
+                    "a {source} feed: {} saturated passes landed at one instant",
                     drain.passes,
                 );
                 judged.push(drain);
@@ -601,9 +638,9 @@ impl SloWindow {
         }
     }
 
-    /// RUNG 2 — the slowest judged source's drain rate, in writes per second.
+    /// RUNG 2 — the slowest judged feed's drain rate, in writes per second.
     pub fn drain_rate_per_sec(&self) -> Option<f64> {
-        self.drain().worst().map(SourceDrain::rate_per_sec)
+        self.drain().worst().map(FeedDrain::rate_per_sec)
     }
 
     /// Saturated passes across every judged busy period — the verdict's `n`.
@@ -616,7 +653,7 @@ impl SloWindow {
         self.drain().judged.iter().map(|d| d.deliveries).sum()
     }
 
-    /// Each source with a judged busy period is judged on its own; the rung
+    /// Each feed with a judged busy period is judged on its own; the rung
     /// fails when the slowest of them is below the floor.
     pub fn throughput_verdict(&self) -> RungVerdict {
         let drain = self.drain();
@@ -769,7 +806,9 @@ mod tests {
             delivered_at: at,
             delivery_batch: batch,
             source: "block".to_string(),
+            feed: 0,
             superseded: Superseded::default(),
+            quiet: QuietBatches::default(),
         }
     }
 
@@ -946,9 +985,9 @@ mod tests {
     fn batched_deliveries_do_not_inflate_the_drain_rate() {
         let mut w = SloWindow::default();
         let t0 = Instant::now();
-        // 50 writes dispatched at t0, retired in five passes of 10, 300ms
+        // 60 writes dispatched at t0, retired in six passes of 10, 300ms
         // apart: passes 2-4 each leave work behind, 30 deliveries over 900ms.
-        for pass in 0..5u64 {
+        for pass in 0..6u64 {
             for i in 0..10u64 {
                 w.record(write(t0, 0, 300_000 * (pass + 1) + i, pass));
             }
@@ -1059,22 +1098,28 @@ mod tests {
     }
 
     /// Probe Q2. Arrivals every 299ms against a 300ms serial pipeline: the
-    /// queue grows by one write every 299 passes. Once it holds a second write,
-    /// every pass leaves work behind, and the rate is the pipeline's own.
+    /// queue grows by one write every 299 passes. Once it holds a third write,
+    /// every pass leaves work behind for the pass after next, and the rate is
+    /// the pipeline's own.
     #[test]
     fn an_overloaded_serial_pipeline_is_a_slow_drain_once_its_queue_grows() {
         let record = |n: u64| {
-            let mut w = SloWindow::default();
+            let mut w = SloWindow::new(
+                ClockOrigin::Ui,
+                n as usize,
+                SERVICE_TIME_SLO_MS,
+                THROUGHPUT_FLOOR_WRITES_PER_SEC,
+            );
             let t0 = Instant::now();
             for k in 0..n {
                 w.record(write(t0, 299_000 * k, 300_000 * (k + 1), k));
             }
             w
         };
-        for n in [40u64, 100, 150] {
+        for n in [40u64, 150, 400] {
             assert_unjudged(&record(n), 0);
         }
-        assert_fails_at(&record(400), 1000.0 / 300.0, 100);
+        assert_fails_at(&record(700), 1000.0 / 300.0, 100);
     }
 
     /// Probe Q3. Two writes together through a serial 300ms pipeline, three
@@ -1105,30 +1150,32 @@ mod tests {
         assert_unjudged(&w, 0);
     }
 
-    /// A write dispatched in the very instant a pass lands is queued behind
-    /// the next pass: two writes wait at every landing here.
+    /// Probe "leftover at the landing instant": write `k` is dispatched as
+    /// pass `k-2` lands and retired by pass `k`. It is also the trace of an
+    /// unbounded 300ms pipeline whose writes commit 1ms after dispatch, too
+    /// late for pass `k-1`, so the one pass it waited proves no backlog.
     #[test]
-    fn a_write_dispatched_as_a_pass_lands_is_left_behind() {
+    fn a_write_dispatched_as_a_pass_lands_is_unjudged() {
         let mut w = SloWindow::default();
         let t0 = Instant::now();
         for k in 0..6u64 {
             let dispatched = 300_000 * k.saturating_sub(1);
             w.record(write(t0, dispatched, 300_000 * (k + 1), k));
         }
-        assert_fails_at(&w, 1000.0 / 300.0, 4);
+        assert_unjudged(&w, 0);
     }
 
     /// [`MIN_SATURATED_PASSES`] is the line between a burst and sustained
-    /// load: two saturated passes are not judged, three are.
+    /// load: two passes that leave work behind are not judged, three are.
     #[test]
     fn two_saturated_passes_are_not_a_busy_period_and_three_are() {
         let t0 = Instant::now();
         let mut w = SloWindow::default();
-        for k in 0..4u64 {
+        for k in 0..5u64 {
             w.record(write(t0, 0, 300_000 * (k + 1), k));
         }
         assert_unjudged(&w, 2);
-        w.record(write(t0, 0, 1_500_000, 4));
+        w.record(write(t0, 0, 1_800_000, 5));
         assert_fails_at(&w, 1000.0 / 300.0, 3);
     }
 
@@ -1144,13 +1191,13 @@ mod tests {
             }
         };
         let mut w = SloWindow::default();
-        burst(&mut w, 0, 4, 0);
-        burst(&mut w, 10_000, 4, 10);
+        burst(&mut w, 0, 5, 0);
+        burst(&mut w, 10_000, 5, 10);
         assert_unjudged(&w, 2);
 
         let mut w = SloWindow::default();
-        burst(&mut w, 0, 5, 0);
-        burst(&mut w, 10_000, 5, 10);
+        burst(&mut w, 0, 6, 0);
+        burst(&mut w, 10_000, 6, 10);
         assert_fails_at(&w, 1000.0 / 300.0, 6);
     }
 
@@ -1161,12 +1208,13 @@ mod tests {
     fn sources_are_sequenced_and_judged_separately() {
         let t0 = Instant::now();
         let mut w = SloWindow::default();
-        for k in 0..6u64 {
+        for k in 0..7u64 {
             w.record(write(t0, 0, 300_000 * (k + 1), k));
         }
-        for k in 0..5u64 {
+        for k in 0..6u64 {
             w.record(E2eSample {
                 source: "focus_roots".to_string(),
+                feed: 1,
                 ..write(t0, 150_000, 160_000 + 10_000 * k, 100 + k)
             });
         }
@@ -1176,6 +1224,31 @@ mod tests {
             "{}",
             w.report()
         );
+    }
+
+    /// Two subscribers of one source are two feeds side by side. The second
+    /// applies each of the first's batches 1ms later and closes nothing until
+    /// its last one. Sequenced as one feed, its quiet passes would halve every
+    /// gap and make the probe above look two passes behind.
+    #[test]
+    fn two_feeds_of_one_source_are_sequenced_apart() {
+        let mut w = SloWindow::default();
+        let t0 = Instant::now();
+        for k in 0..6u64 {
+            let dispatched = 300_000 * k.saturating_sub(1);
+            w.record(write(t0, dispatched, 300_000 * (k + 1), k));
+        }
+        let closed_at = 2_000_000;
+        w.record(E2eSample {
+            feed: 1,
+            quiet: QuietBatches::new(
+                (0..6)
+                    .map(|k| closed_at - 300_000 * (k + 1) - 1_000)
+                    .collect(),
+            ),
+            ..write(t0, 1_900_000, closed_at, 6)
+        });
+        assert_unjudged(&w, 0);
     }
 
     /// One keystroke every `gap_ms` to ONE block through a serial subscriber
@@ -1334,12 +1407,15 @@ mod tests {
     /// is committed if none is queued, and carries every write committed by
     /// its start, `commit_ms` after dispatch. Per target it carries, it closes
     /// the newest clock dispatched by its start and supersedes the older ones,
-    /// as `close_received` does. `writes` are `(dispatch ms, target)`, sorted.
+    /// as `close_received` does. A pass that closes nothing is reported by the
+    /// next one that does, as `log_quiet` does. `writes` are `(dispatch ms,
+    /// target)`, sorted.
     fn unbounded_pipeline(writes: &[(u64, u8)], pass_ms: u64, commit_ms: u64) -> SloWindow {
         let mut w = SloWindow::default();
         let t0 = Instant::now();
         let (mut carried, mut opened) = (0, 0);
         let mut pending: Vec<(u64, u8)> = Vec::new();
+        let mut quiet: Vec<u64> = Vec::new();
         let mut start = 0;
         let mut batch = 0;
         while carried < writes.len() {
@@ -1356,6 +1432,8 @@ mod tests {
                 opened += 1;
             }
             let landed = start + pass_ms;
+            let quiet_ages = QuietBatches::new(quiet.iter().map(|q| (landed - q) * 1000).collect());
+            let mut closed_any = false;
             for target in targets {
                 let mut on_target: Vec<u64> = pending
                     .iter()
@@ -1367,11 +1445,18 @@ mod tests {
                 let Some(newest) = on_target.pop() else {
                     continue;
                 };
+                closed_any = true;
                 w.record(E2eSample {
                     target: format!("block:{target}"),
                     superseded: Superseded::new(on_target.iter().map(|d| landed - d).collect()),
+                    quiet: quiet_ages.clone(),
                     ..write(t0, newest * 1000, landed * 1000, batch)
                 });
+            }
+            if closed_any {
+                quiet.clear();
+            } else {
+                quiet.push(landed);
             }
             batch += 1;
             start = landed;
@@ -1455,6 +1540,46 @@ mod tests {
         assert!(!w.throughput_verdict().is_fail(), "{}", w.report());
     }
 
+    /// Unbounded 202ms passes, 125ms commit latency. The pass landing at
+    /// 1012ms carries the writes of 522 and 607 on block 1, whose clock the
+    /// pass before closed early, so it closes nothing. Without it the last
+    /// gap spans two passes and the busy period fails at 9.9/s.
+    #[test]
+    fn a_pass_that_closes_nothing_is_still_a_pass() {
+        let w = unbounded_pipeline(
+            &[
+                (79, 0),
+                (122, 1),
+                (232, 1),
+                (330, 1),
+                (367, 0),
+                (417, 1),
+                (522, 1),
+                (607, 1),
+                (705, 0),
+            ],
+            202,
+            125,
+        );
+        assert_unjudged(&w, 0);
+    }
+
+    /// A write commits 25ms after its dispatch, while its feed applies five
+    /// 5ms batches of untracked rows. Those passes retired nothing and only
+    /// waited on the commit: judged as passes that left the write behind they
+    /// fail the drain at 0/s.
+    #[test]
+    fn quiet_passes_waiting_on_a_commit_are_not_a_slow_drain() {
+        let mut w = SloWindow::default();
+        let t0 = Instant::now();
+        w.record(write(t0, 0, 100_000, 0));
+        w.record(E2eSample {
+            quiet: QuietBatches::new((1..=5).map(|k| 30_000 - 5_000 * k).collect()),
+            ..write(t0, 100_000, 130_000, 1)
+        });
+        assert_unjudged(&w, 0);
+    }
+
     /// SplitMix64: a fixed seed gives a fixed trace.
     fn split_mix(state: &mut u64) -> u64 {
         *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
@@ -1465,9 +1590,10 @@ mod tests {
     }
 
     /// **The rule's premise, as a property.** A pipeline whose every pass takes
-    /// all that is queued has no capacity limit, so its drain can never fail,
-    /// whatever the arrivals: bursts, paced typing, one block or fifty, passes
-    /// of 20-400ms. See `lane-logs/drain-estimator.md` for the derivation.
+    /// all that is committed has no capacity limit, so its drain can never
+    /// fail, whatever the arrivals: bursts, paced typing, one block or fifty,
+    /// passes of 20-400ms, commit latency below the pass time. See
+    /// `lane-logs/drain-estimator.md` for the derivation.
     #[test]
     fn an_unbounded_pipeline_never_fails_the_drain() {
         let mut judged = 0;
@@ -1485,11 +1611,12 @@ mod tests {
                     (at, draw(targets) as u8)
                 })
                 .collect();
-            let w = unbounded_pipeline(&writes, pass_ms, 0);
+            let commit_ms = draw(pass_ms);
+            let w = unbounded_pipeline(&writes, pass_ms, commit_ms);
             let verdict = w.throughput_verdict();
             assert!(
                 !verdict.is_fail(),
-                "seed {seed}: pass {pass_ms}ms, writes {writes:?}: {}",
+                "seed {seed}: pass {pass_ms}ms, commit {commit_ms}ms, writes {writes:?}: {}",
                 w.report()
             );
             if matches!(verdict, RungVerdict::Pass { .. }) {
@@ -1511,8 +1638,8 @@ mod tests {
                 ..write(t0, 0, 300_000 * (k + 1), k)
             });
         }
-        assert_eq!(w.drain_delivery_count(), 8);
-        assert_fails_at(&w, 8.0 / 1.2, 4);
+        assert_eq!(w.drain_delivery_count(), 6);
+        assert_fails_at(&w, 6.0 / 0.9, 3);
     }
 
     /// **The false-red the third estimator shipped.** A healthy session — 40
@@ -1544,8 +1671,8 @@ mod tests {
         assert_eq!(w.drain_pass_count(), 0);
     }
 
-    /// 40 writes dispatched together, retired one per 150ms: passes 2-39 each
-    /// leave work behind, 38 of them in 5.7s, ~6.7/s, under the 10/s floor.
+    /// 40 writes dispatched together, retired one per 150ms: passes 2-38 each
+    /// leave work behind, 37 of them in 5.55s, ~6.7/s, under the 10/s floor.
     /// The time before the first landing is not charged: it holds the first
     /// write's service.
     #[test]
@@ -1555,7 +1682,7 @@ mod tests {
         for k in 0..40u64 {
             w.record(write(t0, 0, 150_000 * (k + 1), k));
         }
-        assert_fails_at(&w, 38.0 / 5.7, 38);
+        assert_fails_at(&w, 37.0 / 5.55, 37);
     }
 
     /// A burst whose every write reports zero elapsed in one shared batch is

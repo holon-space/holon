@@ -26,6 +26,7 @@ use std::time::Instant;
 use holon_api::latency_slo::ClockOrigin;
 use holon_api::latency_slo::E2eSample;
 use holon_api::latency_slo::OriginWindows;
+use holon_api::latency_slo::QuietBatches;
 use holon_api::latency_slo::SERVICE_TIME_SLO_MS;
 use holon_api::latency_slo::SloWindow;
 use holon_api::latency_slo::Superseded;
@@ -145,7 +146,9 @@ struct E2eVisitor {
     delivery_batch: Option<u64>,
     source: Option<String>,
     block: Option<String>,
+    feed: Option<u64>,
     superseded_ms: Option<String>,
+    quiet_batches_us: Option<String>,
 }
 
 impl tracing::field::Visit for E2eVisitor {
@@ -155,6 +158,7 @@ impl tracing::field::Visit for E2eVisitor {
             "in_flight" => self.in_flight = Some(value),
             "backlog" => self.backlog = Some(value),
             "delivery_batch" => self.delivery_batch = Some(value),
+            "feed" => self.feed = Some(value),
             _ => {}
         }
     }
@@ -179,6 +183,7 @@ impl tracing::field::Visit for E2eVisitor {
             "source" => self.source = Some(value.to_string()),
             "block" => self.block = Some(value.to_string()),
             "superseded_ms" => self.superseded_ms = Some(value.to_string()),
+            "quiet_batches_us" => self.quiet_batches_us = Some(value.to_string()),
             _ => {}
         }
     }
@@ -226,8 +231,10 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SloProbeLayer {
             Some(contended),
             Some(delivery_batch),
             Some(source),
+            Some(feed),
             Some(target),
             Some(superseded),
+            Some(quiet),
         ) = (
             v.ms,
             v.in_flight,
@@ -235,28 +242,38 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SloProbeLayer {
             v.contended,
             v.delivery_batch,
             v.source.clone(),
+            v.feed,
             v.block.clone(),
             v.superseded_ms.clone(),
+            v.quiet_batches_us.clone(),
         )
         else {
             panic!(
                 "slo probe: an `e2e` event lacked ms/in_flight/backlog/contended/delivery_batch/\
-                 source/block/superseded_ms (ms={:?} in_flight={:?} backlog={:?} \
-                 contended={:?} delivery_batch={:?} source={:?} block={:?} superseded_ms={:?}) — \
-                 the correlator's emission and this probe have diverged",
+                 source/feed/block/superseded_ms/quiet_batches_us (ms={:?} in_flight={:?} \
+                 backlog={:?} contended={:?} delivery_batch={:?} source={:?} feed={:?} \
+                 block={:?} superseded_ms={:?} quiet_batches_us={:?}) — the correlator's \
+                 emission and this probe have diverged",
                 v.ms,
                 v.in_flight,
                 v.backlog,
                 v.contended,
                 v.delivery_batch,
                 v.source,
+                v.feed,
                 v.block,
-                v.superseded_ms
+                v.superseded_ms,
+                v.quiet_batches_us
             );
         };
-        let superseded: Superseded = superseded.parse().unwrap_or_else(|e| {
-            panic!("slo probe: an `e2e` event carried {e} — the correlator's emission and this probe have diverged")
-        });
+        fn diverged(e: holon_api::latency_e2e::MalformedAges) -> ! {
+            panic!(
+                "slo probe: an `e2e` event carried {e} — the correlator's emission and this probe \
+                 have diverged"
+            )
+        }
+        let superseded: Superseded = superseded.parse().unwrap_or_else(|e| diverged(e));
+        let quiet: QuietBatches = quiet.parse().unwrap_or_else(|e| diverged(e));
         // Same reasoning as the queue depths: a sample nobody can attribute to a
         // clock seam would have to be filed under a guess, and a guess here is
         // the pooled percentile D119.a forbids.
@@ -281,7 +298,9 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SloProbeLayer {
                 delivered_at: Instant::now(),
                 delivery_batch,
                 source,
+                feed,
                 superseded,
+                quiet,
             });
     }
 }
