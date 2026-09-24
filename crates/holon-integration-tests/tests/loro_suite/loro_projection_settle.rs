@@ -6,7 +6,7 @@
 //!
 //! @pbt kind harness
 //! @pbt covers loro-projection-settle — no settle while a change is in flight
-//! or withheld
+//! or owed
 
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
@@ -55,7 +55,7 @@ impl Fixture {
             Arc::new(StdMutex::new(Frontiers::default())),
             sink.clone() as Arc<dyn OriginTaggedWrites>,
             sink.clone() as Arc<dyn SinkReader>,
-            tempdir.path().join("sc.sync"),
+            tempdir.path().join("sidecar").join("sc.sync"),
             holon_api::block_read_model::BlockReadModel::new(),
             Arc::new(holon_api::ConditionBus::new()),
         ));
@@ -73,6 +73,15 @@ impl Fixture {
 
     fn settled(&self) -> bool {
         settled(&self.projection, &self.global, &self.layout)
+    }
+
+    fn set_sidecar_dir_mode(&self, mode: u32) -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            self._tempdir.path().join("sidecar"),
+            std::fs::Permissions::from_mode(mode),
+        )?;
+        Ok(())
     }
 
     /// Record the settle verdict at the moment the sink write starts.
@@ -170,6 +179,31 @@ async fn a_pass_that_owes_a_withheld_op_is_not_settled() -> Result<()> {
     delete_block_in(&fx.doc_store, DocScope::Global, half_born).await?;
     assert_eq!(fx.projection.project().await?, ProjectionPass::Converged);
     assert_eq!(fx.sink.row_ids(), ["block:keep-id"]);
+    assert!(fx.settled());
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_pass_whose_sidecar_write_fails_is_not_settled_and_recovers() -> Result<()> {
+    let fx = Fixture::new().await?;
+    insert_root_block(&fx.doc_store, "a-id", "a").await?;
+    assert_eq!(fx.projection.project().await?, ProjectionPass::Converged);
+
+    let b = insert_root_block(&fx.doc_store, "b-id", "b").await?;
+    fx.set_sidecar_dir_mode(0o500)?;
+    let failed = fx.projection.project().await;
+    fx.set_sidecar_dir_mode(0o700)?;
+    let err = failed.expect_err("an unwritable sidecar fails the pass");
+    assert!(format!("{err:#}").contains("sidecar"), "{err:#}");
+    assert!(!fx.settled(), "a pass that returned Err reported settled");
+
+    delete_block_in(&fx.doc_store, DocScope::Global, b).await?;
+    assert_eq!(fx.projection.project().await?, ProjectionPass::Converged);
+    assert_eq!(
+        fx.sink.row_ids(),
+        ["block:a-id"],
+        "the delete after the failed pass never reached the sink"
+    );
     assert!(fx.settled());
     Ok(())
 }

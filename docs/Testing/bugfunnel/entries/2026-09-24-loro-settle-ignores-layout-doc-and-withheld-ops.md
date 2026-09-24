@@ -56,9 +56,31 @@ this is a lying settle, not data loss.
   watermarks and the pending queues. The handle exposes only `is_settled()`, so
   a caller cannot forget the layout doc.
 - The watermarks advance in `advance_watermarks` after the sink write commits,
-  and only when the pass withheld nothing. An owed op now keeps the projection
-  visibly unsettled until a later pass pays it.
-- Pinned by `loro_suite::loro_projection_settle`: two deterministic tests that
-  were red before the fix, red with the fix removed, and green with it.
+  and only when the pass owes nothing. An owed op now keeps the projection
+  visibly unsettled until a later pass pays it. Deletes an UNARMED pass
+  withholds are not owed (`withheld_deletes_are_owed`): before `arm()` the sink
+  legitimately holds seed rows that Loro adopts later, so such a pass still
+  advances the watermarks.
+- `advance_watermarks` writes the sidecar first and sets the in-memory
+  watermarks only after it succeeds. Both legs of `project()` send a failed
+  sidecar write to the same arm as a failed sink write: `seeded = false`,
+  `pending_reseed_reason = SinkFail`, so the next pass reseeds from sink truth.
+- Pinned by `loro_suite::loro_projection_settle`: three deterministic tests that
+  were red with the fix removed and green with it.
 - A/B stress (8 rounds × 16 copies, `loro_create_persists_prod_session`): 42/128
   failed with the fix removed, 0/128 with it (Fisher two-sided p = 8.0e-15).
+
+## Gap in the first fix
+The first version of this fix moved `persist_sidecar` out of `emit_ops` into
+`advance_watermarks`, which set both watermarks and then wrote the sidecar, and
+called it with `?`. When the sidecar write failed, `project()` returned `Err`
+after the watermarks advanced, before `live` took the staged rows, and after the
+pending queues were drained. `seeded` stayed true and no reseed reason was
+recorded. The projection then read settled right after an `Err` pass, and a
+later delete of the block that pass created was never emitted: `live` did not
+hold the block, and the idle check short-circuited every later pass. A fresh
+verifier found it with a probe (sidecar directory `chmod 0o500`); no test had
+failed a sidecar write (COVERAGE). Pinned by
+`a_pass_whose_sidecar_write_fails_is_not_settled_and_recovers`. The settle
+assertion goes red when the sidecar is written after the watermarks move. The
+row assertion goes red when the failed write does not route to the reseed.

@@ -236,8 +236,8 @@ enum FullReason {
     /// Seeded+armed, but the drained batch exceeded the incremental cap
     /// (`INCREMENTAL_BATCH_MAX.max(live_len)`) — cold org-scan / bulk import.
     Oversized,
-    /// A prior pass's incremental sink write failed (batch rolled back); this
-    /// pass rebuilds the base from sink truth and retries.
+    /// A prior pass's sink or sidecar write failed; this pass rebuilds the
+    /// base from sink truth and retries.
     SinkFail,
 }
 
@@ -703,8 +703,8 @@ pub struct LoroProjection {
     /// the idle short-circuit within a session, and a cold boot takes the full
     /// walk regardless (`seeded` is false), which reads both docs.
     layout_last_synced: StdMutex<Frontiers>,
-    /// Set when a pass clears `seeded` and RETURNS (the incremental sink-write
-    /// failure at `emit_ops` Err) so the *next* pass's full walk — which sees
+    /// Set when a pass clears `seeded` and RETURNS (a failed sink or sidecar
+    /// write) so the *next* pass's full walk — which sees
     /// only `seeded == false` at entry, indistinguishable from cold boot — can
     /// attribute its `mode=full` event to `sink_fail` rather than `coldboot`.
     /// Taken (cleared) by that next full walk. The orphan reseed falls through
@@ -852,7 +852,7 @@ impl LoroProjection {
 
     /// Whether every change up to `global` and `layout` (the two projected
     /// documents' `oplog_frontiers`) has reached the sink. The watermarks
-    /// advance only after a pass wrote its rows AND withheld nothing, so an
+    /// advance only after a pass wrote its rows AND owes nothing, so an
     /// in-flight or owed change always reads as unsettled.
     pub fn is_settled_at(&self, global: &Frontiers, layout: &Frontiers) -> bool {
         &*self.last_synced.lock().unwrap() == global
@@ -1182,7 +1182,7 @@ impl LoroProjection {
                         );
                     } else {
                         let snapshot_ms = t0.elapsed().as_millis();
-                        match self
+                        let written = match self
                             .emit_ops(
                                 ops,
                                 &t0,
@@ -1194,9 +1194,11 @@ impl LoroProjection {
                             )
                             .await
                         {
+                            Ok(()) => self.advance_watermarks(current, layout_current).await,
+                            Err(e) => Err(e),
+                        };
+                        match written {
                             Ok(()) => {
-                                // Sink write committed — now advance the diff base.
-                                self.advance_watermarks(current, layout_current).await?;
                                 let mut live = self.live.lock().unwrap();
                                 for (id, v) in staging {
                                     match v {
@@ -1211,7 +1213,7 @@ impl LoroProjection {
                                 return Ok(ProjectionPass::Converged);
                             }
                             Err(e) => {
-                                // The sink write failed (batch rolled back). Leave
+                                // The sink or sidecar write failed. Leave
                                 // `live`/`last_synced` untouched and force a full
                                 // reseed next pass so the base is rebuilt from truth
                                 // and the change retried — never silently dropped
@@ -1362,7 +1364,7 @@ impl LoroProjection {
         // succeeds, so a failed apply (batch rollback) never advances `live` /
         // `last_synced` ahead of the sink (silent drift). On failure the pass
         // returns `Err` with the base untouched and retries next wake.
-        if let Err(e) = self
+        let written = match self
             .emit_ops(
                 ops,
                 &t0,
@@ -1374,9 +1376,14 @@ impl LoroProjection {
             )
             .await
         {
+            Ok(()) if ungrounded == 0 => self.advance_watermarks(current, layout_current).await,
+            other => other,
+        };
+        if let Err(e) = written {
             // Symmetric with the incremental path's Err arm: record `sink_fail`
             // so a retry pass (which sees only `seeded == false`) is labeled by
-            // its true cause — a sink write failure — not mislabeled `coldboot`.
+            // its true cause — a failed sink or sidecar write — not `coldboot`.
+            self.seeded.store(false, Ordering::SeqCst);
             *self.pending_reseed_reason.lock().unwrap() = Some(FullReason::SinkFail);
             self.disclose_read_model_ahead_of_index(&e);
             return Err(e);
@@ -1393,8 +1400,6 @@ impl LoroProjection {
         if ungrounded > 0 {
             self.seeded.store(false, Ordering::SeqCst);
             *self.pending_reseed_reason.lock().unwrap() = Some(FullReason::Orphan);
-        } else {
-            self.advance_watermarks(current, layout_current).await?;
         }
         if may_seed_live(after_settled, ungrounded) {
             let mut idx = collab.with_read(|doc| Ok(crate::loro_backend::build_tid_index(doc)))?;
@@ -1572,12 +1577,14 @@ impl LoroProjection {
     }
 
     /// Record that the sink reflects both documents up to these heads. Only a
-    /// pass that wrote its rows and withheld nothing may call this: the
-    /// watermarks are what [`Self::is_settled_at`] reads.
+    /// pass that wrote its rows and owes nothing may call this: the watermarks
+    /// are what [`Self::is_settled_at`] reads. A failed sidecar write leaves
+    /// both watermarks where they were.
     async fn advance_watermarks(&self, global: Frontiers, layout: Frontiers) -> Result<()> {
+        self.persist_sidecar(&global).await?;
         *self.last_synced.lock().unwrap() = global;
         *self.layout_last_synced.lock().unwrap() = layout;
-        self.persist_sidecar().await
+        Ok(())
     }
 
     /// Both projected documents: the replicated global tree and the
@@ -1602,13 +1609,12 @@ impl LoroProjection {
     }
 
     #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-    async fn persist_sidecar(&self) -> Result<()> {
-        let bytes = self.last_synced.lock().unwrap().encode();
-        write_sidecar(&self.sidecar_path, &bytes)
+    async fn persist_sidecar(&self, global: &Frontiers) -> Result<()> {
+        write_sidecar(&self.sidecar_path, &global.encode())
     }
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-    async fn persist_sidecar(&self) -> Result<()> {
+    async fn persist_sidecar(&self, _global: &Frontiers) -> Result<()> {
         // wasm32 demo is in-memory; no sidecar persistence.
         Ok(())
     }
