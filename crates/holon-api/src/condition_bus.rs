@@ -311,9 +311,10 @@ pub enum ConditionKind {
     /// The global doc holds more than one live mount of one shared tree: two
     /// devices accepted the same ticket before they synced. Holon uses the
     /// mount with the smallest tree id on every device and does not delete
-    /// the others. `subject` is the shared tree.
+    /// the others. `subject` is the shared tree; a change in the set of
+    /// mounts raises it again.
     ///
-    /// All-clear: none. The duplicates stay until the user deletes them.
+    /// All-clear: the next mount lookup that finds one live mount.
     DuplicateMount {
         canonical: String,
         duplicates: Vec<String>,

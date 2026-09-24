@@ -294,7 +294,7 @@ const DUPLICATE_MOUNT: ConditionProfile = ConditionProfile::new(
     "Share mounted twice",
     icons::WARN,
     ConditionPlacement::Toast,
-    AllClear::UntilRestart,
+    AllClear::RemedyApplied,
     &[],
 );
 

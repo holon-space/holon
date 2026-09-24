@@ -622,53 +622,124 @@ fn walk_to_page(tree: &loro::LoroTree, start: loro::TreeID) -> anyhow::Result<Wa
 /// by every backend over that tree.
 pub type MountCache = Arc<Mutex<MountIndex>>;
 
-/// The canonical mount of each shared tree, valid while no other peer's ops
-/// have arrived since it was built.
+/// The canonical mount of each shared tree. A tree event that creates, moves
+/// or deletes a mount, itself or inside a subtree, invalidates it: local
+/// writes (a batch rollback recreating a mount) and merges alike.
 #[derive(Default)]
 pub struct MountIndex {
-    remote_versions: Option<loro::VersionVector>,
+    /// Address of the `LoroDoc` the subscription watches.
+    doc: usize,
+    subscription: Option<loro::Subscription>,
+    touched: Arc<Mutex<TouchedNodes>>,
+    built: bool,
     canonical: HashMap<String, loro::TreeID>,
-    duplicates: HashMap<String, Vec<loro::TreeID>>,
+    /// Every live mount, in canonical order, of the shared trees that have
+    /// more than one.
+    duplicated: HashMap<String, Vec<loro::TreeID>>,
+    known: HashSet<loro::TreeID>,
 }
 
-/// What a peer other than this doc's own has contributed to it. A merge can
-/// add a mount that no local write made, so a change here rebuilds the index.
-pub(crate) fn remote_versions(doc: &loro::LoroDoc) -> loro::VersionVector {
-    let mut versions = doc.oplog_vv();
-    versions.remove(&doc.peer_id());
-    versions
+/// Targets of the tree events since the last lookup. A burst past the limit
+/// (a large import) only records that one happened.
+#[derive(Default)]
+struct TouchedNodes {
+    nodes: Vec<loro::TreeID>,
+    overflow: bool,
+}
+
+const TOUCHED_LIMIT: usize = 1024;
+
+impl MountIndex {
+    fn watch(&mut self, doc: &loro::LoroDoc, tree: &loro::LoroTree) {
+        let address = std::ptr::from_ref(doc) as usize;
+        if self.subscription.is_some() && self.doc == address {
+            return;
+        }
+        let touched = self.touched.clone();
+        self.subscription = Some(doc.subscribe(
+            &loro::ContainerTrait::id(tree),
+            Arc::new(move |event| {
+                let mut touched = touched.lock().unwrap();
+                for diff in &event.events {
+                    if let loro::event::Diff::Tree(tree_diff) = &diff.diff
+                        && !touched.overflow
+                    {
+                        touched
+                            .nodes
+                            .extend(tree_diff.diff.iter().map(|item| item.target));
+                        if touched.nodes.len() > TOUCHED_LIMIT {
+                            touched.nodes = Vec::new();
+                            touched.overflow = true;
+                        }
+                    }
+                }
+            }),
+        ));
+        self.doc = address;
+        self.built = false;
+    }
+
+    /// A delete reports only the subtree root, so a known mount can die with
+    /// an ancestor; a create or move of a subtree can carry a mount inside.
+    fn mounts_touched(&self, tree: &loro::LoroTree) -> bool {
+        let touched = std::mem::take(&mut *self.touched.lock().unwrap());
+        if touched.overflow {
+            return true;
+        }
+        if touched.nodes.is_empty() {
+            return false;
+        }
+        if self
+            .known
+            .iter()
+            .any(|&mount| node_deleted_now(tree, mount))
+        {
+            return true;
+        }
+        let mut queue = touched.nodes;
+        while let Some(node) = queue.pop() {
+            if self.known.contains(&node) || is_mount_node(tree, node) {
+                return true;
+            }
+            queue.extend(tree.children(node).into_iter().flatten());
+        }
+        false
+    }
 }
 
 /// `stable id -> (shared tree id, TreeID)` for the loaded shared docs. A hit
 /// is checked against its doc, so an unloaded doc or a moved id drops it.
 pub type SharedIdCache = Arc<Mutex<HashMap<String, (String, loro::TreeID)>>>;
 
+/// A change in which mounts of one shared tree are live: the canonical first
+/// and the others after it, or `None` when it is down to one mount again.
+pub(crate) type MountReport<'a> = Option<(loro::TreeID, &'a [loro::TreeID])>;
+
 /// The canonical live mount of `shared_tree_id`, `None` when it has none.
 ///
 /// Pairing refuses mounts only at pair time (ADR 0033), so two paired devices
 /// that accept one ticket before they sync each create a mount, and the
-/// merged doc holds both. The smallest `TreeID` is canonical on every
-/// device and on both paths; the others go to `disclose` when they change.
+/// merged doc holds both. The smallest `TreeID` is canonical on every device
+/// and on both paths; `report` hears each change in the set of duplicates.
 fn mount_node_of(
     doc: &loro::LoroDoc,
     mounts: &MountCache,
     shared_tree_id: &str,
-    disclose: impl Fn(&str, loro::TreeID, &[loro::TreeID]),
+    report: impl Fn(&str, MountReport<'_>),
 ) -> Option<loro::TreeID> {
     let tree = doc.get_tree(TREE_NAME);
-    let versions = remote_versions(doc);
     let mut index = mounts.lock().unwrap();
-    let fresh = index.remote_versions.as_ref() == Some(&versions);
-    if fresh
-        && let Some(&mount) = index.canonical.get(shared_tree_id)
-        && !node_deleted_now(&tree, mount)
-    {
+    index.watch(doc, &tree);
+    let fresh = index.built && !index.mounts_touched(&tree);
+    if fresh && let Some(&mount) = index.canonical.get(shared_tree_id) {
         let info = read_mount_info(&tree, mount);
         assert!(
-            info.as_ref()
-                .is_some_and(|info| info.shared_tree_id == shared_tree_id),
-            "mount cache names {mount:?} for shared tree `{shared_tree_id}`, but that live node \
-             carries {info:?}"
+            !node_deleted_now(&tree, mount)
+                && info
+                    .as_ref()
+                    .is_some_and(|info| info.shared_tree_id == shared_tree_id),
+            "mount cache names {mount:?} for shared tree `{shared_tree_id}`, but that node is \
+             deleted or carries {info:?}"
         );
         return Some(mount);
     }
@@ -685,24 +756,30 @@ fn mount_node_of(
         }
     }
     let mut canonical = HashMap::with_capacity(found.len());
-    let mut duplicates = HashMap::new();
+    let mut duplicated = HashMap::new();
+    let mut known = HashSet::new();
     for (id, mut nodes) in found {
         nodes.sort();
-        let extra = nodes.split_off(1);
-        if !extra.is_empty() {
-            if index.duplicates.get(&id) != Some(&extra) {
-                disclose(&id, nodes[0], &extra);
-            }
-            duplicates.insert(id.clone(), extra);
+        known.extend(nodes.iter().copied());
+        canonical.insert(id.clone(), nodes[0]);
+        if nodes.len() > 1 {
+            duplicated.insert(id, nodes);
         }
-        canonical.insert(id, nodes[0]);
+    }
+    let previous = std::mem::take(&mut index.duplicated);
+    for (id, nodes) in &duplicated {
+        if previous.get(id) != Some(nodes) {
+            report(id, Some((nodes[0], &nodes[1..])));
+        }
+    }
+    for id in previous.keys().filter(|id| !duplicated.contains_key(*id)) {
+        report(id, None);
     }
     let answer = canonical.get(shared_tree_id).copied();
-    *index = MountIndex {
-        remote_versions: Some(versions),
-        canonical,
-        duplicates,
-    };
+    index.built = true;
+    index.canonical = canonical;
+    index.duplicated = duplicated;
+    index.known = known;
     answer
 }
 
@@ -2287,9 +2364,21 @@ impl LoroBackend {
         &self,
         doc: &loro::LoroDoc,
         shared_tree_id: &str,
-        canonical: loro::TreeID,
-        duplicates: &[loro::TreeID],
+        report: MountReport<'_>,
     ) {
+        use holon_api::condition_bus::Condition;
+        use holon_api::condition_bus::ConditionKey;
+        use holon_api::condition_bus::ConditionKind;
+        let Some((canonical, duplicates)) = report else {
+            tracing::info!(shared_tree_id, "shared tree is down to one live mount");
+            if let Some(bus) = &self.condition_bus {
+                bus.clear(&ConditionKey {
+                    subject: shared_tree_id.to_string(),
+                    kind: ConditionKind::DUPLICATE_MOUNT,
+                });
+            }
+            return;
+        };
         let tree = doc.get_tree(TREE_NAME);
         let name = |node: loro::TreeID| match classify(&tree, node) {
             LiveNode::Settled(sid) => EntityUri::block(&sid).to_string(),
@@ -2304,9 +2393,9 @@ impl LoroBackend {
             "shared tree has more than one live mount; the smallest TreeID is used"
         );
         if let Some(bus) = &self.condition_bus {
-            bus.emit(holon_api::condition_bus::Condition {
+            bus.emit(Condition {
                 subject: shared_tree_id.to_string(),
-                reason: holon_api::condition_bus::ConditionKind::DuplicateMount {
+                reason: ConditionKind::DuplicateMount {
                     canonical,
                     duplicates,
                 },
@@ -4253,14 +4342,10 @@ impl LoroBackend {
             (WalkEnd::Root, WriteTarget::Shared { shared_tree_id, .. }) => self
                 .collab_doc
                 .with_read(|doc| {
-                    let mount = mount_node_of(
-                        doc,
-                        &self.mount_cache,
-                        shared_tree_id,
-                        |id, canonical, duplicates| {
-                            self.disclose_duplicate_mounts(doc, id, canonical, duplicates)
-                        },
-                    );
+                    let mount =
+                        mount_node_of(doc, &self.mount_cache, shared_tree_id, |id, report| {
+                            self.disclose_duplicate_mounts(doc, id, report)
+                        });
                     let tree = doc.get_tree(TREE_NAME);
                     Ok(match mount {
                         Some(mount) => OwningPage::Page(Box::new(stored_block_at(&tree, mount)?)),

@@ -209,16 +209,21 @@ impl ConditionKind {
             )),
 
             // Block ids are BODY lines: the user finds and deletes them by id.
+            // The remedy names no mount to delete, so it stays right while the
+            // user works through the list.
             Self::DuplicateMount {
                 canonical,
                 duplicates,
             } => ConditionDetail::with_body(
                 format!(
                     "shared tree {subject} is mounted more than once, because two of your devices \
-                     accepted it before they synced. Holon uses {canonical}; delete these extra \
-                     mounts:"
+                     accepted it before they synced. Holon shows it at {canonical}. To fix it, \
+                     keep one of these mounts and delete the others as blocks; unsharing one \
+                     stops the share for all of them:"
                 ),
-                duplicates.clone(),
+                std::iter::once(canonical.clone())
+                    .chain(duplicates.iter().cloned())
+                    .collect(),
             ),
         }
     }

@@ -372,15 +372,16 @@ pub fn first_mount_below(tree: &LoroTree, root: TreeID) -> Result<Option<TreeID>
     Ok(None)
 }
 
-/// A live mount anywhere in `doc`: a shared doc that holds one is a nested
-/// share (ADR 0028 A7).
-pub fn any_live_mount(doc: &LoroDoc) -> Option<TreeID> {
+/// Every live mount in `doc`: a shared doc that holds one is a nested share
+/// (ADR 0028 A7).
+pub fn live_mounts(doc: &LoroDoc) -> std::collections::HashSet<TreeID> {
     let tree = doc.get_tree(TREE_NAME);
     tree.get_nodes(false)
         .into_iter()
         .filter(|n| !matches!(n.parent, TreeParentId::Deleted | TreeParentId::Unexist))
         .map(|n| n.id)
-        .find(|&node| is_mount_node(&tree, node))
+        .filter(|&node| is_mount_node(&tree, node))
+        .collect()
 }
 
 /// Result of a share_subtree operation: extraction + mount replacement.
