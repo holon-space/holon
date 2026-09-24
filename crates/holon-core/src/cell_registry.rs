@@ -28,6 +28,7 @@ use crate::block_ordering::BlockCreateRequest;
 use crate::cell::Cell;
 use crate::cell::CellBacking;
 use crate::consolidator::Seen;
+use crate::traits::FieldDelta;
 
 /// An op that would remove a shared page, on either side of its share.
 ///
@@ -47,13 +48,41 @@ pub struct ShareExitRefused {
 }
 
 /// What [`EntityCellRegistry::delete_exiting_shares`] did.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TreeDelete {
     /// No cell route holds the entity; the caller deletes it elsewhere.
     NotInTree,
     Deleted,
-    /// Deleted, and at least one share went through its exit.
-    DeletedExitingShares,
+    /// Deleted, and each of these shares, at least one, went through its exit.
+    DeletedExitingShares(Vec<ExitedShare>),
+}
+
+/// A share a delete took off this device.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExitedShare {
+    /// What the user knows the share by.
+    pub handle: EntityUri,
+    pub shared_tree_id: String,
+}
+
+/// The history rows of a delete of `deleted` that exited `exited`: the
+/// deleted block, and each share's `shared-tree-id` going to NULL.
+pub fn share_exiting_delete_changes(deleted: &str, exited: &[ExitedShare]) -> Vec<FieldDelta> {
+    let mut changes = vec![FieldDelta::new(
+        deleted,
+        "id",
+        Value::String(deleted.to_string()),
+        Value::Null,
+    )];
+    changes.extend(exited.iter().map(|share| {
+        FieldDelta::history_only(
+            share.handle.as_str(),
+            holon_api::share_props::SHARED_TREE_ID_PROPERTY,
+            Value::String(share.shared_tree_id.clone()),
+            Value::Null,
+        )
+    }));
+    changes
 }
 
 /// The op a [`ShareExitRefused`] refused.

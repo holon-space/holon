@@ -12,7 +12,8 @@ summary: >-
   could also stop after an irreversible exit without saying so, and an undo
   could rebuild a share that unshare no longer reached. An owner's revoking
   delete could destroy a child created while it ran, and share, accept,
-  unshare and the revoking delete left no row in the op history.
+  unshare, the revoking delete and the revoking delete_subtree left no row
+  in the op history.
 ---
 
 ## Bug
@@ -64,9 +65,17 @@ Found by the round-6 verifier against 9d274aa2 (verify-2 items 2b and 3):
    so the ops that cannot be undone were also the ones nobody could find
    later.
 
-One entry with nine rungs, not nine entries: all have one root cause (the
+Found by the round-7 verifier against cf09e8a0 (verify item D3):
+
+10. **A revoking `delete_subtree` leaves no history.** `delete_subtree`
+    returned `changes: []` when its delete exited a share, so revoking a share
+    by deleting its subtree wrote no `block_history` row. The refusal of an
+    owner's bare delete of a shared page with children points users to
+    `delete_subtree`.
+
+One entry with ten rungs, not ten entries: all have one root cause (the
 removal of a share's mount or page was not tied to that share's exit) and
-one chokepoint fixes them. Nine entries would count one defect nine times in
+one chokepoint fixes them. Ten entries would count one defect ten times in
 the gap distribution.
 
 ## Root cause
@@ -133,7 +142,10 @@ cannot resolve the doc.
 The revoking delete reports the deleted handle (`id` → NULL) and each exited
 share (`shared-tree-id` → NULL); share and accept report the placed share
 (`share_placed`, loro_share_backend.rs:85) and unshare the removed one (rung
-9). Undo is keyed on `UndoAction::Undo` alone, so these results stay
+9). `delete_subtree` reports the same rows (rung 10): the registry's
+`TreeDelete::DeletedExitingShares` carries the exited shares, and both deletes
+build their rows with `share_exiting_delete_changes` (holon-core
+cell_registry.rs). Undo is keyed on `UndoAction::Undo` alone, so these results stay
 irreversible and the engine only adds their history rows.
 
 Pairing wipes the whole global tree without any exit. It is refused while
@@ -166,3 +178,7 @@ shipped wiring and `block_history`) and
 `accepting_and_unsharing_report_the_share_they_change`. The rung 8 test and
 the history test are red on 9d274aa2, and each of the five fixes (leaf check, delete, share,
 accept, unshare rows) turns its test red again when removed.
+
+Rung 10: `revoking_a_share_by_deleting_its_subtree_is_in_the_history`
+(irreversible_share_ops_record_history.rs), red on cf09e8a0 with only the
+`share_subtree` row for the page.

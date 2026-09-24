@@ -1,5 +1,6 @@
-//! Sharing a page and revoking it by deleting the page cannot be undone, and
-//! both still land in the queryable op history (`block_history`, ADR 0024 P8).
+//! Sharing a page and revoking it by deleting the page or its subtree cannot be
+//! undone, and both still land in the queryable op history (`block_history`,
+//! ADR 0024 P8).
 
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -22,6 +23,10 @@ const PAGE: &str = "block:revoke-probe-page";
 
 const VAULT_ORG: &str = "#+ID: revoke-probe-doc\n* Revoke probe :Page:\n:PROPERTIES:\n:ID: \
                          revoke-probe-page\n:END:\n";
+
+const VAULT_ORG_WITH_CHILD: &str = "#+ID: revoke-probe-doc\n* Revoke probe :Page:\n:PROPERTIES:\n:ID: \
+                                    revoke-probe-page\n:END:\n** Child\n:PROPERTIES:\n:ID: \
+                                    revoke-probe-child\n:END:\n";
 
 async fn boot(dir: &std::path::Path) -> (Arc<BackendEngine>, Arc<FrontendSession>) {
     let config = HolonConfig {
@@ -94,6 +99,32 @@ async fn sharing_a_page_and_revoking_it_are_both_in_the_history() {
     assert!(
         revoked.iter().any(|op| op == "delete"),
         "the revoking delete left no history row: {revoked:?}"
+    );
+    assert!(
+        !engine.can_undo().await,
+        "neither the share nor its revoke can be undone"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn revoking_a_share_by_deleting_its_subtree_is_in_the_history() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("probe.org"), VAULT_ORG_WITH_CHILD)
+        .expect("write the probe vault");
+    let (engine, _session) = boot(dir.path()).await;
+
+    user_op(
+        &engine,
+        "tree",
+        "share_subtree",
+        &[("id", PAGE), ("retention", "none")],
+    )
+    .await;
+    user_op(&engine, "block", "delete_subtree", &[("id", PAGE)]).await;
+    let revoked = ops_recorded_for(&engine, PAGE).await;
+    assert!(
+        revoked.iter().any(|op| op == "delete_subtree"),
+        "the revoking delete_subtree left no history row: {revoked:?}"
     );
     assert!(
         !engine.can_undo().await,

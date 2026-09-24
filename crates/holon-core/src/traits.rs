@@ -2578,9 +2578,9 @@ where
     #[holon_macros::boundary_behavior(private_only)]
     async fn delete_subtree(&self, id: &EntityUri) -> Result<OperationResult> {
         match delete_exiting_shares_via_cells(self.cells(), id).await? {
-            crate::cell_registry::TreeDelete::DeletedExitingShares => {
+            crate::cell_registry::TreeDelete::DeletedExitingShares(exited) => {
                 return Ok(OperationResult::declared_irreversible(
-                    Vec::new(),
+                    crate::cell_registry::share_exiting_delete_changes(id.as_str(), &exited),
                     "delete_subtree of a subtree holding a share's mount takes the share off \
                      this device: a share received is left, a share made here is revoked; \
                      restoring either takes a new ticket",

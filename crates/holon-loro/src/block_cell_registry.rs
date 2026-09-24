@@ -727,7 +727,12 @@ impl EntityCellRegistry for BlockCellRegistry {
         Ok(if exited.is_empty() {
             TreeDelete::Deleted
         } else {
-            TreeDelete::DeletedExitingShares
+            TreeDelete::DeletedExitingShares(
+                exited
+                    .iter()
+                    .map(crate::loro_backend::RemovedShare::exited)
+                    .collect(),
+            )
         })
     }
 

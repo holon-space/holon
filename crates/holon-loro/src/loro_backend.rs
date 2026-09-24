@@ -2320,6 +2320,15 @@ pub struct RemovedShare {
     pub role: crate::shared_tree::MountRole,
 }
 
+impl RemovedShare {
+    pub fn exited(&self) -> holon_core::ExitedShare {
+        holon_core::ExitedShare {
+            handle: self.handle.clone(),
+            shared_tree_id: self.shared_tree_id.clone(),
+        }
+    }
+}
+
 /// Where a resolved write must land. A block's live node lives in exactly one
 /// doc: the global tree, the device-local layout tree, or — once pruned at
 /// share time — a shared subtree doc. Writing through the wrong doc silently

@@ -7416,9 +7416,11 @@ mod tests {
         let fixture = PageShareFixture::accepted().await;
         let registry = fixture.registry_b().await;
         let parent = EntityUri::block("root-b");
-        assert_eq!(
-            registry.delete_exiting_shares(&parent).await.unwrap(),
-            TreeDelete::DeletedExitingShares,
+        assert!(
+            matches!(
+                registry.delete_exiting_shares(&parent).await.unwrap(),
+                TreeDelete::DeletedExitingShares(_)
+            ),
             "root-b holds a received page, so deleting it leaves that page's share"
         );
 
@@ -7587,9 +7589,11 @@ mod tests {
         assert!(fixture.b.manager.get_doc(&fixture.shared_tree_id).is_some());
 
         let registry = fixture.registry_b().await;
-        assert_eq!(
-            registry.delete_exiting_shares(&mount).await.unwrap(),
-            TreeDelete::DeletedExitingShares,
+        assert!(
+            matches!(
+                registry.delete_exiting_shares(&mount).await.unwrap(),
+                TreeDelete::DeletedExitingShares(_)
+            ),
             "the mount is the page's placement, so deleting it leaves the page's share"
         );
         fixture.assert_b_left_the_share().await;
@@ -7623,9 +7627,11 @@ mod tests {
         );
 
         let registry = registry_of(a).await;
-        assert_eq!(
-            registry.delete_exiting_shares(&ancestor).await.unwrap(),
-            TreeDelete::DeletedExitingShares,
+        assert!(
+            matches!(
+                registry.delete_exiting_shares(&ancestor).await.unwrap(),
+                TreeDelete::DeletedExitingShares(_)
+            ),
             "root-a holds the owner's mount of the share, so deleting it revokes the share"
         );
         assert!(!has_mount(a, &fixture.shared_tree_id).await);
@@ -7677,10 +7683,10 @@ mod tests {
 
         let registry = registry_of(&fixture.a).await;
         let ancestor = EntityUri::block("root-a");
-        assert_eq!(
+        assert!(matches!(
             registry.delete_exiting_shares(&ancestor).await.unwrap(),
-            TreeDelete::DeletedExitingShares
-        );
+            TreeDelete::DeletedExitingShares(_)
+        ));
 
         assert_eq!(
             fixture.b.sync_with_peers(&stid).await.unwrap(),
@@ -7741,9 +7747,11 @@ mod tests {
         );
 
         let registry = registry_of(&b).await;
-        assert_eq!(
-            registry.delete_exiting_shares(&ancestor).await.unwrap(),
-            TreeDelete::DeletedExitingShares,
+        assert!(
+            matches!(
+                registry.delete_exiting_shares(&ancestor).await.unwrap(),
+                TreeDelete::DeletedExitingShares(_)
+            ),
             "root-b holds a received block share, so deleting it leaves the share"
         );
         assert!(!has_mount(&b, &stid).await);
@@ -8066,7 +8074,10 @@ mod tests {
                 "second-page's share was revoked while root-a was not deleted, undisclosed: {e}"
             );
         }
-        assert_eq!(deleted.unwrap(), TreeDelete::DeletedExitingShares);
+        assert!(matches!(
+            deleted.unwrap(),
+            TreeDelete::DeletedExitingShares(_)
+        ));
         assert_owner_revoked(&a, &second, "block:second-page").await;
         assert!(!has_mount(&a, &first).await);
         assert!(a.manager.get_doc(&first).is_none());
