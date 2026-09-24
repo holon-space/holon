@@ -24,14 +24,19 @@
 //! driven faster than it drains paints a violation per keystroke while being
 //! perfectly healthy (five banners off one queue ramp, BugFunnel 2026-08-31).
 //! Per Martin's ruling D50.a the layer accumulates events into a
-//! [`holon_api::latency_slo::SloWindow`] and reports its two rungs — service
-//! p95 and saturated drain rate. That is the SAME type the land gate scores
-//! (`crates/holon-integration-tests/tests/latency_slo_gate.rs`), so the banner
-//! and the gate cannot disagree about either number.
+//! [`holon_api::latency_slo::SloWindow`] and reports its service p95 — the SAME
+//! type and number the land gate scores
+//! (`crates/holon-integration-tests/tests/latency_slo_gate.rs`).
 //!
-//! Violations are edge-triggered: one banner when a rung turns red, not one per
-//! event. Boundary disclosure: a rung below its sample floor is `Unjudged` and
-//! paints nothing — the window has not seen enough to accuse the pipeline.
+//! Throughput is a disclosure here, never a violation (Martin's ruling
+//! D207.a): the passive drain estimate can misjudge a trace, and only the land
+//! gate's controlled drain test judges capacity. An estimate below the floor
+//! paints a WARNING banner that says so.
+//!
+//! Banners are edge-triggered: one when a rung turns red or the estimate drops
+//! below the floor, not one per event. A rung below its sample floor is
+//! `Unjudged` and paints nothing — the window has not seen enough to accuse
+//! the pipeline.
 //!
 //! # Two origins, two windows
 //!
@@ -58,6 +63,7 @@ use std::time::Instant;
 use std::time::SystemTime;
 
 use holon_api::latency_slo::ClockOrigin;
+use holon_api::latency_slo::DrainEstimate;
 use holon_api::latency_slo::E2eSample;
 use holon_api::latency_slo::OriginWindows;
 use holon_api::latency_slo::QuietBatches;
@@ -89,7 +95,7 @@ pub struct LatencySloLayer {
     /// percentile and vice versa (D119.a) — the routing is the type's job, not
     /// a filter this layer has to remember.
     windows: Mutex<OriginWindows>,
-    /// Which rungs were red at the last evaluation, PER ORIGIN, so a sustained
+    /// Which banners were up at the last evaluation, PER ORIGIN, so a sustained
     /// breach paints one banner rather than one per delivered row — and a
     /// facade breach cannot suppress the UI banner by sharing its edge.
     red: Mutex<RedByOrigin>,
@@ -98,7 +104,7 @@ pub struct LatencySloLayer {
 #[derive(Default, Clone, Copy, PartialEq)]
 struct RedRungs {
     service: bool,
-    throughput: bool,
+    drain_warned: bool,
 }
 
 #[derive(Default)]
@@ -129,24 +135,25 @@ impl LatencySloLayer {
         }
     }
 
-    /// Add one delivery to the window and paint a banner for each rung that
-    /// has just turned red. A rung already red stays red silently; a rung that
-    /// recovers clears its edge so a later breach speaks again.
+    /// Add one delivery to the window and paint a banner for the service rung
+    /// or the drain estimate when it has just turned. One already up stays up
+    /// silently; one that recovers clears its edge so a later breach speaks
+    /// again.
     fn record_and_judge(&self, sample: E2eSample) {
         let origin = sample.origin;
-        let (service, throughput, report) = {
+        let (service, drain, report) = {
             let mut windows = self.windows.lock().expect("latency-slo window poisoned");
             windows.record(sample);
             let window = windows.window(origin);
             (
                 window.service_verdict(),
-                window.throughput_verdict(),
+                window.drain_estimate(),
                 window.report(),
             )
         };
         let now = RedRungs {
             service: service.is_fail(),
-            throughput: throughput.is_fail(),
+            drain_warned: drain.is_below(),
         };
         let mut red = self.red.lock().expect("latency-slo edge state poisoned");
         let slot = red.get_mut(origin);
@@ -167,14 +174,15 @@ impl LatencySloLayer {
                 self.slo_ms,
             ));
         }
-        if now.throughput && !was.throughput {
-            let RungVerdict::Fail { measured, n } = throughput else {
-                unreachable!("is_fail() implies Fail")
+        if now.drain_warned && !was.drain_warned {
+            let DrainEstimate::Below { rate, passes, .. } = drain else {
+                unreachable!("is_below() implies Below")
             };
             self.raise(format!(
-                "[latency-slo] THROUGHPUT (origin={origin_label}) {measured:.1} writes/s while \
-                 saturated over {n} intervals (floor: {THROUGHPUT_FLOOR_WRITES_PER_SEC:.1}/s). \
-                 {report}",
+                "[latency-slo] WARNING drain estimate (origin={origin_label}) {rate:.1} writes/s \
+                 below the {THROUGHPUT_FLOOR_WRITES_PER_SEC:.1}/s floor over {passes} saturated \
+                 passes — a disclosure, not a verdict; the land gate's drain test judges \
+                 capacity. {report}",
             ));
         }
     }
@@ -591,17 +599,17 @@ mod tests {
         assert_eq!(fired, 0, "unscoreable samples must not reach a verdict");
     }
 
-    /// **The THROUGHPUT banner branch** (`record_and_judge`'s second arm).
-    /// Every other test here exercises the service branch, so without this one
-    /// the drain-rate half of the oracle could stop raising entirely and no
-    /// test would notice.
+    /// **The drain-estimate WARNING branch** (`record_and_judge`'s second
+    /// arm). Every other test here exercises the service branch, so without
+    /// this one the disclosure could stop raising entirely and no test would
+    /// notice. The banner must say it is a disclosure, not a verdict.
     ///
     /// Drives a saturated stretch retiring one delivery per 150ms — ~6.7
     /// writes/s, under the floor: 20 writes dispatched together, each `ms`
     /// counting back to that one dispatch.
     #[test]
-    fn a_slow_drain_paints_a_throughput_banner() {
-        let fired = violations_around("THROUGHPUT", |layer| {
+    fn a_slow_drain_estimate_paints_a_warning() {
+        let fired = violations_around("WARNING drain estimate", |layer| {
             let subscriber = tracing_subscriber::registry().with(layer);
             tracing::subscriber::with_default(subscriber, || {
                 for i in 0..20u64 {
@@ -630,7 +638,7 @@ mod tests {
         });
         assert_eq!(
             fired, 1,
-            "a sustained slow drain must raise the THROUGHPUT banner exactly once"
+            "a sustained slow drain estimate must raise the WARNING banner exactly once"
         );
     }
 

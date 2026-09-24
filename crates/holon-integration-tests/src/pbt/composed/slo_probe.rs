@@ -14,8 +14,10 @@
 //! it judges.
 //!
 //! Scoring goes through the same `SloWindow` the runtime `latency-slo` oracle
-//! uses (`holon_oracles::latency`), which is the point: the banner the app
-//! paints and the gate that fails the build are the same two numbers.
+//! uses (`holon_oracles::latency`), which is the point: the service p95 the app
+//! paints and the one that fails the build are the same number. The window's
+//! drain estimate is a disclosure only; the gate's drain test reads the
+//! window's samples directly.
 
 use std::sync::Mutex;
 use std::sync::OnceLock;

@@ -15,16 +15,15 @@
 //!    were alone in the pipeline for their whole life (see
 //!    [`E2eSample::is_service_time`]), so no sample carries another
 //!    interaction's wait. Budget: [`SERVICE_TIME_SLO_MS`].
-//! 2. **Throughput** — [`SloWindow::drain_rate_per_sec`]. The pipeline's
-//!    CAPACITY: writes retired per second over busy periods of at least
-//!    [`MIN_SATURATED_PASSES`] consecutive passes, judged only where the rate
-//!    can show capacity — arrivals at or above the floor, or passes that left
-//!    queued work behind. An idle gap ends a busy period. Floor:
-//!    [`THROUGHPUT_FLOOR_WRITES_PER_SEC`].
+//! 2. **Throughput** — the pipeline's CAPACITY against
+//!    [`THROUGHPUT_FLOOR_WRITES_PER_SEC`]. The verdict is the controlled drain
+//!    test in [`crate::latency_drain`] (Martin's ruling D207.a).
+//!    [`SloWindow::drain_estimate`] infers the drain rate from whatever traffic
+//!    a window holds; it is a DISCLOSURE only and never a verdict.
 //!
-//! Each rung reports [`RungVerdict::Unjudged`] below its sample floor rather
-//! than passing on thin evidence: a gate that goes green because it collected
-//! four samples is the failure mode this module exists to prevent.
+//! The service rung reports [`RungVerdict::Unjudged`] below its sample floor
+//! rather than passing on thin evidence: a gate that goes green because it
+//! collected four samples is the failure mode this module exists to prevent.
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -40,44 +39,25 @@ pub use crate::latency_e2e::Superseded;
 /// samples are eligible to be scored against it.
 pub const SERVICE_TIME_SLO_MS: u64 = 200;
 
-/// Throughput floor: writes per second the pipeline must retire under a burst.
+/// Throughput floor: writes per second the pipeline must retire, as judged by
+/// the drain test in [`crate::latency_drain`].
 ///
-/// **10/s = 100ms per write. REPORT-ONLY, and under-calibrated — see below.**
-///
-/// Calibrated on the environment the gate runs in, not the one the bug was
-/// found in: the ruling cites ~53 writes/s from a debug GPUI app, but the
-/// headless harness carries OTel span layers and its own runtime, so only its
-/// numbers can fail a build.
-///
-/// Observed by `latency_slo_rung_throughput_floor` (test profile, the
-/// sustained drive, the busy-period estimator): **56.5 · 58.7 · 61.7 · 68.6 ·
-/// 74.0 writes/s**.
-/// Observations under the earlier wave drive and interval estimators are void:
-/// those estimators could inflate a rate by charging a pass to a 1ms span.
-///
-/// The rate is REPORT-ONLY: `latency_slo_rung_throughput_floor` prints it and
-/// never fails on it. 10/s is a floor-of-last-resort, below every observation,
-/// whose only job is to give the printed line a reference point.
-///
-/// **Promotion condition.** Gate this floor only once five admitted runs on a
-/// quiet host agree within ~1.6x; then set the floor to the worst of those
-/// divided by 1.6, per `docs/Testing/latency-ceilings.txt`. The scorer's
-/// falsification is `throughput_rung_fails_a_slow_drain` and the false-red
-/// pins beside it.
+/// 10/s = 100ms per write. The passive estimator observed 56.5 · 58.7 · 61.7 ·
+/// 68.6 · 74.0 writes/s on the gate's earlier sustained drive (test profile).
 pub const THROUGHPUT_FLOOR_WRITES_PER_SEC: f64 = 10.0;
 
 /// Service samples required before the p95 rung will return a verdict. The
 /// ruling names n ≥ 30; a p95 over fewer samples is one sample's opinion.
 pub const MIN_SERVICE_SAMPLES: usize = 30;
 
-/// Saturated passes a busy period needs before the throughput rung judges it.
+/// Saturated passes a busy period needs before the drain estimate judges it.
 ///
 /// One slow pass, or a burst of two writes, is a SERVICE event. Three
 /// consecutive passes with work queued behind each is sustained load.
-pub const MIN_SATURATED_PASSES: usize = 3;
+const MIN_SATURATED_PASSES: usize = 3;
 
-/// Slow the CDC delivery actor on purpose, so the rungs above can be shown to
-/// have teeth.
+/// Slow the CDC delivery actor on purpose, so the service rung and the drain
+/// test can be shown to have teeth.
 ///
 /// A gate nobody has watched fail is a decoration. The obvious way to prove
 /// these two — a uniform delay switched on by the environment — does not work
@@ -101,7 +81,7 @@ pub mod fault_injection {
 
     /// Delay every subsequent CDC delivery by `ms` PER ROW it carries (`0`
     /// disarms) — so the armed pipeline behaves as though each write costs
-    /// `ms` more, which is what the throughput rung measures.
+    /// `ms` more, which caps its capacity at `1000 / ms` writes/s.
     pub fn set_delivery_delay_ms(ms: u64) {
         DELIVERY_DELAY_MS.store(ms, Ordering::Relaxed);
     }
@@ -134,7 +114,7 @@ pub struct E2eSample {
     /// An event over the whole interval, not a reading at an instant — see
     /// `holon_api::latency_e2e`'s `Pending::contended`.
     pub contended: bool,
-    /// When the delivery closed. The throughput rung's clock.
+    /// When the delivery closed.
     pub delivered_at: Instant,
     /// The correlator delivery that closed this sample. Samples one applied
     /// batch retired share it; their `delivered_at` differ by the emit loop's
@@ -282,7 +262,7 @@ impl FeedDrain<'_> {
     }
 }
 
-/// The throughput rung's reading of a window.
+/// The drain estimator's reading of a window.
 struct Drain<'a> {
     judged: Vec<FeedDrain<'a>>,
     /// The most saturated passes any busy period reached, judged or not.
@@ -309,6 +289,37 @@ pub enum RungVerdict {
 impl RungVerdict {
     pub fn is_fail(&self) -> bool {
         matches!(self, RungVerdict::Fail { .. })
+    }
+}
+
+/// The passive drain estimator's reading of a window — a DISCLOSURE, never a
+/// verdict (Martin's ruling D207.a). It infers capacity from whatever traffic
+/// the window happened to hold, and adversarial traces have misjudged it both
+/// ways. It has no failing variant on purpose: the verdict is the controlled
+/// drain test in [`crate::latency_drain`].
+#[derive(Clone, Debug, PartialEq)]
+pub enum DrainEstimate {
+    AtOrAbove {
+        rate: f64,
+        passes: usize,
+        deliveries: usize,
+    },
+    Below {
+        rate: f64,
+        passes: usize,
+        deliveries: usize,
+    },
+    /// No busy period was judged. `longest_busy_period` is the longest run of
+    /// saturated passes found.
+    Unjudged {
+        longest_busy_period: usize,
+        needed: usize,
+    },
+}
+
+impl DrainEstimate {
+    pub fn is_below(&self) -> bool {
+        matches!(self, DrainEstimate::Below { .. })
     }
 }
 
@@ -479,7 +490,7 @@ impl SloWindow {
     }
 
     /// Each feed's source and passes, ordered by when they landed, quiet ones
-    /// included. The batch — not the sample — is the unit this rung reasons
+    /// included. The batch — not the sample — is the unit this estimate reasons
     /// about: every closure one applied batch made retired at the same moment.
     fn passes_by_feed(&self) -> BTreeMap<u64, (&str, Vec<Pass>)> {
         let mut by_batch: HashMap<u64, (u64, &str, &QuietBatches, Pass)> = HashMap::new();
@@ -604,7 +615,6 @@ impl SloWindow {
                 elapsed: Duration::ZERO,
             };
             let mut judge = |a: usize, b: usize| {
-                longest_busy_period = longest_busy_period.max(b - a);
                 if b - a >= MIN_SATURATED_PASSES {
                     drain.deliveries += passes[a + 1..=b]
                         .iter()
@@ -615,6 +625,7 @@ impl SloWindow {
                 }
             };
             for (a, b) in runs(0, passes.len().saturating_sub(1), saturated) {
+                longest_busy_period = longest_busy_period.max(b - a);
                 if arrivals_reach_floor(a, b) {
                     judge(a, b);
                 } else {
@@ -638,37 +649,31 @@ impl SloWindow {
         }
     }
 
-    /// RUNG 2 — the slowest judged feed's drain rate, in writes per second.
-    pub fn drain_rate_per_sec(&self) -> Option<f64> {
-        self.drain().worst().map(FeedDrain::rate_per_sec)
-    }
-
-    /// Saturated passes across every judged busy period — the verdict's `n`.
-    pub fn drain_pass_count(&self) -> usize {
-        self.drain().judged.iter().map(|d| d.passes).sum()
-    }
-
-    /// Interactions retired by those passes, superseded ones included.
-    pub fn drain_delivery_count(&self) -> usize {
-        self.drain().judged.iter().map(|d| d.deliveries).sum()
-    }
-
-    /// Each feed with a judged busy period is judged on its own; the rung
-    /// fails when the slowest of them is below the floor.
-    pub fn throughput_verdict(&self) -> RungVerdict {
+    /// The slowest judged feed's drain rate. A disclosure: see
+    /// [`DrainEstimate`].
+    pub fn drain_estimate(&self) -> DrainEstimate {
         let drain = self.drain();
-        let n = drain.judged.iter().map(|d| d.passes).sum();
+        let passes = drain.judged.iter().map(|d| d.passes).sum();
+        let deliveries = drain.judged.iter().map(|d| d.deliveries).sum();
         let Some(worst) = drain.worst() else {
-            return RungVerdict::Unjudged {
-                n: drain.longest_busy_period,
+            return DrainEstimate::Unjudged {
+                longest_busy_period: drain.longest_busy_period,
                 needed: MIN_SATURATED_PASSES,
             };
         };
-        let measured = worst.rate_per_sec();
-        if measured >= self.floor_per_sec {
-            RungVerdict::Pass { measured, n }
+        let rate = worst.rate_per_sec();
+        if rate >= self.floor_per_sec {
+            DrainEstimate::AtOrAbove {
+                rate,
+                passes,
+                deliveries,
+            }
         } else {
-            RungVerdict::Fail { measured, n }
+            DrainEstimate::Below {
+                rate,
+                passes,
+                deliveries,
+            }
         }
     }
 
@@ -701,20 +706,29 @@ impl SloWindow {
             .drain()
             .worst()
             .map_or(String::new(), |d| format!(", slowest source {}", d.source));
-        let throughput = match self.throughput_verdict() {
-            RungVerdict::Pass { measured, n } => format!(
-                "drain {measured:.1}/s >= {:.1}/s over {n} saturated passes ({} deliveries{worst_source})",
+        let throughput = match self.drain_estimate() {
+            DrainEstimate::AtOrAbove {
+                rate,
+                passes,
+                deliveries,
+            } => format!(
+                "drain estimate (disclosure) {rate:.1}/s >= {:.1}/s over {passes} saturated passes ({deliveries} deliveries{worst_source})",
                 self.floor_per_sec,
-                self.drain_delivery_count(),
             ),
-            RungVerdict::Fail { measured, n } => format!(
-                "drain {measured:.1}/s BELOW {:.1}/s over {n} saturated passes ({} deliveries{worst_source})",
+            DrainEstimate::Below {
+                rate,
+                passes,
+                deliveries,
+            } => format!(
+                "drain estimate (disclosure) {rate:.1}/s BELOW {:.1}/s over {passes} saturated passes ({deliveries} deliveries{worst_source})",
                 self.floor_per_sec,
-                self.drain_delivery_count(),
             ),
-            RungVerdict::Unjudged { n, needed } => {
-                format!("drain rate unjudged (longest busy period {n} saturated passes < {needed})")
-            }
+            DrainEstimate::Unjudged {
+                longest_busy_period,
+                needed,
+            } => format!(
+                "drain estimate (disclosure) unjudged (no busy period of {needed}+ saturated passes was judged; longest {longest_busy_period})"
+            ),
         };
         format!(
             "[origin={}] {service}{spread}{excluded} | {throughput}",
@@ -902,7 +916,10 @@ mod tests {
         // Same events, judged the new way: no service verdict is even offered.
         assert_eq!(w.service_sample_count(), 0);
         // Same events, same pipeline: 10ms per write is 100/s, far above floor.
-        assert!(matches!(w.throughput_verdict(), RungVerdict::Pass { .. }));
+        assert!(matches!(
+            w.drain_estimate(),
+            DrainEstimate::AtOrAbove { .. }
+        ));
     }
 
     /// A write of source `block`, dispatched and landed at the given offsets
@@ -940,33 +957,52 @@ mod tests {
         }
     }
 
+    /// The estimate's rate, or `None` when nothing was judged.
+    fn rate(w: &SloWindow) -> Option<f64> {
+        match w.drain_estimate() {
+            DrainEstimate::AtOrAbove { rate, .. } | DrainEstimate::Below { rate, .. } => Some(rate),
+            DrainEstimate::Unjudged { .. } => None,
+        }
+    }
+
+    /// Saturated passes and deliveries across every judged busy period.
+    fn judged(w: &SloWindow) -> (usize, usize) {
+        match w.drain_estimate() {
+            DrainEstimate::AtOrAbove {
+                passes, deliveries, ..
+            }
+            | DrainEstimate::Below {
+                passes, deliveries, ..
+            } => (passes, deliveries),
+            DrainEstimate::Unjudged { .. } => (0, 0),
+        }
+    }
+
     fn assert_unjudged(w: &SloWindow, longest: usize) {
         assert_eq!(
-            w.throughput_verdict(),
-            RungVerdict::Unjudged {
-                n: longest,
+            w.drain_estimate(),
+            DrainEstimate::Unjudged {
+                longest_busy_period: longest,
                 needed: MIN_SATURATED_PASSES
             },
             "{}",
             w.report()
         );
-        assert_eq!(w.drain_rate_per_sec(), None);
     }
 
-    fn assert_fails_at(w: &SloWindow, rate: f64, passes: usize) {
-        assert_eq!(
-            w.throughput_verdict(),
-            RungVerdict::Fail {
-                measured: w.drain_rate_per_sec().expect("a judged busy period"),
-                n: passes
-            },
-            "{}",
-            w.report()
-        );
-        let measured = w.drain_rate_per_sec().expect("a judged busy period");
+    fn assert_below_at(w: &SloWindow, expected: f64, passes: usize) {
+        let DrainEstimate::Below {
+            rate,
+            passes: judged,
+            ..
+        } = w.drain_estimate()
+        else {
+            panic!("expected a drain estimate below the floor: {}", w.report());
+        };
+        assert_eq!(judged, passes, "{}", w.report());
         assert!(
-            (measured - rate).abs() < 0.01,
-            "expected {rate}/s, got {measured}/s"
+            (rate - expected).abs() < 0.01,
+            "expected {expected}/s, got {rate}/s"
         );
     }
 
@@ -992,9 +1028,8 @@ mod tests {
                 w.record(write(t0, 0, 300_000 * (pass + 1) + i, pass));
             }
         }
-        assert_eq!(w.drain_pass_count(), 3);
-        assert_eq!(w.drain_delivery_count(), 30);
-        let rate = w.drain_rate_per_sec().expect("a judged busy period");
+        assert_eq!(judged(&w), (3, 30));
+        let rate = rate(&w).expect("a judged busy period");
         assert!((rate - 30.0 / 0.9).abs() < 0.01, "got {rate}");
     }
 
@@ -1032,7 +1067,7 @@ mod tests {
         let t0 = Instant::now();
         w.record(write(t0, 50_000, 100_000, 1));
         w.record(write(t0, 10_000, 200_000, 2));
-        assert_unjudged(&w, 0);
+        assert_unjudged(&w, 1);
     }
 
     /// Probe M2's fixture. A write whose dispatch cannot be placed before the
@@ -1070,7 +1105,7 @@ mod tests {
             w.record(write(t0, start, start + 5_000, 2 * round));
             w.record(write(t0, start + 1_000, start + 305_000, 2 * round + 1));
         }
-        assert_unjudged(&w, 0);
+        assert_unjudged(&w, 1);
     }
 
     /// Probe P2. A clock that never delivers holds no busy period open: the
@@ -1094,7 +1129,7 @@ mod tests {
         let mut w = SloWindow::default();
         let t0 = Instant::now();
         serial(&mut w, t0, 0, 40, 300, 1, 0);
-        assert_unjudged(&w, 0);
+        assert_unjudged(&w, 39);
     }
 
     /// Probe Q2. Arrivals every 299ms against a 300ms serial pipeline: the
@@ -1117,9 +1152,9 @@ mod tests {
             w
         };
         for n in [40u64, 150, 400] {
-            assert_unjudged(&record(n), 0);
+            assert_unjudged(&record(n), n as usize - 1);
         }
-        assert_fails_at(&record(700), 1000.0 / 300.0, 100);
+        assert_below_at(&record(700), 1000.0 / 300.0, 100);
     }
 
     /// Probe Q3. Two writes together through a serial 300ms pipeline, three
@@ -1133,7 +1168,7 @@ mod tests {
             w.record(write(t0, start, start + 300_000, 2 * round));
             w.record(write(t0, start, start + 600_000, 2 * round + 1));
         }
-        assert_unjudged(&w, 0);
+        assert_unjudged(&w, 1);
     }
 
     /// Probe Q4. A slow head alone for 300ms and a cheap write that joins 1ms
@@ -1147,7 +1182,7 @@ mod tests {
             w.record(write(t0, start, start + 300_000, 2 * round));
             w.record(write(t0, start + 1_000, start + 301_000, 2 * round + 1));
         }
-        assert_unjudged(&w, 0);
+        assert_unjudged(&w, 1);
     }
 
     /// Probe "leftover at the landing instant": write `k` is dispatched as
@@ -1162,7 +1197,7 @@ mod tests {
             let dispatched = 300_000 * k.saturating_sub(1);
             w.record(write(t0, dispatched, 300_000 * (k + 1), k));
         }
-        assert_unjudged(&w, 0);
+        assert_unjudged(&w, 5);
     }
 
     /// [`MIN_SATURATED_PASSES`] is the line between a burst and sustained
@@ -1174,9 +1209,9 @@ mod tests {
         for k in 0..5u64 {
             w.record(write(t0, 0, 300_000 * (k + 1), k));
         }
-        assert_unjudged(&w, 2);
+        assert_unjudged(&w, 4);
         w.record(write(t0, 0, 1_800_000, 5));
-        assert_fails_at(&w, 1000.0 / 300.0, 3);
+        assert_below_at(&w, 1000.0 / 300.0, 3);
     }
 
     /// An idle gap ends a busy period. Two short ones either side of it are
@@ -1193,12 +1228,12 @@ mod tests {
         let mut w = SloWindow::default();
         burst(&mut w, 0, 5, 0);
         burst(&mut w, 10_000, 5, 10);
-        assert_unjudged(&w, 2);
+        assert_unjudged(&w, 4);
 
         let mut w = SloWindow::default();
         burst(&mut w, 0, 6, 0);
         burst(&mut w, 10_000, 6, 10);
-        assert_fails_at(&w, 1000.0 / 300.0, 6);
+        assert_below_at(&w, 1000.0 / 300.0, 6);
     }
 
     /// Passes are sequenced per source: a subscriber applies its own batches in
@@ -1218,7 +1253,7 @@ mod tests {
                 ..write(t0, 150_000, 160_000 + 10_000 * k, 100 + k)
             });
         }
-        assert_fails_at(&w, 1000.0 / 300.0, 7);
+        assert_below_at(&w, 1000.0 / 300.0, 7);
         assert!(
             w.report().contains("slowest source block"),
             "{}",
@@ -1248,7 +1283,7 @@ mod tests {
             ),
             ..write(t0, 1_900_000, closed_at, 6)
         });
-        assert_unjudged(&w, 0);
+        assert_unjudged(&w, 5);
     }
 
     /// One keystroke every `gap_ms` to ONE block through a serial subscriber
@@ -1285,12 +1320,8 @@ mod tests {
 
     fn assert_arrival_limited(gap: u64, pass: u64) {
         let w = typed_on_one_block(gap, pass, 400);
-        assert_eq!(
-            w.throughput_verdict(),
-            RungVerdict::Unjudged {
-                n: 0,
-                needed: MIN_SATURATED_PASSES
-            },
+        assert!(
+            matches!(w.drain_estimate(), DrainEstimate::Unjudged { .. }),
             "gap {gap}ms pass {pass}ms: {}",
             w.report()
         );
@@ -1304,14 +1335,14 @@ mod tests {
     fn typing_on_one_block_above_the_floor_is_retired_in_full() {
         for (gap, pass, offered) in [(100, 150, 10.0), (50, 120, 20.0), (80, 110, 12.5)] {
             let w = typed_on_one_block(gap, pass, 400);
-            let rate = w.drain_rate_per_sec().expect("a judged busy period");
+            let rate = rate(&w).expect("a judged busy period");
             assert!(
                 (rate - offered).abs() < offered * 0.01,
                 "gap {gap}ms pass {pass}ms: offered {offered}/s, got {rate}/s: {}",
                 w.report()
             );
             assert!(
-                matches!(w.throughput_verdict(), RungVerdict::Pass { .. }),
+                matches!(w.drain_estimate(), DrainEstimate::AtOrAbove { .. }),
                 "{}",
                 w.report()
             );
@@ -1346,13 +1377,13 @@ mod tests {
     #[test]
     fn an_overloaded_batching_pipeline_is_a_slow_drain() {
         let w = batcher(50, 0, 120, 7);
-        let rate = w.drain_rate_per_sec().expect("a judged busy period");
+        let rate = rate(&w).expect("a judged busy period");
         assert!(
             (rate - 1000.0 / 120.0).abs() < 0.05,
             "got {rate}/s: {}",
             w.report()
         );
-        assert!(w.throughput_verdict().is_fail(), "{}", w.report());
+        assert!(w.drain_estimate().is_below(), "{}", w.report());
     }
 
     /// The arrival-limited residuals: typing slower than the floor into passes
@@ -1372,7 +1403,7 @@ mod tests {
     #[test]
     fn a_short_typing_burst_through_an_unbounded_pipeline_does_not_fail() {
         let w = typed_on_one_block(80, 150, 5);
-        assert!(!w.throughput_verdict().is_fail(), "{}", w.report());
+        assert!(!w.drain_estimate().is_below(), "{}", w.report());
     }
 
     /// Three blocks, flat 140ms passes that take everything committed, 20ms
@@ -1399,7 +1430,7 @@ mod tests {
                 ..write(t0, dispatched * 1000, landed * 1000, batch)
             });
         }
-        assert!(!w.throughput_verdict().is_fail(), "{}", w.report());
+        assert!(!w.drain_estimate().is_below(), "{}", w.report());
     }
 
     /// A pipeline of unbounded capacity: every pass takes `pass_ms` whatever it
@@ -1470,10 +1501,11 @@ mod tests {
     fn a_write_one_millisecond_after_the_first_is_an_arrival() {
         let w = unbounded_pipeline(&[(20, 3), (21, 3), (121, 1), (221, 1), (241, 1)], 110, 0);
         assert_eq!(
-            w.throughput_verdict(),
-            RungVerdict::Pass {
-                measured: 4.0 / 0.33,
-                n: 3
+            w.drain_estimate(),
+            DrainEstimate::AtOrAbove {
+                rate: 4.0 / 0.33,
+                passes: 3,
+                deliveries: judged(&w).1,
             },
             "{}",
             w.report()
@@ -1498,10 +1530,11 @@ mod tests {
             0,
         );
         assert_eq!(
-            w.throughput_verdict(),
-            RungVerdict::Pass {
-                measured: 6.0 / 0.42,
-                n: 3
+            w.drain_estimate(),
+            DrainEstimate::AtOrAbove {
+                rate: 6.0 / 0.42,
+                passes: 3,
+                deliveries: judged(&w).1,
             },
             "{}",
             w.report()
@@ -1523,7 +1556,7 @@ mod tests {
             superseded: Superseded::new(vec![600]),
             ..write(t0, 300_000, 600_000, 3)
         });
-        assert_unjudged(&w, 0);
+        assert_unjudged(&w, 3);
     }
 
     /// Only the busy period's own passes retire its arrivals. Pass 0 here
@@ -1537,7 +1570,7 @@ mod tests {
             100,
             30,
         );
-        assert!(!w.throughput_verdict().is_fail(), "{}", w.report());
+        assert!(!w.drain_estimate().is_below(), "{}", w.report());
     }
 
     /// Unbounded 202ms passes, 125ms commit latency. The pass landing at
@@ -1561,7 +1594,7 @@ mod tests {
             202,
             125,
         );
-        assert_unjudged(&w, 0);
+        assert_unjudged(&w, 4);
     }
 
     /// A write commits 25ms after its dispatch, while its feed applies five
@@ -1577,53 +1610,7 @@ mod tests {
             quiet: QuietBatches::new((1..=5).map(|k| 30_000 - 5_000 * k).collect()),
             ..write(t0, 100_000, 130_000, 1)
         });
-        assert_unjudged(&w, 0);
-    }
-
-    /// SplitMix64: a fixed seed gives a fixed trace.
-    fn split_mix(state: &mut u64) -> u64 {
-        *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
-        let mut z = *state;
-        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-        z ^ (z >> 31)
-    }
-
-    /// **The rule's premise, as a property.** A pipeline whose every pass takes
-    /// all that is committed has no capacity limit, so its drain can never
-    /// fail, whatever the arrivals: bursts, paced typing, one block or fifty,
-    /// passes of 20-400ms, commit latency below the pass time. See
-    /// `lane-logs/drain-estimator.md` for the derivation.
-    #[test]
-    fn an_unbounded_pipeline_never_fails_the_drain() {
-        let mut judged = 0;
-        for seed in 0..10_000u64 {
-            let mut rng = seed;
-            let mut draw = |n: u64| split_mix(&mut rng) % n;
-            let pass_ms = 20 + draw(380);
-            let max_gap = [5, 30, 60, 120, 250][draw(5) as usize];
-            let min_gap = draw(2);
-            let targets = [1, 2, 3, 8, 50][draw(5) as usize];
-            let mut at = 0;
-            let writes: Vec<(u64, u8)> = (0..3 + draw(57))
-                .map(|_| {
-                    at += min_gap + draw(max_gap - min_gap);
-                    (at, draw(targets) as u8)
-                })
-                .collect();
-            let commit_ms = draw(pass_ms);
-            let w = unbounded_pipeline(&writes, pass_ms, commit_ms);
-            let verdict = w.throughput_verdict();
-            assert!(
-                !verdict.is_fail(),
-                "seed {seed}: pass {pass_ms}ms, commit {commit_ms}ms, writes {writes:?}: {}",
-                w.report()
-            );
-            if matches!(verdict, RungVerdict::Pass { .. }) {
-                judged += 1;
-            }
-        }
-        assert!(judged >= 3_000, "only {judged} of 10000 traces were judged");
+        assert_unjudged(&w, 6);
     }
 
     /// A pass that closes one clock and supersedes another retired both. The
@@ -1638,8 +1625,8 @@ mod tests {
                 ..write(t0, 0, 300_000 * (k + 1), k)
             });
         }
-        assert_eq!(w.drain_delivery_count(), 6);
-        assert_fails_at(&w, 6.0 / 0.9, 3);
+        assert_eq!(judged(&w).1, 6);
+        assert_below_at(&w, 6.0 / 0.9, 3);
     }
 
     /// **The false-red the third estimator shipped.** A healthy session — 40
@@ -1656,11 +1643,11 @@ mod tests {
         assert_unjudged(&w, 0);
     }
 
-    /// **`drain_pass_count` counts saturated passes, not samples.** Returning
+    /// **The estimate counts saturated passes, not samples.** Returning
     /// `samples.len()` once let 39 unsaturated samples plus one saturated one
     /// satisfy a floor of 20.
     #[test]
-    fn drain_pass_count_counts_saturated_passes_only() {
+    fn the_estimate_counts_saturated_passes_only() {
         let mut w = SloWindow::default();
         let t0 = Instant::now();
         for i in 0..39u64 {
@@ -1668,7 +1655,7 @@ mod tests {
         }
         w.record(sample(10, 2, 1, t0 + Duration::from_millis(50 * 39)));
         assert_eq!(w.samples().len(), 40);
-        assert_eq!(w.drain_pass_count(), 0);
+        assert_eq!(judged(&w).0, 0);
     }
 
     /// 40 writes dispatched together, retired one per 150ms: passes 2-38 each
@@ -1676,13 +1663,13 @@ mod tests {
     /// The time before the first landing is not charged: it holds the first
     /// write's service.
     #[test]
-    fn throughput_rung_fails_a_slow_drain() {
+    fn the_estimate_reads_a_slow_drain_below_the_floor() {
         let mut w = SloWindow::default();
         let t0 = Instant::now();
         for k in 0..40u64 {
             w.record(write(t0, 0, 150_000 * (k + 1), k));
         }
-        assert_fails_at(&w, 37.0 / 5.55, 37);
+        assert_below_at(&w, 37.0 / 5.55, 37);
     }
 
     /// A burst whose every write reports zero elapsed in one shared batch is

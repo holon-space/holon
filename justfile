@@ -679,9 +679,10 @@ latency-scale-gate size='1600' per_doc='50' settle_ms='180000' max_load='32' cei
 # `landing-gate`.
 # Distinct from `latency-gate`
 # above: that one is a per-rung REGRESSION RATCHET against ceilings that only
-# move down, this one judges the fixed 200ms SLO and a throughput floor. A tree
-# can regress within its ratchet and still be inside the SLO, or blow the SLO
-# without moving a p50 — neither gate subsumes the other.
+# move down, this one judges the fixed 200ms SLO and a throughput floor (a
+# controlled drain test). A tree can regress within its ratchet and still be
+# inside the SLO, or blow the SLO without moving a p50 — neither gate subsumes
+# the other.
 #
 # Serialized (`--test-threads=1`): the rungs measure wall-clock latency, so two
 # of them running at once would each measure the other's load.
@@ -693,7 +694,8 @@ latency-slo-gate *FLAGS:
     # Tree assertion: a failed `cd` must never yield a green that ran nothing
     # (a gate exited 0 having run 0 tests in the WRONG tree, 2026-07-25).
     for f in crates/holon-integration-tests/tests/latency_slo_gate.rs \
-             crates/holon-api/src/latency_slo.rs; do
+             crates/holon-api/src/latency_slo.rs \
+             crates/holon-api/src/latency_drain.rs; do
         [ -f "$f" ] || { echo "latency-slo-gate: wrong tree — missing $f" >&2; exit 2; }
     done
     cargo test {{CANON}} --test latency_slo_gate \

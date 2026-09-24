@@ -911,8 +911,9 @@ fn block_row_pairs(c: &crate::Change<crate::StorageEntity>) -> Vec<(String, Opti
 ///
 /// A batch that closes no clock of an origin is reported on the feed's next
 /// closure of that origin, in `quiet_batches_us`: see [`log_quiet`]. A batch
-/// applied while nothing is pending is not: every clock a later batch closes
-/// was dispatched after it.
+/// applied while no clock of ANY origin is pending is not logged: every clock
+/// a later batch closes was dispatched after it. A batch applied while only
+/// the other origin has clocks pending is logged for this origin too.
 pub fn rows_delivered<'a>(
     source: &'static str,
     feed: Feed,

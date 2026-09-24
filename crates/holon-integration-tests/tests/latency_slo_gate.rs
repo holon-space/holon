@@ -14,12 +14,12 @@
 //!
 //! * [`latency_slo_rung_service_time_p95`] — one interaction in flight
 //!   (dispatch, settle, next), p95 over n ≥ 30 `set_field`-class writes.
-//! * [`latency_slo_rung_throughput_floor`] — `set_field` writes offered faster
-//!   than the pipeline retires them, through the fire-and-forget door, scored
-//!   on how fast the pipeline drains while its queue stays full. REPORT-ONLY on
-//!   the rate today; see its doc comment for what promoting it to a gate needs.
-//! * [`a_slowed_pipeline_fails_the_throughput_rung`] — the same drive with a
-//!   per-row delivery delay armed must FAIL the throughput verdict.
+//! * [`latency_slo_rung_drain_test`] — the controlled drain test (Martin's
+//!   ruling D207.a): 60 `set_field` writes at 20/s through the fire-and-forget
+//!   door, each to its own block, must all be visible within `N/f + s`. See
+//!   `holon_api::latency_drain` for the rule and its proof.
+//! * [`a_slowed_pipeline_fails_the_drain_test`] — the same drive with a per-row
+//!   delivery delay that halves the capacity must FAIL.
 //! * [`latency_slo_rung_facade_origin_is_measured_and_not_pooled`] — an
 //!   agent/MCP-driven operation through `HolonService::execute_operation` is
 //!   measured at all, and its samples stay out of the UI percentile (D119.a).
@@ -28,9 +28,11 @@
 //!   flight leaves a concurrent UI interaction service-time eligible, and a
 //!   delivery for a block both origins are waiting on closes BOTH.
 //!
-//! Both score `holon_api::latency_slo::SloWindow`, the type the runtime
-//! `latency-slo` oracle also scores, so the banner and this gate cannot report
-//! different numbers for the same pipeline.
+//! The service rung scores `holon_api::latency_slo::SloWindow`, the type the
+//! runtime `latency-slo` oracle also scores, so the banner and this gate cannot
+//! report different service numbers for the same pipeline. The window's
+//! passive drain estimate is printed beside the drain test as a disclosure and
+//! never judged.
 //!
 //! The drive reuses the keystone alphabet and drivers verbatim — the
 //! `CreateBlockUnderFocus → FocusEditableText → TypeChars×N` prefix the
@@ -48,7 +50,7 @@
 //!
 //! @pbt kind gate
 //! @pbt covers latency-slo-service-time — paced interaction→visible p95
-//! @pbt covers latency-slo-throughput — saturated pipeline drain rate
+//! @pbt covers latency-slo-throughput — controlled drain test at the floor
 //! @pbt covers latency-slo-facade-origin — facade interactions measured, scored
 //! apart
 //! @pbt covers latency-slo-origin-partition — a facade clock in flight cannot
@@ -60,9 +62,11 @@ use holon::api::holon_service::HolonService;
 use holon_api::EntityName;
 use holon_api::EntityUri;
 use holon_api::Value;
+use holon_api::latency_drain::DRAIN_TEST_SLACK;
+use holon_api::latency_drain::DrainTest;
+use holon_api::latency_drain::DrainVerdict;
 use holon_api::latency_e2e::MAX_PENDING;
 use holon_api::latency_slo::ClockOrigin;
-use holon_api::latency_slo::MIN_SATURATED_PASSES;
 use holon_api::latency_slo::MIN_SERVICE_SAMPLES;
 use holon_api::latency_slo::RungVerdict;
 use holon_api::latency_slo::SERVICE_TIME_SLO_MS;
@@ -92,40 +96,24 @@ use proptest_state_machine::StateMachineTest;
 /// coalesced.
 const PACED_WRITES: usize = 40;
 
-/// Blocks the sustained drive writes to, created by the setup prefix. The
-/// drive cycles through them; at most [`MAX_OFFERED_PENDING`] are pending, so
-/// a block is written again only long after its previous write.
-const DRIVE_TARGETS: usize = 150;
+/// Writes the drain test drives, ONE per block, so each write closes its own
+/// clock. Below the correlator's per-origin capacity (`MAX_PENDING`), so no
+/// clock is evicted however slow the pipeline.
+const DRAIN_WRITES: usize = 60;
 
-/// Saturated passes the drive runs until. Twice the scorer's minimum, so one
-/// lost pass cannot turn a run Unjudged.
-const DRIVE_SATURATED_PASSES: usize = 2 * MIN_SATURATED_PASSES;
+/// Offered rate: 20 writes/s, twice the floor. Driver jitter of up to 50ms a
+/// write then cannot put a write behind the `t0 + k/f` schedule the Pass
+/// proof needs, and passes stay small enough that per-pass overhead counts.
+const DRAIN_OFFER_EVERY: std::time::Duration = std::time::Duration::from_millis(50);
 
-/// Writes the same-block phase offers to ONE block. The correlator closes one
-/// clock per pass there and retires the older ones with it, which is how a
-/// user typing into one block looks.
-const SAME_BLOCK_WRITES: usize = 60;
+/// How long the drive waits for the last delivery. The verdict is known at
+/// the limit; waiting longer only measures how far a failing run missed it.
+/// Below the correlator's 30s expiry, so no pending clock is dropped.
+const DRAIN_OBSERVE_FOR: std::time::Duration = std::time::Duration::from_secs(25);
 
-/// How long the whole drive may run before it declares the pipeline unable to
-/// sustain a busy period.
-const DRIVE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(90);
-
-/// Offered load: one write per this interval, far faster than the pipeline
-/// retires them, so every pass lands with writes already queued behind it.
-const OFFER_EVERY: std::time::Duration = std::time::Duration::from_millis(5);
-
-/// Most writes the drive keeps pending. Below the correlator's per-origin
-/// capacity (`MAX_PENDING`), so no clock is ever evicted.
-const MAX_OFFERED_PENDING: usize = 48;
-
-/// How long the drive may go without a new delivery before it declares the
-/// pipeline stuck. The correlator expires a clock at 30s.
-const STALL_DEADLINE: std::time::Duration = std::time::Duration::from_secs(20);
-
-/// The per-row delivery delay the throughput teeth arm. A pass carrying `r`
-/// rows then takes at least `r` times this, so the drain rate is at most
-/// 1000 / 150 = 6.7 writes/s, under the 10/s floor, however the rows batch.
-const THROUGHPUT_TEETH_DELAY_MS: u64 = 150;
+/// The per-row delivery delay the drain teeth arm: capacity at most
+/// 1000 / 200 = 5 writes/s, half the floor, however the rows batch.
+const THROUGHPUT_TEETH_DELAY_MS: u64 = 200;
 
 /// The block every write lands on. Born-equal id, so oracle and SUT share it
 /// and no synthetic→real reconcile is in the measured path.
@@ -139,10 +127,10 @@ fn host_uri() -> EntityUri {
     EntityUri::parse(HOST_ID).expect("HOST_ID is a well-formed block uri")
 }
 
-/// The sustained drive's per-write target. One block per write: a delivered
-/// block row carries no `write_seq` in this wiring, so the correlator closes
-/// the NEWEST pending clock on a target and supersedes the rest. Distinct
-/// targets make every closure the write's own.
+/// The drain test's per-write target. One block per write: a delivered block
+/// row carries no `write_seq` in this wiring, so the correlator closes the
+/// NEWEST pending clock on a target and supersedes the rest. Distinct targets
+/// make every closure the write's own.
 const DRIVE_TARGET_PREFIX: &str = "block:slo-gate-burst-";
 
 fn burst_target(i: usize) -> String {
@@ -150,12 +138,12 @@ fn burst_target(i: usize) -> String {
 }
 
 /// Bring the SUT to "an editor is open on a block we own" — the exact prefix
-/// the latency-ratchet corpus uses — plus the burst rung's target rows.
+/// the latency-ratchet corpus uses — plus the drain test's target rows.
 /// Nothing here is measured.
 fn setup_sequence() -> Vec<E2ETransition> {
     // Burst targets FIRST, then the host, then the focus: a create moves the
     // editor, so focusing the host has to be the last thing the prefix does.
-    let mut v: Vec<E2ETransition> = (0..DRIVE_TARGETS)
+    let mut v: Vec<E2ETransition> = (0..DRAIN_WRITES)
         .map(|i| {
             E2ETransition::CreateBlockUnderFocus(CreateBlockUnderFocus {
                 content: format!("burst target {i}"),
@@ -277,141 +265,84 @@ fn drive_window(probe: &SloProbe) -> SloWindow {
     drive
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum DrivePhase {
-    Distinct,
-    Draining,
-    SameBlock,
-    Done,
-}
-
-/// Writes the drive has seen retired, superseded ones included.
-fn retired(window: &SloWindow) -> usize {
-    window.samples().iter().map(|s| s.retired().get()).sum()
-}
-
-/// Offer writes through the production fire-and-forget door, one per
-/// [`OFFER_EVERY`], with at most [`MAX_OFFERED_PENDING`] pending, and return
-/// the drive's window once every offered write is retired.
-///
-/// * Phase 1 writes to a different block each time until the window holds
-///   [`DRIVE_SATURATED_PASSES`] judged saturated passes. It ends on that
-///   property, not on a write count, so a slow host costs time, not margin.
-/// * Phase 2, when `same_block_writes > 0`, writes to ONE block. The rows of
-///   one pass then close one clock and retire the older ones with it, so the
-///   drive only finishes if every superseded write is counted as retired.
+/// Drive the controlled drain test: [`DRAIN_WRITES`] content writes, one per
+/// block, on the absolute schedule `t0 + k × DRAIN_OFFER_EVERY` through the
+/// production fire-and-forget door, and judge their e2e samples with
+/// [`DrainTest`].
 ///
 /// `delay_ms` arms the per-row delivery delay for the drive. It sleeps in
-/// `LiveData::subscribe` before the subscriber applies a batch, so a slowed
-/// "pass" is one subscriber batch: exactly the step after which the user sees
-/// the rows.
-fn measure_sustained(
-    sut: &ComposedSut<WideE2E>,
-    delay_ms: u64,
-    same_block_writes: usize,
-) -> SloWindow {
-    const _: () = assert!(MAX_OFFERED_PENDING < MAX_PENDING);
-    const _: () = assert!(MAX_OFFERED_PENDING < DRIVE_TARGETS);
+/// `LiveData::subscribe` before the subscriber applies a batch.
+fn run_drain_test(sut: &ComposedSut<WideE2E>, delay_ms: u64) -> DrainVerdict {
+    const _: () = assert!(DRAIN_WRITES < MAX_PENDING);
     let engine = sut
         .handle()
         .reactive()
         .expect("the full-headless draw boots a reactive engine");
+    let test = DrainTest::new(
+        DRAIN_WRITES,
+        THROUGHPUT_FLOOR_WRITES_PER_SEC,
+        DRAIN_TEST_SLACK,
+    );
 
     let probe = SloProbe::arm();
     let delay = ArmedDeliveryDelay::arm(delay_ms);
-    sut.runtime().block_on(async {
+    let writes = sut.runtime().block_on(async {
         engine.ui_state().set_detached_dispatch(true);
-        let started = std::time::Instant::now();
-        let mut last_progress = started;
-        let mut dispatched = 0;
-        let mut delivered = 0;
-        let mut phase = DrivePhase::Distinct;
-        let mut same_block_offered = 0;
-        loop {
-            let window = drive_window(&probe);
-            let now = retired(&window);
-            if now > delivered {
-                delivered = now;
-                last_progress = std::time::Instant::now();
-            }
-            let drained = delivered == dispatched;
-            phase = match phase {
-                DrivePhase::Distinct if window.drain_pass_count() >= DRIVE_SATURATED_PASSES => {
-                    DrivePhase::Draining
-                }
-                DrivePhase::Draining if drained && same_block_writes > 0 => DrivePhase::SameBlock,
-                DrivePhase::Draining if drained => DrivePhase::Done,
-                DrivePhase::SameBlock if same_block_offered == same_block_writes => {
-                    DrivePhase::Done
-                }
-                other => other,
-            };
-            let target = match phase {
-                DrivePhase::Distinct => Some(burst_target(dispatched % DRIVE_TARGETS)),
-                DrivePhase::SameBlock => Some(burst_target(0)),
-                DrivePhase::Draining => None,
-                DrivePhase::Done if drained => break,
-                DrivePhase::Done => None,
-            };
-            let pending = dispatched.checked_sub(delivered).unwrap_or_else(|| {
-                panic!(
-                    "[latency-slo gate] {delivered} writes retired but only {dispatched} \
-                     dispatched by the drive — a drive-target clock opened outside the drive \
-                     was retired with it"
-                )
-            });
-            let room = pending < MAX_OFFERED_PENDING;
-            if let Some(target) = target.filter(|_| room) {
-                if phase == DrivePhase::SameBlock {
-                    same_block_offered += 1;
-                }
-                let mut params = HashMap::new();
-                params.insert("id".to_string(), Value::String(target));
-                params.insert("field".to_string(), Value::String("content".to_string()));
-                // Distinct per write: an identity re-commit produces no CDC
-                // delta, so it would yield no sample.
-                params.insert(
-                    "value".to_string(),
-                    Value::String(format!("sustained {dispatched}")),
-                );
-                dispatch_intent_through_armed_door(
-                    &engine,
-                    OperationIntent::new(EntityName::new("block"), "set_field".to_string(), params),
-                )
-                .await
-                .expect("the detached door accepts a content write");
-                dispatched += 1;
-            }
-            assert!(
-                last_progress.elapsed() < STALL_DEADLINE,
-                "[latency-slo gate] {delivered} of {dispatched} dispatched writes retired, and \
-                 none for {STALL_DEADLINE:?} (delay {delay_ms}ms per row) — the pipeline \
-                 stopped retiring the drive, or a retired write went uncounted"
-            );
-            assert!(
-                started.elapsed() < DRIVE_DEADLINE,
-                "[latency-slo gate] {DRIVE_DEADLINE:?} of drive produced only {} judged \
-                 saturated passes, {DRIVE_SATURATED_PASSES} required (delay {delay_ms}ms per \
-                 row). Window: {}",
-                window.drain_pass_count(),
-                window.report(),
-            );
-            tokio::time::sleep(OFFER_EVERY).await;
+        let t0 = tokio::time::Instant::now();
+        let mut writes = Vec::with_capacity(DRAIN_WRITES);
+        for k in 0..DRAIN_WRITES {
+            tokio::time::sleep_until(t0 + DRAIN_OFFER_EVERY * k as u32).await;
+            let target = burst_target(k);
+            let mut params = HashMap::new();
+            params.insert("id".to_string(), Value::String(target.clone()));
+            params.insert("field".to_string(), Value::String("content".to_string()));
+            params.insert("value".to_string(), Value::String(format!("drain {k}")));
+            let dispatched = std::time::Instant::now();
+            dispatch_intent_through_armed_door(
+                &engine,
+                OperationIntent::new(EntityName::new("block"), "set_field".to_string(), params),
+            )
+            .await
+            .expect("the detached door accepts a content write");
+            writes.push((target, dispatched));
+        }
+        let first = writes[0].1;
+        while drive_window(&probe).len() < DRAIN_WRITES && first.elapsed() < DRAIN_OBSERVE_FOR {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
         engine.ui_state().set_detached_dispatch(false);
+        writes
     });
     drop(delay);
     let window = drive_window(&probe);
     drop(probe);
+    let verdict = test.verdict(&writes, window.samples());
+    let ratio = match &verdict {
+        DrainVerdict::Pass { completion, limit }
+        | DrainVerdict::Fail {
+            completion: Some(completion),
+            limit,
+            ..
+        } => format!("{:.2}", completion.as_secs_f64() / limit.as_secs_f64()),
+        DrainVerdict::Fail {
+            completion: None, ..
+        }
+        | DrainVerdict::Invalid { .. } => "-".to_string(),
+    };
     eprintln!(
-        "[latency-slo gate] sustained drive (delay {delay_ms}ms/row, {same_block_writes} \
-         same-block writes): {} writes retired in {} samples, {} saturated passes: {}",
-        retired(&window),
-        window.len(),
-        window.drain_pass_count(),
-        window.report(),
+        "[latency-slo gate] drain calibration: delay={delay_ms}ms/row C/L={ratio} \
+         verdict={verdict:?} limit={:?}",
+        test.limit(),
     );
-    window
+    eprintln!("[latency-slo gate] drain window: {}", window.report());
+    if window.drain_estimate().is_below() {
+        eprintln!(
+            "[latency-slo gate] WARNING (disclosure, not a verdict): the passive drain estimate \
+             is below the floor over this run: {:?}",
+            window.drain_estimate(),
+        );
+    }
+    verdict
 }
 
 /// Fail with the window's full report. A latency red must say what it measured
@@ -486,9 +417,10 @@ fn latency_slo_rung_service_time_p95() {
     );
 }
 
-/// **RUNG 2 — THROUGHPUT FLOOR.** Writes offered faster than the pipeline
-/// retires them, so its queue stays full and the deliveries measure how fast
-/// it DRAINS rather than how fast the driver offers.
+/// **RUNG 2 — THE DRAIN TEST (Martin's ruling D207.a).** [`DRAIN_WRITES`]
+/// writes at twice the floor rate must all be visible within `N/f + s` of the
+/// first dispatch. A healthy pipeline cannot miss it and one below 9.375
+/// writes/s cannot make it: see `holon_api::latency_drain`.
 ///
 /// Driven by intent rather than by the `TypeChars` transition: the editor cap
 /// awaits each commit before returning, so a transition drive cannot put two
@@ -496,72 +428,64 @@ fn latency_slo_rung_service_time_p95() {
 /// door the GPUI keystroke handler uses, and it dispatches the same
 /// `block`/`set_field` op. The oracle is deliberately not advanced: the SUT
 /// state this leaves behind is discarded.
-///
-/// **REPORT-ONLY on the rate.** The floor is computed and printed, but a rate
-/// below it does not fail this test. What DOES fail is a drive that produced
-/// no judged busy period: it measured nothing, which must never read as a pass.
-/// The verdict's teeth are [`a_slowed_pipeline_fails_the_throughput_rung`].
-/// To promote the rate to a gate, calibrate per the ceilings file's
-/// methodology (see `THROUGHPUT_FLOOR_WRITES_PER_SEC`).
 #[test]
-fn latency_slo_rung_throughput_floor() {
+fn latency_slo_rung_drain_test() {
     let _turn = RUNG_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let (sut, _ref_state) = boot();
     require_a_judgeable_host();
-    let window = measure_sustained(&sut, 0, SAME_BLOCK_WRITES);
-    eprintln!(
-        "[latency-slo gate] throughput rung: {} ({} samples, {} saturated passes)",
-        window.report(),
-        window.len(),
-        window.drain_pass_count(),
-    );
-    // REPORT-ONLY (see the doc comment): printed, never fatal on the rate.
-    match window.throughput_verdict() {
-        RungVerdict::Pass { measured, n } => eprintln!(
-            "[latency-slo gate] throughput (report-only): {measured:.1} writes/s over n={n} \
-             — at or above the {THROUGHPUT_FLOOR_WRITES_PER_SEC:.0}/s floor"
+    match run_drain_test(&sut, 0) {
+        DrainVerdict::Pass { completion, limit } => eprintln!(
+            "[latency-slo gate] drain test: PASS — {DRAIN_WRITES} writes visible after \
+             {completion:?}, limit {limit:?}"
         ),
-        RungVerdict::Fail { measured, n } => eprintln!(
-            "[latency-slo gate] throughput (report-only): {measured:.1} writes/s over n={n} \
-             — BELOW the {THROUGHPUT_FLOOR_WRITES_PER_SEC:.0}/s floor. Not fatal while this \
-             rung is report-only; investigate if it persists on an idle host."
+        DrainVerdict::Fail {
+            completion,
+            delivered,
+            limit,
+        } => panic!(
+            "[latency-slo gate] drain test FAILED: {delivered} of {DRAIN_WRITES} writes \
+             visible, the last after {completion:?}, limit {limit:?} (N/f + s at \
+             {THROUGHPUT_FLOOR_WRITES_PER_SEC:.0}/s). A healthy pipeline cannot miss this \
+             limit; load arriving after boot admission can, so confirm on an idle host before \
+             attributing it to the tree."
         ),
-        RungVerdict::Unjudged { n, needed } => panic!(
-            "[latency-slo gate] throughput produced NO VERDICT: the longest busy period had {n} \
-             saturated passes, {needed} required. The drive offers writes faster than the \
-             pipeline retires them, so its queue should stay full; it did not, and the rung \
-             measured nothing, which is not a pass.\n  {}",
-            window.report(),
+        DrainVerdict::Invalid { write, late_by } => panic!(
+            "[latency-slo gate] INVALID (not red): the driver dispatched write {write} \
+             {late_by:?} behind the floor-rate schedule, so the run did not offer the load the \
+             Pass proof assumes. NOTHING was judged. Re-run on a quiet machine."
         ),
     }
 }
 
-/// **The throughput verdict must respond to the pipeline.** The same
-/// sustained drive with [`THROUGHPUT_TEETH_DELAY_MS`] per row armed in
-/// `LiveData`'s apply path must FAIL the throughput rung.
+/// **The drain test must respond to the pipeline.** The same drive with
+/// [`THROUGHPUT_TEETH_DELAY_MS`] per row armed in `LiveData`'s apply path —
+/// capacity at most 5 writes/s — must FAIL. No host admission: a busy host only
+/// makes a slow pipeline slower.
 #[test]
-fn a_slowed_pipeline_fails_the_throughput_rung() {
+fn a_slowed_pipeline_fails_the_drain_test() {
     let _turn = RUNG_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let (sut, _ref_state) = boot();
-    let window = measure_sustained(&sut, THROUGHPUT_TEETH_DELAY_MS, 0);
-    let verdict = window.throughput_verdict();
-    assert!(
-        verdict.is_fail(),
-        "[latency-slo gate] {THROUGHPUT_TEETH_DELAY_MS}ms per row caps the drain at \
-         {:.1} writes/s, under the {THROUGHPUT_FLOOR_WRITES_PER_SEC:.0}/s floor, yet the \
-         throughput rung said {verdict:?}. Either the injector is not reaching the subscriber, \
-         or the estimator no longer sees a slow drain. Window: {}",
-        1000.0 / THROUGHPUT_TEETH_DELAY_MS as f64,
-        window.report(),
-    );
-    eprintln!(
-        "[latency-slo gate] throughput teeth: {verdict:?} with {THROUGHPUT_TEETH_DELAY_MS}ms per \
-         row armed"
-    );
+    match run_drain_test(&sut, THROUGHPUT_TEETH_DELAY_MS) {
+        verdict @ DrainVerdict::Fail { .. } => eprintln!(
+            "[latency-slo gate] drain teeth: {verdict:?} with {THROUGHPUT_TEETH_DELAY_MS}ms per \
+             row armed"
+        ),
+        DrainVerdict::Pass { completion, limit } => panic!(
+            "[latency-slo gate] {THROUGHPUT_TEETH_DELAY_MS}ms per row caps the pipeline at \
+             {:.1} writes/s, yet all {DRAIN_WRITES} writes were visible after {completion:?}, \
+             inside the {limit:?} limit. Either the injector is not reaching the subscriber, or \
+             the drain test no longer measures completion.",
+            1000.0 / THROUGHPUT_TEETH_DELAY_MS as f64,
+        ),
+        DrainVerdict::Invalid { write, late_by } => panic!(
+            "[latency-slo gate] INVALID (not red): the driver dispatched write {write} \
+             {late_by:?} behind the floor-rate schedule. Re-run on a quiet machine."
+        ),
+    }
 }
 
 /// The facade rung's target: the block the paced prefix already focuses, so the
@@ -836,10 +760,9 @@ fn latency_slo_rung_a_facade_clock_in_flight_does_not_alter_a_ui_sample() {
 //   where each write waits for its own sample, and the service statistic must
 //   move. It proves the wiring; the service verdict's flip is owned by
 //   `holon_api::latency_slo`'s `service_rung_fails_on_a_slow_paced_pipeline`.
-// * THROUGHPUT: [`a_slowed_pipeline_fails_the_throughput_rung`] arms a per-row
-//   delay under the sustained drive and asserts the verdict itself fails. The
-//   estimator's false-red and false-green pins are the probe tests in
-//   `holon_api::latency_slo`.
+// * THROUGHPUT: [`a_slowed_pipeline_fails_the_drain_test`] arms a per-row delay
+//   that halves the capacity and asserts the drain test fails. The rule's
+//   healthy/slow property is in `holon_api::latency_drain`.
 //
 // An earlier version accepted `Unjudged` as "red enough", and duly reported
 // that a rung had teeth on a run that collected ZERO samples. Both teeth

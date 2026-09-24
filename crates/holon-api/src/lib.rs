@@ -47,6 +47,7 @@ pub mod inline_mark;
 pub mod input_types;
 /// flutter_rust_bridge:ignore
 pub mod interp_value;
+pub mod latency_drain;
 pub mod latency_e2e;
 pub mod latency_slo;
 pub mod lifecycle;
