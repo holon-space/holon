@@ -822,20 +822,10 @@ impl BlockOrdering for SqlBlockOperations {
         // it, goes through the share's exit, as a delete of it does.
         if self
             .cell_registry
-            .exit_shares_removed_with(&uri)
+            .delete_exiting_shares(&uri)
             .await
             .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { format!("{e:#}").into() })?
-        {
-            self.cell_registry.delete_entity(&uri).await.map_err(
-                |e| -> Box<dyn std::error::Error + Send + Sync> { format!("{e:#}").into() },
-            )?;
-            return Ok(());
-        }
-        if self
-            .cell_registry
-            .delete_entity(&uri)
-            .await
-            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { format!("{e:#}").into() })?
+            != holon_core::TreeDelete::NotInTree
         {
             // Loro-backed: the outbound projector writes the SQL DELETE.
             return Ok(());

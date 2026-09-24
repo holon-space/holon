@@ -1159,8 +1159,8 @@ async fn delete_block_via_cells(
         .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })
 }
 
-/// Refuse `action` on `id` when `id` is a page another device shared with this
-/// one: removing it is leaving its share, which only a delete does.
+/// Refuse `action` on `id` when `id` is a shared page: removing it takes its
+/// share off this device, which only a delete does.
 async fn refuse_share_exit(
     registry: Option<&dyn crate::cell_registry::EntityCellRegistry>,
     id: &EntityUri,
@@ -1170,7 +1170,7 @@ async fn refuse_share_exit(
         return Ok(());
     };
     if reg
-        .is_received_share_root(id)
+        .is_share_root(id)
         .await
         .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?
     {
@@ -1183,16 +1183,16 @@ async fn refuse_share_exit(
     Ok(())
 }
 
-/// Take every share whose mount a removal of `id` removes off this device.
-/// `Ok(false)` when there is none, or no registry routes shares.
-async fn exit_shares_via_cells(
+/// [`delete_block_via_cells`], taking every share whose mount the delete
+/// removes off this device first. `NotInTree` when no registry routes `id`.
+async fn delete_exiting_shares_via_cells(
     registry: Option<&dyn crate::cell_registry::EntityCellRegistry>,
     id: &EntityUri,
-) -> Result<bool> {
+) -> Result<crate::cell_registry::TreeDelete> {
     let Some(reg) = registry else {
-        return Ok(false);
+        return Ok(crate::cell_registry::TreeDelete::NotInTree);
     };
-    reg.exit_shares_removed_with(id)
+    reg.delete_exiting_shares(id)
         .await
         .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })
 }
@@ -1916,9 +1916,8 @@ where
     ///          old slot (i.e. before any of `id`'s former siblings)
     ///        - deletes `id`
     ///
-    /// Refused when `id` is a page another device shared with this one
-    /// ([`crate::ShareExitRefused`]): only a delete may take it off this
-    /// device.
+    /// Refused when `id` is a shared page ([`crate::ShareExitRefused`]): only
+    /// a delete may take it off this device.
     ///
     /// In either case the editor cursor moves onto the merge target at the
     /// join boundary (= old target content length).
@@ -2303,8 +2302,7 @@ where
     /// error rather than a lossy inverse. `split_block`'s new block is always a
     /// leaf, and `join_block` only chooses this inverse for the leaf case, so
     /// the guard never trips on the sanctioned paths. Refused when `deleted_id`
-    /// is a page another device shared with this one
-    /// ([`crate::ShareExitRefused`]).
+    /// is a shared page ([`crate::ShareExitRefused`]).
     #[holon_macros::affects("content", "parent_id", "sort_key")]
     #[holon_macros::boundary_behavior(private_only)]
     async fn restore_join(
@@ -2574,25 +2572,27 @@ where
     /// Declared irreversible: faithfully resurrecting an ordered subtree is out
     /// of scope (fail-loud, never a lossy inverse) — the same line the leaf
     /// `delete` inverse draws. Every share whose mount is in the subtree goes
-    /// through its exit first: a share received is left, a share made here is
+    /// through its exit: a share received is left, a share made here is
     /// revoked.
     #[holon_macros::menu_exposure(listed)]
     #[holon_macros::boundary_behavior(private_only)]
     async fn delete_subtree(&self, id: &EntityUri) -> Result<OperationResult> {
-        if exit_shares_via_cells(self.cells(), id).await? {
-            delete_block_via_cells(self.cells(), id).await?;
-            return Ok(OperationResult::declared_irreversible(
-                Vec::new(),
-                "delete_subtree of a subtree holding a share's mount takes the share off this \
-                 device: a share received is left, a share made here is revoked; restoring either \
-                 takes a new ticket",
-            ));
-        }
-        if delete_block_via_cells(self.cells(), id).await? {
-            return Ok(OperationResult::declared_irreversible(
-                Vec::new(),
-                "delete_subtree: subtree resurrection not implemented (Loro authority)",
-            ));
+        match delete_exiting_shares_via_cells(self.cells(), id).await? {
+            crate::cell_registry::TreeDelete::DeletedExitingShares => {
+                return Ok(OperationResult::declared_irreversible(
+                    Vec::new(),
+                    "delete_subtree of a subtree holding a share's mount takes the share off \
+                     this device: a share received is left, a share made here is revoked; \
+                     restoring either takes a new ticket",
+                ));
+            }
+            crate::cell_registry::TreeDelete::Deleted => {
+                return Ok(OperationResult::declared_irreversible(
+                    Vec::new(),
+                    "delete_subtree: subtree resurrection not implemented (Loro authority)",
+                ));
+            }
+            crate::cell_registry::TreeDelete::NotInTree => {}
         }
         let descendants: Vec<T> = self.get_descendants(id).await?;
         // Deepest-first: a node is deleted only after all of its descendants,
@@ -2624,8 +2624,8 @@ where
     /// directly.
     ///
     /// Declared irreversible: the reparent + delete pair has no exact single
-    /// inverse (mirrors `join_block`'s with-children case). Refused on a page
-    /// another device shared with this one ([`crate::ShareExitRefused`]).
+    /// inverse (mirrors `join_block`'s with-children case). Refused on a
+    /// shared page ([`crate::ShareExitRefused`]).
     #[holon_macros::affects("parent_id", "sort_key")]
     #[holon_macros::menu_exposure(listed)]
     #[holon_macros::boundary_behavior(crossing_widens)]

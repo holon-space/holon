@@ -3084,53 +3084,93 @@ impl LoroBackend {
         })
     }
 
-    /// When `id` is the root of a page share this device RECEIVED, the share
-    /// it belongs to: a delete of the page leaves that share instead of
-    /// deleting the owner's page.
-    pub async fn received_page_share(&self, id: &str) -> Result<Option<String>, ApiError> {
+    /// Whether `id` is the root of a page share on this device, of either
+    /// side. Only a delete removes one: a recipient's leaves the share, an
+    /// owner's revokes it.
+    pub async fn is_page_share_root(&self, id: &str) -> Result<bool, ApiError> {
         match self.resolve_write_target(id).await {
-            Ok(target) => self.received_share_of(&target, id),
-            Err(ApiError::BlockNotFound { .. }) => Ok(None),
+            Ok(target) => Ok(self.placing_mount(&target)?.is_some()),
+            Err(ApiError::BlockNotFound { .. }) => Ok(false),
             Err(e) => Err(e),
         }
     }
 
-    fn received_share_of(
+    /// The side of the share `info` records, which only a mount written before
+    /// sides were recorded lacks.
+    fn mount_role(
+        info: &crate::shared_tree::MountInfo,
+        handle: &EntityUri,
+    ) -> Result<crate::shared_tree::MountRole, ApiError> {
+        info.role.ok_or_else(|| ApiError::InvalidOperation {
+            message: format!(
+                "{handle} is a share whose mount records no side of the share, so removing it \
+                 cannot tell leaving it from revoking it — unshare {handle} first"
+            ),
+        })
+    }
+
+    /// Fail when the layout or shared doc holding `target` holds a mount at or
+    /// under it: mounts are created in the global tree only, and a share never
+    /// holds another share.
+    fn assert_no_mount_outside_global(
         &self,
         target: &WriteTarget,
         id: &str,
-    ) -> Result<Option<String>, ApiError> {
-        let Some((_, info)) = self.placing_mount(target)? else {
-            return Ok(None);
+    ) -> Result<(), ApiError> {
+        let (mounts, doc) = match target {
+            WriteTarget::Global(_) => return Ok(()),
+            WriteTarget::Layout(node) => (
+                self.layout_doc()
+                    .with_read(|doc| {
+                        Ok(crate::shared_tree::mounts_in_subtree(
+                            &doc.get_tree(TREE_NAME),
+                            *node,
+                        ))
+                    })
+                    .map_err(|e| ApiError::InternalError {
+                        message: format!("read the layout doc under {id}: {e:#}"),
+                    })?,
+                "the layout doc".to_string(),
+            ),
+            WriteTarget::Shared {
+                shared_tree_id,
+                doc,
+                tree_id,
+            } => (
+                crate::shared_tree::mounts_in_subtree(&doc.get_tree(TREE_NAME), *tree_id),
+                format!("shared tree {shared_tree_id}"),
+            ),
         };
-        match info.role {
-            Some(crate::shared_tree::MountRole::Recipient) => Ok(Some(info.shared_tree_id)),
-            Some(crate::shared_tree::MountRole::Owner) => Ok(None),
-            None => Err(ApiError::InvalidOperation {
+        match mounts.first() {
+            None => Ok(()),
+            Some((_, info)) => Err(ApiError::InternalError {
                 message: format!(
-                    "{id} is a shared page whose mount records no side of the share (it was \
-                     mounted before sides were recorded), so a delete cannot tell leaving from \
-                     deleting the owner's page — unshare {id} instead"
+                    "{id} in {doc} is or holds a mount of shared tree {}, but mounts live in the \
+                     global tree only",
+                    info.shared_tree_id
                 ),
             }),
         }
     }
 
     /// Every share whose mount a removal of `id` takes off this device: the
-    /// share placing `id` when `id` is a received page, else every mount at or
+    /// share placing `id` when `id` is a shared page, else every mount at or
     /// under `id` in the global tree, of either kind and on either side.
     fn shares_removed_with(
         &self,
         target: &WriteTarget,
         id: &str,
     ) -> Result<Vec<RemovedShare>, ApiError> {
-        if let Some(shared_tree_id) = self.received_share_of(target, id)? {
+        self.assert_no_mount_outside_global(target, id)?;
+        if let Some((_, info)) = self.placing_mount(target)? {
+            // ALLOW(entity_uri_from_raw): id &str backend API param (accepts both id
+            // formats)
+            let handle = EntityUri::from_raw(id);
+            let role = Self::mount_role(&info, &handle)?;
             return Ok(vec![RemovedShare {
-                // ALLOW(entity_uri_from_raw): id &str backend API param (accepts both id
-                // formats)
-                handle: EntityUri::from_raw(id),
-                shared_tree_id,
-                role: crate::shared_tree::MountRole::Recipient,
+                handle,
+                shared_tree_id: info.shared_tree_id,
+                role,
             }]);
         }
         let WriteTarget::Global(root) = target else {
@@ -3140,12 +3180,7 @@ impl LoroBackend {
             .with_read(|doc| {
                 let tree = doc.get_tree(TREE_NAME);
                 let mut shares = Vec::new();
-                let mut queue = vec![*root];
-                while let Some(node) = queue.pop() {
-                    queue.extend(tree.children(node).unwrap_or_default());
-                    let Some(info) = read_mount_info(&tree, node) else {
-                        continue;
-                    };
+                for (node, info) in crate::shared_tree::mounts_in_subtree(&tree, *root) {
                     let handle = match info.kind()? {
                         crate::shared_tree::ShareKind::Page { root: page } => {
                             EntityUri::block(page)
@@ -3154,13 +3189,7 @@ impl LoroBackend {
                             block_uri_from_meta(&tree.get_meta(node)?, node)
                         }
                     };
-                    let role = info.role.ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "{handle} at {id} is a share whose mount records no side of the \
-                             share, so removing it cannot tell leaving it from revoking it — \
-                             unshare {handle} first"
-                        )
-                    })?;
+                    let role = Self::mount_role(&info, &handle)?;
                     shares.push(RemovedShare {
                         handle,
                         shared_tree_id: info.shared_tree_id,
@@ -3174,48 +3203,91 @@ impl LoroBackend {
             })
     }
 
-    /// Take every share a removal of `id` removes off this device through its
-    /// exit: a received share is left (the owner's data stays), a share this
-    /// device made is revoked (its recipients lose it). Irreversible. Returns
-    /// the shares exited. The ONE way a mount leaves this device;
+    /// Delete `id`, taking every share whose mount the delete removes off this
+    /// device first: a received share is left (the owner's data stays), a
+    /// share this device made is revoked (its recipients lose it). Returns the
+    /// shares exited. The ONE way a mount leaves this device;
     /// `delete_block` refuses to remove one.
-    pub async fn exit_shares_removed_with(&self, id: &str) -> Result<Vec<RemovedShare>, ApiError> {
+    ///
+    /// The exits cannot be undone, so every check that can refuse runs before
+    /// the first of them. An error after one names what was already exited.
+    pub async fn delete_exiting_shares(&self, id: &str) -> Result<Vec<RemovedShare>, ApiError> {
         let target = match self.resolve_write_target(id).await {
             Ok(target) => target,
             Err(ApiError::BlockNotFound { .. }) => return Ok(Vec::new()),
             Err(e) => return Err(e),
         };
         let shares = self.shares_removed_with(&target, id)?;
-        for share in &shares {
-            self.exit_share(id, share).await?;
+        if shares.is_empty() {
+            self.delete_block(id).await?;
+            return Ok(shares);
+        }
+        let exit = self.share_exit(id, &shares)?;
+        for (exited, share) in shares.iter().enumerate() {
+            if let Err(e) = exit.exit(&share.shared_tree_id).await {
+                return Err(Self::stopped_after_exits(
+                    id,
+                    &shares[..exited],
+                    format!("exit the share of {}: {e:#}", share.handle),
+                ));
+            }
+        }
+        if let Err(e) = self.delete_block(id).await {
+            return Err(Self::stopped_after_exits(id, &shares, e.to_string()));
         }
         Ok(shares)
     }
 
-    /// Whether `id` itself is a share's handle on this device: a received
-    /// page, or a mount of either kind and side.
-    pub async fn is_share_handle(&self, id: &str) -> Result<bool, ApiError> {
+    /// The error of a [`Self::delete_exiting_shares`] that stopped after
+    /// exiting `exited`.
+    fn stopped_after_exits(id: &str, exited: &[RemovedShare], cause: String) -> ApiError {
+        if exited.is_empty() {
+            return ApiError::InternalError { message: cause };
+        }
+        let names: Vec<&str> = exited.iter().map(|s| s.handle.as_str()).collect();
+        ApiError::InternalError {
+            message: format!(
+                "deleting {id} took the share(s) of {} off this device, which cannot be undone, \
+                 but {id} itself was not deleted: {cause}; delete {id} again to finish",
+                names.join(", ")
+            ),
+        }
+    }
+
+    /// The side of the share `id` is a handle on: a shared page, or a mount of
+    /// either kind. `None` when `id` is no share's handle.
+    pub async fn share_handle(
+        &self,
+        id: &str,
+    ) -> Result<Option<crate::shared_tree::MountRole>, ApiError> {
         let target = match self.resolve_write_target(id).await {
             Ok(target) => target,
-            Err(ApiError::BlockNotFound { .. }) => return Ok(false),
+            Err(ApiError::BlockNotFound { .. }) => return Ok(None),
             Err(e) => return Err(e),
         };
-        if self.received_share_of(&target, id)?.is_some() {
-            return Ok(true);
+        // ALLOW(entity_uri_from_raw): id &str backend API param (accepts both id
+        // formats)
+        let handle = EntityUri::from_raw(id);
+        self.assert_no_mount_outside_global(&target, id)?;
+        if let Some((_, info)) = self.placing_mount(&target)? {
+            return Self::mount_role(&info, &handle).map(Some);
         }
         let WriteTarget::Global(node) = target else {
-            return Ok(false);
+            return Ok(None);
         };
-        self.collab_doc
-            .with_read(|doc| Ok(read_mount_info(&doc.get_tree(TREE_NAME), node).is_some()))
+        let info = self
+            .collab_doc
+            .with_read(|doc| Ok(read_mount_info(&doc.get_tree(TREE_NAME), node)))
             .map_err(|e| ApiError::InternalError {
                 message: format!("is {id} a share's mount: {e:#}"),
-            })
+            })?;
+        info.map(|info| Self::mount_role(&info, &handle))
+            .transpose()
     }
 
     /// Refuse removing `id` when it is or holds a share's mount: removing one
     /// takes the share off this device, which only
-    /// [`Self::exit_shares_removed_with`] does.
+    /// [`Self::delete_exiting_shares`] does.
     fn refuse_removing_shares(&self, target: &WriteTarget, id: &str) -> Result<(), ApiError> {
         let shares = self.shares_removed_with(target, id)?;
         if shares.is_empty() {
@@ -3231,25 +3303,20 @@ impl LoroBackend {
         })
     }
 
-    /// Take `share` off this device through the share backend that owns it.
-    async fn exit_share(&self, id: &str, share: &RemovedShare) -> Result<(), ApiError> {
-        let exit = self
-            .shared_trees
+    /// The share backend that takes `shares` off this device.
+    fn share_exit(
+        &self,
+        id: &str,
+        shares: &[RemovedShare],
+    ) -> Result<Arc<dyn crate::shared_tree::ShareExit>, ApiError> {
+        self.shared_trees
             .as_ref()
             .and_then(|store| store.exit())
             .ok_or_else(|| ApiError::InvalidOperation {
                 message: format!(
                     "removing {id} takes the share of {} off this device, but no share backend \
                      is attached to exit it through",
-                    share.handle
-                ),
-            })?;
-        exit.exit(&share.shared_tree_id)
-            .await
-            .map_err(|e| ApiError::InternalError {
-                message: format!(
-                    "exit the share of {} while removing {id}: {e:#}",
-                    share.handle
+                    shares[0].handle
                 ),
             })
     }

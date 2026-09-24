@@ -29,21 +29,31 @@ use crate::cell::Cell;
 use crate::cell::CellBacking;
 use crate::consolidator::Seen;
 
-/// An op that would remove a page another device shared with this one.
+/// An op that would remove a shared page, on either side of its share.
 ///
-/// Removing such a page is leaving its share, which is irreversible, so only a
-/// delete may do it ([`EntityCellRegistry::exit_shares_removed_with`]). Any
-/// other op removing it would leave the share behind an inverse that cannot
-/// bring the share back.
+/// Removing such a page takes its share off this device, which is
+/// irreversible, so only a delete may do it
+/// ([`EntityCellRegistry::delete_exiting_shares`]). Any other op removing it
+/// would leave the share behind an inverse that cannot bring the share back.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error(
-    "{page} is a page shared with you, so {action} would take it off this device without \
-     leaving its share. Delete {page} instead: that leaves the share and keeps the owner's \
-     page unchanged."
+    "{page} is a shared page, so {action} would take it off this device without its share. \
+     Delete {page} instead: that leaves a share you received, keeping the owner's page, or \
+     revokes a share you made."
 )]
 pub struct ShareExitRefused {
     pub page: EntityUri,
     pub action: RemovingAction,
+}
+
+/// What [`EntityCellRegistry::delete_exiting_shares`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TreeDelete {
+    /// No cell route holds the entity; the caller deletes it elsewhere.
+    NotInTree,
+    Deleted,
+    /// Deleted, and at least one share went through its exit.
+    DeletedExitingShares,
 }
 
 /// The op a [`ShareExitRefused`] refused.
@@ -189,19 +199,23 @@ pub trait EntityCellRegistry: Send + Sync {
         Ok(false)
     }
 
-    /// Whether `uri` is the root of a page another device shared with this
-    /// one. Only [`Self::exit_shares_removed_with`] removes such a page;
+    /// Whether `uri` is the root of a page share on this device, of either
+    /// side. Only [`Self::delete_exiting_shares`] removes such a page;
     /// [`Self::delete_entity`] refuses it.
-    async fn is_received_share_root(&self, _: &EntityUri) -> Result<bool> {
+    async fn is_share_root(&self, _: &EntityUri) -> Result<bool> {
         Ok(false)
     }
 
-    /// Take every share whose mount a removal of `uri` removes off this
-    /// device: a share received is left (the owner's data stays), a share
-    /// made here is revoked (its recipients lose it). Irreversible.
-    /// `Ok(false)` when there is none.
-    async fn exit_shares_removed_with(&self, _: &EntityUri) -> Result<bool> {
-        Ok(false)
+    /// [`Self::delete_entity`], taking every share whose mount the delete
+    /// removes off this device first: a share received is left (the owner's
+    /// data stays), a share made here is revoked (its recipients lose it).
+    /// Exiting a share is irreversible.
+    async fn delete_exiting_shares(&self, uri: &EntityUri) -> Result<TreeDelete> {
+        Ok(if self.delete_entity(uri).await? {
+            TreeDelete::Deleted
+        } else {
+            TreeDelete::NotInTree
+        })
     }
 
     /// Batch twin of [`create_entity`](Self::create_entity): one warm + one

@@ -1208,17 +1208,21 @@ impl CrudOperations<Block> for LoroBlockOperations {
     async fn delete(&self, id: &str) -> Result<OperationResult> {
         let backend = self.find_doc_for_block(id).await?;
 
-        // A received page or a share's mount is a handle on a share: its
-        // delete takes the share off this device, whatever it holds.
-        if backend
-            .is_share_handle(id)
+        // A shared page or a share's mount is a handle on a share: its delete
+        // takes the share off this device. Revoking destroys the shared
+        // content, so only an owner's delete keeps the leaf rule.
+        if let Some(role) = backend
+            .share_handle(id)
             .await
             .map_err(|e| format!("delete: classify {id}: {e}"))?
         {
+            if role == crate::shared_tree::MountRole::Owner {
+                Self::refuse_cascade(&backend, id).await?;
+            }
             backend
-                .exit_shares_removed_with(id)
+                .delete_exiting_shares(id)
                 .await
-                .map_err(|e| format!("delete: exit the share of {id}: {e}"))?;
+                .map_err(|e| format!("delete: {e}"))?;
             return Ok(OperationResult::declared_irreversible(
                 vec![],
                 "delete of a share's handle takes the share off this device: a share received is \
@@ -1251,19 +1255,7 @@ impl CrudOperations<Block> for LoroBlockOperations {
             Err(e) => return Err(format!("delete: capture block {id}: {e}").into()),
         };
 
-        let children = backend
-            .list_children(id)
-            .await
-            .map_err(|e| format!("delete: list children of {id}: {e}"))?;
-        if !children.is_empty() {
-            return Err(format!(
-                "delete: block {id} has {} child(ren); refusing to cascade. Use \
-                 `delete_subtree` to delete the whole subtree, or \
-                 `delete_keep_children` to reparent the children first.",
-                children.len()
-            )
-            .into());
-        }
+        Self::refuse_cascade(&backend, id).await?;
 
         // Leaf: read the pre-delete sibling predecessor for the exact inverse.
         let siblings = backend
@@ -1314,6 +1306,24 @@ impl CrudOperations<Block> for LoroBlockOperations {
 }
 
 impl LoroBlockOperations {
+    /// A bare `delete` never cascades: refuse `id` when it has children.
+    async fn refuse_cascade(backend: &LoroBackend, id: &str) -> Result<()> {
+        let children = backend
+            .list_children(id)
+            .await
+            .map_err(|e| format!("delete: list children of {id}: {e}"))?;
+        if !children.is_empty() {
+            return Err(format!(
+                "delete: block {id} has {} child(ren); refusing to cascade. Use \
+                 `delete_subtree` to delete the whole subtree, or \
+                 `delete_keep_children` to reparent the children first.",
+                children.len()
+            )
+            .into());
+        }
+        Ok(())
+    }
+
     /// Build the `create`-op params that resurrect a just-deleted LEAF block
     /// identically: same id, parent, content (rich `Object{text, marks}` when
     /// the block carried marks, else plain text), edge fields, every stored

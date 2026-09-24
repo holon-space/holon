@@ -2039,17 +2039,24 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
                     anyhow::bail!("block {id} not found in Loro tree");
                 };
                 let tree = doc.get_tree(crate::loro_backend::TREE_NAME);
-                if shared_tree::is_mount_node(&tree, tid) {
-                    return Err(anyhow::Error::msg(format!(
-                        "block {id} is already a mount node; sharing a mount is not supported"
-                    )));
-                }
-                if let Some(mount) = shared_tree::first_mount_below(&tree, tid)? {
-                    return Err(anyhow::Error::new(NestedShareRefusal::ContainsShare {
-                        id: id.to_string(),
-                        mount: read_stable_id(&tree, mount)
+                let mount_name =
+                    |mount: TreeID, info: &shared_tree::MountInfo| match info.placed_page() {
+                        Some(page) => page.to_string(),
+                        None => read_stable_id(&tree, mount)
                             .map(|s| block_uri_from_bare(&s))
                             .unwrap_or_else(|| format!("{mount:?}")),
+                    };
+                let held = shared_tree::mounts_in_subtree(&tree, tid);
+                if let Some((mount, info)) = held.iter().find(|(mount, _)| *mount == tid) {
+                    return Err(anyhow::Error::msg(format!(
+                        "block {id} is a share ({}); a share cannot hold another share",
+                        mount_name(*mount, info)
+                    )));
+                }
+                if let Some((mount, info)) = held.first() {
+                    return Err(anyhow::Error::new(NestedShareRefusal::ContainsShare {
+                        id: id.to_string(),
+                        mount: mount_name(*mount, info),
                     }));
                 }
                 // Amendment A: the mount is a Page (Inc 2), so it must sit under a
@@ -2750,11 +2757,14 @@ impl LoroShareBackend {
             .await
             .remove(&shared_tree_id);
 
-        // (3) Close the advertiser endpoint + stop advertising.
-        self.advertiser
-            .drop_share(&shared_tree_id)
-            .await
-            .map_err(|e| err(format!("drop_share({shared_tree_id}): {e:#}")))?;
+        // (3) Close the advertiser endpoint + stop advertising. A share whose
+        // roster could not be rebuilt at rehydration is loaded unadvertised.
+        if self.advertiser.is_active(&shared_tree_id).await {
+            self.advertiser
+                .drop_share(&shared_tree_id)
+                .await
+                .map_err(|e| err(format!("drop_share({shared_tree_id}): {e:#}")))?;
+        }
 
         // (4) Unregister the shared doc from the manager. Keep the handle so we
         // can enumerate the descendant block ids for SQL row deletion below.
@@ -3323,6 +3333,7 @@ fn block_uri_from_bare(stored: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use holon_core::TreeDelete;
     use tempfile::TempDir;
 
     use super::*;
@@ -7306,7 +7317,7 @@ mod tests {
             "the refused delete changed nothing"
         );
         let exited = authority
-            .exit_shares_removed_with("block:shared-page")
+            .delete_exiting_shares("block:shared-page")
             .await
             .expect("a recipient may leave a placed page's share");
         assert_eq!(
@@ -7337,11 +7348,11 @@ mod tests {
         let fixture = PageShareFixture::accepted().await;
         let registry = fixture.registry_b().await;
         let parent = EntityUri::block("root-b");
-        assert!(
-            registry.exit_shares_removed_with(&parent).await.unwrap(),
+        assert_eq!(
+            registry.delete_exiting_shares(&parent).await.unwrap(),
+            TreeDelete::DeletedExitingShares,
             "root-b holds a received page, so deleting it leaves that page's share"
         );
-        assert!(registry.delete_entity(&parent).await.unwrap());
 
         fixture.assert_b_left_the_share().await;
         fixture.close().await;
@@ -7508,11 +7519,11 @@ mod tests {
         assert!(fixture.b.manager.get_doc(&fixture.shared_tree_id).is_some());
 
         let registry = fixture.registry_b().await;
-        assert!(
-            registry.exit_shares_removed_with(&mount).await.unwrap(),
+        assert_eq!(
+            registry.delete_exiting_shares(&mount).await.unwrap(),
+            TreeDelete::DeletedExitingShares,
             "the mount is the page's placement, so deleting it leaves the page's share"
         );
-        registry.delete_entity(&mount).await.unwrap();
         fixture.assert_b_left_the_share().await;
         fixture.close().await;
     }
@@ -7544,11 +7555,11 @@ mod tests {
         );
 
         let registry = registry_of(a).await;
-        assert!(
-            registry.exit_shares_removed_with(&ancestor).await.unwrap(),
+        assert_eq!(
+            registry.delete_exiting_shares(&ancestor).await.unwrap(),
+            TreeDelete::DeletedExitingShares,
             "root-a holds the owner's mount of the share, so deleting it revokes the share"
         );
-        assert!(registry.delete_entity(&ancestor).await.unwrap());
         assert!(!has_mount(a, &fixture.shared_tree_id).await);
         assert!(
             a.manager.get_doc(&fixture.shared_tree_id).is_none(),
@@ -7598,8 +7609,10 @@ mod tests {
 
         let registry = registry_of(&fixture.a).await;
         let ancestor = EntityUri::block("root-a");
-        assert!(registry.exit_shares_removed_with(&ancestor).await.unwrap());
-        registry.delete_entity(&ancestor).await.unwrap();
+        assert_eq!(
+            registry.delete_exiting_shares(&ancestor).await.unwrap(),
+            TreeDelete::DeletedExitingShares
+        );
 
         assert_eq!(
             fixture.b.sync_with_peers(&stid).await.unwrap(),
@@ -7660,11 +7673,11 @@ mod tests {
         );
 
         let registry = registry_of(&b).await;
-        assert!(
-            registry.exit_shares_removed_with(&ancestor).await.unwrap(),
+        assert_eq!(
+            registry.delete_exiting_shares(&ancestor).await.unwrap(),
+            TreeDelete::DeletedExitingShares,
             "root-b holds a received block share, so deleting it leaves the share"
         );
-        assert!(registry.delete_entity(&ancestor).await.unwrap());
         assert!(!has_mount(&b, &stid).await);
         assert!(
             b.manager.get_doc(&stid).is_none(),
@@ -7724,6 +7737,195 @@ mod tests {
             0,
             "the refused rollback restored no mount"
         );
+        fixture.close().await;
+    }
+
+    /// The owner's own share of `shared_tree_id` is gone: no mount, no loaded
+    /// doc, no advertiser, no snapshot, and the revocation is disclosed once.
+    async fn assert_owner_revoked(a: &LoroShareBackend, shared_tree_id: &str, page: &str) {
+        assert!(
+            !has_mount(a, shared_tree_id).await,
+            "the mount outlived the delete"
+        );
+        assert!(
+            a.manager.get_doc(shared_tree_id).is_none(),
+            "the revoked share's doc is still registered"
+        );
+        assert!(!a.advertiser.is_active(shared_tree_id).await);
+        assert!(!a.snapshot_store.exists(shared_tree_id));
+        let disclosed: Vec<_> = a
+            .degraded_bus()
+            .current()
+            .into_iter()
+            .filter(|c| {
+                c.subject == page && c.reason.condition_kind() == ConditionKind::DELETED_SHARED_PAGE
+            })
+            .collect();
+        assert_eq!(disclosed.len(), 1, "{page}'s revocation is disclosed once");
+    }
+
+    /// An owner deleting the page it shared deletes it through the share's
+    /// exit: the share is revoked for every recipient, irreversibly.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn an_owners_delete_of_its_shared_page_revokes_the_share() {
+        use holon_core::cell_registry::EntityCellRegistry;
+        use holon_core::traits::CrudOperations;
+
+        let fixture = PageShareFixture::accepted().await;
+        let stid = fixture.shared_tree_id.clone();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        edit_shared_root(&fixture.a, &stid, "before-revocation-").await;
+        assert!(fixture.b.sync_with_peers(&stid).await.unwrap() > 0);
+
+        let ops = crate::LoroBlockOperations::new(fixture.a.store.clone()).with_shared_trees(
+            fixture.a.manager.clone() as Arc<dyn crate::shared_tree::SharedTreeStore>,
+        );
+        ops.delete("block:p-child").await.unwrap();
+        let page = EntityUri::block("shared-page");
+        assert!(
+            registry_of(&fixture.a)
+                .await
+                .is_share_root(&page)
+                .await
+                .unwrap(),
+            "only a delete may remove the owner's shared page"
+        );
+        ops.delete(page.as_str()).await.unwrap();
+
+        assert_owner_revoked(&fixture.a, &stid, "block:shared-page").await;
+        assert_eq!(
+            fixture.b.sync_with_peers(&stid).await.unwrap(),
+            0,
+            "a recipient of a revoked share completes no further round"
+        );
+        fixture.close().await;
+    }
+
+    /// No undo of an owner's delete of its shared page can rebuild the page
+    /// beside a mount `unshare` no longer reaches.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn undoing_an_owners_delete_of_its_shared_page_rebuilds_no_half_share() {
+        use holon_core::traits::CrudOperations;
+
+        let fixture = PageShareFixture::accepted().await;
+        let ops = crate::LoroBlockOperations::new(fixture.a.store.clone()).with_shared_trees(
+            fixture.a.manager.clone() as Arc<dyn crate::shared_tree::SharedTreeStore>,
+        );
+        ops.delete("block:p-child").await.unwrap();
+        let deleted = ops.delete("block:shared-page").await.unwrap();
+        if let UndoAction::Undo(inverse) = deleted.undo.clone() {
+            let params = inverse
+                .params
+                .into_iter()
+                .map(|(k, v)| (k.into(), v))
+                .collect();
+            ops.execute_operation(&inverse.entity_name, &inverse.op_name, params)
+                .await
+                .unwrap();
+            assert!(
+                !has_mount(&fixture.a, &fixture.shared_tree_id).await,
+                "the undo rebuilt the page beside a live mount; unshare now says {:?}",
+                fixture.a.unshare("block:shared-page").await.err()
+            );
+        }
+        assert!(
+            matches!(deleted.undo, UndoAction::DeclaredIrreversible(_)),
+            "the owner's delete revokes the share, so it is irreversible: {:?}",
+            deleted.undo
+        );
+        fixture.close().await;
+    }
+
+    /// A bare delete never cascades: the owner's delete of a shared page that
+    /// still has children is refused, and revokes nothing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn an_owners_bare_delete_of_a_shared_page_with_children_revokes_nothing() {
+        use holon_core::traits::CrudOperations;
+
+        let fixture = PageShareFixture::accepted().await;
+        let ops = crate::LoroBlockOperations::new(fixture.a.store.clone()).with_shared_trees(
+            fixture.a.manager.clone() as Arc<dyn crate::shared_tree::SharedTreeStore>,
+        );
+        let refused = ops
+            .delete("block:shared-page")
+            .await
+            .expect_err("a bare delete never cascades");
+        assert!(
+            refused.to_string().contains("refusing to cascade"),
+            "{refused}"
+        );
+        assert!(has_mount(&fixture.a, &fixture.shared_tree_id).await);
+        assert!(
+            fixture
+                .a
+                .advertiser
+                .is_active(&fixture.shared_tree_id)
+                .await
+        );
+        fixture.close().await;
+    }
+
+    /// A delete above two shares takes both off the device and deletes the
+    /// block, even when one of them is not advertised; it never stops between
+    /// the exits and the delete without saying so.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn a_delete_above_two_shares_exits_both_and_deletes() {
+        use holon_api::repository::CoreOperations;
+        use holon_core::cell_registry::EntityCellRegistry;
+
+        let (a, _dir_a) = make_backend();
+        seed_page(&a, "root-a", None, "Root A").await;
+        seed_page(&a, "first-page", Some("root-a"), "First").await;
+        seed_page(&a, "second-page", Some("root-a"), "Second").await;
+        let (_, first) = share_and_ticket(&a, "block:first-page").await;
+        let (_, second) = share_and_ticket(&a, "block:second-page").await;
+        a.advertiser.drop_share(&first).await.unwrap();
+
+        let registry = registry_of(&a).await;
+        let ancestor = EntityUri::block("root-a");
+        let deleted = registry.delete_exiting_shares(&ancestor).await;
+        if let Err(e) = &deleted {
+            let e = format!("{e:#}");
+            assert!(
+                has_mount(&a, &second).await
+                    || (e.contains("block:second-page")
+                        && e.contains("block:root-a itself was not")),
+                "second-page's share was revoked while root-a was not deleted, undisclosed: {e}"
+            );
+        }
+        assert_eq!(deleted.unwrap(), TreeDelete::DeletedExitingShares);
+        assert_owner_revoked(&a, &second, "block:second-page").await;
+        assert!(!has_mount(&a, &first).await);
+        assert!(a.manager.get_doc(&first).is_none());
+        assert!(
+            authority_of(&a)
+                .await
+                .get_block("block:root-a")
+                .await
+                .is_err()
+        );
+        a.advertiser.close_all().await;
+    }
+
+    /// A share is never nested in another.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn sharing_a_block_that_holds_a_mount_is_refused() {
+        let fixture = PageShareFixture::accepted().await;
+        let refused = fixture
+            .b
+            .share_subtree("block:root-b", "none".into())
+            .await
+            .expect_err("root-b holds the mount of a received page");
+        assert!(
+            refused.to_string().contains("block:shared-page"),
+            "{refused}"
+        );
+        assert_eq!(fixture.mounts_on_b().await, 1);
         fixture.close().await;
     }
 

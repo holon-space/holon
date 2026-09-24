@@ -1046,7 +1046,7 @@ impl Module for OrgModeModule {
                         .optional_resolve_async::<holon_loro::block_cell_registry::BlockCellRegistry>()
                         .await
                     {
-                        Some(registry) => sql.with_received_pages(registry),
+                        Some(registry) => sql.with_shared_pages(registry),
                         None => sql,
                     },
                 ) as Arc<dyn OperationProvider>;

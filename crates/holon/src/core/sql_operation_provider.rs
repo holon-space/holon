@@ -403,9 +403,9 @@ pub struct SqlOperationProvider {
     edge_fields: HashMap<String, EdgeFieldDescriptor>,
     /// Wall-clock authority for write-time timestamps. Defaults to SystemClock.
     clock: std::sync::Arc<dyn holon_api::Clock>,
-    /// Tells which blocks are pages another device shared with this one.
-    /// `None` on a wiring that holds no shares.
-    received_pages: Option<std::sync::Arc<dyn holon_core::cell_registry::EntityCellRegistry>>,
+    /// Tells which blocks are shared pages. `None` on a wiring that holds no
+    /// shares.
+    shared_pages: Option<std::sync::Arc<dyn holon_core::cell_registry::EntityCellRegistry>>,
 }
 
 impl SqlOperationProvider {
@@ -489,17 +489,17 @@ impl SqlOperationProvider {
             write_schema,
             edge_fields,
             clock: std::sync::Arc::new(holon_api::SystemClock),
-            received_pages: None,
+            shared_pages: None,
         }
     }
 
-    /// Let `merge_blocks` tell the pages another device shared with this one,
-    /// which it must never merge away.
-    pub fn with_received_pages(
+    /// Let `merge_blocks` tell the shared pages, which it must never merge
+    /// away.
+    pub fn with_shared_pages(
         mut self,
         registry: std::sync::Arc<dyn holon_core::cell_registry::EntityCellRegistry>,
     ) -> Self {
-        self.received_pages = Some(registry);
+        self.shared_pages = Some(registry);
         self
     }
 
@@ -2425,19 +2425,18 @@ impl SqlOperationProvider {
         }
     }
 
-    /// A merge deletes the block it merges away, and removing a page another
-    /// device shared with this one is leaving its share, which only a delete
-    /// does.
-    async fn refuse_merging_away_received_page(&self, id: &str) -> Result<()> {
-        let Some(registry) = &self.received_pages else {
+    /// A merge deletes the block it merges away, and removing a shared page
+    /// takes its share off this device, which only a delete does.
+    async fn refuse_merging_away_shared_page(&self, id: &str) -> Result<()> {
+        let Some(registry) = &self.shared_pages else {
             return Ok(());
         };
         // ALLOW(entity_uri_from_raw): merge plan side id from operation params
         let page = EntityUri::from_raw(id);
         if registry
-            .is_received_share_root(&page)
+            .is_share_root(&page)
             .await
-            .map_err(|e| format!("merge_blocks: is '{id}' a page shared with you: {e:#}"))?
+            .map_err(|e| format!("merge_blocks: is '{id}' a shared page: {e:#}"))?
         {
             return Err(holon_core::ShareExitRefused {
                 page,
@@ -4324,8 +4323,7 @@ impl OriginTaggedWrites for SqlOperationProvider {
                     )
                     .into());
                 }
-                self.refuse_merging_away_received_page(&duplicate_id)
-                    .await?;
+                self.refuse_merging_away_shared_page(&duplicate_id).await?;
                 if self.has_file_binding(&duplicate_id).await? {
                     return Err(format!(
                         "merge_blocks: '{duplicate_id}' is a document root with a live file \
@@ -4371,7 +4369,7 @@ impl OriginTaggedWrites for SqlOperationProvider {
                     };
                     let mut losers = Vec::with_capacity(loser_ids.len());
                     for id in loser_ids {
-                        self.refuse_merging_away_received_page(&id).await?;
+                        self.refuse_merging_away_shared_page(&id).await?;
                         let children: Vec<String> = self
                             .read_merge_children(&id)
                             .await?

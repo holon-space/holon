@@ -56,7 +56,7 @@ impl EntityCellRegistry for ReceivedPages {
 
     fn on_entity_deleted(&self, _: &EntityUri) {}
 
-    async fn is_received_share_root(&self, uri: &EntityUri) -> anyhow::Result<bool> {
+    async fn is_share_root(&self, uri: &EntityUri) -> anyhow::Result<bool> {
         Ok(self.0.contains(uri))
     }
 }
@@ -82,7 +82,7 @@ async fn block_engine_receiving(pages: Vec<EntityUri>) -> Arc<BackendEngine> {
                         "block".to_string(),
                         descriptors,
                     )
-                    .with_received_pages(received.clone()),
+                    .with_shared_pages(received.clone()),
                 ) as Arc<dyn OperationProvider>
             })
             .with_operation_provider_factory(|backend| {

@@ -583,10 +583,10 @@ impl BlockOrdering for LoroBlockOrdering {
         // A share's mount removed from its file, alone or with a block above
         // it, goes through the share's exit, as a delete of it does.
         self.backend
-            .exit_shares_removed_with(id)
+            .delete_exiting_shares(id)
             .await
-            .map_err(boxed)?;
-        self.backend.delete_block(id).await.map_err(boxed)
+            .map(|_| ())
+            .map_err(boxed)
     }
 
     /// No separate upstream consolidator: the Loro tree is the store AND the

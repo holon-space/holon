@@ -804,6 +804,15 @@ impl DevicePairing {
                 }
                 depth.push((d, node.id));
             }
+            if let Some((_, mount)) = depth
+                .iter()
+                .find(|(_, id)| crate::shared_tree::is_mount_node(&tree, *id))
+            {
+                anyhow::bail!(
+                    "the pre-pair tree holds the share mount {mount:?}, which pairing refuses \
+                     before it wipes; wiping it would remove the share without its exit"
+                );
+            }
             depth.sort_by_key(|a| std::cmp::Reverse(a.0));
             for (_, id) in depth {
                 tree.delete(id)
@@ -922,10 +931,7 @@ impl DevicePairing {
     /// Every reason this device cannot adopt this invite, decided before the
     /// store is touched and before any dial.
     async fn refuse_unpairable(&self, invite: &PairingInvite) -> anyhow::Result<()> {
-        let shares = self.mounted_share_ids().await?;
-        if !shares.is_empty() {
-            return Err(PairingRefused::ReceiverHoldsMounts { shares }.into());
-        }
+        self.refuse_holding_mounts().await?;
         if let Some(record) = crate::pairing_swap::read_record(self.store.storage_dir())? {
             return Err(PairingRefused::AlreadyPaired {
                 owner: record.owner,
@@ -948,6 +954,16 @@ impl DevicePairing {
                 }
                 .into());
             }
+        }
+        Ok(())
+    }
+
+    /// Refuse pairing while this device holds a share: the wipe of its tree
+    /// would remove the share's mount without the share's exit.
+    async fn refuse_holding_mounts(&self) -> anyhow::Result<()> {
+        let shares = self.mounted_share_ids().await?;
+        if !shares.is_empty() {
+            return Err(PairingRefused::ReceiverHoldsMounts { shares }.into());
         }
         Ok(())
     }
@@ -1249,6 +1265,8 @@ impl DevicePairingOperations<()> for DevicePairing {
 
         let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ").to_string();
         let (staging, staged) = self.stage_owner_documents(&invite, &stamp).await?;
+        // A share accepted while the dial ran would be wiped below.
+        self.refuse_holding_mounts().await?;
 
         // From here the live store changes. The marker names both directories,
         // so a process killed at any point between the two renames is finished

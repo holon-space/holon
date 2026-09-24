@@ -314,14 +314,19 @@ subtree hangs here.
   `delete_subtree` or any other route that reaches the authority): the mount,
   the loaded shared doc, the workers, the projected rows and the local snapshot
   go, and a `left-shared-page` notice says so. The shared doc is never written,
-  so the owner's page is unchanged. An owner's delete of `P` still deletes the
-  page for everyone. A mount without a recorded role refuses the delete and
-  names `unshare`.
+  so the owner's page is unchanged. An owner's delete of `P` revokes the share
+  (below). A mount without a recorded role refuses the delete and names
+  `unshare`.
 - **Every delete that removes a mount goes through the share's exit**: a delete
-  of the mount by its own id, or of any block above it, for either share kind.
-  A recipient leaves the share, as above. An owner revokes it as `unshare`
-  does, and a `deleted-shared-page` notice says its recipients lose it.
+  of the mount by its own id, of any block above it, or of the page it places,
+  for either share kind and on either side. A recipient leaves the share, as
+  above. An owner revokes it as `unshare` does, and a `deleted-shared-page`
+  notice says its recipients lose it. The delete is irreversible (no undo, no
+  redo). `LoroBackend::delete_exiting_shares` checks what can refuse before the
+  first exit; an error after an exit names the shares already exited.
   `LoroBackend::delete_block` refuses every other removal of a mount.
+- **A share never holds another share.** `share_subtree` refuses a block that
+  is or holds a mount; a mount lives in the global tree only.
 - **One placement per share per device.** A second `accept_shared_subtree` of
   a share this device already mounts is refused, naming the share's handle:
   before any network work, and again inside the write transaction that creates

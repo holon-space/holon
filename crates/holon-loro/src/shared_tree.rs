@@ -748,6 +748,19 @@ pub fn is_mount_node(tree: &LoroTree, node: TreeID) -> bool {
     )
 }
 
+/// Every mount node at or under `root` in `tree`, with its record.
+pub fn mounts_in_subtree(tree: &LoroTree, root: TreeID) -> Vec<(TreeID, MountInfo)> {
+    let mut mounts = Vec::new();
+    let mut queue = vec![root];
+    while let Some(node) = queue.pop() {
+        queue.extend(tree.children(node).unwrap_or_default());
+        if let Some(info) = read_mount_info(tree, node) {
+            mounts.push((node, info));
+        }
+    }
+    mounts
+}
+
 /// The live mount node that places shared tree `shared_tree_id` in `tree`.
 /// One share has at most one mount per tree: a second accept of a mounted share
 /// is refused (`accept_shared_subtree`).

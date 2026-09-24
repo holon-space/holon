@@ -29,6 +29,7 @@ use holon_core::cell::CellBacking;
 use holon_core::cell_registry::CellCache;
 use holon_core::cell_registry::EntityCellRegistry;
 use holon_core::cell_registry::EntityCellRegistryExt;
+use holon_core::cell_registry::TreeDelete;
 use holon_core::consolidator::Seen;
 use loro::LoroDoc;
 use loro::LoroText;
@@ -703,25 +704,31 @@ impl EntityCellRegistry for BlockCellRegistry {
         Ok(in_tree)
     }
 
-    async fn is_received_share_root(&self, uri: &EntityUri) -> Result<bool> {
-        Ok(self
-            .backend
-            .received_page_share(uri.as_str())
+    async fn is_share_root(&self, uri: &EntityUri) -> Result<bool> {
+        self.backend
+            .is_page_share_root(uri.as_str())
             .await
-            .map_err(|e| anyhow!("classify {uri}: {e:#}"))?
-            .is_some())
+            .map_err(|e| anyhow!("classify {uri}: {e:#}"))
     }
 
-    async fn exit_shares_removed_with(&self, uri: &EntityUri) -> Result<bool> {
+    async fn delete_exiting_shares(&self, uri: &EntityUri) -> Result<TreeDelete> {
+        if !self.backend.is_live_anywhere(uri.id()).await {
+            return Ok(TreeDelete::NotInTree);
+        }
         let exited = self
             .backend
-            .exit_shares_removed_with(uri.as_str())
+            .delete_exiting_shares(uri.as_str())
             .await
-            .map_err(|e| anyhow!("exit the shares removed with {uri}: {e:#}"))?;
+            .map_err(|e| anyhow!("delete {uri} with the shares it removes: {e:#}"))?;
         for share in &exited {
             self.cache.evict_uri(&share.handle);
         }
-        Ok(!exited.is_empty())
+        self.cache.evict_uri(uri);
+        Ok(if exited.is_empty() {
+            TreeDelete::Deleted
+        } else {
+            TreeDelete::DeletedExitingShares
+        })
     }
 
     /// [`create_entity`](EntityCellRegistry::create_entity) for a whole chunk
