@@ -639,7 +639,7 @@ async fn compose_sut_seeded_impl(
                 .register_gesture_writes(&mut caps, comp.driver());
             Arc::new(DriverInputComponent::with_input_headless(
                 comp.reactive(),
-                comp.driver(),
+                comp.driver_concrete(),
                 resolver.clone(),
             ))
             .register(&mut caps);

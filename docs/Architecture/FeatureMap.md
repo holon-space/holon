@@ -107,7 +107,7 @@ The pin / right-sidebar cluster is the largest open family in the registry: one 
 | Block history | An op-grounded history table over block writes | `inv-history-no-phantom-rows/block_history`, `inv-history-records-all-creates/block_history` | [0025](../adr/0025-op-grounded-projections.md) | Storage | [Schema.md](Schema.md) |
 | Schema & typed entities | Runtime-declared types projected into their own matviews | `DeclareTypedSchema`, `CreateTypedEntity`, `RegisterEntityScheme`, `ConcurrentSchemaInit`; `inv-typed-matview-matches-ref` | [0029](../adr/0029-entity-identity-single-minting-authority.md) | — | `crates/holon-turso/src/dynamic_schema_module.rs` |
 
-Open reds here: `history-ingest-create-unrecorded`, `history-join-phantom-row`.
+Open reds here: `history-ingest-create-unrecorded`.
 
 ## Rules & automation
 

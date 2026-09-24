@@ -2424,8 +2424,8 @@ components:
   uses_cap_transition_macro: true
   covers:
   - slash-command — slash-menu keystroke sequence -> command
-  rung: 'input-pipeline `apply_trigger_slash_command_to_sut`: click + type ''/'' + command chars + Enter,
-    every step a real UserDriver gesture.'
+  rung: 'input-pipeline `SutBlockInteract::trigger_slash_command`: click + home + type ''/'' + command
+    chars + Enter, every step a real UserDriver gesture.'
 - file: crates/holon-integration-tests/src/pbt/transitions/type_chars.rs
   kind: transition
   requires_ref_caps:

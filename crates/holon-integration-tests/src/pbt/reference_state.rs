@@ -523,6 +523,10 @@ pub struct ReferenceState {
     /// check.
     pub history_ever_created: BTreeSet<EntityUri>,
     pub history_min_op_groups: usize,
+    /// Every block id a transition removed from `domain.block_state.blocks`
+    /// (recorded by [`Self::record_removed_blocks`]). The append-only
+    /// `block_history` keeps rows for these after the block is gone.
+    pub history_removed: BTreeSet<EntityUri>,
 
     /// Undo→redo burned-id oracle (NOT model state proper): the real block ids
     /// the harness reconcile retired because a `Redo` re-minted their block
@@ -986,6 +990,7 @@ impl ReferenceState {
         };
         resolved.domain.profile_block_ids =
             self.domain.profile_block_ids.iter().map(resolve).collect();
+        resolved.history_removed = self.history_removed.iter().map(resolve).collect();
         // Navigation focus per region can itself be a doc URI (a region drilled
         // into a document). Remap every history entry so the resolved view's
         // `current_focus(region)` is SUT-keyed — `inv-navigation-focus` compares
@@ -1043,6 +1048,7 @@ impl ReferenceState {
             conditions: super::conditions_state::ConditionsRefState::default(),
             history_ever_created: BTreeSet::new(),
             history_min_op_groups: 0,
+            history_removed: BTreeSet::new(),
             undo_redo_burned_ids: BTreeSet::new(),
             renamed_away_page_paths: Vec::new(),
             typed_entities: {
@@ -2885,6 +2891,14 @@ impl ReferenceState {
     pub fn shadow_catch_up_primary(&self) {
         self.loro
             .shadow_catch_up_primary(&self.domain.block_state.blocks);
+    }
+
+    /// Add to `history_removed` every id of `before` (the block map's keys
+    /// before a transition) that the block map no longer holds.
+    pub fn record_removed_blocks(&mut self, before: BTreeSet<EntityUri>) {
+        let blocks = &self.domain.block_state.blocks;
+        self.history_removed
+            .extend(before.into_iter().filter(|id| !blocks.contains_key(id)));
     }
 
     /// Re-canonicalize sequences and rebuild profile tracking.

@@ -28,6 +28,7 @@ use holon_frontend::navigation::NavDirection;
 use holon_frontend::pbt_caps::SutArrowNavigate;
 use holon_frontend::reactive::BuilderServices;
 use holon_frontend::reactive::ReactiveEngine;
+use holon_frontend::user_driver::ReactiveEngineDriver;
 use holon_frontend::user_driver::UserDriver;
 use holon_pbt_core::capabilities::CapRegion;
 use holon_pbt_core::capabilities::EngineFocus;
@@ -83,8 +84,9 @@ pub struct DriverInputComponent {
     /// `GpuiWindowComponent::wait_for_bounds`): the harness settles the frame
     /// to a fixed point before reads, so a poll loop would only spin.
     geometry: Option<Box<dyn GeometryProvider>>,
-    /// True for the `with_input_headless` build (the VM-rung driver in the
-    /// headless composed `CapMap`). It gates OFF the `SutDriver` cap in
+    /// `Some` for the `with_input_headless` build (the VM-rung driver in the
+    /// headless composed `CapMap`): the same instance as `driver`, concrete, so
+    /// gestures can read its editor mirror. It gates OFF the `SutDriver` cap in
     /// `register`: headless, `engine_focused_block` reads the frontend
     /// `ReactiveEngine`'s global focus, which is honestly `None` for a
     /// non-editor page block (no editor mounts without a window), so
@@ -95,7 +97,7 @@ pub struct DriverInputComponent {
     /// `inv-navigation-focus`/`inv-focus-roots` (the `SutFocusWrite`/
     /// `SutSqlProjection` path). So the headless build provides
     /// only the gesture caps (`SutBlockInteract`/`SutArrowNavigate`).
-    headless: bool,
+    headless_driver: Option<Arc<ReactiveEngineDriver>>,
     /// Synthetic-oracle→SUT-real id map (`Some` only for the headless composed
     /// build, which drives an id-minting backend: a split mints a fresh
     /// uuid that the harness reconciles onto the oracle's
@@ -114,7 +116,7 @@ impl DriverInputComponent {
             forced_engine_focus: None,
             driver: None,
             geometry: None,
-            headless: false,
+            headless_driver: None,
             resolver: None,
         }
     }
@@ -128,7 +130,7 @@ impl DriverInputComponent {
             forced_engine_focus: Some(focus),
             driver: None,
             geometry: None,
-            headless: false,
+            headless_driver: None,
             resolver: None,
         }
     }
@@ -147,7 +149,7 @@ impl DriverInputComponent {
             forced_engine_focus: None,
             driver: Some(driver),
             geometry: Some(geometry),
-            headless: false,
+            headless_driver: None,
             resolver: None,
         }
     }
@@ -173,7 +175,7 @@ impl DriverInputComponent {
             forced_engine_focus: None,
             driver: Some(driver),
             geometry: Some(geometry),
-            headless: false,
+            headless_driver: None,
             resolver: Some(resolver),
         }
     }
@@ -191,15 +193,15 @@ impl DriverInputComponent {
     /// [`Self::require_bounds`].
     pub fn with_input_headless(
         engine: Arc<ReactiveEngine>,
-        driver: Arc<dyn UserDriver>,
+        driver: Arc<ReactiveEngineDriver>,
         resolver: IdResolver,
     ) -> Self {
         Self {
             engine,
             forced_engine_focus: None,
-            driver: Some(driver),
+            driver: Some(driver.clone() as Arc<dyn UserDriver>),
             geometry: None,
-            headless: true,
+            headless_driver: Some(driver),
             resolver: Some(resolver),
         }
     }
@@ -528,9 +530,6 @@ impl SutBlockInteract for DriverInputComponent {
     async fn trigger_slash_command(&self, block_id: &EntityUri) {
         let resolved = self.resolve(block_id);
         let block_id = &resolved;
-        // Faithful port of `apply_trigger_slash_command_to_sut` driving the real
-        // window: focus the editor, open the slash menu, filter to "delete",
-        // press Enter — every step a production `UserDriver` gesture.
         self.require_bounds(block_id, "TriggerSlashCommand");
         self.driver()
             .click_entity(block_id, "main")
@@ -550,10 +549,17 @@ impl SutBlockInteract for DriverInputComponent {
             .await
             .unwrap_or_else(|e| panic!("[TriggerSlashCommand] {e}"));
         let driver = self.driver();
-        driver
-            .send_raw_keystroke("/", &[])
-            .await
-            .unwrap_or_else(|e| panic!("[TriggerSlashCommand] '/' keystroke failed: {e:#}"));
+        // `/` opens the menu only at line start or after whitespace; `home`
+        // puts it there whatever the block's text and wherever the click
+        // left the caret.
+        for key in ["home", "/"] {
+            driver
+                .send_raw_keystroke(key, &[])
+                .await
+                .unwrap_or_else(|e| {
+                    panic!("[TriggerSlashCommand] {key:?} keystroke failed: {e:#}")
+                });
+        }
         for ch in "delete".chars() {
             driver
                 .send_raw_keystroke(&ch.to_string(), &[])
@@ -561,6 +567,17 @@ impl SutBlockInteract for DriverInputComponent {
                 .unwrap_or_else(|e| {
                     panic!("[TriggerSlashCommand] filter char {ch:?} keystroke failed: {e:#}")
                 });
+        }
+        if let Some(headless) = &self.headless_driver {
+            let labels = headless.slash_menu_labels(block_id);
+            assert!(
+                labels.as_ref().and_then(|l| l.first()).map(String::as_str)
+                    == Some("Delete Subtree"),
+                "[TriggerSlashCommand] slash menu on {block_id} does not select \"Delete Subtree\" before \
+                 Enter (menu: {labels:?}, buffer: {:?}, caret: {:?})",
+                headless.editor_live_text(block_id),
+                driver.editor_cursor_byte(block_id),
+            );
         }
         driver
             .send_raw_keystroke("enter", &[])
@@ -726,7 +743,7 @@ impl CapProvider for DriverInputComponent {
         // NOT provide it — `engine_focused_block` is honestly `None` for a non-editor
         // page block headless, so claiming the cap would select those windowed
         // invariants over a focus signal they were never meant to read (faked cap).
-        if !self.headless {
+        if self.headless_driver.is_none() {
             caps.insert(self.clone() as Arc<dyn SutDriver>);
         }
         // The input caps are provided ONLY when a real `UserDriver` is installed

@@ -279,6 +279,9 @@ impl RefHistoryExpectation for NullRef {
     fn ever_created_ids(&self) -> BTreeSet<EntityUri> {
         panic!("class-2: invariant read RefHistoryExpectation::ever_created_ids")
     }
+    fn removed_block_ids(&self) -> BTreeSet<EntityUri> {
+        panic!("class-2: invariant read RefHistoryExpectation::removed_block_ids")
+    }
     fn min_recorded_op_groups(&self) -> usize {
         panic!("class-2: invariant read RefHistoryExpectation::min_recorded_op_groups")
     }

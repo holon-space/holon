@@ -394,8 +394,9 @@ fn compare_no_ghost_rows(
 /// be a block the reference model created or knew (G9, phantom guard). The
 /// reference anchor is the union of the live block universe and every id the
 /// oracle minted (`RefHistoryExpectation::ever_created_ids`, which retains
-/// create-then-deleted ids from the reconcile map). Asymmetric SUBSET check:
-/// history ⊆ known-universe. A recorded id outside it is a phantom/ghost
+/// create-then-deleted ids from the reconcile map) and every id a transition
+/// removed (`RefHistoryExpectation::removed_block_ids`). Asymmetric SUBSET
+/// check: history ⊆ known-universe. A recorded id outside it is a phantom/ghost
 /// history row (a mis-keyed or leaked recording). Cap-gated on `SutHistory`, so
 /// an org-only draw (no recording substrate) deselects cleanly.
 pub struct HistoryNoPhantomRows;
@@ -436,6 +437,7 @@ fn ref_history_universe(refs: &CapMap) -> Extraction<BTreeSet<EntityUri>> {
         .chain(RefLayout::layout_block_ids(refs))
         .chain(RefLayout::profile_block_ids(refs))
         .chain(RefHistoryExpectation::ever_created_ids(refs))
+        .chain(RefHistoryExpectation::removed_block_ids(refs))
         .collect();
     Extraction::Value(universe)
 }

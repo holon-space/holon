@@ -655,6 +655,10 @@ impl RefHistoryExpectation for ReferenceState {
         self.history_ever_created.clone()
     }
 
+    fn removed_block_ids(&self) -> BTreeSet<EntityUri> {
+        self.history_removed.clone()
+    }
+
     fn min_recorded_op_groups(&self) -> usize {
         self.history_min_op_groups
     }

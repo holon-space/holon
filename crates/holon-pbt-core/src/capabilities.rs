@@ -3507,6 +3507,10 @@ pub trait RefHistoryExpectation {
     /// anchor for the phantom-history subset check (bigger only weakens the
     /// check, never false-fails it).
     fn ever_created_ids(&self) -> BTreeSet<EntityUri>;
+    /// Every block id a transition removed from the reference, seeded blocks
+    /// included — the phantom-history anchor for blocks the reconcile never
+    /// minted.
+    fn removed_block_ids(&self) -> BTreeSet<EntityUri>;
     /// A conservative lower bound on the distinct `op_group`s the SUT must have
     /// recorded: the count of UI-driven (synthetic→real reconciled) creates,
     /// each routed through `execute_operation` recording ≥1 delta. Excludes

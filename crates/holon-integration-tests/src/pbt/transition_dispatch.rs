@@ -195,11 +195,14 @@ macro_rules! declare_e2e_transitions {
             }
 
             fn apply_to_ref(&self, state: &mut $crate::pbt::reference_state::ReferenceState) {
+                let before: ::std::collections::BTreeSet<::holon_api::EntityUri> =
+                    state.domain.block_state.blocks.keys().cloned().collect();
                 match self {
                     $( $enum_name::$variant(v) => <$ty as ::holon_pbt_core::TransitionRef<
                         $crate::pbt::reference_state::ReferenceState,
                     >>::apply_to_ref(v, state), )*
                 }
+                state.record_removed_blocks(before);
                 // E-solid shadow-mesh centralized primary catch-up: after every
                 // ref transition, mirror the ref block map into the shadow
                 // primary at the SUT's fed Lamport height. One site covers all
