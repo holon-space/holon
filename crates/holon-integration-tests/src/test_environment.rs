@@ -1471,16 +1471,14 @@ impl TestEnvironment {
         }
     }
 
-    /// Wait for the `LoroSyncController` to reach quiescence — i.e., its
-    /// `last_synced` watermark matches the current `oplog_frontiers()`.
-    /// No-op when Loro is disabled.
+    /// Wait for the `LoroSyncController` to reach quiescence
+    /// ([`holon_loro::LoroSyncControllerHandle::is_settled`]). No-op when Loro
+    /// is disabled.
     pub async fn wait_for_loro_quiescence(&self, timeout: std::time::Duration) {
-        let (Some(handle), Some(doc_store)) =
-            (self.loro_sync_handle.get(), self.loro_doc_store.get())
-        else {
+        let Some(handle) = self.loro_sync_handle.get() else {
             return;
         };
-        holon_loro_testing::quiescence::wait_for_loro_quiescence_on(handle, doc_store, timeout)
+        holon_loro_testing::quiescence::wait_for_loro_quiescence_on(handle, timeout)
             .await
             .expect("wait_for_loro_quiescence: loro sync did not quiesce before the deadline");
     }

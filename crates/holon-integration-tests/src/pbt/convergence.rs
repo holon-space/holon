@@ -8,8 +8,6 @@ use std::time::Duration;
 
 use holon::api::BackendEngine;
 use holon_frontend::reactive::ReactiveEngine;
-use holon_loro::DocScope;
-use holon_loro::LoroDocumentStore;
 use holon_loro::LoroSyncControllerHandle;
 use holon_orgmode::OrgSyncIdleSignal;
 
@@ -22,8 +20,8 @@ use crate::test_environment::pbt_quiet_floor;
 ///
 /// 1. **Turso CDC** — `cdc_emitted_watermark` stable for one quiet floor (the
 ///    `block_raw` matview the block invariants query is CDC-fed).
-/// 2. **Loro** — the sync controller is settled (`is_settled_at`) at the
-///    authority doc's `oplog_frontiers()` (a peer/merge write projects
+/// 2. **Loro** — the sync controller is settled (`is_settled`) at both
+///    projected docs' `oplog_frontiers()` (a peer/merge write projects
 ///    asynchronously).
 /// 3. **block-matview mirror** — the `BlockFeed`'s `consumed_seq` stops
 ///    advancing (the org write-back reads that mirror, so its ARRIVAL, not
@@ -48,7 +46,6 @@ use crate::test_environment::pbt_quiet_floor;
 pub(crate) async fn converge_signals(
     engine: Option<&Arc<BackendEngine>>,
     sync: Option<Arc<LoroSyncControllerHandle>>,
-    store: Option<LoroDocumentStore>,
     org_idle: Option<Arc<OrgSyncIdleSignal>>,
     block_feed: Option<Arc<holon_api::live_data::LiveData<holon_api::Block>>>,
     reactive: Option<&Arc<ReactiveEngine>>,
@@ -80,16 +77,13 @@ pub(crate) async fn converge_signals(
         // in Loro -> CDC -> org order, instead of the old sequential race where
         // stage-1 CDC drained before stage-2 ever wrote the sort_key. (An absent
         // sync/store = a Loro-off draw = nothing to wait for.)
-        if let (Some(sync), Some(store)) = (&sync, &store) {
-            let current = store
-                .get_doc(DocScope::Global)
+        if let Some(sync) = &sync
+            && !sync
+                .is_settled()
                 .await
-                .expect("converge_signals: get_doc(Global) failed")
-                .doc()
-                .oplog_frontiers();
-            if !sync.is_settled_at(&current) {
-                active = true;
-            }
+                .expect("converge_signals: Loro settle predicate failed")
+        {
+            active = true;
         }
 
         // Turso CDC watermark. The projection's SQL write bumps this, so it only

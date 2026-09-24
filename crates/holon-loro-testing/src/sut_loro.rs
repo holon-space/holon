@@ -94,7 +94,7 @@ impl LoroSut {
         let Some(handle) = self.sync_handle.as_ref() else {
             return;
         };
-        wait_for_loro_quiescence_on(handle, &self.doc_store, timeout)
+        wait_for_loro_quiescence_on(handle, timeout)
             .await
             .expect("LoroSut::wait_for_quiescence: peer sync did not quiesce before the deadline");
     }

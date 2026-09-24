@@ -7,6 +7,7 @@ mod loro_kind_fidelity_through_projection;
 mod loro_live_entity_wiring;
 mod loro_memory_start_app;
 mod loro_projection_atomic_advance;
+mod loro_projection_settle;
 mod loro_projection_unarmed_delete;
 mod loro_projection_withheld_delete;
 mod loro_read_model_publish_ordering_and_disclosure;

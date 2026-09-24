@@ -958,15 +958,10 @@ impl HeadlessFrontendComponent {
         let sync = injector
             .try_resolve::<holon_loro::LoroSyncControllerHandle>()
             .ok(); // ALLOW(ok): optional DI service — absent when Loro/sync is off
-        let store = injector
-            .try_resolve::<holon_loro::LoroDocumentStore>()
-            .ok() // ALLOW(ok): optional DI service — absent when Loro is off
-            .map(|s| (*s).clone());
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         crate::pbt::convergence::converge_signals(
             Some(engine),
             sync,
-            store,
             org_idle,
             injector
                 .try_resolve::<holon_api::live_data::BlockFeed>()

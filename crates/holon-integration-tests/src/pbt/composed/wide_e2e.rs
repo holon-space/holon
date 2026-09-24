@@ -180,14 +180,13 @@ pub async fn converge_handle(handle: &WideHandle, budget: Duration) {
 async fn converge_projections(handle: &WideHandle, budget: Duration) {
     // The frontend accessors are queried at settle time, not at boot: the sync
     // controller / idle signal resolve on a spawned `post_ready_work` task.
-    let (sync, store, org_idle, block_feed) = match &handle.frontend {
+    let (sync, org_idle, block_feed) = match &handle.frontend {
         Some(comp) => (
             comp.loro_sync_handle(),
-            comp.loro_doc_store(),
             comp.org_idle_signal(),
             comp.block_feed(),
         ),
-        None => (None, None, None, None),
+        None => (None, None, None),
     };
     // The reactive engine whose watch-consumer drain the settle must also wait
     // out (see `converge_signals`' reactive-epoch stage): its `snapshot()` is
@@ -201,7 +200,6 @@ async fn converge_projections(handle: &WideHandle, budget: Duration) {
     let converged = crate::pbt::convergence::converge_signals(
         handle.engine.as_ref(),
         sync,
-        store,
         org_idle,
         block_feed,
         reactive.as_ref(),

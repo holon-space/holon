@@ -2731,25 +2731,14 @@ impl HolonMcpServer {
 
             // Loro FIRST (the projection that writes the reordered sort_key CDC
             // then fires): a frontier not yet caught up counts as activity.
-            if let (Some(sync), Some(store)) = (&loro_sync, &loro_store) {
-                let collab = {
-                    let guard = store.read().await;
-                    guard.get_doc(DocScope::Global).await.map_err(|e| {
-                        rmcp::ErrorData::internal_error(
-                            format!("await_quiescence: live Loro global doc unreachable: {e}"),
-                            None,
-                        )
-                    })?
-                };
-                let current = collab.with_read(|doc| Ok(doc.oplog_frontiers())).map_err(
-                    |e: anyhow::Error| {
-                        rmcp::ErrorData::internal_error(
-                            format!("await_quiescence: reading Loro global doc frontiers: {e:#}"),
-                            None,
-                        )
-                    },
-                )?;
-                if !sync.is_settled_at(&current) {
+            if let (true, Some(sync)) = (check_loro, &loro_sync) {
+                let settled = sync.is_settled().await.map_err(|e| {
+                    rmcp::ErrorData::internal_error(
+                        format!("await_quiescence: reading the Loro settle predicate: {e:#}"),
+                        None,
+                    )
+                })?;
+                if !settled {
                     moving.push("loro");
                 }
             }

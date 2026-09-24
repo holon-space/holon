@@ -385,11 +385,9 @@ impl LoroSyncControllerHandle {
         self.projection.pending_is_empty()
     }
 
-    /// Whether every Loro change up to `current` (the global doc's
-    /// `oplog_frontiers`) has reached the sink. The one settle predicate for
-    /// every quiescence detector.
-    pub fn is_settled_at(&self, current: &Frontiers) -> bool {
-        &self.last_synced_frontiers() == current && self.pending_is_empty()
+    /// See [`LoroProjection::is_settled`].
+    pub async fn is_settled(&self) -> Result<bool> {
+        self.projection.is_settled().await
     }
 
     /// Number of errors the controller has logged since startup. Used by the
@@ -852,6 +850,25 @@ impl LoroProjection {
         self.pending.lock().unwrap().is_empty() && self.layout_pending.lock().unwrap().is_empty()
     }
 
+    /// Whether every change up to `global` and `layout` (the two projected
+    /// documents' `oplog_frontiers`) has reached the sink. The watermarks
+    /// advance only after a pass wrote its rows AND withheld nothing, so an
+    /// in-flight or owed change always reads as unsettled.
+    pub fn is_settled_at(&self, global: &Frontiers, layout: &Frontiers) -> bool {
+        &*self.last_synced.lock().unwrap() == global
+            && &*self.layout_last_synced.lock().unwrap() == layout
+            && self.pending_is_empty()
+    }
+
+    /// [`Self::is_settled_at`] the documents' current heads. The one settle
+    /// predicate for every quiescence detector.
+    pub async fn is_settled(&self) -> Result<bool> {
+        let (collab, layout) = self.docs().await?;
+        let global = collab.with_read(|doc| Ok(doc.oplog_frontiers()))?;
+        let layout = layout.with_read(|doc| Ok(doc.oplog_frontiers()))?;
+        Ok(self.is_settled_at(&global, &layout))
+    }
+
     /// Phase 2 shadow counters `(agreements, divergences)`: how many projection
     /// batches' emitted ops decoded to a `ChangeSet` that agreed with /
     /// diverged from the source op multiset. The gate requires `divergences
@@ -1168,7 +1185,6 @@ impl LoroProjection {
                         match self
                             .emit_ops(
                                 ops,
-                                current,
                                 &t0,
                                 snapshot_ms,
                                 after_len,
@@ -1180,7 +1196,7 @@ impl LoroProjection {
                         {
                             Ok(()) => {
                                 // Sink write committed — now advance the diff base.
-                                *self.layout_last_synced.lock().unwrap() = layout_current;
+                                self.advance_watermarks(current, layout_current).await?;
                                 let mut live = self.live.lock().unwrap();
                                 for (id, v) in staging {
                                     match v {
@@ -1349,7 +1365,6 @@ impl LoroProjection {
         if let Err(e) = self
             .emit_ops(
                 ops,
-                current,
                 &t0,
                 snapshot_ms,
                 after_len,
@@ -1378,6 +1393,8 @@ impl LoroProjection {
         if ungrounded > 0 {
             self.seeded.store(false, Ordering::SeqCst);
             *self.pending_reseed_reason.lock().unwrap() = Some(FullReason::Orphan);
+        } else {
+            self.advance_watermarks(current, layout_current).await?;
         }
         if may_seed_live(after_settled, ungrounded) {
             let mut idx = collab.with_read(|doc| Ok(crate::loro_backend::build_tid_index(doc)))?;
@@ -1390,7 +1407,6 @@ impl LoroProjection {
             // corollary 3).
             self.read_model.publish_snapshot(&after);
             *self.live.lock().unwrap() = after;
-            *self.layout_last_synced.lock().unwrap() = layout_current;
             self.seeded.store(true, Ordering::SeqCst);
             // This full snapshot captured everything up to `current`, so any facts
             // accumulated before/during it are now stale — drop them so the next
@@ -1428,8 +1444,8 @@ impl LoroProjection {
         });
     }
 
-    /// Apply the diff ops through the consolidator and advance the watermark.
-    /// Shared by the incremental fast path and the full reseed path.
+    /// Apply the diff ops through the consolidator. Shared by the incremental
+    /// fast path and the full reseed path.
     // This is an internal batch-emission helper called from exactly two
     // orchestration sites in this file with the diagnostic fields
     // (t0/snapshot_ms/after_len/before_len/mode/reason) already at hand
@@ -1439,7 +1455,6 @@ impl LoroProjection {
     async fn emit_ops(
         &self,
         ops: Vec<(String, holon_api::StorageEntity)>,
-        current: Frontiers,
         t0: &std::time::Instant,
         snapshot_ms: u128,
         after_len: usize,
@@ -1553,9 +1568,16 @@ impl LoroProjection {
             );
         }
 
-        *self.last_synced.lock().unwrap() = current;
-        self.persist_sidecar().await?;
         Ok(())
+    }
+
+    /// Record that the sink reflects both documents up to these heads. Only a
+    /// pass that wrote its rows and withheld nothing may call this: the
+    /// watermarks are what [`Self::is_settled_at`] reads.
+    async fn advance_watermarks(&self, global: Frontiers, layout: Frontiers) -> Result<()> {
+        *self.last_synced.lock().unwrap() = global;
+        *self.layout_last_synced.lock().unwrap() = layout;
+        self.persist_sidecar().await
     }
 
     /// Both projected documents: the replicated global tree and the

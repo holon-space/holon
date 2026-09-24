@@ -236,7 +236,11 @@ impl LoroSyncSut for StubSut {
         let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
         loop {
             let current = self.primary_oplog_frontiers().await;
-            if handle.is_settled_at(&current) {
+            if handle
+                .is_settled()
+                .await
+                .expect("[StubSut::wait_for_quiescence] settle predicate failed")
+            {
                 return;
             }
             if tokio::time::Instant::now() >= deadline {
@@ -257,8 +261,11 @@ impl LoroSyncSut for StubSut {
         self.stub_ops.snapshot().await
     }
 
-    fn is_settled_at(&self, current: &Frontiers) -> bool {
-        self.handle().is_settled_at(current)
+    async fn is_settled(&self) -> bool {
+        self.handle()
+            .is_settled()
+            .await
+            .expect("[StubSut::is_settled] settle predicate failed")
     }
 
     async fn primary_oplog_frontiers(&self) -> Frontiers {
