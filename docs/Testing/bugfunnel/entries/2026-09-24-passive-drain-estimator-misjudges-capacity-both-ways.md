@@ -45,7 +45,7 @@ Martin's ruling D207.a. The gate runs a controlled drain test
    blocks a write past its floor deadline.
 
 A min-plus bound proves that a healthy pipeline cannot fail this test. A
-sustained rate below `N/L ≈ 9.93` writes/s cannot pass it. The estimator is
+sustained rate below `N/L = 600 / 60.4 s ≈ 9.934` writes/s cannot pass it. The estimator is
 demoted to `SloWindow::drain_estimate`, a disclosure type with no failing
 variant: `OracleStatus` holds it as a `Severity::Warning` finding, logged at
 WARN and painted as an amber banner, never as a violation.

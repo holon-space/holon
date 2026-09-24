@@ -449,7 +449,7 @@ fn latency_slo_rung_service_time_p95() {
 /// **RUNG 2 — THE DRAIN TEST (Martin's ruling D207.a).** [`DRAIN_WRITES`]
 /// writes offered at twice the floor rate must all be visible within
 /// `N/f + s` of the first dispatch. A healthy pipeline cannot miss it and one
-/// below 9.93 writes/s cannot make it: see `holon_api::latency_drain`.
+/// below 9.934 writes/s cannot make it: see `holon_api::latency_drain`.
 ///
 /// Driven by intent rather than by the `TypeChars` transition: the editor cap
 /// awaits each commit before returning, so a transition drive cannot put two

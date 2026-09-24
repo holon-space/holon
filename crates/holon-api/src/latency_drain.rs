@@ -8,11 +8,15 @@
 //! a disclosure only.
 //!
 //! "Capacity at least `f`" means a rate-latency service curve: a backlog of `B`
-//! writes is retired within `S + B/f`, where `S` is the pipeline's latency term
-//! (commit latency, the pass already in flight, the first pass's overhead, each
-//! bounded by one idle service time, so `S ≤ 2 ×` [`SERVICE_TIME_SLO_MS`] `=
-//! s`). Both block mirrors apply rows in commit order, and the first one to
-//! apply a row closes its clock.
+//! writes is retired within `S + B/f`, where `S` is the pipeline's latency
+//! term. `S` is the pass already in flight plus the commit latency and
+//! first-pass overhead of the new backlog. Each of the two parts is at most one
+//! idle service time, so `S ≤ 2 ×` [`SERVICE_TIME_SLO_MS`] `= s = 400 ms`. Both
+//! block mirrors apply rows in commit order, and the first one to apply a row
+//! closes its clock.
+//!
+//! The gate's numbers: `f = 10/s`, `N = 600`, `W = 40`, so `L = 60 s + 0.4 s =
+//! 60.4 s`, the stall bound `s + W/f = 4.4 s`, and `f·s = 4` writes.
 //!
 //! **A healthy pipeline cannot fail.** Every Fail below is a proof that the
 //! curve does not hold:
@@ -21,16 +25,24 @@
 //!   `t0 + S + N/f`, so the completion is at most `L`.
 //! * [`DrainVerdict::Stalled`]: the window keeps every write's backlog at
 //!   dispatch within `W`, so a healthy pipeline delivers it within `s + W/f`.
-//! * [`DrainVerdict::WindowHeld`]: while the schedule holds, a healthy pipeline
-//!   has at most `f·s + 1` writes pending at `t0 + k/f`, fewer than `W`.
+//! * [`DrainVerdict::WindowHeld`]: it is judged at the first write `k` not
+//!   offered by `t0 + k/f`, so writes `0..k` met their deadlines and are the
+//!   only ones offered. The Late bound then has a healthy pipeline deliver all
+//!   but `f·S ≤ f·s = 4` of them by `t0 + k/f`, fewer than `W`.
 //!
 //! **A slow pipeline always fails.** No write exists before `t0`, and a feed
 //! spends at least `1/μ` on each row, so the last row is visible no earlier
-//! than `t0 + N/μ`: every `μ < N/L` fails, host load notwithstanding. For the
-//! gate's `N = 600` that is `600 / 60.4 s ≈ 9.93/s`, so only rates in
-//! `[9.93, 10)/s` sit below the floor and can still pass. A sustained slow
-//! stretch fails early: its backlog fills the window, and the oldest write
-//! then waits past `s + W/f`, or the next write misses its floor deadline.
+//! than `t0 + N/μ`: every `μ < N/L = 600 / 60.4 s ≈ 9.934/s` fails, host load
+//! notwithstanding, so only rates in `[9.934, 10)/s` sit below the floor and
+//! can still pass. A sustained slow stretch fails early: its backlog fills the
+//! window, and the oldest write then waits past `s + W/f`, or the next write
+//! misses its floor deadline.
+//!
+//! "Slow" is a rate sustained over the drive. A shorter dip below `f` fails
+//! only once one of its writes waits past `s + W/f = 4.4 s`. With writes
+//! offered every 50 ms, the `j`-th write of a dip to 5/s waits about
+//! `j · (200 − 50) ms`, so a dip of up to 29 writes passes and one of 30
+//! fails as `Stalled`.
 //!
 //! **Nothing observed is lost.** The window stays below the correlator's
 //! per-origin capacity (`MAX_PENDING`), so no drive clock is evicted, and a
@@ -1022,23 +1034,49 @@ mod tests {
         );
     }
 
-    /// The edges of the band that sits below the floor yet passes: 9.9/s
-    /// fails and 9.95/s passes.
+    /// The lower edge of the band that sits below the floor yet passes,
+    /// `N/L ≈ 9.934/s`: 9.930/s fails and 9.940/s passes.
     #[test]
-    fn the_passing_band_below_the_floor_is_9_93_to_10_per_sec() {
-        let (dispatched, delivered) = throttled(|k| 101 * (k + 1));
+    fn the_passing_band_below_the_floor_is_9_934_to_10_per_sec() {
+        let (dispatched, delivered) = throttled(|k| (k + 1) * 1007 / 10);
         assert!(matches!(
-            judged(&dispatched, &delivered, 60_600),
+            judged(&dispatched, &delivered, 60_420),
             DrainVerdict::Late {
                 completion: Some(_),
                 delivered: N,
                 ..
             }
         ));
-        let (dispatched, delivered) = throttled(|k| (k + 1) * 1005 / 10);
+        let (dispatched, delivered) = throttled(|k| (k + 1) * 1006 / 10);
         assert!(matches!(
-            judged(&dispatched, &delivered, 60_300),
+            judged(&dispatched, &delivered, 60_360),
             DrainVerdict::Pass { .. }
+        ));
+    }
+
+    /// A 5/s dip at the end of a fast drive: 29 writes stay within the stall
+    /// bound, 30 do not.
+    #[test]
+    fn a_short_dip_below_the_floor_passes_only_within_the_stall_bound() {
+        let tail = |len: u64| {
+            let fast = N as u64 - len;
+            move |k: u64| {
+                if k < fast {
+                    50 * k + 20
+                } else {
+                    50 * (fast - 1) + 20 + 200 * (k - fast + 1)
+                }
+            }
+        };
+        let (dispatched, delivered) = throttled(tail(29));
+        assert!(matches!(
+            judged(&dispatched, &delivered, 60_400),
+            DrainVerdict::Pass { .. }
+        ));
+        let (dispatched, delivered) = throttled(tail(30));
+        assert!(matches!(
+            judged(&dispatched, &delivered, 60_400),
+            DrainVerdict::Stalled { .. }
         ));
     }
 
