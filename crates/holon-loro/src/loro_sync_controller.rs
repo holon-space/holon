@@ -1614,7 +1614,7 @@ impl LoroProjection {
     }
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-    async fn persist_sidecar(&self, _global: &Frontiers) -> Result<()> {
+    async fn persist_sidecar(&self, _: &Frontiers) -> Result<()> {
         // wasm32 demo is in-memory; no sidecar persistence.
         Ok(())
     }

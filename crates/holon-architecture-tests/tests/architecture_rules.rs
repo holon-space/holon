@@ -226,7 +226,6 @@ const DOC_ESCAPES: &[(&str, usize)] = &[
         "crates/holon-integration-tests/src/pbt/composed/two_instance_transport.rs",
         1,
     ),
-    ("crates/holon-integration-tests/src/pbt/convergence.rs", 1),
     (
         "crates/holon-integration-tests/src/pbt/loro_sync/stub_sut.rs",
         4,
@@ -235,7 +234,6 @@ const DOC_ESCAPES: &[(&str, usize)] = &[
         "crates/holon-integration-tests/tests/loro_suite/projection_harness.rs",
         1,
     ),
-    ("crates/holon-loro-testing/src/quiescence.rs", 1),
     // The vault's `UndoManager`: a long-lived observer registered on the doc,
     // the same shape as a subscription.
     ("crates/holon-loro/src/text_undo.rs", 2),

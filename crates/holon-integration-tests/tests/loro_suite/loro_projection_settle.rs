@@ -103,23 +103,25 @@ impl Fixture {
 }
 
 fn settled(projection: &LoroProjection, global: &LoroDocument, layout: &LoroDocument) -> bool {
-    projection.is_settled_at(
-        &global.doc().oplog_frontiers(),
-        &layout.doc().oplog_frontiers(),
-    )
+    let frontiers = |doc: &LoroDocument| {
+        doc.with_read(|d| Ok(d.oplog_frontiers()))
+            .expect("reading the oplog frontiers under the read guard")
+    };
+    projection.is_settled_at(&frontiers(global), &frontiers(layout))
 }
 
 fn insert_child_in(doc: &LoroDocument, parent: TreeID, stable_id: &str) -> Result<()> {
-    let doc = doc.doc();
-    let tree = doc.get_tree(TREE_NAME);
-    let node = tree.create(Some(parent))?;
-    let meta = tree.get_meta(node)?;
-    meta.insert(STABLE_ID, loro::LoroValue::from(stable_id))?;
-    meta.insert(CONTENT_TYPE, loro::LoroValue::from("text"))?;
-    meta.ensure_mergeable_text(CONTENT_RAW)?
-        .insert(0, stable_id)?;
-    doc.commit();
-    Ok(())
+    doc.with_write(holon_loro::WriteOrigin::Probe("settle"), |txn| {
+        let tree = txn.get_tree(TREE_NAME);
+        let node = tree.create(Some(parent))?;
+        let meta = tree.get_meta(node)?;
+        meta.insert(STABLE_ID, loro::LoroValue::from(stable_id))?;
+        meta.insert(CONTENT_TYPE, loro::LoroValue::from("text"))?;
+        meta.ensure_mergeable_text(CONTENT_RAW)?
+            .insert(0, stable_id)?;
+        txn.commit();
+        Ok(())
+    })
 }
 
 #[tokio::test]
