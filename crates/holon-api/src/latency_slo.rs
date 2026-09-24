@@ -39,8 +39,9 @@ pub use crate::latency_e2e::Superseded;
 /// samples are eligible to be scored against it.
 pub const SERVICE_TIME_SLO_MS: u64 = 200;
 
-/// Throughput floor: writes per second the pipeline must retire, as judged by
-/// the drain test in [`crate::latency_drain`].
+/// Throughput floor: writes per second the pipeline must retire. The SLO's
+/// number; the drain test in [`crate::latency_drain`] fails every sustained
+/// rate below `N/L ≈ 9.93/s` and can pass one in `[9.93, 10)/s`.
 ///
 /// 10/s = 100ms per write. The passive estimator observed 56.5 · 58.7 · 61.7 ·
 /// 68.6 · 74.0 writes/s on the gate's earlier sustained drive (test profile).

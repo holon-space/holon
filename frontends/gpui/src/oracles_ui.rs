@@ -10,8 +10,8 @@
 //!   tokio runtime (called from `main.rs`, off the GPUI thread).
 //! - [`spawn_oracle_bridge`] — global-status → GPUI-entity pump, mirroring
 //!   `share_ui::spawn_degraded_bus_bridge`.
-//! - [`render_banner`] — the impossible-to-miss red top banner (fail loud,
-//!   never fake).
+//! - [`render_banner`] — the impossible-to-miss top banner (fail loud, never
+//!   fake): red for violations, amber when every finding is a warning.
 
 use std::sync::Arc;
 
@@ -36,8 +36,9 @@ use holon_oracles::checks::SourceLanguageRow;
 use holon_oracles::runner::OracleRunnerConfig;
 use holon_oracles::runner::OracleStateAccess;
 use holon_oracles::runner::run_oracle_loop;
+use holon_oracles::status::Finding;
 use holon_oracles::status::OracleStatus;
-use holon_oracles::status::Violation;
+use holon_oracles::status::Severity;
 
 // ─── Engine snapshot access ─────────────────────────────────────────────────
 
@@ -130,7 +131,7 @@ pub fn spawn_oracle_runner(
 /// Per-window mirror of the global [`OracleStatus`] snapshot.
 #[derive(Default)]
 pub struct OracleUiState {
-    pub violations: Vec<Violation>,
+    pub violations: Vec<Finding>,
 }
 
 pub struct NotifyOracleUi;
@@ -146,7 +147,7 @@ pub fn spawn_oracle_bridge(
     window_handle: AnyWindowHandle,
     async_cx: &AsyncApp,
 ) {
-    let (tx, mut rx) = futures::channel::mpsc::unbounded::<Vec<Violation>>();
+    let (tx, mut rx) = futures::channel::mpsc::unbounded::<Vec<Finding>>();
 
     rt_handle.spawn(async move {
         let mut watch = OracleStatus::global().watch();
@@ -191,8 +192,9 @@ pub fn spawn_oracle_bridge(
 
 // ─── Banner ─────────────────────────────────────────────────────────────────
 
-/// Render the oracle-violation banner: a full-width red bar pinned to the top
-/// of the window. Returns `None` when there is nothing to report.
+/// Render the oracle banner: a full-width bar pinned to the top of the window,
+/// red when any finding is a violation and amber when all are warnings.
+/// Returns `None` when there is nothing to report.
 pub fn render_banner(
     state: &OracleUiState,
     oracle_state: Entity<OracleUiState>,
@@ -203,6 +205,32 @@ pub fn render_banner(
 
     const MAX_LINES: usize = 4;
     let total = state.violations.len();
+    let violations = state
+        .violations
+        .iter()
+        .filter(|f| f.severity == Severity::Violation)
+        .count();
+    let warnings = total - violations;
+    let (background, border) = if violations > 0 {
+        (0xb91c1cee, 0x7f1d1dff)
+    } else {
+        (0xb45309ee, 0x78350fff)
+    };
+    let headline = match (violations, warnings) {
+        (0, w) => format!(
+            "ORACLE WARNING{} ({w}) — a disclosure, not a failed check",
+            plural(w)
+        ),
+        (v, 0) => format!(
+            "ORACLE VIOLATION{} ({v}) — live invariant check failed",
+            plural(v)
+        ),
+        (v, w) => format!(
+            "ORACLE VIOLATION{} ({v}) — live invariant check failed · WARNING{} ({w})",
+            plural(v),
+            plural(w)
+        ),
+    };
     let mut lines = div().flex().flex_col().gap_1();
     for v in state.violations.iter().take(MAX_LINES) {
         // Messages are already self-tagged with their oracle id.
@@ -224,9 +252,9 @@ pub fn render_banner(
         .right_0()
         .px_3()
         .py_2()
-        .bg(gpui::rgba(0xb91c1cee))
+        .bg(gpui::rgba(background))
         .border_b_2()
-        .border_color(gpui::rgba(0x7f1d1dff))
+        .border_color(gpui::rgba(border))
         .text_color(gpui::rgba(0xffffffff))
         .flex()
         .flex_row()
@@ -241,10 +269,7 @@ pub fn render_banner(
                     div()
                         .text_size(px(13.0))
                         .font_weight(gpui::FontWeight::BOLD)
-                        .child(format!(
-                            "ORACLE VIOLATION{} ({total}) — live invariant check failed",
-                            if total == 1 { "" } else { "S" }
-                        )),
+                        .child(headline),
                 )
                 .child(lines),
         )
@@ -256,7 +281,7 @@ pub fn render_banner(
                 .text_size(px(12.0))
                 .child("dismiss ✕")
                 .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                    // Latency violations are sticky → clear them. Structural
+                    // Latency findings are sticky → clear them. Structural
                     // violations are NOT dismissible (loud, never fake) — so
                     // reflect the true post-dismissal state (global snapshot)
                     // rather than blanking the banner: if only latency
@@ -274,4 +299,8 @@ pub fn render_banner(
         );
 
     Some(banner.into_any_element())
+}
+
+fn plural(n: usize) -> &'static str {
+    if n == 1 { "" } else { "S" }
 }

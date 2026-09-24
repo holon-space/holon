@@ -58,6 +58,8 @@ static WINDOW: OnceLock<Mutex<OriginWindows>> = OnceLock::new();
 /// with every test still green, which is how the `dispatch` emission on the
 /// click path went missing without anything noticing.
 static STAGES: Mutex<Vec<(String, Option<String>)>> = Mutex::new(Vec::new());
+/// Every clock the correlator dropped unmeasured while armed.
+static LOST: Mutex<Vec<LostClock>> = Mutex::new(Vec::new());
 /// Every `matview_ddl` duration seen this process, armed or not — the covariate
 /// is a BOOT measurement, so it is collected before any rung arms the window.
 static DDL_MS: Mutex<Vec<u64>> = Mutex::new(Vec::new());
@@ -78,6 +80,14 @@ pub fn contention_ms() -> Option<f64> {
     (!v.is_empty()).then(|| v.iter().sum::<u64>() as f64 / v.len() as f64)
 }
 
+/// A clock the correlator dropped without a measurement.
+#[derive(Clone, Debug)]
+pub struct LostClock {
+    /// `e2e_expired` or `e2e_evicted`.
+    pub stage: String,
+    pub target: String,
+}
+
 /// The armed measurement window. Dropping it disarms the probe, so a rung that
 /// panics mid-measurement cannot leave the probe recording into the next one.
 pub struct SloProbe {
@@ -90,6 +100,9 @@ impl SloProbe {
     pub fn arm() -> Self {
         window().lock().expect("slo probe window poisoned").clear();
         STAGES.lock().expect("slo probe stage log poisoned").clear();
+        LOST.lock()
+            .expect("slo probe lost-clock log poisoned")
+            .clear();
         ARMED.store(true, Ordering::Release);
         Self { _private: () }
     }
@@ -104,6 +117,26 @@ impl SloProbe {
         self.stage_samples()
             .iter()
             .any(|(s, a)| s == stage && a.as_deref() == Some(action))
+    }
+
+    /// Every clock the correlator expired or evicted while armed.
+    pub fn lost_clocks(&self) -> Vec<LostClock> {
+        LOST.lock()
+            .expect("slo probe lost-clock log poisoned")
+            .clone()
+    }
+
+    /// The samples of `origin` recorded after the first `seen`, in recording
+    /// order.
+    pub fn samples_after(&self, origin: ClockOrigin, seen: usize) -> Vec<E2eSample> {
+        let live = window().lock().expect("slo probe window poisoned");
+        let all = live.window(origin).samples();
+        assert!(
+            all.len() < PROBE_CAPACITY,
+            "the probe window reached its capacity of {PROBE_CAPACITY}, so it may have dropped \
+             samples"
+        );
+        all[seen..].to_vec()
     }
 
     /// The samples of ONE clock origin recorded so far, scored as the two SLO
@@ -219,6 +252,20 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SloProbeLayer {
                 .lock()
                 .expect("slo probe stage log poisoned")
                 .push((stage.clone(), v.action.clone()));
+        }
+        if let Some(stage @ ("e2e_expired" | "e2e_evicted")) = v.stage.as_deref() {
+            LOST.lock()
+                .expect("slo probe lost-clock log poisoned")
+                .push(LostClock {
+                    stage: stage.to_string(),
+                    target: v.block.clone().unwrap_or_else(|| {
+                        panic!(
+                            "slo probe: an `{stage}` event lacked `block` — the correlator's \
+                             emission and this probe have diverged"
+                        )
+                    }),
+                });
+            return;
         }
         if v.stage.as_deref() != Some("e2e") {
             return;

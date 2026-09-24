@@ -20,8 +20,8 @@ use crate::OracleMode;
 use crate::checks::ParentRow;
 use crate::checks::SourceLanguageRow;
 use crate::checks::{self};
+use crate::status::Finding;
 use crate::status::OracleStatus;
-use crate::status::Violation;
 
 /// Live-state snapshot access, implemented by the frontend at the boundary
 /// (SQL row → typed row parsing happens in the impl, fail-loud).
@@ -103,11 +103,11 @@ pub async fn run_oracle_loop(
                     .clamp(config.interval, config.max_interval);
                 // Snapshot failure is itself a violation — never silently
                 // degrade to "no news is good news".
-                let v = Violation {
-                    oracle: "oracle-runner",
-                    message: format!("oracle snapshot failed: {e:#}"),
-                    at: SystemTime::now(),
-                };
+                let v = Finding::violation(
+                    "oracle-runner",
+                    format!("oracle snapshot failed: {e:#}"),
+                    SystemTime::now(),
+                );
                 tracing::error!(target: "holon_oracles", "ORACLE VIOLATION: {}", v.message);
                 OracleStatus::global().set_structural(vec![v]);
             }
@@ -116,7 +116,7 @@ pub async fn run_oracle_loop(
 }
 
 struct CycleOutcome {
-    violations: Vec<Violation>,
+    violations: Vec<Finding>,
     matview_rows: usize,
     raw_rows: usize,
 }
@@ -127,7 +127,7 @@ async fn run_cheap_cycle(db: &dyn OracleStateAccess) -> anyhow::Result<CycleOutc
     let source_rows = db.source_language_rows().await?;
 
     let now = SystemTime::now();
-    let violations: Vec<Violation> = checks::find_orphans(&matview)
+    let violations: Vec<Finding> = checks::find_orphans(&matview)
         .into_iter()
         .map(|m| ("inv-no-orphan-blocks", m))
         .chain(
@@ -140,11 +140,7 @@ async fn run_cheap_cycle(db: &dyn OracleStateAccess) -> anyhow::Result<CycleOutc
                 .into_iter()
                 .map(|m| ("inv-source-language-iff-source", m)),
         )
-        .map(|(oracle, message)| Violation {
-            oracle,
-            message,
-            at: now,
-        })
+        .map(|(oracle, message)| Finding::violation(oracle, message, now))
         .collect();
 
     Ok(CycleOutcome {

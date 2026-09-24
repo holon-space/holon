@@ -36,13 +36,26 @@ traces it did not shape. The gate had no control over the load it judged.
 Martin's ruling D207.a. The gate runs a controlled drain test
 (`crates/holon-api/src/latency_drain.rs`, `latency_slo_rung_drain_test`):
 
-1. It drives 60 writes, one per block, at 20/s.
-2. All 60 must be visible within `N/f + 2 × 200 ms` = 6.4 s.
+1. It drives 600 writes, one per block, offered at 20/s (30 s of sustained
+   load), with at most 40 undelivered at once. An unmeasured warm-up write
+   takes the cold path before `t0`, and the drive starts only once no clock is
+   pending on its targets.
+2. All 600 must be visible within `N/f + 2 × 200 ms` = 60.4 s. The drive fails
+   early when a write waits past `s + W/f` = 4.4 s, or when a full window
+   blocks a write past its floor deadline.
 
 A min-plus bound proves that a healthy pipeline cannot fail this test. A
-pipeline below 9.375 writes/s cannot pass it. The estimator is demoted to
-`SloWindow::drain_estimate`, a disclosure type with no failing variant: it may
-paint a WARNING banner and never a violation.
+sustained rate below `N/L ≈ 9.93` writes/s cannot pass it. The estimator is
+demoted to `SloWindow::drain_estimate`, a disclosure type with no failing
+variant: `OracleStatus` holds it as a `Severity::Warning` finding, logged at
+WARN and painted as an amber banner, never as a violation.
+
+A second verifier round on the first drain test (60 writes) found five more
+defects, all fixed with the same remedy: a cold first door call over 100 ms
+made the run INVALID; a pipeline fast for 60 rows and then at 5/s passed; any
+rate in [9.375, 10)/s passed; a setup clock left pending on a drive target
+panicked the verdict; and the disclosure was pushed into the ledger as a
+violation. Red for each: `lane-logs/fix-red.log`, `lane-logs/fix-red-d5.log`.
 
 Red first: on today's estimator, the property
 `the_drain_gate_passes_every_healthy_pipeline_and_fails_every_slow_one` gave

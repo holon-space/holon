@@ -15,9 +15,9 @@
 //! * [`latency_slo_rung_service_time_p95`] — one interaction in flight
 //!   (dispatch, settle, next), p95 over n ≥ 30 `set_field`-class writes.
 //! * [`latency_slo_rung_drain_test`] — the controlled drain test (Martin's
-//!   ruling D207.a): 60 `set_field` writes at 20/s through the fire-and-forget
-//!   door, each to its own block, must all be visible within `N/f + s`. See
-//!   `holon_api::latency_drain` for the rule and its proof.
+//!   ruling D207.a): 600 `set_field` writes offered at 20/s through the
+//!   fire-and-forget door, each to its own block, must all be visible within
+//!   `N/f + s`. See `holon_api::latency_drain` for the rule and its proof.
 //! * [`a_slowed_pipeline_fails_the_drain_test`] — the same drive with a per-row
 //!   delivery delay that halves the capacity must FAIL.
 //! * [`latency_slo_rung_facade_origin_is_measured_and_not_pooled`] — an
@@ -62,11 +62,14 @@ use holon::api::holon_service::HolonService;
 use holon_api::EntityName;
 use holon_api::EntityUri;
 use holon_api::Value;
-use holon_api::latency_drain::DRAIN_TEST_SLACK;
+use holon_api::latency_drain::DRAIN_WRITES;
 use holon_api::latency_drain::DrainTest;
 use holon_api::latency_drain::DrainVerdict;
-use holon_api::latency_e2e::MAX_PENDING;
+use holon_api::latency_drain::Drive;
+use holon_api::latency_drain::Step;
+use holon_api::latency_e2e::pending_targets;
 use holon_api::latency_slo::ClockOrigin;
+use holon_api::latency_slo::E2eSample;
 use holon_api::latency_slo::MIN_SERVICE_SAMPLES;
 use holon_api::latency_slo::RungVerdict;
 use holon_api::latency_slo::SERVICE_TIME_SLO_MS;
@@ -96,20 +99,8 @@ use proptest_state_machine::StateMachineTest;
 /// coalesced.
 const PACED_WRITES: usize = 40;
 
-/// Writes the drain test drives, ONE per block, so each write closes its own
-/// clock. Below the correlator's per-origin capacity (`MAX_PENDING`), so no
-/// clock is evicted however slow the pipeline.
-const DRAIN_WRITES: usize = 60;
-
-/// Offered rate: 20 writes/s, twice the floor. Driver jitter of up to 50ms a
-/// write then cannot put a write behind the `t0 + k/f` schedule the Pass
-/// proof needs, and passes stay small enough that per-pass overhead counts.
-const DRAIN_OFFER_EVERY: std::time::Duration = std::time::Duration::from_millis(50);
-
-/// How long the drive waits for the last delivery. The verdict is known at
-/// the limit; waiting longer only measures how far a failing run missed it.
-/// Below the correlator's 30s expiry, so no pending clock is dropped.
-const DRAIN_OBSERVE_FOR: std::time::Duration = std::time::Duration::from_secs(25);
+/// How often the drive looks for new deliveries while it waits.
+const DRAIN_POLL: std::time::Duration = std::time::Duration::from_millis(2);
 
 /// The per-row delivery delay the drain teeth arm: capacity at most
 /// 1000 / 200 = 5 writes/s, half the floor, however the rows batch.
@@ -134,22 +125,40 @@ fn host_uri() -> EntityUri {
 const DRIVE_TARGET_PREFIX: &str = "block:slo-gate-burst-";
 
 fn burst_target(i: usize) -> String {
-    format!("block:slo-gate-burst-{i}")
+    format!("{DRIVE_TARGET_PREFIX}{i}")
+}
+
+/// The drain test's warm-up write lands here.
+fn warm_up_target() -> String {
+    format!("{DRIVE_TARGET_PREFIX}warm-up")
+}
+
+/// What the drain test's setup creates for it.
+#[derive(Clone, Copy, PartialEq)]
+enum DriveTargets {
+    Skip,
+    Create,
 }
 
 /// Bring the SUT to "an editor is open on a block we own" — the exact prefix
-/// the latency-ratchet corpus uses — plus the drain test's target rows.
-/// Nothing here is measured.
-fn setup_sequence() -> Vec<E2ETransition> {
+/// the latency-ratchet corpus uses — plus the drain test's target rows when
+/// asked. Nothing here is measured.
+fn setup_sequence(targets: DriveTargets) -> Vec<E2ETransition> {
+    let names: Vec<String> = match targets {
+        DriveTargets::Skip => Vec::new(),
+        DriveTargets::Create => (0..DRAIN_WRITES)
+            .map(burst_target)
+            .chain(std::iter::once(warm_up_target()))
+            .collect(),
+    };
     // Burst targets FIRST, then the host, then the focus: a create moves the
     // editor, so focusing the host has to be the last thing the prefix does.
-    let mut v: Vec<E2ETransition> = (0..DRAIN_WRITES)
-        .map(|i| {
+    let mut v: Vec<E2ETransition> = names
+        .iter()
+        .map(|name| {
             E2ETransition::CreateBlockUnderFocus(CreateBlockUnderFocus {
-                content: format!("burst target {i}"),
-                id: Some(
-                    EntityUri::parse(&burst_target(i)).expect("burst target is a well-formed uri"),
-                ),
+                content: format!("burst target {name}"),
+                id: Some(EntityUri::parse(name).expect("burst target is a well-formed uri")),
             })
         })
         .collect();
@@ -182,10 +191,10 @@ fn write_sequence(n: usize) -> Vec<E2ETransition> {
 }
 
 /// Boot the SUT and run the (unmeasured) setup prefix.
-fn boot() -> (ComposedSut<WideE2E>, ReferenceState) {
+fn boot(targets: DriveTargets) -> (ComposedSut<WideE2E>, ReferenceState) {
     let mut ref_state = wide_e2e_ref();
     let mut sut = <ComposedSut<WideE2E> as StateMachineTest>::init_test(&ref_state);
-    for t in setup_sequence() {
+    for t in setup_sequence(targets) {
         assert!(
             WideE2EMachine::preconditions(&ref_state, &t),
             "latency-slo gate: setup transition {t:?} violates its precondition against the \
@@ -204,21 +213,22 @@ fn boot() -> (ComposedSut<WideE2E>, ReferenceState) {
 /// 2.2/s, against 45ms and 44/s on a quiet one — the same tree, minutes apart.
 /// Judging that would make the gate something people re-run until green.
 ///
-/// A refused run PANICS rather than returning: a "too busy to judge" that
-/// passes is a vacuous green, which is exactly the hole this whole change
-/// closes. The message says INVALID so a reader can tell it from a real red —
-/// the same three-outcome shape `just latency-gate` gets from its exit code 3.
+/// A refused run PANICS, so the test fails: a "too busy to judge" that passes
+/// is a vacuous green. The message says INVALID so a reader can tell a run
+/// that judged nothing from one that judged the tree slow.
 fn require_a_judgeable_host() {
     let Some(ddl) = contention_ms() else {
         panic!(
-            "[latency-slo gate] INVALID (not red): the boot emitted no `matview_ddl` events, so \
+            "[latency-slo gate] INVALID (this test fails WITHOUT a verdict on the tree): the \
+             boot emitted no `matview_ddl` events, so \
              the contention covariate is missing and this run cannot be certified quiet enough \
              to judge. The probe layer or the storage boot changed — investigate, do not relax."
         );
     };
     assert!(
         ddl <= MAX_CONTENTION_MS,
-        "[latency-slo gate] INVALID (not red): mean boot matview_ddl {ddl:.1}ms exceeds the \
+        "[latency-slo gate] INVALID (this test fails WITHOUT a verdict on the tree): mean boot \
+         matview_ddl {ddl:.1}ms exceeds the \
          {MAX_CONTENTION_MS:.0}ms contention cut, so the host was too busy for a wall-clock \
          latency verdict. NOTHING was scored — this is not evidence the tree regressed. Re-run \
          on a quiet machine. If it persists on an idle host, the tree itself slowed boot DDL, \
@@ -247,93 +257,112 @@ impl Drop for ArmedDeliveryDelay {
     }
 }
 
-/// The drive's own samples: those on its targets. Any other UI interaction in
-/// the window is not the drive's to count.
-fn drive_window(probe: &SloProbe) -> SloWindow {
-    let all = probe.snapshot(ClockOrigin::Ui);
-    let mut drive = SloWindow::new(
-        ClockOrigin::Ui,
-        all.len().max(1),
-        SERVICE_TIME_SLO_MS,
-        THROUGHPUT_FLOOR_WRITES_PER_SEC,
+/// The drive's samples: those on its targets. Any other UI interaction in the
+/// window is not the drive's to count.
+fn collect_drive_samples(probe: &SloProbe, seen: &mut usize, into: &mut Vec<E2eSample>) {
+    let fresh = probe.samples_after(ClockOrigin::Ui, *seen);
+    *seen += fresh.len();
+    into.extend(
+        fresh
+            .into_iter()
+            .filter(|s| s.target.starts_with(DRIVE_TARGET_PREFIX)),
     );
-    for s in all.samples() {
-        if s.target.starts_with(DRIVE_TARGET_PREFIX) {
-            drive.record(s.clone());
-        }
-    }
-    drive
 }
 
-/// Drive the controlled drain test: [`DRAIN_WRITES`] content writes, one per
-/// block, on the absolute schedule `t0 + k × DRAIN_OFFER_EVERY` through the
-/// production fire-and-forget door, and judge their e2e samples with
-/// [`DrainTest`].
+/// Drive the controlled drain test through the production fire-and-forget
+/// door, as [`Drive`] schedules it, and judge it.
 ///
 /// `delay_ms` arms the per-row delivery delay for the drive. It sleeps in
 /// `LiveData::subscribe` before the subscriber applies a batch.
 fn run_drain_test(sut: &ComposedSut<WideE2E>, delay_ms: u64) -> DrainVerdict {
-    const _: () = assert!(DRAIN_WRITES < MAX_PENDING);
     let engine = sut
         .handle()
         .reactive()
         .expect("the full-headless draw boots a reactive engine");
-    let test = DrainTest::new(
-        DRAIN_WRITES,
-        THROUGHPUT_FLOOR_WRITES_PER_SEC,
-        DRAIN_TEST_SLACK,
+    let test = DrainTest::gate();
+    let mut drive = Drive::new(
+        test,
+        warm_up_target(),
+        (0..DRAIN_WRITES).map(burst_target).collect(),
     );
 
     let probe = SloProbe::arm();
     let delay = ArmedDeliveryDelay::arm(delay_ms);
-    let writes = sut.runtime().block_on(async {
+    let samples = sut.runtime().block_on(async {
         engine.ui_state().set_detached_dispatch(true);
-        let t0 = tokio::time::Instant::now();
-        let mut writes = Vec::with_capacity(DRAIN_WRITES);
-        for k in 0..DRAIN_WRITES {
-            tokio::time::sleep_until(t0 + DRAIN_OFFER_EVERY * k as u32).await;
-            let target = burst_target(k);
-            let mut params = HashMap::new();
-            params.insert("id".to_string(), Value::String(target.clone()));
-            params.insert("field".to_string(), Value::String("content".to_string()));
-            params.insert("value".to_string(), Value::String(format!("drain {k}")));
-            let dispatched = std::time::Instant::now();
-            dispatch_intent_through_armed_door(
-                &engine,
-                OperationIntent::new(EntityName::new("block"), "set_field".to_string(), params),
-            )
-            .await
-            .expect("the detached door accepts a content write");
-            writes.push((target, dispatched));
-        }
-        let first = writes[0].1;
-        while drive_window(&probe).len() < DRAIN_WRITES && first.elapsed() < DRAIN_OBSERVE_FOR {
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let mut seen = 0;
+        let mut samples = Vec::new();
+        loop {
+            let now = std::time::Instant::now();
+            collect_drive_samples(&probe, &mut seen, &mut samples);
+            match drive.step(now, &samples, pending_targets) {
+                Step::Dispatch { target } => {
+                    let mut params = HashMap::new();
+                    params.insert("id".to_string(), Value::String(target.clone()));
+                    params.insert("field".to_string(), Value::String("content".to_string()));
+                    params.insert(
+                        "value".to_string(),
+                        Value::String(format!("drained {target}")),
+                    );
+                    drive.dispatched(std::time::Instant::now());
+                    dispatch_intent_through_armed_door(
+                        &engine,
+                        OperationIntent::new(
+                            EntityName::new("block"),
+                            "set_field".to_string(),
+                            params,
+                        ),
+                    )
+                    .await
+                    .expect("the detached door accepts a content write");
+                }
+                Step::Wait { until } => {
+                    tokio::time::sleep(until.saturating_duration_since(now).min(DRAIN_POLL)).await;
+                }
+                Step::Done => break,
+            }
         }
         engine.ui_state().set_detached_dispatch(false);
-        writes
+        samples
     });
     drop(delay);
-    let window = drive_window(&probe);
+    let lost: Vec<_> = probe
+        .lost_clocks()
+        .into_iter()
+        .filter(|l| l.target.starts_with(DRIVE_TARGET_PREFIX))
+        .collect();
     drop(probe);
-    let verdict = test.verdict(&writes, window.samples());
+    assert!(
+        lost.is_empty(),
+        "[latency-slo gate] the correlator dropped drive clocks unmeasured: {lost:?}. The \
+         window keeps drive clocks below its capacity and the stall bound ends the drive long \
+         before its expiry, so this is a broken premise, not a slow pipeline"
+    );
+    let verdict = drive.verdict();
     let ratio = match &verdict {
         DrainVerdict::Pass { completion, limit }
-        | DrainVerdict::Fail {
+        | DrainVerdict::Late {
             completion: Some(completion),
             limit,
             ..
         } => format!("{:.2}", completion.as_secs_f64() / limit.as_secs_f64()),
-        DrainVerdict::Fail {
-            completion: None, ..
-        }
-        | DrainVerdict::Invalid { .. } => "-".to_string(),
+        _ => "-".to_string(),
     };
     eprintln!(
         "[latency-slo gate] drain calibration: delay={delay_ms}ms/row C/L={ratio} \
-         verdict={verdict:?} limit={:?}",
+         verdict={verdict:?} limit={:?} stall_bound={:?}",
         test.limit(),
+        test.stall_bound(),
     );
+    let mut window = SloWindow::new(
+        ClockOrigin::Ui,
+        samples.len().max(1),
+        SERVICE_TIME_SLO_MS,
+        THROUGHPUT_FLOOR_WRITES_PER_SEC,
+    );
+    for s in samples {
+        window.record(s);
+    }
     eprintln!("[latency-slo gate] drain window: {}", window.report());
     if window.drain_estimate().is_below() {
         eprintln!(
@@ -381,7 +410,7 @@ fn latency_slo_rung_service_time_p95() {
     let _turn = RUNG_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let (mut sut, mut ref_state) = boot();
+    let (mut sut, mut ref_state) = boot(DriveTargets::Skip);
     require_a_judgeable_host();
 
     let probe = SloProbe::arm();
@@ -418,9 +447,9 @@ fn latency_slo_rung_service_time_p95() {
 }
 
 /// **RUNG 2 — THE DRAIN TEST (Martin's ruling D207.a).** [`DRAIN_WRITES`]
-/// writes at twice the floor rate must all be visible within `N/f + s` of the
-/// first dispatch. A healthy pipeline cannot miss it and one below 9.375
-/// writes/s cannot make it: see `holon_api::latency_drain`.
+/// writes offered at twice the floor rate must all be visible within
+/// `N/f + s` of the first dispatch. A healthy pipeline cannot miss it and one
+/// below 9.93 writes/s cannot make it: see `holon_api::latency_drain`.
 ///
 /// Driven by intent rather than by the `TypeChars` transition: the editor cap
 /// awaits each commit before returning, so a transition drive cannot put two
@@ -433,28 +462,24 @@ fn latency_slo_rung_drain_test() {
     let _turn = RUNG_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let (sut, _ref_state) = boot();
+    let (sut, _ref_state) = boot(DriveTargets::Create);
     require_a_judgeable_host();
     match run_drain_test(&sut, 0) {
         DrainVerdict::Pass { completion, limit } => eprintln!(
             "[latency-slo gate] drain test: PASS — {DRAIN_WRITES} writes visible after \
              {completion:?}, limit {limit:?}"
         ),
-        DrainVerdict::Fail {
-            completion,
-            delivered,
-            limit,
-        } => panic!(
-            "[latency-slo gate] drain test FAILED: {delivered} of {DRAIN_WRITES} writes \
-             visible, the last after {completion:?}, limit {limit:?} (N/f + s at \
-             {THROUGHPUT_FLOOR_WRITES_PER_SEC:.0}/s). A healthy pipeline cannot miss this \
-             limit; load arriving after boot admission can, so confirm on an idle host before \
-             attributing it to the tree."
-        ),
         DrainVerdict::Invalid { write, late_by } => panic!(
-            "[latency-slo gate] INVALID (not red): the driver dispatched write {write} \
-             {late_by:?} behind the floor-rate schedule, so the run did not offer the load the \
-             Pass proof assumes. NOTHING was judged. Re-run on a quiet machine."
+            "[latency-slo gate] INVALID (this test fails WITHOUT a verdict on the tree): the \
+             driver offered write {write} {late_by:?} behind the floor-rate schedule while the \
+             pipeline had room, so the run did not offer the load the proof needs. Re-run on a \
+             quiet machine."
+        ),
+        fail => panic!(
+            "[latency-slo gate] drain test FAILED: {fail:?} (floor \
+             {THROUGHPUT_FLOOR_WRITES_PER_SEC:.0}/s). A healthy pipeline cannot fail this test; \
+             load arriving after boot admission can, so confirm on an idle host before \
+             attributing it to the tree."
         ),
     }
 }
@@ -468,9 +493,9 @@ fn a_slowed_pipeline_fails_the_drain_test() {
     let _turn = RUNG_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let (sut, _ref_state) = boot();
+    let (sut, _ref_state) = boot(DriveTargets::Create);
     match run_drain_test(&sut, THROUGHPUT_TEETH_DELAY_MS) {
-        verdict @ DrainVerdict::Fail { .. } => eprintln!(
+        verdict if verdict.is_fail() => eprintln!(
             "[latency-slo gate] drain teeth: {verdict:?} with {THROUGHPUT_TEETH_DELAY_MS}ms per \
              row armed"
         ),
@@ -481,9 +506,9 @@ fn a_slowed_pipeline_fails_the_drain_test() {
              the drain test no longer measures completion.",
             1000.0 / THROUGHPUT_TEETH_DELAY_MS as f64,
         ),
-        DrainVerdict::Invalid { write, late_by } => panic!(
-            "[latency-slo gate] INVALID (not red): the driver dispatched write {write} \
-             {late_by:?} behind the floor-rate schedule. Re-run on a quiet machine."
+        invalid => panic!(
+            "[latency-slo gate] INVALID (this test fails WITHOUT a verdict on the tree): \
+             {invalid:?}. Re-run on a quiet machine."
         ),
     }
 }
@@ -518,7 +543,7 @@ fn latency_slo_rung_facade_origin_is_measured_and_not_pooled() {
     let _turn = RUNG_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let (mut sut, mut ref_state) = boot();
+    let (mut sut, mut ref_state) = boot(DriveTargets::Skip);
     let engine = sut
         .handle()
         .engine()
@@ -635,7 +660,7 @@ fn latency_slo_rung_a_facade_clock_in_flight_does_not_alter_a_ui_sample() {
     let _turn = RUNG_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let (mut sut, mut ref_state) = boot();
+    let (mut sut, mut ref_state) = boot(DriveTargets::Skip);
 
     let probe = SloProbe::arm();
 
@@ -797,7 +822,7 @@ fn a_slowed_pipeline_moves_the_service_statistic() {
     let _turn = RUNG_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let (mut sut, mut ref_state) = boot();
+    let (mut sut, mut ref_state) = boot(DriveTargets::Skip);
 
     let probe = SloProbe::arm();
     set_delivery_delay_ms(TEETH_DELAY_MS);

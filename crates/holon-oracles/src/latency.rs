@@ -78,8 +78,9 @@ use tracing::field::Visit;
 use tracing_subscriber::layer::Context;
 use tracing_subscriber::layer::Layer;
 
+use crate::status::Finding;
 use crate::status::OracleStatus;
-use crate::status::Violation;
+use crate::status::Severity;
 
 pub const DEFAULT_SLO_MS: u64 = 200;
 const LATENCY_TARGET: &str = "holon_latency";
@@ -168,34 +169,51 @@ impl LatencySloLayer {
             let RungVerdict::Fail { measured, n } = service else {
                 unreachable!("is_fail() implies Fail")
             };
-            self.raise(format!(
-                "[latency-slo] SERVICE TIME (origin={origin_label}) p95 {measured:.0}ms over \
+            Self::raise(Finding::violation(
+                "latency-slo",
+                format!(
+                    "[latency-slo] SERVICE TIME (origin={origin_label}) p95 {measured:.0}ms over \
                  n={n} interactions dispatched with an empty queue (SLO: p95 <{}ms). {report}",
-                self.slo_ms,
+                    self.slo_ms,
+                ),
+                SystemTime::now(),
             ));
         }
         if now.drain_warned && !was.drain_warned {
             let DrainEstimate::Below { rate, passes, .. } = drain else {
                 unreachable!("is_below() implies Below")
             };
-            self.raise(format!(
-                "[latency-slo] WARNING drain estimate (origin={origin_label}) {rate:.1} writes/s \
+            Self::raise(Finding::warning(
+                "latency-slo",
+                format!(
+                    "[latency-slo] WARNING drain estimate (origin={origin_label}) {rate:.1} writes/s \
                  below the {THROUGHPUT_FLOOR_WRITES_PER_SEC:.1}/s floor over {passes} saturated \
                  passes — a disclosure, not a verdict; the land gate's drain test judges \
                  capacity. {report}",
+                ),
+                SystemTime::now(),
             ));
         }
     }
 
-    fn raise(&self, message: String) {
-        // Loud in the log channel too. Different target than the events this
-        // layer filters on, so re-entry terminates immediately.
-        tracing::error!(target: "holon_oracles", oracle = "latency-slo", "ORACLE VIOLATION: {message}");
-        OracleStatus::global().push_latency(Violation {
-            oracle: "latency-slo",
-            message,
-            at: SystemTime::now(),
-        });
+    fn raise(finding: Finding) {
+        // In the log channel too. Different target than the events this layer
+        // filters on, so re-entry terminates immediately.
+        match finding.severity {
+            Severity::Violation => tracing::error!(
+                target: "holon_oracles",
+                oracle = finding.oracle,
+                "ORACLE VIOLATION: {}",
+                finding.message
+            ),
+            Severity::Warning => tracing::warn!(
+                target: "holon_oracles",
+                oracle = finding.oracle,
+                "ORACLE WARNING: {}",
+                finding.message
+            ),
+        }
+        OracleStatus::global().push_latency(finding);
     }
 
     /// Threshold from `HOLON_ORACLES_SLO_MS` (default [`DEFAULT_SLO_MS`]).
@@ -599,46 +617,75 @@ mod tests {
         assert_eq!(fired, 0, "unscoreable samples must not reach a verdict");
     }
 
-    /// **The drain-estimate WARNING branch** (`record_and_judge`'s second
-    /// arm). Every other test here exercises the service branch, so without
-    /// this one the disclosure could stop raising entirely and no test would
-    /// notice. The banner must say it is a disclosure, not a verdict.
-    ///
-    /// Drives a saturated stretch retiring one delivery per 150ms — ~6.7
-    /// writes/s, under the floor: 20 writes dispatched together, each `ms`
-    /// counting back to that one dispatch.
+    /// A saturated stretch retiring one delivery per 150ms — ~6.7 writes/s,
+    /// under the floor: 20 writes dispatched together, each `ms` counting back
+    /// to that one dispatch.
+    fn drive_slow_drain(
+        layer: impl tracing_subscriber::Layer<tracing_subscriber::Registry> + Send + Sync,
+    ) {
+        let subscriber = tracing_subscriber::registry().with(layer);
+        tracing::subscriber::with_default(subscriber, || {
+            for i in 0..20u64 {
+                tracing::info!(
+                    target: "holon_latency",
+                    stage = "e2e",
+                    action = "set_field",
+                    block = "block:slow-drain",
+                    origin = "ui",
+                    ms = 150 * (i + 1),
+                    contended = false,
+                    in_flight = i + 1,
+                    backlog = 19 - i,
+                    delivery_batch = i,
+                    source = "block",
+                    superseded_ms = "",
+                    quiet_batches_us = "",
+                    feed = 1u64,
+                    "holon_latency",
+                );
+                // Real wall time — the drain rate is measured against the
+                // clock, so the test has to spend it.
+                std::thread::sleep(std::time::Duration::from_millis(150));
+            }
+        });
+    }
+
+    /// The drain-estimate branch of `record_and_judge`: every other test here
+    /// exercises the service branch.
     #[test]
     fn a_slow_drain_estimate_paints_a_warning() {
-        let fired = violations_around("WARNING drain estimate", |layer| {
-            let subscriber = tracing_subscriber::registry().with(layer);
-            tracing::subscriber::with_default(subscriber, || {
-                for i in 0..20u64 {
-                    tracing::info!(
-                        target: "holon_latency",
-                        stage = "e2e",
-                        action = "set_field",
-                        block = "block:slow-drain",
-                        origin = "ui",
-                        ms = 150 * (i + 1),
-                        contended = false,
-                        in_flight = i + 1,
-                        backlog = 19 - i,
-                        delivery_batch = i,
-                        source = "block",
-                        superseded_ms = "",
-                        quiet_batches_us = "",
-                        feed = 1u64,
-                        "holon_latency",
-                    );
-                    // Real wall time — the drain rate is measured against the
-                    // clock, so the test has to spend it.
-                    std::thread::sleep(std::time::Duration::from_millis(150));
-                }
-            });
-        });
+        let fired = violations_around("WARNING drain estimate", drive_slow_drain);
         assert_eq!(
             fired, 1,
             "a sustained slow drain estimate must raise the WARNING banner exactly once"
+        );
+    }
+
+    /// The estimate is a disclosure: the ledger holds it as a warning, never
+    /// as a violation.
+    #[test]
+    fn a_slow_drain_estimate_is_a_warning_not_a_violation() {
+        let _turn = ORACLE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let drain_findings = |severity: Severity| {
+            OracleStatus::global()
+                .snapshot()
+                .into_iter()
+                .filter(|f| f.severity == severity && f.message.contains("WARNING drain estimate"))
+                .count()
+        };
+        let before = (
+            drain_findings(Severity::Violation),
+            drain_findings(Severity::Warning),
+        );
+        drive_slow_drain(LatencySloLayer::new(SLO_MS));
+        assert_eq!(
+            (
+                drain_findings(Severity::Violation) - before.0,
+                drain_findings(Severity::Warning) - before.1,
+            ),
+            (0, 1)
         );
     }
 
