@@ -8,8 +8,10 @@
 //! itself in `holon-core` (`owning_page_by_hops` tests).
 //!
 //! Around a share both authorities follow D197.a: `owning_page` is the page
-//! whose org file stores the block. `children` at the mount keep each
-//! authority's own shape (Model.md invariant 11), asserted per authority.
+//! whose org file stores the block. For a block share, `children` at the mount
+//! keep each authority's own shape (Model.md invariant 11), asserted per
+//! authority. A page share has no mount row in SQL (D198.a), so both
+//! authorities give the same `children` answer at the shared page.
 //!
 //! @pbt kind harness
 //! @pbt covers write-authority-owning-page-parity — both write authorities
