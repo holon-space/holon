@@ -82,6 +82,8 @@ const MOUNT_KIND: &str = "mount_kind";
 const MOUNT_KIND_VALUE: &str = "shared_tree";
 const MOUNT_SHARED_TREE_ID: &str = "shared_tree_id";
 const MOUNT_SHARED_ROOT: &str = "shared_root";
+/// Every meta key that decides whether, and of which share, a node is a mount.
+pub(crate) const MOUNT_META_KEYS: [&str; 3] = [MOUNT_KIND, MOUNT_SHARED_TREE_ID, MOUNT_SHARED_ROOT];
 
 // Share-property keys live canonically in `holon-api::share_props` so every
 // layer (share backend, org write-back, SQL projection) agrees on one spelling.

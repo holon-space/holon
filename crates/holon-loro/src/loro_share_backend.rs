@@ -7342,6 +7342,94 @@ mod tests {
         d.b.advertiser.close_all().await;
     }
 
+    /// A paired device whose ops the global doc imports.
+    fn peer_of(d: &DuplicatedShare, peer_id: u64) -> LoroDoc {
+        let peer = d.global.with_read(|doc| Ok(doc.fork())).unwrap();
+        peer.set_peer_id(peer_id).unwrap();
+        peer
+    }
+
+    fn import_from(d: &DuplicatedShare, peer: &LoroDoc) {
+        let update = d
+            .global
+            .with_read(|doc| Ok(peer.export(loro::ExportMode::updates(&doc.oplog_vv()))?))
+            .unwrap();
+        d.global.apply_update(&update).unwrap();
+    }
+
+    /// Mount status lives in the node's meta, so a peer can unmount the
+    /// canonical mount without a tree op.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn a_remote_meta_only_unmount_is_seen_by_the_warm_cache() {
+        let mut d = DuplicatedShare::new(1).await;
+        assert!(d.m2_tid < d.m1_tid);
+        assert_eq!(d.warm(), d.m2, "warm before");
+        assert_eq!(d.events().len(), 1, "the duplicate is disclosed");
+        let peer = peer_of(&d, 7);
+        peer.get_tree(crate::loro_backend::TREE_NAME)
+            .get_meta(d.m2_tid)
+            .unwrap()
+            .delete("mount_kind")
+            .unwrap();
+        peer.commit();
+        import_from(&d, &peer);
+        assert_eq!(d.cold(), d.m1, "cold after the meta-only unmount");
+        assert_eq!(d.warm(), d.m1, "warm after the meta-only unmount");
+        assert_eq!(d.warm(), d.m1, "warm again");
+        assert_eq!(d.events(), vec!["cleared".to_string()]);
+        d.b.advertiser.close_all().await;
+    }
+
+    /// A peer turns a plain node with a smaller TreeID into a mount of the
+    /// same share by a meta-only edit.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn a_remote_meta_only_mount_is_seen_by_the_warm_cache() {
+        let d = DuplicatedShare::new(1).await;
+        assert_eq!(d.warm(), d.m2, "warm before");
+        let info = d
+            .global
+            .with_read(|doc| {
+                Ok(shared_tree::read_mount_info(
+                    &doc.get_tree(crate::loro_backend::TREE_NAME),
+                    d.m2_tid,
+                ))
+            })
+            .unwrap()
+            .expect("m2 is a mount");
+        let peer = peer_of(&d, 0);
+        let host =
+            find_tree_id_by_stable_id(&peer, &EntityUri::parse("block:host").unwrap()).unwrap();
+        let node = peer
+            .get_tree(crate::loro_backend::TREE_NAME)
+            .create(Some(host))
+            .unwrap();
+        set_stable_id(&peer, node, "forged").unwrap();
+        peer.commit();
+        import_from(&d, &peer);
+        assert_eq!(d.warm(), d.m2, "warm after the plain node arrives");
+
+        let meta = peer
+            .get_tree(crate::loro_backend::TREE_NAME)
+            .get_meta(node)
+            .unwrap();
+        meta.insert("mount_kind", "shared_tree").unwrap();
+        meta.insert("shared_tree_id", info.shared_tree_id.as_str())
+            .unwrap();
+        meta.insert(
+            "shared_root",
+            format!("{}:{}", info.shared_root.peer, info.shared_root.counter),
+        )
+        .unwrap();
+        peer.commit();
+        import_from(&d, &peer);
+        assert!(node < d.m2_tid);
+        assert_eq!(d.cold(), "block:forged", "cold after the meta-only mount");
+        assert_eq!(d.warm(), "block:forged", "warm after the meta-only mount");
+        d.b.advertiser.close_all().await;
+    }
+
     fn duplicate_mount_events(
         changes: &mut tokio::sync::broadcast::Receiver<holon_api::condition_bus::ConditionChange>,
     ) -> Vec<String> {

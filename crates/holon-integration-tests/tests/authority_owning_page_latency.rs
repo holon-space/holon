@@ -127,6 +127,41 @@ where
     )
 }
 
+/// Like [`measure`], one pass, with `write` run untimed before each lookup:
+/// the lookup then pays the mount index's check of what the write touched.
+async fn measure_after_writes(
+    label: &str,
+    probes: &[(EntityUri, EntityUri)],
+    reads: &Arc<dyn WriteAuthorityReads>,
+    write: impl Fn(usize),
+) -> String {
+    let mut samples = Vec::with_capacity(probes.len());
+    for (round, (leaf, mount)) in probes.iter().enumerate() {
+        write(round);
+        let started = Instant::now();
+        let answer = reads
+            .owning_page(leaf)
+            .await
+            .unwrap_or_else(|e| panic!("{label}: owning_page({leaf}): {e}"));
+        samples.push(started.elapsed());
+        match answer {
+            OwningPage::Page(page) => assert_eq!(
+                &page.block.id, mount,
+                "{label}: {leaf} walked to the wrong mount"
+            ),
+            other => panic!("{label}: {leaf} has no owning page: {other:?}"),
+        }
+    }
+    samples.sort();
+    format!(
+        "OWNING_PAGE_LATENCY {label}: n={} p50={:?} p95={:?} max={:?}",
+        samples.len(),
+        percentile(&samples, 0.50),
+        percentile(&samples, 0.95),
+        samples[samples.len() - 1]
+    )
+}
+
 /// Shares `id` as a block share and returns the mount block it minted.
 async fn share_mount(env: &holon_integration_tests::TestEnvironment, id: &str) -> EntityUri {
     let params: holon_api::StorageEntity = [("id", id), ("retention", "none")]
@@ -228,6 +263,62 @@ fn owning_page_cost_on_a_deep_vault() {
                 let loro = loro.clone();
                 async move { loro.owning_page(&leaf).await }
             })
+            .await,
+        );
+        let global = loro_env
+            .loro_doc_store()
+            .expect("a Loro vault has a doc store")
+            .read()
+            .await
+            .get_doc(holon_loro::DocScope::Global)
+            .await
+            .expect("the global doc");
+        let node_of = |id: &str| {
+            holon_loro::LoroBackend::from_document(global.clone())
+                .find_tree_id_by_stable_id_sync(id)
+                .unwrap_or_else(|| panic!("{id} has no tree node"))
+        };
+        let write = |f: &dyn Fn(&holon_loro::WriteTxn) -> anyhow::Result<()>| {
+            global
+                .with_write(holon_loro::WriteOrigin::BlockOps, |txn| {
+                    f(txn)?;
+                    txn.commit();
+                    Ok(())
+                })
+                .expect("a raw write to the global doc")
+        };
+        let moved = node_of("op-000-001-01");
+        let parents = [node_of("op-000-002-01"), node_of("op-000-003-01")];
+        report.push(
+            measure_after_writes(
+                "loro in a block share after moving a chain",
+                &shared_probes,
+                &loro,
+                |round| {
+                    write(&|txn| {
+                        Ok(txn
+                            .get_tree(holon_loro::TREE_NAME)
+                            .mov(moved, parents[round % 2])?)
+                    })
+                },
+            )
+            .await,
+        );
+        let plain = node_of("op-000-004-01");
+        report.push(
+            measure_after_writes(
+                "loro in a block share after a mount meta key edit",
+                &shared_probes,
+                &loro,
+                |round| {
+                    write(&|txn| {
+                        txn.get_tree(holon_loro::TREE_NAME)
+                            .get_meta(plain)?
+                            .insert("shared_tree_id", format!("bench-{round}"))?;
+                        Ok(())
+                    })
+                },
+            )
             .await,
         );
         let mut reads = Vec::with_capacity(shared_probes.len());
