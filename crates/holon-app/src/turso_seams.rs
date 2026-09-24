@@ -1034,13 +1034,22 @@ impl Module for OrgModeModule {
                 let db_handle = resolver
                     .resolve::<dyn holon::di::DbHandleProvider>()
                     .handle();
-                let sql = Arc::new(holon::core::SqlOperationProvider::with_edge_fields(
+                let sql = holon::core::SqlOperationProvider::with_edge_fields(
                     db_handle,
                     BLOCK_WRITE_TABLE.to_string(),
                     "block".to_string(),
                     "block".to_string(),
                     BlockSchemaModule.edge_fields(),
-                )) as Arc<dyn OperationProvider>;
+                );
+                let sql = Arc::new(
+                    match resolver
+                        .optional_resolve_async::<holon_loro::block_cell_registry::BlockCellRegistry>()
+                        .await
+                    {
+                        Some(registry) => sql.with_received_pages(registry),
+                        None => sql,
+                    },
+                ) as Arc<dyn OperationProvider>;
                 // ALLOW(ok): optional DI service — presence == Loro authority.
                 let loro_authority = resolver.try_resolve::<CrudAuthority>().is_ok();
                 let allowlist: &[&str] = if loro_authority {

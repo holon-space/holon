@@ -87,6 +87,7 @@ use crate::pbt::op_write_cap::IdResolver;
 use crate::pbt::reference_state::ReferenceState;
 use crate::pbt::transitions::CreateBlockUnderFocus;
 use crate::pbt::transitions::DeletePlacedRoot;
+use crate::pbt::transitions::DeletePlacementParent;
 use crate::pbt::transitions::E2ETransition;
 use crate::pbt::transitions::JoinPlacedRoot;
 use crate::pbt::transitions::MovePlacedRoot;
@@ -699,6 +700,47 @@ impl SutTwoInstance for TwoInstanceHandle {
         self.settle_shares().await;
     }
 
+    async fn delete_placement_parent_on_receiver(
+        &self,
+        page: &EntityUri,
+        receiver_parent: &EntityUri,
+    ) {
+        let page = self.resolve_owner_id(page);
+        let shelf = EntityUri::block(&format!("placement-of-{}", page.id()));
+        let mut create = holon_api::StorageEntity::new();
+        create.insert("id".into(), holon_api::Value::String(shelf.to_string()));
+        create.insert(
+            "content".into(),
+            holon_api::Value::String(format!("Placement of {}", page.id())),
+        );
+        create.insert(
+            "parent_id".into(),
+            holon_api::Value::String(receiver_parent.to_string()),
+        );
+        create.insert(
+            "tags".into(),
+            holon_api::Value::Array(vec![holon_api::Value::String(
+                holon_api::PAGE_TAG.to_string(),
+            )]),
+        );
+        dispatch_op(&self.receiver, "receiver", "block", "create", create)
+            .await
+            .unwrap_or_else(|e| panic!("the receiver refused to create {shelf}: {e:#}"));
+        self.move_on_receiver(&page, &shelf).await;
+        let mut delete = holon_api::StorageEntity::new();
+        delete.insert("id".into(), holon_api::Value::String(shelf.to_string()));
+        dispatch_op(
+            &self.receiver,
+            "receiver",
+            "block",
+            "delete_subtree",
+            delete,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("the receiver refused to delete {shelf}: {e:#}"));
+        self.settle_shares().await;
+    }
+
     async fn sync_witness(&self) -> SyncRoundWitness {
         let witness = self
             .state
@@ -1151,6 +1193,7 @@ impl ReferenceStateMachine for TwoInstanceMachine {
         offer!(MovePlacedRoot);
         offer!(DeletePlacedRoot);
         offer!(JoinPlacedRoot);
+        offer!(DeletePlacementParent);
         // `Nothing` has no preconditions, so `arms` is never empty and the
         // Union below cannot panic on a state where everything else is gated.
         offer!(Nothing);

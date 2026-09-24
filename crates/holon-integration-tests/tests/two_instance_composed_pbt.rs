@@ -2532,6 +2532,7 @@ fn pairing_keeps_a_page_created_under_the_device_local_layout_root() {
 // ─── The Overlay proposal, increment 1: page-share placement (D198.a) ──────
 
 use holon_integration_tests::pbt::transitions::DeletePlacedRoot;
+use holon_integration_tests::pbt::transitions::DeletePlacementParent;
 use holon_integration_tests::pbt::transitions::JoinPlacedRoot;
 use holon_integration_tests::pbt::transitions::MovePlacedRoot;
 use holon_integration_tests::pbt::transitions::SharePage;
@@ -2654,11 +2655,46 @@ fn recipient_delete_chain(subtree: bool) {
     <Sut as StateMachineTest>::check_invariants(&sut, &ref_state);
 }
 
+/// **Deleting the block a received page hangs under leaves the page's share.**
+/// The receiver files the page under a new page of its own and deletes that
+/// page's subtree. The receiver must hold nothing of the shared page
+/// afterwards, and the owner's page must be exactly where it was.
+#[test]
+fn deleting_the_block_a_received_page_hangs_under_leaves_its_share() {
+    let mut ref_state = wide_e2e_ref();
+    let mut sut = <Sut as StateMachineTest>::init_test(&ref_state);
+    let page = ref_state
+        .shareable_pages()
+        .into_iter()
+        .next()
+        .expect("the booted owner holds a user page to share");
+
+    sut = page_share_step(
+        sut,
+        &mut ref_state,
+        E2ETransition::SharePage(SharePage { page: page.clone() }),
+    );
+    let receiver_parent = ref_state.page_shares()[&page].receiver_parent.clone();
+    sut = page_share_step(
+        sut,
+        &mut ref_state,
+        E2ETransition::DeletePlacementParent(DeletePlacementParent {
+            page,
+            receiver_parent,
+        }),
+    );
+    let report = sut.run_report_now(&ref_state);
+    assert_engaged_and_ok(&report, "inv-overlay-placement-local");
+    <Sut as StateMachineTest>::check_invariants(&sut, &ref_state);
+}
+
 /// **Only a delete takes a received page off the receiver.** The receiver
 /// presses Backspace at the start of a placed page that has a block above it,
 /// then undoes. The join would remove the page without leaving its share and
 /// its undo would bring it back as a local block carrying the owner's id, so
 /// the join is refused and the receiver keeps the page exactly where it was.
+/// Only the refusal message pins `join_block`'s own refusal: without it the
+/// authority's `delete_block` still refuses the page, so it stays placed.
 #[test]
 fn joining_a_received_page_away_is_refused_and_leaves_it_placed() {
     let mut ref_state = wide_e2e_ref();

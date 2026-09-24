@@ -712,16 +712,16 @@ impl EntityCellRegistry for BlockCellRegistry {
             .is_some())
     }
 
-    async fn leave_share(&self, uri: &EntityUri) -> Result<bool> {
+    async fn leave_received_shares(&self, uri: &EntityUri) -> Result<bool> {
         let left = self
             .backend
-            .leave_received_page(uri.as_str())
+            .leave_received_pages(uri.as_str())
             .await
-            .map_err(|e| anyhow!("leave the share of {uri}: {e:#}"))?;
-        if left {
-            self.cache.evict_uri(uri);
+            .map_err(|e| anyhow!("leave the shares of the received pages at {uri}: {e:#}"))?;
+        for page in &left {
+            self.cache.evict_uri(page);
         }
-        Ok(left)
+        Ok(!left.is_empty())
     }
 
     /// [`create_entity`](EntityCellRegistry::create_entity) for a whole chunk
@@ -759,7 +759,11 @@ impl EntityCellRegistry for BlockCellRegistry {
         let will_create: std::collections::HashSet<&str> =
             requests.iter().map(|r| r.id.id()).collect();
         for (idx, request) in requests.iter().enumerate() {
-            if backend.peek_id_cache(request.id.id()).is_some() {
+            // The cache knows the global tree only; a block of a loaded share
+            // (a received page an org file names) is in the tree too.
+            if backend.peek_id_cache(request.id.id()).is_some()
+                || backend.is_live_in_a_share(request.id.id())
+            {
                 // Already in the tree: the idempotent reconcile path (placeholder
                 // completion, edge-field reconcile) is subtle and rare on a cold
                 // boot — run the single-block seam unchanged.

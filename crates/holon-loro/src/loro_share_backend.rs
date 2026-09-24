@@ -6851,6 +6851,65 @@ mod tests {
                 .with_shared_trees(self.b.manager.clone() as Arc<dyn SharedTreeStore>)
         }
 
+        /// B's cell registry, the route production structural deletes take.
+        async fn registry_b(&self) -> crate::block_cell_registry::BlockCellRegistry {
+            use crate::shared_tree::SharedTreeStore;
+            let store = self.b.store.read().await;
+            crate::block_cell_registry::BlockCellRegistry::with_loro(
+                store.get_doc(DocScope::Global).await.unwrap(),
+                store.get_doc(DocScope::Layout).await.unwrap(),
+            )
+            .with_shared_trees(self.b.manager.clone() as Arc<dyn SharedTreeStore>)
+        }
+
+        /// B no longer holds the share: no mount, no loaded doc, no rows.
+        async fn assert_b_left_the_share(&self) {
+            assert_eq!(self.mounts_on_b().await, 0, "the placement is gone");
+            assert!(
+                self.b.manager.get_doc(&self.shared_tree_id).is_none(),
+                "B left the share: its copy of the shared doc is unloaded"
+            );
+            assert!(self.sql_b.get("block:shared-page").is_none());
+            assert!(self.sql_b.get("block:p-child").is_none());
+            assert!(
+                self.b.degraded_bus().current().iter().any(|c| {
+                    c.subject == "block:shared-page"
+                        && c.reason.condition_kind() == "left-shared-page"
+                }),
+                "leaving is disclosed: {:?}",
+                self.b.degraded_bus().current()
+            );
+            let owner_doc = self.a.manager.get_doc(&self.shared_tree_id).unwrap();
+            assert_eq!(
+                owner_doc
+                    .get_tree(crate::loro_backend::TREE_NAME)
+                    .roots()
+                    .len(),
+                1,
+                "the owner's page is unchanged"
+            );
+        }
+
+        /// How many live nodes of B's global tree carry stable id `id`.
+        async fn global_nodes_named(&self, id: &str) -> usize {
+            self.b
+                .global_doc()
+                .await
+                .unwrap()
+                .with_read(|doc| {
+                    let tree = doc.get_tree(crate::loro_backend::TREE_NAME);
+                    Ok(tree
+                        .get_nodes(false)
+                        .into_iter()
+                        .filter(|n| {
+                            !matches!(n.parent, TreeParentId::Deleted | TreeParentId::Unexist)
+                        })
+                        .filter(|n| read_stable_id(&tree, n.id).as_deref() == Some(id))
+                        .count())
+                })
+                .unwrap()
+        }
+
         /// How many live mounts of the share B's global tree holds.
         async fn mounts_on_b(&self) -> usize {
             self.b
@@ -7224,11 +7283,12 @@ mod tests {
             1,
             "the refused delete changed nothing"
         );
-        assert!(
+        assert_eq!(
             authority
-                .leave_received_page("block:shared-page")
+                .leave_received_pages("block:shared-page")
                 .await
-                .expect("a recipient may leave a placed page's share")
+                .expect("a recipient may leave a placed page's share"),
+            vec![EntityUri::block("shared-page")]
         );
 
         assert_eq!(
@@ -7236,29 +7296,111 @@ mod tests {
             untouched,
             "the recipient's delete never writes the shared doc"
         );
-        assert_eq!(fixture.mounts_on_b().await, 0, "the placement is gone");
+        fixture.assert_b_left_the_share().await;
+        fixture.close().await;
+    }
+
+    /// Deleting the block a received page hangs under removes the page from
+    /// this device, so it leaves the page's share through the same exit as a
+    /// delete of the page, on the registry route production deletes take.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn deleting_the_block_a_received_page_hangs_under_leaves_its_share() {
+        use holon_core::cell_registry::EntityCellRegistry;
+
+        let fixture = PageShareFixture::accepted().await;
+        let registry = fixture.registry_b().await;
+        let parent = EntityUri::block("root-b");
         assert!(
-            fixture.b.manager.get_doc(&fixture.shared_tree_id).is_none(),
-            "B left the share: its copy of the shared doc is unloaded"
+            registry.leave_received_shares(&parent).await.unwrap(),
+            "root-b holds a received page, so deleting it leaves that page's share"
         );
-        assert!(fixture.sql_b.get("block:shared-page").is_none());
-        assert!(fixture.sql_b.get("block:p-child").is_none());
-        assert!(
-            fixture.b.degraded_bus().current().iter().any(|c| {
-                c.subject == "block:shared-page" && c.reason.condition_kind() == "left-shared-page"
-            }),
-            "leaving is disclosed: {:?}",
-            fixture.b.degraded_bus().current()
-        );
-        let owner_doc = fixture.a.manager.get_doc(&fixture.shared_tree_id).unwrap();
+        assert!(registry.delete_entity(&parent).await.unwrap());
+
+        fixture.assert_b_left_the_share().await;
+        fixture.close().await;
+    }
+
+    /// A create that names a received page's id — an ingest of a file
+    /// carrying `:ID: <P>` — reconciles the placed page and never mints a
+    /// second node for it, on the single and the batched ingest seam.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn a_create_naming_a_received_page_mints_no_second_node() {
+        use holon_core::cell_registry::EntityCellRegistry;
+
+        let fixture = PageShareFixture::accepted().await;
+        let registry = fixture.registry_b().await;
+        let page = EntityUri::block("shared-page");
+        assert_eq!(fixture.global_nodes_named(page.id()).await, 0);
+        let request = holon_core::block_ordering::BlockCreateRequest {
+            parent_id: EntityUri::block("shelf-b"),
+            id: page.clone(),
+            content: holon_api::BlockContent::text("My Shared Page"),
+            properties: HashMap::new(),
+            edges: holon_api::BlockEdges::default(),
+        };
+        registry
+            .create_entity(
+                &request.parent_id,
+                None,
+                &page,
+                request.content.clone(),
+                &request.properties,
+                &request.edges,
+            )
+            .await
+            .unwrap();
         assert_eq!(
-            owner_doc
-                .get_tree(crate::loro_backend::TREE_NAME)
-                .roots()
-                .len(),
-            1,
-            "the owner's page is unchanged"
+            fixture.global_nodes_named(page.id()).await,
+            0,
+            "the single-block ingest seam minted a second node for the placed page"
         );
+        registry
+            .create_entities(std::slice::from_ref(&request))
+            .await
+            .unwrap();
+        assert_eq!(
+            fixture.global_nodes_named(page.id()).await,
+            0,
+            "the batched ingest seam minted a second node for the placed page"
+        );
+        assert_eq!(fixture.mounts_on_b().await, 1, "the page is still placed");
+        fixture.close().await;
+    }
+
+    /// A plain block delete of the block a received page hangs under is
+    /// refused, as a plain delete of the page is: only the share exit may take
+    /// the page off this device.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn a_plain_delete_of_the_block_a_received_page_hangs_under_is_refused() {
+        use holon_api::repository::CoreOperations;
+
+        let fixture = PageShareFixture::accepted().await;
+        let authority = fixture.authority_b().await;
+        let refused = authority
+            .delete_block("block:root-b")
+            .await
+            .expect_err("a plain block delete never removes a received page");
+        assert!(
+            refused.to_string().contains("block:shared-page"),
+            "the refusal names the received page: {refused}"
+        );
+        let refused = authority
+            .delete_blocks(vec!["block:root-b".to_string()])
+            .await
+            .expect_err("a batch block delete never removes a received page");
+        assert!(
+            refused.to_string().contains("block:shared-page"),
+            "the refusal names the received page: {refused}"
+        );
+        assert_eq!(
+            fixture.mounts_on_b().await,
+            1,
+            "the refused deletes changed nothing"
+        );
+        assert!(fixture.b.manager.get_doc(&fixture.shared_tree_id).is_some());
         fixture.close().await;
     }
 

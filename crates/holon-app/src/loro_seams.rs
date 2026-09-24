@@ -580,10 +580,9 @@ impl BlockOrdering for LoroBlockOrdering {
             .get("id")
             .and_then(|v| v.as_string())
             .ok_or_else(|| boxed("delete_in_tree: missing 'id' param"))?;
-        // A received page removed from its file is left, as a delete of it is.
-        if self.backend.leave_received_page(id).await.map_err(boxed)? {
-            return Ok(());
-        }
+        // A received page removed from its file, alone or with the block it
+        // hangs under, is left, as a delete of it is.
+        self.backend.leave_received_pages(id).await.map_err(boxed)?;
         self.backend.delete_block(id).await.map_err(boxed)
     }
 

@@ -2680,6 +2680,12 @@ impl LoroBackend {
         self.is_live_anywhere_sync(id)
     }
 
+    /// Does `id` name a live node in a share loaded on this device? Walks only
+    /// the shared docs, for a caller that already knows the global tree.
+    pub fn is_live_in_a_share(&self, id: &str) -> bool {
+        self.scan_shared_for_stable_id(id).is_some()
+    }
+
     /// Synchronous twin of [`Self::is_live_anywhere`].
     pub fn is_live_anywhere_sync(&self, id: &str) -> bool {
         !matches!(
@@ -3100,16 +3106,92 @@ impl LoroBackend {
         }
     }
 
-    /// When `id` is a page another device shared with this one, leave its
-    /// share: this device's placement, copy and rows go, the owner's page
-    /// stays. Irreversible. `Ok(false)` when `id` is no such page. The ONE way
-    /// a received page leaves this device; `delete_block` refuses it.
-    pub async fn leave_received_page(&self, id: &str) -> Result<bool, ApiError> {
-        let Some(shared_tree_id) = self.received_page_share(id).await? else {
-            return Ok(false);
+    /// Every page another device shared with this one at or under `id`, with
+    /// the share each belongs to: `id` itself, or the page of each recipient
+    /// page mount below it in the global tree.
+    fn received_pages_at(
+        &self,
+        target: &WriteTarget,
+        id: &str,
+    ) -> Result<Vec<(EntityUri, String)>, ApiError> {
+        if let Some(shared_tree_id) = self.received_share_of(target, id)? {
+            // ALLOW(entity_uri_from_raw): id &str backend API param (accepts both id
+            // formats)
+            return Ok(vec![(EntityUri::from_raw(id), shared_tree_id)]);
+        }
+        let WriteTarget::Global(root) = target else {
+            return Ok(Vec::new());
         };
-        self.leave_received_share(id, &shared_tree_id).await?;
-        Ok(true)
+        self.collab_doc
+            .with_read(|doc| {
+                let tree = doc.get_tree(TREE_NAME);
+                let mut pages = Vec::new();
+                let mut queue = tree.children(*root).unwrap_or_default();
+                while let Some(node) = queue.pop() {
+                    queue.extend(tree.children(node).unwrap_or_default());
+                    let Some(info) = read_mount_info(&tree, node) else {
+                        continue;
+                    };
+                    let crate::shared_tree::ShareKind::Page { root: page } = info.kind()? else {
+                        continue;
+                    };
+                    let page = EntityUri::block(page);
+                    match info.role {
+                        Some(crate::shared_tree::MountRole::Recipient) => {
+                            pages.push((page, info.shared_tree_id))
+                        }
+                        Some(crate::shared_tree::MountRole::Owner) => {}
+                        None => anyhow::bail!(
+                            "{page} under {id} is a shared page whose mount records no side of \
+                             the share, so removing it cannot tell leaving from deleting the \
+                             owner's page — unshare {page} first"
+                        ),
+                    }
+                }
+                Ok(pages)
+            })
+            .map_err(|e| ApiError::InvalidOperation {
+                message: format!("the received pages under {id}: {e:#}"),
+            })
+    }
+
+    /// Leave the share of every page another device shared with this one at or
+    /// under `id`: this device's placement, copy and rows of each go, the
+    /// owners' pages stay. Irreversible. Returns the pages left. The ONE way a
+    /// received page leaves this device; `delete_block` refuses to remove one.
+    pub async fn leave_received_pages(&self, id: &str) -> Result<Vec<EntityUri>, ApiError> {
+        let target = match self.resolve_write_target(id).await {
+            Ok(target) => target,
+            Err(ApiError::BlockNotFound { .. }) => return Ok(Vec::new()),
+            Err(e) => return Err(e),
+        };
+        let pages = self.received_pages_at(&target, id)?;
+        for (page, shared_tree_id) in &pages {
+            self.leave_received_share(page.as_str(), shared_tree_id)
+                .await?;
+        }
+        Ok(pages.into_iter().map(|(page, _)| page).collect())
+    }
+
+    /// Refuse removing `id` when it is or holds a received page: removing one
+    /// is leaving its share, which only [`Self::leave_received_pages`] does.
+    fn refuse_removing_received_pages(
+        &self,
+        target: &WriteTarget,
+        id: &str,
+    ) -> Result<(), ApiError> {
+        let pages = self.received_pages_at(target, id)?;
+        if pages.is_empty() {
+            return Ok(());
+        }
+        let names: Vec<&str> = pages.iter().map(|(page, _)| page.as_str()).collect();
+        Err(ApiError::InvalidOperation {
+            message: format!(
+                "{id} is or holds a page shared with you ({}), so this op cannot remove it; \
+                 delete {id} to leave the share",
+                names.join(", ")
+            ),
+        })
     }
 
     /// Leave the share `shared_tree_id` through the share backend that owns it.
@@ -5408,18 +5490,9 @@ impl CoreOperations for LoroBackend {
             Err(ApiError::BlockNotFound { .. }) => return Ok(()),
             Err(e) => return Err(e),
         };
-        // Removing a received page is leaving its share, which only
-        // `leave_received_page` does: every other route that reaches here
-        // would pair the removal with an inverse that cannot bring the share
-        // back.
-        if self.received_share_of(&target, id)?.is_some() {
-            return Err(ApiError::InvalidOperation {
-                message: format!(
-                    "{id} is a page shared with you, so this op cannot remove it; delete {id} \
-                     to leave the share"
-                ),
-            });
-        }
+        // Every route that reaches here would pair the removal with an
+        // inverse that cannot bring a left share back.
+        self.refuse_removing_received_pages(&target, id)?;
         let (write_doc, tree_id) = self.target_doc(&target);
 
         let mut did_delete = false;
@@ -5738,6 +5811,7 @@ impl CoreOperations for LoroBackend {
         let mut resolved = Vec::with_capacity(unique_ids.len());
         for id in &unique_ids {
             let tid = self.require_tree_id(id).await?;
+            self.refuse_removing_received_pages(&WriteTarget::Global(tid), id)?;
             resolved.push(tid);
         }
 

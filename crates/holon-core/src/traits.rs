@@ -1183,16 +1183,16 @@ async fn refuse_share_exit(
     Ok(())
 }
 
-/// Leave the share of `id` when it is a page another device shared with this
-/// one. `Ok(false)` when it is no such page, or no registry routes shares.
-async fn leave_share_via_cells(
+/// Leave the share of every page another device shared with this one at or
+/// under `id`. `Ok(false)` when there is none, or no registry routes shares.
+async fn leave_shares_via_cells(
     registry: Option<&dyn crate::cell_registry::EntityCellRegistry>,
     id: &EntityUri,
 ) -> Result<bool> {
     let Some(reg) = registry else {
         return Ok(false);
     };
-    reg.leave_share(id)
+    reg.leave_received_shares(id)
         .await
         .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })
 }
@@ -2302,7 +2302,9 @@ where
     /// single primitive (its subtree would be orphaned), so that is a loud
     /// error rather than a lossy inverse. `split_block`'s new block is always a
     /// leaf, and `join_block` only chooses this inverse for the leaf case, so
-    /// the guard never trips on the sanctioned paths.
+    /// the guard never trips on the sanctioned paths. Refused when `deleted_id`
+    /// is a page another device shared with this one
+    /// ([`crate::ShareExitRefused`]).
     #[holon_macros::affects("content", "parent_id", "sort_key")]
     #[holon_macros::boundary_behavior(private_only)]
     async fn restore_join(
@@ -2311,6 +2313,12 @@ where
         target_content: String,
         deleted_id: &EntityUri,
     ) -> Result<OperationResult> {
+        refuse_share_exit(
+            self.cells(),
+            deleted_id,
+            crate::cell_registry::RemovingAction::UndoSplit,
+        )
+        .await?;
         let block = self
             .get_by_id(deleted_id.as_str())
             .await?
@@ -2565,16 +2573,17 @@ where
     ///
     /// Declared irreversible: faithfully resurrecting an ordered subtree is out
     /// of scope (fail-loud, never a lossy inverse) — the same line the leaf
-    /// `delete` inverse draws. On a page another device shared with this one it
-    /// leaves the share, as `delete` does.
+    /// `delete` inverse draws. Every page another device shared with this one
+    /// in the subtree leaves its share, as a `delete` of that page does.
     #[holon_macros::menu_exposure(listed)]
     #[holon_macros::boundary_behavior(private_only)]
     async fn delete_subtree(&self, id: &EntityUri) -> Result<OperationResult> {
-        if leave_share_via_cells(self.cells(), id).await? {
+        if leave_shares_via_cells(self.cells(), id).await? {
+            delete_block_via_cells(self.cells(), id).await?;
             return Ok(OperationResult::declared_irreversible(
                 Vec::new(),
-                "delete_subtree of a received shared page leaves its share; rejoining takes a new \
-                 ticket",
+                "delete_subtree of a subtree holding a received shared page leaves that page's \
+                 share; rejoining takes a new ticket",
             ));
         }
         if delete_block_via_cells(self.cells(), id).await? {

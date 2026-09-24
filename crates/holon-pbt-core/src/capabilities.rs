@@ -3900,6 +3900,15 @@ pub trait SutTwoInstance {
     /// production op. A refusal must be the share-exit refusal; an accepted
     /// join is undone through the receiver's engine, as a user would.
     async fn join_on_receiver(&self, id: &EntityUri);
+
+    /// On the RECEIVER, create a page under `receiver_parent`, move `page`
+    /// under it and delete the new page through the production
+    /// `delete_subtree` op.
+    async fn delete_placement_parent_on_receiver(
+        &self,
+        page: &EntityUri,
+        receiver_parent: &EntityUri,
+    );
 }
 
 /// SUT-side observation of the RECEIVER instance's projections. Separate from

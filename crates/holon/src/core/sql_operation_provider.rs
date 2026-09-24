@@ -403,6 +403,9 @@ pub struct SqlOperationProvider {
     edge_fields: HashMap<String, EdgeFieldDescriptor>,
     /// Wall-clock authority for write-time timestamps. Defaults to SystemClock.
     clock: std::sync::Arc<dyn holon_api::Clock>,
+    /// Tells which blocks are pages another device shared with this one.
+    /// `None` on a wiring that holds no shares.
+    received_pages: Option<std::sync::Arc<dyn holon_core::cell_registry::EntityCellRegistry>>,
 }
 
 impl SqlOperationProvider {
@@ -486,7 +489,18 @@ impl SqlOperationProvider {
             write_schema,
             edge_fields,
             clock: std::sync::Arc::new(holon_api::SystemClock),
+            received_pages: None,
         }
+    }
+
+    /// Let `merge_blocks` tell the pages another device shared with this one,
+    /// which it must never merge away.
+    pub fn with_received_pages(
+        mut self,
+        registry: std::sync::Arc<dyn holon_core::cell_registry::EntityCellRegistry>,
+    ) -> Self {
+        self.received_pages = Some(registry);
+        self
     }
 
     /// What a dispatched op of this entity targets. Block-shaped entities
@@ -2411,21 +2425,49 @@ impl SqlOperationProvider {
         }
     }
 
-    /// A merge deletes the block it merges away, and removing a shared
-    /// block is a share write or, on a received page, leaving the share —
-    /// neither of which a merge step may do behind its own undo.
-    async fn refuse_merging_away_shared(&self, id: &str) -> Result<()> {
-        let (_, properties, _) = self
-            .read_merge_side(id)
-            .await?
-            .ok_or_else(|| format!("merge_blocks: '{id}' not found"))?;
-        if let Some(shared_tree_id) =
-            Self::property_from_blob(&properties, holon_api::share_props::SHARED_TREE_ID_PROPERTY)?
+    /// A merge deletes the block it merges away, and removing a page another
+    /// device shared with this one is leaving its share, which only a delete
+    /// does.
+    async fn refuse_merging_away_received_page(&self, id: &str) -> Result<()> {
+        let Some(registry) = &self.received_pages else {
+            return Ok(());
+        };
+        // ALLOW(entity_uri_from_raw): merge plan side id from operation params
+        let page = EntityUri::from_raw(id);
+        if registry
+            .is_received_share_root(&page)
+            .await
+            .map_err(|e| format!("merge_blocks: is '{id}' a page shared with you: {e:#}"))?
         {
+            return Err(holon_core::ShareExitRefused {
+                page,
+                action: holon_core::RemovingAction::MergeIntoAnotherBlock,
+            }
+            .into());
+        }
+        Ok(())
+    }
+
+    /// The shared tree a block's row is stamped with; `None` for this
+    /// device's own tree.
+    fn shared_tree_of(properties: &Value) -> Result<Option<Value>> {
+        Self::property_from_blob(properties, holon_api::share_props::SHARED_TREE_ID_PROPERTY)
+    }
+
+    /// A merge moves `from`'s children under `to`, and no move crosses from
+    /// one tree to another.
+    fn refuse_moving_children_across_trees(
+        from: &str,
+        from_properties: &Value,
+        to: &str,
+        to_properties: &Value,
+    ) -> Result<()> {
+        let from_tree = Self::shared_tree_of(from_properties)?;
+        let to_tree = Self::shared_tree_of(to_properties)?;
+        if from_tree != to_tree {
             return Err(format!(
-                "merge_blocks: '{id}' belongs to shared tree {shared_tree_id:?}, and a merge \
-                 would remove it from the share. Delete it instead (on a page shared with you, \
-                 that leaves the share)."
+                "merge_blocks: '{from}' (tree {from_tree:?}) and '{to}' (tree {to_tree:?}) live \
+                 in different trees, and the merge would move {from}'s children between them"
             )
             .into());
         }
@@ -4282,7 +4324,8 @@ impl OriginTaggedWrites for SqlOperationProvider {
                     )
                     .into());
                 }
-                self.refuse_merging_away_shared(&duplicate_id).await?;
+                self.refuse_merging_away_received_page(&duplicate_id)
+                    .await?;
                 if self.has_file_binding(&duplicate_id).await? {
                     return Err(format!(
                         "merge_blocks: '{duplicate_id}' is a document root with a live file \
@@ -4295,7 +4338,16 @@ impl OriginTaggedWrites for SqlOperationProvider {
                 // then the duplicate's, each keeping its relative order.
                 let mut merged_children = self.read_merge_children(&canonical_id).await?;
                 let canonical_child_count = merged_children.len() as i64;
-                merged_children.extend(self.read_merge_children(&duplicate_id).await?);
+                let duplicate_children = self.read_merge_children(&duplicate_id).await?;
+                if !duplicate_children.is_empty() {
+                    Self::refuse_moving_children_across_trees(
+                        &duplicate_id,
+                        &duplicate_properties,
+                        &canonical_id,
+                        &canonical_properties,
+                    )?;
+                }
+                merged_children.extend(duplicate_children);
 
                 // Enrich each collapse with the reads the engine would otherwise
                 // have to make mid-merge, when the tree is already half-moved.
@@ -4306,24 +4358,38 @@ impl OriginTaggedWrites for SqlOperationProvider {
                         .await?
                         .last()
                         .map(|c| c.id.clone());
+                    let (_, keeper_properties, _) =
+                        self.read_merge_side(&keeper).await?.ok_or_else(|| {
+                            format!("merge_blocks_plan: dedupe keeper '{keeper}' vanished")
+                        })?;
                     let keeper_merged_from = {
-                        let (_, props, _) =
-                            self.read_merge_side(&keeper).await?.ok_or_else(|| {
-                                format!("merge_blocks_plan: dedupe keeper '{keeper}' vanished")
-                            })?;
-                        let raw =
-                            Self::property_from_blob(&props, merge_blocks_plan::MERGED_FROM_FIELD)?;
+                        let raw = Self::property_from_blob(
+                            &keeper_properties,
+                            merge_blocks_plan::MERGED_FROM_FIELD,
+                        )?;
                         merge_blocks_plan::parse_merged_from(raw.as_ref())?
                     };
                     let mut losers = Vec::with_capacity(loser_ids.len());
                     for id in loser_ids {
-                        self.refuse_merging_away_shared(&id).await?;
-                        let children = self
+                        self.refuse_merging_away_received_page(&id).await?;
+                        let children: Vec<String> = self
                             .read_merge_children(&id)
                             .await?
                             .into_iter()
                             .map(|c| c.id)
                             .collect();
+                        if !children.is_empty() {
+                            let (_, loser_properties, _) =
+                                self.read_merge_side(&id).await?.ok_or_else(|| {
+                                    format!("merge_blocks_plan: dedupe loser '{id}' vanished")
+                                })?;
+                            Self::refuse_moving_children_across_trees(
+                                &id,
+                                &loser_properties,
+                                &keeper,
+                                &keeper_properties,
+                            )?;
+                        }
                         losers.push(merge_blocks_plan::DedupeLoser { id, children });
                     }
                     dedupe_groups.push(merge_blocks_plan::DedupeGroup {

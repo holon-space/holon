@@ -32,8 +32,8 @@ use crate::consolidator::Seen;
 /// An op that would remove a page another device shared with this one.
 ///
 /// Removing such a page is leaving its share, which is irreversible, so only a
-/// delete may do it ([`EntityCellRegistry::leave_share`]). Any other op
-/// removing it would leave the share behind an inverse that cannot bring the
+/// delete may do it ([`EntityCellRegistry::leave_received_shares`]). Any other
+/// op removing it would leave the share behind an inverse that cannot bring the
 /// share back.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error(
@@ -51,6 +51,8 @@ pub struct ShareExitRefused {
 pub enum RemovingAction {
     JoinIntoBlockAbove,
     DeleteKeepingChildren,
+    MergeIntoAnotherBlock,
+    UndoSplit,
 }
 
 impl std::fmt::Display for RemovingAction {
@@ -58,6 +60,8 @@ impl std::fmt::Display for RemovingAction {
         f.write_str(match self {
             Self::JoinIntoBlockAbove => "joining it into the block above",
             Self::DeleteKeepingChildren => "deleting it while keeping its children",
+            Self::MergeIntoAnotherBlock => "merging it into another block",
+            Self::UndoSplit => "undoing the split that made it",
         })
     }
 }
@@ -186,16 +190,16 @@ pub trait EntityCellRegistry: Send + Sync {
     }
 
     /// Whether `uri` is the root of a page another device shared with this
-    /// one. Only [`Self::leave_share`] removes such a page;
+    /// one. Only [`Self::leave_received_shares`] removes such a page;
     /// [`Self::delete_entity`] refuses it.
     async fn is_received_share_root(&self, _: &EntityUri) -> Result<bool> {
         Ok(false)
     }
 
-    /// Leave the share whose received page is `uri`: this device's placement
-    /// and copy go, the owner's page stays. Irreversible. `Ok(false)` when
-    /// `uri` is no such page.
-    async fn leave_share(&self, _: &EntityUri) -> Result<bool> {
+    /// Leave the share of every page another device shared with this one at
+    /// or under `uri`: this device's placement and copy of each go, the
+    /// owners' pages stay. Irreversible. `Ok(false)` when there is none.
+    async fn leave_received_shares(&self, _: &EntityUri) -> Result<bool> {
         Ok(false)
     }
 
