@@ -267,6 +267,12 @@ pub enum ConditionKind {
     ///
     /// All-clear: none — a one-shot notice about what the delete did.
     LeftSharedPage { title: String },
+    /// This device deleted a page (or block) it had shared, and the delete
+    /// revoked the share: every recipient loses it. `subject` is what the
+    /// share was known by; `title` its title when it was deleted.
+    ///
+    /// All-clear: none — a one-shot notice about what the delete did.
+    DeletedSharedPage { title: String },
     /// `orphans` block(s) this device wrote before it was paired are NOT in the
     /// store it now shows: their parent is in neither the owner's store nor the
     /// archive, so the re-import has nowhere to put them. The app boots without
@@ -352,6 +358,7 @@ impl ConditionKind {
     pub const INTEGRATION_SIDECAR_SUPERSEDED: &'static str = "integration-sidecar-superseded";
     pub const PAIRING_REIMPORTED_LOCAL_CONTENT: &'static str = "pairing-reimported-local-content";
     pub const LEFT_SHARED_PAGE: &'static str = "left-shared-page";
+    pub const DELETED_SHARED_PAGE: &'static str = "deleted-shared-page";
     pub const PAIRING_REIMPORT_DEFERRED: &'static str = "pairing-reimport-deferred";
     pub const REHYDRATION_FAILED: &'static str = "rehydration-failed";
     pub const SECRETS_HELD_IN_MEMORY: &'static str = "secrets-held-in-memory";
@@ -397,6 +404,7 @@ impl ConditionKind {
             Self::WritebackDegraded(_) => Self::WRITEBACK_DEGRADED,
             Self::PairingReimportedLocalContent { .. } => Self::PAIRING_REIMPORTED_LOCAL_CONTENT,
             Self::LeftSharedPage { .. } => Self::LEFT_SHARED_PAGE,
+            Self::DeletedSharedPage { .. } => Self::DELETED_SHARED_PAGE,
             Self::PairingReimportDeferred { .. } => Self::PAIRING_REIMPORT_DEFERRED,
             Self::EditRefusedReadOnlyFormat { .. } => Self::EDIT_REFUSED_READ_ONLY_FORMAT,
             Self::LocalEditNotApplied { .. } => Self::LOCAL_EDIT_NOT_APPLIED,

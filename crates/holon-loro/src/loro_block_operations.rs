@@ -1208,21 +1208,21 @@ impl CrudOperations<Block> for LoroBlockOperations {
     async fn delete(&self, id: &str) -> Result<OperationResult> {
         let backend = self.find_doc_for_block(id).await?;
 
-        // A page someone shared with this device is placed here, not owned
-        // here: its delete leaves the share, whatever the page holds.
+        // A received page or a share's mount is a handle on a share: its
+        // delete takes the share off this device, whatever it holds.
         if backend
-            .received_page_share(id)
+            .is_share_handle(id)
             .await
             .map_err(|e| format!("delete: classify {id}: {e}"))?
-            .is_some()
         {
             backend
-                .leave_received_pages(id)
+                .exit_shares_removed_with(id)
                 .await
-                .map_err(|e| format!("delete: leave the share of {id}: {e}"))?;
+                .map_err(|e| format!("delete: exit the share of {id}: {e}"))?;
             return Ok(OperationResult::declared_irreversible(
                 vec![],
-                "delete of a received shared page leaves the share; rejoining takes a new ticket",
+                "delete of a share's handle takes the share off this device: a share received is \
+                 left, a share made here is revoked; restoring either takes a new ticket",
             ));
         }
 

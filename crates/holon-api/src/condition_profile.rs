@@ -462,6 +462,15 @@ const LEFT_SHARED_PAGE: ConditionProfile = ConditionProfile::new(
     &[],
 );
 
+const DELETED_SHARED_PAGE: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Info,
+    "You deleted a page you shared",
+    icons::INFO,
+    ConditionPlacement::Toast,
+    AllClear::UntilRestart,
+    &[],
+);
+
 const PAIRING_REIMPORTED_LOCAL_CONTENT: ConditionProfile = ConditionProfile::new(
     ConditionSeverity::Info,
     "Content kept from this device",
@@ -537,6 +546,7 @@ impl ConditionKind {
             Self::UndoHistoryClearedAtBoot { .. } => UNDO_HISTORY_CLEARED_AT_BOOT,
             Self::PairingReimportedLocalContent { .. } => PAIRING_REIMPORTED_LOCAL_CONTENT,
             Self::LeftSharedPage { .. } => LEFT_SHARED_PAGE,
+            Self::DeletedSharedPage { .. } => DELETED_SHARED_PAGE,
             Self::PairingReimportDeferred { .. } => PAIRING_REIMPORT_DEFERRED,
             Self::BearerTicketEnrollment { .. } => BEARER_TICKET_ENROLLMENT,
             Self::OwnerRecoveryCodeNotShown => OWNER_RECOVERY_CODE_NOT_SHOWN,

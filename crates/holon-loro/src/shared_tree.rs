@@ -39,16 +39,17 @@ pub trait SharedTreeStore: Send + Sync {
     /// List all shared tree IDs currently in the store.
     fn shared_tree_ids(&self) -> Vec<String>;
 
-    /// What leaves a share on this device. `None` when no share backend is
+    /// What takes a share off this device. `None` when no share backend is
     /// attached, so nothing can tear a share down.
     fn exit(&self) -> Option<Arc<dyn ShareExit>>;
 }
 
-/// Leaves a share on this device: its placement, workers, projected rows and
-/// local snapshot go; every other peer keeps its copy.
+/// Takes a share off this device, as a delete of its mount does: its
+/// placement, workers, projected rows and local snapshot go. A recipient
+/// leaves the share and every other peer keeps its copy; an owner revokes it.
 #[async_trait::async_trait]
 pub trait ShareExit: Send + Sync {
-    async fn leave(&self, shared_tree_id: &str) -> Result<()>;
+    async fn exit(&self, shared_tree_id: &str) -> Result<()>;
 }
 
 /// Simple in-memory implementation of SharedTreeStore for testing.

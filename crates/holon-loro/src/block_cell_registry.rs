@@ -712,16 +712,16 @@ impl EntityCellRegistry for BlockCellRegistry {
             .is_some())
     }
 
-    async fn leave_received_shares(&self, uri: &EntityUri) -> Result<bool> {
-        let left = self
+    async fn exit_shares_removed_with(&self, uri: &EntityUri) -> Result<bool> {
+        let exited = self
             .backend
-            .leave_received_pages(uri.as_str())
+            .exit_shares_removed_with(uri.as_str())
             .await
-            .map_err(|e| anyhow!("leave the shares of the received pages at {uri}: {e:#}"))?;
-        for page in &left {
-            self.cache.evict_uri(page);
+            .map_err(|e| anyhow!("exit the shares removed with {uri}: {e:#}"))?;
+        for share in &exited {
+            self.cache.evict_uri(&share.handle);
         }
-        Ok(!left.is_empty())
+        Ok(!exited.is_empty())
     }
 
     /// [`create_entity`](EntityCellRegistry::create_entity) for a whole chunk

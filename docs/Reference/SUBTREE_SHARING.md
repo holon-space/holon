@@ -317,6 +317,11 @@ subtree hangs here.
   so the owner's page is unchanged. An owner's delete of `P` still deletes the
   page for everyone. A mount without a recorded role refuses the delete and
   names `unshare`.
+- **Every delete that removes a mount goes through the share's exit**: a delete
+  of the mount by its own id, or of any block above it, for either share kind.
+  A recipient leaves the share, as above. An owner revokes it as `unshare`
+  does, and a `deleted-shared-page` notice says its recipients lose it.
+  `LoroBackend::delete_block` refuses every other removal of a mount.
 - **One placement per share per device.** A second `accept_shared_subtree` of
   a share this device already mounts is refused, naming the share's handle:
   before any network work, and again inside the write transaction that creates

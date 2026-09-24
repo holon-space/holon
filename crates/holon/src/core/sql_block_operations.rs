@@ -818,11 +818,11 @@ impl BlockOrdering for SqlBlockOperations {
         )?;
         // ALLOW(entity_uri_from_raw): id/parent_id/after_id from operation params dict
         let uri = EntityUri::from_raw(id);
-        // A received page removed from its file, alone or with the block it
-        // hangs under, is left, as a delete of it is.
+        // A share's mount removed from its file, alone or with a block above
+        // it, goes through the share's exit, as a delete of it does.
         if self
             .cell_registry
-            .leave_received_shares(&uri)
+            .exit_shares_removed_with(&uri)
             .await
             .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { format!("{e:#}").into() })?
         {

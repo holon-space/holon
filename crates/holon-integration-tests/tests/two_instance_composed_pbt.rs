@@ -2533,6 +2533,7 @@ fn pairing_keeps_a_page_created_under_the_device_local_layout_root() {
 
 use holon_integration_tests::pbt::transitions::DeletePlacedRoot;
 use holon_integration_tests::pbt::transitions::DeletePlacementParent;
+use holon_integration_tests::pbt::transitions::DeletePlacementRecord;
 use holon_integration_tests::pbt::transitions::JoinPlacedRoot;
 use holon_integration_tests::pbt::transitions::MovePlacedRoot;
 use holon_integration_tests::pbt::transitions::SharePage;
@@ -2682,6 +2683,35 @@ fn deleting_the_block_a_received_page_hangs_under_leaves_its_share() {
             page,
             receiver_parent,
         }),
+    );
+    let report = sut.run_report_now(&ref_state);
+    assert_engaged_and_ok(&report, "inv-overlay-placement-local");
+    <Sut as StateMachineTest>::check_invariants(&sut, &ref_state);
+}
+
+/// **Deleting a received page's placement record leaves the page's share.**
+/// The receiver deletes the mount that places the page, by the mount's own
+/// id. The receiver must hold nothing of the shared page afterwards, and the
+/// owner's page must be exactly where it was.
+#[test]
+fn deleting_a_received_pages_placement_record_leaves_its_share() {
+    let mut ref_state = wide_e2e_ref();
+    let mut sut = <Sut as StateMachineTest>::init_test(&ref_state);
+    let page = ref_state
+        .shareable_pages()
+        .into_iter()
+        .next()
+        .expect("the booted owner holds a user page to share");
+
+    sut = page_share_step(
+        sut,
+        &mut ref_state,
+        E2ETransition::SharePage(SharePage { page: page.clone() }),
+    );
+    sut = page_share_step(
+        sut,
+        &mut ref_state,
+        E2ETransition::DeletePlacementRecord(DeletePlacementRecord { page }),
     );
     let report = sut.run_report_now(&ref_state);
     assert_engaged_and_ok(&report, "inv-overlay-placement-local");

@@ -628,7 +628,8 @@ mod adapter {
             }
         }
 
-        /// Attach the share backend that leaves this manager's shares.
+        /// Attach the share backend that takes this manager's shares off the
+        /// device.
         pub fn set_exit(&self, exit: std::sync::Weak<dyn crate::shared_tree::ShareExit>) {
             *self.exit.write().unwrap() = Some(exit);
         }

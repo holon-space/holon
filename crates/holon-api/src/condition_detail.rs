@@ -86,6 +86,11 @@ impl ConditionKind {
                 "You left the shared page {title:?}; the owner's page is unchanged"
             )),
 
+            Self::DeletedSharedPage { title } => ConditionDetail::prose(format!(
+                "You deleted {title:?}, which you shared; the share is revoked and its recipients \
+                 lose it"
+            )),
+
             // The archive path is a BODY line: the user reproduces it
             // character for character, and the headline is capped.
             Self::PairingReimportedLocalContent {

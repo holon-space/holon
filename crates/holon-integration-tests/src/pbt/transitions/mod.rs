@@ -112,6 +112,7 @@ pub mod delete_backward;
 mod delete_document;
 pub mod delete_placed_root;
 pub mod delete_placement_parent;
+pub mod delete_placement_record;
 mod dense_projection_edit;
 mod dispatch_unschemed_block_id;
 mod drag_drop_block;
@@ -198,6 +199,7 @@ pub use delete_backward::DeleteBackward;
 pub use delete_document::DeleteDocument;
 pub use delete_placed_root::DeletePlacedRoot;
 pub use delete_placement_parent::DeletePlacementParent;
+pub use delete_placement_record::DeletePlacementRecord;
 pub use deliver_block_content::DeliverBlockContent;
 pub use dense_projection_edit::DenseProjectionEdit;
 pub use dispatch_unschemed_block_id::DispatchUnschemedBlockId;
@@ -366,6 +368,7 @@ crate::declare_e2e_transitions! {
         DeletePlacedRoot(DeletePlacedRoot),
         JoinPlacedRoot(JoinPlacedRoot),
         DeletePlacementParent(DeletePlacementParent),
+        DeletePlacementRecord(DeletePlacementRecord),
     }
 }
 

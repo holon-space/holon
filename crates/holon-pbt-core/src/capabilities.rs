@@ -3909,6 +3909,11 @@ pub trait SutTwoInstance {
         page: &EntityUri,
         receiver_parent: &EntityUri,
     );
+
+    /// Delete the RECEIVER's placement record of `page` — the mount that
+    /// places it — by the record's own id, through the production
+    /// `delete_subtree` op.
+    async fn delete_placement_record_on_receiver(&self, page: &EntityUri);
 }
 
 /// SUT-side observation of the RECEIVER instance's projections. Separate from

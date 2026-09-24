@@ -1183,16 +1183,16 @@ async fn refuse_share_exit(
     Ok(())
 }
 
-/// Leave the share of every page another device shared with this one at or
-/// under `id`. `Ok(false)` when there is none, or no registry routes shares.
-async fn leave_shares_via_cells(
+/// Take every share whose mount a removal of `id` removes off this device.
+/// `Ok(false)` when there is none, or no registry routes shares.
+async fn exit_shares_via_cells(
     registry: Option<&dyn crate::cell_registry::EntityCellRegistry>,
     id: &EntityUri,
 ) -> Result<bool> {
     let Some(reg) = registry else {
         return Ok(false);
     };
-    reg.leave_received_shares(id)
+    reg.exit_shares_removed_with(id)
         .await
         .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })
 }
@@ -2573,17 +2573,19 @@ where
     ///
     /// Declared irreversible: faithfully resurrecting an ordered subtree is out
     /// of scope (fail-loud, never a lossy inverse) — the same line the leaf
-    /// `delete` inverse draws. Every page another device shared with this one
-    /// in the subtree leaves its share, as a `delete` of that page does.
+    /// `delete` inverse draws. Every share whose mount is in the subtree goes
+    /// through its exit first: a share received is left, a share made here is
+    /// revoked.
     #[holon_macros::menu_exposure(listed)]
     #[holon_macros::boundary_behavior(private_only)]
     async fn delete_subtree(&self, id: &EntityUri) -> Result<OperationResult> {
-        if leave_shares_via_cells(self.cells(), id).await? {
+        if exit_shares_via_cells(self.cells(), id).await? {
             delete_block_via_cells(self.cells(), id).await?;
             return Ok(OperationResult::declared_irreversible(
                 Vec::new(),
-                "delete_subtree of a subtree holding a received shared page leaves that page's \
-                 share; rejoining takes a new ticket",
+                "delete_subtree of a subtree holding a share's mount takes the share off this \
+                 device: a share received is left, a share made here is revoked; restoring either \
+                 takes a new ticket",
             ));
         }
         if delete_block_via_cells(self.cells(), id).await? {

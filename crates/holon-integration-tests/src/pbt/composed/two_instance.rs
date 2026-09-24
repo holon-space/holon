@@ -88,6 +88,7 @@ use crate::pbt::reference_state::ReferenceState;
 use crate::pbt::transitions::CreateBlockUnderFocus;
 use crate::pbt::transitions::DeletePlacedRoot;
 use crate::pbt::transitions::DeletePlacementParent;
+use crate::pbt::transitions::DeletePlacementRecord;
 use crate::pbt::transitions::E2ETransition;
 use crate::pbt::transitions::JoinPlacedRoot;
 use crate::pbt::transitions::MovePlacedRoot;
@@ -741,6 +742,28 @@ impl SutTwoInstance for TwoInstanceHandle {
         self.settle_shares().await;
     }
 
+    async fn delete_placement_record_on_receiver(&self, page: &EntityUri) {
+        let page = self.resolve_owner_id(page);
+        let record = self
+            .receiver_placement_record(&page)
+            .await
+            .unwrap_or_else(|| panic!("the receiver holds no placement record of {page}"));
+        let mut delete = holon_api::StorageEntity::new();
+        delete.insert("id".into(), holon_api::Value::String(record.to_string()));
+        dispatch_op(
+            &self.receiver,
+            "receiver",
+            "block",
+            "delete_subtree",
+            delete,
+        )
+        .await
+        .unwrap_or_else(|e| {
+            panic!("the receiver refused to delete {page}'s placement record {record}: {e:#}")
+        });
+        self.settle_shares().await;
+    }
+
     async fn sync_witness(&self) -> SyncRoundWitness {
         let witness = self
             .state
@@ -790,6 +813,41 @@ impl TwoInstanceHandle {
             .shared_tree_store()
             .expect("the receiver wires the share machinery");
         holon_loro::loro_backend::LoroBackend::from_document(global).with_shared_trees(shared)
+    }
+
+    /// The stable id of the receiver's mount that places `page`.
+    async fn receiver_placement_record(&self, page: &EntityUri) -> Option<EntityUri> {
+        let doc = Self::registry(&self.receiver, "receiver")
+            .store()
+            .get_doc(DocScope::Global)
+            .await
+            .unwrap_or_else(|e| panic!("the receiver instance has no global Loro doc: {e:#}"));
+        doc.with_read(|d| {
+            let tree = d.get_tree(holon_loro::loro_backend::TREE_NAME);
+            Ok(tree
+                .get_nodes(false)
+                .into_iter()
+                .filter(|n| {
+                    !matches!(
+                        n.parent,
+                        loro::TreeParentId::Deleted | loro::TreeParentId::Unexist
+                    )
+                })
+                .find(|n| {
+                    holon_loro::shared_tree::read_mount_info(&tree, n.id)
+                        .is_some_and(|info| info.placed_page().as_ref() == Some(page))
+                })
+                .map(|n| {
+                    let meta = tree.get_meta(n.id).expect("a live mount has metadata");
+                    match meta.get(holon_loro::loro_backend::STABLE_ID) {
+                        Some(loro::ValueOrContainer::Value(loro::LoroValue::String(id))) => {
+                            EntityUri::block(id.as_str())
+                        }
+                        other => panic!("the mount placing {page} has no stable id: {other:?}"),
+                    }
+                }))
+        })
+        .unwrap_or_else(|e| panic!("reading the receiver's Loro doc failed: {e:#}"))
     }
 
     /// Oracle id space → the owner's real id, which a shared page keeps on
@@ -1194,6 +1252,7 @@ impl ReferenceStateMachine for TwoInstanceMachine {
         offer!(DeletePlacedRoot);
         offer!(JoinPlacedRoot);
         offer!(DeletePlacementParent);
+        offer!(DeletePlacementRecord);
         // `Nothing` has no preconditions, so `arms` is never empty and the
         // Union below cannot panic on a state where everything else is gated.
         offer!(Nothing);
