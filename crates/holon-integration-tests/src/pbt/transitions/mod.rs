@@ -126,6 +126,7 @@ pub mod indent;
 mod instantiate_template;
 mod jj_git_init;
 pub mod join_block;
+pub mod join_placed_root;
 mod jump_to_search_hit;
 pub mod move_cursor;
 pub mod move_down;
@@ -221,6 +222,7 @@ pub use indent::Indent;
 pub use instantiate_template::InstantiateTemplate;
 pub use jj_git_init::JjGitInit;
 pub use join_block::JoinBlock;
+pub use join_placed_root::JoinPlacedRoot;
 pub use jump_to_search_hit::JumpToSearchHit;
 pub use move_cursor::MoveCursor;
 pub use move_down::MoveDown;
@@ -360,6 +362,7 @@ crate::declare_e2e_transitions! {
         SharePage(SharePage),
         MovePlacedRoot(MovePlacedRoot),
         DeletePlacedRoot(DeletePlacedRoot),
+        JoinPlacedRoot(JoinPlacedRoot),
     }
 }
 

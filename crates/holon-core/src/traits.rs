@@ -1159,6 +1159,44 @@ async fn delete_block_via_cells(
         .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })
 }
 
+/// Refuse `action` on `id` when `id` is a page another device shared with this
+/// one: removing it is leaving its share, which only a delete does.
+async fn refuse_share_exit(
+    registry: Option<&dyn crate::cell_registry::EntityCellRegistry>,
+    id: &EntityUri,
+    action: crate::cell_registry::RemovingAction,
+) -> Result<()> {
+    let Some(reg) = registry else {
+        return Ok(());
+    };
+    if reg
+        .is_received_share_root(id)
+        .await
+        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?
+    {
+        return Err(crate::cell_registry::ShareExitRefused {
+            page: id.clone(),
+            action,
+        }
+        .into());
+    }
+    Ok(())
+}
+
+/// Leave the share of `id` when it is a page another device shared with this
+/// one. `Ok(false)` when it is no such page, or no registry routes shares.
+async fn leave_share_via_cells(
+    registry: Option<&dyn crate::cell_registry::EntityCellRegistry>,
+    id: &EntityUri,
+) -> Result<bool> {
+    let Some(reg) = registry else {
+        return Ok(false);
+    };
+    reg.leave_share(id)
+        .await
+        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })
+}
+
 /// Pair every member of `descendants` with its hop count from `root`, walking
 /// `parent_id` inside the set itself.
 ///
@@ -1878,6 +1916,10 @@ where
     ///          old slot (i.e. before any of `id`'s former siblings)
     ///        - deletes `id`
     ///
+    /// Refused when `id` is a page another device shared with this one
+    /// ([`crate::ShareExitRefused`]): only a delete may take it off this
+    /// device.
+    ///
     /// In either case the editor cursor moves onto the merge target at the
     /// join boundary (= old target content length).
     ///
@@ -1917,6 +1959,12 @@ where
         if position != 0 {
             return Ok(OperationResult::irreversible(vec![]));
         }
+        refuse_share_exit(
+            self.cells(),
+            id,
+            crate::cell_registry::RemovingAction::JoinIntoBlockAbove,
+        )
+        .await?;
 
         let id_str = id.as_str();
         let block: T = self
@@ -2517,10 +2565,18 @@ where
     ///
     /// Declared irreversible: faithfully resurrecting an ordered subtree is out
     /// of scope (fail-loud, never a lossy inverse) — the same line the leaf
-    /// `delete` inverse draws.
+    /// `delete` inverse draws. On a page another device shared with this one it
+    /// leaves the share, as `delete` does.
     #[holon_macros::menu_exposure(listed)]
     #[holon_macros::boundary_behavior(private_only)]
     async fn delete_subtree(&self, id: &EntityUri) -> Result<OperationResult> {
+        if leave_share_via_cells(self.cells(), id).await? {
+            return Ok(OperationResult::declared_irreversible(
+                Vec::new(),
+                "delete_subtree of a received shared page leaves its share; rejoining takes a new \
+                 ticket",
+            ));
+        }
         if delete_block_via_cells(self.cells(), id).await? {
             return Ok(OperationResult::declared_irreversible(
                 Vec::new(),
@@ -2557,11 +2613,18 @@ where
     /// directly.
     ///
     /// Declared irreversible: the reparent + delete pair has no exact single
-    /// inverse (mirrors `join_block`'s with-children case).
+    /// inverse (mirrors `join_block`'s with-children case). Refused on a page
+    /// another device shared with this one ([`crate::ShareExitRefused`]).
     #[holon_macros::affects("parent_id", "sort_key")]
     #[holon_macros::menu_exposure(listed)]
     #[holon_macros::boundary_behavior(crossing_widens)]
     async fn delete_keep_children(&self, id: &EntityUri) -> Result<OperationResult> {
+        refuse_share_exit(
+            self.cells(),
+            id,
+            crate::cell_registry::RemovingAction::DeleteKeepingChildren,
+        )
+        .await?;
         let id_str = id.as_str();
         let block: T = self
             .get_by_id(id_str)

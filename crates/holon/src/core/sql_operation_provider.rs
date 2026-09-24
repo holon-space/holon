@@ -2411,6 +2411,27 @@ impl SqlOperationProvider {
         }
     }
 
+    /// A merge deletes the block it merges away, and removing a shared
+    /// block is a share write or, on a received page, leaving the share —
+    /// neither of which a merge step may do behind its own undo.
+    async fn refuse_merging_away_shared(&self, id: &str) -> Result<()> {
+        let (_, properties, _) = self
+            .read_merge_side(id)
+            .await?
+            .ok_or_else(|| format!("merge_blocks: '{id}' not found"))?;
+        if let Some(shared_tree_id) =
+            Self::property_from_blob(&properties, holon_api::share_props::SHARED_TREE_ID_PROPERTY)?
+        {
+            return Err(format!(
+                "merge_blocks: '{id}' belongs to shared tree {shared_tree_id:?}, and a merge \
+                 would remove it from the share. Delete it instead (on a page shared with you, \
+                 that leaves the share)."
+            )
+            .into());
+        }
+        Ok(())
+    }
+
     /// Read one block's plan-relevant columns. `None` when the row is absent.
     async fn read_merge_side(&self, id: &str) -> Result<Option<(String, Value, i64)>> {
         let sql = format!(
@@ -4261,6 +4282,7 @@ impl OriginTaggedWrites for SqlOperationProvider {
                     )
                     .into());
                 }
+                self.refuse_merging_away_shared(&duplicate_id).await?;
                 if self.has_file_binding(&duplicate_id).await? {
                     return Err(format!(
                         "merge_blocks: '{duplicate_id}' is a document root with a live file \
@@ -4295,6 +4317,7 @@ impl OriginTaggedWrites for SqlOperationProvider {
                     };
                     let mut losers = Vec::with_capacity(loser_ids.len());
                     for id in loser_ids {
+                        self.refuse_merging_away_shared(&id).await?;
                         let children = self
                             .read_merge_children(&id)
                             .await?

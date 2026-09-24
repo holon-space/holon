@@ -3895,6 +3895,11 @@ pub trait SutTwoInstance {
     /// Delete `id` on the RECEIVER through its production `delete_subtree`
     /// op when `subtree`, else its bare `delete` op.
     async fn delete_on_receiver(&self, id: &EntityUri, subtree: bool);
+
+    /// `join_block` at position 0 on `id` on the RECEIVER through its
+    /// production op. A refusal must be the share-exit refusal; an accepted
+    /// join is undone through the receiver's engine, as a user would.
+    async fn join_on_receiver(&self, id: &EntityUri);
 }
 
 /// SUT-side observation of the RECEIVER instance's projections. Separate from

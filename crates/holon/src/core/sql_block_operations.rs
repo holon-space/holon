@@ -818,6 +818,15 @@ impl BlockOrdering for SqlBlockOperations {
         )?;
         // ALLOW(entity_uri_from_raw): id/parent_id/after_id from operation params dict
         let uri = EntityUri::from_raw(id);
+        // A received page removed from its file is left, as a delete of it is.
+        if self
+            .cell_registry
+            .leave_share(&uri)
+            .await
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { format!("{e:#}").into() })?
+        {
+            return Ok(());
+        }
         if self
             .cell_registry
             .delete_entity(&uri)

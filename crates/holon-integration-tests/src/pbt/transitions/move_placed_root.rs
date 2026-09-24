@@ -27,12 +27,14 @@ pub struct MovePlacedRoot {
     pub new_parent: EntityUri,
 }
 
-/// Every `(page, receiver page)` pair that would actually move the page.
+/// Every `(page, receiver page)` pair that would actually move a page the
+/// receiver still holds.
 fn candidate_moves<R: RefSharedView>(state: &R) -> Vec<(EntityUri, EntityUri)> {
     let pages = state.receiver_pages();
     state
         .page_shares()
         .into_iter()
+        .filter(|(_, share)| !share.left)
         .flat_map(|(page, share)| {
             pages
                 .iter()

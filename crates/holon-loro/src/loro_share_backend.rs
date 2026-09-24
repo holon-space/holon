@@ -9,6 +9,7 @@
 //! model.
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -222,8 +223,7 @@ where
     /// the mount node from the global tree plus the share's SQL rows, and
     /// finally delete the on-disk snapshot. Loud error if `id` names no share.
     #[holon_macros::affects("parent_id")]
-    async fn unshare(&self, #[entity_ref("block")] id: &str)
-    -> Result<OperationResult>;
+    async fn unshare(&self, #[entity_ref("block")] id: &str) -> Result<OperationResult>;
 }
 
 /// Holder for a per-share save worker. Wraps the generic
@@ -356,6 +356,25 @@ pub struct LoroShareBackend {
     /// to call back into `&self`-shaped methods without threading
     /// `Arc<Self>` through every call site.
     self_weak: std::sync::Weak<LoroShareBackend>,
+    /// Shares an accept is placing right now. An accept claims its share
+    /// before its first side effect, so a concurrent second accept of the same
+    /// ticket is refused before it binds, bumps or writes anything.
+    accepting: Arc<std::sync::Mutex<HashSet<String>>>,
+}
+
+/// An accept's claim on its share, released when the accept ends.
+struct AcceptClaim {
+    accepting: Arc<std::sync::Mutex<HashSet<String>>>,
+    shared_tree_id: String,
+}
+
+impl Drop for AcceptClaim {
+    fn drop(&mut self) {
+        self.accepting
+            .lock()
+            .expect("accept claims lock")
+            .remove(&self.shared_tree_id);
+    }
 }
 
 /// Which per-share writers a settle waits for.
@@ -860,6 +879,7 @@ impl LoroShareBackend {
             sync_workers: Arc::new(RwLock::new(HashMap::new())),
             projection_workers: Arc::new(RwLock::new(HashMap::new())),
             self_weak: self_weak.clone(),
+            accepting: Arc::new(std::sync::Mutex::new(HashSet::new())),
         });
         let exit: std::sync::Weak<dyn shared_tree::ShareExit> = Arc::downgrade(&backend) as _;
         backend.manager.set_exit(exit);
@@ -1803,6 +1823,22 @@ fn first_local_collision(global: &LoroDoc, ops: &[(String, StorageEntity)]) -> O
 /// one would write an unaddressable SQL row for a block that does have an
 /// identity, just not yet a readable one.
 /// The refusal of a second accept of a share this device already holds.
+impl LoroShareBackend {
+    fn claim_accept(&self, shared_tree_id: &str) -> Result<AcceptClaim> {
+        let mut accepting = self.accepting.lock().expect("accept claims lock");
+        if !accepting.insert(shared_tree_id.to_string()) {
+            return Err(err(format!(
+                "shared tree {shared_tree_id} is already being accepted on this device; a share \
+                 has one placement per device, so this second accept is refused"
+            )));
+        }
+        Ok(AcceptClaim {
+            accepting: self.accepting.clone(),
+            shared_tree_id: shared_tree_id.to_string(),
+        })
+    }
+}
+
 fn already_accepted(
     shared_tree_id: &str,
     handle: &str,
@@ -2148,9 +2184,9 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
         // the pruned snapshot becomes the base it never re-deletes those ids.
         // If we re-created the descendant rows BEFORE that delete pass ran, the
         // delete would wipe them again. We defeat it deterministically:
-        //   1. register the shared doc, so every reader that follows the mount
-        //      finds it and a full reseed of the global projection counts the
-        //      share's rows as the share's;
+        //   1. register the shared doc, so every reader that follows the mount finds it
+        //      and a full reseed of the global projection counts the share's rows as
+        //      the share's;
         //   2. a BLOCK share projects its container row (an UPSERT; carries
         //      `share-role`) — a page share has none, its page keeps its own row;
         //   3. flush the global projection — this acquires its project lock
@@ -2261,7 +2297,9 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
         // One placement per share on this device. A second accept names a
         // second place for the SAME page, and a page has one parent; refuse it
         // before anything touches the network, and name the mount the user can
-        // move instead.
+        // move instead. The claim covers an accept still in flight, the mount
+        // one that finished.
+        let _claim = self.claim_accept(&t.shared_tree_id)?;
         if let Some((_, existing)) = self
             .global_doc()
             .await?
@@ -2394,9 +2432,11 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
             .map_err(|e| err(format!("read the share record of {shared_tree_id}: {e:#}")))?
             .ok_or_else(|| {
                 err(format!(
-                    "shared tree {shared_tree_id} carries no share record: the sharer runs a \
-                     build that predates recorded share kinds, so this device cannot tell a page \
-                     share from a block share"
+                    "shared tree {shared_tree_id} carries no share record, so this device cannot \
+                     tell whether it shares a page or a block, and does not place it. The share \
+                     was made before share kinds were recorded; a share gets its record only when \
+                     it is made, so updating either device does not add one. Ask the owner to \
+                     unshare it and share it again, then accept the new ticket."
                 ))
             })?;
 
@@ -2421,11 +2461,6 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
         let (mount_stable_id, mount_parent_uri) = collab
             .with_write(WriteOrigin::ShareLifecycle, |txn| {
                 let doc = txn.doc();
-                // Re-checked under the write lock: two accepts of one ticket can
-                // both pass the check above while the network runs.
-                if let Some((_, existing)) = find_mount_by_shared_tree_id(doc, &shared_tree_id)? {
-                    return Err(anyhow::anyhow!("{}", already_accepted(&shared_tree_id, &existing)));
-                }
                 let new_id = format!("block:{}", Uuid::new_v4());
                 let Some(parent_tid) = find_tree_id_by_stable_id(doc, &parent_uri) else {
                     if let Some(shared_tree_id) = self.shared_tree_holding(&parent_uri) {
@@ -2742,7 +2777,9 @@ impl LoroShareBackend {
                     .execute_operation(&entity, "delete", params)
                     .await
                     .map_err(|e| {
-                        err(format!("unshare: delete container row {mount_row} from SQL: {e}"))
+                        err(format!(
+                            "unshare: delete container row {mount_row} from SQL: {e}"
+                        ))
                     })?;
             }
         }
@@ -2915,7 +2952,9 @@ pub async fn rehydrate_shared_trees(
         let kind = match &info.kind {
             shared_tree::KindRecord::Recorded(kind) => Ok(kind.clone()),
             shared_tree::KindRecord::Unrecorded => {
-                backend.record_legacy_share_kind(&shared_tree_id, &doc).await
+                backend
+                    .record_legacy_share_kind(&shared_tree_id, &doc)
+                    .await
             }
             shared_tree::KindRecord::Corrupt(why) => Err(err(format!(
                 "the mount records an unreadable share kind: {why}"
@@ -3199,9 +3238,10 @@ impl LoroShareBackend {
             .await?
             .with_write(WriteOrigin::ShareLifecycle, |txn| {
                 let tree = txn.doc().get_tree(crate::loro_backend::TREE_NAME);
-                let mount = shared_tree::find_mount_node(&tree, shared_tree_id).ok_or_else(|| {
-                    anyhow::anyhow!("shared tree {shared_tree_id} lost its mount mid-rehydrate")
-                })?;
+                let mount =
+                    shared_tree::find_mount_node(&tree, shared_tree_id).ok_or_else(|| {
+                        anyhow::anyhow!("shared tree {shared_tree_id} lost its mount mid-rehydrate")
+                    })?;
                 shared_tree::record_share_kind(&tree, mount, &kind)?;
                 txn.commit();
                 Ok(())
@@ -6835,9 +6875,10 @@ mod tests {
         }
 
         fn sql_parent_on_b(&self, id: &str) -> Option<String> {
-            self.sql_b
-                .get(id)
-                .and_then(|row| row.get("parent_id").and_then(|v| v.as_string().map(str::to_string)))
+            self.sql_b.get(id).and_then(|row| {
+                row.get("parent_id")
+                    .and_then(|v| v.as_string().map(str::to_string))
+            })
         }
 
         async fn close(self) {
@@ -6846,9 +6887,10 @@ mod tests {
         }
     }
 
-    /// R5: the one-placement check holds under a race. Both accepts pass the
-    /// pre-network check together; the re-check inside the write transaction
-    /// lets exactly one place the share.
+    /// R5: the one-placement check holds under a race. Exactly one of two
+    /// concurrent accepts places the share, and the other leaves nothing
+    /// behind: no minted peer id, and no doc of its own bound to the
+    /// advertiser.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial_test::serial]
     async fn two_concurrent_accepts_of_one_ticket_place_the_share_once() {
@@ -6877,19 +6919,149 @@ mod tests {
              {outcomes:?}"
         );
         assert!(
-            outcomes
-                .iter()
-                .any(|o| o.as_ref().is_err_and(|e| e.contains("already accepted"))),
+            outcomes.iter().any(|o| o.as_ref().is_err_and(|e| {
+                e.contains("already accepted") || e.contains("already being accepted")
+            })),
             "the losing accept is refused as a second placement: {outcomes:?}"
         );
         assert_eq!(fixture.mounts_on_b().await, 1, "one share, one mount");
+        assert_eq!(
+            fixture
+                .b
+                .snapshot_store
+                .load_generation(&fixture.shared_tree_id)
+                .unwrap(),
+            1,
+            "only the winning accept minted a peer id for the share"
+        );
+
+        // The owner's next edit, pushed to B's advertiser, lands in the doc B
+        // registered: the loser bound none of its own.
+        {
+            let doc = fixture.a.manager.get_doc(&fixture.shared_tree_id).unwrap();
+            let tree = doc.get_tree(crate::loro_backend::TREE_NAME);
+            tree.get_meta(tree.roots()[0])
+                .unwrap()
+                .insert("r5-probe", "pushed by the owner")
+                .unwrap();
+            doc.commit();
+        }
+        fixture
+            .a
+            .sync_with_peers(&fixture.shared_tree_id)
+            .await
+            .expect("the owner pushes its edit to B");
+        let registered = fixture.b.manager.get_doc(&fixture.shared_tree_id).unwrap();
+        let tree = registered.get_tree(crate::loro_backend::TREE_NAME);
+        assert!(
+            tree.get_meta(tree.roots()[0])
+                .unwrap()
+                .get("r5-probe")
+                .is_some(),
+            "the owner's push reached the doc B registered for the share"
+        );
+        fixture.close().await;
+    }
+
+    /// R4: a share made before share kinds were recorded carries no record in
+    /// its doc. Accepting it is refused before anything is placed, and the
+    /// refusal says why and what the owner does about it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn accepting_a_share_without_a_kind_record_names_the_remedy() {
+        let fixture = PageShareFixture::shared().await;
+        let doc = fixture.a.manager.get_doc(&fixture.shared_tree_id).unwrap();
+        shared_tree::erase_share_record(&doc).unwrap();
+
+        let refused = fixture
+            .b
+            .accept_shared_subtree("block:root-b", fixture.ticket.clone())
+            .await
+            .map(|_| ())
+            .expect_err("a share with no kind record is not placed");
+        let message = format!("{refused:#}");
+        assert!(
+            message.contains("carries no share record")
+                && message.contains("Ask the owner to unshare it and share it again"),
+            "the refusal names the missing record and the remedy: {message}"
+        );
+        assert_eq!(fixture.mounts_on_b().await, 0, "nothing is placed");
+        fixture.close().await;
+    }
+
+    /// R4: a mount written before kinds were recorded gets its kind once, from
+    /// the sharer's record when the shared doc has one, else from the root's
+    /// `Page` tag.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn an_unrecorded_mount_kind_is_recorded_from_the_share_or_the_root_tag() {
+        let fixture = PageShareFixture::accepted().await;
+        let id = fixture.shared_tree_id.clone();
+        let mount_kind = || async {
+            fixture
+                .b
+                .global_doc()
+                .await
+                .unwrap()
+                .with_read(|doc| {
+                    let tree = doc.get_tree(crate::loro_backend::TREE_NAME);
+                    let mount = shared_tree::find_mount_node(&tree, &id).unwrap();
+                    Ok(shared_tree::read_mount_info(&tree, mount).unwrap().kind)
+                })
+                .unwrap()
+        };
+        let erase_mount_kind = || async {
+            fixture
+                .b
+                .global_doc()
+                .await
+                .unwrap()
+                .with_write(WriteOrigin::ShareLifecycle, |txn| {
+                    let tree = txn.doc().get_tree(crate::loro_backend::TREE_NAME);
+                    let mount = shared_tree::find_mount_node(&tree, &id).unwrap();
+                    shared_tree::erase_kind(&tree.get_meta(mount)?)?;
+                    txn.commit();
+                    Ok(())
+                })
+                .unwrap()
+        };
+        let page = shared_tree::ShareKind::Page {
+            root: "shared-page".to_string(),
+        };
+        let shared_doc = fixture.b.manager.get_doc(&id).unwrap();
+
+        erase_mount_kind().await;
+        assert_eq!(mount_kind().await, shared_tree::KindRecord::Unrecorded);
+        let from_record = fixture
+            .b
+            .record_legacy_share_kind(&id, &shared_doc)
+            .await
+            .unwrap();
+        assert_eq!(from_record, page, "the sharer's record decides");
+        assert_eq!(
+            mount_kind().await,
+            shared_tree::KindRecord::Recorded(page.clone())
+        );
+
+        erase_mount_kind().await;
+        shared_tree::erase_share_record(&shared_doc).unwrap();
+        let from_tag = fixture
+            .b
+            .record_legacy_share_kind(&id, &shared_doc)
+            .await
+            .unwrap();
+        assert_eq!(
+            from_tag, page,
+            "with no record, the root's Page tag decides"
+        );
+        assert_eq!(mount_kind().await, shared_tree::KindRecord::Recorded(page));
         fixture.close().await;
     }
 
     /// R4: a share's kind is fixed when it is made. The owner dropping the
     /// `Page` tag from the shared page afterwards changes a field of the page,
-    /// never where the recipient placed it: the authority and SQL keep agreeing,
-    /// and the recipient's moves keep moving its own mount.
+    /// never where the recipient placed it: the authority and SQL keep
+    /// agreeing, and the recipient's moves keep moving its own mount.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial_test::serial]
     async fn the_owner_dropping_the_page_tag_leaves_the_recipients_placement_intact() {
@@ -6917,7 +7089,11 @@ mod tests {
             .await;
         let authority = fixture.authority_b().await;
         assert!(
-            !authority.get_block("block:shared-page").await.unwrap().is_page(),
+            !authority
+                .get_block("block:shared-page")
+                .await
+                .unwrap()
+                .is_page(),
             "precondition: the owner's untagging reached B"
         );
 
@@ -7018,10 +7194,11 @@ mod tests {
         fixture.close().await;
     }
 
-    /// R1: a recipient's delete of a placed page removes only its own
-    /// placement. It leaves the share on this device — the mount, the shared
-    /// doc and every projected row go — with a notice, and never writes the
-    /// shared doc, so the owner's page is unchanged.
+    /// R1: a recipient's leave of a placed page removes only its own
+    /// placement, and a plain block delete refuses it. It leaves the share on
+    /// this device — the mount, the shared doc and every projected row go —
+    /// with a notice, and never writes the shared doc, so the owner's page
+    /// is unchanged.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial_test::serial]
     async fn a_recipient_delete_of_the_placed_page_leaves_the_share() {
@@ -7031,12 +7208,28 @@ mod tests {
         let shared_doc_b = fixture.b.manager.get_doc(&fixture.shared_tree_id).unwrap();
         let untouched = shared_doc_b.oplog_vv();
 
-        fixture
-            .authority_b()
-            .await
+        let authority = fixture.authority_b().await;
+        let refused = authority
             .delete_block("block:shared-page")
             .await
-            .expect("a recipient may delete a placed page");
+            .expect_err("a plain block delete never removes a received page");
+        assert!(
+            refused
+                .to_string()
+                .contains("delete block:shared-page to leave the share"),
+            "the refusal names the way out: {refused}"
+        );
+        assert_eq!(
+            fixture.mounts_on_b().await,
+            1,
+            "the refused delete changed nothing"
+        );
+        assert!(
+            authority
+                .leave_received_page("block:shared-page")
+                .await
+                .expect("a recipient may leave a placed page's share")
+        );
 
         assert_eq!(
             shared_doc_b.oplog_vv(),
@@ -7059,9 +7252,55 @@ mod tests {
         );
         let owner_doc = fixture.a.manager.get_doc(&fixture.shared_tree_id).unwrap();
         assert_eq!(
-            owner_doc.get_tree(crate::loro_backend::TREE_NAME).roots().len(),
+            owner_doc
+                .get_tree(crate::loro_backend::TREE_NAME)
+                .roots()
+                .len(),
             1,
             "the owner's page is unchanged"
+        );
+        fixture.close().await;
+    }
+
+    /// R1: a batch that left a share cannot be rolled back. Its leave is
+    /// irreversible, and the whole-document rewind would restore a mount whose
+    /// share is gone, so the rollback refuses before reverting anything.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn a_batch_that_left_a_share_refuses_its_rollback() {
+        use holon_core::BatchWindow;
+        use holon_core::batch_rollback::BatchRollback;
+        use holon_core::batch_rollback::RollbackRefused;
+        use holon_core::traits::CrudOperations;
+
+        let fixture = PageShareFixture::accepted().await;
+        let ops = crate::LoroBlockOperations::new(fixture.b.store.clone()).with_shared_trees(
+            fixture.b.manager.clone() as Arc<dyn crate::shared_tree::SharedTreeStore>,
+        );
+        let mut window = BatchWindow::opened(ops.observe().await.unwrap());
+        ops.delete("block:shared-page")
+            .await
+            .expect("the batch's delete leaves the share");
+        window.absorb(ops.observe().await.unwrap());
+        assert_eq!(
+            fixture.mounts_on_b().await,
+            0,
+            "the leave removed the mount"
+        );
+
+        let refused = ops
+            .rollback_to(&window)
+            .await
+            .expect_err("a rollback across a share exit is refused");
+        assert!(
+            matches!(&refused, RollbackRefused::Unreachable { doc, .. }
+                if *doc == format!("shared:{}", fixture.shared_tree_id)),
+            "the refusal names the share that left: {refused:?}"
+        );
+        assert_eq!(
+            fixture.mounts_on_b().await,
+            0,
+            "the refused rollback restored no mount"
         );
         fixture.close().await;
     }

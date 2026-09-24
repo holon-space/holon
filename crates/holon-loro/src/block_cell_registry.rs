@@ -110,7 +110,10 @@ impl BlockCellRegistry {
     /// structural write through this registry misses shared content — the
     /// block is not in the global tree — and falls through to a SQL-only write
     /// that the share never sees.
-    pub fn with_shared_trees(mut self, store: Arc<dyn crate::shared_tree::SharedTreeStore>) -> Self {
+    pub fn with_shared_trees(
+        mut self,
+        store: Arc<dyn crate::shared_tree::SharedTreeStore>,
+    ) -> Self {
         Arc::get_mut(&mut self.backend)
             .expect("the registry's backend is shared only once construction ends")
             .set_shared_trees(store);
@@ -698,6 +701,27 @@ impl EntityCellRegistry for BlockCellRegistry {
             self.cache.evict_uri(uri);
         }
         Ok(in_tree)
+    }
+
+    async fn is_received_share_root(&self, uri: &EntityUri) -> Result<bool> {
+        Ok(self
+            .backend
+            .received_page_share(uri.as_str())
+            .await
+            .map_err(|e| anyhow!("classify {uri}: {e:#}"))?
+            .is_some())
+    }
+
+    async fn leave_share(&self, uri: &EntityUri) -> Result<bool> {
+        let left = self
+            .backend
+            .leave_received_page(uri.as_str())
+            .await
+            .map_err(|e| anyhow!("leave the share of {uri}: {e:#}"))?;
+        if left {
+            self.cache.evict_uri(uri);
+        }
+        Ok(left)
     }
 
     /// [`create_entity`](EntityCellRegistry::create_entity) for a whole chunk

@@ -88,6 +88,7 @@ use crate::pbt::reference_state::ReferenceState;
 use crate::pbt::transitions::CreateBlockUnderFocus;
 use crate::pbt::transitions::DeletePlacedRoot;
 use crate::pbt::transitions::E2ETransition;
+use crate::pbt::transitions::JoinPlacedRoot;
 use crate::pbt::transitions::MovePlacedRoot;
 use crate::pbt::transitions::Nothing;
 use crate::pbt::transitions::ReceiverCreateBlock;
@@ -667,6 +668,37 @@ impl SutTwoInstance for TwoInstanceHandle {
         self.settle_shares().await;
     }
 
+    async fn join_on_receiver(&self, id: &EntityUri) {
+        let id = self.resolve_owner_id(id);
+        let mut params = holon_api::StorageEntity::new();
+        params.insert("id".into(), holon_api::Value::String(id.to_string()));
+        params.insert("position".into(), holon_api::Value::Integer(0));
+        match dispatch_op(&self.receiver, "receiver", "block", "join_block", params).await {
+            Err(e) => {
+                let refusal = holon_core::ShareExitRefused {
+                    page: id.clone(),
+                    action: holon_core::RemovingAction::JoinIntoBlockAbove,
+                }
+                .to_string();
+                let got = format!("{e:#}");
+                assert!(
+                    got.contains(&refusal),
+                    "join_block of the placed page {id} failed, but not with the share-exit \
+                     refusal: {got}"
+                );
+            }
+            Ok(_) => {
+                self.receiver
+                    .engine()
+                    .expect("the receiver instance has a backend engine")
+                    .undo()
+                    .await
+                    .unwrap_or_else(|e| panic!("undo of the receiver's join of {id}: {e:#}"));
+            }
+        }
+        self.settle_shares().await;
+    }
+
     async fn sync_witness(&self) -> SyncRoundWitness {
         let witness = self
             .state
@@ -1118,6 +1150,7 @@ impl ReferenceStateMachine for TwoInstanceMachine {
         offer!(SharePage);
         offer!(MovePlacedRoot);
         offer!(DeletePlacedRoot);
+        offer!(JoinPlacedRoot);
         // `Nothing` has no preconditions, so `arms` is never empty and the
         // Union below cannot panic on a state where everything else is gated.
         offer!(Nothing);

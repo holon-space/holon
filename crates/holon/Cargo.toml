@@ -187,6 +187,10 @@ name = "undo_compound_interleave"
 required-features = ["test-helpers"]
 
 [[test]]
+name = "merge_refuses_shared_blocks"
+required-features = ["test-helpers"]
+
+[[test]]
 name = "undo_inverse_wave1"
 required-features = ["test-helpers"]
 

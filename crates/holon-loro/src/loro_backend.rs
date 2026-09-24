@@ -3100,6 +3100,18 @@ impl LoroBackend {
         }
     }
 
+    /// When `id` is a page another device shared with this one, leave its
+    /// share: this device's placement, copy and rows go, the owner's page
+    /// stays. Irreversible. `Ok(false)` when `id` is no such page. The ONE way
+    /// a received page leaves this device; `delete_block` refuses it.
+    pub async fn leave_received_page(&self, id: &str) -> Result<bool, ApiError> {
+        let Some(shared_tree_id) = self.received_page_share(id).await? else {
+            return Ok(false);
+        };
+        self.leave_received_share(id, &shared_tree_id).await?;
+        Ok(true)
+    }
+
     /// Leave the share `shared_tree_id` through the share backend that owns it.
     async fn leave_received_share(&self, id: &str, shared_tree_id: &str) -> Result<(), ApiError> {
         let exit = self
@@ -5396,11 +5408,17 @@ impl CoreOperations for LoroBackend {
             Err(ApiError::BlockNotFound { .. }) => return Ok(()),
             Err(e) => return Err(e),
         };
-        // A received page is placed here, not owned here: deleting it removes
-        // this device's placement and copy — it leaves the share — and never
-        // deletes the owner's page.
-        if let Some(shared_tree_id) = self.received_share_of(&target, id)? {
-            return self.leave_received_share(id, &shared_tree_id).await;
+        // Removing a received page is leaving its share, which only
+        // `leave_received_page` does: every other route that reaches here
+        // would pair the removal with an inverse that cannot bring the share
+        // back.
+        if self.received_share_of(&target, id)?.is_some() {
+            return Err(ApiError::InvalidOperation {
+                message: format!(
+                    "{id} is a page shared with you, so this op cannot remove it; delete {id} \
+                     to leave the share"
+                ),
+            });
         }
         let (write_doc, tree_id) = self.target_doc(&target);
 

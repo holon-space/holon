@@ -29,6 +29,39 @@ use crate::cell::Cell;
 use crate::cell::CellBacking;
 use crate::consolidator::Seen;
 
+/// An op that would remove a page another device shared with this one.
+///
+/// Removing such a page is leaving its share, which is irreversible, so only a
+/// delete may do it ([`EntityCellRegistry::leave_share`]). Any other op
+/// removing it would leave the share behind an inverse that cannot bring the
+/// share back.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "{page} is a page shared with you, so {action} would take it off this device without \
+     leaving its share. Delete {page} instead: that leaves the share and keeps the owner's \
+     page unchanged."
+)]
+pub struct ShareExitRefused {
+    pub page: EntityUri,
+    pub action: RemovingAction,
+}
+
+/// The op a [`ShareExitRefused`] refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemovingAction {
+    JoinIntoBlockAbove,
+    DeleteKeepingChildren,
+}
+
+impl std::fmt::Display for RemovingAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::JoinIntoBlockAbove => "joining it into the block above",
+            Self::DeleteKeepingChildren => "deleting it while keeping its children",
+        })
+    }
+}
+
 /// Registry surface used by chord ops, frontend handlers, and sync
 /// providers. Implementations live per entity type
 /// (e.g. `BlockCellRegistry`).
@@ -149,6 +182,20 @@ pub trait EntityCellRegistry: Send + Sync {
     /// (SqlOnly mode, synthetic test stores). Callers fall back to the
     /// SQL delete on `Ok(false)`.
     async fn delete_entity(&self, _: &EntityUri) -> Result<bool> {
+        Ok(false)
+    }
+
+    /// Whether `uri` is the root of a page another device shared with this
+    /// one. Only [`Self::leave_share`] removes such a page;
+    /// [`Self::delete_entity`] refuses it.
+    async fn is_received_share_root(&self, _: &EntityUri) -> Result<bool> {
+        Ok(false)
+    }
+
+    /// Leave the share whose received page is `uri`: this device's placement
+    /// and copy go, the owner's page stays. Irreversible. `Ok(false)` when
+    /// `uri` is no such page.
+    async fn leave_share(&self, _: &EntityUri) -> Result<bool> {
         Ok(false)
     }
 

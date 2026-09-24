@@ -1211,15 +1211,10 @@ impl CrudOperations<Block> for LoroBlockOperations {
         // A page someone shared with this device is placed here, not owned
         // here: its delete leaves the share, whatever the page holds.
         if backend
-            .received_page_share(id)
+            .leave_received_page(id)
             .await
-            .map_err(|e| format!("delete: classify {id}: {e}"))?
-            .is_some()
+            .map_err(|e| format!("delete: leave the share of {id}: {e}"))?
         {
-            backend
-                .delete_block(id)
-                .await
-                .map_err(|e| format!("delete: leave the share of {id}: {e}"))?;
             return Ok(OperationResult::declared_irreversible(
                 vec![],
                 "delete of a received shared page leaves the share; rejoining takes a new ticket",

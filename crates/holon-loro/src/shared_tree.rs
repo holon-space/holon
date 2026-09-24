@@ -364,7 +364,9 @@ impl MountInfo {
     /// mount, which is known by its own id.
     pub fn placed_page(&self) -> Option<holon_api::EntityUri> {
         match &self.kind {
-            KindRecord::Recorded(ShareKind::Page { root }) => Some(holon_api::EntityUri::block(root)),
+            KindRecord::Recorded(ShareKind::Page { root }) => {
+                Some(holon_api::EntityUri::block(root))
+            }
             _ => None,
         }
     }
@@ -475,6 +477,23 @@ pub fn write_share_record(shared_doc: &LoroDoc, kind: &ShareKind) -> Result<()> 
 pub fn read_share_record(shared_doc: &LoroDoc) -> Result<Option<ShareKind>> {
     let map = shared_doc.get_map(SHARE_RECORD_MAP);
     read_kind(|key| map.get(key))
+}
+
+/// Remove the kind from a record map, as a share or mount written before
+/// kinds were recorded looks.
+#[cfg(test)]
+pub(crate) fn erase_kind(map: &loro::LoroMap) -> Result<()> {
+    map.delete(SHARE_KIND_KEY)?;
+    map.delete(SHARE_ROOT_KEY)?;
+    Ok(())
+}
+
+/// A shared doc as a share made before kinds were recorded carries it.
+#[cfg(test)]
+pub(crate) fn erase_share_record(shared_doc: &LoroDoc) -> Result<()> {
+    erase_kind(&shared_doc.get_map(SHARE_RECORD_MAP))?;
+    shared_doc.commit();
+    Ok(())
 }
 
 /// Record on `mount` what it places and which side of the share this device is.
