@@ -305,22 +305,12 @@ fn share_answers_follow_the_file_model() {
             ]),
             "the shared page carries its own task vocabulary"
         );
-        assert_eq!(child_ids(loro, p).await, ["block:shr-delta"]);
+        assert_eq!(child_ids(loro, &n).await, ["block:shr-delta"]);
         for authority in [loro, &sql as &dyn WriteAuthorityReads] {
-            assert_eq!(child_ids(authority, &n).await, ["block:shr-delta"]);
+            assert_eq!(child_ids(authority, p).await, ["block:shr-delta"]);
         }
-        let sql_answers = [
-            owning_page_id(&sql, p).await,
-            owning_page_id(&sql, "block:shr-delta").await,
-            owning_page_id(&sql, "block:shr-delta-one").await,
-        ];
-        assert_eq!(
-            sql_answers,
-            ["Absent".to_string(), n.clone(), n.clone()],
-            "EXPECTED DIVERGENCE (D198.a): the SQL projection mints a fresh mount id for a \
-             page share instead of adopting P's, so SQL names the mount {n} and does not hold \
-             {p}. Once D198.a's lane gives the mount P's identity this assertion fails: \
-             replace it with `owning_page = {p}` for all three, matching Loro."
-        );
+        for id in [p, "block:shr-delta", "block:shr-delta-one"] {
+            assert_eq!(owning_page_id(&sql, id).await, p, "SQL owning_page({id})");
+        }
     });
 }
