@@ -717,7 +717,7 @@ impl EntityCellRegistry for BlockCellRegistry {
         }
         let exited = self
             .backend
-            .delete_exiting_shares(uri.as_str())
+            .delete_exiting_shares(uri.as_str(), crate::shared_tree::ExitRoot::WithSubtree)
             .await
             .map_err(|e| anyhow!("delete {uri} with the shares it removes: {e:#}"))?;
         for share in &exited {

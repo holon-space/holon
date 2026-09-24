@@ -3211,7 +3211,11 @@ impl LoroBackend {
     ///
     /// The exits cannot be undone, so every check that can refuse runs before
     /// the first of them. An error after one names what was already exited.
-    pub async fn delete_exiting_shares(&self, id: &str) -> Result<Vec<RemovedShare>, ApiError> {
+    pub async fn delete_exiting_shares(
+        &self,
+        id: &str,
+        root: crate::shared_tree::ExitRoot,
+    ) -> Result<Vec<RemovedShare>, ApiError> {
         let target = match self.resolve_write_target(id).await {
             Ok(target) => target,
             Err(ApiError::BlockNotFound { .. }) => return Ok(Vec::new()),
@@ -3224,7 +3228,7 @@ impl LoroBackend {
         }
         let exit = self.share_exit(id, &shares)?;
         for (exited, share) in shares.iter().enumerate() {
-            if let Err(e) = exit.exit(&share.shared_tree_id).await {
+            if let Err(e) = exit.exit(&share.shared_tree_id, root).await {
                 return Err(Self::stopped_after_exits(
                     id,
                     &shares[..exited],

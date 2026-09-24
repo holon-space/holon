@@ -408,9 +408,12 @@ divergent edits.
   operations on entity `tree`, alongside `share_subtree` and
   `accept_shared_subtree`; `list_operations` on that entity returns all four.
   `unshare` takes the share's handle (see "Mount nodes") and tears down in a
-  resurrection-safe order — per-share workers first, so no worker can re-write
-  the snapshot after it is deleted, then the advertiser endpoint, then the
-  shared-doc registration, then the mount node. `gc_orphans` deletes
+  resurrection-safe order — the shared-doc registration first, under the
+  doc's guard, so no write reaches the doc after that point; then the
+  per-share workers, so no worker can re-write the snapshot after it is
+  deleted; then the advertiser endpoint, then the mount node. An owner's bare
+  delete of its shared page asks that teardown to refuse, before anything is
+  torn down, when the page has a child. `gc_orphans` deletes
   `shares/<id>.loro` and its `.peers.json` sidecar for shares with no
   surviving mount node, and returns the deleted ids; it runs only when invoked,
   and any confirmation gate belongs to the UI.

@@ -49,6 +49,9 @@ tracing.workspace = true
 futures.workspace = true
 holon = { workspace = true, features = ["test-helpers"] }
 holon-block-roundtrip-testing.workspace = true
+# `ShareCredentials::in_memory`: a share dispatched through the shipped wiring
+# needs custody that is not the login keychain.
+holon-loro = { workspace = true, features = ["test-helpers"] }
 holon-net.workspace = true
 holon-org-format.workspace = true
 proptest.workspace = true

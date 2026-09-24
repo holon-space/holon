@@ -583,7 +583,7 @@ impl BlockOrdering for LoroBlockOrdering {
         // A share's mount removed from its file, alone or with a block above
         // it, goes through the share's exit, as a delete of it does.
         self.backend
-            .delete_exiting_shares(id)
+            .delete_exiting_shares(id, holon_loro::shared_tree::ExitRoot::WithSubtree)
             .await
             .map(|_| ())
             .map_err(boxed)

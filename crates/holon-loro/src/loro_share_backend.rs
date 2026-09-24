@@ -24,6 +24,7 @@ use holon_api::condition_bus::ConditionKey;
 use holon_api::condition_bus::ConditionKind;
 use holon_api::sharing::Capabilities;
 use holon_core::DownstreamProjection;
+use holon_core::FieldDelta;
 use holon_core::MaybeSendSync;
 use holon_core::OperationProvider;
 use holon_core::OperationResult;
@@ -69,6 +70,7 @@ use crate::share_enrollment::ShareRoster;
 use crate::share_enrollment::peer_fingerprint;
 use crate::share_peer_id::stable_peer_id;
 use crate::shared_snapshot_store::SharedSnapshotStore;
+use crate::shared_tree::ExitRoot;
 use crate::shared_tree::HistoryRetention;
 use crate::shared_tree::MountRole;
 use crate::shared_tree::NestedShareRefusal;
@@ -79,6 +81,16 @@ use crate::shared_tree::ShareKind;
 use crate::shared_tree::{self};
 use crate::ticket::Ticket;
 use crate::write_origin::WriteOrigin;
+
+/// The history row of a share placed on this device at `handle`.
+fn share_placed(handle: &str, shared_tree_id: &str) -> FieldDelta {
+    FieldDelta::history_only(
+        handle,
+        SHARED_TREE_ID_PROPERTY,
+        Value::Null,
+        Value::String(shared_tree_id.to_string()),
+    )
+}
 
 fn err(msg: impl Into<String>) -> Box<dyn std::error::Error + Send + Sync> {
     Box::<dyn std::error::Error + Send + Sync>::from(msg.into())
@@ -217,9 +229,9 @@ where
     /// Stop sharing (on an owner) or leave (on a recipient) the share known by
     /// `id`: the page of a page share, the container row of a block share.
     ///
-    /// Tears the share down in a resurrection-safe order: drop the per-share
-    /// workers FIRST (so no worker can re-write the snapshot after we delete
-    /// it), close the advertiser endpoint, unregister the shared doc, delete
+    /// Tears the share down in a resurrection-safe order: unregister the
+    /// shared doc, drop the per-share workers (so no worker can re-write the
+    /// snapshot after we delete it), close the advertiser endpoint, delete
     /// the mount node from the global tree plus the share's SQL rows, and
     /// finally delete the on-disk snapshot. Loud error if `id` names no share.
     #[holon_macros::affects("parent_id")]
@@ -2274,7 +2286,7 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
             "shared_root": format!("{}:{}", shared_root.peer, shared_root.counter),
         });
         Ok(
-            OperationResult::irreversible(vec![])
+            OperationResult::irreversible(vec![share_placed(id, &shared_tree_id)])
                 .with_response(Value::String(response.to_string())),
         )
     }
@@ -2577,7 +2589,7 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
             "handle": handle,
         });
         Ok(
-            OperationResult::irreversible(vec![])
+            OperationResult::irreversible(vec![share_placed(&handle, &shared_tree_id)])
                 .with_response(Value::String(response.to_string())),
         )
     }
@@ -2664,13 +2676,22 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
                     ))
                 })
         })?;
-        self.teardown_share(mount_tid, info, TeardownCause::Unshare)
-            .await?;
-        let response = serde_json::json!({ "unshared": id });
-        Ok(
-            OperationResult::irreversible(vec![])
-                .with_response(Value::String(response.to_string())),
+        let shared_tree_id = info.shared_tree_id.clone();
+        self.teardown_share(
+            mount_tid,
+            info,
+            TeardownCause::Unshare,
+            ExitRoot::WithSubtree,
         )
+        .await?;
+        let response = serde_json::json!({ "unshared": id });
+        Ok(OperationResult::irreversible(vec![FieldDelta::history_only(
+            id,
+            SHARED_TREE_ID_PROPERTY,
+            Value::String(shared_tree_id),
+            Value::Null,
+        )])
+        .with_response(Value::String(response.to_string())))
     }
 }
 
@@ -2685,7 +2706,7 @@ enum TeardownCause {
 impl LoroShareBackend {
     /// Take `shared_tree_id` off this device — what a delete of its mount
     /// does: a recipient leaves the share, an owner revokes it.
-    pub async fn exit_share(&self, shared_tree_id: &str) -> Result<()> {
+    pub async fn exit_share(&self, shared_tree_id: &str, root: ExitRoot) -> Result<()> {
         let collab = self.global_doc().await?;
         let (mount_tid, info) = collab.with_read(|doc| {
             let tree = doc.get_tree(crate::loro_backend::TREE_NAME);
@@ -2696,7 +2717,7 @@ impl LoroShareBackend {
                 .ok_or_else(|| anyhow::anyhow!("mount {mount:?} carries no mount metadata"))?;
             Ok((mount, info))
         })?;
-        self.teardown_share(mount_tid, info, TeardownCause::Delete)
+        self.teardown_share(mount_tid, info, TeardownCause::Delete, root)
             .await
     }
 
@@ -2709,6 +2730,7 @@ impl LoroShareBackend {
         mount_tid: TreeID,
         info: shared_tree::MountInfo,
         cause: TeardownCause,
+        root: ExitRoot,
     ) -> Result<()> {
         let shared_tree_id = info.shared_tree_id.clone();
         let collab = self.global_doc().await?;
@@ -2746,7 +2768,12 @@ impl LoroShareBackend {
             _ => None,
         };
 
-        // (2) Drop the per-share workers FIRST. Dropping each handle aborts its
+        // (1) Unregister the shared doc, so no write reaches it after `root` was
+        // checked. Keep the handle to enumerate the descendant block ids for SQL
+        // row deletion below.
+        let shared_doc = self.unregister_shared_doc(&info, &handle, root)?;
+
+        // (2) Drop the per-share workers. Dropping each handle aborts its
         // task, so no save/sync/projection worker can resurrect the snapshot
         // (or re-project SQL) after we tear the rest down — closes the
         // gc_orphans-style resurrection race.
@@ -2766,11 +2793,7 @@ impl LoroShareBackend {
                 .map_err(|e| err(format!("drop_share({shared_tree_id}): {e:#}")))?;
         }
 
-        // (4) Unregister the shared doc from the manager. Keep the handle so we
-        // can enumerate the descendant block ids for SQL row deletion below.
-        let shared_doc = self.manager.remove(&shared_tree_id);
-
-        // (5) Delete the mount node from the global tree, then flush to disk.
+        // (4) Delete the mount node from the global tree, then flush to disk.
         // The share's rows are the share projection's alone — the global
         // projection skips mounts and never reads the shared doc — so they are
         // deleted here, explicitly.
@@ -2824,14 +2847,14 @@ impl LoroShareBackend {
             }
         }
 
-        // (6) Delete the on-disk snapshot — now safe, all workers are gone.
+        // (5) Delete the on-disk snapshot — now safe, all workers are gone.
         // This also removes the roster sidecar, so no restart can rebuild an
         // acceptor roster for a share that no longer exists here.
         self.snapshot_store
             .delete_snapshot(&shared_tree_id)
             .map_err(|e| err(format!("delete_snapshot({shared_tree_id}): {e:#}")))?;
 
-        // (7) Revoke the share as a whole: drop its capability secret. Every
+        // (6) Revoke the share as a whole: drop its capability secret. Every
         // ticket ever issued for it is now inert — this device can no longer
         // build the roster a holder would prove itself against, and cannot
         // prove itself to anyone else either.
@@ -2847,12 +2870,57 @@ impl LoroShareBackend {
         }
         Ok(())
     }
+
+    /// Unregister `info`'s shared doc. `root` is checked under the doc's guard,
+    /// which excludes every writer until the doc can no longer be resolved.
+    fn unregister_shared_doc(
+        &self,
+        info: &shared_tree::MountInfo,
+        handle: &str,
+        root: ExitRoot,
+    ) -> Result<Option<Arc<LoroDoc>>> {
+        let shared_tree_id = &info.shared_tree_id;
+        let Some(doc) = self.manager.get_doc(shared_tree_id) else {
+            if root == ExitRoot::Leaf {
+                return Err(err(format!(
+                    "{handle}: the doc of share {shared_tree_id} is not loaded, so whether its \
+                     root has children is unknown; refusing to take it off this device"
+                )));
+            }
+            return Ok(None);
+        };
+        let unregistered = crate::loro_document::LoroDocument::from_existing(
+            doc,
+            shared_tree_id.clone(),
+        )
+        .with_read(|doc| {
+            if root == ExitRoot::Leaf {
+                let tree = doc.get_tree(crate::loro_backend::TREE_NAME);
+                anyhow::ensure!(
+                    tree.contains(info.shared_root),
+                    "share {shared_tree_id} has no root {:?}",
+                    info.shared_root
+                );
+                let children = tree.children(info.shared_root).unwrap_or_default();
+                if !children.is_empty() {
+                    anyhow::bail!(
+                        "delete: block {handle} has {} child(ren); refusing to cascade. Use \
+                         `delete_subtree` to delete the whole subtree, or \
+                         `delete_keep_children` to reparent the children first.",
+                        children.len()
+                    );
+                }
+            }
+            Ok(self.manager.remove(shared_tree_id))
+        })?;
+        Ok(unregistered)
+    }
 }
 
 #[async_trait]
 impl shared_tree::ShareExit for LoroShareBackend {
-    async fn exit(&self, shared_tree_id: &str) -> anyhow::Result<()> {
-        self.exit_share(shared_tree_id)
+    async fn exit(&self, shared_tree_id: &str, root: ExitRoot) -> anyhow::Result<()> {
+        self.exit_share(shared_tree_id, root)
             .await
             .map_err(|e| anyhow::anyhow!("exit shared tree {shared_tree_id}: {e}"))
     }
@@ -7317,7 +7385,7 @@ mod tests {
             "the refused delete changed nothing"
         );
         let exited = authority
-            .delete_exiting_shares("block:shared-page")
+            .delete_exiting_shares("block:shared-page", ExitRoot::WithSubtree)
             .await
             .expect("a recipient may leave a placed page's share");
         assert_eq!(
@@ -7865,6 +7933,107 @@ mod tests {
                 .is_active(&fixture.shared_tree_id)
                 .await
         );
+        fixture.close().await;
+    }
+
+    /// Accepting and unsharing cannot be undone, and each reports the share it
+    /// placed or removed, so the op history records it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn accepting_and_unsharing_report_the_share_they_change() {
+        let fixture = PageShareFixture::shared().await;
+        let stid = Value::String(fixture.shared_tree_id.clone());
+        let rows = |result: &OperationResult| -> Vec<(String, String, Value, Value)> {
+            result
+                .changes
+                .iter()
+                .map(|d| {
+                    (
+                        d.entity_id.clone(),
+                        d.field.clone(),
+                        d.old_value.clone(),
+                        d.new_value.clone(),
+                    )
+                })
+                .collect()
+        };
+        let row = |old: &Value, new: &Value| {
+            vec![(
+                "block:shared-page".to_string(),
+                SHARED_TREE_ID_PROPERTY.to_string(),
+                old.clone(),
+                new.clone(),
+            )]
+        };
+
+        let accepted = fixture
+            .b
+            .accept_shared_subtree("block:root-b", fixture.ticket.clone())
+            .await
+            .unwrap();
+        assert_eq!(rows(&accepted), row(&Value::Null, &stid));
+        let unshared = fixture.b.unshare("block:shared-page").await.unwrap();
+        assert_eq!(rows(&unshared), row(&stid, &Value::Null));
+        fixture.close().await;
+    }
+
+    /// A share exit that creates a child of `page` before it takes the share
+    /// off the device.
+    struct ChildBornBeforeExit {
+        authority: crate::loro_backend::LoroBackend,
+        page: EntityUri,
+        inner: Arc<LoroShareBackend>,
+    }
+
+    #[async_trait]
+    impl shared_tree::ShareExit for ChildBornBeforeExit {
+        async fn exit(&self, shared_tree_id: &str, root: ExitRoot) -> anyhow::Result<()> {
+            use holon_api::repository::CoreOperations;
+            self.authority
+                .create_block(
+                    self.page.clone(),
+                    holon_api::BlockContent::text("born while the delete runs"),
+                    Some(EntityUri::block("window-child")),
+                )
+                .await?;
+            shared_tree::ShareExit::exit(&*self.inner, shared_tree_id, root).await
+        }
+    }
+
+    /// A child created after the owner's delete of its shared page began is
+    /// never destroyed with the revoked share: the delete refuses instead.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn a_child_born_during_an_owners_delete_of_its_shared_page_survives() {
+        use holon_api::repository::CoreOperations;
+        use holon_core::traits::CrudOperations;
+
+        let fixture = PageShareFixture::accepted().await;
+        let ops = crate::LoroBlockOperations::new(fixture.a.store.clone()).with_shared_trees(
+            fixture.a.manager.clone() as Arc<dyn crate::shared_tree::SharedTreeStore>,
+        );
+        ops.delete("block:p-child").await.unwrap();
+        let racing: Arc<dyn shared_tree::ShareExit> = Arc::new(ChildBornBeforeExit {
+            authority: authority_of(&fixture.a).await,
+            page: EntityUri::block("shared-page"),
+            inner: fixture.a.clone(),
+        });
+        fixture.a.manager.set_exit(Arc::downgrade(&racing));
+
+        let refused = ops
+            .delete("block:shared-page")
+            .await
+            .expect_err("the delete destroyed a child it never saw");
+        assert!(
+            refused.to_string().contains("refusing to cascade"),
+            "{refused}"
+        );
+        assert!(has_mount(&fixture.a, &fixture.shared_tree_id).await);
+        authority_of(&fixture.a)
+            .await
+            .get_block("block:window-child")
+            .await
+            .expect("the child outlives the refused delete");
         fixture.close().await;
     }
 

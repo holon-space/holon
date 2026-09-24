@@ -10,7 +10,9 @@ summary: >-
   block above its shared page, a block above a received block share, the
   owner's shared page itself, and a share of a block holding a mount. A delete
   could also stop after an irreversible exit without saying so, and an undo
-  could rebuild a share that unshare no longer reached.
+  could rebuild a share that unshare no longer reached. An owner's revoking
+  delete could destroy a child created while it ran, and share, accept,
+  unshare and the revoking delete left no row in the op history.
 ---
 
 ## Bug
@@ -50,9 +52,21 @@ by the fix round's own red tests (rung 7):
    the mount from the global tree without the share's exit and copied it into
    the new share's doc.
 
-One entry with seven rungs, not seven entries: all have one root cause (the
+Found by the round-6 verifier against 9d274aa2 (verify-2 items 2b and 3):
+
+8. **A child born during an owner's delete.** The owner's no-cascade check ran
+   in `LoroBlockOperations::delete` and then awaited the share's exit. A child
+   of `P` created in that window was destroyed with the revoked share's doc,
+   with `changes: []`, no undo entry and no disclosure.
+9. **Irreversible share ops leave no history.** The engine records a
+   `block_history` row per reported `FieldDelta`. `share_subtree`,
+   `accept_shared_subtree`, `unshare` and the revoking delete reported none,
+   so the ops that cannot be undone were also the ones nobody could find
+   later.
+
+One entry with nine rungs, not nine entries: all have one root cause (the
 removal of a share's mount or page was not tied to that share's exit) and
-one chokepoint fixes them. Seven entries would count one defect seven times in
+one chokepoint fixes them. Nine entries would count one defect nine times in
 the gap distribution.
 
 ## Root cause
@@ -98,8 +112,8 @@ refuse any removal that `shares_removed_with` finds a share in
 (`refuse_removing_shares`, :2882).
 
 Every route goes through that one call: the bare `delete` op when its target is
-a share's handle (`share_handle`, :2850; an owner's bare delete keeps the
-no-cascade rule, loro_block_operations.rs:1162), `delete_subtree` and the SQL
+a share's handle (`share_handle`, :2850; an owner's bare delete asks for
+`ExitRoot::Leaf`, loro_block_operations.rs:1161), `delete_subtree` and the SQL
 ingest delete through `EntityCellRegistry::delete_exiting_shares`
 (holon-core cell_registry.rs:213), and the Loro ingest delete (loro_seams.rs).
 Join, delete-keeping-children, merge and undo-split refuse a shared page on
@@ -107,6 +121,20 @@ either side (`is_share_root`, cell_registry.rs:205). A delete that exits a
 share is declared irreversible, so the engine journals no undo or redo entry
 for it (rung 5). Share and accept are irreversible too, so no journaled op can
 create a mount.
+
+The no-cascade rule of an owner's delete is checked where the content goes
+(rung 8). `teardown_share` first unregisters the shared doc
+(`unregister_shared_doc`, loro_share_backend.rs:2783), under the doc's guard,
+which excludes every writer. With `ExitRoot::Leaf` (shared_tree.rs:57) it
+refuses there when the share's root has a child, before anything is torn
+down. A write that commits before the check is seen by it; one after it
+cannot resolve the doc.
+
+The revoking delete reports the deleted handle (`id` → NULL) and each exited
+share (`shared-tree-id` → NULL); share and accept report the placed share
+(`share_placed`, loro_share_backend.rs:85) and unshare the removed one (rung
+9). Undo is keyed on `UndoAction::Undo` alone, so these results stay
+irreversible and the engine only adds their history rows.
 
 Pairing wipes the whole global tree without any exit. It is refused while
 the device holds a mount (`refuse_holding_mounts`, device_pairing_op.rs:963),
@@ -129,3 +157,12 @@ the no-cascade rule) and `sharing_a_block_that_holds_a_mount_is_refused`
 tests are red on 29eb4736, except the no-cascade test, which 29eb4736 passes
 because it never exits an owner's page. Each is red again when its own fix is
 removed.
+
+Rung 8: `a_child_born_during_an_owners_delete_of_its_shared_page_survives`
+(loro_share_backend.rs), which creates the child from a wrapping `ShareExit`.
+Rung 9: `sharing_a_page_and_revoking_it_are_both_in_the_history`
+(crates/holon-app/tests/irreversible_share_ops_record_history.rs, through the
+shipped wiring and `block_history`) and
+`accepting_and_unsharing_report_the_share_they_change`. The rung 8 test and
+the history test are red on 9d274aa2, and each of the five fixes (leaf check, delete, share,
+accept, unshare rows) turns its test red again when removed.

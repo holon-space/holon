@@ -1216,15 +1216,32 @@ impl CrudOperations<Block> for LoroBlockOperations {
             .await
             .map_err(|e| format!("delete: classify {id}: {e}"))?
         {
-            if role == crate::shared_tree::MountRole::Owner {
-                Self::refuse_cascade(&backend, id).await?;
-            }
-            backend
-                .delete_exiting_shares(id)
+            let root = match role {
+                crate::shared_tree::MountRole::Owner => crate::shared_tree::ExitRoot::Leaf,
+                crate::shared_tree::MountRole::Recipient => {
+                    crate::shared_tree::ExitRoot::WithSubtree
+                }
+            };
+            let exited = backend
+                .delete_exiting_shares(id, root)
                 .await
                 .map_err(|e| format!("delete: {e}"))?;
+            let mut changes = vec![FieldDelta::new(
+                id,
+                "id",
+                Value::String(id.to_string()),
+                Value::Null,
+            )];
+            changes.extend(exited.iter().map(|share| {
+                FieldDelta::history_only(
+                    share.handle.as_str(),
+                    crate::shared_tree::SHARED_TREE_ID_PROPERTY,
+                    Value::String(share.shared_tree_id.clone()),
+                    Value::Null,
+                )
+            }));
             return Ok(OperationResult::declared_irreversible(
-                vec![],
+                changes,
                 "delete of a share's handle takes the share off this device: a share received is \
                  left, a share made here is revoked; restoring either takes a new ticket",
             ));

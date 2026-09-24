@@ -49,7 +49,16 @@ pub trait SharedTreeStore: Send + Sync {
 /// leaves the share and every other peer keeps its copy; an owner revokes it.
 #[async_trait::async_trait]
 pub trait ShareExit: Send + Sync {
-    async fn exit(&self, shared_tree_id: &str) -> Result<()>;
+    async fn exit(&self, shared_tree_id: &str, root: ExitRoot) -> Result<()>;
+}
+
+/// What a [`ShareExit`] may take off this device with the share's root.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExitRoot {
+    WithSubtree,
+    /// The exit refuses, before tearing anything down, when the root has a
+    /// child.
+    Leaf,
 }
 
 /// Simple in-memory implementation of SharedTreeStore for testing.
