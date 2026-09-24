@@ -249,6 +249,7 @@ macro_rules! declare_e2e_transitions {
             + ::holon_pbt_core::capabilities::SutTypedEntity
             + ::holon_pbt_core::capabilities::SutRemoteListSync
             + ::holon_pbt_core::capabilities::SutSearch
+            + ::holon_pbt_core::capabilities::SutFullSync
             + ::holon_pbt_core::capabilities::SutReadOnlyEditAttempt
             + ::holon_pbt_core::capabilities::SutUnschemedIdDispatch
             + $crate::pbt::transitions::apply_mutation::SutApplyMutation
@@ -594,8 +595,19 @@ mod cap_transition_generic_arm_selftest {
             fn last_open_tab_activated(&self) -> bool {
                 false
             }
-            fn last_open_tab_departed_root(&self) -> bool {
-                false
+            fn last_open_tab_rerenders(
+                &self,
+            ) -> (
+                holon_pbt_core::budget::FocusRerender,
+                holon_pbt_core::budget::FocusRerender,
+            ) {
+                (
+                    holon_pbt_core::budget::FocusRerender::None,
+                    holon_pbt_core::budget::FocusRerender::None,
+                )
+            }
+            fn last_open_tab_caret_seat(&self) -> holon_pbt_core::budget::CaretSeat {
+                holon_pbt_core::budget::CaretSeat::Fresh
             }
             fn last_keystroke_created_its_target(&self) -> bool {
                 false

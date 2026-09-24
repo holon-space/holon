@@ -153,3 +153,84 @@ async fn dropping_only_the_base_view_forgets_its_dependents() {
          the cache instead of checking sqlite_master"
     );
 }
+
+/// Wait for the next CDC batch on `stream`, failing if none arrives.
+async fn next_batch(stream: &mut holon_turso::turso::RowChangeStream, what: &str) {
+    use futures::StreamExt;
+    tokio::time::timeout(std::time::Duration::from_secs(5), stream.next())
+        .await
+        .unwrap_or_else(|_| panic!("{what}: no CDC batch within 5s — the stream went silent"))
+        .unwrap_or_else(|| panic!("{what}: the stream ended"));
+}
+
+async fn insert_item(handle: &DbHandle, id: &str) {
+    handle
+        .execute(
+            &format!("INSERT INTO items (id, content) VALUES ('{id}', 'y')"),
+            Vec::new(),
+        )
+        .await
+        .expect("insert item");
+}
+
+#[tokio::test]
+async fn dropping_every_watch_view_recreates_the_ones_a_subscriber_listens_to() {
+    let handle = live_database().await;
+    let manager = manager(&handle);
+    let (listened, mut stream) = manager
+        .ensure_and_subscribe("SELECT id FROM items", None)
+        .await
+        .expect("subscribe");
+    let unlistened = manager
+        .ensure_view("SELECT id, content FROM items")
+        .await
+        .expect("ensure unlistened");
+
+    // Another manager on the same database drops them, as `full_sync`'s does.
+    let dropper = self::manager(&handle);
+    dropper.drop_stale_views().await.expect("drop stale views");
+
+    let views: Vec<String> = handle
+        .query(
+            "SELECT name FROM sqlite_master WHERE type='view' AND name LIKE 'watch_view_%'",
+            HashMap::new(),
+        )
+        .await
+        .expect("list views")
+        .into_iter()
+        .filter_map(|row| match row.get("name") {
+            Some(holon_api::Value::String(name)) => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        views,
+        vec![listened.clone()],
+        "only {listened}, which has a subscriber, is recreated; {unlistened} stays dropped"
+    );
+    insert_item(&handle, "b").await;
+    next_batch(&mut stream, "the subscriber of the recreated view").await;
+}
+
+#[tokio::test]
+async fn a_view_dropped_before_its_subscriber_registers_is_recreated_for_it() {
+    let handle = live_database().await;
+    let manager = manager(&handle);
+    let sql = "SELECT id FROM items";
+    let view = manager.ensure_view(sql).await.expect("ensure");
+    handle
+        .execute_ddl(&format!("DROP VIEW IF EXISTS {view}"))
+        .await
+        .expect("drop");
+
+    let mut stream = manager
+        .subscribe_ensured(&view, sql, None)
+        .await
+        .expect("subscribe");
+    insert_item(&handle, "b").await;
+    next_batch(
+        &mut stream,
+        "a subscriber whose view was dropped before it registered",
+    )
+    .await;
+}

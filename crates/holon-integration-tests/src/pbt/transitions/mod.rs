@@ -119,6 +119,7 @@ mod expand_toggle;
 pub mod external_write_same_block_focused;
 pub mod external_write_while_focused;
 pub mod focus_editable_text;
+mod full_sync;
 mod git_init;
 pub mod indent;
 mod instantiate_template;
@@ -199,6 +200,7 @@ pub use expand_toggle::ExpandToggle;
 pub use external_write_same_block_focused::ExternalWriteSameBlockFocused;
 pub use external_write_while_focused::ExternalWriteWhileFocused;
 pub use focus_editable_text::FocusEditableText;
+pub use full_sync::FullSync;
 pub use git_init::GitInit;
 // The peer-sync transitions (`AddPeer`, `PeerEdit`, `PeerCharEdit`,
 // `MergeFromPeer`, `SyncWithPeer`, `CreateStaleLoro`) and their shared helper
@@ -290,6 +292,7 @@ crate::declare_e2e_transitions! {
         DispatchUnschemedBlockId(DispatchUnschemedBlockId),
         DragDropBlock(DragDropBlock),
         EmitMcpData(EmitMcpData),
+        FullSync(FullSync),
         EpochFlipRejected(EpochFlipRejected),
         ExpandToggle(ExpandToggle),
         FocusEditableText(FocusEditableText),
@@ -603,6 +606,7 @@ mod required_caps_guard {
         // ViewControl / McpEmit / HistoryWrite
         one!(SwitchView, c::SutViewControl);
         one!(EmitMcpData, c::SutMcpEmit);
+        one!(FullSync, c::SutFullSync);
         one!(Search, c::SutSearch);
         one!(JumpToSearchHit, c::SutSearch);
         one!(Redo, c::SutHistoryWrite);

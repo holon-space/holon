@@ -1367,9 +1367,14 @@ impl DbHandle {
         &self.cdc_broadcast
     }
 
-    /// Views dropped since the last call — see `MatviewStats::take_dropped`.
-    pub(crate) fn take_dropped_views(&self) -> Vec<String> {
-        self.matview_stats.take_dropped()
+    /// See `MatviewStats::drop_log_len`.
+    pub(crate) fn drop_log_len(&self) -> usize {
+        self.matview_stats.drop_log_len()
+    }
+
+    /// See `MatviewStats::drops_since`.
+    pub(crate) fn drops_since(&self, from: usize) -> (Vec<String>, usize) {
+        self.matview_stats.drops_since(from)
     }
 
     /// A witness for "which database is this?", shared by every clone of this

@@ -851,14 +851,14 @@ impl OperationDispatcher {
                         }
                     }
 
-                    // Step 3: Drop stale matviews so they get recreated fresh
+                    // Step 3: Drop stale matviews so they get recreated fresh. A
+                    // failure here can leave live watches on dropped views, so it
+                    // ends the operation.
                     if let Some(ref mgr) = self.matview_manager {
-                        match mgr.drop_stale_views().await {
-                            Ok(()) => info!("[OperationDispatcher] Dropped stale matviews"),
-                            Err(e) => {
-                                error!("[OperationDispatcher] Failed to drop stale matviews: {e}")
-                            }
-                        }
+                        mgr.drop_stale_views().await.map_err(|e| {
+                            format!("full_sync: dropping and recreating the watch views: {e:#}")
+                        })?;
+                        info!("[OperationDispatcher] Dropped stale matviews");
                     }
 
                     // Step 4: Execute sync on all providers that have it

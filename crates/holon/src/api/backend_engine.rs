@@ -465,17 +465,18 @@ impl BackendEngine {
                 "[diag-cdc-leak] subscribe_sql: SQL → view"
             );
         }
-        let view_name = self.matview_manager.ensure_view(sql).await?;
-        self.matview_manager.subscribe_cdc(&view_name).await
+        let (_, stream) = self.matview_manager.ensure_and_subscribe(sql, None).await?;
+        Ok(stream)
     }
 
     /// `subscribe_sql` for a view whose `watch_key` column routes each row:
     /// the stream carries only the changes of rows keyed `watch_key`.
     pub async fn subscribe_sql_keyed(&self, sql: &str, watch_key: &str) -> Result<RowChangeStream> {
-        let view_name = self.matview_manager.ensure_view(sql).await?;
-        self.matview_manager
-            .subscribe_cdc_keyed(&view_name, Some(watch_key))
-            .await
+        let (_, stream) = self
+            .matview_manager
+            .ensure_and_subscribe(sql, Some(watch_key))
+            .await?;
+        Ok(stream)
     }
 
     /// Keyed watches this engine has opened, ever. Sample it around an action
@@ -959,10 +960,9 @@ impl BackendEngine {
             .await?;
 
         let transformed_sql = self.apply_sql_transforms(&sql);
-        let view_name = self.matview_manager.ensure_view(&transformed_sql).await?;
-        let cdc_stream = self
+        let (view_name, cdc_stream) = self
             .matview_manager
-            .subscribe_cdc_keyed(&view_name, Some(watch_key))
+            .ensure_and_subscribe(&transformed_sql, Some(watch_key))
             .await?;
         let data = self
             .matview_manager
@@ -1008,8 +1008,11 @@ impl BackendEngine {
                 "[diag-cdc-leak] query_and_watch: SQL → view"
             );
         }
-        let view_name = self.matview_manager.ensure_view(&sql_with_params).await?;
-        self.matview_manager.subscribe_cdc(&view_name).await
+        let (_, stream) = self
+            .matview_manager
+            .ensure_and_subscribe(&sql_with_params, None)
+            .await?;
+        Ok(stream)
     }
 
     /// Execute a SQL query, set up CDC streaming, and return initial data +
@@ -1109,7 +1112,10 @@ impl BackendEngine {
             }
             Err(e) => return Err(e),
         };
-        let cdc_stream = self.matview_manager.subscribe_cdc(&view_name).await?;
+        let cdc_stream = self
+            .matview_manager
+            .subscribe_ensured(&view_name, &sql_with_params, None)
+            .await?;
 
         // The snapshot read deliberately does NOT re-apply the ORDER BY that
         // `ensure_view` stripped. Its row order becomes the order of the

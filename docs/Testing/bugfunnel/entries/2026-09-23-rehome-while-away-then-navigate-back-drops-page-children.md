@@ -3,7 +3,7 @@ id: 2026-09-23-rehome-while-away-then-navigate-back-drops-page-children
 date: 2026-09-23
 gap: COVERAGE
 secondary: ORACLE
-status: OPEN
+status: FIXED
 summary: >-
   After Main jumps away from a page, one of the page's leaf children is
   re-homed to Holon storage, and Main navigates back to the page, the main
@@ -75,17 +75,21 @@ The failure shows as DROPPED ROW, and no layer reports it first.
 
 ## Remedy
 
-OPEN (fix written in lane dropped-row, not landed). Focus-root membership is
-now a render trigger:
+FIXED. Focus-root membership is now a render trigger:
 - `watch_ui` subscribes to `FOCUS_ROOT_MEMBERSHIP_SQL`, keyed by its block
   (`BackendEngine::subscribe_sql_keyed`).
 - `is_focus_root` reads the same relation, so the trigger fires exactly when
   the decision can change.
 - The three shared watch views are created at boot
   (`preload_keyed_watch_views`), so a re-render pays no DDL.
+- `full_sync` drops every watch view, the membership view included. It now
+  recreates the views a live subscriber listens to
+  (`MatviewManager::drop_stale_views`), so the focus triggers of open watchers
+  keep firing.
 
-Both replay cases (`rehome-then-navigate-drops-main-panel-rows`,
-`...-loro`) go red on main ffcb5394 and green with the fix. Blocker: the
-pinned OpenTab insert ceiling (26, tolerance 0) now measures 29 or 30,
-because the departing tab's watcher re-renders as a leaf. That ceiling must
-be re-modelled before this can land.
+Replay cases: `rehome-then-navigate-drops-main-panel-rows` and `...-loro` go
+red on main ffcb5394 and green with the fix;
+`rehome-then-full-sync-then-navigate-back` goes red when the recreation is
+removed. The pinned OpenTab budget charges both re-renders the fix adds (the
+left block as a leaf, the reached block as a root when its watcher is warm)
+from the reference; the `open-tab-*` cases pin them exactly.

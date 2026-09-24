@@ -16,8 +16,8 @@ use std::time::Duration;
 // Budget formulas + inputs live in holon-pbt-core (Phase 1a Step 1); re-exported
 // so existing `crate::pbt::transition_budgets::…` import sites keep resolving.
 pub use holon_pbt_core::budget::{
-    CACHE_EVENT_READS, CARET_SEAT_READS, CLICK_JITTER_TOLERANCE, DEPARTING_ROOT_RERENDER_READS,
-    ExpectedSql, JOURNAL_READS, MutationKind, NAV_DML_READS, NAV_RENDER_FAN_READS,
+    CACHE_EVENT_READS, CLICK_JITTER_TOLERANCE, CaretSeat, ExpectedSql, FocusRerender,
+    JOURNAL_READS, MutationKind, NAV_DML_READS, NAV_RENDER_FAN_READS,
     OPEN_TAB_ACTIVATE_CLICK_RESOLVE_READS, OPEN_TAB_INSERT_CLICK_RESOLVE_READS,
     PIN_BLOCK_CLICK_RESOLVE_READS, REACTIVE_BASE, READS_PER_WATCH, SqlBudget, cdc_tolerance,
     docs_tolerance, expected_sql_for_kind,
@@ -116,7 +116,8 @@ struct CardinalityProbe {
     scale: usize,
     first_visit: bool,
     open_tab_activated: bool,
-    open_tab_departed_root: bool,
+    open_tab_rerenders: (FocusRerender, FocusRerender),
+    open_tab_caret_seat: CaretSeat,
     content_writes_sql: bool,
     keystroke_created_its_target: bool,
 }
@@ -143,8 +144,11 @@ impl holon_pbt_core::capabilities::RefSqlCardinality for CardinalityProbe {
     fn last_open_tab_activated(&self) -> bool {
         self.open_tab_activated
     }
-    fn last_open_tab_departed_root(&self) -> bool {
-        self.open_tab_departed_root
+    fn last_open_tab_rerenders(&self) -> (FocusRerender, FocusRerender) {
+        self.open_tab_rerenders
+    }
+    fn last_open_tab_caret_seat(&self) -> CaretSeat {
+        self.open_tab_caret_seat
     }
     fn last_keystroke_created_its_target(&self) -> bool {
         self.keystroke_created_its_target
@@ -182,9 +186,16 @@ pub fn declared_complexity_class(
     // and a 0-sized "state" is not a state any run ever reaches.
     const SMALL: usize = 1;
     const LARGE: usize = 64;
-    for first_visit in [false, true] {
-        for open_tab_activated in [false, true] {
-            for open_tab_departed_root in [false, true] {
+    let open_tab_arms = FocusRerender::ALL.into_iter().flat_map(|departing| {
+        FocusRerender::ALL.into_iter().flat_map(move |arriving| {
+            CaretSeat::ALL
+                .into_iter()
+                .map(move |seat| ((departing, arriving), seat))
+        })
+    });
+    for (open_tab_rerenders, open_tab_caret_seat) in open_tab_arms {
+        for first_visit in [false, true] {
+            for open_tab_activated in [false, true] {
                 for content_writes_sql in [false, true] {
                     for keystroke_created_its_target in [false, true] {
                         let at = |scale| {
@@ -192,7 +203,8 @@ pub fn declared_complexity_class(
                                 scale,
                                 first_visit,
                                 open_tab_activated,
-                                open_tab_departed_root,
+                                open_tab_rerenders,
+                                open_tab_caret_seat,
                                 content_writes_sql,
                                 keystroke_created_its_target,
                             })

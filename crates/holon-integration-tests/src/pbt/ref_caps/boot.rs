@@ -163,9 +163,13 @@ impl holon_pbt_core::capabilities::RefReboot for ReferenceState {
     /// - `seen_focus_targets` — the known-views cache is per-process, so the
     ///   first navigation after a boot pays the view-creation cost again
     ///   (`inv-sql-budget`'s first-visit allowance).
+    /// - `warm_focus_watchers` / `seated_caret_targets` — the frontend's
+    ///   watchers and seated editors died with the process.
     fn reboot_drops_in_memory_state(&mut self) {
         self.ui.tab.active_editor = None;
         self.ui.tab.focused_cursor.clear();
         self.ui.tab.seen_focus_targets.clear();
+        self.ui.tab.warm_focus_watchers.clear();
+        self.ui.tab.seated_caret_targets.clear();
     }
 }

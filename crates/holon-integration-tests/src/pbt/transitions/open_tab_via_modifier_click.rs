@@ -36,15 +36,12 @@ use proptest::strategy::BoxedStrategy;
 use validated::Validated;
 
 #[cfg(feature = "otel-testing")]
-use crate::pbt::transition_budgets::CARET_SEAT_READS;
-#[cfg(feature = "otel-testing")]
-use crate::pbt::transition_budgets::DEPARTING_ROOT_RERENDER_READS;
-#[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::ExpectedSql;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::JOURNAL_READS;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::NAV_DML_READS;
+#[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::OPEN_TAB_ACTIVATE_CLICK_RESOLVE_READS;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::OPEN_TAB_INSERT_CLICK_RESOLVE_READS;
@@ -148,9 +145,9 @@ crate::cap_transition! {
         // NO first-visit term, unlike `NavigateFocus`, and no per-watch term,
         // unlike the document-mutating siblings — both were measured at zero
         // here. `open_tab` appends a row instead of closing the region's others,
-        // so the panel keeps rendering the same subtree and no watch matview is
-        // created: first-visit opens cost the same reads and 0 DDL as revisits,
-        // and watches cost nothing (no block mutation ⇒ no CDC).
+        // so no watch matview is created (0 DDL), and watches cost nothing (no
+        // block mutation ⇒ no CDC). What a revisit does change is the caret
+        // seat and the warm watchers, each charged from the reference below.
         // Kept sampled by the hand-authored cases (first visit) and
         // `watch-bearing-click-nav-sql-budget` (watches=2).
         let click_resolve = if state.last_open_tab_activated() {
@@ -158,20 +155,19 @@ crate::cap_transition! {
         } else {
             OPEN_TAB_INSERT_CLICK_RESOLVE_READS
         };
-        let departure = if state.last_open_tab_departed_root() {
-            DEPARTING_ROOT_RERENDER_READS
-        } else {
-            0
-        };
+        // The focus move re-renders the warm watchers of the block it left and
+        // the block it reached (`FocusRootChange`).
+        let (departing, arriving) = state.last_open_tab_rerenders();
         ExpectedSql {
-            // `+ CARET_SEAT_READS`: open_tab carries a target into main, so it
-            // seats a caret there like `navigation.focus` (D97.a).
+            // The caret seat: open_tab carries a target into main, so it seats
+            // a caret there like `navigation.focus` (D97.a).
             reads: REACTIVE_BASE
                 + JOURNAL_READS
                 + NAV_DML_READS
                 + click_resolve
-                + CARET_SEAT_READS
-                + departure,
+                + state.last_open_tab_caret_seat().reads()
+                + departing.reads()
+                + arriving.reads(),
             writes: 0,
             ddl: 0,
             tolerance: 0,

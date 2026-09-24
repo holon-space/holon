@@ -9,6 +9,8 @@
 
 use holon_api::Region;
 use holon_api::entity_uri::EntityUri;
+use holon_pbt_core::budget::CaretSeat;
+use holon_pbt_core::budget::FocusRerender;
 use holon_pbt_core::capabilities::RefNavHistory;
 use holon_pbt_core::capabilities::RefNavHistoryMut;
 use holon_pbt_core::capabilities::RefPins;
@@ -45,6 +47,7 @@ impl RefPinsMut for ReferenceState {
     }
 
     fn upsert_open_pin(&mut self, region: Region, block_id: &EntityUri) {
+        self.ui.tab.note_warm_focus_watchers();
         // Move-to-top dedup, mirroring `provider.rs::focus_pin`: SELECT existing
         // open `(region, block_id)`; UPDATE timestamp if found, else INSERT.
         // Bumping `next_pin_ts` (not `next_history_id`) on the UPDATE path
@@ -141,6 +144,7 @@ impl ReferenceState {
 
 impl RefNavHistoryMut for ReferenceState {
     fn nav_step_back(&mut self, region: Region) {
+        self.ui.tab.note_warm_focus_watchers();
         let target = self
             .ui
             .tab
@@ -163,6 +167,7 @@ impl RefNavHistoryMut for ReferenceState {
     }
 
     fn nav_step_forward(&mut self, region: Region) {
+        self.ui.tab.note_warm_focus_watchers();
         let target = self
             .ui
             .tab
@@ -183,6 +188,7 @@ impl RefNavHistoryMut for ReferenceState {
     }
 
     fn nav_go_home(&mut self, region: Region) {
+        self.ui.tab.note_warm_focus_watchers();
         // Idempotent like same-target focus: when already home (current focus is
         // `None`), prod's `focus(region, None)` writes NO new `navigation_history`
         // / `open_pins` row. Pushing a duplicate would let `NavigateBack` walk back
@@ -220,6 +226,7 @@ impl RefNavHistoryMut for ReferenceState {
     }
 
     fn nav_focus(&mut self, region: Region, block_id: &EntityUri) {
+        self.ui.tab.note_warm_focus_watchers();
         // Re-focusing the region's current target is idempotent in prod:
         // `navigation.focus` on the active target writes no new history row.
         let already_focused = self.current_focus(region).as_ref() == Some(block_id);
@@ -263,9 +270,17 @@ impl RefNavHistoryMut for ReferenceState {
         // set: `focus` CLOSES the region's other rows, `open_tab` leaves them
         // open (`provider.rs::open_tab` inserts without a close sweep), so the
         // region accumulates background tabs.
+        self.ui.tab.note_warm_focus_watchers();
         let previous = self.current_focus(region);
         let already_current = previous.as_ref() == Some(block_id);
-        self.ui.tab.last_open_tab_departed_root = previous.is_some() && !already_current;
+        self.ui.tab.last_open_tab_rerenders = if already_current {
+            (FocusRerender::None, FocusRerender::None)
+        } else {
+            (
+                self.departing_rerender(region, previous.as_ref()),
+                self.arriving_rerender(block_id),
+            )
+        };
         self.ui.tab.last_navigate_first_visit =
             self.ui.tab.seen_focus_targets.insert(block_id.clone());
 
@@ -301,10 +316,77 @@ impl RefNavHistoryMut for ReferenceState {
                 });
         }
 
+        assert_eq!(
+            region,
+            Region::Main,
+            "open_tab into {region:?}: the caret-seat budget models region main only"
+        );
+        self.ui.tab.last_open_tab_caret_seat = self.caret_seat_cost(block_id);
         self.ui.tab.focused_entity_id.remove(&region);
         self.ui.tab.focused_cursor.remove(&region);
         self.seat_caret_after_navigation(region, block_id);
         self.blur_active_editor();
+    }
+}
+
+impl ReferenceState {
+    /// The re-render of the block `region`'s cursor leaves: it stays a focus
+    /// root iff another region's cursor rests on it too.
+    fn departing_rerender(&self, region: Region, previous: Option<&EntityUri>) -> FocusRerender {
+        let Some(previous) = previous else {
+            return FocusRerender::None;
+        };
+        if !self.ui.tab.warm_focus_watchers.contains(previous) {
+            return FocusRerender::None;
+        }
+        let root_elsewhere = self
+            .ui
+            .tab
+            .navigation_history
+            .iter()
+            .any(|(r, h)| *r != region && h.current_focus().as_ref() == Some(previous));
+        if root_elsewhere {
+            FocusRerender::Root
+        } else {
+            FocusRerender::Leaf
+        }
+    }
+
+    fn arriving_rerender(&self, target: &EntityUri) -> FocusRerender {
+        if self.ui.tab.warm_focus_watchers.contains(target) {
+            FocusRerender::Root
+        } else {
+            FocusRerender::None
+        }
+    }
+
+    /// Mirror of a first seat's reads: the editor's source, then the
+    /// vocabulary walk (`SqlTaskVocabularySource`), one read per row up to the
+    /// first page, a missing row, or a row without a parent.
+    fn caret_seat_cost(&mut self, destination: &EntityUri) -> CaretSeat {
+        let target = self.caret_seat_for_navigation(destination);
+        if !self.ui.tab.seated_caret_targets.insert(target.clone()) {
+            return CaretSeat::Reseat;
+        }
+        let mut walk_reads = 0;
+        let mut cursor = Some(target.clone());
+        while let Some(id) = cursor {
+            walk_reads += 1;
+            cursor = match self.domain.block_state.blocks.get(&id) {
+                Some(block) if !block.is_page() && block.parent_id != EntityUri::no_parent() => {
+                    Some(block.parent_id.clone())
+                }
+                _ => None,
+            };
+        }
+        match walk_reads {
+            1 => CaretSeat::Fresh,
+            2 => CaretSeat::FreshUnderPage,
+            n => panic!(
+                "open_tab into {destination} seats the caret on {target}, whose vocabulary walk \
+                 reads {n} rows — a seat cost the budget does not model"
+            ),
+        }
     }
 }
 

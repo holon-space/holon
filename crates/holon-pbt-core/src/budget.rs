@@ -106,26 +106,72 @@ pub const OPEN_TAB_ACTIVATE_CLICK_RESOLVE_READS: usize = 10;
 /// A tolerance of even 1 would destroy that: the branch delta IS 1, so the
 /// activate ceiling would reach the insert cost and a backwards flag would sail
 /// through. Anything this transition measures other than exactly 25 (activate)
-/// or exactly 26 (insert) — each including `CARET_SEAT_READS`, plus
-/// `DEPARTING_ROOT_RERENDER_READS` when the click moved the cursor off a focus
-/// root — is DATA: report and model it, never pad it away.
+/// or exactly 26 (insert) — each including a fresh [`CaretSeat`], plus the
+/// [`FocusRerender`]s of the watchers the click moved focus between — is DATA:
+/// report and model it, never pad it away.
 pub const OPEN_TAB_INSERT_CLICK_RESOLVE_READS: usize = 11;
 
-/// Reads of the leaf re-render of the block a region's cursor leaves: its
-/// watcher re-runs `render_entity` on `FocusRootChange` — the query-source
-/// load, the focus-root check, and the leaf view's snapshot for its key.
-pub const DEPARTING_ROOT_RERENDER_READS: usize = 3;
+/// How a warm watcher re-renders when its block enters or leaves a region's
+/// focus roots (`FocusRootChange`): `render_entity` re-decides between the
+/// block's subtree and the block alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FocusRerender {
+    /// No warm watcher for the block, or its membership did not change.
+    None,
+    /// It is no focus root any more: the query-source load, the focus-root
+    /// check, and the leaf view's snapshot for its key.
+    Leaf,
+    /// It is a focus root: the query-source load, the focus-root check, the
+    /// active-perspective read, the block and subtree reads of its profile
+    /// context, and the root-subtree view's snapshot for its key.
+    Root,
+}
+
+impl FocusRerender {
+    pub const ALL: [FocusRerender; 3] = [Self::None, Self::Leaf, Self::Root];
+
+    pub fn reads(self) -> usize {
+        match self {
+            Self::None => 0,
+            Self::Leaf => 3,
+            Self::Root => 6,
+        }
+    }
+}
 
 /// What seating the caret in the destination costs (D97.a): a navigation into
 /// region `main` that names a target resolves the destination's first editable
-/// row and renders it as the caret row.
+/// row, and the editor mounted there reads its source and walks to the owning
+/// page for the task vocabulary (one read per hop).
 ///
-/// It applies to `navigation.focus` and `open_tab` alike — the two ops that
-/// carry a `block_id` into main — and to NEITHER `PinBlock` nor any other
-/// region, which seat no caret at all. Like the branch pins around it, this is
-/// a MEASURED constant with no pad: a different delta is data to model, never
+/// Charged by `open_tab` only — `NavigateFocus` carries a tolerance instead —
+/// and never by `PinBlock` or any other region, which seat no caret at all.
+/// Each arm is MEASURED with no pad: a different delta is data to model, never
 /// to widen.
-pub const CARET_SEAT_READS: usize = 3;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaretSeat {
+    /// The first seat in a creation slot or on a page: the vocabulary walk
+    /// stops after one read.
+    Fresh,
+    /// The first seat on a row under the destination page: the walk reads the
+    /// row, then the page.
+    FreshUnderPage,
+    /// A target a navigation seated the caret in before, this process: one
+    /// source read, no walk.
+    Reseat,
+}
+
+impl CaretSeat {
+    pub const ALL: [CaretSeat; 3] = [Self::Fresh, Self::FreshUnderPage, Self::Reseat];
+
+    pub fn reads(self) -> usize {
+        match self {
+            Self::Fresh => 3,
+            Self::FreshUnderPage => 4,
+            Self::Reseat => 1,
+        }
+    }
+}
 
 /// `PinBlock`'s one-read pad for the reactive render's nondeterministic
 /// coalescing. `PinBlock` is its only user.

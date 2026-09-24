@@ -95,8 +95,16 @@ impl RefSqlCardinality for ReferenceState {
     fn last_open_tab_activated(&self) -> bool {
         self.ui.tab.last_open_tab_activated
     }
-    fn last_open_tab_departed_root(&self) -> bool {
-        self.ui.tab.last_open_tab_departed_root
+    fn last_open_tab_rerenders(
+        &self,
+    ) -> (
+        holon_pbt_core::budget::FocusRerender,
+        holon_pbt_core::budget::FocusRerender,
+    ) {
+        self.ui.tab.last_open_tab_rerenders
+    }
+    fn last_open_tab_caret_seat(&self) -> holon_pbt_core::budget::CaretSeat {
+        self.ui.tab.last_open_tab_caret_seat
     }
 
     fn last_keystroke_created_its_target(&self) -> bool {

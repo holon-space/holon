@@ -57,6 +57,7 @@ use holon_pbt_core::capabilities::SutErrorLog;
 use holon_pbt_core::capabilities::SutFocus;
 use holon_pbt_core::capabilities::SutFocusWrite;
 use holon_pbt_core::capabilities::SutFsWrites;
+use holon_pbt_core::capabilities::SutFullSync;
 use holon_pbt_core::capabilities::SutHistory;
 use holon_pbt_core::capabilities::SutHistoryWrite;
 use holon_pbt_core::capabilities::SutHomeProfile;
@@ -3658,6 +3659,43 @@ impl SutMcpEmit for HeadlessFrontendComponent {
 #[async_trait::async_trait(?Send)]
 impl SutEntityTypeRegister for HeadlessFrontendComponent {
     async fn register_entity_type(&self, entity_name: &str) {
+        self.call_mcp_tool(
+            "create_entity_type",
+            serde_json::json!({
+                "type_definition": {
+                    "name": entity_name,
+                    "fields": [
+                        { "name": "id", "sql_type": "TEXT", "primary_key": true },
+                        { "name": "title", "sql_type": "TEXT", "nullable": true },
+                    ],
+                }
+            }),
+        )
+        .await;
+    }
+}
+
+/// `SutFullSync` (the `FullSync` transition): `*::full_sync` through the MCP
+/// `execute_operation` tool, the entry point an agent uses.
+#[async_trait::async_trait(?Send)]
+impl SutFullSync for HeadlessFrontendComponent {
+    async fn full_sync(&self) {
+        self.call_mcp_tool(
+            "execute_operation",
+            serde_json::json!({ "entity_name": "*", "operation": "full_sync", "params": {} }),
+        )
+        .await;
+    }
+}
+
+impl HeadlessFrontendComponent {
+    /// Call one MCP tool over a real rmcp transport, against a server sharing
+    /// THIS component's engine and `TypeRegistry`, and panic on any error.
+    ///
+    /// The server is built per call rather than kept: it holds no state of its
+    /// own (engine, registry and debug services are all shared `Arc`s), so a
+    /// fresh one is the same server an integration would reconnect to.
+    async fn call_mcp_tool(&self, tool: &str, arguments: serde_json::Value) {
         use rmcp::ServiceExt;
 
         let server = holon_mcp::server::HolonMcpServer::with_type_registry(
@@ -3678,28 +3716,18 @@ impl SutEntityTypeRegister for HeadlessFrontendComponent {
             },
             async { ().serve(client_transport).await.map_err(anyhow::Error::from) },
         )
-        .expect("in-process MCP handshake for create_entity_type");
+        .unwrap_or_else(|e| panic!("in-process MCP handshake for {tool}: {e}"));
         let result = client_running
             .peer()
             .call_tool(rmcp::model::CallToolRequestParam {
-                name: "create_entity_type".into(),
-                arguments: serde_json::json!({
-                    "type_definition": {
-                        "name": entity_name,
-                        "fields": [
-                            { "name": "id", "sql_type": "TEXT", "primary_key": true },
-                            { "name": "title", "sql_type": "TEXT", "nullable": true },
-                        ],
-                    }
-                })
-                .as_object()
-                .cloned(),
+                name: tool.to_string().into(),
+                arguments: arguments.as_object().cloned(),
             })
             .await
-            .unwrap_or_else(|e| panic!("create_entity_type('{entity_name}') failed over MCP: {e}"));
+            .unwrap_or_else(|e| panic!("{tool}({arguments}) failed over MCP: {e}"));
         assert!(
             result.is_error != Some(true),
-            "create_entity_type('{entity_name}') reported a tool error: {:?}",
+            "{tool}({arguments}) reported a tool error: {:?}",
             result.content
         );
         client_running

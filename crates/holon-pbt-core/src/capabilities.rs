@@ -1108,6 +1108,14 @@ pub trait SutMcpEmit {
     async fn emit_mcp_data(&self);
 }
 
+/// SUT capability: run `*::full_sync` the way an agent does, through the MCP
+/// `execute_operation` tool. Drives the `FullSync` PBT transition; hosted only
+/// where a Turso engine owns the watch views that `full_sync` drops.
+#[holon_macros::capmap_adapter]
+pub trait SutFullSync {
+    async fn full_sync(&self);
+}
+
 /// SUT capability: the agent-facing MCP **data tools** are drivable —
 /// `dense_query` → edit → `dense_patch` round trips against a served MCP
 /// surface. Drives the `DenseProjectionEdit` PBT transition (`Dense*` weight
@@ -3283,10 +3291,13 @@ pub trait RefSqlCardinality {
     /// switches on it because the two branches issue different SQL, and the
     /// post-apply state cannot tell them apart.
     fn last_open_tab_activated(&self) -> bool;
-    /// True iff the last `open_tab` moved its region's cursor off a block that
-    /// was the region's focus root. That block's watcher re-renders it as a
-    /// leaf (`FocusRootChange`), which the budget charges separately.
-    fn last_open_tab_departed_root(&self) -> bool;
+    /// How the last `open_tab`'s focus move re-rendered the warm watchers of
+    /// the block it left and of the block it arrived at, in that order.
+    fn last_open_tab_rerenders(
+        &self,
+    ) -> (crate::budget::FocusRerender, crate::budget::FocusRerender);
+    /// What seating the caret cost on the last `open_tab`.
+    fn last_open_tab_caret_seat(&self) -> crate::budget::CaretSeat;
 
     /// True iff the most recent keystroke ALSO created the block it wrote to —
     /// a caret seated in a creation slot, where typing is a text edit whose

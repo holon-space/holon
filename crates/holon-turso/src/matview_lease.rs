@@ -36,10 +36,10 @@ pub struct MatviewStats {
     leased_views: AtomicU64,
     active_leases: AtomicU64,
     pinned: AtomicU64,
-    /// Views dropped out from under their users, each with every view that
-    /// depends on it, since the cache of known views last drained this list —
-    /// see `MatviewManager`'s shared view state, its one consumer.
-    dropped: std::sync::Mutex<Vec<String>>,
+    /// Every view dropped out from under its users, each with every view that
+    /// depends on it, in drop order. Append-only: a reader remembers how far it
+    /// has read — see `MatviewManager`'s cache of known views.
+    drop_log: std::sync::Mutex<Vec<String>>,
 }
 
 /// Sample of [`MatviewStats`]. Coherent as a whole: the actor publishes all
@@ -59,15 +59,18 @@ impl MatviewStats {
     /// from every path that removes a view it did not just create, with the
     /// transitive closure of the views that depend on them.
     pub(crate) fn note_dropped(&self, names: impl IntoIterator<Item = String>) {
-        self.dropped
-            .lock()
-            .expect("dropped-views mutex")
-            .extend(names);
+        self.drop_log.lock().expect("drop-log mutex").extend(names);
     }
 
-    /// Every view noted as dropped since the last call.
-    pub(crate) fn take_dropped(&self) -> Vec<String> {
-        std::mem::take(&mut *self.dropped.lock().expect("dropped-views mutex"))
+    /// Length of the drop log: a position to read it from later.
+    pub(crate) fn drop_log_len(&self) -> usize {
+        self.drop_log.lock().expect("drop-log mutex").len()
+    }
+
+    /// The views dropped after position `from`, and the log's length now.
+    pub(crate) fn drops_since(&self, from: usize) -> (Vec<String>, usize) {
+        let log = self.drop_log.lock().expect("drop-log mutex");
+        (log[from..].to_vec(), log.len())
     }
 
     pub fn snapshot(&self) -> MatviewStatsSnapshot {

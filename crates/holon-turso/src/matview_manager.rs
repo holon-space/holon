@@ -549,10 +549,16 @@ pub struct MatviewManager {
     fdw_backed_tables: Arc<tokio::sync::RwLock<HashSet<String>>>,
     /// Optional hook called after FDW cache priming.
     hook: Arc<tokio::sync::RwLock<Option<Arc<dyn MatviewHook>>>>,
-    /// Cache of view names known to exist in `sqlite_master`, and the DDL
-    /// mutex guarding create-if-absent. Both come from [`shared_for_database`],
-    /// so every manager on one database sees one cache and one mutex.
-    known_views: Arc<tokio::sync::RwLock<HashSet<String>>>,
+    /// Cache of view names known to exist in `sqlite_master`, the SQL each
+    /// was ensured from, and the DDL mutex guarding create-if-absent. All come
+    /// from [`shared_for_database`], so every manager on one database sees one
+    /// cache and one mutex.
+    known_views: Arc<tokio::sync::RwLock<KnownViews>>,
+    view_sql: Arc<std::sync::Mutex<HashMap<String, String>>>,
+    /// Every CDC subscription any manager on this database holds, by view.
+    /// Shared because the manager that drops a view is often not the one
+    /// whose demux delivers to its subscribers.
+    subscriptions: Arc<std::sync::Mutex<Subscriptions>>,
     /// Counters for measuring cache effectiveness. `cache_hits` is the number
     /// of `ensure_view`/`preload` calls that returned via the in-memory cache
     /// without a `view_exists` SQL round trip. `exists_calls` is the number of
@@ -566,8 +572,43 @@ pub struct MatviewManager {
 /// The view-existence cache and DDL mutex belonging to ONE database.
 #[derive(Clone)]
 struct SharedViewState {
-    known_views: Arc<tokio::sync::RwLock<HashSet<String>>>,
+    known_views: Arc<tokio::sync::RwLock<KnownViews>>,
+    view_sql: Arc<std::sync::Mutex<HashMap<String, String>>>,
+    subscriptions: Arc<std::sync::Mutex<Subscriptions>>,
     ddl_mutex: Arc<tokio::sync::Mutex<()>>,
+}
+
+/// Weak handles on the CDC subscriptions of one database, by view. Weak so
+/// that holding one never keeps a stream open its demux has closed.
+#[derive(Default)]
+struct Subscriptions(HashMap<String, Vec<mpsc::WeakSender<BatchWithMetadata<RowChange>>>>);
+
+impl Subscriptions {
+    fn add(&mut self, view_name: &str, tx: &mpsc::Sender<BatchWithMetadata<RowChange>>) {
+        let subs = self.0.entry(view_name.to_string()).or_default();
+        subs.retain(Self::listening);
+        subs.push(tx.downgrade());
+    }
+
+    fn listening(weak: &mpsc::WeakSender<BatchWithMetadata<RowChange>>) -> bool {
+        weak.upgrade().is_some_and(|tx| !tx.is_closed())
+    }
+
+    /// The views some subscriber still listens to, forgetting the rest.
+    fn live_views(&mut self) -> HashSet<String> {
+        self.0.retain(|_, subs| {
+            subs.retain(Self::listening);
+            !subs.is_empty()
+        });
+        self.0.keys().cloned().collect()
+    }
+}
+
+/// Views known to exist, valid as of the first `drops_applied` entries of
+/// the database's drop log (`DbHandle::drops_since`).
+struct KnownViews {
+    names: HashSet<String>,
+    drops_applied: usize,
 }
 
 /// Live databases' [`SharedViewState`], keyed by the address of the database's
@@ -608,12 +649,16 @@ fn shared_for_database(
     {
         return state.clone();
     }
+    // A fresh cache knows nothing, so drops noted before it are no news.
     let state = SharedViewState {
-        known_views: Arc::new(tokio::sync::RwLock::new(HashSet::new())),
+        known_views: Arc::new(tokio::sync::RwLock::new(KnownViews {
+            names: HashSet::new(),
+            drops_applied: db_handle.drop_log_len(),
+        })),
+        view_sql: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        subscriptions: Arc::new(std::sync::Mutex::new(Subscriptions::default())),
         ddl_mutex: seed_mutex,
     };
-    // A fresh cache knows nothing, so drops noted before it are no news.
-    db_handle.take_dropped_views();
     table.insert(key, (witness, state.clone()));
     state
 }
@@ -632,6 +677,8 @@ impl MatviewManager {
             fdw_backed_tables: Arc::new(tokio::sync::RwLock::new(HashSet::new())),
             hook: Arc::new(tokio::sync::RwLock::new(None)),
             known_views: shared.known_views,
+            view_sql: shared.view_sql,
+            subscriptions: shared.subscriptions,
             cache_hits: Arc::new(AtomicU64::new(0)),
             exists_calls: Arc::new(AtomicU64::new(0)),
             ddl_creates: Arc::new(AtomicU64::new(0)),
@@ -826,12 +873,14 @@ impl MatviewManager {
         cmd_tx
     }
 
-    /// Drop all `watch_view_*` materialized views left over from a previous
-    /// session.
+    /// Drop all `watch_view_*` materialized views and recreate the ones a
+    /// subscriber still listens to.
     ///
     /// Turso IVM matviews can become stale across app restarts (e.g., when
     /// document UUIDs change or the underlying data is re-synced). Dropping
-    /// them ensures they get recreated fresh with correct IVM state.
+    /// them ensures they get recreated fresh with correct IVM state. A live
+    /// subscription is keyed by view name, so recreating its view under the
+    /// same name keeps its stream delivering; left dropped, it would go silent.
     pub async fn drop_stale_views(&self) -> Result<()> {
         let rows = self
             .db_handle
@@ -850,12 +899,43 @@ impl MatviewManager {
             }
         }
 
-        // Reset the in-memory cache: every view tracked there is either one we
-        // just dropped or one that was never registered to begin with.
-        self.known_views.write().await.clear();
-
         if !rows.is_empty() {
             tracing::info!("[MatviewManager] Dropped {} stale watch views", rows.len());
+        }
+
+        // Asked AFTER the drops: a subscriber registered later ensured its view
+        // after them too, or `subscribe_ensured` recreates it.
+        let live = self
+            .subscriptions
+            .lock()
+            .expect("subscriptions mutex")
+            .live_views();
+        for row in &rows {
+            let Some(Value::String(name)) = row.get("name") else {
+                continue;
+            };
+            if !live.contains(name) {
+                continue;
+            }
+            let sql = self
+                .view_sql
+                .lock()
+                .expect("view_sql mutex")
+                .get(name)
+                .cloned()
+                .with_context(|| {
+                    format!(
+                        "view {name} has live subscribers but no recorded SQL, so it cannot be \
+                         recreated and their streams would go silent"
+                    )
+                })?;
+            self.ensure_view(&sql)
+                .await
+                .with_context(|| format!("recreating view {name} for its live subscribers"))?;
+            tracing::info!(
+                "[MatviewManager] Recreated {} for its live subscribers",
+                name
+            );
         }
 
         Ok(())
@@ -890,8 +970,10 @@ impl MatviewManager {
             return Ok(view_name);
         }
 
-        if self.view_exists(&view_name).await {
-            self.mark_view_known(&view_name).await;
+        let probed_at = self.db_handle.drop_log_len();
+        if self.view_exists(&view_name).await
+            && self.mark_view_known(&view_name, sql, probed_at).await
+        {
             tracing::debug!(
                 "[MatviewManager] View {} already exists, reusing",
                 view_name
@@ -920,8 +1002,10 @@ impl MatviewManager {
             );
             return Ok(view_name);
         }
-        if self.view_exists(&view_name).await {
-            self.mark_view_known(&view_name).await;
+        let probed_at = self.db_handle.drop_log_len();
+        if self.view_exists(&view_name).await
+            && self.mark_view_known(&view_name, sql, probed_at).await
+        {
             tracing::debug!(
                 "[MatviewManager] View {} was created while waiting for DDL mutex, reusing",
                 view_name
@@ -961,6 +1045,7 @@ impl MatviewManager {
             requires
         );
 
+        let created_at = self.db_handle.drop_log_len();
         self.db_handle
             .execute_ddl_with_deps(&create_view_sql, provides, requires, priority::DDL_MATVIEW)
             .await
@@ -975,7 +1060,12 @@ impl MatviewManager {
             })?;
 
         self.ddl_creates.fetch_add(1, Ordering::Relaxed);
-        self.mark_view_known(&view_name).await;
+        if !self.mark_view_known(&view_name, sql, created_at).await {
+            anyhow::bail!(
+                "materialized view {view_name} was dropped while it was being created; a \
+                 subscriber to it would receive nothing"
+            );
+        }
         // The one choke point every mint passes through, whichever watch API
         // asked for it. Attributing a mint to its SQL from any other place
         // misses the callers that do not go through `query_and_watch`.
@@ -1007,8 +1097,10 @@ impl MatviewManager {
             return Ok(view_name);
         }
 
-        if self.view_exists(&view_name).await {
-            self.mark_view_known(&view_name).await;
+        let probed_at = self.db_handle.drop_log_len();
+        if self.view_exists(&view_name).await
+            && self.mark_view_known(&view_name, sql, probed_at).await
+        {
             tracing::debug!(
                 "[MatviewManager] preload: view {} already exists, skipping",
                 view_name
@@ -1025,11 +1117,19 @@ impl MatviewManager {
         // A preload failure is disclosed, not fatal: `watch_query` creates the
         // view lazily later, so the app degrades to a cold first render rather
         // than failing to boot.
+        let created_at = self.db_handle.drop_log_len();
         match self.db_handle.execute_ddl(&create_view_sql).await {
             Ok(_) => {
                 self.ddl_creates.fetch_add(1, Ordering::Relaxed);
-                self.mark_view_known(&view_name).await;
-                tracing::info!("[MatviewManager] preload: created view {}", view_name);
+                if self.mark_view_known(&view_name, sql, created_at).await {
+                    tracing::info!("[MatviewManager] preload: created view {}", view_name);
+                } else {
+                    tracing::warn!(
+                        "[MatviewManager] preload: view {} was dropped while it was being \
+                         created; the first watch creates it",
+                        view_name
+                    );
+                }
             }
             Err(e) => {
                 tracing::warn!(
@@ -1167,6 +1267,10 @@ impl MatviewManager {
         watch_key: Option<&str>,
     ) -> Result<RowChangeStream> {
         let (tx, rx) = mpsc::channel(1024);
+        self.subscriptions
+            .lock()
+            .expect("subscriptions mutex")
+            .add(view_name, &tx);
         let (ack_tx, ack_rx) = oneshot::channel();
         tracing::info!(
             "[MatviewManager] subscribe_cdc('{}') key={:?}",
@@ -1190,12 +1294,50 @@ impl MatviewManager {
         Ok(tokio_stream::wrappers::ReceiverStream::new(rx))
     }
 
+    /// Subscribe to `view_name`, which `ensure_view(sql)` returned.
+    ///
+    /// A view dropped between that return and the registration would leave
+    /// the stream silently empty, so the registration is checked against the
+    /// drop log and the view recreated from `sql` if it is gone.
+    pub async fn subscribe_ensured(
+        &self,
+        view_name: &str,
+        sql: &str,
+        watch_key: Option<&str>,
+    ) -> Result<RowChangeStream> {
+        let stream = self.subscribe_cdc_keyed(view_name, watch_key).await?;
+        if self.is_view_known(view_name).await {
+            return Ok(stream);
+        }
+        let recreated = self.ensure_view(sql).await?;
+        assert_eq!(
+            recreated, view_name,
+            "ensure_view named a different view for the same SQL"
+        );
+        anyhow::ensure!(
+            self.is_view_known(view_name).await,
+            "view {view_name} was dropped again right after it was recreated for a new \
+             subscriber, whose stream would receive nothing"
+        );
+        Ok(stream)
+    }
+
+    /// `ensure_view` + [`Self::subscribe_ensured`].
+    pub async fn ensure_and_subscribe(
+        &self,
+        sql: &str,
+        watch_key: Option<&str>,
+    ) -> Result<(String, RowChangeStream)> {
+        let view_name = self.ensure_view(sql).await?;
+        let stream = self.subscribe_ensured(&view_name, sql, watch_key).await?;
+        Ok((view_name, stream))
+    }
+
     /// Ensure a materialized view exists, query its initial data, and subscribe
     /// to CDC.
     #[tracing::instrument(skip(self, sql))]
     pub async fn watch(&self, sql: &str) -> Result<WatchResult> {
-        let view_name = self.ensure_view(sql).await?;
-        let stream = self.subscribe_cdc(&view_name).await?;
+        let (view_name, stream) = self.ensure_and_subscribe(sql, None).await?;
         // The clause comes off the SOURCE query, where its table aliases are in
         // scope; over the view they are not, so it has to be re-expressed in the
         // view's own output columns before it can be spliced onto the read.
@@ -1239,22 +1381,45 @@ impl MatviewManager {
 
     /// Whether the cache still vouches for `view_name`.
     ///
-    /// The actor notes every view it drops, with the views depending on it;
+    /// The actor logs every view it drops, with the views depending on it;
     /// those names alone are forgotten, so a drop elsewhere costs no probe
     /// here.
     async fn is_view_known(&self, view_name: &str) -> bool {
-        let dropped = self.db_handle.take_dropped_views();
-        if !dropped.is_empty() {
-            let mut known = self.known_views.write().await;
-            for name in &dropped {
-                known.remove(name);
+        {
+            let known = self.known_views.read().await;
+            if known.drops_applied == self.db_handle.drop_log_len() {
+                return known.names.contains(view_name);
             }
         }
-        self.known_views.read().await.contains(view_name)
+        let mut known = self.known_views.write().await;
+        self.apply_drops(&mut known);
+        known.names.contains(view_name)
     }
 
-    async fn mark_view_known(&self, view_name: &str) {
-        self.known_views.write().await.insert(view_name.to_string());
+    fn apply_drops(&self, known: &mut KnownViews) {
+        let (dropped, applied) = self.db_handle.drops_since(known.drops_applied);
+        for name in &dropped {
+            known.names.remove(name);
+        }
+        known.drops_applied = applied;
+    }
+
+    /// Record `view_name`, ensured from `sql`, as existing — as seen when the
+    /// drop log was `seen_at` long. `false`, recording nothing, iff it was
+    /// dropped after that.
+    async fn mark_view_known(&self, view_name: &str, sql: &str, seen_at: usize) -> bool {
+        let mut known = self.known_views.write().await;
+        self.apply_drops(&mut known);
+        let (dropped_since, _) = self.db_handle.drops_since(seen_at);
+        if dropped_since.iter().any(|name| name == view_name) {
+            return false;
+        }
+        known.names.insert(view_name.to_string());
+        self.view_sql
+            .lock()
+            .expect("view_sql mutex")
+            .insert(view_name.to_string(), sql.to_string());
+        true
     }
 
     /// Prime FDW-backed cache tables referenced in the SQL.

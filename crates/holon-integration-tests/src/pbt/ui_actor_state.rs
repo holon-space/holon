@@ -32,6 +32,8 @@ use std::collections::HashSet;
 
 use holon_api::Region;
 use holon_api::entity_uri::EntityUri;
+use holon_pbt_core::budget::CaretSeat;
+use holon_pbt_core::budget::FocusRerender;
 
 use super::ui_types::ActiveEditor;
 use super::ui_types::CursorPosition;
@@ -94,10 +96,24 @@ pub struct UITabState {
     /// pick which of the two `OPEN_TAB_*_READS` ceilings applies.
     pub last_open_tab_activated: bool,
 
-    /// Whether the most recent `open_tab` moved its region's cursor off a
-    /// block that was the region's focus root. Recorded by `nav_open_tab`
-    /// because post-apply the previous root is gone from the state.
-    pub last_open_tab_departed_root: bool,
+    /// Blocks whose watcher is warm: every block that has been a region's
+    /// current focus this process. The frontend keeps a rendered block's
+    /// watcher at refcount 0 instead of reclaiming it
+    /// (`ReactiveEngine::ensure_watching`), so it re-renders on every later
+    /// focus-root change of its block.
+    pub warm_focus_watchers: HashSet<EntityUri>,
+
+    /// Blocks and creation slots a navigation has seated the caret in this
+    /// process; seating there again costs [`CaretSeat::Reseat`].
+    pub seated_caret_targets: HashSet<EntityUri>,
+
+    /// The re-renders of the left and the arrived-at block's warm watchers
+    /// that the most recent `open_tab` caused. Recorded by `nav_open_tab`
+    /// because post-apply the previous focus is gone from the state.
+    pub last_open_tab_rerenders: (FocusRerender, FocusRerender),
+
+    /// What the most recent `open_tab`'s caret seat cost.
+    pub last_open_tab_caret_seat: CaretSeat,
 
     /// Whether the most recent keystroke also CREATED the block it wrote to
     /// (a caret in a creation slot). Recorded by the ref's slot-birth apply
@@ -129,7 +145,10 @@ impl UITabState {
             seen_focus_targets: HashSet::new(),
             last_navigate_first_visit: false,
             last_open_tab_activated: false,
-            last_open_tab_departed_root: false,
+            warm_focus_watchers: HashSet::new(),
+            seated_caret_targets: HashSet::new(),
+            last_open_tab_rerenders: (FocusRerender::None, FocusRerender::None),
+            last_open_tab_caret_seat: CaretSeat::Fresh,
             last_keystroke_created_its_target: false,
             last_backspace_joins: 0,
         }
@@ -137,6 +156,18 @@ impl UITabState {
 }
 
 impl UITabState {
+    /// Record every block a region's cursor rests on now as warm; the
+    /// callers are the mutators that move a cursor, so every block that was
+    /// ever a current focus is recorded before it is left.
+    pub fn note_warm_focus_watchers(&mut self) {
+        let current: Vec<EntityUri> = self
+            .navigation_history
+            .values()
+            .filter_map(|h| h.current_focus())
+            .collect();
+        self.warm_focus_watchers.extend(current);
+    }
+
     pub fn current_focus(&self, region: Region) -> Option<EntityUri> {
         self.navigation_history
             .get(&region)
