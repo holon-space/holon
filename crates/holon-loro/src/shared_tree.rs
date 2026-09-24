@@ -38,6 +38,17 @@ pub trait SharedTreeStore: Send + Sync {
 
     /// List all shared tree IDs currently in the store.
     fn shared_tree_ids(&self) -> Vec<String>;
+
+    /// What leaves a share on this device. `None` when no share backend is
+    /// attached, so nothing can tear a share down.
+    fn exit(&self) -> Option<Arc<dyn ShareExit>>;
+}
+
+/// Leaves a share on this device: its placement, workers, projected rows and
+/// local snapshot go; every other peer keeps its copy.
+#[async_trait::async_trait]
+pub trait ShareExit: Send + Sync {
+    async fn leave(&self, shared_tree_id: &str) -> Result<()>;
 }
 
 /// Simple in-memory implementation of SharedTreeStore for testing.
@@ -74,6 +85,10 @@ impl SharedTreeStore for InMemorySharedTreeStore {
 
     fn shared_tree_ids(&self) -> Vec<String> {
         self.trees.keys().cloned().collect()
+    }
+
+    fn exit(&self) -> Option<Arc<dyn ShareExit>> {
+        None
     }
 }
 
@@ -337,6 +352,148 @@ pub struct MountInfo {
     pub shared_tree_id: String,
     /// TreeID of the root node in the shared tree
     pub shared_root: TreeID,
+    /// What the mount places, as recorded on it.
+    pub kind: KindRecord,
+    /// Which side of the share this device is. `None` only on a mount written
+    /// before the role was recorded — nothing can recover it afterwards.
+    pub role: Option<MountRole>,
+}
+
+impl MountInfo {
+    /// The block id a page share is known by — its page. `None` for any other
+    /// mount, which is known by its own id.
+    pub fn placed_page(&self) -> Option<holon_api::EntityUri> {
+        match &self.kind {
+            KindRecord::Recorded(ShareKind::Page { root }) => Some(holon_api::EntityUri::block(root)),
+            _ => None,
+        }
+    }
+
+    /// The recorded kind, or an error naming what is wrong with the record.
+    pub fn kind(&self) -> Result<&ShareKind> {
+        match &self.kind {
+            KindRecord::Recorded(kind) => Ok(kind),
+            KindRecord::Unrecorded => bail!(
+                "the mount of shared tree {} records no share kind",
+                self.shared_tree_id
+            ),
+            KindRecord::Corrupt(why) => bail!(
+                "the mount of shared tree {} records an unreadable share kind: {why}",
+                self.shared_tree_id
+            ),
+        }
+    }
+}
+
+/// A mount's share-kind record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KindRecord {
+    Recorded(ShareKind),
+    /// A mount written before kinds were recorded; rehydration records it
+    /// (`record_share_kind`).
+    Unrecorded,
+    Corrupt(String),
+}
+
+/// What a share places, fixed when the share is made. Recorded in the shared
+/// doc (so every peer reads the sharer's decision) and on each device's mount
+/// (so every reader on that device reads one field, never the root's mutable
+/// `Page` tag).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ShareKind {
+    /// A page share: the page keeps its identity, and `root` is its bare
+    /// stable id — the handle the user knows the share by.
+    Page { root: String },
+    /// A block share: the block hangs under a synthetic container page, which
+    /// is the mount's own row.
+    Block,
+}
+
+/// This device's side of a share.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MountRole {
+    /// The device that shared the subtree.
+    Owner,
+    /// A device that accepted a ticket for it.
+    Recipient,
+}
+
+impl MountRole {
+    fn as_str(self) -> &'static str {
+        match self {
+            MountRole::Owner => "owner",
+            MountRole::Recipient => "recipient",
+        }
+    }
+}
+
+const SHARE_RECORD_MAP: &str = "share";
+const SHARE_KIND_KEY: &str = "kind";
+const SHARE_ROOT_KEY: &str = "root";
+const SHARE_KIND_PAGE: &str = "page";
+const SHARE_KIND_BLOCK: &str = "block";
+const MOUNT_ROLE: &str = "mount_role";
+
+fn write_kind(map: &loro::LoroMap, kind: &ShareKind) -> Result<()> {
+    match kind {
+        ShareKind::Page { root } => {
+            map.insert(SHARE_KIND_KEY, SHARE_KIND_PAGE)?;
+            map.insert(SHARE_ROOT_KEY, root.as_str())?;
+        }
+        ShareKind::Block => map.insert(SHARE_KIND_KEY, SHARE_KIND_BLOCK)?,
+    }
+    Ok(())
+}
+
+fn read_kind(get: impl Fn(&str) -> Option<ValueOrContainer>) -> Result<Option<ShareKind>> {
+    let string = |key: &str| match get(key) {
+        Some(ValueOrContainer::Value(LoroValue::String(s))) => Some(s.to_string()),
+        _ => None,
+    };
+    match string(SHARE_KIND_KEY).as_deref() {
+        None => Ok(None),
+        Some(SHARE_KIND_BLOCK) => Ok(Some(ShareKind::Block)),
+        Some(SHARE_KIND_PAGE) => {
+            let root =
+                string(SHARE_ROOT_KEY).context("a page share's record names no root page")?;
+            Ok(Some(ShareKind::Page { root }))
+        }
+        Some(other) => bail!("unknown share kind {other:?}"),
+    }
+}
+
+/// Record the share's kind in the shared doc itself — the sharer's decision,
+/// which every recipient copies onto its own mount. Commits the shared doc.
+pub fn write_share_record(shared_doc: &LoroDoc, kind: &ShareKind) -> Result<()> {
+    write_kind(&shared_doc.get_map(SHARE_RECORD_MAP), kind)?;
+    shared_doc.commit();
+    Ok(())
+}
+
+/// The share kind the sharer recorded in the shared doc, `None` for a share
+/// made before the record existed.
+pub fn read_share_record(shared_doc: &LoroDoc) -> Result<Option<ShareKind>> {
+    let map = shared_doc.get_map(SHARE_RECORD_MAP);
+    read_kind(|key| map.get(key))
+}
+
+/// Record on `mount` what it places and which side of the share this device is.
+pub fn record_mount(
+    tree: &LoroTree,
+    mount: TreeID,
+    kind: &ShareKind,
+    role: MountRole,
+) -> Result<()> {
+    let meta = tree.get_meta(mount).context("mount node metadata")?;
+    write_kind(&meta, kind)?;
+    meta.insert(MOUNT_ROLE, role.as_str())?;
+    Ok(())
+}
+
+/// Record the kind on a mount written before kinds were recorded. The role
+/// stays unrecorded: nothing on this device says which side it was.
+pub fn record_share_kind(tree: &LoroTree, mount: TreeID, kind: &ShareKind) -> Result<()> {
+    write_kind(&tree.get_meta(mount).context("mount node metadata")?, kind)
 }
 
 /// Why `share_subtree` refuses a block: v1 forbids nested and overlapping
@@ -603,9 +760,25 @@ pub fn read_mount_info(tree: &LoroTree, node: TreeID) -> Option<MountInfo> {
         _ => return None,
     };
 
+    let kind = match read_kind(|key| meta.get(key)) {
+        Ok(Some(kind)) => KindRecord::Recorded(kind),
+        Ok(None) => KindRecord::Unrecorded,
+        Err(e) => KindRecord::Corrupt(format!("{e:#}")),
+    };
+    let role = match meta.get(MOUNT_ROLE) {
+        Some(ValueOrContainer::Value(LoroValue::String(s))) => match s.as_ref() {
+            "owner" => Some(MountRole::Owner),
+            "recipient" => Some(MountRole::Recipient),
+            _ => None,
+        },
+        _ => None,
+    };
+
     Some(MountInfo {
         shared_tree_id,
         shared_root,
+        kind,
+        role,
     })
 }
 

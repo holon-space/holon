@@ -1208,6 +1208,24 @@ impl CrudOperations<Block> for LoroBlockOperations {
     async fn delete(&self, id: &str) -> Result<OperationResult> {
         let backend = self.find_doc_for_block(id).await?;
 
+        // A page someone shared with this device is placed here, not owned
+        // here: its delete leaves the share, whatever the page holds.
+        if backend
+            .received_page_share(id)
+            .await
+            .map_err(|e| format!("delete: classify {id}: {e}"))?
+            .is_some()
+        {
+            backend
+                .delete_block(id)
+                .await
+                .map_err(|e| format!("delete: leave the share of {id}: {e}"))?;
+            return Ok(OperationResult::declared_irreversible(
+                vec![],
+                "delete of a received shared page leaves the share; rejoining takes a new ticket",
+            ));
+        }
+
         // Capture the FULL block state BEFORE deleting so a LEAF delete is
         // identity-invertible: the inverse is a `create` with the SAME id,
         // parent_id, content+marks, tags/edges, and properties, restored at the

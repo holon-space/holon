@@ -726,6 +726,10 @@ pub struct LoroProjection {
     /// `RECONCILE_MAX_ATTEMPTS`, which says nothing about the window in which
     /// the UI has already shown a change SQL rejected.
     degraded: Arc<holon_api::condition_bus::ConditionBus>,
+    /// The shares loaded on this device. Their rows are written by each
+    /// share's own projection, so the full walk leaves exactly those rows
+    /// alone. `None`: no share machinery, so every row is this walk's.
+    shared_trees: Option<Arc<dyn crate::shared_tree::SharedTreeStore>>,
 }
 
 impl LoroProjection {
@@ -765,7 +769,18 @@ impl LoroProjection {
             subscriptions: StdMutex::new(Vec::new()),
             read_model,
             degraded,
+            shared_trees: None,
         }
+    }
+
+    /// Leave the rows of every share loaded in `store` to that share's own
+    /// projection.
+    pub fn with_shared_trees(
+        mut self,
+        store: Arc<dyn crate::shared_tree::SharedTreeStore>,
+    ) -> Self {
+        self.shared_trees = Some(store);
+        self
     }
 
     /// The UI read model this projection publishes into. Handed to consumers
@@ -1282,16 +1297,18 @@ impl LoroProjection {
         let after = after;
         // A share's rows are written by that share's projection from its own
         // doc, which this walk never reads; diffing them here would delete them.
+        // Which rows those are comes from the shares loaded right now, never
+        // from a row's `shared-tree-id` property, which any file can carry.
+        // Read AFTER the SQL snapshot: a share is registered and its doc
+        // written before its projection writes a row, so every share row the
+        // snapshot holds is named here.
+        let sql_rows = self.read_sql_snapshot().await?;
+        let share_rows =
+            collab.with_read(|doc| registered_share_rows(doc, self.shared_trees.as_deref()))?;
         let before: Arc<HashMap<String, SnapshotBlock>> = Arc::new(
-            self.read_sql_snapshot()
-                .await?
+            sql_rows
                 .into_iter()
-                .filter(|(_, snap)| {
-                    !snap
-                        .block
-                        .properties_map()
-                        .contains_key(holon_api::share_props::SHARED_TREE_ID_PROPERTY)
-                })
+                .filter(|(id, _)| !share_rows.contains(id))
                 .collect(),
         );
         let snapshot_ms = t0.elapsed().as_millis();
@@ -2669,6 +2686,45 @@ fn block_diff_params(old: &SnapshotBlock, new: &SnapshotBlock) -> holon_api::Sto
     }
 
     params
+}
+
+/// The rows the share projections own right now: every live node of every
+/// loaded shared doc, and the container row of each loaded block share.
+fn registered_share_rows(
+    global: &loro::LoroDoc,
+    store: Option<&dyn crate::shared_tree::SharedTreeStore>,
+) -> Result<std::collections::HashSet<String>> {
+    use crate::shared_tree::KindRecord;
+    use crate::shared_tree::ShareKind;
+    let Some(store) = store else {
+        return Ok(std::collections::HashSet::new());
+    };
+    let loaded: std::collections::HashSet<String> = store.shared_tree_ids().into_iter().collect();
+    let mut rows: std::collections::HashSet<String> = loaded
+        .iter()
+        .filter_map(|stid| store.get_shared_doc(stid))
+        .flat_map(|doc| crate::loro_backend::snapshot_blocks_from_doc(&doc).into_keys())
+        .collect();
+    let tree = global.get_tree(crate::loro_backend::TREE_NAME);
+    for node in tree.get_nodes(false) {
+        let Some(info) = crate::shared_tree::read_mount_info(&tree, node.id) else {
+            continue;
+        };
+        if loaded.contains(&info.shared_tree_id)
+            && info.kind == KindRecord::Recorded(ShareKind::Block)
+        {
+            let meta = tree.get_meta(node.id)?;
+            let sid = crate::settled_read::read_stable_id(&meta).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "the mount of block share {} has no stable id, so its container row cannot \
+                     be named",
+                    info.shared_tree_id
+                )
+            })?;
+            rows.insert(holon_api::EntityUri::block(&sid).to_string());
+        }
+    }
+    Ok(rows)
 }
 
 fn blocks_differ(a: &SnapshotBlock, b: &SnapshotBlock) -> bool {

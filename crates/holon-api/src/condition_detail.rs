@@ -82,6 +82,10 @@ impl ConditionKind {
                 "{subject} is {format}, which Holon reads but cannot write — edit the file on disk"
             )),
 
+            Self::LeftSharedPage { title } => ConditionDetail::prose(format!(
+                "You left the shared page {title:?}; the owner's page is unchanged"
+            )),
+
             // The archive path is a BODY line: the user reproduces it
             // character for character, and the headline is capped.
             Self::PairingReimportedLocalContent {

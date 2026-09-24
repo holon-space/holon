@@ -106,6 +106,17 @@ impl BlockCellRegistry {
         }
     }
 
+    /// Follow mounts into the shares loaded on this device. Without it every
+    /// structural write through this registry misses shared content — the
+    /// block is not in the global tree — and falls through to a SQL-only write
+    /// that the share never sees.
+    pub fn with_shared_trees(mut self, store: Arc<dyn crate::shared_tree::SharedTreeStore>) -> Self {
+        Arc::get_mut(&mut self.backend)
+            .expect("the registry's backend is shared only once construction ends")
+            .set_shared_trees(store);
+        self
+    }
+
     /// Install the dispatcher's write-tier authority. Without it a content cell
     /// on a read-only-format block would write the vault's CRDT doc behind the
     /// dispatcher's back.

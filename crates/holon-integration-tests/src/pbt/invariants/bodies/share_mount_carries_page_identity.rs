@@ -37,24 +37,34 @@ fn property_str(block: &holon_api::Block, key: &str) -> Option<String> {
         .and_then(|v| v.as_string().map(str::to_string))
 }
 
-/// The ids of `roots` and of every row below them, by parent links within
-/// `rows` — the blocks a per-page share of `roots` carries.
-pub fn page_share_members<'a>(
-    roots: impl IntoIterator<Item = &'a holon_api::EntityUri>,
-    rows: &[holon_api::Block],
-) -> BTreeSet<holon_api::EntityUri> {
-    let mut members: BTreeSet<holon_api::EntityUri> = roots.into_iter().cloned().collect();
-    loop {
-        let before = members.len();
-        for row in rows {
-            if members.contains(&row.parent_id) {
-                members.insert(row.id.clone());
-            }
-        }
-        if members.len() == before {
-            return members;
-        }
-    }
+/// Every block the model puts in a page share the RECEIVER still holds: each
+/// such page and everything below it in the model.
+pub fn held_page_share_members<R: RefSharedView>(ref_: &R) -> BTreeSet<holon_api::EntityUri> {
+    ref_.page_shares()
+        .into_iter()
+        .filter(|(_, share)| !share.left)
+        .flat_map(|(page, _)| ref_.page_share_subtree(&page))
+        .collect()
+}
+
+/// Every block the model puts in any page share the OWNER made — the owner
+/// keeps sharing a page the receiver left.
+fn owned_page_share_members<R: RefSharedView>(ref_: &R) -> BTreeSet<holon_api::EntityUri> {
+    ref_.page_shares()
+        .into_keys()
+        .flat_map(|page| ref_.page_share_subtree(&page))
+        .collect()
+}
+
+/// A row stamped as a share's member that the model puts in no share: the
+/// stamp decides which rows the share projection owns, so a stray one is a
+/// row the projection claims without cause.
+fn stray_stamp<'a>(
+    rows: &'a [holon_api::Block],
+    members: &BTreeSet<holon_api::EntityUri>,
+) -> Option<&'a holon_api::Block> {
+    rows.iter()
+        .find(|b| !members.contains(&b.id) && property_str(b, SHARED_TREE_ID_PROPERTY).is_some())
 }
 
 #[allow(async_fn_in_trait)]
@@ -68,15 +78,39 @@ where
     }
 
     async fn check(&self, ref_: &R, sut: &S) -> InvariantResult {
-        let shares = ref_.page_shares();
-        if shares.is_empty() {
-            return InvariantResult::Skipped("the model records no per-page share".into());
-        }
         let owner = sut.block_raw_snapshot().await;
         let receiver = sut.receiver_block_raw_snapshot().await;
+        for (side, rows, members) in [
+            ("owner", &owner, owned_page_share_members(ref_)),
+            ("receiver", &receiver, held_page_share_members(ref_)),
+        ] {
+            if let Some(stray) = stray_stamp(rows, &members) {
+                return InvariantResult::Fail(format!(
+                    "[inv-share-mount-carries-page-identity] the {side}'s {} {:?} is stamped \
+                     `{SHARED_TREE_ID_PROPERTY}` = {:?}, but the model puts it in no share the \
+                     {side} holds",
+                    stray.id,
+                    stray.content,
+                    property_str(stray, SHARED_TREE_ID_PROPERTY)
+                ));
+            }
+        }
+
+        let shares: Vec<_> = ref_
+            .page_shares()
+            .into_iter()
+            .filter(|(_, share)| !share.left)
+            .map(|(page, _)| page)
+            .collect();
+        if shares.is_empty() {
+            return InvariantResult::Skipped(
+                "the receiver holds no per-page share (and no row carries a stray share stamp)"
+                    .into(),
+            );
+        }
         let owner_ids: BTreeSet<_> = owner.iter().map(|b| b.id.clone()).collect();
 
-        for page in shares.keys() {
+        for page in &shares {
             for (side, rows) in [("owner", &owner), ("receiver", &receiver)] {
                 let named: Vec<_> = rows.iter().filter(|b| &b.id == page).collect();
                 if named.len() != 1 {
@@ -126,6 +160,9 @@ where
                     receiver_row.tags, owner_row.tags
                 ));
             }
+            // Every owner property, `todo_keywords` included: a page share
+            // carries the page's `#+TODO` vocabulary, which the keystone's
+            // block comparison strips as internal.
             let receiver_props = receiver_row.properties_map();
             for (key, value) in owner_row.properties_map() {
                 if receiver_props.get(&key) != Some(&value) {
@@ -137,8 +174,8 @@ where
                 }
             }
 
+            let members = ref_.page_share_subtree(page);
             for (side, rows) in [("owner", &owner), ("receiver", &receiver)] {
-                let members = page_share_members([page], rows);
                 if let Some(unstamped) = rows
                     .iter()
                     .filter(|b| members.contains(&b.id))

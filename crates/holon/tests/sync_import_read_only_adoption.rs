@@ -277,6 +277,13 @@ async fn a_block_imported_by_the_share_projection_refuses_the_users_next_edit() 
             .unwrap()
             .insert(STABLE_ID, loro::LoroValue::from("mount"))
             .unwrap();
+        holon_loro::shared_tree::record_mount(
+            &tree,
+            mount,
+            &holon_loro::shared_tree::ShareKind::Block,
+            holon_loro::shared_tree::MountRole::Recipient,
+        )
+        .unwrap();
         doc.commit();
     }
     backend

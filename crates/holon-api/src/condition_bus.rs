@@ -260,6 +260,13 @@ pub enum ConditionKind {
         conflict_copies: usize,
         archive: String,
     },
+    /// This device left a page someone shared with it: deleting the page here
+    /// removed only this device's placement of it and its copy of the share.
+    /// The owner's page, and every other recipient's, is unchanged. `subject`
+    /// is the page; `title` its title when this device left.
+    ///
+    /// All-clear: none — a one-shot notice about what the delete did.
+    LeftSharedPage { title: String },
     /// `orphans` block(s) this device wrote before it was paired are NOT in the
     /// store it now shows: their parent is in neither the owner's store nor the
     /// archive, so the re-import has nowhere to put them. The app boots without
@@ -344,6 +351,7 @@ impl ConditionKind {
     pub const INTEGRATION_SIDECAR_UNUSABLE: &'static str = "integration-sidecar-unusable";
     pub const INTEGRATION_SIDECAR_SUPERSEDED: &'static str = "integration-sidecar-superseded";
     pub const PAIRING_REIMPORTED_LOCAL_CONTENT: &'static str = "pairing-reimported-local-content";
+    pub const LEFT_SHARED_PAGE: &'static str = "left-shared-page";
     pub const PAIRING_REIMPORT_DEFERRED: &'static str = "pairing-reimport-deferred";
     pub const REHYDRATION_FAILED: &'static str = "rehydration-failed";
     pub const SECRETS_HELD_IN_MEMORY: &'static str = "secrets-held-in-memory";
@@ -388,6 +396,7 @@ impl ConditionKind {
             Self::SharedSubtreeNotMaterialized { .. } => Self::SHARED_SUBTREE_NOT_MATERIALIZED,
             Self::WritebackDegraded(_) => Self::WRITEBACK_DEGRADED,
             Self::PairingReimportedLocalContent { .. } => Self::PAIRING_REIMPORTED_LOCAL_CONTENT,
+            Self::LeftSharedPage { .. } => Self::LEFT_SHARED_PAGE,
             Self::PairingReimportDeferred { .. } => Self::PAIRING_REIMPORT_DEFERRED,
             Self::EditRefusedReadOnlyFormat { .. } => Self::EDIT_REFUSED_READ_ONLY_FORMAT,
             Self::LocalEditNotApplied { .. } => Self::LOCAL_EDIT_NOT_APPLIED,

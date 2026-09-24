@@ -170,6 +170,17 @@ impl Module for LoroModule {
                             (*doc_store).clone(),
                             tokio::runtime::Handle::current(),
                         );
+                #[cfg(all(
+                    feature = "iroh-sync",
+                    not(all(target_arch = "wasm32", target_os = "unknown"))
+                ))]
+                {
+                    use holon_loro::iroh_sync_adapter::SharedTreeSyncManager;
+                    use holon_loro::shared_tree::SharedTreeStore;
+                    let manager = resolver.resolve::<Arc<SharedTreeSyncManager>>();
+                    registry =
+                        registry.with_shared_trees((*manager).clone() as Arc<dyn SharedTreeStore>);
+                }
                 // A content cell writes the block's `LoroText` directly, so it
                 // needs the dispatcher's write-tier decision or it becomes a
                 // second, ungated writer (Model.md invariant 4).
@@ -242,6 +253,16 @@ impl Module for LoroModule {
                     (*degraded).clone(),
                 )
                 .unwrap_or_else(|e| panic!("[LoroModule] build the Loro projection: {e:#}"));
+                #[cfg(all(
+                    feature = "iroh-sync",
+                    not(all(target_arch = "wasm32", target_os = "unknown"))
+                ))]
+                let projection = {
+                    use holon_loro::iroh_sync_adapter::SharedTreeSyncManager;
+                    use holon_loro::shared_tree::SharedTreeStore;
+                    let manager = resolver.resolve::<Arc<SharedTreeSyncManager>>();
+                    projection.with_shared_trees((*manager).clone() as Arc<dyn SharedTreeStore>)
+                };
                 // The incremental input leg must exist before the org initial
                 // scan starts flushing this projection: the scan resolves it as
                 // `dyn DownstreamProjection` and drives one flush per file,

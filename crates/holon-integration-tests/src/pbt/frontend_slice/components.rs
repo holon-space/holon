@@ -1263,6 +1263,17 @@ impl HeadlessFrontendComponent {
             .map(|manager| (*manager).clone() as Arc<dyn holon_loro::shared_tree::SharedTreeStore>)
     }
 
+    /// The frontend's share backend. `None` when the share machinery is not
+    /// wired on this build.
+    pub async fn share_backend(
+        &self,
+    ) -> Option<Arc<holon_loro::loro_share_backend::LoroShareBackend>> {
+        self.injector()
+            .optional_resolve_async::<Arc<holon_loro::loro_share_backend::LoroShareBackend>>()
+            .await
+            .map(|backend| (*backend).clone())
+    }
+
     pub fn loro_doc_store(&self) -> Option<holon_loro::LoroDocumentStore> {
         self.injector()
             .try_resolve::<holon_loro::LoroDocumentStore>()

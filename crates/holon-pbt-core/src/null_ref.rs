@@ -397,6 +397,9 @@ impl RefSharedView for NullRef {
     fn receiver_pages(&self) -> Vec<EntityUri> {
         panic!("class-2: invariant read RefSharedView::receiver_pages")
     }
+    fn page_share_subtree(&self, _: &EntityUri) -> std::collections::BTreeSet<EntityUri> {
+        panic!("class-2: invariant read RefSharedView::page_share_subtree")
+    }
 }
 
 #[allow(unused_variables)]

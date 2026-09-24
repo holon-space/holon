@@ -202,6 +202,7 @@ impl SharingRefState {
                             receiver_parent: resolve(&v.receiver_parent),
                             owner_parent: resolve(&v.owner_parent),
                             moved: v.moved,
+                            left: v.left,
                         },
                     )
                 })

@@ -81,10 +81,7 @@ where
         // The whole-vault audience says nothing about a per-page share: the
         // receiver accepted that page's own ticket, so the page and everything
         // below it are in audience regardless.
-        let page_shared = super::share_mount_carries_page_identity::page_share_members(
-            ref_.page_shares().keys(),
-            &sut.receiver_block_raw_snapshot().await,
-        );
+        let page_shared = super::share_mount_carries_page_identity::held_page_share_members(ref_);
         let held: Vec<_> = exclusive
             .intersection(&receiver)
             .filter(|id| !page_shared.contains(*id))

@@ -3006,6 +3006,16 @@ impl LoroBackend {
     /// `None` for every other target, including a block share's root, which
     /// sits under the synthetic container its mount projects as.
     fn placement_mount(&self, target: &WriteTarget) -> Result<Option<loro::TreeID>, ApiError> {
+        Ok(self.placing_mount(target)?.map(|(mount, _)| mount))
+    }
+
+    /// [`Self::placement_mount`] with the mount's record. Whether the root is a
+    /// page is the share kind recorded on the mount when the share was made,
+    /// never the root's current `Page` tag.
+    fn placing_mount(
+        &self,
+        target: &WriteTarget,
+    ) -> Result<Option<(loro::TreeID, crate::shared_tree::MountInfo)>, ApiError> {
         let WriteTarget::Shared {
             shared_tree_id,
             doc,
@@ -3014,28 +3024,99 @@ impl LoroBackend {
         else {
             return Ok(None);
         };
-        let tree = doc.get_tree(TREE_NAME);
-        if get_node_parent(&tree, *tree_id).is_some()
-            || !read_block_from_tree(&tree, *tree_id, None).is_page()
-        {
+        if get_node_parent(&doc.get_tree(TREE_NAME), *tree_id).is_some() {
             return Ok(None);
         }
-        let mount = self
+        let placed = self
             .collab_doc
             .with_read(|global| {
-                Ok(crate::shared_tree::find_mount_node(
-                    &global.get_tree(TREE_NAME),
-                    shared_tree_id,
-                ))
+                let tree = global.get_tree(TREE_NAME);
+                Ok(crate::shared_tree::find_mount_node(&tree, shared_tree_id)
+                    .map(|mount| (mount, read_mount_info(&tree, mount))))
             })
             .map_err(|e| ApiError::InternalError {
                 message: format!("placement_mount: read global tree failed: {e}"),
             })?;
-        mount.map(Some).ok_or_else(|| ApiError::InvalidOperation {
-            message: format!(
-                "the root of shared tree {shared_tree_id} is a page, but no mount in this                  device's tree places it — the share is loaded without its placement record"
-            ),
+        let Some((mount, info)) = placed else {
+            let recorded = crate::shared_tree::read_share_record(doc).map_err(|e| {
+                ApiError::InvalidOperation {
+                    message: format!("shared tree {shared_tree_id}'s share record: {e:#}"),
+                }
+            })?;
+            return match recorded {
+                Some(crate::shared_tree::ShareKind::Page { root }) => {
+                    Err(ApiError::InvalidOperation {
+                        message: format!(
+                            "shared tree {shared_tree_id} shares page {root}, but no mount in this \
+                             device's tree places it — the share is loaded without its placement \
+                             record"
+                        ),
+                    })
+                }
+                _ => Ok(None),
+            };
+        };
+        let info = info.ok_or_else(|| ApiError::InvalidOperation {
+            message: format!("mount {mount:?} of shared tree {shared_tree_id} has no mount record"),
+        })?;
+        let kind = info.kind().map_err(|e| ApiError::InvalidOperation {
+            message: format!("{e:#}"),
+        })?;
+        Ok(match kind {
+            crate::shared_tree::ShareKind::Page { .. } => Some((mount, info)),
+            crate::shared_tree::ShareKind::Block => None,
         })
+    }
+
+    /// When `id` is the root of a page share this device RECEIVED, the share
+    /// it belongs to: a delete of the page leaves that share instead of
+    /// deleting the owner's page.
+    pub async fn received_page_share(&self, id: &str) -> Result<Option<String>, ApiError> {
+        match self.resolve_write_target(id).await {
+            Ok(target) => self.received_share_of(&target, id),
+            Err(ApiError::BlockNotFound { .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn received_share_of(
+        &self,
+        target: &WriteTarget,
+        id: &str,
+    ) -> Result<Option<String>, ApiError> {
+        let Some((_, info)) = self.placing_mount(target)? else {
+            return Ok(None);
+        };
+        match info.role {
+            Some(crate::shared_tree::MountRole::Recipient) => Ok(Some(info.shared_tree_id)),
+            Some(crate::shared_tree::MountRole::Owner) => Ok(None),
+            None => Err(ApiError::InvalidOperation {
+                message: format!(
+                    "{id} is a shared page whose mount records no side of the share (it was \
+                     mounted before sides were recorded), so a delete cannot tell leaving from \
+                     deleting the owner's page — unshare {id} instead"
+                ),
+            }),
+        }
+    }
+
+    /// Leave the share `shared_tree_id` through the share backend that owns it.
+    async fn leave_received_share(&self, id: &str, shared_tree_id: &str) -> Result<(), ApiError> {
+        let exit = self
+            .shared_trees
+            .as_ref()
+            .and_then(|store| store.exit())
+            .ok_or_else(|| ApiError::InvalidOperation {
+                message: format!(
+                    "deleting the received shared page {id} leaves its share, but no share backend \
+                     is attached to leave it through"
+                ),
+            })?;
+        exit.leave(shared_tree_id)
+            .await
+            .map_err(|e| ApiError::InternalError {
+                message: format!("leave the share of {id}: {e:#}"),
+            })
     }
 
     /// Where a mount sits in the global tree: its parent's uri and its stable
@@ -4601,11 +4682,14 @@ impl LoroBackend {
     pub async fn block_sort_key(&self, id: &str) -> Result<Option<String>, ApiError> {
         let (read_doc, tree_id) = match self.resolve_layout(id) {
             Some(target) => self.target_doc(&target),
-            None => (
-                // ALLOW(loro_doc_escape): re-wrapped under the same boundary lock.
-                LoroDocument::from_existing(self.collab_doc.doc(), self.collab_doc.doc_id()),
-                self.require_tree_id(id).await?,
-            ),
+            None => {
+                let target = self.resolve_write_target(id).await?;
+                // A placed page sits where its mount does.
+                match self.placement_mount(&target)? {
+                    Some(mount) => self.target_doc(&WriteTarget::Global(mount)),
+                    None => self.target_doc(&target),
+                }
+            }
         };
         read_doc
             .with_read(|doc| {
@@ -5312,6 +5396,12 @@ impl CoreOperations for LoroBackend {
             Err(ApiError::BlockNotFound { .. }) => return Ok(()),
             Err(e) => return Err(e),
         };
+        // A received page is placed here, not owned here: deleting it removes
+        // this device's placement and copy — it leaves the share — and never
+        // deletes the owner's page.
+        if let Some(shared_tree_id) = self.received_share_of(&target, id)? {
+            return self.leave_received_share(id, &shared_tree_id).await;
+        }
         let (write_doc, tree_id) = self.target_doc(&target);
 
         let mut did_delete = false;
@@ -5383,6 +5473,17 @@ impl CoreOperations for LoroBackend {
         }
         // A mount destination means "under the shared root it stands for".
         let new_parent = parent_route.parent.clone();
+        // An anchor that is a placed page sits where its mount does.
+        let after = match after {
+            Some(anchor) => {
+                let anchor_target = self.resolve_write_target(anchor.as_str()).await?;
+                Some(match self.placement_mount(&anchor_target)? {
+                    Some(mount) => self.mount_placement(mount)?.1,
+                    None => anchor,
+                })
+            }
+            None => None,
+        };
 
         let block_before = self.get_block(id.as_str()).await?;
         let (write_doc, tree_id) = self.target_doc(&source_target);
@@ -5420,10 +5521,9 @@ impl CoreOperations for LoroBackend {
                 // LoroTree.mov re-checks cycles natively (defense-in-depth).
                 tree.mov(tree_id, new_parent_tree_id)?;
 
-                // Handle `after` positioning via mov_after
-                if let Some(after_uri) = &after
-                    && let Some(after_tid) = uri_to_tree_id(after_uri)
-                {
+                if let Some(after_uri) = &after {
+                    let after_tid = resolve_parent_tree_id(&tree, &id_cache, after_uri)?
+                        .ok_or_else(|| anyhow::anyhow!("after-anchor {after_uri} is the root"))?;
                     tree.mov_after(tree_id, after_tid)?;
                 }
 

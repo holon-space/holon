@@ -1662,8 +1662,8 @@ fn production_pairing_refuses_a_receiver_that_holds_mounts() {
         );
         assert!(
             refusal.contains(&mount),
-            "the refusal must name the mount that caused it so the user can unshare it; got: \
-             {refusal}"
+            "the refusal must name the share that caused it, by the id the user can unshare it \
+             by; got: {refusal}"
         );
     });
 }
@@ -1820,7 +1820,8 @@ async fn receiver_day_block(
 }
 
 /// Give the receiver a mount by accepting a share of one of the owner's
-/// subtrees — the state D73.a refuses to pair over. Returns the mount block id.
+/// subtrees — the state D73.a refuses to pair over. Returns the share's handle:
+/// the id the user knows it by, which `unshare` takes.
 async fn mount_the_owners_subtree_on_the_receiver(
     handle: &std::sync::Arc<
         holon_integration_tests::pbt::composed::two_instance::TwoInstanceHandle,
@@ -1881,12 +1882,12 @@ async fn mount_the_owners_subtree_on_the_receiver(
     .and_then(|v| v.as_string().map(str::to_string))
     .map(|json| {
         serde_json::from_str::<serde_json::Value>(&json)
-            .expect("accept_shared_subtree's response is JSON")["mount_block_id"]
+            .expect("accept_shared_subtree's response is JSON")["handle"]
             .as_str()
-            .expect("accept_shared_subtree's response carries the mount block id")
+            .expect("accept_shared_subtree's response carries the share's handle")
             .to_string()
     })
-    .expect("accept_shared_subtree returns the mount block id")
+    .expect("accept_shared_subtree returns the share's handle")
 }
 
 async fn dispatch_tree_op(
@@ -2530,6 +2531,7 @@ fn pairing_keeps_a_page_created_under_the_device_local_layout_root() {
 
 // ─── The Overlay proposal, increment 1: page-share placement (D198.a) ──────
 
+use holon_integration_tests::pbt::transitions::DeletePlacedRoot;
 use holon_integration_tests::pbt::transitions::MovePlacedRoot;
 use holon_integration_tests::pbt::transitions::SharePage;
 
@@ -2563,20 +2565,24 @@ fn assert_engaged_and_ok(report: &RunReport, id: &str) {
 /// The property draws `SharePage` only in the draws that do not open with a
 /// `ShareContainer`, and `MovePlacedRoot` only after it, so a short random run
 /// can miss both; this chain is what guarantees they engage in the gate.
+/// One step of a deterministic page-share chain, judged by the harness's
+/// per-tick reconcile exactly as a property draw is.
+fn page_share_step(sut: Sut, ref_state: &mut ReferenceState, t: E2ETransition) -> Sut {
+    assert!(
+        Machine::preconditions(ref_state, &t),
+        "page-share chain: {t:?} violates its precondition against the booted oracle"
+    );
+    *ref_state = Machine::apply(ref_state.clone(), &t);
+    let sut = <Sut as StateMachineTest>::apply(sut, ref_state, t);
+    sut.settle_projections();
+    sut
+}
+
 #[test]
 fn a_shared_page_keeps_its_identity_and_the_receiver_places_it_locally() {
     let mut ref_state = wide_e2e_ref();
     let mut sut = <Sut as StateMachineTest>::init_test(&ref_state);
-    let step = |sut: Sut, ref_state: &mut ReferenceState, t: E2ETransition| -> Sut {
-        assert!(
-            Machine::preconditions(ref_state, &t),
-            "page-share chain: {t:?} violates its precondition against the booted oracle"
-        );
-        *ref_state = Machine::apply(ref_state.clone(), &t);
-        let sut = <Sut as StateMachineTest>::apply(sut, ref_state, t);
-        sut.settle_projections();
-        sut
-    };
+    let step = page_share_step;
 
     let page = ref_state
         .shareable_pages()
@@ -2609,5 +2615,40 @@ fn a_shared_page_keeps_its_identity_and_the_receiver_places_it_locally() {
         assert_engaged_and_ok(&report, "inv-share-mount-carries-page-identity");
         assert_engaged_and_ok(&report, "inv-overlay-placement-local");
     }
+    <Sut as StateMachineTest>::check_invariants(&sut, &ref_state);
+}
+
+/// **A recipient delete of a shared page leaves the share, and only there.**
+/// The owner shares a page, the receiver accepts it and then deletes it. The
+/// receiver must hold nothing of the page afterwards, and the owner's page
+/// must be exactly where it was.
+#[test]
+fn a_recipient_delete_of_a_shared_page_leaves_the_share_and_keeps_the_owners_page() {
+    for subtree in [false, true] {
+        recipient_delete_chain(subtree);
+    }
+}
+
+fn recipient_delete_chain(subtree: bool) {
+    let mut ref_state = wide_e2e_ref();
+    let mut sut = <Sut as StateMachineTest>::init_test(&ref_state);
+    let page = ref_state
+        .shareable_pages()
+        .into_iter()
+        .next()
+        .expect("the booted owner holds a user page to share");
+
+    sut = page_share_step(
+        sut,
+        &mut ref_state,
+        E2ETransition::SharePage(SharePage { page: page.clone() }),
+    );
+    sut = page_share_step(
+        sut,
+        &mut ref_state,
+        E2ETransition::DeletePlacedRoot(DeletePlacedRoot { page, subtree }),
+    );
+    let report = sut.run_report_now(&ref_state);
+    assert_engaged_and_ok(&report, "inv-overlay-placement-local");
     <Sut as StateMachineTest>::check_invariants(&sut, &ref_state);
 }

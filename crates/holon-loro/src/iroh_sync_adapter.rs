@@ -609,6 +609,9 @@ mod adapter {
     /// Implements SharedTreeStore so LoroBackend can traverse mount nodes.
     pub struct SharedTreeSyncManager {
         trees: Arc<RwLock<HashMap<String, Arc<LoroDoc>>>>,
+        /// The share backend that owns the shares registered here. Weak: the
+        /// backend owns this manager.
+        exit: RwLock<Option<std::sync::Weak<dyn crate::shared_tree::ShareExit>>>,
     }
 
     impl Default for SharedTreeSyncManager {
@@ -621,7 +624,13 @@ mod adapter {
         pub fn new() -> Self {
             Self {
                 trees: Arc::new(RwLock::new(HashMap::new())),
+                exit: RwLock::new(None),
             }
+        }
+
+        /// Attach the share backend that leaves this manager's shares.
+        pub fn set_exit(&self, exit: std::sync::Weak<dyn crate::shared_tree::ShareExit>) {
+            *self.exit.write().unwrap() = Some(exit);
         }
 
         pub fn register(&self, shared_tree_id: String, doc: LoroDoc) {
@@ -651,6 +660,10 @@ mod adapter {
 
         fn shared_tree_ids(&self) -> Vec<String> {
             self.trees.read().unwrap().keys().cloned().collect()
+        }
+
+        fn exit(&self) -> Option<Arc<dyn crate::shared_tree::ShareExit>> {
+            self.exit.read().unwrap().as_ref().and_then(|w| w.upgrade())
         }
     }
 

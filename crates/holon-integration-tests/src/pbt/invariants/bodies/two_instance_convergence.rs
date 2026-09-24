@@ -87,10 +87,7 @@ where
         let receiver_authored = sut.locally_authored_ids(false).await;
         // A per-page share sanctions its page and everything below it,
         // independently of the whole-vault share.
-        let page_shared = super::share_mount_carries_page_identity::page_share_members(
-            ref_.page_shares().keys(),
-            &sut.receiver_block_raw_snapshot().await,
-        );
+        let page_shared = super::share_mount_carries_page_identity::held_page_share_members(ref_);
         let leaked: Vec<_> = exclusive
             .intersection(&receiver)
             .filter(|id| !receiver_authored.contains(*id) && !page_shared.contains(*id))

@@ -453,6 +453,15 @@ const UNDO_HISTORY_CLEARED_AT_BOOT: ConditionProfile = ConditionProfile::new(
     &[],
 );
 
+const LEFT_SHARED_PAGE: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Info,
+    "You left a shared page",
+    icons::INFO,
+    ConditionPlacement::Toast,
+    AllClear::UntilRestart,
+    &[],
+);
+
 const PAIRING_REIMPORTED_LOCAL_CONTENT: ConditionProfile = ConditionProfile::new(
     ConditionSeverity::Info,
     "Content kept from this device",
@@ -527,6 +536,7 @@ impl ConditionKind {
             Self::SecretsHeldInMemory { .. } => SECRETS_HELD_IN_MEMORY,
             Self::UndoHistoryClearedAtBoot { .. } => UNDO_HISTORY_CLEARED_AT_BOOT,
             Self::PairingReimportedLocalContent { .. } => PAIRING_REIMPORTED_LOCAL_CONTENT,
+            Self::LeftSharedPage { .. } => LEFT_SHARED_PAGE,
             Self::PairingReimportDeferred { .. } => PAIRING_REIMPORT_DEFERRED,
             Self::BearerTicketEnrollment { .. } => BEARER_TICKET_ENROLLMENT,
             Self::OwnerRecoveryCodeNotShown => OWNER_RECOVERY_CODE_NOT_SHOWN,

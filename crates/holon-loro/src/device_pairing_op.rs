@@ -150,15 +150,16 @@ impl PairCapability {
 /// can act on it without reading a log.
 #[derive(Debug, thiserror::Error)]
 pub enum PairingRefused {
-    /// The receiver holds per-subtree mounts. Their shared documents are
+    /// The receiver holds per-subtree shares. Their shared documents are
     /// outside the owner's replication set, so pairing would adopt the owner's
-    /// store and silently drop them.
+    /// store and silently drop them. Each share is named by the id the user
+    /// knows it by: a shared page by the page, a shared block by its container.
     #[error(
-        "this device holds {} mounted share(s) and cannot be paired; unshare them first: {}",
-        mounts.len(),
-        mounts.join(", ")
+        "this device holds {} share(s) and cannot be paired; unshare or leave them first: {}",
+        shares.len(),
+        shares.join(", ")
     )]
-    ReceiverHoldsMounts { mounts: Vec<String> },
+    ReceiverHoldsMounts { shares: Vec<String> },
 
     /// A block this device wrote hangs under a parent that the owner's store
     /// does not hold and that this device did not write either — so the
@@ -586,9 +587,10 @@ impl DevicePairing {
         ContainerRegistry::new(self.store.clone())
     }
 
-    /// Every mount node's BLOCK id, read off the global tree — the same walk
-    /// `rehydrate_shared_trees` does, which is the authoritative one. The block
-    /// id, not the shared-tree id, because that is what `tree.unshare` takes.
+    /// Every share's handle, read off the global tree's mount nodes — the same
+    /// walk `rehydrate_shared_trees` does, which is the authoritative one. The
+    /// handle is what `tree.unshare` takes: a shared page's own id, else the
+    /// mount's container row.
     async fn mounted_share_ids(&self) -> anyhow::Result<Vec<String>> {
         let doc = self.store.get_doc(DocScope::Global).await?;
         doc.with_read(|d| {
@@ -598,7 +600,14 @@ impl DevicePairing {
                 .get_nodes(false)
                 .into_iter()
                 .filter(|node| crate::shared_tree::is_mount_node(&tree, node.id))
-                .filter_map(|node| by_tid.get(&node.id).cloned())
+                .filter_map(|node| {
+                    match crate::shared_tree::read_mount_info(&tree, node.id)
+                        .and_then(|info| info.placed_page())
+                    {
+                        Some(page) => Some(page.to_string()),
+                        None => by_tid.get(&node.id).cloned(),
+                    }
+                })
                 .collect();
             out.sort();
             Ok(out)
@@ -913,9 +922,9 @@ impl DevicePairing {
     /// Every reason this device cannot adopt this invite, decided before the
     /// store is touched and before any dial.
     async fn refuse_unpairable(&self, invite: &PairingInvite) -> anyhow::Result<()> {
-        let mounts = self.mounted_share_ids().await?;
-        if !mounts.is_empty() {
-            return Err(PairingRefused::ReceiverHoldsMounts { mounts }.into());
+        let shares = self.mounted_share_ids().await?;
+        if !shares.is_empty() {
+            return Err(PairingRefused::ReceiverHoldsMounts { shares }.into());
         }
         if let Some(record) = crate::pairing_swap::read_record(self.store.storage_dir())? {
             return Err(PairingRefused::AlreadyPaired {
@@ -1613,7 +1622,7 @@ mod tests {
     #[test]
     fn the_mounts_refusal_names_every_mount() {
         let refusal = PairingRefused::ReceiverHoldsMounts {
-            mounts: vec!["tree-a".into(), "tree-b".into()],
+            shares: vec!["tree-a".into(), "tree-b".into()],
         };
         let msg = refusal.to_string();
         assert!(msg.contains("tree-a") && msg.contains("tree-b"), "{msg}");

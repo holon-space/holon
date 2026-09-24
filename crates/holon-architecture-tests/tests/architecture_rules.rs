@@ -201,7 +201,7 @@ fn latency_target_is_suppressed_by_every_filter_builder() {
 
 /// Calls of `WriteTxn::doc()`, which runs under the held write guard. Pinned
 /// per file, so a `txn.doc()` anywhere else still counts as an escape.
-const WRITE_TXN_DOC_SITES: &[(&str, usize)] = &[("crates/holon-loro/src/loro_share_backend.rs", 3)];
+const WRITE_TXN_DOC_SITES: &[(&str, usize)] = &[("crates/holon-loro/src/loro_share_backend.rs", 4)];
 
 /// Calls of a `doc()` accessor belonging to another type, with that type's
 /// name. Pinned per file, so an escape added alongside them still counts.
@@ -229,6 +229,11 @@ const DOC_ESCAPES: &[(&str, usize)] = &[
     (
         "crates/holon-integration-tests/src/pbt/loro_sync/stub_sut.rs",
         4,
+    ),
+    // Tests planting a mount in the global doc, the way an accept does.
+    (
+        "crates/holon-integration-tests/tests/loro_suite/loro_projection_share_rows.rs",
+        2,
     ),
     (
         "crates/holon-integration-tests/tests/loro_suite/projection_harness.rs",
@@ -263,10 +268,9 @@ const DOC_ESCAPES: &[(&str, usize)] = &[
     ("crates/holon-loro/src/import_atomicity_probe.rs", 7),
     // cfg(test) probe that measures raw-doc `revert_to` semantics on purpose (D146).
     ("crates/holon-loro/src/revert_to_rollback_probe.rs", 7),
-    // +2: `layout_writer` and `block_sort_key`'s global arm, both re-wrapping an
-    // existing `Arc<LoroDoc>` via `from_existing` so the wrapper keeps the same
-    // boundary lock.
-    ("crates/holon-loro/src/loro_backend.rs", 10),
+    // +1: `layout_writer`, re-wrapping an existing `Arc<LoroDoc>` via
+    // `from_existing` so the wrapper keeps the same boundary lock.
+    ("crates/holon-loro/src/loro_backend.rs", 9),
     // +1: the origin-watching subscription the scope-origin tests register.
     // +1: the stray-batch pin, which must build the state a broken write path
     // would leave behind and so cannot go through `with_write`.
@@ -283,7 +287,8 @@ const DOC_ESCAPES: &[(&str, usize)] = &[
     // +1: the share projection's global-doc commit subscription, which wakes it
     // when this device moves the mount that places the share (D198.a).
     // +2: tests planting a mount in the global doc, the way an accept does.
-    ("crates/holon-loro/src/loro_share_backend.rs", 19),
+    // +1: a test planting a page's `#+TODO` vocabulary, as org ingest stores it.
+    ("crates/holon-loro/src/loro_share_backend.rs", 20),
     // +1: the layout doc's `subscribe_root` registration, same rationale as the
     // global doc's.
     ("crates/holon-loro/src/loro_sync_controller.rs", 2),

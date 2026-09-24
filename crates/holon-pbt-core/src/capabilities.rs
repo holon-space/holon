@@ -3891,6 +3891,10 @@ pub trait SutTwoInstance {
     /// Move `id` under `new_parent` on the RECEIVER through its production
     /// `move_block` op.
     async fn move_on_receiver(&self, id: &EntityUri, new_parent: &EntityUri);
+
+    /// Delete `id` on the RECEIVER through its production `delete_subtree`
+    /// op when `subtree`, else its bare `delete` op.
+    async fn delete_on_receiver(&self, id: &EntityUri, subtree: bool);
 }
 
 /// SUT-side observation of the RECEIVER instance's projections. Separate from
@@ -3938,6 +3942,19 @@ pub trait SutReceiverBackend {
     /// The receiver's `block_raw` rows, after settle — the receiver twin of
     /// [`SutBackend::block_raw_snapshot`].
     async fn receiver_block_raw_snapshot(&self) -> Vec<holon_api::Block>;
+
+    /// The `sort_key` column of the receiver's row `id`, `None` without a row.
+    async fn receiver_row_sort_key(&self, id: &EntityUri) -> Option<String>;
+
+    /// The sort key of the node that positions `id` in the receiver's own
+    /// Loro tree: for a placed page, the mount that places it. `None` when the
+    /// receiver's authority holds no position for `id`.
+    async fn receiver_placement_sort_key(&self, id: &EntityUri) -> Option<String>;
+
+    /// The parent the receiver's Loro authority gives block `id` — for a
+    /// placed page, its mount's parent. `None` when the authority holds no
+    /// such block, in its own tree or in any share it has loaded.
+    async fn receiver_authority_parent(&self, id: &EntityUri) -> Option<EntityUri>;
 }
 
 /// One block the RECEIVER authored, as the two-writer model predicts it: where
@@ -3962,6 +3979,9 @@ pub struct PageShare {
     pub owner_parent: EntityUri,
     /// Whether the receiver has moved the page since it accepted the share.
     pub moved: bool,
+    /// Whether the receiver has left the share by deleting the page. The owner
+    /// still shares it.
+    pub left: bool,
 }
 
 /// Reference-side view of what the receiver is ENTITLED to hold, and how many
@@ -4011,6 +4031,10 @@ pub trait RefSharedView {
 
     /// Receiver pages a shared page may be placed under.
     fn receiver_pages(&self) -> Vec<EntityUri>;
+
+    /// `page` and every block the model holds below it — what a per-page share
+    /// of `page` carries.
+    fn page_share_subtree(&self, page: &EntityUri) -> BTreeSet<EntityUri>;
 }
 
 /// Write side of [`RefSharedView`] — the two model mutations the sharing
@@ -4039,6 +4063,9 @@ pub trait RefSharedViewMut: RefSharedView {
 
     /// Record the receiver moving the shared `page` under `new_parent`.
     fn note_placed_root_move(&mut self, page: &EntityUri, new_parent: EntityUri);
+
+    /// Record the receiver deleting the shared `page`, which leaves the share.
+    fn note_placed_root_left(&mut self, page: &EntityUri);
 }
 
 #[cfg(test)]

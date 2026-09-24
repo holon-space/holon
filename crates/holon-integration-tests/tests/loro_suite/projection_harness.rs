@@ -85,6 +85,23 @@ impl MemorySink {
         self.read_calls.load(Ordering::SeqCst)
     }
 
+    /// Put `block` into the sink as if an earlier session had projected it —
+    /// the durable `holon.db` a cold boot reconciles against. Its properties
+    /// sit in the `properties` JSON column, where the SQL provider packs them.
+    pub(crate) fn plant_row(&self, block: Block) {
+        let id = block.id.to_string();
+        let properties = block.properties.clone();
+        let mut params = holon_loro::block_to_params(&SnapshotBlock {
+            block,
+            sort_key: "A0".to_string(),
+        });
+        for key in properties.keys() {
+            params.remove(key.as_str());
+        }
+        params.insert("properties".into(), Value::Object(properties));
+        self.blocks.lock().unwrap().insert(id, params);
+    }
+
     pub(crate) fn row_ids(&self) -> Vec<String> {
         let mut ids: Vec<String> = self.blocks.lock().unwrap().keys().cloned().collect();
         ids.sort();

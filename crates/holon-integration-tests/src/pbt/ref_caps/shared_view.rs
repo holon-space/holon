@@ -92,6 +92,19 @@ impl RefSharedView for ReferenceState {
             .map(|p| EntityUri::parse(p).expect("a well-formed receiver page id"))
             .collect()
     }
+
+    fn page_share_subtree(&self, page: &EntityUri) -> BTreeSet<EntityUri> {
+        let mut members = BTreeSet::from([page.clone()]);
+        let mut frontier = vec![page.clone()];
+        while let Some(parent) = frontier.pop() {
+            for child in self.children_of(&parent) {
+                if members.insert(child.clone()) {
+                    frontier.push(child);
+                }
+            }
+        }
+        members
+    }
 }
 
 impl RefSharedViewMut for ReferenceState {
@@ -123,6 +136,7 @@ impl RefSharedViewMut for ReferenceState {
                 receiver_parent,
                 owner_parent,
                 moved: false,
+                left: false,
             },
         );
     }
@@ -134,5 +148,12 @@ impl RefSharedViewMut for ReferenceState {
             });
         share.receiver_parent = new_parent;
         share.moved = true;
+    }
+
+    fn note_placed_root_left(&mut self, page: &EntityUri) {
+        let share = self.sharing.page_shares.get_mut(page).unwrap_or_else(|| {
+            panic!("DeletePlacedRoot names {page}, which the model never shared")
+        });
+        share.left = true;
     }
 }

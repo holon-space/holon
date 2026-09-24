@@ -50,6 +50,7 @@ use holon_loro::sync_transport::StablePeerId;
 use holon_pbt_core::TransitionImpl;
 use holon_pbt_core::capabilities::SutBackend;
 use holon_pbt_core::capabilities::SutBlockCreate;
+use holon_pbt_core::capabilities::SutOrderKeys;
 use holon_pbt_core::capabilities::SutOrgRead;
 use holon_pbt_core::capabilities::SutReceiverBackend;
 use holon_pbt_core::capabilities::SutTwoInstance;
@@ -85,6 +86,7 @@ use crate::pbt::composed::wide_e2e::wide_e2e_ref;
 use crate::pbt::op_write_cap::IdResolver;
 use crate::pbt::reference_state::ReferenceState;
 use crate::pbt::transitions::CreateBlockUnderFocus;
+use crate::pbt::transitions::DeletePlacedRoot;
 use crate::pbt::transitions::E2ETransition;
 use crate::pbt::transitions::MovePlacedRoot;
 use crate::pbt::transitions::Nothing;
@@ -160,6 +162,9 @@ pub struct TwoInstanceHandle {
     /// owner's: `CapMap` is keyed by cap TYPE, so one map cannot hold two
     /// realizations of `SutBlockCreate`).
     receiver_create: Arc<dyn SutBlockCreate>,
+    /// The receiver's `sort_key` column, which the domain `Block` does not
+    /// carry.
+    receiver_order: Arc<dyn SutOrderKeys>,
     /// The OWNER-side reconcile map. A peer write names its parent in oracle id
     /// space; the receiver holds that block under the owner's REAL id, so the
     /// parent has to be resolved through the owner's resolver before the
@@ -632,6 +637,7 @@ impl SutTwoInstance for TwoInstanceHandle {
                 "the receiver refused to accept the share of {page} under {receiver_parent}: {e:#}"
             )
         });
+        self.settle_shares().await;
     }
 
     async fn move_on_receiver(&self, id: &EntityUri, new_parent: &EntityUri) {
@@ -647,6 +653,18 @@ impl SutTwoInstance for TwoInstanceHandle {
             .unwrap_or_else(|e| {
                 panic!("the receiver refused to move {id} under {new_parent}: {e:#}")
             });
+        self.settle_shares().await;
+    }
+
+    async fn delete_on_receiver(&self, id: &EntityUri, subtree: bool) {
+        let id = self.resolve_owner_id(id);
+        let mut params = holon_api::StorageEntity::new();
+        params.insert("id".into(), holon_api::Value::String(id.to_string()));
+        let op = if subtree { "delete_subtree" } else { "delete" };
+        dispatch_op(&self.receiver, "receiver", "block", op, params)
+            .await
+            .unwrap_or_else(|e| panic!("the receiver refused to delete {id}: {e:#}"));
+        self.settle_shares().await;
     }
 
     async fn sync_witness(&self) -> SyncRoundWitness {
@@ -661,6 +679,45 @@ impl SutTwoInstance for TwoInstanceHandle {
 }
 
 impl TwoInstanceHandle {
+    /// Wait until every per-share write has crossed to the other side and
+    /// reached both projections, so a judge sees a share op's whole effect.
+    async fn settle_shares(&self) {
+        use holon_loro::loro_share_backend::SettleScope;
+        for (side, handle) in [
+            ("receiver", &self.receiver),
+            ("owner", &self.owner),
+            ("receiver", &self.receiver),
+        ] {
+            handle
+                .frontend()
+                .unwrap_or_else(|| panic!("the {side} boots a frontend session"))
+                .share_backend()
+                .await
+                .unwrap_or_else(|| panic!("the {side} wires the share machinery"))
+                .wait_for_workers_idle(SettleScope::IncludingSync)
+                .await;
+        }
+    }
+
+    /// The receiver's Loro authority, following its mounts into every share
+    /// it has loaded.
+    async fn receiver_authority(&self) -> holon_loro::loro_backend::LoroBackend {
+        let frontend = self
+            .receiver
+            .frontend()
+            .expect("the receiver boots a frontend session");
+        let global = frontend
+            .loro_doc_store()
+            .expect("the receiver runs the Loro store")
+            .get_doc(DocScope::Global)
+            .await
+            .expect("the receiver's global doc");
+        let shared = frontend
+            .shared_tree_store()
+            .expect("the receiver wires the share machinery");
+        holon_loro::loro_backend::LoroBackend::from_document(global).with_shared_trees(shared)
+    }
+
     /// Oracle id space → the owner's real id, which a shared page keeps on
     /// both peers.
     fn resolve_owner_id(&self, id: &EntityUri) -> EntityUri {
@@ -757,6 +814,32 @@ impl SutReceiverBackend for TwoInstanceHandle {
 
     async fn receiver_block_raw_snapshot(&self) -> Vec<holon_api::Block> {
         self.receiver_backend.block_raw_snapshot().await
+    }
+
+    async fn receiver_row_sort_key(&self, id: &EntityUri) -> Option<String> {
+        self.receiver_order
+            .live_block_order_keys()
+            .await
+            .into_iter()
+            .find(|(row, _)| row == id)
+            .map(|(_, key)| key)
+    }
+
+    async fn receiver_placement_sort_key(&self, id: &EntityUri) -> Option<String> {
+        self.receiver_authority()
+            .await
+            .block_sort_key(id.as_str())
+            .await
+            .unwrap_or_else(|e| panic!("the receiver's authority cannot place {id}: {e}"))
+    }
+
+    async fn receiver_authority_parent(&self, id: &EntityUri) -> Option<EntityUri> {
+        use holon_api::repository::CoreOperations;
+        match self.receiver_authority().await.get_block(id.as_str()).await {
+            Ok(block) => Some(block.parent_id),
+            Err(holon_api::ApiError::BlockNotFound { .. }) => None,
+            Err(e) => panic!("the receiver's authority cannot read {id}: {e}"),
+        }
     }
 
     async fn crdt_converged(&self) -> Option<bool> {
@@ -961,6 +1044,7 @@ async fn boot_two_instances_seeded_on(
         clock: crate::pbt::frontend_slice::components::keystone_boot_clock(),
         receiver_boot_ids,
         receiver_create: receiver_caps.expect::<dyn SutBlockCreate>(),
+        receiver_order: receiver_caps.expect::<dyn SutOrderKeys>(),
         owner_resolver: Arc::clone(resolver),
         state: Mutex::new(SharingRuntime::default()),
     });
@@ -1033,6 +1117,7 @@ impl ReferenceStateMachine for TwoInstanceMachine {
         // Overlay proposal's increment 1). Exclusive with `ShareContainer`.
         offer!(SharePage);
         offer!(MovePlacedRoot);
+        offer!(DeletePlacedRoot);
         // `Nothing` has no preconditions, so `arms` is never empty and the
         // Union below cannot panic on a state where everything else is gated.
         offer!(Nothing);

@@ -226,8 +226,8 @@ An accepted shared doc is projected into the recipient's SQL `block` table
 (`project_descendants_to_sql` + `spawn_projection_worker`), keyed by the
 **block ids chosen by the remote sharer**. Shared and locally-authored content
 share one id space in one table, distinguished only by a `shared-tree-id`
-property. Initial projection uses `create` (INSERT OR IGNORE), so a colliding
-id is dropped on accept — but the **ongoing** worker emits `update`/`delete`
+property. Initial projection uses `create` (an UPSERT), guarded by the collision
+check below — and the **ongoing** worker emits `update`/`delete`
 via `diff_snapshots_to_ops`. A sharer who knows/guesses a recipient id (e.g. a
 well-known seed like `block:journals`) could later mutate a node with that id in
 the shared doc and the diff would `update`/`delete` the recipient's own row.
@@ -297,20 +297,48 @@ subtree hangs here.
   the shared doc, so a recipient's placement never reaches the owner. The
   share's projection worker is woken by global-doc commits too, so the move
   reaches `P`'s row.
+- **The share kind is fixed when the share is made.** `share_subtree` reads
+  the root's `Page` tag once and records the kind in the shared doc (map
+  `share`: `kind`, and `root` for a page share). Each device copies it onto its
+  mount (`kind`, `root`), with its side of the share (`mount_role`:
+  `owner` / `recipient`). The projection and the authority read the mount's
+  record, never the root's current tag: an owner who later removes `Page` from
+  `P` changes a field of `P`, not how any device places it. A mount made before
+  the record existed gets its kind at rehydration (the shared record, else the
+  tag, read that once); its role cannot be recovered.
+- **A share is known by its handle**: the page `P` for a page share, the
+  container row for a block share. `unshare` takes the handle (the mount id of a
+  page share is internal and refused); `accept_shared_subtree` returns it as
+  `handle`; the pairing refusal (D73.a) names each share by it.
+- **A recipient's delete of `P` leaves the share** (bare `delete`,
+  `delete_subtree` or any other route that reaches the authority): the mount,
+  the loaded shared doc, the workers, the projected rows and the local snapshot
+  go, and a `left-shared-page` notice says so. The shared doc is never written,
+  so the owner's page is unchanged. An owner's delete of `P` still deletes the
+  page for everyone. A mount without a recorded role refuses the delete and
+  names `unshare`.
 - **One placement per share per device.** A second `accept_shared_subtree` of
-  a share this device already mounts is refused before any network work, naming
-  the existing mount.
+  a share this device already mounts is refused, naming the share's handle:
+  before any network work, and again inside the write transaction that creates
+  the mount, so two concurrent accepts of one ticket place it once.
 - **The global Loro→SQL projection skips mount nodes**, and its full reseed
-  leaves rows stamped `shared-tree-id` alone: the share's own projection owns
-  every row of the tree it places.
+  leaves alone exactly the rows of the shares loaded right now: every live node
+  of each registered shared doc, plus each block share's container row. A
+  `shared-tree-id` property protects nothing — it is drawer data a file can
+  carry — so a stale stamp, a pre-D198.a mount row, and the rows of a share
+  that did not load (or whose doc lost the node) are reconciled away.
+- **The editor's cell route follows mounts too** (`BlockCellRegistry::with_shared_trees`):
+  structural ops that reach the authority through it (`move_block`,
+  `delete_subtree`) land in the share, not in a SQL-only write.
 - The org file of a page share is `P`'s own; the ingest guard
-  (`is_registered_mount`) recognizes it by `P`'s id through the mount that
-  places it.
+  (`is_registered_mount`) recognizes it by `P`'s id, recorded on the mount.
 
 Covered by `share_page_keeps_the_pages_identity`,
-`accept_page_keeps_the_pages_identity_and_places_it_locally` and the
-two-instance keystone transitions `SharePage` / `MovePlacedRoot`
-(`inv-share-mount-carries-page-identity`, `inv-overlay-placement-local`).
+`accept_page_keeps_the_pages_identity_and_places_it_locally`, the page-share
+tests beside them (R1–R7 of the increment-1 review), `loro_projection_share_rows`
+and the two-instance keystone transitions `SharePage` / `MovePlacedRoot` /
+`DeletePlacedRoot` (`inv-share-mount-carries-page-identity`,
+`inv-overlay-placement-local`).
 
 **Sibling position is not preserved.** `commit_share_prune` deletes the subtree
 and `create_mount_node` appends a fresh node at the end of the parent's child
@@ -369,7 +397,7 @@ divergent edits.
 - **Teardown exists.** `unshare` and `gc_orphans` are both registered
   operations on entity `tree`, alongside `share_subtree` and
   `accept_shared_subtree`; `list_operations` on that entity returns all four.
-  `unshare` takes the share's `mount_block_id` and tears down in a
+  `unshare` takes the share's handle (see "Mount nodes") and tears down in a
   resurrection-safe order — per-share workers first, so no worker can re-write
   the snapshot after it is deleted, then the advertiser endpoint, then the
   shared-doc registration, then the mount node. `gc_orphans` deletes
