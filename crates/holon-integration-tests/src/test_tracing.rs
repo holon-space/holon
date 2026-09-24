@@ -819,8 +819,18 @@ impl SpanCollector {
     /// provider — falling back to the declared name for a dispatch that
     /// errored out before routing settled.
     pub fn dispatched_operations(&self) -> std::collections::BTreeSet<(String, String)> {
+        self.dispatched_operations_since(std::time::SystemTime::UNIX_EPOCH)
+    }
+
+    /// [`Self::dispatched_operations`] restricted to dispatches that started
+    /// at or after `opened`, whatever the window still holds from before it.
+    pub fn dispatched_operations_since(
+        &self,
+        opened: std::time::SystemTime,
+    ) -> std::collections::BTreeSet<(String, String)> {
         self.spans_named("dispatcher.execute_operation")
             .iter()
+            .filter(|span| span.start_time >= opened)
             .filter_map(|span| {
                 let entity = span_attr(span, "operation.resolved_entity")
                     .or_else(|| span_attr(span, "operation.entity"))?;

@@ -68,5 +68,30 @@ red at 8276 ms against 5000 ms; the same sleep classed Maintenance passes at
 `settle_class` (only global `*` ops may be Maintenance). Re-adding the
 rebuild to `full_sync` reds `full_sync_syncs_without_touching_the_watch_views`.
 
-Open gap: `rebuild_views` discloses what it did only when it ends (the MCP
-result and a log line). No UI shows progress while it runs.
+## Rung 2: the maintenance class leaked, and the op ran undisclosed
+Found by a fresh verifier of the D214 remedy (probe sidecar
+`[RebuildViews, Reboot]`, no repo edit).
+
+- Class leak (ORACLE, in the harness). `ComposedSut::rebooted` opens the span
+  window only after the boot, so `note_settle` for a `Reboot` read the ops the
+  PREVIOUS transition dispatched. After `RebuildViews` the probe logged
+  `action=Reboot … budget_ms=12000`; the control `[NavigateFocus, Reboot]`
+  took the 5000 ms path. A reboot regression between 5 s and 12 s could not
+  go red there. Fix: `SettleLatencyLifecycle::note_settle` takes the instant
+  the transition's timed window opened, and the class is read from
+  `fired_operations_since(opened)` (dispatch spans that started at or after
+  it). No transition depends on a span-window reset for its class any more,
+  so a transition that dispatches nothing is always Interaction, on every
+  path. Red on the base: `a_transition_is_classed_only_by_the_ops_it_dispatched`
+  (`lane-logs/red-1-class-leak.log`). Tooth T1, the stale window put back:
+  red (`lane-logs/teeth-T1-stale-window.log`).
+- No disclosure while running. D214 requires the op to disclose itself
+  while it runs; it did so only when it ended. Fix: the dispatcher raises
+  `ConditionKind::WatchViewsRebuilding` (subject `watch-views`, all-clear
+  `AllClear::RaisingOperationEnds`) for the whole op through a drop guard,
+  so the condition clears however the op ends. `rebuild_views` is advertised
+  only where a `ConditionBus` is wired. Red on the base:
+  `rebuild_views_is_disclosed_while_it_runs_and_not_after`
+  (`crates/holon-app/tests/`, `lane-logs/red-2-running-disclosure.log`).
+  Tooth T2, the guard dropped at once: red
+  (`lane-logs/teeth-T2-no-running-disclosure.log`).

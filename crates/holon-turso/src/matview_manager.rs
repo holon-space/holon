@@ -820,7 +820,8 @@ impl MatviewManager {
                                 if let Some(senders) = subscribers.get_mut(view_name) {
                                     // A keyed subscriber owns one watch on a shared
                                     // relation, so it sees only its own rows. An
-                                    // empty result is not delivered: forwarding
+                                    // empty result without a disclosure is not
+                                    // delivered: forwarding
                                     // other watches' traffic as empty batches would
                                     // multiply the churn every consumer already has
                                     // to settle.
@@ -839,7 +840,9 @@ impl MatviewManager {
                                             mine.inner.items.retain(|item| {
                                                 item.watch_key.as_deref() == Some(key.as_str())
                                             });
-                                            if mine.inner.items.is_empty() {
+                                            if mine.inner.items.is_empty()
+                                                && mine.metadata.degraded.is_none()
+                                            {
                                                 !sub.tx.is_closed()
                                             } else {
                                                 send_batch(&sub.tx, mine, view_name)

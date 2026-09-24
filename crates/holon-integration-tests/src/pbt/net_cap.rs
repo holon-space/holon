@@ -34,8 +34,14 @@ pub trait SutDerivedNet {
 /// the `dispatcher.execute_operation` span, so this sees ops a component's own
 /// write caps never routed — rule firings and follow-up dispatches included.
 pub fn fired_operations_from_spans() -> BTreeSet<(String, String)> {
+    fired_operations_since(std::time::SystemTime::UNIX_EPOCH)
+}
+
+/// [`fired_operations_from_spans`] for the dispatches that started at or after
+/// `opened`.
+pub fn fired_operations_since(opened: std::time::SystemTime) -> BTreeSet<(String, String)> {
     crate::test_tracing::SpanCollector::global()
-        .dispatched_operations()
+        .dispatched_operations_since(opened)
         .into_iter()
         .map(|(entity, op)| (EntityName::new(&entity).as_str().to_string(), op))
         .collect()

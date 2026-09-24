@@ -171,3 +171,39 @@ async fn a_rebuild_recreates_every_listened_view_it_can_and_names_each_one_it_ca
         })
         .expect("the healthy stream ended");
 }
+
+#[tokio::test]
+async fn a_subscriber_whose_view_cannot_be_recreated_is_told_so() {
+    let handle = live_database().await;
+    let manager = manager(&handle);
+    let sql = "SELECT id, extra FROM t2";
+    let (view, mut unkeyed) = manager
+        .ensure_and_subscribe(sql, None)
+        .await
+        .expect("subscribe unkeyed");
+    let (_, mut keyed) = manager
+        .ensure_and_subscribe(sql, Some("one-watch"))
+        .await
+        .expect("subscribe keyed");
+    handle.execute_ddl("DROP TABLE t2").await.expect("drop t2");
+
+    self::manager(&handle)
+        .rebuild_watch_views()
+        .await
+        .expect_err("a listened view over a dropped table cannot be recreated");
+
+    for (who, stream) in [("unkeyed", &mut unkeyed), ("keyed", &mut keyed)] {
+        let batch = tokio::time::timeout(Duration::from_secs(5), stream.next())
+            .await
+            .unwrap_or_else(|_| panic!("the {who} subscriber of {view} was never told"))
+            .expect("the stream ended");
+        let note = batch
+            .metadata
+            .degraded
+            .unwrap_or_else(|| panic!("the {who} subscriber got a batch with no disclosure"));
+        assert!(
+            note.contains(&view),
+            "the {who} subscriber's disclosure must name {view}: {note}"
+        );
+    }
+}

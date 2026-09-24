@@ -95,3 +95,27 @@ Test (1) cannot build a genuinely stale IVM view: every corruption shape known
 in the fork now passes (`tests/replace_into_matview_base.rs` is 30/30, including
 the formerly ignored rowid-REPLACE case). `random()` in the view stands in, to
 change what a rebuild produces.
+
+## Rung 2: a subscriber of a view that failed to recreate was never told
+Found by a fresh verifier: the Err named the failed view to the operator,
+but its live subscribers were left with a permanently silent stream.
+
+- Fix: when any step after the DROP fails and a subscriber still listens,
+  the actor sends that view's subscribers a batch whose
+  `BatchMetadata::degraded` names the view and the error. This is the
+  existing per-subscription disclosure path: the reactive layer lifts it to
+  `ReactiveRenderedRows::degraded` and the render shows it as
+  `degraded_disclosure`. The demux now delivers a keyed subscriber an empty
+  batch that carries a disclosure (it used to drop every empty keyed batch).
+  The note stays for the life of that subscription; a new subscription to the
+  view starts without it.
+- Red on the base: `a_subscriber_whose_view_cannot_be_recreated_is_told_so`
+  (`crates/holon-turso/tests/watch_view_rebuild.rs`,
+  `lane-logs/red-3-silenced-subscriber.log`). Teeth: T3 (no disclosure sent)
+  and T3b (keyed empty batches dropped again) both red
+  (`lane-logs/teeth-T3-*.log`, `lane-logs/teeth-T3b-*.log`).
+- `_rowid` stays in the compared row. `LiveData` records the `_rowid` of every
+  Created/Updated row, id-keyed ones included (`holon-api/src/live_data.rs`),
+  and resolves rowid-keyed deletes through that map (the CDC parse-failure
+  delete path emits them). Renumbered rowids that were not re-sent would
+  route a later delete to the wrong row.

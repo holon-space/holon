@@ -919,6 +919,7 @@ impl<S: ComposedSlice> ComposedSut<S> {
         let (before, after, caps, handle, action_us) = rt.block_on(async move {
             let before = sut_ids(&caps).await;
             S::invalidate_render_caches(&handle);
+            let opened = std::time::SystemTime::now();
             let t_action = std::time::Instant::now();
             let rebuilt =
                 tokio::time::timeout(wedge, S::reboot(handle, caps, resolver_ref, ref_state)).await;
@@ -938,7 +939,7 @@ impl<S: ComposedSlice> ComposedSut<S> {
             if let Some(l) =
                 caps.get::<dyn crate::pbt::composed::settle_latency::SettleLatencyLifecycle>()
             {
-                l.note_settle(&action, std::time::Duration::from_micros(action_us));
+                l.note_settle(&action, opened, std::time::Duration::from_micros(action_us));
             }
             tracing::info!(
                 target: "holon_latency",
@@ -1226,6 +1227,7 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
                 // the post-transition settled state (never a stale pre-mutation
                 // frame). No-op for slices without a render memo.
                 S::invalidate_render_caches(handle);
+                let opened = std::time::SystemTime::now();
                 let t_action = std::time::Instant::now();
                 // Bounded wait (`inv-settle-budget`): a WEDGED transition — the
                 // 2026-07-28 turso IVM regime held one navigation write for 23
@@ -1285,7 +1287,7 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
                 if let Some(l) =
                     caps.get::<dyn crate::pbt::composed::settle_latency::SettleLatencyLifecycle>()
                 {
-                    l.note_settle(&action, std::time::Duration::from_micros(action_us));
+                    l.note_settle(&action, opened, std::time::Duration::from_micros(action_us));
                 }
                 // Latency (end-to-end, action->visible rows): dispatch through the
                 // real pipeline plus the CDC settle — everything except final GPU

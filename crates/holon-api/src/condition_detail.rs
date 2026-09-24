@@ -225,6 +225,11 @@ impl ConditionKind {
                     .chain(duplicates.iter().cloned())
                     .collect(),
             ),
+
+            Self::WatchViewsRebuilding => ConditionDetail::prose(
+                "every watched view is being dropped and recreated; lists may lag until it \
+                 finishes",
+            ),
         }
     }
 }

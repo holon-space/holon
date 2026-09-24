@@ -128,6 +128,12 @@ pub enum ConditionKind {
     /// All-clear: none. Nothing re-applies the lost keystroke, so the notice
     /// stands until the user retypes and the session restarts.
     LocalEditNotApplied { detail: String },
+    /// `*::rebuild_views` is dropping and recreating every watch view. A
+    /// subscriber's list may lag or jump while it runs. `subject` is
+    /// [`WATCH_VIEWS_SUBJECT`].
+    ///
+    /// All-clear: the op returns, whatever its outcome.
+    WatchViewsRebuilding,
     /// The org write-back stream died and its supervisor could not keep it
     /// alive — edits reach Loro + SQL but stop reaching disk. String carries
     /// the supervisor's escalation summary (what died, how often).
@@ -325,6 +331,8 @@ pub enum ConditionKind {
 /// name. Used by [`ConditionKind::OwnerRecoveryCodeNotShown`].
 pub const OWNER_IDENTITY_SUBJECT: &str = "owner-identity";
 
+pub const WATCH_VIEWS_SUBJECT: &str = "watch-views";
+
 impl ConditionKind {
     /// Kind constants, so an all-clear site names the condition it lifts
     /// through the compiler instead of retyping the string.
@@ -353,6 +361,7 @@ impl ConditionKind {
     pub const OWNER_RECOVERY_CODE_NOT_SHOWN: &'static str = "owner-recovery-code-not-shown";
     pub const NESTED_SHARE_LOADED: &'static str = "nested-share-loaded";
     pub const DUPLICATE_MOUNT: &'static str = "duplicate-mount";
+    pub const WATCH_VIEWS_REBUILDING: &'static str = "watch-views-rebuilding";
 
     /// The condition's stable identity, paired with the subject to form a
     /// [`ConditionKey`]. Total: every degradation is a sticky
@@ -386,6 +395,7 @@ impl ConditionKind {
             Self::OwnerRecoveryCodeNotShown => Self::OWNER_RECOVERY_CODE_NOT_SHOWN,
             Self::NestedShareLoaded { .. } => Self::NESTED_SHARE_LOADED,
             Self::DuplicateMount { .. } => Self::DUPLICATE_MOUNT,
+            Self::WatchViewsRebuilding => Self::WATCH_VIEWS_REBUILDING,
         }
     }
 }

@@ -119,6 +119,8 @@ pub enum AllClear {
     RemedyApplied,
     /// Info only. See [`ConditionProfile::new`].
     Elapsed(Duration),
+    /// The operation that raised it returns, whatever its outcome.
+    RaisingOperationEnds,
     /// Nothing clears it in this process. Legal, and disclosed as such — a
     /// condition that is true for the whole session should say so rather than
     /// vanish and look resolved.
@@ -490,6 +492,15 @@ const OWNER_RECOVERY_CODE_NOT_SHOWN: ConditionProfile = ConditionProfile::new(
     &[],
 );
 
+const WATCH_VIEWS_REBUILDING: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Warning,
+    "Rebuilding views",
+    icons::RETRY,
+    ConditionPlacement::Toast,
+    AllClear::RaisingOperationEnds,
+    &[],
+);
+
 impl ConditionKind {
     /// This kind's profile. Total, like
     /// [`condition_kind`](ConditionKind::condition_kind): a new variant cannot
@@ -521,6 +532,7 @@ impl ConditionKind {
             Self::OwnerRecoveryCodeNotShown => OWNER_RECOVERY_CODE_NOT_SHOWN,
             Self::NestedShareLoaded { .. } => NESTED_SHARE_LOADED,
             Self::DuplicateMount { .. } => DUPLICATE_MOUNT,
+            Self::WatchViewsRebuilding => WATCH_VIEWS_REBUILDING,
         }
     }
 }

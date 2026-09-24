@@ -55,6 +55,7 @@ pub struct OperationDispatcher {
     observers: Vec<Arc<dyn OperationObserver>>,
     sync_token_store: Option<Arc<dyn SyncTokenStore>>,
     matview_manager: Option<Arc<crate::sync::MatviewManager>>,
+    condition_bus: Option<Arc<holon_api::ConditionBus>>,
     boundary_enforcer: Option<Arc<dyn BoundaryEnforcer>>,
     /// ADR 0031 Increment 3 — the world declared `#[require]` guards are
     /// evaluated against. Absent only in composition sites with no projection.
@@ -145,6 +146,11 @@ impl OperationDispatcher {
 
     pub fn set_matview_manager(&mut self, mgr: Arc<crate::sync::MatviewManager>) {
         self.matview_manager = Some(mgr);
+    }
+
+    /// The bus a maintenance op discloses itself on while it runs.
+    pub fn set_condition_bus(&mut self, bus: Arc<holon_api::ConditionBus>) {
+        self.condition_bus = Some(bus);
     }
 
     /// Install the registry-backed link classifier used to parse inline markup
@@ -796,6 +802,17 @@ impl OperationDispatcher {
                         .matview_manager
                         .as_ref()
                         .expect("rebuild_views is advertised only when a matview manager is wired");
+                    let bus = self
+                        .condition_bus
+                        .as_ref()
+                        .expect("rebuild_views is advertised only when a condition bus is wired");
+                    let _running = RaisedWhileRunning::raise(
+                        bus,
+                        holon_api::Condition {
+                            subject: holon_api::condition_bus::WATCH_VIEWS_SUBJECT.to_string(),
+                            reason: holon_api::ConditionKind::WatchViewsRebuilding,
+                        },
+                    );
                     let rebuilt = mgr
                         .rebuild_watch_views()
                         .await
@@ -1559,7 +1576,7 @@ impl OperationProvider for OperationDispatcher {
             });
         }
 
-        if self.matview_manager.is_some() {
+        if self.matview_manager.is_some() && self.condition_bus.is_some() {
             ops.push(OperationDescriptor {
                 entity_name: "*".into(),
                 entity_short_name: "all".to_string(),
@@ -1694,6 +1711,27 @@ impl OperationProvider for OperationDispatcher {
     }
 }
 
+/// A condition that stands exactly as long as the scope holding this runs,
+/// however that scope ends.
+struct RaisedWhileRunning<'a> {
+    bus: &'a holon_api::ConditionBus,
+    key: holon_api::ConditionKey,
+}
+
+impl<'a> RaisedWhileRunning<'a> {
+    fn raise(bus: &'a holon_api::ConditionBus, condition: holon_api::Condition) -> Self {
+        let key = condition.condition_key();
+        bus.emit(condition);
+        Self { bus, key }
+    }
+}
+
+impl Drop for RaisedWhileRunning<'_> {
+    fn drop(&mut self) {
+        self.bus.clear(&self.key);
+    }
+}
+
 pub struct OperationModule;
 
 impl Module for OperationModule {
@@ -1732,6 +1770,12 @@ impl Module for OperationModule {
                 dispatcher.set_sync_token_store(store);
             }
             dispatcher.set_matview_manager(matview_mgr);
+            if let Some(bus) = r
+                .optional_resolve_async::<Arc<holon_api::ConditionBus>>()
+                .await
+            {
+                dispatcher.set_condition_bus((*bus).clone());
+            }
             dispatcher.set_guard_world(Arc::new(crate::api::guard_world::SqlGuardWorld::new(
                 db_handle_provider.handle(),
             )));
@@ -2363,6 +2407,8 @@ mod tests {
         db.execute_ddl("DROP TABLE gone").await.expect("drop gone");
         let mut dispatcher = OperationDispatcher::new(vec![]);
         dispatcher.set_matview_manager(manager.clone());
+        let bus = Arc::new(holon_api::ConditionBus::new());
+        dispatcher.set_condition_bus(bus.clone());
         assert!(
             dispatcher
                 .operations()
@@ -2380,6 +2426,11 @@ mod tests {
             err.contains(&broken) && err.contains(&healthy),
             "the error must name the view that failed ({broken}) and the one rebuilt \
              ({healthy}): {err}"
+        );
+        assert!(
+            bus.current().is_empty(),
+            "the failed rebuild left its condition raised: {:?}",
+            bus.current()
         );
 
         db.execute(

@@ -4061,65 +4061,94 @@ impl TursoBackend {
         Self::handle_ddl(conn, &state.schema_catalog, &drop_sql)
             .await
             .map_err(|e| fail("dropping it", &e))?;
-        crate::matview_manager::cleanup_orphaned_dbsp_state_on_conn(conn, name)
-            .await
-            .map_err(|e| fail("checking for DBSP residue after its drop", &e))?;
+        let rebuilt: Result<ViewRebuild> = async {
+            crate::matview_manager::cleanup_orphaned_dbsp_state_on_conn(conn, name)
+                .await
+                .map_err(|e| fail("checking for DBSP residue after its drop", &e))?;
 
-        // Asked again after the drop is noted: a subscriber that registers
-        // later reads the drop log afterwards, so recreates its own view.
-        let sql = match (listened(name), listened_before) {
-            (Listened::Listened { sql: Some(sql) }, _)
-            | (Listened::Unlistened, Listened::Listened { sql: Some(sql) }) => sql,
-            (Listened::Unlistened, Listened::Unlistened) => return Ok(ViewRebuild::Dropped),
-            _ => {
-                return Err(StorageError::DatabaseError(
-                    "dropped, but it has live subscribers and no recorded SQL to recreate it \
-                     from, so their streams are silent"
-                        .into(),
-                ));
+            // Asked again after the drop is noted: a subscriber that registers
+            // later reads the drop log afterwards, so recreates its own view.
+            let sql = match (listened(name), listened_before) {
+                (Listened::Listened { sql: Some(sql) }, _)
+                | (Listened::Unlistened, Listened::Listened { sql: Some(sql) }) => sql,
+                (Listened::Unlistened, Listened::Unlistened) => return Ok(ViewRebuild::Dropped),
+                _ => {
+                    return Err(StorageError::DatabaseError(
+                        "dropped, but it has live subscribers and no recorded SQL to recreate it \
+                         from, so their streams are silent"
+                            .into(),
+                    ));
+                }
+            };
+            let create_sql = format!(
+                "CREATE MATERIALIZED VIEW IF NOT EXISTS {name} AS {}",
+                crate::util::strip_order_by(&sql)
+            );
+            Self::handle_ddl(conn, &state.schema_catalog, &create_sql)
+                .await
+                .map_err(|e| {
+                    fail(
+                        "dropped, then recreating it failed, so its subscribers are silent",
+                        &e,
+                    )
+                })?;
+
+            let Some(before) = held else {
+                return Ok(ViewRebuild::Recreated { sql });
+            };
+            let after = Self::query_rows(conn, &view_rows_sql(name), HashMap::new())
+                .await
+                .map_err(|e| {
+                    fail(
+                        "recreated, but reading it to correct its subscribers failed",
+                        &e,
+                    )
+                })?;
+            let items = crate::watch_view_rebuild::resync_changes(name, before, after)
+                .map_err(|e| fail("recreated, but its subscribers cannot be corrected", &e))?;
+            if !items.is_empty() {
+                Self::send_to_view_subscribers(cdc_broadcast, cdc_seq, name, items, None);
             }
-        };
-        let create_sql = format!(
-            "CREATE MATERIALIZED VIEW IF NOT EXISTS {name} AS {}",
-            crate::util::strip_order_by(&sql)
-        );
-        Self::handle_ddl(conn, &state.schema_catalog, &create_sql)
-            .await
-            .map_err(|e| {
-                fail(
-                    "dropped, then recreating it failed, so its subscribers are silent",
-                    &e,
-                )
-            })?;
-
-        let Some(before) = held else {
-            return Ok(ViewRebuild::Recreated { sql });
-        };
-        let after = Self::query_rows(conn, &view_rows_sql(name), HashMap::new())
-            .await
-            .map_err(|e| {
-                fail(
-                    "recreated, but reading it to correct its subscribers failed",
-                    &e,
-                )
-            })?;
-        let items = crate::watch_view_rebuild::resync_changes(name, before, after)
-            .map_err(|e| fail("recreated, but its subscribers cannot be corrected", &e))?;
-        if !items.is_empty() {
-            let seq = cdc_seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-            let _ = cdc_broadcast.send(BatchWithMetadata {
-                inner: Batch { items },
-                metadata: BatchMetadata {
-                    relation_name: name.to_string(),
-                    trace_context: None,
-                    linked_contexts: Vec::new(),
-                    sync_token: None,
-                    seq,
-                    degraded: None,
-                },
-            });
+            Ok(ViewRebuild::Recreated { sql })
         }
-        Ok(ViewRebuild::Recreated { sql })
+        .await;
+        if let Err(e) = &rebuilt
+            && matches!(listened(name), Listened::Listened { .. })
+        {
+            Self::send_to_view_subscribers(
+                cdc_broadcast,
+                cdc_seq,
+                name,
+                Vec::new(),
+                Some(format!(
+                    "rebuild_views dropped the view {name} behind this list and could not \
+                     restore it ({e}); the list may be stale and may no longer update"
+                )),
+            );
+        }
+        rebuilt
+    }
+
+    fn send_to_view_subscribers(
+        cdc_broadcast: &broadcast::Sender<BatchWithMetadata<RowChange>>,
+        cdc_seq: &AtomicU64,
+        view: &str,
+        items: Vec<RowChange>,
+        degraded: Option<String>,
+    ) {
+        let seq = cdc_seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        // No receiver means no subscriber is left to tell.
+        let _ = cdc_broadcast.send(BatchWithMetadata {
+            inner: Batch { items },
+            metadata: BatchMetadata {
+                relation_name: view.to_string(),
+                trace_context: None,
+                linked_contexts: Vec::new(),
+                sync_token: None,
+                seq,
+                degraded,
+            },
+        });
     }
 
     /// Drop every `watch_view_%` and start a new lease generation.
