@@ -68,6 +68,7 @@ allow = [
     "ISC",
     "Zlib",
     "Unicode-3.0",
+    "Unicode-DFS-2016",  # Unicode-3.0's predecessor; finl_unicode, via cooklang in guests/cooklang
     "BSL-1.0",
     "CC0-1.0",
     "MPL-2.0",
@@ -82,6 +83,7 @@ confidence-threshold = 0.8
 # third-party FSL crate still fails and a new Holon crate needs one line here.
 exceptions = [
     { crate = "holon", allow = ["FSL-1.1-ALv2"] },
+    { crate = "holon-abi-guest", allow = ["FSL-1.1-ALv2"] },
     { crate = "holon-advice", allow = ["FSL-1.1-ALv2"] },
     { crate = "holon-api", allow = ["FSL-1.1-ALv2"] },
     { crate = "holon-app", allow = ["FSL-1.1-ALv2"] },
@@ -97,6 +99,8 @@ exceptions = [
     { crate = "holon-filesystem", allow = ["FSL-1.1-ALv2"] },
     { crate = "holon-frontend", allow = ["FSL-1.1-ALv2"] },
     { crate = "holon-gpui", allow = ["FSL-1.1-ALv2"] },
+    { crate = "holon-guest-cooklang", allow = ["FSL-1.1-ALv2"] },
+    { crate = "holon-guest-testkit", allow = ["FSL-1.1-ALv2"] },
     { crate = "holon-integration-tests", allow = ["FSL-1.1-ALv2"] },
     { crate = "holon-kitchen", allow = ["FSL-1.1-ALv2"] },
     { crate = "holon-layout-testing", allow = ["FSL-1.1-ALv2"] },

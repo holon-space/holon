@@ -2,9 +2,9 @@
 //! through the window's interaction pump must come back as the painted frame.
 //!
 //! This is the path the MCP `screenshot` tool takes on Android, where there is
-//! no OS-level window capture. It relies on `Window::render_to_image` being
-//! available outside gpui's `test-support` feature, which only the holon-space
-//! zed fork provides; a fork rebase that loses it breaks this binary.
+//! no OS-level window capture. This binary enables gpui's `test-support`, which
+//! provides `render_to_image` by itself; the fork's release-build
+//! `render_to_image` is pinned by `just check-release-shape`.
 //!
 //! Run: cargo nextest run -p holon-gpui --features holon-gpui/pbt --test
 //! screenshot_readback_windowed

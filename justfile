@@ -33,6 +33,8 @@ CANON := "--workspace --features " + CANON_FEATURES
 #   * out-of-workspace manifests (holon-worker, dioxus-web) and `cargo mutants`.
 #   * scripts/capability-cert-native.sh, which needs `holon/test-helpers`;
 #     folding that into CANON_FEATURES would change what every gate compiles.
+#   * `check-release-shape`, whose point is the feature set without any
+#     dev-dependency.
 
 # Gate/check recipes write their logs to `target/gate-logs/<name>.log`, never to
 # a fixed /tmp path: `target/` is per jj workspace, so parallel lanes no longer
@@ -963,15 +965,17 @@ check-android:
 fmt-check:
     cargo fmt --check
 
-# Audit dependencies for vulnerabilities, license issues, and bans. The three
-# frontends with their own lockfile get the same license check.
+# Audit dependencies for vulnerabilities, license issues, and bans. The frontends
+# and wasm guests with their own lockfile get the same license check (the
+# cooklang guest's `.wasm` ships inside holon-plugin-host). `--locked` fails on
+# a stale lockfile instead of rewriting it unseen.
 deny:
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p target/gate-logs
-    cargo deny check 2>&1 | tee target/gate-logs/holon-deny.log
-    for fe in holon-worker dioxus-web waterui; do
-        cargo deny --manifest-path frontends/$fe/Cargo.toml --config deny.toml check licenses 2>&1 | tee target/gate-logs/holon-deny-$fe.log
+    cargo deny --locked check 2>&1 | tee target/gate-logs/holon-deny.log
+    for manifest in frontends/holon-worker frontends/dioxus-web frontends/waterui guests/cooklang guests/testkit; do
+        cargo deny --locked --manifest-path $manifest/Cargo.toml --config deny.toml check licenses 2>&1 | tee target/gate-logs/holon-deny-${manifest##*/}.log
     done
 
 # Find unused dependencies
@@ -1277,6 +1281,23 @@ gate-compile:
         2>&1 | tee target/gate-logs/gate-compile.log
     just check-web-arm
 
+# Every test target enables gpui's `test-support`, which provides
+# `Window::render_to_image` by itself; release builds get it only from the
+# holon-space zed fork, so a fork rebase that drops it (the in-app MCP
+# screenshot) fails here and in no test.
+# Typecheck of what ships: the workspace without any dev-dependency.
+check-release-shape:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p target/gate-logs
+    gpui_features=$(cargo tree --locked --workspace -e normal,build,features -i gpui)
+    if grep -q 'gpui feature "test-support"' <<<"$gpui_features"; then
+        echo "check-release-shape: a non-dev dependency enables gpui/test-support, so this check no longer sees the release API" >&2
+        exit 1
+    fi
+    cargo check --locked --workspace --lib --bins \
+        2>&1 | tee target/gate-logs/check-release-shape.log
+
 # Reclaim superseded `target/<profile>/build/<crate>/<hash>/` directories
 # (D85.c part A): a hash dir is garbage once a newer dir for the same
 # crate/target exists. The CANON feature shape above is what stops NEW churn;
@@ -1371,37 +1392,39 @@ landing-gate:
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p target/gate-logs
-    echo "== landing [1/16]: fmt =="
+    echo "== landing [1/17]: fmt =="
     cargo fmt --all -- --check
-    echo "== landing [2/16]: typecheck incl. every test target =="
+    echo "== landing [2/17]: typecheck incl. every test target =="
     just gate-compile
-    echo "== landing [3/16]: browser-target typecheck =="
+    echo "== landing [3/17]: typecheck of the release feature set =="
+    just check-release-shape
+    echo "== landing [4/17]: browser-target typecheck =="
     just check-frontend-wasm
-    echo "== landing [4/16]: out-of-workspace browser frontend =="
+    echo "== landing [5/17]: out-of-workspace browser frontend =="
     just check-dioxus-web-wasm
-    echo "== landing [5/16]: out-of-workspace wasi worker =="
+    echo "== landing [6/17]: out-of-workspace wasi worker =="
     just check-worker-wasm
-    echo "== landing [6/16]: architecture rules =="
+    echo "== landing [7/17]: architecture rules =="
     just gate-arch
-    echo "== landing [7/16]: @c4 structure matches the committed baseline =="
+    echo "== landing [8/17]: @c4 structure matches the committed baseline =="
     just arch-validate 2>&1 | tee target/gate-logs/landing-arch-validate.log
-    echo "== landing [8/16]: feature map matches the tree =="
+    echo "== landing [9/17]: feature map matches the tree =="
     /usr/bin/python3 scripts/featuremap.py check 2>&1 | tee target/gate-logs/landing-featuremap.log
-    echo "== landing [9/16]: architecture lints (archlint) =="
+    echo "== landing [10/17]: architecture lints (archlint) =="
     just analyze-arch 2>&1 | tee target/gate-logs/landing-analyze-arch.log
-    echo "== landing [10/16]: keystone smoke =="
+    echo "== landing [11/17]: keystone smoke =="
     just keystone-smoke
-    echo "== landing [11/16]: loro consolidator suite =="
+    echo "== landing [12/17]: loro consolidator suite =="
     just loro-suite
-    echo "== landing [12/16]: hand-authored regressions =="
+    echo "== landing [13/17]: hand-authored regressions =="
     just hand-authored
-    echo "== landing [13/16]: projector-lag lock =="
+    echo "== landing [14/17]: projector-lag lock =="
     just projector-lag-lock
-    echo "== landing [14/16]: latency SLO (D50.a) =="
+    echo "== landing [15/17]: latency SLO (D50.a) =="
     just latency-slo-gate
-    echo "== landing [15/16]: guest wasm artifacts match their source =="
+    echo "== landing [16/17]: guest wasm artifacts match their source =="
     just guests-verify
-    echo "== landing [16/16]: target-gc (D85.c, this lane's own target/ only) =="
+    echo "== landing [17/17]: target-gc (D85.c, this lane's own target/ only) =="
     just target-gc || echo "target-gc: non-fatal (busy or nothing to reclaim), see above"
     echo "== landing gate PASS =="
 

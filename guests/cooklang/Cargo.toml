@@ -6,6 +6,7 @@ name = "holon-guest-cooklang"
 version = "0.1.0"
 edition = "2021"
 publish = false
+license = "FSL-1.1-ALv2"
 
 [lib]
 crate-type = ["cdylib"]

@@ -119,3 +119,7 @@ fn max_scroll_shows_the_last_row_after_the_rows_are_replaced(cx: &mut TestAppCon
 fn max_scroll_shows_the_last_row_after_rows_are_pushed(cx: &mut TestAppContext) {
     max_scroll_shows_the_last_row(cx, LateRows::PushAfterFirstPaint);
 }
+
+// Installs the windowed capturing tracing subscriber before this binary's
+// first line of test code (see tests/test_init/mod.rs).
+mod test_init;
