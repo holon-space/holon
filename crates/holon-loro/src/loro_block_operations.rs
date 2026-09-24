@@ -79,6 +79,7 @@ pub struct LoroBlockOperations {
     /// scan the whole tree for its mount.
     mount_cache: crate::loro_backend::MountCache,
     shared_id_cache: crate::loro_backend::SharedIdCache,
+    condition_bus: Option<Arc<holon_api::ConditionBus>>,
 }
 
 impl LoroBlockOperations {
@@ -89,7 +90,14 @@ impl LoroBlockOperations {
             id_cache: Default::default(),
             mount_cache: Default::default(),
             shared_id_cache: Default::default(),
+            condition_bus: None,
         }
+    }
+
+    /// Handed to every backend, which discloses what it must not repair.
+    pub fn with_condition_bus(mut self, bus: Arc<holon_api::ConditionBus>) -> Self {
+        self.condition_bus = Some(bus);
+        self
     }
 
     /// Attach the shared-tree registry so per-operation write backends can
@@ -160,6 +168,9 @@ impl LoroBlockOperations {
             .with_id_cache(self.id_cache.clone())
             .with_mount_cache(self.mount_cache.clone())
             .with_shared_id_cache(self.shared_id_cache.clone());
+        if let Some(bus) = &self.condition_bus {
+            backend = backend.with_condition_bus(bus.clone());
+        }
         if let Some(store) = &self.shared_trees {
             backend = backend.with_shared_trees(store.clone());
         }

@@ -541,7 +541,7 @@ pub fn create_mount_node(
             !matches!(n.parent, TreeParentId::Deleted | TreeParentId::Unexist)
                 && read_mount_info(tree, n.id).is_some_and(|i| i.shared_tree_id == shared_tree_id)
         }),
-        "shared tree {shared_tree_id} already has a live mount; the mount cache assumes one"
+        "shared tree {shared_tree_id} already has a live mount in this doc"
     );
     let mount = tree.create(parent).context("Failed to create mount node")?;
     let meta = tree

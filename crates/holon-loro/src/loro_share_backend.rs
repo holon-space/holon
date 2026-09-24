@@ -250,6 +250,7 @@ fn spawn_save_worker(
     let doc_for_work = doc.clone();
     let store_for_work = store.clone();
     let bus_for_work = bus.clone();
+    let nested = Arc::new(std::sync::Mutex::new(NestedMountWatch::new(&doc)));
     let handle = debounced_commit_worker::spawn(
         doc.clone(),
         any_commit(),
@@ -260,6 +261,7 @@ fn spawn_save_worker(
             let doc = doc_for_work.clone();
             let store = store_for_work.clone();
             let bus = bus_for_work.clone();
+            nested.lock().unwrap().check(&bus, &id, &doc);
             async move {
                 if let Err(e) = store.save(&id, &doc) {
                     // Emit the degraded-mode signal for the UI. The
@@ -1636,6 +1638,36 @@ fn disclose_nested_mount(bus: &ConditionBus, shared_tree_id: &str, doc: &LoroDoc
         subject: shared_tree_id.to_string(),
         reason: ConditionKind::NestedShareLoaded { mount },
     });
+}
+
+/// Discloses a nested mount that live sync brings into an already loaded
+/// shared doc; load time is [`disclose_nested_mount`]'s job. Local writes
+/// cannot nest a share, so only a change in remote versions triggers a scan.
+struct NestedMountWatch {
+    remote_versions: loro::VersionVector,
+    disclosed: Option<TreeID>,
+}
+
+impl NestedMountWatch {
+    fn new(doc: &LoroDoc) -> Self {
+        Self {
+            remote_versions: crate::loro_backend::remote_versions(doc),
+            disclosed: shared_tree::any_live_mount(doc),
+        }
+    }
+
+    fn check(&mut self, bus: &ConditionBus, shared_tree_id: &str, doc: &LoroDoc) {
+        let versions = crate::loro_backend::remote_versions(doc);
+        if versions == self.remote_versions {
+            return;
+        }
+        self.remote_versions = versions;
+        let mount = shared_tree::any_live_mount(doc);
+        if mount.is_some() && mount != self.disclosed {
+            disclose_nested_mount(bus, shared_tree_id, doc);
+        }
+        self.disclosed = mount;
+    }
 }
 
 fn find_tree_id_by_stable_id(doc: &LoroDoc, stable_id: &EntityUri) -> Option<TreeID> {
@@ -7070,6 +7102,136 @@ mod tests {
             }
         }
         assert_eq!(disclosed, vec![st1]);
+        b.advertiser.close_all().await;
+    }
+
+    /// An older peer can sync a mount into a shared doc this device has
+    /// already loaded; the live import discloses it like a load does.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn a_nested_share_arriving_by_sync_is_disclosed() {
+        let (b, _d) = make_backend();
+        seed_page(&b, "host", None, "Host").await;
+        seed_block(&b, "gamma", Some("host"), "Gamma").await;
+        let (_, st1) = share_ok(&b, "block:gamma").await;
+        let shared = b.manager.get_doc(&st1).expect("the share's doc is loaded");
+        b.wait_for_workers_idle(SettleScope::LocalWrites).await;
+        let mut changes = b.degraded_bus().subscribe().changes;
+
+        let older_peer = shared.fork();
+        {
+            let tree = older_peer.get_tree(crate::loro_backend::TREE_NAME);
+            let root = tree.roots()[0];
+            shared_tree::create_mount_node(&tree, Some(root), "synced-inner-share", root).unwrap();
+            older_peer.commit();
+        }
+        shared
+            .import(
+                &older_peer
+                    .export(loro::ExportMode::updates(&shared.oplog_vv()))
+                    .unwrap(),
+            )
+            .unwrap();
+        b.wait_for_workers_idle(SettleScope::LocalWrites).await;
+
+        let mut disclosed = Vec::new();
+        while let Ok(change) = changes.try_recv() {
+            if let Some(event) = change.raised()
+                && let ConditionKind::NestedShareLoaded { .. } = &event.reason
+            {
+                disclosed.push(event.subject.clone());
+            }
+        }
+        assert_eq!(disclosed, vec![st1]);
+        b.advertiser.close_all().await;
+    }
+
+    /// Two paired devices that accept one ticket before they sync each create
+    /// a mount. After the merge, a warm and a cold mount cache both answer the
+    /// mount with the smallest TreeID, and the duplicate is disclosed once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn a_mount_accepted_twice_resolves_to_one_canonical_mount() {
+        let (b, _d) = make_backend();
+        seed_page(&b, "host", None, "Host").await;
+        seed_block(&b, "gamma", Some("host"), "Gamma").await;
+        let global = b.global_doc().await.unwrap();
+        let other_device = global.with_read(|doc| Ok(doc.fork())).unwrap();
+        other_device.set_peer_id(1).unwrap();
+        let (m1, st1) = share_ok(&b, "block:gamma").await;
+
+        let bus = Arc::new(ConditionBus::new());
+        let mut changes = bus.subscribe().changes;
+        let warm = reads_of(&b, global.clone()).with_condition_bus(bus.clone());
+        assert_eq!(page_id(warm.owning_page("block:gamma").unwrap()), m1);
+
+        let (tree_ids, m2) = global
+            .with_read(|doc| {
+                let tree = doc.get_tree(crate::loro_backend::TREE_NAME);
+                let m1_tid =
+                    find_tree_id_by_stable_id(doc, &EntityUri::parse(&m1)?).expect("m1 is live");
+                let shared_root = shared_tree::read_mount_info(&tree, m1_tid)
+                    .expect("m1 is a mount")
+                    .shared_root;
+                let host =
+                    find_tree_id_by_stable_id(&other_device, &EntityUri::parse("block:host")?)
+                        .expect("host is live on the other device");
+                let other_tree = other_device.get_tree(crate::loro_backend::TREE_NAME);
+                let m2_tid =
+                    shared_tree::create_mount_node(&other_tree, Some(host), &st1, shared_root)?;
+                set_stable_id(&other_device, m2_tid, "second-mount")?;
+                other_device.commit();
+                Ok(([m1_tid, m2_tid], "block:second-mount".to_string()))
+            })
+            .unwrap();
+        global
+            .apply_update(
+                &global
+                    .with_read(|doc| {
+                        Ok(other_device.export(loro::ExportMode::updates(&doc.oplog_vv()))?)
+                    })
+                    .unwrap(),
+            )
+            .unwrap();
+
+        assert!(
+            tree_ids[1] < tree_ids[0],
+            "the other device's mount sorts first, so the warm cache's m1 is stale"
+        );
+        let canonical = &m2;
+        let cold = reads_of(&b, global.clone());
+        assert_eq!(
+            page_id(cold.owning_page("block:gamma").unwrap()),
+            *canonical,
+            "cold"
+        );
+        assert_eq!(
+            page_id(warm.owning_page("block:gamma").unwrap()),
+            *canonical,
+            "warm"
+        );
+        assert_eq!(
+            page_id(warm.owning_page("block:gamma").unwrap()),
+            *canonical,
+            "warm again"
+        );
+
+        let mut disclosed = Vec::new();
+        while let Ok(change) = changes.try_recv() {
+            if let Some(event) = change.raised()
+                && let ConditionKind::DuplicateMount {
+                    canonical,
+                    duplicates,
+                } = &event.reason
+            {
+                disclosed.push((event.subject.clone(), canonical.clone(), duplicates.clone()));
+            }
+        }
+        assert_eq!(
+            disclosed,
+            vec![(st1, canonical.clone(), vec![m1.clone()])],
+            "disclosed once"
+        );
         b.advertiser.close_all().await;
     }
 

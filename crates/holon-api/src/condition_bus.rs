@@ -308,6 +308,16 @@ pub enum ConditionKind {
     /// All-clear: none. The state lives in the stored doc until the user
     /// unshares it, so the condition holds for the session.
     NestedShareLoaded { mount: String },
+    /// The global doc holds more than one live mount of one shared tree: two
+    /// devices accepted the same ticket before they synced. Holon uses the
+    /// mount with the smallest tree id on every device and does not delete
+    /// the others. `subject` is the shared tree.
+    ///
+    /// All-clear: none. The duplicates stay until the user deletes them.
+    DuplicateMount {
+        canonical: String,
+        duplicates: Vec<String>,
+    },
 }
 
 /// Subject of the device-wide conditions on this bus, which have no share to
@@ -341,6 +351,7 @@ impl ConditionKind {
     pub const BEARER_TICKET_ENROLLMENT: &'static str = "bearer-ticket-enrollment";
     pub const OWNER_RECOVERY_CODE_NOT_SHOWN: &'static str = "owner-recovery-code-not-shown";
     pub const NESTED_SHARE_LOADED: &'static str = "nested-share-loaded";
+    pub const DUPLICATE_MOUNT: &'static str = "duplicate-mount";
 
     /// The condition's stable identity, paired with the subject to form a
     /// [`ConditionKey`]. Total: every degradation is a sticky
@@ -373,6 +384,7 @@ impl ConditionKind {
             Self::BearerTicketEnrollment { .. } => Self::BEARER_TICKET_ENROLLMENT,
             Self::OwnerRecoveryCodeNotShown => Self::OWNER_RECOVERY_CODE_NOT_SHOWN,
             Self::NestedShareLoaded { .. } => Self::NESTED_SHARE_LOADED,
+            Self::DuplicateMount { .. } => Self::DUPLICATE_MOUNT,
         }
     }
 }

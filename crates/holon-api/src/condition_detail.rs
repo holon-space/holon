@@ -207,6 +207,19 @@ impl ConditionKind {
                  support a share inside a share, so pages in it may not resolve. To fix it, \
                  stop sharing {subject} and share its parts one by one"
             )),
+
+            // Block ids are BODY lines: the user finds and deletes them by id.
+            Self::DuplicateMount {
+                canonical,
+                duplicates,
+            } => ConditionDetail::with_body(
+                format!(
+                    "shared tree {subject} is mounted more than once, because two of your devices \
+                     accepted it before they synced. Holon uses {canonical}; delete these extra \
+                     mounts:"
+                ),
+                duplicates.clone(),
+            ),
         }
     }
 }

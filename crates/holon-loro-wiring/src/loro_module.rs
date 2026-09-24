@@ -126,7 +126,9 @@ impl Module for LoroModule {
         // are lazy factories, so registration order within `configure` is moot.
         injector.provide::<LoroBlockOperations>(Provider::root(|resolver| {
             let doc_store = resolver.resolve::<LoroDocumentStore>();
-            let ops = LoroBlockOperations::new(Arc::new(RwLock::new((*doc_store).clone())));
+            let bus = resolver.resolve::<Arc<holon_api::ConditionBus>>();
+            let ops = LoroBlockOperations::new(Arc::new(RwLock::new((*doc_store).clone())))
+                .with_condition_bus((*bus).clone());
             #[cfg(all(
                 feature = "iroh-sync",
                 not(all(target_arch = "wasm32", target_os = "unknown"))
