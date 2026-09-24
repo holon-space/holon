@@ -53,7 +53,6 @@
 //! build that is actually dogfooded. Guarded by
 //! `latency_events_are_emitted_above_the_release_level_ceiling`.
 
-use std::num::NonZeroUsize;
 use std::sync::Mutex;
 use std::time::Instant;
 use std::time::SystemTime;
@@ -62,6 +61,7 @@ use holon_api::latency_slo::ClockOrigin;
 use holon_api::latency_slo::E2eSample;
 use holon_api::latency_slo::OriginWindows;
 use holon_api::latency_slo::RungVerdict;
+use holon_api::latency_slo::Superseded;
 use holon_api::latency_slo::THROUGHPUT_FLOOR_WRITES_PER_SEC;
 use tracing::Event;
 use tracing::Metadata;
@@ -221,7 +221,7 @@ struct LatencyFields {
     contended: Option<bool>,
     delivery_batch: Option<u64>,
     source: Option<String>,
-    retired: Option<u64>,
+    superseded_ms: Option<String>,
 }
 
 impl LatencyFields {
@@ -232,6 +232,7 @@ impl LatencyFields {
             "block" => self.block = Some(value),
             "origin" => self.origin = Some(value),
             "source" => self.source = Some(value),
+            "superseded_ms" => self.superseded_ms = Some(value),
             _ => {}
         }
     }
@@ -246,8 +247,6 @@ impl Visit for LatencyFields {
             "in_flight" => self.in_flight = Some(value),
             "backlog" => self.backlog = Some(value),
             "delivery_batch" => self.delivery_batch = Some(value),
-            "retired" => self.retired = Some(value),
-
             _ => {}
         }
     }
@@ -319,7 +318,7 @@ impl<S: Subscriber> Layer<S> for LatencySloLayer {
                 Some(delivery_batch),
                 Some(source),
                 Some(target),
-                Some(retired),
+                Some(superseded),
             ) = (
                 fields.in_flight,
                 fields.backlog,
@@ -327,17 +326,29 @@ impl<S: Subscriber> Layer<S> for LatencySloLayer {
                 fields.delivery_batch,
                 fields.source,
                 fields.block,
-                fields.retired.and_then(|r| NonZeroUsize::new(r as usize)),
+                fields.superseded_ms,
             )
             else {
                 tracing::warn!(
                     target: "holon_oracles",
                     oracle = "latency-slo",
                     "[latency-slo] an `e2e` event carried no queue depths, delivery batch, source, \
-                     block or non-zero `retired` — this sample is unscoreable and the SLO rungs \
-                     are running on partial evidence",
+                     block or `superseded_ms` — this sample is unscoreable and the SLO rungs are \
+                     running on partial evidence",
                 );
                 return;
+            };
+            let superseded = match superseded.parse::<Superseded>() {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(
+                        target: "holon_oracles",
+                        oracle = "latency-slo",
+                        "[latency-slo] an `e2e` event carried {e} — this sample is unscoreable \
+                         and the SLO rungs are running on partial evidence",
+                    );
+                    return;
+                }
             };
             // Parsed, never defaulted: an unknown or missing origin would have
             // to be filed somewhere, and filing it as `ui` is precisely the
@@ -366,7 +377,7 @@ impl<S: Subscriber> Layer<S> for LatencySloLayer {
                 delivered_at: Instant::now(),
                 delivery_batch,
                 source,
-                retired,
+                superseded,
             });
         } else if ms > self.slo_ms {
             // Diagnostic attribution: which pipeline stage ate the budget.
@@ -449,7 +460,7 @@ mod tests {
                     contended = false,
                     delivery_batch = i as u64,
                     source = "block",
-                        retired = 1u64,
+                    superseded_ms = "",
                     "holon_latency",
                 );
             }
@@ -510,7 +521,7 @@ mod tests {
                         contended = false,
                         delivery_batch = i,
                         source = "block",
-                        retired = 1u64,
+                        superseded_ms = "",
                         "holon_latency",
                     );
                 }
@@ -588,7 +599,7 @@ mod tests {
                         backlog = 19 - i,
                         delivery_batch = i,
                         source = "block",
-                        retired = 1u64,
+                        superseded_ms = "",
                         "holon_latency",
                     );
                     // Real wall time — the drain rate is measured against the
@@ -641,7 +652,7 @@ mod tests {
                         contended = false,
                         delivery_batch = i,
                         source = "block",
-                        retired = 1u64,
+                        superseded_ms = "",
                         "holon_latency",
                     );
                 }
@@ -687,7 +698,7 @@ mod tests {
                         // Present, so the event reaches the origin check.
                         delivery_batch = i,
                         source = "block",
-                        retired = 1u64,
+                        superseded_ms = "",
                         "holon_latency",
                     );
                 }

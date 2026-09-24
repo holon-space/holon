@@ -17,7 +17,6 @@
 //! uses (`holon_oracles::latency`), which is the point: the banner the app
 //! paints and the gate that fails the build are the same two numbers.
 
-use std::num::NonZeroUsize;
 use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
@@ -29,6 +28,7 @@ use holon_api::latency_slo::E2eSample;
 use holon_api::latency_slo::OriginWindows;
 use holon_api::latency_slo::SERVICE_TIME_SLO_MS;
 use holon_api::latency_slo::SloWindow;
+use holon_api::latency_slo::Superseded;
 use holon_api::latency_slo::THROUGHPUT_FLOOR_WRITES_PER_SEC;
 
 /// Retention for a gate rung: past any rung's write count, so an armed stretch
@@ -145,7 +145,7 @@ struct E2eVisitor {
     delivery_batch: Option<u64>,
     source: Option<String>,
     block: Option<String>,
-    retired: Option<u64>,
+    superseded_ms: Option<String>,
 }
 
 impl tracing::field::Visit for E2eVisitor {
@@ -155,8 +155,6 @@ impl tracing::field::Visit for E2eVisitor {
             "in_flight" => self.in_flight = Some(value),
             "backlog" => self.backlog = Some(value),
             "delivery_batch" => self.delivery_batch = Some(value),
-            "retired" => self.retired = Some(value),
-
             _ => {}
         }
     }
@@ -180,6 +178,7 @@ impl tracing::field::Visit for E2eVisitor {
             "origin" => self.origin = Some(value.to_string()),
             "source" => self.source = Some(value.to_string()),
             "block" => self.block = Some(value.to_string()),
+            "superseded_ms" => self.superseded_ms = Some(value.to_string()),
             _ => {}
         }
     }
@@ -228,7 +227,7 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SloProbeLayer {
             Some(delivery_batch),
             Some(source),
             Some(target),
-            Some(retired),
+            Some(superseded),
         ) = (
             v.ms,
             v.in_flight,
@@ -237,14 +236,14 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SloProbeLayer {
             v.delivery_batch,
             v.source.clone(),
             v.block.clone(),
-            v.retired.and_then(|r| NonZeroUsize::new(r as usize)),
+            v.superseded_ms.clone(),
         )
         else {
             panic!(
                 "slo probe: an `e2e` event lacked ms/in_flight/backlog/contended/delivery_batch/\
-                 source/block/non-zero retired (ms={:?} in_flight={:?} backlog={:?} \
-                 contended={:?} delivery_batch={:?} source={:?} block={:?} retired={:?}) — the \
-                 correlator's emission and this probe have diverged",
+                 source/block/superseded_ms (ms={:?} in_flight={:?} backlog={:?} \
+                 contended={:?} delivery_batch={:?} source={:?} block={:?} superseded_ms={:?}) — \
+                 the correlator's emission and this probe have diverged",
                 v.ms,
                 v.in_flight,
                 v.backlog,
@@ -252,9 +251,12 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SloProbeLayer {
                 v.delivery_batch,
                 v.source,
                 v.block,
-                v.retired
+                v.superseded_ms
             );
         };
+        let superseded: Superseded = superseded.parse().unwrap_or_else(|e| {
+            panic!("slo probe: an `e2e` event carried {e} — the correlator's emission and this probe have diverged")
+        });
         // Same reasoning as the queue depths: a sample nobody can attribute to a
         // clock seam would have to be filed under a guess, and a guess here is
         // the pooled percentile D119.a forbids.
@@ -279,7 +281,7 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for SloProbeLayer {
                 delivered_at: Instant::now(),
                 delivery_batch,
                 source,
-                retired,
+                superseded,
             });
     }
 }

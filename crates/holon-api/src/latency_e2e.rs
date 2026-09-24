@@ -73,7 +73,8 @@
 //!   [`touched_entities`]). Closes the matching entries and emits, per closure:
 //!
 //!   `tracing::info!(target="holon_latency", stage="e2e", action, block,
-//!   origin, source, ms, in_flight, backlog, delivery_batch)`
+//!   origin, source, ms, in_flight, backlog, contended, superseded_ms,
+//!   delivery_batch)`
 //!
 //!   `delivery_batch` names the `rows_delivered` call that closed the entry,
 //!   so a consumer can tell which samples one applied batch retired together.
@@ -219,6 +220,67 @@ impl std::str::FromStr for ClockOrigin {
     }
 }
 
+/// The clocks one closure retired besides its winner: the older clocks on the
+/// winner's target it superseded, as their ages in whole milliseconds at the
+/// close. A consumer places each at its own dispatch, `delivered_at - age`.
+///
+/// Emitted as the `superseded_ms` field: the ages separated by single spaces,
+/// the empty string for none.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Superseded(Vec<u64>);
+
+impl Superseded {
+    pub fn new(ages_ms: Vec<u64>) -> Self {
+        Self(ages_ms)
+    }
+
+    pub fn ages_ms(&self) -> &[u64] {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for Superseded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut sep = "";
+        for age in &self.0 {
+            write!(f, "{sep}{age}")?;
+            sep = " ";
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MalformedSuperseded(pub String);
+
+impl std::fmt::Display for MalformedSuperseded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "malformed `superseded_ms` {:?} (expected whole milliseconds separated by single \
+             spaces)",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for MalformedSuperseded {}
+
+impl std::str::FromStr for Superseded {
+    type Err = MalformedSuperseded;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.is_empty() {
+            return Ok(Self::default());
+        }
+        s.split(' ')
+            .map(|age| age.parse::<u64>())
+            .collect::<Result<Vec<_>, _>>()
+            .map(Self)
+            .map_err(|_| MalformedSuperseded(s.to_string()))
+    }
+}
+
 /// What an interaction is waiting to SEE, and what a batch actually delivered —
 /// the same vocabulary on both ends of the correlation.
 ///
@@ -313,10 +375,10 @@ struct Closed {
     /// Whether the other origin overlapped this interaction's life, carried
     /// from [`Pending`].
     contended: bool,
-    /// Clocks this closure retired: the winner plus the older clocks on its
-    /// target that it superseded. The rows it delivered made all of them
-    /// visible, so a drain rate must count them all.
-    retired: usize,
+    /// The older clocks on its target this closure retired with the winner.
+    /// The rows it delivered made all of them visible, so a drain rate must
+    /// count them all, each at its own dispatch.
+    superseded: Superseded,
 }
 
 /// The pending-interaction registry, **partitioned by [`ClockOrigin`]**.
@@ -817,7 +879,7 @@ pub fn rows_delivered<'a>(
             // foreign traffic shared the pipeline anyway, which is what tells an
             // uncontended sample from a queued one (D119.a rounds 2-3).
             contended = c.contended,
-            retired = c.retired as u64,
+            superseded_ms = %c.superseded,
             delivery_batch,
             "holon_latency",
         );
@@ -943,10 +1005,19 @@ fn close_delivered<S: AsRef<str>>(
             continue;
         };
         let winner_t0 = pending[winner].t0;
-        let retired = pending
-            .iter()
-            .filter(|p| p.target == target && p.observable.kind() == kind && p.t0 <= winner_t0)
-            .count();
+        let superseded = Superseded(
+            pending
+                .iter()
+                .enumerate()
+                .filter(|&(i, p)| {
+                    i != winner
+                        && p.target == target
+                        && p.observable.kind() == kind
+                        && p.t0 <= winner_t0
+                })
+                .map(|(_, p)| now.duration_since(p.t0).as_millis() as u64)
+                .collect(),
+        );
         closed.push(Closed {
             action: pending[winner].action.clone(),
             target: pending[winner].target.clone(),
@@ -955,7 +1026,7 @@ fn close_delivered<S: AsRef<str>>(
             in_flight: pending[winner].in_flight,
             backlog: 0,
             contended: pending[winner].contended,
-            retired,
+            superseded,
         });
         // Remove the winner and all OLDER entries of the same (target, kind)
         // (superseded). A different kind on the same target is a different
@@ -1412,6 +1483,23 @@ mod tests {
         assert_eq!(pending.len(), 1, "the unexpired entry survives");
     }
 
+    /// `superseded_ms` round-trips, and anything but whole milliseconds
+    /// separated by single spaces is refused rather than read as fewer clocks.
+    #[test]
+    fn superseded_ages_parse_strictly() {
+        for ages in [vec![], vec![7], vec![5007, 12, 0]] {
+            let s = Superseded(ages);
+            assert_eq!(s.to_string().parse::<Superseded>(), Ok(s));
+        }
+        for bad in [" ", "5 ", " 5", "5  7", "5,7", "x", "-1"] {
+            assert_eq!(
+                bad.parse::<Superseded>(),
+                Err(MalformedSuperseded(bad.to_string())),
+                "{bad:?}"
+            );
+        }
+    }
+
     /// Tokenless ops (toggle/split/delete) correlate by newest-per-target and
     /// drop older same-target entries — a tokenless no-op cannot steal either.
     #[test]
@@ -1434,8 +1522,9 @@ mod tests {
             "newest entry's elapsed, not the older one's"
         );
         assert_eq!(
-            closed[0].retired, 2,
-            "the delivery made the superseded entry visible too"
+            closed[0].superseded,
+            Superseded(vec![5007]),
+            "the delivery made the superseded entry visible too, at its own age"
         );
         assert!(
             pending.is_empty(),
@@ -1519,7 +1608,11 @@ mod tests {
         );
         assert_eq!(closed.len(), 1);
         assert_eq!(closed[0].ms, 3);
-        assert_eq!(closed[0].retired, 1, "a newer entry is not retired");
+        assert_eq!(
+            closed[0].superseded,
+            Superseded::default(),
+            "a newer entry is not retired"
+        );
         assert_eq!(
             pending.len(),
             1,

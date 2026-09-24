@@ -287,7 +287,7 @@ enum DrivePhase {
 
 /// Writes the drive has seen retired, superseded ones included.
 fn retired(window: &SloWindow) -> usize {
-    window.samples().iter().map(|s| s.retired.get()).sum()
+    window.samples().iter().map(|s| s.retired().get()).sum()
 }
 
 /// Offer writes through the production fire-and-forget door, one per
@@ -353,7 +353,14 @@ fn measure_sustained(
                 DrivePhase::Done if drained => break,
                 DrivePhase::Done => None,
             };
-            let room = dispatched - delivered < MAX_OFFERED_PENDING;
+            let pending = dispatched.checked_sub(delivered).unwrap_or_else(|| {
+                panic!(
+                    "[latency-slo gate] {delivered} writes retired but only {dispatched} \
+                     dispatched by the drive — a drive-target clock opened outside the drive \
+                     was retired with it"
+                )
+            });
+            let room = pending < MAX_OFFERED_PENDING;
             if let Some(target) = target.filter(|_| room) {
                 if phase == DrivePhase::SameBlock {
                     same_block_offered += 1;
