@@ -1110,10 +1110,18 @@ pub trait SutMcpEmit {
 
 /// SUT capability: run `*::full_sync` the way an agent does, through the MCP
 /// `execute_operation` tool. Drives the `FullSync` PBT transition; hosted only
-/// where a Turso engine owns the watch views that `full_sync` drops.
+/// where a Turso engine is wired.
 #[holon_macros::capmap_adapter]
 pub trait SutFullSync {
     async fn full_sync(&self);
+}
+
+/// SUT capability: run `*::rebuild_views` through the MCP `execute_operation`
+/// tool. Drives the `RebuildViews` PBT transition; hosted only where a Turso
+/// engine owns the watch views it rebuilds.
+#[holon_macros::capmap_adapter]
+pub trait SutRebuildViews {
+    async fn rebuild_views(&self);
 }
 
 /// SUT capability: the agent-facing MCP **data tools** are drivable —

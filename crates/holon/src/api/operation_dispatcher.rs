@@ -778,8 +778,8 @@ impl OperationDispatcher {
             // ADR 0031 Increment 3 — guard evaluation does NOT cover this arm,
             // and the gap is vacuous rather than tolerated. The complete set of
             // ops advertised under entity `*` is synthesized in
-            // `OperationProvider::operations` below: `sync` and `full_sync`.
-            // Both carry `required_params: []`, an empty `id_column`,
+            // `OperationProvider::operations` below: `sync`, `full_sync` and
+            // `rebuild_views`. All carry `required_params: []`, an empty `id_column`,
             // `TargetScope::Global` and `OpGuard::None` — they name no subject
             // block, so a relational guard has nothing to bind.
             //
@@ -790,6 +790,26 @@ impl OperationDispatcher {
                     "[OperationDispatcher] Wildcard operation detected: op={}",
                     op_name
                 );
+
+                if op_name == "rebuild_views" {
+                    let mgr = self
+                        .matview_manager
+                        .as_ref()
+                        .expect("rebuild_views is advertised only when a matview manager is wired");
+                    let rebuilt = mgr
+                        .rebuild_watch_views()
+                        .await
+                        .map_err(|e| format!("rebuild_views: {e:#}"))?;
+                    let summary = format!(
+                        "dropped {} watch views; recreated {} for their live subscribers: {}",
+                        rebuilt.dropped.len(),
+                        rebuilt.recreated.len(),
+                        rebuilt.recreated.join(", ")
+                    );
+                    info!("[OperationDispatcher] rebuild_views {summary}");
+                    return Ok(OperationResult::irreversible(Vec::new())
+                        .with_response(holon_api::Value::String(summary)));
+                }
 
                 // Special handling for full_sync: clear sync tokens, clear caches, then sync
                 // IMPORTANT: Tokens must be cleared FIRST because clearing caches can trigger
@@ -851,17 +871,7 @@ impl OperationDispatcher {
                         }
                     }
 
-                    // Step 3: Drop stale matviews so they get recreated fresh. A
-                    // failure here can leave live watches on dropped views, so it
-                    // ends the operation.
-                    if let Some(ref mgr) = self.matview_manager {
-                        mgr.drop_stale_views().await.map_err(|e| {
-                            format!("full_sync: dropping and recreating the watch views: {e:#}")
-                        })?;
-                        info!("[OperationDispatcher] Dropped stale matviews");
-                    }
-
-                    // Step 4: Execute sync on all providers that have it
+                    // Step 3: Execute sync on all providers that have it
                     info!("[OperationDispatcher] Executing sync on all providers");
                     let mut sync_success_count = 0;
                     let mut sync_error_count = 0;
@@ -1450,6 +1460,24 @@ fn duplicate_operations(ops: &[OperationDescriptor]) -> Vec<String> {
     dups
 }
 
+/// How long an operation may take to become visible. An interaction is held
+/// to the interaction→visible SLO; a maintenance op is a deliberate job an
+/// agent or the user starts, which reports what it did when it ends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OpClass {
+    Interaction,
+    Maintenance,
+}
+
+/// The class of `entity::op`, declared beside the wildcard ops this
+/// dispatcher synthesizes.
+pub fn op_class(entity: &str, op: &str) -> OpClass {
+    match (entity, op) {
+        ("*", "rebuild_views") => OpClass::Maintenance,
+        _ => OpClass::Interaction,
+    }
+}
+
 #[async_trait]
 impl OperationProvider for OperationDispatcher {
     /// The one rollback-capable provider in the wired set.
@@ -1514,6 +1542,33 @@ impl OperationProvider for OperationDispatcher {
                 display_name: "Full Sync".to_string(),
                 description: "Clear all caches, reset sync tokens, and re-sync from external \
                               systems"
+                    .to_string(),
+                required_params: vec![],
+                affected_fields: vec![],
+                param_mappings: vec![],
+                target_scope: holon_api::TargetScope::Global,
+                boundary_behavior: holon_api::BoundaryBehavior::Unclassified,
+                menu_exposure: holon_api::MenuExposure::NotListed {
+                    surface: holon_api::NonMenuSurface::External,
+                },
+                trigger: None,
+                bound_params: Default::default(),
+                marking_delta: holon_api::marking::MarkingDelta::Undeclared,
+                guard: holon_api::pattern::OpGuard::None,
+                arcs: holon_api::arcs::TransitionArcs::Undeclared,
+            });
+        }
+
+        if self.matview_manager.is_some() {
+            ops.push(OperationDescriptor {
+                entity_name: "*".into(),
+                entity_short_name: "all".to_string(),
+                id_column: String::new(),
+                name: "rebuild_views".to_string(),
+                display_name: "Rebuild Views".to_string(),
+                description: "Drop every watch view and recreate the ones a live watch listens \
+                              to, correcting what each watch holds; reports each view rebuilt \
+                              and each one that failed"
                     .to_string(),
                 required_params: vec![],
                 affected_fields: vec![],
@@ -2276,5 +2331,179 @@ mod tests {
         assert_eq!(entities.len(), 2);
         assert!(entities.contains(&EntityName::new("entity1")));
         assert!(entities.contains(&EntityName::new("entity2")));
+    }
+
+    #[tokio::test]
+    async fn rebuild_views_rebuilds_past_a_view_it_cannot_and_names_both() {
+        use futures::StreamExt;
+        use holon_turso::matview_manager::MatviewManager;
+
+        let (backend, db) = holon_turso::turso::TursoBackend::new_in_memory()
+            .await
+            .expect("in-memory db");
+        std::mem::forget(backend);
+        for ddl in [
+            "CREATE TABLE items (id TEXT PRIMARY KEY, content TEXT DEFAULT '')",
+            "CREATE TABLE gone (id TEXT PRIMARY KEY)",
+        ] {
+            db.execute_ddl(ddl).await.expect("create table");
+        }
+        let manager = Arc::new(MatviewManager::new(
+            db.clone(),
+            Arc::new(tokio::sync::Mutex::new(())),
+        ));
+        let (healthy, mut healthy_stream) = manager
+            .ensure_and_subscribe("SELECT id, content FROM items", None)
+            .await
+            .expect("subscribe healthy");
+        let (broken, _broken_stream) = manager
+            .ensure_and_subscribe("SELECT id FROM gone", None)
+            .await
+            .expect("subscribe broken");
+        db.execute_ddl("DROP TABLE gone").await.expect("drop gone");
+        let mut dispatcher = OperationDispatcher::new(vec![]);
+        dispatcher.set_matview_manager(manager.clone());
+        assert!(
+            dispatcher
+                .operations()
+                .iter()
+                .any(|op| op.entity_name == "*" && op.name == "rebuild_views"),
+            "rebuild_views must be advertised where a matview manager is wired"
+        );
+
+        let err = dispatcher
+            .execute_operation(&EntityName::new("*"), "rebuild_views", StorageEntity::new())
+            .await
+            .expect_err("a listened view over a dropped table cannot be rebuilt")
+            .to_string();
+        assert!(
+            err.contains(&broken) && err.contains(&healthy),
+            "the error must name the view that failed ({broken}) and the one rebuilt \
+             ({healthy}): {err}"
+        );
+
+        db.execute(
+            "INSERT INTO items (id, content) VALUES ('after', 'x')",
+            Vec::new(),
+        )
+        .await
+        .expect("insert");
+        tokio::time::timeout(std::time::Duration::from_secs(5), healthy_stream.next())
+            .await
+            .unwrap_or_else(|_| panic!("{healthy} was not recreated past the failure"))
+            .expect("the healthy stream ended");
+    }
+
+    /// A provider whose `sync` writes one row, as a real sync writes what it
+    /// fetched.
+    struct SyncingProvider {
+        db: holon_turso::turso::DbHandle,
+        synced: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait]
+    impl OperationProvider for SyncingProvider {
+        fn operations(&self) -> Vec<OperationDescriptor> {
+            vec![create_test_operation("items", "sync")]
+        }
+
+        async fn execute_operation(
+            &self,
+            _: &EntityName,
+            op_name: &str,
+            _: StorageEntity,
+        ) -> Result<OperationResult> {
+            assert_eq!(op_name, "sync", "only sync is advertised");
+            self.db
+                .execute(
+                    "INSERT INTO items (id, content) VALUES ('synced', 'x')",
+                    Vec::new(),
+                )
+                .await?;
+            self.synced.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(OperationResult::irreversible(Vec::new()))
+        }
+    }
+
+    #[tokio::test]
+    async fn full_sync_syncs_without_touching_the_watch_views() {
+        use futures::StreamExt;
+        use holon_turso::matview_manager::MatviewManager;
+
+        let (backend, db) = holon_turso::turso::TursoBackend::new_in_memory()
+            .await
+            .expect("in-memory db");
+        std::mem::forget(backend);
+        db.execute_ddl("CREATE TABLE items (id TEXT PRIMARY KEY, content TEXT DEFAULT '')")
+            .await
+            .expect("create items");
+        let manager = Arc::new(MatviewManager::new(
+            db.clone(),
+            Arc::new(tokio::sync::Mutex::new(())),
+        ));
+        let (view, mut stream) = manager
+            .ensure_and_subscribe("SELECT id, content FROM items", None)
+            .await
+            .expect("subscribe");
+        let provider = Arc::new(SyncingProvider {
+            db: db.clone(),
+            synced: std::sync::atomic::AtomicBool::new(false),
+        });
+        let mut dispatcher = OperationDispatcher::new(vec![provider.clone()]);
+        dispatcher.set_matview_manager(manager.clone());
+        let unlistened = manager
+            .ensure_view("SELECT id FROM items")
+            .await
+            .expect("ensure unlistened view");
+        let watch_views = || async {
+            db.query(
+                "SELECT name FROM sqlite_master WHERE name LIKE 'watch_view_%' ORDER BY name",
+                std::collections::HashMap::new(),
+            )
+            .await
+            .expect("read sqlite_master")
+        };
+        let before = watch_views().await;
+        assert_eq!(
+            before.len(),
+            2,
+            "{view} and {unlistened} must exist before full_sync"
+        );
+
+        dispatcher
+            .execute_operation(&EntityName::new("*"), "full_sync", StorageEntity::new())
+            .await
+            .expect("full_sync");
+
+        assert!(
+            provider.synced.load(std::sync::atomic::Ordering::SeqCst),
+            "full_sync must run the providers' sync"
+        );
+        assert_eq!(
+            watch_views().await,
+            before,
+            "full_sync must drop no watch view; a view rebuild would drop the unlistened \
+             {unlistened}"
+        );
+        let batch = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next())
+            .await
+            .unwrap_or_else(|_| panic!("the subscriber of {view} never saw the synced row"))
+            .expect("the stream ended");
+        assert!(
+            batch.inner.items.iter().any(|item| matches!(
+                &item.change,
+                holon_api::Change::Created { data, .. }
+                    if data.get("id") == Some(&holon_api::Value::String("synced".into()))
+            )),
+            "the subscriber of {view} must be sent the row the sync wrote: {batch:?}"
+        );
+    }
+
+    #[test]
+    fn only_rebuild_views_is_a_maintenance_op() {
+        assert_eq!(op_class("*", "rebuild_views"), OpClass::Maintenance);
+        for (entity, op) in [("*", "full_sync"), ("*", "sync"), ("block", "set_field")] {
+            assert_eq!(op_class(entity, op), OpClass::Interaction, "{entity}::{op}");
+        }
     }
 }

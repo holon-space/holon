@@ -56,6 +56,9 @@ impl SettleLatencyLifecycle for ComposedSettleLatency {
         *self.last.borrow_mut() = Some(SettleSample {
             action: action.to_string(),
             elapsed,
+            class: crate::pbt::invariants::bodies::settle_budget::settle_class(
+                &crate::pbt::net_cap::fired_operations_from_spans(),
+            ),
         });
     }
 }

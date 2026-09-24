@@ -32,3 +32,4 @@ pub mod turso;
 pub mod turso_actor_stats;
 pub mod turso_adapter;
 pub mod util;
+pub mod watch_view_rebuild;

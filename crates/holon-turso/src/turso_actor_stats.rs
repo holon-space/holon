@@ -160,6 +160,7 @@ pub fn cmd_fingerprint(cmd: &DbCommand) -> (&'static str, Option<&str>) {
             ("EnsurePinnedView", Some(select_sql.as_str()))
         }
         DbCommand::ResetWatchViews { .. } => ("ResetWatchViews", None),
+        DbCommand::RebuildWatchView { .. } => ("RebuildWatchView", None),
         DbCommand::Shutdown { .. } => ("Shutdown", None),
     }
 }

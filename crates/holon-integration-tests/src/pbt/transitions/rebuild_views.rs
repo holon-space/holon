@@ -1,16 +1,18 @@
-//! Transition: run `*::full_sync`, which resets every sync token and runs
-//! every provider's sync.
+//! Transition: run `*::rebuild_views`, the maintenance op that drops every
+//! Turso watch view, recreates the ones a live watch listens to, and sends
+//! each watch what its rebuilt view gained and lost.
 //!
 //! @pbt rung mcp
 //!   drives the MCP `execute_operation` tool, the entry point an agent uses;
-//!   no UI binding reaches `full_sync`.
-//! @pbt covers full-sync — a full re-sync leaves every live watch rendering
-//!   the synced state
+//!   no UI binding reaches `rebuild_views`.
+//! @pbt covers watch-views-survive-rebuild — a watch opened before a
+//!   `rebuild_views` keeps receiving changes after it and holds what its
+//!   rebuilt view holds
 
 use holon_pbt_core::TransitionFactory;
 use holon_pbt_core::TransitionRef;
 use holon_pbt_core::capabilities::RefLifecycle;
-use holon_pbt_core::capabilities::SutFullSync;
+use holon_pbt_core::capabilities::SutRebuildViews;
 use holon_pbt_core::validation::Reason;
 use holon_pbt_core::validation::check;
 use proptest::prelude::*;
@@ -22,16 +24,17 @@ use crate::pbt::transition_budgets::ExpectedSql;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::REACTIVE_BASE;
 
-/// The org provider, the keystone's one provider with a `sync`: its block
-/// scan and its sync-token load.
+/// `MatviewManager::rebuild_watch_views` lists the watch views once. The
+/// rebuild runs one actor turn per view and issues no SQL span, so no term
+/// grows with the number of views; its cost is wall time.
 #[cfg(feature = "otel-testing")]
-const ORG_SYNC_READS: usize = 2;
+const WATCH_VIEW_LIST_READS: usize = 1;
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
-#[step_template("an agent runs a full sync")]
-pub struct FullSync;
+#[step_template("an agent rebuilds the views")]
+pub struct RebuildViews;
 
-impl<R: RefLifecycle> TransitionFactory<R> for FullSync {
+impl<R: RefLifecycle> TransitionFactory<R> for RebuildViews {
     fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
         Self::declared_caps()
     }
@@ -41,13 +44,13 @@ impl<R: RefLifecycle> TransitionFactory<R> for FullSync {
         ::holon_pbt_core::RequiredWiring::HasStorage(::holon_pbt_core::StorageAdapter::Turso)
     }
     fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
-        FullSync
+        RebuildViews
             .preconditions(state)
-            .map(|_| (1, Just(FullSync).boxed()))
+            .map(|_| (1, Just(RebuildViews).boxed()))
     }
 }
 
-impl<R: RefLifecycle> TransitionRef<R> for FullSync {
+impl<R: RefLifecycle> TransitionRef<R> for RebuildViews {
     type Reason = Reason;
 
     fn preconditions(&self, state: &R) -> Validated<(), Reason> {
@@ -55,22 +58,21 @@ impl<R: RefLifecycle> TransitionRef<R> for FullSync {
     }
 
     fn apply_to_ref(&self, _: &mut R) {
-        // The keystone's one syncing provider re-reads the org files, which
-        // the model already mirrors: the state does not change.
+        // Views are a projection of the model's state, which a rebuild does
+        // not change.
     }
 }
 
 crate::cap_transition! {
-    FullSync: SutFullSync,
+    RebuildViews: SutRebuildViews,
     where R: [ RefLifecycle ],
     |_me, _state, sut| {
-        sut.full_sync().await;
+        sut.rebuild_views().await;
     }
     sql_budget: |_me, _state| {
-        // Writes: the sync-token reset and the org provider's token save.
         ExpectedSql {
-            reads: REACTIVE_BASE + ORG_SYNC_READS,
-            writes: 2,
+            reads: REACTIVE_BASE + WATCH_VIEW_LIST_READS,
+            writes: 0,
             ddl: 0,
             tolerance: 0,
         }

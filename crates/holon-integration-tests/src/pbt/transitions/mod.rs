@@ -139,6 +139,7 @@ pub mod outdent;
 mod pin_block;
 mod press_key;
 mod reboot;
+mod rebuild_views;
 pub mod receiver_create_block;
 mod redo;
 pub mod register_entity_scheme;
@@ -230,6 +231,7 @@ pub use outdent::Outdent;
 pub use pin_block::PinBlock;
 pub use press_key::PressKey;
 pub use reboot::Reboot;
+pub use rebuild_views::RebuildViews;
 pub use receiver_create_block::ReceiverCreateBlock;
 pub use redo::Redo;
 pub use register_entity_scheme::RegisterEntityScheme;
@@ -293,6 +295,7 @@ crate::declare_e2e_transitions! {
         DragDropBlock(DragDropBlock),
         EmitMcpData(EmitMcpData),
         FullSync(FullSync),
+        RebuildViews(RebuildViews),
         EpochFlipRejected(EpochFlipRejected),
         ExpandToggle(ExpandToggle),
         FocusEditableText(FocusEditableText),
@@ -607,6 +610,7 @@ mod required_caps_guard {
         one!(SwitchView, c::SutViewControl);
         one!(EmitMcpData, c::SutMcpEmit);
         one!(FullSync, c::SutFullSync);
+        one!(RebuildViews, c::SutRebuildViews);
         one!(Search, c::SutSearch);
         one!(JumpToSearchHit, c::SutSearch);
         one!(Redo, c::SutHistoryWrite);

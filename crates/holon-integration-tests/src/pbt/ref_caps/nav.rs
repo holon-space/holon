@@ -363,9 +363,9 @@ impl ReferenceState {
     /// Mirror of a first seat's reads: the editor's source, then the
     /// vocabulary walk (`SqlTaskVocabularySource`), one read per row up to the
     /// first page, a missing row, or a row without a parent.
-    fn caret_seat_cost(&mut self, destination: &EntityUri) -> CaretSeat {
+    fn caret_seat_cost(&self, destination: &EntityUri) -> CaretSeat {
         let target = self.caret_seat_for_navigation(destination);
-        if !self.ui.tab.seated_caret_targets.insert(target.clone()) {
+        if self.ui.tab.seated_caret_targets.contains(&target) {
             return CaretSeat::Reseat;
         }
         let mut walk_reads = 0;
@@ -403,7 +403,9 @@ impl ReferenceState {
         if region != Region::Main {
             return;
         }
-        self.ui.tab.focused_block = Some(self.caret_seat_for_navigation(destination));
+        let target = self.caret_seat_for_navigation(destination);
+        self.ui.tab.seated_caret_targets.insert(target.clone());
+        self.ui.tab.focused_block = Some(target);
     }
 }
 

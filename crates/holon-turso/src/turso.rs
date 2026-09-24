@@ -80,6 +80,9 @@ use crate::sql_parser::extract_created_tables;
 use crate::sql_parser::extract_table_refs;
 use crate::sql_parser::parse_sql;
 use crate::sql_utils::rewrite_named_params;
+use crate::watch_view_rebuild::Listened;
+use crate::watch_view_rebuild::ListenedTo;
+use crate::watch_view_rebuild::ViewRebuild;
 
 // ============================================================================
 // Types moved from turso_actor.rs
@@ -269,6 +272,15 @@ pub enum DbCommand {
     /// start a new lease generation. Answers with the number of views dropped.
     ResetWatchViews {
         response: oneshot::Sender<Result<usize>>,
+    },
+
+    /// Drop one watch view and recreate it if it is listened to — see
+    /// `DbHandle::rebuild_watch_view`.
+    RebuildWatchView {
+        view_name: String,
+        listened: ListenedTo,
+        cdc_seq: Arc<AtomicU64>,
+        response: oneshot::Sender<Result<ViewRebuild>>,
     },
 
     /// Graceful shutdown
@@ -1307,6 +1319,34 @@ impl DbHandle {
             .map_err(|_| StorageError::DatabaseError("Actor response channel closed".to_string()))?
     }
 
+    /// Drop `view_name` and, if `listened` says a subscriber listens to it,
+    /// recreate it from its SQL and send its subscribers the changes that take
+    /// the old view's rows to the new one's.
+    ///
+    /// One actor turn, so no write lands between the snapshot and the drop or
+    /// between the recreation and the correction; other commands run between
+    /// two views' turns.
+    #[tracing::instrument(skip(self, listened))]
+    pub async fn rebuild_watch_view(
+        &self,
+        view_name: &str,
+        listened: ListenedTo,
+    ) -> Result<ViewRebuild> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.tx
+            .send(DbCommand::RebuildWatchView {
+                view_name: view_name.to_string(),
+                listened,
+                cdc_seq: self.cdc_seq.clone(),
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| StorageError::ActorGone)?;
+        response_rx
+            .await
+            .map_err(|_| StorageError::DatabaseError("Actor response channel closed".to_string()))?
+    }
+
     /// Current matview lease counters.
     pub fn matview_stats(&self) -> crate::matview_lease::MatviewStatsSnapshot {
         self.matview_stats.snapshot()
@@ -1433,8 +1473,23 @@ impl DbHandle {
 // Helper functions moved from turso_actor.rs
 // ============================================================================
 
+/// Every row of `view` in the shape a watch's snapshot reads it.
+fn view_rows_sql(view: &str) -> String {
+    format!("SELECT *, rowid AS _rowid FROM {view}")
+}
+
+/// Take the routing column off a shared view's row: captured so the demux can
+/// route the change, removed so it never reaches a consumer as if it were part
+/// of the query's result.
+pub(crate) fn take_watch_key(data: &mut StorageEntity) -> Option<String> {
+    match data.remove(WATCH_KEY_COLUMN) {
+        Some(Value::String(s)) => Some(s),
+        _ => None,
+    }
+}
+
 /// Extract ChangeOrigin from row data's _change_origin column
-fn extract_change_origin_from_data(data: &StorageEntity) -> ChangeOrigin {
+pub(crate) fn extract_change_origin_from_data(data: &StorageEntity) -> ChangeOrigin {
     data.get(CHANGE_ORIGIN_COLUMN)
         .and_then(|v| match v {
             Value::String(json) => ChangeOrigin::from_json(json),
@@ -2410,16 +2465,6 @@ impl TursoBackend {
             ));
         }
 
-        /// Take the routing column off a shared view's row: captured so the
-        /// demux can route the change, removed so it never reaches a
-        /// consumer as if it were part of the query's result.
-        fn take_watch_key(data: &mut StorageEntity) -> Option<String> {
-            match data.remove(WATCH_KEY_COLUMN) {
-                Some(Value::String(s)) => Some(s),
-                _ => None,
-            }
-        }
-
         for change in event.changes.iter() {
             let mut row_watch_key: Option<String> = None;
             let change_data = match &change.change {
@@ -2938,6 +2983,24 @@ impl TursoBackend {
 
             DbCommand::ResetWatchViews { response } => {
                 let result = Self::handle_reset_watch_views(conn, state).await;
+                let _ = response.send(result);
+            }
+
+            DbCommand::RebuildWatchView {
+                view_name,
+                listened,
+                cdc_seq,
+                response,
+            } => {
+                let result = Self::handle_rebuild_watch_view(
+                    conn,
+                    state,
+                    cdc_broadcast,
+                    &cdc_seq,
+                    &view_name,
+                    &listened,
+                )
+                .await;
                 let _ = response.send(result);
             }
 
@@ -3966,6 +4029,97 @@ impl TursoBackend {
         }
         state.publish_matview_stats();
         tracing::debug!(view = %view_name, "[TursoBackend::Actor] reaped unleased matview");
+    }
+
+    async fn handle_rebuild_watch_view(
+        conn: &turso::Connection,
+        state: &mut ActorState,
+        cdc_broadcast: &broadcast::Sender<BatchWithMetadata<RowChange>>,
+        cdc_seq: &AtomicU64,
+        name: &str,
+        listened: &ListenedTo,
+    ) -> Result<ViewRebuild> {
+        let fail = |what: &str, e: &dyn std::fmt::Display| {
+            StorageError::DatabaseError(format!("{what}: {e}"))
+        };
+        let listened_before = listened(name);
+        let held = match listened_before {
+            Listened::Unlistened => None,
+            Listened::Listened { .. } => Some(
+                Self::query_rows(conn, &view_rows_sql(name), HashMap::new())
+                    .await
+                    .map_err(|e| {
+                        fail("reading the rows its subscribers hold, before any drop", &e)
+                    })?,
+            ),
+        };
+
+        let drop_sql = format!("DROP VIEW IF EXISTS {name}");
+        Self::note_view_drop(conn, state, &drop_sql)
+            .await
+            .map_err(|e| fail("noting its drop", &e))?;
+        Self::handle_ddl(conn, &state.schema_catalog, &drop_sql)
+            .await
+            .map_err(|e| fail("dropping it", &e))?;
+        crate::matview_manager::cleanup_orphaned_dbsp_state_on_conn(conn, name)
+            .await
+            .map_err(|e| fail("checking for DBSP residue after its drop", &e))?;
+
+        // Asked again after the drop is noted: a subscriber that registers
+        // later reads the drop log afterwards, so recreates its own view.
+        let sql = match (listened(name), listened_before) {
+            (Listened::Listened { sql: Some(sql) }, _)
+            | (Listened::Unlistened, Listened::Listened { sql: Some(sql) }) => sql,
+            (Listened::Unlistened, Listened::Unlistened) => return Ok(ViewRebuild::Dropped),
+            _ => {
+                return Err(StorageError::DatabaseError(
+                    "dropped, but it has live subscribers and no recorded SQL to recreate it \
+                     from, so their streams are silent"
+                        .into(),
+                ));
+            }
+        };
+        let create_sql = format!(
+            "CREATE MATERIALIZED VIEW IF NOT EXISTS {name} AS {}",
+            crate::util::strip_order_by(&sql)
+        );
+        Self::handle_ddl(conn, &state.schema_catalog, &create_sql)
+            .await
+            .map_err(|e| {
+                fail(
+                    "dropped, then recreating it failed, so its subscribers are silent",
+                    &e,
+                )
+            })?;
+
+        let Some(before) = held else {
+            return Ok(ViewRebuild::Recreated { sql });
+        };
+        let after = Self::query_rows(conn, &view_rows_sql(name), HashMap::new())
+            .await
+            .map_err(|e| {
+                fail(
+                    "recreated, but reading it to correct its subscribers failed",
+                    &e,
+                )
+            })?;
+        let items = crate::watch_view_rebuild::resync_changes(name, before, after)
+            .map_err(|e| fail("recreated, but its subscribers cannot be corrected", &e))?;
+        if !items.is_empty() {
+            let seq = cdc_seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            let _ = cdc_broadcast.send(BatchWithMetadata {
+                inner: Batch { items },
+                metadata: BatchMetadata {
+                    relation_name: name.to_string(),
+                    trace_context: None,
+                    linked_contexts: Vec::new(),
+                    sync_token: None,
+                    seq,
+                    degraded: None,
+                },
+            });
+        }
+        Ok(ViewRebuild::Recreated { sql })
     }
 
     /// Drop every `watch_view_%` and start a new lease generation.

@@ -188,7 +188,10 @@ async fn dropping_every_watch_view_recreates_the_ones_a_subscriber_listens_to() 
 
     // Another manager on the same database drops them, as `full_sync`'s does.
     let dropper = self::manager(&handle);
-    dropper.drop_stale_views().await.expect("drop stale views");
+    dropper
+        .rebuild_watch_views()
+        .await
+        .expect("rebuild watch views");
 
     let views: Vec<String> = handle
         .query(

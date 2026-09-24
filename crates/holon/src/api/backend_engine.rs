@@ -437,12 +437,6 @@ impl BackendEngine {
         self.matview_manager.set_hook(hook).await;
     }
 
-    /// Drop all `watch_view_*` matviews. Used by `full_sync` to force fresh
-    /// recreation.
-    pub async fn drop_stale_matviews(&self) -> Result<()> {
-        self.matview_manager.drop_stale_views().await
-    }
-
     /// Snapshot of (cache_hits, exists_calls, ddl_creates) from the matview
     /// manager.
     pub fn matview_cache_metrics(&self) -> (u64, u64, u64) {

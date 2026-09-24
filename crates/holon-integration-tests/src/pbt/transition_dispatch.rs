@@ -250,6 +250,7 @@ macro_rules! declare_e2e_transitions {
             + ::holon_pbt_core::capabilities::SutRemoteListSync
             + ::holon_pbt_core::capabilities::SutSearch
             + ::holon_pbt_core::capabilities::SutFullSync
+            + ::holon_pbt_core::capabilities::SutRebuildViews
             + ::holon_pbt_core::capabilities::SutReadOnlyEditAttempt
             + ::holon_pbt_core::capabilities::SutUnschemedIdDispatch
             + $crate::pbt::transitions::apply_mutation::SutApplyMutation

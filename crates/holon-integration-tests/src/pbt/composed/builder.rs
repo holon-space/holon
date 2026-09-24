@@ -472,9 +472,10 @@ async fn compose_sut_seeded_impl(
         // production `quick_open_search` predicate needs the `block` matview
         // and the `block_tags` junction, which only this config has.
         caps.insert(comp.clone() as Arc<dyn holon_pbt_core::capabilities::SutSearch>);
-        // `SutFullSync`: `full_sync` drops and recreates the Turso watch views
-        // this arm's engine owns.
         caps.insert(comp.clone() as Arc<dyn holon_pbt_core::capabilities::SutFullSync>);
+        // `SutRebuildViews`: `rebuild_views` rebuilds the Turso watch views
+        // this arm's engine owns.
+        caps.insert(comp.clone() as Arc<dyn holon_pbt_core::capabilities::SutRebuildViews>);
         // `SutHistory` (C2 provenance oracle read cap): this frontend's
         // `BackendEngine` unconditionally wires a real `TursoHistoryStore`, so
         // expose `block_history` to the phantom/missed-history correspondences.

@@ -32,6 +32,9 @@ use crate::turso::RowChangeStream;
 use crate::turso::WATCH_KEY_COLUMN;
 use crate::turso::priority;
 use crate::util::strip_order_by;
+use crate::watch_view_rebuild::Listened;
+use crate::watch_view_rebuild::ListenedTo;
+use crate::watch_view_rebuild::ViewRebuild;
 
 /// Normalize a SQL statement for comparison: collapse whitespace, strip
 /// trailing semicolons, lowercase keywords, and drop spaces before `(` (Turso's
@@ -569,6 +572,15 @@ pub struct MatviewManager {
     ddl_creates: Arc<AtomicU64>,
 }
 
+/// What [`MatviewManager::rebuild_watch_views`] did, for its caller to
+/// disclose.
+#[derive(Debug)]
+pub struct RebuiltViews {
+    pub dropped: Vec<String>,
+    /// The dropped views recreated for their live subscribers.
+    pub recreated: Vec<String>,
+}
+
 /// The view-existence cache and DDL mutex belonging to ONE database.
 #[derive(Clone)]
 struct SharedViewState {
@@ -874,71 +886,77 @@ impl MatviewManager {
     }
 
     /// Drop all `watch_view_*` materialized views and recreate the ones a
-    /// subscriber still listens to.
+    /// subscriber still listens to, correcting what each subscriber holds.
     ///
     /// Turso IVM matviews can become stale across app restarts (e.g., when
     /// document UUIDs change or the underlying data is re-synced). Dropping
     /// them ensures they get recreated fresh with correct IVM state. A live
     /// subscription is keyed by view name, so recreating its view under the
     /// same name keeps its stream delivering; left dropped, it would go silent.
-    pub async fn drop_stale_views(&self) -> Result<()> {
-        let rows = self
+    ///
+    /// Every view is attempted; the Err names each one that failed and why,
+    /// and each one that was rebuilt.
+    pub async fn rebuild_watch_views(&self) -> Result<RebuiltViews> {
+        let names: Vec<String> = self
             .db_handle
             .query(
                 "SELECT name FROM sqlite_master WHERE type='view' AND name LIKE 'watch_view_%'",
                 HashMap::new(),
             )
-            .await?;
-
-        for row in &rows {
-            if let Some(Value::String(name)) = row.get("name") {
-                tracing::info!("[MatviewManager] Dropping stale view: {}", name);
-                let drop_sql = format!("DROP VIEW IF EXISTS {}", name);
-                self.db_handle.execute_ddl(&drop_sql).await?;
-                self.cleanup_orphaned_dbsp_tables(name).await?;
-            }
-        }
-
-        if !rows.is_empty() {
-            tracing::info!("[MatviewManager] Dropped {} stale watch views", rows.len());
-        }
-
-        // Asked AFTER the drops: a subscriber registered later ensured its view
-        // after them too, or `subscribe_ensured` recreates it.
-        let live = self
-            .subscriptions
-            .lock()
-            .expect("subscriptions mutex")
-            .live_views();
-        for row in &rows {
-            let Some(Value::String(name)) = row.get("name") else {
-                continue;
-            };
-            if !live.contains(name) {
-                continue;
-            }
-            let sql = self
-                .view_sql
+            .await?
+            .into_iter()
+            .map(|row| match row.get("name") {
+                Some(Value::String(name)) => name.clone(),
+                other => panic!("sqlite_master row without a text name: {other:?}"),
+            })
+            .collect();
+        let subscriptions = self.subscriptions.clone();
+        let view_sql = self.view_sql.clone();
+        let listened: ListenedTo = Arc::new(move |name: &str| {
+            let live = subscriptions
                 .lock()
-                .expect("view_sql mutex")
-                .get(name)
-                .cloned()
-                .with_context(|| {
-                    format!(
-                        "view {name} has live subscribers but no recorded SQL, so it cannot be \
-                         recreated and their streams would go silent"
-                    )
-                })?;
-            self.ensure_view(&sql)
-                .await
-                .with_context(|| format!("recreating view {name} for its live subscribers"))?;
-            tracing::info!(
-                "[MatviewManager] Recreated {} for its live subscribers",
-                name
-            );
-        }
+                .expect("subscriptions mutex")
+                .live_views();
+            if !live.contains(name) {
+                return Listened::Unlistened;
+            }
+            let sql = view_sql.lock().expect("view_sql mutex").get(name).cloned();
+            Listened::Listened { sql }
+        });
 
-        Ok(())
+        let mut recreated = Vec::new();
+        let mut failures = Vec::new();
+        for name in &names {
+            match self
+                .db_handle
+                .rebuild_watch_view(name, listened.clone())
+                .await
+            {
+                Ok(ViewRebuild::Dropped) => {}
+                Ok(ViewRebuild::Recreated { sql }) => {
+                    recreated.push(name.clone());
+                    let rebuilt_at = self.db_handle.drop_log_len();
+                    self.mark_view_known(name, &sql, rebuilt_at).await;
+                }
+                Err(e) => failures.push(format!("{name}: {e}")),
+            }
+        }
+        tracing::info!(
+            "[MatviewManager] Dropped {} watch views and recreated {} for their live subscribers",
+            names.len(),
+            recreated.len()
+        );
+        anyhow::ensure!(
+            failures.is_empty(),
+            "{} watch view(s) could not be rebuilt: {}. Rebuilt: [{}]",
+            failures.len(),
+            failures.join("; "),
+            recreated.join(", ")
+        );
+        Ok(RebuiltViews {
+            dropped: names,
+            recreated,
+        })
     }
 
     /// Hash SQL text into a deterministic view name.
@@ -1242,26 +1260,17 @@ impl MatviewManager {
             .collect()
     }
 
-    /// Subscribe to CDC for a specific view, returning a filtered stream.
+    /// Subscribe to CDC for a view, registered with the single demux, which
+    /// routes batches by `relation_name`. Awaits the demux's registration ack,
+    /// so a later query observes registration-before-query ordering.
     ///
-    /// Registers with the single demultiplexer task instead of spawning a
-    /// per-subscription filter task. The demux routes batches by
-    /// `relation_name` and prunes closed subscribers automatically. Awaits
-    /// the demux's registration ack before returning, so a subsequent query
-    /// is guaranteed to observe registration-before-query ordering.
-    pub async fn subscribe_cdc(&self, view_name: &str) -> Result<RowChangeStream> {
-        self.subscribe_cdc_keyed(view_name, None).await
-    }
-
-    /// `subscribe_cdc` for a SHAPE-KEYED shared view: one matview serves every
-    /// watch of the same query shape, and `watch_key` selects this watch's
-    /// rows out of it.
-    ///
-    /// The filter runs in the demux rather than in the consumer because a
-    /// `Deleted` change carries no row: the key has to be read while the
-    /// deleted row is still in hand, which happens in the CDC conversion
+    /// For a SHAPE-KEYED shared view `watch_key` selects this watch's rows. The
+    /// filter runs in the demux because a `Deleted` change carries no row: the
+    /// key is read while the deleted row is still in hand
     /// (`RowChange::watch_key`).
-    pub async fn subscribe_cdc_keyed(
+    ///
+    /// Private: the drop log is checked only by [`Self::subscribe_ensured`].
+    async fn subscribe_cdc_keyed(
         &self,
         view_name: &str,
         watch_key: Option<&str>,
@@ -1396,12 +1405,27 @@ impl MatviewManager {
         known.names.contains(view_name)
     }
 
+    /// Forget the views dropped since the cache last looked. A dropped view
+    /// nobody listens to is gone for good, so its SQL goes too; a listened one
+    /// keeps it for whoever recreates it.
     fn apply_drops(&self, known: &mut KnownViews) {
         let (dropped, applied) = self.db_handle.drops_since(known.drops_applied);
+        known.drops_applied = applied;
+        if dropped.is_empty() {
+            return;
+        }
+        let live = self
+            .subscriptions
+            .lock()
+            .expect("subscriptions mutex")
+            .live_views();
+        let mut view_sql = self.view_sql.lock().expect("view_sql mutex");
         for name in &dropped {
             known.names.remove(name);
+            if !live.contains(name) {
+                view_sql.remove(name);
+            }
         }
-        known.drops_applied = applied;
     }
 
     /// Record `view_name`, ensured from `sql`, as existing — as seen when the
@@ -1863,5 +1887,44 @@ mod tests {
         assert_eq!(base.len(), 1, "base row must survive reboot + reconcile");
 
         handle.shutdown().await.expect("shutdown boot-2");
+    }
+
+    #[tokio::test]
+    async fn a_permanently_dropped_view_forgets_its_sql_and_a_listened_one_keeps_it() {
+        use crate::turso::TursoBackend;
+
+        let (_backend, handle) = TursoBackend::new_in_memory()
+            .await
+            .expect("in-memory backend");
+        handle
+            .execute_ddl("CREATE TABLE items (id TEXT PRIMARY KEY, v TEXT)")
+            .await
+            .expect("create items");
+        let manager = MatviewManager::new(handle.clone(), Arc::new(tokio::sync::Mutex::new(())));
+        let unlistened = manager
+            .ensure_view("SELECT id FROM items")
+            .await
+            .expect("ensure unlistened");
+        let (listened, _stream) = manager
+            .ensure_and_subscribe("SELECT id, v FROM items", None)
+            .await
+            .expect("subscribe listened");
+        for view in [&unlistened, &listened] {
+            handle
+                .execute_ddl(&format!("DROP VIEW IF EXISTS {view}"))
+                .await
+                .expect("drop view");
+        }
+
+        assert!(!manager.is_view_known(&unlistened).await);
+        let recorded = manager.view_sql.lock().expect("view_sql mutex").clone();
+        assert!(
+            !recorded.contains_key(&unlistened),
+            "{unlistened} is dropped and nobody listens to it, so its SQL must go: {recorded:?}"
+        );
+        assert!(
+            recorded.contains_key(&listened),
+            "{listened} has a live subscriber, whose recreation needs its SQL: {recorded:?}"
+        );
     }
 }

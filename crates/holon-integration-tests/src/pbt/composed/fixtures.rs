@@ -590,6 +590,7 @@ impl crate::pbt::composed::settle_latency::SettleLatency for FixtureSettleLatenc
             |elapsed| crate::pbt::invariants::bodies::settle_budget::SettleSample {
                 action: "NavigateFocus".to_string(),
                 elapsed,
+                class: holon::api::operation_dispatcher::OpClass::Interaction,
             },
         )
     }

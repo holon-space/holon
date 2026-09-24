@@ -71,6 +71,7 @@ use holon_pbt_core::capabilities::SutOrgRead;
 use holon_pbt_core::capabilities::SutOrgRender;
 use holon_pbt_core::capabilities::SutQueryResults;
 use holon_pbt_core::capabilities::SutReadModel;
+use holon_pbt_core::capabilities::SutRebuildViews;
 use holon_pbt_core::capabilities::SutRenderer;
 use holon_pbt_core::capabilities::SutSeamMutate;
 use holon_pbt_core::capabilities::SutSqlProjection;
@@ -3683,6 +3684,19 @@ impl SutFullSync for HeadlessFrontendComponent {
         self.call_mcp_tool(
             "execute_operation",
             serde_json::json!({ "entity_name": "*", "operation": "full_sync", "params": {} }),
+        )
+        .await;
+    }
+}
+
+/// `SutRebuildViews` (the `RebuildViews` transition): `*::rebuild_views`
+/// through the MCP `execute_operation` tool.
+#[async_trait::async_trait(?Send)]
+impl SutRebuildViews for HeadlessFrontendComponent {
+    async fn rebuild_views(&self) {
+        self.call_mcp_tool(
+            "execute_operation",
+            serde_json::json!({ "entity_name": "*", "operation": "rebuild_views", "params": {} }),
         )
         .await;
     }
