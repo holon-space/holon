@@ -526,9 +526,8 @@ fn register_subtree_share(injector: &Injector) {
         ))
     }));
     // `Arc<ConditionBus>` is NOT registered here. Disclosure must exist in
-    // every container, not only the Loro one, so the composition root
-    // (`holon-app`'s `add_frontend`) owns it; resolving it below therefore also
-    // asserts this module was configured by a root that provides it.
+    // every container, not only the Loro one, so holon's core registration
+    // owns it.
     injector.provide::<Arc<holon_loro::shared_snapshot_store::SharedSnapshotStore>>(
         Provider::root(|resolver| {
             let config = resolver.resolve::<LoroConfig>();

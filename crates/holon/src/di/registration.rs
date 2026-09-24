@@ -340,6 +340,13 @@ fn register_shared_services(injector: &Injector) -> Result<()> {
         )) as Arc<dyn OperationProvider>
     }));
 
+    // Degraded-state disclosure bus: the only channel through which a frontend
+    // learns that something degraded, so every container has one. It is a
+    // plain broadcast channel, so mode has no say in whether it exists.
+    injector.provide::<Arc<holon_api::ConditionBus>>(Provider::root(|_| {
+        Shared::new(Arc::new(holon_api::ConditionBus::new()))
+    }));
+
     OperationModule
         .configure(injector)
         .map_err(|e| anyhow::anyhow!("Failed to register OperationModule: {}", e))?;

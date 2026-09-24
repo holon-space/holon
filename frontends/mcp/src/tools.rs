@@ -5655,11 +5655,6 @@ pub(crate) mod engine_harness {
         holon::di::create_backend_engine_with_extras(
             ":memory:".into(),
             move |injector| {
-                // The composition root, not `LoroModule`, owns the disclosure
-                // bus, so a harness that configures the module owes it one.
-                injector.provide::<Arc<holon_api::ConditionBus>>(Provider::root(|_| {
-                    fluxdi::Shared::new(Arc::new(holon_api::ConditionBus::new()))
-                }));
                 injector.provide::<holon_loro_wiring::LoroConfig>(Provider::root(move |_| {
                     fluxdi::Shared::new(
                         holon_loro_wiring::LoroConfig::new(storage_dir.clone())

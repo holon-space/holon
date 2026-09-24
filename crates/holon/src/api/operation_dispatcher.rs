@@ -54,8 +54,7 @@ pub struct OperationDispatcher {
     declared_providers: std::sync::RwLock<Vec<Arc<dyn OperationProvider>>>,
     observers: Vec<Arc<dyn OperationObserver>>,
     sync_token_store: Option<Arc<dyn SyncTokenStore>>,
-    matview_manager: Option<Arc<crate::sync::MatviewManager>>,
-    condition_bus: Option<Arc<holon_api::ConditionBus>>,
+    view_rebuild: Option<ViewRebuild>,
     boundary_enforcer: Option<Arc<dyn BoundaryEnforcer>>,
     /// ADR 0031 Increment 3 — the world declared `#[require]` guards are
     /// evaluated against. Absent only in composition sites with no projection.
@@ -144,13 +143,18 @@ impl OperationDispatcher {
         self.sync_token_store = Some(store);
     }
 
-    pub fn set_matview_manager(&mut self, mgr: Arc<crate::sync::MatviewManager>) {
-        self.matview_manager = Some(mgr);
-    }
-
-    /// The bus a maintenance op discloses itself on while it runs.
-    pub fn set_condition_bus(&mut self, bus: Arc<holon_api::ConditionBus>) {
-        self.condition_bus = Some(bus);
+    /// Wire `*::rebuild_views`: the views it rebuilds, and the bus it
+    /// discloses the rebuild on while it runs.
+    pub fn set_view_rebuild(
+        &mut self,
+        manager: Arc<crate::sync::MatviewManager>,
+        bus: Arc<holon_api::ConditionBus>,
+    ) {
+        self.view_rebuild = Some(ViewRebuild {
+            manager,
+            bus,
+            running: std::sync::atomic::AtomicBool::new(false),
+        });
     }
 
     /// Install the registry-backed link classifier used to parse inline markup
@@ -798,22 +802,13 @@ impl OperationDispatcher {
                 );
 
                 if op_name == "rebuild_views" {
-                    let mgr = self
-                        .matview_manager
+                    let rebuild = self
+                        .view_rebuild
                         .as_ref()
-                        .expect("rebuild_views is advertised only when a matview manager is wired");
-                    let bus = self
-                        .condition_bus
-                        .as_ref()
-                        .expect("rebuild_views is advertised only when a condition bus is wired");
-                    let _running = RaisedWhileRunning::raise(
-                        bus,
-                        holon_api::Condition {
-                            subject: holon_api::condition_bus::WATCH_VIEWS_SUBJECT.to_string(),
-                            reason: holon_api::ConditionKind::WatchViewsRebuilding,
-                        },
-                    );
-                    let rebuilt = mgr
+                        .expect("rebuild_views is advertised only when a view rebuild is wired");
+                    let _running = rebuild.start()?;
+                    let rebuilt = rebuild
+                        .manager
                         .rebuild_watch_views()
                         .await
                         .map_err(|e| format!("rebuild_views: {e:#}"))?;
@@ -1576,7 +1571,7 @@ impl OperationProvider for OperationDispatcher {
             });
         }
 
-        if self.matview_manager.is_some() && self.condition_bus.is_some() {
+        if self.view_rebuild.is_some() {
             ops.push(OperationDescriptor {
                 entity_name: "*".into(),
                 entity_short_name: "all".to_string(),
@@ -1711,24 +1706,41 @@ impl OperationProvider for OperationDispatcher {
     }
 }
 
-/// A condition that stands exactly as long as the scope holding this runs,
-/// however that scope ends.
-struct RaisedWhileRunning<'a> {
-    bus: &'a holon_api::ConditionBus,
-    key: holon_api::ConditionKey,
+struct ViewRebuild {
+    manager: Arc<crate::sync::MatviewManager>,
+    bus: Arc<holon_api::ConditionBus>,
+    running: std::sync::atomic::AtomicBool,
 }
 
-impl<'a> RaisedWhileRunning<'a> {
-    fn raise(bus: &'a holon_api::ConditionBus, condition: holon_api::Condition) -> Self {
-        let key = condition.condition_key();
-        bus.emit(condition);
-        Self { bus, key }
+impl ViewRebuild {
+    /// The bus holds one condition per key and no count, so a second
+    /// concurrent rebuild would have its disclosure cleared by the first.
+    fn start(&self) -> Result<RebuildRunning<'_>> {
+        if self.running.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return Err("rebuild_views: a view rebuild is already running".into());
+        }
+        self.bus.emit(Self::condition());
+        Ok(RebuildRunning(self))
+    }
+
+    fn condition() -> holon_api::Condition {
+        holon_api::Condition {
+            subject: holon_api::condition_bus::WATCH_VIEWS_SUBJECT.to_string(),
+            reason: holon_api::ConditionKind::WatchViewsRebuilding,
+        }
     }
 }
 
-impl Drop for RaisedWhileRunning<'_> {
+/// The one running rebuild. Its condition stands exactly as long as this
+/// lives, however the rebuild ends.
+struct RebuildRunning<'a>(&'a ViewRebuild);
+
+impl Drop for RebuildRunning<'_> {
     fn drop(&mut self) {
-        self.bus.clear(&self.key);
+        self.0.bus.clear(&ViewRebuild::condition().condition_key());
+        self.0
+            .running
+            .store(false, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -1769,13 +1781,8 @@ impl Module for OperationModule {
             if let Some(store) = sync_token_store {
                 dispatcher.set_sync_token_store(store);
             }
-            dispatcher.set_matview_manager(matview_mgr);
-            if let Some(bus) = r
-                .optional_resolve_async::<Arc<holon_api::ConditionBus>>()
-                .await
-            {
-                dispatcher.set_condition_bus((*bus).clone());
-            }
+            let bus = r.resolve_async::<Arc<holon_api::ConditionBus>>().await;
+            dispatcher.set_view_rebuild(matview_mgr, (*bus).clone());
             dispatcher.set_guard_world(Arc::new(crate::api::guard_world::SqlGuardWorld::new(
                 db_handle_provider.handle(),
             )));
@@ -2406,9 +2413,8 @@ mod tests {
             .expect("subscribe broken");
         db.execute_ddl("DROP TABLE gone").await.expect("drop gone");
         let mut dispatcher = OperationDispatcher::new(vec![]);
-        dispatcher.set_matview_manager(manager.clone());
         let bus = Arc::new(holon_api::ConditionBus::new());
-        dispatcher.set_condition_bus(bus.clone());
+        dispatcher.set_view_rebuild(manager.clone(), bus.clone());
         assert!(
             dispatcher
                 .operations()
@@ -2443,6 +2449,66 @@ mod tests {
             .await
             .unwrap_or_else(|_| panic!("{healthy} was not recreated past the failure"))
             .expect("the healthy stream ended");
+    }
+
+    #[tokio::test]
+    async fn a_rebuild_overlapping_a_running_one_is_refused_and_the_disclosure_stands() {
+        use holon_turso::matview_manager::MatviewManager;
+
+        let (backend, db) = holon_turso::turso::TursoBackend::new_in_memory()
+            .await
+            .expect("in-memory db");
+        std::mem::forget(backend);
+        db.execute_ddl("CREATE TABLE items (id TEXT PRIMARY KEY, content TEXT DEFAULT '')")
+            .await
+            .expect("create items");
+        let manager = Arc::new(MatviewManager::new(
+            db.clone(),
+            Arc::new(tokio::sync::Mutex::new(())),
+        ));
+        let (_view, _stream) = manager
+            .ensure_and_subscribe("SELECT id, content FROM items", None)
+            .await
+            .expect("subscribe");
+        let mut dispatcher = OperationDispatcher::new(vec![]);
+        let bus = Arc::new(holon_api::ConditionBus::new());
+        dispatcher.set_view_rebuild(manager, bus.clone());
+        let rebuilding = || {
+            bus.current()
+                .iter()
+                .any(|c| c.condition_key().kind == holon_api::ConditionKind::WATCH_VIEWS_REBUILDING)
+        };
+        let wildcard = EntityName::new("*");
+        let rebuild =
+            || dispatcher.execute_operation(&wildcard, "rebuild_views", StorageEntity::new());
+
+        let mut first = Box::pin(rebuild());
+        assert!(
+            futures::poll!(first.as_mut()).is_pending(),
+            "the first rebuild never yielded, so nothing can overlap it"
+        );
+        let mut second = Box::pin(rebuild());
+        let second_on_first_poll = futures::poll!(second.as_mut());
+        first.await.expect("the first rebuild");
+
+        if second_on_first_poll.is_pending() {
+            assert!(
+                rebuilding(),
+                "the second rebuild is still running and the bus does not say so: {:?}",
+                bus.current()
+            );
+        }
+        let err = match second_on_first_poll {
+            std::task::Poll::Ready(result) => result,
+            std::task::Poll::Pending => second.await,
+        }
+        .expect_err("a rebuild overlapping a running one must be refused")
+        .to_string();
+        assert!(
+            err.contains("a view rebuild is already running"),
+            "the refusal must say why: {err}"
+        );
+        assert!(!rebuilding(), "no rebuild runs and the condition stands");
     }
 
     /// A provider whose `sync` writes one row, as a real sync writes what it
@@ -2501,7 +2567,7 @@ mod tests {
             synced: std::sync::atomic::AtomicBool::new(false),
         });
         let mut dispatcher = OperationDispatcher::new(vec![provider.clone()]);
-        dispatcher.set_matview_manager(manager.clone());
+        dispatcher.set_view_rebuild(manager.clone(), Arc::new(holon_api::ConditionBus::new()));
         let unlistened = manager
             .ensure_view("SELECT id FROM items")
             .await

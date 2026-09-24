@@ -549,22 +549,9 @@ impl Module for McpIntegrationsModule {
             let credential_root = credential_root.clone();
             async move {
                 // Every non-connected integration is disclosed on this bus so
-                // the resulting blank pages are attributable. A container that
-                // registers integrations but no bus can never tell the user
-                // anything is wrong, so its absence is a wiring bug, not a mode
-                // — fail the boot rather than ship a mute build.
-                let degraded_bus: Arc<ConditionBus> = (*resolver
-                    .try_resolve_async::<Arc<ConditionBus>>()
-                    .await
-                    .unwrap_or_else(|e| {
-                        panic!(
-                            "[McpIntegrationsModule] No ConditionBus in this container ({e}) \
-                             — integration connect failures would have no disclosure channel at \
-                             all and their pages would render blank. Register it in the \
-                             composition root (holon-app `add_frontend`)."
-                        )
-                    }))
-                .clone();
+                // the resulting blank pages are attributable.
+                let degraded_bus: Arc<ConditionBus> =
+                    (*resolver.resolve_async::<Arc<ConditionBus>>().await).clone();
 
                 for s in superseded.iter() {
                     disclose_superseded_sidecar(s, &degraded_bus);

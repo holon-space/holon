@@ -124,17 +124,6 @@ impl FrontendInjectorExt for Injector {
             move |_| Shared::new(gate.clone())
         }));
 
-        // Degraded-state disclosure bus. Registered UNCONDITIONALLY, before any
-        // conditional module: it is the only channel through which a frontend
-        // learns that something degraded (dead MCP integration, failed org
-        // ingest, share write-back gap), and a container without it degrades
-        // invisibly — blank pages, no banner. It is a plain broadcast channel
-        // with no Loro/iroh dependency, so mode has no say in whether it exists.
-        self.provide::<Arc<holon_api::ConditionBus>>(Provider::root(|_| {
-            Shared::new(Arc::new(holon_api::ConditionBus::new()))
-        }));
-        disclosure.performed(BootStep::ConditionBus);
-
         // Write-back supervision disclosure. Registered UNCONDITIONALLY for the
         // same reason as the bus itself: org write-back runs in every mode, so
         // the one signal saying "your edits stopped reaching disk" must not be

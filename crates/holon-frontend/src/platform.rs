@@ -110,8 +110,6 @@ impl PlatformCapabilities {
 pub enum BootStep {
     /// Model.md invariant 10: reject a vault consolidated under another mode.
     ConsolidatorEpochGuard,
-    /// The one channel through which a frontend learns something degraded.
-    ConditionBus,
     /// Tells the frontend that edits stopped reaching disk. Needs no
     /// filesystem itself — it is a plain provider that emits on the bus.
     WritebackDisclosure,
@@ -149,9 +147,8 @@ pub enum BootStep {
 }
 
 impl BootStep {
-    pub const ALL: [BootStep; 15] = [
+    pub const ALL: [BootStep; 14] = [
         Self::ConsolidatorEpochGuard,
-        Self::ConditionBus,
         Self::WritebackDisclosure,
         Self::ThemeAndPreferences,
         Self::UiInfo,
@@ -180,8 +177,7 @@ impl BootStep {
                 Some(PlatformCapability::Filesystem)
             }
             Self::McpIntegrations | Self::McpFdwTables => Some(PlatformCapability::ProcessSpawn),
-            Self::ConditionBus
-            | Self::WritebackDisclosure
+            Self::WritebackDisclosure
             | Self::ThemeAndPreferences
             | Self::UiInfo
             | Self::PublishErrorTracker
@@ -196,7 +192,6 @@ impl BootStep {
     pub fn label(self) -> &'static str {
         match self {
             Self::ConsolidatorEpochGuard => "consolidator-epoch-guard",
-            Self::ConditionBus => "degraded-signal-bus",
             Self::WritebackDisclosure => "writeback-disclosure",
             Self::ThemeAndPreferences => "theme-and-preferences",
             Self::UiInfo => "ui-info",
@@ -434,7 +429,6 @@ mod tests {
         assert_eq!(
             report.drift(),
             vec![
-                BootStep::ConditionBus,
                 BootStep::WritebackDisclosure,
                 BootStep::UiInfo,
                 BootStep::TransitionDbToReady,

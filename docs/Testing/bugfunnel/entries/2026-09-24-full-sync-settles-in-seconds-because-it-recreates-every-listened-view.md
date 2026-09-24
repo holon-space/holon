@@ -95,3 +95,24 @@ Found by a fresh verifier of the D214 remedy (probe sidecar
   (`crates/holon-app/tests/`, `lane-logs/red-2-running-disclosure.log`).
   Tooth T2, the guard dropped at once: red
   (`lane-logs/teeth-T2-no-running-disclosure.log`).
+
+## Rung 3: two overlapping rebuilds cleared the disclosure early
+Found by a fresh verifier of rung 2 (code audit of the drop guard).
+
+- ORACLE. Two concurrent `rebuild_views` calls (two MCP clients, or one agent
+  issuing two) raise the same `ConditionKey`, and `ConditionBus` keeps no
+  count. The first to end cleared the condition while the second still ran,
+  so the bus said "all clear" during a rebuild. No test ran two rebuilds.
+- Fix: `ViewRebuild::start` refuses a rebuild while one runs, with the Err
+  "a view rebuild is already running". The rebuild is neither queued nor
+  refcounted: two concurrent full rebuilds are never useful.
+- The bus is now registered once in holon's core registration, and
+  `OperationModule` resolves it as required, so no container can lose
+  `rebuild_views` by losing the bus.
+- Red on the base:
+  `a_rebuild_overlapping_a_running_one_is_refused_and_the_disclosure_stands`
+  (`crates/holon/src/api/operation_dispatcher.rs`,
+  `lane-logs/fix3-red.log`: "the second rebuild is still running and the bus
+  does not say so"). Tooth T4, the refusal removed: red
+  (`lane-logs/fix3-teeth.log`); restore proven by sha256
+  (`lane-logs/fix3-teeth-sha.log`).
