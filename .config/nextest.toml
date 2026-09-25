@@ -61,8 +61,8 @@ slow-timeout = { period = "60s", terminate-after = 5 }  # 5 min hard cap
 
 # Two of the latency gate's tests each drive the 600-write drain test on 600
 # freshly created blocks: minutes per test, which the 2 min default cuts off as
-# a TIMEOUT that reads like a slow pipeline. `just latency-slo-gate` runs the
-# same binary under `cargo test` and is the recipe that judges the tree.
+# a TIMEOUT that reads like a slow pipeline. `just latency-slo-gate` runs this
+# binary serially under this override and is the recipe that judges the tree.
 [[profile.default.overrides]]
 filter = "binary(latency_slo_gate)"
 slow-timeout = { period = "60s", terminate-after = 20 }  # 20 min hard cap

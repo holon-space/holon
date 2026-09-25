@@ -270,11 +270,15 @@ fn collect_drive_samples(probe: &SloProbe, seen: &mut usize, into: &mut Vec<E2eS
 }
 
 /// Drive the controlled drain test through the production fire-and-forget
-/// door, as [`Drive`] schedules it, and judge it.
+/// door, as [`Drive`] schedules it, and judge it. Returns the verdict and the
+/// longest per-write wait, a reported number the verdict does not depend on.
 ///
 /// `delay_ms` arms the per-row delivery delay for the drive. It sleeps in
 /// `LiveData::subscribe` before the subscriber applies a batch.
-fn run_drain_test(sut: &ComposedSut<WideE2E>, delay_ms: u64) -> DrainVerdict {
+fn run_drain_test(
+    sut: &ComposedSut<WideE2E>,
+    delay_ms: u64,
+) -> (DrainVerdict, std::time::Duration) {
     let engine = sut
         .handle()
         .reactive()
@@ -335,10 +339,11 @@ fn run_drain_test(sut: &ComposedSut<WideE2E>, delay_ms: u64) -> DrainVerdict {
     assert!(
         lost.is_empty(),
         "[latency-slo gate] the correlator dropped drive clocks unmeasured: {lost:?}. The \
-         window keeps drive clocks below its capacity and the stall bound ends the drive long \
-         before its expiry, so this is a broken premise, not a slow pipeline"
+         window keeps drive clocks below its capacity, so these writes waited past its expiry \
+         and whether they were delivered is unknown: the run judges nothing"
     );
     let verdict = drive.verdict();
+    let longest_wait = drive.longest_wait();
     let ratio = match &verdict {
         DrainVerdict::Pass { completion, limit }
         | DrainVerdict::Late {
@@ -350,9 +355,8 @@ fn run_drain_test(sut: &ComposedSut<WideE2E>, delay_ms: u64) -> DrainVerdict {
     };
     eprintln!(
         "[latency-slo gate] drain calibration: delay={delay_ms}ms/row C/L={ratio} \
-         verdict={verdict:?} limit={:?} stall_bound={:?}",
+         verdict={verdict:?} limit={:?} longest_wait={longest_wait:?}",
         test.limit(),
-        test.stall_bound(),
     );
     let mut window = SloWindow::new(
         ClockOrigin::Ui,
@@ -371,7 +375,7 @@ fn run_drain_test(sut: &ComposedSut<WideE2E>, delay_ms: u64) -> DrainVerdict {
             window.drain_estimate(),
         );
     }
-    verdict
+    (verdict, longest_wait)
 }
 
 /// Fail with the window's full report. A latency red must say what it measured
@@ -464,10 +468,11 @@ fn latency_slo_rung_drain_test() {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let (sut, _ref_state) = boot(DriveTargets::Create);
     require_a_judgeable_host();
-    match run_drain_test(&sut, 0) {
+    let (verdict, longest_wait) = run_drain_test(&sut, 0);
+    match verdict {
         DrainVerdict::Pass { completion, limit } => eprintln!(
             "[latency-slo gate] drain test: PASS — {DRAIN_WRITES} writes visible after \
-             {completion:?}, limit {limit:?}"
+             {completion:?}, limit {limit:?}, longest per-write wait {longest_wait:?}"
         ),
         DrainVerdict::Invalid { write, late_by } => panic!(
             "[latency-slo gate] INVALID (this test fails WITHOUT a verdict on the tree): the \
@@ -477,7 +482,8 @@ fn latency_slo_rung_drain_test() {
         ),
         fail => panic!(
             "[latency-slo gate] drain test FAILED: {fail:?} (floor \
-             {THROUGHPUT_FLOOR_WRITES_PER_SEC:.0}/s). A healthy pipeline cannot fail this test; \
+             {THROUGHPUT_FLOOR_WRITES_PER_SEC:.0}/s, longest per-write wait {longest_wait:?}). \
+             A healthy pipeline cannot fail this test; \
              load arriving after boot admission can, so confirm on an idle host before \
              attributing it to the tree."
         ),
@@ -494,10 +500,11 @@ fn a_slowed_pipeline_fails_the_drain_test() {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let (sut, _ref_state) = boot(DriveTargets::Create);
-    match run_drain_test(&sut, THROUGHPUT_TEETH_DELAY_MS) {
+    let (verdict, longest_wait) = run_drain_test(&sut, THROUGHPUT_TEETH_DELAY_MS);
+    match verdict {
         verdict if verdict.is_fail() => eprintln!(
             "[latency-slo gate] drain teeth: {verdict:?} with {THROUGHPUT_TEETH_DELAY_MS}ms per \
-             row armed"
+             row armed, longest per-write wait {longest_wait:?}"
         ),
         DrainVerdict::Pass { completion, limit } => panic!(
             "[latency-slo gate] {THROUGHPUT_TEETH_DELAY_MS}ms per row caps the pipeline at \
@@ -775,6 +782,38 @@ fn latency_slo_rung_a_facade_clock_in_flight_does_not_alter_a_ui_sample() {
         "[latency-slo gate] partition rung: the same-target facade clock closed with its own \
          sample; the UI sample kept its own queue depth (in_flight=1 backlog=0) and was \
          excluded from the service rung as cross-origin contended, counted and named"
+    );
+}
+
+/// A clock left pending by an earlier stretch of the process closes on a later
+/// delivery of its row, or squats until its 30 s expiry, so a window armed
+/// over it would score someone else's interaction.
+#[test]
+fn arming_the_probe_over_a_pending_clock_is_refused() {
+    let _turn = RUNG_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    const LEFTOVER: &str = "block:slo-probe-leftover";
+    holon_api::latency_e2e::interaction_dispatched(
+        "set_field",
+        LEFTOVER,
+        holon_api::latency_e2e::Observable::BlockRow(None),
+        ClockOrigin::Ui,
+    );
+    let armed = std::panic::catch_unwind(SloProbe::arm);
+    holon_api::latency_e2e::interaction_failed("set_field", LEFTOVER, ClockOrigin::Ui);
+    let Err(refusal) = armed else {
+        panic!(
+            "SloProbe::arm accepted a window while a clock was pending, so the window can score \
+             an interaction it did not see dispatched"
+        );
+    };
+    let message = refusal
+        .downcast_ref::<String>()
+        .expect("the refusal is a formatted panic message");
+    assert!(
+        message.contains(LEFTOVER),
+        "the refusal must name the pending clock: {message}"
     );
 }
 

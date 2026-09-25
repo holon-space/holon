@@ -42,7 +42,10 @@ Martin's ruling D207.a. The gate runs a controlled drain test
    pending on its targets.
 2. All 600 must be visible within `N/f + 2 × 200 ms` = 60.4 s. The drive fails
    early when a write waits past `s + W/f` = 4.4 s, or when a full window
-   blocks a write past its floor deadline.
+   blocks a write past its floor deadline. One write's wait is reported,
+   never judged (Martin's ruling D219.a): a per-write bound `s + W/f` = 4.4 s
+   failed unslowed drives as `Stalled` on a loaded host, where per-write e2e
+   measured about 1.7 s p50 and 3.7 s max in the `test` profile.
 
 A min-plus bound proves that a healthy pipeline cannot fail this test. A
 sustained rate below `N/L = 600 / 60.4 s ≈ 9.934` writes/s cannot pass it. The estimator is

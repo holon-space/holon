@@ -684,8 +684,11 @@ latency-scale-gate size='1600' per_doc='50' settle_ms='180000' max_load='32' cei
 # inside the SLO, or blow the SLO without moving a p50 — neither gate subsumes
 # the other.
 #
-# Serialized (`--test-threads=1`): the rungs measure wall-clock latency, so two
-# of them running at once would each measure the other's load.
+# Serialized (nextest's `--no-capture` runs one test at a time): the rungs
+# measure wall-clock latency, so two of them running at once would each measure
+# the other's load. Nextest gives each rung its own process: the correlator's
+# pending clocks are process-global, and a failed rung's orphans would poison
+# the next one.
 latency-slo-gate *FLAGS:
     #!/usr/bin/env bash
     # pipefail so a `tee`'d failure cannot report success (see `hand-authored`).
@@ -698,8 +701,8 @@ latency-slo-gate *FLAGS:
              crates/holon-api/src/latency_drain.rs; do
         [ -f "$f" ] || { echo "latency-slo-gate: wrong tree — missing $f" >&2; exit 2; }
     done
-    cargo test {{CANON}} --test latency_slo_gate \
-        -- --nocapture --test-threads=1 {{FLAGS}} 2>&1 \
+    cargo nextest run {{CANON}} --test latency_slo_gate \
+        --no-capture --no-fail-fast {{FLAGS}} 2>&1 \
         | tee target/gate-logs/latency-slo-gate.log
 
 # Scale-soak: drive the REAL pipeline against a seeded 5–10k-block vault WITH CRDT on,

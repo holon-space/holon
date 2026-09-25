@@ -25,6 +25,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
+use holon_api::latency_e2e::pending_targets;
 use holon_api::latency_slo::ClockOrigin;
 use holon_api::latency_slo::E2eSample;
 use holon_api::latency_slo::OriginWindows;
@@ -97,7 +98,17 @@ pub struct SloProbe {
 impl SloProbe {
     /// Start recording into an EMPTY window. The caller must already have
     /// installed the global subscriber (any `ComposedSut` boot does).
+    ///
+    /// The correlator's registry is process-global: a clock pending at arm
+    /// time would close into this window or expire as one of its lost clocks.
     pub fn arm() -> Self {
+        let pending = pending_targets();
+        assert!(
+            pending.is_empty(),
+            "slo probe: armed while clocks were pending on {pending:?}. They belong to an earlier \
+             stretch of this process, a failed rung's orphaned drive for one, and would be \
+             scored or lost in this window. Run each rung in its own process."
+        );
         window().lock().expect("slo probe window poisoned").clear();
         STAGES.lock().expect("slo probe stage log poisoned").clear();
         LOST.lock()
