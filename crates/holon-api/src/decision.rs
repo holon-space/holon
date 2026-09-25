@@ -407,20 +407,70 @@ pub enum AnswerInput<K> {
 }
 
 /// A suggestion: it never changes the status.
+///
+/// ```compile_fail,E0451
+/// use holon_api::decision::{Answer, AnswerBody, Distribution};
+/// fn forge(of: &Answer, sums_to_two: Distribution) -> Answer {
+///     Answer { by: of.by().clone(), at: of.at(), body: AnswerBody::Categorical(sums_to_two), rationale: None }
+/// }
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct Answer {
-    pub by: Answerer,
-    pub at: DateTime<Utc>,
-    pub body: AnswerBody,
-    pub rationale: Option<String>,
+    by: Answerer,
+    at: DateTime<Utc>,
+    body: AnswerBody,
+    rationale: Option<String>,
 }
 
+impl Answer {
+    pub fn by(&self) -> &Answerer {
+        &self.by
+    }
+
+    pub fn at(&self) -> DateTime<Utc> {
+        self.at
+    }
+
+    pub fn body(&self) -> &AnswerBody {
+        &self.body
+    }
+
+    pub fn rationale(&self) -> Option<&str> {
+        self.rationale.as_deref()
+    }
+}
+
+/// ```compile_fail,E0451
+/// use holon_api::decision::{Decider, Ruling};
+/// fn forge(of_another_decision: &Ruling) -> Ruling {
+///     let chosen = of_another_decision.chosen().clone();
+///     Ruling { chosen, decider: Decider::Person("eve".into()), at: of_another_decision.at(), note: None }
+/// }
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ruling {
-    pub chosen: Selection,
-    pub decider: Decider,
-    pub at: DateTime<Utc>,
-    pub note: Option<String>,
+    chosen: Selection,
+    decider: Decider,
+    at: DateTime<Utc>,
+    note: Option<String>,
+}
+
+impl Ruling {
+    pub fn chosen(&self) -> &Selection {
+        &self.chosen
+    }
+
+    pub fn decider(&self) -> &Decider {
+        &self.decider
+    }
+
+    pub fn at(&self) -> DateTime<Utc> {
+        self.at
+    }
+
+    pub fn note(&self) -> Option<&str> {
+        self.note.as_deref()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -514,9 +564,34 @@ pub enum Command {
     Withdraw { by: Answerer },
 }
 
+/// What one command does to one state of one decision. Only
+/// [`Decision::apply`] makes it, and [`Decision::commit`] takes it only on
+/// that same state.
+///
+/// ```compile_fail,E0451
+/// use holon_api::decision::{Change, Decision, Effect};
+/// fn forge(basis: Decision, effect: Effect) -> Change {
+///     Change { basis, effect }
+/// }
+/// ```
 #[derive(Debug, Clone, PartialEq)]
-pub enum Change {
-    Asked(Box<Decision>),
+pub struct Change {
+    basis: Decision,
+    effect: Effect,
+}
+
+impl Change {
+    pub fn decision(&self) -> &DecisionRef {
+        &self.basis.id
+    }
+
+    pub fn effect(&self) -> &Effect {
+        &self.effect
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Effect {
     Answered(Answer),
     /// `replaces` is the ruling this one overwrites in place (DC9). Every
     /// reader's read mark on the decision is stale after it.
@@ -531,7 +606,8 @@ pub enum Change {
 }
 
 /// The rule a [`DecisionError`] enforces. `Syntax` is a malformed value that
-/// no DC rule names.
+/// no DC rule names; `Stale` is a [`Change`] committed to a state it was not
+/// made from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Rule {
     Dc1,
@@ -542,6 +618,7 @@ pub enum Rule {
     Dc7,
     Dc8,
     Syntax,
+    Stale,
 }
 
 /// Where a key set sits in a decision.
@@ -612,6 +689,8 @@ pub enum DecisionError {
     MalformedAnswerer(String),
     #[error("time {raw:?} is not RFC 3339: {reason}")]
     MalformedTime { raw: String, reason: String },
+    #[error("a change made for a state of {0} other than the one it is committed to")]
+    StaleChange(DecisionRef),
 }
 
 impl DecisionError {
@@ -634,6 +713,7 @@ impl DecisionError {
             MalformedRef { .. } | SupersedesItself(_) => Rule::Dc7,
             ModelCannotDecide(_) | DeciderNotAllowed(_) => Rule::Dc8,
             MalformedAnswerer(_) | MalformedTime { .. } => Rule::Syntax,
+            StaleChange(_) => Rule::Stale,
         }
     }
 }
@@ -734,7 +814,11 @@ impl Decision {
     }
 
     /// A new, open decision in the home that minted `id`.
-    pub fn ask(id: DecisionRef, label: String, q: DraftQuestion) -> Result<Change, DecisionError> {
+    pub fn ask(
+        id: DecisionRef,
+        label: String,
+        q: DraftQuestion,
+    ) -> Result<Decision, DecisionError> {
         Decision::parse(DecisionDraft {
             id,
             label,
@@ -744,7 +828,6 @@ impl Decision {
             answers: Vec::new(),
             refused: Vec::new(),
         })
-        .map(|d| Change::Asked(Box::new(d)))
     }
 
     pub fn apply(
@@ -753,17 +836,17 @@ impl Decision {
         now: DateTime<Utc>,
         deciders: &AllowedDeciders,
     ) -> Result<Change, DecisionError> {
-        match c {
+        let effect = match c {
             Command::Answer {
                 by,
                 body,
                 rationale,
-            } => Ok(Change::Answered(Answer {
+            } => Effect::Answered(Answer {
                 by,
                 at: now,
                 body: AnswerBody::parse(&body, &self.options, self.choose)?,
                 rationale,
-            })),
+            }),
             Command::Decide {
                 chosen,
                 decider,
@@ -779,7 +862,7 @@ impl Decision {
                     return Err(DecisionError::DeciderNotAllowed(decider));
                 }
                 let chosen = Selection::parse(&chosen, &self.options, self.choose, Site::Ruling)?;
-                Ok(Change::Decided {
+                Effect::Decided {
                     ruling: Ruling {
                         chosen,
                         decider,
@@ -787,28 +870,31 @@ impl Decision {
                         note,
                     },
                     replaces,
-                })
+                }
             }
             Command::Withdraw { by } => match self.status {
-                Status::Open => Ok(Change::Withdrawn { by, at: now }),
-                _ => Err(DecisionError::WithdrawClosed),
+                Status::Open => Effect::Withdrawn { by, at: now },
+                _ => return Err(DecisionError::WithdrawClosed),
             },
-        }
+        };
+        Ok(Change {
+            basis: self.clone(),
+            effect,
+        })
     }
 
-    /// The decision after `change`, which [`Self::apply`] returned for it.
-    pub fn commit(&self, change: Change) -> Decision {
-        let mut next = self.clone();
-        match change {
-            Change::Asked(d) => panic!(
-                "Change::Asked creates decision {}; it cannot apply to {}",
-                d.id, self.id
-            ),
-            Change::Answered(a) => next.answers.push(a),
-            Change::Decided { ruling, .. } => next.status = Status::Decided(ruling),
-            Change::Withdrawn { by, at } => next.status = Status::Withdrawn { by, at },
+    /// The decision after `change`, which [`Self::apply`] made from `self`.
+    pub fn commit(&self, change: Change) -> Result<Decision, DecisionError> {
+        if change.basis != *self {
+            return Err(DecisionError::StaleChange(change.basis.id));
         }
-        next
+        let mut next = change.basis;
+        match change.effect {
+            Effect::Answered(a) => next.answers.push(a),
+            Effect::Decided { ruling, .. } => next.status = Status::Decided(ruling),
+            Effect::Withdrawn { by, at } => next.status = Status::Withdrawn { by, at },
+        }
+        Ok(next)
     }
 
     /// The draft that parses back to `self`.

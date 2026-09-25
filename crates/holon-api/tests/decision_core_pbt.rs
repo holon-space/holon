@@ -2,6 +2,7 @@
 //! model finds no violated rule, random command sequences match the model, and
 //! an illegal command names one of the rules it violates and changes nothing.
 
+use std::cell::Cell;
 use std::collections::BTreeSet;
 
 use chrono::TimeZone;
@@ -15,8 +16,10 @@ use holon_api::decision::Command;
 use holon_api::decision::Decider;
 use holon_api::decision::Decision;
 use holon_api::decision::DecisionDraft;
+use holon_api::decision::DecisionError;
 use holon_api::decision::DecisionRef;
 use holon_api::decision::DraftQuestion;
+use holon_api::decision::Effect;
 use holon_api::decision::OptionKey;
 use holon_api::decision::RawAnswer;
 use holon_api::decision::RawRuling;
@@ -25,6 +28,8 @@ use holon_api::decision::RefusedInput;
 use holon_api::decision::Rule;
 use holon_api::decision::Status;
 use proptest::prelude::*;
+use proptest::test_runner::TestCaseError;
+use proptest::test_runner::TestRunner;
 
 type Instant = chrono::DateTime<Utc>;
 
@@ -86,6 +91,13 @@ const REFS: &[(&str, bool)] = &[
     ("sentinel:no_parent", false),
     ("with space:x", false),
 ];
+
+fn cases(default: u32) -> u32 {
+    match std::env::var("PROPTEST_CASES") {
+        Ok(n) => n.parse().expect("PROPTEST_CASES is a count"),
+        Err(_) => default,
+    }
+}
 
 const PROBS: &[f64] = &[0.0, 0.2, 0.5, 0.8, 1.0, 1.5, -0.1, f64::NAN];
 
@@ -426,12 +438,12 @@ fn assert_matches_draft(d: &Decision, draft: &DecisionDraft) {
         (Status::Open, None, None) => {}
         (Status::Decided(r), Some(raw), None) => {
             assert_eq!(
-                selection_strings(r.chosen.keys()),
+                selection_strings(r.chosen().keys()),
                 raw.chosen.iter().flatten().cloned().collect()
             );
-            assert_eq!(Some(r.decider.to_string()), raw.decider);
-            assert_eq!(r.at, instant(raw.at.as_deref().unwrap()));
-            assert_eq!(r.note, raw.note);
+            assert_eq!(Some(r.decider().to_string()), raw.decider);
+            assert_eq!(r.at(), instant(raw.at.as_deref().unwrap()));
+            assert_eq!(r.note(), raw.note.as_deref());
         }
         (Status::Withdrawn { by, at }, None, Some(raw)) => {
             assert_eq!(Some(by.to_string()), raw.by);
@@ -441,10 +453,10 @@ fn assert_matches_draft(d: &Decision, draft: &DecisionDraft) {
     }
     assert_eq!(d.answers().len(), draft.answers.len());
     for (a, raw) in d.answers().iter().zip(&draft.answers) {
-        assert_eq!(a.by.to_string(), raw.by);
-        assert_eq!(a.at, instant(&raw.at));
-        assert_eq!(a.rationale, raw.rationale);
-        match (&a.body, &raw.body) {
+        assert_eq!(a.by().to_string(), raw.by);
+        assert_eq!(a.at(), instant(&raw.at));
+        assert_eq!(a.rationale(), raw.rationale.as_deref());
+        match (a.body(), &raw.body) {
             (AnswerBody::Pick(s), AnswerInput::Pick(k)) => {
                 assert_eq!(selection_strings(s.keys()), k.iter().cloned().collect())
             }
@@ -465,7 +477,7 @@ fn assert_matches_draft(d: &Decision, draft: &DecisionDraft) {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(512))]
+    #![proptest_config(ProptestConfig::with_cases(cases(512)))]
 
     #[test]
     fn a_draft_parses_exactly_when_it_violates_no_rule(draft in raw_draft()) {
@@ -489,14 +501,13 @@ proptest! {
         let id = DecisionRef::parse(ID).unwrap();
         let (expected, _) = question_violations(ID, &q);
         match Decision::ask(id.clone(), "sharing-12".into(), q.clone()) {
-            Ok(Change::Asked(d)) => {
+            Ok(d) => {
                 prop_assert!(expected.is_empty(), "asked, but the model expects {expected:?}");
                 prop_assert_eq!(d.status(), &Status::Open);
                 prop_assert!(d.answers().is_empty());
                 prop_assert_eq!(d.id(), &id);
-                prop_assert_eq!(Decision::parse(d.to_draft()), Ok(*d));
+                prop_assert_eq!(Decision::parse(d.to_draft()), Ok(d));
             }
-            Ok(other) => prop_assert!(false, "ask returned {other:?}"),
             Err(e) => prop_assert!(
                 expected.contains(&e.rule()),
                 "refused with {e}; the model expects {expected:?}"
@@ -532,9 +543,9 @@ impl Model {
         let status = match d.status() {
             Status::Open => ModelStatus::Open,
             Status::Decided(r) => ModelStatus::Decided {
-                chosen: selection_strings(r.chosen.keys()),
-                decider: r.decider.to_string(),
-                at: r.at,
+                chosen: selection_strings(r.chosen().keys()),
+                decider: r.decider().to_string(),
+                at: r.at(),
             },
             Status::Withdrawn { by, at } => ModelStatus::Withdrawn {
                 by: by.to_string(),
@@ -552,7 +563,7 @@ impl Model {
             answers: d
                 .answers()
                 .iter()
-                .map(|a| (a.by.to_string(), a.at))
+                .map(|a| (a.by().to_string(), a.at()))
                 .collect(),
         }
     }
@@ -671,65 +682,129 @@ fn allowed() -> AllowedDeciders {
     )
 }
 
-proptest! {
-    #![proptest_config(ProptestConfig::with_cases(256))]
+/// Changes `apply` made for other states: earlier states of the decision
+/// under test, and states of a second decision.
+struct NotFromHere(Vec<Change>);
 
-    #[test]
-    fn command_sequences_match_the_model(
-        q in legal_question(),
-        commands in prop::collection::vec(command(), 0..30),
-    ) {
-        let deciders = allowed();
-        let Change::Asked(asked) = Decision::ask(DecisionRef::parse(ID).unwrap(), "sharing-12".into(), q)
-            .expect("legal_question is legal")
-        else {
-            panic!("ask returns Asked")
-        };
-        let mut d = *asked;
-        let mut model = Model::project(&d);
-        let t0 = Utc.with_ymd_and_hms(2026, 9, 25, 10, 0, 0).unwrap();
-        for (i, c) in commands.into_iter().enumerate() {
-            let now = t0 + chrono::Duration::seconds(i as i64);
-            let expected = model.violations(&c);
-            let before = d.clone();
-            match d.apply(c.clone(), now, &deciders) {
-                Ok(change) => {
-                    prop_assert!(expected.is_empty(), "{c:?} applied, but the model expects {expected:?}");
-                    match (&change, &c, &model.status) {
-                        (Change::Answered(a), Command::Answer { by, rationale, .. }, _) => {
-                            prop_assert_eq!(&a.by, by);
-                            prop_assert_eq!(a.at, now);
-                            prop_assert_eq!(&a.rationale, rationale);
-                        }
-                        (Change::Decided { ruling, replaces }, Command::Decide { note, .. }, prior) => {
-                            prop_assert_eq!(&ruling.note, note);
-                            let replaced = replaces.as_ref().map(|r| ModelStatus::Decided {
-                                chosen: selection_strings(r.chosen.keys()),
-                                decider: r.decider.to_string(),
-                                at: r.at,
-                            });
-                            let prior_ruling = matches!(prior, ModelStatus::Decided { .. }).then(|| prior.clone());
-                            prop_assert_eq!(replaced, prior_ruling, "DC9: a re-decide carries the ruling it replaces");
-                        }
-                        (Change::Withdrawn { at, .. }, Command::Withdraw { .. }, _) => prop_assert_eq!(*at, now),
-                        (ch, c, _) => prop_assert!(false, "{c:?} produced {ch:?}"),
-                    }
-                    d = d.commit(change);
-                    model.step(&c, now);
-                    prop_assert_eq!(Model::project(&d), model.clone());
-                    prop_assert_eq!(Decision::parse(d.to_draft()), Ok(d.clone()));
-                }
-                Err(e) => {
-                    prop_assert!(
-                        expected.contains(&e.rule()),
-                        "{c:?} refused with {e} ({:?}); the model expects {expected:?}",
-                        e.rule()
-                    );
-                    prop_assert_eq!(&d, &before);
-                }
+impl NotFromHere {
+    /// Each is refused with `Rule::Stale`; returns how many were tried.
+    fn assert_refused_by(&self, d: &Decision) -> Result<usize, TestCaseError> {
+        for c in &self.0 {
+            match d.commit(c.clone()) {
+                Err(e) => prop_assert_eq!(e.rule(), Rule::Stale, "{}", e),
+                Ok(_) => prop_assert!(false, "{c:?} committed to {d:?}"),
             }
         }
+        Ok(self.0.len())
     }
+}
+
+fn apply_all(
+    mut d: Decision,
+    commands: Vec<Command>,
+    t0: Instant,
+    deciders: &AllowedDeciders,
+) -> Vec<Change> {
+    let mut made = Vec::new();
+    for (i, c) in commands.into_iter().enumerate() {
+        if let Ok(change) = d.apply(c, t0 + chrono::Duration::seconds(i as i64), deciders) {
+            d = d.commit(change.clone()).expect("apply made it for d");
+            made.push(change);
+        }
+    }
+    made
+}
+
+#[test]
+fn command_sequences_match_the_model() {
+    let refused = Cell::new(0usize);
+    let strategy = (
+        legal_question(),
+        prop::collection::vec(command(), 0..30),
+        legal_question(),
+        prop::collection::vec(command(), 0..8),
+    );
+    TestRunner::new(ProptestConfig::with_cases(cases(256)))
+        .run(&strategy, |(q, commands, other_q, other_commands)| {
+            let deciders = allowed();
+            let t0 = Utc.with_ymd_and_hms(2026, 9, 25, 10, 0, 0).unwrap();
+            let other = Decision::ask(
+                DecisionRef::parse("block:other-3").unwrap(),
+                "other-3".into(),
+                other_q,
+            )
+            .expect("legal_question is legal");
+            let mut not_from_here = NotFromHere(apply_all(other, other_commands, t0, &deciders));
+            let mut d = Decision::ask(DecisionRef::parse(ID).unwrap(), "sharing-12".into(), q)
+                .expect("legal_question is legal");
+            let mut model = Model::project(&d);
+            for (i, c) in commands.into_iter().enumerate() {
+                let now = t0 + chrono::Duration::seconds(i as i64);
+                let expected = model.violations(&c);
+                let before = d.clone();
+                match d.apply(c.clone(), now, &deciders) {
+                    Ok(change) => {
+                        prop_assert!(
+                            expected.is_empty(),
+                            "{c:?} applied, but the model expects {expected:?}"
+                        );
+                        prop_assert_eq!(change.decision(), d.id());
+                        match (change.effect(), &c, &model.status) {
+                            (Effect::Answered(a), Command::Answer { by, rationale, .. }, _) => {
+                                prop_assert_eq!(a.by(), by);
+                                prop_assert_eq!(a.at(), now);
+                                prop_assert_eq!(a.rationale(), rationale.as_deref());
+                            }
+                            (
+                                Effect::Decided { ruling, replaces },
+                                Command::Decide { note, .. },
+                                prior,
+                            ) => {
+                                prop_assert_eq!(ruling.note(), note.as_deref());
+                                let replaced = replaces.as_ref().map(|r| ModelStatus::Decided {
+                                    chosen: selection_strings(r.chosen().keys()),
+                                    decider: r.decider().to_string(),
+                                    at: r.at(),
+                                });
+                                let prior_ruling = matches!(prior, ModelStatus::Decided { .. })
+                                    .then(|| prior.clone());
+                                prop_assert_eq!(
+                                    replaced,
+                                    prior_ruling,
+                                    "DC9: a re-decide carries the ruling it replaces"
+                                );
+                            }
+                            (Effect::Withdrawn { at, .. }, Command::Withdraw { .. }, _) => {
+                                prop_assert_eq!(*at, now)
+                            }
+                            (e, c, _) => prop_assert!(false, "{c:?} produced {e:?}"),
+                        }
+                        refused.set(refused.get() + not_from_here.assert_refused_by(&d)?);
+                        d = d.commit(change.clone()).expect("apply made it for d");
+                        not_from_here.0.push(change);
+                        model.step(&c, now);
+                        prop_assert_eq!(Model::project(&d), model.clone());
+                        prop_assert_eq!(Decision::parse(d.to_draft()), Ok(d.clone()));
+                    }
+                    Err(e) => {
+                        prop_assert!(
+                            expected.contains(&e.rule()),
+                            "{c:?} refused with {e} ({:?}); the model expects {expected:?}",
+                            e.rule()
+                        );
+                        prop_assert_eq!(&d, &before);
+                    }
+                }
+            }
+            refused.set(refused.get() + not_from_here.assert_refused_by(&d)?);
+            Ok(())
+        })
+        .unwrap();
+    eprintln!(
+        "changes not made for the committed state, all refused: {}",
+        refused.get()
+    );
+    assert!(refused.get() > 0, "no foreign or stale change was tried");
 }
 
 #[test]
@@ -754,4 +829,78 @@ fn a_decision_ref_is_scheme_qualified() {
             .scheme(),
         "github-issue"
     );
+}
+
+fn asked(options: &[&str], choose: &str) -> Decision {
+    let q = DraftQuestion {
+        question: "q".into(),
+        options: options
+            .iter()
+            .map(|k| (k.to_string(), k.to_string()))
+            .collect(),
+        choose: Some(choose.into()),
+        recommend: None,
+        supersedes: None,
+    };
+    Decision::ask(DecisionRef::parse(ID).unwrap(), "l".into(), q).unwrap()
+}
+
+fn t0() -> Instant {
+    Utc.with_ymd_and_hms(2026, 9, 25, 10, 0, 0).unwrap()
+}
+
+fn decide(keys: &[&str]) -> Command {
+    Command::Decide {
+        chosen: keys.iter().map(|k| OptionKey::parse(k).unwrap()).collect(),
+        decider: Answerer::parse("person:martin").unwrap(),
+        note: None,
+    }
+}
+
+#[test]
+fn a_change_from_another_decision_is_stale() {
+    let a = asked(&["a", "b"], "1");
+    let b = Decision::parse(DecisionDraft {
+        id: DecisionRef::parse("block:other-3").unwrap(),
+        ..a.to_draft()
+    })
+    .unwrap();
+    let change = a.apply(decide(&["a"]), t0(), &allowed()).unwrap();
+    let e = b.commit(change).unwrap_err();
+    assert!(matches!(e, DecisionError::StaleChange(_)), "{e:?}");
+}
+
+#[test]
+fn a_withdrawn_decision_takes_no_earlier_ruling() {
+    let d = asked(&["a", "b"], "1");
+    let ruling = d.apply(decide(&["a"]), t0(), &allowed()).unwrap();
+    let by = Answerer::parse("person:martin").unwrap();
+    let withdrawn = d
+        .commit(d.apply(Command::Withdraw { by }, t0(), &allowed()).unwrap())
+        .unwrap();
+    let e = withdrawn.commit(ruling).unwrap_err();
+    assert!(matches!(e, DecisionError::StaleChange(_)), "{e:?}");
+}
+
+#[test]
+fn a_decided_decision_takes_no_earlier_withdrawal() {
+    let d = asked(&["a", "b"], "1");
+    let by = Answerer::parse("person:martin").unwrap();
+    let withdrawal = d.apply(Command::Withdraw { by }, t0(), &allowed()).unwrap();
+    let decided = d
+        .commit(d.apply(decide(&["a"]), t0(), &allowed()).unwrap())
+        .unwrap();
+    let e = decided.commit(withdrawal).unwrap_err();
+    assert!(matches!(e, DecisionError::StaleChange(_)), "{e:?}");
+}
+
+#[test]
+fn a_change_survives_rereading_the_same_state() {
+    let d = asked(&["a", "b"], "1");
+    let change = d.apply(decide(&["a"]), t0(), &allowed()).unwrap();
+    let reread = Decision::parse(d.to_draft()).unwrap();
+    assert!(matches!(
+        reread.commit(change).unwrap().status(),
+        Status::Decided(_)
+    ));
 }
