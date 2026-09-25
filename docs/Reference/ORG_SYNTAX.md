@@ -286,14 +286,22 @@ of the `|`; its category then comes from that declaration.
 
 A `?` asks something only when text follows it on the same line. A bare `* ?`
 is the title text `?`, not a task: the parser, the store's convergence and the
-editor apply the same rule (`asks_nothing` in `task_keyword.rs`). The store
-therefore never holds task state `?` over empty content:
+editor apply the same rule (`asks_nothing` in `task_keyword.rs`). A task state
+is written only as the headline keyword; a `:task_state:` or
+`:task_state_category:` drawer key refuses the file.
+
+Own writes do not produce task state `?` over empty content:
 
 | Write | Result |
 |-------|--------|
 | `set_field task_state "?"`, `create`/`update` with `task_state: "?"`, on empty content | refused with an error that names the block |
 | `cycle_task_state` on a block with no text | the ring skips `?` |
 | a content write that empties a `?` block | the same gesture clears the task state |
+| org ingest of a headline that no longer carries a keyword (`* ?`, `* `, `* buy milk`) | the stored task state is cleared |
+
+A merge of concurrent peer edits (one clears the text, one sets `?`) can still
+produce the state. The editor then shows the stored content and discloses the
+refusal (`QuestionWithoutText`), and the keyword is not editable there.
 
 Views that could treat an open `?` block as work:
 

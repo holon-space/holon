@@ -212,8 +212,8 @@ pub enum SourceProjection {
     Text(String),
     /// Projecting would produce text that does NOT parse back to this state, so
     /// the caller must seed the stored content instead and say so. Every arm
-    /// is reachable from imported or legacy rows, never from a converged
-    /// write.
+    /// is reachable from rows no converged write produces: imported or legacy
+    /// rows, or a merge of concurrent peer edits.
     Refused(ProjectionRefusal),
 }
 
@@ -229,6 +229,8 @@ pub enum ProjectionRefusal {
     /// The content starts with whitespace, which the parser eats: `TODO  milk`
     /// parses back to `milk`, losing the leading space on the first commit.
     ContentStartsWithWhitespace { content: String },
+    /// A `?` block with empty content: the bare `?` reads back as prose.
+    QuestionWithoutText,
 }
 
 impl ProjectionRefusal {
@@ -236,6 +238,7 @@ impl ProjectionRefusal {
         match self {
             Self::KeywordNotDeclared { .. } => "keyword_not_declared",
             Self::ContentStartsWithWhitespace { .. } => "content_starts_with_whitespace",
+            Self::QuestionWithoutText => "question_without_text",
         }
     }
 }
@@ -255,6 +258,11 @@ impl fmt::Display for ProjectionRefusal {
                 f,
                 "content {content:?} starts with whitespace, which the keyword parser eats — the \
                  projection would not round-trip"
+            ),
+            Self::QuestionWithoutText => write!(
+                f,
+                "a `?` question with no text projects to a bare `?`, which reads back as prose \
+                 and would demote the question"
             ),
         }
     }
@@ -286,10 +294,9 @@ pub fn source_projection(
             content: content.to_string(),
         });
     }
-    assert!(
-        !asks_nothing(&task_state.keyword, content),
-        "a `?` task with content {content:?} has no vault source; the store refuses to hold one"
-    );
+    if asks_nothing(&task_state.keyword, content) {
+        return SourceProjection::Refused(ProjectionRefusal::QuestionWithoutText);
+    }
     SourceProjection::Text(if content.is_empty() {
         task_state.keyword.clone()
     } else {

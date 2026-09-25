@@ -59,12 +59,6 @@ pub fn project_or_disclose(
         .filter(|k| !k.is_empty())
         .map(TaskState::from_keyword);
     let untasked = state.is_none();
-    assert!(
-        !state
-            .as_ref()
-            .is_some_and(|s| holon_org_format::asks_nothing(&s.keyword, content)),
-        "block {block_id} is a `?` question with no text, which the store refuses to hold"
-    );
     match holon_org_format::source_projection(state.as_ref(), content, vocabulary) {
         SourceProjection::Text(text) => SurfaceSeed {
             text,
@@ -175,6 +169,24 @@ mod tests {
             project_or_disclose("block:legacy", " milk", Some("NEXT"), &next_only()),
             SurfaceSeed {
                 text: " milk".into(),
+                surface: Surface::Refused
+            }
+        );
+    }
+
+    /// A `?` over empty content, which a merge of peer edits can produce,
+    /// opens as a refused surface instead of taking the editor down.
+    #[test]
+    fn a_question_without_text_is_not_projected() {
+        assert_eq!(
+            project_or_disclose(
+                "block:merged",
+                "",
+                Some("?"),
+                &TaskKeywordVocabulary::default()
+            ),
+            SurfaceSeed {
+                text: String::new(),
                 surface: Surface::Refused
             }
         );

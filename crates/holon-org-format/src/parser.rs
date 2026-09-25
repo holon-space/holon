@@ -1112,6 +1112,13 @@ fn process_headlines(
                          {value:?}"
                     );
                 }
+            } else if key.eq_ignore_ascii_case("task_state")
+                || key.eq_ignore_ascii_case("task_state_category")
+            {
+                anyhow::bail!(
+                    "block {id}: drawer key :{key}: is refused; a task state is written as the \
+                     headline keyword (`* TODO …`), never as a property"
+                );
             } else {
                 block.set_property(key, holon_api::Value::String(value.to_string()));
             }

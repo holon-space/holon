@@ -2,6 +2,7 @@
 
 mod cycle_task_state_cold_boot_reingest;
 mod editor_pure_pbt;
+mod empty_question_loro_arm;
 mod merge_blocks_pbt;
 mod schedule_boundary_observables;
 mod split_block_content_pbt;

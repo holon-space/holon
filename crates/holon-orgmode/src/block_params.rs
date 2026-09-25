@@ -111,6 +111,10 @@ pub fn build_block_params(
             "task_state_category".into(),
             Value::String(task_state.category.as_str().to_string()),
         );
+    } else if previous.is_some_and(|p| p.task_state().is_some()) {
+        // The file dropped the headline's keyword, so the block is no task.
+        params.insert("task_state".into(), Value::REMOVED);
+        params.insert("task_state_category".into(), Value::REMOVED);
     }
     // Always emit, like `collapsed` below: an ingest that finds NO priority
     // carrier means the file no longer has one, and a stored rank that nothing

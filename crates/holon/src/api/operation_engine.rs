@@ -1572,9 +1572,12 @@ impl DispatchingOperationEngine {
     /// write authority: a keystroke must see the previous keystroke's demotion,
     /// which a lagging projection does not hold yet.
     async fn stored_task_keyword(&self, id: &str) -> Result<Option<String>> {
-        let Some(authority) = self.write_authority.as_ref() else {
-            return Ok(None);
-        };
+        let authority = self.write_authority.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "reading block {id}'s task keyword needs the block write authority, which this \
+                 engine was built without"
+            )
+        })?;
         // ALLOW(entity_uri_from_raw): `id` is the operation's own `id` param.
         let uri = holon_api::EntityUri::from_raw(id);
         let block = authority

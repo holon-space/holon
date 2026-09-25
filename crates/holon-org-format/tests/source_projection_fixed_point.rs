@@ -57,7 +57,7 @@ fn declared_vocabulary() -> impl Strategy<Value = TaskKeywordVocabulary> {
     ]
 }
 
-/// A state the store refuses to hold, so it has no projection to test.
+/// Refused by design (`QuestionWithoutText`), pinned by example below.
 fn is_question_without_text(task_state: Option<&TaskState>, content: &str) -> bool {
     task_state.is_some_and(|s| asks_nothing(&s.keyword, content))
 }
@@ -165,12 +165,14 @@ fn an_open_question_projects_and_parses_back_under_the_defaults() {
 }
 
 #[test]
-#[should_panic(expected = "has no vault source")]
-fn a_question_without_text_has_no_projection() {
-    source_projection(
-        Some(&TaskState::active("?")),
-        "",
-        &TaskKeywordVocabulary::default(),
+fn a_question_without_text_is_refused() {
+    assert_eq!(
+        source_projection(
+            Some(&TaskState::active("?")),
+            "",
+            &TaskKeywordVocabulary::default()
+        ),
+        SourceProjection::Refused(ProjectionRefusal::QuestionWithoutText)
     );
 }
 

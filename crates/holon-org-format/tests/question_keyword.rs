@@ -193,3 +193,23 @@ fn a_bare_question_mark_headline_is_title_text() {
         );
     }
 }
+
+#[test]
+fn a_task_state_drawer_key_is_refused() {
+    for key in ["task_state", "task_state_category", "TASK_STATE"] {
+        let source =
+            format!("#+ID: questions\n* \n:PROPERTIES:\n:ID: q-drawer\n:{key}: ?\n:END:\n");
+        let Err(err) = parse_org_file(
+            Path::new(FILE),
+            &source,
+            &EntityUri::no_parent(),
+            Path::new(ROOT),
+        ) else {
+            panic!(":{key}: parsed, but only the headline keyword may carry a task state");
+        };
+        assert!(
+            format!("{err:#}").contains("q-drawer"),
+            "the refusal must name the block: {err:#}"
+        );
+    }
+}
