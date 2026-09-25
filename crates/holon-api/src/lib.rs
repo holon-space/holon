@@ -255,6 +255,7 @@ pub use holon_expr::bounded_engine;
 // profile boot path proves every entity-lookup a bundled computed field calls
 // is registered on the engine.
 pub use holon_expr::referenced_functions;
+pub use holon_expr::unguarded_columns;
 pub use holon_expr::unoptimized_engine;
 // The guard AST, the transition-arc vocabulary and the dynamic `Value` live in
 // the leaf crate `holon-pattern` (reachable from `holon-macros`, which parses

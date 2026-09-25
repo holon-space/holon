@@ -41,7 +41,7 @@ use crate::core::operation_log::OperationLogObserver;
 use crate::core::operation_log::OperationLogStore;
 use crate::entity_profile::LiveEntities;
 use crate::entity_profile::ProfileResolver;
-use crate::entity_profile::parse_entity_profile;
+use crate::entity_profile::parse_profile_yaml;
 use crate::identity::IdentityProvider;
 use crate::navigation::NavigationProvider;
 use crate::storage::ChangeOriginInjector;
@@ -196,6 +196,7 @@ async fn create_initialized_engine(
         ui_info,
         LiveEntities::new(),
         type_profiles,
+        type_registry.profile_scope_check(),
     )
     .await?;
 
@@ -460,6 +461,10 @@ async fn create_profile_resolver(
     ui_info: holon_api::UiInfo,
     live_entities: LiveEntities,
     type_profiles: Vec<crate::entity_profile::EntityProfile>,
+    profile_scope_check: impl Fn(&crate::entity_profile::ParsedProfile) -> Result<()>
+    + Send
+    + Sync
+    + 'static,
 ) -> Result<Arc<ProfileResolver>> {
     use holon_api::EntityName;
     let mut entity_operations: HashMap<EntityName, Vec<holon_api::OperationDescriptor>> =
@@ -501,12 +506,14 @@ async fn create_profile_resolver(
                         .ok_or_else(|| anyhow::anyhow!("profile row missing 'id'"))?;
                     Ok(id)
                 },
-                |row| {
+                move |row| {
                     let content = row
                         .get("content")
                         .and_then(|v| v.as_string())
                         .ok_or_else(|| anyhow::anyhow!("profile row missing 'content'"))?;
-                    parse_entity_profile(content)
+                    let profile = parse_profile_yaml(content)?;
+                    profile_scope_check(&profile)?;
+                    profile.to_entity_profile()
                 },
             );
             live_profiles.subscribe("entity_profile", result.stream);

@@ -240,6 +240,7 @@ impl TypeRegistry {
     /// Adds computed fields and profile variants. Uses the same `ParsedProfile`
     /// produced by both bundled and org-embedded YAML parsing.
     pub fn apply_parsed_profile(&self, profile: ParsedProfile) -> Result<()> {
+        crate::check_profile_scope(&profile, self.get(&profile.entity_name).as_ref())?;
         let entity_name = profile.entity_name;
         let computed: Vec<(String, ComputedFieldDecl)> = profile.computed.into_iter().collect();
         if !computed.is_empty() {
@@ -274,6 +275,21 @@ impl TypeRegistry {
     /// for exactly the entities that exist.
     pub fn link_target_classifier(self: &Arc<Self>) -> LinkTargetClassifier {
         LinkTargetClassifier::with_registry(self.clone() as Arc<dyn LinkSchemeRegistry>)
+    }
+
+    /// [`crate::check_profile_scope`] against a snapshot of the types
+    /// registered now, for profiles that load after the registry is built
+    /// (org-embedded profile blocks).
+    pub fn profile_scope_check(
+        &self,
+    ) -> impl Fn(&ParsedProfile) -> Result<()> + Send + Sync + 'static {
+        let types = self.types.read().expect("TypeRegistry poisoned").clone();
+        move |profile| {
+            crate::check_profile_scope(
+                profile,
+                types.get(TableName::from_scheme(&profile.entity_name).as_str()),
+            )
+        }
     }
 
     /// Get all registered type definitions.

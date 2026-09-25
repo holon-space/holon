@@ -239,6 +239,32 @@ fn is_def_var_guards(ast: &AST) -> BTreeSet<String> {
     guarded
 }
 
+/// The required columns an expression reads with no absence guard at all:
+/// [`required_columns`] minus every name it also compares against `()`
+/// (`x != ()` / `x == ()`). Such a comparison is the author declaring `x`
+/// optional, just as `is_def_var("x")` is.
+pub fn unguarded_columns(ast: &AST) -> BTreeSet<String> {
+    let mut unit_compared = BTreeSet::new();
+    ast.walk(&mut |path: &[ASTNode]| {
+        if let ASTNode::Expr(Expr::FnCall(call, _)) = path.last().unwrap() {
+            if matches!(call.name.as_str(), "!=" | "==") {
+                if let [lhs, rhs] = &call.args[..] {
+                    for (var, other) in [(lhs, rhs), (rhs, lhs)] {
+                        if let (Expr::Variable(info, _, _), Expr::Unit(_)) = (var, other) {
+                            unit_compared.insert(info.1.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        true
+    });
+    required_columns(ast)
+        .difference(&unit_compared)
+        .cloned()
+        .collect()
+}
+
 /// The names of every free-function call the expression makes — `foo(args)`,
 /// NOT method calls (`x.foo()`), property reads, or namespace-qualified paths,
 /// which are structurally distinct AST nodes.
