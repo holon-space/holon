@@ -67,6 +67,11 @@ slow-timeout = { period = "60s", terminate-after = 5 }  # 5 min hard cap
 filter = "binary(latency_slo_gate)"
 slow-timeout = { period = "60s", terminate-after = 20 }  # 20 min hard cap
 
+# The 1500-pipeline drain soundness sweep takes ~27s idle and >120s on a loaded host.
+[[profile.default.overrides]]
+filter = "package(holon-api) & test(=latency_drain::tests::the_drain_gate_passes_every_healthy_pipeline_and_fails_every_slow_one)"
+slow-timeout = { period = "60s", terminate-after = 6 }
+
 # The vault-scale main-panel guard asserts a 5s wall-clock budget on a cold
 # matview create + first read (~70 pages). It measures the machine as much as
 # the query, so it needs a core to itself: 853ms alone on a quiet machine,
