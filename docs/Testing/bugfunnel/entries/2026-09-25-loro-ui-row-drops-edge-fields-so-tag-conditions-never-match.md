@@ -53,5 +53,13 @@ engine (ORACLE).
 - **Fix:** `Block::to_storage_row` (`crates/holon-api/src/block.rs`) is the
   inverse of `TryFrom<StorageEntity> for Block`. It writes the edge fields and
   `marks` in matview shape, and `block_to_row` uses it.
+- **Generator:** org headlines now carry `:tags:` (arbitrary words and
+  `decision`), so non-seed blocks reach the invariant with tags.
+- **Parity:** `crates/holon-app/tests/loro_ui_row_matches_sql_row.rs` compares
+  the Loro UI row with the `block` matview row the projection writes for the
+  same blocks. It found two more gaps, both fixed: the Loro row had no
+  `sort_key`, so a collection sorted its rows by nothing, and it carried
+  `collapsed` as a boolean, so `bullet_shape` (`collapsed != 0`) showed the
+  collapsed bullet on every block.
 - **Follow-up:** a full no-Turso renderer arm in `compose_sut`, for when the
   Loro read model becomes the production frontend (D172.a).

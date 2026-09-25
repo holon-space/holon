@@ -30,6 +30,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use holon::api::BackendEngine;
+use holon::api::OperationEngine;
 use holon_api::EdgeFieldUpdate;
 use holon_api::EntityUri;
 use holon_api::StorageEntity;
@@ -447,26 +448,24 @@ impl SutBlockTreeWrite for KeystrokeBlockTreeWriter {
     }
 }
 
-/// `SutEdgeFieldWrite` realization for a Loro-authority composed config (the
-/// `full_headless` frontend). Dispatches the edge-field write as a production
-/// `block` `set_field` op through the real [`BackendEngine`] — the SAME path
-/// content/structural writes take (and the same `OpDispatchWriter` uses) — so
-/// the write is journaled on the engine's undo stack and `UndoLastMutation` can
-/// retract it. In Loro-authority mode `set_field` routes the edge value to the
-/// production `set_block_{tags,requires,advice_suppressed}` setters over the
-/// authority doc → `project()` → SQL, exactly as before, PLUS the undo entry
-/// (whole-set-restore inverse) the raw-`LoroBackend` path could never record.
+/// `SutEdgeFieldWrite` realization for a Loro-authority composed config.
+/// Dispatches the edge-field write as a production `block` `set_field` op
+/// through the session's operation engine: the frontend's [`BackendEngine`],
+/// or the dispatcher a no-Turso session runs. `set_field` routes the edge
+/// value to the production `set_block_{tags,requires,advice_suppressed}`
+/// setters over the authority doc. The frontend's engine journals the write,
+/// so `UndoLastMutation` can retract it.
 ///
 /// Resolves oracle ids through the shared [`IdResolver`] (like
 /// [`OpDispatchWriter`]) so the write — and each `requires` dependency target —
 /// hits the real (split-reconciled) block, not a synthetic oracle id.
 pub struct EdgeFieldWriter {
-    engine: Arc<BackendEngine>,
+    engine: Arc<dyn OperationEngine>,
     resolver: IdResolver,
 }
 
 impl EdgeFieldWriter {
-    pub fn new(engine: Arc<BackendEngine>, resolver: IdResolver) -> Self {
+    pub fn new(engine: Arc<dyn OperationEngine>, resolver: IdResolver) -> Self {
         Self { engine, resolver }
     }
 

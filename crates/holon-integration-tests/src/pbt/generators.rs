@@ -361,6 +361,19 @@ fn uniquify_ids(ids: impl IntoIterator<Item = String>) -> Vec<String> {
         .collect()
 }
 
+/// Org headline `:tags:` for a generated heading: none for most, else one or
+/// two drawn from arbitrary lowercase words and `decision`.
+fn headline_tags_strategy() -> impl Strategy<Value = std::collections::BTreeSet<String>> {
+    let tag = prop_oneof![
+        1 => Just("decision".to_string()),
+        2 => "[a-z]{3,6}",
+    ];
+    prop_oneof![
+        2 => Just(std::collections::BTreeSet::new()),
+        1 => prop::collection::btree_set(tag, 1..=2),
+    ]
+}
+
 /// Generate `(filename, content)` for a `WriteOrgFile` transition.
 ///
 /// `allow_index_override`: when `false`, only emits non-index files
@@ -416,6 +429,7 @@ pub fn generate_org_file_content_with_keywords(
                 // per-file block count (via a shape profile) widens the
                 // reachable tree depth toward real-vault shape.
                 prop::num::u8::ANY,
+                headline_tags_strategy(),
             ),
             1..=blocks_per_file_gen_bound(),
         ),
@@ -431,7 +445,7 @@ pub fn generate_org_file_content_with_keywords(
             // predecessor by id. Collected up front because the dependency
             // target (`ids[i-1]`) must be known while building block `i`.
             // Uniquified (see `uniquify_ids`): org files require unique `:ID:`s.
-            let ids = uniquify_ids(headings.iter().map(|(_, id, _, _, _, _)| id.clone()));
+            let ids = uniquify_ids(headings.iter().map(|(_, id, _, _, _, _, _)| id.clone()));
             // First pass: resolve each heading's parent. Flat (doc root) by
             // default; under extended gen, heading `i` parents to
             // `sel % (i + 1)` (0 = root, k = heading k-1) — well-founded by
@@ -440,7 +454,7 @@ pub fn generate_org_file_content_with_keywords(
                 .iter()
                 .enumerate()
                 .map(
-                    |(i, (_, _, _, _, _, parent_sel))| match *parent_sel as usize % (i + 1) {
+                    |(i, (_, _, _, _, _, parent_sel, _))| match *parent_sel as usize % (i + 1) {
                         0 => doc_uri.clone(),
                         k => EntityUri::block(&ids[k - 1]),
                     },
@@ -450,13 +464,14 @@ pub fn generate_org_file_content_with_keywords(
                 .into_iter()
                 .enumerate()
                 .map(
-                    |(i, (headline, _, task_keyword, make_requires, make_contributes, _))| {
+                    |(i, (headline, _, task_keyword, make_requires, make_contributes, _, tags))| {
                         let mut b = Block::new_text(
                             EntityUri::block(&ids[i]),
                             parents[i].clone(),
                             &headline,
                         );
                         b.set_property("ID", Value::String(ids[i].clone()));
+                        b.tags = holon_api::Tags::from_tag_iter(tags);
                         if let Some(pick) = task_keyword {
                             let kw = &all_keywords[pick as usize % all_keywords.len()];
                             b.set_task_state(Some(TaskState::from_keyword(kw)));

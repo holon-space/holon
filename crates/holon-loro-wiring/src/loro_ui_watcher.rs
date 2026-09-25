@@ -393,16 +393,15 @@ async fn render_state(
 
     let render_expr = derive_render_expr(&snapshot, block_id);
 
-    let mut blocks: Vec<Block> = Vec::new();
+    let mut ordered = Vec::new();
     if let Some(block) = snapshot.block_by_id(block_id) {
-        blocks.push(block);
+        let row = block_to_row(&block, sibling_index(&snapshot, &block));
+        ordered.push((block.id, row));
     }
-    blocks.extend(snapshot.children_ordered(block_id));
-
-    let ordered = blocks
-        .iter()
-        .map(|block| (block.id.clone(), block_to_row(block)))
-        .collect();
+    for (index, child) in snapshot.children_ordered(block_id).into_iter().enumerate() {
+        let row = block_to_row(&child, index);
+        ordered.push((child.id, row));
+    }
 
     Ok((render_expr, ordered))
 }
@@ -508,12 +507,26 @@ fn derive_root_slot_expr(
     }
 }
 
+/// `block`'s position among its parent's children in `snapshot`.
+pub fn sibling_index(snapshot: &holon_core::storage::BlockSnapshot, block: &Block) -> usize {
+    snapshot
+        .children_ordered(&block.parent_id)
+        .iter()
+        .position(|sibling| sibling.id == block.id)
+        .unwrap_or_else(|| panic!("{} is not among its parent's children", block.id))
+}
+
 /// Convert a [`Block`] into the row map the reactive engine consumes: the
 /// `block` matview row ([`Block::to_storage_row`]) with `properties` flattened
 /// to top-level keys, as [`holon_api::widget_spec::EnrichedRow`]'s
-/// `flatten_properties` does.
-pub fn block_to_row(block: &Block) -> HashMap<Arc<str>, Value> {
+/// `flatten_properties` does. `sort_key` encodes `sibling_index`, so rows sort
+/// in sibling order wherever the matview's key would.
+pub fn block_to_row(block: &Block, sibling_index: usize) -> HashMap<Arc<str>, Value> {
     let mut row = block.to_storage_row();
+    row.insert(
+        "sort_key".into(),
+        Value::String(format!("{sibling_index:010}")),
+    );
     if let Some(Value::Object(props)) = row.get("properties").cloned() {
         for (key, value) in props {
             row.entry(Arc::from(key)).or_insert(value);

@@ -4710,6 +4710,17 @@ impl LoroBackend {
             .unwrap_or_default()
     }
 
+    /// Every block the Loro→SQL projection would write, with its sort key,
+    /// read under one doc lock: a concurrent structural write lands wholly
+    /// before or wholly after the read.
+    pub fn projected_blocks(&self) -> Result<Vec<SnapshotBlock>, ApiError> {
+        self.collab_doc
+            .with_read(|doc| Ok(snapshot_blocks_from_doc(doc).into_values().collect()))
+            .map_err(|e| ApiError::InternalError {
+                message: format!("projected_blocks: {e:#}"),
+            })
+    }
+
     /// The live doc's Lamport height — the E-solid oracle's clock-sync
     /// scalar (see `multi_peer::lamport_height` / `clock_parity_spike`).
     pub async fn lamport_height(&self) -> Result<u32, ApiError> {

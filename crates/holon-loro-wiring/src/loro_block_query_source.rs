@@ -1,21 +1,17 @@
 //! A Turso-free [`BlockQuerySource`] backed directly by the Loro tree.
 //!
 //! This is the read seam ADR 0004 Phase 9 needs so a wiring *without* Turso can
-//! still answer the block queries the PBT invariants depend on. It walks the
-//! `LoroBackend` tree directly (`CoreOperations::list_children` / `get_blocks`)
-//! — **not** the `QueryableCache`, which is a thin wrapper over a Turso
-//! `DbHandle` and would re-introduce the Turso dependency we are removing.
+//! still answer the block queries the PBT invariants depend on. It reads the
+//! `LoroBackend` tree directly — **not** the `QueryableCache`, which is a thin
+//! wrapper over a Turso `DbHandle` and would re-introduce the Turso dependency
+//! we are removing.
 //!
 //! Per the redesigned seam, the *reads* are synchronous against a captured
 //! [`BlockSnapshot`]; the only async concern is producing that snapshot. For
-//! Loro there is no CDC to settle, so `snapshot()` just performs one DFS
-//! capture of the tree. Sibling order is the Loro tree's own child order (the
-//! fractional index the SQL projection would otherwise materialize as
-//! `sort_key`), so the capture is in canonical sibling order (ADR 0005) without
-//! any SQL `ORDER BY`.
+//! Loro there is no CDC to settle, so `snapshot()` reads the block set the
+//! Loro→SQL projection writes, under one doc lock, and orders siblings by the
+//! sort keys that projection writes (ADR 0005).
 
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -25,9 +21,6 @@ use fluxdi::Shared;
 use holon::api::DispatchingOperationEngine;
 use holon::api::OperationEngine;
 use holon::api::operation_dispatcher::OperationDispatcher;
-use holon_api::EntityUri;
-use holon_api::block::Block;
-use holon_api::repository::CoreOperations;
 use holon_core::OperationProvider;
 use holon_core::storage::BlockQuerySource;
 use holon_core::storage::BlockSnapshot;
@@ -48,43 +41,24 @@ impl LoroBlockQuerySource {
     pub fn new(backend: Arc<LoroBackend>) -> Self {
         Self { backend }
     }
-
-    /// Append `parent`'s subtree to `out` in pre-order: each block immediately
-    /// before its own subtree, siblings in canonical Loro order.
-    fn collect_subtree<'a>(
-        &'a self,
-        parent: &'a EntityUri,
-        out: &'a mut Vec<Block>,
-    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
-        Box::pin(async move {
-            // `list_children` returns child URIs in Loro tree order; `get_blocks`
-            // preserves that input order.
-            let child_ids = self.backend.list_children(parent.as_str()).await?;
-            let children = self.backend.get_blocks(child_ids).await?;
-            for child in children {
-                let child_id = child.id.clone();
-                out.push(child);
-                self.collect_subtree(&child_id, out).await?;
-            }
-            Ok(())
-        })
-    }
 }
 
 #[async_trait]
 impl BlockQuerySource for LoroBlockQuerySource {
     async fn snapshot(&self) -> Result<BlockSnapshot> {
-        let mut ordered = Vec::new();
-        // `no_parent` resolves to the Loro tree roots (see
-        // `LoroBackend::list_children`).
-        self.collect_subtree(&EntityUri::no_parent(), &mut ordered)
-            .await?;
+        let mut blocks = self.backend.projected_blocks()?;
+        blocks.sort_by(|a, b| {
+            (&a.sort_key, a.block.id.as_str()).cmp(&(&b.sort_key, b.block.id.as_str()))
+        });
 
         // Navigation focus is a Turso matview today with no Loro-native source.
         // Under a Loro-only wiring `inv-focus-roots` drops (it reads that
         // matview), so empty focus-roots is the correct, disclosed behaviour for
         // this slice — see plan task V3. An in-memory nav source is deferred.
-        Ok(BlockSnapshot::from_ordered(ordered, Vec::new()))
+        Ok(BlockSnapshot::from_ordered(
+            blocks.into_iter().map(|snap| snap.block),
+            Vec::new(),
+        ))
     }
 
     fn change_version(&self) -> Option<u64> {
@@ -178,6 +152,13 @@ pub fn register_loro_operation_engine(
             Err(_) => block_ops,
         }
     };
+    let engine = loro_operation_engine(block_ops);
+    injector.provide::<dyn OperationEngine>(Provider::root(move |_| engine.clone()));
+}
+
+/// The operation engine a no-Turso session dispatches through, over
+/// `block_ops`.
+pub fn loro_operation_engine(block_ops: LoroBlockOperations) -> Arc<dyn OperationEngine> {
     // Navigation ops (focus / back / forward / home) have no Turso substrate in
     // a Loro-only session; an in-memory provider keeps per-device focus history
     // so click / arrow / back-forward navigation dispatches succeed.
@@ -213,17 +194,18 @@ pub fn register_loro_operation_engine(
     // History relation (C2b): no Turso query substrate here, so wire the
     // DISCLOSED degraded store (warns at construction; reads fail loud) rather
     // than silently omitting history.
-    let engine: Arc<dyn OperationEngine> = Arc::new(
+    Arc::new(
         DispatchingOperationEngine::new(Arc::new(dispatcher))
             .with_history_store(Arc::new(holon::api::DegradedHistoryStore::new())),
-    );
-    injector.provide::<dyn OperationEngine>(Provider::root(move |_| engine.clone()));
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use holon::di::lifecycle::build_no_turso_container;
     use holon_api::BlockContent;
+    use holon_api::EntityUri;
+    use holon_api::repository::CoreOperations;
     use holon_api::repository::Lifecycle;
     use holon_core::storage::BlockQuery;
 
@@ -439,6 +421,88 @@ mod tests {
         assert_eq!(
             reloaded.content, "persisted",
             "the no-Turso mutation must persist across a store reopen"
+        );
+    }
+
+    /// A snapshot taken while another task deletes and re-creates subtrees
+    /// must neither fail nor tear: every captured block's parent is captured
+    /// too, or is the tree root.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn snapshot_is_consistent_under_concurrent_structural_writes() {
+        let backend = Arc::new(
+            LoroBackend::create_new("loro-query-source-race".to_string())
+                .await
+                .unwrap(),
+        );
+        let root = backend
+            .create_block(EntityUri::no_parent(), BlockContent::text("root"), None)
+            .await
+            .unwrap();
+        for i in 0..40 {
+            let child = backend
+                .create_block(root.id.clone(), BlockContent::text(format!("c{i}")), None)
+                .await
+                .unwrap();
+            for j in 0..3 {
+                backend
+                    .create_block(
+                        child.id.clone(),
+                        BlockContent::text(format!("g{i}.{j}")),
+                        None,
+                    )
+                    .await
+                    .unwrap();
+            }
+        }
+
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let writer = tokio::spawn({
+            let backend = backend.clone();
+            let root = root.id.clone();
+            let stop = stop.clone();
+            async move {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let parent = backend
+                        .create_block(root.clone(), BlockContent::text("churn"), None)
+                        .await
+                        .unwrap();
+                    let child = backend
+                        .create_block(parent.id.clone(), BlockContent::text("churn child"), None)
+                        .await
+                        .unwrap();
+                    tokio::task::yield_now().await;
+                    backend.delete_block(child.id.as_str()).await.unwrap();
+                    backend.delete_block(parent.id.as_str()).await.unwrap();
+                    tokio::task::yield_now().await;
+                }
+            }
+        });
+
+        let source = LoroBlockQuerySource::new(backend.clone());
+        let mut failures = Vec::new();
+        for attempt in 0..300 {
+            match source.snapshot().await {
+                Ok(snap) => {
+                    for block in snap.iter_blocks() {
+                        let parent = &block.parent_id;
+                        if !parent.is_no_parent() && snap.block_by_id(parent).is_none() {
+                            failures.push(format!(
+                                "attempt {attempt}: {} captured without its parent {parent}",
+                                block.id
+                            ));
+                        }
+                    }
+                }
+                Err(e) => failures.push(format!("attempt {attempt}: {e}")),
+            }
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        writer.await.unwrap();
+        assert!(
+            failures.is_empty(),
+            "{} of 300 snapshots failed or tore, first: {:?}",
+            failures.len(),
+            failures.iter().take(3).collect::<Vec<_>>()
         );
     }
 }

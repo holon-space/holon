@@ -859,8 +859,8 @@ fn require_string_array(
 
 impl Block {
     /// The row a `block` matview read yields for this block: the inverse of
-    /// `TryFrom<StorageEntity>`. Edge fields and `marks` are JSON text, as the
-    /// matview hydrates them.
+    /// `TryFrom<StorageEntity>`. Edge fields and `marks` are JSON text and
+    /// flags are 0/1 integers, as the matview hydrates them.
     pub fn to_storage_row(&self) -> crate::StorageEntity {
         use crate::entity::IntoEntity;
 
@@ -887,6 +887,11 @@ impl Block {
         row.insert(
             "contributes_to".into(),
             json_text_array(self.contributes_to.iter().map(EntityUri::as_str)),
+        );
+        row.insert("collapsed".into(), Value::Integer(self.collapsed.into()));
+        row.insert(
+            "widget_only".into(),
+            Value::Integer(self.widget_only.into()),
         );
         row.insert(
             "marks".into(),

@@ -544,7 +544,7 @@ async fn compose_sut_seeded_impl(
         // `set_field` op so the write is journaled for undo (`UndoLastMutation`).
         if comp.loro_doc_store().is_some() {
             caps.insert(Arc::new(crate::pbt::op_write_cap::EdgeFieldWriter::new(
-                comp.engine(),
+                comp.engine() as Arc<dyn holon::api::OperationEngine>,
                 resolver.clone(),
             )) as Arc<dyn SutEdgeFieldWrite>);
         }
@@ -804,6 +804,16 @@ async fn compose_sut_seeded_impl(
                 sync.clone(),
             ))
             .register(&mut loro_caps);
+        }
+        // Pure Loro: the tag operation dispatches through the Loro-only
+        // operation engine a no-Turso session runs, over the canonical doc.
+        if !has_turso {
+            let block_ops =
+                holon_loro::loro_block_operations::LoroBlockOperations::new(doc_store.clone());
+            loro_caps.insert(Arc::new(crate::pbt::op_write_cap::EdgeFieldWriter::new(
+                holon_loro_wiring::loro_block_query_source::loro_operation_engine(block_ops),
+                resolver.clone(),
+            )) as Arc<dyn SutEdgeFieldWrite>);
         }
         // The peer-mesh surface (`SutLoro`) is contributed whenever the `doc_store` it
         // drives over is the SAME doc whose mutations reach the canonical `SutBackend`

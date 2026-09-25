@@ -31,6 +31,7 @@ use holon_api::Tags;
 use holon_pbt_core::TransitionFactory;
 use holon_pbt_core::TransitionRef;
 use holon_pbt_core::capabilities::RefBlockTree;
+use holon_pbt_core::capabilities::RefDocuments;
 use holon_pbt_core::capabilities::RefLayout;
 use holon_pbt_core::capabilities::RefLayoutInteract;
 use holon_pbt_core::capabilities::RefLayoutMutate;
@@ -59,10 +60,13 @@ pub struct SetEdgeField {
 }
 
 /// Blocks whose edge fields are safe to rewrite: existing, non-page (so a
-/// `tags` rewrite can't flip `is_page`), and not layout/profile/render/query
+/// `tags` rewrite can't flip `is_page`), not layout/profile/render/query
 /// special blocks (rewriting their edge fields would perturb unrelated
-/// invariants).
-fn eligible_blocks<R: RefBlockTree + RefLayout + RefLayoutInteract>(state: &R) -> Vec<EntityUri> {
+/// invariants), and outside the seed document, which a pure-Loro store does
+/// not hold (the same rule `ApplyMutation` targets by).
+fn eligible_blocks<R: RefBlockTree + RefDocuments + RefLayout + RefLayoutInteract>(
+    state: &R,
+) -> Vec<EntityUri> {
     let special: std::collections::HashSet<EntityUri> = state
         .render_source_ids()
         .into_iter()
@@ -77,6 +81,9 @@ fn eligible_blocks<R: RefBlockTree + RefLayout + RefLayoutInteract>(state: &R) -
                 && !special.contains(id)
                 && !state.is_layout_block(id)
                 && !state.is_immutable(id)
+                && state
+                    .block_document_of(id)
+                    .is_none_or(|doc| !doc.is_no_parent())
         })
         .collect()
 }
@@ -93,8 +100,15 @@ fn composed_loro_host<R: RefLifecycle + RefWiring>(state: &R) -> bool {
     state.enable_loro() && state.has_cap_set()
 }
 
-impl<R: RefLifecycle + RefBlockTree + RefLayout + RefLayoutInteract + RefWiring + RefLayoutMutate>
-    TransitionFactory<R> for SetEdgeField
+impl<
+    R: RefLifecycle
+        + RefBlockTree
+        + RefDocuments
+        + RefLayout
+        + RefLayoutInteract
+        + RefWiring
+        + RefLayoutMutate,
+> TransitionFactory<R> for SetEdgeField
 {
     fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
         // Single-sourced from the `cap_transition!` below.
@@ -123,11 +137,15 @@ impl<R: RefLifecycle + RefBlockTree + RefLayout + RefLayoutInteract + RefWiring 
         // pool:random. The pool sub-arm draws DISTINCT tags from
         // `ADVICE_TAG_POOL` (the same pool the advice-rule generator anchors on),
         // making `task`/`lesson` tagging and hence advice tag-overlap reachable;
-        // the random sub-arm keeps arbitrary `[a-z]{3,6}` coverage.
+        // the random sub-arm keeps arbitrary `[a-z]{3,6}` coverage, plus
+        // `decision`.
         {
             let random_tags = (
                 proptest::sample::select(eligible.clone()),
-                proptest::collection::vec("[a-z]{3,6}", 1..3),
+                proptest::collection::vec(
+                    prop_oneof![3 => "[a-z]{3,6}", 1 => Just("decision".to_string())],
+                    1..3,
+                ),
             )
                 .prop_map(|(block_id, tags)| SetEdgeField {
                     block_id,
