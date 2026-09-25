@@ -205,6 +205,7 @@ mod tests {
     use holon::di::lifecycle::build_no_turso_container;
     use holon_api::BlockContent;
     use holon_api::EntityUri;
+    use holon_api::block::Block;
     use holon_api::repository::CoreOperations;
     use holon_api::repository::Lifecycle;
     use holon_core::storage::BlockQuery;
@@ -424,17 +425,16 @@ mod tests {
         );
     }
 
-    /// Between every two guarded reads the snapshot makes, a writer on
-    /// another thread replaces the only child of `left` and of `right` with
-    /// round `n + 1`'s pair. A snapshot of one doc state holds one round's
-    /// pair.
+    /// After every guarded read of the doc, a writer on another thread sets
+    /// the only child of `left` and of `right` to round `n + 1`'s text. Every
+    /// doc state therefore shows one round's pair.
     #[test]
-    fn snapshot_is_one_doc_state_when_writes_land_between_its_reads() {
+    fn snapshot_is_one_doc_state_when_a_write_follows_every_read() {
         let reader_rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
-        let (backend, root, left, right) = reader_rt.block_on(async {
+        let (backend, sides) = reader_rt.block_on(async {
             let backend = Arc::new(
                 LoroBackend::create_new("loro-query-source-interleave".to_string())
                     .await
@@ -445,30 +445,31 @@ mod tests {
                 .await
                 .unwrap()
                 .id;
-            let mut parents = Vec::new();
+            let mut sides = Vec::new();
             for side in ["left", "right"] {
                 let parent = backend
                     .create_block(root.clone(), BlockContent::text(side), None)
                     .await
                     .unwrap()
                     .id;
-                backend
+                let child = backend
                     .create_block(
                         parent.clone(),
                         BlockContent::text(format!("{side} 0")),
                         None,
                     )
                     .await
-                    .unwrap();
-                parents.push(parent);
+                    .unwrap()
+                    .id;
+                sides.push((side, parent, child));
             }
-            (backend, root, parents[0].clone(), parents[1].clone())
+            (backend, sides)
         });
 
         let (round_tx, round_rx) = std::sync::mpsc::channel::<std::sync::mpsc::Sender<()>>();
         let writer = std::thread::spawn({
             let backend = backend.clone();
-            let (left, right) = (left.clone(), right.clone());
+            let sides = sides.clone();
             move || {
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
@@ -477,19 +478,14 @@ mod tests {
                 for (index, done) in round_rx.into_iter().enumerate() {
                     let round = index + 1;
                     rt.block_on(async {
-                        for (parent, side) in [(&left, "left"), (&right, "right")] {
-                            let old = backend.list_children(parent.as_str()).await.unwrap();
+                        for (side, _, child) in &sides {
                             backend
-                                .create_block(
-                                    parent.clone(),
+                                .update_block(
+                                    child.as_str(),
                                     BlockContent::text(format!("{side} {round}")),
-                                    None,
                                 )
                                 .await
                                 .unwrap();
-                            for id in old {
-                                backend.delete_block(id.as_str()).await.unwrap();
-                            }
                         }
                     });
                     done.send(()).unwrap();
@@ -497,44 +493,44 @@ mod tests {
             }
         });
         let writer_thread = writer.thread().id();
-        let rounds = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let doc = backend.collab_for_test();
-        doc.set_after_read_hook(Some(Arc::new({
-            let rounds = rounds.clone();
-            move || {
-                if std::thread::current().id() == writer_thread {
-                    return;
-                }
-                let (done_tx, done_rx) = std::sync::mpsc::channel();
-                round_tx.send(done_tx).unwrap();
-                done_rx.recv().unwrap();
-                rounds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        doc.set_after_read_hook(Some(Arc::new(move || {
+            if std::thread::current().id() == writer_thread {
+                return;
             }
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            round_tx.send(done_tx).unwrap();
+            done_rx.recv().unwrap();
         })));
 
         let snapshot = reader_rt.block_on(LoroBlockQuerySource::new(backend.clone()).snapshot());
         doc.set_after_read_hook(None);
         writer.join().unwrap();
+        let snapshot = snapshot.expect("a snapshot with a write after each of its reads");
 
-        let snapshot = snapshot.expect("a snapshot with writes between its reads");
-        assert!(
-            rounds.load(std::sync::atomic::Ordering::SeqCst) > 0,
-            "no write landed between the snapshot's reads"
-        );
-        let only_child = |parent: &EntityUri| {
-            let children = snapshot.children_ordered(parent);
-            assert_eq!(
-                children.len(),
-                1,
-                "every doc state gives {parent} one child; the snapshot has {children:?}"
-            );
-            children[0].content_text().to_string()
+        let texts = |children: Vec<Block>| -> Vec<String> {
+            children
+                .iter()
+                .map(|b| b.content_text().to_string())
+                .collect()
         };
-        let (left_child, right_child) = (only_child(&left), only_child(&right));
-        assert_eq!(
-            left_child.trim_start_matches("left "),
-            right_child.trim_start_matches("right "),
-            "the snapshot mixes two doc states: {left_child:?} beside {right_child:?} under {root}"
-        );
+        let captured: Vec<Vec<String>> = sides
+            .iter()
+            .map(|(_, parent, _)| texts(snapshot.children_ordered(parent)))
+            .collect();
+        let live: Vec<Vec<String>> = reader_rt.block_on(async {
+            let mut live = Vec::new();
+            for (_, parent, _) in &sides {
+                let ids = backend.list_children(parent.as_str()).await.unwrap();
+                live.push(texts(backend.get_blocks(ids).await.unwrap()));
+            }
+            live
+        });
+        assert_ne!(captured, live, "no write landed after the snapshot's reads");
+        let one_round = captured[0].len() == 1
+            && captured[1].len() == 1
+            && captured[0][0].trim_start_matches("left ")
+                == captured[1][0].trim_start_matches("right ");
+        assert!(one_round, "the snapshot mixes doc states: {captured:?}");
     }
 }

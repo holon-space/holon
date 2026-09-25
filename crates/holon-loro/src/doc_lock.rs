@@ -120,13 +120,6 @@ impl DocLock {
     }
 
     /// Whether THIS thread currently holds this doc's write guard.
-    ///
-    /// Production enforcement lives in [`mutate_guarded`], which asks the same
-    /// question of the document a mutation lands in. This method answers it
-    /// for a caller that holds the lock rather than the doc: the tests read it
-    /// from inside a commit's subscriber callback to prove the flush itself
-    /// was exclusive.
-    #[cfg(test)]
     pub(crate) fn this_thread_holds_write(&self) -> bool {
         held(self.key).writes > 0
     }

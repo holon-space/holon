@@ -66,10 +66,6 @@ const SQL_ONLY: &[(&str, &str)] = &[
         "completed",
         "Loro keeps it in node meta outside `Block`; no shipped profile reads it",
     ),
-    (
-        "priority",
-        "the projection writes Null to clear a stale rank; no shipped profile reads it",
-    ),
 ];
 
 /// Columns both rows carry whose values differ by construction.
@@ -297,19 +293,6 @@ async fn loro_ui_row_matches_the_sql_block_row() {
             }
             let equal = if list_valued.contains(column.as_str()) {
                 as_set(column, loro_value) == as_set(column, sql_value)
-            } else if column == "properties" {
-                let (Value::Object(loro_bag), Value::Object(sql_bag)) = (loro_value, sql_value)
-                else {
-                    panic!("{id}: `properties` is not an object on both sides");
-                };
-                let mut sql_bag = sql_bag.clone();
-                // The projection writes an absent priority as Null to clear a stale rank.
-                if !loro_bag.contains_key("priority")
-                    && sql_bag.get("priority") == Some(&Value::Null)
-                {
-                    sql_bag.remove("priority");
-                }
-                *loro_bag == sql_bag
             } else {
                 loro_value == sql_value
             };

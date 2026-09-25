@@ -220,6 +220,31 @@ impl LoroDocument {
         self.lock.set_after_read_hook(hook);
     }
 
+    /// A private copy of the doc's last commit-boundary state.
+    ///
+    /// Forking commits the doc's pending transaction, so it is refused while
+    /// ops are pending: inside a write batch, or ops left by an unguarded
+    /// mutation. Committing them here would publish them under no origin.
+    pub fn fork_committed(&self) -> Result<LoroDoc> {
+        if self.lock.this_thread_holds_write() {
+            anyhow::bail!(
+                "doc '{}': fork_committed inside a write batch would commit the batch midway",
+                self.doc_id
+            );
+        }
+        self.lock.read(&self.doc_id, || {
+            let pending = self.doc.get_pending_txn_len();
+            if pending > 0 {
+                anyhow::bail!(
+                    "doc '{}': {pending} uncommitted ops outside any write batch; forking would \
+                     commit them with no origin",
+                    self.doc_id
+                );
+            }
+            Ok(self.doc.fork())
+        })
+    }
+
     pub fn with_read<F, R>(&self, f: F) -> Result<R>
     where
         F: FnOnce(&LoroDoc) -> Result<R>,

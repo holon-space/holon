@@ -2501,13 +2501,6 @@ pub fn block_to_params(snap: &SnapshotBlock) -> holon_api::StorageEntity {
         params.entry(k.as_str().into()).or_insert_with(|| v.clone());
     }
 
-    // A block that carries no priority must CLEAR the column, for the same
-    // reason `collapsed` is always emitted: the flatten above can only ever add
-    // a rank, so a stored one would outlive the authored value forever.
-    params
-        .entry("priority".into())
-        .or_insert(holon_api::Value::Null);
-
     // Project Block.marks → SQL `marks` TEXT column as a JSON string. None →
     // omit (NULL); Some(empty or non-empty) → JSON-encode. The SQL column
     // discriminator is `marks IS NOT NULL`.
@@ -2611,7 +2604,7 @@ fn block_diff_params(old: &SnapshotBlock, new: &SnapshotBlock) -> holon_api::Sto
         // Emit the `Value::REMOVED` sentinel for every key present in `old` but
         // absent from `new`. Distinct from the `marks` / `source_language`
         // clears above: those are real COLUMNS taking a real SQL NULL, this is
-        // a property that must stop existing. Iterating only
+        // a property that must stop existing, `priority` included. Iterating only
         // `new.properties` could not represent a deletion, so a property
         // removed in Loro left the stale value in SQL's `properties` JSON
         // forever (the base advances to `after`, so it is never re-diffed —
@@ -2622,15 +2615,7 @@ fn block_diff_params(old: &SnapshotBlock, new: &SnapshotBlock) -> holon_api::Sto
                 continue;
             }
             if !new.properties.contains_key(k) {
-                // `priority` is a real SQL COLUMN (like `marks` above), so
-                // clearing it is a NULL. The removal sentinel only edits the
-                // `properties` JSON bag and would leave the column's stale rank.
-                let clear = if k == "priority" {
-                    Value::Null
-                } else {
-                    Value::REMOVED
-                };
-                params.entry(k.as_str().into()).or_insert(clear);
+                params.entry(k.as_str().into()).or_insert(Value::REMOVED);
             }
         }
     }
@@ -2873,28 +2858,22 @@ mod marks_outbound_tests {
         }
     }
 
-    /// `priority` is a real SQL column, so a block that carries none must NULL
-    /// it. The properties flatten can only ever ADD a rank, so without this a
-    /// stored rank outlives the authored value forever.
+    /// `priority` lives in the `properties` bag, like any property.
     #[test]
-    fn block_to_params_nulls_an_absent_priority() {
+    fn block_to_params_carries_no_priority_for_a_block_without_one() {
         let params = block_to_params(&block_with_priority(None));
-        assert_eq!(
-            params.get("priority"),
-            Some(&Value::Null),
-            "an absent priority must clear the column"
-        );
+        assert_eq!(params.get("priority"), None);
+        let params = block_to_params(&block_with_priority(Some(2)));
+        assert_eq!(params.get("priority"), Some(&Value::Integer(2)));
     }
 
-    /// The removal sentinel edits only the `properties` JSON bag; a column
-    /// needs a real NULL, as `marks` does above.
     #[test]
-    fn block_diff_params_nulls_a_cleared_priority() {
+    fn block_diff_params_removes_a_cleared_priority() {
         let params = block_diff_params(&block_with_priority(Some(1)), &block_with_priority(None));
         assert_eq!(
             params.get("priority"),
-            Some(&Value::Null),
-            "clearing the priority must emit a column NULL, not the removal sentinel"
+            Some(&Value::REMOVED),
+            "clearing the priority must remove it from the properties bag"
         );
     }
 

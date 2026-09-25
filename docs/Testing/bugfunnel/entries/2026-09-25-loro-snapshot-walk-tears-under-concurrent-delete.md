@@ -28,11 +28,12 @@ and the recursion into a listed child made `list_children(child)` fail in
 the same window could capture a block twice or not at all. A stress test (a task
 creating and deleting a subtree against 300 snapshots) failed 78 of them under
 load (`lane-logs/tags2-c-red.log`) but 0 of 1500 on an idle machine.
-`snapshot_is_one_doc_state_when_writes_land_between_its_reads`
+`snapshot_is_one_doc_state_when_a_write_follows_every_read`
 (`crates/holon-loro-wiring/src/loro_block_query_source.rs`) reproduces it
 every time: an after-read hook on the doc lock (`LoroDocument::set_after_read_hook`)
-lands a write between every two guarded reads, and the per-node walk fails
-5 of 5 runs (`lane-logs/tags3-c-teeth-red.log`).
+advances two blocks to the next round after every guarded read, and the
+per-node walk captures two rounds at once in 5 of 5 runs
+(`lane-logs/tags4-a-teeth-red.log`, e.g. `[["left 20"], ["right 31"]]`).
 
 ## Missing piece
 The keystone's `SutLoroUiRows` component stopped the resolver's refresh task
@@ -42,9 +43,14 @@ had no seam that injects a write between two guarded reads.
 ## Remedy
 `snapshot` now reads `LoroBackend::projected_blocks`: the block set the
 Loro→SQL projection writes (`snapshot_blocks_from_doc`), walked on a fork of
-the doc taken under one doc read lock, with siblings ordered by the sort keys
-that projection writes. The lock covers only the fork: at 10,101 blocks it is
-held 47–69 ms in the test profile and 1.9 ms in release, against 510–650 ms
-and 90 ms for a walk under the lock (`lane-logs/tags3-b-probe-*.log`). The
+the doc taken under one doc read lock (`LoroDocument::fork_committed`), with
+siblings ordered by the sort keys that projection writes. The lock covers only
+the fork: at 10,101 blocks it is held 47–69 ms in the test profile and 1.9 ms
+in release, against 510–650 ms and 90 ms for a walk under the lock
+(`lane-logs/tags3-b-probe-*.log`). A fork commits the doc's pending
+transaction, so `fork_committed` refuses to fork inside a write batch or while
+ops are pending; otherwise it would publish them under no origin
+(`crates/holon-loro/tests/projected_blocks_commits_nothing.rs`, red in
+`lane-logs/tags4-b-red.log`). The
 keystone component no longer stops the refresh task, so its refresh snapshots
 now run concurrently with the keystone's writes, as in production.

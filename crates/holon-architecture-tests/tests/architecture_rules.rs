@@ -245,6 +245,12 @@ const DOC_ESCAPES: &[(&str, usize)] = &[
     // The peer-id guard drives Loro's id directly: reading it through the
     // wrapper's cache is the bug the test exists to catch.
     ("crates/holon-loro/tests/text_undo_contract.rs", 3),
+    // An origin-recording subscription, and the unguarded op the projection
+    // read must refuse to commit.
+    (
+        "crates/holon-loro/tests/projected_blocks_commits_nothing.rs",
+        2,
+    ),
     // Two `UndoManager::new(&doc)` handoffs. The manager is a long-lived
     // observer registered on the document, the same shape as a subscription.
     ("crates/holon-loro/tests/undo_history_trim_probe.rs", 2),

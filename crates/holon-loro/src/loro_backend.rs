@@ -4717,7 +4717,7 @@ impl LoroBackend {
     pub fn projected_blocks(&self) -> Result<Vec<SnapshotBlock>, ApiError> {
         let copy = self
             .collab_doc
-            .with_read(|doc| Ok(doc.fork()))
+            .fork_committed()
             .map_err(|e| ApiError::InternalError {
                 message: format!("projected_blocks: {e:#}"),
             })?;
