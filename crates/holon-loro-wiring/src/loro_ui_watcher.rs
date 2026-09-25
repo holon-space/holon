@@ -32,7 +32,6 @@ use holon_api::UiEvent;
 use holon_api::Value;
 use holon_api::WatchHandle;
 use holon_api::block::Block;
-use holon_api::entity::IntoEntity;
 use holon_api::streaming::ActorAbortGuard;
 use holon_api::streaming::Batch;
 use holon_api::streaming::BatchMetadata;
@@ -509,14 +508,12 @@ fn derive_root_slot_expr(
     }
 }
 
-/// Convert a [`Block`] into the row map the reactive engine consumes.
-///
-/// `Block::to_entity().fields` is the canonical field→`Value` map (the same one
-/// the storage layer writes to `block_raw`), so it cannot drift from the column
-/// shape the renderer expects. `properties` is flattened to top-level keys to
-/// match [`holon_api::widget_spec::EnrichedRow`]'s `flatten_properties`.
-fn block_to_row(block: &Block) -> HashMap<Arc<str>, Value> {
-    let mut row: HashMap<Arc<str>, Value> = block.to_entity().fields;
+/// Convert a [`Block`] into the row map the reactive engine consumes: the
+/// `block` matview row ([`Block::to_storage_row`]) with `properties` flattened
+/// to top-level keys, as [`holon_api::widget_spec::EnrichedRow`]'s
+/// `flatten_properties` does.
+pub fn block_to_row(block: &Block) -> HashMap<Arc<str>, Value> {
+    let mut row = block.to_storage_row();
     if let Some(Value::Object(props)) = row.get("properties").cloned() {
         for (key, value) in props {
             row.entry(Arc::from(key)).or_insert(value);

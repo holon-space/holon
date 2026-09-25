@@ -55,6 +55,7 @@ pub mod live_children_match_ref;
 pub mod live_tree_matches_fresh;
 pub mod loro_children_match_ref;
 pub mod loro_no_errors;
+pub mod loro_ui_rows_match_ref;
 pub mod main_panel_rows_match_focus;
 pub mod mark_bounds_within_content;
 pub mod matview_recompute_matches;

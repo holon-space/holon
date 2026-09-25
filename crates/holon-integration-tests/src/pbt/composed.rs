@@ -33,6 +33,7 @@ pub mod catalog;
 pub mod correspondences;
 pub mod first_divergent;
 pub mod invariants;
+pub mod loro_ui_rows;
 pub mod remote_list_sut;
 
 /// The composed-slice host for the `inv-sql-budget` span-metrics cap

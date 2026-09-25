@@ -857,6 +857,48 @@ fn require_string_array(
     }
 }
 
+impl Block {
+    /// The row a `block` matview read yields for this block: the inverse of
+    /// `TryFrom<StorageEntity>`. Edge fields and `marks` are JSON text, as the
+    /// matview hydrates them.
+    pub fn to_storage_row(&self) -> crate::StorageEntity {
+        use crate::entity::IntoEntity;
+
+        fn json_text_array<'a>(items: impl Iterator<Item = &'a str>) -> Value {
+            Value::String(
+                serde_json::to_string(&items.collect::<Vec<_>>())
+                    .expect("a string array serializes"),
+            )
+        }
+
+        let mut row = self.to_entity().fields;
+        row.insert(
+            "tags".into(),
+            json_text_array(self.tags.iter().map(String::as_str)),
+        );
+        row.insert(
+            "requires".into(),
+            json_text_array(self.requires.iter().map(EntityUri::as_str)),
+        );
+        row.insert(
+            "advice_suppressed".into(),
+            json_text_array(self.advice_suppressed.iter().map(EntityUri::as_str)),
+        );
+        row.insert(
+            "contributes_to".into(),
+            json_text_array(self.contributes_to.iter().map(EntityUri::as_str)),
+        );
+        row.insert(
+            "marks".into(),
+            match &self.marks {
+                None => Value::Null,
+                Some(marks) => Value::String(crate::marks_to_json(marks)),
+            },
+        );
+        row
+    }
+}
+
 impl TryFrom<crate::StorageEntity> for Block {
     type Error = anyhow::Error;
     fn try_from(row: crate::StorageEntity) -> Result<Self, Self::Error> {
@@ -1661,5 +1703,81 @@ mod mutation_gap_tests {
         no_content.remove("content");
         let err = Block::try_from(no_content).unwrap_err().to_string();
         assert!(err.contains("content"), "got: {err}");
+    }
+}
+
+#[cfg(test)]
+mod storage_row_round_trip {
+    use proptest::prelude::*;
+
+    use super::*;
+    use crate::inline_mark::InlineMark;
+
+    fn arb_uri() -> impl Strategy<Value = EntityUri> {
+        "[a-z0-9]{1,8}".prop_map(|s| EntityUri::block(&s))
+    }
+
+    fn arb_block() -> impl Strategy<Value = Block> {
+        (
+            (
+                arb_uri(),
+                prop::option::of(arb_uri()),
+                prop::collection::btree_set(
+                    prop::sample::select(vec!["Page", "decision", "two words", "x"]),
+                    0..4,
+                ),
+                prop::collection::vec(arb_uri(), 0..3),
+                prop::collection::vec(arb_uri(), 0..3),
+                prop::collection::vec(arb_uri(), 0..3),
+            ),
+            (
+                "[a-z ]{0,12}",
+                prop::collection::hash_map("[a-z]{1,5}", "[a-z0-9]{0,5}", 0..3),
+                0..3u8,
+                any::<bool>(),
+                any::<bool>(),
+                any::<i64>(),
+                any::<i64>(),
+            ),
+        )
+            .prop_map(
+                |(
+                    (id, parent, tags, requires, advice_suppressed, contributes_to),
+                    (content, properties, marks_kind, collapsed, widget_only, created, updated),
+                )| {
+                    let len = content.len();
+                    let mut block =
+                        Block::new_text(id, parent.unwrap_or_else(EntityUri::no_parent), content);
+                    block.tags = Tags::from_tag_iter(tags.into_iter().map(str::to_string));
+                    block.requires = requires;
+                    block.advice_suppressed = advice_suppressed;
+                    block.contributes_to = contributes_to;
+                    block.properties = properties
+                        .into_iter()
+                        .map(|(k, v)| (k, Value::String(v)))
+                        .collect();
+                    block.marks = match marks_kind {
+                        0 => None,
+                        // The read boundary drops zero-width spans.
+                        _ if len == 0 => Some(Vec::new()),
+                        1 => Some(Vec::new()),
+                        _ => Some(vec![MarkSpan::new(0, len, InlineMark::Bold)]),
+                    };
+                    block.collapsed = collapsed;
+                    block.widget_only = widget_only;
+                    block.created_at = created;
+                    block.updated_at = updated;
+                    block
+                },
+            )
+    }
+
+    proptest! {
+        #[test]
+        fn storage_row_parses_back_to_the_same_block(block in arb_block()) {
+            let parsed = Block::try_from(block.to_storage_row())
+                .map_err(|e| TestCaseError::fail(format!("{e:#}")))?;
+            prop_assert_eq!(parsed, block);
+        }
     }
 }

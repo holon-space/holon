@@ -1122,7 +1122,11 @@ impl<S: ComposedSlice> ComposedSut<S> {
 /// expr whose rendered widget kind is assertable), i.e. a FORK — flagged,
 /// deferred. Its restructure (honest `Skipped`, never a fake `Ok`) still lands
 /// as a strict improvement.
-const ENGAGEMENT_FLOOR: &[&str] = &["inv-viewmodel-entity-ids-subset-of-data"];
+const ENGAGEMENT_FLOOR: &[&str] = &[
+    "inv-viewmodel-entity-ids-subset-of-data",
+    // Every Loro draw seeds the page root, a ref-known block.
+    "inv-loro-ui-rows-match-ref",
+];
 
 /// The shared floor, for a slice that ADDS to it rather than replacing it.
 pub fn default_engagement_floor() -> Vec<&'static str> {

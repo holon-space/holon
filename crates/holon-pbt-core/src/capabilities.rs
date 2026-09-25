@@ -1478,6 +1478,25 @@ pub trait SutLoroLog {
     async fn loro_block_snapshot(&self) -> Option<Vec<holon_api::block::Block>>;
 }
 
+/// One Loro block's row as the no-Turso render path hands it to the reactive
+/// engine, observed after profile resolution.
+#[derive(Debug, Clone)]
+pub struct LoroUiRow {
+    pub id: EntityUri,
+    /// The row read back through the canonical block-row parser
+    /// (`TryFrom<StorageEntity> for Block`); `Err` carries the parser's
+    /// message.
+    pub parsed: Result<holon_api::block::Block, String>,
+    /// The resolved `is_page_row` computed field.
+    pub is_page_row: holon_api::Value,
+}
+
+#[holon_macros::capmap_adapter]
+pub trait SutLoroUiRows {
+    /// Every block in the live Loro tree, as a UI row.
+    async fn loro_ui_rows(&self) -> Vec<LoroUiRow>;
+}
+
 // ─── Phase 6b — Turso/CDC cluster (Stage B) ──────────────────────────
 //
 // Binds: WriteOrgFile, BulkExternalAdd, all matview-touching invariants

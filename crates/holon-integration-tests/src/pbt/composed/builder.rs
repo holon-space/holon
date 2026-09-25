@@ -785,6 +785,8 @@ async fn compose_sut_seeded_impl(
         loro_backend = Some(backend.clone());
 
         let mut loro_caps = CapMap::new();
+        Arc::new(crate::pbt::composed::loro_ui_rows::LoroUiRowsComponent::new(backend.clone()))
+            .register(&mut loro_caps);
         // Full mode (frontend booted Loro on) carries the live sync-controller
         // handle captured above; hand it to the read component so
         // `SutLoroLog::loro_had_errors` reports the controller's REAL error

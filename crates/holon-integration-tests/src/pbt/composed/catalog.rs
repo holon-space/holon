@@ -274,6 +274,10 @@ fn central_invariants() -> Vec<Box<dyn CapInvariant>> {
         // quiescence. Needs `SutReadModel`; only a slice booting a real Loro
         // projection supplies it. Fast-path on agreement, so no per-tick cost.
         invariants::view_model_matches_store::wire(),
+        // The row a no-Turso `LoroUiWatcher` session renders carries the
+        // edge fields profile conditions read. Needs `SutLoroUiRows`, which
+        // every Loro draw supplies.
+        invariants::loro_ui_rows_match_ref::wire(),
         // Undo→redo referential round trip (observability, 2026-07-26): prod's
         // redo re-executes the forward op and mints a FRESH id, so a block that
         // comes back after an undo comes back with a NEW identity. Every
