@@ -11,6 +11,7 @@ use rhai::AST;
 use rhai::ASTNode;
 use rhai::Engine;
 use rhai::Expr;
+use rhai::FnCallExpr;
 use rhai::Stmt;
 use serde::Deserialize;
 use serde::Serialize;
@@ -227,7 +228,7 @@ fn free_variables(ast: &AST) -> BTreeSet<String> {
 fn is_def_var_guards(ast: &AST) -> BTreeSet<String> {
     let mut guarded = BTreeSet::new();
     ast.walk(&mut |path: &[ASTNode]| {
-        if let ASTNode::Expr(Expr::FnCall(call, _)) = path.last().unwrap() {
+        if let Some(call) = fn_call(path) {
             if call.name.as_str() == "is_def_var" {
                 if let Some(Expr::StringConstant(s, _)) = call.args.first() {
                     guarded.insert(s.to_string());
@@ -242,11 +243,12 @@ fn is_def_var_guards(ast: &AST) -> BTreeSet<String> {
 /// The required columns an expression reads with no absence guard at all:
 /// [`required_columns`] minus every name it also compares against `()`
 /// (`x != ()` / `x == ()`). Such a comparison is the author declaring `x`
-/// optional, just as `is_def_var("x")` is.
+/// optional, just as `is_def_var("x")` is. Empty whenever [`required_columns`]
+/// is, so a name read only inside a closure, `for` or nested `let` escapes it.
 pub fn unguarded_columns(ast: &AST) -> BTreeSet<String> {
     let mut unit_compared = BTreeSet::new();
     ast.walk(&mut |path: &[ASTNode]| {
-        if let ASTNode::Expr(Expr::FnCall(call, _)) = path.last().unwrap() {
+        if let Some(call) = fn_call(path) {
             if matches!(call.name.as_str(), "!=" | "==") {
                 if let [lhs, rhs] = &call.args[..] {
                     for (var, other) in [(lhs, rhs), (rhs, lhs)] {
@@ -265,6 +267,16 @@ pub fn unguarded_columns(ast: &AST) -> BTreeSet<String> {
         .collect()
 }
 
+/// The call at the walk's current node. The optimizer lifts a call that forms a
+/// whole statement (`x != ()` on its own) out of `Expr::FnCall` into
+/// `Stmt::FnCall`.
+fn fn_call<'a>(path: &[ASTNode<'a>]) -> Option<&'a FnCallExpr> {
+    match path.last().expect("walk always pushes the current node") {
+        ASTNode::Expr(Expr::FnCall(call, _)) | ASTNode::Stmt(Stmt::FnCall(call, _)) => Some(call),
+        _ => None,
+    }
+}
+
 /// The names of every free-function call the expression makes — `foo(args)`,
 /// NOT method calls (`x.foo()`), property reads, or namespace-qualified paths,
 /// which are structurally distinct AST nodes.
@@ -278,7 +290,7 @@ pub fn unguarded_columns(ast: &AST) -> BTreeSet<String> {
 pub fn referenced_functions(ast: &AST) -> BTreeSet<String> {
     let mut called: BTreeSet<String> = BTreeSet::new();
     ast.walk(&mut |path: &[ASTNode]| {
-        if let ASTNode::Expr(Expr::FnCall(call, _)) = path.last().unwrap() {
+        if let Some(call) = fn_call(path) {
             if call.namespace.is_empty() && is_identifier(&call.name) {
                 called.insert(call.name.to_string());
             }
@@ -550,5 +562,42 @@ mod required_columns_tests {
         // A single top-level `let` is soundly scoped (not nested) — extraction
         // stays precise, so this must NOT fail-close to empty.
         assert_eq!(req("let x = 5; x + tags.len"), set(&["tags"]));
+    }
+}
+
+#[cfg(test)]
+mod unguarded_columns_tests {
+    use super::*;
+
+    fn unguarded(engine: &Engine, src: &str) -> BTreeSet<String> {
+        unguarded_columns(&CompiledExpr::compile(engine, src).unwrap().ast)
+    }
+
+    #[test]
+    fn a_unit_comparison_guards_its_variable_in_every_shape() {
+        for (level, engine) in [
+            ("optimized", bounded_engine()),
+            ("unoptimized", unoptimized_engine()),
+        ] {
+            for src in [
+                "x != ()",
+                "x == ()",
+                "() != x",
+                "x != () && true",
+                "true && x != ()",
+                "x != () && x == \"m\"",
+            ] {
+                let left = unguarded(&engine, src);
+                assert!(left.is_empty(), "{level} `{src}` guards x, got {left:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_read_without_a_guard_is_unguarded() {
+        let expected: BTreeSet<String> = ["x".to_string()].into();
+        for engine in [bounded_engine(), unoptimized_engine()] {
+            assert_eq!(unguarded(&engine, "x == \"m\""), expected);
+        }
     }
 }

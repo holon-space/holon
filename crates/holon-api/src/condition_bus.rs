@@ -338,6 +338,13 @@ pub enum ConditionKind {
         canonical: String,
         duplicates: Vec<String>,
     },
+    /// An entity profile source block failed to load and is not applied.
+    /// `subject` is the block; `error` names the profile, the variant or
+    /// computed field, the expression and the column.
+    ///
+    /// All-clear: the next successful load of the same block. A deleted block's
+    /// condition stands until restart.
+    ProfileRefused { error: String },
 }
 
 /// Subject of the device-wide conditions on this bus, which have no share to
@@ -377,6 +384,7 @@ impl ConditionKind {
     pub const NESTED_SHARE_LOADED: &'static str = "nested-share-loaded";
     pub const DUPLICATE_MOUNT: &'static str = "duplicate-mount";
     pub const WATCH_VIEWS_REBUILDING: &'static str = "watch-views-rebuilding";
+    pub const PROFILE_REFUSED: &'static str = "profile-refused";
 
     /// The condition's stable identity, paired with the subject to form a
     /// [`ConditionKey`]. Total: every degradation is a sticky
@@ -413,6 +421,7 @@ impl ConditionKind {
             Self::NestedShareLoaded { .. } => Self::NESTED_SHARE_LOADED,
             Self::DuplicateMount { .. } => Self::DUPLICATE_MOUNT,
             Self::WatchViewsRebuilding => Self::WATCH_VIEWS_REBUILDING,
+            Self::ProfileRefused { .. } => Self::PROFILE_REFUSED,
         }
     }
 }

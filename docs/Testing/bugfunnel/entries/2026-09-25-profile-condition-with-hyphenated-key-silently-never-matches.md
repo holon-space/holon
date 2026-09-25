@@ -44,3 +44,19 @@ every org-embedded profile block (`TypeRegistry::profile_scope_check`, wired in
 crates/holon/src/di/registration.rs). Pinned by
 crates/holon-profiles/tests/profile_scope_refusal.rs. All shipped profiles
 under assets/default/types/ load unchanged.
+
+## Follow-up defects in the remedy (verifier)
+- A lone guard (`asker != ()`, `asker == ()`, `asker != () && true`) was
+  refused. Rhai's optimizer lifts a whole-statement call into `Stmt::FnCall`,
+  and the analysis matched only `Expr::FnCall`. `holon_expr::fn_call` now
+  matches both, and `check_profile_scope` analyses every expression compiled
+  without optimization. Pinned by `unguarded_columns_tests` in
+  crates/holon-expr/src/lib.rs and `guarded_and_declared_reads_load`.
+- An org-embedded profile refused at boot panicked the app
+  (`LiveData::new` "parse_fn failed on initial row"). A refused profile block
+  is now left out of the mirror at boot and after boot and raised as
+  `ConditionKind::ProfileRefused` on its block, which clears when the block
+  loads. Pinned by crates/holon-app/tests/refused_profile_boots_degraded.rs.
+- Known limit: a name read only inside a closure, `for` loop or nested `let` is
+  not checked at load (`required_columns` is empty there); eval of it fails
+  loudly.

@@ -26,6 +26,7 @@ pub fn check_profile_scope(
     type_def: Option<&TypeDefinition>,
 ) -> Result<()> {
     let known = scope_names(profile, type_def);
+    // Checked as written: the optimizer folds reads away (`false && x`).
     let engine = holon_api::unoptimized_engine();
     for (name, decl) in &profile.computed {
         let compiled = CompiledExpr::compile(&engine, decl.expr.as_str())
@@ -39,10 +40,14 @@ pub fn check_profile_scope(
     }
     for variant in &profile.variants {
         if let Some(condition) = &variant.condition {
+            let source_shape =
+                CompiledExpr::compile(&engine, condition.source.as_str()).map_err(|e| {
+                    anyhow::anyhow!("variant '{}' failed to compile: {e}", variant.name)
+                })?;
             check_expr(
                 profile,
                 &format!("variant '{}'", variant.name),
-                condition,
+                &source_shape,
                 &known,
             )?;
         }

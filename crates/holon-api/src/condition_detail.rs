@@ -239,6 +239,11 @@ impl ConditionKind {
                 "every watched view is being dropped and recreated; lists may lag until it \
                  finishes",
             ),
+
+            Self::ProfileRefused { error } => ConditionDetail::with_body(
+                format!("the entity profile in {subject} is not applied — fix it:"),
+                vec![error.clone()],
+            ),
         }
     }
 }

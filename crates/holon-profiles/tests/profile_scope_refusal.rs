@@ -43,6 +43,15 @@ fn an_undeclared_identifier_is_refused() {
 }
 
 #[test]
+fn a_read_the_optimizer_folds_away_is_refused() {
+    let err = load(&block_profile_with_condition(
+        "false && asker == \"martin\"",
+    ))
+    .expect_err("the source reads `asker` unguarded");
+    assert!(format!("{err:#}").contains("`asker`"), "{err:#}");
+}
+
+#[test]
 fn an_undeclared_identifier_in_a_computed_field_is_refused() {
     let err = load("entity_name: block\ncomputed:\n  is_asked: 'asker == \"martin\"'\n")
         .expect_err("a computed field is as silent as a condition when its input never exists");
@@ -59,6 +68,10 @@ fn guarded_and_declared_reads_load() {
         "properties[\"asked-by\"] != ()",
         "is_def_var(\"asker\") && asker == \"martin\"",
         "asker != () && asker == \"martin\"",
+        "asker != ()",
+        "asker == ()",
+        "asker != () && true",
+        "true && asker != ()",
         "is_task && content_type == \"text\" && tags != ()",
         "is_focused && role == \"page_title\"",
     ] {
@@ -77,9 +90,11 @@ fn an_org_embedded_profile_is_checked_against_the_registered_types() {
     let msg = format!("{:#}", check(&refused).expect_err("hyphenated key refused"));
     assert!(msg.contains("properties[\"asked-by\"]"), "{msg}");
 
-    // A bundled computed field (`is_task`) and a profile named after no type.
+    // A bundled computed field (`is_task`), a lone guard and a profile named
+    // after no type.
     for yaml in [
         block_profile_with_condition("is_task"),
+        block_profile_with_condition("asker != ()"),
         "entity_name: kanban_collection\nvariants:\n  - name: board\n    render: 'text(\"b\")'\n"
             .to_string(),
     ] {

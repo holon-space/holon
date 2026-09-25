@@ -104,6 +104,7 @@ pub enum ClearingEvent {
     WritebackRespawn,
     IntegrationConnect,
     PairReimport,
+    ProfileLoad,
 }
 
 /// The named moment that clears a condition.
@@ -519,6 +520,15 @@ const WATCH_VIEWS_REBUILDING: ConditionProfile = ConditionProfile::new(
     &[],
 );
 
+const PROFILE_REFUSED: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Error,
+    "Profile refused",
+    icons::BLOCKED,
+    ConditionPlacement::Toast,
+    AllClear::NextSuccessOf(ClearingEvent::ProfileLoad),
+    &[],
+);
+
 impl ConditionKind {
     /// This kind's profile. Total, like
     /// [`condition_kind`](ConditionKind::condition_kind): a new variant cannot
@@ -553,6 +563,7 @@ impl ConditionKind {
             Self::NestedShareLoaded { .. } => NESTED_SHARE_LOADED,
             Self::DuplicateMount { .. } => DUPLICATE_MOUNT,
             Self::WatchViewsRebuilding => WATCH_VIEWS_REBUILDING,
+            Self::ProfileRefused { .. } => PROFILE_REFUSED,
         }
     }
 }
