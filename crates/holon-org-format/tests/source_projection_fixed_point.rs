@@ -49,6 +49,10 @@ fn declared_vocabulary() -> impl Strategy<Value = TaskKeywordVocabulary> {
             &["LATER".to_string()],
             &["CANCELLED".to_string()],
         )),
+        Just(TaskKeywordVocabulary::for_document(
+            &["?".to_string()],
+            &["DONE".to_string()],
+        )),
     ]
 }
 
@@ -135,6 +139,22 @@ fn an_empty_titled_task_projects_to_the_bare_keyword() {
     let parsed = converge_keyword_headed("TODO", &vocabulary).expect("the bare keyword parses");
     assert_eq!(parsed.keyword, todo);
     assert_eq!(parsed.stripped, "");
+}
+
+#[test]
+fn an_open_question_projects_and_parses_back_under_the_defaults() {
+    let vocabulary = TaskKeywordVocabulary::default();
+    let question = TaskState::active("?");
+    for content in ["", "pick a storage engine"] {
+        let SourceProjection::Text(text) = source_projection(Some(&question), content, &vocabulary)
+        else {
+            panic!("`?` is a default keyword, so {content:?} must project");
+        };
+        let parsed = converge_keyword_headed(&text, &vocabulary)
+            .unwrap_or_else(|| panic!("projection {text:?} must parse back as a task"));
+        assert_eq!(parsed.keyword, question);
+        assert_eq!(parsed.stripped, content);
+    }
 }
 
 /// REFUSAL 1 — the silent-demotion guard. A block carrying a keyword its own

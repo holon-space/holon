@@ -285,11 +285,11 @@ impl RefBlockTreeMut for ReferenceState {
     }
 
     /// Walk to the nearest page ancestor (`id` itself included) and read the
-    /// `todo_keywords` the drawn document declares. Derived, never a copy of
-    /// the SUT's constant.
+    /// `todo_keywords` the drawn document declares, else the model's own
+    /// defaults. Never a copy of the SUT's constant.
     fn block_task_vocabulary(&self, id: &EntityUri) -> holon_org_format::TaskKeywordVocabulary {
         use holon_org_format::OrgDocumentExt;
-        let defaults = holon_org_format::TaskKeywordVocabulary::default;
+        let defaults = crate::pbt::generators::model_default_vocabulary;
         let mut cursor = parse_id(id);
         for _ in 0..1024 {
             let Some(uri) = cursor else { return defaults() };
@@ -297,7 +297,7 @@ impl RefBlockTreeMut for ReferenceState {
                 return defaults();
             };
             if block.is_page() {
-                let Some(states) = block.todo_keywords() else {
+                let Some(states) = block.todo_keywords().filter(|s| !s.is_empty()) else {
                     return defaults();
                 };
                 let active: Vec<String> = states
@@ -310,7 +310,7 @@ impl RefBlockTreeMut for ReferenceState {
                     .filter(|s| s.is_done())
                     .map(|s| s.keyword.clone())
                     .collect();
-                return holon_org_format::TaskKeywordVocabulary::for_document(&active, &done);
+                return holon_org_format::TaskKeywordVocabulary::new(active, done);
             }
             cursor = Some(block.parent_id.clone());
         }

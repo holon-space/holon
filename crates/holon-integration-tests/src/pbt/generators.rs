@@ -53,6 +53,21 @@ use super::reference_state::valid_render_expression_strings;
 /// `is_page`.
 pub const ADVICE_TAG_POOL: &[&str] = &["task", "lesson", "proj", "urgent", "ctx"];
 
+/// The task keywords an org file with no `#+TODO:` line admits, as the model
+/// states them. Written out here rather than read from the parser's defaults,
+/// so a keyword prod drops from its defaults convicts prod instead of vanishing
+/// from both sides.
+pub const MODEL_DEFAULT_ACTIVE_KEYWORDS: &[&str] = &["TODO", "DOING", "LATER", "NOW", "?"];
+pub const MODEL_DEFAULT_DONE_KEYWORDS: &[&str] = &["DONE", "CANCELLED", "CLOSED"];
+
+pub fn model_default_vocabulary() -> holon_org_format::TaskKeywordVocabulary {
+    let owned = |keywords: &[&str]| keywords.iter().map(|k| k.to_string()).collect();
+    holon_org_format::TaskKeywordVocabulary::new(
+        owned(MODEL_DEFAULT_ACTIVE_KEYWORDS),
+        owned(MODEL_DEFAULT_DONE_KEYWORDS),
+    )
+}
+
 /// A set of TODO keywords generated per test case.
 /// Drives both the `#+TODO:` org header and the task_state mutation generator.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -239,7 +254,7 @@ pub fn edit_content_strategy() -> BoxedStrategy<String> {
 /// `"TODO <word>"` (paste / prepend shape) are the two forms the guard
 /// distinguishes.
 fn task_keyword_prefix_strategy() -> BoxedStrategy<String> {
-    let keyword = prop::sample::select(holon_org_format::models::DEFAULT_ACTIVE_KEYWORDS.to_vec());
+    let keyword = prop::sample::select(MODEL_DEFAULT_ACTIVE_KEYWORDS.to_vec());
     prop_oneof![
         1 => keyword.clone().prop_map(|k| format!("{k} ")),
         1 => (keyword, "[a-z]{2,5}").prop_map(|(k, w)| format!("{k} {w}")),
@@ -362,9 +377,9 @@ pub fn generate_org_file_content_with_keywords(
     use proptest::collection::vec as prop_vec;
 
     let ks = keyword_set.clone();
-    // Generate headlines with optional task states: (headline, id,
-    // maybe_task_state_index) ~50% of headlines get a random task keyword when
-    // a keyword_set is present.
+    // Generate headlines with optional task states: ~50% of headlines get a
+    // task keyword drawn from the file's `#+TODO:` set, or from the model's
+    // defaults when the file declares none.
     //
     // Headline regex requires the *second* character to be lowercase so the
     // first word cannot accidentally match an all-caps TODO keyword (TODO,
@@ -381,7 +396,7 @@ pub fn generate_org_file_content_with_keywords(
                 // empty, org-special prefixes) stress the parser boundary.
                 content_strategy(),
                 "[a-z0-9-]+",
-                prop::bool::ANY,
+                proptest::option::of(prop::num::u8::ANY),
                 // `make_requires`: when true (and a prior sibling exists), this
                 // heading gets a `:REQUIRES:` org-edna dependency on the
                 // immediately-preceding sibling. Exercises the `requires` edge
@@ -408,10 +423,10 @@ pub fn generate_org_file_content_with_keywords(
         .prop_map(move |(filename, headings)| {
             let doc_uri = EntityUri::block("gen-placeholder");
 
-            let all_keywords: Vec<String> = ks
-                .as_ref()
-                .map(|set| set.all_keywords())
-                .unwrap_or_default();
+            let all_keywords: Vec<String> = match ks.as_ref() {
+                Some(declared) => declared.all_keywords(),
+                None => model_default_vocabulary().all_keywords(),
+            };
             // Sibling ids in document order, so a heading can depend on its
             // predecessor by id. Collected up front because the dependency
             // target (`ids[i-1]`) must be known while building block `i`.
@@ -435,17 +450,15 @@ pub fn generate_org_file_content_with_keywords(
                 .into_iter()
                 .enumerate()
                 .map(
-                    |(i, (headline, _, make_task, make_requires, make_contributes, _))| {
+                    |(i, (headline, _, task_keyword, make_requires, make_contributes, _))| {
                         let mut b = Block::new_text(
                             EntityUri::block(&ids[i]),
                             parents[i].clone(),
                             &headline,
                         );
                         b.set_property("ID", Value::String(ids[i].clone()));
-                        // Assign a task keyword to ~50% of headlines when keywords exist.
-                        // Cycle through keywords using the index for variety.
-                        if make_task && !all_keywords.is_empty() {
-                            let kw = &all_keywords[i % all_keywords.len()];
+                        if let Some(pick) = task_keyword {
+                            let kw = &all_keywords[pick as usize % all_keywords.len()];
                             b.set_task_state(Some(TaskState::from_keyword(kw)));
                         }
                         // Single-element requires (depend on the previous TRUE
@@ -1268,6 +1281,39 @@ pub fn generate_profile_content_mutation(ids: Vec<EntityUri>) -> impl Strategy<V
                 .collect(),
         }
     })
+}
+
+#[cfg(test)]
+mod default_vocabulary_tests {
+    use super::*;
+
+    /// A file with no `#+TODO:` line must draw every model default keyword,
+    /// `?` included, or the default-vocabulary parse is never judged.
+    #[test]
+    fn undeclared_files_draw_every_model_default_keyword() {
+        use proptest::strategy::ValueTree;
+        use proptest::test_runner::TestRunner;
+        let mut runner = TestRunner::deterministic();
+        let strat = generate_org_file_content_with_keywords(None, false, false);
+        let mut drawn = std::collections::BTreeSet::new();
+        for _ in 0..400 {
+            let (_, blocks) = strat
+                .new_tree(&mut runner)
+                .expect("file strategy must draw")
+                .current();
+            drawn.extend(
+                blocks
+                    .iter()
+                    .filter_map(|b| b.task_state())
+                    .map(|s| s.keyword),
+            );
+        }
+        let expected: std::collections::BTreeSet<String> = model_default_vocabulary()
+            .all_keywords()
+            .into_iter()
+            .collect();
+        assert_eq!(drawn, expected);
+    }
 }
 
 #[cfg(test)]

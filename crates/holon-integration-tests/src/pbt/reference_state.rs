@@ -1186,7 +1186,9 @@ impl ReferenceState {
         }
         {
             use holon_pbt_core::capabilities::RefBlockTreeMut;
-            if holon_org_format::source_channel_commit(&surface, &in_memory) {
+            if holon_pbt_core::capabilities::ref_commits_through_source_channel(
+                self, &id, &surface, &in_memory,
+            ) {
                 self.commit_editor_source(&id, &in_memory);
             } else {
                 self.set_block_content(&id, &in_memory);

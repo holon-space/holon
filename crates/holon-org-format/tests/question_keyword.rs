@@ -131,7 +131,6 @@ fn question_property_keys_round_trip() {
 }
 
 #[test]
-#[ignore = "could_converge admits only uppercase keywords, so typing `? x` is never promoted"]
 fn typed_question_keyword_is_a_convergence_candidate() {
     assert!(
         could_converge("? foo"),

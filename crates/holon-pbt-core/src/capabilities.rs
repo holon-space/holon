@@ -3363,6 +3363,29 @@ pub trait RefBackend {
 
 // ─── Cross-cut helpers ───────────────────────────────────────────────
 
+/// Whether the model routes an editor commit through the source channel: the
+/// editor's shape pre-filter admits it, or either buffer is keyword-headed
+/// under the block's own vocabulary. The second arm is the model's rule;
+/// without it a keyword the pre-filter misses would be missed by both sides
+/// alike.
+pub fn ref_commits_through_source_channel<R>(
+    state: &R,
+    id: &EntityUri,
+    surface: &str,
+    text: &str,
+) -> bool
+where
+    R: RefBlockTreeMut + ?Sized,
+{
+    if holon_org_format::source_channel_commit(surface, text) {
+        return true;
+    }
+    let vocabulary = state.block_task_vocabulary(id);
+    [surface, text]
+        .iter()
+        .any(|buffer| holon_org_format::keyword_headed(buffer, &vocabulary).is_some())
+}
+
 /// Cross-cut helper used by `TypeChars::apply_to_ref` and
 /// `DeleteBackward::apply_to_ref` when Loro is enabled. Reads the active
 /// editor's pending text, commits it to `block_content` of the focused
@@ -3389,7 +3412,7 @@ where
         state.mark_active_editor_committed();
         return false;
     }
-    if holon_org_format::source_channel_commit(&surface, &text) {
+    if ref_commits_through_source_channel(state, &block_id, &surface, &text) {
         state.commit_editor_source(&block_id, &text);
     } else {
         state.set_block_content(&block_id, &text);

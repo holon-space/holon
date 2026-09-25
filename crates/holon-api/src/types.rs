@@ -615,6 +615,11 @@ impl TaskState {
         !self.is_done()
     }
 
+    /// The `?` keyword: an open question waiting for an answer, not work.
+    pub fn is_open_question(&self) -> bool {
+        self.keyword == "?"
+    }
+
     /// Whether this state is in the DOING (in-progress) family. Drives the
     /// half-filled progress glyph. `NOW` is LogSeq's in-progress keyword
     /// (its flow is LATER -> NOW -> DONE), so it maps to the same family as

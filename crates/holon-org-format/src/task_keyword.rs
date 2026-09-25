@@ -151,18 +151,24 @@ pub fn keyword_headed<'a>(
 /// The vocabulary-free superset of [`keyword_headed`] — end-of-string included.
 ///
 /// This is the STORE's cheap pre-filter: a content write whose shape cannot
-/// converge under ANY ASCII-uppercase vocabulary is answered without reading
-/// the owning document at all, which is what keeps ordinary prose off the
-/// vocabulary lookup. [`source_channel_commit`] reuses it for the editor's
-/// commit routing, so both sides admit exactly the same shapes.
+/// converge under ANY ASCII-uppercase vocabulary, nor as the `?` keyword, is
+/// answered without reading the owning document at all, which is what keeps
+/// ordinary prose off the vocabulary lookup. [`source_channel_commit`] reuses
+/// it for the editor's commit routing, so both sides admit exactly the same
+/// shapes.
 pub fn could_converge(s: &str) -> bool {
+    let token_ends =
+        |rest: &str| rest.is_empty() || rest.starts_with(|c: char| c.is_ascii_whitespace());
+    if let Some(rest) = s.strip_prefix('?') {
+        return token_ends(rest);
+    }
     let end = s
         .find(|c: char| !(c.is_ascii_uppercase() || c.is_ascii_digit() || c == '-' || c == '_'))
         .unwrap_or(s.len());
     let (token, rest) = s.split_at(end);
     (2..=32).contains(&token.len())
         && token.starts_with(|c: char| c.is_ascii_uppercase())
-        && (rest.is_empty() || rest.starts_with(|c: char| c.is_ascii_whitespace()))
+        && token_ends(rest)
 }
 
 /// Which channel an EDITOR buffer commit takes: the source channel (the store

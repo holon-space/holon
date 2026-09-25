@@ -862,6 +862,11 @@ impl TaskInfo {
         let Some(task_state) = task_state else {
             return Ok(None);
         };
+        // Left out of the net, an open question also keeps every task that
+        // depends on it blocked until it is answered.
+        if task_state.is_open_question() {
+            return Ok(None);
+        }
 
         let priority = match props.get("priority") {
             Some(v) => {
@@ -1892,5 +1897,29 @@ mod tests {
             "only the task_state block is ranked; the verb-dict block is excluded"
         );
         assert_eq!(result.ranked[0].block_id, task_id.to_string());
+    }
+
+    #[test]
+    fn open_question_is_not_ranked_and_still_blocks_its_dependents() {
+        let question_id = EntityUri::block_random();
+        let dependent_id = EntityUri::block_random();
+        let mut dependent = task_block(&dependent_id, "migrate the store", "TODO");
+        dependent.set_property(
+            "depends_on",
+            holon_api::Value::String(question_id.to_string()),
+        );
+
+        let open = task_block(&question_id, "pick a storage engine", "?");
+        let result = rank_tasks(&[open, dependent.clone()]).expect("rank_tasks must succeed");
+        assert!(
+            result.ranked.is_empty(),
+            "an open `?` block is not work, and its dependent waits for the answer; ranked: {:?}",
+            result.ranked
+        );
+
+        let answered = task_block(&question_id, "pick a storage engine", "DONE");
+        let result = rank_tasks(&[answered, dependent]).expect("rank_tasks must succeed");
+        let ranked: Vec<&String> = result.ranked.iter().map(|r| &r.block_id).collect();
+        assert_eq!(ranked, vec![&dependent_id.to_string()]);
     }
 }
