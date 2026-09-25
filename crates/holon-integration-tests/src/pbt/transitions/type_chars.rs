@@ -39,6 +39,14 @@ use crate::pbt::transition_budgets::REACTIVE_BASE;
 /// page: the block itself, then the page.
 const VOCABULARY_RESOLVE_READS: usize = 2;
 
+/// Extra reads charged once per draw that opens the source channel at all.
+///
+/// The RESIDUAL of a measurement, like [`NEWBORN_FIRST_WRITE_READS`]: typing
+/// `? milk` into an empty block measures 31 dedup reads where the ordinary
+/// formula grants `5 + 2*6 + 2*4 = 25`, because `?` shares its promotion's
+/// fixed cost with only six characters.
+const SOURCE_CHANNEL_DRAW_READS: usize = 6;
+
 /// Extra reads charged when the keystroke ALSO created the block it wrote to.
 ///
 /// A keystroke whose target was created in the same gesture reads the
@@ -247,7 +255,12 @@ crate::cap_transition! {
                 holon_org_format::could_converge(&prefix)
             })
             .count();
-        let vocabulary_reads = VOCABULARY_RESOLVE_READS * source_keystrokes;
+        let vocabulary_reads = VOCABULARY_RESOLVE_READS * source_keystrokes
+            + if source_keystrokes > 0 {
+                SOURCE_CHANNEL_DRAW_READS
+            } else {
+                0
+            };
         let newborn_reads = if state.last_keystroke_created_its_target() {
             NEWBORN_FIRST_WRITE_READS
         } else {

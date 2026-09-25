@@ -56,6 +56,11 @@ fn declared_vocabulary() -> impl Strategy<Value = TaskKeywordVocabulary> {
     ]
 }
 
+/// Refused by design (`QuestionWithoutText`), pinned by example below.
+fn is_question_without_text(task_state: Option<&TaskState>, content: &str) -> bool {
+    task_state.is_some_and(|s| s.keyword == "?") && content.is_empty()
+}
+
 proptest! {
     /// THE FIXED POINT. For every block state whose projection is accepted,
     /// parsing that projection reproduces the state exactly — same keyword,
@@ -72,6 +77,7 @@ proptest! {
             let kw = &all[keyword_index % all.len()];
             TaskState::from_keyword_with_done_list(kw, vocabulary.done_keywords())
         });
+        prop_assume!(!is_question_without_text(task_state.as_ref(), &content));
 
         let projected = source_projection(task_state.as_ref(), &content, &vocabulary);
         let SourceProjection::Text(text) = projected else {
@@ -111,6 +117,7 @@ proptest! {
         let all = vocabulary.all_keywords();
         let task_state =
             TaskState::from_keyword_with_done_list(&all[0], vocabulary.done_keywords());
+        prop_assume!(!is_question_without_text(Some(&task_state), &content));
         let SourceProjection::Text(text) =
             source_projection(Some(&task_state), &content, &vocabulary)
         else {
@@ -145,16 +152,29 @@ fn an_empty_titled_task_projects_to_the_bare_keyword() {
 fn an_open_question_projects_and_parses_back_under_the_defaults() {
     let vocabulary = TaskKeywordVocabulary::default();
     let question = TaskState::active("?");
-    for content in ["", "pick a storage engine"] {
-        let SourceProjection::Text(text) = source_projection(Some(&question), content, &vocabulary)
-        else {
-            panic!("`?` is a default keyword, so {content:?} must project");
-        };
-        let parsed = converge_keyword_headed(&text, &vocabulary)
-            .unwrap_or_else(|| panic!("projection {text:?} must parse back as a task"));
-        assert_eq!(parsed.keyword, question);
-        assert_eq!(parsed.stripped, content);
-    }
+    let content = "pick a storage engine";
+    let SourceProjection::Text(text) = source_projection(Some(&question), content, &vocabulary)
+    else {
+        panic!("`?` is a default keyword, so {content:?} must project");
+    };
+    let parsed = converge_keyword_headed(&text, &vocabulary)
+        .unwrap_or_else(|| panic!("projection {text:?} must parse back as a task"));
+    assert_eq!(parsed.keyword, question);
+    assert_eq!(parsed.stripped, content);
+}
+
+#[test]
+fn a_question_without_text_is_refused() {
+    let vocabulary = TaskKeywordVocabulary::default();
+    assert_eq!(
+        source_projection(Some(&TaskState::active("?")), "", &vocabulary),
+        SourceProjection::Refused(ProjectionRefusal::QuestionWithoutText)
+    );
+    assert_eq!(
+        converge_keyword_headed("?", &vocabulary),
+        None,
+        "a bare `?` reads back as prose"
+    );
 }
 
 /// REFUSAL 1 — the silent-demotion guard. A block carrying a keyword its own

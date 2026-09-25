@@ -113,6 +113,14 @@ impl TaskKeywordVocabulary {
     }
 }
 
+/// The question keyword: it asks something only when text follows it, so a
+/// lone `?` is prose and never converges.
+const QUESTION: &str = "?";
+
+fn asks_nothing(keyword: &str, rest: &str) -> bool {
+    keyword == QUESTION && rest.trim().is_empty()
+}
+
 /// A detected promotion: the keyword the block becomes, and the content it
 /// keeps once the keyword is stripped off the front.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -140,7 +148,9 @@ pub fn keyword_headed<'a>(
         let Some(rest) = s.strip_prefix(keyword.as_str()) else {
             continue;
         };
-        if !(rest.is_empty() || rest.starts_with(|c: char| c.is_ascii_whitespace())) {
+        if !(rest.is_empty() || rest.starts_with(|c: char| c.is_ascii_whitespace()))
+            || asks_nothing(keyword, rest)
+        {
             continue;
         }
         return Some((vocabulary.task_state(keyword), rest));
@@ -151,7 +161,7 @@ pub fn keyword_headed<'a>(
 /// The vocabulary-free superset of [`keyword_headed`] — end-of-string included.
 ///
 /// This is the STORE's cheap pre-filter: a content write whose shape cannot
-/// converge under ANY ASCII-uppercase vocabulary, nor as the `?` keyword, is
+/// converge under ANY ASCII-uppercase vocabulary, nor as a `?` question, is
 /// answered without reading the owning document at all, which is what keeps
 /// ordinary prose off the vocabulary lookup. [`source_channel_commit`] reuses
 /// it for the editor's commit routing, so both sides admit exactly the same
@@ -159,8 +169,8 @@ pub fn keyword_headed<'a>(
 pub fn could_converge(s: &str) -> bool {
     let token_ends =
         |rest: &str| rest.is_empty() || rest.starts_with(|c: char| c.is_ascii_whitespace());
-    if let Some(rest) = s.strip_prefix('?') {
-        return token_ends(rest);
+    if let Some(rest) = s.strip_prefix(QUESTION) {
+        return token_ends(rest) && !asks_nothing(QUESTION, rest);
     }
     let end = s
         .find(|c: char| !(c.is_ascii_uppercase() || c.is_ascii_digit() || c == '-' || c == '_'))
@@ -196,8 +206,8 @@ pub enum SourceProjection {
     /// commit of an unedited buffer parses straight back into.
     Text(String),
     /// Projecting would produce text that does NOT parse back to this state, so
-    /// the caller must seed the stored content instead and say so. Both arms
-    /// are reachable from imported or legacy rows, never from a converged
+    /// the caller must seed the stored content instead and say so. Every arm
+    /// is reachable from imported or legacy rows, never from a converged
     /// write.
     Refused(ProjectionRefusal),
 }
@@ -214,6 +224,8 @@ pub enum ProjectionRefusal {
     /// The content starts with whitespace, which the parser eats: `TODO  milk`
     /// parses back to `milk`, losing the leading space on the first commit.
     ContentStartsWithWhitespace { content: String },
+    /// A `?` block with empty content: the bare `?` reads back as prose.
+    QuestionWithoutText,
 }
 
 impl ProjectionRefusal {
@@ -221,6 +233,7 @@ impl ProjectionRefusal {
         match self {
             Self::KeywordNotDeclared { .. } => "keyword_not_declared",
             Self::ContentStartsWithWhitespace { .. } => "content_starts_with_whitespace",
+            Self::QuestionWithoutText => "question_without_text",
         }
     }
 }
@@ -240,6 +253,11 @@ impl fmt::Display for ProjectionRefusal {
                 f,
                 "content {content:?} starts with whitespace, which the keyword parser eats — the \
                  projection would not round-trip"
+            ),
+            Self::QuestionWithoutText => write!(
+                f,
+                "a `?` question with no text projects to a bare `?`, which reads back as prose \
+                 and would demote the question"
             ),
         }
     }
@@ -270,6 +288,9 @@ pub fn source_projection(
         return SourceProjection::Refused(ProjectionRefusal::ContentStartsWithWhitespace {
             content: content.to_string(),
         });
+    }
+    if asks_nothing(&task_state.keyword, content) {
+        return SourceProjection::Refused(ProjectionRefusal::QuestionWithoutText);
     }
     SourceProjection::Text(if content.is_empty() {
         task_state.keyword.clone()

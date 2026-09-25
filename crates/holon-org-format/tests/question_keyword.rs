@@ -6,11 +6,15 @@ use std::path::Path;
 
 use holon_api::EntityUri;
 use holon_api::StateCategory;
+use holon_api::TaskState;
 use holon_api::block::Block;
 use holon_org_format::OrgBlockExt;
 use holon_org_format::OrgRenderer;
+use holon_org_format::TaskKeywordVocabulary;
+use holon_org_format::converge_keyword_headed;
 use holon_org_format::could_converge;
 use holon_org_format::parse_org_file;
+use holon_org_format::source_channel_commit;
 
 const ROOT: &str = "/vault";
 const FILE: &str = "/vault/questions.org";
@@ -136,8 +140,28 @@ fn typed_question_keyword_is_a_convergence_candidate() {
         could_converge("? foo"),
         "`? foo` must reach the store's convergence"
     );
-    assert!(
-        could_converge("?"),
-        "a bare `?` renders as `* ?`, a task with no title"
-    );
+}
+
+#[test]
+fn a_question_mark_without_text_stays_prose() {
+    let vocabulary = TaskKeywordVocabulary::default();
+    for typed in ["?", "? ", "?\t ", "?  "] {
+        assert!(
+            !could_converge(typed),
+            "{typed:?} must not reach the store's convergence"
+        );
+        assert!(
+            !source_channel_commit("", typed),
+            "typing {typed:?} into an empty block must stay on the content channel"
+        );
+        assert_eq!(
+            converge_keyword_headed(typed, &vocabulary),
+            None,
+            "{typed:?} asks nothing, so it must not become a question"
+        );
+    }
+    let promoted =
+        converge_keyword_headed("? milk", &vocabulary).expect("`? milk` must become a question");
+    assert_eq!(promoted.keyword, TaskState::active("?"));
+    assert_eq!(promoted.stripped, "milk");
 }

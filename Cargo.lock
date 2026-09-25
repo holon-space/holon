@@ -6020,6 +6020,7 @@ dependencies = [
  "holon-core",
  "holon-engine",
  "holon-expr",
+ "holon-org-format",
  "rhai",
  "thiserror 2.0.19",
  "tracing",

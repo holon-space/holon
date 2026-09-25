@@ -841,13 +841,33 @@ struct TaskInfo {
     is_question: bool,
 }
 
+/// The stored `task_state_category` sidecar carries the category the block's
+/// own document vocabulary gave the keyword; rows without it use the defaults.
+fn task_state_of(block: &Block, keyword: &str) -> Result<TaskState, PetriError> {
+    use holon_api::StateCategory;
+    use holon_api::Value as HValue;
+    let category = match block.properties.get("task_state_category") {
+        None => return Ok(TaskState::from_keyword(keyword)),
+        Some(HValue::String(c)) if c == StateCategory::Active.as_str() => StateCategory::Active,
+        Some(HValue::String(c)) if c == StateCategory::Done.as_str() => StateCategory::Done,
+        Some(other) => {
+            return Err(PetriError::UnexpectedPropertyType {
+                block_id: block.id.to_string(),
+                field: "task_state_category".to_string(),
+                detail: format!("{other:?} (expected \"active\" or \"done\")"),
+            });
+        }
+    };
+    Ok(TaskState::new(keyword, category))
+}
+
 impl TaskInfo {
     fn from_block(block: &Block, position: usize) -> Result<Option<Self>, PetriError> {
         use holon_api::Value as HValue;
         let props = &block.properties;
 
         let task_state = match props.get("task_state") {
-            Some(HValue::String(s)) => Some(TaskState::from_keyword(s)),
+            Some(HValue::String(s)) => Some(task_state_of(block, s)?),
             Some(other) => {
                 return Err(PetriError::UnexpectedPropertyType {
                     block_id: block.id.to_string(),

@@ -615,9 +615,10 @@ impl TaskState {
         !self.is_done()
     }
 
-    /// The `?` keyword: an open question waiting for an answer, not work.
+    /// The `?` keyword in an active category: an open question waiting for
+    /// an answer, not work. A document that declares `?` done closes it.
     pub fn is_open_question(&self) -> bool {
-        self.keyword == "?"
+        self.keyword == "?" && self.is_active()
     }
 
     /// Whether this state is in the DOING (in-progress) family. Drives the
