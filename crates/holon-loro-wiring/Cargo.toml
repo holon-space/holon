@@ -49,6 +49,7 @@ proptest-state-machine = { workspace = true, optional = true }
 iroh = { workspace = true, features = ["default"], optional = true }
 
 [dev-dependencies]
+holon-loro = { workspace = true, features = ["test-helpers"] }
 proptest.workspace = true
 proptest-state-machine.workspace = true
 tempfile.workspace = true

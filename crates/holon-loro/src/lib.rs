@@ -147,6 +147,8 @@ pub use consolidator::BlockConsolidator;
 pub use container_registry::ContainerRegistry;
 pub use container_registry::RegisteredContainer;
 pub use container_registry::SubtreeIndex;
+#[cfg(any(test, feature = "test-helpers"))]
+pub use doc_lock::AfterReadHook;
 pub use event_bus::*;
 pub use event_ring::DEFAULT_EVENT_RING_CAPACITY;
 pub use event_ring::EventRing;

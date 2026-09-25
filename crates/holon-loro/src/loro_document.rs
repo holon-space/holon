@@ -213,6 +213,13 @@ impl LoroDocument {
         })
     }
 
+    /// Run `hook` on the reading thread after every outermost guarded read of
+    /// this doc, through any wrapper; `None` removes it.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn set_after_read_hook(&self, hook: Option<crate::doc_lock::AfterReadHook>) {
+        self.lock.set_after_read_hook(hook);
+    }
+
     pub fn with_read<F, R>(&self, f: F) -> Result<R>
     where
         F: FnOnce(&LoroDoc) -> Result<R>,

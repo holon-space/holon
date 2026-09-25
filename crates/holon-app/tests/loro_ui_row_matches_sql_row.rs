@@ -138,6 +138,10 @@ fn fixture() -> Vec<StorageEntity> {
             ("content", text("second")),
             ("task_state", text("TODO")),
             ("collapsed", Value::Boolean(true)),
+            (
+                "properties",
+                text(r#"{"priority":3,"effort":"2h","completed":"no","block_type":"memo"}"#),
+            ),
         ]),
         create_params(&[
             ("id", text("block:third")),
@@ -299,7 +303,12 @@ async fn loro_ui_row_matches_the_sql_block_row() {
                     panic!("{id}: `properties` is not an object on both sides");
                 };
                 let mut sql_bag = sql_bag.clone();
-                sql_bag.retain(|key, _| !sql_only.contains(key.as_str()));
+                // The projection writes an absent priority as Null to clear a stale rank.
+                if !loro_bag.contains_key("priority")
+                    && sql_bag.get("priority") == Some(&Value::Null)
+                {
+                    sql_bag.remove("priority");
+                }
                 *loro_bag == sql_bag
             } else {
                 loro_value == sql_value

@@ -424,85 +424,117 @@ mod tests {
         );
     }
 
-    /// A snapshot taken while another task deletes and re-creates subtrees
-    /// must neither fail nor tear: every captured block's parent is captured
-    /// too, or is the tree root.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn snapshot_is_consistent_under_concurrent_structural_writes() {
-        let backend = Arc::new(
-            LoroBackend::create_new("loro-query-source-race".to_string())
-                .await
-                .unwrap(),
-        );
-        let root = backend
-            .create_block(EntityUri::no_parent(), BlockContent::text("root"), None)
-            .await
+    /// Between every two guarded reads the snapshot makes, a writer on
+    /// another thread replaces the only child of `left` and of `right` with
+    /// round `n + 1`'s pair. A snapshot of one doc state holds one round's
+    /// pair.
+    #[test]
+    fn snapshot_is_one_doc_state_when_writes_land_between_its_reads() {
+        let reader_rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
             .unwrap();
-        for i in 0..40 {
-            let child = backend
-                .create_block(root.id.clone(), BlockContent::text(format!("c{i}")), None)
+        let (backend, root, left, right) = reader_rt.block_on(async {
+            let backend = Arc::new(
+                LoroBackend::create_new("loro-query-source-interleave".to_string())
+                    .await
+                    .unwrap(),
+            );
+            let root = backend
+                .create_block(EntityUri::no_parent(), BlockContent::text("root"), None)
                 .await
-                .unwrap();
-            for j in 0..3 {
+                .unwrap()
+                .id;
+            let mut parents = Vec::new();
+            for side in ["left", "right"] {
+                let parent = backend
+                    .create_block(root.clone(), BlockContent::text(side), None)
+                    .await
+                    .unwrap()
+                    .id;
                 backend
                     .create_block(
-                        child.id.clone(),
-                        BlockContent::text(format!("g{i}.{j}")),
+                        parent.clone(),
+                        BlockContent::text(format!("{side} 0")),
                         None,
                     )
                     .await
                     .unwrap();
+                parents.push(parent);
             }
-        }
+            (backend, root, parents[0].clone(), parents[1].clone())
+        });
 
-        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let writer = tokio::spawn({
+        let (round_tx, round_rx) = std::sync::mpsc::channel::<std::sync::mpsc::Sender<()>>();
+        let writer = std::thread::spawn({
             let backend = backend.clone();
-            let root = root.id.clone();
-            let stop = stop.clone();
-            async move {
-                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
-                    let parent = backend
-                        .create_block(root.clone(), BlockContent::text("churn"), None)
-                        .await
-                        .unwrap();
-                    let child = backend
-                        .create_block(parent.id.clone(), BlockContent::text("churn child"), None)
-                        .await
-                        .unwrap();
-                    tokio::task::yield_now().await;
-                    backend.delete_block(child.id.as_str()).await.unwrap();
-                    backend.delete_block(parent.id.as_str()).await.unwrap();
-                    tokio::task::yield_now().await;
+            let (left, right) = (left.clone(), right.clone());
+            move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                for (index, done) in round_rx.into_iter().enumerate() {
+                    let round = index + 1;
+                    rt.block_on(async {
+                        for (parent, side) in [(&left, "left"), (&right, "right")] {
+                            let old = backend.list_children(parent.as_str()).await.unwrap();
+                            backend
+                                .create_block(
+                                    parent.clone(),
+                                    BlockContent::text(format!("{side} {round}")),
+                                    None,
+                                )
+                                .await
+                                .unwrap();
+                            for id in old {
+                                backend.delete_block(id.as_str()).await.unwrap();
+                            }
+                        }
+                    });
+                    done.send(()).unwrap();
                 }
             }
         });
-
-        let source = LoroBlockQuerySource::new(backend.clone());
-        let mut failures = Vec::new();
-        for attempt in 0..300 {
-            match source.snapshot().await {
-                Ok(snap) => {
-                    for block in snap.iter_blocks() {
-                        let parent = &block.parent_id;
-                        if !parent.is_no_parent() && snap.block_by_id(parent).is_none() {
-                            failures.push(format!(
-                                "attempt {attempt}: {} captured without its parent {parent}",
-                                block.id
-                            ));
-                        }
-                    }
+        let writer_thread = writer.thread().id();
+        let rounds = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let doc = backend.collab_for_test();
+        doc.set_after_read_hook(Some(Arc::new({
+            let rounds = rounds.clone();
+            move || {
+                if std::thread::current().id() == writer_thread {
+                    return;
                 }
-                Err(e) => failures.push(format!("attempt {attempt}: {e}")),
+                let (done_tx, done_rx) = std::sync::mpsc::channel();
+                round_tx.send(done_tx).unwrap();
+                done_rx.recv().unwrap();
+                rounds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             }
-        }
-        stop.store(true, std::sync::atomic::Ordering::Relaxed);
-        writer.await.unwrap();
+        })));
+
+        let snapshot = reader_rt.block_on(LoroBlockQuerySource::new(backend.clone()).snapshot());
+        doc.set_after_read_hook(None);
+        writer.join().unwrap();
+
+        let snapshot = snapshot.expect("a snapshot with writes between its reads");
         assert!(
-            failures.is_empty(),
-            "{} of 300 snapshots failed or tore, first: {:?}",
-            failures.len(),
-            failures.iter().take(3).collect::<Vec<_>>()
+            rounds.load(std::sync::atomic::Ordering::SeqCst) > 0,
+            "no write landed between the snapshot's reads"
+        );
+        let only_child = |parent: &EntityUri| {
+            let children = snapshot.children_ordered(parent);
+            assert_eq!(
+                children.len(),
+                1,
+                "every doc state gives {parent} one child; the snapshot has {children:?}"
+            );
+            children[0].content_text().to_string()
+        };
+        let (left_child, right_child) = (only_child(&left), only_child(&right));
+        assert_eq!(
+            left_child.trim_start_matches("left "),
+            right_child.trim_start_matches("right "),
+            "the snapshot mixes two doc states: {left_child:?} beside {right_child:?} under {root}"
         );
     }
 }

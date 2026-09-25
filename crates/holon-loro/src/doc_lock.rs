@@ -35,6 +35,13 @@ const LOCK_WAIT_BUDGET: Duration = Duration::from_secs(30);
 /// Identity of the inner doc a lock guards. Stable for the doc's lifetime.
 type DocKey = usize;
 
+/// Runs on the reading thread each time an outermost read guard is released.
+#[cfg(any(test, feature = "test-helpers"))]
+pub type AfterReadHook = Arc<dyn Fn() + Send + Sync>;
+
+#[cfg(any(test, feature = "test-helpers"))]
+type HookSlot = Arc<parking_lot::Mutex<Option<AfterReadHook>>>;
+
 #[derive(Clone)]
 pub(crate) struct DocLock {
     key: DocKey,
@@ -44,15 +51,24 @@ pub(crate) struct DocLock {
     /// a path that is already about to park for up to [`LOCK_WAIT_BUDGET`].
     /// An uncontended acquire never touches it.
     waiting: Arc<AtomicUsize>,
+    #[cfg(any(test, feature = "test-helpers"))]
+    after_read: HookSlot,
+}
+
+/// What every lock over one doc shares.
+struct Entry {
+    /// Proves the entry's doc is still alive.
+    doc: Weak<LoroDoc>,
+    lock: Arc<RwLock<()>>,
+    waiting: Arc<AtomicUsize>,
+    #[cfg(any(test, feature = "test-helpers"))]
+    after_read: HookSlot,
 }
 
 impl DocLock {
     /// The lock for `doc`, creating it on first sight. Any two `LoroDocument`s
     /// wrapping the same `Arc<LoroDoc>` receive the same lock.
     pub(crate) fn for_doc(doc: &Arc<LoroDoc>) -> Self {
-        /// The weak handle proves the entry's doc is still alive; the lock is
-        /// what callers share.
-        type Entry = (Weak<LoroDoc>, Arc<RwLock<()>>, Arc<AtomicUsize>);
         static REGISTRY: OnceLock<Mutex<HashMap<DocKey, Entry>>> = OnceLock::new();
         let key = Arc::as_ptr(doc) as DocKey;
         let mut map = REGISTRY
@@ -63,23 +79,35 @@ impl DocLock {
         // `Weak` is dead belonged to a freed doc that happened to sit at the
         // same address — dropping it cannot steal a lock still in use.
         if map.len() > 64 {
-            map.retain(|_, (weak, _, _)| weak.strong_count() > 0);
+            map.retain(|_, entry| entry.doc.strong_count() > 0);
         }
-        if map.get(&key).is_some_and(|(w, _, _)| w.strong_count() == 0) {
+        if map
+            .get(&key)
+            .is_some_and(|entry| entry.doc.strong_count() == 0)
+        {
             map.remove(&key);
         }
-        let entry = map.entry(key).or_insert_with(|| {
-            (
-                Arc::downgrade(doc),
-                Arc::new(RwLock::new(())),
-                Arc::new(AtomicUsize::new(0)),
-            )
+        let entry = map.entry(key).or_insert_with(|| Entry {
+            doc: Arc::downgrade(doc),
+            lock: Arc::new(RwLock::new(())),
+            waiting: Arc::new(AtomicUsize::new(0)),
+            #[cfg(any(test, feature = "test-helpers"))]
+            after_read: HookSlot::default(),
         });
         Self {
             key,
-            lock: entry.1.clone(),
-            waiting: entry.2.clone(),
+            lock: entry.lock.clone(),
+            waiting: entry.waiting.clone(),
+            #[cfg(any(test, feature = "test-helpers"))]
+            after_read: entry.after_read.clone(),
         }
+    }
+
+    /// Install (or clear, with `None`) the hook every lock over this doc runs
+    /// after an outermost read guard is released.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub(crate) fn set_after_read_hook(&self, hook: Option<AfterReadHook>) {
+        *self.after_read.lock() = hook;
     }
 
     /// How many threads are parked waiting to write this doc.
@@ -244,19 +272,29 @@ impl DocLock {
         if h.writes > 0 || h.reads > 0 {
             return f();
         }
-        let Some(_guard) = self.lock.try_read_recursive_for(LOCK_WAIT_BUDGET) else {
-            bail!(
-                "doc '{doc_id}': timed out after {LOCK_WAIT_BUDGET:?} waiting for the doc read \
-                 lock. A writer is holding it — a long write batch, or a doc-lock callback that \
-                 re-enters the doc."
-            );
+        let result = {
+            let Some(_guard) = self.lock.try_read_recursive_for(LOCK_WAIT_BUDGET) else {
+                bail!(
+                    "doc '{doc_id}': timed out after {LOCK_WAIT_BUDGET:?} waiting for the doc \
+                     read lock. A writer is holding it — a long write batch, or a doc-lock \
+                     callback that re-enters the doc."
+                );
+            };
+            enter(self.key, false);
+            let _depth = DepthGuard {
+                key: self.key,
+                write: false,
+            };
+            f()
         };
-        enter(self.key, false);
-        let _depth = DepthGuard {
-            key: self.key,
-            write: false,
-        };
-        f()
+        #[cfg(any(test, feature = "test-helpers"))]
+        {
+            let hook = self.after_read.lock().clone();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
+        result
     }
 }
 
