@@ -15,8 +15,9 @@
 //! block mirrors apply rows in commit order, and the first one to apply a row
 //! closes its clock.
 //!
-//! The gate's numbers: `f = 10/s`, `N = 600`, `W = 40`, so `L = 60 s + 0.4 s =
-//! 60.4 s` and `f·s = 4` writes.
+//! The gate's numbers: `f = 10/s`, `N = 600`, `W = 60`, `P =`
+//! [`DRAIN_PATIENCE`] `= 20 s`, so `L = 60 s + 0.4 s = 60.4 s`, `f·s = 4`
+//! writes, and a full window is retired within `s + W/f = 6.4 s`.
 //!
 //! **A healthy pipeline cannot fail.** Every Fail below is a proof that the
 //! curve does not hold:
@@ -26,28 +27,37 @@
 //! * [`DrainVerdict::WindowHeld`]: it is judged at the first write `k` not
 //!   offered by `t0 + k/f`, so writes `0..k` met their deadlines and are the
 //!   only ones offered. The Late bound then has a healthy pipeline deliver all
-//!   but `f·S ≤ f·s = 4` of them by `t0 + k/f`, fewer than `W`.
+//!   but `f·S ≤ f·s = 4` of them by `t0 + k/f`, fewer than `W = 60`. The
+//!   earliest such deadline is write `W`'s at `t0 + W/f = 6.0 s`, so over the
+//!   first window a write may take up to 6.0 s.
+//! * [`DrainVerdict::Undelivered`]: a write is offered with at most `W` writes
+//!   undelivered, so a healthy pipeline retires it within `s + W/f = 6.4 s`,
+//!   and a write still undelivered `P = 20 s` after its dispatch disproves the
+//!   curve.
 //!
 //! **A slow pipeline always fails.** No write exists before `t0`, and a feed
 //! spends at least `1/μ` on each row, so the last row is visible no earlier
 //! than `t0 + N/μ`: every `μ < N/L = 600 / 60.4 s ≈ 9.934/s` fails, host load
 //! notwithstanding, so only rates in `[9.934, 10)/s` sit below the floor and
 //! can still pass. A sustained slow stretch fails early: its backlog fills the
-//! window, and the next write misses its floor deadline as `WindowHeld`.
+//! window, and the next write misses its floor deadline as `WindowHeld`. A
+//! pipeline that stops delivering fails as `Undelivered` at most `P` after the
+//! dispatch of its first write it never delivers.
 //!
-//! "Slow" is a rate sustained over the drive; one write's wait judges nothing.
-//! A dip below `f` fails only once it pushes the completion past `L` or holds
-//! the window full at a floor deadline. The writes are all offered by about
-//! 30 s, so a drive can end with up to 202 writes at 5/s and pass; 203 fail as
-//! `Late`. The longest per-write wait is reported, never judged: under the
-//! gate's drive in the `test` profile, per-write e2e measured about 1.7 s p50
-//! and 3.7 s max, far beyond `s`, so a per-write bound is not a sound verdict.
+//! "Slow" is a rate sustained over the drive. A dip below `f` fails only once
+//! it pushes the completion past `L` or holds the window full at a floor
+//! deadline. The writes are all offered by about 30 s, so a drive can end with
+//! up to 202 writes at 5/s and pass (`29.97 s + 150 ms × 202 ≤ L`); 203 fail as
+//! `Late`. One write's wait is judged only past `P`, over three times the
+//! healthy bound: under the gate's drive in the `test` profile, per-write e2e
+//! measured about 1.7 s p50 and 3.7 s max, far beyond `s`, so the longest wait
+//! is reported, and judged only as a hang.
 //!
 //! **Nothing observed is lost.** The window stays below the correlator's
-//! per-origin capacity (`MAX_PENDING`), so no drive clock is evicted. The drive
-//! starts only once no clock is pending on any of its targets. A drive clock
-//! the correlator expires after 30 s hides whether its write was delivered, so
-//! it is an assertion failure, never a verdict.
+//! per-origin capacity (`MAX_PENDING`), so no drive clock is evicted, and `P`
+//! stays below its 30 s expiry, so the drive ends before any drive clock can
+//! expire. The drive starts only once no clock is pending on any of its
+//! targets.
 //!
 //! **Invalid.** A driver that offered a write after `t0 + k/f` while the window
 //! had room did not offer the load the Late proof needs, and no Fail proof
@@ -58,6 +68,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 use std::time::Instant;
 
+use crate::latency_e2e::EXPIRY;
 use crate::latency_e2e::MAX_PENDING;
 use crate::latency_slo::E2eSample;
 use crate::latency_slo::SERVICE_TIME_SLO_MS;
@@ -73,7 +84,10 @@ pub const DRAIN_WRITES: usize = 600;
 pub const DRAIN_OFFER_EVERY: Duration = Duration::from_millis(50);
 
 /// Undelivered drive writes allowed at once.
-pub const DRAIN_WINDOW: usize = 40;
+pub const DRAIN_WINDOW: usize = 60;
+
+/// How long a dispatched write may stay undelivered before the drive fails.
+pub const DRAIN_PATIENCE: Duration = Duration::from_secs(20);
 
 /// How long setup's clocks on the drive targets may take to close.
 const QUIESCE_WITHIN: Duration = Duration::from_secs(10);
@@ -83,7 +97,8 @@ const WARM_UP_WITHIN: Duration = Duration::from_secs(10);
 
 /// One drain test: `writes` writes, each to its own target, offered every
 /// `offer_every` with at most `window` undelivered, judged against a floor of
-/// `floor_per_sec` with latency allowance `slack`.
+/// `floor_per_sec` with latency allowance `slack`, each within `patience` of
+/// its dispatch.
 #[derive(Clone, Copy, Debug)]
 pub struct DrainTest {
     writes: usize,
@@ -91,6 +106,7 @@ pub struct DrainTest {
     slack: Duration,
     window: usize,
     offer_every: Duration,
+    patience: Duration,
 }
 
 /// What a drain test observed.
@@ -111,6 +127,9 @@ pub enum DrainVerdict {
     /// At write `write`'s floor deadline the pipeline still held `pending`
     /// writes, a full window, so the driver could not offer it.
     WindowHeld { write: usize, pending: usize },
+    /// Write `write` was still undelivered `after` its dispatch: the pipeline
+    /// stopped delivering.
+    Undelivered { write: usize, after: Duration },
     /// Write `write` was offered `late_by` after its floor deadline while the
     /// window had room: the driver fell behind, and nothing was judged.
     Invalid { write: usize, late_by: Duration },
@@ -118,7 +137,10 @@ pub enum DrainVerdict {
 
 impl DrainVerdict {
     pub fn is_fail(&self) -> bool {
-        matches!(self, Self::Late { .. } | Self::WindowHeld { .. })
+        matches!(
+            self,
+            Self::Late { .. } | Self::WindowHeld { .. } | Self::Undelivered { .. }
+        )
     }
 }
 
@@ -131,6 +153,7 @@ impl DrainTest {
             DRAIN_TEST_SLACK,
             DRAIN_WINDOW,
             DRAIN_OFFER_EVERY,
+            DRAIN_PATIENCE,
         )
     }
 
@@ -140,6 +163,7 @@ impl DrainTest {
         slack: Duration,
         window: usize,
         offer_every: Duration,
+        patience: Duration,
     ) -> Self {
         assert!(writes > 0, "a drain test drives at least one write");
         assert!(floor_per_sec > 0.0, "the floor is a positive rate");
@@ -155,12 +179,24 @@ impl DrainTest {
             offer_every.as_secs_f64() < 1.0 / floor_per_sec,
             "the offered rate must exceed the floor"
         );
+        let full_window = slack + Duration::from_secs_f64(window as f64 / floor_per_sec);
+        assert!(
+            patience > full_window,
+            "a patience of {patience:?} fails a healthy pipeline, which retires a full window \
+             within {full_window:?}"
+        );
+        assert!(
+            patience < EXPIRY,
+            "a patience of {patience:?} lets the correlator expire a drive clock at {EXPIRY:?} \
+             before the drive judges it"
+        );
         Self {
             writes,
             floor_per_sec,
             slack,
             window,
             offer_every,
+            patience,
         }
     }
 
@@ -202,6 +238,16 @@ impl DrainTest {
                 "write {j} was offered with {backlog} writes undelivered, past the window of {}",
                 self.window
             );
+        }
+        let stuck = (0..dispatched.len()).find(|&j| {
+            let give_up = dispatched[j] + self.patience;
+            until >= give_up && delivered[j].is_none_or(|d| d >= give_up)
+        });
+        if let Some(write) = stuck {
+            return DrainVerdict::Undelivered {
+                write,
+                after: self.patience,
+            };
         }
         for write in 0..self.writes {
             let deadline = t0 + self.floor_time(write);
@@ -294,6 +340,7 @@ pub struct Drive {
     dispatched: Vec<Instant>,
     delivered: Vec<Option<Instant>>,
     delivered_count: usize,
+    oldest_undelivered: usize,
     seen: usize,
     observed_until: Option<Instant>,
 }
@@ -324,6 +371,7 @@ impl Drive {
             dispatched: Vec::new(),
             delivered: vec![None; test.writes],
             delivered_count: 0,
+            oldest_undelivered: 0,
             seen: 0,
             observed_until: None,
         }
@@ -386,10 +434,33 @@ impl Drive {
     }
 
     fn drive(&mut self, now: Instant) -> Step {
-        let k = self.dispatched.len();
         let Some(&t0) = self.dispatched.first() else {
             return self.dispatch(0);
         };
+        while self.delivered[..self.dispatched.len()]
+            .get(self.oldest_undelivered)
+            .is_some_and(Option::is_some)
+        {
+            self.oldest_undelivered += 1;
+        }
+        let give_up = self
+            .dispatched
+            .get(self.oldest_undelivered)
+            .map(|&at| at + self.test.patience);
+        if give_up.is_some_and(|g| now >= g) {
+            self.phase = Phase::Done;
+            return Step::Done;
+        }
+        match self.schedule(now, t0) {
+            Step::Wait { until } => Step::Wait {
+                until: give_up.map_or(until, |g| g.min(until)),
+            },
+            step => step,
+        }
+    }
+
+    fn schedule(&mut self, now: Instant, t0: Instant) -> Step {
+        let k = self.dispatched.len();
         if k == self.test.writes {
             let limit_at = t0 + self.test.limit();
             if self.delivered_count == k || now >= limit_at {
@@ -561,6 +632,8 @@ mod tests {
         Batching { lo: u64, hi: u64, per_row: u64 },
         /// One row per pass: 1ms for the first `fast_rows`, `per_row` after.
         FastThen { fast_rows: usize, per_row: u64 },
+        /// One row per 5ms pass for the first `rows`, then no pass ever again.
+        Hangs { rows: usize },
     }
 
     /// A clock setup left pending on drive target 7.
@@ -718,7 +791,9 @@ mod tests {
                 let committed: Vec<usize> = (0..rows.len())
                     .filter(|&r| !rows[r].applied[f] && rows[r].commit <= now)
                     .collect();
-                if committed.is_empty() {
+                if committed.is_empty()
+                    || matches!(feed.shape, Shape::Hangs { rows } if feed.applied >= rows)
+                {
                     continue;
                 }
                 feed.received = now;
@@ -741,6 +816,7 @@ mod tests {
                         },
                         vec![committed[0]],
                     ),
+                    Shape::Hangs { .. } => (5_000, vec![committed[0]]),
                 };
                 feed.busy_until = Some(now + took.max(1));
                 feed.rows = batch;
@@ -782,7 +858,24 @@ mod tests {
                         let until = (until - base).as_micros() as u64;
                         driver_wake = Some(until.max(now + 1));
                     }
-                    Step::Done => return drive.verdict(),
+                    Step::Done => {
+                        let expiry = crate::latency_e2e::EXPIRY.as_micros() as u64;
+                        let expired = (0..N)
+                            .find(|&t| clocks[t].iter().any(|&c| now - c >= expiry))
+                            .map(target)
+                            .or_else(|| {
+                                samples
+                                    .iter()
+                                    .find(|s| s.ms * 1000 >= expiry)
+                                    .map(|s| s.target.clone())
+                            });
+                        assert!(
+                            expired.is_none(),
+                            "the correlator expired the drive clock on {expired:?} before the \
+                             drive ended: the run judges nothing"
+                        );
+                        return drive.verdict();
+                    }
                 }
             }
             let idle_commit = rows
@@ -939,6 +1032,22 @@ mod tests {
         );
     }
 
+    /// `rows` counts the warm-up's row: 1 hangs on the first drive write, 601
+    /// never hangs.
+    #[test]
+    fn a_pipeline_that_stops_delivering_fails() {
+        for rows in [1, 100, 300, 520, 540, 580, 599, 600] {
+            let verdict = run(
+                &Pipeline {
+                    feeds: vec![Shape::Hangs { rows }],
+                    ..fast_serial()
+                },
+                1,
+            );
+            assert!(verdict.is_fail(), "hang after {rows} rows: {verdict:?}");
+        }
+    }
+
     #[test]
     fn a_setup_clock_still_in_flight_on_a_drive_target_is_waited_out() {
         let verdict = run(
@@ -1051,13 +1160,16 @@ mod tests {
             }
         ));
         let (dispatched, delivered) = throttled(tail(300));
-        assert!(matches!(
+        assert_eq!(
             judged(&dispatched, &delivered, 60_400),
-            DrainVerdict::WindowHeld { .. }
-        ));
+            DrainVerdict::WindowHeld {
+                write: 569,
+                pending: DRAIN_WINDOW,
+            }
+        );
     }
 
-    /// A pipeline at the floor whose last write is offered at 56.4s and still
+    /// A pipeline at the floor whose last write is offered at 54.4s and still
     /// undelivered at the 60.4s limit.
     #[test]
     fn an_undelivered_write_is_late() {
@@ -1073,14 +1185,23 @@ mod tests {
         );
     }
 
+    /// Write 3, offered at 150ms, delivered 1ms inside and at the 20s patience.
     #[test]
-    fn one_slow_write_within_the_limit_passes() {
+    fn one_slow_write_passes_until_it_waits_the_patience() {
         let (dispatched, mut delivered) = throttled(|k| 50 * k + 20);
-        delivered[3] = Some(150 + 20_000);
+        delivered[3] = Some(150 + 19_999);
         assert!(matches!(
             judged(&dispatched, &delivered, 60_400),
             DrainVerdict::Pass { .. }
         ));
+        delivered[3] = Some(150 + 20_000);
+        assert_eq!(
+            judged(&dispatched, &delivered, 60_400),
+            DrainVerdict::Undelivered {
+                write: 3,
+                after: DRAIN_PATIENCE,
+            }
+        );
     }
 
     /// Write 3 offered at 301ms, 1ms behind `t0 + 3/f`, with the window empty:
@@ -1101,14 +1222,34 @@ mod tests {
         );
     }
 
-    /// Forty writes offered on schedule and none delivered by write 40's floor
-    /// deadline at 4s: the drive stops there.
+    /// Sixty writes offered on schedule and none delivered by write 60's floor
+    /// deadline at 6s: the drive stops there.
     #[test]
     fn a_window_held_full_at_a_floor_deadline_fails() {
         let dispatched: Vec<u64> = (0..DRAIN_WINDOW as u64).map(|k| k * 50).collect();
         let delivered = vec![None; DRAIN_WINDOW];
         assert_eq!(
-            judged(&dispatched, &delivered, 4_000),
+            judged(&dispatched, &delivered, 6_000),
+            DrainVerdict::WindowHeld {
+                write: DRAIN_WINDOW,
+                pending: DRAIN_WINDOW,
+            }
+        );
+    }
+
+    /// A pipeline at 20/s whose first window lands at once after a cold start:
+    /// at 6.00s it frees write 60 on its floor deadline, at 6.05s it does not.
+    #[test]
+    fn the_first_window_may_take_six_seconds() {
+        let cold = |first: u64| move |k: u64| first.max(50 * k + 20);
+        let (dispatched, delivered) = throttled(cold(6_000));
+        assert!(matches!(
+            judged(&dispatched, &delivered, 60_400),
+            DrainVerdict::Pass { .. }
+        ));
+        let (dispatched, delivered) = throttled(cold(6_050));
+        assert_eq!(
+            judged(&dispatched, &delivered, 60_400),
             DrainVerdict::WindowHeld {
                 write: DRAIN_WINDOW,
                 pending: DRAIN_WINDOW,

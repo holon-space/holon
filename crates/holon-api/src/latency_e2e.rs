@@ -542,7 +542,7 @@ static PENDING: Mutex<Registry> = Mutex::new(Registry {
 pub const MAX_PENDING: usize = 64;
 /// Sequence of `rows_delivered` calls; every sample one call closes shares it.
 static DELIVERY_BATCH: AtomicU64 = AtomicU64::new(0);
-const EXPIRY: Duration = Duration::from_secs(30);
+pub(crate) const EXPIRY: Duration = Duration::from_secs(30);
 
 /// Extract the op-instance token from op params: the editor stamps `write_seq`
 /// (`> 0`) into content-write params; every other op omits it. A `0` value is

@@ -39,3 +39,10 @@ Pinned by `arming_the_probe_over_a_pending_clock_is_refused` in
 `crates/holon-integration-tests/tests/latency_slo_gate.rs`: red without the
 check (`lane-logs/d219-red-2a.log`, `lane-logs/d219-teeth-2a-mutant.log`).
 `just latency-slo-gate` runs the binary under nextest, one process per test.
+
+The partition rung left its facade clock on `block:facade-inflight-probe`
+pending even when it passed, so under one `cargo test` process every later
+rung refused to arm. The rung now holds that clock in a guard that retires it
+on drop and asserts that no clock is pending at its end. Red:
+`lane-logs/d219b-red-item4.log`; teeth by removal:
+`lane-logs/d219b-teeth-item4.log`.
