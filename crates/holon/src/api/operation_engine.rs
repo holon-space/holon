@@ -1653,6 +1653,53 @@ impl DispatchingOperationEngine {
         }
     }
 
+    /// Refuse a write that would give a block the `?` keyword over empty
+    /// content: org reads `* ?` back as the title `?`, so no file can hold it.
+    async fn refuse_empty_question(
+        &self,
+        entity_name: &EntityName,
+        op_name: &str,
+        params: &StorageEntity,
+    ) -> Result<()> {
+        let param = |key: &str| params.get(key).and_then(|v| v.as_string());
+        if entity_name.as_str() != "block" {
+            return Ok(());
+        }
+        let (keyword, content) = match op_name {
+            "set_field" if param("field") == Some("task_state") => (param("value"), None),
+            "create" | "update" => (param("task_state"), param("content")),
+            _ => return Ok(()),
+        };
+        if keyword != Some(holon_org_format::QUESTION_KEYWORD) {
+            return Ok(());
+        }
+        let id = param("id").ok_or_else(|| {
+            anyhow::anyhow!("{op_name}: a `?` task_state write names no block id")
+        })?;
+        let content = match (content, op_name) {
+            (Some(content), _) => content.to_string(),
+            (None, "create") => String::new(),
+            (None, _) => self.read_task_keyword_prior_state(op_name, id).await?.0,
+        };
+        if holon_org_format::asks_nothing(holon_org_format::QUESTION_KEYWORD, &content) {
+            bail!(
+                "{op_name}: refusing task_state `?` on block {id}: its content {content:?} asks \
+                 nothing, and a question needs text"
+            );
+        }
+        Ok(())
+    }
+
+    /// Whether a content write left block `id` a `?` question with no text,
+    /// which the same gesture then demotes.
+    async fn leaves_empty_question(&self, id: &str, content: &str) -> Result<bool> {
+        if !holon_org_format::asks_nothing(holon_org_format::QUESTION_KEYWORD, content) {
+            return Ok(false);
+        }
+        Ok(self.stored_task_keyword(id).await?.as_deref()
+            == Some(holon_org_format::QUESTION_KEYWORD))
+    }
+
     /// Rewrite a block write that would land the illegal state into the task it
     /// already is, BEFORE it reaches the store. Pre-rewriting rather than
     /// repairing afterwards is what keeps the unconverged content from ever
@@ -1717,16 +1764,24 @@ impl DispatchingOperationEngine {
             let Some(content) = delta.new_value.as_string() else {
                 continue;
             };
-            let Some(promotion) = self
+            let writes = match self
                 .keyword_convergence(&delta.entity_id, content, false)
                 .await?
-            else {
-                continue;
+            {
+                Some(promotion) => vec![
+                    ("content", promotion.stripped),
+                    ("task_state", promotion.keyword.keyword),
+                ],
+                // An empty question is not a question.
+                None if self
+                    .leaves_empty_question(&delta.entity_id, content)
+                    .await? =>
+                {
+                    vec![("task_state", String::new())]
+                }
+                None => continue,
             };
-            for (field, value) in [
-                ("content", promotion.stripped.clone()),
-                ("task_state", promotion.keyword.keyword.clone()),
-            ] {
+            for (field, value) in writes {
                 let mut p = StorageEntity::new();
                 p.insert("id".into(), Value::String(delta.entity_id.clone()));
                 p.insert("field".into(), Value::String(field.to_string()));
@@ -1915,10 +1970,14 @@ impl DispatchingOperationEngine {
             .await;
 
         let vocabulary = self.document_vocabulary(CYCLE_TASK_STATE_OP, &id).await?;
-        let (_content, prior_keyword) = self
+        let (content, prior_keyword) = self
             .read_task_keyword_prior_state(CYCLE_TASK_STATE_OP, &id)
             .await?;
-        let ring = cycle_ring(&vocabulary);
+        // A block with no text cannot be a question, so its ring skips `?`.
+        let mut ring = cycle_ring(&vocabulary);
+        if holon_org_format::asks_nothing(holon_org_format::QUESTION_KEYWORD, &content) {
+            ring.retain(|k| k != holon_org_format::QUESTION_KEYWORD);
+        }
         let next = holon_api::render_eval::cycle_state(
             prior_keyword.as_deref().unwrap_or_default(),
             &ring,
@@ -2970,6 +3029,8 @@ impl OperationEngine for DispatchingOperationEngine {
         // ordinary block-field data down the existing write path and lands in
         // `block_raw.properties`, with no provider edits.
         let params = self.stamp_provenance(op_name, params, &origin)?;
+        self.refuse_empty_question(entity_name, op_name, &params)
+            .await?;
 
         // Keyword convergence (ruling 2026-08-10): a write that would leave the
         // block as keyword-headed plain text is rewritten to the task it

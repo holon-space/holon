@@ -276,3 +276,35 @@ org-drawer spellings on read** and **one canonical spelling on write**:
 | Render source ID | `models.rs` | `source_block_to_org()` writes `block.id.id()` |
 | Sync controller | `file_sync_controller.rs` | `build_block_params()` uses `get_block_id()` with `block.id.id()` fallback |
 | Test serializer | `org_utils.rs` | `serialize_block_recursive()` writes `block.id.id()` |
+
+## Task keywords: the `?` question
+
+`?` is a default active keyword (`DEFAULT_ACTIVE_KEYWORDS`,
+`crates/holon-org-format/src/models.rs`): `* ? pick a storage engine` is an open
+question, task state `?`. A document may declare it in `#+TODO:`, on either side
+of the `|`; its category then comes from that declaration.
+
+A `?` asks something only when text follows it on the same line. A bare `* ?`
+is the title text `?`, not a task: the parser, the store's convergence and the
+editor apply the same rule (`asks_nothing` in `task_keyword.rs`). The store
+therefore never holds task state `?` over empty content:
+
+| Write | Result |
+|-------|--------|
+| `set_field task_state "?"`, `create`/`update` with `task_state: "?"`, on empty content | refused with an error that names the block |
+| `cycle_task_state` on a block with no text | the ring skips `?` |
+| a content write that empties a `?` block | the same gesture clears the task state |
+
+Views that could treat an open `?` block as work:
+
+| Site | Verdict |
+|------|---------|
+| Vault `Now.org` now-query and `now_for_agent` MCP tool | selects TODO/DOING only; `?` excluded |
+| Vault `Now.org` REQUIRES rollup | dependents of an open `?` stay blocked until it is answered |
+| `rank_tasks` (Petri `TaskInfo::from_block`) | open `?` is not ranked and blocks its dependents; a `?` declared done frees them |
+| Petri `? ` content prefix | separate question-arc syntax, unaffected |
+| `dense_query` `task_state_category != 'done'` example | lists open `?` blocks as open items |
+| Kanban lanes (`collection_profile.yaml`) | `?` gets its own lane |
+| `state_icon` / `state_display` (`render_eval.rs`) | open-task glyph |
+| Native cycle ring (`task_keyword_cycle.rs`) | `?` is not in it; a click on `?` goes to TODO |
+| `TaskEntity::completed` (`holon-core/src/traits.rs`) | open `?` is not completed; ignores the category sidecar |

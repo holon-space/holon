@@ -39,13 +39,12 @@ use crate::pbt::transition_budgets::REACTIVE_BASE;
 /// page: the block itself, then the page.
 const VOCABULARY_RESOLVE_READS: usize = 2;
 
-/// Extra reads charged once per draw that opens the source channel at all.
+/// Extra reads charged once when the draw turns an untasked block into a task.
 ///
-/// The RESIDUAL of a measurement, like [`NEWBORN_FIRST_WRITE_READS`]: typing
-/// `? milk` into an empty block measures 31 dedup reads where the ordinary
-/// formula grants `5 + 2*6 + 2*4 = 25`, because `?` shares its promotion's
-/// fixed cost with only six characters.
-const SOURCE_CHANNEL_DRAW_READS: usize = 6;
+/// Measured on the promoting keystroke in isolation: `m` after `? ` costs 22
+/// dedup reads where the same keystroke as prose costs 17, and
+/// [`VOCABULARY_RESOLVE_READS`] accounts for 2 of the 5.
+const PROMOTION_READS: usize = 3;
 
 /// Extra reads charged when the keystroke ALSO created the block it wrote to.
 ///
@@ -148,12 +147,22 @@ where
     // predicts). Prod reaches it through `edit_target_id`, which resolves the
     // caret through the birth chokepoint before naming an edit target.
     if let Some(parent) = caret_creation_slot_parent(state) {
+        state.note_draw_promoted(false);
         state.birth_block_via_creation_slot(&parent, text);
         return;
     }
+    let tasked = |state: &R| {
+        state
+            .active_editor_block()
+            .and_then(|id| state.block_task_state(&id))
+            .is_some_and(|k| !k.is_empty())
+    };
+    let tasked_before = tasked(state);
     for ch in text.chars() {
         type_one_char_to_ref(&ch.to_string(), state);
     }
+    let promoted = !tasked_before && tasked(state);
+    state.note_draw_promoted(promoted);
 }
 
 /// One keystroke: insert it into the editable surface, then commit that
@@ -255,19 +264,19 @@ crate::cap_transition! {
                 holon_org_format::could_converge(&prefix)
             })
             .count();
-        let vocabulary_reads = VOCABULARY_RESOLVE_READS * source_keystrokes
-            + if source_keystrokes > 0 {
-                SOURCE_CHANNEL_DRAW_READS
-            } else {
-                0
-            };
+        let vocabulary_reads = VOCABULARY_RESOLVE_READS * source_keystrokes;
+        let promotion_reads = if state.last_draw_promoted() {
+            PROMOTION_READS
+        } else {
+            0
+        };
         let newborn_reads = if state.last_keystroke_created_its_target() {
             NEWBORN_FIRST_WRITE_READS
         } else {
             0
         };
         ExpectedSql {
-            reads: REACTIVE_BASE + 2 * chars + vocabulary_reads + newborn_reads,
+            reads: REACTIVE_BASE + 2 * chars + vocabulary_reads + promotion_reads + newborn_reads,
             // A source-channel keystroke lands TWO columns (content and
             // task_state) where a content keystroke lands one. Charged for
             // every keystroke the channel admits — an OVER-approximation,

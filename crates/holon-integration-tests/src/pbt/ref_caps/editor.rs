@@ -77,4 +77,8 @@ impl RefEditorMirrorMut for ReferenceState {
     fn note_backspace_joins(&mut self, joins: usize) {
         self.ui.tab.last_backspace_joins = joins;
     }
+
+    fn note_draw_promoted(&mut self, promoted: bool) {
+        self.ui.tab.last_draw_promoted = promoted;
+    }
 }

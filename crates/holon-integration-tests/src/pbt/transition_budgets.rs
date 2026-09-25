@@ -120,6 +120,7 @@ struct CardinalityProbe {
     open_tab_caret_seat: CaretSeat,
     content_writes_sql: bool,
     keystroke_created_its_target: bool,
+    draw_promoted: bool,
 }
 
 impl holon_pbt_core::capabilities::RefSqlCardinality for CardinalityProbe {
@@ -155,6 +156,9 @@ impl holon_pbt_core::capabilities::RefSqlCardinality for CardinalityProbe {
     }
     fn content_writes_reach_sql(&self) -> bool {
         self.content_writes_sql
+    }
+    fn last_draw_promoted(&self) -> bool {
+        self.draw_promoted
     }
 }
 
@@ -197,7 +201,9 @@ pub fn declared_complexity_class(
         for first_visit in [false, true] {
             for open_tab_activated in [false, true] {
                 for content_writes_sql in [false, true] {
-                    for keystroke_created_its_target in [false, true] {
+                    for (keystroke_created_its_target, draw_promoted) in
+                        [(false, false), (false, true), (true, false), (true, true)]
+                    {
                         let at = |scale| {
                             transition.expected_sql(&CardinalityProbe {
                                 scale,
@@ -207,6 +213,7 @@ pub fn declared_complexity_class(
                                 open_tab_caret_seat,
                                 content_writes_sql,
                                 keystroke_created_its_target,
+                                draw_promoted,
                             })
                         };
                         let small = at(SMALL);

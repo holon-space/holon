@@ -833,11 +833,6 @@ fn process_headlines(
             needs_id.push(id.clone());
         }
 
-        // Extract TODO keyword first, parsed into TaskState with category
-        let task_state = headline
-            .todo_keyword()
-            .map(|t| TaskState::from_keyword_with_done_list(t.as_ref(), done_keywords));
-
         // `title_raw()` is the HEADLINE_TITLE node, and the parser consumes the
         // TODO keyword into its own token BEFORE building that node — so the
         // keyword is already gone. Stripping it again here would delete a
@@ -845,6 +840,15 @@ fn process_headlines(
         // whose text is `TODO x`, and re-stripping turns it into `x` on every
         // read of the file.
         let title = headline.title_raw().trim().to_string();
+        let keyword = headline.todo_keyword().map(|t| t.to_string());
+        let (task_state, title) = match keyword {
+            Some(k) if crate::task_keyword::asks_nothing(&k, &title) => (None, k),
+            Some(k) => (
+                Some(TaskState::from_keyword_with_done_list(&k, done_keywords)),
+                title,
+            ),
+            None => (None, title),
+        };
 
         // The priority COOKIE (`[#A]`); the token carries just the letter. A
         // letter outside the A/B/C default is data — org's accepted range is

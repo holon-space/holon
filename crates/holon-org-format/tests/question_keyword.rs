@@ -165,3 +165,31 @@ fn a_question_mark_without_text_stays_prose() {
     assert_eq!(promoted.keyword, TaskState::active("?"));
     assert_eq!(promoted.stripped, "milk");
 }
+
+#[test]
+fn a_bare_question_mark_headline_is_title_text() {
+    for todo_line in ["", "#+TODO: TODO ? | DONE\n", "#+TODO: TODO | DONE ?\n"] {
+        let source = format!(
+            "#+ID: questions\n{todo_line}* ?\n:PROPERTIES:\n:ID: q-bare\n:END:\n\
+             * ? pick a storage engine\n:PROPERTIES:\n:ID: q-real\n:END:\n"
+        );
+        let (document, blocks) = parse(&source);
+        let bare = block_titled(&blocks, "?");
+        assert_eq!(
+            bare.task_state(),
+            None,
+            "`* ?` asks nothing, so it is title text (with {todo_line:?})"
+        );
+        let real = block_titled(&blocks, "pick a storage engine");
+        assert_eq!(real.task_state().map(|s| s.keyword), Some("?".to_string()));
+
+        let first = render(&document, &blocks);
+        let (document, blocks) = parse(&first);
+        assert_eq!(block_titled(&blocks, "?").task_state(), None);
+        assert_eq!(
+            render(&document, &blocks),
+            first,
+            "render is not a fixed point"
+        );
+    }
+}

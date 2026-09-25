@@ -59,6 +59,12 @@ pub fn project_or_disclose(
         .filter(|k| !k.is_empty())
         .map(TaskState::from_keyword);
     let untasked = state.is_none();
+    assert!(
+        !state
+            .as_ref()
+            .is_some_and(|s| holon_org_format::asks_nothing(&s.keyword, content)),
+        "block {block_id} is a `?` question with no text, which the store refuses to hold"
+    );
     match holon_org_format::source_projection(state.as_ref(), content, vocabulary) {
         SourceProjection::Text(text) => SurfaceSeed {
             text,

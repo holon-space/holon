@@ -26,6 +26,7 @@ use holon_api::TaskState;
 use holon_org_format::ProjectionRefusal;
 use holon_org_format::SourceProjection;
 use holon_org_format::TaskKeywordVocabulary;
+use holon_org_format::asks_nothing;
 use holon_org_format::converge_keyword_headed;
 use holon_org_format::source_projection;
 use proptest::prelude::*;
@@ -56,9 +57,9 @@ fn declared_vocabulary() -> impl Strategy<Value = TaskKeywordVocabulary> {
     ]
 }
 
-/// Refused by design (`QuestionWithoutText`), pinned by example below.
+/// A state the store refuses to hold, so it has no projection to test.
 fn is_question_without_text(task_state: Option<&TaskState>, content: &str) -> bool {
-    task_state.is_some_and(|s| s.keyword == "?") && content.is_empty()
+    task_state.is_some_and(|s| asks_nothing(&s.keyword, content))
 }
 
 proptest! {
@@ -164,16 +165,12 @@ fn an_open_question_projects_and_parses_back_under_the_defaults() {
 }
 
 #[test]
-fn a_question_without_text_is_refused() {
-    let vocabulary = TaskKeywordVocabulary::default();
-    assert_eq!(
-        source_projection(Some(&TaskState::active("?")), "", &vocabulary),
-        SourceProjection::Refused(ProjectionRefusal::QuestionWithoutText)
-    );
-    assert_eq!(
-        converge_keyword_headed("?", &vocabulary),
-        None,
-        "a bare `?` reads back as prose"
+#[should_panic(expected = "has no vault source")]
+fn a_question_without_text_has_no_projection() {
+    source_projection(
+        Some(&TaskState::active("?")),
+        "",
+        &TaskKeywordVocabulary::default(),
     );
 }
 

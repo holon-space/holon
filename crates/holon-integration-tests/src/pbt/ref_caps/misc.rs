@@ -113,6 +113,9 @@ impl RefSqlCardinality for ReferenceState {
     fn content_writes_reach_sql(&self) -> bool {
         !self.enable_loro()
     }
+    fn last_draw_promoted(&self) -> bool {
+        self.ui.tab.last_draw_promoted
+    }
     fn last_backspace_joins(&self) -> usize {
         self.ui.tab.last_backspace_joins
     }

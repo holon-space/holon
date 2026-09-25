@@ -122,6 +122,10 @@ pub struct UITabState {
     /// newborn's first-write read set exactly once.
     pub last_keystroke_created_its_target: bool,
 
+    /// Whether the most recent `TypeChars` turned an untasked block into a
+    /// task; `inv-sql-budget` charges the promotion's fixed reads once.
+    pub last_draw_promoted: bool,
+
     /// How many block MERGES the most recent `DeleteBackward` performed — a
     /// backspace at caret 0 joins into the predecessor rather than deleting a
     /// character. Recorded by `DeleteBackward::apply_to_ref` because
@@ -150,6 +154,7 @@ impl UITabState {
             last_open_tab_rerenders: (FocusRerender::None, FocusRerender::None),
             last_open_tab_caret_seat: CaretSeat::Fresh,
             last_keystroke_created_its_target: false,
+            last_draw_promoted: false,
             last_backspace_joins: 0,
         }
     }

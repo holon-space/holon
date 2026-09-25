@@ -113,12 +113,17 @@ impl TaskKeywordVocabulary {
     }
 }
 
-/// The question keyword: it asks something only when text follows it, so a
-/// lone `?` is prose and never converges.
-const QUESTION: &str = "?";
+/// The question keyword: it asks something only when text follows it on its
+/// own line, so a lone `?` is prose — to the parser, the store and the editor.
+pub const QUESTION_KEYWORD: &str = "?";
 
-fn asks_nothing(keyword: &str, rest: &str) -> bool {
-    keyword == QUESTION && rest.trim().is_empty()
+/// Whether `keyword` followed by `rest` is a question with no text.
+pub fn asks_nothing(keyword: &str, rest: &str) -> bool {
+    keyword == QUESTION_KEYWORD
+        && rest
+            .split('\n')
+            .next()
+            .is_none_or(|line| line.trim().is_empty())
 }
 
 /// A detected promotion: the keyword the block becomes, and the content it
@@ -169,8 +174,8 @@ pub fn keyword_headed<'a>(
 pub fn could_converge(s: &str) -> bool {
     let token_ends =
         |rest: &str| rest.is_empty() || rest.starts_with(|c: char| c.is_ascii_whitespace());
-    if let Some(rest) = s.strip_prefix(QUESTION) {
-        return token_ends(rest) && !asks_nothing(QUESTION, rest);
+    if let Some(rest) = s.strip_prefix(QUESTION_KEYWORD) {
+        return token_ends(rest) && !asks_nothing(QUESTION_KEYWORD, rest);
     }
     let end = s
         .find(|c: char| !(c.is_ascii_uppercase() || c.is_ascii_digit() || c == '-' || c == '_'))
@@ -224,8 +229,6 @@ pub enum ProjectionRefusal {
     /// The content starts with whitespace, which the parser eats: `TODO  milk`
     /// parses back to `milk`, losing the leading space on the first commit.
     ContentStartsWithWhitespace { content: String },
-    /// A `?` block with empty content: the bare `?` reads back as prose.
-    QuestionWithoutText,
 }
 
 impl ProjectionRefusal {
@@ -233,7 +236,6 @@ impl ProjectionRefusal {
         match self {
             Self::KeywordNotDeclared { .. } => "keyword_not_declared",
             Self::ContentStartsWithWhitespace { .. } => "content_starts_with_whitespace",
-            Self::QuestionWithoutText => "question_without_text",
         }
     }
 }
@@ -253,11 +255,6 @@ impl fmt::Display for ProjectionRefusal {
                 f,
                 "content {content:?} starts with whitespace, which the keyword parser eats — the \
                  projection would not round-trip"
-            ),
-            Self::QuestionWithoutText => write!(
-                f,
-                "a `?` question with no text projects to a bare `?`, which reads back as prose \
-                 and would demote the question"
             ),
         }
     }
@@ -289,9 +286,10 @@ pub fn source_projection(
             content: content.to_string(),
         });
     }
-    if asks_nothing(&task_state.keyword, content) {
-        return SourceProjection::Refused(ProjectionRefusal::QuestionWithoutText);
-    }
+    assert!(
+        !asks_nothing(&task_state.keyword, content),
+        "a `?` task with content {content:?} has no vault source; the store refuses to hold one"
+    );
     SourceProjection::Text(if content.is_empty() {
         task_state.keyword.clone()
     } else {
