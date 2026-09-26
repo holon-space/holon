@@ -13,16 +13,16 @@ use holon_api::block::Block;
 use holon_api::marks_to_json;
 use holon_org_format::OrgBlockExt;
 
-/// `previous` is accepted to satisfy the adapter contract but has nothing to
-/// act on here: these params carry no user-authored property namespace (the
-/// field set below is closed), so no key can go stale in the store.
+/// `previous` is the block as the file previously declared it. A task marker
+/// `previous` carried and `block` no longer does is emitted as
+/// `Value::REMOVED`, so the store drops the task state the file dropped.
+/// `None` for a create.
 pub fn build_block_params(
     block: &Block,
     parent_id: &EntityUri,
     document_uri: &EntityUri,
     previous: Option<&Block>,
 ) -> StorageEntity {
-    let _ = previous;
     let mut params = StorageEntity::new();
     params.insert("id".into(), Value::String(block.id.to_string()));
     params.insert("parent_id".into(), Value::String(parent_id.to_string()));
@@ -70,6 +70,9 @@ pub fn build_block_params(
             "task_state_category".into(),
             Value::String(task_state.category.as_str().to_string()),
         );
+    } else if previous.is_some_and(|p| p.task_state().is_some()) {
+        params.insert("task_state".into(), Value::REMOVED);
+        params.insert("task_state_category".into(), Value::REMOVED);
     }
     if let Some(priority) = block.priority() {
         params.insert("priority".into(), Value::Integer(priority.rank() as i64));

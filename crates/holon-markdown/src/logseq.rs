@@ -16,6 +16,7 @@ use holon_api::block::Block;
 use holon_core::file_format::FileFormatAdapter;
 use holon_core::file_format::FileFormatParseResult;
 use holon_core::file_format::WriteTier;
+use holon_org_format::OrgBlockExt;
 
 use crate::build::apply_planning;
 use crate::build::opaque_block;
@@ -325,7 +326,10 @@ impl FileFormatAdapter for LogseqMarkdownAdapter {
     }
 
     fn content_differs(&self, a: &Block, b: &Block) -> bool {
-        a.content != b.content || a.marks != b.marks || a.tags != b.tags
+        a.content != b.content
+            || a.marks != b.marks
+            || a.tags != b.tags
+            || a.task_state() != b.task_state()
     }
 
     fn writeback_drops(
