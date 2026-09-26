@@ -65,11 +65,12 @@ use crate::McpUserDriver;
 use crate::pbt::composed::harness::ComposedSlice;
 use crate::pbt::composed::harness::sut_ids;
 use crate::pbt::composed::seed_primitives::fixed_ids;
-use crate::pbt::composed::wide_e2e::WIDE_TREE_ORG;
+use crate::pbt::composed::wide_e2e::JournalsSeed;
 use crate::pbt::composed::wide_e2e::WideE2E;
 use crate::pbt::composed::wide_e2e::WideE2EMachine;
 use crate::pbt::composed::wide_e2e::page_root;
 use crate::pbt::composed::wide_e2e::wide_e2e_windowed_ref;
+use crate::pbt::composed::wide_e2e::wide_seed_files;
 use crate::pbt::op_write_cap::IdResolver;
 use crate::pbt::reference_state::ReferenceState;
 use crate::pbt::sut_row_parsing::BLOCK_RAW_SNAPSHOT_SQL;
@@ -87,8 +88,6 @@ const SEED_INDEX_ORG: &str = concat!(
     include_str!("../../../scripts/seed_wide/index.org.header"),
     include_str!("../../../../../assets/default/index.org")
 );
-/// The first-boot journals page.
-const SEED_JOURNALS_ORG: &str = include_str!("../../../scripts/seed_wide/Journals.org");
 
 /// `await_quiescence` budget — matches the headless `converge_projections` cap.
 const QUIESCE_BUDGET_MS: u64 = 30_000;
@@ -1027,19 +1026,16 @@ impl ComposedSlice for LiveMcpE2E {
                 .expect("connect to live MCP app (is it running and serving MCP?)"),
         );
 
-        // Per-case isolation: rebuild the vault from the embedded seed and
-        // self-check the resulting block_raw id set (fail loud on drift).
+        // Per-case isolation: rebuild the vault from the wide seed plus the
+        // app's own layout document, and self-check the resulting block_raw
+        // id set (fail loud on drift).
+        let files: Vec<serde_json::Value> = wide_seed_files(ref_state, JournalsSeed::File)
+            .into_iter()
+            .chain([("index.org", SEED_INDEX_ORG)])
+            .map(|(name, content)| serde_json::json!({ "name": name, "content": content }))
+            .collect();
         let reset = driver
-            .call_tool_json(
-                "reset_vault",
-                serde_json::json!({
-                    "files": [
-                        { "name": "structural-page.org", "content": WIDE_TREE_ORG },
-                        { "name": "index.org", "content": SEED_INDEX_ORG },
-                        { "name": "Journals.org", "content": SEED_JOURNALS_ORG },
-                    ]
-                }),
-            )
+            .call_tool_json("reset_vault", serde_json::json!({ "files": files }))
             .await
             .expect("reset_vault over MCP failed (HOLON_MCP_ALLOW_RESET=1 on the app?)");
         let ids = reset["block_raw_ids"]
@@ -1211,7 +1207,8 @@ fn wires_to_blocks(v: &serde_json::Value) -> Vec<Block> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::pbt::composed::wide_e2e::JOURNALS_SHELL_ORG;
+    use crate::pbt::composed::wide_e2e::WIDE_TREE_ORG;
 
     /// DRIFT GUARD (hard gate). The browser worker has NO org parser
     /// (holon-orgmode won't build on wasm), so
@@ -1251,7 +1248,7 @@ mod tests {
 
         for (name, org, expected) in [
             ("structural-page.org", WIDE_TREE_ORG, EXPECTED_STRUCTURAL),
-            ("Journals.org", SEED_JOURNALS_ORG, EXPECTED_JOURNALS),
+            ("Journals.org", JOURNALS_SHELL_ORG, EXPECTED_JOURNALS),
         ] {
             let path = PathBuf::from(format!("/seed/{name}"));
             let root = PathBuf::from("/seed");

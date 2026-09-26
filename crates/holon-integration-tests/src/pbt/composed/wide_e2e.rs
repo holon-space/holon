@@ -1029,6 +1029,59 @@ fn install_observability_caps(caps: &mut CapMap, carry: Option<ObservabilityCarr
     }
 }
 
+/// Whether a wide boot seeds `Journals.org` as a file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JournalsSeed {
+    /// Seed the journals page (and any companion date page the oracle carries)
+    /// as vault files.
+    File,
+    /// Leave the journals page to the programmatic first-boot layout seed.
+    Programmatic,
+}
+
+/// The vault files every wide boot path (headless, windowed, live MCP) seeds.
+/// Each optional file is keyed on the oracle carrying its blocks, so a boot
+/// seeds a file exactly when the reference expects what it contains.
+///
+/// The default `Journals.org` is a bare `#+ID: journals` shell: prod seeds the
+/// journal rule programmatically, and ingesting the packaged body would add
+/// rows the oracle does not model. When the oracle carries a companion closure
+/// (`seed_folder_companion` / `seed_folder_companion_subdir`), `Journals.org`
+/// becomes the companion that inlines that date page as a heading.
+pub fn wide_seed_files(
+    ref_state: &ReferenceState,
+    journals: JournalsSeed,
+) -> Vec<(&'static str, &'static str)> {
+    let blocks = &ref_state.domain.block_state.blocks;
+    let mut files = vec![("structural-page.org", WIDE_TREE_ORG)];
+    if !ref_state.read_only.homes().is_empty() {
+        files.push((READ_ONLY_RECIPE_FILE, KEYSTONE_RECIPE_COOK));
+    }
+    if journals == JournalsSeed::File {
+        let carries_folder_companion = blocks.contains_key(&folder_journal_page());
+        if carries_folder_companion {
+            files.push(("2026-07-10.org", FOLDER_JOURNAL_PAGE_ORG));
+        }
+        // The subdir closure seeds no date file: the fileless nested page is
+        // what writeback must materialize.
+        let journals_org = if blocks.contains_key(&subdir_journal_page()) {
+            SUBDIR_COMPANION_JOURNALS_ORG
+        } else if carries_folder_companion {
+            FOLDER_COMPANION_JOURNALS_ORG
+        } else {
+            JOURNALS_SHELL_ORG
+        };
+        files.push(("Journals.org", journals_org));
+    }
+    if blocks.contains_key(&forward_edge_page()) {
+        files.push(("forward-edge-page.org", FORWARD_EDGE_ORG));
+    }
+    files
+}
+
+/// The bare journals page shell.
+pub const JOURNALS_SHELL_ORG: &str = include_str!("../../../scripts/seed_wide/Journals.org");
+
 /// Boot the windowless production SUT for the oracle's wiring via the
 /// PRODUCTION builder (`compose_sut_seeded`) and seed the working tree, then
 /// (for a focus-capable config) drive the initial focus onto the page root
@@ -1085,84 +1138,7 @@ pub async fn boot_and_seed_wide_with_peer_id(
     // so the invariant catalog stays green while every action pays the whole-vault
     // projection/CDC/consolidator cost.
     let soak_files = crate::pbt::composed::soak_seed::soak_org_files();
-    // `block:journals` is a first-boot page that is disk-backed in prod (the
-    // packaged `assets/default/Journals.org`, fixed id `block:journals`). Seed a
-    // bare page SHELL (`#+ID: journals`, no query/render/action body) so the
-    // journals page is a genuine on-disk file AND is TRACKED for the `/org`
-    // comparison. Prod-faithful for the keystone's non-empty vault: on a vault
-    // that already has `.org` files, `seed_default_org_assets` does NOT re-seed
-    // the packaged body, but `seed_default_layout` still creates the page shell
-    // idempotently — exactly the shell modeled here. Body blocks are omitted on
-    // purpose: ingesting the packaged query/render/action source blocks would add
-    // rows the oracle's first-boot layout model does not carry (→ a `block_raw`
-    // false-divergence). With the shell tracked, a non-page block created under
-    // journals via `CreateBlockUnderFocus` lands INLINE in `Journals.org` (the
-    // page-file-placement rule: `doc_id_to_path` → `name_chain(block:journals)` =
-    // `["Journals"]` → `<root>/Journals.org`, because the child's nearest ancestor
-    // page IS journals), so the `/org` snapshot observes it and matches the
-    // reference's `org_blocks` (non-seed, non-page journals child). Mirrors the
-    // `live_mcp` sibling harness's `Journals.org` seed, extended to also track it.
-    // `Journals.org`: the bare page shell. The journal auto-create RULE (trigger +
-    // action) is seeded PROGRAMMATICALLY by prod's `build_default_layout_blocks`
-    // (not via this disk file), so the disk `Journals.org` stays a bare `#+ID:`
-    // shell — matching prod, where `DEFAULT_ASSETS` is empty and journals is a
-    // programmatic seed. (Non-machinery variant kept for the folder-companion.)
-    // Companion demotion closure: when the oracle carries the date page
-    // (`seed_folder_companion`, a frontend draw), `Journals.org` becomes the
-    // COMPANION that inlines the page-file's id as a plain heading, and the
-    // top-level page-file `2026-07-10.org` is seeded FIRST (it sorts before the
-    // `Journals.org` companion → cold-boot ingests the `Page` doc-root before the
-    // demoting companion reconcile). Keyed on the ref like forward-edge.
-    let carries_folder_companion = ref_state
-        .domain
-        .block_state
-        .blocks
-        .contains_key(&folder_journal_page());
-    // Row-137 subdir fileless closure (Fork B B1): when the oracle carries the
-    // NESTED fileless date page (`seed_folder_companion_subdir`), `Journals.org`
-    // becomes the row-137 companion that inlines it as a `:Page:` heading with NO
-    // date file of its own — writeback must materialize `Journals/2026-07-11.org`
-    // and de-inline the heading. Mutually exclusive with the flat Fork-A closure.
-    let carries_subdir_companion = ref_state
-        .domain
-        .block_state
-        .blocks
-        .contains_key(&subdir_journal_page());
-    let journals_org: &str = if carries_subdir_companion {
-        SUBDIR_COMPANION_JOURNALS_ORG
-    } else if carries_folder_companion {
-        FOLDER_COMPANION_JOURNALS_ORG
-    } else {
-        "#+ID: journals\n"
-    };
-    let mut seed_files: Vec<(&str, &str)> = vec![("structural-page.org", WIDE_TREE_ORG)];
-    // The read-only-format document. Seeded on the same condition as the oracle
-    // (`seed_read_only_recipe`, a frontend draw) so file and oracle cannot
-    // disagree about whether this vault has a second format.
-    if !ref_state.read_only.homes().is_empty() {
-        seed_files.push((READ_ONLY_RECIPE_FILE, KEYSTONE_RECIPE_COOK));
-    }
-    if carries_folder_companion {
-        seed_files.push(("2026-07-10.org", FOLDER_JOURNAL_PAGE_ORG));
-    }
-    // NB the subdir closure seeds NO date file on purpose (fileless — the loss
-    // row 137 reports; writeback materializes it).
-    seed_files.push(("Journals.org", journals_org));
-    // Forward-edge ingest corpus (dogfood 2026-07-10 P0): seed
-    // `forward-edge-page.org` through the REAL FileSyncController ingest ONLY
-    // when this draw's oracle carries the corpus (a frontend draw —
-    // `wide_e2e_ref_for` inserts it via `seed_forward_edge_corpus`). Keying the
-    // file seed on the oracle keeps every non-corpus frontend boot (the teeth,
-    // which build their own oracles) untouched: no corpus in the ref ⇒ no file on
-    // disk ⇒ no `/org` divergence.
-    if ref_state
-        .domain
-        .block_state
-        .blocks
-        .contains_key(&forward_edge_page())
-    {
-        seed_files.push(("forward-edge-page.org", FORWARD_EDGE_ORG));
-    }
+    let mut seed_files: Vec<(&str, &str)> = wide_seed_files(ref_state, JournalsSeed::File);
     for (name, body) in &soak_files {
         seed_files.push((name.as_str(), body.as_str()));
     }
@@ -1449,31 +1425,7 @@ pub async fn boot_and_seed_wide_windowed_base(
         "the windowed wide base needs a frontend (ViewModel) session for the window to render; \
          got {set:?}"
     );
-    // Seed-parity with the headless `boot_and_seed_wide`: the windowed oracle is a
-    // frontend (ViewModel) draw, so `wide_e2e_ref_for` ALWAYS injects the
-    // forward-edge corpus (`seed_forward_edge_corpus`). The windowed base MUST
-    // ingest the matching `forward-edge-page.org` file or the SUT is permanently
-    // missing `fe-parent`/`fe-blocked`/`fe-target` that the oracle models — a
-    // `SetEdgeField`/`SetupWatch` targeting any fe-* then fails loud ("Block not
-    // found: block:fe-target") or diverges `inv-watch-rows-match-ref`. Key it on
-    // the oracle carrying the corpus, exactly like the headless path.
-    let mut seed_files: Vec<(&str, &str)> = vec![("structural-page.org", WIDE_TREE_ORG)];
-    if ref_state
-        .domain
-        .block_state
-        .blocks
-        .contains_key(&forward_edge_page())
-    {
-        seed_files.push(("forward-edge-page.org", FORWARD_EDGE_ORG));
-    }
-    // The read-only-format document, keyed on the oracle carrying its homes
-    // exactly like the arm above (and like `boot_and_seed_wide`): without the
-    // file, the recipe's page and steps the oracle models never reach
-    // `block_raw`, so `inv-watch-rows-match-ref` reports them missing and
-    // `AttemptIngestCompoundOnReadOnly` finds no row to re-write.
-    if !ref_state.read_only.homes().is_empty() {
-        seed_files.push((READ_ONLY_RECIPE_FILE, KEYSTONE_RECIPE_COOK));
-    }
+    let seed_files = wide_seed_files(ref_state, JournalsSeed::Programmatic);
     let bundle =
         compose_sut_windowed_base_seeded(&set, resolver, &seed_files, &wide_seed_tree()).await;
 

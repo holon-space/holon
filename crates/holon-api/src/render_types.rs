@@ -611,8 +611,8 @@ pub enum TypeHint {
 }
 
 impl TypeHint {
-    // ALLOW(compatibility): legacy string format is still emitted by older fixtures
-    /// Convert from legacy string format for backward compatibility
+    /// Map the type name `holon-macros` infers from an operation parameter's
+    /// Rust type to a hint.
     pub fn from_string(s: &str) -> Self {
         match s {
             "bool" | "boolean" => TypeHint::Bool,
@@ -649,8 +649,7 @@ impl TypeHint {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OperationParam {
     pub name: String, // "completed", "new_parent_id"
-    #[serde(deserialize_with = "deserialize_type_hint")]
-    pub type_hint: TypeHint, // Now enum instead of String
+    pub type_hint: TypeHint,
     pub description: String, // "Whether task is completed"
 }
 
@@ -669,96 +668,6 @@ pub struct ParamMapping {
     /// Default values for params not extractable from source
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub defaults: HashMap<String, Value>,
-}
-
-/// Custom deserializer for TypeHint that supports both old string format and
-/// new enum format
-fn deserialize_type_hint<'de, D>(deserializer: D) -> Result<TypeHint, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    use std::fmt;
-
-    use serde::de::Visitor;
-    use serde::de::{self};
-
-    struct TypeHintVisitor;
-
-    impl<'de> Visitor<'de> for TypeHintVisitor {
-        type Value = TypeHint;
-
-        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-            formatter.write_str("a string or TypeHint enum")
-        }
-
-        fn visit_str<E>(self, value: &str) -> Result<TypeHint, E>
-        where
-            E: de::Error,
-        {
-            Ok(TypeHint::from_string(value))
-        }
-
-        fn visit_map<M>(self, mut map: M) -> Result<TypeHint, M::Error>
-        where
-            M: de::MapAccess<'de>,
-        {
-            // Delegate to default deserialization for enum format
-            let mut type_field: Option<String> = None;
-            let mut entity_name: Option<EntityName> = None;
-            let mut values: Option<Vec<Value>> = None;
-            let mut fields: Option<Vec<OperationParam>> = None;
-
-            while let Some(key) = map.next_key::<String>()? {
-                match key.as_str() {
-                    "type" => {
-                        type_field = Some(map.next_value()?);
-                    }
-                    "entity_name" => {
-                        entity_name = Some(map.next_value()?);
-                    }
-                    "values" => {
-                        values = Some(map.next_value()?);
-                    }
-                    "fields" => {
-                        fields = Some(map.next_value()?);
-                    }
-                    _ => {
-                        let _ = map.next_value::<de::IgnoredAny>()?;
-                    }
-                }
-            }
-
-            match type_field.as_deref() {
-                Some("entity_id") | Some("EntityId") => {
-                    let entity_name =
-                        entity_name.ok_or_else(|| de::Error::missing_field("entity_name"))?;
-                    Ok(TypeHint::EntityId { entity_name })
-                }
-                Some("one_of") | Some("OneOf") => {
-                    let values = values.ok_or_else(|| de::Error::missing_field("values"))?;
-                    Ok(TypeHint::OneOf { values })
-                }
-                Some("object") | Some("Object") => {
-                    let fields = fields.ok_or_else(|| de::Error::missing_field("fields"))?;
-                    Ok(TypeHint::Object { fields })
-                }
-                Some("bool") | Some("Bool") => Ok(TypeHint::Bool),
-                Some("string") | Some("String") => Ok(TypeHint::String),
-                Some("number") | Some("Number") => Ok(TypeHint::Number),
-                Some("expr") | Some("Expr") => Ok(TypeHint::Expr),
-                Some("collection") | Some("Collection") => Ok(TypeHint::Collection),
-                // ALLOW(compatibility): older fixtures still serialize "enum" rather than "one_of"
-                // Older fixtures: handle "enum" as "one_of"
-                Some("enum") | Some("Enum") => {
-                    let values = values.ok_or_else(|| de::Error::missing_field("values"))?;
-                    Ok(TypeHint::OneOf { values })
-                }
-                _ => Err(de::Error::custom("Unknown type hint variant")),
-            }
-        }
-    }
-
-    deserializer.deserialize_any(TypeHintVisitor)
 }
 
 /// Connects lineage analysis results to operation metadata
@@ -1082,6 +991,46 @@ mod tests {
         Arg {
             name: Some(name.into()),
             value,
+        }
+    }
+
+    #[test]
+    fn every_type_hint_round_trips_through_json() {
+        let block = EntityName::new("block");
+        let hints = [
+            TypeHint::Bool,
+            TypeHint::String,
+            TypeHint::Number,
+            TypeHint::EntityId {
+                entity_name: block.clone(),
+            },
+            TypeHint::EntityIdOrRoot {
+                entity_name: block.clone(),
+            },
+            TypeHint::RowKey,
+            TypeHint::OneOf {
+                values: vec![Value::String("TODO".into())],
+            },
+            TypeHint::Object {
+                fields: vec![OperationParam {
+                    name: "inner".into(),
+                    type_hint: TypeHint::RowKey,
+                    description: String::new(),
+                }],
+            },
+            TypeHint::Expr,
+            TypeHint::Collection,
+        ];
+        for type_hint in hints {
+            let param = OperationParam {
+                name: "p".into(),
+                type_hint,
+                description: String::new(),
+            };
+            let json = serde_json::to_string(&param).expect("serialize OperationParam");
+            let back: OperationParam = serde_json::from_str(&json)
+                .unwrap_or_else(|e| panic!("{json} did not deserialize: {e}"));
+            assert_eq!(back, param);
         }
     }
 

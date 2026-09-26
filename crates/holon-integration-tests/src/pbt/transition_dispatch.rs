@@ -52,10 +52,13 @@
 /// HOLON_PBT_WEIGHTS=*Edit*:0,Click*:50    # silence one family, boost another
 /// ```
 ///
+/// When several patterns match a variant, the LAST one wins, so
+/// `*:0,DenseProjectionEdit:100` silences everything except one variant.
 /// Multiplier `0` removes the variant from the strategy entirely
 /// (`weighted_generator` still computes its base weight, but
 /// `Union::new_weighted` drops zero-weight arms). Multiplier defaults
-/// to `1` for any variant not matched by any pattern.
+/// to `1` for any variant not matched by any pattern. A malformed entry
+/// panics rather than being skipped.
 ///
 /// Why a single env var: previously each "interesting family"
 /// (chord ops, navigation, edit) needed its own bespoke env var
@@ -66,16 +69,19 @@ pub fn variant_weight_multiplier(variant_name: &'static str) -> u32 {
     use std::sync::OnceLock;
 
     static PARSED: OnceLock<Vec<(WeightPattern, u32)>> = OnceLock::new();
-    let rules = PARSED.get_or_init(parse_weight_env);
-    if rules.is_empty() {
-        return 1;
-    }
-    for (pattern, mult) in rules {
-        if pattern.matches(variant_name) {
-            return *mult;
-        }
-    }
-    1
+    let rules = PARSED.get_or_init(|| match std::env::var("HOLON_PBT_WEIGHTS") {
+        Ok(raw) => parse_weight_spec(&raw),
+        Err(_) => Vec::new(),
+    });
+    multiplier_for(rules, variant_name)
+}
+
+fn multiplier_for(rules: &[(WeightPattern, u32)], variant_name: &str) -> u32 {
+    rules
+        .iter()
+        .rev()
+        .find(|(pattern, _)| pattern.matches(variant_name))
+        .map_or(1, |(_, mult)| *mult)
 }
 
 #[derive(Debug)]
@@ -100,28 +106,19 @@ impl WeightPattern {
     }
 }
 
-fn parse_weight_env() -> Vec<(WeightPattern, u32)> {
-    let raw = match std::env::var("HOLON_PBT_WEIGHTS") {
-        Ok(s) if !s.is_empty() => s,
-        _ => return Vec::new(),
-    };
+fn parse_weight_spec(raw: &str) -> Vec<(WeightPattern, u32)> {
     let mut rules = Vec::new();
     for entry in raw.split(',') {
         let entry = entry.trim();
         if entry.is_empty() {
             continue;
         }
-        let Some((pat_raw, mult_raw)) = entry.split_once(':') else {
-            eprintln!("[HOLON_PBT_WEIGHTS] ignoring '{entry}': expected `pattern:multiplier`");
-            continue;
-        };
-        let mult: u32 = match mult_raw.trim().parse() {
-            Ok(n) => n,
-            Err(_) => {
-                eprintln!("[HOLON_PBT_WEIGHTS] ignoring '{entry}': multiplier must be a u32");
-                continue;
-            }
-        };
+        let (pat_raw, mult_raw) = entry.split_once(':').unwrap_or_else(|| {
+            panic!("HOLON_PBT_WEIGHTS entry '{entry}': expected `pattern:multiplier`")
+        });
+        let mult: u32 = mult_raw.trim().parse().unwrap_or_else(|e| {
+            panic!("HOLON_PBT_WEIGHTS entry '{entry}': multiplier must be a u32: {e}")
+        });
         let pat_lower = pat_raw.trim().to_ascii_lowercase();
         let pattern = if pat_lower == "*" {
             WeightPattern::Star
@@ -533,6 +530,18 @@ macro_rules! declare_e2e_transitions {
             )),* ]
         }
     };
+}
+
+#[cfg(test)]
+mod weight_spec_tests {
+    use super::*;
+
+    #[test]
+    fn a_later_rule_overrides_a_leading_star() {
+        let rules = parse_weight_spec("*:0,DenseProjectionEdit:100");
+        assert_eq!(multiplier_for(&rules, "DenseProjectionEdit"), 100);
+        assert_eq!(multiplier_for(&rules, "SplitBlock"), 0);
+    }
 }
 
 /// Confined proof that the generic-over-`R` `cap_transition!` arm expands and
