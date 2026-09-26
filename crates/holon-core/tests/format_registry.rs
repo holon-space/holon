@@ -48,10 +48,16 @@ impl FileFormatAdapter for StubAdapter {
     fn parse(&self, _: &Path, _: &str, _: &EntityUri, _: &Path) -> Result<FileFormatParseResult> {
         unimplemented!("routing-only stub")
     }
-    fn render_document(&self, _: &Block, _: &[Block], _: &Path, _: &EntityUri) -> String {
+    fn render_document(
+        &self,
+        _: &Block,
+        _: &[Block],
+        _: &Path,
+        _: &EntityUri,
+    ) -> anyhow::Result<String> {
         unimplemented!("routing-only stub")
     }
-    fn render_blocks(&self, _: &[Block], _: &Path, _: &EntityUri) -> String {
+    fn render_blocks(&self, _: &[Block], _: &Path, _: &EntityUri) -> anyhow::Result<String> {
         unimplemented!("routing-only stub")
     }
     fn doc_id_from_content(&self, _: &str) -> Option<String> {

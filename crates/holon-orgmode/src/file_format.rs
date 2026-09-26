@@ -76,11 +76,16 @@ impl FileFormatAdapter for OrgFormatAdapter {
         blocks: &[Block],
         file_path: &Path,
         file_id: &EntityUri,
-    ) -> String {
+    ) -> anyhow::Result<String> {
         OrgRenderer::render_document(document, blocks, file_path, file_id)
     }
 
-    fn render_blocks(&self, blocks: &[Block], file_path: &Path, file_id: &EntityUri) -> String {
+    fn render_blocks(
+        &self,
+        blocks: &[Block],
+        file_path: &Path,
+        file_id: &EntityUri,
+    ) -> anyhow::Result<String> {
         OrgRenderer::render_entitys(blocks, file_path, file_id)
     }
 
@@ -273,7 +278,9 @@ mod tests {
         child.set_property(SHARED_TREE_ID_PROPERTY, "stid-x");
         child.set_property("ID", "p-child");
 
-        let org = adapter.render_document(&mount, &[child], &path, &doc_uri);
+        let org = adapter
+            .render_document(&mount, &[child], &path, &doc_uri)
+            .expect("org render");
         // (a) the shared content is actually on disk.
         assert!(
             org.contains("Child under P"),
@@ -306,8 +313,11 @@ mod tests {
         let content = "* Hello World\n:PROPERTIES:\n:ID: block-1\n:END:\n";
 
         let parsed = adapter.parse(&path, content, &parent, &root).unwrap();
-        let via_adapter = adapter.render_blocks(&parsed.blocks, &path, &parsed.document.id);
-        let via_direct = OrgRenderer::render_entitys(&parsed.blocks, &path, &parsed.document.id);
+        let via_adapter = adapter
+            .render_blocks(&parsed.blocks, &path, &parsed.document.id)
+            .expect("org render");
+        let via_direct = OrgRenderer::render_entitys(&parsed.blocks, &path, &parsed.document.id)
+            .expect("org render");
         assert_eq!(via_adapter, via_direct);
     }
 

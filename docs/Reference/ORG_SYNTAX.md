@@ -273,12 +273,14 @@ file-level drawer, and a source block's header arguments
   refuses any other id on every route that can carry one: the `ID` property,
   the `properties` bag, the `org_properties` carrier, the `file_properties`
   carrier (where an empty `:ID:` is allowed, since it is authored text and not
-  an identity), and the `id` of a `create` whose id is a `block:` URI or bare.
-  If such an id still reaches the renderer, the drawer gets the block's own id
-  and a warning names the dropped value. The parser still accepts any
-  authored `:ID:` that forms a URI; it does not apply this rule to text an
-  external editor wrote. A source block's `:id` header argument is the same
-  kind of id; the parser refuses a file whose source block `:id` forms no URI.
+  an identity), and the `id` of a `create`, which must be `block:<id>`. The
+  parser refuses a file whose heading `:ID:` is not a bare block id, naming
+  the headline and the id. If such an id still reaches the renderer (as the
+  carrier's `ID` or as a block id with another scheme), the render fails with
+  an error naming it and the write-back leaves the file as it was; no id is
+  ever written in its place. A source block's `:id` header argument is the
+  same kind of id; the parser refuses a file whose source block `:id` forms
+  no URI.
 - **Keys the parser lifts into typed fields are not plain properties.**
   `PRIORITY`, `COLLAPSED`, `WIDGET_ONLY`, `REQUIRES`, `BLOCKED-BY`,
   `ADVICE_SUPPRESSED` and `contributes-to` (any case) become typed block

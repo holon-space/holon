@@ -634,7 +634,8 @@ async fn cold_boot(store: &FakeStore, root: &std::path::Path) -> String {
         std::slice::from_ref(&store.render_input("milk-block")),
         &path,
         &doc.id,
-    );
+    )
+    .expect("org render");
     ingest(store, root, &rendered).await;
     rendered
 }

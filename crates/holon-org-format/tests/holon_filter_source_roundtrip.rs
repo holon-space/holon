@@ -73,7 +73,8 @@ fn multi_line_body_and_header_args_survive_roundtrip() {
     );
 
     let org =
-        OrgRenderer::render_entitys(&[heading, filter], Path::new("/test/Filters.org"), &page);
+        OrgRenderer::render_entitys(&[heading, filter], Path::new("/test/Filters.org"), &page)
+            .expect("org render");
     let blocks = parse_filter_page(&org);
     let src = blocks
         .iter()

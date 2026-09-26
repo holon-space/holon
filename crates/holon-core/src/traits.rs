@@ -2714,7 +2714,8 @@ where
             Some(facts) => facts,
             None => {
                 let maybe_block: Option<T> = self.get_by_id(id_str).await?;
-                let block: T = maybe_block.ok_or_else(|| anyhow::anyhow!("Block not found"))?;
+                let block: T =
+                    maybe_block.ok_or_else(|| anyhow::anyhow!("Block not found: {id_str}"))?;
                 // The root sentinel is a legal ORIGIN, not only a legal
                 // destination (root-sentinel ruling, 2026-08-23): a block
                 // sitting at the root is not the root itself, and

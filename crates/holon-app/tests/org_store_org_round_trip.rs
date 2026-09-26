@@ -182,10 +182,12 @@ async fn render_both_ways(source: &str, leg: WriteLeg) -> (String, String) {
         .expect("the fixture must parse");
 
     let from_parser =
-        OrgRenderer::render_document(&parsed.document, &parsed.blocks, path, &parsed.document.id);
+        OrgRenderer::render_document(&parsed.document, &parsed.blocks, path, &parsed.document.id)
+            .expect("org render");
     let restored = through_the_store(&parsed.document, &parsed.blocks, leg).await;
     let after_store =
-        OrgRenderer::render_document(&parsed.document, &restored, path, &parsed.document.id);
+        OrgRenderer::render_document(&parsed.document, &restored, path, &parsed.document.id)
+            .expect("org render");
 
     (from_parser, after_store)
 }
@@ -252,7 +254,8 @@ async fn non_alphabetical_drawer_order_survives_the_store() {
     );
 
     let after_store =
-        OrgRenderer::render_document(&parsed.document, &restored, path, &parsed.document.id);
+        OrgRenderer::render_document(&parsed.document, &restored, path, &parsed.document.id)
+            .expect("org render");
     assert_eq!(
         after_store, NON_ALPHABETICAL,
         "a non-alphabetically authored drawer must round-trip org → store → org byte-identical: \
@@ -274,7 +277,8 @@ async fn non_alphabetical_drawer_order_survives_the_store() {
         })
         .collect();
     let without_carrier =
-        OrgRenderer::render_document(&parsed.document, &stripped, path, &parsed.document.id);
+        OrgRenderer::render_document(&parsed.document, &stripped, path, &parsed.document.id)
+            .expect("org render");
     assert_eq!(
         without_carrier, ALPHABETICAL,
         "without `_drawer_order` the renderer falls back to its alphabetical tiebreak — so the \
@@ -311,7 +315,8 @@ async fn non_alphabetical_drawer_order_survives_the_ingest_leg() {
     );
 
     let after_store =
-        OrgRenderer::render_document(&parsed.document, &restored, path, &parsed.document.id);
+        OrgRenderer::render_document(&parsed.document, &restored, path, &parsed.document.id)
+            .expect("org render");
     assert_eq!(
         after_store, NON_ALPHABETICAL,
         "a non-alphabetically authored drawer must round-trip org → ingest → store → org \

@@ -76,7 +76,8 @@ fn full_journals_layout_render_parse_roundtrip() {
         &[src, render, heading, rule],
         Path::new("/test/Journals.org"),
         &file_id,
-    );
+    )
+    .expect("org render");
     let parsed = parse_org_file(
         Path::new("/test/Journals.org"),
         &org,

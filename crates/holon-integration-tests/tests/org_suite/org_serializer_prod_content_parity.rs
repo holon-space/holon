@@ -54,7 +54,8 @@ fn assert_parity(block: &Block, doc: &EntityUri) {
         std::slice::from_ref(block),
         std::path::Path::new("/vault/page.org"),
         doc,
-    );
+    )
+    .expect("org render");
     let harness = serialize_blocks_to_org_with_doc(&[block], doc, None);
 
     assert_eq!(

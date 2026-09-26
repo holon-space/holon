@@ -48,6 +48,7 @@ fn reemit(org: &str) -> String {
         Path::new(FILE),
         &parsed.document.id,
     )
+    .expect("org render")
 }
 
 /// CONTROL: the same file shape carrying its identity as `#+ID:` is already a

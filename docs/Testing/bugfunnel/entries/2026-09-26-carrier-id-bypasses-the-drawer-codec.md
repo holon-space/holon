@@ -42,10 +42,8 @@ delimiters. The bare-id rule is
 
 Open:
 - A bad id that reaches the renderer past the engine (sync, peer merge,
-  ingest) makes the renderer write the block's own id and log a warning
-  (`a_bad_carrier_id_past_the_engine_does_not_freeze_the_file`); a vetoed
-  write-back is quarantined with an ERROR log. Neither is disclosed to the
-  user yet (`WritebackDegraded`, org-faithful group B).
-- The parser still accepts any authored `:ID:` that forms a URI, so an
-  external editor's `:ID: doc:x` files a headline as a foreign entity, and a
-  duplicate or case-variant `:ID:` line is dropped on read.
+  ingest) fails the render by name, and that write-back is refused with an
+  ERROR log (`a_bad_carrier_id_past_the_engine_refuses_the_write_back`). The
+  refusal is not disclosed to the user yet (`WritebackDegraded`, org-faithful
+  group B).
+- A duplicate or case-variant `:ID:` line is dropped on read.

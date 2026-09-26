@@ -172,11 +172,10 @@ fn a_multi_line_id_in_the_file_drawer_carrier_is_refused() {
 }
 
 /// A write that reaches the store past the engine (here: a sync-origin write
-/// straight into the dispatcher) cannot be refused there. The renderer then
-/// writes the block's own id, discloses the dropped carrier id, and the rest
-/// of the file still reaches disk.
+/// straight into the dispatcher) cannot be refused there. The render then
+/// fails on the id by name, and the write-back leaves the file as it was.
 #[test]
-fn a_bad_carrier_id_past_the_engine_does_not_freeze_the_file() {
+fn a_bad_carrier_id_past_the_engine_refuses_the_write_back() {
     let collector = test_tracing::SpanCollector::global();
     let scope = test_tracing::begin_test_scope();
     let mut builder = tokio::runtime::Builder::new_multi_thread();
@@ -185,6 +184,7 @@ fn a_bad_carrier_id_past_the_engine_does_not_freeze_the_file() {
     let rt = Arc::new(builder.build().expect("build runtime"));
     rt.clone().block_on(async move {
         let t = booted(rt.clone()).await;
+        let before = org_file_after_settle(&t).await;
         let mut p = holon_api::StorageEntity::new();
         p.insert("id".into(), text(TARGET_ID));
         p.insert("field".into(), text("org_properties"));
@@ -205,21 +205,12 @@ fn a_bad_carrier_id_past_the_engine_does_not_freeze_the_file() {
             .expect("the dispatcher stores the write");
         let file = org_file_after_settle(&t).await;
         let errors = collector.captured_problems();
-        let warnings = collector.captured_warnings();
+        assert_eq!(file, before, "the write-back reached notes.org");
         assert!(
-            file.contains(":ID: n-target\n") && file.contains(":note: keep\n"),
-            "write-back did not reach notes.org; errors: {errors:#?}\nnotes.org:\n{file}"
-        );
-        assert!(
-            !file.lines().any(|l| l.starts_with("* Evil")),
-            "the id broke out of its drawer line:\n{file}"
-        );
-        assert!(errors.is_empty(), "write-back raised errors: {errors:#?}");
-        assert!(
-            warnings
+            errors
                 .iter()
-                .any(|w| w.message.contains(&format!("{BAD_ID:?}"))),
-            "the dropped carrier id was not disclosed; warnings: {warnings:#?}"
+                .any(|e| e.message.contains(&format!("{BAD_ID:?}"))),
+            "the refused render was not reported by the id; errors: {errors:#?}"
         );
     });
 }
@@ -255,7 +246,7 @@ fn an_id_that_is_not_a_bare_block_id_is_refused_on_every_route() {
             .collect();
         let mut accepted = Vec::new();
         for id in ids {
-            let routes: Vec<Route> = vec![
+            let mut routes: Vec<Route> = vec![
                 (
                     "set_field",
                     "org_properties",
@@ -288,7 +279,7 @@ fn an_id_that_is_not_a_bare_block_id_is_refused_on_every_route() {
                 ),
                 (
                     "create",
-                    "id",
+                    "id as block:<id>",
                     vec![
                         ("id", text(&format!("block:{id}"))),
                         ("parent_id", text(TARGET_ID)),
@@ -296,6 +287,18 @@ fn an_id_that_is_not_a_bare_block_id_is_refused_on_every_route() {
                     ],
                 ),
             ];
+            // `block:n-scheme` is itself a valid created id: `block:` over a bare id.
+            if !id.starts_with("block:") {
+                routes.push((
+                    "create",
+                    "id",
+                    vec![
+                        ("id", text(id)),
+                        ("parent_id", text(TARGET_ID)),
+                        ("content", text("child")),
+                    ],
+                ));
+            }
             for (op, route, params) in routes {
                 let before = org_file_after_settle(&t).await;
                 let mut p = holon_api::StorageEntity::new();

@@ -1719,13 +1719,13 @@ impl DispatchingOperationEngine {
         };
         let id = params.get("id").and_then(|v| v.as_string());
         if let (Some(id), "create") = (id, op_name) {
-            let bare = match EntityUri::schemed(id) {
-                None => Some(id),
-                Some(_) => id.strip_prefix("block:"),
+            let Some(bare) = EntityUri::schemed(id)
+                .filter(EntityUri::is_block)
+                .and_then(|_| id.strip_prefix("block:"))
+            else {
+                bail!("create: refusing block id {id:?}: a created block's id is a `block:` URI");
             };
-            if let Some(bare) = bare
-                && let Err(e) = holon_org_format::DrawerId::parse(bare)
-            {
+            if let Err(e) = holon_org_format::DrawerId::parse(bare) {
                 bail!("create: refusing block id {id:?}: {e}");
             }
         }

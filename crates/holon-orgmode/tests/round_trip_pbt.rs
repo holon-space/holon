@@ -266,7 +266,7 @@ fn block_to_headline_spec(block: &Block, all_blocks: &[Block]) -> HeadlineSpec {
 
 fn build_org_text(doc: &Block, blocks: &[Block]) -> String {
     let file_path = PathBuf::from("/test/test.org");
-    OrgRenderer::render_document(doc, blocks, &file_path, &doc.id)
+    OrgRenderer::render_document(doc, blocks, &file_path, &doc.id).expect("org render")
 }
 
 fn parse_org(org_text: &str) -> Result<holon_orgmode::parser::ParseResult, String> {

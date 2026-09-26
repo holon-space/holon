@@ -299,7 +299,9 @@ fn mount_page_org(path: &std::path::Path) -> String {
     );
     child.set_property("shared-tree-id", "stid-abc");
     child.set_property("ID", MOUNT_CHILD_ID);
-    OrgFormatAdapter::new().render_document(&mount, &[child], path, &doc_uri)
+    OrgFormatAdapter::new()
+        .render_document(&mount, &[child], path, &doc_uri)
+        .expect("org render")
 }
 
 /// A temp vault holding exactly one mount-shaped org file, with a controller

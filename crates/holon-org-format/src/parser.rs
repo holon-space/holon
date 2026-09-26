@@ -822,22 +822,22 @@ fn process_headlines(
         let sequence = *sequence_counter;
         *sequence_counter += 1;
 
-        // Extract :ID: property if exists. An authored `:ID:` is text a person
-        // typed, so one that forms no URI is a content error in this file —
-        // refused here, where `EntityUri::from_raw` below would otherwise
-        // unwind inside the URI constructor and take the whole ingest down.
+        // An authored `:ID:` is text a person typed; one that is not a bare
+        // block id is a content error in this file, refused by name.
         let (id, needs_write) = extract_or_generate_id(&headline);
-        EntityUri::try_from_raw(&id).with_context(|| {
-            format!(
-                "org heading id in {} is not usable: headline {:?} carries `:ID: {}`, which \
-                 forms no URI. An id must be a UUID or another URI-safe token (no spaces). \
-                 Refusing the file rather than filing the heading under a minted id it \
-                 does not name.",
-                file_id.as_str(),
-                headline.title_raw().trim(),
-                id,
-            )
-        })?;
+        let id = crate::drawer::DrawerId::parse(&id)
+            .with_context(|| {
+                format!(
+                    "org heading id in {} is not usable: headline {:?} carries `:ID: {:?}`. \
+                     Refusing the file rather than filing the heading under an id it does \
+                     not name.",
+                    file_id.as_str(),
+                    headline.title_raw().trim(),
+                    id,
+                )
+            })?
+            .as_str()
+            .to_string();
         if needs_write {
             needs_id.push(id.clone());
         }
@@ -1000,8 +1000,7 @@ fn process_headlines(
 
         let now = holon_api::clock::now_millis();
         let mut block = Block {
-            // ALLOW(entity_uri_from_raw): org parser output: id from extract_or_generate_id()
-            id: EntityUri::from_raw(&id),
+            id: EntityUri::block(&id),
             // ALLOW(entity_uri_from_raw): org parser output: parent headline raw org slug
             parent_id: EntityUri::from_raw(parent_id),
             content,
@@ -1841,23 +1840,41 @@ mod tests {
         assert_eq!(parsed.document.id.as_str(), "block:abc");
     }
 
-    /// The heading carrier is idempotent the same way.
+    /// A heading `:ID:` is a bare block id. Any other id refuses the file by
+    /// name: accepted, it would be stored under an id the renderer cannot
+    /// write.
     #[test]
-    fn a_heading_id_that_already_carries_its_scheme_is_not_re_schemed() {
-        let content = "* A\n:PROPERTIES:\n:ID: block:h1\n:END:\n";
+    fn a_heading_id_that_is_not_a_bare_block_id_refuses_the_file() {
         let path = PathBuf::from("/test/file.org");
         let root = PathBuf::from("/test");
-        let parsed = parse_org_file(&path, content, &EntityUri::no_parent(), &root)
-            .expect("an already-schemed heading id parses");
-        assert!(
-            parsed.blocks.iter().any(|b| b.id.as_str() == "block:h1"),
-            "expected a block keyed `block:h1`, got {:?}",
-            parsed
-                .blocks
-                .iter()
-                .map(|b| b.id.as_str())
-                .collect::<Vec<_>>()
-        );
+        let mut accepted = Vec::new();
+        for id in [
+            "block:h1",
+            "doc:x",
+            "file:x",
+            "a:b",
+            "sentinel:no_parent",
+            ":split-0",
+        ] {
+            let content = format!("* A\n:PROPERTIES:\n:ID: {id}\n:END:\n");
+            match parse_org_file(&path, &content, &EntityUri::no_parent(), &root) {
+                Ok(parsed) => accepted.push(format!(
+                    "{id:?} -> {:?}",
+                    parsed
+                        .blocks
+                        .iter()
+                        .map(|b| b.id.as_str())
+                        .collect::<Vec<_>>()
+                )),
+                Err(e) => {
+                    let msg = format!("{e:#}");
+                    if !(msg.contains(&format!("{id:?}")) && msg.contains("file.org")) {
+                        accepted.push(format!("{id:?} refused without naming it: {msg}"));
+                    }
+                }
+            }
+        }
+        assert!(accepted.is_empty(), "{accepted:#?}");
     }
 
     /// A well-formed file (distinct ids, no `#+ID:` collision) still parses.
@@ -2171,7 +2188,8 @@ mod tests {
             ":BLOCKED-BY: must lift into block.requires"
         );
 
-        let rendered = OrgRenderer::render_entitys(&result.blocks, &path, &file_id);
+        let rendered =
+            OrgRenderer::render_entitys(&result.blocks, &path, &file_id).expect("org render");
         // Canonical key :REQUIRES:, targets sorted (set-valued edge):
         // "now-query-mcp" < "orient-daily-view".
         assert!(
@@ -2212,7 +2230,8 @@ mod tests {
         let h = result.blocks.iter().find(|b| b.id.id() == "t2").unwrap();
         assert_eq!(h.requires, vec![EntityUri::parse("block:dep-a").unwrap()]);
 
-        let rendered = OrgRenderer::render_entitys(&result.blocks, &path, &file_id);
+        let rendered =
+            OrgRenderer::render_entitys(&result.blocks, &path, &file_id).expect("org render");
         assert!(
             rendered.contains(":REQUIRES: dep-a") && !rendered.contains(":BLOCKED-BY:"),
             ":BLOCKED-BY: input must render back as canonical :REQUIRES:; got:\n{rendered}"
@@ -2337,7 +2356,8 @@ mod tests {
             "bare slugs must normalise to block: URIs in the typed field"
         );
 
-        let rendered = OrgRenderer::render_entitys(&result.blocks, &path, &file_id);
+        let rendered =
+            OrgRenderer::render_entitys(&result.blocks, &path, &file_id).expect("org render");
         assert!(
             rendered.contains(":ADVICE_SUPPRESSED: id1 id2"),
             "renderer must emit the bare space-joined list, got:\n{rendered}"
@@ -2374,7 +2394,8 @@ mod tests {
             "COLLAPSED: t must parse to block.collapsed = true"
         );
 
-        let rendered = OrgRenderer::render_entitys(&result.blocks, &path, &file_id);
+        let rendered =
+            OrgRenderer::render_entitys(&result.blocks, &path, &file_id).expect("org render");
         assert!(
             rendered.contains(":COLLAPSED: t"),
             "renderer must emit the drawer property for a folded block, got:\n{rendered}"
@@ -2398,7 +2419,8 @@ mod tests {
             .unwrap();
         assert!(!e.collapsed);
         let expanded_rendered =
-            OrgRenderer::render_entitys(&expanded_result.blocks, &path, &file_id);
+            OrgRenderer::render_entitys(&expanded_result.blocks, &path, &file_id)
+                .expect("org render");
         assert!(
             !expanded_rendered.contains("COLLAPSED"),
             "an expanded block must not gain a :COLLAPSED: drawer line, got:\n{expanded_rendered}"
@@ -2424,7 +2446,8 @@ mod tests {
             "WIDGET_ONLY: t must parse to block.widget_only = true"
         );
 
-        let rendered = OrgRenderer::render_entitys(&result.blocks, &path, &file_id);
+        let rendered =
+            OrgRenderer::render_entitys(&result.blocks, &path, &file_id).expect("org render");
         assert!(
             rendered.contains(":WIDGET_ONLY: t"),
             "renderer must emit the drawer property, got:\n{rendered}"
@@ -2445,7 +2468,8 @@ mod tests {
             .find(|b| b.id.id() == "w2")
             .unwrap();
         assert!(!p.widget_only);
-        let plain_rendered = OrgRenderer::render_entitys(&plain_result.blocks, &path, &file_id);
+        let plain_rendered =
+            OrgRenderer::render_entitys(&plain_result.blocks, &path, &file_id).expect("org render");
         assert!(
             !plain_rendered.contains("WIDGET_ONLY"),
             "a plain block must not gain a :WIDGET_ONLY: drawer line, got:\n{plain_rendered}"
@@ -2977,7 +3001,8 @@ select {id, parent_id, content, content_type}
         assert_eq!(img2.content, "img/b.png");
 
         // Round-trip: render back to org text
-        let rendered = OrgRenderer::render_entitys(&result.blocks, &path, &file_id);
+        let rendered =
+            OrgRenderer::render_entitys(&result.blocks, &path, &file_id).expect("org render");
 
         // Re-parse the rendered text
         let result2 = parse_org_file(&path, &rendered, &EntityUri::no_parent(), &root).unwrap();

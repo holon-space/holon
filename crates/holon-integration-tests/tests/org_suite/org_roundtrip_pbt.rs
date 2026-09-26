@@ -86,7 +86,8 @@ fn run_case(doc: &Block, blocks: &[Block]) -> Result<(), TestCaseError> {
     let root = doc_root();
 
     // First render — the canonical org text.
-    let rendered_1 = OrgRenderer::render_document(doc, blocks, &path, &doc_uri());
+    let rendered_1 =
+        OrgRenderer::render_document(doc, blocks, &path, &doc_uri()).expect("org render");
 
     // Parse it back.
     let parsed =
@@ -96,7 +97,8 @@ fn run_case(doc: &Block, blocks: &[Block]) -> Result<(), TestCaseError> {
 
     // Re-render the parsed result and assert the fixed point.
     let rendered_2 =
-        OrgRenderer::render_document(&parsed.document, &parsed.blocks, &path, &doc_uri());
+        OrgRenderer::render_document(&parsed.document, &parsed.blocks, &path, &doc_uri())
+            .expect("org render");
     if rendered_1 != rendered_2 {
         return Err(TestCaseError::fail(format!(
             "[inv-org-render-fixed-point] render→parse→render diverged\n--- FIRST \

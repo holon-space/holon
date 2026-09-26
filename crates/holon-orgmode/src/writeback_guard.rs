@@ -273,6 +273,7 @@ Command palette body.
             &path(),
             &parsed.document.id,
         )
+        .expect("org render")
     }
 
     /// Per-file surviving set from a rendered projection — the shape every

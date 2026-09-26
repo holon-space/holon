@@ -244,7 +244,13 @@ impl FileFormatAdapter for PluginFormatAdapter {
         })
     }
 
-    fn render_document(&self, _: &Block, _: &[Block], path: &Path, _: &EntityUri) -> String {
+    fn render_document(
+        &self,
+        _: &Block,
+        _: &[Block],
+        path: &Path,
+        _: &EntityUri,
+    ) -> anyhow::Result<String> {
         // Unreachability assert, not input handling: a sidecar admits only
         // read-only formats, so no caller has a render path to here.
         unreachable!(
@@ -255,7 +261,7 @@ impl FileFormatAdapter for PluginFormatAdapter {
         );
     }
 
-    fn render_blocks(&self, _: &[Block], path: &Path, _: &EntityUri) -> String {
+    fn render_blocks(&self, _: &[Block], path: &Path, _: &EntityUri) -> anyhow::Result<String> {
         unreachable!(
             "the {} plugin is registered read-only; render_blocks must be unreachable — reaching \
              it for {} is a wiring bug, not bad input.",

@@ -112,6 +112,7 @@ impl OrgFormat {
             path,
             &parsed.document.id,
         )
+        .expect("org render")
         .to_lowercase();
         let present = markers
             .iter()
@@ -159,7 +160,8 @@ impl OrgFormat {
         // Author a starting set, so a detach has a subject that really was
         // there — "gone" must not be true before the write.
         block.tags = Tags::from_tag_iter(authored.iter().map(|t| (*t).to_string()));
-        let authored_src = OrgRenderer::render_document(&doc, &[block.clone()], path, &doc.id);
+        let authored_src = OrgRenderer::render_document(&doc, &[block.clone()], path, &doc.id)
+            .expect("org render");
         let staged = parse_org_file(
             path,
             &authored_src,
@@ -194,7 +196,8 @@ impl OrgFormat {
 
         block.tags = Tags::from_tag_iter(wanted.iter().map(|t| (*t).to_string()));
         let rendered =
-            OrgRenderer::render_document(&staged.document, &[block], path, &staged.document.id);
+            OrgRenderer::render_document(&staged.document, &[block], path, &staged.document.id)
+                .expect("org render");
         let parsed = parse_org_file(path, &rendered, &EntityUri::no_parent(), Path::new(ROOT))
             .map_err(|e| {
                 anyhow::anyhow!("the rendered fixture must parse back: {e}\n{rendered}")
@@ -240,6 +243,7 @@ impl OrgFormat {
             path,
             &parsed.document.id,
         )
+        .expect("org render")
         .to_lowercase();
 
         let present = markers
@@ -320,7 +324,8 @@ impl CertifiableFormat for OrgFormat {
             other => anyhow::bail!("org has no carrier named {other}"),
         }
 
-        let rendered = OrgRenderer::render_document(&doc, &[block], path, &doc.id);
+        let rendered =
+            OrgRenderer::render_document(&doc, &[block], path, &doc.id).expect("org render");
         let parsed = parse_org_file(path, &rendered, &EntityUri::no_parent(), Path::new(ROOT))
             .map_err(|e| {
                 anyhow::anyhow!("the rendered fixture must parse back: {e}\n{rendered}")
@@ -371,7 +376,8 @@ impl CertifiableFormat for OrgFormat {
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("the ordering fixture must carry the probe block"))?;
         let rendered =
-            OrgRenderer::render_document(&parsed.document, &[block], path, &parsed.document.id);
+            OrgRenderer::render_document(&parsed.document, &[block], path, &parsed.document.id)
+                .expect("org render");
 
         // Read the ORDER off the rendered drawer, not off a map: the claim is
         // about what reaches disk, and a HashMap read-back would hide a
@@ -719,7 +725,8 @@ impl CertifiableFormat for OrgFormat {
             &parsed.blocks,
             Path::new(FILE),
             &parsed.document.id,
-        );
+        )
+        .expect("org render");
         let back = parse_org_file(
             Path::new(FILE),
             &rendered,
@@ -767,7 +774,8 @@ impl CertifiableFormat for OrgFormat {
             &parsed.blocks,
             Path::new(FILE),
             &parsed.document.id,
-        );
+        )
+        .expect("org render");
         let back = match parse_org_file(
             Path::new(FILE),
             &rendered,
@@ -922,6 +930,7 @@ impl CertifiableFormat for OrgFormat {
             Path::new(FILE),
             &parsed.document.id,
         )
+        .expect("org render")
         .to_lowercase();
         // Any of the shapes an explicit key could take on disk.
         Ok(Some(
@@ -1010,7 +1019,8 @@ impl CertifiableFormat for OrgFormat {
             &changed,
             Path::new(FILE),
             &parsed.document.id,
-        );
+        )
+        .expect("org render");
         // The FRAGMENT form: just the block that changed.
         let only_changed: Vec<_> = changed
             .iter()
@@ -1020,7 +1030,8 @@ impl CertifiableFormat for OrgFormat {
         // `render_entitys` is the fragment API that exists: blocks only, no
         // document header.
         let fragment =
-            OrgRenderer::render_entitys(&only_changed, Path::new(FILE), &parsed.document.id);
+            OrgRenderer::render_entitys(&only_changed, Path::new(FILE), &parsed.document.id)
+                .expect("org render");
 
         Ok(Some(
             // whole-document: carries the UNTOUCHED sibling, carries the
@@ -1057,7 +1068,8 @@ impl CertifiableFormat for OrgFormat {
             &blocks,
             Path::new(FILE),
             &parsed.document.id,
-        );
+        )
+        .expect("org render");
         // A write COUNTS only if it round-trips: bytes produced AND read back.
         let back = parse_org_file(
             Path::new(FILE),

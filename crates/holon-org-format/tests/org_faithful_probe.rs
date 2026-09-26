@@ -29,7 +29,8 @@ fn round_trip(kid: Block) -> (String, Option<Block>) {
     let (document, mut blocks) = parse("#+ID: p\n* Topic\n:PROPERTIES:\n:ID: topic\n:END:\n");
     let id = kid.id.clone();
     blocks.push(kid);
-    let text = OrgRenderer::render_document(&document, &blocks, Path::new(FILE), &document.id);
+    let text = OrgRenderer::render_document(&document, &blocks, Path::new(FILE), &document.id)
+        .expect("org render");
     let (_, reparsed) = parse(&text);
     let back = reparsed.into_iter().find(|b| b.id == id);
     (text, back)
@@ -184,24 +185,55 @@ fn a_drawer_carrier_without_an_id_keeps_the_block_id() {
     );
 }
 
+fn render(blocks: &[Block]) -> Result<String, String> {
+    let (document, _) = parse("#+ID: p\n");
+    OrgRenderer::render_document(&document, blocks, Path::new(FILE), &document.id)
+        .map_err(|e| format!("{e:#}"))
+}
+
+/// An id an `:ID:` line cannot carry fails the render by name; the renderer
+/// never writes a different id in its place.
 #[test]
-fn a_carrier_id_org_cannot_hold_leaves_the_block_intact() {
-    let mut b = kid("Kid");
-    b.set_org_properties(Some(
-        serde_json::json!({
-            "ID": "kid\nline one\n* Evil heading\n:PROPERTIES:\n:ID: hijack\n:END:",
-            "note": "keep",
+fn an_id_org_cannot_hold_fails_the_render() {
+    let bad_carrier_ids = [
+        "kid\nline one\n* Evil heading\n:PROPERTIES:\n:ID: hijack\n:END:",
+        "doc:x",
+        "a:b",
+        "sentinel:no_parent",
+        "block:kid",
+    ];
+    let mut cases: Vec<(String, Block)> = bad_carrier_ids
+        .iter()
+        .map(|id| {
+            let mut b = Block::new_text(
+                EntityUri::block("kid"),
+                EntityUri::block("p"),
+                "Kid".to_string(),
+            );
+            b.set_org_properties(Some(
+                serde_json::json!({ "ID": id, "note": "keep" }).to_string(),
+            ));
+            (id.to_string(), b)
         })
-        .to_string(),
-    ));
-    let (text, back) = round_trip(b);
-    let back = back.unwrap_or_else(|| panic!("block:kid lost its id:\n{text}"));
-    assert_eq!(
-        back.get_property("note"),
-        Some(Value::String("keep".into())),
-        "{text}"
-    );
-    assert!(!text.contains("hijack"), "{text}");
+        .collect();
+    for uri in ["doc:x", "file:x", "sentinel:no_parent"] {
+        let id = EntityUri::parse(uri).expect("a schemed URI");
+        cases.push((
+            uri.to_string(),
+            Block::new_text(id, EntityUri::block("p"), "Kid".to_string()),
+        ));
+    }
+    let mut rewritten = Vec::new();
+    for (id, block) in cases {
+        match render(&[block]) {
+            Ok(text) => rewritten.push(format!("{id:?} rendered:\n{text}")),
+            Err(e) if !e.contains(&format!("{id:?}")) => {
+                rewritten.push(format!("{id:?} refused without naming it: {e}"))
+            }
+            Err(_) => {}
+        }
+    }
+    assert!(rewritten.is_empty(), "{rewritten:#?}");
 }
 
 #[test]

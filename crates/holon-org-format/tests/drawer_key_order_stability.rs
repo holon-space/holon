@@ -31,6 +31,7 @@ fn write_back(source: &str) -> String {
         Path::new(FILE),
         &parsed.document.id,
     )
+    .expect("org render")
 }
 
 fn assert_stable(source: &str) {

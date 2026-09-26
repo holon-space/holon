@@ -3,7 +3,7 @@ id: 2026-09-26-schemed-or-reserved-id-accepted-on-the-id-line
 date: 2026-09-26
 gap: COVERAGE
 secondary: null
-status: PARTIAL
+status: FIXED
 summary: >-
   The engine accepted an id that is not a bare block id (`doc:x`,
   `sentinel:no_parent`, `:END:`, `#+ID:`, `a:b`, `kid+`, `*kid`, 5000
@@ -31,11 +31,19 @@ pinned `block:abc` as valid.
 ## Remedy
 `DrawerId` is a bare block id: at most 255 characters from the RFC 3986
 unreserved set, in parts joined by `:` or `::`, naming no URI scheme, and
-reading back as `block:<id>`. The engine refuses any other id on the `ID`
-property, the `properties` bag, `org_properties`, `file_properties` and a
-`create`'s `block:` id (`an_id_that_is_not_a_bare_block_id_is_refused_on_every_route`,
-red `lane-logs/groupA-r3-red-engine.log`). The vault and the seeds hold no id
-the rule refuses (`lane-logs/groupA-r3-write-rules-census.log`).
+reading back as `block:<id>`. It holds at every boundary:
+- The engine refuses any other id on the `ID` property, the `properties` bag,
+  `org_properties` and `file_properties`, and a `create` whose `id` is not
+  `block:<DrawerId>` (`doc:x`, `file:x`, `sentinel:no_parent` and bare ids
+  included) (`an_id_that_is_not_a_bare_block_id_is_refused_on_every_route`,
+  red `lane-logs/groupA-r3-red-engine.log` and
+  `lane-logs/groupA-r4-red-engine-create.log`).
+- The parser refuses a file whose heading `:ID:` is not a bare block id
+  (`a_heading_id_that_is_not_a_bare_block_id_refuses_the_file`, red
+  `lane-logs/groupA-r4-red-parser.log`).
+- The renderer fails on such an id by name instead of writing another one
+  (`2026-09-26-renderer-rewrites-an-id-it-cannot-write.md`).
 
-Open: the parser still accepts any authored `:ID:` that forms a URI, so text
-an external editor wrote (`:ID: doc:x`) is not refused on read.
+The vault (all 1062 org files, hidden directories included) and the seeds
+hold no id the rule refuses (`lane-logs/groupA-r4-vault-id-census.log`,
+`lane-logs/groupA-r4-seed-id-census.log`).

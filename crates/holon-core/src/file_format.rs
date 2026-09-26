@@ -200,12 +200,17 @@ pub trait FileFormatAdapter: Send + Sync {
         blocks: &[Block],
         file_path: &Path,
         file_id: &EntityUri,
-    ) -> String;
+    ) -> Result<String>;
 
     /// Render only the block tree, without document header. Used when the
     /// controller has blocks but no `Block` for the document entity itself
     /// (e.g. during initialization before the document row is loaded).
-    fn render_blocks(&self, blocks: &[Block], file_path: &Path, file_id: &EntityUri) -> String;
+    fn render_blocks(
+        &self,
+        blocks: &[Block],
+        file_path: &Path,
+        file_id: &EntityUri,
+    ) -> Result<String>;
 
     /// Extract the document's stable bare id from raw file content, if the
     /// format embeds one (e.g. org's `#+ID:` header). Returns `None` when the

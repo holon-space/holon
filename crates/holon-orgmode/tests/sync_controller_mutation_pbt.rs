@@ -1521,7 +1521,7 @@ fn stabilize_blocks(
     root_dir: &std::path::Path,
 ) -> Vec<Block> {
     let file_path = root_dir.join("test.org");
-    let org_text = OrgRenderer::render_entitys(blocks, &file_path, doc_id);
+    let org_text = OrgRenderer::render_entitys(blocks, &file_path, doc_id).expect("org render");
     let org_text = format!("#+ID: {}\n{}", doc_id.id(), org_text);
     let parse_result = parse_org_file(&file_path, &org_text, &EntityUri::no_parent(), root_dir)
         .expect("stabilize: parse must succeed");
@@ -1568,7 +1568,7 @@ proptest! {
             fixture.controller.initialize().await.expect("initialize must succeed");
 
             let initial_org =
-                OrgRenderer::render_entitys(&baseline, &fixture.file_path(), &fixture.doc_id);
+                OrgRenderer::render_entitys(&baseline, &fixture.file_path(), &fixture.doc_id).expect("org render");
             tokio::fs::write(&fixture.file_path(), &initial_org)
                 .await
                 .unwrap();
@@ -1645,7 +1645,7 @@ proptest! {
             // branch that creates a new Page from a bare `#+ID:` — the one
             // that must honor the directory chain for `parent_id`.
             let mut initial_org =
-                OrgRenderer::render_entitys(&baseline, &fixture.file_path(), &fixture.doc_id);
+                OrgRenderer::render_entitys(&baseline, &fixture.file_path(), &fixture.doc_id).expect("org render");
             if inject_id_directive {
                 initial_org = format!("#+ID: {}\n{}", fixture.doc_id.id(), initial_org);
             }
@@ -3062,7 +3062,8 @@ mod atomic_rename_tests {
         fx.ensure_parent_dirs().await;
         let baseline = vec![child.clone()];
         fx.seed_blocks(&baseline);
-        let org_children = OrgRenderer::render_entitys(&baseline, &fx.file_path(), &fx.doc_id);
+        let org_children = OrgRenderer::render_entitys(&baseline, &fx.file_path(), &fx.doc_id)
+            .expect("org render");
         let org = format!("#+ID: {}\n{}", fx.doc_id.id(), org_children);
         tokio::fs::write(&fx.file_path(), org.as_bytes())
             .await
@@ -3407,7 +3408,8 @@ mod intermediate_ancestor_writeback_hole {
         tokio::fs::create_dir_all(pm_path.parent().unwrap())
             .await
             .unwrap();
-        let pm_body = OrgRenderer::render_entitys(&[n_moved, x_edited.clone()], &pm_path, &p_m);
+        let pm_body = OrgRenderer::render_entitys(&[n_moved, x_edited.clone()], &pm_path, &p_m)
+            .expect("org render");
         tokio::fs::write(&pm_path, format!("#+ID: la-pm\n{pm_body}"))
             .await
             .unwrap();

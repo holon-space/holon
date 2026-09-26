@@ -162,7 +162,8 @@ impl FileFormatAdapter for FixtureAdapter {
             .enumerate()
             .map(|(i, line)| {
                 Block::new_text(
-                    EntityUri::block(&format!("{}::b::{i}", file_id.id())),
+                    // A block id is a bare org `:ID:` id, which holds no `/`.
+                    EntityUri::block(&format!("{}::b::{i}", file_id.id().replace('/', "."))),
                     file_id.clone(),
                     line.trim().to_string(),
                 )
@@ -183,11 +184,16 @@ impl FileFormatAdapter for FixtureAdapter {
         blocks: &[Block],
         path: &Path,
         id: &EntityUri,
-    ) -> String {
+    ) -> anyhow::Result<String> {
         self.org.render_document(document, blocks, path, id)
     }
 
-    fn render_blocks(&self, blocks: &[Block], path: &Path, id: &EntityUri) -> String {
+    fn render_blocks(
+        &self,
+        blocks: &[Block],
+        path: &Path,
+        id: &EntityUri,
+    ) -> anyhow::Result<String> {
         self.org.render_blocks(blocks, path, id)
     }
 

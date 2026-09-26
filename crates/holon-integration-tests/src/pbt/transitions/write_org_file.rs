@@ -141,7 +141,8 @@ impl holon_pbt_core::step_vocabulary::StepVocabulary for WriteOrgFile {
             &self.blocks,
             std::path::Path::new(self.filename.as_str()),
             &EntityUri::block(GEN_PLACEHOLDER),
-        );
+        )
+        .expect("org render");
         let docstring = match &self.keyword_set {
             Some(ks) => format!("{}\n{}", ks.to_org_header(), rendered),
             None => rendered,
@@ -331,7 +332,7 @@ crate::cap_transition! {
             &me.blocks,
             std::path::Path::new(me.filename.as_str()),
             &EntityUri::block(GEN_PLACEHOLDER),
-        );
+        ).expect("org render");
 
         // Pin the document's identity into the file so production's
         // file_sync_controller picks up the same `block:ref-doc-N` URI the
@@ -402,7 +403,7 @@ mod keyword_set_round_trip_tests {
                 &blocks,
                 std::path::Path::new(filename.as_str()),
                 &placeholder,
-            );
+            ).expect("org render");
             let content = format!("{}\n{}", ks.to_org_header(), rendered);
 
             let parsed = holon_orgmode::parse_org_file(

@@ -22,6 +22,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::drawer::DrawerId;
+use crate::drawer::UnrepresentableId;
 use crate::drawer::ValueCarrier;
 
 /// Property keys for org-specific fields stored in properties JSON.
@@ -164,29 +165,37 @@ pub trait ToOrg {
     fn to_org(&self) -> String;
 }
 
-/// Format properties drawer from JSON
-/// Input: JSON string -> Output: ":PROPERTIES:\n:KEY: VALUE\n:END:"
-/// The `:ID:` line comes first. A carrier without a writable `ID` gets the
-/// block's own id, since the drawer is what keeps the block's identity in the
-/// file.
-fn format_properties_drawer(properties_json: &str, block_id: &str) -> String {
-    let props: serde_json::Map<String, serde_json::Value> = serde_json::from_str(properties_json)
-        .unwrap_or_else(|e| {
-            panic!(
-                "malformed org_properties JSON {properties_json:?}: {e} — silently dropping the \
-                 :PROPERTIES: drawer would lose :ID: and churn block identity"
-            )
-        });
+fn drawer_map(properties_json: &str) -> serde_json::Map<String, serde_json::Value> {
+    serde_json::from_str(properties_json).unwrap_or_else(|e| {
+        panic!(
+            "malformed org_properties JSON {properties_json:?}: {e} — silently dropping the \
+             :PROPERTIES: drawer would lose :ID: and churn block identity"
+        )
+    })
+}
 
-    let id = match props.get("ID").map(|v| DrawerId::parse(&json_text(v))) {
-        Some(Ok(id)) => id.as_str().to_string(),
-        Some(Err(e)) => {
-            tracing::warn!("org drawer of block {block_id}: {e}; the block's own id is written");
-            block_id.to_string()
+/// The id a block's `:ID:` line carries: the `ID` of its drawer carrier, else
+/// the block's own id. A block id with another scheme than `block:` is
+/// checked whole, so it is refused rather than written without its scheme.
+fn headline_drawer_id(block: &Block) -> Result<DrawerId, UnrepresentableId> {
+    let carried = block
+        .org_properties()
+        .and_then(|json| drawer_map(&json).get("ID").map(json_text));
+    let id = carried.unwrap_or_else(|| {
+        if block.id.is_block() {
+            block.id.id().to_string()
+        } else {
+            block.id.as_str().to_string()
         }
-        None => block_id.to_string(),
-    };
-    let mut result = format!(":PROPERTIES:\n:ID: {id}\n");
+    });
+    DrawerId::parse(&id)
+}
+
+/// Format properties drawer from JSON, the `:ID:` line first.
+/// Input: JSON string -> Output: ":PROPERTIES:\n:KEY: VALUE\n:END:"
+fn format_properties_drawer(properties_json: &str, id: &DrawerId) -> String {
+    let props = drawer_map(properties_json);
+    let mut result = format!(":PROPERTIES:\n:ID: {}\n", id.as_str());
 
     // Render other properties (excluding ID which we already rendered) in the
     // JSON's own key order — serde_json::Map is an IndexMap (preserve_order
@@ -225,15 +234,7 @@ fn json_text(value: &serde_json::Value) -> String {
 /// Returns an empty string when no non-ID properties remain, so a block whose
 /// only drawer content was its `:ID:` renders with no drawer at all.
 fn format_properties_drawer_without_id(properties_json: &str) -> String {
-    let props: serde_json::Map<String, serde_json::Value> = serde_json::from_str(properties_json)
-        .unwrap_or_else(|e| {
-            panic!(
-                "malformed org_properties JSON {properties_json:?}: {e} — dense render must not \
-                 silently drop drawer properties"
-            )
-        });
-
-    let lines: String = props
+    let lines: String = drawer_map(properties_json)
         .iter()
         .filter(|(k, _)| k.as_str() != "ID")
         .map(|(key, value)| drawer_line(key, value, ValueCarrier::HeadlineDrawer))
@@ -1056,7 +1057,7 @@ impl OrgBlockExt for Block {
 /// headline-building logic stays a single implementation.
 pub(crate) enum HeadlineIdentity<'a> {
     /// Canonical: `:ID:` inside the properties drawer.
-    Drawer,
+    Drawer(DrawerId),
     /// Dense projection: trailing `{#alias}` token, `:ID:` line suppressed.
     /// `gap` renders a `^` inside the token (`{#alias^}`) meaning one or more
     /// unselected ancestors were elided above this block — its rendered parent
@@ -1064,19 +1065,26 @@ pub(crate) enum HeadlineIdentity<'a> {
     DenseToken { alias: &'a str, gap: bool },
 }
 
+/// A block's org text, refused when its `:ID:` line cannot carry its id.
+pub(crate) fn block_to_org(block: &Block) -> anyhow::Result<String> {
+    // Source blocks render as #+BEGIN_SRC ... #+END_SRC
+    if block.content_type == ContentType::Source {
+        return Ok(source_block_to_org(block));
+    }
+
+    // Image blocks render as [[file:path]] inline link
+    if block.content_type == ContentType::Image {
+        return Ok(format!("[[file:{}]]\n", block.content));
+    }
+
+    let id = headline_drawer_id(block)
+        .map_err(|e| anyhow::anyhow!("org render of block {} refused: {e}", block.id))?;
+    Ok(render_headline_block(block, HeadlineIdentity::Drawer(id)))
+}
+
 impl ToOrg for Block {
     fn to_org(&self) -> String {
-        // Source blocks render as #+BEGIN_SRC ... #+END_SRC
-        if self.content_type == ContentType::Source {
-            return source_block_to_org(self);
-        }
-
-        // Image blocks render as [[file:path]] inline link
-        if self.content_type == ContentType::Image {
-            return format!("[[file:{}]]\n", self.content);
-        }
-
-        render_headline_block(self, HeadlineIdentity::Drawer)
+        block_to_org(self).unwrap_or_else(|e| panic!("{e:#}"))
     }
 }
 
@@ -1427,7 +1435,7 @@ pub(crate) fn render_headline_block(block: &Block, identity: HeadlineIdentity) -
     // emitted, and a drawer that held only `:ID:` collapses to nothing.
     if let Some(props_json) = block.org_properties() {
         let props_drawer = match identity {
-            HeadlineIdentity::Drawer => format_properties_drawer(&props_json, block.id.id()),
+            HeadlineIdentity::Drawer(ref id) => format_properties_drawer(&props_json, id),
             HeadlineIdentity::DenseToken { .. } => format_properties_drawer_without_id(&props_json),
         };
         if !props_drawer.is_empty() {

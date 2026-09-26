@@ -1489,7 +1489,7 @@ pub async fn run_file_sync_controller(
                                 }
                                 Err(e) => {
                                     error!(
-                                        "[OrgMode] Block change error for {}: {}",
+                                        "[OrgMode] Block change error for {}: {:#}",
                                         doc, e
                                     );
                                 }
@@ -1515,7 +1515,7 @@ pub async fn run_file_sync_controller(
                     .re_render_all_tracked(&std::collections::HashSet::new())
                     .await
                 {
-                    error!("[OrgMode] re_render_all_tracked (debounced) error: {}", e);
+                    error!("[OrgMode] re_render_all_tracked (debounced) error: {:#}", e);
                 }
                 idle_signal_for_task.mark_progress();
             }

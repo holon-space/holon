@@ -27,8 +27,12 @@ fn parse(source: &str) -> (Block, Vec<Block>) {
     (parsed.document, parsed.blocks)
 }
 
-fn render(document: &Block, blocks: &[Block]) -> String {
+fn try_render(document: &Block, blocks: &[Block]) -> anyhow::Result<String> {
     OrgRenderer::render_document(document, blocks, Path::new(FILE), &document.id)
+}
+
+fn render(document: &Block, blocks: &[Block]) -> String {
+    try_render(document, blocks).unwrap_or_else(|e| panic!("org render: {e:#}"))
 }
 
 fn skeleton() -> (Block, Vec<Block>) {
@@ -180,10 +184,19 @@ proptest! {
         let baseline = parse_kid(&document, &blocks, kid.clone());
         kid.set_property(&k, Value::String(v.clone()));
         blocks.push(kid);
+        let written_id = (k == "ID").then(|| carried_id(&v)).flatten();
+        if k == "ID" && written_id.is_none() {
+            let refused = try_render(&document, &blocks).map_err(|e| format!("{e:#}"));
+            prop_assert!(
+                refused.as_ref().is_err_and(|e| e.contains(&format!("{v:?}"))),
+                "an id the :ID: line cannot carry must fail the render by name: {:?}",
+                refused
+            );
+            return Ok(());
+        }
         let text = render(&document, &blocks);
         let (_, back) = parse(&text);
         prop_assert_eq!(back.len(), 2, "the value grew or ate blocks:\n{}", text);
-        let written_id = (k == "ID").then(|| carried_id(&v)).flatten();
         let id = written_id.clone().unwrap_or_else(|| EntityUri::block("kid"));
         let kid = back.iter().find(|b| b.id == id);
         prop_assert!(kid.is_some(), "{} lost its id:\n{}", id, text);

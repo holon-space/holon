@@ -292,7 +292,7 @@ fn build_harness_from(doc: Block, blocks: Vec<Block>) -> Harness {
 /// exactly as the pre-Tier-1 `render_file_by_doc_id` did.
 fn full_render_oracle(h: &Harness) -> String {
     let blocks = h.reader.blocks.lock().unwrap().clone();
-    OrgRenderer::render_document(&h.doc, &blocks, &h.path, &h.doc.id)
+    OrgRenderer::render_document(&h.doc, &blocks, &h.path, &h.doc.id).expect("org render")
 }
 
 /// A benign, non-`Page` tag used PURELY to force a full reseed: the render

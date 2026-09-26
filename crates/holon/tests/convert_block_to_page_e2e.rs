@@ -554,7 +554,7 @@ async fn assert_title_round_trips(origin_content: &str) {
 
     let root = PathBuf::from("/vault");
     let path = page_file_path(&root, &[], &doc.title());
-    let rendered = OrgRenderer::render_document(&doc, &[], &path, &doc_id);
+    let rendered = OrgRenderer::render_document(&doc, &[], &path, &doc_id).expect("org render");
 
     // Lock the vehicle decision: the title rides the filename, NEVER `#+TITLE:`.
     assert!(

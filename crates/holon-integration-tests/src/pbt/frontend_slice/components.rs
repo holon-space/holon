@@ -2849,7 +2849,8 @@ impl SutOrgRender for HeadlessFrontendComponent {
                 .await
                 .expect("SutOrgRender: get_blocks failed");
             let rendered =
-                OrgRenderer::render_document(doc_block, &descendants, path, &doc_block.id);
+                OrgRenderer::render_document(doc_block, &descendants, path, &doc_block.id)
+                    .expect("org render");
             let disk = FileSystem::read_to_string(self.org_fs().as_ref(), path)
                 .await
                 .expect("SutOrgRender: read org file");
@@ -2876,7 +2877,8 @@ impl SutOrgRender for HeadlessFrontendComponent {
                 .await
                 .expect("SutOrgRender: get_blocks (materialized page) failed");
             let rendered =
-                OrgRenderer::render_document(doc_block, &descendants, &path, &doc_block.id);
+                OrgRenderer::render_document(doc_block, &descendants, &path, &doc_block.id)
+                    .expect("org render");
             let disk = FileSystem::read_to_string(self.org_fs().as_ref(), &path)
                 .await
                 .expect("SutOrgRender: read materialized org file");
@@ -6016,7 +6018,8 @@ mod tests {
                     std::slice::from_ref(&child),
                     &path,
                     &page_id,
-                ),
+                )
+                .expect("org render"),
             ),
         ] {
             let res = parse_org_file(&path, &org, &EntityUri::no_parent(), root).unwrap();

@@ -51,12 +51,10 @@ fn org_files(root: &Path) -> Vec<PathBuf> {
 /// return the bytes. This is the store→disk half of the sync loop.
 fn write_back(path: &Path, source: &str, root: &Path) -> anyhow::Result<String> {
     let parsed = parse_org_file(path, source, &EntityUri::no_parent(), root)?;
-    Ok(OrgRenderer::render_document(
-        &parsed.document,
-        &parsed.blocks,
-        path,
-        &parsed.document.id,
-    ))
+    Ok(
+        OrgRenderer::render_document(&parsed.document, &parsed.blocks, path, &parsed.document.id)
+            .expect("org render"),
+    )
 }
 
 fn changed_lines(before: &str, after: &str) -> Vec<(usize, String, String)> {

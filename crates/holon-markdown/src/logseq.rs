@@ -286,7 +286,13 @@ impl FileFormatAdapter for LogseqMarkdownAdapter {
         })
     }
 
-    fn render_document(&self, _d: &Block, _b: &[Block], path: &Path, _id: &EntityUri) -> String {
+    fn render_document(
+        &self,
+        _d: &Block,
+        _b: &[Block],
+        path: &Path,
+        _id: &EntityUri,
+    ) -> anyhow::Result<String> {
         panic!(
             "LogseqMarkdownAdapter is read-only (Tier R/O): refused to render {} — a write to a \
              foreign vault is loss under ADR 0025 until anchored write-back lands",
@@ -294,7 +300,7 @@ impl FileFormatAdapter for LogseqMarkdownAdapter {
         );
     }
 
-    fn render_blocks(&self, _b: &[Block], path: &Path, _id: &EntityUri) -> String {
+    fn render_blocks(&self, _b: &[Block], path: &Path, _id: &EntityUri) -> anyhow::Result<String> {
         panic!(
             "LogseqMarkdownAdapter is read-only: refused to render {}",
             path.display()

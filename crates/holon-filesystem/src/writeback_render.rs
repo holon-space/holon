@@ -3,6 +3,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use anyhow::Context;
 use anyhow::Result;
 use holon_api::Block;
 use holon_api::EntityUri;
@@ -149,9 +150,9 @@ impl WritebackRenderer {
         blocks: &[Block],
         path: &Path,
     ) -> Result<String> {
-        Ok(self
-            .writable_adapter(path)?
-            .render_document(document, blocks, path, &document.id))
+        self.writable_adapter(path)?
+            .render_document(document, blocks, path, &document.id)
+            .with_context(|| format!("write-back render of {} refused", path.display()))
     }
 
     /// Render the body alone — no document header.
@@ -165,9 +166,9 @@ impl WritebackRenderer {
     }
 
     fn render_body_raw(&self, doc_id: &EntityUri, path: &Path, blocks: &[Block]) -> Result<String> {
-        Ok(self
-            .writable_adapter(path)?
-            .render_blocks(blocks, path, doc_id))
+        self.writable_adapter(path)?
+            .render_blocks(blocks, path, doc_id)
+            .with_context(|| format!("write-back render of {} refused", path.display()))
     }
 }
 

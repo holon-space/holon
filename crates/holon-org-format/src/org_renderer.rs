@@ -11,7 +11,6 @@ use holon_api::block::Block;
 
 use crate::models::OrgBlockExt;
 use crate::models::OrgDocumentExt;
-use crate::models::ToOrg;
 use crate::models::render_document_header;
 use crate::task_keyword::TaskKeywordVocabulary;
 
@@ -30,7 +29,7 @@ impl OrgRenderer {
         blocks: &[Block],
         _: &Path,
         file_id: &EntityUri,
-    ) -> String {
+    ) -> anyhow::Result<String> {
         let mut result = render_document_header(doc_block);
         if !result.is_empty() && !result.ends_with('\n') {
             result.push('\n');
@@ -63,8 +62,8 @@ impl OrgRenderer {
             blocks,
             file_id,
             Some(&vocabulary),
-            &|b: &Block| b.to_org(),
-        ));
+            &crate::models::block_to_org,
+        )?);
         // Every org file ends with exactly one '\n'. Strip any trailing
         // whitespace/newlines and re-add one — keeps disk content stable across
         // render → parse → render so PBT round-trips converge to a fixed point.
@@ -75,7 +74,7 @@ impl OrgRenderer {
             result.pop();
         }
         result.push('\n');
-        result
+        Ok(result)
     }
 
     /// Render blocks to org-mode format.
@@ -93,8 +92,12 @@ impl OrgRenderer {
     /// encodes). Task states therefore render as stored here; the refusal in
     /// [`Self::refuse_undeclared_task_state`] applies only where the owning
     /// document is in hand, i.e. [`Self::render_document`].
-    pub fn render_entitys(blocks: &[Block], _: &Path, file_id: &EntityUri) -> String {
-        Self::render_walk(blocks, file_id, None, &|b: &Block| b.to_org())
+    pub fn render_entitys(
+        blocks: &[Block],
+        _: &Path,
+        file_id: &EntityUri,
+    ) -> anyhow::Result<String> {
+        Self::render_walk(blocks, file_id, None, &crate::models::block_to_org)
     }
 
     /// Dense projection variant of [`Self::render_entitys`]: identical tree
@@ -108,17 +111,18 @@ impl OrgRenderer {
         alias_table: &crate::dense::AliasTable,
         gap_ids: &std::collections::HashSet<String>,
     ) -> String {
-        Self::render_walk(blocks, file_id, None, &|b: &Block| {
-            crate::dense::to_org_dense(b, alias_table, gap_ids)
-        })
+        let Ok(text) = Self::render_walk(blocks, file_id, None, &|b: &Block| {
+            Ok::<_, std::convert::Infallible>(crate::dense::to_org_dense(b, alias_table, gap_ids))
+        });
+        text
     }
 
-    fn render_walk<F: Fn(&Block) -> String>(
+    fn render_walk<E, F: Fn(&Block) -> Result<String, E>>(
         blocks: &[Block],
         file_id: &EntityUri,
         vocabulary: Option<&TaskKeywordVocabulary>,
         render_block: &F,
-    ) -> String {
+    ) -> Result<String, E> {
         let mut result = String::new();
 
         // Sibling order is the caller's responsibility — `blocks` arrives in
@@ -140,9 +144,8 @@ impl OrgRenderer {
         // block in this set. Otherwise the block is a dangling orphan that this
         // renderer would silently drop (never reachable from the file roots).
         // A self-parented row (the filtered-out `sentinel:no_parent` FK anchor)
-        // is excluded so it can never trip a false positive. This path returns
-        // `String` (see the `FileFormat::render_document` trait), so a `Result`
-        // is not available — per the fail-loud directive a `panic!` is used.
+        // is excluded so it can never trip a false positive. A dangling parent
+        // is a projection bug, not content, so it panics.
         let file_id_str = file_id.as_str();
         for b in blocks {
             let parent = b.parent_id.as_str();
@@ -185,7 +188,7 @@ impl OrgRenderer {
                     &mut visited,
                     vocabulary,
                     render_block,
-                );
+                )?;
             }
         }
 
@@ -195,7 +198,7 @@ impl OrgRenderer {
         // A block that was NOT visited is present with a present parent yet
         // unreachable from any root — the signature of a parent CYCLE (or a
         // disconnected component). Self-parented sentinel rows are skipped so
-        // they cannot masquerade as a cycle. No `Result` on this path → `panic!`.
+        // they cannot masquerade as a cycle.
         for b in blocks {
             if b.parent_id.as_str() == b.id.as_str() {
                 continue; // self-parented FK-anchor sentinel
@@ -217,11 +220,11 @@ impl OrgRenderer {
             }
         }
 
-        result
+        Ok(result)
     }
 
     /// Render a block and its children recursively.
-    fn render_entity_tree<'b, F: Fn(&Block) -> String>(
+    fn render_entity_tree<'b, E, F: Fn(&Block) -> Result<String, E>>(
         block: &'b Block,
         children_by_parent: &HashMap<&'b str, Vec<&'b Block>>,
         result: &mut String,
@@ -229,7 +232,7 @@ impl OrgRenderer {
         visited: &mut std::collections::HashSet<&'b str>,
         vocabulary: Option<&TaskKeywordVocabulary>,
         render_block: &F,
-    ) {
+    ) -> Result<(), E> {
         // Record reachability for the WP-F cycle/disconnected-component assertion
         // in `render_entitys` — free, we are already walking every reachable node.
         visited.insert(block.id.as_str());
@@ -242,7 +245,7 @@ impl OrgRenderer {
         // Render via the caller-supplied per-block renderer (canonical
         // `Block::to_org` or the dense token form). Both guarantee a trailing
         // newline.
-        result.push_str(&render_block(&prepared_block));
+        result.push_str(&render_block(&prepared_block)?);
 
         if let Some(kids) = children_by_parent.get(block.id.as_str()) {
             for child_block in kids {
@@ -254,9 +257,10 @@ impl OrgRenderer {
                     visited,
                     vocabulary,
                     render_block,
-                );
+                )?;
             }
         }
+        Ok(())
     }
 
     /// Prepare a block for org rendering by transferring Loro properties to
@@ -375,11 +379,7 @@ impl OrgRenderer {
         // flat properties like "ID" exist but the "org_properties" JSON key doesn't).
         // to_org() renders the :PROPERTIES: drawer exclusively from org_properties().
         if block.org_properties().is_none() {
-            let id = properties
-                .get("ID")
-                .and_then(|v| v.as_string())
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| block.id.id().to_string());
+            let id = properties.get("ID").and_then(|v| v.as_string());
 
             // Order drawer properties by the sequence the author wrote them
             // (recorded at parse in `_drawer_order`); keys the author never
@@ -401,7 +401,9 @@ impl OrgRenderer {
             drawer_props.sort_by(|(a, _), (b, _)| rank(a).cmp(&rank(b)).then_with(|| a.cmp(b)));
 
             let mut org_props = serde_json::Map::new();
-            org_props.insert("ID".to_string(), serde_json::Value::String(id));
+            if let Some(id) = id {
+                org_props.insert("ID".to_string(), serde_json::Value::String(id.to_string()));
+            }
             for (k, v) in drawer_props {
                 org_props.insert(k, serde_json::Value::String(v));
             }
@@ -458,7 +460,8 @@ mod tests {
         block.set_property("ID", Value::String("test-uuid".to_string()));
 
         let file_path = Path::new("/test/file.org");
-        let org_text = OrgRenderer::render_entitys(&[block], file_path, &test_doc_uri());
+        let org_text =
+            OrgRenderer::render_entitys(&[block], file_path, &test_doc_uri()).expect("org render");
 
         assert!(org_text.contains("* Test Title"));
         assert!(org_text.contains("Body content here"));
@@ -477,7 +480,8 @@ mod tests {
             "Orphan",
         );
         orphan.set_property("ID", Value::String("orphan".to_string()));
-        let _ = OrgRenderer::render_entitys(&[orphan], Path::new("/test/file.org"), &doc);
+        let _ = OrgRenderer::render_entitys(&[orphan], Path::new("/test/file.org"), &doc)
+            .expect("org render");
     }
 
     // WP-F: a parent cycle (present parents, unreachable from the file root)
@@ -490,7 +494,8 @@ mod tests {
         a.set_property("ID", Value::String("a".to_string()));
         let mut b = Block::new_text(EntityUri::block("b"), EntityUri::block("a"), "B");
         b.set_property("ID", Value::String("b".to_string()));
-        let _ = OrgRenderer::render_entitys(&[a, b], Path::new("/test/file.org"), &doc);
+        let _ = OrgRenderer::render_entitys(&[a, b], Path::new("/test/file.org"), &doc)
+            .expect("org render");
     }
 
     // WP-F guard against false positives: a normal tree (roots parented to the
@@ -503,7 +508,8 @@ mod tests {
         let mut child =
             Block::new_text(EntityUri::block("child"), EntityUri::block("root"), "Child");
         child.set_property("ID", Value::String("child".to_string()));
-        let out = OrgRenderer::render_entitys(&[root, child], Path::new("/test/file.org"), &doc);
+        let out = OrgRenderer::render_entitys(&[root, child], Path::new("/test/file.org"), &doc)
+            .expect("org render");
         assert!(out.contains("Root"));
         assert!(out.contains("Child"));
     }
@@ -523,7 +529,8 @@ mod tests {
             "Sentinel",
         );
         sentinel.set_property("ID", Value::String("selfanchor".to_string()));
-        let out = OrgRenderer::render_entitys(&[root, sentinel], Path::new("/test/file.org"), &doc);
+        let out = OrgRenderer::render_entitys(&[root, sentinel], Path::new("/test/file.org"), &doc)
+            .expect("org render");
         assert!(out.contains("Root"));
     }
 
@@ -536,7 +543,8 @@ mod tests {
         block.set_property("PRIORITY", Value::String("A".to_string()));
 
         let file_path = Path::new("/test/file.org");
-        let org_text = OrgRenderer::render_entitys(&[block], file_path, &test_doc_uri());
+        let org_text =
+            OrgRenderer::render_entitys(&[block], file_path, &test_doc_uri()).expect("org render");
 
         assert!(org_text.contains("* TODO [#A] Task headline"));
     }
@@ -561,7 +569,8 @@ mod tests {
 
         let file_path = Path::new("/test/file.org");
         let blocks = vec![parent, child_heading, source_block];
-        let org_text = OrgRenderer::render_entitys(&blocks, file_path, &test_doc_uri());
+        let org_text =
+            OrgRenderer::render_entitys(&blocks, file_path, &test_doc_uri()).expect("org render");
 
         let src_pos = org_text
             .find("#+BEGIN_SRC")
@@ -596,7 +605,8 @@ mod tests {
 
         let file_path = Path::new("/test/file.org");
         let blocks = vec![parent, child, src1, src2];
-        let org_text = OrgRenderer::render_entitys(&blocks, file_path, &test_doc_uri());
+        let org_text =
+            OrgRenderer::render_entitys(&blocks, file_path, &test_doc_uri()).expect("org render");
 
         let src1_pos = org_text
             .find("#+BEGIN_SRC holon_sql")
@@ -629,7 +639,8 @@ mod tests {
         // Deliberately put text_child before src_child in the input vec
         let file_path = Path::new("/test/file.org");
         let blocks = vec![parent, text_child, src_child];
-        let org_text = OrgRenderer::render_entitys(&blocks, file_path, &test_doc_uri());
+        let org_text =
+            OrgRenderer::render_entitys(&blocks, file_path, &test_doc_uri()).expect("org render");
 
         let src_pos = org_text.find("#+BEGIN_SRC python").expect("source block");
         let sub_pos = org_text.find("** Sub Heading").expect("sub heading");

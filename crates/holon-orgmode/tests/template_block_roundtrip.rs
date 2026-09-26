@@ -72,7 +72,9 @@ fn template_subtree_round_trips_through_org_adapter() {
     // renderer's parent-chain invariant (roots must parent to the file node)
     // holds.
     let file_id = EntityUri::from_raw(tpl_root.parent_id.as_str());
-    let rendered = adapter.render_document(&first.document, &first.blocks, path, &file_id);
+    let rendered = adapter
+        .render_document(&first.document, &first.blocks, path, &file_id)
+        .expect("org render");
     assert!(
         rendered.contains("{{date}}") && rendered.contains("{{mood}}"),
         "slots must render verbatim, got:\n{rendered}"
@@ -165,7 +167,9 @@ fn template_with_marks_round_trips_stable() {
         .find(|b| b.id.id() == "tpl-marks-root")
         .expect("template root");
     let file_id = EntityUri::from_raw(tpl_root.parent_id.as_str());
-    let rendered = adapter.render_document(&first.document, &first.blocks, path, &file_id);
+    let rendered = adapter
+        .render_document(&first.document, &first.blocks, path, &file_id)
+        .expect("org render");
     assert!(
         rendered.contains("{{greeting}}"),
         "slots must render verbatim, got:\n{rendered}"
@@ -240,7 +244,9 @@ fn template_with_underscore_var_round_trips_verbatim() {
     );
 
     let file_id = EntityUri::from_raw(tpl_root.parent_id.as_str());
-    let rendered = adapter.render_document(&first.document, &first.blocks, path, &file_id);
+    let rendered = adapter
+        .render_document(&first.document, &first.blocks, path, &file_id)
+        .expect("org render");
 
     // If the underscore gets mangled (e.g. _ → subscript), {{my_var}} would
     // no longer appear verbatim. This is the regression gate.
@@ -317,7 +323,9 @@ fn template_without_vars_round_trips_and_has_no_template_vars_property() {
 
     // Round-trip: render → re-parse.
     let file_id = EntityUri::from_raw(tpl_root.parent_id.as_str());
-    let rendered = adapter.render_document(&first.document, &first.blocks, path, &file_id);
+    let rendered = adapter
+        .render_document(&first.document, &first.blocks, path, &file_id)
+        .expect("org render");
     assert!(
         rendered.to_ascii_uppercase().contains(":TEMPLATE:"),
         "TEMPLATE marker must survive render, got:\n{rendered}"
