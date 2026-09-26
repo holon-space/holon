@@ -84,6 +84,10 @@ pub struct HeadlessEditorMirror {
     /// detected as an edge — GPUI gets the same edge from its deduped focus
     /// signal ([`commit_departing_editor`](Self::commit_departing_editor)).
     last_focused: Mutex<Option<String>>,
+    /// A block a creation-slot gesture just brought into existence, whose
+    /// editor has not mounted yet. Prod mounts an editor on the focused
+    /// newborn when its row lands; the settle mounts this one's twin.
+    newborn_awaiting_mount: Mutex<Option<holon_api::EntityUri>>,
 }
 
 impl Default for HeadlessEditorMirror {
@@ -99,7 +103,21 @@ impl HeadlessEditorMirror {
             editors: Mutex::new(HashMap::new()),
             slash_menus: Mutex::new(HashMap::new()),
             last_focused: Mutex::new(None),
+            newborn_awaiting_mount: Mutex::new(None),
         }
+    }
+
+    /// Record that a creation-slot gesture birthed `block`, so the next settle
+    /// mounts its editor.
+    pub fn note_newborn(&self, block: holon_api::EntityUri) {
+        *self.newborn_awaiting_mount.lock().unwrap() = Some(block);
+    }
+
+    /// Whether `block` is the newborn whose editor has not mounted yet.
+    /// Clears the record either way: only the settle right after the birth
+    /// mounts it.
+    pub fn take_newborn_awaiting_mount(&self, block: &holon_api::EntityUri) -> bool {
+        self.newborn_awaiting_mount.lock().unwrap().take().as_ref() == Some(block)
     }
 
     /// Reset the tracked cursor for one occurrence of a block (Escape / focus
@@ -729,6 +747,13 @@ impl HeadlessEditorMirror {
                 new_text.insert_str(cursor_byte, &inserted);
                 self.vm_commit_edit(engine, &block_id, &current_text, &new_text)
                     .await?;
+                if crate::row_origin::RowOrigin::from_id(&block_id).is_creation_placeholder() {
+                    let born = engine
+                        .focused_block()
+                        .filter(|f| f != &block_uri)
+                        .expect("a keystroke into a creation slot moves focus to its newborn");
+                    self.note_newborn(born);
+                }
                 let new_cursor_byte = cursor_byte + inserted.len();
                 self.set_cursor(&block_id, occ, new_cursor_byte);
                 self.note_text_changed(engine, &block_uri, &new_text, new_cursor_byte);

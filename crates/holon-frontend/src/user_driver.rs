@@ -608,7 +608,11 @@ impl ReactiveEngineDriver {
             // response rather than a plain navigation: mounting on every settle
             // would charge two authority reads per focused block to blocks no
             // editor ever opened on (the keystone's PinBlock read budget).
-            if self.engine.peek_caret_seed(&block).is_some()
+            //
+            // A creation-slot birth arms no seed (its caret is end-of-text),
+            // so the mirror's own birth record marks that mount instead.
+            let newborn = self.editor_mirror.take_newborn_awaiting_mount(&block);
+            if (newborn || self.engine.peek_caret_seed(&block).is_some())
                 && self.editor_mirror.live_text(&block.to_string()).is_none()
             {
                 self.editor_mirror
@@ -780,6 +784,7 @@ impl ReactiveEngineDriver {
                 ))
                 .await?;
         }
+        self.editor_mirror.note_newborn(born.clone());
         Ok(born)
     }
 

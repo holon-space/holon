@@ -1,8 +1,8 @@
 ---
 id: 2026-09-10-second-keystroke-into-a-fresh-slot-inserts-at-caret-zero
 date: 2026-09-10
-gap: ENVIRONMENT
-secondary: COVERAGE
+gap: COVERAGE
+secondary: null
 status: FIXED
 summary: >-
   The second character typed into a freshly created creation-slot block is
@@ -56,16 +56,13 @@ change. Logs: `lane-logs/ab-base-birth-*.log`, `lane-logs/diag-h1-*.log` in the
 
 ## Missing piece
 
-Two, which is why this is recorded as dual:
-
-- **ENVIRONMENT (primary).** The failing code path is the GPUI editor's caret /
-  `InputState`, which the headless rung does not have — its editor-caret
-  invariants deselect there (`inv-editor-caret/mirror` runs windowed-only). The
-  keystone can generate the interaction; the code that gets it wrong does not
-  exist in the headless wiring.
-- **COVERAGE (secondary).** No test on ANY rung had typed two characters into a
-  fresh slot. Every existing case typed exactly one, which cannot distinguish a
-  caret that advances from one that does not.
+COVERAGE. No test on ANY rung had typed two characters into a fresh slot. Every
+existing case typed exactly one, which cannot distinguish a caret that advances
+from one that does not. The random keystone walk rarely reaches a seated slot
+(it needs a jump into an empty page), and when it did, a multi-character
+`TypeChars` almost never followed. The headless rung has the failing mechanism:
+its editor mirror adopts the armed caret seed on the newborn's first keystroke,
+as the GPUI mount does, so the gap is not ENVIRONMENT.
 
 ## Remedy
 
@@ -82,10 +79,10 @@ Covering tests, red on the pre-fix birth and green after:
 - headless keystone: hand-authored case
   `typing-several-characters-into-a-creation-slot-keeps-their-order`
   (`crates/holon-integration-tests/hand-authored-regressions/keystone.jsonl`);
-  red `milka` for typed `a milk`. The headless rung DOES reproduce it: its
-  editor mirror adopts the armed seed on the newborn's first keystroke exactly
-  as the GPUI mount does, so the ENVIRONMENT classification above was too
-  pessimistic — the real gap was COVERAGE (no case typed two characters into a
-  slot, and the generator rarely stayed on a seated slot long enough to type).
+  red `milka` for typed `a milk`.
 - generator: `TypeChars` weight is raised while the caret sits on a creation
   slot (`crates/holon-integration-tests/src/pbt/transitions/type_chars.rs`).
+- headless mirror: the armed seed was also what told the headless editor
+  mirror to mount the newborn's editor. The mirror now records the birth
+  itself (`HeadlessEditorMirror::note_newborn`), so a slot-born block can be
+  split at once; hand-authored case `a-block-born-from-the-slot-can-be-split-at-once`.
