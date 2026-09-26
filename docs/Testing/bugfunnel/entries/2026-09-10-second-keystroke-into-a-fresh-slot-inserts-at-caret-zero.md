@@ -3,7 +3,7 @@ id: 2026-09-10-second-keystroke-into-a-fresh-slot-inserts-at-caret-zero
 date: 2026-09-10
 gap: ENVIRONMENT
 secondary: COVERAGE
-status: OPEN
+status: FIXED
 summary: >-
   The second character typed into a freshly created creation-slot block is
   inserted at caret offset 0 instead of after the first, so typing "ab"
@@ -69,12 +69,23 @@ Two, which is why this is recorded as dual:
 
 ## Remedy
 
-OPEN. Not fixed in the `slot-birth` lane: it is a different defect from the one
-that lane exists for (D112, birth-versus-write ordering), and fixing it there
-would have made the D112 fix unprovable on its own.
+FIXED. `birth_creation_affordance` (`crates/holon-frontend/src/reactive.rs`)
+now seats focus on the newborn WITHOUT arming a caret offset. The newborn's
+editor mounts after the edit that births it has landed, so the mount's default,
+end-of-text, puts the caret after the typed text. The fix is in the shared
+reactive layer, so every frontend gets it.
 
-Covering test, already in the tree and PARKED as red-first evidence:
-`a_second_keystroke_into_a_fresh_slot_appends_rather_than_prepends`
-(`frontends/gpui/tests/quick_open_returns_focus_windowed.rs`), carrying
-`#[ignore]` that names this entry. Removing that `#[ignore]` is the first step
-of the queued `slot-caret-advance` lane.
+Covering tests, red on the pre-fix birth and green after:
+- windowed: `a_second_keystroke_into_a_fresh_slot_appends_rather_than_prepends`
+  (`frontends/gpui/tests/quick_open_returns_focus_windowed.rs`), no longer
+  ignored; red `"ba"`.
+- headless keystone: hand-authored case
+  `typing-several-characters-into-a-creation-slot-keeps-their-order`
+  (`crates/holon-integration-tests/hand-authored-regressions/keystone.jsonl`);
+  red `milka` for typed `a milk`. The headless rung DOES reproduce it: its
+  editor mirror adopts the armed seed on the newborn's first keystroke exactly
+  as the GPUI mount does, so the ENVIRONMENT classification above was too
+  pessimistic — the real gap was COVERAGE (no case typed two characters into a
+  slot, and the generator rarely stayed on a seated slot long enough to type).
+- generator: `TypeChars` weight is raised while the caret sits on a creation
+  slot (`crates/holon-integration-tests/src/pbt/transitions/type_chars.rs`).

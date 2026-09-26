@@ -2301,12 +2301,7 @@ impl UiState {
     /// cross-block nav (placement offset). The mounting editor reads the seed
     /// via [`peek_caret_seed`](Self::peek_caret_seed) (non-destructively, so
     /// both the synchronous first-mount grab and the focus subscription can
-    /// apply it idempotently).
-    pub(crate) fn set_focus_with_caret(&self, block: EntityUri, offset: usize) {
-        self.set_focus_with_caret_placed(block, offset, CaretPlacement::Seating);
-    }
-
-    /// [`Self::set_focus_with_caret`], saying who moved the caret; see
+    /// apply it idempotently). `placement` says who moved the caret; see
     /// [`Self::set_focus_placed`].
     pub(crate) fn set_focus_with_caret_placed(
         &self,
@@ -3056,10 +3051,14 @@ impl ReactiveEngine {
     /// with empty content — a valid contract value, so ADR 0030 D1's birth
     /// contract is satisfied in a single firing.
     ///
-    /// The caret is seated BEFORE the create resolves: the newborn's editor
-    /// mounts when its row lands and reads the armed seed, and the affordance
+    /// The caret is seated BEFORE the create resolves, and the affordance
     /// itself mounts no editor, so no keystroke in that window can be
     /// misrouted into another block.
+    ///
+    /// No caret offset is armed: the newborn's editor mounts AFTER the edit
+    /// that births it has landed, so its only correct caret is end-of-text —
+    /// the mount's default. An armed 0 put every later keystroke in front of
+    /// the first one.
     ///
     /// Fails loud on a non-affordance id — reaching here with anything else is
     /// a frontend routing bug, not user input.
@@ -3084,7 +3083,7 @@ impl ReactiveEngine {
             .already_born_at(affordance_id)
         {
             self.reap_untouched_newborns(Some(&already));
-            self.ui_state.set_focus_with_caret(already.clone(), 0);
+            self.ui_state.set_focus(Some(already.clone()));
             return Ok(already);
         }
 
@@ -3096,7 +3095,7 @@ impl ReactiveEngine {
         self.reap_untouched_newborns(Some(&id));
         // ALLOW(direct_focus_mutation): seating the caret in the block this
         // very call is bringing into existence.
-        self.ui_state.set_focus_with_caret(id.clone(), 0);
+        self.ui_state.set_focus(Some(id.clone()));
 
         // The node is created HERE, synchronously, before this returns — so
         // the keystroke that follows writes into a block that exists. Creating
@@ -5879,7 +5878,7 @@ mod tests {
         let ui = UiState::new();
         let a = EntityUri::block("a");
         let b = EntityUri::block("b");
-        ui.set_focus_with_caret(a.clone(), 5);
+        ui.set_focus_with_caret_placed(a.clone(), 5, CaretPlacement::Seating);
         // Peek twice: same answer both times (non-destructive).
         assert_eq!(ui.peek_caret_seed(&a), Some(5));
         assert_eq!(ui.peek_caret_seed(&a), Some(5));
@@ -5957,11 +5956,11 @@ mod tests {
         let b = EntityUri::block("b");
 
         // split(a) → new block b focused, seed (b, 0).
-        ui.set_focus_with_caret(b.clone(), 0);
+        ui.set_focus_with_caret_placed(b.clone(), 0, CaretPlacement::Seating);
         assert_eq!(ui.peek_caret_seed(&b), Some(0));
 
         // join(b) → merges back into a at the join boundary; seed (a, 5).
-        ui.set_focus_with_caret(a.clone(), 5);
+        ui.set_focus_with_caret_placed(a.clone(), 5, CaretPlacement::Seating);
         assert_eq!(ui.peek_caret_seed(&a), Some(5));
         // The split's (b, 0) seed was overwritten by the join, not left behind.
         assert_eq!(ui.peek_caret_seed(&b), None);
@@ -5995,7 +5994,7 @@ mod tests {
         let ui = UiState::new();
         let a = EntityUri::block("a");
         let b = EntityUri::block("b");
-        ui.set_focus_with_caret(a.clone(), 3);
+        ui.set_focus_with_caret_placed(a.clone(), 3, CaretPlacement::Seating);
         // A no-op for a block that doesn't own the seed.
         ui.consume_caret_seed(&b);
         assert_eq!(ui.peek_caret_seed(&a), Some(3));

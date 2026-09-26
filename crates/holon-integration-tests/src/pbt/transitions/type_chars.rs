@@ -117,7 +117,11 @@ pub fn type_chars_weighted_generator<
 ) -> Validated<(u32, BoxedStrategy<TypeChars>), Reason> {
     type_chars_preconditions(state).map(|_| {
         let last = state.last_transition_kind();
+        // A seated creation slot is the rare state (a jump into an EMPTY page)
+        // where typing is the whole point; at weight 1 the random walk almost
+        // always left it before any multi-character draw reached it.
         let tc_weight = match last {
+            _ if caret_creation_slot_parent(state).is_some() => 6,
             Some("FocusEditableText") | Some("MoveCursor") => 6,
             Some("TypeChars") => 4,
             _ => 1,

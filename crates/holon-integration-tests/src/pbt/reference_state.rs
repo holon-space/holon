@@ -2222,7 +2222,8 @@ impl ReferenceState {
         self.recanon_without_minting();
 
         // The gesture MOVES the caret: focus reaching the affordance is what
-        // births the block, and the birth seats focus + caret in it (offset 0).
+        // births the block, and the birth seats focus + caret in it (end of
+        // the text typed so far).
         // The global in-memory focus mirror (ADR 0010) must follow, or
         // `inv-focus-matches-ref` compares the pre-gesture focus root against
         // the SUT's newborn.

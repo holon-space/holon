@@ -773,26 +773,12 @@ fn typing_into_a_slot_creates_the_node_before_the_write() {
     f.shutdown();
 }
 
-/// PARKED — red-first evidence for the caret-advance defect, not for D112.
-///
-/// Typing two characters into a fresh slot yields `"ba"`: the second keystroke
-/// is inserted at caret offset 0 instead of after the first. Measured cause —
-/// the editor's own input already holds `"ba"` before any write, so every layer
-/// below it records faithfully:
-///
-/// ```text
-/// DIAG delta buffer="a" new_text="ba"
-/// DIAG cell.apply_text_op op=Insert { pos_codepoint: 0, text: "b" } container_before="a"
-/// ```
-///
-/// The caret is seeded at 0 when the slot is seated
-/// (`ReactiveEngine::birth_creation_affordance`, `set_focus_with_caret(id, 0)`)
-/// and is still 0 when the second character arrives. PRE-EXISTING: an A/B
-/// against `main`'s birth code reproduces it identically, so it is not the
-/// slot-birth change. Unreached until now because no test typed TWO characters
-/// into a fresh slot.
+/// Typing two characters into a fresh slot must store them in typed order.
+/// The first keystroke births the block; if the birth armed the newborn's
+/// caret at 0, the editor that mounts for the newborn inserts every later
+/// keystroke in front of the first (`"ab"` stored as `"ba"`, bugfunnel
+/// 2026-09-10-second-keystroke-into-a-fresh-slot-inserts-at-caret-zero).
 #[test]
-#[ignore = "bugfunnel: 2026-09-10-second-keystroke-into-a-fresh-slot-inserts-at-caret-zero — PRE-EXISTING caret-advance defect (A/B: reproduces on main). Red-for-the-right-reason for the `slot-caret-advance` lane; typing \"ab\" yields \"ba\". Removing this ignore is that lane's first step."]
 fn a_second_keystroke_into_a_fresh_slot_appends_rather_than_prepends() {
     let mut f = Fixture::boot_with_cell_registry("Holon-TestPlatform-SlotCaretAdvance");
     f.focus_target_row();
