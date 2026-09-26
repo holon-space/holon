@@ -17,9 +17,13 @@
 //! * [`latency_slo_rung_drain_test`] — the controlled drain test (Martin's
 //!   ruling D207.a): 600 `set_field` writes offered at 20/s through the
 //!   fire-and-forget door, each to its own block, must all be visible within
-//!   `N/f + s`. See `holon_api::latency_drain` for the rule and its proof.
+//!   `N/f + s`. See `holon_api::latency_drain` for the rule and its proof. A
+//!   wall-time failure while other processes held the CPU is INVALID, not red
+//!   (Martin's ruling D228.a): see
+//!   `holon_integration_tests::pbt::composed::host_contention`.
 //! * [`a_slowed_pipeline_fails_the_drain_test`] — the same rule over 200
-//!   writes, with a per-row delivery delay that halves the capacity, must FAIL.
+//!   writes, with a per-row delivery delay that halves the capacity, must not
+//!   pass.
 //! * [`latency_slo_rung_facade_origin_is_measured_and_not_pooled`] — an
 //!   agent/MCP-driven operation through `HolonService::execute_operation` is
 //!   measured at all, and its samples stay out of the UI percentile (D119.a).
@@ -83,6 +87,12 @@ use holon_api::latency_slo::fault_injection::set_delivery_delay_ms;
 use holon_frontend::operations::OperationIntent;
 use holon_frontend::reactive::dispatch_intent_through_armed_door;
 use holon_integration_tests::pbt::composed::harness::ComposedSut;
+use holon_integration_tests::pbt::composed::host_contention::DrainJudgement;
+use holon_integration_tests::pbt::composed::host_contention::DriveUsage;
+use holon_integration_tests::pbt::composed::host_contention::HostContention;
+use holon_integration_tests::pbt::composed::host_contention::Refusal;
+use holon_integration_tests::pbt::composed::host_contention::UsageMeter;
+use holon_integration_tests::pbt::composed::host_contention::judge_drain;
 use holon_integration_tests::pbt::composed::slo_probe::MAX_CONTENTION_MS;
 use holon_integration_tests::pbt::composed::slo_probe::SloProbe;
 use holon_integration_tests::pbt::composed::slo_probe::contention_ms;
@@ -276,6 +286,21 @@ impl Drop for ArmedDeliveryDelay {
     }
 }
 
+/// One drain drive: the wall-time verdict, and what the process spent on it.
+struct DrainRun {
+    verdict: DrainVerdict,
+    /// Reported, never judged.
+    longest_wait: std::time::Duration,
+    /// From the warm-up dispatch to the end of the drive.
+    host: HostContention,
+}
+
+impl DrainRun {
+    fn judge(&self) -> DrainJudgement {
+        judge_drain(&self.verdict, &self.host)
+    }
+}
+
 /// The drive's samples: those on its targets. Any other UI interaction in the
 /// window is not the drive's to count.
 fn collect_drive_samples(probe: &SloProbe, seen: &mut usize, into: &mut Vec<E2eSample>) {
@@ -289,16 +314,9 @@ fn collect_drive_samples(probe: &SloProbe, seen: &mut usize, into: &mut Vec<E2eS
 }
 
 /// Drive the controlled drain test through the production fire-and-forget
-/// door, as [`Drive`] schedules it, and judge it. Returns the verdict and the
-/// longest per-write wait, a reported number the verdict does not depend on.
-///
-/// `delay_ms` arms the per-row delivery delay for the drive. It sleeps in
-/// `LiveData::subscribe` before the subscriber applies a batch.
-fn run_drain_test(
-    sut: &ComposedSut<WideE2E>,
-    test: DrainTest,
-    delay_ms: u64,
-) -> (DrainVerdict, std::time::Duration) {
+/// door, as [`Drive`] schedules it, with `delay_ms` per row armed in
+/// `LiveData::subscribe`, and meter the process over the drive.
+fn run_drain_test(sut: &ComposedSut<WideE2E>, test: DrainTest, delay_ms: u64) -> DrainRun {
     let engine = sut
         .handle()
         .reactive()
@@ -311,15 +329,22 @@ fn run_drain_test(
 
     let probe = SloProbe::arm();
     let delay = ArmedDeliveryDelay::arm(delay_ms);
-    let samples = sut.runtime().block_on(async {
+    let (samples, host) = sut.runtime().block_on(async {
         engine.ui_state().set_detached_dispatch(true);
         let mut seen = 0;
         let mut samples = Vec::new();
+        let mut meter = None;
         loop {
             let now = std::time::Instant::now();
             collect_drive_samples(&probe, &mut seen, &mut samples);
             match drive.step(now, &samples, pending_targets) {
                 Step::Dispatch { target } => {
+                    // Metered from the warm-up on: the drive waits for the
+                    // warm-up's delivery before write 0, so the counter read
+                    // cannot delay a measured write.
+                    if target == warm_up_target() {
+                        meter = Some(UsageMeter::start());
+                    }
                     let mut params = HashMap::new();
                     params.insert("id".to_string(), Value::String(target.clone()));
                     params.insert("field".to_string(), Value::String("content".to_string()));
@@ -345,8 +370,11 @@ fn run_drain_test(
                 Step::Done => break,
             }
         }
+        let host = meter
+            .expect("the drive dispatches its warm-up write first")
+            .finish();
         engine.ui_state().set_detached_dispatch(false);
-        samples
+        (samples, host)
     });
     drop(delay);
     let lost: Vec<_> = probe
@@ -377,6 +405,7 @@ fn run_drain_test(
          verdict={verdict:?} limit={:?} longest_wait={longest_wait:?}",
         test.limit(),
     );
+    eprintln!("[latency-slo gate] drain host: {host}");
     let mut window = SloWindow::new(
         ClockOrigin::Ui,
         samples.len().max(1),
@@ -394,7 +423,11 @@ fn run_drain_test(
             window.drain_estimate(),
         );
     }
-    (verdict, longest_wait)
+    DrainRun {
+        verdict,
+        longest_wait,
+        host,
+    }
 }
 
 /// Fail with the window's full report. A latency red must say what it measured
@@ -490,37 +523,41 @@ fn latency_slo_rung_drain_test() {
         },
         Host::Admitted,
     );
-    let (verdict, longest_wait) = run_drain_test(&sut, DrainTest::gate(), 0);
-    match verdict {
-        DrainVerdict::Pass { completion, limit } => eprintln!(
-            "[latency-slo gate] drain test: PASS — {DRAIN_WRITES} writes visible after \
-             {completion:?}, limit {limit:?}, longest per-write wait {longest_wait:?}"
+    let run = run_drain_test(&sut, DrainTest::gate(), 0);
+    let (verdict, longest_wait, host) = (&run.verdict, run.longest_wait, run.host);
+    match run.judge() {
+        DrainJudgement::Pass => eprintln!(
+            "[latency-slo gate] drain test: PASS on wall time — {verdict:?}, {DRAIN_WRITES} \
+             writes, longest per-write wait {longest_wait:?}; {host}"
         ),
-        DrainVerdict::Invalid { write, late_by } => panic!(
-            "[latency-slo gate] INVALID (this test fails WITHOUT a verdict on the tree): the \
-             driver offered write {write} {late_by:?} behind the floor-rate schedule while the \
-             pipeline had room, so the run did not offer the load the proof needs. Re-run on a \
-             quiet machine."
+        DrainJudgement::Invalid(refusal) => panic!(
+            "[latency-slo gate] INVALID (this test fails WITHOUT a verdict on the tree): \
+             {refusal}. Wall verdict {verdict:?}; {host}"
         ),
-        DrainVerdict::Undelivered { write, after } => panic!(
-            "[latency-slo gate] drain test FAILED: the pipeline stopped delivering: write \
-             {write} was still invisible {after:?} after its dispatch (longest per-write wait \
-             {longest_wait:?}). A healthy pipeline delivers any drive write within seconds."
-        ),
-        fail => panic!(
-            "[latency-slo gate] drain test FAILED: {fail:?} (floor \
-             {THROUGHPUT_FLOOR_WRITES_PER_SEC:.0}/s, longest per-write wait {longest_wait:?}). \
-             A healthy pipeline cannot fail this test; \
-             load arriving after boot admission can, so confirm on an idle host before \
-             attributing it to the tree."
-        ),
+        DrainJudgement::Fail => match verdict {
+            DrainVerdict::Undelivered { write, after } => panic!(
+                "[latency-slo gate] drain test FAILED: the pipeline stopped delivering: write \
+                 {write} was still invisible {after:?} after its dispatch (longest per-write \
+                 wait {longest_wait:?}). A healthy pipeline delivers any drive write within \
+                 seconds. {host}"
+            ),
+            fail => panic!(
+                "[latency-slo gate] drain test FAILED on wall time: {fail:?} (floor \
+                 {THROUGHPUT_FLOOR_WRITES_PER_SEC:.0}/s, longest per-write wait \
+                 {longest_wait:?}). The CPU run queue was quiet over the drive, so no other \
+                 process's CPU caused this. A saturated disk still can, and looks the same as \
+                 our own off-CPU waits: check the disk write rate. {host}"
+            ),
+        },
     }
 }
 
 /// **The drain test must respond to the pipeline.** The gate's rule over
 /// [`THROUGHPUT_TEETH_WRITES`] writes with [`THROUGHPUT_TEETH_DELAY_MS`] per
 /// row armed in `LiveData`'s apply path — capacity at most 5 writes/s — must
-/// FAIL.
+/// fail on wall time, and [`judge_drain`] must never pass it. Load only slows a
+/// drive further, so neither assertion can be made false by a busy host: this
+/// accepts both FAIL (quiet host) and INVALID (busy host).
 #[test]
 fn a_slowed_pipeline_fails_the_drain_test() {
     let _turn = RUNG_LOCK
@@ -542,28 +579,113 @@ fn a_slowed_pipeline_fails_the_drain_test() {
         DRAIN_OFFER_EVERY,
         DRAIN_PATIENCE,
     );
-    let (verdict, longest_wait) = run_drain_test(&sut, test, THROUGHPUT_TEETH_DELAY_MS);
+    let run = run_drain_test(&sut, test, THROUGHPUT_TEETH_DELAY_MS);
     eprintln!(
         "[latency-slo gate] drain teeth timing: boot+setup {setup:?}, drive {:?}",
         started.elapsed() - setup
     );
-    match verdict {
-        verdict if verdict.is_fail() => eprintln!(
-            "[latency-slo gate] drain teeth: {verdict:?} with {THROUGHPUT_TEETH_DELAY_MS}ms per \
-             row armed, longest per-write wait {longest_wait:?}"
-        ),
-        DrainVerdict::Pass { completion, limit } => panic!(
-            "[latency-slo gate] {THROUGHPUT_TEETH_DELAY_MS}ms per row caps the pipeline at \
-             {:.1} writes/s, yet all {THROUGHPUT_TEETH_WRITES} writes were visible after \
-             {completion:?}, inside the {limit:?} limit. Either the injector is not reaching the subscriber, or \
-             the drain test no longer measures completion.",
-            1000.0 / THROUGHPUT_TEETH_DELAY_MS as f64,
-        ),
-        invalid => panic!(
-            "[latency-slo gate] INVALID (this test fails WITHOUT a verdict on the tree): \
-             {invalid:?}. Re-run on a quiet machine."
-        ),
+    let (verdict, longest_wait, host) = (&run.verdict, run.longest_wait, run.host);
+    assert!(
+        verdict.is_fail(),
+        "[latency-slo gate] {THROUGHPUT_TEETH_DELAY_MS}ms per row caps the pipeline at {:.1} \
+         writes/s, yet the wall verdict is {verdict:?}, not a failure. Either the injector is \
+         not reaching the subscriber, or the drain test no longer measures completion. {host}",
+        1000.0 / THROUGHPUT_TEETH_DELAY_MS as f64,
+    );
+    let judged = run.judge();
+    assert_ne!(
+        judged,
+        DrainJudgement::Pass,
+        "[latency-slo gate] judge_drain passed a pipeline capped at half the floor: wall \
+         verdict {verdict:?}; {host}"
+    );
+    eprintln!(
+        "[latency-slo gate] drain teeth: judged {judged:?} (FAIL on a quiet host, INVALID on a \
+         busy one) — wall verdict {verdict:?} with {THROUGHPUT_TEETH_DELAY_MS}ms per row armed, \
+         longest per-write wait {longest_wait:?}; {host}"
+    );
+}
+
+/// The wall verdict of the verifier's D228 counterexample: 200ms per row
+/// armed, `WindowHeld` at write 82 with the window full.
+fn slowed_drive() -> DrainVerdict {
+    DrainVerdict::WindowHeld {
+        write: 82,
+        pending: DRAIN_WINDOW,
     }
+}
+
+fn healthy_drive() -> DrainVerdict {
+    DrainVerdict::Pass {
+        completion: std::time::Duration::from_secs(33),
+        limit: DrainTest::gate().limit(),
+    }
+}
+
+fn host(queue_wait_s: f64, own_cpu_s: f64) -> HostContention {
+    HostContention::Measured(DriveUsage {
+        wall: std::time::Duration::from_millis(8_500),
+        process_cpu: std::time::Duration::from_secs_f64(own_cpu_s),
+        queue_wait: std::time::Duration::from_secs_f64(queue_wait_s),
+        disk_written_bytes: 60_000_000,
+    })
+}
+
+/// The verifier's measured busy host: 7.0s queue wait over 11.3s own CPU.
+fn verifier_busy_host() -> HostContention {
+    host(7.0, 11.3)
+}
+
+/// A slowed pipeline on a busy host is INVALID, never a pass: from the
+/// process's own counters a busy host and a slow tree look the same.
+#[test]
+fn a_slowed_pipeline_on_a_busy_host_is_invalid() {
+    let judged = judge_drain(&slowed_drive(), &verifier_busy_host());
+    assert!(
+        matches!(judged, DrainJudgement::Invalid(Refusal::HostBusy { queue_wait_ratio })
+            if (queue_wait_ratio - 7.0 / 11.3).abs() < 1e-9),
+        "{judged:?}"
+    );
+}
+
+#[test]
+fn a_slowed_pipeline_on_a_quiet_host_fails() {
+    assert_eq!(
+        judge_drain(&slowed_drive(), &host(0.1, 11.3)),
+        DrainJudgement::Fail
+    );
+}
+
+#[test]
+fn a_hang_on_a_busy_host_is_invalid() {
+    let hang = DrainVerdict::Undelivered {
+        write: 3,
+        after: DRAIN_PATIENCE,
+    };
+    assert!(matches!(
+        judge_drain(&hang, &verifier_busy_host()),
+        DrainJudgement::Invalid(Refusal::HostBusy { .. })
+    ));
+}
+
+/// Load only slows a drive, so a wall-time pass stands on any host.
+#[test]
+fn a_healthy_drive_passes_on_any_host() {
+    for load in [host(0.1, 70.0), verifier_busy_host(), host(72.0, 71.6)] {
+        assert_eq!(
+            judge_drain(&healthy_drive(), &load),
+            DrainJudgement::Pass,
+            "{load}"
+        );
+    }
+}
+
+#[test]
+fn a_wall_failure_on_an_unmeasured_host_is_invalid() {
+    assert_eq!(
+        judge_drain(&slowed_drive(), &HostContention::Unmeasured),
+        DrainJudgement::Invalid(Refusal::Unmeasured)
+    );
 }
 
 /// The facade rung's target: the block the paced prefix already focuses, so the

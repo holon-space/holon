@@ -67,6 +67,10 @@ pub mod reseed_observer;
 /// tracing layer is wired in [`crate::test_tracing`] beside the reseed one.
 pub mod slo_probe;
 
+/// The test process's own CPU and run-queue counters, so the latency gate can
+/// tell a busy host from a slow pipeline.
+pub mod host_contention;
+
 /// The generic composed-SUT `StateMachineTest` harness (E3 increment 3).
 /// Available under the `pbt` feature (not just `cfg(test)`) so the **macro
 /// repoint** can drive a `ComposedSut`-backed StateMachineTest from a `tests/`

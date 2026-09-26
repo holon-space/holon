@@ -179,6 +179,10 @@ chromiumoxide = { version = "=0.9.1", optional = true }
 futures-util = { version = "0.3", optional = true }
 workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# The latency gate reads its own process's scheduler counters (`host_contention`).
+libc = "0.2"
+
 [dev-dependencies]
 # The vault-scan counter the incremental-scan test reads across a restart.
 holon-plugin-host.workspace = true

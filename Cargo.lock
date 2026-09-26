@@ -5594,6 +5594,7 @@ dependencies = [
  "holon-turso-testing",
  "image",
  "indexmap 2.14.0",
+ "libc",
  "loro",
  "memory-stats",
  "nonempty-collections",
