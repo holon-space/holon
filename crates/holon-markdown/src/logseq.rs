@@ -307,18 +307,18 @@ impl FileFormatAdapter for LogseqMarkdownAdapter {
         );
     }
 
-    fn doc_id_from_content(&self, content: &str) -> Option<String> {
+    fn doc_id_from_content(&self, content: &str) -> anyhow::Result<Option<EntityUri>> {
         for l in content.lines() {
             if l.trim_start().starts_with("- ") || l.trim() == "-" {
                 break;
             }
             if let Some((k, v)) = parse_property(l) {
                 if k.eq_ignore_ascii_case("id") {
-                    return Some(v);
+                    return Ok(Some(EntityUri::block(&v)));
                 }
             }
         }
-        None
+        Ok(None)
     }
 
     fn build_block_params(

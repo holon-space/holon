@@ -212,13 +212,13 @@ pub trait FileFormatAdapter: Send + Sync {
         file_id: &EntityUri,
     ) -> Result<String>;
 
-    /// Extract the document's stable bare id from raw file content, if the
-    /// format embeds one (e.g. org's `#+ID:` header). Returns `None` when the
-    /// file carries no explicit identity — the controller then falls back to
-    /// name-chain resolution. Cheaper than a full `parse` because the
-    /// controller only needs the id to resolve the document entity before
-    /// committing to a full parse.
-    fn doc_id_from_content(&self, content: &str) -> Option<String>;
+    /// The document's id as raw file content declares it, if the format embeds
+    /// one (e.g. org's `#+ID:` header). `Ok(None)` when the file carries no
+    /// explicit identity — the controller then falls back to name-chain
+    /// resolution; `Err` names a declared id the format refuses. Cheaper than
+    /// a full `parse` because the controller only needs the id to resolve the
+    /// document entity before committing to a full parse.
+    fn doc_id_from_content(&self, content: &str) -> Result<Option<EntityUri>>;
 
     /// Where this format's document identity comes from. See
     /// [`DocumentIdentity`]; the default is the org contract.

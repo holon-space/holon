@@ -59,10 +59,11 @@ impl fmt::Display for UnrepresentableKey {
 
 impl std::error::Error for UnrepresentableKey {}
 
-/// The value of an `:ID:` line: a block's bare id, which the org parser reads
-/// back as `block:<id>`. It is at most [`DrawerId::MAX_LEN`] bytes of RFC 3986
-/// unreserved characters (`A-Z a-z 0-9 - . _ ~`) in parts joined by `:` or
-/// `::`, and it names no URI scheme of its own (`doc:x`, `sentinel:no_parent`).
+/// A block's bare id as org carries it — on a headline's `:ID:` line, a source
+/// block's `:id` header argument, or a page's `#+ID:` — and reads it back as
+/// `block:<id>` with the same id. It names no URI scheme of its own (`doc:x`,
+/// `block:x`), since a reader could not tell it from a schemed reference, and
+/// it is at most [`DrawerId::MAX_LEN`] bytes.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DrawerId(String);
 
@@ -75,9 +76,9 @@ impl fmt::Display for UnrepresentableId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "the id {:?} cannot be written to an org :ID: line: an id is a bare block id of at \
-             most {} characters from A-Z a-z 0-9 - . _ ~, in parts joined by ':' or '::', that \
-             names no URI scheme",
+            "the id {:?} cannot be written to an org id line: an id there is a bare block id \
+             of at most {} bytes that forms the URI `block:<id>` with the same id, names no URI \
+             scheme of its own and does not start with ':'",
             self.value,
             DrawerId::MAX_LEN
         )
@@ -90,16 +91,13 @@ impl DrawerId {
     pub const MAX_LEN: usize = 255;
 
     pub fn parse(raw: &str) -> Result<DrawerId, UnrepresentableId> {
-        let unreserved = |c: char| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | '~');
-        let parts: Vec<&str> = raw.split(':').collect();
-        let joined_by_colons = parts.first().is_some_and(|p| !p.is_empty())
-            && parts.last().is_some_and(|p| !p.is_empty())
-            && !parts.windows(2).any(|w| w[0].is_empty() && w[1].is_empty());
-        let legal = raw.len() <= Self::MAX_LEN
-            && joined_by_colons
-            && raw.chars().all(|c| c == ':' || unreserved(c))
+        let legal = !raw.is_empty()
+            && raw.len() <= Self::MAX_LEN
             && holon_api::EntityUri::schemed(raw).is_none()
-            && holon_api::EntityUri::try_from_raw(raw).is_ok_and(|u| u.is_block() && u.id() == raw);
+            && holon_api::EntityUri::try_from_raw(raw).is_ok_and(|u| u.is_block() && u.id() == raw)
+            && crate::models::parse_header_args_from_str(&format!(":id {raw}"))
+                .into_iter()
+                .eq([("id".to_string(), raw.to_string())]);
         if legal {
             Ok(DrawerId(raw.to_string()))
         } else {
@@ -263,6 +261,13 @@ mod tests {
             "journals::auto-create",
             "lessons_for_tasks::rule::0",
             "a.b_c~d",
+            "a/b",
+            "Notes/Sub.md::b::0",
+            "a%20b",
+            "a=b",
+            "a:::b",
+            "kid+",
+            "*kid",
         ] {
             assert!(DrawerId::parse(id).is_ok(), "{id:?} was refused");
         }
@@ -283,10 +288,7 @@ mod tests {
             ":PROPERTIES:",
             "#+ID:",
             "a:b",
-            "kid+",
-            "*kid",
             "kid:",
-            "a:::b",
             "caf\u{e9}",
             too_long.as_str(),
         ] {

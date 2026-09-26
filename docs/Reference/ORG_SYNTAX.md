@@ -151,7 +151,8 @@ SELECT * FROM blocks
 
 - `:id abc-123::src::0` — bare string in header args
 - Parser wraps with `EntityUri::block(src_id)` → `block:abc-123::src::0`
-- Renderer writes `block.id.id()` (path part only)
+- Renderer writes the bare id; an id no org id line holds is refused (see
+  `DrawerId` above)
 - Fallback ID (when no `:id` header arg): `{parent_id}::src::{index}` (e.g., `abc-123::src::0`)
 
 ### Rule blocks (`holon_rule`)
@@ -263,24 +264,28 @@ file-level drawer, and a source block's header arguments
   headline rule is the stricter one), the file-level rule for
   `file_properties`. The renderer leaves such a property out of the file (with
   a warning) and keeps the rest of the block.
-- **The `:ID:` line holds a bare block id, not a value** (`DrawerId`). It is
-  not encoded: the parser reads it verbatim and turns it into `block:<id>`.
-  An id is at most 255 characters from the RFC 3986 unreserved set
-  (`A-Z a-z 0-9 - . _ ~`), in parts joined by `:` or `::` (so it neither
-  starts nor ends with `:`), and it names no URI scheme of its own: `doc:x`,
-  `block:x`, `sentinel:no_parent` and `a:b` are refused, while `12:34` (a
-  scheme cannot start with a digit) and `x::src::0` are bare. The engine
-  refuses any other id on every route that can carry one: the `ID` property,
-  the `properties` bag, the `org_properties` carrier, the `file_properties`
-  carrier (where an empty `:ID:` is allowed, since it is authored text and not
-  an identity), and the `id` of a `create`, which must be `block:<id>`. The
-  parser refuses a file whose heading `:ID:` is not a bare block id, naming
-  the headline and the id. If such an id still reaches the renderer (as the
-  carrier's `ID` or as a block id with another scheme), the render fails with
-  an error naming it and the write-back leaves the file as it was; no id is
-  ever written in its place. A source block's `:id` header argument is the
-  same kind of id; the parser refuses a file whose source block `:id` forms
-  no URI.
+- **Every org id line holds a bare block id, not a value** (`DrawerId`): a
+  heading's `:ID:`, a source block's `:id` header argument, and a page's
+  `#+ID:` or file-drawer `:ID:`. It is not encoded: the parser reads it
+  verbatim and turns it into `block:<id>`. The rule is the contract itself:
+  the id is non-empty, at most 255 bytes, forms the URI `block:<id>` with the
+  same id (so no whitespace, control character, `#` or `?`), names no URI
+  scheme of its own, and does not start with `:` (a source block's header
+  arguments would read that as the next key). So `doc:x`, `block:x`,
+  `sentinel:no_parent`, `a:b` and `:split-1` are refused, while `12:34` (a
+  scheme cannot start with a digit), `x::src::0`, `Notes/Sub.md::b::0` (the
+  Markdown adapters' ids) and `a%20b` are bare. The engine refuses any other
+  id on every route that can carry one: the `ID` property, the `properties`
+  bag, the `org_properties` carrier, the `file_properties` carrier (where an
+  empty `:ID:` is allowed, since it is authored text and not an identity), and
+  the `id` of a `create`, which must be `block:<id>`. The parser refuses a
+  file whose heading `:ID:`, source block `:id` or page id is not a bare block
+  id, naming the id. If such an id still reaches the renderer (a block or page
+  id with another scheme, or a carrier `ID`), the render fails with an error
+  naming it and the write-back leaves that file as it was, disclosed with an
+  ERROR, while the other files of the pass are written; no id is ever written
+  in its place. A page with a `file:` id keeps its path identity and gets no
+  id line.
 - **Keys the parser lifts into typed fields are not plain properties.**
   `PRIORITY`, `COLLAPSED`, `WIDGET_ONLY`, `REQUIRES`, `BLOCKED-BY`,
   `ADVICE_SUPPRESSED` and `contributes-to` (any case) become typed block

@@ -40,10 +40,14 @@ The codec PBT key generator reaches `ID`, its case variants, `x+` and the
 delimiters. The bare-id rule is
 `2026-09-26-schemed-or-reserved-id-accepted-on-the-id-line.md`.
 
+A bad id that reaches the renderer past the engine (sync, peer merge,
+ingest) fails the render by name on every org id carrier — heading `:ID:`,
+source block `:id`, page `#+ID:` — and that file's write-back is refused with
+an ERROR log while the other files of a batch pass are still written
+(`a_bad_carrier_id_past_the_engine_refuses_the_write_back`,
+`crates/holon-orgmode/tests/render_refusal_is_per_file.rs`).
+
 Open:
-- A bad id that reaches the renderer past the engine (sync, peer merge,
-  ingest) fails the render by name, and that write-back is refused with an
-  ERROR log (`a_bad_carrier_id_past_the_engine_refuses_the_write_back`). The
-  refusal is not disclosed to the user yet (`WritebackDegraded`, org-faithful
-  group B).
+- The refusal is not disclosed to the user yet (`WritebackDegraded`,
+  org-faithful group B).
 - A duplicate or case-variant `:ID:` line is dropped on read.

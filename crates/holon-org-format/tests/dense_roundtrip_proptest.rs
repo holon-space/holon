@@ -122,7 +122,7 @@ proptest! {
 
         // No holes in this generator (every parent is present), so no gap markers.
         let gap_ids = std::collections::HashSet::new();
-        let dense = render_dense(&doc, &blocks, &fid, &table, &gap_ids);
+        let dense = render_dense(&doc, &blocks, &fid, &table, &gap_ids).expect("dense render");
 
         // Density property: no :ID: drawer line survived, and at least one
         // trailing token was emitted (the whole point of the projection).

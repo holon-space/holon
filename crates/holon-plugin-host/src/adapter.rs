@@ -270,10 +270,10 @@ impl FileFormatAdapter for PluginFormatAdapter {
         );
     }
 
-    fn doc_id_from_content(&self, _: &str) -> Option<String> {
+    fn doc_id_from_content(&self, _: &str) -> anyhow::Result<Option<EntityUri>> {
         // A guest is a pure function over bytes; nothing in the contract lets
         // it name a stable document id, so the caller resolves by name chain.
-        None
+        Ok(None)
     }
 
     fn document_identity(&self) -> DocumentIdentity {

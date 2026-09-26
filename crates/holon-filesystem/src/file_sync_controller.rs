@@ -292,6 +292,7 @@ async fn flush_downstream_with_redrive(
 const IDENTITY_PREFLIGHT_SITE: &str = "identity-file-preflight";
 const PATH_DERIVATION_SITE: &str = "page-file-path-derivation";
 const IMAGE_PATH_SITE: &str = "image-file-path-derivation";
+const BATCH_RENDER_SITE: &str = "batch-pass-render";
 /// Identity-refusal disclosure conditions, kept apart so one does not mute
 /// the other for the same file.
 const DUPLICATE_ID_SITE: &str = "duplicate-doc-id";
@@ -1679,10 +1680,11 @@ impl FileSyncController {
     }
 
     async fn heal_title_less_doc_root(&mut self, path: &Path, disk_content: &str) -> Result<bool> {
-        let Some(bare) = self.adapter(path)?.doc_id_from_content(disk_content) else {
+        // A declared id the format refuses is not a heal candidate:
+        // `ingest_file` reaches the same probe next and refuses the file by name.
+        let Ok(Some(id)) = self.adapter(path)?.doc_id_from_content(disk_content) else {
             return Ok(false);
         };
-        let id = EntityUri::block(&bare);
         let Some(mut doc) = self.doc_manager.get_by_id(&id).await? else {
             return Ok(false);
         };
@@ -1796,9 +1798,12 @@ impl FileSyncController {
         let deleted_adapter = self.adapter(path)?;
         let rooted_here = last
             .as_deref()
-            .and_then(|l| deleted_adapter.doc_id_from_content(l));
+            .map(|l| deleted_adapter.doc_id_from_content(l))
+            .transpose()
+            .with_context(|| format!("last projection of deleted {}", path.display()))?
+            .flatten();
         let document = match &rooted_here {
-            Some(bare) => self.doc_manager.get_by_id(&EntityUri::block(bare)).await?,
+            Some(id) => self.doc_manager.get_by_id(id).await?,
             None => {
                 let rel_path = path.strip_prefix(&self.root_dir).map_err(|e| {
                     anyhow::anyhow!(
@@ -1841,27 +1846,25 @@ impl FileSyncController {
         // ordering (which this scan cannot see yet) is prevented at the source by
         // the pairing's relevance-gate + timeout-only flush, and any residual is
         // repaired by `poll_new_files` + re-ingest.
-        let reunion: Option<PathBuf> = self
-            .last_projection
-            .iter()
-            .find_map(|(p, content)| {
-                if p == canonical {
-                    return None;
-                }
-                // Routed by `p`, not by the deleted file: a reunion
-                // destination may be a different format from the departure.
-                match self
-                    .formats
-                    .adapter_for(p.as_path_buf())
-                    .and_then(|a| a.doc_id_from_content(content))
-                {
-                    Some(bare) if EntityUri::block(&bare) == document_uri => {
-                        Some(p.as_path_buf().clone())
-                    }
-                    _ => None,
-                }
-            })
-            .filter(|dest| self.fs.exists(dest));
+        let mut reunion: Option<PathBuf> = None;
+        for (p, content) in &self.last_projection {
+            if p == canonical {
+                continue;
+            }
+            // Routed by `p`, not by the deleted file: a reunion destination
+            // may be a different format from the departure.
+            let Some(adapter) = self.formats.adapter_for(p.as_path_buf()) else {
+                continue;
+            };
+            let declared = adapter
+                .doc_id_from_content(content)
+                .with_context(|| format!("last projection of {}", p.as_path_buf().display()))?;
+            if declared.as_ref() == Some(&document_uri) {
+                reunion = Some(p.as_path_buf().clone());
+                break;
+            }
+        }
+        let reunion = reunion.filter(|dest| self.fs.exists(dest));
         if let Some(dest) = reunion {
             info!(
                 "[FileSyncController] Deleted file {} is the SOURCE side of a rename — document                  {} already lives at {}; re-homing (id-based reunification) instead of                  cascade-deleting",
@@ -2509,9 +2512,12 @@ impl FileSyncController {
         let from_adapter = self.adapter(from)?;
         let document = match last
             .as_deref()
-            .and_then(|l| from_adapter.doc_id_from_content(l))
+            .map(|l| from_adapter.doc_id_from_content(l))
+            .transpose()
+            .with_context(|| format!("last projection of renamed {}", from.display()))?
+            .flatten()
         {
-            Some(bare) => self.doc_manager.get_by_id(&EntityUri::block(&bare)).await?,
+            Some(id) => self.doc_manager.get_by_id(&id).await?,
             None => match from.strip_prefix(&self.root_dir) {
                 Ok(rel) => {
                     let segments = path_to_name_chain(rel);
@@ -2866,7 +2872,7 @@ impl FileSyncController {
     /// through the format adapter so this is format-agnostic (org's `#+ID:`,
     /// etc.). Returns `Ok(None)` when there is no companion, or the companion
     /// carries no explicit id (a name-chain-only page).
-    async fn companion_doc_id(&self, rel_dir: &str) -> Result<Option<String>> {
+    async fn companion_doc_id(&self, rel_dir: &str) -> Result<Option<EntityUri>> {
         for ext in self.formats.sorted_extensions() {
             // `rel_dir` is a join of page TITLES, so it carries author-supplied
             // text. An escaping chain must not reach outside the vault for a
@@ -2890,12 +2896,13 @@ impl FileSyncController {
                     .with_context(|| format!("read companion {}", candidate.display()))?;
                 // By the CANDIDATE's own extension: the union above may span
                 // formats, and each answers document identity its own way.
-                if let Some(bare) = self
-                    .formats
-                    .adapter_for(candidate)
-                    .and_then(|a| a.doc_id_from_content(&content))
-                {
-                    return Ok(Some(bare));
+                if let Some(adapter) = self.formats.adapter_for(candidate) {
+                    let declared = adapter
+                        .doc_id_from_content(&content)
+                        .with_context(|| format!("folder companion {}", candidate.display()))?;
+                    if declared.is_some() {
+                        return Ok(declared);
+                    }
                 }
             }
         }
@@ -2936,10 +2943,7 @@ impl FileSyncController {
             // Adopt the companion `#+ID` when present; else the deterministic
             // path-derived id. Computed even when a page already exists so a
             // divergent claim can be disclosed loudly (never silently picked).
-            let companion_id = self
-                .companion_doc_id(&accumulated)
-                .await?
-                .map(|bare| EntityUri::block(&bare));
+            let companion_id = self.companion_doc_id(&accumulated).await?;
             let path_id = holon_api::link_parser::PageId::for_path(&accumulated)
                 .map_err(anyhow::Error::msg)?
                 .into_entity_uri();
@@ -3248,7 +3252,7 @@ impl FileSyncController {
         let disk_root = match adapter.document_identity() {
             holon_core::DocumentIdentity::Embedded => adapter
                 .doc_id_from_content(&disk_content)
-                .map(|bare| EntityUri::block(&bare)),
+                .with_context(|| format!("{} was REFUSED", path.display()))?,
             holon_core::DocumentIdentity::ByRecordedHome => {
                 self.last_projection_doc.get(&canonical).cloned()
             }
@@ -3403,7 +3407,9 @@ impl FileSyncController {
                     ingest_adapter.format_name(),
                 )
             })?;
-        let bare_id_in_file = ingest_adapter.doc_id_from_content(&disk_content);
+        let id_in_file = ingest_adapter
+            .doc_id_from_content(&disk_content)
+            .with_context(|| format!("{} was REFUSED", path.display()))?;
 
         // D102.a — the block-level twin of the duplicate-`#+ID:` refusal, and
         // it sits at the same place in the pipeline: after the parse (which
@@ -3441,9 +3447,8 @@ impl FileSyncController {
         // resolved an existing one). Computed from the resolution itself —
         // BEFORE `create_forcing_id`/`resolve_dir_page_chain` materialise the row
         // — so a re-ingest/edit of an existing doc never counts as a create.
-        let (document, doc_was_created) = match bare_id_in_file.as_deref() {
-            Some(bare) => {
-                let id = EntityUri::block(bare);
+        let (document, doc_was_created) = match id_in_file.clone() {
+            Some(id) => {
                 match self.doc_manager.get_by_id(&id).await? {
                     // The duplicate-id refusal already ran ahead of the fast
                     // path, so reaching here means this file owns the id.
@@ -4828,7 +4833,7 @@ impl FileSyncController {
         // so the renderer can persist `#+ID: <uuid>` to disk. This makes the
         // document's identity rename-safe and lets future loads short-circuit the
         // name-chain lookup.
-        let needs_id_writeback = bare_id_in_file.is_none();
+        let needs_id_writeback = id_in_file.is_none();
         // `did_text_merge` forces the round-trip: a merge produced content that
         // is on NEITHER disk nor in `last_projection`, so recording disk as the
         // projection and returning would strand the merged text (disk would
@@ -6218,7 +6223,7 @@ impl FileSyncController {
             let doc = match self
                 .adapter(&path)?
                 .doc_id_from_content(&disk_content)
-                .map(|bare| EntityUri::block(&bare))
+                .with_context(|| format!("[re_render_all_tracked] {}", path.display()))?
             {
                 Some(id) => match self.doc_manager.get_by_id(&id).await {
                     Ok(Some(doc)) => Some(doc),
@@ -6265,7 +6270,16 @@ impl FileSyncController {
                 },
             };
 
-            let rendered = self.render_file_by_doc_id(&doc.id, &path).await?;
+            let rendered = match self.render_file_by_doc_id(&doc.id, &path).await {
+                Ok(rendered) => {
+                    self.clear_failure(&doc.id, BATCH_RENDER_SITE);
+                    rendered
+                }
+                Err(e) => {
+                    self.disclose_batch_render_failure(&doc.id, &path, &e, "re_render_all_tracked");
+                    continue;
+                }
+            };
 
             let current_last = self
                 .last_projection
@@ -6614,14 +6628,15 @@ impl FileSyncController {
         // render at the new home — the invariant (one page, one file) wins
         // over that window, the same store-wins call reconciliation makes
         // elsewhere in this controller.
-        match self.adapter(prior)?.doc_id_from_content(&disk) {
-            Some(bare) if EntityUri::block(&bare) == *page_id => {
-                Ok(StaleHomeOwner::StillRootsThisPage)
-            }
-            Some(bare) => Ok(StaleHomeOwner::Refused(format!(
-                "its bytes differ from our last projection AND its header now roots {} instead of \
-                 this page",
-                EntityUri::block(&bare)
+        match self
+            .adapter(prior)?
+            .doc_id_from_content(&disk)
+            .with_context(|| format!("prior home {}", prior.display()))?
+        {
+            Some(id) if id == *page_id => Ok(StaleHomeOwner::StillRootsThisPage),
+            Some(id) => Ok(StaleHomeOwner::Refused(format!(
+                "its bytes differ from our last projection AND its header now roots {id} instead \
+                 of this page"
             ))),
             None => Ok(StaleHomeOwner::Refused(
                 "its bytes differ from our last projection and it declares no `#+ID:` root at all"
@@ -6752,7 +6767,21 @@ impl FileSyncController {
             if !disk.is_empty() {
                 continue;
             }
-            let rendered = self.render_doc_blocks(&doc_id, &path, &blocks).await?;
+            let rendered = match self.render_doc_blocks(&doc_id, &path, &blocks).await {
+                Ok(rendered) => {
+                    self.clear_failure(&doc_id, BATCH_RENDER_SITE);
+                    rendered
+                }
+                Err(e) => {
+                    self.disclose_batch_render_failure(
+                        &doc_id,
+                        &path,
+                        &e,
+                        "materialize_missing_page_files",
+                    );
+                    continue;
+                }
+            };
             if rendered.trim().is_empty() {
                 continue;
             }
@@ -7659,6 +7688,38 @@ impl FileSyncController {
                 consequence,
                 "[FileSyncController] page-file path still underivable for this doc (already \
                  disclosed once at ERROR)",
+            );
+        }
+    }
+
+    /// Disclose that a batch pass could not render `doc_id`'s file, ONCE per
+    /// doc until it renders again (the `disclose_derivation_failure`
+    /// precedent): the pass leaves that file untouched and goes on.
+    fn disclose_batch_render_failure(
+        &self,
+        doc_id: &EntityUri,
+        path: &Path,
+        err: &anyhow::Error,
+        pass: &str,
+    ) {
+        if self.first_failure_for_doc(doc_id, BATCH_RENDER_SITE) {
+            tracing::error!(
+                doc_id = %doc_id,
+                path = %path.display(),
+                error = %format!("{err:#}"),
+                pass,
+                "[FileSyncController] could not render this document's file — it is left \
+                 untouched on disk; every other file of the pass is still written. Repeats \
+                 for this doc log at DEBUG until it renders again.",
+            );
+        } else {
+            tracing::debug!(
+                doc_id = %doc_id,
+                path = %path.display(),
+                error = %format!("{err:#}"),
+                pass,
+                "[FileSyncController] document still does not render (already disclosed once \
+                 at ERROR)",
             );
         }
     }

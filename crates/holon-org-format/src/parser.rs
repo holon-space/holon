@@ -247,6 +247,18 @@ pub fn parse_doc_id_any_carrier(content: &str) -> Option<String> {
     parse_doc_id(content)
 }
 
+/// [`parse_doc_id_any_carrier`] as the page's block URI, refused by name when
+/// the declared id is not a bare block id (`#+ID: block:abc`).
+pub fn parse_doc_uri_any_carrier(content: &str) -> Result<Option<EntityUri>> {
+    parse_doc_id_any_carrier(content)
+        .map(|bare| {
+            let id = crate::drawer::DrawerId::parse(&bare)
+                .with_context(|| format!("org document id `{bare}` is not usable"))?;
+            Ok(EntityUri::block(id.as_str()))
+        })
+        .transpose()
+}
+
 /// The document's bare id from the two carriers a file may use — the
 /// file-level drawer's `:ID:` and the `#+ID:` keyword — or `None` when it uses
 /// neither and keeps its path-derived `file:` identity.
@@ -393,25 +405,22 @@ pub fn parse_org_file_with(
         );
     }
 
-    // An authored `#+ID:` is text a person typed into the file. One that forms
-    // no URI cannot become the document's id, and minting a replacement would
-    // file the page under an id the file does not name — the same data loss the
-    // probe/parse divergence above refuses. So the file is refused whole.
-    //
-    // `try_from_raw`, not `parse("block:{bare}")`: the carrier is authored, so
-    // it can already read `#+ID: block:abc`, and re-scheming that mints
-    // `block:block:abc` — a page id nothing matches (the KF-8 shape). This leg
-    // is idempotent, like the heading leg below.
+    // An authored page id is a bare block id, like a heading's `:ID:`. Any
+    // other id refuses the file by name: minting a replacement would file the
+    // page under an id the file does not name.
     let file_id = match resolved {
-        Some(bare) => EntityUri::try_from_raw(&bare).with_context(|| {
-            format!(
-                "org document id in {} is not usable: `#+ID: {}` forms no URI. An id must \
-                 be a UUID or another URI-safe token (no spaces). Refusing the file rather \
-                 than filing the page under a minted id it does not name.",
-                path.display(),
-                bare,
-            )
-        })?,
+        Some(bare) => {
+            let id = crate::drawer::DrawerId::parse(&bare).with_context(|| {
+                format!(
+                    "org document id in {} is not usable: the file names its page `{}`. \
+                     Refusing the file rather than filing the page under an id it does not \
+                     name.",
+                    path.display(),
+                    bare,
+                )
+            })?;
+            EntityUri::block(id.as_str())
+        }
         None => generate_file_id(path, root),
     };
 
@@ -643,13 +652,14 @@ fn emit_section_children(
         let src_sequence = *sequence_counter;
         *sequence_counter += 1;
 
-        let id = EntityUri::parse(&format!("block:{src_id}")).with_context(|| {
+        let id = crate::drawer::DrawerId::parse(&src_id).with_context(|| {
             format!(
                 "org source block id is not usable: a `#+BEGIN_SRC` under {parent_bare:?} \
-                 carries `:id {src_id}`, which forms no URI. Refusing the file rather than \
-                 filing the block under an id it does not name."
+                 carries `:id {src_id}`. Refusing the file rather than filing the block under \
+                 an id it does not name."
             )
         })?;
+        let id = EntityUri::block(id.as_str());
         let mut src_block = Block {
             id,
             // ALLOW(entity_uri_from_raw): org parser output: parent headline raw org slug
@@ -1826,18 +1836,21 @@ mod tests {
         );
     }
 
-    /// The `#+ID:` carrier is authored, so it can already read `block:abc`.
-    /// Re-scheming that mints `block:block:abc`, a page id nothing matches —
-    /// and unlike the constructor it replaced, a plain `parse` of the
-    /// re-schemed string returns Ok, so the wrong id travels silently.
+    /// A page id is a bare block id, like a heading's: `#+ID: block:abc` is
+    /// refused by name rather than read as `block:abc` or `block:block:abc`.
     #[test]
-    fn a_document_id_that_already_carries_its_scheme_is_not_re_schemed() {
+    fn a_document_id_that_carries_a_scheme_refuses_the_file() {
         let content = "#+ID: block:abc\n* A\n";
         let path = PathBuf::from("/test/file.org");
         let root = PathBuf::from("/test");
-        let parsed = parse_org_file(&path, content, &EntityUri::no_parent(), &root)
-            .expect("an already-schemed document id parses");
-        assert_eq!(parsed.document.id.as_str(), "block:abc");
+        let err = match parse_org_file(&path, content, &EntityUri::no_parent(), &root) {
+            Ok(parsed) => panic!("accepted as {}", parsed.document.id),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(
+            err.contains("block:abc") && err.contains("file.org"),
+            "{err}"
+        );
     }
 
     /// A heading `:ID:` is a bare block id. Any other id refuses the file by

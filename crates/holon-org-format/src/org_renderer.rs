@@ -30,7 +30,7 @@ impl OrgRenderer {
         _: &Path,
         file_id: &EntityUri,
     ) -> anyhow::Result<String> {
-        let mut result = render_document_header(doc_block);
+        let mut result = render_document_header(doc_block)?;
         if !result.is_empty() && !result.ends_with('\n') {
             result.push('\n');
         }

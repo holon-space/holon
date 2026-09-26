@@ -175,20 +175,25 @@ fn drawer_map(properties_json: &str) -> serde_json::Map<String, serde_json::Valu
 }
 
 /// The id a block's `:ID:` line carries: the `ID` of its drawer carrier, else
-/// the block's own id. A block id with another scheme than `block:` is
-/// checked whole, so it is refused rather than written without its scheme.
+/// the block's own id.
 fn headline_drawer_id(block: &Block) -> Result<DrawerId, UnrepresentableId> {
-    let carried = block
+    match block
         .org_properties()
-        .and_then(|json| drawer_map(&json).get("ID").map(json_text));
-    let id = carried.unwrap_or_else(|| {
-        if block.id.is_block() {
-            block.id.id().to_string()
-        } else {
-            block.id.as_str().to_string()
-        }
-    });
-    DrawerId::parse(&id)
+        .and_then(|json| drawer_map(&json).get("ID").map(json_text))
+    {
+        Some(carried) => DrawerId::parse(&carried),
+        None => own_drawer_id(&block.id),
+    }
+}
+
+/// `id` as an org id line writes it. An id with another scheme than `block:`
+/// is checked whole, so it is refused rather than written without its scheme.
+fn own_drawer_id(id: &EntityUri) -> Result<DrawerId, UnrepresentableId> {
+    if id.is_block() {
+        DrawerId::parse(id.id())
+    } else {
+        DrawerId::parse(id.as_str())
+    }
 }
 
 /// Format properties drawer from JSON, the `:ID:` line first.
@@ -493,7 +498,17 @@ pub(crate) fn trim_blank_lines(s: &str) -> &str {
     }
 }
 
-pub fn render_document_header(doc_block: &Block) -> String {
+/// A page's header, refused when its id is one no `#+ID:` line holds. A page
+/// with a `file:` id keeps its path identity and gets no id line.
+pub fn render_document_header(doc_block: &Block) -> anyhow::Result<String> {
+    let id = if doc_block.id.is_file() {
+        None
+    } else {
+        Some(
+            own_drawer_id(&doc_block.id)
+                .map_err(|e| anyhow::anyhow!("org render of page {} refused: {e}", doc_block.id))?,
+        )
+    };
     let mut result = String::new();
 
     // A hand-authored FILE-LEVEL `:PROPERTIES:` drawer goes first and verbatim:
@@ -522,8 +537,15 @@ pub fn render_document_header(doc_block: &Block) -> String {
                 // same reason; the two guards must agree or write-back invents
                 // an identity the parse will not accept back.
                 if key.eq_ignore_ascii_case("ID") && !authored.is_empty() {
+                    let id = id.as_ref().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "org render of page {} refused: its file drawer carries :ID: \
+                             {authored:?} but the page has no block id to write there",
+                            doc_block.id
+                        )
+                    })?;
                     carries_id = true;
-                    result.push_str(&format!(":{key}: {}\n", doc_block.id.id()));
+                    result.push_str(&format!(":{key}: {}\n", id.as_str()));
                 } else if key.eq_ignore_ascii_case("ID") {
                     result.push_str(&format!(":{key}: \n"));
                 } else {
@@ -546,8 +568,11 @@ pub fn render_document_header(doc_block: &Block) -> String {
     // chose instead of growing a second one on every write-back. A file that
     // authored BOTH (in agreement — the parser rejects disagreement) keeps both.
     let authored_id_keyword = doc_block.get_property(org_props::FILE_ID_KEYWORD).is_some();
-    if doc_block.id.is_block() && (!drawer_carries_id || authored_id_keyword) {
-        result.push_str(&format!("#+ID: {}\n", doc_block.id.id()));
+    if let Some(id) = id
+        .as_ref()
+        .filter(|_| !drawer_carries_id || authored_id_keyword)
+    {
+        result.push_str(&format!("#+ID: {}\n", id.as_str()));
     }
 
     // File title. A doc-root with no `file_title` — including one PROMOTED from
@@ -588,7 +613,7 @@ pub fn render_document_header(doc_block: &Block) -> String {
         result.push('\n');
     }
 
-    result
+    Ok(result)
 }
 
 // =============================================================================
@@ -1067,9 +1092,13 @@ pub(crate) enum HeadlineIdentity<'a> {
 
 /// A block's org text, refused when its `:ID:` line cannot carry its id.
 pub(crate) fn block_to_org(block: &Block) -> anyhow::Result<String> {
-    // Source blocks render as #+BEGIN_SRC ... #+END_SRC
+    let refused =
+        |e: UnrepresentableId| anyhow::anyhow!("org render of block {} refused: {e}", block.id);
     if block.content_type == ContentType::Source {
-        return Ok(source_block_to_org(block));
+        return Ok(source_block_to_org(
+            block,
+            &own_drawer_id(&block.id).map_err(refused)?,
+        ));
     }
 
     // Image blocks render as [[file:path]] inline link
@@ -1077,8 +1106,7 @@ pub(crate) fn block_to_org(block: &Block) -> anyhow::Result<String> {
         return Ok(format!("[[file:{}]]\n", block.content));
     }
 
-    let id = headline_drawer_id(block)
-        .map_err(|e| anyhow::anyhow!("org render of block {} refused: {e}", block.id))?;
+    let id = headline_drawer_id(block).map_err(refused)?;
     Ok(render_headline_block(block, HeadlineIdentity::Drawer(id)))
 }
 
@@ -1526,7 +1554,7 @@ fn body_needs_list_terminator(body: &str) -> bool {
 }
 
 /// Render a source-type Block as Org Mode #+BEGIN_SRC ... #+END_SRC
-fn source_block_to_org(block: &Block) -> String {
+fn source_block_to_org(block: &Block, id: &DrawerId) -> String {
     let mut result = String::new();
 
     // #+NAME: if present
@@ -1547,7 +1575,7 @@ fn source_block_to_org(block: &Block) -> String {
     // Include block ID in header arguments so it survives round-trips
     // This is critical for preventing orphan blocks when Org files are re-parsed
     result.push_str(" :id ");
-    result.push_str(block.id.id());
+    result.push_str(id.as_str());
 
     // Header arguments (standard known args)
     let header_args = block.get_source_header_args();
@@ -1871,7 +1899,11 @@ mod tests {
 
     #[test]
     fn test_document_to_org() {
-        let mut doc = Block::new_text(EntityUri::no_parent(), EntityUri::no_parent(), "test.org");
+        let mut doc = Block::new_text(
+            EntityUri::file("test.org"),
+            EntityUri::no_parent(),
+            "test.org",
+        );
         doc.set_page(true);
         doc.set_file_title(Some("My Document".to_string()));
         doc.set_todo_keywords(Some(vec![
@@ -1880,7 +1912,7 @@ mod tests {
             TaskState::done("DONE"),
         ]));
 
-        let org = render_document_header(&doc);
+        let org = render_document_header(&doc).unwrap();
         assert!(org.contains("#+TITLE: My Document"));
         assert!(org.contains("#+TODO: TODO DOING | DONE"));
     }

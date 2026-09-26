@@ -270,7 +270,7 @@ pub fn build_projection(blocks: Vec<Block>) -> Result<BuiltProjection> {
     }
 
     let doc_block = synth_doc_block(&file_id, &ordered);
-    let dense_text = render_dense(&doc_block, &ordered, &file_id, &alias_table, &gap_ids);
+    let dense_text = render_dense(&doc_block, &ordered, &file_id, &alias_table, &gap_ids)?;
 
     Ok(BuiltProjection {
         file_id,

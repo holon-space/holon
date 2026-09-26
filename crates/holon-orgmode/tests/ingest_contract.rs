@@ -162,8 +162,7 @@ impl FileFormatAdapter for FixtureAdapter {
             .enumerate()
             .map(|(i, line)| {
                 Block::new_text(
-                    // A block id is a bare org `:ID:` id, which holds no `/`.
-                    EntityUri::block(&format!("{}::b::{i}", file_id.id().replace('/', "."))),
+                    EntityUri::block(&format!("{}::b::{i}", file_id.id())),
                     file_id.clone(),
                     line.trim().to_string(),
                 )
@@ -197,10 +196,10 @@ impl FileFormatAdapter for FixtureAdapter {
         self.org.render_blocks(blocks, path, id)
     }
 
-    fn doc_id_from_content(&self, _: &str) -> Option<String> {
+    fn doc_id_from_content(&self, _: &str) -> anyhow::Result<Option<EntityUri>> {
         // `None` is the cooklang shape: the format embeds no identity, so the
         // controller resolves the document by its path-derived name chain.
-        self.embedded_doc_id.clone()
+        Ok(self.embedded_doc_id.as_deref().map(EntityUri::block))
     }
 
     fn build_block_params(

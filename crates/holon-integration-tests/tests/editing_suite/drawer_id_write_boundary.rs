@@ -215,8 +215,8 @@ fn a_bad_carrier_id_past_the_engine_refuses_the_write_back() {
     });
 }
 
-/// Ids that are not a bare block id: a schemed URI, a drawer delimiter, org's
-/// append or headline syntax, a non-URI-safe character, an overlong token.
+/// Ids that are not a bare block id: a schemed URI, a drawer delimiter, a
+/// URI fragment, an overlong token.
 const NOT_BARE_IDS: &[&str] = &[
     "block:n-scheme",
     "doc:n-scheme",
@@ -225,9 +225,7 @@ const NOT_BARE_IDS: &[&str] = &[
     ":END:",
     ":PROPERTIES:",
     "#+ID:",
-    "*kid",
     "a:b",
-    "kid+",
 ];
 
 /// `(op, route, params)`.

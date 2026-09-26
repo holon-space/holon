@@ -19,7 +19,7 @@ use crate::block_params::build_block_params;
 use crate::models::OrgBlockExt;
 use crate::models::OrgDocumentExt;
 use crate::org_renderer::OrgRenderer;
-use crate::parser::parse_doc_id_any_carrier;
+use crate::parser::parse_doc_uri_any_carrier;
 use crate::parser::parse_org_file_with;
 
 /// Carries the link-target classifier used at the ingest parse boundary. The
@@ -89,13 +89,13 @@ impl FileFormatAdapter for OrgFormatAdapter {
         OrgRenderer::render_entitys(blocks, file_path, file_id)
     }
 
-    fn doc_id_from_content(&self, content: &str) -> Option<String> {
+    fn doc_id_from_content(&self, content: &str) -> Result<Option<EntityUri>> {
         // BOTH carriers, not just `#+ID:`. The controller treats `None` as "no
         // stable identity" and force-writes `#+ID: <name-chain uuid>` onto the
         // file; for a file identified by its file-level drawer that would add a
         // SECOND, disagreeing carrier, and the next parse rejects the file
         // outright. Seeing the drawer here is what keeps that from happening.
-        parse_doc_id_any_carrier(content)
+        parse_doc_uri_any_carrier(content)
     }
 
     fn build_block_params(

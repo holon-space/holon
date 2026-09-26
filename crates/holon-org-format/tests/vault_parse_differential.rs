@@ -23,7 +23,9 @@ use holon_api::EntityUri;
 use holon_org_format::OrgBlockExt;
 use holon_org_format::parse_org_file;
 
-fn org_files(root: &Path) -> Vec<PathBuf> {
+/// Every org file under `root`. `hidden` also walks dot-directories other
+/// than version-control stores.
+fn org_files(root: &Path, hidden: bool) -> Vec<PathBuf> {
     let mut found = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -32,7 +34,8 @@ fn org_files(root: &Path) -> Vec<PathBuf> {
             .flatten()
         {
             let path = entry.path();
-            if entry.file_name().to_string_lossy().starts_with('.') {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') && (!hidden || name == ".git" || name == ".jj") {
                 continue;
             }
             if path.is_dir() {
@@ -54,7 +57,7 @@ fn dump_parsed_vault() {
     let mut sink = std::io::BufWriter::new(
         std::fs::File::create(&out).unwrap_or_else(|e| panic!("create {}: {e}", out.display())),
     );
-    let files = org_files(&root);
+    let files = org_files(&root, false);
     assert!(!files.is_empty(), "no org files under {}", root.display());
     let mut blocks = 0usize;
     for path in &files {
@@ -104,11 +107,19 @@ fn write_rules_census() {
     use holon_org_format::ValueCarrier;
 
     let root = PathBuf::from(std::env::var("HOLON_VAULT_SIM").expect("HOLON_VAULT_SIM"));
-    let files = org_files(&root);
+    let files = org_files(&root, true);
     assert!(!files.is_empty(), "no org files under {}", root.display());
     let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
     for path in &files {
         let source = std::fs::read_to_string(path).unwrap();
+        for line in source.lines() {
+            if let Some(id) = line.trim().strip_prefix("#+ID:") {
+                *counts.entry("#+ID: lines").or_default() += 1;
+                if EntityUri::schemed(id.trim()).is_some() {
+                    *counts.entry("#+ID: lines that name a scheme").or_default() += 1;
+                }
+            }
+        }
         let parsed = match parse_org_file(path, &source, &EntityUri::no_parent(), &root) {
             Ok(p) => p,
             Err(_) => {

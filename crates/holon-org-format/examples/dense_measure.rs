@@ -73,7 +73,8 @@ fn main() {
 
     let alias_table = AliasTable::assign(blocks.iter().map(|b| b.id.clone()));
     let gap_ids = HashSet::new();
-    let dense = render_dense(&doc, &blocks, &file_id, &alias_table, &gap_ids);
+    let dense =
+        render_dense(&doc, &blocks, &file_id, &alias_table, &gap_ids).expect("dense render");
 
     // chars/4 is the conventional GPT-family token estimate.
     let est = |s: &str| (s.chars().count() as f64 / 4.0).round() as usize;

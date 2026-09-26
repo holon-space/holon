@@ -60,8 +60,8 @@ impl FileFormatAdapter for StubAdapter {
     fn render_blocks(&self, _: &[Block], _: &Path, _: &EntityUri) -> anyhow::Result<String> {
         unimplemented!("routing-only stub")
     }
-    fn doc_id_from_content(&self, _: &str) -> Option<String> {
-        None
+    fn doc_id_from_content(&self, _: &str) -> anyhow::Result<Option<EntityUri>> {
+        Ok(None)
     }
     fn build_block_params(
         &self,

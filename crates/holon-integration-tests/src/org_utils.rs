@@ -48,7 +48,8 @@ pub fn serialize_blocks_to_org_with_doc(
     let mut result = String::new();
 
     if let Some(doc) = doc_block {
-        let header = holon_orgmode::models::render_document_header(doc);
+        let header =
+            holon_orgmode::models::render_document_header(doc).unwrap_or_else(|e| panic!("{e:#}"));
         result.push_str(&header);
     }
 

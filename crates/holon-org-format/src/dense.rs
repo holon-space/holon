@@ -191,8 +191,8 @@ pub fn render_dense(
     file_id: &EntityUri,
     alias_table: &AliasTable,
     gap_ids: &HashSet<String>,
-) -> String {
-    let mut result = render_document_header(doc_block);
+) -> anyhow::Result<String> {
+    let mut result = render_document_header(doc_block)?;
     if !result.is_empty() && !result.ends_with('\n') {
         result.push('\n');
     }
@@ -209,7 +209,7 @@ pub fn render_dense(
         result.pop();
     }
     result.push('\n');
-    result
+    Ok(result)
 }
 
 /// One block in a parsed dense projection.
