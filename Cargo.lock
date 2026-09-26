@@ -5795,6 +5795,7 @@ dependencies = [
  "holon-core",
  "holon-org-format",
  "tempfile",
+ "tracing",
  "workspace-hack 0.1.0",
 ]
 

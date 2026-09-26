@@ -13,10 +13,25 @@ use holon_api::block::Block;
 use holon_api::marks_to_json;
 use holon_org_format::OrgBlockExt;
 
-/// `previous` is the block as the file previously declared it. A task marker
-/// `previous` carried and `block` no longer does is emitted as
-/// `Value::REMOVED`, so the store drops the task state the file dropped.
-/// `None` for a create.
+/// Whether an edit from `a` to `b` changes anything [`build_block_params`]
+/// carries, so the ingest must emit an update. The priority cookie, planning
+/// lines and `key:: value` lines are stripped from `content`, so each is
+/// compared on its own.
+pub fn content_differs(a: &Block, b: &Block) -> bool {
+    a.content != b.content
+        || a.marks != b.marks
+        || a.tags != b.tags
+        || a.task_state() != b.task_state()
+        || a.priority() != b.priority()
+        || a.scheduled() != b.scheduled()
+        || a.deadline() != b.deadline()
+        || a.drawer_properties() != b.drawer_properties()
+}
+
+/// `previous` is the block as the file previously declared it. A task marker,
+/// priority, planning line or property `previous` carried and `block` no
+/// longer does is emitted as `Value::REMOVED`, so the store drops what the
+/// file dropped. `None` for a create.
 pub fn build_block_params(
     block: &Block,
     parent_id: &EntityUri,
@@ -84,6 +99,35 @@ pub fn build_block_params(
         params.insert("deadline".into(), Value::String(deadline.to_string()));
     }
 
+    for (key, value) in block.drawer_properties() {
+        if is_storage_column(&key) {
+            tracing::warn!(
+                block = %block.id,
+                key = %key,
+                "markdown property names a `block_raw` storage column and cannot be stored as a \
+                 property — dropping it from this block's ingest params. Rename the property."
+            );
+            continue;
+        }
+        params.insert(key.into(), Value::String(value));
+    }
+
+    if let Some(previous) = previous {
+        let dropped_properties = previous
+            .drawer_properties()
+            .into_keys()
+            .filter(|key| !is_storage_column(key));
+        let dropped_fields = ["priority", "scheduled", "deadline"]
+            .into_iter()
+            .filter(|key| previous.get_property(key).is_some())
+            .map(String::from);
+        for key in dropped_properties.chain(dropped_fields) {
+            if !params.contains_key(key.as_str()) {
+                params.insert(key.into(), Value::REMOVED);
+            }
+        }
+    }
+
     if block.content_type == ContentType::Source {
         if let Some(ref lang) = block.source_language {
             params.insert("source_language".into(), Value::String(lang.to_string()));
@@ -91,4 +135,10 @@ pub fn build_block_params(
     }
 
     params
+}
+
+/// A property named after a `block_raw` column would overwrite that column:
+/// `SqlOperationProvider::partition_params` routes such a param to the column.
+fn is_storage_column(key: &str) -> bool {
+    holon_api::schema::BLOCK.columns().contains(&key)
 }

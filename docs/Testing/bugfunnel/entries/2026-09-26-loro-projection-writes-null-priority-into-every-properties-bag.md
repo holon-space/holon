@@ -3,10 +3,10 @@ id: 2026-09-26-loro-projection-writes-null-priority-into-every-properties-bag
 date: 2026-09-26
 gap: ORACLE
 secondary: null
-status: PARTIAL
+status: FIXED
 summary: >-
-  The Loro→SQL projection wrote `"priority": null` into the `properties` bag
-  of every block that has no priority, so the SQL row disagreed with the Loro
+  The Loro→SQL projection and the org-ingest params wrote `"priority": null`
+  into the `properties` bag of every block that has no priority, so the SQL row disagreed with the Loro
   authority and every `TaskEntity::priority()` read of such a row logged a
   warning.
 ---
@@ -46,6 +46,25 @@ The projection emits no `priority` for a block without one, and a cleared
 priority becomes `Value::REMOVED`, like any other removed property. The parity
 test compares the bags exactly (`lane-logs/tags4-c-parity-green.log`).
 
-Open: the org-ingest leg (`crates/holon-orgmode/src/block_params.rs`, the
-`priority` insert after `task_state_category`) still writes a Null
-`priority`, so org-ingested SQL rows keep the same Null key.
+The org-ingest leg (`crates/holon-orgmode/src/block_params.rs`) had the same
+shape: it always inserted `priority`, `Value::Null` when the headline has
+none. Red through the production write path
+(`lane-logs/h1-red-org-store.log`,
+`holon-app::org_store_org_round_trip::a_block_that_never_had_a_priority_stores_no_priority_key`:
+`"priority": Null` in the stored bag after a create and after an update; and
+`a_file_that_lost_its_priority_clears_the_stored_rank_on_re_ingest`, which now
+passes the previous parse the way `FileSyncController` does: `"priority":
+Null` instead of no key). Clearing did work, and `content_differs` compares
+`priority()`, so no update was dispatched because of it; the defect is the
+stored null key. The keystone cannot see it: `normalize_block`
+(`crates/holon-pbt-core/src/block_compare.rs`) strips Null-valued properties
+before comparing, so a hand-authored "edit a block without priority" case
+passed on both arms before the fix.
+
+The org leg now emits `priority` only when the headline carries one, and
+`Value::REMOVED` when `previous` carried one and the file no longer does
+(`lane-logs/h1-green-org-store.log`, and the hand-authored cases
+`ingest-clears-a-removed-priority-{loro,sqlonly}-arm`). One behavior change:
+an ingest with no `previous` (a create, or a block re-parented from another
+document's file) no longer clears a stored priority, the same contract as
+drawer keys and the task keyword.

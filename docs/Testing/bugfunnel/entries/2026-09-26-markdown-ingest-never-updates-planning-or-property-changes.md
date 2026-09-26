@@ -3,7 +3,7 @@ id: 2026-09-26-markdown-ingest-never-updates-planning-or-property-changes
 date: 2026-09-26
 gap: COVERAGE
 secondary: null
-status: OPEN
+status: FIXED
 summary: >-
   On the LogSeq leg, changing or removing a block's SCHEDULED, DEADLINE,
   priority or `key:: value` property in the file dispatches no update, so the
@@ -50,8 +50,22 @@ LogSeq file. The keystone cannot drive Markdown vaults at all (D56.a), and
 `crates/holon-markdown/tests/task_marker_reingest.rs` covers task markers only.
 
 ## Remedy
-OPEN. Red first per shape in the style of `task_marker_reingest.rs`. Then make
-the markdown `content_differs` compare the planning fields, the priority and
-the properties, and give the markdown params the org leg's erasers instead of
-a second mechanism. Decide whether the markdown params must carry `key:: value`
-properties at all; today they never reach the store through this builder.
+Red first, one test per shape in
+`crates/holon-markdown/tests/planning_property_reingest.rs`
+(`lane-logs/h2-red-markdown.log`: 10 of 11 red, each "no update op" or, for
+the create, no `aisle` param). Green in `lane-logs/h2-green-markdown.log`.
+
+- `content_differs` is one function, `holon_markdown::params::content_differs`,
+  used by both adapters. It compares priority, `scheduled`, `deadline` and
+  the user properties (`drawer_properties()`) as well.
+- `build_block_params` emits the user properties, and `Value::REMOVED` for a
+  priority, planning field or property that `previous` carried and the file
+  no longer does. This is the org leg's rule, not a second mechanism.
+- The markdown params carry `key:: value` properties because the Loro-authority
+  create already does (`BlockCreateRequest::of` packs `block.properties`); only
+  the params path dropped them. A property that names a `block_raw` storage
+  column is dropped with a warning, as on the org leg, because
+  `partition_params` would write it into that column.
+
+Adapter-level only, like `task_marker_reingest.rs`: the keystone cannot drive
+Markdown vaults (D56.a), so there is no hand-authored case.

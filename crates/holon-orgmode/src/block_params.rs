@@ -116,16 +116,9 @@ pub fn build_block_params(
         params.insert("task_state".into(), Value::REMOVED);
         params.insert("task_state_category".into(), Value::REMOVED);
     }
-    // Always emit, like `collapsed` below: an ingest that finds NO priority
-    // carrier means the file no longer has one, and a stored rank that nothing
-    // clears outlives the authored value forever.
-    params.insert(
-        "priority".into(),
-        match block.priority() {
-            Some(p) => Value::Integer(p.rank() as i64),
-            None => Value::Null,
-        },
-    );
+    if let Some(priority) = block.priority() {
+        params.insert("priority".into(), Value::Integer(priority.rank() as i64));
+    }
     // Tags are already serialized into the `tags` JSON-array param above
     // (lines 53-57); the legacy CSV-via-properties shape is gone. Skip the
     // OrgBlockExt::tags() shim here so we don't overwrite the JSON list with
@@ -183,6 +176,23 @@ pub fn build_block_params(
     // from the drawer and only this explicit forward gets it to the store.
     if let Some(flag) = block.get_property(crate::models::org_props::PRIORITY_DRAWER_ONLY) {
         params.insert(crate::models::org_props::PRIORITY_DRAWER_ONLY.into(), flag);
+    }
+
+    // `priority`, `scheduled` and `deadline` are stored in the properties bag,
+    // where a Null is a stored JSON null rather than a clear, and the two `_`
+    // carriers are out of reach of the drawer loop below.
+    if let Some(previous) = previous {
+        for key in [
+            crate::models::org_props::PRIORITY,
+            crate::models::org_props::SCHEDULED,
+            crate::models::org_props::DEADLINE,
+            crate::models::org_props::DRAWER_ORDER,
+            crate::models::org_props::PRIORITY_DRAWER_ONLY,
+        ] {
+            if !params.contains_key(key) && previous.get_property(key).is_some() {
+                params.insert(key.into(), Value::REMOVED);
+            }
+        }
     }
 
     // The file is authoritative for its own drawer: a key it USED to declare

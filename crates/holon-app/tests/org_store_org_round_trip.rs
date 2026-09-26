@@ -542,31 +542,28 @@ async fn every_authored_priority_carrier_survives_the_store_byte_identical() {
 const PRIORITY_NONE: &str = "#+ID: prio-page\n* TODO Drawer carries it\n:PROPERTIES:\n:ID: \
                              prio-drawer\n:END:\n";
 
-/// The migration hinges on this: `RENDERER_VERSION` forces a re-ingest, but a
-/// re-ingest only repairs a stale stored rank if an ingest that finds NO
-/// priority carrier CLEARS the column. Without the clear, a block the erasure
-/// bug already stripped on disk keeps its legacy (inverted, or raw-string) rank
-/// forever, and nothing in the pipeline can ever notice.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_file_that_lost_its_priority_clears_the_stored_rank_on_re_ingest() {
-    use holon_org_format::models::OrgBlockExt;
+/// A headline that never carried a priority, edited in the file.
+const UNPRIORITIZED: &str = "#+ID: prio-page\n* TODO Buy milk\n:PROPERTIES:\n:ID: \
+                             prio-none\n:END:\n";
+const UNPRIORITIZED_EDITED: &str = "#+ID: prio-page\n* TODO Buy oat milk\n:PROPERTIES:\n:ID: \
+                                    prio-none\n:END:\n";
 
-    let parse = |source: &str| {
-        parse_org_file(
-            Path::new(FILE),
-            source,
-            &EntityUri::no_parent(),
-            Path::new(ROOT),
-        )
-        .expect("the fixture must parse")
-    };
-    let with_priority = parse(PRIORITY_DRAWER);
-    let without = parse(PRIORITY_NONE);
-    assert_eq!(
-        with_priority.blocks[0].priority(),
-        Some(holon_api::Priority::A),
-        "control: the first ingest must actually carry a priority"
-    );
+fn parse_fixture(source: &str) -> holon_org_format::ParseResult {
+    parse_org_file(
+        Path::new(FILE),
+        source,
+        &EntityUri::no_parent(),
+        Path::new(ROOT),
+    )
+    .expect("the fixture must parse")
+}
+
+/// Ingest `sources` in order into one fresh store the way `FileSyncController`
+/// does: the first file creates every block, each later file updates the
+/// blocks `content_differs` flags, with the previous parse as `previous`.
+/// Returns the stored `properties` bag of the headline with id `headline`.
+async fn ingest_in_sequence(sources: &[&str], headline: &str) -> HashMap<String, holon_api::Value> {
+    use holon_core::file_format::FileFormatAdapter;
 
     let (_backend, handle) = TursoBackend::new_in_memory()
         .await
@@ -580,50 +577,96 @@ async fn a_file_that_lost_its_priority_clears_the_stored_rank_on_re_ingest() {
         BlockSchemaModule.edge_fields(),
     ));
     let entity: EntityName = "block".to_string().into();
+    let adapter = holon_orgmode::OrgFormatAdapter::new();
 
-    let ingest = |parsed: &holon_org_format::ParseResult, op: &'static str| {
-        let doc = parsed.document.clone();
-        let blocks = parsed.blocks.clone();
-        let provider = provider.clone();
-        let entity = entity.clone();
-        async move {
-            for (i, block) in std::iter::once(&doc).chain(blocks.iter()).enumerate() {
-                let mut params =
-                    holon_orgmode::build_block_params(block, &block.parent_id, &doc.id, None);
-                params.insert(
-                    "sort_key".into(),
-                    holon_api::Value::String(format!("{i:010}")),
-                );
-                provider
-                    .execute_operation(&entity, op, params)
-                    .await
-                    .unwrap_or_else(|e| panic!("{op} {}: {e}", block.id));
-            }
+    let mut previous: Option<holon_org_format::ParseResult> = None;
+    for source in sources {
+        let parsed = parse_fixture(source);
+        let doc = &parsed.document;
+        for (i, block) in std::iter::once(doc).chain(parsed.blocks.iter()).enumerate() {
+            let old = previous.as_ref().map(|p| {
+                std::iter::once(&p.document)
+                    .chain(p.blocks.iter())
+                    .find(|b| b.id == block.id)
+                    .unwrap_or_else(|| panic!("{} is new in a later fixture", block.id))
+            });
+            let (op, mut params) = match old {
+                None => (
+                    "create",
+                    adapter.build_block_params(block, &block.parent_id, &doc.id, None),
+                ),
+                Some(old) if adapter.content_differs(old, block) => (
+                    "update",
+                    adapter.build_block_params(block, &block.parent_id, &doc.id, Some(old)),
+                ),
+                Some(_) => continue,
+            };
+            params.insert(
+                "sort_key".into(),
+                holon_api::Value::String(format!("{i:010}")),
+            );
+            provider
+                .execute_operation(&entity, op, params)
+                .await
+                .unwrap_or_else(|e| panic!("{op} {}: {e}", block.id));
         }
-    };
-    ingest(&with_priority, "create").await;
-    ingest(&without, "update").await;
+        previous = Some(parsed);
+    }
 
-    let cache: Arc<QueryableCache<Block>> = Arc::new(
-        QueryableCache::<Block>::new(handle.clone(), Block::type_definition())
-            .await
-            .expect("block cache"),
-    );
-    let reader: Arc<dyn BlockReader> = Arc::new(CacheBlockReader::new(cache));
-    let restored = reader
-        .get_blocks(&without.document.id)
+    let rows = handle
+        .query(
+            &format!("SELECT properties FROM block_raw WHERE id = 'block:{headline}'"),
+            HashMap::new(),
+        )
         .await
-        .expect("get_blocks must read the document back");
-    let headline = restored
-        .iter()
-        .find(|b| b.level() == 1)
-        .expect("the fixture has one headline");
+        .expect("read the stored properties bag");
+    assert_eq!(rows.len(), 1, "exactly one stored row for {headline}");
+    match rows[0].get("properties") {
+        Some(holon_api::Value::Object(bag)) => bag.clone(),
+        other => panic!("{headline}: `properties` is not an object: {other:?}"),
+    }
+}
+
+/// The migration hinges on this: `RENDERER_VERSION` forces a re-ingest, but a
+/// re-ingest only repairs a stale stored rank if an ingest that finds NO
+/// priority carrier CLEARS it. Without the clear, a block the erasure bug
+/// already stripped on disk keeps its legacy (inverted, or raw-string) rank
+/// forever, and nothing in the pipeline can ever notice.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_that_lost_its_priority_clears_the_stored_rank_on_re_ingest() {
+    use holon_org_format::models::OrgBlockExt;
 
     assert_eq!(
-        headline.priority(),
-        None,
-        "a file with no priority carrier must clear the stored rank, not leave the legacy one"
+        parse_fixture(PRIORITY_DRAWER).blocks[0].priority(),
+        Some(holon_api::Priority::A),
+        "control: the first ingest must actually carry a priority"
     );
+    let bag = ingest_in_sequence(&[PRIORITY_DRAWER, PRIORITY_NONE], "prio-drawer").await;
+    assert_eq!(
+        bag.get("priority"),
+        None,
+        "a file with no priority carrier must remove the stored rank, not leave it or a null: \
+         {bag:?}"
+    );
+    for carrier in ["_priority_drawer_only", "_drawer_order"] {
+        assert_eq!(
+            bag.get(carrier),
+            None,
+            "the file no longer authors a drawer priority, so its `{carrier}` carrier must go \
+             too: {bag:?}"
+        );
+    }
+}
+
+/// `priority` lives in the `properties` bag, so a Null written to "clear" it
+/// is a real JSON null key on every block without one, and each
+/// `TaskEntity::priority()` read of that row warns.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_block_that_never_had_a_priority_stores_no_priority_key() {
+    let bag = ingest_in_sequence(&[UNPRIORITIZED], "prio-none").await;
+    assert_eq!(bag.get("priority"), None, "create: {bag:?}");
+    let bag = ingest_in_sequence(&[UNPRIORITIZED, UNPRIORITIZED_EDITED], "prio-none").await;
+    assert_eq!(bag.get("priority"), None, "update: {bag:?}");
 }
 
 /// The sort contract behind the vault's `Now.org` query: the stored value is a
