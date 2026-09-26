@@ -1,6 +1,3 @@
-use std::collections::HashSet;
-use std::sync::LazyLock;
-
 use holon_api::EntityUri;
 use holon_api::Value;
 use holon_api::block::Block;
@@ -156,10 +153,10 @@ pub fn build_block_params(
     params.insert("ID".into(), Value::String(id));
 
     for (k, v) in block.drawer_properties() {
-        if is_edge_drawer_key(&k) || is_typed_field_drawer_key(&k) {
+        if holon_api::EdgeField::is_edge_drawer_key(&k) || is_typed_field_drawer_key(&k) {
             continue;
         }
-        if is_storage_column_key(&k) {
+        if holon_api::schema::is_block_column(&k) {
             warn_unrepresentable_drawer_key(&k, block);
             continue;
         }
@@ -207,9 +204,9 @@ pub fn build_block_params(
             // and a removal is not a loss of authored data — it is a refusal to
             // write `SET <column> = NULL` over row state this builder does not
             // own (`sort_key` is the consolidator's order key).
-            if is_edge_drawer_key(&k)
+            if holon_api::EdgeField::is_edge_drawer_key(&k)
                 || is_typed_field_drawer_key(&k)
-                || is_storage_column_key(&k)
+                || holon_api::schema::is_block_column(&k)
                 || params.contains_key(&*k)
             {
                 continue;
@@ -221,26 +218,12 @@ pub fn build_block_params(
     params
 }
 
-/// True for the drawer keys `drawer_properties()` emits for org RENDERING that
-/// are really typed edge fields, already carried as `Value::Array` params.
-/// Re-inserting one as a flat string would pollute `block.properties` with a
-/// stray key the reference model never has.
-///
-/// The drawer spelling and the column name differ (`:contributes-to:` vs
-/// `contributes_to`), so this compares against both.
-fn is_edge_drawer_key(key: &str) -> bool {
-    holon_api::EdgeField::ALL.iter().any(|f| {
-        let column = f.column();
-        key.eq_ignore_ascii_case(column) || key.eq_ignore_ascii_case(&column.replace('_', "-"))
-    })
-}
-
 /// True for the drawer keys `drawer_properties()` reconstructs from a typed
-/// SCALAR `Block` field, the way [`is_edge_drawer_key`] covers the ones it
-/// reconstructs from a typed EDGE field. Both are already carried as typed
-/// params (`collapsed` / `widget_only`, emitted above); re-ingesting the drawer
-/// spelling would ALSO park a stray uppercase string in `block.properties`,
-/// which the reference model never has.
+/// SCALAR `Block` field, the way `EdgeField::is_edge_drawer_key` covers the
+/// ones it reconstructs from a typed EDGE field. Both are already carried as
+/// typed params (`collapsed` / `widget_only`, emitted above); re-ingesting the
+/// drawer spelling would ALSO park a stray uppercase string in
+/// `block.properties`, which the reference model never has.
 ///
 /// This is a narrow allowlist of the two keys Holon itself serializes, NOT a
 /// case-insensitive match against the schema: matching case-insensitively would
@@ -251,27 +234,6 @@ fn is_typed_field_drawer_key(key: &str) -> bool {
     // either casing is reconstructed from the typed `Priority` on write-back.
     matches!(key, "COLLAPSED" | "WIDGET_ONLY")
         || key.eq_ignore_ascii_case(crate::models::org_props::PRIORITY)
-}
-
-/// The `block_raw` storage columns, as one set built once.
-static BLOCK_STORAGE_COLUMNS: LazyLock<HashSet<&'static str>> =
-    LazyLock::new(|| holon_api::schema::BLOCK.columns().into_iter().collect());
-
-/// True for a drawer key that spells a `block_raw` STORAGE COLUMN.
-///
-/// Such a key is not a property at all:
-/// `SqlOperationProvider::partition_params` routes any param whose key names a
-/// column straight to that column, so emitting one overwrites real row state
-/// (`:id:` rewrites the primary key, `:content:` the block's text,
-/// `:properties:` merges the drawer's own value into the property map) and
-/// nulling one on removal emits `SET sort_key = NULL`, destroying the order key
-/// the consolidator owns.
-///
-/// Matched case-sensitively against the schema, exactly as `partition_params`
-/// matches, so `:Sort_Key:` stays an ordinary property instead of being
-/// over-refused.
-fn is_storage_column_key(key: &str) -> bool {
-    BLOCK_STORAGE_COLUMNS.contains(key)
 }
 
 /// Disclose a refused drawer key. The value IS being dropped, so this must be

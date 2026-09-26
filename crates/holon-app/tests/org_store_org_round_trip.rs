@@ -542,6 +542,9 @@ async fn every_authored_priority_carrier_survives_the_store_byte_identical() {
 const PRIORITY_NONE: &str = "#+ID: prio-page\n* TODO Drawer carries it\n:PROPERTIES:\n:ID: \
                              prio-drawer\n:END:\n";
 
+/// The priority page before its headline was written.
+const PRIORITY_DOC_ONLY: &str = "#+ID: prio-page\n";
+
 /// A headline that never carried a priority, edited in the file.
 const UNPRIORITIZED: &str = "#+ID: prio-page\n* TODO Buy milk\n:PROPERTIES:\n:ID: \
                              prio-none\n:END:\n";
@@ -558,11 +561,19 @@ fn parse_fixture(source: &str) -> holon_org_format::ParseResult {
     .expect("the fixture must parse")
 }
 
+/// What [`ingest_in_sequence`] left behind for one headline.
+struct Ingested {
+    /// The stored `properties` bag.
+    bag: HashMap<String, holon_api::Value>,
+    /// Every create/update op the ingest dispatched for it, in order.
+    ops: Vec<holon_api::StorageEntity>,
+}
+
 /// Ingest `sources` in order into one fresh store the way `FileSyncController`
-/// does: the first file creates every block, each later file updates the
-/// blocks `content_differs` flags, with the previous parse as `previous`.
-/// Returns the stored `properties` bag of the headline with id `headline`.
-async fn ingest_in_sequence(sources: &[&str], headline: &str) -> HashMap<String, holon_api::Value> {
+/// does: a block absent from the previous file is created, a block present in
+/// it is updated when `content_differs` flags it, with the previous parse as
+/// `previous`.
+async fn ingest_in_sequence(sources: &[&str], headline: &str) -> Ingested {
     use holon_core::file_format::FileFormatAdapter;
 
     let (_backend, handle) = TursoBackend::new_in_memory()
@@ -580,6 +591,7 @@ async fn ingest_in_sequence(sources: &[&str], headline: &str) -> HashMap<String,
     let adapter = holon_orgmode::OrgFormatAdapter::new();
 
     let mut previous: Option<holon_org_format::ParseResult> = None;
+    let mut ops = Vec::new();
     for source in sources {
         let parsed = parse_fixture(source);
         let doc = &parsed.document;
@@ -588,9 +600,8 @@ async fn ingest_in_sequence(sources: &[&str], headline: &str) -> HashMap<String,
                 std::iter::once(&p.document)
                     .chain(p.blocks.iter())
                     .find(|b| b.id == block.id)
-                    .unwrap_or_else(|| panic!("{} is new in a later fixture", block.id))
             });
-            let (op, mut params) = match old {
+            let (op, mut params) = match old.flatten() {
                 None => (
                     "create",
                     adapter.build_block_params(block, &block.parent_id, &doc.id, None),
@@ -605,6 +616,9 @@ async fn ingest_in_sequence(sources: &[&str], headline: &str) -> HashMap<String,
                 "sort_key".into(),
                 holon_api::Value::String(format!("{i:010}")),
             );
+            if block.id.id() == headline {
+                ops.push(params.clone());
+            }
             provider
                 .execute_operation(&entity, op, params)
                 .await
@@ -621,10 +635,11 @@ async fn ingest_in_sequence(sources: &[&str], headline: &str) -> HashMap<String,
         .await
         .expect("read the stored properties bag");
     assert_eq!(rows.len(), 1, "exactly one stored row for {headline}");
-    match rows[0].get("properties") {
+    let bag = match rows[0].get("properties") {
         Some(holon_api::Value::Object(bag)) => bag.clone(),
         other => panic!("{headline}: `properties` is not an object: {other:?}"),
-    }
+    };
+    Ingested { bag, ops }
 }
 
 /// The migration hinges on this: `RENDERER_VERSION` forces a re-ingest, but a
@@ -641,7 +656,9 @@ async fn a_file_that_lost_its_priority_clears_the_stored_rank_on_re_ingest() {
         Some(holon_api::Priority::A),
         "control: the first ingest must actually carry a priority"
     );
-    let bag = ingest_in_sequence(&[PRIORITY_DRAWER, PRIORITY_NONE], "prio-drawer").await;
+    let bag = ingest_in_sequence(&[PRIORITY_DRAWER, PRIORITY_NONE], "prio-drawer")
+        .await
+        .bag;
     assert_eq!(
         bag.get("priority"),
         None,
@@ -663,10 +680,41 @@ async fn a_file_that_lost_its_priority_clears_the_stored_rank_on_re_ingest() {
 /// `TaskEntity::priority()` read of that row warns.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_block_that_never_had_a_priority_stores_no_priority_key() {
-    let bag = ingest_in_sequence(&[UNPRIORITIZED], "prio-none").await;
-    assert_eq!(bag.get("priority"), None, "create: {bag:?}");
-    let bag = ingest_in_sequence(&[UNPRIORITIZED, UNPRIORITIZED_EDITED], "prio-none").await;
-    assert_eq!(bag.get("priority"), None, "update: {bag:?}");
+    let created = ingest_in_sequence(&[UNPRIORITIZED], "prio-none").await;
+    let edited = ingest_in_sequence(&[UNPRIORITIZED, UNPRIORITIZED_EDITED], "prio-none").await;
+    assert_eq!(
+        edited.ops.len(),
+        2,
+        "one create and one update: {:?}",
+        edited.ops
+    );
+    for Ingested { bag, ops } in [created, edited] {
+        assert_eq!(bag.get("priority"), None, "{bag:?}");
+        // An eraser for a key the block never had leaves the bag unchanged, so
+        // only the op can show it.
+        for op in &ops {
+            assert_eq!(op.get("priority"), None, "{op:?}");
+        }
+    }
+}
+
+/// A headline that appears in a later file is created there, with no
+/// previous state to clear against.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_headline_new_in_a_later_file_is_created_without_erasers() {
+    let Ingested { bag, ops } =
+        ingest_in_sequence(&[PRIORITY_DOC_ONLY, PRIORITY_DRAWER], "prio-drawer").await;
+    assert_eq!(
+        bag.get("priority"),
+        Some(&holon_api::Value::Integer(1)),
+        "{bag:?}"
+    );
+    assert_eq!(ops.len(), 1, "{ops:?}");
+    assert!(
+        !ops[0].values().any(holon_api::Value::is_removed),
+        "a create carries no eraser: {:?}",
+        ops[0]
+    );
 }
 
 /// The sort contract behind the vault's `Now.org` query: the stored value is a

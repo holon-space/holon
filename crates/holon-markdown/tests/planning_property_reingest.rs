@@ -161,3 +161,11 @@ fn an_unchanged_block_emits_no_op() {
     let (new, _) = parse_one(&adapter, source);
     assert!(!adapter.content_differs(&old, &new));
 }
+
+#[test]
+fn an_edge_spelled_property_is_not_stored_as_a_property() {
+    let adapter = LogseqMarkdownAdapter::new();
+    let (block, doc) = parse_one(&adapter, "- buy milk\n  contributes-to:: groceries\n");
+    let create = adapter.build_block_params(&block, &doc, &doc, None);
+    assert!(!create.contains_key("contributes-to"), "{create:?}");
+}

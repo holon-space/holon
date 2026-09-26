@@ -12,4 +12,5 @@ mod nested_vault_copy_dup_slug;
 mod org_roundtrip_pbt;
 mod org_serializer_prod_content_parity;
 mod probe_link_marks_roundtrip;
+mod reparent_clears_removed_values;
 mod writeback_stale_cross_doc_prune;

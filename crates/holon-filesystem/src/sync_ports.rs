@@ -186,8 +186,9 @@ pub trait BlockReader: Send + Sync {
     }
 
     /// Check if any of the given block IDs already exist under a DIFFERENT
-    /// document. Returns Vec<(block_id, owning_doc_uri)> for conflicts
-    /// found.
+    /// document. Returns `(stored block, owning_doc_uri)` for each conflict
+    /// found; the stored block is the baseline an adopting ingest clears
+    /// against.
     ///
     /// Default implementation uses `iter_documents_with_blocks()` to correctly
     /// attribute nested blocks to their document root (not just direct parent).
@@ -195,7 +196,7 @@ pub trait BlockReader: Send + Sync {
         &self,
         block_ids: &[EntityUri],
         expected_doc_uri: &EntityUri,
-    ) -> Result<Vec<(EntityUri, EntityUri)>> {
+    ) -> Result<Vec<(Block, EntityUri)>> {
         if block_ids.is_empty() {
             return Ok(Vec::new());
         }
@@ -204,13 +205,13 @@ pub trait BlockReader: Send + Sync {
         let documents = self.iter_documents_with_blocks().await?;
 
         let mut conflicts = Vec::new();
-        for (doc_uri, blocks) in &documents {
-            if doc_uri == expected_doc_uri {
+        for (doc_uri, blocks) in documents {
+            if &doc_uri == expected_doc_uri {
                 continue;
             }
             for block in blocks {
                 if id_set.contains(&block.id) {
-                    conflicts.push((block.id.clone(), doc_uri.clone()));
+                    conflicts.push((block, doc_uri.clone()));
                 }
             }
         }

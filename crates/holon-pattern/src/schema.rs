@@ -208,6 +208,16 @@ const fn column(name: &'static str, intent: FieldIntent, arc_place: bool) -> Sch
     }
 }
 
+static BLOCK_COLUMNS: std::sync::LazyLock<std::collections::HashSet<&'static str>> =
+    std::sync::LazyLock::new(|| BLOCK.columns().into_iter().collect());
+
+/// True for a param key that names a `block_raw` storage column. The write
+/// path routes such a param to the column itself, so an ingest must never emit
+/// a user property under that name. Case-sensitive, as that routing is.
+pub fn is_block_column(key: &str) -> bool {
+    BLOCK_COLUMNS.contains(key)
+}
+
 /// The `block` entity. Column order is the `block_raw` DDL order, so the lock
 /// between the two reads as one list.
 pub const BLOCK: EntitySchema = EntitySchema {

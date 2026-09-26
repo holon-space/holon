@@ -100,7 +100,10 @@ pub fn build_block_params(
     }
 
     for (key, value) in block.drawer_properties() {
-        if is_storage_column(&key) {
+        if holon_api::EdgeField::is_edge_drawer_key(&key) {
+            continue;
+        }
+        if holon_api::schema::is_block_column(&key) {
             tracing::warn!(
                 block = %block.id,
                 key = %key,
@@ -113,10 +116,10 @@ pub fn build_block_params(
     }
 
     if let Some(previous) = previous {
-        let dropped_properties = previous
-            .drawer_properties()
-            .into_keys()
-            .filter(|key| !is_storage_column(key));
+        let dropped_properties = previous.drawer_properties().into_keys().filter(|key| {
+            !holon_api::EdgeField::is_edge_drawer_key(key)
+                && !holon_api::schema::is_block_column(key)
+        });
         let dropped_fields = ["priority", "scheduled", "deadline"]
             .into_iter()
             .filter(|key| previous.get_property(key).is_some())
@@ -135,10 +138,4 @@ pub fn build_block_params(
     }
 
     params
-}
-
-/// A property named after a `block_raw` column would overwrite that column:
-/// `SqlOperationProvider::partition_params` routes such a param to the column.
-fn is_storage_column(key: &str) -> bool {
-    holon_api::schema::BLOCK.columns().contains(&key)
 }

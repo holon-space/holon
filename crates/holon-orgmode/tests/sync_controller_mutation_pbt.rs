@@ -1976,7 +1976,7 @@ mod find_foreign_blocks_tests {
             .await
             .unwrap();
         assert_eq!(conflicts.len(), 1);
-        assert_eq!(conflicts[0].0, EntityUri::from_raw("block:x"));
+        assert_eq!(conflicts[0].0.id, EntityUri::from_raw("block:x"));
     }
 
     #[tokio::test]

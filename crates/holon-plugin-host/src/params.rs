@@ -7,15 +7,6 @@ use holon_api::StorageEntity;
 use holon_api::Value;
 use holon_api::block::Block;
 
-/// The `block_raw` storage columns, as one set built once.
-static BLOCK_STORAGE_COLUMNS: std::sync::LazyLock<std::collections::HashSet<&'static str>> =
-    std::sync::LazyLock::new(|| holon_api::schema::BLOCK.columns().into_iter().collect());
-
-/// True for a property key that spells a `block_raw` STORAGE COLUMN.
-pub(crate) fn names_block_storage_column(key: &str) -> bool {
-    BLOCK_STORAGE_COLUMNS.contains(key)
-}
-
 /// `previous` is accepted to satisfy the adapter contract but has nothing to
 /// act on: these params carry no user-authored property namespace, so no key
 /// can go stale in the store.
@@ -62,7 +53,7 @@ pub(crate) fn build_block_params(
         // A hard refusal, not a debug_assert: a debug_assert is a no-op in
         // release, exactly where overwriting a row's real state would do its
         // damage unseen.
-        if names_block_storage_column(key) {
+        if holon_api::schema::is_block_column(key) {
             anyhow::bail!(
                 "block {} carries property {key:?}, which names a `block_raw` storage column; \
                  emitting it as a param would overwrite the row's own state",

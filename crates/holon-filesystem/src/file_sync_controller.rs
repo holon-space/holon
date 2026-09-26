@@ -3917,8 +3917,10 @@ impl FileSyncController {
             .block_reader
             .find_foreign_blocks(&new_block_ids, &document_uri)
             .await?;
-        let conflict_ids: std::collections::HashSet<EntityUri> =
-            conflicts.iter().map(|(id, _)| id.clone()).collect();
+        let adopted_from_store: HashMap<EntityUri, Block> = conflicts
+            .iter()
+            .map(|(block, _)| (block.id.clone(), block.clone()))
+            .collect();
         if !conflicts.is_empty() {
             info!(
                 "[FileSyncController] Re-parenting {} blocks from other documents to {} (blocks \
@@ -4229,18 +4231,20 @@ impl FileSyncController {
                 } else {
                     &block.parent_id
                 };
-                // No prior file state for this block (it is absent from the
-                // diff base), so nothing can have gone stale — the write names
-                // no authority over peer property keys.
+                // Absent from the diff base. A block another document holds is
+                // adopted with its stored state as the baseline, so what this
+                // file does not author is cleared; a new block has nothing to
+                // clear.
+                let adopted = adopted_from_store.get(&block.id);
                 let mut params =
-                    ingest_adapter.build_block_params(block, parent_id, &document_uri, None);
+                    ingest_adapter.build_block_params(block, parent_id, &document_uri, adopted);
                 if let Some(Some(prev)) = predecessors.get(&block.id) {
                     params.insert(
                         POSITION_AFTER_BLOCK_ID_PARAM.into(),
                         Value::String(prev.to_string()),
                     );
                 }
-                let op = if conflict_ids.contains(&block.id) {
+                let op = if adopted.is_some() {
                     "update"
                 } else {
                     "create"

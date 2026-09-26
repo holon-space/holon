@@ -58,6 +58,31 @@ carried the key and the file no longer does. Pinned by the hand-authored cases
 `holon-app::org_store_org_round_trip::a_file_that_lost_its_priority_clears_the_stored_rank_on_re_ingest`
 for the carriers.
 
+### The adoption path
+The lane verifier (`lane-logs/ingest-verify.md`, probe 1) found the one
+production `update` that passed no `previous`: the ingest's re-parent path
+(`find_foreign_blocks` → `update` for a block absent from the diff base). A
+stored priority, planning line or property survived it. Before this lane the
+unconditional `priority = Null` hid the stale rank, so the first fix
+regressed `priority` on that path. `scheduled`, `deadline` and properties
+were already broken there.
+
+A headline moved between two page files never reaches this path (see
+`2026-09-26-a-headline-moved-between-org-files-is-lost-when-the-target-is-ingested-first`).
+It is reached by a block the store holds outside any page.
+Red on both arms through the controller:
+`holon-integration-tests::org_suite::reparent_clears_removed_values`
+(`lane-logs/reparent-red.log`: `"priority": Integer(1)`, `"scheduled"`,
+`"aisle"` kept after `Beta.org` adopted the block).
+
+Fix: `BlockReader::find_foreign_blocks` returns the stored block with each
+conflict (its default implementation already held it), and the controller
+passes that block as `previous`. This is the same baseline a cold-boot ingest
+uses, since the diff base is then seeded from the store. Green:
+`lane-logs/reparent-green.log`. The keystone cannot express it:
+`WriteOrgFile` refuses an id another document owns, and no catalog
+transition I found creates a block outside a page.
+
 OPEN follow-up, shared with the task-keyword entry: a keystone transition that
 rewrites an existing headline's keyword, priority or planning, so the
 generator reaches this shape without a hand-authored case.

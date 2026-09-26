@@ -59,6 +59,17 @@ impl EdgeField {
         Self::ALL.iter().any(|f| f.column() == key)
     }
 
+    /// Whether a drawer / property key spells an edge field, as its column
+    /// name or its kebab drawer spelling (`contributes-to`), in any case. The
+    /// value already travels as the typed edge param, so an ingest must not
+    /// store it a second time as a flat string property.
+    pub fn is_edge_drawer_key(key: &str) -> bool {
+        Self::ALL.iter().any(|f| {
+            let column = f.column();
+            key.eq_ignore_ascii_case(column) || key.eq_ignore_ascii_case(&column.replace('_', "-"))
+        })
+    }
+
     /// Whether this edge field's set is empty for `block`.
     pub fn is_empty(self, block: &Block) -> bool {
         match self {

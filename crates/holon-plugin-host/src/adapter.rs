@@ -388,7 +388,7 @@ impl PluginFormatAdapter {
             if consumed.contains(&key.as_ref()) {
                 continue;
             }
-            if crate::params::names_block_storage_column(key.as_ref()) {
+            if holon_api::schema::is_block_column(key.as_ref()) {
                 bail!(
                     "the {} plugin emitted property {key:?}, which names a `block_raw` storage \
                      column; storing it would overwrite the block's own row state",
