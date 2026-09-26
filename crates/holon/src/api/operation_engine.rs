@@ -1693,9 +1693,9 @@ impl DispatchingOperationEngine {
         Ok(())
     }
 
-    /// Refuse a block write whose property value holds a line break: an org
-    /// property drawer holds one line, and the rest of the value would land in
-    /// the file as headings and drawers of its own.
+    /// Refuse a block write that puts a line break into a value the org
+    /// drawer writes: a drawer line holds one line, and the rest of the value
+    /// would land in the file as headings and drawers of its own.
     fn refuse_multi_line_property(
         entity_name: &EntityName,
         op_name: &str,
@@ -1704,29 +1704,72 @@ impl DispatchingOperationEngine {
         if entity_name.as_str() != "block" {
             return Ok(());
         }
-        let text = |key: &str| params.get(key).and_then(|v| v.as_string());
-        let written: Vec<(&str, &str)> = match op_name {
-            "set_field" => text("field").zip(text("value")).into_iter().collect(),
-            "create" | "update" => params
-                .iter()
-                .filter_map(|(k, v)| Some((k.as_ref(), v.as_string()?)))
-                .collect(),
+        let written: Vec<(&str, &Value)> = match op_name {
+            "set_field" => match (
+                params.get("field").and_then(|v| v.as_string()),
+                params.get("value"),
+            ) {
+                (Some(field), Some(value)) => vec![(field, value)],
+                _ => return Ok(()),
+            },
+            "create" | "update" => params.iter().map(|(k, v)| (k.as_ref(), v)).collect(),
             _ => return Ok(()),
         };
         for (key, value) in written {
-            let is_property = matches!(
-                holon_api::BlockWriteField::parse(key),
-                Ok(holon_api::BlockWriteField::Property(_))
-            );
-            if is_property && !key.starts_with('_') && value.contains(['\n', '\r']) {
-                let id = text("id").unwrap_or("<no id>");
-                bail!(
-                    "{op_name}: refusing property `{key}` on block {id}: its value {value:?} \
-                     holds a line break, and an org property drawer holds one line"
-                );
+            for (path, text) in Self::drawer_texts(key, value)? {
+                if text.contains(['\n', '\r']) {
+                    let id = params
+                        .get("id")
+                        .and_then(|v| v.as_string())
+                        .unwrap_or("<no id>");
+                    bail!(
+                        "{op_name}: refusing property `{path}` on block {id}: its value {text:?} \
+                         holds a line break, and an org property drawer holds one line"
+                    );
+                }
             }
         }
         Ok(())
+    }
+
+    /// The text values `key = value` puts into an org drawer, each named by
+    /// its path. The property bag and the drawer carriers hold one per key.
+    fn drawer_texts(key: &str, value: &Value) -> Result<Vec<(String, String)>> {
+        use anyhow::Context;
+        use holon_org_format::org_props;
+        if key.starts_with('_') {
+            return Ok(Vec::new());
+        }
+        if [
+            "properties",
+            org_props::ORG_PROPERTIES,
+            org_props::FILE_PROPERTIES,
+        ]
+        .contains(&key)
+        {
+            let object: serde_json::Map<String, serde_json::Value> = match value {
+                Value::Object(_) => match serde_json::Value::from(value.clone()) {
+                    serde_json::Value::Object(map) => map,
+                    other => unreachable!("an Object converts to a JSON object, got {other}"),
+                },
+                Value::String(json) | Value::Json(json) => serde_json::from_str(json)
+                    .with_context(|| format!("`{key}` is not a JSON object: {json:?}"))?,
+                other => bail!("`{key}` must be an object or a JSON object, got {other:?}"),
+            };
+            return Ok(object
+                .into_iter()
+                .filter(|(k, _)| !k.starts_with('_'))
+                .filter_map(|(k, v)| Some((format!("{key}.{k}"), v.as_str()?.to_string())))
+                .collect());
+        }
+        let is_property = matches!(
+            holon_api::BlockWriteField::parse(key),
+            Ok(holon_api::BlockWriteField::Property(_))
+        );
+        Ok(match value.as_string() {
+            Some(text) if is_property => vec![(key.to_string(), text.to_string())],
+            _ => Vec::new(),
+        })
     }
 
     /// Whether a content write left block `id` a `?` question with no text,

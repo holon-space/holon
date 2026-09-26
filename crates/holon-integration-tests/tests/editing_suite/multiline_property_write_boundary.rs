@@ -139,3 +139,86 @@ fn create_with_a_multi_line_property_is_refused() {
         assert_refused_and_intact(result, &file, "block:n-child");
     });
 }
+
+async fn write_values(
+    t: &TestEnvironment,
+    op: &str,
+    params: Vec<(&str, Value)>,
+) -> anyhow::Result<()> {
+    let mut p = holon_api::StorageEntity::new();
+    for (k, v) in params {
+        p.insert(k.into(), v);
+    }
+    t.engine()
+        .execute_operation(&EntityName::new("block"), op, p, OpOrigin::User)
+        .await
+        .map(|_| ())
+}
+
+fn bag() -> Value {
+    Value::Object([("note".to_string(), Value::String(INJECTION.into()))].into())
+}
+
+fn bag_json() -> String {
+    serde_json::json!({ "note": INJECTION }).to_string()
+}
+
+fn text(s: &str) -> Value {
+    Value::String(s.to_string())
+}
+
+fn refused_case(op: &'static str, block: &'static str, params: fn() -> Vec<(&'static str, Value)>) {
+    let rt = runtime();
+    rt.clone().block_on(async move {
+        let t = booted(rt.clone()).await;
+        let result = write_values(&t, op, params()).await;
+        let file = org_file_after_settle(&t).await;
+        assert_refused_and_intact(result, &file, block);
+    });
+}
+
+#[test]
+fn create_with_a_multi_line_value_in_the_properties_object_is_refused() {
+    refused_case("create", "block:n-child", || {
+        vec![
+            ("id", text("block:n-child")),
+            ("parent_id", text(TARGET_ID)),
+            ("content", text("child")),
+            ("properties", bag()),
+        ]
+    });
+}
+
+#[test]
+fn create_with_a_multi_line_value_in_the_properties_json_is_refused() {
+    refused_case("create", "block:n-child", || {
+        vec![
+            ("id", text("block:n-child")),
+            ("parent_id", text(TARGET_ID)),
+            ("content", text("child")),
+            ("properties", text(&bag_json())),
+        ]
+    });
+}
+
+#[test]
+fn set_field_of_the_whole_properties_bag_with_a_multi_line_value_is_refused() {
+    refused_case("set_field", TARGET_ID, || {
+        vec![
+            ("id", text(TARGET_ID)),
+            ("field", text("properties")),
+            ("value", bag()),
+        ]
+    });
+}
+
+#[test]
+fn set_field_of_the_org_drawer_carrier_with_a_multi_line_value_is_refused() {
+    refused_case("set_field", TARGET_ID, || {
+        vec![
+            ("id", text(TARGET_ID)),
+            ("field", text("org_properties")),
+            ("value", text(&bag_json())),
+        ]
+    });
+}

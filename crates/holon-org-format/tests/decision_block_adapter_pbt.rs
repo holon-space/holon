@@ -244,22 +244,42 @@ fn words(first: &'static str) -> impl Strategy<Value = String> + Clone {
 const PLAIN_LINES: &[&str] = &[
     "Keep it short",
     "  indented line",
+    "\tlead tab",
     ":END:",
     ":PROPERTIES:",
     "- [ ] item",
     "|a|b|",
     "*x marks",
+    "*\tx",
+    "**",
+    "#1 is my choice",
+    "#hashtag start",
+    "# comment",
+    "#+begin_quote",
+    "#+:",
+    "CLOSED: [2026-01-01 Thu]",
+    "x SCHEDULED: <2026-01-01 Thu>",
+    "x [y]",
+    "x [[",
 ];
-/// Lines org reads as structure, trims, or rewrites.
+/// Lines a body holds verbatim only as its first line.
+const PLAIN_FIRST_LINES: &[&str] = &["SCHEDULED: tomorrow", "DEADLINE: soon"];
+/// Lines org reads as structure, trims, moves, or rewrites.
 const HAZARD_LINES: &[&str] = &[
     "",
     "   ",
     "* heading",
     "** heading",
+    "*  x",
     "#+TITLE: x",
-    "# comment",
+    "#+NAME: x",
+    "#+RESULTS:",
+    "#+begin_src\nfn\n#+end_src",
     "DEADLINE: <2026-01-01 Thu>",
     "SCHEDULED: <2026-01-01 Thu>",
+    "SCHEDULED: tomorrow",
+    "  SCHEDULED: tomorrow",
+    "DEADLINE: tomorrow",
     "see [[x]]",
     "trailing  ",
     " leading",
@@ -282,17 +302,79 @@ fn line(hazard: bool) -> BoxedStrategy<String> {
 }
 
 fn lines(hazard: bool) -> BoxedStrategy<String> {
-    prop::collection::vec(line(hazard), 1..4)
-        .prop_map(|ls| ls.join("\n"))
+    (
+        prop::option::of(prop::sample::select(PLAIN_FIRST_LINES)),
+        prop::collection::vec(line(hazard), 1..4),
+    )
+        .prop_map(|(first, rest)| {
+            first
+                .into_iter()
+                .map(str::to_string)
+                .chain(rest)
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
         .boxed()
 }
 
-/// A headline or a property value: one line of words, or any text.
-fn title(hazard: bool) -> BoxedStrategy<String> {
+#[derive(Debug, Clone, Copy)]
+enum Headline {
+    Question,
+    Label,
+}
+
+/// Titles org keeps verbatim in both headlines.
+const PLAIN_TITLES: &[&str] = &[
+    "COMMENT x",
+    "Comment x",
+    "x [#A]",
+    "[#10] x",
+    "x [1/2]",
+    "x *bold*",
+    "x <2026-01-01 Thu>",
+    "x :y:z",
+    "x :tag: y",
+];
+/// Kept verbatim by an option headline, which carries no keyword or tag.
+const PLAIN_LABELS: &[&str] = &["Pick ::", "x ::", "x:y:", "x :"];
+/// Kept verbatim by the decision headline, which carries its own keyword.
+const PLAIN_QUESTIONS: &[&str] = &["? x", "TODO x", "DONE x"];
+/// Titles org reads as a cookie, keyword, tags or link, or refuses to parse.
+const HAZARD_TITLES: &[&str] = &[
+    "[#A] which one?",
+    "[#a] x",
+    "[#A]x",
+    "x [[y]]",
+    "x :tag:",
+    ":tag:",
+    "Pick ::",
+    "x:y:",
+    "TODO x",
+    "? x",
+    "LATER x",
+    "x ",
+    "",
+];
+
+fn title(hazard: bool, headline: Headline) -> BoxedStrategy<String> {
+    let own = match headline {
+        Headline::Question => PLAIN_QUESTIONS,
+        Headline::Label => PLAIN_LABELS,
+    };
+    let plain = prop_oneof![
+        3 => words("[A-Z][a-z]{1,8}"),
+        1 => prop::sample::select(PLAIN_TITLES).prop_map(str::to_string),
+        1 => prop::sample::select(own).prop_map(str::to_string),
+    ];
     if hazard {
-        prop_oneof![words("[A-Z][a-z]{1,8}"), lines(true)].boxed()
+        prop_oneof![
+            plain,
+            prop::sample::select(HAZARD_TITLES).prop_map(str::to_string),
+            lines(true),
+        ]
+        .boxed()
     } else {
-        words("[A-Z][a-z]{1,8}").boxed()
+        plain.boxed()
     }
 }
 
@@ -316,7 +398,7 @@ fn shape(hazard: bool) -> impl Strategy<Value = Shape> {
         .prop_shuffle()
         .prop_flat_map(move |keys| {
             let n = keys.len() as u8;
-            let labels = prop::collection::vec(title(hazard), keys.len());
+            let labels = prop::collection::vec(title(hazard, Headline::Label), keys.len());
             let bounds = (1..=n).prop_flat_map(|max| (0..=max, Just(max)));
             (Just(keys), labels, bounds, 0..3u8)
         })
@@ -411,7 +493,7 @@ fn decision_with(hazard: bool) -> impl Strategy<Value = (Decision, Shape)> {
             ]));
             let commands = prop::collection::vec((command(&shape), 0..1000u32), 0..8);
             (
-                title(shape.hazard),
+                title(shape.hazard, Headline::Question),
                 Just(shape),
                 recommend,
                 supersedes,
@@ -552,6 +634,12 @@ proptest! {
         (d, _shape) in decision_with(false),
         breach in prop::sample::select(Breach::ALL),
     ) {
+        let first_word = d.question().split(' ').next().unwrap_or_default();
+        prop_assume!(
+            !matches!(breach, Breach::NoKeyword)
+                || !PLAIN_QUESTIONS.iter().any(|q| q.starts_with(first_word)),
+            "without its own keyword the headline reads the question's first word as one"
+        );
         let mut vault = stored(&d);
         breach.apply(&mut vault);
         let got = vault.read();
@@ -893,4 +981,58 @@ fn a_multi_line_note_is_refused() {
         ),
         "{got:?}"
     );
+}
+
+fn asking(question: &str) -> Decision {
+    Decision::ask(
+        DecisionRef::parse(&format!("block:{DECISION_ID}")).unwrap(),
+        DECISION_ID.to_string(),
+        DraftQuestion {
+            question: question.into(),
+            options: vec![("a".into(), "Pick ::".into())],
+            choose: None,
+            recommend: None,
+            supersedes: None,
+        },
+    )
+    .unwrap()
+}
+
+#[test]
+fn a_question_with_a_priority_cookie_is_refused() {
+    let got = try_stored(&asking("[#A] which one?"));
+    assert!(
+        matches!(
+            &got,
+            Err(BlockDecisionError::Unencodable {
+                field: "question",
+                ..
+            })
+        ),
+        "{:?}",
+        got.map(|v| v.read())
+    );
+}
+
+/// The decision headline ends in its `:decision:` tag, and org reads a title
+/// that ends in `:` into it.
+#[test]
+fn a_question_ending_in_a_colon_does_not_survive_org() {
+    let mut vault = stored(&asking("Pick one"));
+    let id = vault.decision_id();
+    vault.block_mut(&id).content = "Pick ::".into();
+    let text = render(&vault.document, &vault.blocks);
+    let (_, blocks) = parse(&text);
+    let question = blocks
+        .iter()
+        .find(|b| b.id == id)
+        .map(|b| b.content.clone());
+    assert_ne!(question.as_deref(), Some("Pick ::"), "{text}");
+    assert!(matches!(
+        try_stored(&asking("Pick ::")),
+        Err(BlockDecisionError::Unencodable {
+            field: "question",
+            ..
+        })
+    ));
 }

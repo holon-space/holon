@@ -34,6 +34,8 @@ use crate::decision::Ruling;
 use crate::decision::Status;
 use crate::entity_uri::EntityUri;
 use crate::render_types::Operation;
+use crate::types::DEFAULT_ACTIVE_KEYWORDS;
+use crate::types::DEFAULT_DONE_KEYWORDS;
 
 pub const DECISION_TAG: &str = "decision";
 
@@ -295,7 +297,7 @@ pub fn ask_ops(
     ));
     props.push(("tags", Value::Array(vec![text_value(DECISION_TAG)])));
 
-    let question = headline("question", decision.question())?;
+    let question = headline("question", decision.question(), Headline::Decision)?;
     let mut ops = vec![create(&id, parent, after, question, props)];
     let mut last: Option<EntityUri> = None;
     for option in decision.options().iter() {
@@ -304,7 +306,7 @@ pub fn ask_ops(
             &child,
             &id,
             last.as_ref(),
-            headline("option label", &option.label)?,
+            headline("option label", &option.label, Headline::Option)?,
             vec![(OPTION, text_value(option.key.as_str()))],
         ));
         last = Some(child);
@@ -546,54 +548,138 @@ fn one_line(field: &'static str, text: &str) -> Result<Value, BlockDecisionError
     Ok(text_value(text))
 }
 
-/// A headline title: one line, and org rewrites a link in it into marks.
-fn headline<'t>(field: &'static str, text: &'t str) -> Result<&'t str, BlockDecisionError> {
+/// Which headline a title goes into.
+#[derive(Debug, Clone, Copy)]
+enum Headline {
+    /// Carries the decision's own keyword and ends in its `:decision:` tag.
+    Decision,
+    /// Carries no keyword and no tag.
+    Option,
+}
+
+/// A headline title org gives back as the same text.
+fn headline<'t>(
+    field: &'static str,
+    text: &'t str,
+    headline: Headline,
+) -> Result<&'t str, BlockDecisionError> {
+    let refuse = |reason| Err(unencodable(field, text, reason));
     one_line(field, text)?;
-    if text.contains("[[") {
-        return Err(unencodable(field, text, "org stores a link as marks"));
+    if has_link(text) {
+        return refuse("org stores a link as marks");
     }
-    let last_word = text.rsplit(' ').next().unwrap_or(text);
-    if last_word.len() > 1 && last_word.starts_with(':') && last_word.ends_with(':') {
-        return Err(unencodable(
-            field,
-            text,
-            "org reads a trailing :word: as tags",
-        ));
+    if starts_with_priority_cookie(text) {
+        return refuse("org reads a leading [#x] as the priority cookie");
     }
-    Ok(text)
+    match headline {
+        Headline::Decision if text.ends_with(':') => {
+            refuse("org reads a title that ends in `:` into the `:decision:` tag")
+        }
+        Headline::Decision => Ok(text),
+        Headline::Option => {
+            let first = text.split(' ').next().unwrap_or(text);
+            if DEFAULT_ACTIVE_KEYWORDS.contains(&first) || DEFAULT_DONE_KEYWORDS.contains(&first) {
+                return refuse("org reads a leading task keyword as the block's state");
+            }
+            let last = text.rsplit(' ').next().unwrap_or(text);
+            if is_tag_group(last) {
+                return refuse("org reads a trailing :tag: group as tags");
+            }
+            Ok(text)
+        }
+    }
+}
+
+fn has_link(text: &str) -> bool {
+    text.find("[[")
+        .is_some_and(|open| text[open + 2..].contains("]]"))
+}
+
+/// `[#` + one character + `]`, as in `[#A]`.
+fn starts_with_priority_cookie(text: &str) -> bool {
+    let mut rest = match text.strip_prefix("[#") {
+        Some(rest) => rest.chars(),
+        None => return false,
+    };
+    rest.next().is_some() && rest.as_str().starts_with(']')
+}
+
+/// `:a:` or `:a:b:`, each tag non-empty.
+fn is_tag_group(word: &str) -> bool {
+    word.len() >= 3
+        && word.starts_with(':')
+        && word.ends_with(':')
+        && word[1..word.len() - 1]
+            .split(':')
+            .all(|tag| !tag.is_empty())
 }
 
 /// Text org keeps verbatim as the lines of a block body.
 fn body(field: &'static str, text: &str) -> Result<(), BlockDecisionError> {
     let refuse = |reason| Err(unencodable(field, text, reason));
-    let lines: Vec<&str> = text.split('\n').collect();
     if text.contains('\r') {
         return refuse("org has no carriage return");
     }
+    let lines: Vec<&str> = text.split('\n').collect();
     if lines.first().is_some_and(|l| l.trim().is_empty())
         || lines.last().is_some_and(|l| l.trim().is_empty())
     {
         return refuse("org drops blank lines at the edges of a body");
     }
-    for line in lines {
-        if line.trim_end() != line {
+    if has_link(text) {
+        return refuse("org stores a link as marks");
+    }
+    let lower: Vec<String> = lines.iter().map(|l| l.to_ascii_lowercase()).collect();
+    let src_block = lower
+        .iter()
+        .position(|l| l.starts_with("#+begin_src"))
+        .is_some_and(|begin| {
+            lower[begin + 1..]
+                .iter()
+                .any(|l| l.starts_with("#+end_src"))
+        });
+    if src_block {
+        return refuse("org reads a #+begin_src … #+end_src pair as a source block");
+    }
+    for (i, line) in lines.iter().enumerate() {
+        if !line.trim().is_empty() && line.trim_end() != *line {
             return refuse("org trims the end of a body line");
         }
         if line.starts_with('*') && line.trim_start_matches('*').starts_with(' ') {
             return refuse("a line of stars and a space starts a heading");
         }
-        if line.starts_with('#') {
-            return refuse("a line that starts with # is an org keyword or comment");
+        if line
+            .strip_prefix("#+")
+            .and_then(|rest| rest.split_once(':'))
+            .is_some_and(|(name, _)| !name.is_empty() && !name.contains(char::is_whitespace))
+        {
+            return refuse("org reads a #+name: line as a keyword of the block");
         }
-        let planning = ["SCHEDULED:", "DEADLINE:", "CLOSED:"];
-        if planning.iter().any(|p| line.trim_start().starts_with(p)) {
-            return refuse("a planning line belongs to the heading");
-        }
-        if line.contains("[[") {
-            return refuse("org stores a link as marks");
+        if is_planning(i, line, lines.get(i + 1).copied()) {
+            return refuse("org reads a SCHEDULED: or DEADLINE: line as the heading's planning");
         }
     }
     Ok(())
+}
+
+/// Org keeps a `SCHEDULED:` / `DEADLINE:` line as text only as the first,
+/// unindented body line, with no active timestamp after it and no blank line
+/// below it.
+fn is_planning(index: usize, line: &str, next: Option<&str>) -> bool {
+    let unindented = line.trim_start();
+    let Some(rest) = ["SCHEDULED:", "DEADLINE:"]
+        .iter()
+        .find_map(|k| unindented.strip_prefix(k))
+    else {
+        return false;
+    };
+    let kept_as_text = index == 0
+        && unindented.len() == line.len()
+        && rest.starts_with(' ')
+        && !rest.trim_start().is_empty()
+        && !rest.trim_start().starts_with('<')
+        && next.is_none_or(|n| !n.trim().is_empty());
+    !kept_as_text
 }
 
 fn answer_create(
