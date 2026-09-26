@@ -5,9 +5,9 @@ gap: COVERAGE
 secondary: null
 status: FIXED
 summary: >-
-  Removing a task keyword from a headline in the org file (`* TODO buy milk` to
-  `* buy milk`) left the stored task_state in place, and write-back then put
-  the keyword back into the file.
+  On the org leg, removing a task keyword from a headline in the file
+  (`* TODO buy milk` to `* buy milk`) left the stored task_state in place, and
+  write-back then put the keyword back into the file.
 ---
 
 ## Bug
@@ -48,6 +48,11 @@ the state.
 `task_state_category` when the previous block had a task state and the file no
 longer does. Pinned by the hand-authored cases
 `ingest-drops-removed-keyword-{loro,sqlonly}-arm` and
-`ingest-drops-emptied-question-loro-arm`. OPEN follow-up: a keystone
+`ingest-drops-emptied-question-loro-arm`. This status covers the org leg only.
+
+The markdown leg (LogSeq, Obsidian) has the same defect with a second cause
+and is OPEN: `2026-09-26-markdown-ingest-never-updates-a-changed-task-marker`.
+
+OPEN follow-up: a keystone
 transition that rewrites an existing headline's keyword, so the generator
 reaches this shape without a hand-authored case.
