@@ -282,7 +282,7 @@ async fn the_task_state_sidecar_still_rides_the_one_bag_writer() {
         &provider,
         &id,
         "task_state",
-        Value::String("DONE".to_string()),
+        holon_api::TaskStateWrite::Set(holon_api::TaskState::done("DONE")).to_value(),
     )
     .await;
     assert_eq!(

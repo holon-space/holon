@@ -212,6 +212,23 @@ impl SqlBlockOperations {
     /// decision needs come back in the [`MintedPosition`] for the caller's
     /// firing transaction to write; minting them here would make a refused
     /// create leave a rewritten keyspace behind (ADR 0030 D1).
+    /// The position of a block created under `parent_id` at `placement`.
+    /// `Last` anchors after the last sibling whatever its key looks like, so an
+    /// unkeyed sibling is re-minted in place rather than skipped.
+    pub async fn mint_placed_key(
+        &self,
+        parent_id: &str,
+        placement: &holon_api::ChildPlacement,
+    ) -> Result<MintedPosition> {
+        let after = match placement.anchor() {
+            Some(anchor) => anchor.map(|a| a.as_str().to_string()),
+            None => self.sibling_keys(parent_id).await?.pop().map(|(id, _)| id),
+        };
+        // ALLOW(order_minting): sanctioned SqlOnly order-owner mint site
+        // (Replication.md §5), same file/gate as `new_child_anchor`.
+        self.mint_child_key(parent_id, after.as_deref()).await
+    }
+
     async fn mint_child_key(
         &self,
         parent_id: &str,
@@ -717,6 +734,34 @@ impl BlockOrdering for SqlBlockOperations {
                 .get("parent_id")
                 .and_then(|v| v.as_string())
                 .map(str::to_string);
+            // The ingest pairs a keyword with the category its file's ring gives
+            // it; the pair is written as ONE task_state write.
+            if let Some(keyword) = params.remove("task_state") {
+                let category = params.remove("task_state_category");
+                let write = match (&keyword, &category) {
+                    (Value::String(keyword), Some(Value::String(category))) => {
+                        let category =
+                            holon_api::StateCategory::parse(category).ok_or_else(|| {
+                                format!(
+                                    "update_in_tree({id}): unknown task_state_category {category:?}"
+                                )
+                            })?;
+                        holon_api::TaskStateWrite::Set(holon_api::TaskState::new(
+                            keyword.clone(),
+                            category,
+                        ))
+                    }
+                    (Value::Removed(_), _) => holon_api::TaskStateWrite::Clear,
+                    _ => {
+                        return Err(format!(
+                            "update_in_tree({id}): task_state {keyword:?} without its \
+                             task_state_category {category:?}"
+                        )
+                        .into());
+                    }
+                };
+                params.insert("task_state".into(), write.to_value());
+            }
             // Content / edge / scalar fields → Loro via set_field. Skip the
             // primary key, the routing hint (not a field), and parent_id +
             // position which `place` owns.
@@ -1144,10 +1189,9 @@ impl CrudOperations<Block> for SqlBlockOperations {
         // consecutive id-less creates under the same parent then collide on
         // the identical key, leaving sibling order ambiguous until some
         // later op (e.g. `split_block`'s tie-detected rebalance) re-mints
-        // distinct keys. Mint a real key here — strictly after the current
-        // last sibling — using the same `gen_key_between` fractional-index
-        // generator `new_child_anchor` uses, so a caller-supplied `sort_key`
-        // still wins.
+        // distinct keys. Mint a real key here at the params' placement, using
+        // the same `gen_key_between` fractional-index generator
+        // `new_child_anchor` uses, so a caller-supplied `sort_key` still wins.
         //
         // Gated on consolidator exactly like `new_child_anchor`: only the
         // SqlOnly order owner mints. In Upstream (Loro) mode the tree is
@@ -1163,22 +1207,12 @@ impl CrudOperations<Block> for SqlBlockOperations {
                 .and_then(|v| v.as_string())
                 .map(str::to_string)
         {
-            // Append = anchor after the LAST sibling, whatever its key looks
-            // like. Routing through `mint_child_key` means an unkeyed sibling
-            // gets re-minted in place and the new block still lands after it;
-            // anchoring on the greatest minted key instead would skip the
-            // unkeyed row and silently place the new block BEFORE it. Positional
-            // (after-a-specific-block) creates come through `create_at`, not
-            // here — `split_block` / `restore_split` pre-mint and call that.
-            let last_id = self.sibling_keys(&parent_id).await?.pop().map(|(id, _)| id);
-            // ALLOW(order_minting): sanctioned SqlOnly order-owner mint site
-            // (Replication.md §5), same file/gate as `new_child_anchor`.
-            let minted = self
-                .mint_child_key(&parent_id, last_id.as_deref())
-                .await
-                .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+            let placement = holon_api::ChildPlacement::of_create(&fields)?;
+            let minted = self.mint_placed_key(&parent_id, &placement).await.map_err(
+                |e| -> Box<dyn std::error::Error + Send + Sync> {
                     format!("SqlBlockOperations::create: mint sort_key: {e:#}").into()
-                })?;
+                },
+            )?;
             // The key AND its sibling re-keys travel TYPED into create_row's
             // transaction, so a refused create leaves the keyspace untouched
             // (ADR 0030 D1) and no `_order_rekeys` params key ever exists.

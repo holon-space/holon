@@ -602,6 +602,19 @@ impl SqlOperationProvider {
         std::collections::HashMap<String, Value>,
         Vec<(EdgeFieldDescriptor, Vec<String>)>,
     )> {
+        if params
+            .get("task_state")
+            .and_then(|v| v.as_string())
+            .is_some()
+            && !params.contains_key("task_state_category")
+        {
+            return Err(format!(
+                "a write of task_state {:?} without its task_state_category: the engine derives \
+                 the category from the document's #+TODO: ring, so this write bypassed it",
+                params.get("task_state")
+            )
+            .into());
+        }
         let mut sql_fields = Vec::new();
         let mut extra_props = std::collections::HashMap::new();
         let mut edge_field_params: Vec<(EdgeFieldDescriptor, Vec<String>)> = Vec::new();
@@ -3574,6 +3587,19 @@ impl OriginTaggedWrites for SqlOperationProvider {
                 let raw_value = params
                     .get("value")
                     .ok_or_else(|| "Missing 'value' parameter".to_string())?;
+                // A task_state write carries the category the engine classified
+                // from the document's ring; the keyword is the value written.
+                let task_state_write = (field == "task_state")
+                    .then(|| holon_api::TaskStateWrite::parse(raw_value))
+                    .transpose()?;
+                let keyword_value;
+                let raw_value = match &task_state_write {
+                    Some(holon_api::TaskStateWrite::Set(state)) => {
+                        keyword_value = Value::String(state.keyword.clone());
+                        &keyword_value
+                    }
+                    _ => raw_value,
+                };
                 // Decided ONCE, before any read or write: a field with no route
                 // on this entity is refused here rather than reaching the
                 // `properties` overflow that only block-shaped tables have.
@@ -3729,19 +3755,10 @@ impl OriginTaggedWrites for SqlOperationProvider {
                         } else {
                             vec![BagEntry::remove(field)]
                         }
-                    } else if field == "task_state" {
-                        // A bare keyword write gets its `task_state_category`
-                        // sidecar derived and written in the SAME statement —
-                        // otherwise every UI cycle dropped/staled the category and
-                        // a DONE keyword could read back as Active (see
-                        // `TaskState::category_str_for_keyword`).
-                        let keyword = value.as_string().ok_or_else(|| {
-                            format!(
-                                "set_field('task_state'): expected String or Value::REMOVED, got \
-                                 {value:?}"
-                            )
-                        })?;
-                        let category = holon_api::TaskState::category_str_for_keyword(keyword);
+                    } else if let Some(holon_api::TaskStateWrite::Set(state)) = &task_state_write {
+                        // The keyword and its category land in the SAME
+                        // statement, so the pair never reads back half-written.
+                        let category = state.category.as_str();
                         vec![
                             BagEntry::set("task_state", sql_value(), &value),
                             BagEntry::set_derived(
@@ -3755,7 +3772,8 @@ impl OriginTaggedWrites for SqlOperationProvider {
                     format!(
                         "UPDATE {} SET {} WHERE id = '{}'",
                         self.table_name,
-                        bag_and_kinds_set_clause(&entries),
+                        bag_and_kinds_set_clause(&entries)
+                            .map_err(|e| format!("set_field {field} on {id}: {e}"))?,
                         id.replace('\'', "''")
                     )
                 };
@@ -4078,13 +4096,16 @@ impl OriginTaggedWrites for SqlOperationProvider {
                     vec!["".into(), "TODO".into(), "DOING".into(), "DONE".into()];
                 let next = holon_api::render_eval::cycle_state(current, &states);
 
-                // `set_field("task_state")` pairs the `task_state_category`
-                // sidecar in the same UPDATE (see the set_field arm), keeping
-                // the pair invariant `Block::set_task_state` establishes.
+                // This ring is the native one, so its keywords take the native
+                // categories.
                 let mut set_params = StorageEntity::new();
                 set_params.insert("id".into(), Value::String(id));
                 set_params.insert("field".into(), Value::String("task_state".into()));
-                set_params.insert("value".into(), Value::String(next));
+                set_params.insert(
+                    "value".into(),
+                    holon_api::TaskStateWrite::Set(holon_api::TaskState::from_keyword(&next))
+                        .to_value(),
+                );
                 self.execute_operation_with_origin(entity_name, "set_field", set_params, origin)
                     .await
             }

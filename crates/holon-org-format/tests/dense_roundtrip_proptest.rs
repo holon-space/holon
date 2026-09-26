@@ -2,7 +2,8 @@
 //!
 //! Property: for any generated block forest `F` with a per-query alias table
 //! `T`, `parse_dense(render_dense(F, T))` recovers `F`'s structure and content
-//! — titles, task states, and the parent/child tree (matched by alias). The
+//! — titles, task states, tags, drawer properties, and the parent/child tree
+//! (matched by alias). The
 //! dense form must also actually be dense: `:ID:` drawer scaffolding replaced
 //! by a trailing `{#alias}` token.
 //!
@@ -51,9 +52,93 @@ fn state() -> impl Strategy<Value = Option<TaskState>> {
     ]
 }
 
-/// A generated node: title, task state, and a raw seed that selects its parent.
-fn node() -> impl Strategy<Value = (String, Option<TaskState>, usize)> {
-    (title(), state(), any::<usize>())
+const TAG_POOL: &[&str] = &["decision", "option", "ops_2"];
+const PROPERTY_KEYS: &[&str] = &["choose", "recommend", "option", "asked-by"];
+
+fn tags() -> impl Strategy<Value = Vec<String>> {
+    prop::sample::subsequence(TAG_POOL, 0..=TAG_POOL.len())
+        .prop_map(|ts| ts.into_iter().map(str::to_string).collect())
+}
+
+/// Drawer properties whose values carry the characters a title-side token
+/// grammar would trip over (`{`, `:`, `#`).
+fn properties() -> impl Strategy<Value = Vec<(String, String)>> {
+    prop::sample::subsequence(PROPERTY_KEYS, 0..=2).prop_flat_map(|keys| {
+        let n = keys.len();
+        prop::collection::vec(
+            prop_oneof![
+                title(),
+                Just("1..3".to_string()),
+                Just("a {#1} :x:".to_string()),
+            ],
+            n,
+        )
+        .prop_map(move |values| {
+            keys.iter()
+                .map(|k| k.to_string())
+                .zip(values)
+                .collect::<Vec<_>>()
+        })
+    })
+}
+
+/// Titles carrying the characters the headline grammar gives meaning to: a
+/// trailing tag-shaped group, colons, a mid-title `{#n}`, and `#`.
+fn org_shaped_title() -> impl Strategy<Value = String> {
+    prop_oneof![
+        title(),
+        (title(), word()).prop_map(|(t, w)| format!("{t} :{w}:")),
+        (title(), word(), word()).prop_map(|(t, a, b)| format!("{t} :{a}:{b}:")),
+        title().prop_map(|t| format!("{t}:")),
+        (title(), 0u8..10).prop_map(|(t, n)| format!("{t} {{#{n}}}")),
+        (title(), word()).prop_map(|(t, w)| format!("{t} ::{w} #{w}")),
+        (word(), word()).prop_map(|(a, b)| format!("{a} :{a} {b}:")),
+    ]
+}
+
+/// Values a headline drawer holds only as a literal, next to plain ones.
+fn any_value() -> impl Strategy<Value = String> {
+    prop_oneof![
+        title(),
+        "\\PC{0,8}",
+        prop::sample::select(vec!["", " ", " a ", "a\nb", "\"q\"", ":x:", "{#1}"])
+            .prop_map(str::to_string),
+    ]
+}
+
+struct GenNode {
+    title: String,
+    state: Option<TaskState>,
+    tags: Vec<String>,
+    properties: Vec<(String, String)>,
+    parent_seed: usize,
+}
+
+/// A generated node; `parent_seed` selects its parent.
+fn node() -> impl Strategy<Value = GenNode> {
+    (title(), state(), tags(), properties(), any::<usize>()).prop_map(
+        |(title, state, tags, properties, parent_seed)| GenNode {
+            title,
+            state,
+            tags,
+            properties,
+            parent_seed,
+        },
+    )
+}
+
+impl std::fmt::Debug for GenNode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{:?} {:?} {:?} {:?} ^{}",
+            self.title,
+            self.state.as_ref().map(|s| &s.keyword),
+            self.tags,
+            self.properties,
+            self.parent_seed
+        )
+    }
 }
 
 /// The document id every projection roots at.
@@ -64,13 +149,14 @@ fn file_id() -> EntityUri {
 /// Build a block forest from generated nodes. Node `i`'s parent is chosen from
 /// `{root} ∪ {0..i}` via its seed, clamped so depth never exceeds 3. Returns
 /// the blocks in tree (pre-)order — parent always precedes child.
-fn build_forest(nodes: &[(String, Option<TaskState>, usize)]) -> Vec<Block> {
+fn build_forest(nodes: &[GenNode]) -> Vec<Block> {
     let fid = file_id();
     let mut ids: Vec<EntityUri> = Vec::with_capacity(nodes.len());
     let mut depth: Vec<usize> = Vec::with_capacity(nodes.len());
     let mut blocks: Vec<Block> = Vec::with_capacity(nodes.len());
 
-    for (i, (t, st, seed)) in nodes.iter().enumerate() {
+    for (i, n) in nodes.iter().enumerate() {
+        let seed = &n.parent_seed;
         let id = EntityUri::block(&format!("n{i}"));
         // Candidate parent index in 0..=i; == i means "root".
         let cand = seed % (i + 1);
@@ -82,8 +168,12 @@ fn build_forest(nodes: &[(String, Option<TaskState>, usize)]) -> Vec<Block> {
         ids.push(id.clone());
         depth.push(d);
 
-        let mut b = Block::new_text(id, parent_id, t.clone());
-        b.set_task_state(st.clone());
+        let mut b = Block::new_text(id, parent_id, n.title.clone());
+        b.set_task_state(n.state.clone());
+        b.tags = holon_api::Tags::from_tag_iter(n.tags.clone());
+        for (k, v) in &n.properties {
+            b.set_property(k, holon_api::Value::String(v.clone()));
+        }
         blocks.push(b);
     }
     blocks
@@ -104,6 +194,40 @@ fn doc_block() -> Block {
         TaskState::done("CANCELLED"),
     ]));
     doc
+}
+
+/// `dense` parsed and rendered again with the same aliases.
+fn rerender(dense: &str, doc: &Block) -> String {
+    let fid = file_id();
+    let parsed = parse_dense(dense).expect("dense projection must parse");
+    let blocks: Vec<Block> = parsed
+        .blocks
+        .iter()
+        .map(|db| {
+            let mut b = db.block.clone();
+            if db.parent_parse_id.is_none() {
+                b.parent_id = fid.clone();
+            }
+            b
+        })
+        .collect();
+    let table = AliasTable::from_pairs(parsed.blocks.iter().map(|db| {
+        (
+            db.alias
+                .clone()
+                .expect("every projected block carries an alias"),
+            db.block.id.clone(),
+        )
+    }))
+    .expect("aliases are distinct");
+    render_dense(
+        doc,
+        &blocks,
+        &fid,
+        &table,
+        &std::collections::HashSet::new(),
+    )
+    .expect("dense re-render")
 }
 
 proptest! {
@@ -176,6 +300,20 @@ proptest! {
                 "task state diverged for alias {}",
                 alias
             );
+            prop_assert_eq!(
+                db.block.tags(),
+                original.tags(),
+                "tags diverged for alias {}:\n{}",
+                alias,
+                dense
+            );
+            prop_assert_eq!(
+                db.block.drawer_properties(),
+                original.drawer_properties(),
+                "drawer properties diverged for alias {}:\n{}",
+                alias,
+                dense
+            );
 
             // Parent correspondence: a root (parent == file id) parses to no
             // parent row; a nested block's parent row carries the parent's alias.
@@ -204,5 +342,34 @@ proptest! {
                 );
             }
         }
+    }
+
+    #[test]
+    fn dense_projection_is_a_render_fixed_point(
+        nodes in prop::collection::vec(
+            (org_shaped_title(), state(), tags(), prop::collection::btree_map("p[a-z-]{0,5}", any_value(), 0..3), any::<usize>())
+                .prop_map(|(title, state, tags, properties, parent_seed)| GenNode {
+                    title,
+                    state,
+                    tags,
+                    properties: properties.into_iter().collect(),
+                    parent_seed,
+                }),
+            1..=8,
+        )
+    ) {
+        let blocks = build_forest(&nodes);
+        let fid = file_id();
+        let table = AliasTable::assign(blocks.iter().map(|b| b.id.clone()));
+        let doc = doc_block();
+        let gap_ids = std::collections::HashSet::new();
+        let dense = render_dense(&doc, &blocks, &fid, &table, &gap_ids).expect("dense render");
+
+        // A stored title ending in a tag-shaped run reads back with that run
+        // as tags, so the first render need not be the fixed point; the
+        // projection of what it parses to must be.
+        let once = rerender(&dense, &doc);
+        let again = rerender(&once, &doc);
+        prop_assert_eq!(&again, &once, "render . parse is not the identity on:\n{}", once);
     }
 }

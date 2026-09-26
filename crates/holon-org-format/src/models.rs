@@ -289,6 +289,36 @@ pub fn is_done_keyword(keyword: &str) -> bool {
     DEFAULT_DONE_KEYWORDS.contains(&keyword)
 }
 
+/// True for a flat property key a headline's `:PROPERTIES:` drawer never
+/// shows: Holon's own block fields and `_`-prefixed carriers.
+pub fn is_hidden_drawer_key(key: &str) -> bool {
+    const INTERNAL_KEYS: &[&str] = &[
+        "level",
+        "sequence",
+        "task_state",
+        "task_state_category",
+        "priority",
+        "tags",
+        "requires",
+        "advice_suppressed",
+        "contributes_to",
+        "scheduled",
+        "deadline",
+        "org_properties",
+        "TODO",
+        "PRIORITY",
+        "TAGS",
+        "SCHEDULED",
+        "DEADLINE",
+        "ID",
+        "COLLAPSED",
+        "WIDGET_ONLY",
+        "_source_header_args",
+        "_source_results",
+    ];
+    INTERNAL_KEYS.contains(&key) || key.starts_with('_')
+}
+
 /// Trait for converting entities to org-mode formatted strings
 pub trait ToOrg {
     fn to_org(&self) -> String;
@@ -1445,32 +1475,6 @@ impl OrgBlockExt for Block {
     }
 
     fn drawer_properties(&self) -> HashMap<String, String> {
-        // Known internal keys that are NOT drawer properties
-        const INTERNAL_KEYS: &[&str] = &[
-            "level",
-            "sequence",
-            "task_state",
-            "task_state_category",
-            "priority",
-            "tags",
-            "requires",
-            "advice_suppressed",
-            "contributes_to",
-            "scheduled",
-            "deadline",
-            "org_properties",
-            "TODO",
-            "PRIORITY",
-            "TAGS",
-            "SCHEDULED",
-            "DEADLINE",
-            "ID",
-            "COLLAPSED",
-            "WIDGET_ONLY",
-            "_source_header_args",
-            "_source_results",
-        ];
-
         let mut result = HashMap::new();
 
         // First, extract from the org_properties JSON if present: its keys
@@ -1499,7 +1503,7 @@ impl OrgBlockExt for Block {
 
         // Also include any flat properties that are not internal.
         for (k, v) in &self.properties {
-            if INTERNAL_KEYS.contains(&k.as_str()) {
+            if is_hidden_drawer_key(k) {
                 continue;
             }
             if let (Some(key), Some(s)) =

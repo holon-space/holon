@@ -483,6 +483,32 @@ async fn inline_marks_around_a_link_survive_the_loro_text_seam() {
     }
 }
 
+/// A link whose label is its target is written back without the label: the
+/// one authored form whose bytes change on write-back.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_link_labelled_with_its_target_is_written_back_bare() {
+    const AUTHORED: &str = "#+ID: bare-page\n* Links\n:PROPERTIES:\n:ID: bare-anchor\n:END:\nSee \
+                            [[https://example.test/1][https://example.test/1]] and \
+                            [[https://example.test/2][two]].\n";
+    const WRITTEN: &str = "#+ID: bare-page\n* Links\n:PROPERTIES:\n:ID: bare-anchor\n:END:\nSee \
+                           [[https://example.test/1]] and [[https://example.test/2][two]].\n";
+    for leg in [WriteLeg::OrgIngest, WriteLeg::Loro] {
+        let (from_parser, after_store) = render_both_ways(AUTHORED, leg).await;
+        assert_eq!(
+            from_parser,
+            WRITTEN,
+            "leg {}: the format-only leg writes the bare form",
+            leg.name()
+        );
+        assert_eq!(
+            after_store,
+            WRITTEN,
+            "leg {}: the store round trip writes the bare form",
+            leg.name()
+        );
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn inline_marks_around_a_link_survive_both_write_legs() {
     for leg in [WriteLeg::OrgIngest, WriteLeg::Loro] {

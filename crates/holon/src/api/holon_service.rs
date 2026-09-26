@@ -233,6 +233,19 @@ impl HolonService {
         op_name: &str,
         params: StorageEntity,
     ) -> Result<holon_api::OpOutcome> {
+        self.execute_with_parsed_carriers(entity_name, op_name, params, &[])
+            .await
+    }
+
+    /// [`Self::execute_operation`] with `carriers` the org parser read from the
+    /// author's own text written alongside `params`.
+    pub async fn execute_with_parsed_carriers(
+        &self,
+        entity_name: &EntityName,
+        op_name: &str,
+        params: StorageEntity,
+        carriers: &[holon_org_format::ParsedCarrier],
+    ) -> Result<holon_api::OpOutcome> {
         // End-to-end latency: the facade is a dispatch entry point of its own,
         // so it opens an interaction clock exactly as the frontend seams do.
         // Without it every agent/MCP-driven operation is absent from the SLO.
@@ -266,7 +279,13 @@ impl HolonService {
         // second copy buries the cause underneath repeated names.
         let outcome = self
             .engine
-            .execute_operation(entity_name, op_name, params, self.origin.clone())
+            .execute_with_parsed_carriers(
+                entity_name,
+                op_name,
+                params,
+                carriers,
+                self.origin.clone(),
+            )
             .await;
 
         // A refused/failed op writes nothing: retire its entry so no later

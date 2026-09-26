@@ -237,9 +237,10 @@ pub use clock::TestClock;
 pub use edge_field::{BlockEdges, EdgeField, EdgeFieldUpdate};
 // Re-export entity types (for Entity derive macro)
 pub use entity::{
-    ColumnValueKind, ComputedSpec, ComputedTier, DynamicEntity, FieldLifetime, FieldSchema,
-    HomeProfileId, IntoEntity, InvalidHomeProfileId, POSITION_AFTER_BLOCK_ID_PARAM, ProfileVariant,
-    ROUTING_DOC_URI_KEY, StorageEntity, TryFromEntity, TypeDefinition, TypeSource, WriteAuthority,
+    ChildPlacement, ColumnValueKind, ComputedSpec, ComputedTier, DynamicEntity, FieldLifetime,
+    FieldSchema, HomeProfileId, IntoEntity, InvalidHomeProfileId, POSITION_AFTER_BLOCK_ID_PARAM,
+    ProfileVariant, ROUTING_DOC_URI_KEY, StorageEntity, TryFromEntity, TypeDefinition, TypeSource,
+    WriteAuthority,
 };
 // Re-export entity URI type
 pub use entity_reference::EntityReferenceParam;
@@ -347,7 +348,7 @@ pub use streaming::{
 // Re-export typed domain types
 pub use types::{
     ContentType, DependsOn, EntityName, NavigationOp, Priority, QueryLanguage, Region,
-    SourceLanguage, StateCategory, Tags, TaskState, Timestamp, UiInfo,
+    SourceLanguage, StateCategory, Tags, TaskState, TaskStateWrite, Timestamp, UiInfo,
 };
 // Re-export widget meta types
 // Note: StaticParam and WidgetMeta use &'static str which FRB wraps as unsized `str`.

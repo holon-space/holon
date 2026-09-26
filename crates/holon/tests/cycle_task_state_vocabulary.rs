@@ -357,3 +357,688 @@ async fn one_cycle_is_one_undoable_gesture() {
         "one undo steps back exactly one cycle"
     );
 }
+
+/// A page whose `#+TODO:` ring is `ring`, with one child `child`.
+async fn page_with_ring(
+    engine: &BackendEngine,
+    page: &str,
+    child: &str,
+    ring: &[holon_api::TaskState],
+) {
+    create_block(engine, page, "Shipping").await;
+    set_field(
+        engine,
+        page,
+        "todo_keywords",
+        &serde_json::to_string(ring).expect("TaskState serializes"),
+    )
+    .await;
+    tag_as_page(engine, page).await;
+    create_child(engine, child, page).await;
+}
+
+async fn set_state_as(engine: &BackendEngine, id: &str, keyword: &str, origin: OpOrigin) {
+    let mut params: StorageEntity = HashMap::new();
+    params.insert("id".into(), Value::String(id.to_string()));
+    params.insert("field".into(), Value::String("task_state".to_string()));
+    params.insert("value".into(), Value::String(keyword.to_string()));
+    engine
+        .execute_operation(&EntityName::new("block"), "set_field", params, origin)
+        .await
+        .unwrap_or_else(|e| panic!("set_field task_state on {id}: {e:#}"));
+}
+
+/// The category of a written keyword is the one the block's OWN document ring
+/// gives it: `SHIPPED` is done in `TODO | SHIPPED`, `CANCELLED` is active in
+/// `TODO CANCELLED | DONE`, whatever org's default lists say.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_written_keyword_takes_its_documents_category() {
+    use holon_api::TaskState;
+
+    let engine = block_engine().await;
+    page_with_ring(
+        &engine,
+        "block:shipping",
+        "block:s1",
+        &[TaskState::active("TODO"), TaskState::done("SHIPPED")],
+    )
+    .await;
+    page_with_ring(
+        &engine,
+        "block:triage",
+        "block:t1",
+        &[
+            TaskState::active("TODO"),
+            TaskState::active("CANCELLED"),
+            TaskState::done("DONE"),
+        ],
+    )
+    .await;
+
+    set_state_as(&engine, "block:s1", "SHIPPED", OpOrigin::User).await;
+    assert_eq!(
+        prop(&engine, "block:s1", "task_state_category")
+            .await
+            .as_deref(),
+        Some("done"),
+        "SHIPPED is done in `TODO | SHIPPED`"
+    );
+    set_state_as(&engine, "block:t1", "CANCELLED", OpOrigin::User).await;
+    assert_eq!(
+        prop(&engine, "block:t1", "task_state_category")
+            .await
+            .as_deref(),
+        Some("active"),
+        "CANCELLED is active in `TODO CANCELLED | DONE`"
+    );
+
+    // Undo replays the prior keyword, classified by the same ring.
+    set_state_as(&engine, "block:s1", "TODO", OpOrigin::User).await;
+    engine.undo().await.expect("undo dispatch");
+    engine.undo().await.expect("undo dispatch");
+    assert_eq!(
+        prop(&engine, "block:t1", "task_state").await.as_deref(),
+        None,
+        "the CANCELLED write is taken back"
+    );
+    assert_eq!(
+        (
+            prop(&engine, "block:s1", "task_state").await,
+            prop(&engine, "block:s1", "task_state_category").await
+        ),
+        (Some("SHIPPED".to_string()), Some("done".to_string())),
+        "undoing TODO restores SHIPPED as done"
+    );
+}
+
+/// A created row that carries a keyword carries its category too, from its
+/// document's ring.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_created_task_carries_its_documents_category() {
+    use holon_api::TaskState;
+
+    let engine = block_engine().await;
+    page_with_ring(
+        &engine,
+        "block:shipping",
+        "block:s1",
+        &[TaskState::active("TODO"), TaskState::done("SHIPPED")],
+    )
+    .await;
+    let mut params: StorageEntity = HashMap::new();
+    params.insert("id".into(), Value::String("block:s2".to_string()));
+    params.insert("content".into(), Value::String("Fresh row".to_string()));
+    params.insert(
+        "parent_id".into(),
+        Value::String("block:shipping".to_string()),
+    );
+    params.insert("task_state".into(), Value::String("SHIPPED".to_string()));
+    engine
+        .execute_operation(&EntityName::new("block"), "create", params, OpOrigin::User)
+        .await
+        .unwrap_or_else(|e| panic!("create a task: {e:#}"));
+    assert_eq!(
+        (
+            prop(&engine, "block:s2", "task_state").await,
+            prop(&engine, "block:s2", "task_state_category").await
+        ),
+        (Some("SHIPPED".to_string()), Some("done".to_string()))
+    );
+}
+
+async fn move_block(engine: &BackendEngine, id: &str, parent: &str) {
+    let mut params: StorageEntity = HashMap::new();
+    params.insert("id".into(), Value::String(id.to_string()));
+    params.insert("parent_id".into(), Value::String(parent.to_string()));
+    engine
+        .execute_operation(
+            &EntityName::new("block"),
+            "move_block",
+            params,
+            OpOrigin::User,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("move {id} under {parent}: {e:#}"));
+}
+
+/// Two documents whose rings classify `CANCELLED` differently.
+async fn two_rings(engine: &BackendEngine) {
+    use holon_api::TaskState;
+
+    page_with_ring(
+        engine,
+        "block:closing",
+        "block:x",
+        &[TaskState::active("TODO"), TaskState::done("CANCELLED")],
+    )
+    .await;
+    page_with_ring(
+        engine,
+        "block:triage",
+        "block:y",
+        &[
+            TaskState::active("TODO"),
+            TaskState::active("CANCELLED"),
+            TaskState::done("DONE"),
+        ],
+    )
+    .await;
+    set_state_as(engine, "block:x", "CANCELLED", OpOrigin::User).await;
+}
+
+async fn pair(engine: &BackendEngine, id: &str) -> (Option<String>, Option<String>) {
+    (
+        prop(engine, id, "task_state").await,
+        prop(engine, id, "task_state_category").await,
+    )
+}
+
+/// A task moved into a document whose ring classifies its keyword otherwise
+/// takes that document's category, and undoing the move gives the old one back.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_moved_task_takes_its_new_documents_category() {
+    let engine = block_engine().await;
+    two_rings(&engine).await;
+    assert_eq!(
+        pair(&engine, "block:x").await,
+        (Some("CANCELLED".into()), Some("done".into()))
+    );
+
+    move_block(&engine, "block:x", "block:triage").await;
+    assert_eq!(
+        pair(&engine, "block:x").await,
+        (Some("CANCELLED".into()), Some("active".into())),
+        "CANCELLED is active in the document it moved to"
+    );
+
+    engine.undo().await.expect("undo dispatch");
+    assert_eq!(
+        pair(&engine, "block:x").await,
+        (Some("CANCELLED".into()), Some("done".into())),
+        "undoing the move puts it back under the ring that makes it done"
+    );
+}
+
+/// A ring edit re-derives the category of the document's tasks.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_ring_edit_rederives_its_documents_categories() {
+    use holon_api::TaskState;
+
+    let engine = block_engine().await;
+    two_rings(&engine).await;
+    set_field(
+        &engine,
+        "block:closing",
+        "todo_keywords",
+        &serde_json::to_string(&[
+            TaskState::active("TODO"),
+            TaskState::active("CANCELLED"),
+            TaskState::done("DONE"),
+        ])
+        .expect("TaskState serializes"),
+    )
+    .await;
+    assert_eq!(
+        pair(&engine, "block:x").await,
+        (Some("CANCELLED".into()), Some("active".into())),
+        "the ring now declares CANCELLED active"
+    );
+}
+
+/// A keyword the document's ring does not declare is refused by name, and
+/// nothing is stored.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_keyword_its_documents_ring_does_not_declare_is_refused() {
+    let engine = block_engine().await;
+    page_with_ring(
+        &engine,
+        "block:shipping",
+        "block:s1",
+        &[
+            holon_api::TaskState::active("NEXT"),
+            holon_api::TaskState::done("SHIPPED"),
+        ],
+    )
+    .await;
+    let mut params: StorageEntity = HashMap::new();
+    params.insert("id".into(), Value::String("block:s1".to_string()));
+    params.insert("field".into(), Value::String("task_state".to_string()));
+    params.insert("value".into(), Value::String("TODO".to_string()));
+    let err = engine
+        .execute_operation(
+            &EntityName::new("block"),
+            "set_field",
+            params,
+            OpOrigin::User,
+        )
+        .await
+        .expect_err("TODO is not a keyword of `NEXT | SHIPPED`");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("TODO") && msg.contains("block:shipping") && msg.contains("NEXT | SHIPPED"),
+        "the refusal names the keyword, the document and its ring: {msg}"
+    );
+    assert_eq!(pair(&engine, "block:s1").await, (None, None));
+}
+
+async fn try_op(engine: &BackendEngine, op: &str, params: &[(&str, &str)]) -> anyhow::Result<()> {
+    let params: StorageEntity = params
+        .iter()
+        .map(|(k, v)| (Arc::from(*k), Value::String(v.to_string())))
+        .collect();
+    engine
+        .execute_operation(&EntityName::new("block"), op, params, OpOrigin::User)
+        .await
+        .map(|_| ())
+}
+
+async fn parent_of(engine: &BackendEngine, id: &str) -> Option<String> {
+    let rows = engine
+        .db_handle()
+        .query(
+            &format!(
+                "SELECT parent_id AS v FROM {BLOCK_WRITE_TABLE} WHERE id = '{}'",
+                id.replace('\'', "''")
+            ),
+            HashMap::new(),
+        )
+        .await
+        .expect("parent query");
+    rows.first()
+        .and_then(|r| r.get("v"))
+        .and_then(|v| v.as_string())
+        .map(str::to_string)
+}
+
+/// Page `block:closing` (`TODO | CANCELLED`) holding `block:x` = `TODO`, and
+/// page `block:shipping` (`NEXT | SHIPPED`), which does not declare `TODO`.
+async fn a_ring_without_todo(engine: &BackendEngine) {
+    use holon_api::TaskState;
+
+    page_with_ring(
+        engine,
+        "block:closing",
+        "block:x",
+        &[TaskState::active("TODO"), TaskState::done("CANCELLED")],
+    )
+    .await;
+    page_with_ring(
+        engine,
+        "block:shipping",
+        "block:s1",
+        &[TaskState::active("NEXT"), TaskState::done("SHIPPED")],
+    )
+    .await;
+    set_state_as(engine, "block:x", "TODO", OpOrigin::User).await;
+}
+
+fn assert_names_the_ring(result: anyhow::Result<()>, block: &str) {
+    let msg = format!("{:#}", result.expect_err("the move must be refused"));
+    assert!(
+        msg.contains("\"TODO\"")
+            && msg.contains(block)
+            && msg.contains("block:shipping")
+            && msg.contains("NEXT | SHIPPED"),
+        "the refusal names the keyword, the block, the target document and its ring: {msg}"
+    );
+}
+
+/// A task moved into a document whose ring does not declare its keyword is
+/// refused before any write: org would write the headline without it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_move_into_a_ring_that_lacks_the_keyword_is_refused() {
+    let engine = block_engine().await;
+    a_ring_without_todo(&engine).await;
+
+    let moved = try_op(
+        &engine,
+        "move_block",
+        &[("id", "block:x"), ("parent_id", "block:shipping")],
+    )
+    .await;
+    assert_names_the_ring(moved, "block:x");
+    assert_eq!(
+        parent_of(&engine, "block:x").await.as_deref(),
+        Some("block:closing")
+    );
+    assert_eq!(
+        pair(&engine, "block:x").await,
+        (Some("TODO".into()), Some("active".into()))
+    );
+
+    let reparented = try_op(
+        &engine,
+        "set_field",
+        &[
+            ("id", "block:x"),
+            ("field", "parent_id"),
+            ("value", "block:shipping"),
+        ],
+    )
+    .await;
+    assert_names_the_ring(reparented, "block:x");
+    assert_eq!(
+        parent_of(&engine, "block:x").await.as_deref(),
+        Some("block:closing")
+    );
+}
+
+/// The refusal covers every block the move hands to the target document, not
+/// only the moved one.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_subtree_move_is_refused_by_its_descendants_keyword() {
+    let engine = block_engine().await;
+    a_ring_without_todo(&engine).await;
+    create_child(&engine, "block:holder", "block:closing").await;
+    move_block(&engine, "block:x", "block:holder").await;
+
+    let moved = try_op(
+        &engine,
+        "move_block",
+        &[("id", "block:holder"), ("parent_id", "block:shipping")],
+    )
+    .await;
+    assert_names_the_ring(moved, "block:x");
+    assert_eq!(
+        parent_of(&engine, "block:holder").await.as_deref(),
+        Some("block:closing")
+    );
+}
+
+/// Indenting under a sibling that is a page hands the block to that page's
+/// document.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_indent_into_a_ring_that_lacks_the_keyword_is_refused() {
+    let engine = block_engine().await;
+    a_ring_without_todo(&engine).await;
+    move_block(&engine, "block:shipping", "block:closing").await;
+    let mut params: StorageEntity = HashMap::new();
+    params.insert("id".into(), Value::String("block:x".to_string()));
+    params.insert(
+        "parent_id".into(),
+        Value::String("block:closing".to_string()),
+    );
+    params.insert(
+        "after_block_id".into(),
+        Value::String("block:shipping".to_string()),
+    );
+    engine
+        .execute_operation(
+            &EntityName::new("block"),
+            "move_block",
+            params,
+            OpOrigin::User,
+        )
+        .await
+        .expect("place block:x right after the nested page");
+
+    let indented = try_op(&engine, "indent", &[("id", "block:x")]).await;
+    assert_names_the_ring(indented, "block:x");
+    assert_eq!(
+        parent_of(&engine, "block:x").await.as_deref(),
+        Some("block:closing")
+    );
+}
+
+/// A ring edit that drops a keyword one of the document's tasks carries is
+/// refused: the file would lose that task's state.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_ring_edit_that_drops_a_used_keyword_is_refused() {
+    use holon_api::TaskState;
+
+    let engine = block_engine().await;
+    a_ring_without_todo(&engine).await;
+    let ring = serde_json::to_string(&[TaskState::active("NEXT"), TaskState::done("SHIPPED")])
+        .expect("TaskState serializes");
+    let edited = try_op(
+        &engine,
+        "set_field",
+        &[
+            ("id", "block:closing"),
+            ("field", "todo_keywords"),
+            ("value", &ring),
+        ],
+    )
+    .await;
+    let msg = format!("{:#}", edited.expect_err("the ring edit must be refused"));
+    assert!(
+        msg.contains("\"TODO\"") && msg.contains("block:x") && msg.contains("NEXT | SHIPPED"),
+        "the refusal names the keyword, the block and the new ring: {msg}"
+    );
+    assert_eq!(
+        pair(&engine, "block:x").await,
+        (Some("TODO".into()), Some("active".into()))
+    );
+}
+
+/// Page `block:closing` (`TODO WAITING |`) holding `holder`, whose child
+/// `block:kid` is `WAITING`, and page `block:home`, which declares no ring.
+async fn a_waiting_task_under(engine: &BackendEngine, holder: &str, content: &str) {
+    use holon_api::TaskState;
+
+    page_with_ring(
+        engine,
+        "block:closing",
+        holder,
+        &[TaskState::active("TODO"), TaskState::active("WAITING")],
+    )
+    .await;
+    set_field(engine, holder, "content", content).await;
+    create_child(engine, "block:kid", holder).await;
+    set_state_as(engine, "block:kid", "WAITING", OpOrigin::Sync).await;
+    create_block(engine, "block:home", "Home").await;
+    tag_as_page(engine, "block:home").await;
+}
+
+async fn ids_where(engine: &BackendEngine, condition: &str) -> Vec<String> {
+    let rows = engine
+        .db_handle()
+        .query(
+            &format!("SELECT id FROM {BLOCK_WRITE_TABLE} WHERE {condition} ORDER BY id"),
+            HashMap::new(),
+        )
+        .await
+        .expect("id query");
+    rows.iter()
+        .map(|r| {
+            r.get("id")
+                .and_then(|v| v.as_string())
+                .expect("id column")
+                .to_string()
+        })
+        .collect()
+}
+
+fn assert_names_waiting(result: anyhow::Result<()>, op: &str) {
+    let msg = format!("{:#}", result.expect_err("the compound must be refused"));
+    assert!(
+        msg.starts_with(op) && msg.contains("\"WAITING\"") && msg.contains("block:kid"),
+        "the refusal names the compound, the keyword and the block: {msg}"
+    );
+}
+
+/// "Turn into page" mints a page that declares its source document's ring, so
+/// every keyword of the subtree it takes stays a keyword of its document.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_converted_page_declares_its_source_documents_ring() {
+    let engine = block_engine().await;
+    a_waiting_task_under(&engine, "block:origin", "Origin").await;
+    let is_page = "id IN (SELECT block_id FROM block_tags WHERE tag = 'Page')";
+    let pages_before = ids_where(&engine, is_page).await;
+
+    try_op(
+        &engine,
+        "convert_block_to_page",
+        &[("target", "block:origin"), ("destination_path", "")],
+    )
+    .await
+    .expect("the convert applies");
+    let page = parent_of(&engine, "block:kid")
+        .await
+        .expect("block:kid has a parent");
+    assert!(
+        !pages_before.contains(&page) && ids_where(&engine, is_page).await.contains(&page),
+        "block:kid moved to the minted page, got {page}"
+    );
+    assert_eq!(
+        prop(&engine, &page, "todo_keywords").await,
+        prop(&engine, "block:closing", "todo_keywords").await
+    );
+    assert_eq!(
+        pair(&engine, "block:kid").await,
+        (Some("WAITING".into()), Some("active".into()))
+    );
+
+    engine.undo().await.expect("undo dispatch");
+    assert_eq!(ids_where(&engine, is_page).await, pages_before);
+    assert_eq!(
+        parent_of(&engine, "block:kid").await.as_deref(),
+        Some("block:origin")
+    );
+}
+
+/// Merging a duplicate into a canonical in another document hands the
+/// duplicate's children to that document; a keyword its ring lacks refuses
+/// the merge before the canonical's body or children change.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_merge_whose_moved_keyword_the_canonical_document_lacks_writes_nothing() {
+    let engine = block_engine().await;
+    a_waiting_task_under(&engine, "block:dup", "Dup body").await;
+    create_child(&engine, "block:canon", "block:home").await;
+    set_field(&engine, "block:canon", "content", "Canon").await;
+    let blocks_before = ids_where(&engine, "1 = 1").await;
+
+    let merged = try_op(
+        &engine,
+        "merge_blocks",
+        &[("canonical", "block:canon"), ("duplicate", "block:dup")],
+    )
+    .await;
+    assert_names_waiting(merged, "merge_blocks");
+    assert_eq!(ids_where(&engine, "1 = 1").await, blocks_before);
+    assert_eq!(
+        parent_of(&engine, "block:kid").await.as_deref(),
+        Some("block:dup")
+    );
+    assert!(
+        !engine.can_undo().await,
+        "a refused gesture journals nothing"
+    );
+}
+
+/// A merge whose canonical adopts the duplicate's ring moves the duplicate's
+/// children before the ring arrives, so it is refused, naming why.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_merge_that_adopts_the_ring_its_moved_keyword_needs_is_refused_by_name() {
+    let engine = block_engine().await;
+    a_waiting_task_under(&engine, "block:holder", "Holder").await;
+    let blocks_before = ids_where(&engine, "1 = 1").await;
+
+    let merged = try_op(
+        &engine,
+        "merge_blocks",
+        &[("canonical", "block:home"), ("duplicate", "block:closing")],
+    )
+    .await;
+    let msg = format!("{:#}", merged.expect_err("the merge must be refused"));
+    assert!(
+        msg.starts_with("merge_blocks")
+            && msg.contains("\"WAITING\"")
+            && msg.contains("block:kid")
+            && msg.contains("block:home")
+            && msg.contains("adopts"),
+        "the refusal names the keyword, the block, the document and why the adopted ring does \
+         not admit it: {msg}"
+    );
+    assert_eq!(ids_where(&engine, "1 = 1").await, blocks_before);
+}
+
+/// Template `block:tpl` (in no document) whose child `block:tpl-kid` carries
+/// `keyword`, instantiated under page `block:shipping`, whose ring is `ring`.
+async fn instantiate_keyword_into_ring(
+    engine: &BackendEngine,
+    ring: &[holon_api::TaskState],
+    keyword: &str,
+) -> anyhow::Result<()> {
+    page_with_ring(engine, "block:shipping", "block:s1", ring).await;
+    create_block(engine, "block:tpl", "Template").await;
+    set_field(engine, "block:tpl", "template", "weekly").await;
+    create_child(engine, "block:tpl-kid", "block:tpl").await;
+    set_field(engine, "block:tpl-kid", "content", "Review").await;
+    set_state_as(engine, "block:tpl-kid", keyword, OpOrigin::Sync).await;
+    try_op(
+        engine,
+        "instantiate_template",
+        &[
+            ("template_id", "block:tpl"),
+            ("target_parent", "block:shipping"),
+            ("context_key", "week-1"),
+        ],
+    )
+    .await
+}
+
+/// A template keyword the target document's ring lacks refuses the whole
+/// instantiation by name before any block is created.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_template_keyword_the_target_ring_lacks_is_refused_before_any_create() {
+    use holon_api::TaskState;
+
+    let engine = block_engine().await;
+    let refused = instantiate_keyword_into_ring(
+        &engine,
+        &[TaskState::active("NEXT"), TaskState::done("SHIPPED")],
+        "TODO",
+    )
+    .await;
+    let msg = format!(
+        "{:#}",
+        refused.expect_err("the instantiation must be refused")
+    );
+    assert!(
+        msg.starts_with("instantiate_template")
+            && msg.contains("\"TODO\"")
+            && msg.contains("block:tpl-kid")
+            && msg.contains("block:shipping")
+            && msg.contains("NEXT | SHIPPED"),
+        "the refusal names the keyword, the template block and the target document: {msg}"
+    );
+    assert_eq!(
+        ids_where(&engine, "parent_id = 'block:shipping'").await,
+        vec!["block:s1".to_string()],
+        "no instance block is created"
+    );
+}
+
+/// An instance task takes its category from the target document's ring:
+/// `CANCELLED` is done in the template's and active in the target's.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_instance_task_takes_the_target_documents_category() {
+    use holon_api::TaskState;
+
+    let engine = block_engine().await;
+    instantiate_keyword_into_ring(
+        &engine,
+        &[
+            TaskState::active("TODO"),
+            TaskState::active("CANCELLED"),
+            TaskState::done("DONE"),
+        ],
+        "CANCELLED",
+    )
+    .await
+    .expect("the instantiation applies");
+    let instance_kids = ids_where(
+        &engine,
+        "parent_id IN (SELECT id FROM block_raw WHERE parent_id = 'block:shipping' AND id != \
+         'block:s1')",
+    )
+    .await;
+    let [kid] = instance_kids.as_slice() else {
+        panic!("one instance child, got {instance_kids:?}");
+    };
+    assert_eq!(
+        pair(&engine, kid).await,
+        (Some("CANCELLED".into()), Some("active".into()))
+    );
+}

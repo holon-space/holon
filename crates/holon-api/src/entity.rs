@@ -1051,6 +1051,84 @@ pub const ROUTING_DOC_URI_KEY: &str = "_routing_doc_uri";
 /// from the persisted row.
 pub const POSITION_AFTER_BLOCK_ID_PARAM: &str = "after_block_id";
 
+/// Where a block lands among its parent's children. Every write authority
+/// places a created or moved block by this one rule.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ChildPlacement {
+    /// After every existing child.
+    Last,
+    /// Before every existing child.
+    First,
+    /// Right after this sibling.
+    After(crate::EntityUri),
+}
+
+impl ChildPlacement {
+    /// The placement a create's params ask for, read the same way by every
+    /// write authority. [`POSITION_AFTER_BLOCK_ID_PARAM`] and the
+    /// delete-inverse restore key `after` mean the same; both present and
+    /// disagreeing is refused rather than one picked.
+    pub fn of_create(params: &StorageEntity) -> Result<ChildPlacement> {
+        let read = |key: &str| {
+            params
+                .contains_key(key)
+                .then(|| Self::from_param(params, key))
+                .transpose()
+        };
+        match (read(POSITION_AFTER_BLOCK_ID_PARAM)?, read("after")?) {
+            (Some(canonical), Some(restore)) if canonical != restore => Err(format!(
+                "conflicting positional anchors — {POSITION_AFTER_BLOCK_ID_PARAM}={canonical:?} \
+                 but after={restore:?}"
+            )
+            .into()),
+            (canonical, restore) => Ok(canonical.or(restore).unwrap_or(ChildPlacement::Last)),
+        }
+    }
+
+    /// The placement a params bag asks for under `key`: absent is
+    /// [`ChildPlacement::Last`], `Null` is [`ChildPlacement::First`], a string
+    /// names the predecessor sibling.
+    pub fn from_param(params: &StorageEntity, key: &str) -> Result<ChildPlacement> {
+        match params.get(key) {
+            None => Ok(ChildPlacement::Last),
+            Some(Value::Null) => Ok(ChildPlacement::First),
+            Some(Value::String(after)) => {
+                // ALLOW(entity_uri_from_raw): a predecessor id from the StorageEntity params
+                // map
+                Ok(ChildPlacement::After(crate::EntityUri::from_raw(after)))
+            }
+            Some(other) => Err(format!("'{key}' must be a block id or Null, got {other:?}").into()),
+        }
+    }
+
+    /// The predecessor sibling a placement relative to an existing child
+    /// names (`None`: the first child); `None` for [`ChildPlacement::Last`].
+    pub fn anchor(&self) -> Option<Option<&crate::EntityUri>> {
+        match self {
+            ChildPlacement::Last => None,
+            ChildPlacement::First => Some(None),
+            ChildPlacement::After(after) => Some(Some(after)),
+        }
+    }
+
+    /// Put `id` into `siblings`, a parent's children in order.
+    pub fn place(&self, siblings: &mut Vec<crate::EntityUri>, id: crate::EntityUri) -> Result<()> {
+        let at = match self {
+            ChildPlacement::Last => siblings.len(),
+            ChildPlacement::First => 0,
+            ChildPlacement::After(after) => {
+                siblings
+                    .iter()
+                    .position(|s| s == after)
+                    .ok_or_else(|| format!("{after} is not a sibling of {id}"))?
+                    + 1
+            }
+        };
+        siblings.insert(at, id);
+        Ok(())
+    }
+}
+
 /// Operation-control param carrying a minted position's sibling re-keys to the
 /// write that consumes the key, so both land in ONE transaction (ADR 0030 D1).
 /// Never persisted: the SQL writer lifts it into statements and drops it.

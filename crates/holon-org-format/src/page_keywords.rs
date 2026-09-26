@@ -16,12 +16,81 @@ use orgize::SyntaxNode;
 
 use crate::models::OrgDocumentExt;
 
-/// The value of a keyword line whose key is one of `keys`, in any case.
-pub(crate) fn keyword_value<'a>(line: &'a str, keys: &[&str]) -> Option<&'a str> {
-    let (key, value) = line.trim().strip_prefix("#+")?.split_once(':')?;
-    keys.iter()
-        .any(|k| key.eq_ignore_ascii_case(k))
-        .then(|| value.trim())
+macro_rules! file_keywords {
+    ($($variant:ident => $key:literal,)*) => {
+        /// A keyword org reads from any line of a file for the whole page:
+        /// its title, a buffer setting `org-set-regexps-and-options` collects
+        /// (task keywords, file tags, category, properties, ...), or an export
+        /// setting.
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        pub enum FileKeyword {
+            $($variant,)*
+        }
+
+        impl FileKeyword {
+            pub const ALL: &'static [FileKeyword] = &[$(FileKeyword::$variant,)*];
+
+            /// The key as org spells it, upper case.
+            pub fn key(self) -> &'static str {
+                match self {
+                    $(FileKeyword::$variant => $key,)*
+                }
+            }
+        }
+    };
+}
+
+file_keywords! {
+    Title => "TITLE",
+    TypTodo => "TYP_TODO",
+    Todo => "TODO",
+    SeqTodo => "SEQ_TODO",
+    Filetags => "FILETAGS",
+    Tags => "TAGS",
+    Archive => "ARCHIVE",
+    Category => "CATEGORY",
+    Columns => "COLUMNS",
+    Constants => "CONSTANTS",
+    Link => "LINK",
+    Options => "OPTIONS",
+    Priorities => "PRIORITIES",
+    Property => "PROPERTY",
+    Startup => "STARTUP",
+    Setupfile => "SETUPFILE",
+    Date => "DATE",
+    Author => "AUTHOR",
+    Email => "EMAIL",
+    Language => "LANGUAGE",
+    SelectTags => "SELECT_TAGS",
+    ExcludeTags => "EXCLUDE_TAGS",
+    Creator => "CREATOR",
+    CiteExport => "CITE_EXPORT",
+    Macro => "MACRO",
+    Bind => "BIND",
+}
+
+impl FileKeyword {
+    /// The keyword `line` declares, its key in any case, and its value.
+    pub fn of(line: &str) -> Option<(FileKeyword, &str)> {
+        let (key, value) = line.trim().strip_prefix("#+")?.split_once(':')?;
+        Self::ALL
+            .iter()
+            .find(|k| key.eq_ignore_ascii_case(k.key()))
+            .map(|k| (*k, value.trim()))
+    }
+}
+
+/// The value of a `keyword` line.
+fn keyword_value(line: &str, keyword: FileKeyword) -> Option<&str> {
+    FileKeyword::of(line)
+        .filter(|(k, _)| *k == keyword)
+        .map(|(_, value)| value)
+}
+
+/// Whether org reads `line`, wherever it stands in a file, as a keyword of the
+/// page: a [`FileKeyword`] or the page's id.
+pub fn declares_page_keyword(line: &str) -> bool {
+    FileKeyword::of(line).is_some() || crate::comma_escape::is_page_id_keyword(line)
 }
 
 /// The org keyword kind of a task-keyword line; org orders the ring by it.
@@ -59,13 +128,12 @@ impl RingWord {
 /// `|`, the last one is done, as org reads it. A trailing `(...)` is a
 /// fast-access key, not part of the keyword (org-remove-keyword-keys).
 fn ring_line(line: &str) -> Option<(RingKind, Vec<RingWord>)> {
-    let (kind, value) = [
-        (RingKind::Type, "TYP_TODO"),
-        (RingKind::Todo, "TODO"),
-        (RingKind::Sequence, "SEQ_TODO"),
-    ]
-    .into_iter()
-    .find_map(|(kind, key)| keyword_value(line, &[key]).map(|v| (kind, v)))?;
+    let (kind, value) = match FileKeyword::of(line)? {
+        (FileKeyword::TypTodo, value) => (RingKind::Type, value),
+        (FileKeyword::Todo, value) => (RingKind::Todo, value),
+        (FileKeyword::SeqTodo, value) => (RingKind::Sequence, value),
+        _ => return None,
+    };
     let words: Vec<&str> = value.split_whitespace().collect();
     if words.is_empty() {
         return None;
@@ -96,8 +164,9 @@ fn ring_line(line: &str) -> Option<(RingKind, Vec<RingWord>)> {
 /// The lines of `text` org reads as `#+TITLE:` lines: indentation allowed, key
 /// in any case, anywhere in the file (org-macro--find-keyword-value).
 pub(crate) fn title_lines(text: &str) -> impl Iterator<Item = &str> {
-    text.lines()
-        .filter(|line| keyword_value(line.trim_start_matches([' ', '\t']), &["TITLE"]).is_some())
+    text.lines().filter(|line| {
+        keyword_value(line.trim_start_matches([' ', '\t']), FileKeyword::Title).is_some()
+    })
 }
 
 /// The page title the lines declare: every TITLE value joined with one space,
@@ -105,7 +174,7 @@ pub(crate) fn title_lines(text: &str) -> impl Iterator<Item = &str> {
 pub(crate) fn title_of<'a>(lines: impl IntoIterator<Item = &'a str>) -> Option<String> {
     let title = lines
         .into_iter()
-        .filter_map(|line| keyword_value(line, &["TITLE"]))
+        .filter_map(|line| keyword_value(line, FileKeyword::Title))
         .collect::<Vec<_>>()
         .join(" ");
     let title = title.trim();
@@ -224,7 +293,7 @@ pub(crate) fn edits(
     if current.title != wanted_title {
         let title_lines: Vec<&(LineAt, String)> = lines
             .iter()
-            .filter(|(_, raw)| keyword_value(raw, &["TITLE"]).is_some())
+            .filter(|(_, raw)| keyword_value(raw, FileKeyword::Title).is_some())
             .collect();
         match (&wanted_title, title_lines.split_first()) {
             (Some(title), Some(((at, raw), rest))) => {

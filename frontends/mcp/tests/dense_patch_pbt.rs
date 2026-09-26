@@ -2,9 +2,12 @@
 //!
 //! Metamorphic identity: for a captured projection `P` and any generated edit
 //! script producing an edited projection `P'`, applying `plan_patch(P, P')` to
-//! a model of `P` reproduces `P'` exactly. This exercises the REAL planner
-//! (`plan_patch`) and its relative-diff / LIS move detection against an
-//! independent in-memory reference model — the same "project → mutate → patch →
+//! a model of `P` reproduces `P'` exactly. `P` is built by the real
+//! `build_projection` and `P'` is rendered by the real dense renderer, so this
+//! exercises the REAL planner and its relative-diff / LIS move detection
+//! against an independent in-memory reference model, tags and drawer
+//! properties included —
+//! the same "project → mutate → patch →
 //! store == the mutation applied directly" shape as the composed keystone, with
 //! generators/refs compatible with it (block trees, task states, structural
 //! moves). Also asserts the ruling invariant: blocks the edit left untouched
@@ -13,21 +16,24 @@
 //! Synthetic data only (repo is PUBLIC).
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 use holon_api::EntityUri;
 use holon_api::block::Block;
 use holon_api::types::TaskState;
 use holon_mcp::dense_patch::PatchOp;
 use holon_mcp::dense_patch::Ref as PRef;
+use holon_mcp::dense_patch::RowAttributes;
 use holon_mcp::dense_patch::plan_patch;
-use holon_mcp::dense_projection::BlockVersion;
 use holon_mcp::dense_projection::ProjectedBlock;
 use holon_mcp::dense_projection::Projection;
+use holon_mcp::dense_projection::build_projection;
 use holon_org_format::Alias;
 use holon_org_format::AliasTable;
-use holon_org_format::DenseBlock;
-use holon_org_format::DenseParse;
 use holon_org_format::OrgBlockExt;
+use holon_org_format::OrgDocumentExt;
+use holon_org_format::parse_dense;
+use holon_org_format::render_dense;
 use proptest::prelude::*;
 
 const PAGE: &str = "page";
@@ -45,14 +51,40 @@ struct Node {
     block_id: Option<String>,
     title: String,
     state: Option<TaskState>,
+    attributes: RowAttributes,
     kids: Vec<Node>,
+}
+
+const TAG_POOL: &[&str] = &["decision", "option", "ops"];
+const PROPERTY_KEYS: &[&str] = &["choose", "Content", "a+b"];
+const PROPERTY_VALUES: &[&str] = &["1", "", " b {#2} :x:\n\"q\""];
+
+/// Tags from a bit mask over [`TAG_POOL`], properties from a base-4 digit per
+/// key of [`PROPERTY_KEYS`] (0 = absent, else a [`PROPERTY_VALUES`] index + 1).
+fn attrs(tag_mask: usize, prop_digits: usize) -> RowAttributes {
+    let tags = TAG_POOL
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| tag_mask & (1 << i) != 0)
+        .map(|(_, t)| t.to_string());
+    let mut properties = std::collections::BTreeMap::new();
+    for (i, key) in PROPERTY_KEYS.iter().enumerate() {
+        let digit = (prop_digits >> (2 * i)) & 3;
+        if digit != 0 {
+            properties.insert(key.to_string(), PROPERTY_VALUES[digit - 1].to_string());
+        }
+    }
+    RowAttributes {
+        tags: holon_api::Tags::from_tag_iter(tags),
+        properties,
+    }
 }
 
 fn kw_state(i: usize) -> Option<TaskState> {
     match i % 4 {
         0 => None,
         1 => Some(TaskState::active("TODO")),
-        2 => Some(TaskState::active("NEXT")),
+        2 => Some(TaskState::active("DOING")),
         _ => Some(TaskState::done("DONE")),
     }
 }
@@ -60,153 +92,132 @@ fn kw_state(i: usize) -> Option<TaskState> {
 /// Generate a small projection tree; every node is an existing block (alias set
 /// after generation from a monotonic counter).
 fn gen_tree() -> impl Strategy<Value = Node> {
-    let leaf = (0usize..9, 0usize..4).prop_map(|(t, s)| Node {
+    let leaf = (0usize..9, 0usize..4, 0usize..8, 0usize..64).prop_map(|(t, s, tm, pd)| Node {
         alias: Some(String::new()),
         block_id: None,
         title: format!("t{t}"),
         state: kw_state(s),
+        attributes: attrs(tm, pd),
         kids: vec![],
     });
     leaf.prop_recursive(3, 24, 4, |inner| {
-        (0usize..9, 0usize..4, prop::collection::vec(inner, 0..4)).prop_map(|(t, s, kids)| Node {
-            alias: Some(String::new()),
-            block_id: None,
-            title: format!("t{t}"),
-            state: kw_state(s),
-            kids,
-        })
+        (
+            0usize..9,
+            0usize..4,
+            0usize..8,
+            0usize..64,
+            prop::collection::vec(inner, 0..4),
+        )
+            .prop_map(|(t, s, tm, pd, kids)| Node {
+                alias: Some(String::new()),
+                block_id: None,
+                title: format!("t{t}"),
+                state: kw_state(s),
+                attributes: attrs(tm, pd),
+                kids,
+            })
     })
 }
 
-/// Assign real block ids + aliases in pre-order. Aliases are decimal strings
-/// (valid base62); block ids are `block:b<n>`.
-fn assign_ids(node: &mut Node, counter: &mut usize, alias_pairs: &mut Vec<(String, String)>) {
+/// Assign real block ids in pre-order: `block:b<n>`.
+fn assign_ids(node: &mut Node, counter: &mut usize) {
     if node.alias.is_some() {
-        let n = *counter;
+        node.block_id = Some(format!("block:b{counter}"));
         *counter += 1;
-        let alias = n.to_string();
-        let block_id = format!("block:b{n}");
-        node.alias = Some(alias.clone());
-        node.block_id = Some(block_id.clone());
-        alias_pairs.push((alias, block_id));
     }
     for k in &mut node.kids {
-        assign_ids(k, counter, alias_pairs);
+        assign_ids(k, counter);
     }
 }
 
-// ---------------------------------------------------------------------------
-// Build the Projection from the tree.
-// ---------------------------------------------------------------------------
+/// The tree's blocks in pre-order; a new node gets the id `block:new<n>`.
+fn blocks_of(root: &Node) -> Vec<Block> {
+    fn walk(node: &Node, parent: &EntityUri, new_ctr: &mut usize, out: &mut Vec<Block>) {
+        for kid in &node.kids {
+            let id = match &kid.block_id {
+                Some(id) => EntityUri::parse(id).unwrap(),
+                None => {
+                    *new_ctr += 1;
+                    EntityUri::block(&format!("new{new_ctr}"))
+                }
+            };
+            let mut b = Block::new_text(id.clone(), parent.clone(), kid.title.clone());
+            b.set_task_state(kid.state.clone());
+            b.tags = kid.attributes.tags.clone();
+            for (k, v) in &kid.attributes.properties {
+                b.set_property(k, holon_api::Value::String(v.clone()));
+            }
+            out.push(b);
+            walk(kid, &id, new_ctr, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, &EntityUri::block(PAGE), &mut 0, &mut out);
+    out
+}
 
-fn build_projection_from_tree(root: &Node, alias_pairs: &[(String, String)]) -> Projection {
-    let alias_table = AliasTable::from_pairs(
-        alias_pairs
-            .iter()
-            .map(|(a, id)| (Alias::parse(a).unwrap(), EntityUri::parse(id).unwrap())),
+/// Project the tree through the real `build_projection`, and record each
+/// node's alias.
+fn project(root: &mut Node) -> Projection {
+    let built = build_projection(
+        blocks_of(root),
+        &holon_mcp::dense_projection::DocVocabularies::Uniform(
+            holon_org_format::TaskKeywordVocabulary::default(),
+        ),
     )
+    .expect("the tree projects");
+    fn set_aliases(node: &mut Node, table: &AliasTable) {
+        for kid in &mut node.kids {
+            let id = EntityUri::parse(kid.block_id.as_ref().unwrap()).unwrap();
+            kid.alias = Some(table.alias_of(&id).unwrap().as_str().to_string());
+            set_aliases(kid, table);
+        }
+    }
+    set_aliases(root, &built.alias_table);
+    Projection::new("test".into(), &built)
+}
+
+/// The edited tree as the dense text an agent would send: rendered by the
+/// real renderer under the projection's `header`, with no token on a new row.
+fn edited_text(root: &Node, header: &[String]) -> String {
+    let blocks = blocks_of(root);
+    let mut aliases: HashMap<String, String> = HashMap::new();
+    fn collect(node: &Node, out: &mut HashMap<String, String>) {
+        for kid in &node.kids {
+            if let (Some(id), Some(alias)) = (&kid.block_id, &kid.alias) {
+                out.insert(id.clone(), alias.clone());
+            }
+            collect(kid, out);
+        }
+    }
+    collect(root, &mut aliases);
+    let mut new_tokens = Vec::new();
+    let table = AliasTable::from_pairs(blocks.iter().enumerate().map(|(i, b)| {
+        let alias = aliases.get(b.id.as_str()).cloned().unwrap_or_else(|| {
+            let token = format!("zz{i}");
+            new_tokens.push(format!(" {{#{token}}}"));
+            token
+        });
+        (Alias::parse(&alias).unwrap(), b.id.clone())
+    }))
     .unwrap();
     let file_id = EntityUri::block(PAGE);
-    let mut records = HashMap::new();
-    fn walk(
-        node: &Node,
-        parent_block: Option<&str>,
-        alias_table: &AliasTable,
-        records: &mut HashMap<String, ProjectedBlock>,
-    ) {
-        for (i, kid) in node.kids.iter().enumerate() {
-            let alias = kid.alias.as_ref().unwrap();
-            let id = alias_table
-                .id_of(&Alias::parse(alias).unwrap())
-                .unwrap()
-                .clone();
-            let proj_parent = parent_block.map(EntityUri::block);
-            records.insert(
-                id.as_str().to_string(),
-                ProjectedBlock {
-                    block_id: id.clone(),
-                    true_parent: proj_parent
-                        .clone()
-                        .unwrap_or_else(|| EntityUri::block(PAGE)),
-                    proj_parent: proj_parent.clone(),
-                    proj_index: i,
-                    gap: false,
-                    title: kid.title.clone(),
-                    task_state: kid.state.clone(),
-                    version: BlockVersion { updated_at: 0 },
-                },
-            );
-            walk(kid, Some(id.id()), alias_table, records);
-        }
+    let mut doc = Block::new_text(
+        file_id.clone(),
+        EntityUri::block("dense-projection-anchor"),
+        "Projection".to_string(),
+    );
+    doc.set_page(true);
+    doc.set_todo_keywords(Some((0..4).filter_map(kw_state).collect()));
+    let mut text = render_dense(&doc, &blocks, &file_id, &table, &HashSet::new()).unwrap();
+    for token in new_tokens {
+        text = text.replacen(&token, "", 1);
     }
-    // Roots use proj_parent None (top level); nested use their parent block id.
-    fn walk_root(
-        node: &Node,
-        alias_table: &AliasTable,
-        records: &mut HashMap<String, ProjectedBlock>,
-    ) {
-        for (i, kid) in node.kids.iter().enumerate() {
-            let alias = kid.alias.as_ref().unwrap();
-            let id = alias_table
-                .id_of(&Alias::parse(alias).unwrap())
-                .unwrap()
-                .clone();
-            records.insert(
-                id.as_str().to_string(),
-                ProjectedBlock {
-                    block_id: id.clone(),
-                    true_parent: EntityUri::block(PAGE),
-                    proj_parent: None,
-                    proj_index: i,
-                    gap: false,
-                    title: kid.title.clone(),
-                    task_state: kid.state.clone(),
-                    version: BlockVersion { updated_at: 0 },
-                },
-            );
-            walk(kid, Some(id.id()), alias_table, records);
-        }
-    }
-    walk_root(root, &alias_table, &mut records);
-    Projection::new("test".into(), file_id, alias_table, records)
-}
-
-// ---------------------------------------------------------------------------
-// Flatten a tree to a DenseParse (what the agent's edited text parses to).
-// ---------------------------------------------------------------------------
-
-fn tree_to_parse(root: &Node) -> DenseParse {
-    let mut blocks = Vec::new();
-    let mut counter = 0usize;
-    fn walk(
-        node: &Node,
-        parent_parse: Option<EntityUri>,
-        counter: &mut usize,
-        blocks: &mut Vec<DenseBlock>,
-    ) {
-        for kid in &node.kids {
-            let pid = EntityUri::block(&format!("p{}", *counter));
-            *counter += 1;
-            let mut b = Block::new_text(
-                pid.clone(),
-                parent_parse
-                    .clone()
-                    .unwrap_or_else(|| EntityUri::block("panchor")),
-                kid.title.clone(),
-            );
-            b.set_task_state(kid.state.clone());
-            blocks.push(DenseBlock {
-                block: b,
-                alias: kid.alias.as_ref().map(|a| Alias::parse(a).unwrap()),
-                gap: false,
-                parse_id: pid.clone(),
-                parent_parse_id: parent_parse.clone(),
-            });
-            walk(kid, Some(pid), counter, blocks);
-        }
-    }
-    walk(root, None, &mut counter, &mut blocks);
-    DenseParse { blocks }
+    let rows: Vec<&str> = text
+        .lines()
+        .skip_while(|line| !line.starts_with("* "))
+        .collect();
+    format!("{}\n{}\n", header.join("\n"), rows.join("\n"))
 }
 
 // ---------------------------------------------------------------------------
@@ -224,6 +235,7 @@ struct MNode {
     key: Key,
     title: String,
     state: Option<TaskState>,
+    attributes: RowAttributes,
     parent: Option<Key>, // None = root
 }
 
@@ -255,10 +267,12 @@ impl Model {
             if let Some(kids) = children.get(&parent_id) {
                 for r in kids {
                     let key = Key::Existing(r.block_id.as_str().to_string());
+                    let shown = r.shown.as_ref().expect("every row carries a token");
                     nodes.push(MNode {
                         key: key.clone(),
-                        title: r.title.clone(),
-                        state: r.task_state.clone(),
+                        title: shown.title.clone(),
+                        state: shown.task_state.clone(),
+                        attributes: shown.attributes.clone(),
                         parent: parent_key.clone(),
                     });
                     emit(
@@ -363,20 +377,30 @@ impl Model {
                     temp,
                     parent,
                     after,
-                    title,
+                    content,
                     task_state,
+                    attributes,
+                    carriers,
                 } => {
+                    assert_eq!(
+                        carriers,
+                        &Vec::new(),
+                        "the edits here write drawers in key order and no keyword line, which \
+                         org renders unaided"
+                    );
                     let node = MNode {
                         key: Key::New(*temp),
-                        title: title.clone(),
+                        title: content.text.clone(),
                         state: task_state.clone(),
+                        attributes: attributes.clone(),
                         parent: Self::ref_to_key(parent),
                     };
                     self.insert(node, after.as_ref().and_then(Self::ref_to_key));
                 }
-                PatchOp::UpdateTitle { block_id, title } => {
+                PatchOp::SetContent { block_id, content } => {
                     let k = Key::Existing(block_id.as_str().to_string());
-                    self.nodes.iter_mut().find(|n| n.key == k).unwrap().title = title.clone();
+                    self.nodes.iter_mut().find(|n| n.key == k).unwrap().title =
+                        content.text.clone();
                 }
                 PatchOp::SetState {
                     block_id,
@@ -385,6 +409,37 @@ impl Model {
                     let k = Key::Existing(block_id.as_str().to_string());
                     self.nodes.iter_mut().find(|n| n.key == k).unwrap().state = task_state.clone();
                 }
+                PatchOp::SetTags { block_id, tags } => {
+                    let k = Key::Existing(block_id.as_str().to_string());
+                    self.nodes
+                        .iter_mut()
+                        .find(|n| n.key == k)
+                        .unwrap()
+                        .attributes
+                        .tags = tags.clone();
+                }
+                PatchOp::SetProperty {
+                    block_id,
+                    key,
+                    value,
+                } => {
+                    let k = Key::Existing(block_id.as_str().to_string());
+                    let props = &mut self
+                        .nodes
+                        .iter_mut()
+                        .find(|n| n.key == k)
+                        .unwrap()
+                        .attributes
+                        .properties;
+                    match value {
+                        Some(v) => props.insert(key.as_str().to_string(), v.clone()),
+                        None => props.remove(key.as_str()),
+                    };
+                }
+                PatchOp::SetCarrier { block_id, carrier } => panic!(
+                    "the edits here write drawers in key order and no keyword line, which org \
+                     renders unaided; {block_id} got {carrier:?}"
+                ),
                 PatchOp::Move {
                     block_id,
                     parent,
@@ -445,11 +500,13 @@ impl Model {
                 .map(|s| s.keyword.clone())
                 .unwrap_or_default();
             out.push_str(&format!(
-                "{}|{}|{}|{}\n",
+                "{}|{}|{}|{}|{:?}|{:?}\n",
                 depth_of(self, &n.key),
                 id,
                 n.title,
-                st
+                st,
+                n.attributes.tags,
+                n.attributes.properties
             ));
         }
         out
@@ -465,8 +522,9 @@ enum Edit {
     Retitle(usize), // nth existing alias
     SetState(usize, usize),
     Delete(usize),
-    AddChild(usize), // add a new child under the nth existing node (or root)
-    Reorder(usize),  // move nth existing node to front of its siblings
+    AddChild(usize, usize, usize), // new child under the nth existing node, with attrs
+    Reorder(usize),                // move nth existing node to front of its siblings
+    SetAttributes(usize, usize, usize),
 }
 
 fn collect_aliases(node: &Node, out: &mut Vec<String>) {
@@ -505,7 +563,7 @@ fn apply_edit(
             delete_by_alias(root, &a);
             Some(a)
         }
-        Edit::AddChild(i) => {
+        Edit::AddChild(i, tm, pd) => {
             let a = &aliases[i % aliases.len()];
             let title = format!("new{}", *new_counter);
             *new_counter += 1;
@@ -517,6 +575,7 @@ fn apply_edit(
                         block_id: None,
                         title: title.clone(),
                         state: None,
+                        attributes: attrs(*tm, *pd),
                         kids: vec![],
                     },
                 )
@@ -526,6 +585,12 @@ fn apply_edit(
         Edit::Reorder(i) => {
             let a = aliases[i % aliases.len()].clone();
             reorder_to_front(root, &a);
+            None
+        }
+        Edit::SetAttributes(i, tm, pd) => {
+            let a = &aliases[i % aliases.len()];
+            let new = attrs(*tm, *pd);
+            set_by_alias(root, a, |n| n.attributes = new.clone());
             None
         }
     }
@@ -567,8 +632,9 @@ fn edit_strategy() -> impl Strategy<Value = Edit> {
         (0usize..20).prop_map(Edit::Retitle),
         (0usize..20, 0usize..4).prop_map(|(i, s)| Edit::SetState(i, s)),
         (0usize..20).prop_map(Edit::Delete),
-        (0usize..20).prop_map(Edit::AddChild),
+        (0usize..20, 0usize..8, 0usize..64).prop_map(|(i, tm, pd)| Edit::AddChild(i, tm, pd)),
         (0usize..20).prop_map(Edit::Reorder),
+        (0usize..20, 0usize..8, 0usize..64).prop_map(|(i, tm, pd)| Edit::SetAttributes(i, tm, pd)),
     ]
 }
 
@@ -585,11 +651,8 @@ proptest! {
         edits in prop::collection::vec(edit_strategy(), 0..6),
     ) {
         let mut base = tree.clone();
-        let mut counter = 0usize;
-        let mut alias_pairs = Vec::new();
-        assign_ids(&mut base, &mut counter, &mut alias_pairs);
-
-        let projection = build_projection_from_tree(&base, &alias_pairs);
+        assign_ids(&mut base, &mut 0);
+        let projection = project(&mut base);
 
         // Apply the edit script to a clone → the edited target.
         let mut edited = base.clone();
@@ -606,13 +669,13 @@ proptest! {
             }
         }
 
-        // parse1 = the edited tree as a DenseParse; deletes are absent aliases.
-        let parse1 = tree_to_parse(&edited);
+        let text = edited_text(&edited, &projection.header);
+        let parse1 = parse_dense(&text).expect("the edited projection parses");
         let delete_aliases: Vec<Alias> =
             deleted_aliases.iter().map(|a| Alias::parse(a).unwrap()).collect();
 
-        let plan = plan_patch(&projection, &parse1, &delete_aliases)
-            .expect("plan_patch must succeed");
+        let plan = plan_patch(&projection, &text, &parse1, &delete_aliases)
+            .unwrap_or_else(|e| panic!("plan_patch must succeed: {e:#}\n{text}"));
 
         // Apply plan to the model of the projection; compare to the edited tree
         // model.
@@ -632,7 +695,7 @@ proptest! {
         // no Move op. We check the weaker, robust form: the number of Move ops
         // never exceeds the number of edits that can cause a move
         // (Delete/AddChild/Reorder). Retitle/SetState alone never move.
-        let move_causing = edits.iter().filter(|e| matches!(e, Edit::Delete(_) | Edit::AddChild(_) | Edit::Reorder(_))).count();
+        let move_causing = edits.iter().filter(|e| matches!(e, Edit::Delete(_) | Edit::AddChild(..) | Edit::Reorder(_))).count();
         prop_assert!(
             plan.move_count() <= move_causing + aliases.len(),
             "unexpected move ops: {} for {} move-causing edits",
@@ -660,6 +723,7 @@ fn tree_to_model(root: &Node) -> Model {
                 key: key.clone(),
                 title: k.title.clone(),
                 state: k.state.clone(),
+                attributes: k.attributes.clone(),
                 parent: parent.clone(),
             });
             walk(k, Some(key), nodes, new_ctr);

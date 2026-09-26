@@ -48,6 +48,11 @@ const ORG_ID_PROPERTY: &str = "ID";
 /// still round-trip verbatim per the proposal).
 const NON_COPYABLE_PROPERTIES: &[&str] = &[ORG_ID_PROPERTY, crate::PROVENANCE_PROPERTY];
 
+/// A block's task keyword and its derived category. Both live in the property
+/// bag, but a write carries the keyword as its own field.
+const TASK_STATE_PROPERTY: &str = "task_state";
+const TASK_STATE_CATEGORY_PROPERTY: &str = "task_state_category";
+
 /// One declared template variable: a name and an optional default.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TemplateVarDecl {
@@ -334,6 +339,10 @@ pub fn plan_instantiation(
         for key in NON_COPYABLE_PROPERTIES {
             props.remove(*key);
         }
+        // The engine classifies the keyword by the ring of the document the
+        // instance lands in.
+        props.remove(TASK_STATE_CATEGORY_PROPERTY);
+        let task_state = props.remove(TASK_STATE_PROPERTY);
         for value in props.values_mut() {
             if let Value::String(s) = value {
                 let (substituted, _) = substitute(s, &effective)?;
@@ -373,6 +382,9 @@ pub fn plan_instantiation(
         }
         if let Some(completed) = stored.completed {
             put("completed", Value::Boolean(completed));
+        }
+        if let Some(task_state) = task_state {
+            put(TASK_STATE_PROPERTY, task_state);
         }
         if !props.is_empty() {
             let json = serde_json::to_string(&props).expect("property map serialization is total");

@@ -201,6 +201,8 @@ proptest.workspace = true
 proptest-state-machine.workspace = true
 futures.workspace = true
 similar-asserts = "1.7.0"
+# The dense_patch judge's org tag-character oracle (Unicode general categories).
+unicode-properties = "0.1.3"
 regex.workspace = true
 loro.workspace = true
 serde_json.workspace = true

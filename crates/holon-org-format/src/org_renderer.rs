@@ -635,31 +635,23 @@ impl OrgRenderer {
         if block.org_properties().is_none() {
             let id = properties.get("ID").and_then(|v| v.as_string());
 
-            // Order drawer properties by the sequence the author wrote them
-            // (recorded at parse in `_drawer_order`); keys the author never
-            // wrote follow, alphabetically, for determinism.
             // serde_json::Map uses IndexMap (preserve_order feature is enabled
-            // by a transitive dependency), so insertion order matters.
-            // Exact spelling wins, so `:Effort:` and `:effort:` keep their own
-            // slots; the case-insensitive probe then catches the lifted keys the
-            // renderer re-spells (`:collapsed:` authored, `COLLAPSED` emitted).
+            // by a transitive dependency), so insertion order is line order.
             // An unreadable order carrier leaves the drawer in alphabetical order.
-            let authored = block.authored_drawer_order().unwrap_or_default();
-            let rank = |key: &str| {
-                authored
-                    .iter()
-                    .position(|k| k == key)
-                    .or_else(|| authored.iter().position(|k| k.eq_ignore_ascii_case(key)))
-                    .unwrap_or(usize::MAX)
-            };
-            let mut drawer_props: Vec<_> = block.drawer_properties().into_iter().collect();
-            drawer_props.sort_by(|(a, _), (b, _)| rank(a).cmp(&rank(b)).then_with(|| a.cmp(b)));
+            let mut drawer_props = block.drawer_properties();
+            let order = drawer_key_order(
+                &block.authored_drawer_order().unwrap_or_default(),
+                drawer_props.keys().cloned().collect(),
+            );
 
             let mut org_props = serde_json::Map::new();
             if let Some(id) = id {
                 org_props.insert("ID".to_string(), serde_json::Value::String(id.to_string()));
             }
-            for (k, v) in drawer_props {
+            for k in order {
+                let v = drawer_props
+                    .remove(&k)
+                    .expect("the order holds each drawer key once");
                 org_props.insert(k, serde_json::Value::String(v));
             }
             let json = serde_json::to_string(&org_props)
@@ -739,6 +731,23 @@ fn end_with_blank_lines(text: &mut String, blank_lines: &[String]) {
 fn trailing_blank_lines(text: &str) -> usize {
     let content = text.trim_end_matches('\n');
     (text.len() - content.len()).saturating_sub(usize::from(!content.is_empty()))
+}
+
+/// `keys` in the order a headline drawer renders them: the order the author
+/// wrote (`_drawer_order`) first, then keys the author never wrote, in byte
+/// order. An exact spelling wins, so `:Effort:` and `:effort:` keep their own
+/// slots; any casing then places the lifted keys the renderer re-spells
+/// (`:collapsed:` authored, `COLLAPSED` emitted).
+pub fn drawer_key_order(authored: &[String], mut keys: Vec<String>) -> Vec<String> {
+    let rank = |key: &str| {
+        authored
+            .iter()
+            .position(|k| k == key)
+            .or_else(|| authored.iter().position(|k| k.eq_ignore_ascii_case(key)))
+            .unwrap_or(usize::MAX)
+    };
+    keys.sort_by(|a, b| rank(a).cmp(&rank(b)).then_with(|| a.cmp(b)));
+    keys
 }
 
 #[cfg(test)]

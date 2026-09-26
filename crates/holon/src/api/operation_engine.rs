@@ -12,6 +12,8 @@
 //! no-Turso session reports the capability's absence as a typed fact rather
 //! than panicking behind `engine()`.
 
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering;
@@ -54,6 +56,8 @@ use holon_core::UndoStateReader;
 use holon_core::UndoStore;
 use holon_core::storage::types::StorageEntity;
 use holon_core::verify_precondition;
+use holon_org_format::OrgDocumentExt;
+use holon_org_format::ParsedCarrier;
 use holon_profiles::trust::TrustDecision;
 use holon_profiles::trust::TrustPolicy;
 use tokio::sync::RwLock;
@@ -138,13 +142,10 @@ pub struct DispatchingOperationEngine {
     discarded_at_boot: usize,
     /// Whoever accepts block writes, read by `instantiate_template`
     /// (docs/Proposals/Templating-2026-07-12.md) so a template written moments
-    /// ago is found. `None` disables the operation, disclosed.
+    /// ago is found, and for every block's document and `#+TODO:` ring. `None`
+    /// disables the operation, disclosed, and fails every write that needs a
+    /// ring.
     write_authority: Option<Arc<dyn holon_core::WriteAuthorityReads>>,
-    /// Resolver for the owning document's `#+TODO:` vocabulary, consulted by
-    /// every path that parses or cycles a task keyword. `None` on a wiring
-    /// without a queryable block projection — those paths then fall back to the
-    /// defaults and say so.
-    vocabulary_source: Option<Arc<dyn crate::core::task_keyword_promotion::TaskVocabularySource>>,
     /// Trust policy (VisionGapAnalysis C5): decides per (origin, entity, op)
     /// whether a dispatch executes against canonical state or is coerced into
     /// a proposal emission. Defaults to [`TrustPolicy::trust_all`] — the gate
@@ -283,6 +284,95 @@ pub const CYCLE_TASK_STATE_OP: &str = "cycle_task_state";
 const CONVERGE_TASK_KEYWORD_OP: &str = "converge_task_keyword";
 
 pub use holon_api::SOURCE_TEXT_FIELD;
+
+/// How a write can change the document, or the ring, its block's subtree is
+/// judged by.
+enum DocumentChange {
+    Parent(String),
+    Indent,
+    Outdent,
+    /// Whether the block becomes a page.
+    Page(bool),
+    /// The page's new `todo_keywords`; `None` removes the declaration.
+    Ring(Option<Value>),
+}
+
+impl DocumentChange {
+    const FIELDS: [&str; 3] = [
+        "parent_id",
+        holon_org_format::org_props::TODO_KEYWORDS,
+        "tags",
+    ];
+
+    fn of_field(field: &str, value: &Value) -> Result<Option<Self>> {
+        Ok(match field {
+            "parent_id" => Some(Self::Parent(
+                value
+                    .as_string()
+                    .ok_or_else(|| anyhow::anyhow!("`parent_id` must be a string, got {value:?}"))?
+                    .to_string(),
+            )),
+            holon_org_format::org_props::TODO_KEYWORDS => Some(Self::Ring(match value {
+                Value::Null => None,
+                other => Some(other.clone()),
+            })),
+            "tags" => {
+                let tags = match value {
+                    Value::String(csv) => holon_api::Tags::from_csv(csv),
+                    Value::Array(items) => items
+                        .iter()
+                        .map(|t| {
+                            t.as_string().map(str::to_string).ok_or_else(|| {
+                                anyhow::anyhow!("`tags` must hold strings, got {t:?}")
+                            })
+                        })
+                        .collect::<Result<holon_api::Tags>>()?,
+                    Value::Null => holon_api::Tags::default(),
+                    other => {
+                        bail!("`tags` must be a list or a comma-separated string, got {other:?}")
+                    }
+                };
+                Some(Self::Page(tags.contains(holon_api::PAGE_TAG)))
+            }
+            _ => None,
+        })
+    }
+}
+
+/// The block's stored task keyword; `None` for a block that is no task.
+fn stored_keyword(block: &holon_api::block::Block) -> Option<String> {
+    block
+        .properties
+        .get("task_state")
+        .and_then(|v| v.as_string())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// `keyword` as `ring`, the ring of `document`, classifies it for `block`. A
+/// keyword the ring does not declare is refused: org reads it as title text, so
+/// the file could not hold the state. The empty keyword is the cleared state.
+fn state_in_ring(
+    op: &str,
+    block: &str,
+    keyword: &str,
+    document: Option<&EntityUri>,
+    ring: &holon_org_format::TaskKeywordVocabulary,
+) -> Result<holon_api::TaskState> {
+    if !keyword.is_empty() && !ring.all_keywords().iter().any(|k| k == keyword) {
+        bail!(
+            "{op}: task_state {keyword:?} of {block} is not a keyword of the document {}, whose \
+             #+TODO: ring is {} | {} — org would read it as title text",
+            document.map_or("(none: org's defaults)", |d| d.as_str()),
+            ring.active_keywords().join(" "),
+            ring.done_keywords().join(" ")
+        );
+    }
+    Ok(holon_api::TaskState::from_keyword_with_done_list(
+        keyword,
+        ring.done_keywords(),
+    ))
+}
 
 /// The id of the child that parks a merged-away block's body when BOTH sides
 /// carried content. Derived from the duplicate's id so a merge is idempotent
@@ -596,7 +686,6 @@ impl DispatchingOperationEngine {
             discarded_at_boot: 0,
             history: None,
             write_authority: None,
-            vocabulary_source: None,
             trust_policy: Arc::new(TrustPolicy::trust_all()),
             entity_write_locks: EntityWriteLocks::default(),
         }
@@ -646,25 +735,13 @@ impl DispatchingOperationEngine {
         self
     }
 
-    /// Wire the block write authority, enabling the engine-level
-    /// `instantiate_template` operation on the `block` entity.
+    /// Wire the block write authority: the engine-level `instantiate_template`
+    /// operation and every task-keyword write read documents from it.
     pub fn with_write_authority(
         mut self,
         authority: Arc<dyn holon_core::WriteAuthorityReads>,
     ) -> Self {
         self.write_authority = Some(authority);
-        self
-    }
-
-    /// Wire the owning-document `#+TODO:` vocabulary resolver. Without it every
-    /// keyword parse judges blocks against the DEFAULT keywords, which
-    /// disagrees with the parser in any document that declares its own — so an
-    /// unwired source is announced at WARN, never degraded quietly.
-    pub fn with_task_vocabulary_source(
-        mut self,
-        source: Arc<dyn crate::core::task_keyword_promotion::TaskVocabularySource>,
-    ) -> Self {
-        self.vocabulary_source = Some(source);
         self
     }
 
@@ -714,7 +791,6 @@ impl DispatchingOperationEngine {
             text_undo: std::sync::OnceLock::new(),
             history: None,
             write_authority: None,
-            vocabulary_source: None,
             trust_policy: Arc::new(TrustPolicy::trust_all()),
             entity_write_locks: EntityWriteLocks::default(),
         })
@@ -1027,11 +1103,20 @@ impl DispatchingOperationEngine {
         let (params, converged) = self
             .converge_block_write(&op.entity_name, &op.op_name, params)
             .await?;
+        let params = self
+            .classify_task_state(&op.entity_name, &op.op_name, params)
+            .await?;
+        let rehomed = self
+            .rehomed_root(&op.entity_name, &op.op_name, &params)
+            .await?;
         let mut result = self
             .dispatcher
             .execute_operation(&op.entity_name, &op.op_name, params)
             .await
             .map_err(|e| anyhow::anyhow!("undo/redo replay of '{}' failed: {e}", op.op_name))?;
+        if let Some(root) = &rehomed {
+            self.recategorize(root).await?;
+        }
         // A replay is the user taking their own gesture back, so its
         // convergence repairs are judged as the user's too.
         if let Some((id, promotion)) = &converged {
@@ -1109,6 +1194,8 @@ impl DispatchingOperationEngine {
             .map_err(|e| anyhow::anyhow!("{e}"))?
             .ok_or_else(|| anyhow::anyhow!("template '{}' not found", request.template_id))?;
         let plan = plan_instantiation(&nodes, &request)?;
+        self.refuse_template_keywords(&request.target_parent, &nodes)
+            .await?;
 
         let block_entity = EntityName::new("block");
         let creates = plan.creates;
@@ -1167,6 +1254,37 @@ impl DispatchingOperationEngine {
         Ok(Some(Value::String(root_id)))
     }
 
+    /// Refuse an instantiation, naming every offender, when a template task
+    /// carries a keyword the ring of `target_parent`'s document does not
+    /// declare. Every instance block lands in that document.
+    async fn refuse_template_keywords(
+        &self,
+        target_parent: &str,
+        nodes: &[holon_api::StoredBlock],
+    ) -> Result<()> {
+        let op = "instantiate_template";
+        let (document, ring) = self.document_ring(op, target_parent).await?;
+        let refusals: Vec<String> = nodes
+            .iter()
+            .filter_map(|node| {
+                let keyword = stored_keyword(&node.block)?;
+                state_in_ring(
+                    op,
+                    node.block.id.as_str(),
+                    &keyword,
+                    document.as_ref(),
+                    &ring,
+                )
+                .err()
+            })
+            .map(|refusal| format!("{refusal:#}"))
+            .collect();
+        if !refusals.is_empty() {
+            bail!("{}", refusals.join("; "));
+        }
+        Ok(())
+    }
+
     /// Route ONE constituent write of a compound to the dispatcher under the
     /// COMPOUND's origin.
     ///
@@ -1182,16 +1300,24 @@ impl DispatchingOperationEngine {
         params: StorageEntity,
         origin: &OpOrigin,
     ) -> Result<holon_core::OperationResult> {
-        self.dispatcher
+        let block = EntityName::new("block");
+        let params = self.classify_task_state(&block, op_name, params).await?;
+        let rehomed = self.rehomed_root(&block, op_name, &params).await?;
+        let result = self
+            .dispatcher
             .execute_operation_with_provenance(
-                &EntityName::new("block"),
+                &block,
                 op_name,
                 params,
                 AuthoredInput::Verbatim,
                 origin.clone(),
             )
             .await
-            .map_err(|e| anyhow::anyhow!("{e}"))
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        if let Some(root) = &rehomed {
+            self.recategorize(root).await?;
+        }
+        Ok(result)
     }
 
     /// Dispatch ONE constituent write of the block→page compound through the
@@ -1206,6 +1332,7 @@ impl DispatchingOperationEngine {
         origin: &OpOrigin,
     ) -> Result<(Operation, Operation, Vec<FieldDelta>)> {
         let block = EntityName::new("block");
+        let params = self.classify_task_state(&block, op_name, params).await?;
         let forward = Operation::new(
             block.clone(),
             op_name,
@@ -1324,6 +1451,29 @@ impl DispatchingOperationEngine {
             }
         }
 
+        // P declares the ring of the document it leaves, so its children keep
+        // their keywords' ring.
+        let source = self
+            .document_page(CONVERT_BLOCK_TO_PAGE_OP, &plan.origin_id)
+            .await?;
+        let ring = holon_org_format::TaskKeywordVocabulary::from_declared(
+            source.as_ref().and_then(|page| page.block.todo_keywords()),
+        );
+        let declared_ring = source
+            .filter(|_| ring != holon_org_format::TaskKeywordVocabulary::default())
+            .and_then(|page| {
+                page.block
+                    .get_property(holon_org_format::org_props::TODO_KEYWORDS)
+            });
+        // ALLOW(entity_uri_from_raw): plan.page_id is a derived PageId::for_path id.
+        let page = EntityUri::from_raw(&plan.page_id);
+        for child in &plan.child_ids {
+            // ALLOW(entity_uri_from_raw): a child id the planner read from the store.
+            let child = EntityUri::from_raw(child);
+            self.refuse_move_into(CONVERT_BLOCK_TO_PAGE_OP, &child, Some(&page), &ring)
+                .await?;
+        }
+
         // Inverses are bucketed per step, NOT blanket-reversed: the undo order
         // must reverse the STEPS while keeping the child re-homes in FORWARD
         // order (each child's move-back anchors on its original predecessor, so
@@ -1360,6 +1510,9 @@ impl DispatchingOperationEngine {
             Value::String(plan.destination_parent_id.clone()),
         );
         pc.insert("tags".into(), page_tag());
+        if let Some(declared) = declared_ring {
+            pc.insert(holon_org_format::org_props::TODO_KEYWORDS.into(), declared);
+        }
         if let Value::String(marks) = &plan.origin_marks
             && !marks.is_empty()
             && marks != "[]"
@@ -1520,6 +1673,9 @@ impl DispatchingOperationEngine {
         origin: &OpOrigin,
     ) -> Result<(Operation, Operation, Vec<FieldDelta>)> {
         let block = EntityName::new("block");
+        let params = self
+            .classify_task_state(&block, "set_field", params)
+            .await?;
         let forward = Operation::new(
             block.clone(),
             "set_field",
@@ -1591,24 +1747,515 @@ impl DispatchingOperationEngine {
         Ok((content, keyword))
     }
 
-    /// The owning document's task-keyword vocabulary. Read at use and never
-    /// cached: a `#+TODO:` line is ordinary editable content, so a vocabulary
-    /// resolved once goes stale the moment the user edits it.
+    /// `params` with the category the block's own document ring gives the
+    /// `task_state` keyword they write. The category is derived here and never
+    /// taken from a caller: a `set_field` carries the pair as a
+    /// [`holon_api::TaskStateWrite`], a create or update carries
+    /// `task_state_category` beside `task_state`. A write already classified
+    /// passes through unchanged.
+    async fn classify_task_state(
+        &self,
+        entity_name: &EntityName,
+        op_name: &str,
+        mut params: StorageEntity,
+    ) -> Result<StorageEntity> {
+        if entity_name.as_str() != "block" {
+            return Ok(params);
+        }
+        let text = |params: &StorageEntity, key: &str| {
+            params
+                .get(key)
+                .and_then(|v| v.as_string())
+                .map(str::to_string)
+        };
+        match op_name {
+            "set_field" if text(&params, "field").as_deref() == Some("task_state") => {
+                let Some(Value::String(keyword)) = params.get("value") else {
+                    return Ok(params);
+                };
+                let keyword = keyword.clone();
+                let id = text(&params, "id")
+                    .ok_or_else(|| anyhow::anyhow!("set_field('task_state') has no `id`"))?;
+                let state = self.task_state_in_document(op_name, &id, &keyword).await?;
+                params.insert(
+                    "value".into(),
+                    holon_api::TaskStateWrite::Set(state).to_value(),
+                );
+            }
+            "create" | "update" => {
+                let Some(keyword) = text(&params, "task_state") else {
+                    return Ok(params);
+                };
+                // A create with no parent lands at the root, which no
+                // document holds: org's own keywords classify it.
+                let anchor = if op_name == "create" {
+                    "parent_id"
+                } else {
+                    "id"
+                };
+                let state = match text(&params, anchor) {
+                    Some(anchor) => {
+                        self.task_state_in_document(op_name, &anchor, &keyword)
+                            .await?
+                    }
+                    None if op_name == "create" => {
+                        holon_api::TaskState::from_keyword_with_done_list(
+                            &keyword,
+                            holon_org_format::TaskKeywordVocabulary::default().done_keywords(),
+                        )
+                    }
+                    None => bail!("update writing `task_state` has no `id`"),
+                };
+                params.insert(
+                    "task_state_category".into(),
+                    Value::String(state.category.as_str().to_string()),
+                );
+            }
+            _ => {}
+        }
+        Ok(params)
+    }
+
+    /// `keyword` as the `#+TODO:` ring of the document holding `block`
+    /// classifies it (see [`state_in_ring`]).
+    async fn task_state_in_document(
+        &self,
+        op: &str,
+        block: &str,
+        keyword: &str,
+    ) -> Result<holon_api::TaskState> {
+        let (document, ring) = self.document_ring(op, block).await?;
+        state_in_ring(op, block, keyword, document.as_ref(), &ring)
+    }
+
+    /// The block at the root of the subtree `op` hands to another document or
+    /// re-rings, after refusing it by name when a task block of that subtree
+    /// carries a keyword its prospective ring does not declare. `None` when
+    /// the write leaves every block's ring as it is.
+    async fn rehomed_root(
+        &self,
+        entity_name: &EntityName,
+        op: &str,
+        params: &StorageEntity,
+    ) -> Result<Option<EntityUri>> {
+        if entity_name.as_str() != "block" {
+            return Ok(None);
+        }
+        let text = |key: &str| params.get(key).and_then(|v| v.as_string());
+        let change = match op {
+            "move_block" => text("parent_id").map(|p| DocumentChange::Parent(p.to_string())),
+            "indent" => Some(DocumentChange::Indent),
+            "outdent" => Some(DocumentChange::Outdent),
+            "add_tag" | "remove_tag" if text("tag") == Some(holon_api::PAGE_TAG) => {
+                Some(DocumentChange::Page(op == "add_tag"))
+            }
+            "set_field" => match text("field") {
+                Some(field) => params
+                    .get("value")
+                    .map(|value| DocumentChange::of_field(field, value))
+                    .transpose()?
+                    .flatten(),
+                None => None,
+            },
+            "update" => {
+                let mut changes = DocumentChange::FIELDS
+                    .iter()
+                    .filter_map(|field| params.get(*field).map(|v| (*field, v)));
+                match (changes.next(), changes.next()) {
+                    (None, _) => None,
+                    (Some((field, value)), None) => DocumentChange::of_field(field, value)?,
+                    (Some(_), Some(_)) => bail!(
+                        "update: writes more than one of {:?} at once; send them as separate \
+                         writes so each re-homing is judged on its own",
+                        DocumentChange::FIELDS
+                    ),
+                }
+            }
+            _ => None,
+        };
+        let Some(change) = change else {
+            return Ok(None);
+        };
+        let id = text("id").ok_or_else(|| anyhow::anyhow!("{op}: no `id` param"))?;
+        let authority = self.block_authority(op)?;
+        // ALLOW(entity_uri_from_raw): `id` is the operation's own block id.
+        let root = EntityUri::from_raw(id);
+        let Some(stored) = authority
+            .block(&root)
+            .await
+            .map_err(|e| anyhow::anyhow!("{op}: reading {root}: {e}"))?
+        else {
+            return Ok(None);
+        };
+        let is_page = stored.block.is_page();
+        let parent = stored.block.parent_id.clone();
+        let destination = match change {
+            DocumentChange::Parent(parent) if !is_page => {
+                // ALLOW(entity_uri_from_raw): the operation's own `parent_id` param.
+                Some(EntityUri::from_raw(&parent))
+            }
+            DocumentChange::Indent if !is_page => {
+                let siblings = authority
+                    .children(&parent)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{op}: reading the siblings of {root}: {e}"))?;
+                siblings
+                    .iter()
+                    .position(|s| *s == root)
+                    .and_then(|i| i.checked_sub(1))
+                    .map(|i| siblings[i].clone())
+            }
+            DocumentChange::Outdent if !is_page => authority
+                .block(&parent)
+                .await
+                .map_err(|e| anyhow::anyhow!("{op}: reading {parent}: {e}"))?
+                .map(|p| p.block.parent_id),
+            DocumentChange::Page(becomes_page) if becomes_page != is_page => {
+                if becomes_page {
+                    let ring = holon_org_format::TaskKeywordVocabulary::from_declared(
+                        stored.block.todo_keywords(),
+                    );
+                    self.refuse_undeclared_keywords(op, &root, Some(&root), &ring)
+                        .await?;
+                    return Ok(Some(root));
+                }
+                Some(parent)
+            }
+            DocumentChange::Ring(declared) if is_page => {
+                let mut edited = stored.block.clone();
+                match declared {
+                    Some(value) => {
+                        edited.set_property(holon_org_format::org_props::TODO_KEYWORDS, value)
+                    }
+                    None => {
+                        edited
+                            .properties
+                            .remove(holon_org_format::org_props::TODO_KEYWORDS);
+                    }
+                }
+                let ring =
+                    holon_org_format::TaskKeywordVocabulary::from_declared(edited.todo_keywords());
+                self.refuse_undeclared_keywords(op, &root, Some(&root), &ring)
+                    .await?;
+                return Ok(Some(root));
+            }
+            _ => None,
+        };
+        let Some(destination) = destination else {
+            return Ok(None);
+        };
+        let (document, ring) = self.document_ring(op, destination.as_str()).await?;
+        if self.document_ring(op, root.as_str()).await? == (document.clone(), ring.clone()) {
+            return Ok(None);
+        }
+        self.refuse_undeclared_keywords(op, &root, document.as_ref(), &ring)
+            .await?;
+        Ok(Some(root))
+    }
+
+    /// Refuse, naming every offender, when a task block the write hands to
+    /// `document` carries a keyword `ring` does not declare. Blocks under a
+    /// page inside the subtree stay in that page's document and are not judged.
+    async fn refuse_undeclared_keywords(
+        &self,
+        op: &str,
+        root: &EntityUri,
+        document: Option<&EntityUri>,
+        ring: &holon_org_format::TaskKeywordVocabulary,
+    ) -> Result<()> {
+        let blocks = self
+            .block_authority(op)?
+            .subtree(root)
+            .await
+            .map_err(|e| anyhow::anyhow!("{op}: reading the subtree of {root}: {e}"))?
+            .ok_or_else(|| anyhow::anyhow!("{op}: block {root} is not in the store"))?;
+        let mut elsewhere: HashSet<EntityUri> = HashSet::new();
+        let mut refusals = Vec::new();
+        for stored in &blocks {
+            let block = &stored.block;
+            if block.id != *root && (block.is_page() || elsewhere.contains(&block.parent_id)) {
+                elsewhere.insert(block.id.clone());
+                continue;
+            }
+            if let Some(keyword) = stored_keyword(block)
+                && let Err(refusal) = state_in_ring(op, block.id.as_str(), &keyword, document, ring)
+            {
+                refusals.push(format!("{refusal:#}"));
+            }
+        }
+        if !refusals.is_empty() {
+            bail!("{}", refusals.join("; "));
+        }
+        Ok(())
+    }
+
+    /// [`Self::refuse_undeclared_keywords`] for a move of `root` into
+    /// `document`; a page keeps its own document wherever it moves.
+    async fn refuse_move_into(
+        &self,
+        op: &str,
+        root: &EntityUri,
+        document: Option<&EntityUri>,
+        ring: &holon_org_format::TaskKeywordVocabulary,
+    ) -> Result<()> {
+        if self.page_block(op, root).await?.is_some() {
+            return Ok(());
+        }
+        self.refuse_undeclared_keywords(op, root, document, ring)
+            .await
+    }
+
+    /// `id` when it is a page, else `None`. Fails loud on a missing block.
+    async fn page_block(&self, op: &str, id: &EntityUri) -> Result<Option<holon_api::StoredBlock>> {
+        let stored = self
+            .block_authority(op)?
+            .block(id)
+            .await
+            .map_err(|e| anyhow::anyhow!("{op}: reading {id}: {e}"))?
+            .ok_or_else(|| anyhow::anyhow!("{op}: block {id} is not in the store"))?;
+        Ok(stored.block.is_page().then_some(stored))
+    }
+
+    /// The document `id` belongs to as a child of a block of `parent`.
+    async fn document_as_child(
+        &self,
+        op: &str,
+        id: EntityUri,
+        parent: &(Option<EntityUri>, holon_org_format::TaskKeywordVocabulary),
+    ) -> Result<(Option<EntityUri>, holon_org_format::TaskKeywordVocabulary)> {
+        Ok(match self.page_block(op, &id).await? {
+            Some(page) => (
+                Some(id),
+                holon_org_format::TaskKeywordVocabulary::from_declared(page.block.todo_keywords()),
+            ),
+            None => parent.clone(),
+        })
+    }
+
+    /// Refuse a merge before its first write when one of its constituents
+    /// would be refused by [`Self::rehomed_root`]. Judges the constituents in
+    /// dispatch order, each against the tree it will meet; a block a
+    /// constituent deletes is still judged, so this can only be stricter.
+    async fn refuse_merge_rehomes(
+        &self,
+        plan: &crate::core::merge_blocks_plan::MergeBlocksPlan,
+    ) -> Result<()> {
+        use holon_org_format::TaskKeywordVocabulary;
+
+        let op = MERGE_BLOCKS_OP;
+        // ALLOW(entity_uri_from_raw): ids the merge planner read from the store.
+        let uri = |id: &str| EntityUri::from_raw(id);
+        let canonical = uri(&plan.canonical_id);
+        let (canonical_document, canonical_ring) =
+            self.document_ring(op, canonical.as_str()).await?;
+
+        let Some(stored) = self
+            .block_authority(op)?
+            .block(&canonical)
+            .await
+            .map_err(|e| anyhow::anyhow!("{op}: reading {canonical}: {e}"))?
+        else {
+            bail!("{op}: canonical {canonical} is not in the store");
+        };
+        let becomes_page =
+            !stored.block.is_page() && plan.union_tags.iter().any(|t| t == holon_api::PAGE_TAG);
+        let adopted_ring = plan
+            .adopted_properties
+            .iter()
+            .find(|(key, _)| key == holon_org_format::org_props::TODO_KEYWORDS)
+            .filter(|_| becomes_page || stored.block.is_page())
+            .map(|(_, declared)| {
+                let mut adopting = stored.block.clone();
+                adopting.set_property(holon_org_format::org_props::TODO_KEYWORDS, declared.clone());
+                TaskKeywordVocabulary::from_declared(adopting.todo_keywords())
+            });
+        // The adopted ring arrives after the moves, and undo removes it before
+        // moving the blocks back, so it cannot admit a moved keyword.
+        let before_adoption = |refusal: anyhow::Error| match &adopted_ring {
+            Some(ring) => anyhow::anyhow!(
+                "{refusal:#}; {canonical} adopts the ring {} | {} in this merge only after it \
+                 moves the duplicate's blocks, so they are judged by its current ring",
+                ring.active_keywords().join(" "),
+                ring.done_keywords().join(" ")
+            ),
+            None => refusal,
+        };
+
+        let moved: Vec<EntityUri> = plan
+            .merged_children
+            .iter()
+            .skip(plan.canonical_child_count as usize)
+            .map(|c| uri(&c.id))
+            .collect();
+        for child in &moved {
+            if self.document_ring(op, child.as_str()).await?
+                != (canonical_document.clone(), canonical_ring.clone())
+            {
+                self.refuse_move_into(op, child, canonical_document.as_ref(), &canonical_ring)
+                    .await
+                    .map_err(before_adoption)?;
+            }
+        }
+
+        // Keeper and losers are the canonical's children by the time the
+        // dedupe runs.
+        let under_canonical = (canonical_document.clone(), canonical_ring.clone());
+        let mut from_pages: Vec<EntityUri> = Vec::new();
+        for group in &plan.dedupe_groups {
+            let (keeper_document, keeper_ring) = self
+                .document_as_child(op, uri(&group.keeper), &under_canonical)
+                .await?;
+            for loser in &group.losers {
+                let (loser_document, _) = self
+                    .document_as_child(op, uri(&loser.id), &under_canonical)
+                    .await?;
+                if loser_document == keeper_document {
+                    continue;
+                }
+                for orphan in &loser.children {
+                    self.refuse_move_into(op, &uri(orphan), keeper_document.as_ref(), &keeper_ring)
+                        .await
+                        .map_err(before_adoption)?;
+                    if keeper_document == canonical_document {
+                        from_pages.push(uri(orphan));
+                    }
+                }
+            }
+        }
+
+        let mut rings = Vec::new();
+        if becomes_page {
+            rings.push(TaskKeywordVocabulary::from_declared(
+                stored.block.todo_keywords(),
+            ));
+        }
+        rings.extend(adopted_ring);
+        for ring in &rings {
+            self.refuse_undeclared_keywords(op, &canonical, Some(&canonical), ring)
+                .await?;
+            for root in moved.iter().chain(&from_pages) {
+                self.refuse_move_into(op, root, Some(&canonical), ring)
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Re-derive the stored `task_state_category` of every task block at or
+    /// below `root` from its document's ring, read from the write authority.
+    /// The category is derived data, so the write takes no undo step: every
+    /// path that moves a block or edits a ring runs this, undo and redo
+    /// included. Rings are read once per document: a block takes its parent's
+    /// document unless it is a page itself.
+    async fn recategorize(&self, root: &EntityUri) -> Result<()> {
+        let op = "recategorize";
+        let Some(blocks) = self
+            .block_authority(op)?
+            .subtree(root)
+            .await
+            .map_err(|e| anyhow::anyhow!("reading the subtree of {root}: {e}"))?
+        else {
+            return Ok(());
+        };
+        let block_entity = EntityName::new("block");
+        let mut rings: HashMap<
+            EntityUri,
+            (
+                Option<EntityUri>,
+                Arc<holon_org_format::TaskKeywordVocabulary>,
+            ),
+        > = HashMap::new();
+        for stored in blocks {
+            let block = &stored.block;
+            let (document, ring) = if block.is_page() {
+                (
+                    Some(block.id.clone()),
+                    Arc::new(holon_org_format::TaskKeywordVocabulary::from_declared(
+                        block.todo_keywords(),
+                    )),
+                )
+            } else if let Some(inherited) = rings.get(&block.parent_id) {
+                inherited.clone()
+            } else {
+                let (document, ring) = self.document_ring(op, block.id.as_str()).await?;
+                (document, Arc::new(ring))
+            };
+            rings.insert(block.id.clone(), (document.clone(), ring.clone()));
+            let Some(keyword) = stored_keyword(block) else {
+                continue;
+            };
+            let want = state_in_ring(op, block.id.as_str(), &keyword, document.as_ref(), &ring)?;
+            let stored_category = block
+                .properties
+                .get("task_state_category")
+                .and_then(|v| v.as_string());
+            if stored_category == Some(want.category.as_str()) {
+                continue;
+            }
+            let mut params = StorageEntity::new();
+            params.insert("id".into(), Value::String(block.id.as_str().to_string()));
+            params.insert("field".into(), Value::String("task_state".into()));
+            params.insert(
+                "value".into(),
+                holon_api::TaskStateWrite::Set(want).to_value(),
+            );
+            self.dispatcher
+                .execute_operation(&block_entity, "set_field", params)
+                .await
+                .map_err(|e| anyhow::anyhow!("re-deriving the category of {}: {e}", block.id))?;
+        }
+        Ok(())
+    }
+
+    fn block_authority(&self, op: &str) -> Result<&Arc<dyn holon_core::WriteAuthorityReads>> {
+        self.write_authority.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "{op}: this engine has no block write authority, so it cannot know a document's \
+                 #+TODO: ring; a composition that writes blocks must wire one"
+            )
+        })
+    }
+
     async fn document_vocabulary(
         &self,
         op: &str,
         id: &str,
     ) -> Result<holon_org_format::TaskKeywordVocabulary> {
-        match &self.vocabulary_source {
-            Some(source) => source.vocabulary_for_block(id).await,
-            None => {
-                tracing::warn!(
-                    block = %id,
-                    op,
-                    "no task-vocabulary source wired; judging against the DEFAULT keywords, which \
-                     disagrees with the parser in any document declaring #+TODO:"
-                );
-                Ok(holon_org_format::TaskKeywordVocabulary::default())
+        Ok(self.document_ring(op, id).await?.1)
+    }
+
+    /// The document holding `id` and its `#+TODO:` ring, read from the write
+    /// authority: a write right after a move must see the move, which a
+    /// lagging projection does not hold yet. `None` when no document holds
+    /// `id`, which then takes org's defaults.
+    async fn document_ring(
+        &self,
+        op: &str,
+        id: &str,
+    ) -> Result<(Option<EntityUri>, holon_org_format::TaskKeywordVocabulary)> {
+        Ok(match self.document_page(op, id).await? {
+            Some(page) => (
+                Some(page.block.id.clone()),
+                holon_org_format::TaskKeywordVocabulary::from_declared(page.block.todo_keywords()),
+            ),
+            None => (None, holon_org_format::TaskKeywordVocabulary::default()),
+        })
+    }
+
+    /// The page of the document holding `id`; `None` when no document holds it.
+    async fn document_page(&self, op: &str, id: &str) -> Result<Option<holon_api::StoredBlock>> {
+        // ALLOW(entity_uri_from_raw): `id` is an operation's own block id.
+        let uri = EntityUri::from_raw(id);
+        let owner = self
+            .block_authority(op)?
+            .owning_page(&uri)
+            .await
+            .map_err(|e| anyhow::anyhow!("{op}: reading the document holding {id}: {e}"))?;
+        match owner {
+            holon_core::OwningPage::Page(page) => Ok(Some(*page)),
+            holon_core::OwningPage::NoOwner | holon_core::OwningPage::Absent => Ok(None),
+            holon_core::OwningPage::Broken(why) => {
+                bail!("{op}: the document holding {id} cannot be resolved: {why:?}")
             }
         }
     }
@@ -1655,6 +2302,7 @@ impl DispatchingOperationEngine {
     async fn keyword_convergence(
         &self,
         id: &str,
+        ring_of: &str,
         content: &str,
         write_sets_task_state: bool,
     ) -> Result<Option<holon_org_format::Promotion>> {
@@ -1665,7 +2313,7 @@ impl DispatchingOperationEngine {
             return Ok(None);
         }
         let vocabulary = self
-            .document_vocabulary(CONVERGE_TASK_KEYWORD_OP, id)
+            .document_vocabulary(CONVERGE_TASK_KEYWORD_OP, ring_of)
             .await?;
         if self.reader.is_none() && holon_org_format::keyword_headed(content, &vocabulary).is_some()
         {
@@ -1841,7 +2489,8 @@ impl DispatchingOperationEngine {
     fn drawer_entries(field: &str, value: &Value) -> Result<Vec<(String, serde_json::Value)>> {
         use anyhow::Context;
         use holon_org_format::org_props;
-        if field.starts_with('_') && field != org_props::FILE_PROPERTIES {
+        // A removal writes no drawer entry.
+        if (field.starts_with('_') && field != org_props::FILE_PROPERTIES) || value.is_removed() {
             return Ok(Vec::new());
         }
         if [
@@ -1852,7 +2501,11 @@ impl DispatchingOperationEngine {
         .contains(&field)
         {
             let object: serde_json::Map<String, serde_json::Value> = match value {
-                Value::Object(_) => match serde_json::Value::from(value.clone()) {
+                Value::Object(_) => match value
+                    .clone()
+                    .try_into_json()
+                    .with_context(|| format!("`{field}` is not a JSON object"))?
+                {
                     serde_json::Value::Object(map) => map,
                     other => unreachable!("an Object converts to a JSON object, got {other}"),
                 },
@@ -1870,7 +2523,11 @@ impl DispatchingOperationEngine {
             Ok(holon_api::BlockWriteField::Property(_))
         );
         Ok(if is_property {
-            vec![(field.to_string(), serde_json::Value::from(value.clone()))]
+            let value = value
+                .clone()
+                .try_into_json()
+                .with_context(|| format!("property `{field}` is not a value"))?;
+            vec![(field.to_string(), value)]
         } else {
             Vec::new()
         })
@@ -1912,8 +2569,17 @@ impl DispatchingOperationEngine {
             return Ok((params, None));
         };
         let content = content.to_string();
+        // A created block is not in the store yet: its parent's document
+        // holds it.
+        let ring_of = match op_name {
+            "create" => params
+                .get("parent_id")
+                .and_then(|v| v.as_string())
+                .map_or_else(|| id.clone(), str::to_string),
+            _ => id.clone(),
+        };
         let Some(promotion) = self
-            .keyword_convergence(&id, &content, sets_task_state)
+            .keyword_convergence(&id, &ring_of, &content, sets_task_state)
             .await?
         else {
             return Ok((params, None));
@@ -1951,7 +2617,7 @@ impl DispatchingOperationEngine {
                 continue;
             };
             let writes = match self
-                .keyword_convergence(&delta.entity_id, content, false)
+                .keyword_convergence(&delta.entity_id, &delta.entity_id, content, false)
                 .await?
             {
                 Some(promotion) => vec![
@@ -2245,6 +2911,8 @@ impl DispatchingOperationEngine {
             .ok_or_else(|| anyhow::anyhow!("merge_blocks: planner returned no plan payload"))?;
         let plan = MergeBlocksPlan::from_value(&plan_value)
             .map_err(|e| anyhow::anyhow!("merge_blocks: {e}"))?;
+
+        self.refuse_merge_rehomes(&plan).await?;
 
         // Same forced window as the block→page compound: see there.
         #[cfg(feature = "test-yield")]
@@ -3098,13 +3766,70 @@ impl DispatchingOperationEngine {
     }
 }
 
-#[async_trait]
-impl OperationEngine for DispatchingOperationEngine {
-    async fn execute_operation(
+/// `params` of a block `op_name` with `carriers` written alongside: a `create`
+/// takes each carrier the text gives as a property, and a `set_field` names
+/// its one carrier as the field.
+fn with_parsed_carriers(
+    entity_name: &EntityName,
+    op_name: &str,
+    mut params: StorageEntity,
+    carriers: &[ParsedCarrier],
+) -> Result<StorageEntity> {
+    if carriers.is_empty() {
+        return Ok(params);
+    }
+    anyhow::ensure!(
+        entity_name.as_str() == "block",
+        "parser carriers are block properties; '{op_name}' on '{entity_name}' cannot write them"
+    );
+    match op_name {
+        "create" => {
+            for carrier in carriers {
+                if let Some(value) = carrier.value() {
+                    let displaced =
+                        params.insert(carrier.key().into(), Value::String(value.into()));
+                    assert!(
+                        displaced.is_none(),
+                        "reject_parser_carriers admitted a create naming {}",
+                        carrier.key()
+                    );
+                }
+            }
+        }
+        "set_field" => {
+            let [carrier] = carriers else {
+                anyhow::bail!(
+                    "a set_field writes one parser carrier, not {}",
+                    carriers.len()
+                );
+            };
+            anyhow::ensure!(
+                !params.contains_key("field") && !params.contains_key("value"),
+                "a set_field of the parser carrier {} takes its field and value from the carrier",
+                carrier.key()
+            );
+            params.insert("field".into(), Value::String(carrier.key().into()));
+            params.insert(
+                "value".into(),
+                carrier
+                    .value()
+                    .map_or(Value::REMOVED, |v| Value::String(v.into())),
+            );
+        }
+        _ => anyhow::bail!("'{op_name}' cannot write parser carriers; create and set_field can"),
+    }
+    Ok(params)
+}
+
+impl DispatchingOperationEngine {
+    /// Execute `op_name` with `carriers` the org parser read from the author's
+    /// own text written alongside its `params`, which may name no carrier.
+    pub async fn execute_with_parsed_carriers(
         &self,
         entity_name: &EntityName,
         op_name: &str,
         params: StorageEntity,
+        carriers: &[ParsedCarrier],
         origin: OpOrigin,
     ) -> Result<OpOutcome> {
         // Ruling D5.a, and it runs before the trust gate for that reason: a
@@ -3113,6 +3838,7 @@ impl OperationEngine for DispatchingOperationEngine {
         // at accept time, an operation the author never performed.
         reject_engine_owned_keys(op_name, &params)?;
         reject_parser_carriers(op_name, &params, &origin)?;
+        let params = with_parsed_carriers(entity_name, op_name, params, carriers)?;
 
         // Trust gate (VisionGapAnalysis C5): a sub-threshold (origin, entity,
         // op) never reaches canonical state — it is coerced into a proposal
@@ -3232,6 +3958,9 @@ impl OperationEngine for DispatchingOperationEngine {
         let (params, converged) = self
             .converge_block_write(entity_name, op_name, params)
             .await?;
+        let params = self
+            .classify_task_state(entity_name, op_name, params)
+            .await?;
 
         // Same reason, second consumer of the origin this method is the last to
         // hold: whether `content` may carry raw org markup the author just typed
@@ -3255,6 +3984,7 @@ impl OperationEngine for DispatchingOperationEngine {
                 .collect(),
         );
 
+        let rehomed = self.rehomed_root(entity_name, op_name, &params).await?;
         let mut result = self
             .dispatcher
             .execute_operation_with_provenance(entity_name, op_name, params, input, origin.clone())
@@ -3262,6 +3992,9 @@ impl OperationEngine for DispatchingOperationEngine {
             .map_err(|e| {
                 anyhow::anyhow!("Operation '{op_name}' on entity '{entity_name}' failed: {e}")
             })?;
+        if let Some(root) = &rehomed {
+            self.recategorize(root).await?;
+        }
 
         // Ruling #2: an unclassified result is a loud error, never a silent
         // no-entry.
@@ -3371,6 +4104,20 @@ impl OperationEngine for DispatchingOperationEngine {
             response: result.response,
             delivery: result.delivery,
         })
+    }
+}
+
+#[async_trait]
+impl OperationEngine for DispatchingOperationEngine {
+    async fn execute_operation(
+        &self,
+        entity_name: &EntityName,
+        op_name: &str,
+        params: StorageEntity,
+        origin: OpOrigin,
+    ) -> Result<OpOutcome> {
+        self.execute_with_parsed_carriers(entity_name, op_name, params, &[], origin)
+            .await
     }
 
     async fn available_operations(&self, entity_name: &str) -> Vec<OperationDescriptor> {
@@ -4364,6 +5111,32 @@ mod provenance_stamp_tests {
         }
     }
 
+    #[test]
+    fn a_removal_inside_a_properties_object_is_refused_by_name() {
+        let params = params_with(&[
+            ("id", Value::String("block:x".into())),
+            ("field", Value::String("properties".into())),
+            (
+                "value",
+                Value::Object(std::collections::HashMap::from([(
+                    "owner".to_string(),
+                    Value::REMOVED,
+                )])),
+            ),
+        ]);
+        let err = DispatchingOperationEngine::refuse_undrawable_property_key(
+            &EntityName::new("block"),
+            "set_field",
+            &params,
+        )
+        .expect_err("a removal nested in an object is not a value");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("properties") && msg.contains("owner"),
+            "the refusal must name the field and the key: {msg}"
+        );
+    }
+
     /// The SECOND route: `set_field` names the key in a param VALUE, so a
     /// refusal reading only param KEYS lets a FORGED stamp through — and a
     /// forged stamp is worse than a replaced one, because
@@ -4502,6 +5275,93 @@ mod provenance_stamp_tests {
             reject_parser_carriers(op, params, &OpOrigin::Sync)
                 .expect("a peer merge carries the carriers");
         }
+    }
+
+    #[test]
+    fn an_agent_write_of_a_carrier_dense_patch_writes_is_refused() {
+        let agent = OpOrigin::Agent {
+            session_id: "s".into(),
+            tool_call_id: "t".into(),
+        };
+        for carrier in ParsedCarrier::KEYS {
+            let via_set_field = params_with(&[
+                ("id", Value::String("block:x".into())),
+                ("field", Value::String(carrier.into())),
+                ("value", Value::String("[]".into())),
+            ]);
+            let via_create = params_with(&[
+                ("id", Value::String("block:x".into())),
+                (carrier, Value::String("[]".into())),
+            ]);
+            for (op, params) in [("set_field", &via_set_field), ("create", &via_create)] {
+                let err = reject_parser_carriers(op, params, &agent)
+                    .expect_err("an agent's raw carrier write must be REFUSED");
+                assert!(format!("{err:#}").contains(carrier), "{err:#}");
+            }
+        }
+    }
+
+    fn parsed_row() -> holon_org_format::DenseBlock {
+        let text = "* Row\n:PROPERTIES:\n:b: 1\n:a: 2\n:END:\n#+CAPTION: x\nbody\n";
+        holon_org_format::parse_dense(text)
+            .expect("dense text parses")
+            .blocks
+            .swap_remove(0)
+    }
+
+    #[test]
+    fn parsed_carriers_join_a_create_and_name_a_set_field() {
+        let row = parsed_row();
+        let block = EntityName::new("block");
+        let carriers = [row.drawer_order.clone(), row.keyword_lines.clone()];
+        let create = with_parsed_carriers(
+            &block,
+            "create",
+            params_with(&[("id", Value::String("block:x".into()))]),
+            &carriers,
+        )
+        .expect("a create takes the carriers");
+        for carrier in &carriers {
+            assert_eq!(
+                create.get(carrier.key()).and_then(|v| v.as_string()),
+                carrier.value(),
+                "{}",
+                carrier.key()
+            );
+        }
+        let set = with_parsed_carriers(
+            &block,
+            "set_field",
+            params_with(&[("id", Value::String("block:x".into()))]),
+            std::slice::from_ref(&row.keyword_lines),
+        )
+        .expect("a set_field names its carrier");
+        assert_eq!(
+            (
+                set.get("field").and_then(|v| v.as_string()),
+                set.get("value").and_then(|v| v.as_string()),
+            ),
+            (Some(row.keyword_lines.key()), row.keyword_lines.value())
+        );
+    }
+
+    #[test]
+    fn a_parsed_carrier_does_not_override_an_authored_field_or_join_another_op() {
+        let row = parsed_row();
+        let block = EntityName::new("block");
+        let named = params_with(&[
+            ("id", Value::String("block:x".into())),
+            ("field", Value::String("content".into())),
+            ("value", Value::String("v".into())),
+        ]);
+        let carrier = std::slice::from_ref(&row.drawer_order);
+        with_parsed_carriers(&block, "set_field", named, carrier)
+            .expect_err("the carrier names the field");
+        let id = params_with(&[("id", Value::String("block:x".into()))]);
+        with_parsed_carriers(&block, "update", id.clone(), carrier)
+            .expect_err("only create and set_field write carriers");
+        with_parsed_carriers(&EntityName::new("task"), "create", id, carrier)
+            .expect_err("carriers are block properties");
     }
 
     #[test]

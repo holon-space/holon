@@ -2227,6 +2227,28 @@ impl ReferenceState {
         // it irreversible — that path would then need to skip this snapshot to
         // match, mirroring the join/slash-delete leaf gates.
         self.push_undo_snapshot();
+        self.create_block_under_with_id_outside_history(parent, content, new_id);
+    }
+
+    /// [`Self::create_block_under`] without an undo snapshot. The caller
+    /// carries the finished block across the history
+    /// ([`Self::carry_block_placement_across_history`]).
+    pub fn create_block_under_outside_history(
+        &mut self,
+        parent: &EntityUri,
+        content: &str,
+    ) -> EntityUri {
+        let new_id = EntityUri::block(&format!(":create-{}", self.domain.block_state.next_id));
+        self.create_block_under_with_id_outside_history(parent, content, new_id.clone());
+        new_id
+    }
+
+    fn create_block_under_with_id_outside_history(
+        &mut self,
+        parent: &EntityUri,
+        content: &str,
+        new_id: EntityUri,
+    ) {
         // The org lens applies to a block BORN from UI input exactly as it does
         // to one edited (`set_block_content`): the creation slot commits typed
         // text, so raw `[[Page]]` / `*bold*` markup arrives here and the store
@@ -3124,6 +3146,87 @@ impl ReferenceState {
     pub fn push_undo_snapshot(&mut self) {
         self.action.undo_stack.push(self.domain.block_state.clone());
         self.action.redo_stack.clear();
+    }
+
+    /// `id`'s text and task state as they are now, in every undo and redo
+    /// snapshot that holds `id`: an agent write is outside the user's undo
+    /// history (prod journals only User-origin ops), so no restore takes it
+    /// back.
+    pub fn carry_block_text_across_history(&mut self, id: &EntityUri) {
+        const TASK_KEYS: [&str; 2] = ["task_state", "task_state_category"];
+        let now = self.domain.block_state.blocks[id].clone();
+        for snapshot in self
+            .action
+            .undo_stack
+            .iter_mut()
+            .chain(self.action.redo_stack.iter_mut())
+        {
+            let Some(block) = snapshot.blocks.get_mut(id) else {
+                continue;
+            };
+            block.content = now.content.clone();
+            block.marks = now.marks.clone();
+            for key in TASK_KEYS {
+                match now.properties.get(key) {
+                    Some(value) => {
+                        block.properties.insert(key.to_string(), value.clone());
+                    }
+                    None => {
+                        block.properties.remove(key);
+                    }
+                }
+            }
+        }
+    }
+
+    /// `id` and its place among its siblings as they are now, in every undo
+    /// and redo snapshot that holds its parent: an agent create or move is
+    /// outside the user's undo history, so no restore takes it back.
+    pub fn carry_block_placement_across_history(&mut self, id: &EntityUri) {
+        use holon_orgmode::models::OrgBlockExt;
+        let now = self.domain.block_state.blocks[id].clone();
+        let document = self.domain.block_state.block_documents.get(id).cloned();
+        let after = self.domain.block_state.previous_sibling(id);
+        for snapshot in self
+            .action
+            .undo_stack
+            .iter_mut()
+            .chain(self.action.redo_stack.iter_mut())
+        {
+            if !snapshot.blocks.contains_key(&now.parent_id) {
+                continue;
+            }
+            let mut siblings: Vec<EntityUri> = snapshot
+                .children_of(&now.parent_id)
+                .into_iter()
+                .filter(|s| s != id)
+                .collect();
+            let at = match &after {
+                None => 0,
+                Some(anchor) => siblings
+                    .iter()
+                    .position(|s| s == anchor)
+                    .map_or(siblings.len(), |p| p + 1),
+            };
+            siblings.insert(at, id.clone());
+            snapshot
+                .blocks
+                .entry(id.clone())
+                .or_insert_with(|| now.clone())
+                .parent_id = now.parent_id.clone();
+            if let Some(document) = &document {
+                snapshot
+                    .block_documents
+                    .insert(id.clone(), document.clone());
+            }
+            for (i, sibling) in siblings.iter().enumerate() {
+                snapshot
+                    .blocks
+                    .get_mut(sibling)
+                    .expect("a sibling listed from the snapshot is in it")
+                    .set_sequence(i as i64);
+            }
+        }
     }
 
     /// Undo: snapshot current state onto redo stack, restore from undo stack.

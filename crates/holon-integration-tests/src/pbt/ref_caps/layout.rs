@@ -298,6 +298,27 @@ impl RefLayoutMutate for ReferenceState {
         ReferenceState::create_block_under(self, parent, content);
     }
 
+    fn create_block_under_with_attributes(
+        &mut self,
+        parent: &EntityUri,
+        content: &str,
+        tags: &holon_api::Tags,
+        properties: &std::collections::BTreeMap<String, String>,
+    ) {
+        let id = ReferenceState::create_block_under_outside_history(self, parent, content);
+        let block = self
+            .domain
+            .block_state
+            .blocks
+            .get_mut(&id)
+            .expect("create_block_under inserts the block it returns");
+        block.tags = tags.clone();
+        for (key, value) in properties {
+            block.set_property(key, holon_api::Value::String(value.clone()));
+        }
+        ReferenceState::carry_block_placement_across_history(self, &id);
+    }
+
     fn create_block_under_with_id(&mut self, parent: &EntityUri, content: &str, id: EntityUri) {
         ReferenceState::create_block_under_with_id(self, parent, content, id);
     }

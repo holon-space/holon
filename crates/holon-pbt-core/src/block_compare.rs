@@ -111,13 +111,14 @@ pub fn normalize_block(block: &Block) -> Block {
     // The reference model does not re-derive them, so the whole namespace is
     // stripped here rather than key-by-key (`_provenance`, `_drawer_order`, …).
     normalized.properties.retain(|k, _| !k.starts_with('_'));
-    // Strip Null-valued and empty-string properties: the org parser stores
-    // task_state=Null explicitly in the DB but the reference model omits absent
-    // properties. Empty-string task_state means "no state" and is lost during
-    // org round-trip (not written as a keyword, so not parsed back).
-    normalized.properties.retain(|_, v| match v {
+    // Strip Null-valued properties: the org parser stores task_state=Null
+    // explicitly in the DB but the reference model omits absent properties.
+    // An empty-string task_state means "no state" and is lost during the org
+    // round trip (not written as a keyword, so not parsed back); any other
+    // empty value is a value an org drawer carries as `""`.
+    normalized.properties.retain(|k, v| match v {
         holon_api::Value::Null => false,
-        holon_api::Value::String(s) if s.is_empty() => false,
+        holon_api::Value::String(s) if s.is_empty() => k != "task_state",
         _ => true,
     });
     // `task_state_category` is `task_state`'s sidecar — without a (non-empty)
@@ -476,6 +477,20 @@ mod tests {
             EntityUri::block(parent),
             content.to_string(),
         )
+    }
+
+    #[test]
+    fn a_lost_empty_property_value_diverges() {
+        let mut expected = blk("a", "p", "row");
+        expected.set_property("note", holon_api::Value::String(String::new()));
+        let actual = blk("a", "p", "row");
+        assert!(
+            matches!(
+                compare_blocks("t", &[actual], &[expected], false),
+                InvariantResult::Fail(_)
+            ),
+            "a property whose empty value the store lost must diverge"
+        );
     }
 
     /// The diff must name the divergence, not merely report one. These assert

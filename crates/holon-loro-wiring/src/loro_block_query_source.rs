@@ -163,8 +163,9 @@ pub fn loro_operation_engine(block_ops: LoroBlockOperations) -> Arc<dyn Operatio
     // a Loro-only session; an in-memory provider keeps per-device focus history
     // so click / arrow / back-forward navigation dispatches succeed.
     let nav_ops = holon::navigation::InMemoryNavigationProvider::new();
+    let block_ops = Arc::new(block_ops);
     let mut dispatcher = OperationDispatcher::new(vec![
-        Arc::new(block_ops) as Arc<dyn OperationProvider>,
+        block_ops.clone() as Arc<dyn OperationProvider>,
         Arc::new(nav_ops) as Arc<dyn OperationProvider>,
     ]);
     // ADR 0028 C3 — the Loro-only session dispatches through THIS dispatcher,
@@ -196,7 +197,8 @@ pub fn loro_operation_engine(block_ops: LoroBlockOperations) -> Arc<dyn Operatio
     // than silently omitting history.
     Arc::new(
         DispatchingOperationEngine::new(Arc::new(dispatcher))
-            .with_history_store(Arc::new(holon::api::DegradedHistoryStore::new())),
+            .with_history_store(Arc::new(holon::api::DegradedHistoryStore::new()))
+            .with_write_authority(block_ops as Arc<dyn holon_core::WriteAuthorityReads>),
     )
 }
 
@@ -532,5 +534,177 @@ mod tests {
             && captured[0][0].trim_start_matches("left ")
                 == captured[1][0].trim_start_matches("right ");
         assert!(one_round, "the snapshot mixes doc states: {captured:?}");
+    }
+
+    /// The engine a no-Turso session writes through, over a fresh doc, with
+    /// pages `block:closing` (`TODO | CANCELLED`) and `block:shipping`
+    /// (`NEXT | SHIPPED`), each holding one child.
+    async fn org_standalone_engine_with_rings() -> (Arc<dyn OperationEngine>, LoroBlockOperations) {
+        use holon_api::EntityName;
+        use holon_api::OpOrigin;
+        use holon_api::Value;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(RwLock::new(LoroDocumentStore::new(tmp.keep())));
+        let engine = loro_operation_engine(LoroBlockOperations::new(store.clone()));
+        let run = |op: &'static str, params: Vec<(&'static str, String)>| {
+            let engine = engine.clone();
+            async move {
+                let params = params
+                    .into_iter()
+                    .map(|(k, v)| (Arc::from(k), Value::String(v)))
+                    .collect();
+                engine
+                    .execute_operation(&EntityName::new("block"), op, params, OpOrigin::User)
+                    .await
+                    .unwrap_or_else(|e| panic!("{op}: {e:#}"));
+            }
+        };
+        for (page, ring, child) in [
+            ("block:closing", "TODO|CANCELLED", "block:x"),
+            ("block:shipping", "NEXT|SHIPPED", "block:s"),
+        ] {
+            run(
+                "create",
+                vec![
+                    ("id", page.into()),
+                    ("parent_id", EntityUri::no_parent().to_string()),
+                    ("content", page.into()),
+                ],
+            )
+            .await;
+            run(
+                "set_field",
+                vec![
+                    ("id", page.into()),
+                    ("field", "todo_keywords".into()),
+                    ("value", ring.into()),
+                ],
+            )
+            .await;
+            run("add_tag", vec![("id", page.into()), ("tag", "Page".into())]).await;
+            run(
+                "create",
+                vec![
+                    ("id", child.into()),
+                    ("parent_id", page.into()),
+                    ("content", "row".into()),
+                ],
+            )
+            .await;
+        }
+        (engine, LoroBlockOperations::new(store))
+    }
+
+    async fn task_pair(ops: &LoroBlockOperations, id: &str) -> (Option<String>, Option<String>) {
+        use holon_core::WriteAuthorityReads;
+
+        // ALLOW(entity_uri_from_raw): test-fixture literal
+        let stored = ops.block(&EntityUri::from_raw(id)).await.unwrap().unwrap();
+        let prop = |key: &str| {
+            stored
+                .block
+                .properties
+                .get(key)
+                .and_then(|v| v.as_string())
+                .map(str::to_string)
+        };
+        (prop("task_state"), prop("task_state_category"))
+    }
+
+    async fn try_op(
+        engine: &Arc<dyn OperationEngine>,
+        op: &str,
+        params: &[(&str, &str)],
+    ) -> anyhow::Result<()> {
+        let params = params
+            .iter()
+            .map(|(k, v)| (Arc::from(*k), holon_api::Value::String(v.to_string())))
+            .collect();
+        engine
+            .execute_operation(
+                &holon_api::EntityName::new("block"),
+                op,
+                params,
+                holon_api::OpOrigin::User,
+            )
+            .await
+            .map(|_| ())
+    }
+
+    /// The org-standalone engine judges a task keyword by its document's ring,
+    /// like every other composition: an undeclared keyword and a move into a
+    /// ring that lacks it are refused by name, and a ring edit re-derives the
+    /// category.
+    #[tokio::test]
+    async fn the_org_standalone_engine_judges_keywords_by_the_documents_ring() {
+        let (engine, ops) = org_standalone_engine_with_rings().await;
+
+        let refused = try_op(
+            &engine,
+            "set_field",
+            &[
+                ("id", "block:s"),
+                ("field", "task_state"),
+                ("value", "TODO"),
+            ],
+        )
+        .await;
+        let msg = format!(
+            "{:#}",
+            refused.expect_err("TODO is not in `NEXT | SHIPPED`")
+        );
+        assert!(
+            msg.contains("block:shipping") && msg.contains("NEXT | SHIPPED"),
+            "{msg}"
+        );
+
+        try_op(
+            &engine,
+            "set_field",
+            &[
+                ("id", "block:x"),
+                ("field", "task_state"),
+                ("value", "CANCELLED"),
+            ],
+        )
+        .await
+        .expect("CANCELLED is declared by `TODO | CANCELLED`");
+        assert_eq!(
+            task_pair(&ops, "block:x").await,
+            (Some("CANCELLED".into()), Some("done".into()))
+        );
+
+        let moved = try_op(
+            &engine,
+            "move_block",
+            &[("id", "block:x"), ("parent_id", "block:shipping")],
+        )
+        .await;
+        let msg = format!(
+            "{:#}",
+            moved.expect_err("CANCELLED is not in `NEXT | SHIPPED`")
+        );
+        assert!(
+            msg.contains("block:x") && msg.contains("NEXT | SHIPPED"),
+            "{msg}"
+        );
+
+        try_op(
+            &engine,
+            "set_field",
+            &[
+                ("id", "block:closing"),
+                ("field", "todo_keywords"),
+                ("value", "TODO,CANCELLED|DONE"),
+            ],
+        )
+        .await
+        .expect("the new ring still declares CANCELLED");
+        assert_eq!(
+            task_pair(&ops, "block:x").await,
+            (Some("CANCELLED".into()), Some("active".into())),
+            "the ring edit re-derives the category"
+        );
     }
 }

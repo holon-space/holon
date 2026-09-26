@@ -69,8 +69,16 @@ impl<'a> BagEntry<'a> {
     }
 }
 
-fn json_path(key: &str) -> String {
-    format!("'$.{}'", key.replace('\'', "''"))
+/// A JSON path naming `key` as ONE member: quoted, so a `.` or `[` in the key
+/// is part of its name rather than a nested step. A quoted member has no
+/// escape for `"` or `\`.
+fn json_path(key: &str) -> Result<String, String> {
+    if key.contains(['"', '\\']) {
+        return Err(format!(
+            "property key {key:?} holds a `\"` or `\\`, which a JSON path cannot name"
+        ));
+    }
+    Ok(format!("'$.\"{}\"'", key.replace('\'', "''")))
 }
 
 /// The `SET` assignments writing `entries` into the bag and keeping
@@ -78,7 +86,7 @@ fn json_path(key: &str) -> String {
 ///
 /// An empty kind map is stored as NULL, not `{}`, so "no key carries a
 /// non-evident kind" has ONE spelling on disk whichever leg wrote it.
-pub(crate) fn bag_and_kinds_set_clause(entries: &[BagEntry<'_>]) -> String {
+pub(crate) fn bag_and_kinds_set_clause(entries: &[BagEntry<'_>]) -> Result<String, String> {
     let removed: Vec<&str> = entries
         .iter()
         .filter(|e| e.value_sql.is_none())
@@ -88,20 +96,23 @@ pub(crate) fn bag_and_kinds_set_clause(entries: &[BagEntry<'_>]) -> String {
 
     let mut bag = "COALESCE(properties, '{}')".to_string();
     if !removed.is_empty() {
-        let paths: Vec<String> = removed.iter().map(|k| json_path(k)).collect();
+        let paths: Vec<String> = removed
+            .iter()
+            .map(|k| json_path(k))
+            .collect::<Result<_, _>>()?;
         bag = format!("json_remove({bag}, {})", paths.join(", "));
     }
     if !stored.is_empty() {
         let pairs: Vec<String> = stored
             .iter()
             .map(|e| {
-                format!(
+                Ok(format!(
                     "{}, {}",
-                    json_path(e.key),
+                    json_path(e.key)?,
                     e.value_sql.as_deref().expect("filtered to stored")
-                )
+                ))
             })
-            .collect();
+            .collect::<Result<_, String>>()?;
         bag = format!("json_set({bag}, {})", pairs.join(", "));
     }
 
@@ -109,20 +120,25 @@ pub(crate) fn bag_and_kinds_set_clause(entries: &[BagEntry<'_>]) -> String {
     // laid down, so a key rewritten at a JSON-evident kind cannot keep the
     // entry it held.
     let mut kinds = "COALESCE(property_kinds, '{}')".to_string();
-    let cleared: Vec<String> = entries.iter().map(|e| json_path(e.key)).collect();
+    let cleared: Vec<String> = entries
+        .iter()
+        .map(|e| json_path(e.key))
+        .collect::<Result<_, _>>()?;
     kinds = format!("json_remove({kinds}, {})", cleared.join(", "));
     let recorded: Vec<String> = entries
         .iter()
         .filter_map(|e| {
             e.kind
-                .map(|k| format!("{}, '{}'", json_path(e.key), k.as_str()))
+                .map(|k| Ok(format!("{}, '{}'", json_path(e.key)?, k.as_str())))
         })
-        .collect();
+        .collect::<Result<_, String>>()?;
     if !recorded.is_empty() {
         kinds = format!("json_set({kinds}, {})", recorded.join(", "));
     }
 
-    format!("properties = {bag}, property_kinds = NULLIF({kinds}, '{{}}')")
+    Ok(format!(
+        "properties = {bag}, property_kinds = NULLIF({kinds}, '{{}}')"
+    ))
 }
 
 #[cfg(test)]
@@ -137,13 +153,14 @@ mod tests {
             "Probe",
             "'just text'".to_string(),
             &Value::String("just text".into()),
-        )]);
+        )])
+        .unwrap();
         assert!(
-            clause.contains("json_set(COALESCE(properties, '{}'), '$.Probe', 'just text')"),
+            clause.contains("json_set(COALESCE(properties, '{}'), '$.\"Probe\"', 'just text')"),
             "{clause}"
         );
         assert!(
-            clause.contains("json_remove(COALESCE(property_kinds, '{}'), '$.Probe')")
+            clause.contains("json_remove(COALESCE(property_kinds, '{}'), '$.\"Probe\"')")
                 && !clause.contains("date_time"),
             "a plain overwrite must CLEAR the entry, not leave it: {clause}"
         );
@@ -155,8 +172,9 @@ mod tests {
             "when",
             "'2026-08-22T10:00:00Z'".to_string(),
             &Value::DateTime("2026-08-22T10:00:00Z".into()),
-        )]);
-        assert!(clause.contains("'$.when', 'date_time'"), "{clause}");
+        )])
+        .unwrap();
+        assert!(clause.contains("'$.\"when\"', 'date_time'"), "{clause}");
         assert!(
             clause.starts_with("properties = ") && clause.contains(", property_kinds = "),
             "both columns must be assigned by one statement: {clause}"
@@ -165,20 +183,20 @@ mod tests {
 
     #[test]
     fn a_removal_drops_the_key_and_its_kind() {
-        let clause = bag_and_kinds_set_clause(&[BagEntry::remove("when")]);
+        let clause = bag_and_kinds_set_clause(&[BagEntry::remove("when")]).unwrap();
         assert!(
-            clause.contains("json_remove(COALESCE(properties, '{}'), '$.when')"),
+            clause.contains("json_remove(COALESCE(properties, '{}'), '$.\"when\"')"),
             "{clause}"
         );
         assert!(
-            clause.contains("json_remove(COALESCE(property_kinds, '{}'), '$.when')"),
+            clause.contains("json_remove(COALESCE(property_kinds, '{}'), '$.\"when\"')"),
             "{clause}"
         );
     }
 
     #[test]
     fn an_emptied_kind_map_is_stored_as_null() {
-        let clause = bag_and_kinds_set_clause(&[BagEntry::remove("when")]);
+        let clause = bag_and_kinds_set_clause(&[BagEntry::remove("when")]).unwrap();
         assert!(
             clause.contains("NULLIF(") && clause.ends_with(", '{}')"),
             "an empty map must collapse to NULL so 'no kinds' has one spelling: {clause}"

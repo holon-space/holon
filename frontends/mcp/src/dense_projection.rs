@@ -27,6 +27,8 @@
 //! move that does not bump `updated_at` is not version-guarded; write_seq is a
 //! possible future refinement.)
 
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -34,20 +36,86 @@ use std::sync::Mutex;
 use std::time::Duration;
 use std::time::Instant;
 
+use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
 use holon_api::EntityUri;
+use holon_api::Tags;
 use holon_api::block::Block;
+use holon_api::types::TaskState;
+use holon_org_format::Alias;
 use holon_org_format::AliasTable;
+use holon_org_format::DenseBlock;
 use holon_org_format::OrgBlockExt;
 use holon_org_format::OrgDocumentExt;
+use holon_org_format::TaskKeywordVocabulary;
+use holon_org_format::is_headline;
+use holon_org_format::models::is_hidden_drawer_key;
+use holon_org_format::parse_dense;
 use holon_org_format::render_dense;
+
+use crate::dense_patch::RowAttributes;
+use crate::dense_patch::RowView;
 
 /// The synthetic render root used when the projection's roots do not share one
 /// real parent (a query spanning multiple parents). Blocks re-rooted here have
 /// no single natural home; `dense_patch` refuses to create a NEW top-level
 /// block against it.
 pub const SYNTHETIC_ROOT: &str = "dense-projection-root";
+
+/// The task keywords of the document a block's children live in, by that
+/// block's id: each row is read, and judged, by its OWN document's ring.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DocVocabularies {
+    /// Every document has this vocabulary (a test over a single file).
+    Uniform(TaskKeywordVocabulary),
+    /// Keyed by parent block id; a parent the query result needs must be
+    /// present.
+    ByParent(HashMap<String, TaskKeywordVocabulary>),
+}
+
+impl DocVocabularies {
+    /// The vocabulary of the document a child of `parent` lives in.
+    pub fn under(&self, parent: &EntityUri) -> &TaskKeywordVocabulary {
+        match self {
+            DocVocabularies::Uniform(v) => v,
+            DocVocabularies::ByParent(map) => map.get(parent.as_str()).unwrap_or_else(|| {
+                panic!("no task vocabulary was read for the document under {parent}")
+            }),
+        }
+    }
+
+    /// The parents read here.
+    pub fn parents(&self) -> Vec<String> {
+        match self {
+            DocVocabularies::ByParent(map) => map.keys().cloned().collect(),
+            DocVocabularies::Uniform(_) => panic!("a uniform vocabulary is not read per parent"),
+        }
+    }
+
+    /// The parents whose document `now` reads with another vocabulary.
+    pub fn changed_in(&self, now: &DocVocabularies) -> Vec<String> {
+        let (DocVocabularies::ByParent(then), DocVocabularies::ByParent(now)) = (self, now) else {
+            panic!("vocabularies are compared per parent")
+        };
+        let mut changed: Vec<String> = then
+            .iter()
+            .filter(|(parent, vocabulary)| now.get(parent.as_str()) != Some(vocabulary))
+            .map(|(parent, _)| parent.clone())
+            .collect();
+        changed.sort();
+        changed
+    }
+}
+
+/// `keyword` as `vocabulary` classifies it.
+pub fn state_in(vocabulary: &TaskKeywordVocabulary, keyword: &str) -> TaskState {
+    if vocabulary.done_keywords().iter().any(|k| k == keyword) {
+        TaskState::done(keyword)
+    } else {
+        TaskState::active(keyword)
+    }
+}
 
 /// Per-block optimistic-concurrency token captured at projection time.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -79,11 +147,26 @@ pub struct ProjectedBlock {
     /// Whether this block is rendered with the elided-ancestor gap marker: its
     /// true parent was NOT selected and is not the render root.
     pub gap: bool,
-    /// The block's title (first content line) at projection time — the baseline
-    /// the patch diffs against to detect a retitle.
-    pub title: String,
-    /// The block's task state at projection time — baseline for a state change.
-    pub task_state: Option<holon_api::types::TaskState>,
+    /// The block as stored, which a plan's writes start from.
+    pub stored: Block,
+    /// The stored task state, which the shown row may not match: org reads a
+    /// stored keyword-headed title as a task.
+    pub task_state: Option<TaskState>,
+    /// The stored tags, which a headline edit replaces.
+    pub tags: Tags,
+    /// The stored authored drawer key order, which places drawer lines.
+    pub drawer_order: Vec<String>,
+    /// The stored carriers an edit of the row's text leaves in place.
+    pub kept: holon_org_format::KeptCarriers,
+    /// The task keywords of the block's own document, which is also the
+    /// document its children live in.
+    pub vocabulary: TaskKeywordVocabulary,
+    /// The row the projection text shows for this block, parsed back: what an
+    /// edit is detected against. `None` for a block rendered without a token.
+    pub shown: Option<RowView>,
+    /// That row's text, as [`holon_org_format::row_lines`] reads it: a row
+    /// whose text is unchanged is not an edit, whatever org reads it as.
+    pub shown_lines: Vec<String>,
     pub version: BlockVersion,
 }
 
@@ -92,6 +175,17 @@ pub struct ProjectedBlock {
 pub struct Projection {
     /// The query that produced it (for diagnostics / re-projection).
     pub query: String,
+    /// The task keywords of the document a new top-level row lands in; `None`
+    /// under the synthetic root, where no new top-level row may land.
+    pub root_vocabulary: Option<TaskKeywordVocabulary>,
+    /// The document vocabularies the projection was read with; a patch
+    /// against a document whose vocabulary changed since is a conflict.
+    pub vocabularies: DocVocabularies,
+    /// The non-blank lines the text shows before its first row.
+    pub header: Vec<String>,
+    /// Rows whose text does not parse back as one row; a patch against this
+    /// projection is refused.
+    pub unreadable: BTreeMap<Alias, String>,
     /// Render root id (`file_id`): the roots' shared real parent, or
     /// [`SYNTHETIC_ROOT`]. New top-level blocks anchor here.
     pub file_id: EntityUri,
@@ -102,17 +196,19 @@ pub struct Projection {
 }
 
 impl Projection {
-    pub fn new(
-        query: String,
-        file_id: EntityUri,
-        alias_table: AliasTable,
-        records: HashMap<String, ProjectedBlock>,
-    ) -> Projection {
+    pub fn new(query: String, built: &BuiltProjection) -> Projection {
         Projection {
             query,
-            file_id,
-            alias_table,
-            records,
+            header: preamble(&built.dense_text)
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            unreadable: built.unreadable.clone(),
+            root_vocabulary: built.root_vocabulary.clone(),
+            vocabularies: built.vocabularies.clone(),
+            file_id: built.file_id.clone(),
+            alias_table: built.alias_table.clone(),
+            records: built.records.clone(),
             created: Instant::now(),
         }
     }
@@ -166,10 +262,32 @@ impl ProjectionRegistry {
 /// to register the handle.
 pub struct BuiltProjection {
     pub file_id: EntityUri,
+    /// The task keywords of the document a new top-level row lands in; `None`
+    /// under the synthetic root, where no new top-level row may land.
+    pub root_vocabulary: Option<TaskKeywordVocabulary>,
+    pub vocabularies: DocVocabularies,
     pub ordered_blocks: Vec<Block>,
     pub alias_table: AliasTable,
     pub records: HashMap<String, ProjectedBlock>,
     pub dense_text: String,
+    /// Per row, the stored property keys its drawer does not show, because
+    /// an org drawer line cannot spell them. Rows that show every property
+    /// are absent.
+    pub omitted: BTreeMap<Alias, Vec<String>>,
+    /// Per row, how its text shows the block otherwise than it is stored.
+    pub unfaithful: BTreeMap<Alias, String>,
+    /// The rows of [`Self::unfaithful`] whose text does not even parse back
+    /// as one row; a patch of the projection is refused.
+    pub unreadable: BTreeMap<Alias, String>,
+}
+
+/// The non-blank lines of `text` before its first org headline.
+pub fn preamble(text: &str) -> Vec<&str> {
+    text.lines()
+        .take_while(|line| !is_headline(line))
+        .map(str::trim_end)
+        .filter(|line| !line.is_empty())
+        .collect()
 }
 
 /// Build a dense projection from a query's block result. Pure (no I/O), so it
@@ -179,7 +297,10 @@ pub struct BuiltProjection {
 ///
 /// `blocks` arrive in the query's result order; that order is preserved among
 /// siblings. Page (container) blocks are dropped — they are not content.
-pub fn build_projection(blocks: Vec<Block>) -> Result<BuiltProjection> {
+pub fn build_projection(
+    blocks: Vec<Block>,
+    vocabularies: &DocVocabularies,
+) -> Result<BuiltProjection> {
     let selected: Vec<Block> = blocks.into_iter().filter(|b| !b.is_page()).collect();
     let in_set: HashSet<String> = selected.iter().map(|b| b.id.as_str().to_string()).collect();
 
@@ -230,6 +351,8 @@ pub fn build_projection(blocks: Vec<Block>) -> Result<BuiltProjection> {
         .iter()
         .map(|b| (b.id.as_str(), b.parent_id.clone()))
         .collect();
+    let selected_by_id: HashMap<&str, &Block> =
+        selected.iter().map(|b| (b.id.as_str(), b)).collect();
     let mut sibling_counter: HashMap<String, usize> = HashMap::new();
     let mut records: HashMap<String, ProjectedBlock> = HashMap::new();
     let mut gap_ids: HashSet<String> = HashSet::new();
@@ -254,6 +377,7 @@ pub fn build_projection(blocks: Vec<Block>) -> Result<BuiltProjection> {
         if gap {
             gap_ids.insert(rb.id.as_str().to_string());
         }
+        let vocabulary = vocabularies.under(&true_parent).clone();
         records.insert(
             rb.id.as_str().to_string(),
             ProjectedBlock {
@@ -262,23 +386,164 @@ pub fn build_projection(blocks: Vec<Block>) -> Result<BuiltProjection> {
                 proj_parent,
                 proj_index,
                 gap,
-                title: rb.org_title(),
+                stored: selected_by_id[rb.id.as_str()].clone(),
                 task_state: rb.task_state(),
+                tags: rb.tags(),
+                drawer_order: rb
+                    .authored_drawer_order()
+                    .with_context(|| format!("block {} holds an unreadable drawer order", rb.id))?,
+                kept: holon_org_format::KeptCarriers::of(rb),
+                vocabulary,
+                shown: None,
+                shown_lines: Vec::new(),
                 version: BlockVersion::of(rb),
             },
         );
     }
 
-    let doc_block = synth_doc_block(&file_id, &ordered);
+    let root_vocabulary = (file_id.id() != SYNTHETIC_ROOT).then(|| vocabularies.under(&file_id));
+    let doc_block = synth_doc_block(&file_id, &ordered, &records, root_vocabulary);
     let dense_text = render_dense(&doc_block, &ordered, &file_id, &alias_table, &gap_ids)?;
 
+    // Parsing the rendered text back is what makes an unedited row diff to
+    // nothing, whatever the store's own spelling is.
+    let reparsed = parse_dense(&dense_text)?;
+    let stored: HashMap<&str, &Block> = ordered.iter().map(|b| (b.id.as_str(), b)).collect();
+    let mut omitted = BTreeMap::new();
+    let mut unfaithful = BTreeMap::new();
+    let mut unreadable = BTreeMap::new();
+    let mut previous: Option<&Alias> = None;
+    for row in &reparsed.blocks {
+        let Some(alias) = &row.alias else {
+            let owner = previous.unwrap_or_else(|| {
+                panic!("a row without a token precedes every projected row:\n{dense_text}")
+            });
+            let title = row.block.org_title();
+            let line = dense_text
+                .lines()
+                .find(|l| is_headline(l) && l.trim_start_matches('*').trim() == title)
+                .unwrap_or(&title);
+            unreadable.entry(owner.clone()).or_insert_with(|| {
+                format!(
+                    "the body line `{line}` reads back as a row of its own, so the text cannot \
+                     show this block"
+                )
+            });
+            continue;
+        };
+        previous = Some(alias);
+        let id = alias_table
+            .id_of(alias)
+            .unwrap_or_else(|| panic!("rendered alias {alias} is not in the projection table"));
+        let record = records
+            .get_mut(id.as_str())
+            .unwrap_or_else(|| panic!("rendered alias {alias} has no projection record"));
+        if record.shown.is_some() {
+            unreadable.insert(
+                alias.clone(),
+                "its token appears on more than one row of the text".to_string(),
+            );
+        }
+        record.shown = Some(RowView::of(row)?);
+        let hidden = unshown_property_keys(stored[id.as_str()], row);
+        if !hidden.is_empty() {
+            omitted.insert(alias.clone(), hidden.clone());
+        }
+        if let Some(why) = shown_unlike_stored(stored[id.as_str()], row, &hidden) {
+            unfaithful.insert(alias.clone(), why);
+        }
+    }
+    for row in holon_org_format::dense_rows(&dense_text) {
+        let Some(alias) = holon_org_format::row_alias(&row)? else {
+            continue;
+        };
+        let id = alias_table
+            .id_of(&alias)
+            .unwrap_or_else(|| panic!("rendered alias {alias} is not in the projection table"));
+        records
+            .get_mut(id.as_str())
+            .unwrap_or_else(|| panic!("rendered alias {alias} has no projection record"))
+            .shown_lines = holon_org_format::row_lines(&row)?;
+    }
+    for (alias, why) in &unreadable {
+        unfaithful.insert(alias.clone(), why.clone());
+    }
+
     Ok(BuiltProjection {
+        root_vocabulary: root_vocabulary.cloned(),
+        vocabularies: vocabularies.clone(),
         file_id,
         ordered_blocks: ordered,
         alias_table,
         records,
         dense_text,
+        omitted,
+        unfaithful,
+        unreadable,
     })
+}
+
+/// How `row`, the text `block` renders to read back by org, shows the block
+/// otherwise than it is stored, or `None` when it shows it as stored. Keys the
+/// drawer cannot spell are disclosed as omitted instead.
+fn shown_unlike_stored(block: &Block, row: &DenseBlock, omitted: &[String]) -> Option<String> {
+    let mut differences = Vec::new();
+    let keyword = |state: Option<holon_api::types::TaskState>| state.map(|s| s.keyword);
+    let (stored_state, shown_state) =
+        (keyword(block.task_state()), keyword(row.block.task_state()));
+    if stored_state != shown_state {
+        differences.push(format!(
+            "task state {} is shown as {}",
+            stored_state.as_deref().unwrap_or("(none)"),
+            shown_state.as_deref().unwrap_or("(none)")
+        ));
+    }
+    let (stored_title, stored_body) = match block.content.split_once('\n') {
+        Some((title, body)) => (title, Some(body.to_string())),
+        None => (block.content.as_str(), None),
+    };
+    let (shown_title, shown_tags) = (row.block.org_title(), row.block.tags());
+    if stored_title.trim_end() != shown_title || block.tags() != shown_tags {
+        differences.push(format!(
+            "title {stored_title:?} with tags {:?} is shown as {shown_title:?} with tags {:?}",
+            block.tags().to_vec(),
+            shown_tags.to_vec()
+        ));
+    }
+    if stored_body != row.block.body() {
+        differences.push(format!(
+            "body {stored_body:?} is shown as {:?}",
+            row.block.body()
+        ));
+    }
+    let mut stored_props = RowAttributes::of(block).properties;
+    stored_props.retain(|k, _| !omitted.contains(k));
+    let shown_props = RowAttributes::of(&row.block).properties;
+    if stored_props != shown_props {
+        differences.push(format!(
+            "drawer {stored_props:?} is shown as {shown_props:?}"
+        ));
+    }
+    (!differences.is_empty()).then(|| format!("the stored {}", differences.join("; the stored ")))
+}
+
+/// The keys of `block`'s properties that `row`, its rendered drawer, does not
+/// show.
+fn unshown_property_keys(block: &Block, row: &DenseBlock) -> Vec<String> {
+    let shown: HashSet<&str> = row.drawer.iter().map(|(k, _)| k.as_str()).collect();
+    let keys: BTreeSet<String> = block
+        .drawer_properties()
+        .into_keys()
+        .chain(
+            block
+                .properties
+                .keys()
+                .filter(|k| !is_hidden_drawer_key(k))
+                .cloned(),
+        )
+        .filter(|k| !shown.contains(k.as_str()))
+        .collect();
+    keys.into_iter().collect()
 }
 
 /// Pre-order the blocks (parent before child) from `file_id`, preserving input
@@ -323,17 +588,35 @@ fn preorder(blocks: &[Block], file_id: &EntityUri) -> Vec<Block> {
     out
 }
 
-/// Build a projection-only document block whose `#+TODO:` config covers every
-/// distinct task-state keyword in `blocks`, so parse_dense recovers each
-/// block's category regardless of the vault's custom keyword dialect.
-fn synth_doc_block(file_id: &EntityUri, blocks: &[Block]) -> Block {
-    use holon_api::types::TaskState;
+/// Build a projection-only document block whose `#+TODO:` config covers the
+/// task keywords of every document a row lives in (its own ring, or org's
+/// defaults when it declares none) and every keyword a row holds, so the dense
+/// text reads each row's keyword as its document does. Which keyword a row may
+/// be GIVEN is its own document's call, not the header's: see `plan_patch`.
+fn synth_doc_block(
+    file_id: &EntityUri,
+    blocks: &[Block],
+    records: &HashMap<String, ProjectedBlock>,
+    root_vocabulary: Option<&TaskKeywordVocabulary>,
+) -> Block {
     let mut seen: Vec<TaskState> = Vec::new();
+    let mut declare = |state: TaskState| {
+        if !seen.iter().any(|s| s.keyword == state.keyword) {
+            seen.push(state);
+        }
+    };
+    for vocabulary in blocks
+        .iter()
+        .map(|b| &records[b.id.as_str()].vocabulary)
+        .chain(root_vocabulary)
+    {
+        for keyword in vocabulary.all_keywords() {
+            declare(state_in(vocabulary, &keyword));
+        }
+    }
     for b in blocks {
         if let Some(st) = b.task_state() {
-            if !seen.iter().any(|s| s.keyword == st.keyword) {
-                seen.push(st);
-            }
+            declare(st);
         }
     }
     let mut doc = Block::new_text(
@@ -342,9 +625,7 @@ fn synth_doc_block(file_id: &EntityUri, blocks: &[Block]) -> Block {
         "Projection".to_string(),
     );
     doc.set_page(true);
-    if !seen.is_empty() {
-        doc.set_todo_keywords(Some(seen));
-    }
+    doc.set_todo_keywords(Some(seen));
     doc
 }
 
@@ -372,7 +653,13 @@ mod tests {
             blk("a", "P", "alpha", Some(TaskState::active("TODO"))),
             blk("b", "P", "beta", Some(TaskState::active("NEXT"))),
         ];
-        let built = build_projection(all).unwrap();
+        let built = build_projection(
+            all,
+            &crate::dense_projection::DocVocabularies::Uniform(
+                holon_org_format::TaskKeywordVocabulary::default(),
+            ),
+        )
+        .unwrap();
         assert_eq!(
             built.file_id,
             EntityUri::block("P"),
@@ -389,7 +676,13 @@ mod tests {
     #[test]
     fn selected_parent_child_nest() {
         let all = vec![blk("a", "P", "alpha", None), blk("a1", "a", "child", None)];
-        let built = build_projection(all).unwrap();
+        let built = build_projection(
+            all,
+            &crate::dense_projection::DocVocabularies::Uniform(
+                holon_org_format::TaskKeywordVocabulary::default(),
+            ),
+        )
+        .unwrap();
         assert_eq!(
             built.records["block:a1"].proj_parent,
             Some(EntityUri::block("a"))
@@ -404,7 +697,13 @@ mod tests {
     #[test]
     fn hole_reroots_child_but_records_true_parent() {
         let all = vec![blk("a", "P", "alpha", None), blk("c", "b", "gamma", None)];
-        let built = build_projection(all).unwrap();
+        let built = build_projection(
+            all,
+            &crate::dense_projection::DocVocabularies::Uniform(
+                holon_org_format::TaskKeywordVocabulary::default(),
+            ),
+        )
+        .unwrap();
         assert_eq!(built.file_id, EntityUri::block(SYNTHETIC_ROOT));
         assert!(built.records["block:c"].proj_parent.is_none());
         assert_eq!(built.records["block:c"].true_parent, EntityUri::block("b"));

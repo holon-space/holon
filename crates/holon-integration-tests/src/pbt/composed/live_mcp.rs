@@ -77,6 +77,11 @@ use crate::pbt::sut_row_parsing::BLOCK_RAW_SNAPSHOT_SQL;
 use crate::pbt::sut_row_parsing::parse_block_rows;
 use crate::pbt::transitions::E2ETransition;
 
+/// Sibling order as the reference model defines it
+/// (`BlockState::sorted_children_of`): position, then id. Every row the driver
+/// picks by position is picked under this one order.
+const SIBLING_ORDER: &str = "ORDER BY sort_key, id";
+
 // ── Embedded seed (compile-time include of the seed sources) ──
 
 /// The default layout (sidebars + main panel) the live app boots — the same
@@ -333,7 +338,7 @@ impl SutSqlProjection for LiveMcp {
 
     async fn sorted_children(&self, parent: &EntityUri) -> Vec<EntityUri> {
         self.rows(&format!(
-            "SELECT id FROM block WHERE parent_id = {} ORDER BY sort_key",
+            "SELECT id FROM block WHERE parent_id = {} {SIBLING_ORDER}",
             sql_lit(parent)
         ))
         .await
@@ -732,131 +737,223 @@ impl SutQuiesce for LiveMcp {
 /// so a swallowed failure would mis-diagnose as a block-set divergence.
 #[async_trait::async_trait(?Send)]
 impl SutDenseTools for LiveMcp {
-    async fn dense_append_child(&self, parent: &EntityUri, content: &str) {
-        let resolved = self.resolve(parent);
-        let query = format!(
-            "SELECT * FROM block WHERE parent_id = '{}' ORDER BY sort_key",
-            resolved.as_str().replace('\'', "''")
-        );
-        // A positioned create is now a SINGLE create op carrying
-        // `after_block_id` (unified positional-create key, 2026-07-27) — the
-        // create-then-move seam and its cross-provider visibility race are
-        // gone, so the transition asserts DIRECT success with no retry.
-        let proj = self
-            .driver
-            .call_tool_json(
-                "dense_query",
-                serde_json::json!({ "query": query, "language": "holon_sql" }),
-            )
-            .await
-            .unwrap_or_else(|e| {
-                panic!("[DenseProjectionEdit] dense_query for {resolved} failed: {e:#}")
-            });
-        let handle = proj["projection_handle"].as_str().unwrap_or_else(|| {
-            panic!("[DenseProjectionEdit] dense_query response missing projection_handle: {proj}")
-        });
-        let dense = proj["dense_org"].as_str().unwrap_or_else(|| {
-            panic!("[DenseProjectionEdit] dense_query response missing dense_org: {proj}")
-        });
-        let rows = proj["block_count"].as_u64().unwrap_or_else(|| {
-            panic!("[DenseProjectionEdit] dense_query response missing block_count: {proj}")
-        });
-        // The generator guarantees ≥1 existing child; an empty projection
-        // would anchor to SYNTHETIC_ROOT (page context lost) and silently
-        // change the append target — fail loud instead.
-        assert!(
-            rows >= 1,
-            "[DenseProjectionEdit] projection for {resolved} is empty (dense_org = \
-             {dense:?}) — generator precondition (≥1 child) not honored by the live projection"
-        );
-        let mut edited = dense.to_string();
-        if !edited.ends_with('\n') {
-            edited.push('\n');
-        }
-        edited.push_str(&format!("* {content}\n"));
-        self.driver
-            .call_tool_json(
-                "dense_patch",
-                serde_json::json!({ "handle": handle, "text": edited }),
-            )
-            .await
-            .unwrap_or_else(|e| {
-                panic!(
-                    "[DenseProjectionEdit] dense_patch appending {content:?} under {resolved} \
-                     failed: {e:#}"
-                )
-            });
+    async fn dense_create_child(
+        &self,
+        parent: &EntityUri,
+        place: holon_pbt_core::capabilities::NewRowPlace,
+        content: &str,
+        tags: &holon_api::Tags,
+        properties: &std::collections::BTreeMap<String, String>,
+    ) {
+        dense_create_child_via(
+            &self.driver,
+            &self.resolve(parent),
+            place,
+            content,
+            tags,
+            properties,
+        )
+        .await;
+    }
+
+    async fn dense_edit_first_row(
+        &self,
+        parent: &EntityUri,
+        title: &str,
+        body: Option<&[String]>,
+        state: Option<&str>,
+    ) {
+        dense_edit_first_row_via(&self.driver, &self.resolve(parent), title, body, state).await;
     }
 
     async fn dense_move_first_child_to_end(&self, parent: &EntityUri) {
-        let resolved = self.resolve(parent);
-        let query = format!(
-            "SELECT * FROM block WHERE parent_id = '{}' ORDER BY sort_key",
-            resolved.as_str().replace('\'', "''")
-        );
-        let proj = self
-            .driver
-            .call_tool_json(
-                "dense_query",
-                serde_json::json!({ "query": query, "language": "holon_sql" }),
-            )
-            .await
-            .unwrap_or_else(|e| {
-                panic!("[DenseProjectionEdit] dense_query for {resolved} failed: {e:#}")
-            });
-        let handle = proj["projection_handle"].as_str().unwrap_or_else(|| {
-            panic!("[DenseProjectionEdit] dense_query response missing projection_handle: {proj}")
-        });
-        let dense = proj["dense_org"].as_str().unwrap_or_else(|| {
-            panic!("[DenseProjectionEdit] dense_query response missing dense_org: {proj}")
-        });
-        // Split into the `#+ID:` header and the top-level ROWS (a row = its
-        // `* ` headline plus any continuation lines, e.g. a property drawer);
-        // move the first row (with its `{#alias}` token) to the end. The
-        // generator guarantees >= 2 children, so fewer rows is a loud drift.
-        let mut lines = dense.lines();
-        let header = lines.next().unwrap_or_default();
-        assert!(
-            header.starts_with("#+ID:"),
-            "[DenseProjectionEdit] dense_org for {resolved} missing #+ID: header: {dense:?}"
-        );
-        let mut rows: Vec<Vec<&str>> = Vec::new();
-        for line in lines {
-            if line.starts_with('*') || rows.is_empty() {
-                rows.push(vec![line]);
-            } else {
-                rows.last_mut().expect("rows non-empty checked").push(line);
-            }
-        }
-        assert!(
-            rows.len() >= 2,
-            "[DenseProjectionEdit] projection for {resolved} has {} rows, need >= 2 for a move \
-             (dense_org = {dense:?}) — generator precondition not honored by the live projection",
-            rows.len()
-        );
-        let first = rows.remove(0);
-        rows.push(first);
-        let mut edited = String::from(header);
-        edited.push('\n');
-        for row in &rows {
-            for l in row {
-                edited.push_str(l);
-                edited.push('\n');
-            }
-        }
-        self.driver
-            .call_tool_json(
-                "dense_patch",
-                serde_json::json!({ "handle": handle, "text": edited }),
-            )
-            .await
-            .unwrap_or_else(|e| {
-                panic!(
-                    "[DenseProjectionEdit] dense_patch move-first-to-end under {resolved} \
-                     failed: {e:#}"
-                )
-            });
+        dense_move_first_child_to_end_via(&self.driver, &self.resolve(parent)).await;
     }
+}
+
+/// `dense_create_child` over `driver`, with `resolved` the SUT's id of the
+/// parent.
+pub async fn dense_create_child_via(
+    driver: &McpUserDriver,
+    resolved: &EntityUri,
+    place: holon_pbt_core::capabilities::NewRowPlace,
+    content: &str,
+    tags: &holon_api::Tags,
+    properties: &std::collections::BTreeMap<String, String>,
+) {
+    let query = format!(
+        "SELECT * FROM block WHERE parent_id = '{}' {SIBLING_ORDER}",
+        resolved.as_str().replace('\'', "''")
+    );
+    // A positioned create is now a SINGLE create op carrying
+    // `after_block_id` (unified positional-create key, 2026-07-27) — the
+    // create-then-move seam and its cross-provider visibility race are
+    // gone, so the transition asserts DIRECT success with no retry.
+    let proj = driver
+        .call_tool_json(
+            "dense_query",
+            serde_json::json!({ "query": query, "language": "holon_sql" }),
+        )
+        .await
+        .unwrap_or_else(|e| {
+            panic!("[DenseProjectionEdit] dense_query for {resolved} failed: {e:#}")
+        });
+    let handle = proj["projection_handle"].as_str().unwrap_or_else(|| {
+        panic!("[DenseProjectionEdit] dense_query response missing projection_handle: {proj}")
+    });
+    let dense = proj["dense_org"].as_str().unwrap_or_else(|| {
+        panic!("[DenseProjectionEdit] dense_query response missing dense_org: {proj}")
+    });
+    let rows = proj["block_count"].as_u64().unwrap_or_else(|| {
+        panic!("[DenseProjectionEdit] dense_query response missing block_count: {proj}")
+    });
+    // The generator guarantees ≥1 existing child; an empty projection
+    // would anchor to SYNTHETIC_ROOT (page context lost) and silently
+    // change the append target — fail loud instead.
+    assert!(
+        rows >= 1,
+        "[DenseProjectionEdit] projection for {resolved} is empty (dense_org = \
+         {dense:?}) — generator precondition (≥1 child) not honored by the live projection"
+    );
+    let mut text = crate::pbt::dense_text::DenseRows::split(dense);
+    text.insert(
+        &crate::pbt::dense_text::NewRowText {
+            title: content.to_string(),
+            body: Vec::new(),
+            state: None,
+            tags: tags.clone(),
+            properties: properties.clone(),
+        },
+        place,
+    );
+    let edited = text.join();
+    driver
+        .call_tool_json(
+            "dense_patch",
+            serde_json::json!({ "handle": handle, "text": edited }),
+        )
+        .await
+        .unwrap_or_else(|e| {
+            panic!(
+                "[DenseProjectionEdit] dense_patch creating {content:?} at {place:?} under {resolved} \
+                 failed: {e:#}"
+            )
+        });
+}
+
+/// `dense_move_first_child_to_end` over `driver`, with `resolved` the SUT's
+/// id of the parent.
+pub async fn dense_move_first_child_to_end_via(driver: &McpUserDriver, resolved: &EntityUri) {
+    let query = format!(
+        "SELECT * FROM block WHERE parent_id = '{}' {SIBLING_ORDER}",
+        resolved.as_str().replace('\'', "''")
+    );
+    let proj = driver
+        .call_tool_json(
+            "dense_query",
+            serde_json::json!({ "query": query, "language": "holon_sql" }),
+        )
+        .await
+        .unwrap_or_else(|e| {
+            panic!("[DenseProjectionEdit] dense_query for {resolved} failed: {e:#}")
+        });
+    let handle = proj["projection_handle"].as_str().unwrap_or_else(|| {
+        panic!("[DenseProjectionEdit] dense_query response missing projection_handle: {proj}")
+    });
+    let dense = proj["dense_org"].as_str().unwrap_or_else(|| {
+        panic!("[DenseProjectionEdit] dense_query response missing dense_org: {proj}")
+    });
+    // Move the first top-level row (with its `{#alias}` token, drawer, body
+    // and subtree) to the end. The generator guarantees >= 2 children, so fewer
+    // rows is a loud drift.
+    let mut text = crate::pbt::dense_text::DenseRows::split(dense);
+    assert!(
+        text.header.first().is_some_and(|h| h.starts_with("#+ID:")),
+        "[DenseProjectionEdit] dense_org for {resolved} missing #+ID: header: {dense:?}"
+    );
+    let top: Vec<usize> = (0..text.rows.len())
+        .filter(|&i| text.rows[i][0].starts_with("* "))
+        .collect();
+    assert!(
+        top.len() >= 2,
+        "[DenseProjectionEdit] projection for {resolved} has {} rows, need >= 2 for a move \
+         (dense_org = {dense:?}) — generator precondition not honored by the live projection",
+        top.len()
+    );
+    let first: Vec<Vec<String>> = text.rows.drain(0..top[1]).collect();
+    text.rows.extend(first);
+    let edited = text.join();
+    driver
+        .call_tool_json(
+            "dense_patch",
+            serde_json::json!({ "handle": handle, "text": edited }),
+        )
+        .await
+        .unwrap_or_else(|e| {
+            panic!(
+                "[DenseProjectionEdit] dense_patch move-first-to-end under {resolved} \
+                 failed: {e:#}"
+            )
+        });
+}
+
+/// The dense edits `LiveMcp` and the headless session share: one tool round
+/// trip over `driver`, every failure a loud panic (the ref already applied the
+/// edit).
+pub async fn dense_edit_first_row_via(
+    driver: &McpUserDriver,
+    parent: &EntityUri,
+    title: &str,
+    body: Option<&[String]>,
+    state: Option<&str>,
+) {
+    use crate::pbt::dense_text::DenseRows;
+    use crate::pbt::dense_text::RowTextEdit;
+
+    let query = format!(
+        "SELECT * FROM block WHERE parent_id = '{}' {SIBLING_ORDER}",
+        parent.as_str().replace('\'', "''")
+    );
+    let proj = driver
+        .call_tool_json(
+            "dense_query",
+            serde_json::json!({ "query": query, "language": "holon_sql" }),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("[DenseProjectionEdit] dense_query for {parent} failed: {e:#}"));
+    let handle = proj["projection_handle"].as_str().unwrap_or_else(|| {
+        panic!("[DenseProjectionEdit] dense_query response missing projection_handle: {proj}")
+    });
+    let dense = proj["dense_org"].as_str().unwrap_or_else(|| {
+        panic!("[DenseProjectionEdit] dense_query response missing dense_org: {proj}")
+    });
+    eprintln!("[DenseProjectionEdit] EditFirstRow under {parent}");
+    let mut text = DenseRows::split(dense);
+    assert!(
+        !text.rows.is_empty(),
+        "[DenseProjectionEdit] projection for {parent} has no row to edit: {dense:?}"
+    );
+    let mut edits = vec![
+        RowTextEdit::SetState(state.map(str::to_string)),
+        RowTextEdit::Retitle(title.to_string()),
+    ];
+    if let Some(body) = body {
+        edits.push(RowTextEdit::SetBody(body.to_vec()));
+    }
+    text.edit_all(0, &edits);
+    let edited = text.join();
+    driver
+        .call_tool_json(
+            "dense_patch",
+            serde_json::json!({ "handle": handle, "text": edited }),
+        )
+        .await
+        .unwrap_or_else(|e| {
+            panic!(
+                "[DenseProjectionEdit] dense_patch editing the first row under {parent} failed: \
+                 {e:#}\n{edited}"
+            )
+        });
 }
 
 /// Register every cap the live rung honestly provides. The captured [`CapSet`]
@@ -881,9 +978,8 @@ fn register_live_caps(caps: &mut CapMap, provider: Arc<LiveMcp>) {
 
 /// The `CapId`s [`register_live_caps`] provides — the live-MCP composition's
 /// static cap surface, exposed for the non-vacuity guard so a transition alive
-/// ONLY over live-MCP (e.g. `DenseProjectionEdit` via `SutDenseTools`, which no
-/// `blessed_manifests` compose_sut registers) still counts as ALIVE — the CAP
-/// is the evidence, NOT a name allowlist. MUST stay in sync with the inserts in
+/// ONLY over live-MCP still counts as ALIVE — the CAP is the evidence, NOT a
+/// name allowlist. MUST stay in sync with the inserts in
 /// [`register_live_caps`] above: it inserts typed `Arc`s, which needs a live
 /// provider (a real MCP connection), so the guard cannot derive this by
 /// booting; co-located here so a cap added above is added here too.

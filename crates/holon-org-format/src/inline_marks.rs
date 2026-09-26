@@ -1446,30 +1446,18 @@ fn open_delim(mark: &InlineMark) -> String {
             if is_block_ref_link(mark) {
                 return String::new();
             }
+            // Bare form `[[uri]]` when the label IS the uri, as the user typed
+            // it; explicit `[[uri][label]]` otherwise. Every target variant
+            // shares this rule, so no link gains a spurious label on a round
+            // trip. The target is emitted byte-exact as authored.
             let uri = match target {
-                EntityRef::External { url } => url.clone(),
-                // Bare form `[[uri]]` when the label IS the uri, as the user
-                // typed it; explicit `[[uri][label]]` otherwise. Every target
-                // variant shares this rule, so no id form gains a spurious
-                // label on a round trip.
-                // Bytes are preserved exactly — the target is emitted as it was
-                // authored, so neither an unregistered scheme nor a
-                // colon-bearing page path is edited by a render cycle.
-                EntityRef::Scheme { raw } => {
-                    if raw == label {
-                        return "[[".into();
-                    }
-                    raw.clone()
-                }
-                // Dangling wiki link: `[[name]]` when the label IS the name
-                // (the bare form the user typed), `[[name][label]]` otherwise.
-                EntityRef::Name { name } => {
-                    if name == label {
-                        return "[[".into();
-                    }
-                    name.clone()
-                }
+                EntityRef::External { url } => url,
+                EntityRef::Scheme { raw } => raw,
+                EntityRef::Name { name } => name,
             };
+            if uri == label {
+                return "[[".into();
+            }
             format!("[[{uri}][")
         }
     }
@@ -1639,6 +1627,20 @@ mod tests {
                 }
             }
             other => panic!("expected Link, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn every_link_target_renders_bare_when_its_label_is_the_target() {
+        for org in [
+            "see [[https://example.com]] now",
+            "see [[mailto:a@b.org]] now",
+            "see [[Some Page]] now",
+            "see [[https://example.com][https://example.com/]] now",
+            "see [[https://example.com][docs]] now",
+        ] {
+            let (out, marks) = extract(org);
+            assert_eq!(render_inline_marks(&out, &marks), org, "{marks:?}");
         }
     }
 

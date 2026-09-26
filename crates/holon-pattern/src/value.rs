@@ -583,9 +583,47 @@ impl From<serde_json::Value> for Value {
     }
 }
 
-impl From<Value> for serde_json::Value {
-    fn from(v: Value) -> Self {
-        match v {
+/// A `Value::REMOVED` where a JSON value is needed. It is a write-leg removal
+/// instruction, not a value, and never becomes JSON `null`: that is the shape
+/// of an explicit null, which would store the value the sentinel deletes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemovalIsNotJson {
+    /// Where the removal sits: object keys and array indices from the root,
+    /// empty for the root itself.
+    pub path: String,
+}
+
+impl std::fmt::Display for RemovalIsNotJson {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let at = if self.path.is_empty() {
+            "the value".to_string()
+        } else {
+            format!("`{}`", self.path)
+        };
+        write!(
+            f,
+            "{at} is Value::REMOVED, a write-leg removal instruction, not a value JSON can hold"
+        )
+    }
+}
+
+impl std::error::Error for RemovalIsNotJson {}
+
+impl Value {
+    /// This value as JSON, refusing a `Value::REMOVED` anywhere inside it.
+    pub fn try_into_json(self) -> Result<serde_json::Value, RemovalIsNotJson> {
+        self.json_at(String::new())
+    }
+
+    fn json_at(self, path: String) -> Result<serde_json::Value, RemovalIsNotJson> {
+        let child = |step: &dyn std::fmt::Display| {
+            if path.is_empty() {
+                step.to_string()
+            } else {
+                format!("{path}.{step}")
+            }
+        };
+        Ok(match self {
             Value::String(s) => serde_json::Value::String(s),
             Value::Integer(i) => serde_json::Value::Number(serde_json::Number::from(i)),
             Value::Float(f) => serde_json::Number::from_f64(f)
@@ -594,21 +632,29 @@ impl From<Value> for serde_json::Value {
             Value::Boolean(b) => serde_json::Value::Bool(b),
             Value::DateTime(s) => serde_json::Value::String(s.clone()),
             Value::Json(s) => serde_json::from_str(&s).unwrap_or(serde_json::Value::Null),
-            Value::Array(arr) => {
-                serde_json::Value::Array(arr.into_iter().map(Into::into).collect())
-            }
-            Value::Object(obj) => {
-                serde_json::Value::Object(obj.into_iter().map(|(k, v)| (k, v.into())).collect())
-            }
-            Value::Null => serde_json::Value::Null,
-            // Never JSON `null`: that is the shape of an explicit null, and
-            // turning a removal into one would store the value the sentinel
-            // exists to delete.
-            Value::Removed(_) => panic!(
-                "Value::REMOVED cannot convert to JSON: it is a write-leg removal instruction, \
-                 not a value"
+            Value::Array(arr) => serde_json::Value::Array(
+                arr.into_iter()
+                    .enumerate()
+                    .map(|(i, v)| v.json_at(child(&i)))
+                    .collect::<Result<_, _>>()?,
             ),
-        }
+            Value::Object(obj) => serde_json::Value::Object(
+                obj.into_iter()
+                    .map(|(k, v)| {
+                        let at = child(&k);
+                        v.json_at(at).map(|v| (k, v))
+                    })
+                    .collect::<Result<_, _>>()?,
+            ),
+            Value::Null => serde_json::Value::Null,
+            Value::Removed(_) => return Err(RemovalIsNotJson { path }),
+        })
+    }
+}
+
+impl From<Value> for serde_json::Value {
+    fn from(v: Value) -> Self {
+        v.try_into_json().unwrap_or_else(|e| panic!("{e}"))
     }
 }
 impl From<HashMap<String, String>> for Value {

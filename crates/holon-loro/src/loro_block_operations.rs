@@ -837,29 +837,25 @@ impl CrudOperations<Block> for LoroBlockOperations {
                 // the `LoroMetaCellBacking` write path. A `Value::Null` is a
                 // real value and IS stored.
                 //
-                // A bare `task_state` keyword write gets its
-                // `task_state_category` sidecar derived and written in the SAME
-                // commit — the pair invariant `Block::set_task_state`
-                // establishes at the org parse boundary (see
-                // `TaskState::category_str_for_keyword`); a `task_state` cleared
-                // with the REMOVED sentinel removes both keys together.
+                // A `task_state` write lands with its `task_state_category` in
+                // the SAME commit — the pair invariant `Block::set_task_state`
+                // establishes; a clear removes both keys together.
                 let mut fields: Vec<(String, Value, Value)> = Vec::new();
-                if field == "task_state" {
-                    let category = match &value {
-                        Value::Removed(_) => Value::REMOVED,
-                        Value::String(kw) => Value::String(
-                            holon_api::TaskState::category_str_for_keyword(kw).to_string(),
+                let value = if field == "task_state" {
+                    // The keyword travels with the category the engine
+                    // classified from the document's ring.
+                    let (keyword, category) = match holon_api::TaskStateWrite::parse(&value)? {
+                        holon_api::TaskStateWrite::Clear => (Value::REMOVED, Value::REMOVED),
+                        holon_api::TaskStateWrite::Set(state) => (
+                            Value::String(state.keyword),
+                            Value::String(state.category.as_str().to_string()),
                         ),
-                        other => {
-                            return Err(format!(
-                                "set_field('task_state'): expected String or Value::REMOVED, got \
-                                 {other:?}"
-                            )
-                            .into());
-                        }
                     };
                     fields.push(("task_state_category".to_string(), Value::REMOVED, category));
-                }
+                    keyword
+                } else {
+                    value
+                };
                 fields.push((field.to_string(), Value::REMOVED, value));
                 backend
                     .update_block_fields(id, &fields)
@@ -885,6 +881,19 @@ impl CrudOperations<Block> for LoroBlockOperations {
             .and_then(|v| v.as_string())
             .map(|s| s.to_string())
             .ok_or("parent_id is required for block creation")?;
+        if fields
+            .get("task_state")
+            .and_then(|v| v.as_string())
+            .is_some()
+            && !fields.contains_key("task_state_category")
+        {
+            return Err(format!(
+                "create writes task_state {:?} without its task_state_category: the engine \
+                 derives the category from the document's #+TODO: ring, so this write bypassed it",
+                fields.get("task_state")
+            )
+            .into());
+        }
         let bag = match fields.get("properties") {
             Some(value) => properties_bag(value)?,
             None => HashMap::new(),
@@ -1131,46 +1140,16 @@ impl CrudOperations<Block> for LoroBlockOperations {
                 .map_err(|e| format!("create: restore marks for {}: {e}", block.id))?;
         }
 
-        // Positional placement. One canonical primitive serves two callers:
-        //   * `after_block_id` (`POSITION_AFTER_BLOCK_ID_PARAM`) — the
-        //     positional-create key every prod caller uses; places a freshly created
-        //     block immediately after its predecessor sibling in one op.
-        //   * `after` — the delete-inverse restore key, restoring a resurrected block
-        //     to its original sibling slot.
-        // Both carry identical value semantics: a String predecessor sibling id, or
-        // `Null` for "first child". Absent ⇒ leave it where `create` put it (append).
-        // Loro owns order via the fractional index, so `update_block_position` is the
-        // single primitive.
-        let parse_anchor = |key: &str, v: &Value| -> Result<Option<String>> {
-            match v {
-                Value::String(p) => Ok(Some(p.clone())),
-                Value::Null => Ok(None),
-                other => {
-                    Err(format!("create: '{key}' must be String or Null, got {other:?}").into())
-                }
-            }
-        };
-        let canonical = fields
-            .get(holon_api::POSITION_AFTER_BLOCK_ID_PARAM)
-            .map(|v| parse_anchor(holon_api::POSITION_AFTER_BLOCK_ID_PARAM, v))
-            .transpose()?;
-        let restore = fields
-            .get("after")
-            .map(|v| parse_anchor("after", v))
-            .transpose()?;
-        // Fail loud when both keys arrive disagreeing — an illegal, ambiguous
-        // op we refuse rather than silently pick a winner.
-        if let (Some(c), Some(r)) = (&canonical, &restore)
-            && c != r
-        {
-            return Err(format!(
-                "create: conflicting positional anchors — after_block_id={c:?} but after={r:?}"
-            )
-            .into());
-        }
-        if let Some(predecessor) = canonical.or(restore) {
+        // `create_block_with_properties` appended the block, so `Last` needs no move.
+        let placement = holon_api::ChildPlacement::of_create(&fields)
+            .map_err(|e| format!("create {}: {e}", block.id))?;
+        if let Some(predecessor) = placement.anchor() {
             backend
-                .update_block_position(block.id.as_str(), &parent_id, predecessor.as_deref())
+                .update_block_position(
+                    block.id.as_str(),
+                    &parent_id,
+                    predecessor.map(|p| p.as_str()),
+                )
                 .await
                 .map_err(|e| format!("create: set position for {}: {e}", block.id))?;
         }
@@ -1456,10 +1435,13 @@ impl TaskOperations<Block> for LoroBlockOperations {
         // Writing `"TODO"` here stored a stray property the cycle never read
         // back, so `cycle_task_state` (read `task_state`, write `TODO`) was a
         // no-op in Loro mode — Cmd+Enter never advanced the keyword.
-        // `set_field("task_state")` pairs the `task_state_category` sidecar in
-        // the same commit (see its properties branch), so this delegate keeps
-        // the pair invariant.
-        self.set_field(id, "task_state", Value::String(state)).await
+        // This op carries no ring, so the keyword takes its native category.
+        self.set_field(
+            id,
+            "task_state",
+            holon_api::TaskStateWrite::Set(holon_api::TaskState::from_keyword(&state)).to_value(),
+        )
+        .await
     }
 
     async fn cycle_task_state(&self, id: &str) -> Result<OperationResult> {
@@ -2806,9 +2788,13 @@ mod advice_dismiss_tests {
         let c3 = seed_child(&backend, &anchor, "c3", "last").await;
 
         // Enrich c2: a task state (property), a tag (edge), and rich content.
-        ops.set_field(&c2, "task_state", Value::String("TODO".into()))
-            .await
-            .expect("task_state");
+        ops.set_field(
+            &c2,
+            "task_state",
+            holon_api::TaskStateWrite::Set(holon_api::TaskState::active("TODO")).to_value(),
+        )
+        .await
+        .expect("task_state");
         ops.set_field(
             &c2,
             "tags",

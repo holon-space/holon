@@ -136,6 +136,9 @@ pub mod two_instance;
 pub mod two_instance_transport;
 pub mod wide_e2e;
 
+/// The `full_headless` session's MCP tools over the embedded server.
+#[cfg(any(test, feature = "pbt"))]
+pub mod embedded_mcp;
 /// The out-of-process LIVE-MCP rung of the composed keystone:
 /// [`live_mcp::LiveMcpE2E`] drives the SAME `WideE2EMachine` transitions +
 /// invariant catalog against a REAL Holon app over its embedded MCP server

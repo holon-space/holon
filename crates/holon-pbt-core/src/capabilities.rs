@@ -376,6 +376,11 @@ pub trait RefBlockTreeMut: RefBlockTree {
     /// and any future direct-write transitions.
     fn set_block_content(&mut self, id: &EntityUri, text: &str);
 
+    /// Set `id`'s task-state keyword, or clear it with `None`.
+    fn set_block_task_state(&mut self, id: &EntityUri, _: Option<&str>) {
+        panic!("this reference models no task state, so it cannot set one on {id}")
+    }
+
     /// Split `id` at `position`. Returns the id of the LOWER block — the one
     /// holding the tail text, which is also the split's focus target. Identity
     /// follows the text: that is the newly-minted block for `position > 0`, but
@@ -403,6 +408,16 @@ pub trait RefBlockTreeMut: RefBlockTree {
 
     /// Swap two siblings (used by MoveUp / MoveDown).
     fn swap_siblings(&mut self, a: &EntityUri, b: &EntityUri);
+
+    /// Keep `id`'s current text and task state across every undo and redo
+    /// restore: the write came from outside the user's undo history. Defaults
+    /// to a no-op for slices that don't model an undo stack.
+    fn carry_block_text_across_history(&mut self, _: &EntityUri) {}
+
+    /// Keep `id` and its place among its siblings across every undo and redo
+    /// restore: the create or move came from outside the user's undo history.
+    /// Defaults to a no-op for slices that don't model an undo stack.
+    fn carry_block_placement_across_history(&mut self, _: &EntityUri) {}
 
     /// Undo the last mutation (pop undo→redo) and reset every region cursor to
     /// start — the whole `UndoLastMutation` reference effect. Defaults to a
@@ -1148,6 +1163,19 @@ pub trait SutRebuildViews {
     async fn rebuild_views(&self);
 }
 
+/// Where an agent's new row goes in a dense text. `n` names an existing row,
+/// modulo the row count.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum NewRowPlace {
+    /// After every other row, at the top level.
+    #[default]
+    Last,
+    /// Right before row `n`, at its level: the first row's place for `n = 0`.
+    Before(usize),
+    /// Right under row `n`'s headline, one level deeper: its first child.
+    FirstChildOf(usize),
+}
+
 /// SUT capability: the agent-facing MCP **data tools** are drivable —
 /// `dense_query` → edit → `dense_patch` round trips against a served MCP
 /// surface. Drives the `DenseProjectionEdit` PBT transition (`Dense*` weight
@@ -1162,13 +1190,21 @@ pub trait SutRebuildViews {
 /// `SutMcpEmit` (which is a frontend-side emission hook, drivable headless).
 #[holon_macros::capmap_adapter]
 pub trait SutDenseTools {
-    /// Project the children of `parent` via `dense_query`, append a new
-    /// top-level headline `content` to the dense text, and apply it back via
+    /// Project the children of `parent` via `dense_query`, insert a new
+    /// headline `content` carrying `tags` as its tag group and `properties`
+    /// as its drawer into the dense text at `place`, and apply it back via
     /// `dense_patch` — the canonical agent round trip. The patch is the SUT
     /// action; any tool error is a loud panic (never swallowed into a no-op:
     /// the ref state HAS applied the create, so a swallowed failure would
     /// surface as an unrelated block-set divergence).
-    async fn dense_append_child(&self, parent: &EntityUri, content: &str);
+    async fn dense_create_child(
+        &self,
+        parent: &EntityUri,
+        place: NewRowPlace,
+        content: &str,
+        tags: &holon_api::Tags,
+        properties: &BTreeMap<String, String>,
+    );
 
     /// Project the children of `parent` via `dense_query`, move the FIRST
     /// top-level row to the END of the dense text (keeping its `{#alias}`
@@ -1177,6 +1213,17 @@ pub trait SutDenseTools {
     /// the row lands anywhere but last is exactly the silent-anchor-drop
     /// defect the order invariants then catch.
     async fn dense_move_first_child_to_end(&self, parent: &EntityUri);
+
+    /// Project the children of `parent` via `dense_query`, and in ONE patch
+    /// retitle the FIRST row to `title`, replace its body lines with `body`
+    /// (keep them when `None`), and set its task keyword to `state`.
+    async fn dense_edit_first_row(
+        &self,
+        parent: &EntityUri,
+        title: &str,
+        body: Option<&[String]>,
+        state: Option<&str>,
+    );
 }
 
 /// SUT capability: undo/redo the last committed mutation. Drives the
@@ -3203,6 +3250,16 @@ pub trait RefLayoutMutate {
     /// Mints a synthetic `block::create-N` id the harness reconcile pairs 1:1
     /// with the SUT's minted uuid.
     fn create_block_under(&mut self, parent: &EntityUri, content: &str);
+
+    /// An agent's create of a block born with `tags` and drawer `properties`:
+    /// [`Self::create_block_under`] outside the user's undo history.
+    fn create_block_under_with_attributes(
+        &mut self,
+        parent: &EntityUri,
+        content: &str,
+        tags: &holon_api::Tags,
+        properties: &BTreeMap<String, String>,
+    );
 
     /// `CreateBlockUnderFocus` with an explicit, born-equal id: append a new
     /// text block carrying `content` as the last child of `parent`, using

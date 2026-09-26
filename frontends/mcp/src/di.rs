@@ -307,7 +307,29 @@ pub async fn run_http_server(
     bind_address: SocketAddr,
     cancellation_token: CancellationToken,
 ) -> anyhow::Result<()> {
+    let listener = tokio::net::TcpListener::bind(bind_address).await?;
+    serve_http_on(
+        engine,
+        debug,
+        builder_services,
+        type_registry,
+        listener,
+        cancellation_token,
+    )
+    .await
+}
+
+/// [`run_http_server`] on a listener the caller already bound.
+pub async fn serve_http_on(
+    engine: Option<Arc<BackendEngine>>,
+    debug: Arc<DebugServices>,
+    builder_services: Option<Arc<dyn BuilderServices>>,
+    type_registry: Option<Arc<holon_profiles::TypeRegistry>>,
+    listener: tokio::net::TcpListener,
+    cancellation_token: CancellationToken,
+) -> anyhow::Result<()> {
     use axum::Router;
+    let bind_address = listener.local_addr()?;
     use axum::response::Html;
     use axum::routing::get;
     use rmcp::transport::StreamableHttpServerConfig;
@@ -340,7 +362,6 @@ pub async fn run_http_server(
             .nest_service("/mcp", mcp_service)
             .layer(axum::middleware::from_fn(add_utf8_charset_to_content_type));
 
-        let listener = tokio::net::TcpListener::bind(bind_address).await?;
         tracing::info!(
             "[mcp] browser relay HTTP listening on http://{}",
             bind_address
@@ -441,8 +462,6 @@ pub async fn run_http_server(
         .nest_service("/mcp", mcp_service)
         .layer(axum::middleware::from_fn(add_utf8_charset_to_content_type));
 
-    // Start HTTP server
-    let listener = tokio::net::TcpListener::bind(bind_address).await?;
     tracing::info!("Holon MCP HTTP server listening on http://{}", bind_address);
 
     axum::serve(listener, app)
@@ -552,6 +571,40 @@ pub fn start_embedded_mcp_server_with_registry(
             tracing::error!("MCP server error: {}", e);
         }
     });
+}
+
+/// An embedded MCP HTTP server on a loopback port the OS picked; it stops
+/// when this is dropped.
+pub struct EmbeddedMcpServer {
+    pub port: u16,
+    cancel: CancellationToken,
+}
+
+impl Drop for EmbeddedMcpServer {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
+}
+
+/// Start an embedded MCP HTTP server on `127.0.0.1:0` — no environment read,
+/// so several servers in one process each get their own port.
+pub fn start_embedded_mcp_server_on_free_port(
+    engine: Option<Arc<BackendEngine>>,
+    builder_services: Option<Arc<dyn BuilderServices>>,
+    debug: Arc<DebugServices>,
+) -> anyhow::Result<EmbeddedMcpServer> {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+    listener.set_nonblocking(true)?;
+    let port = listener.local_addr()?.port();
+    let listener = tokio::net::TcpListener::from_std(listener)?;
+    let cancel = CancellationToken::new();
+    let stop = cancel.clone();
+    tokio::spawn(async move {
+        if let Err(e) = serve_http_on(engine, debug, builder_services, None, listener, stop).await {
+            tracing::error!("MCP server error: {}", e);
+        }
+    });
+    Ok(EmbeddedMcpServer { port, cancel })
 }
 
 /// Extension trait for registering MCP server services in a

@@ -309,6 +309,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `hand-authored-cap-timeout`
 - `integration-toggle-load`
 - `iroh-nat-traversal-address-set`
+- `jump-typechars-no-row`
 - `lib-type-chars-home-profile-derived`
 - `loro-backend-change-count`
 - `loro-dispatch-creation-slot-keystroke-races-create`

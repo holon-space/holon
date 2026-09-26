@@ -22,5 +22,6 @@ pub use property_kinds::AmbiguousKind;
 pub use property_kinds::PropertyKinds;
 pub use property_kinds::PropertyKindsError;
 pub use value::REMOVED_MARKER_KEY;
+pub use value::RemovalIsNotJson;
 pub use value::RemovedTag;
 pub use value::Value;

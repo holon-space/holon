@@ -127,7 +127,7 @@ async fn set_field_on_a_missing_subject_is_refused_for_a_property() {
         &provider,
         GHOST,
         "task_state",
-        Value::String("TODO".to_string()),
+        holon_api::TaskStateWrite::Set(holon_api::TaskState::active("TODO")).to_value(),
     )
     .await
     .expect_err("a property-bag write to a block nothing holds must not report success");
@@ -190,7 +190,7 @@ async fn set_field_to_the_same_value_twice_still_lands() {
             &provider,
             &id,
             "task_state",
-            Value::String("TODO".to_string()),
+            holon_api::TaskStateWrite::Set(holon_api::TaskState::active("TODO")).to_value(),
         )
         .await
         .unwrap_or_else(|e| panic!("{round} property write of an identical value must land: {e}"));
@@ -223,7 +223,7 @@ async fn set_field_on_an_existing_subject_still_lands() {
         &provider,
         &id,
         "task_state",
-        Value::String("TODO".to_string()),
+        holon_api::TaskStateWrite::Set(holon_api::TaskState::active("TODO")).to_value(),
     )
     .await
     .expect("a property write to a row that exists must land");

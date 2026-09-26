@@ -1016,29 +1016,20 @@ impl EntityCellRegistry for BlockCellRegistry {
                 ))
             }
             "task_state" => {
-                // `task_state` travels with its `task_state_category` sidecar:
-                // the org parse boundary (`Block::set_task_state`) writes BOTH
-                // keys and `Block::task_state()` reads the pair back into a
-                // `TaskState`. The widget click intent (`state_toggle` →
-                // `set_field("task_state", next)`) carries only the keyword, so
-                // this boundary derives and writes the sidecar alongside —
-                // otherwise every UI cycle dropped/staled the category (a DONE
-                // keyword could read back as Active). Both keys land in ONE
+                // `task_state` travels with the category the engine classified
+                // from the document's ring; both keys land in ONE
                 // `update_block_properties` commit (per-key LWW merge, H3).
-                let category = match &value {
-                    Value::Removed(_) => Value::REMOVED,
-                    Value::String(kw) => Value::String(
-                        holon_api::TaskState::category_str_for_keyword(kw).to_string(),
+                let (keyword, category) = match holon_api::TaskStateWrite::parse(&value)
+                    .map_err(|e| anyhow!("write_field(task_state): {e}"))?
+                {
+                    holon_api::TaskStateWrite::Clear => (Value::REMOVED, Value::REMOVED),
+                    holon_api::TaskStateWrite::Set(state) => (
+                        Value::String(state.keyword),
+                        Value::String(state.category.as_str().to_string()),
                     ),
-                    other => {
-                        return Err(anyhow!(
-                            "write_field(task_state): expected String or Value::REMOVED, got \
-                             {other:?}"
-                        ));
-                    }
                 };
                 let mut props = std::collections::HashMap::new();
-                props.insert("task_state".to_string(), value);
+                props.insert("task_state".to_string(), keyword);
                 props.insert("task_state_category".to_string(), category);
                 backend
                     .update_block_properties(&id, &props)

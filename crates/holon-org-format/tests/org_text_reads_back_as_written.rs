@@ -60,6 +60,16 @@ fn text_ids(blocks: &[Block]) -> Vec<String> {
     blocks.iter().map(|b| b.id.id().to_string()).collect()
 }
 
+/// `org_properties` names the drawer carrier in a block's property bag; a
+/// drawer line under that key is an authored property like any other.
+#[test]
+fn an_authored_org_properties_key_reads_back_as_written() {
+    let page = "#+ID: p\n* Topic\n:PROPERTIES:\n:ID: topic\n:org_properties: x\n:END:\n";
+    let (document, blocks) = parse(page);
+    let (text, losses) = render(&document, &blocks);
+    assert_eq!((text.as_str(), losses), (page, Vec::<String>::new()));
+}
+
 #[test]
 fn a_body_line_that_starts_with_a_star_reads_back_as_body_text() {
     let bodies = [

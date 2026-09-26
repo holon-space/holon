@@ -133,6 +133,11 @@ fn fixture() -> Vec<StorageEntity> {
             ("parent_id", text("block:doc")),
             ("content", text("second")),
             ("task_state", text("TODO")),
+            // The engine classifies the keyword before a provider's create.
+            (
+                "task_state_category",
+                text(holon_api::TaskState::from_keyword("TODO").category.as_str()),
+            ),
             ("collapsed", Value::Boolean(true)),
             (
                 "properties",

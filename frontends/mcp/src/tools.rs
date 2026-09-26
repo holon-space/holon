@@ -8,6 +8,7 @@ use holon::api::types::Traversal;
 use holon::storage::BLOCK_READ_TABLE;
 use holon_api::Block;
 use holon_api::Change;
+use holon_api::EdgeField;
 use holon_api::EntityName;
 use holon_api::EntityUri;
 use holon_api::POSITION_AFTER_BLOCK_ID_PARAM;
@@ -24,6 +25,7 @@ use tokio::sync::Mutex;
 use tokio_stream::StreamExt;
 use uuid::Uuid;
 
+use crate::dense_patch::RowContent;
 use crate::server::HolonMcpServer;
 use crate::types::*;
 
@@ -387,6 +389,34 @@ fn slugify_for_devlog(s: &str) -> String {
 
 /// Run a single `set_field` op through the standard pipeline so the
 /// org renderer + Loro sync see the write.
+/// A present `marks` param tells the dispatcher the content is already parsed.
+fn create_marks_value(content: &RowContent) -> Value {
+    if content.marks.is_empty() {
+        Value::Null
+    } else {
+        Value::String(holon_api::marks_to_json(&content.marks))
+    }
+}
+
+/// The `{text, marks}` Object both content providers write as given; a String
+/// value would be parsed as org source again.
+fn rich_content_value(content: &RowContent) -> Value {
+    Value::Object(HashMap::from([
+        ("text".to_string(), Value::String(content.text.clone())),
+        (
+            "marks".to_string(),
+            Value::String(holon_api::marks_to_json(&content.marks)),
+        ),
+    ]))
+}
+
+fn describe_marks(content: &RowContent) -> Option<serde_json::Value> {
+    (!content.marks.is_empty()).then(|| {
+        serde_json::from_str(&holon_api::marks_to_json(&content.marks))
+            .expect("marks_to_json emits JSON")
+    })
+}
+
 async fn set_field(
     service: &HolonService,
     id: &str,
@@ -524,11 +554,13 @@ enum AppliedKind {
 ///
 /// Resolution runs to completion first (`plan_block_ids`), so a plan that
 /// cannot apply in full is refused before the first dispatch. A failure the
-/// ENGINE raises once dispatching has begun is taken back at the write
+/// ENGINE raises once dispatching has begun, and a store that does not read
+/// back as `plan.expected` once every op landed, are taken back at the write
 /// authority when it offers a guarded rollback, and disclosed row by row when
-/// it does not (see [`partial_apply_error`]).
+/// it does not (see [`partial_apply_error`], [`readback_error`]).
 async fn apply_plan(
     service: &HolonService,
+    files: Option<&OrgFiles>,
     plan: &crate::dense_patch::PatchPlan,
     file_id: &EntityUri,
 ) -> Result<AppliedCounts, rmcp::ErrorData> {
@@ -558,7 +590,8 @@ async fn apply_plan(
             Ok(AppliedKind::Updated) => counts.updated += 1,
             Ok(AppliedKind::Moved) => counts.moved += 1,
             Ok(AppliedKind::Deleted) => counts.deleted += 1,
-            Err(cause) => {
+            Err(mut cause) => {
+                cause.message = format!("{}: {}", plan.label_of(op), cause.message).into();
                 let outcome = match (rollback, &window) {
                     (Some(authority), Some(window)) => match authority.rollback_to(window).await {
                         Ok(()) => RollbackOutcome::RolledBack,
@@ -574,7 +607,1085 @@ async fn apply_plan(
         }
     }
 
+    // A check that cannot finish leaves the writes unverified: they are taken
+    // back like a mismatch.
+    let mismatched = match read_back(service, files, plan, &new_ids, file_id).await {
+        Ok(mismatched) => mismatched,
+        Err(e) => vec![format!(
+            "the check after the writes failed, so no row is verified: {}",
+            e.message
+        )],
+    };
+    if !mismatched.is_empty() {
+        let outcome = match (rollback, window.as_mut()) {
+            (Some(authority), Some(window)) => {
+                // The wait ran none of this batch's ops.
+                window.observe_between_ops(observe_authority(authority).await?);
+                match authority.rollback_to(window).await {
+                    Ok(()) => RollbackOutcome::RolledBack,
+                    Err(refusal) => RollbackOutcome::Refused(refusal),
+                }
+            }
+            (None, None) => RollbackOutcome::Unavailable,
+            _ => unreachable!("the window is opened exactly when the authority offers a rollback"),
+        };
+        return Err(readback_error(plan, &new_ids, mismatched, outcome));
+    }
+
     Ok(counts)
+}
+
+/// Settle a plan's deletes against the store, before any write: refuse one
+/// whose subtree holds a row the text keeps in place (the delete would take
+/// it), and drop a delete of a block inside another planned deleted subtree.
+async fn settle_deleted_subtrees(
+    service: &HolonService,
+    plan: &mut crate::dense_patch::PatchPlan,
+    projection: &crate::dense_projection::Projection,
+) -> Result<(), rmcp::ErrorData> {
+    use crate::dense_patch::PatchOp;
+
+    let label = |id: &EntityUri| match projection.alias_table.alias_of(id) {
+        Some(alias) => format!("row {{#{alias}}}"),
+        None => id.as_str().to_string(),
+    };
+    let stays: HashMap<&str, &str> = plan
+        .stays
+        .iter()
+        .map(|(id, label)| (id.as_str(), label.as_str()))
+        .collect();
+    let mut inside_deleted: HashSet<String> = HashSet::new();
+    for op in &plan.ops {
+        let PatchOp::Delete { block_id } = op else {
+            continue;
+        };
+        let mut frontier = vec![block_id.as_str().to_string()];
+        while !frontier.is_empty() {
+            let children = service
+                .execute_raw_sql(
+                    &format!(
+                        "SELECT id FROM {BLOCK_READ_TABLE} WHERE parent_id IN ({})",
+                        frontier
+                            .iter()
+                            .map(|id| format!("'{}'", id.replace('\'', "''")))
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    ),
+                    HashMap::new(),
+                )
+                .await
+                .map_err(|e| {
+                    rmcp::ErrorData::internal_error(
+                        format!("dense_patch could not read the subtree of {block_id}: {e:#}"),
+                        None,
+                    )
+                })?;
+            frontier = children
+                .rows
+                .iter()
+                .map(|row| {
+                    row.get("id")
+                        .and_then(|v| v.as_string())
+                        .expect("every block row carries an id")
+                        .to_string()
+                })
+                .collect();
+            inside_deleted.extend(frontier.iter().cloned());
+            if let Some(kept) = frontier.iter().find_map(|id| stays.get(id.as_str())) {
+                return Err(rmcp::ErrorData::invalid_params(
+                    format!(
+                        "{kept} stays in the text, but its block is inside the subtree of deleted \
+                         {}, and a delete takes the whole subtree — nothing was written. Move \
+                         the row under another row in the text, or remove it from the text too",
+                        label(block_id)
+                    ),
+                    None,
+                ));
+            }
+        }
+    }
+    // A delete inside another planned deleted subtree goes with it.
+    plan.ops.retain(|op| match op {
+        PatchOp::Delete { block_id } => !inside_deleted.contains(block_id.as_str()),
+        _ => true,
+    });
+    plan.written.retain(|row| match row {
+        crate::dense_patch::Ref::Existing(id) => !inside_deleted.contains(id.as_str()),
+        _ => true,
+    });
+    Ok(())
+}
+
+fn parent_ids<'a>(blocks: impl Iterator<Item = &'a Block>) -> Vec<String> {
+    blocks.map(|b| b.parent_id.as_str().to_string()).collect()
+}
+
+/// The `#+TODO:` vocabulary of the document each child of `parents` lives in,
+/// read by the same walk the engine's keyword convergence uses.
+async fn document_vocabularies(
+    service: &HolonService,
+    mut parents: Vec<String>,
+) -> Result<crate::dense_projection::DocVocabularies, rmcp::ErrorData> {
+    let source = holon::api::task_vocabulary_source::SqlTaskVocabularySource::new(
+        service.engine().db_handle().clone(),
+        holon::storage::BLOCK_WRITE_TABLE,
+    );
+    parents.sort();
+    parents.dedup();
+    let by_parent = source
+        .vocabularies_for_blocks(&parents)
+        .await
+        .map_err(|e| {
+            rmcp::ErrorData::internal_error(
+                format!("reading the task keywords of the documents under the rows: {e:#}"),
+                None,
+            )
+        })?;
+    Ok(crate::dense_projection::DocVocabularies::ByParent(
+        by_parent,
+    ))
+}
+
+/// How long `dense_patch` waits after its last write for the read model to
+/// show its writes: of the 5 s an answer may take, the other 3 s are for the
+/// bounded work before the writes, the writes, the rollback and the reply.
+const READBACK_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The rows of `plan.expected` the store does not show as the edited text
+/// does, each named, once the read model had [`READBACK_WINDOW`] to catch up
+/// with the writes.
+async fn read_back(
+    service: &HolonService,
+    files: Option<&OrgFiles>,
+    plan: &crate::dense_patch::PatchPlan,
+    new_ids: &HashMap<usize, MintedBlock>,
+    file_id: &EntityUri,
+) -> Result<Vec<String>, rmcp::ErrorData> {
+    use crate::dense_patch::Ref as PRef;
+
+    if plan.expected.is_empty() {
+        return Ok(Vec::new());
+    }
+    let resolve = |r: &PRef| -> String {
+        match r {
+            PRef::Root => file_id.as_str().to_string(),
+            PRef::Existing(id) => id.as_str().to_string(),
+            PRef::New(t) => new_ids
+                .get(t)
+                .unwrap_or_else(|| panic!("plan_block_ids mints every create; #{t} is missing"))
+                .uri
+                .clone(),
+        }
+    };
+    let ids: Vec<String> = plan.expected.iter().map(|e| resolve(&e.block)).collect();
+    let deadline = tokio::time::Instant::now() + READBACK_WINDOW;
+    let sql = format!(
+        "SELECT * FROM {BLOCK_READ_TABLE} WHERE id IN ({})",
+        ids.iter()
+            .map(|id| format!("'{}'", id.replace('\'', "''")))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    loop {
+        let result = service
+            .execute_query(&sql, QueryLanguage::HolonSql, HashMap::new(), None)
+            .await
+            .map_err(|e| {
+                rmcp::ErrorData::internal_error(
+                    format!("dense_patch could not read its rows back: {e:#}"),
+                    None,
+                )
+            })?;
+        let mut stored: HashMap<String, Block> = HashMap::new();
+        for row in &result.rows {
+            let block = Block::try_from(row.clone()).map_err(|e| {
+                rmcp::ErrorData::internal_error(
+                    format!("dense_patch read back a row that is not a block: {e}"),
+                    None,
+                )
+            })?;
+            stored.insert(block.id.as_str().to_string(), block);
+        }
+        let vocabularies = document_vocabularies(service, parent_ids(stored.values())).await?;
+        let mut siblings: HashMap<String, Vec<String>> = HashMap::new();
+        for (parent, _) in plan.expected.iter().filter_map(|e| e.place.as_ref()) {
+            let parent = resolve(parent);
+            if siblings.contains_key(&parent) {
+                continue;
+            }
+            let children = service
+                .execute_raw_sql(
+                    &format!(
+                        "SELECT id FROM {BLOCK_READ_TABLE} WHERE parent_id = '{}' ORDER BY sort_key",
+                        parent.replace('\'', "''")
+                    ),
+                    HashMap::new(),
+                )
+                .await
+                .map_err(|e| {
+                    rmcp::ErrorData::internal_error(
+                        format!("dense_patch could not read the siblings under {parent}: {e:#}"),
+                        None,
+                    )
+                })?;
+            let ids = children
+                .rows
+                .iter()
+                .map(|row| {
+                    row.get("id")
+                        .and_then(|v| v.as_string())
+                        .expect("every block row carries an id")
+                        .to_string()
+                })
+                .collect();
+            siblings.insert(parent, ids);
+        }
+        let mismatched = mismatched_rows(plan, &ids, &stored, &siblings, &vocabularies, &resolve)
+            .map_err(|e| {
+            rmcp::ErrorData::internal_error(
+                format!("dense_patch could not project its rows back: {e:#}"),
+                None,
+            )
+        })?;
+        if !mismatched.is_empty() && tokio::time::Instant::now() >= deadline {
+            return Ok(mismatched);
+        }
+        if mismatched.is_empty() {
+            return match files {
+                Some(files) => file_mismatches(service, files, plan, &ids, &stored, &resolve).await,
+                None => Ok(mismatched),
+            };
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+}
+
+/// Where write-back puts a session's rows: its org renderer and the file each
+/// document was ingested from.
+struct OrgFiles {
+    renderer: Arc<holon_filesystem::WritebackRenderer>,
+    documents: Option<Arc<tokio::sync::RwLock<holon_loro::LoroDocumentStore>>>,
+    root: Option<std::path::PathBuf>,
+}
+
+impl OrgFiles {
+    /// The document whose file holds `block`, and that file: the nearest
+    /// ancestor-or-self write-back routes to a file, by the file it was
+    /// ingested from, else by its name chain — the order write-back takes.
+    async fn file_of(
+        &self,
+        service: &HolonService,
+        block: &str,
+    ) -> Result<(EntityUri, std::path::PathBuf), rmcp::ErrorData> {
+        let mut cursor = block.to_string();
+        for _ in 0..1024 {
+            if let Some(file) = self.own_file(&cursor).await? {
+                return Ok(file);
+            }
+            let parent = service
+                .execute_raw_sql(
+                    &format!(
+                        "SELECT parent_id FROM {BLOCK_READ_TABLE} WHERE id = '{}'",
+                        cursor.replace('\'', "''")
+                    ),
+                    HashMap::new(),
+                )
+                .await
+                .map_err(|e| {
+                    rmcp::ErrorData::internal_error(
+                        format!("reading the parent of {cursor} failed: {e:#}"),
+                        None,
+                    )
+                })?
+                .rows
+                .first()
+                .and_then(|row| row.get("parent_id").and_then(|v| v.as_string()))
+                .map(str::to_string);
+            match parent {
+                Some(parent) if parent != EntityUri::no_parent().as_str() && parent != cursor => {
+                    cursor = parent
+                }
+                _ => {
+                    return Err(rmcp::ErrorData::internal_error(
+                        format!("no ancestor of {block} has a file in this session"),
+                        None,
+                    ));
+                }
+            }
+        }
+        Err(rmcp::ErrorData::internal_error(
+            format!("the parent chain of {block} exceeds 1024 hops"),
+            None,
+        ))
+    }
+
+    /// The file write-back routes `block` itself to, by the file it was
+    /// ingested from, else by its name chain; `None` when it is no document.
+    async fn own_file(
+        &self,
+        block: &str,
+    ) -> Result<Option<(EntityUri, std::path::PathBuf)>, rmcp::ErrorData> {
+        let root = self.root.as_ref().ok_or_else(|| {
+            rmcp::ErrorData::internal_error(
+                "this session names no vault root, so no row can be checked against the file \
+                 that holds it",
+                None,
+            )
+        })?;
+        let doc = EntityUri::parse(block).map_err(|e| {
+            rmcp::ErrorData::internal_error(format!("{block:?} is not a uri: {e}"), None)
+        })?;
+        let alias = match &self.documents {
+            Some(documents) => documents.read().await.resolve_alias_to_path(block).await,
+            None => None,
+        };
+        let file = match alias {
+            Some(path) => Some(path),
+            None => self.renderer.page_file(&doc, root).await.map_err(|e| {
+                rmcp::ErrorData::internal_error(
+                    format!("routing {block} to its page file failed: {e:#}"),
+                    None,
+                )
+            })?,
+        };
+        Ok(file.map(|path| (doc, path)))
+    }
+}
+
+/// Each expected row its org file does not hold as edited, once write-back
+/// renders the store's current state: the render of the row's real document,
+/// parsed back.
+async fn file_mismatches(
+    service: &HolonService,
+    files: &OrgFiles,
+    plan: &crate::dense_patch::PatchPlan,
+    ids: &[String],
+    stored: &HashMap<String, Block>,
+    resolve: &(dyn Fn(&crate::dense_patch::Ref) -> String + Sync),
+) -> Result<Vec<String>, rmcp::ErrorData> {
+    let mut by_file: std::collections::BTreeMap<std::path::PathBuf, (EntityUri, Vec<usize>)> =
+        std::collections::BTreeMap::new();
+    for (row, id) in ids.iter().enumerate() {
+        let (doc, path) = files.file_of(service, id).await?;
+        by_file.entry(path).or_insert((doc, Vec::new())).1.push(row);
+    }
+    let mut out = Vec::new();
+    for (path, (doc, rows)) in by_file {
+        let (held, losses) = files
+            .renderer
+            .as_the_file_holds(&doc, &path)
+            .await
+            .map_err(|e| {
+                rmcp::ErrorData::internal_error(
+                    format!(
+                        "rendering {} as write-back would failed: {e:#}",
+                        path.display()
+                    ),
+                    None,
+                )
+            })?;
+        out.extend(
+            held_mismatches(plan, ids, &rows, &held, &losses, stored, resolve).map_err(|e| {
+                rmcp::ErrorData::internal_error(
+                    format!("projecting the rows {} holds failed: {e:#}", path.display()),
+                    None,
+                )
+            })?,
+        );
+    }
+    Ok(out)
+}
+
+/// Each written row its org file would not hold as edited once the plan
+/// lands: the predicted rows put in their documents' stored blocks, rendered
+/// as write-back renders them and parsed back. A moved row takes its subtree
+/// along, so both the file it leaves and the file it joins are rendered. The
+/// render orders siblings by their order in the block list, so a placed row
+/// is put among its siblings.
+async fn file_refusals(
+    service: &HolonService,
+    files: &OrgFiles,
+    plan: &crate::dense_patch::PatchPlan,
+    root: &EntityUri,
+) -> Result<Vec<String>, rmcp::ErrorData> {
+    use crate::dense_patch::PatchOp;
+    use crate::dense_patch::Ref;
+
+    let resolve = |r: &Ref| match r {
+        Ref::Root => root.as_str().to_string(),
+        Ref::Existing(id) => id.as_str().to_string(),
+        Ref::New(_) => plan.predicted[r].id.as_str().to_string(),
+    };
+    let rows_by_id: HashMap<&str, (&Ref, &Block)> = plan
+        .predicted
+        .iter()
+        .map(|(r, block)| (block.id.as_str(), (r, block)))
+        .collect();
+    let ids: Vec<String> = plan.expected.iter().map(|e| resolve(&e.block)).collect();
+    let stored: HashMap<String, Block> = plan
+        .predicted
+        .values()
+        .map(|block| (block.id.as_str().to_string(), block.clone()))
+        .collect();
+
+    // The document each row lands in: that of its predicted parent, up the
+    // predicted parents until a row that is itself a document or a block the
+    // text does not show.
+    let mut landing: HashMap<String, (EntityUri, std::path::PathBuf)> = HashMap::new();
+    let mut docs: std::collections::BTreeMap<String, (std::path::PathBuf, Vec<Block>)> =
+        std::collections::BTreeMap::new();
+    let mut row_doc: Vec<String> = Vec::with_capacity(plan.expected.len());
+    let mut docs_of_row: HashMap<&Ref, Vec<String>> = HashMap::new();
+    for expected in &plan.expected {
+        let mut walked = Vec::new();
+        let mut cursor = plan.predicted[&expected.block]
+            .parent_id
+            .as_str()
+            .to_string();
+        let file = loop {
+            if let Some(file) = landing.get(&cursor) {
+                break file.clone();
+            }
+            match rows_by_id.get(cursor.as_str()) {
+                Some((r, block)) => {
+                    if !matches!(r, Ref::New(_)) {
+                        if let Some(file) = files.own_file(&cursor).await? {
+                            break file;
+                        }
+                    }
+                    let parent = block.parent_id.as_str().to_string();
+                    walked.push(std::mem::replace(&mut cursor, parent));
+                }
+                None => break files.file_of(service, &cursor).await?,
+            }
+        };
+        walked.push(cursor);
+        for id in walked {
+            landing.insert(id, file.clone());
+        }
+        row_doc.push(file.0.as_str().to_string());
+        docs_of_row
+            .entry(&expected.block)
+            .or_default()
+            .push(file.0.as_str().to_string());
+        docs.entry(file.0.as_str().to_string())
+            .or_insert((file.1, Vec::new()));
+    }
+    for (expected, id) in plan.expected.iter().zip(&ids) {
+        if expected.place.is_some() && matches!(expected.block, Ref::Existing(_)) {
+            let (doc, path) = files.file_of(service, id).await?;
+            docs_of_row
+                .entry(&expected.block)
+                .or_default()
+                .push(doc.as_str().to_string());
+            docs.entry(doc.as_str().to_string())
+                .or_insert((path, Vec::new()));
+        }
+    }
+    let deleted: Vec<Ref> = plan
+        .ops
+        .iter()
+        .filter_map(|op| match op {
+            PatchOp::Delete { block_id } => Some(Ref::Existing(block_id.clone())),
+            _ => None,
+        })
+        .collect();
+    for row in &deleted {
+        if let Ref::Existing(block_id) = row {
+            let (doc, path) = files.file_of(service, block_id.as_str()).await?;
+            docs_of_row
+                .entry(row)
+                .or_default()
+                .push(doc.as_str().to_string());
+            docs.entry(doc.as_str().to_string())
+                .or_insert((path, Vec::new()));
+        }
+    }
+    for (doc, (_, blocks)) in docs.iter_mut() {
+        *blocks = files
+            .renderer
+            .read_blocks(&EntityUri::parse(doc).expect("a document id is a uri"))
+            .await
+            .map_err(|e| {
+                rmcp::ErrorData::internal_error(
+                    format!("reading the blocks of {doc} failed: {e:#}"),
+                    None,
+                )
+            })?;
+        for op in &plan.ops {
+            if let PatchOp::Delete { block_id } = op {
+                take_subtree(blocks, block_id.as_str());
+            }
+        }
+    }
+
+    if let Some(refusal) = lay_rows_into_documents(plan, &row_doc, &mut docs, &resolve) {
+        return Ok(vec![refusal]);
+    }
+    if let Some(refusal) = over_document_work(plan, &docs, &docs_of_row) {
+        return Ok(vec![refusal]);
+    }
+
+    let mut out = Vec::new();
+    for (doc, (path, blocks)) in &docs {
+        let rows: Vec<usize> = (0..plan.expected.len())
+            .filter(|&row| row_doc[row] == *doc)
+            .collect();
+        let doc = EntityUri::parse(doc).expect("a document id is a uri");
+        let (held, losses) = files
+            .renderer
+            .as_a_render_holds(&doc, path, blocks)
+            .await
+            .map_err(|e| {
+                rmcp::ErrorData::internal_error(
+                    format!(
+                        "rendering {} as the plan would leave it failed: {e:#}",
+                        path.display()
+                    ),
+                    None,
+                )
+            })?;
+        out.extend(
+            held_mismatches(plan, &ids, &rows, &held, &losses, &stored, &resolve).map_err(|e| {
+                rmcp::ErrorData::internal_error(
+                    format!(
+                        "projecting the rows {} would hold failed: {e:#}",
+                        path.display()
+                    ),
+                    None,
+                )
+            })?,
+        );
+    }
+    Ok(out)
+}
+
+/// Put each row of `plan.expected` into `docs[row_doc[row]]` as the plan
+/// writes it: a placed row with the subtree it carries, after its anchor or
+/// first under its parent. The refusal of the first row that has no place
+/// there.
+fn lay_rows_into_documents(
+    plan: &crate::dense_patch::PatchPlan,
+    row_doc: &[String],
+    docs: &mut std::collections::BTreeMap<String, (std::path::PathBuf, Vec<Block>)>,
+    resolve: &dyn Fn(&crate::dense_patch::Ref) -> String,
+) -> Option<String> {
+    for (expected, doc) in plan.expected.iter().zip(row_doc) {
+        let block = plan.predicted[&expected.block].clone();
+        let label = &expected.label;
+        let Some((parent, after)) = &expected.place else {
+            let blocks = &mut docs.get_mut(doc).expect("a landing document is loaded").1;
+            let Some(at) = blocks.iter().position(|b| b.id == block.id) else {
+                return Some(format!(
+                    "{label}: it stays where it is, yet the file {doc} its parent lands in does \
+                     not hold it"
+                ));
+            };
+            blocks[at] = block;
+            continue;
+        };
+        let carried = docs
+            .values_mut()
+            .find_map(|(_, blocks)| take_subtree(blocks, block.id.as_str()))
+            .unwrap_or_default();
+        let blocks = &mut docs.get_mut(doc).expect("a landing document is loaded").1;
+        let at = match after {
+            Some(after) => {
+                let after = resolve(after);
+                let Some(at) = blocks.iter().position(|b| b.id.as_str() == after) else {
+                    return Some(format!(
+                        "{label}: the text puts it after {after}, which the file {doc} it lands \
+                         in does not hold"
+                    ));
+                };
+                1 + at
+            }
+            None => {
+                let parent = resolve(parent);
+                blocks
+                    .iter()
+                    .position(|b| b.parent_id.as_str() == parent)
+                    .unwrap_or(blocks.len())
+            }
+        };
+        blocks.splice(
+            at..at,
+            std::iter::once(block).chain(carried.into_iter().skip(1)),
+        );
+    }
+    None
+}
+
+#[cfg(test)]
+mod lay_rows_into_documents_tests {
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+
+    use holon_api::EntityUri;
+    use holon_api::block::Block;
+
+    use super::lay_rows_into_documents;
+    use crate::dense_patch::ExpectedRow;
+    use crate::dense_patch::PatchPlan;
+    use crate::dense_patch::Ref;
+
+    fn row(label: &str, block: Ref, place: Option<(Ref, Option<Ref>)>) -> ExpectedRow {
+        ExpectedRow {
+            label: label.to_string(),
+            block,
+            place,
+            view: Default::default(),
+        }
+    }
+
+    /// A plan whose rows have no place in their document is refused by the
+    /// row's name, whatever text it came from.
+    #[test]
+    fn a_row_without_a_place_in_its_document_is_refused_by_name() {
+        let doc = EntityUri::block("d");
+        let parent = EntityUri::block("parent");
+        let new = Ref::New(0);
+        let new_block = Block::new_text(EntityUri::block("new"), parent.clone(), "new");
+        let stay = EntityUri::block("stay");
+        let stay_block = Block::new_text(stay.clone(), parent.clone(), "stay");
+        let resolve = |r: &Ref| match r {
+            Ref::Root => doc.as_str().to_string(),
+            Ref::Existing(id) => id.as_str().to_string(),
+            Ref::New(_) => new_block.id.as_str().to_string(),
+        };
+        let parent_block = Block::new_text(parent.clone(), doc.clone(), "parent");
+        for (what, expected, predicted) in [
+            (
+                "an anchor the document does not hold",
+                row(
+                    "row {#7}",
+                    new.clone(),
+                    Some((
+                        Ref::Existing(parent.clone()),
+                        Some(Ref::Existing(EntityUri::block("elsewhere"))),
+                    )),
+                ),
+                (new.clone(), new_block.clone()),
+            ),
+            (
+                "a row that stays, missing from its document",
+                row("row {#7}", Ref::Existing(stay.clone()), None),
+                (Ref::Existing(stay.clone()), stay_block.clone()),
+            ),
+        ] {
+            let plan = PatchPlan {
+                expected: vec![expected],
+                predicted: [predicted].into_iter().collect(),
+                ..Default::default()
+            };
+            let mut docs = BTreeMap::from([(
+                doc.as_str().to_string(),
+                (PathBuf::from("/vault/d.org"), vec![parent_block.clone()]),
+            )]);
+            let refusal =
+                lay_rows_into_documents(&plan, &[doc.as_str().to_string()], &mut docs, &resolve)
+                    .unwrap_or_else(|| panic!("{what}: the row is laid in without a place"));
+            assert!(refusal.starts_with("row {#7}:"), "{what}: {refusal}");
+        }
+    }
+}
+
+/// The refusal of the row at which the documents the plan writes into, as
+/// they would hold its rows, pass
+/// [`MAX_DOCUMENT_BLOCKS_PER_PATCH`](crate::dense_patch::MAX_DOCUMENT_BLOCKS_PER_PATCH)
+/// blocks together; `docs_of_row` gives each written row its documents.
+fn over_document_work(
+    plan: &crate::dense_patch::PatchPlan,
+    docs: &std::collections::BTreeMap<String, (std::path::PathBuf, Vec<Block>)>,
+    docs_of_row: &HashMap<&crate::dense_patch::Ref, Vec<String>>,
+) -> Option<String> {
+    use crate::dense_patch::MAX_DOCUMENT_BLOCKS_PER_PATCH;
+
+    let mut counted: Vec<&str> = Vec::new();
+    let mut blocks = 0;
+    for row in &plan.written {
+        let row_docs = docs_of_row
+            .get(row)
+            .unwrap_or_else(|| panic!("every written row has a document: {row:?}"));
+        for doc in row_docs {
+            if counted.contains(&doc.as_str()) {
+                continue;
+            }
+            counted.push(doc);
+            blocks += docs[doc].1.len();
+        }
+        if blocks > MAX_DOCUMENT_BLOCKS_PER_PATCH {
+            let held: Vec<String> = counted
+                .iter()
+                .map(|doc| format!("{} ({} blocks)", docs[*doc].0.display(), docs[*doc].1.len()))
+                .collect();
+            return Some(format!(
+                "{}: with this row the patch writes into {}, which hold {blocks} blocks together; \
+                 one dense_patch writes into documents of at most {MAX_DOCUMENT_BLOCKS_PER_PATCH} \
+                 blocks, since each write renders its documents whole — send this row in a patch \
+                 of its own, or split the document",
+                plan.labels[row],
+                held.join(", ")
+            ));
+        }
+    }
+    None
+}
+
+/// The refusal of the row whose create or move takes the patch past
+/// [`MAX_SIBLING_WORK_PER_PATCH`](crate::dense_patch::MAX_SIBLING_WORK_PER_PATCH):
+/// each such row counts the rows the store holds under its new parent.
+async fn over_sibling_work(
+    service: &HolonService,
+    plan: &crate::dense_patch::PatchPlan,
+    file_id: &EntityUri,
+) -> Result<Option<String>, rmcp::ErrorData> {
+    use crate::dense_patch::MAX_SIBLING_WORK_PER_PATCH;
+    use crate::dense_patch::PatchOp;
+    use crate::dense_patch::Ref as PRef;
+
+    let placed: Vec<(PRef, Option<String>)> = plan
+        .ops
+        .iter()
+        .filter_map(|op| match op {
+            PatchOp::Create { temp, parent, .. } => Some((PRef::New(*temp), parent)),
+            PatchOp::Move {
+                block_id, parent, ..
+            } => Some((PRef::Existing(block_id.clone()), parent)),
+            _ => None,
+        })
+        .map(|(row, parent)| {
+            let parent = match parent {
+                PRef::Root => Some(file_id.as_str().to_string()),
+                PRef::Existing(id) => Some(id.as_str().to_string()),
+                PRef::New(_) => None,
+            };
+            (row, parent)
+        })
+        .collect();
+    let parents: HashSet<&String> = placed.iter().filter_map(|(_, p)| p.as_ref()).collect();
+    if parents.is_empty() {
+        return Ok(None);
+    }
+    let sql = format!(
+        "SELECT parent_id, COUNT(*) AS siblings FROM {BLOCK_READ_TABLE} WHERE parent_id IN ({}) \
+         GROUP BY parent_id",
+        parents
+            .iter()
+            .map(|id| format!("'{}'", id.replace('\'', "''")))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    let result = service
+        .execute_query(&sql, QueryLanguage::HolonSql, HashMap::new(), None)
+        .await
+        .map_err(|e| {
+            rmcp::ErrorData::internal_error(
+                format!("dense_patch could not count the rows under its parents: {e:#}"),
+                None,
+            )
+        })?;
+    let mut siblings: HashMap<String, usize> = HashMap::new();
+    for row in &result.rows {
+        let counted = row
+            .get("parent_id")
+            .and_then(|v| v.as_string())
+            .zip(row.get("siblings").and_then(|v| v.as_i64()))
+            // ALLOW(ok): a row that does not convert is refused by the `ok_or_else` below
+            .and_then(|(parent, count)| Some((parent.to_string(), usize::try_from(count).ok()?)));
+        let (parent, count) = counted.ok_or_else(|| {
+            rmcp::ErrorData::internal_error(
+                format!("counting the rows under a parent gave the row {row:?}"),
+                None,
+            )
+        })?;
+        siblings.insert(parent, count);
+    }
+    let mut work = 0;
+    for (row, parent) in &placed {
+        work += parent
+            .as_ref()
+            .map_or(0, |p| siblings.get(p).copied().unwrap_or(0));
+        if work > MAX_SIBLING_WORK_PER_PATCH {
+            return Ok(Some(format!(
+                "{}: with this row the rows the patch creates or moves land among {work} sibling \
+                 rows in all; one dense_patch places rows among at most \
+                 {MAX_SIBLING_WORK_PER_PATCH}, since placing a row costs time in its siblings — \
+                 send the rows from this one on in another patch",
+                plan.labels[row]
+            )));
+        }
+    }
+    Ok(None)
+}
+
+/// Removes block `id` and its descendants from `blocks` and returns them,
+/// `id` first, in list order; `None` when `blocks` does not hold `id`.
+fn take_subtree(blocks: &mut Vec<Block>, id: &str) -> Option<Vec<Block>> {
+    let at = blocks.iter().position(|b| b.id.as_str() == id)?;
+    let head = blocks.remove(at);
+    let mut inside: HashSet<String> = HashSet::from([id.to_string()]);
+    loop {
+        let before = inside.len();
+        for block in blocks.iter() {
+            if inside.contains(block.parent_id.as_str()) {
+                inside.insert(block.id.as_str().to_string());
+            }
+        }
+        if inside.len() == before {
+            break;
+        }
+    }
+    let (taken, kept): (Vec<Block>, Vec<Block>) = std::mem::take(blocks)
+        .into_iter()
+        .partition(|b| inside.contains(b.id.as_str()));
+    *blocks = kept;
+    Some(std::iter::once(head).chain(taken).collect())
+}
+
+/// Each of `rows` (indexes into `plan.expected` and `ids`) that `held`, a
+/// file as write-back leaves it, does not hold as edited: left out by the
+/// render, absent, placed elsewhere, or reading as another row.
+fn held_mismatches(
+    plan: &crate::dense_patch::PatchPlan,
+    ids: &[String],
+    rows: &[usize],
+    held: &holon_core::FileFormatParseResult,
+    losses: &[holon_api::RenderLoss],
+    stored: &HashMap<String, Block>,
+    resolve: &dyn Fn(&crate::dense_patch::Ref) -> String,
+) -> anyhow::Result<Vec<String>> {
+    use holon_org_format::OrgBlockExt;
+    use holon_org_format::OrgDocumentExt;
+
+    let wanted: HashSet<&str> = rows.iter().map(|&row| ids[row].as_str()).collect();
+    let vocabulary =
+        holon_org_format::TaskKeywordVocabulary::from_declared(held.document.todo_keywords());
+    let built = crate::dense_projection::build_projection(
+        held.blocks
+            .iter()
+            .filter(|b| wanted.contains(b.id.as_str()))
+            .cloned()
+            .collect(),
+        &crate::dense_projection::DocVocabularies::Uniform(vocabulary),
+    )?;
+    let mut out = Vec::new();
+    for &row in rows {
+        let (expected, id) = (&plan.expected[row], ids[row].as_str());
+        if let Some(loss) = losses.iter().find(|loss| loss.block.as_str() == id) {
+            out.push(format!(
+                "{}: its org file leaves out {}",
+                expected.label, loss.detail
+            ));
+            continue;
+        }
+        let Some(block) = held.blocks.iter().find(|b| b.id.as_str() == id) else {
+            out.push(format!("{}: its org file does not hold it", expected.label));
+            continue;
+        };
+        if let Some((parent, after)) = &expected.place {
+            let want = resolve(parent);
+            if block.parent_id.as_str() != want {
+                out.push(format!(
+                    "{}: its org file holds it under {}, not {want}",
+                    expected.label,
+                    block.parent_id.as_str()
+                ));
+                continue;
+            }
+            let siblings: Vec<&str> = held
+                .blocks
+                .iter()
+                .filter(|b| b.parent_id.as_str() == want)
+                .map(|b| b.id.as_str())
+                .collect();
+            let at = siblings
+                .iter()
+                .position(|s| *s == id)
+                .expect("the block is among its parent's children");
+            let follows = at.checked_sub(1).map(|i| siblings[i].to_string());
+            let want_after = after.as_ref().map(resolve);
+            if follows != want_after {
+                out.push(format!(
+                    "{}: its org file places it after {follows:?}, not {want_after:?}",
+                    expected.label
+                ));
+                continue;
+            }
+        }
+        let shown = built.records[id]
+            .shown
+            .as_ref()
+            .expect("every projected text block is shown with a token");
+        if *shown != expected.view {
+            out.push(format!(
+                "{}: its org file holds it as {shown:?}, not as the edited {:?}",
+                expected.label, expected.view
+            ));
+            continue;
+        }
+        let in_store = stored[id]
+            .get_property("task_state_category")
+            .and_then(|v| v.as_string().map(str::to_string));
+        let in_file = block.task_state().map(|s| s.category.as_str().to_string());
+        if in_store != in_file {
+            out.push(format!(
+                "{}: its org file reads its task state as {in_file:?}, the store holds \
+                 {in_store:?}",
+                expected.label
+            ));
+        }
+    }
+    Ok(out)
+}
+
+/// Each expected row that `stored` does not show as expected: absent, under
+/// another parent, or projecting to another row.
+fn mismatched_rows(
+    plan: &crate::dense_patch::PatchPlan,
+    ids: &[String],
+    stored: &HashMap<String, Block>,
+    siblings: &HashMap<String, Vec<String>>,
+    vocabularies: &crate::dense_projection::DocVocabularies,
+    resolve: &dyn Fn(&crate::dense_patch::Ref) -> String,
+) -> anyhow::Result<Vec<String>> {
+    let blocks: Vec<Block> = ids
+        .iter()
+        .filter_map(|id| stored.get(id).cloned())
+        .collect();
+    let built = crate::dense_projection::build_projection(blocks, vocabularies)?;
+    let mut out = Vec::new();
+    for (expected, id) in plan.expected.iter().zip(ids) {
+        let Some(block) = stored.get(id) else {
+            out.push(format!("{}: {id} is not in the store", expected.label));
+            continue;
+        };
+        if let Some((parent, after)) = &expected.place {
+            let want = resolve(parent);
+            if block.parent_id.as_str() != want {
+                out.push(format!(
+                    "{}: it hangs under {}, not {want}",
+                    expected.label,
+                    block.parent_id.as_str()
+                ));
+                continue;
+            }
+            let order = &siblings[&want];
+            let Some(at) = order.iter().position(|s| s == id) else {
+                out.push(format!(
+                    "{}: it is not among the children of {want}",
+                    expected.label
+                ));
+                continue;
+            };
+            let follows = at.checked_sub(1).map(|i| order[i].clone());
+            let want_after = after.as_ref().map(resolve);
+            if follows != want_after {
+                out.push(format!(
+                    "{}: it follows {follows:?} among its siblings, not {want_after:?}",
+                    expected.label
+                ));
+                continue;
+            }
+        }
+        let shown = built.records[id.as_str()]
+            .shown
+            .as_ref()
+            .expect("every projected text block is shown with a token");
+        if *shown != expected.view {
+            out.push(format!(
+                "{}: it reads back as {shown:?}, not as the edited {:?}",
+                expected.label, expected.view
+            ));
+            continue;
+        }
+        if let Some(why) = stored_category_mismatch(block, vocabularies) {
+            out.push(format!("{}: {why}", expected.label));
+        }
+    }
+    Ok(out)
+}
+
+/// Why `block`'s stored `task_state_category` is not the category its
+/// document's ring gives its keyword, when it is not. The dense text shows the
+/// keyword only, so this pair is checked on the stored row.
+fn stored_category_mismatch(
+    block: &Block,
+    vocabularies: &crate::dense_projection::DocVocabularies,
+) -> Option<String> {
+    let stored = block
+        .get_property("task_state_category")
+        .and_then(|v| v.as_string().map(str::to_string));
+    let keyword = block
+        .get_property("task_state")
+        .and_then(|v| v.as_string().map(str::to_string));
+    let want = keyword.as_ref().map(|keyword| {
+        crate::dense_projection::state_in(vocabularies.under(&block.parent_id), keyword)
+            .category
+            .as_str()
+            .to_string()
+    });
+    (stored != want).then(|| {
+        format!(
+            "the store holds its task state {keyword:?} with the category {stored:?}, where its \
+             document's ring gives {want:?}"
+        )
+    })
+}
+
+/// The report for a patch whose every op landed but whose rows the store does
+/// not show as the edited text does.
+fn readback_error(
+    plan: &crate::dense_patch::PatchPlan,
+    new_ids: &HashMap<usize, MintedBlock>,
+    mismatched: Vec<String>,
+    rollback: RollbackOutcome,
+) -> rmcp::ErrorData {
+    let dispatched: Vec<_> = plan
+        .ops
+        .iter()
+        .map(|op| patch_op_row(op, new_ids, Dispatched::Yes))
+        .collect();
+    if matches!(rollback, RollbackOutcome::RolledBack) {
+        return rmcp::ErrorData::internal_error(
+            format!(
+                "ROLLED BACK: all {} op(s) landed, but the store or the org file does not read back \
+                 as the edited text, so they were undone at the write authority. Rows: {}",
+                dispatched.len(),
+                mismatched.join("; ")
+            ),
+            Some(serde_json::json!({
+                "partial_apply": false,
+                "rollback": "rolled_back",
+                "applied": [],
+                "reverted": dispatched,
+                "mismatched_rows": mismatched,
+            })),
+        );
+    }
+    let refusal = match &rollback {
+        RollbackOutcome::Refused(reason) => reason.to_string(),
+        RollbackOutcome::Unavailable => {
+            "this session's SQL write authority offers no batch rollback".to_string()
+        }
+        RollbackOutcome::RolledBack => unreachable!("handled above"),
+    };
+    rmcp::ErrorData::internal_error(
+        format!(
+            "APPLIED INEXACTLY: all {} op(s) ARE in the store, but the store or the org file \
+             does not read back as the edited text. Rollback refused: {refusal}. Reconcile these rows with dense_query \
+             before any retry: {}",
+            dispatched.len(),
+            mismatched.join("; ")
+        ),
+        Some(serde_json::json!({
+            "partial_apply": true,
+            "rollback": "refused",
+            "rollback_refused": refusal,
+            "applied": dispatched,
+            "mismatched_rows": mismatched,
+        })),
+    )
 }
 
 async fn observe_authority(
@@ -753,48 +1864,69 @@ async fn dispatch_patch_op(
             temp,
             parent,
             after,
-            title,
+            content,
             task_state,
+            attributes,
+            carriers,
         } => {
             let minted = minted(*temp)?;
             let parent_id = resolve(parent)?;
             let mut storage: StorageEntity = HashMap::new();
             storage.insert("id".into(), Value::String(minted.uri.clone()));
             storage.insert("parent_id".into(), Value::String(parent_id));
-            storage.insert("content".into(), Value::String(title.clone()));
+            storage.insert("content".into(), Value::String(content.text.clone()));
+            storage.insert("marks".into(), create_marks_value(content));
             storage.insert("content_type".into(), Value::String("text".to_string()));
             storage.insert("ID".into(), Value::String(minted.bare.clone()));
             if let Some(st) = task_state {
                 storage.insert("task_state".into(), Value::String(st.keyword.clone()));
+            }
+            // An empty Array would issue a junction-clearing DELETE for a row
+            // that cannot have tags yet.
+            if !attributes.tags.is_empty() {
                 storage.insert(
-                    "task_state_category".into(),
-                    Value::String(st.category.as_str().to_string()),
+                    EdgeField::Tags.column().into(),
+                    tags_value(&attributes.tags),
+                );
+            }
+            for (key, value) in &attributes.properties {
+                let displaced = storage.insert(
+                    holon_org_format::AuthoredKey::new(key).property().into(),
+                    Value::String(value.clone()),
+                );
+                assert!(
+                    displaced.is_none(),
+                    "plan_patch refuses property keys that name a create param; `{key}` got through"
                 );
             }
             // Create AND position in one op via the canonical positional
             // key: `after_block_id` places the new block immediately after
             // its predecessor sibling atomically across both providers.
-            if let Some(a) = after {
-                let after_id = resolve(a)?;
-                storage.insert(
-                    POSITION_AFTER_BLOCK_ID_PARAM.into(),
-                    Value::String(after_id),
-                );
-            }
+            // `Null` is "the first child": an absent key would append.
+            let anchor = match after {
+                Some(a) => Value::String(resolve(a)?),
+                None => Value::Null,
+            };
+            storage.insert(POSITION_AFTER_BLOCK_ID_PARAM.into(), anchor);
             service
-                .execute_operation(&EntityName::new("block"), "create", storage)
+                .execute_with_parsed_carriers(
+                    &EntityName::new("block"),
+                    "create",
+                    storage,
+                    carriers,
+                )
                 .await
                 .map_err(|e| {
                     rmcp::ErrorData::internal_error(format!("create failed: {e:#}"), None)
                 })?;
             Ok(AppliedKind::Created)
         }
-        PatchOp::UpdateTitle { block_id, title } => {
+        PatchOp::SetContent { block_id, content } => {
             set_field(
                 service,
                 block_id.as_str(),
                 "content",
-                Value::String(title.clone()),
+                rich_content_value(content),
             )
             .await?;
             Ok(AppliedKind::Updated)
@@ -803,18 +1935,63 @@ async fn dispatch_patch_op(
             block_id,
             task_state,
         } => {
-            let (kw, cat) = match task_state {
-                Some(st) => (st.keyword.clone(), st.category.as_str().to_string()),
-                None => (String::new(), String::new()),
-            };
-            set_field(service, block_id.as_str(), "task_state", Value::String(kw)).await?;
+            // The authority writes the category with the keyword and clears both
+            // on REMOVED.
+            match task_state {
+                Some(st) => {
+                    set_field(
+                        service,
+                        block_id.as_str(),
+                        "task_state",
+                        Value::String(st.keyword.clone()),
+                    )
+                    .await?;
+                }
+                None => {
+                    set_field(service, block_id.as_str(), "task_state", Value::REMOVED).await?;
+                }
+            }
+            Ok(AppliedKind::Updated)
+        }
+        PatchOp::SetTags { block_id, tags } => {
             set_field(
                 service,
                 block_id.as_str(),
-                "task_state_category",
-                Value::String(cat),
+                EdgeField::Tags.column(),
+                tags_value(tags),
             )
             .await?;
+            Ok(AppliedKind::Updated)
+        }
+        PatchOp::SetProperty {
+            block_id,
+            key,
+            value,
+        } => {
+            let value = match value {
+                Some(v) => Value::String(v.clone()),
+                None => Value::REMOVED,
+            };
+            set_field(service, block_id.as_str(), &key.property(), value).await?;
+            Ok(AppliedKind::Updated)
+        }
+        PatchOp::SetCarrier { block_id, carrier } => {
+            let mut storage: StorageEntity = HashMap::new();
+            storage.insert("id".into(), Value::String(block_id.as_str().to_string()));
+            service
+                .execute_with_parsed_carriers(
+                    &EntityName::new("block"),
+                    "set_field",
+                    storage,
+                    std::slice::from_ref(carrier),
+                )
+                .await
+                .map_err(|e| {
+                    rmcp::ErrorData::internal_error(
+                        format!("set_field({}) on {block_id} failed: {e:#}", carrier.key()),
+                        None,
+                    )
+                })?;
             Ok(AppliedKind::Updated)
         }
         PatchOp::Move {
@@ -831,7 +2008,7 @@ async fn dispatch_patch_op(
             let mut storage: StorageEntity = HashMap::new();
             storage.insert("id".into(), Value::String(block_id.as_str().to_string()));
             service
-                .execute_operation(&EntityName::new("block"), "delete", storage)
+                .execute_operation(&EntityName::new("block"), "delete_subtree", storage)
                 .await
                 .map_err(|e| {
                     rmcp::ErrorData::internal_error(format!("delete failed: {e:#}"), None)
@@ -839,6 +2016,11 @@ async fn dispatch_patch_op(
             Ok(AppliedKind::Deleted)
         }
     }
+}
+
+/// The `tags` edge param: a string Array, the carrier both write legs read.
+fn tags_value(tags: &holon_api::Tags) -> Value {
+    Value::Array(tags.iter().map(|t| Value::String(t.clone())).collect())
 }
 
 /// One-line JSON description of a planned patch op (for dense_patch dry_run).
@@ -858,18 +2040,50 @@ fn describe_patch_op(op: &crate::dense_patch::PatchOp) -> serde_json::Value {
         // `after_block_id` — no follow-up `move_block` (the create-then-move
         // seam was retired 2026-07-27; positioning is atomic in the create).
         PatchOp::Create {
-            title,
+            content,
             parent,
             after,
+            attributes,
+            carriers,
             ..
         } => serde_json::json!({
             "op": "create",
-            "title": title,
+            "content": content.text,
+            "marks": describe_marks(content),
             "parent": describe_ref(parent),
             "after": after.as_ref().map(describe_ref),
+            "tags": attributes.tags.to_vec(),
+            "properties": attributes.properties,
+            "carriers": carriers.iter().map(|c| (c.key(), c.value())).collect::<std::collections::BTreeMap<_, _>>(),
         }),
-        PatchOp::UpdateTitle { block_id, title } => {
-            serde_json::json!({"op": "update_title", "block": block_id.as_str(), "title": title})
+        PatchOp::SetCarrier { block_id, carrier } => serde_json::json!({
+            "op": "set_carrier",
+            "block": block_id.as_str(),
+            "carrier": carrier.key(),
+            "value": carrier.value(),
+        }),
+        PatchOp::SetTags { block_id, tags } => serde_json::json!({
+            "op": "set_tags",
+            "block": block_id.as_str(),
+            "tags": tags.to_vec(),
+        }),
+        PatchOp::SetProperty {
+            block_id,
+            key,
+            value,
+        } => serde_json::json!({
+            "op": "set_property",
+            "block": block_id.as_str(),
+            "key": key.as_str(),
+            "value": value,
+        }),
+        PatchOp::SetContent { block_id, content } => {
+            serde_json::json!({
+                "op": "set_content",
+                "block": block_id.as_str(),
+                "content": content.text,
+                "marks": describe_marks(content),
+            })
         }
         PatchOp::SetState {
             block_id,
@@ -890,7 +2104,7 @@ fn describe_patch_op(op: &crate::dense_patch::PatchOp) -> serde_json::Value {
             "after": after.as_ref().map(describe_ref),
         }),
         PatchOp::Delete { block_id } => {
-            serde_json::json!({"op": "delete", "block": block_id.as_str()})
+            serde_json::json!({"op": "delete_subtree", "block": block_id.as_str()})
         }
     }
 }
@@ -3472,12 +4686,29 @@ impl HolonMcpServer {
                        compressed to a trailing `{#alias}` token (a short per-query handle) — far \
                        fewer tokens than read_org_file. A `{#alias^}` token (trailing caret) means \
                        one or more UNSELECTED ancestors were elided above this block, so its shown \
-                       parent is not its real parent — display-only, safe to ignore. \n\n\
-                       Returns a `projection_handle`. EDIT `dense_org` (retitle, change TODO/DONE \
-                       state, add/move/nest rows; keep each row's `{#alias}` to preserve identity; \
-                       a row with NO token becomes a NEW block; the `^` marker is noise you may \
-                       drop) and pass it plus the handle to `dense_patch` to apply as one batch. \
-                       Omitting a block does NOT delete it (use dense_patch's `delete`)."
+                       parent is not its real parent — display-only, safe to ignore. Everything \
+                       else is plain org: tags are the headline tag group BEFORE the token \
+                       (`* TODO Title :tag1:tag2: {#3}`), other properties stay in the \
+                       `:PROPERTIES:` drawer under the headline. A property whose key no drawer \
+                       line can spell (`a b`, `END`, `id`, ...) is not in the drawer: \
+                       `omitted_properties` maps each such row's alias to those keys, so a row \
+                       absent from it shows every property it holds. A row the text shows \
+                       otherwise than the block is stored (a stored title `TODO Plan` with no \
+                       task state shows as a task when the header declares `TODO`; a stored title ending in `:x:` shows `x` as a \
+                       tag) is named in `unfaithful_rows` with what differs; when its text does \
+                       not even read back as one row, dense_patch refuses every patch of that \
+                       projection. A body line starting with `*` or `#+` is shown with one more \
+                       leading comma (`,* x`, `,#+CAPTION: x`): that is org's escape, and a line \
+                       you write that way is body text. The `#+TODO:` header declares the task keywords of \
+                       every file the rows belong to (org's defaults for a file that declares \
+                       none). \n\n\
+                       Returns a `projection_handle`. EDIT `dense_org` (retitle, edit body lines, \
+                       change TODO/DONE state, edit tags and drawer properties, add/move/nest \
+                       rows; keep each \
+                       row's `{#alias}` to preserve identity; a row with NO token becomes a NEW \
+                       block; the `^` marker is noise you may drop) and pass it plus the handle \
+                       to `dense_patch` to apply as one batch. Omitting a block does NOT delete \
+                       it (use dense_patch's `delete`)."
     )]
     async fn dense_query(
         &self,
@@ -3537,21 +4768,32 @@ impl HolonMcpServer {
             blocks.push(block);
         }
 
-        let built = build_projection(blocks).map_err(|e| {
+        let vocabularies =
+            document_vocabularies(&self.service(), parent_ids(blocks.iter())).await?;
+        let built = build_projection(blocks, &vocabularies).map_err(|e| {
             rmcp::ErrorData::internal_error(format!("building dense projection failed: {e}"), None)
         })?;
 
-        let handle = self.dense_projections.insert(Projection::new(
-            params.query.clone(),
-            built.file_id.clone(),
-            built.alias_table.clone(),
-            built.records.clone(),
-        ));
+        let handle = self
+            .dense_projections
+            .insert(Projection::new(params.query.clone(), &built));
 
+        let omitted: serde_json::Map<String, serde_json::Value> = built
+            .omitted
+            .iter()
+            .map(|(alias, keys)| (alias.to_string(), serde_json::json!(keys)))
+            .collect();
+        let unfaithful: serde_json::Map<String, serde_json::Value> = built
+            .unfaithful
+            .iter()
+            .map(|(alias, why)| (alias.to_string(), serde_json::json!(why)))
+            .collect();
         let result = serde_json::json!({
             "projection_handle": handle,
             "block_count": built.ordered_blocks.len(),
             "dense_org": built.dense_text,
+            "omitted_properties": omitted,
+            "unfaithful_rows": unfaithful,
         });
 
         Ok(CallToolResult::success(vec![Content::text(
@@ -3568,10 +4810,48 @@ impl HolonMcpServer {
         description = "Apply an edited dense projection (from dense_query) back to the store as one \
                        batch. Pass the `projection_handle` and the edited `dense_org` text. \
                        Matching is by `{#alias}` token: a row keeping its token updates that block \
-                       (retitle, change TODO/DONE state, move/nest); a row with NO token is CREATED \
-                       as a new block at its tree position; the `{#alias^}` gap marker is ignored. \
+                       (retitle, body lines, change TODO/DONE state, tags, drawer properties, \
+                       move/nest); a row with NO token is CREATED as a new block at its tree \
+                       position, with its body lines, tags and drawer properties; the \
+                       `{#alias^}` gap marker is ignored. Tags \
+                       are the org headline tag group; properties are a `:PROPERTIES:` drawer \
+                       under the headline, one `:key: value` line each; deleting a drawer line \
+                       removes that property, and the drawer keeps the line order you write. \
+                       Example — post a decision with two options: \
+                       `* ? Which store? :decision:` + drawer `:choose: 1` `:recommend: a`, then \
+                       `** Turso` + drawer `:option: a` and `** SQLite` + drawer `:option: b`. \
+                       A value org cannot hold raw (empty, surrounding space, a line break) \
+                       is a JSON string literal, as dense_query shows it: `:note: \"\"`. \
+                       An edit applies exactly or the patch is refused before any write, \
+                       naming the row: a new row's `:ID:` line, an `:ID:` naming another block, \
+                       a repeated drawer key, a key org does not write back as a property \
+                       (`_`-prefixed, `tags`, `sequence`, a block field such as `content` or \
+                       `parent_id`, ...), a tag org cannot carry \
+                       (`:a b:`), text before the first row other than the header dense_query \
+                       emitted, a `{#alias}` token that does not end its headline line, a task \
+                       keyword the row's own file does not declare, a line of a row that org \
+                       does not read back as that row's text — a `#+TITLE:`, `#+TODO:`, \
+                       `#+FILETAGS:`, `#+CATEGORY:`, `#+PROPERTY:`, `#+ID:` or other line org \
+                       reads for the whole page, a `#+begin_src` block, a `#+CALL:` line, or \
+                       a `#+` line inside an example or export block (write each `,#+...` as \
+                       the refusal names it) — a carriage \
+                       return anywhere in the text (send LF line breaks), \
+                       a row whose lines dense_query did not show hold more than 100 emphasis \
+                       marks (`*` `/` `_` `+` `=` `~`) in all, \
+                       and any \
+                       field dense_patch does not write: \
+                       priority, SCHEDULED/DEADLINE, REQUIRES, COLLAPSED — on a new row when \
+                       present, on an existing row when changed (leave them as dense_query \
+                       showed them; set them with execute_operation). \
+                       A row you leave exactly as dense_query showed it is not an edit: it plans \
+                       nothing and never blocks the patch, even when it is listed in \
+                       `unfaithful_rows`. A task keyword is stored with the category its own \
+                       file's `#+TODO:` ring gives it. \
                        Blocks you omit are NOT deleted — list their aliases in `delete` to remove \
-                       them (with their subtrees). Optimistic concurrency: if any block you touch \
+                       them with their whole subtrees (a row the text keeps in place inside a \
+                       deleted subtree refuses the patch by its name; move it under another \
+                       row first). Optimistic concurrency: if any block you touch, or the \
+                       `#+TODO:` keywords of a document the projection shows, \
                        changed since dense_query, the whole patch is REJECTED with a conflict list \
                        (re-run dense_query and retry). Set `dry_run: true` to preview the planned \
                        operations without applying. A stale/unknown handle is a loud error. \
@@ -3590,7 +4870,20 @@ impl HolonMcpServer {
                        writes that are not this patch's. An edit this session commits while one \
                        of the patch's own ops is running is attributed to the patch and is \
                        undone with it, silently. That is most of the wall-clock time a patch \
-                       takes, so do not run dense_patch against a document somebody is editing."
+                       takes, so do not run dense_patch against a document somebody is editing. \
+                       After the writes, every written row is read back: a row the store does \
+                       not show as you wrote it rolls the patch back (ROLLED BACK) or, when the \
+                       rollback is refused, is reported as APPLIED INEXACTLY, both with \
+                       `mismatched_rows`. Another writer that changes a patched row before the \
+                       read-back also causes this: a loud refusal, never a silent change. The \
+                       read-back compares each written row's title, state, tags, drawer, body, \
+                       parent and (for a created or moved row) the sibling it follows, in the \
+                       block read model, with the stored task-state category against the \
+                       row's ring, and then the same fields as the row's org file holds \
+                       them: its real document rendered as write-back will write it, parsed \
+                       back. It does not read the file from disk, and it does not check the \
+                       rows the patch did not write. A check that cannot finish takes the \
+                       writes back like a mismatch."
     )]
     async fn dense_patch(
         &self,
@@ -3600,12 +4893,14 @@ impl HolonMcpServer {
         use holon_org_format::parse_dense_with;
 
         use crate::dense_patch::plan_patch;
-
         let projection = self
             .dense_projections
             .get(&params.handle)
             .map_err(|e| rmcp::ErrorData::invalid_params(format!("{e}"), None))?;
 
+        crate::dense_patch::refuse_unparsable_text(&projection, &params.text).map_err(|e| {
+            rmcp::ErrorData::invalid_params(format!("could not plan patch: {e}"), None)
+        })?;
         let classifier = self.link_classifier();
         let parsed = parse_dense_with(&params.text, &classifier).map_err(|e| {
             rmcp::ErrorData::invalid_params(format!("edited dense text did not parse: {e}"), None)
@@ -3618,9 +4913,24 @@ impl HolonMcpServer {
             })?);
         }
 
-        let plan = plan_patch(&projection, &parsed, &delete_aliases).map_err(|e| {
-            rmcp::ErrorData::invalid_params(format!("could not plan patch: {e}"), None)
-        })?;
+        let rings_now =
+            document_vocabularies(&self.service(), projection.vocabularies.parents()).await?;
+        let changed_rings = projection.vocabularies.changed_in(&rings_now);
+        if !changed_rings.is_empty() {
+            return Err(rmcp::ErrorData::invalid_params(
+                format!(
+                    "conflict: the `#+TODO:` keywords of the document under {} changed since \
+                     dense_query — patch rejected. Re-run dense_query and retry.",
+                    changed_rings.join(", ")
+                ),
+                Some(serde_json::json!({ "changed_keyword_documents": changed_rings })),
+            ));
+        }
+
+        let mut plan =
+            plan_patch(&projection, &params.text, &parsed, &delete_aliases).map_err(|e| {
+                rmcp::ErrorData::invalid_params(format!("could not plan patch: {e}"), None)
+            })?;
 
         // Optimistic concurrency: re-read updated_at for every touched block from
         // the same `block` matview the projection was taken from; reject the
@@ -3670,6 +4980,26 @@ impl HolonMcpServer {
                 Some(serde_json::json!({ "conflicting_blocks": conflicts })),
             ));
         }
+        settle_deleted_subtrees(&self.service(), &mut plan, &projection).await?;
+        if let Some(refusal) =
+            over_sibling_work(&self.service(), &plan, &projection.file_id).await?
+        {
+            return Err(rmcp::ErrorData::invalid_params(
+                format!("could not plan patch: {refusal}"),
+                Some(serde_json::json!({ "refused_rows": [refusal] })),
+            ));
+        }
+        let files = self.org_files();
+        if let Some(files) = &files {
+            let refusals =
+                file_refusals(&self.service(), files, &plan, &projection.file_id).await?;
+            if !refusals.is_empty() {
+                return Err(rmcp::ErrorData::invalid_params(
+                    format!("could not plan patch: {}", refusals.join("; ")),
+                    Some(serde_json::json!({ "refused_rows": refusals })),
+                ));
+            }
+        }
 
         if params.dry_run {
             let result = serde_json::json!({
@@ -3683,7 +5013,8 @@ impl HolonMcpServer {
             )]));
         }
 
-        let counts = apply_plan(&self.service(), &plan, &projection.file_id).await?;
+        let counts =
+            apply_plan(&self.service(), files.as_ref(), &plan, &projection.file_id).await?;
 
         let result = serde_json::json!({
             "applied": true,
@@ -4841,6 +6172,23 @@ impl HolonMcpServer {
     /// `OnceLock` (desktop paths that never reset). Tools MUST read through
     /// this, not `debug.loro_doc_store` directly — the `OnceLock` goes stale
     /// after a reset and would silently answer against the retired session.
+    /// Where write-back puts this session's rows; `None` when it syncs no
+    /// files, so no file holds them.
+    fn org_files(&self) -> Option<OrgFiles> {
+        let renderer = self
+            .debug
+            .live_debug
+            .read()
+            .expect("live_debug cell poisoned")
+            .writeback_renderer
+            .clone()?;
+        Some(OrgFiles {
+            renderer,
+            documents: self.current_loro_doc_store(),
+            root: self.debug.orgmode_root.get().cloned(),
+        })
+    }
+
     fn current_loro_doc_store(
         &self,
     ) -> Option<Arc<tokio::sync::RwLock<holon_loro::LoroDocumentStore>>> {
@@ -5552,7 +6900,9 @@ pub(crate) mod engine_harness {
 
     use fluxdi::Module;
     use fluxdi::Provider;
+    use holon_api::EntityUri;
 
+    use super::apply_plan;
     use crate::server::DebugServices;
     use crate::server::HolonMcpServer;
 
@@ -5602,6 +6952,14 @@ pub(crate) mod engine_harness {
         /// This session writes a block that is not the batch's, at the
         /// observation `apply_plan` takes between two of the batch's ops.
         LocalWriteBetweenOps,
+        /// The authority stores every `content` write with a suffix, so a
+        /// patch lands but does not read back as the agent wrote it.
+        RewriteContent,
+        /// The authority refuses every `content` write.
+        FailContent,
+        /// A provider ahead of the others answers `move_block` without its
+        /// anchor, so a moved block lands first among its new siblings.
+        DropMoveAnchor,
     }
 
     /// An engine whose block CRUD authority is Loro, as the desktop app runs
@@ -5641,6 +6999,46 @@ pub(crate) mod engine_harness {
         loro_engine(storage_dir, Interference::LocalWriteBetweenOps).await
     }
 
+    /// An engine whose authority rewrites every `content` write
+    /// ([`Interference::RewriteContent`]).
+    pub(crate) async fn fresh_loro_engine_rewriting_content(
+        storage_dir: &std::path::Path,
+    ) -> (
+        Arc<holon::api::BackendEngine>,
+        Arc<holon_loro::LoroDocumentStore>,
+        Arc<dyn holon_core::DownstreamProjection>,
+    ) {
+        let (engine, store, projection, _) =
+            loro_engine(storage_dir, Interference::RewriteContent).await;
+        (engine, store, projection)
+    }
+
+    /// An engine whose authority refuses every `content` write
+    /// ([`Interference::FailContent`]).
+    pub(crate) async fn fresh_loro_engine_failing_content(
+        storage_dir: &std::path::Path,
+    ) -> (
+        Arc<holon::api::BackendEngine>,
+        Arc<holon_loro::LoroDocumentStore>,
+    ) {
+        let (engine, store, _, _) = loro_engine(storage_dir, Interference::FailContent).await;
+        (engine, store)
+    }
+
+    /// An engine whose authority drops every move anchor
+    /// ([`Interference::DropMoveAnchor`]).
+    pub(crate) async fn fresh_loro_engine_dropping_move_anchors(
+        storage_dir: &std::path::Path,
+    ) -> (
+        Arc<holon::api::BackendEngine>,
+        Arc<holon_loro::LoroDocumentStore>,
+        Arc<dyn holon_core::DownstreamProjection>,
+    ) {
+        let (engine, store, projection, _) =
+            loro_engine(storage_dir, Interference::DropMoveAnchor).await;
+        (engine, store, projection)
+    }
+
     async fn loro_engine(
         storage_dir: &std::path::Path,
         interference: Interference,
@@ -5662,6 +7060,15 @@ pub(crate) mod engine_harness {
                             .with_peer_id(Some(OUR_PEER)),
                     )
                 }));
+                if interference == Interference::DropMoveAnchor {
+                    injector.provide_into_set::<dyn holon_core::OperationProvider>(Provider::root(
+                        |resolver| {
+                            Arc::new(super::peer_interference::MoveWithoutAnchor {
+                                doc_store: resolver.resolve::<holon_loro::LoroDocumentStore>(),
+                            }) as Arc<dyn holon_core::OperationProvider>
+                        },
+                    ));
+                }
                 if interference == Interference::RemotePeerOnMove {
                     injector.provide_into_set::<dyn holon_core::OperationProvider>(Provider::root(
                         |resolver| {
@@ -5688,16 +7095,30 @@ pub(crate) mod engine_harness {
                 injector.provide_into_set::<dyn holon_core::OperationProvider>(Provider::root(
                     move |resolver| {
                         let loro = resolver.resolve::<holon_loro::LoroBlockOperations>();
-                        let authority: Arc<dyn holon_core::OperationProvider> =
-                            if interference == Interference::LocalWriteBetweenOps {
+                        let authority: Arc<dyn holon_core::OperationProvider> = match interference {
+                            Interference::LocalWriteBetweenOps => {
                                 Arc::new(super::peer_interference::AuthorityWithIntruder::new(
                                     loro,
                                     resolver.resolve::<holon_loro::LoroDocumentStore>(),
                                     intruded_for_di.clone(),
                                 ))
-                            } else {
-                                loro
-                            };
+                            }
+                            Interference::RewriteContent => {
+                                Arc::new(super::peer_interference::TamperingAuthority {
+                                    inner: loro,
+                                    tamper: super::peer_interference::Tamper::RewriteContent,
+                                })
+                            }
+                            Interference::FailContent => {
+                                Arc::new(super::peer_interference::TamperingAuthority {
+                                    inner: loro,
+                                    tamper: super::peer_interference::Tamper::FailContent,
+                                })
+                            }
+                            Interference::None
+                            | Interference::RemotePeerOnMove
+                            | Interference::DropMoveAnchor => loro,
+                        };
                         Arc::new(holon_core::OperationWrapper::<
                             super::peer_interference::NoSync,
                         >::without_sync(authority))
@@ -5807,6 +7228,133 @@ pub(crate) mod engine_harness {
                     .to_string()
             })
             .collect()
+    }
+
+    /// `text` with a name link to `Target` over its last six characters.
+    pub(super) fn linked(text: &str) -> crate::dense_patch::RowContent {
+        let end = text.chars().count();
+        crate::dense_patch::RowContent {
+            text: text.to_string(),
+            marks: vec![holon_api::MarkSpan::new(
+                end - 6,
+                end,
+                holon_api::InlineMark::Link {
+                    target: holon_api::EntityRef::Name {
+                        name: "Target".to_string(),
+                    },
+                    label: "Target".to_string(),
+                },
+            )],
+        }
+    }
+
+    /// The stored content, marks and `block_links` targets of `id`.
+    pub(super) async fn stored_content(
+        engine: &holon::api::BackendEngine,
+        id: &str,
+    ) -> (String, Vec<holon_api::MarkSpan>, Vec<String>) {
+        let row = engine
+            .db_handle()
+            .query(
+                &format!(
+                    "SELECT content, marks FROM {} WHERE id = '{id}'",
+                    holon::storage::BLOCK_WRITE_TABLE
+                ),
+                HashMap::new(),
+            )
+            .await
+            .expect("read the stored row")
+            .pop()
+            .unwrap_or_else(|| panic!("{id} is not stored"));
+        let content = row["content"].as_string().expect("content").to_string();
+        let marks = match &row["marks"] {
+            holon_api::Value::Null => Vec::new(),
+            v => holon_api::marks_from_json(v.as_string().expect("marks JSON"))
+                .expect("stored marks parse"),
+        };
+        let links = engine
+            .db_handle()
+            .query(
+                &format!("SELECT target FROM block_links WHERE source_block_id = '{id}'"),
+                HashMap::new(),
+            )
+            .await
+            .expect("read block_links")
+            .into_iter()
+            .map(|r| r["target"].as_string().expect("target").to_string())
+            .collect();
+        (content, marks, links)
+    }
+
+    /// A plan writes content as parsed: org-shaped text stays literal, and the
+    /// marks and their `block_links` rows are the plan's, on create and edit.
+    pub(super) async fn assert_content_is_stored_as_planned(
+        engine: &Arc<holon::api::BackendEngine>,
+        flush: impl AsyncFn(),
+    ) {
+        use crate::dense_patch::PatchOp;
+        use crate::dense_patch::PatchPlan;
+        use crate::dense_patch::Ref as PRef;
+
+        let server = server(engine.clone());
+        let root = EntityUri::block("root");
+        let apply = async |op: PatchOp| {
+            let plan = crate::dense_patch::labelled(PatchPlan {
+                ops: vec![op],
+                ..PatchPlan::default()
+            });
+            apply_plan(&server.service(), None, &plan, &root)
+                .await
+                .expect("the plan applies");
+            flush().await;
+        };
+
+        let created = linked("x =y= Target");
+        apply(PatchOp::Create {
+            temp: 0,
+            parent: PRef::Root,
+            after: None,
+            content: created.clone(),
+            task_state: None,
+            attributes: Default::default(),
+            carriers: Vec::new(),
+        })
+        .await;
+        let [id] = child_ids(engine, root.as_str())
+            .await
+            .try_into()
+            .expect("one created row");
+        let target = vec!["Target".to_string()];
+        assert_eq!(
+            stored_content(engine, &id).await,
+            (created.text, created.marks, target.clone())
+        );
+
+        let edited = linked("z =w= Target");
+        let block_id = EntityUri::parse(&id).expect("stored id");
+        apply(PatchOp::SetContent {
+            block_id: block_id.clone(),
+            content: edited.clone(),
+        })
+        .await;
+        assert_eq!(
+            stored_content(engine, &id).await,
+            (edited.text, edited.marks, target)
+        );
+
+        let plain = "=v= plain".to_string();
+        apply(PatchOp::SetContent {
+            block_id,
+            content: crate::dense_patch::RowContent {
+                text: plain.clone(),
+                marks: Vec::new(),
+            },
+        })
+        .await;
+        assert_eq!(
+            stored_content(engine, &id).await,
+            (plain, Vec::new(), Vec::new())
+        );
     }
 
     /// How many rows the write authority holds under `parent_id`.
@@ -6195,16 +7743,29 @@ mod render_org_doc_id_tests {
         dir: &std::path::Path,
         alias: Option<(&EntityUri, &std::path::Path)>,
     ) -> HolonMcpServer {
+        server_reading(
+            dir,
+            alias,
+            vec![Block::new_text(
+                EntityUri::block("child"),
+                doc_uri(),
+                BODY.to_string(),
+            )],
+        )
+        .await
+    }
+
+    async fn server_reading(
+        dir: &std::path::Path,
+        alias: Option<(&EntityUri, &std::path::Path)>,
+        blocks: Vec<Block>,
+    ) -> HolonMcpServer {
         let debug = Arc::new(DebugServices::default());
         debug.orgmode_root.set(dir.to_path_buf()).ok();
         let renderer = Arc::new(WritebackRenderer::new(
             Arc::new(KeyedReader {
                 declared: doc_uri(),
-                blocks: vec![Block::new_text(
-                    EntityUri::block("child"),
-                    doc_uri(),
-                    BODY.to_string(),
-                )],
+                blocks,
             }),
             Arc::new(UnusedDocManager),
             Arc::new(
@@ -6262,6 +7823,63 @@ mod render_org_doc_id_tests {
         assert!(
             out["rendered"].as_str().expect("rendered").contains(BODY),
             "the document's blocks must be what renders: {out}"
+        );
+    }
+
+    /// Served over a real MCP transport: a block whose parent is not in its
+    /// document makes the renderer panic inside the tool handler.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_panicking_tool_answers_the_agent_with_its_panic() {
+        use rmcp::ServiceExt;
+
+        let (dir, path) =
+            vault_with_file(&format!("#+TITLE: {TITLE}\n#+ID: {DECLARED}\n\n* {BODY}\n"));
+        let server = server_reading(
+            dir.path(),
+            None,
+            vec![Block::new_text(
+                EntityUri::block("orphan"),
+                EntityUri::block("ghost"),
+                BODY.to_string(),
+            )],
+        )
+        .await;
+        let (server_io, client_io) = tokio::io::duplex(64 * 1024);
+        let serving = tokio::spawn(async move {
+            server
+                .serve(server_io)
+                .await
+                .expect("server handshake")
+                .waiting()
+                .await
+        });
+        let client = ().serve(client_io).await.expect("client handshake");
+
+        let answer = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            client.call_tool(rmcp::model::CallToolRequestParam {
+                name: "render_org".into(),
+                arguments: Some(
+                    serde_json::json!({ "doc_id": path.display().to_string(), "scope": "blocks" })
+                        .as_object()
+                        .expect("object")
+                        .clone(),
+                ),
+            }),
+        )
+        .await
+        .expect("render_org panicked and never answered: the agent sees a hang");
+        serving.abort();
+
+        let rmcp::ServiceError::McpError(err) =
+            answer.expect_err("a panicking tool answers with an error")
+        else {
+            panic!("the panic must arrive as the tool's error");
+        };
+        assert!(
+            err.message.contains("render_org") && err.message.contains("dangling parent"),
+            "{}",
+            err.message
         );
     }
 
@@ -6558,17 +8176,64 @@ mod dense_patch_atomicity_tests {
     use crate::dense_patch::PatchOp;
     use crate::dense_patch::PatchPlan;
     use crate::dense_patch::Ref as PRef;
+    use crate::dense_patch::labelled;
 
     const ROOT: &str = "block:root";
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sql_stores_content_as_planned() {
+        let engine = fresh_engine().await;
+        seed_row(&engine, ROOT, "sentinel:no_parent", "root").await;
+        await_projected(&engine, &[ROOT]).await;
+        super::engine_harness::assert_content_is_stored_as_planned(&engine, async || {}).await;
+    }
 
     fn create(temp: usize, title: &str) -> PatchOp {
         PatchOp::Create {
             temp,
             parent: PRef::Root,
             after: None,
-            title: title.to_string(),
+            content: crate::dense_patch::RowContent {
+                text: title.to_string(),
+                ..Default::default()
+            },
             task_state: None,
+            attributes: Default::default(),
+            carriers: Vec::new(),
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_op_the_engine_refuses_is_named_by_its_row() {
+        let engine = fresh_engine().await;
+        seed_row(&engine, ROOT, "sentinel:no_parent", "root").await;
+        await_projected(&engine, &[ROOT]).await;
+        let server = server(engine.clone());
+        let missing = EntityUri::block("missing");
+        let plan = PatchPlan {
+            ops: vec![PatchOp::SetContent {
+                block_id: missing.clone(),
+                content: crate::dense_patch::RowContent {
+                    text: "text".to_string(),
+                    ..Default::default()
+                },
+            }],
+            labels: std::collections::HashMap::from([(
+                PRef::Existing(missing),
+                "row {#9}".to_string(),
+            )]),
+            ..PatchPlan::default()
+        };
+
+        let err = apply_plan(&server.service(), None, &plan, &EntityUri::block("root"))
+            .await
+            .expect_err("the engine has no such block to write");
+
+        assert!(
+            err.message.contains("Cause: row {#9}: "),
+            "the refusal must name the row: {}",
+            err.message
+        );
     }
 
     /// A plan whose second op positions a block against a new block the plan
@@ -6581,21 +8246,29 @@ mod dense_patch_atomicity_tests {
         await_projected(&engine, &[ROOT]).await;
         let server = server(engine.clone());
 
-        let plan = PatchPlan {
+        let plan = labelled(PatchPlan {
             ops: vec![
                 create(0, "first"),
                 PatchOp::Create {
                     temp: 1,
                     parent: PRef::Root,
                     after: Some(PRef::New(7)),
-                    title: "second".to_string(),
+                    content: crate::dense_patch::RowContent {
+                        text: "second".to_string(),
+                        ..Default::default()
+                    },
                     task_state: None,
+                    attributes: Default::default(),
+                    carriers: Vec::new(),
                 },
             ],
             verify: Vec::new(),
-        };
+            expected: Vec::new(),
+            stays: Vec::new(),
+            ..PatchPlan::default()
+        });
 
-        let err = apply_plan(&server.service(), &plan, &EntityUri::block("root"))
+        let err = apply_plan(&server.service(), None, &plan, &EntityUri::block("root"))
             .await
             .expect_err("a plan naming a block it never creates must be refused");
 
@@ -6620,21 +8293,29 @@ mod dense_patch_atomicity_tests {
         await_projected(&engine, &[ROOT]).await;
         let server = server(engine.clone());
 
-        let plan = PatchPlan {
+        let plan = labelled(PatchPlan {
             ops: vec![
                 create(0, "first"),
                 PatchOp::Create {
                     temp: 1,
                     parent: PRef::Root,
                     after: Some(PRef::New(0)),
-                    title: "second".to_string(),
+                    content: crate::dense_patch::RowContent {
+                        text: "second".to_string(),
+                        ..Default::default()
+                    },
                     task_state: None,
+                    attributes: Default::default(),
+                    carriers: Vec::new(),
                 },
             ],
             verify: Vec::new(),
-        };
+            expected: Vec::new(),
+            stays: Vec::new(),
+            ..PatchPlan::default()
+        });
 
-        let counts = apply_plan(&server.service(), &plan, &EntityUri::block("root"))
+        let counts = apply_plan(&server.service(), None, &plan, &EntityUri::block("root"))
             .await
             .expect("a fully resolved plan must apply");
 
@@ -6656,7 +8337,7 @@ mod dense_patch_atomicity_tests {
         await_projected(&engine, &[ROOT]).await;
         let server = server(engine.clone());
 
-        let plan = PatchPlan {
+        let plan = labelled(PatchPlan {
             ops: vec![
                 create(0, "first"),
                 PatchOp::Move {
@@ -6667,9 +8348,12 @@ mod dense_patch_atomicity_tests {
                 create(1, "third"),
             ],
             verify: Vec::new(),
-        };
+            expected: Vec::new(),
+            stays: Vec::new(),
+            ..PatchPlan::default()
+        });
 
-        let err = apply_plan(&server.service(), &plan, &EntityUri::block("root"))
+        let err = apply_plan(&server.service(), None, &plan, &EntityUri::block("root"))
             .await
             .expect_err("op 2 moves a block that does not exist");
 
@@ -6685,7 +8369,7 @@ mod dense_patch_atomicity_tests {
             1,
             "op 1 landed and must be listed: {data}"
         );
-        assert_eq!(data["applied"][0]["title"], serde_json::json!("first"));
+        assert_eq!(data["applied"][0]["content"], serde_json::json!("first"));
         assert_eq!(data["failed"]["op"], serde_json::json!("move"));
         assert_eq!(
             data["not_applied"]
@@ -6695,7 +8379,10 @@ mod dense_patch_atomicity_tests {
             1,
             "op 3 never ran and must be listed as such: {data}"
         );
-        assert_eq!(data["not_applied"][0]["title"], serde_json::json!("third"));
+        assert_eq!(
+            data["not_applied"][0]["content"],
+            serde_json::json!("third")
+        );
         // An id minted for an op that never ran addresses no row; disclosing
         // it under the same key the applied rows use sends a reconciling
         // caller after a phantom. The key must be PRESENT and explicitly
@@ -6737,7 +8424,7 @@ mod dense_patch_atomicity_tests {
         await_projected(&engine, &[ROOT]).await;
         let server = server(engine.clone());
 
-        let plan = PatchPlan {
+        let plan = labelled(PatchPlan {
             ops: vec![
                 PatchOp::Move {
                     block_id: EntityUri::block("ghost"),
@@ -6747,9 +8434,12 @@ mod dense_patch_atomicity_tests {
                 create(0, "second"),
             ],
             verify: Vec::new(),
-        };
+            expected: Vec::new(),
+            stays: Vec::new(),
+            ..PatchPlan::default()
+        });
 
-        let err = apply_plan(&server.service(), &plan, &EntityUri::block("root"))
+        let err = apply_plan(&server.service(), None, &plan, &EntityUri::block("root"))
             .await
             .expect_err("op 1 moves a block that does not exist");
 
@@ -6774,7 +8464,7 @@ mod dense_patch_atomicity_tests {
         await_projected(&engine, &[ROOT]).await;
         let server = server(engine.clone());
 
-        let plan = PatchPlan {
+        let plan = labelled(PatchPlan {
             ops: vec![
                 create(0, "first"),
                 PatchOp::Move {
@@ -6784,10 +8474,14 @@ mod dense_patch_atomicity_tests {
                 },
             ],
             verify: Vec::new(),
-        };
+            expected: Vec::new(),
+            stays: Vec::new(),
+            ..PatchPlan::default()
+        });
 
         for attempt in 1..=2 {
-            let outcome = apply_plan(&server.service(), &plan, &EntityUri::block("root")).await;
+            let outcome =
+                apply_plan(&server.service(), None, &plan, &EntityUri::block("root")).await;
             assert!(
                 outcome.is_err(),
                 "attempt {attempt} must fail on the ghost move"
@@ -6816,6 +8510,7 @@ mod peer_interference {
     use holon_api::EntityName;
     use holon_api::EntityUri;
     use holon_api::OperationDescriptor;
+    use holon_api::repository::CoreOperations;
     use holon_core::OperationProvider;
     use holon_core::OperationResult;
     use holon_core::storage::types::StorageEntity;
@@ -6948,6 +8643,117 @@ mod peer_interference {
         }
     }
 
+    /// How [`TamperingAuthority`] bends the writes it forwards.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum Tamper {
+        /// Store every `content` write with [`REWRITE_SUFFIX`].
+        RewriteContent,
+        /// Refuse every `content` write.
+        FailContent,
+    }
+
+    /// The Loro CRUD authority, bending its writes as `tamper` says.
+    pub(crate) struct TamperingAuthority {
+        pub(super) inner: Arc<LoroBlockOperations>,
+        pub(super) tamper: Tamper,
+    }
+
+    pub(crate) const REWRITE_SUFFIX: &str = " (rewritten)";
+
+    #[async_trait]
+    impl OperationProvider for TamperingAuthority {
+        fn operations(&self) -> Vec<OperationDescriptor> {
+            self.inner.operations()
+        }
+
+        async fn execute_operation(
+            &self,
+            entity: &EntityName,
+            op_name: &str,
+            mut params: StorageEntity,
+        ) -> holon_core::Result<OperationResult> {
+            let writes_content = op_name == "set_field"
+                && params.get("field").and_then(|v| v.as_string()) == Some("content");
+            if writes_content && self.tamper == Tamper::FailContent {
+                return Err("this authority refuses content writes".into());
+            }
+            if writes_content && self.tamper == Tamper::RewriteContent {
+                let Some(holon_api::Value::Object(content)) = params.get_mut("value") else {
+                    panic!("a content write carries a {{text, marks}} Object");
+                };
+                let text = content["text"]
+                    .as_string()
+                    .expect("a text string")
+                    .to_string();
+                content.insert(
+                    "text".into(),
+                    holon_api::Value::String(format!("{text}{REWRITE_SUFFIX}")),
+                );
+            }
+            self.inner.execute_operation(entity, op_name, params).await
+        }
+
+        fn get_last_created_id(&self) -> Option<String> {
+            self.inner.get_last_created_id()
+        }
+
+        fn batch_rollback(&self) -> Option<&dyn holon_core::BatchRollback> {
+            self.inner.batch_rollback()
+        }
+    }
+
+    /// Answers `move_block` by placing the block after the new parent's FIRST
+    /// other child, whatever anchor the op named.
+    pub(super) struct MoveWithoutAnchor {
+        pub(super) doc_store: Arc<LoroDocumentStore>,
+    }
+
+    #[async_trait]
+    impl OperationProvider for MoveWithoutAnchor {
+        fn operations(&self) -> Vec<OperationDescriptor> {
+            PeerWriteThenFail {
+                doc_store: self.doc_store.clone(),
+            }
+            .operations()
+        }
+
+        async fn execute_operation(
+            &self,
+            _: &EntityName,
+            _: &str,
+            params: StorageEntity,
+        ) -> holon_core::Result<OperationResult> {
+            let param = |key: &str| {
+                params
+                    .get(key)
+                    .and_then(|v| v.as_string())
+                    .unwrap_or_else(|| panic!("move_block carries `{key}`"))
+                    .to_string()
+            };
+            let doc = self.doc_store.get_doc(DocScope::Global).await?;
+            let backend = LoroBackend::from_document(doc);
+            let (id, parent) = (param("id"), param("parent_id"));
+            let first_other = backend
+                .list_children(&parent)
+                .await
+                .map_err(|e| format!("list children of {parent}: {e}"))?
+                .into_iter()
+                .find(|child| *child != id)
+                .map(|child| EntityUri::parse(&child))
+                .transpose()
+                .map_err(|e| format!("{e}"))?;
+            backend
+                .move_block(
+                    &EntityUri::parse(&id).map_err(|e| format!("{e}"))?,
+                    EntityUri::parse(&parent).map_err(|e| format!("{e}"))?,
+                    first_other,
+                )
+                .await
+                .map_err(|e| format!("move to the wrong place: {e}"))?;
+            Ok(OperationResult::irreversible(Vec::new()))
+        }
+    }
+
     /// Fills `OperationWrapper`'s sync slot so the harness can wrap the CRUD
     /// authority the way `turso_seams` does without pulling in org sync.
     pub(crate) struct NoSync;
@@ -7043,14 +8849,20 @@ mod dense_patch_rollback_tests {
     use crate::dense_patch::PatchOp;
     use crate::dense_patch::PatchPlan;
     use crate::dense_patch::Ref as PRef;
+    use crate::dense_patch::labelled;
 
     fn create(temp: usize, title: &str) -> PatchOp {
         PatchOp::Create {
             temp,
             parent: PRef::Root,
             after: None,
-            title: title.to_string(),
+            content: crate::dense_patch::RowContent {
+                text: title.to_string(),
+                ..Default::default()
+            },
             task_state: None,
+            attributes: Default::default(),
+            carriers: Vec::new(),
         }
     }
 
@@ -7109,6 +8921,18 @@ mod dense_patch_rollback_tests {
     /// same harness, the same flush, a plan that succeeds. Without it a
     /// projection that never ran would satisfy "no rows after the rollback".
     #[tokio::test(flavor = "multi_thread")]
+    async fn loro_stores_content_as_planned() {
+        let dir = tempfile::tempdir().expect("temp storage");
+        let (engine, store, projection) = fresh_loro_engine(dir.path(), false).await;
+        seed_root(&backend_of(&store).await).await;
+        projection.flush().await.expect("project the root");
+        super::engine_harness::assert_content_is_stored_as_planned(&engine, async || {
+            projection.flush().await.expect("project the patch");
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn a_patch_that_succeeds_reaches_the_sql_projection() {
         let dir = tempfile::tempdir().expect("temp storage");
         let (engine, store, projection) = fresh_loro_engine(dir.path(), false).await;
@@ -7116,11 +8940,14 @@ mod dense_patch_rollback_tests {
         seed_root(&backend).await;
         let server = server(engine.clone());
 
-        let plan = PatchPlan {
+        let plan = labelled(PatchPlan {
             ops: vec![create(0, "first"), create(1, "second")],
             verify: Vec::new(),
-        };
-        apply_plan(&server.service(), &plan, &EntityUri::block("root"))
+            expected: Vec::new(),
+            stays: Vec::new(),
+            ..PatchPlan::default()
+        });
+        apply_plan(&server.service(), None, &plan, &EntityUri::block("root"))
             .await
             .expect("a fully resolved plan must apply");
 
@@ -7140,7 +8967,7 @@ mod dense_patch_rollback_tests {
         let before = stored_ids(&backend).await;
         let server = server(engine.clone());
 
-        let plan = PatchPlan {
+        let plan = labelled(PatchPlan {
             ops: vec![
                 create(0, "first"),
                 create(1, "second"),
@@ -7151,9 +8978,12 @@ mod dense_patch_rollback_tests {
                 },
             ],
             verify: Vec::new(),
-        };
+            expected: Vec::new(),
+            stays: Vec::new(),
+            ..PatchPlan::default()
+        });
 
-        let err = apply_plan(&server.service(), &plan, &EntityUri::block("root"))
+        let err = apply_plan(&server.service(), None, &plan, &EntityUri::block("root"))
             .await
             .expect_err("op 3 moves a block that does not exist");
 
@@ -7206,7 +9036,7 @@ mod dense_patch_rollback_tests {
         seed_root(&backend).await;
         let server = server(engine.clone());
 
-        let plan = PatchPlan {
+        let plan = labelled(PatchPlan {
             ops: vec![
                 create(0, "first"),
                 PatchOp::Move {
@@ -7216,9 +9046,12 @@ mod dense_patch_rollback_tests {
                 },
             ],
             verify: Vec::new(),
-        };
+            expected: Vec::new(),
+            stays: Vec::new(),
+            ..PatchPlan::default()
+        });
 
-        let err = apply_plan(&server.service(), &plan, &EntityUri::block("root"))
+        let err = apply_plan(&server.service(), None, &plan, &EntityUri::block("root"))
             .await
             .expect_err("op 2 moves a block that does not exist");
 
@@ -7254,7 +9087,7 @@ mod dense_patch_rollback_tests {
         seed_root(&backend).await;
         let server = server(engine.clone());
 
-        let plan = PatchPlan {
+        let plan = labelled(PatchPlan {
             ops: vec![
                 create(0, "first"),
                 PatchOp::Move {
@@ -7264,9 +9097,12 @@ mod dense_patch_rollback_tests {
                 },
             ],
             verify: Vec::new(),
-        };
+            expected: Vec::new(),
+            stays: Vec::new(),
+            ..PatchPlan::default()
+        });
 
-        let err = apply_plan(&server.service(), &plan, &EntityUri::block("root"))
+        let err = apply_plan(&server.service(), None, &plan, &EntityUri::block("root"))
             .await
             .expect_err("op 2 fails after the peer's write landed");
 
@@ -7296,5 +9132,893 @@ mod dense_patch_rollback_tests {
             3,
             "root, our dispatched create and the peer's block are all still there: {ids:?}"
         );
+    }
+}
+
+/// `dense_patch` reads its own result back: a patch the store does not show as
+/// the agent wrote it is taken back and named, never reported as applied.
+#[cfg(test)]
+mod dense_patch_readback_tests {
+    use std::collections::HashMap;
+
+    use holon_api::BlockContent;
+    use holon_api::BlockEdges;
+    use holon_api::EntityUri;
+    use holon_api::repository::CoreOperations;
+    use holon_api::repository::Traversal;
+    use holon_loro::LoroBackend;
+    use holon_loro::loro_document_store::DocScope;
+    use rmcp::handler::server::wrapper::Parameters;
+
+    use super::engine_harness::await_projected;
+    use super::engine_harness::fresh_loro_engine_rewriting_content;
+    use super::engine_harness::server;
+    use crate::types::DensePatchParams;
+    use crate::types::DenseQueryParams;
+
+    fn json_of(result: &rmcp::model::CallToolResult) -> serde_json::Value {
+        let text = match &result.content[0].raw {
+            rmcp::model::RawContent::Text(t) => t.text.clone(),
+            other => panic!("expected a text result, got {other:?}"),
+        };
+        serde_json::from_str(&text).expect("tool output is JSON")
+    }
+
+    /// A move that lands among the right siblings but in the wrong place does
+    /// not read back as the edited text.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_move_that_lands_in_the_wrong_position_is_rolled_back_by_name() {
+        let dir = tempfile::tempdir().expect("temp storage");
+        let (engine, store, projection) =
+            super::engine_harness::fresh_loro_engine_dropping_move_anchors(dir.path()).await;
+        let backend =
+            LoroBackend::from_document(store.get_doc(DocScope::Global).await.expect("global doc"));
+        backend
+            .create_block_with_properties(
+                EntityUri::no_parent(),
+                BlockContent::text("root"),
+                Some(EntityUri::block("root")),
+                &HashMap::new(),
+                &BlockEdges::default(),
+            )
+            .await
+            .expect("seed the root");
+        for id in ["a", "b", "c"] {
+            backend
+                .create_block_with_properties(
+                    EntityUri::block("root"),
+                    BlockContent::text(id),
+                    Some(EntityUri::block(id)),
+                    &HashMap::new(),
+                    &BlockEdges::default(),
+                )
+                .await
+                .expect("seed a child");
+        }
+        let flusher = {
+            let projection = projection.clone();
+            tokio::spawn(async move {
+                loop {
+                    projection.flush().await.expect("project the store");
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+        };
+        await_projected(&engine, &["block:a", "block:b", "block:c"]).await;
+        let server = server(engine.clone());
+        let projected = json_of(
+            &server
+                .dense_query(Parameters(DenseQueryParams {
+                    query: "SELECT * FROM block WHERE parent_id = 'block:root' ORDER BY sort_key"
+                        .to_string(),
+                    language: "holon_sql".to_string(),
+                    params: HashMap::new(),
+                    context_id: None,
+                    context_parent_id: None,
+                }))
+                .await
+                .expect("dense_query"),
+        );
+        let dense = projected["dense_org"].as_str().expect("dense_org");
+        let first = dense
+            .lines()
+            .find(|l| l.starts_with("* "))
+            .expect("a first row")
+            .to_string();
+        let moved = format!(
+            "{}\n{first}\n",
+            dense.replacen(&format!("{first}\n"), "", 1).trim_end()
+        );
+        let err = server
+            .dense_patch(Parameters(DensePatchParams {
+                handle: projected["projection_handle"]
+                    .as_str()
+                    .expect("handle")
+                    .to_string(),
+                text: moved.clone(),
+                delete: Vec::new(),
+                dry_run: false,
+            }))
+            .await
+            .expect_err("the moved row lands in the wrong place, so it does not read back");
+        flusher.abort();
+        assert!(
+            err.message.contains("ROLLED BACK") && err.message.contains("{#0}"),
+            "the refusal must say it rolled back and name the row: {}\n{moved}",
+            err.message
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_patch_that_does_not_read_back_as_edited_is_rolled_back_by_name() {
+        let dir = tempfile::tempdir().expect("temp storage");
+        let (engine, store, projection) = fresh_loro_engine_rewriting_content(dir.path()).await;
+        let backend =
+            LoroBackend::from_document(store.get_doc(DocScope::Global).await.expect("global doc"));
+        for (parent, content, id) in [
+            (EntityUri::no_parent(), "root", "root"),
+            (EntityUri::block("root"), "Head", "kid"),
+        ] {
+            backend
+                .create_block_with_properties(
+                    parent,
+                    BlockContent::text(content),
+                    Some(EntityUri::block(id)),
+                    &HashMap::new(),
+                    &BlockEdges::default(),
+                )
+                .await
+                .expect("seed a block");
+        }
+        // The harness projection is a pull; the app's sync loop pushes it.
+        let flusher = {
+            let projection = projection.clone();
+            tokio::spawn(async move {
+                loop {
+                    projection.flush().await.expect("project the store");
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+        };
+        await_projected(&engine, &["block:kid"]).await;
+        let server = server(engine.clone());
+
+        let projected = json_of(
+            &server
+                .dense_query(Parameters(DenseQueryParams {
+                    query: "SELECT * FROM block WHERE parent_id = 'block:root' ORDER BY sort_key"
+                        .to_string(),
+                    language: "holon_sql".to_string(),
+                    params: HashMap::new(),
+                    context_id: None,
+                    context_parent_id: None,
+                }))
+                .await
+                .expect("dense_query"),
+        );
+        let dense = projected["dense_org"].as_str().expect("dense_org");
+        assert!(dense.contains("* Head {#0}"), "the row is shown: {dense}");
+        let started = std::time::Instant::now();
+        let err = server
+            .dense_patch(Parameters(DensePatchParams {
+                handle: projected["projection_handle"]
+                    .as_str()
+                    .expect("handle")
+                    .to_string(),
+                text: dense.replacen("* Head {#0}", "* Renamed {#0}", 1),
+                delete: Vec::new(),
+                dry_run: false,
+            }))
+            .await
+            .expect_err("the store reads back `Renamed (rewritten)`, which is not the edited row");
+        let answered_after = started.elapsed();
+        flusher.abort();
+        assert!(
+            answered_after < std::time::Duration::from_secs(5),
+            "an inexact apply answers within the 5 s limit, not after {answered_after:?}"
+        );
+
+        assert!(
+            err.message.contains("ROLLED BACK") && err.message.contains("{#0}"),
+            "the refusal must say it rolled back and name the row: {}",
+            err.message
+        );
+        let kid = backend
+            .get_all_blocks(Traversal::ALL)
+            .await
+            .expect("read the vault tree")
+            .into_iter()
+            .find(|b| b.id == EntityUri::block("kid"))
+            .expect("the row is still there");
+        assert_eq!(
+            kid.content, "Head",
+            "the rewritten write must be taken back"
+        );
+    }
+}
+
+/// A row's writes are separate ops: when a later write of the row fails after
+/// its state write landed, the state write is taken back and reported.
+#[cfg(test)]
+mod dense_patch_row_rollback_tests {
+    use std::collections::HashMap;
+
+    use holon_api::BlockContent;
+    use holon_api::BlockEdges;
+    use holon_api::EntityUri;
+    use holon_api::repository::CoreOperations;
+    use holon_api::repository::Traversal;
+    use holon_api::types::TaskState;
+    use holon_loro::LoroBackend;
+    use holon_loro::loro_document_store::DocScope;
+
+    use super::apply_plan;
+    use super::engine_harness::fresh_loro_engine_failing_content;
+    use super::engine_harness::server;
+    use crate::dense_patch::PatchOp;
+    use crate::dense_patch::PatchPlan;
+    use crate::dense_patch::labelled;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_content_write_that_fails_after_the_state_write_rolls_the_row_back() {
+        let dir = tempfile::tempdir().expect("temp storage");
+        let (engine, store) = fresh_loro_engine_failing_content(dir.path()).await;
+        let backend =
+            LoroBackend::from_document(store.get_doc(DocScope::Global).await.expect("global doc"));
+        for (parent, content, id) in [
+            (EntityUri::no_parent(), "root", "root"),
+            (EntityUri::block("root"), "Head", "kid"),
+        ] {
+            backend
+                .create_block_with_properties(
+                    parent,
+                    BlockContent::text(content),
+                    Some(EntityUri::block(id)),
+                    &HashMap::new(),
+                    &BlockEdges::default(),
+                )
+                .await
+                .expect("seed a block");
+        }
+        let server = server(engine.clone());
+        let kid = EntityUri::block("kid");
+        let plan = labelled(PatchPlan {
+            ops: vec![
+                PatchOp::SetState {
+                    block_id: kid.clone(),
+                    task_state: Some(TaskState::active("TODO")),
+                },
+                PatchOp::SetContent {
+                    block_id: kid.clone(),
+                    content: crate::dense_patch::RowContent {
+                        text: "Renamed".to_string(),
+                        ..Default::default()
+                    },
+                },
+            ],
+            verify: Vec::new(),
+            expected: Vec::new(),
+            stays: Vec::new(),
+            ..PatchPlan::default()
+        });
+
+        let err = apply_plan(&server.service(), None, &plan, &EntityUri::block("root"))
+            .await
+            .expect_err("the content write is refused");
+
+        assert!(
+            err.message.contains("ROLLED BACK") && err.message.contains("op 2 of 2"),
+            "the report must say the row's first write was undone: {}",
+            err.message
+        );
+        let data = err.data.expect("the report carries its rows");
+        assert_eq!(data["reverted"][0]["op"], serde_json::json!("set_state"));
+        assert_eq!(data["failed"]["op"], serde_json::json!("set_content"));
+        let stored = backend
+            .get_all_blocks(Traversal::ALL)
+            .await
+            .expect("read the vault tree")
+            .into_iter()
+            .find(|b| b.id == kid)
+            .expect("the row is still there");
+        assert_eq!(
+            stored.properties.get("task_state"),
+            None,
+            "the state write must be taken back: {:?}",
+            stored.properties
+        );
+    }
+}
+
+/// The post-apply check judges each written row as its org file holds it, and
+/// a check that cannot finish takes the writes back like a mismatch.
+#[cfg(test)]
+mod dense_patch_file_check_tests {
+    use std::collections::HashMap;
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use holon_api::Block;
+    use holon_api::BlockContent;
+    use holon_api::BlockEdges;
+    use holon_api::EntityUri;
+    use holon_api::repository::CoreOperations;
+    use holon_api::repository::Traversal;
+    use holon_core::FileFormatParseResult;
+    use holon_filesystem::BlockReader;
+    use holon_filesystem::DocumentManager;
+    use holon_filesystem::WritebackRenderer;
+    use holon_loro::LoroBackend;
+    use holon_loro::loro_document_store::DocScope;
+    use holon_org_format::TaskKeywordVocabulary;
+    use holon_org_format::parse_dense;
+
+    use super::OrgFiles;
+    use super::apply_plan;
+    use super::engine_harness::fresh_loro_engine;
+    use super::engine_harness::server;
+    use super::held_mismatches;
+    use crate::dense_patch::ExpectedRow;
+    use crate::dense_patch::PatchOp;
+    use crate::dense_patch::PatchPlan;
+    use crate::dense_patch::Ref as PRef;
+    use crate::dense_patch::RowView;
+    use crate::dense_patch::labelled;
+    use crate::dense_projection::DocVocabularies;
+    use crate::dense_projection::Projection;
+    use crate::dense_projection::build_projection;
+
+    const FILE: &str = "#+ID: page\n* Plan\n:PROPERTIES:\n:ID: plan\n:END:\nold line\n";
+
+    fn held(source: &str) -> FileFormatParseResult {
+        let parsed = holon_org_format::parse_org_file(
+            Path::new("/vault/page.org"),
+            source,
+            &EntityUri::no_parent(),
+            Path::new("/vault"),
+        )
+        .expect("the file parses");
+        FileFormatParseResult {
+            document: parsed.document,
+            blocks: parsed.blocks,
+            blocks_needing_ids: Vec::new(),
+            typed_rows: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_row_its_file_holds_otherwise_than_edited_is_a_mismatch() {
+        let file = held(FILE);
+        let built = build_projection(
+            file.blocks.clone(),
+            &DocVocabularies::Uniform(TaskKeywordVocabulary::default()),
+        )
+        .expect("projection builds");
+        let projection = Projection::new("test".into(), &built);
+        let edited = built.dense_text.replacen("old line", "new line", 1);
+        let plan = crate::dense_patch::plan_patch(
+            &projection,
+            &edited,
+            &parse_dense(&edited).expect("edited text parses"),
+            &[],
+        )
+        .expect("a body edit plans");
+        let ids = vec!["block:plan".to_string()];
+        let stored = HashMap::from([(ids[0].clone(), file.blocks[0].clone())]);
+        let resolve = |r: &PRef| match r {
+            PRef::Existing(id) => id.as_str().to_string(),
+            other => panic!("no {other:?} in this plan"),
+        };
+
+        let stale =
+            held_mismatches(&plan, &ids, &[0], &file, &[], &stored, &resolve).expect("projects");
+        assert!(
+            stale.len() == 1 && stale[0].contains("{#0}") && stale[0].contains("old line"),
+            "the file still holds the old body: {stale:?}"
+        );
+        let written = held(&FILE.replace("old line", "new line"));
+        let exact =
+            held_mismatches(&plan, &ids, &[0], &written, &[], &stored, &resolve).expect("projects");
+        assert!(exact.is_empty(), "the file holds the edit: {exact:?}");
+        let lossy = held_mismatches(
+            &plan,
+            &ids,
+            &[0],
+            &written,
+            &[holon_api::RenderLoss {
+                block: EntityUri::block("plan"),
+                detail: "a property".to_string(),
+            }],
+            &stored,
+            &resolve,
+        )
+        .expect("projects");
+        assert!(
+            lossy.len() == 1 && lossy[0].contains("leaves out a property"),
+            "a render loss of the row is a mismatch: {lossy:?}"
+        );
+    }
+
+    /// The store leg checks the stored category against the row's own ring:
+    /// the dense text shows only the keyword.
+    #[test]
+    fn a_stored_category_its_ring_does_not_give_is_a_mismatch() {
+        use holon_api::TaskState;
+        use holon_org_format::OrgBlockExt;
+
+        let ring = DocVocabularies::Uniform(TaskKeywordVocabulary::new(
+            vec!["TODO".to_string()],
+            vec!["SHIPPED".to_string()],
+        ));
+        let mut block = Block::new_text(
+            EntityUri::block("plan"),
+            EntityUri::block("page"),
+            "Plan".to_string(),
+        );
+        block.set_task_state(Some(TaskState::done("SHIPPED")));
+        assert_eq!(super::stored_category_mismatch(&block, &ring), None);
+        block.set_task_state(Some(TaskState::active("SHIPPED")));
+        let why = super::stored_category_mismatch(&block, &ring).expect("a mismatch");
+        assert!(why.contains("SHIPPED") && why.contains("done"), "{why}");
+    }
+
+    struct NoReads;
+
+    #[async_trait]
+    impl BlockReader for NoReads {
+        async fn get_blocks(&self, _: &EntityUri) -> anyhow::Result<Vec<Block>> {
+            unimplemented!("the check fails before it renders")
+        }
+
+        async fn doc_block_topology(
+            &self,
+            _: &EntityUri,
+        ) -> anyhow::Result<Vec<(EntityUri, EntityUri)>> {
+            unimplemented!("the check fails before it renders")
+        }
+
+        async fn get_block_authoritative(&self, _: &EntityUri) -> anyhow::Result<Option<Block>> {
+            unimplemented!("the check fails before it renders")
+        }
+
+        async fn iter_documents_with_blocks(&self) -> anyhow::Result<Vec<(EntityUri, Vec<Block>)>> {
+            unimplemented!("the check fails before it renders")
+        }
+    }
+
+    #[async_trait]
+    impl DocumentManager for NoReads {
+        async fn find_by_parent_and_name(
+            &self,
+            _: &EntityUri,
+            _: &str,
+        ) -> anyhow::Result<Option<Block>> {
+            unimplemented!("the check fails before it renders")
+        }
+
+        async fn create(&self, _: Block) -> anyhow::Result<Block> {
+            unimplemented!("the check fails before it renders")
+        }
+
+        async fn get_by_id(&self, _: &EntityUri) -> anyhow::Result<Option<Block>> {
+            unimplemented!("the check fails before it renders")
+        }
+
+        async fn update_metadata(&self, _: &Block) -> anyhow::Result<()> {
+            unimplemented!("the check fails before it renders")
+        }
+    }
+
+    /// Two pages with one title, neither with a registered alias.
+    struct TwinPages;
+
+    #[async_trait]
+    impl DocumentManager for TwinPages {
+        async fn find_by_parent_and_name(
+            &self,
+            _: &EntityUri,
+            _: &str,
+        ) -> anyhow::Result<Option<Block>> {
+            unimplemented!("routing reads pages by id")
+        }
+
+        async fn create(&self, _: Block) -> anyhow::Result<Block> {
+            unimplemented!("routing writes nothing")
+        }
+
+        async fn get_by_id(&self, id: &EntityUri) -> anyhow::Result<Option<Block>> {
+            Ok(["block:twin-a", "block:twin-b"]
+                .contains(&id.as_str())
+                .then(|| {
+                    let mut page =
+                        Block::new_text(id.clone(), EntityUri::no_parent(), "Twin".to_string());
+                    page.set_page(true);
+                    page
+                }))
+        }
+
+        async fn update_metadata(&self, _: &Block) -> anyhow::Result<()> {
+            unimplemented!("routing writes nothing")
+        }
+    }
+
+    /// With no alias a row's file is its page's name-chain file, as
+    /// write-back routes it. Two pages with one title route to one path, but
+    /// each keeps its own document: the check renders a document's own blocks,
+    /// and the path only picks the format.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_page_with_no_alias_is_routed_by_its_name_chain() {
+        let dir = tempfile::tempdir().expect("temp storage");
+        let (engine, _store, _projection) = fresh_loro_engine(dir.path(), false).await;
+        let server = server(engine);
+        let files = OrgFiles {
+            renderer: Arc::new(WritebackRenderer::new(
+                Arc::new(NoReads),
+                Arc::new(TwinPages),
+                Arc::new(holon_core::FormatRegistry::new(Vec::new()).expect("no adapters")),
+            )),
+            documents: None,
+            root: Some(dir.path().to_path_buf()),
+        };
+        let a = files
+            .file_of(&server.service(), "block:twin-a")
+            .await
+            .expect("routed");
+        let b = files
+            .file_of(&server.service(), "block:twin-b")
+            .await
+            .expect("routed");
+        assert_eq!(a.1, dir.path().join("Twin.org"));
+        assert_eq!(a.1, b.1, "one title, one name-chain file");
+        assert_eq!(
+            (a.0, b.0),
+            (EntityUri::block("twin-a"), EntityUri::block("twin-b")),
+            "each keeps its own document"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_check_that_cannot_finish_rolls_the_writes_back() {
+        let dir = tempfile::tempdir().expect("temp storage");
+        let (engine, store, projection) = fresh_loro_engine(dir.path(), false).await;
+        let backend =
+            LoroBackend::from_document(store.get_doc(DocScope::Global).await.expect("global doc"));
+        backend
+            .create_block_with_properties(
+                EntityUri::no_parent(),
+                BlockContent::text("root"),
+                Some(EntityUri::block("root")),
+                &HashMap::new(),
+                &BlockEdges::default(),
+            )
+            .await
+            .expect("seed the root block");
+        let flusher = {
+            let projection = projection.clone();
+            tokio::spawn(async move {
+                loop {
+                    projection.flush().await.expect("project the store");
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+        };
+        let server = server(engine.clone());
+        let plan = labelled(PatchPlan {
+            ops: vec![PatchOp::Create {
+                temp: 0,
+                parent: PRef::Root,
+                after: None,
+                content: crate::dense_patch::RowContent {
+                    text: "first".to_string(),
+                    ..Default::default()
+                },
+                task_state: None,
+                attributes: Default::default(),
+                carriers: Vec::new(),
+            }],
+            verify: Vec::new(),
+            expected: vec![ExpectedRow {
+                label: "new row \"first\"".to_string(),
+                block: PRef::New(0),
+                place: Some((PRef::Root, None)),
+                view: RowView {
+                    title: "first".to_string(),
+                    ..RowView::default()
+                },
+            }],
+            stays: Vec::new(),
+            ..PatchPlan::default()
+        });
+        // No vault root: the check cannot find the file.
+        let files = OrgFiles {
+            renderer: Arc::new(WritebackRenderer::new(
+                Arc::new(NoReads),
+                Arc::new(NoReads),
+                Arc::new(holon_core::FormatRegistry::new(Vec::new()).expect("no adapters")),
+            )),
+            documents: None,
+            root: None,
+        };
+
+        let err = apply_plan(
+            &server.service(),
+            Some(&files),
+            &plan,
+            &EntityUri::block("root"),
+        )
+        .await
+        .expect_err("an unverified write is taken back");
+        flusher.abort();
+
+        assert!(
+            err.message.contains("ROLLED BACK")
+                && err.message.contains("no row is verified")
+                && err.message.contains("vault root"),
+            "{}",
+            err.message
+        );
+        let ids: Vec<String> = backend
+            .get_all_blocks(Traversal::ALL)
+            .await
+            .expect("read the vault tree")
+            .into_iter()
+            .map(|b| b.id.to_string())
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["block:root".to_string()],
+            "the create is taken back"
+        );
+    }
+}
+
+/// The engine classifies a task keyword against the ring of the document
+/// holding the block in the WRITE AUTHORITY. The harness projection is a pull,
+/// so without a flush it still shows the tree as it was before a move.
+#[cfg(test)]
+mod task_category_authority_tests {
+    use holon_api::EntityName;
+    use holon_api::EntityUri;
+    use holon_api::OpOrigin;
+    use holon_api::TaskState;
+    use holon_api::Value;
+    use holon_api::repository::CoreOperations;
+    use holon_loro::LoroBackend;
+    use holon_loro::loro_document_store::DocScope;
+
+    use super::engine_harness::fresh_loro_engine;
+
+    async fn op(engine: &holon::api::BackendEngine, name: &str, params: &[(&str, Value)]) {
+        let params: holon_api::StorageEntity = params
+            .iter()
+            .map(|(k, v)| ((*k).into(), v.clone()))
+            .collect();
+        engine
+            .execute_operation(&EntityName::new("block"), name, params, OpOrigin::User)
+            .await
+            .unwrap_or_else(|e| panic!("{name}: {e:#}"));
+    }
+
+    fn text(s: &str) -> Value {
+        Value::String(s.to_string())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_state_written_right_after_a_move_takes_the_new_documents_category() {
+        let dir = tempfile::tempdir().expect("temp storage");
+        let (engine, store, projection) = fresh_loro_engine(dir.path(), false).await;
+        for (page, ring) in [
+            (
+                "block:closing",
+                vec![TaskState::active("TODO"), TaskState::done("CANCELLED")],
+            ),
+            (
+                "block:triage",
+                vec![
+                    TaskState::active("TODO"),
+                    TaskState::active("CANCELLED"),
+                    TaskState::done("DONE"),
+                ],
+            ),
+        ] {
+            op(
+                &engine,
+                "create",
+                &[
+                    ("id", text(page)),
+                    ("parent_id", text(EntityUri::no_parent().as_str())),
+                    ("content", text(page)),
+                ],
+            )
+            .await;
+            op(
+                &engine,
+                "set_field",
+                &[
+                    ("id", text(page)),
+                    ("field", text("todo_keywords")),
+                    (
+                        "value",
+                        text(&serde_json::to_string(&ring).expect("TaskState serializes")),
+                    ),
+                ],
+            )
+            .await;
+            op(
+                &engine,
+                "add_tag",
+                &[("id", text(page)), ("tag", text("Page"))],
+            )
+            .await;
+        }
+        op(
+            &engine,
+            "create",
+            &[
+                ("id", text("block:x")),
+                ("parent_id", text("block:closing")),
+                ("content", text("Move me")),
+                ("task_state", text("CANCELLED")),
+            ],
+        )
+        .await;
+        projection.flush().await.expect("project the store");
+
+        op(
+            &engine,
+            "move_block",
+            &[("id", text("block:x")), ("parent_id", text("block:triage"))],
+        )
+        .await;
+        op(
+            &engine,
+            "set_field",
+            &[
+                ("id", text("block:x")),
+                ("field", text("task_state")),
+                ("value", text("CANCELLED")),
+            ],
+        )
+        .await;
+
+        let backend =
+            LoroBackend::from_document(store.get_doc(DocScope::Global).await.expect("global doc"));
+        let x = backend
+            .get_block("block:x")
+            .await
+            .expect("the block is in the authority");
+        assert_eq!(
+            x.properties
+                .get("task_state_category")
+                .and_then(|v| v.as_string()),
+            Some("active"),
+            "CANCELLED is active in the document the block now sits in: {:?}",
+            x.properties
+        );
+    }
+}
+
+#[cfg(test)]
+mod dense_patch_sibling_work_tests {
+    use std::collections::HashMap;
+
+    use rmcp::handler::server::wrapper::Parameters;
+
+    use super::engine_harness::await_projected;
+    use super::engine_harness::fresh_engine;
+    use super::engine_harness::seed_row;
+    use super::engine_harness::server;
+    use crate::dense_patch::MAX_SIBLING_WORK_PER_PATCH;
+    use crate::types::DensePatchParams;
+    use crate::types::DenseQueryParams;
+
+    const SIBLINGS: usize = 1000;
+
+    fn json_of(result: &rmcp::model::CallToolResult) -> serde_json::Value {
+        let text = match &result.content[0].raw {
+            rmcp::model::RawContent::Text(t) => t.text.clone(),
+            other => panic!("expected a text result, got {other:?}"),
+        };
+        serde_json::from_str(&text).expect("tool output is JSON")
+    }
+
+    async fn query(server: &super::HolonMcpServer) -> (String, String) {
+        let projected = json_of(
+            &server
+                .dense_query(Parameters(DenseQueryParams {
+                    query: "SELECT * FROM block WHERE parent_id = 'block:root' ORDER BY sort_key"
+                        .to_string(),
+                    language: "holon_sql".to_string(),
+                    params: HashMap::new(),
+                    context_id: None,
+                    context_parent_id: None,
+                }))
+                .await
+                .expect("dense_query"),
+        );
+        (
+            projected["projection_handle"]
+                .as_str()
+                .expect("handle")
+                .to_string(),
+            projected["dense_org"]
+                .as_str()
+                .expect("dense_org")
+                .to_string(),
+        )
+    }
+
+    /// `dense` with its first `count` rows in reverse order.
+    fn reversed(dense: &str, count: usize) -> String {
+        let lines: Vec<&str> = dense.lines().collect();
+        let first = lines
+            .iter()
+            .position(|l| l.starts_with('*'))
+            .expect("a row");
+        let mut rows = lines[first..].to_vec();
+        rows[..count].reverse();
+        let mut text = lines[..first].to_vec();
+        text.extend(rows);
+        text.join("\n") + "\n"
+    }
+
+    /// Each row a patch moves costs the rows its parent holds: past
+    /// `MAX_SIBLING_WORK_PER_PATCH` the patch is refused by the row crossing
+    /// the bound before any write, in a session that syncs no org files.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_patch_over_the_sibling_work_bound_is_refused_by_the_row_crossing_it() {
+        let engine = fresh_engine().await;
+        seed_row(&engine, "block:root", "sentinel:no_parent", "root").await;
+        for i in 0..SIBLINGS {
+            seed_row(
+                &engine,
+                &format!("block:r{i}"),
+                "block:root",
+                &format!("r{i}"),
+            )
+            .await;
+        }
+        await_projected(
+            &engine,
+            &["block:root", &format!("block:r{}", SIBLINGS - 1)],
+        )
+        .await;
+        let server = server(engine.clone());
+        assert!(
+            server.org_files().is_none(),
+            "this session syncs no org files"
+        );
+        let (handle, dense) = query(&server).await;
+
+        let err = server
+            .dense_patch(Parameters(DensePatchParams {
+                handle: handle.clone(),
+                text: reversed(&dense, MAX_SIBLING_WORK_PER_PATCH / SIBLINGS + 2),
+                delete: Vec::new(),
+                dry_run: false,
+            }))
+            .await
+            .expect_err("a patch over the sibling work bound is refused");
+        assert!(
+            err.message.contains("sibling") && err.message.contains("{#"),
+            "the refusal names the row crossing the sibling work bound: {}",
+            err.message
+        );
+        assert_eq!(
+            query(&server).await.1,
+            dense,
+            "a refused patch writes nothing"
+        );
+
+        server
+            .dense_patch(Parameters(DensePatchParams {
+                handle,
+                text: reversed(&dense, 2),
+                delete: Vec::new(),
+                dry_run: false,
+            }))
+            .await
+            .unwrap_or_else(|e| panic!("a move within the bound applies: {}", e.message));
     }
 }

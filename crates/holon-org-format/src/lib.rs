@@ -31,13 +31,20 @@ pub mod task_keyword;
 
 // Flat re-exports — mirrors what holon-orgmode used to export directly
 
+pub use comma_escape::is_headline;
+pub use comma_escape::is_page_id_keyword;
 pub use dense::Alias;
 pub use dense::AliasTable;
 pub use dense::DenseBlock;
 pub use dense::DenseParse;
+pub use dense::KeptCarriers;
+pub use dense::ParsedCarrier;
+pub use dense::dense_rows;
 pub use dense::parse_dense;
 pub use dense::parse_dense_with;
 pub use dense::render_dense;
+pub use dense::row_alias;
+pub use dense::row_lines;
 pub use drawer::AuthoredKey;
 pub use drawer::DrawerId;
 pub use drawer::DrawerKey;
@@ -70,6 +77,10 @@ pub use models::render_block_content;
 pub use models::render_block_content_checked;
 pub use models::render_document_header;
 pub use org_renderer::OrgRenderer;
+pub use org_renderer::drawer_key_order;
+pub use page_keywords::FileKeyword;
+pub use page_keywords::declares_page_keyword;
+pub use parser::HeadlineRefused;
 pub use parser::ParseResult;
 pub use parser::parse_org_file;
 pub use parser::parse_org_file_with;

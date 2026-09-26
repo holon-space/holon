@@ -17,7 +17,6 @@ use rmcp::ServerHandler;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::model::*;
 use rmcp::service::RequestContext;
-use rmcp::tool_handler;
 use tokio::sync::Mutex;
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
@@ -529,8 +528,47 @@ impl HolonMcpServer {
     }
 }
 
-#[tool_handler]
 impl ServerHandler for HolonMcpServer {
+    /// rmcp answers a request from the task that runs its handler, so a
+    /// handler that panics never answers: the panic is returned as the
+    /// tool's error instead.
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParam,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        use futures::FutureExt;
+
+        let name = request.name.clone();
+        let call = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+        match std::panic::AssertUnwindSafe(self.tool_router.call(call))
+            .catch_unwind()
+            .await
+        {
+            Ok(answer) => answer,
+            Err(payload) => {
+                let message = payload
+                    .downcast_ref::<&str>()
+                    .map(|s| s.to_string())
+                    .or_else(|| payload.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "a panic payload that is not a string".to_string());
+                tracing::error!(tool = %name, "MCP tool '{name}' panicked: {message}");
+                Err(McpError::internal_error(
+                    format!("MCP tool '{name}' panicked: {message}"),
+                    None,
+                ))
+            }
+        }
+    }
+
+    async fn list_tools(
+        &self,
+        _: Option<PaginatedRequestParam>,
+        _: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, McpError> {
+        Ok(ListToolsResult::with_all_items(self.tool_router.list_all()))
+    }
+
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             instructions: Some("Holon backend engine MCP server for automated testing".into()),

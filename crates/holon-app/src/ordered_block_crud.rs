@@ -18,7 +18,7 @@
 //! `apply_create` derives the index from `position_after_block_id`.
 //!
 //! A create this decorator cannot place — no usable `sort_key` AND no
-//! `parent_id` to append under — is REFUSED here (#63) rather than allowed to
+//! `parent_id` to place it under — is REFUSED here (#63) rather than allowed to
 //! land on the `sort_key` column default. This is the only such guard: it needs
 //! no consolidator check because the decorator is SqlOnly by construction (see
 //! the previous paragraph), and `SqlBlockOperations::create` is not an
@@ -115,7 +115,7 @@ impl OrderedBlockCrud {
             "OrderedBlockCrud: refusing to create block {id} without a position — {reason}. \
              SqlOnly owns sibling order, so the row would land on the `sort_key` column default \
              and collide with every other unpositioned block. Supply a non-empty sort_key, or a \
-             parent_id to append under."
+             parent_id to place it under."
         )
         .into()
     }
@@ -162,8 +162,8 @@ impl OperationProvider for OrderedBlockCrud {
 
         match op_name {
             // A create that names its parent and does not already carry an
-            // explicit position is appended as that parent's last child — the
-            // creation slot's contract ("type here" adds to the end).
+            // explicit position lands where its params place it among that
+            // parent's children (`ChildPlacement::of_create`).
             "create" if !Self::carries_a_position(&params) => {
                 // A `sort_key` that is PRESENT but unusable is a caller bug, not
                 // the append contract. Minting over it would hide the bug, so it
@@ -189,12 +189,14 @@ impl OperationProvider for OrderedBlockCrud {
                         "it supplies no sort_key and no parent_id to mint one against",
                     ));
                 };
-                // ALLOW(entity_uri_from_raw): op-dispatch parent id string → EntityUri
-                let parent = EntityUri::from_raw(&parent);
+                let placement = holon_api::ChildPlacement::of_create(&params)?;
                 // Key AND any sibling re-key it is expressed against, carried
                 // TYPED into the create's transaction (ADR 0030 D1) — never
                 // an `_order_rekeys` params key (Ruling B).
-                let position = self.append_key(&parent, None).await?;
+                let position = self
+                    .order_owner
+                    .mint_placed_key(&parent, &placement)
+                    .await?;
                 self.sql.create_row(params, Some(position)).await
             }
             // A re-parent moves the block into a sequence its old key has no

@@ -606,6 +606,15 @@ async fn compose_sut_seeded_impl(
         // ingest of a `[[t-widget:…]]` link (bug #98); a slice without the cap
         // narrows the transition out.
         caps.insert(comp.clone() as Arc<dyn holon_pbt_core::capabilities::SutEntityTypeRegister>);
+        // The agent's dense tools: every frontend embeds an MCP server, so the
+        // headless frontend serves the same tool round trips the live rung
+        // makes, over this component's engine.
+        if matches!(driver_placement, DriverPlacement::HeadlessReactive) {
+            caps.insert(
+                crate::pbt::composed::embedded_mcp::embedded_dense_tools(&comp, resolver).await
+                    as Arc<dyn holon_pbt_core::capabilities::SutDenseTools>,
+            );
+        }
         // The VM-rung driver (§8.11 layer-localization): install the frontend's OWN
         // headless `ReactiveEngineDriver` as THE driver backing the gesture caps, so
         // the composed `CapMap` drives user gestures UI-adjacently (click-intent

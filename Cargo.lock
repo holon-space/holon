@@ -5619,6 +5619,7 @@ dependencies = [
  "tracing-chrome",
  "tracing-opentelemetry",
  "tracing-subscriber",
+ "unicode-properties",
  "validated",
  "workspace-hack 0.1.0",
  "xcap",

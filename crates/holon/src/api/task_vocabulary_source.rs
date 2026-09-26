@@ -96,17 +96,63 @@ impl SqlTaskVocabularySource {
         &self,
         block_id: &str,
     ) -> Result<Option<Vec<holon_api::TaskState>>> {
-        let properties = match self.owning_page_properties(block_id).await? {
-            None | Some(Value::Null) => return Ok(None),
-            Some(Value::String(s)) | Some(Value::Json(s)) if s.trim().is_empty() => {
-                return Ok(None);
-            }
-            Some(other) => crate::api::operation_engine::properties_object(&other)?,
-        };
-        let mut doc = Block::new_text(EntityUri::no_parent(), EntityUri::no_parent(), "");
-        doc.properties = properties;
-        Ok(doc.todo_keywords())
+        declared_in(self.owning_page_properties(block_id).await?)
     }
+
+    /// The vocabulary of the document each of `block_ids` lives in. Blocks on
+    /// one parent chain share its walk: one read per distinct block walked.
+    pub async fn vocabularies_for_blocks(
+        &self,
+        block_ids: &[String],
+    ) -> Result<HashMap<String, TaskKeywordVocabulary>> {
+        let mut page_properties: HashMap<String, Option<Value>> = HashMap::new();
+        for block_id in block_ids {
+            let mut walked = Vec::new();
+            let mut cursor = Some(block_id.clone());
+            let found = loop {
+                let Some(id) = cursor else { break None };
+                if let Some(known) = page_properties.get(&id) {
+                    break known.clone();
+                }
+                if walked.len() == MAX_HOPS {
+                    anyhow::bail!(
+                        "task vocabulary: parent chain of {block_id} exceeds {MAX_HOPS} hops"
+                    );
+                }
+                let hop = self.hop(&id).await?;
+                walked.push(id);
+                match hop {
+                    None => break None,
+                    Some(hop) if hop.is_page => break hop.properties,
+                    Some(hop) => cursor = hop.parent_id,
+                }
+            };
+            for id in walked {
+                page_properties.insert(id, found.clone());
+            }
+        }
+        block_ids
+            .iter()
+            .map(|id| {
+                let declared = declared_in(page_properties[id].clone())?;
+                Ok((id.clone(), TaskKeywordVocabulary::from_declared(declared)))
+            })
+            .collect()
+    }
+}
+
+/// The `#+TODO:` declaration a document's `properties` hold.
+fn declared_in(properties: Option<Value>) -> Result<Option<Vec<holon_api::TaskState>>> {
+    let properties = match properties {
+        None | Some(Value::Null) => return Ok(None),
+        Some(Value::String(s)) | Some(Value::Json(s)) if s.trim().is_empty() => {
+            return Ok(None);
+        }
+        Some(other) => crate::api::operation_engine::properties_object(&other)?,
+    };
+    let mut doc = Block::new_text(EntityUri::no_parent(), EntityUri::no_parent(), "");
+    doc.properties = properties;
+    Ok(doc.todo_keywords())
 }
 
 #[async_trait]

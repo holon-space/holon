@@ -22,10 +22,15 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 
 use anyhow::Result;
+use anyhow::anyhow;
 use anyhow::bail;
 use holon_api::EntityUri;
 use holon_api::block::Block;
+use holon_api::types::ContentType;
+use holon_api::types::TaskState;
 
+use crate::OrgDocumentExt;
+use crate::drawer::DrawerId;
 use crate::models::HeadlineIdentity;
 use crate::models::render_document_header;
 use crate::models::render_headline_block;
@@ -155,7 +160,6 @@ pub(crate) fn to_org_dense(
     alias_table: &AliasTable,
     gap_ids: &HashSet<String>,
 ) -> String {
-    use holon_api::types::ContentType;
     if matches!(block.content_type, ContentType::Source | ContentType::Image) {
         return crate::models::ToOrg::to_org(block);
     }
@@ -234,6 +238,240 @@ pub struct DenseBlock {
     /// Placeholder id of the parent row, or `None` when this row's parent is
     /// the projection anchor (a projection root), not another parsed row.
     pub parent_parse_id: Option<EntityUri>,
+    /// The row's `:PROPERTIES:` lines other than `:ID:`, as
+    /// [`crate::ParseResult::headline_drawers`] reads them.
+    pub drawer: Vec<(String, String)>,
+    /// The id of the row's `:ID:` line, when it has one.
+    pub authored_id: Option<DrawerId>,
+    /// The drawer lines' key order as the parser read it.
+    pub drawer_order: ParsedCarrier,
+    /// The keyword lines of the row's text as the parser read them.
+    pub keyword_lines: ParsedCarrier,
+}
+
+/// A parser carrier of a row, as the org parser read it from dense text: an
+/// agent's edit writes it with the row's fields. Only [`parse_dense`] makes
+/// one, and only for [`ParsedCarrier::KEYS`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedCarrier {
+    key: &'static str,
+    /// `None` when the row's text gives none.
+    value: Option<String>,
+}
+
+impl ParsedCarrier {
+    pub const KEYS: [&'static str; 2] = [
+        crate::models::org_props::DRAWER_ORDER,
+        crate::models::org_props::KEYWORD_LINES,
+    ];
+
+    fn read(block: &Block, key: &'static str) -> Result<Self> {
+        let value = block
+            .get_property(key)
+            .map(|v| {
+                v.as_string()
+                    .map(str::to_string)
+                    .ok_or_else(|| anyhow!("the drawer key `{key}` holds {v:?}, not a string"))
+            })
+            .transpose()?;
+        Ok(Self { key, value })
+    }
+
+    pub fn key(&self) -> &'static str {
+        self.key
+    }
+
+    pub fn value(&self) -> Option<&str> {
+        self.value.as_deref()
+    }
+}
+
+/// The parser carriers a store holds for a row; a new row holds none.
+#[derive(Debug, Clone, Default)]
+pub struct KeptCarriers(Vec<(&'static str, holon_api::Value)>);
+
+impl KeptCarriers {
+    pub fn of(stored: &Block) -> Self {
+        Self(
+            crate::models::org_props::PARSER_CARRIERS
+                .iter()
+                .filter_map(|key| stored.get_property(key).map(|value| (*key, value)))
+                .collect(),
+        )
+    }
+}
+
+impl DenseBlock {
+    /// This row's block as stored ([`Self::as_stored`]), rendered by
+    /// [`render_dense`] under the text's `#+TODO:` keywords and parsed back.
+    pub fn rendered_back(
+        &self,
+        todo_keywords: Option<&[TaskState]>,
+        kept: &KeptCarriers,
+        written: &[ParsedCarrier],
+    ) -> Result<DenseBlock> {
+        let text = self.rendered(todo_keywords, kept, written)?;
+        let mut rows = parse_dense(&text)?.blocks;
+        if rows.is_empty() {
+            bail!("org reads this row, rendered, back as no row:\n{text}");
+        }
+        Ok(rows.swap_remove(0))
+    }
+
+    /// The lines of [`Self::rendered_back`]'s text, in the form [`row_lines`]
+    /// gives.
+    pub fn rendered_lines(
+        &self,
+        todo_keywords: Option<&[TaskState]>,
+        kept: &KeptCarriers,
+        written: &[ParsedCarrier],
+    ) -> Result<Vec<String>> {
+        row_lines(&self.rendered(todo_keywords, kept, written)?)
+    }
+
+    /// The keyword lines org reads for this row, as stored, from its org file.
+    pub fn file_keyword_lines(
+        &self,
+        kept: &KeptCarriers,
+        written: &[ParsedCarrier],
+    ) -> Result<Vec<crate::models::KeywordLine>> {
+        let file_id = EntityUri::block("dense-row-anchor");
+        let path = std::path::Path::new("dense_row.org");
+        let block = self.as_stored(&file_id, kept, written);
+        let text = OrgRenderer::render_entitys(std::slice::from_ref(&block), path, &file_id)?.text;
+        let parsed = crate::parse_org_file(path, &text, &file_id, std::path::Path::new(""))?;
+        let back = parsed
+            .blocks
+            .iter()
+            .find(|b| b.id == block.id)
+            .ok_or_else(|| anyhow!("org reads this row, rendered, back without its id:\n{text}"))?;
+        crate::models::OrgBlockExt::keyword_lines(back)
+    }
+
+    /// The block a store holds for this row: its parser carriers replaced by
+    /// `kept`, then `written` applied.
+    fn as_stored(
+        &self,
+        file_id: &EntityUri,
+        kept: &KeptCarriers,
+        written: &[ParsedCarrier],
+    ) -> Block {
+        let mut block = self.block.clone();
+        block.parent_id = file_id.clone();
+        block
+            .properties
+            .retain(|key, _| !crate::models::org_props::PARSER_CARRIERS.contains(&key.as_str()));
+        for (key, value) in &kept.0 {
+            block.set_property(*key, value.clone());
+        }
+        for carrier in written {
+            match carrier.value() {
+                Some(value) => block.set_property(carrier.key(), value.to_string()),
+                None => {
+                    block.properties.remove(carrier.key());
+                }
+            }
+        }
+        block
+    }
+
+    fn rendered(
+        &self,
+        todo_keywords: Option<&[TaskState]>,
+        kept: &KeptCarriers,
+        written: &[ParsedCarrier],
+    ) -> Result<String> {
+        let file_id = EntityUri::block("dense-row-anchor");
+        let block = self.as_stored(&file_id, kept, written);
+        let alias = self
+            .alias
+            .clone()
+            .unwrap_or_else(|| Alias(encode_base62(0)));
+        let table = AliasTable::from_pairs([(alias, block.id.clone())])?;
+        let mut doc = Block::new_text(
+            file_id.clone(),
+            EntityUri::block("dense-projection-anchor"),
+            "Row".to_string(),
+        );
+        doc.set_page(true);
+        doc.set_todo_keywords(todo_keywords.map(<[TaskState]>::to_vec));
+        render_dense(&doc, &[block], &file_id, &table, &HashSet::new())
+    }
+}
+
+/// Each row of a dense text as it spells it, from its headline line to the
+/// next one.
+pub fn dense_rows(text: &str) -> Vec<String> {
+    let mut rows: Vec<String> = Vec::new();
+    for line in text.lines() {
+        match rows.last_mut() {
+            Some(row) if !crate::comma_escape::is_headline(line) => {
+                row.push('\n');
+                row.push_str(line);
+            }
+            _ if crate::comma_escape::is_headline(line) => rows.push(line.to_string()),
+            _ => {}
+        }
+    }
+    rows
+}
+
+/// The `{#alias}` token ending the headline of `row` before its tag group,
+/// if it has one.
+pub fn row_alias(row: &str) -> Result<Option<Alias>> {
+    let headline = row.lines().next().unwrap_or_default();
+    title_alias(headline.trim_start_matches('*'))
+}
+
+/// The `{#alias}` token ending `title`, a headline's text after its stars,
+/// before or after its tag group.
+fn title_alias(title: &str) -> Result<Option<Alias>> {
+    let (untagged, _) = crate::parser::split_headline_tags(title);
+    Ok(split_trailing_token(&untagged)?.1.map(|(alias, _)| alias))
+}
+
+/// The words of the first row of `text`, line by line, as the row spells
+/// them: the headline without its stars and `{#alias}` token, then every line
+/// up to the next headline. Whitespace and the order of the tag group are not
+/// compared (runs collapse, blank lines drop, tags sort and repeat once), nor
+/// are an `:ID:` drawer line and a drawer left empty, which name the row rather
+/// than hold its text.
+pub fn row_lines(text: &str) -> Result<Vec<String>> {
+    let mut lines = text
+        .lines()
+        .skip_while(|line| !crate::comma_escape::is_headline(line));
+    let Some(headline) = lines.next() else {
+        bail!("no row in {text:?}");
+    };
+    let (title, _) = split_trailing_token(headline.trim_start_matches('*'))?;
+    let words = |line: &str| line.split_whitespace().collect::<Vec<_>>().join(" ");
+    let (title, mut tags) = crate::parser::split_headline_tags(&title);
+    tags.sort();
+    tags.dedup();
+    let mut row = vec![if tags.is_empty() {
+        words(&title)
+    } else {
+        format!("{} :{}:", words(&title), tags.join(":"))
+    }];
+    for line in lines.take_while(|line| !crate::comma_escape::is_headline(line)) {
+        let line = words(line);
+        let id_line = line
+            .get(..4)
+            .is_some_and(|key| key.eq_ignore_ascii_case(":ID:"));
+        if line.is_empty() || id_line {
+            continue;
+        }
+        if line.eq_ignore_ascii_case(":END:")
+            && row
+                .last()
+                .is_some_and(|last| last.eq_ignore_ascii_case(":PROPERTIES:"))
+        {
+            row.pop();
+            continue;
+        }
+        row.push(line);
+    }
+    Ok(row)
 }
 
 /// Result of parsing a dense projection back into typed blocks.
@@ -241,6 +479,9 @@ pub struct DenseBlock {
 pub struct DenseParse {
     /// Blocks in document order.
     pub blocks: Vec<DenseBlock>,
+    /// The keywords the text's `#+TODO:` lines declare, `None` when it has
+    /// none (org's defaults apply).
+    pub todo_keywords: Option<Vec<TaskState>>,
 }
 
 /// Split a trailing `{#<alias>}` or `{#<alias>^}` token off a headline title's
@@ -271,6 +512,42 @@ fn split_trailing_token(first_line: &str) -> Result<(String, Option<(Alias, bool
     Ok((clean, Some((alias, gap))))
 }
 
+/// `marks` of a text from which the `cut` characters after its first `kept`
+/// were removed. A span over removed characters shrinks by them; one that held
+/// only removed characters is gone.
+fn marks_after_cut(
+    marks: Vec<holon_api::MarkSpan>,
+    kept: usize,
+    cut: usize,
+) -> Vec<holon_api::MarkSpan> {
+    let at = |offset: usize| offset - offset.saturating_sub(kept).min(cut);
+    marks
+        .into_iter()
+        .filter_map(|mut span| {
+            (span.start, span.end) = (at(span.start), at(span.end));
+            (span.start < span.end).then_some(span)
+        })
+        .collect()
+}
+
+/// A headline the org parser refused, named by its row: `row {#alias}`, or
+/// `new row "title"` for a row with no alias.
+fn refused_by_row(e: anyhow::Error) -> anyhow::Error {
+    let refused = match e.downcast::<crate::parser::HeadlineRefused>() {
+        Ok(refused) => refused,
+        Err(e) => return e,
+    };
+    let label = match title_alias(&refused.title) {
+        Ok(Some(alias)) => format!("row {{#{alias}}}"),
+        Ok(None) => format!(
+            "new row {:?}",
+            crate::parser::split_headline_tags(&refused.title).0
+        ),
+        Err(e) => return e.context(refused),
+    };
+    anyhow::anyhow!("{label}: {:#}", refused.cause)
+}
+
 /// Parse a dense projection back into typed blocks, reusing the canonical org
 /// parser. The trailing `{#alias}` token is stripped from each headline at the
 /// boundary and recorded as [`DenseBlock::alias`]. Fails loud on malformed
@@ -295,8 +572,12 @@ pub fn parse_dense_with(
     let path = std::path::Path::new("dense_projection.org");
     let root = std::path::Path::new("");
     let parent_dir_id = EntityUri::block("dense-projection-anchor");
-    let parsed = crate::parse_org_file_with(path, text, &parent_dir_id, root, classifier)?;
+    let parsed = crate::parse_org_file_with(path, text, &parent_dir_id, root, classifier)
+        .map_err(refused_by_row)?;
     let doc_id = parsed.document.id.clone();
+    let todo_keywords = parsed.document.todo_keywords();
+    let mut drawers = parsed.headline_drawers;
+    let minted: HashSet<String> = parsed.headlines_needing_ids.into_iter().collect();
 
     let mut blocks = Vec::with_capacity(parsed.blocks.len());
     for mut block in parsed.blocks {
@@ -315,7 +596,18 @@ pub fn parse_dense_with(
             let first = lines.next().unwrap_or("");
             let (clean_first, token) = split_trailing_token(first)?;
             if token.is_some() {
+                // The renderer writes the tag group BEFORE the token, so the
+                // org parser saw it mid-line and kept it as title text.
+                let (clean_first, tags) = crate::parser::split_headline_tags(&clean_first);
+                for tag in tags {
+                    block.tags.insert(tag);
+                }
                 let rest: Vec<&str> = lines.collect();
+                if let Some(marks) = block.marks.take() {
+                    let kept = clean_first.chars().count();
+                    let cut = first.chars().count() - kept;
+                    block.marks = Some(marks_after_cut(marks, kept, cut));
+                }
                 block.content = if rest.is_empty() {
                     clean_first
                 } else {
@@ -328,7 +620,34 @@ pub fn parse_dense_with(
             }
         };
 
+        let named = |e: anyhow::Error| match &alias {
+            Some(alias) => anyhow!("row {{#{alias}}}: {e:#}"),
+            None => anyhow!(
+                "new row {:?}: {e:#}",
+                crate::models::OrgBlockExt::org_title(&block)
+            ),
+        };
+        let authored_id = (block.content_type == ContentType::Text
+            && !minted.contains(block.id.id()))
+        .then(|| {
+            DrawerId::parse(block.id.id()).map_err(|e| {
+                anyhow!(
+                    "the row id {:?} cannot be carried by org: {e}",
+                    block.id.id()
+                )
+            })
+        })
+        .transpose()
+        .map_err(named)?;
+        let drawer_order =
+            ParsedCarrier::read(&block, crate::models::org_props::DRAWER_ORDER).map_err(named)?;
+        let keyword_lines =
+            ParsedCarrier::read(&block, crate::models::org_props::KEYWORD_LINES).map_err(named)?;
         blocks.push(DenseBlock {
+            drawer: drawers.remove(&block.id).unwrap_or_default(),
+            authored_id,
+            drawer_order,
+            keyword_lines,
             block,
             alias,
             gap,
@@ -337,5 +656,8 @@ pub fn parse_dense_with(
         });
     }
 
-    Ok(DenseParse { blocks })
+    Ok(DenseParse {
+        blocks,
+        todo_keywords,
+    })
 }

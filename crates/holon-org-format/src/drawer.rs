@@ -63,7 +63,8 @@ impl std::error::Error for UnrepresentableKey {}
 
 /// A property key as a file wrote it. A block's property bag keeps the keys
 /// that start with `_` for Holon's own (the parser's carriers, `_provenance`),
-/// so there an authored key that starts with `_` or `\` is stored behind a `\`.
+/// and `org_properties` for the drawer carrier, so there an authored key that
+/// starts with `_` or `\`, or is `org_properties`, is stored behind a `\`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AuthoredKey(String);
 
@@ -78,13 +79,17 @@ impl AuthoredKey {
     pub fn from_property(key: &str) -> Option<Self> {
         match key.strip_prefix(Self::ESCAPE) {
             Some(authored) => Some(Self(authored.to_string())),
-            None => (!key.starts_with('_')).then(|| Self(key.to_string())),
+            None => (!Self::is_reserved(key)).then(|| Self(key.to_string())),
         }
+    }
+
+    fn is_reserved(key: &str) -> bool {
+        key.starts_with('_') || key == crate::models::org_props::ORG_PROPERTIES
     }
 
     /// The key in a block's property bag.
     pub fn property(&self) -> String {
-        if self.0.starts_with(['_', Self::ESCAPE]) {
+        if Self::is_reserved(&self.0) || self.0.starts_with(Self::ESCAPE) {
             format!("{}{}", Self::ESCAPE, self.0)
         } else {
             self.0.clone()

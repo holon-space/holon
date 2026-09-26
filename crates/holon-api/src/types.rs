@@ -545,6 +545,62 @@ impl StateCategory {
             Self::Done => "done",
         }
     }
+
+    /// The category a stored `task_state_category` sidecar spells.
+    pub fn parse(stored: &str) -> Option<Self> {
+        match stored {
+            "active" => Some(Self::Active),
+            "done" => Some(Self::Done),
+            _ => None,
+        }
+    }
+}
+
+/// What a `set_field("task_state")` write carries to a storage boundary: the
+/// keyword with the category its document's `#+TODO:` ring gives it, or a
+/// clear. The engine classifies the keyword; a storage boundary writes the
+/// pair as given and never derives the category itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TaskStateWrite {
+    Set(TaskState),
+    Clear,
+}
+
+impl TaskStateWrite {
+    pub fn to_value(&self) -> Value {
+        match self {
+            Self::Clear => Value::REMOVED,
+            Self::Set(state) => Value::Object(std::collections::HashMap::from([
+                ("keyword".to_string(), Value::String(state.keyword.clone())),
+                (
+                    "category".to_string(),
+                    Value::String(state.category.as_str().to_string()),
+                ),
+            ])),
+        }
+    }
+
+    pub fn parse(value: &Value) -> Result<Self, String> {
+        match value {
+            Value::Removed(_) => Ok(Self::Clear),
+            Value::Object(pair) => {
+                let text = |key: &str| {
+                    pair.get(key)
+                        .and_then(Value::as_string)
+                        .ok_or_else(|| format!("a task_state write has no text `{key}`: {value:?}"))
+                };
+                let category = StateCategory::parse(text("category")?).ok_or_else(|| {
+                    format!("a task_state write has an unknown category: {value:?}")
+                })?;
+                Ok(Self::Set(TaskState::new(text("keyword")?, category)))
+            }
+            other => Err(format!(
+                "a task_state write carries its keyword with the category the document's ring \
+                 gives it ({{keyword, category}}), got {other:?}: only the engine classifies a \
+                 keyword"
+            )),
+        }
+    }
 }
 
 /// Active keywords of a document that declares no `#+TODO:` config.
@@ -606,14 +662,6 @@ impl TaskState {
             StateCategory::Active
         };
         Self::new(keyword, category)
-    }
-
-    /// The `task_state_category` sidecar value for a BARE keyword write
-    /// arriving at a storage boundary (widget click intent, `set_state`,
-    /// `cycle_task_state`) — i.e. one with no org `#+TODO:` config in hand.
-    /// Uses the default done-keyword list, exactly like [`Self::from_keyword`].
-    pub fn category_str_for_keyword(keyword: &str) -> &'static str {
-        Self::from_keyword(keyword).category.as_str()
     }
 
     pub fn is_done(&self) -> bool {

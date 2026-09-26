@@ -156,6 +156,9 @@ fn check(shape: Shape, size: usize, where_: Place) -> Result<(), TestCaseError> 
     Ok(())
 }
 
+/// A line of stars in a body is nested bold to org, which emacs 30.2 reads
+/// only up to its lisp depth (it fails at 5000 stars), and Holon re-parses
+/// level by level; `check` writes the line into a body in every place.
 #[test]
 fn a_line_of_100k_markers_reads_and_writes_back() {
     for marker in ['*', '[', '('] {

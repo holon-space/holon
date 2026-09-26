@@ -99,13 +99,9 @@ pub fn build_block_params(
 
     if let Some(task_state) = block.task_state() {
         params.insert("task_state".into(), Value::String(task_state.to_string()));
-        // `cycle_task_state` writes this sidecar in the same statement as
-        // `task_state` (`sql_operation_provider.rs`'s `category_str_for_keyword`
-        // pairing) so category-filtering queries can see the state without a
-        // keyword-list join. The org parser already derived the category from
-        // `#+TODO:` config (`TaskState::from_keyword_with_done_list`) — mirror
-        // it here so file-originated tasks pair the same way, one source of
-        // truth (`TaskState.category`) instead of two.
+        // The category the org parser derived from the file's `#+TODO:` ring,
+        // so category-filtering queries see the state without a keyword-list
+        // join.
         params.insert(
             "task_state_category".into(),
             Value::String(task_state.category.as_str().to_string()),

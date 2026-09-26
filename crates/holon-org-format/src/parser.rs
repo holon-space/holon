@@ -72,6 +72,10 @@ pub struct ParseResult {
     pub blocks: Vec<Block>,
     /// Block IDs that need :ID: property added (for write-back)
     pub headlines_needing_ids: Vec<String>,
+    /// Each headline's `:PROPERTIES:` lines other than `:ID:`, in order and
+    /// with repeated keys kept, as `(key, decoded value)`. A headline with no
+    /// such line has no entry.
+    pub headline_drawers: HashMap<EntityUri, Vec<(String, String)>>,
 }
 
 /// The task-keyword config the file's keyword lines declare, as `A,B|C,D`:
@@ -475,6 +479,7 @@ pub fn parse_org_file_with(
     // Extract blocks (headlines)
     let mut blocks = Vec::new();
     let mut headlines_needing_ids = Vec::new();
+    let mut headline_drawers = HashMap::new();
     let mut sequence_counter = 0i64;
 
     // Extract done keywords for TaskState categorization
@@ -545,6 +550,7 @@ pub fn parse_org_file_with(
         &mut sequence_counter,
         &mut blocks,
         &mut headlines_needing_ids,
+        &mut headline_drawers,
         &done_kws,
         classifier,
         None,
@@ -584,8 +590,41 @@ pub fn parse_org_file_with(
         document,
         blocks,
         headlines_needing_ids,
+        headline_drawers,
     })
 }
+
+/// A headline the parser refuses, named as the author wrote it: by its title
+/// text and its authored `:ID:`, never by an id the parse minted for it.
+#[derive(Debug)]
+pub struct HeadlineRefused {
+    /// The headline text after its stars, keyword and priority cookie.
+    pub title: String,
+    pub id: Option<String>,
+    pub cause: anyhow::Error,
+}
+
+impl HeadlineRefused {
+    fn new(headline: &Headline, cause: anyhow::Error) -> Self {
+        HeadlineRefused {
+            title: headline_title_text(headline).trim().to_string(),
+            id: headline_id(headline),
+            cause,
+        }
+    }
+}
+
+impl std::fmt::Display for HeadlineRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "org headline {:?}", self.title)?;
+        if let Some(id) = &self.id {
+            write!(f, " (:ID: {id})")?;
+        }
+        write!(f, ": {:#}", self.cause)
+    }
+}
+
+impl std::error::Error for HeadlineRefused {}
 
 /// Parse-boundary forest check (F8, dogfood 2026-07-21): reject a file whose
 /// parsed blocks do not form a valid forest under the document root. A
@@ -604,7 +643,7 @@ fn reject_id_cycles(
     owners.insert(document.id.as_str(), doc_id_carrier);
     for block in blocks {
         if let Some(prev) = owners.insert(block.id.as_str(), "a heading/block (:ID:)") {
-            anyhow::bail!(
+            let cause = anyhow::anyhow!(
                 "org id collision in {}: id {:?} is claimed by both {} and a heading/block -- \
                  duplicate ids make a block its own ancestor (self-parent cycle), which recurses \
                  the tree projection without bound and crashes the app on boot. Give the colliding \
@@ -614,6 +653,15 @@ fn reject_id_cycles(
                 prev,
                 doc_id_carrier,
             );
+            return Err(match block.content_type {
+                ContentType::Text => HeadlineRefused {
+                    title: block.content.lines().next().unwrap_or_default().to_string(),
+                    id: Some(block.id.id().to_string()),
+                    cause,
+                }
+                .into(),
+                _ => cause,
+            });
         }
         // Direct 1-cycle backstop: any block naming itself as parent, however
         // its id was assigned.
@@ -893,6 +941,10 @@ fn parse_keywords_from_config(config: &str) -> (Vec<String>, Vec<String>) {
     (active, done)
 }
 
+fn in_source_header(e: anyhow::Error) -> anyhow::Error {
+    anyhow::anyhow!("a `#+BEGIN_SRC` header argument: {e:#}")
+}
+
 /// Emit a section's source-block and image children as `Block`s parented to
 /// `parent` (the owning headline, or the document root for top-level,
 /// pre-first-headline content), their minted ids after the parent's bare id.
@@ -936,8 +988,7 @@ fn emit_section_children(
 
         let id = crate::drawer::DrawerId::parse(&src_id).with_context(|| {
             format!(
-                "org source block id is not usable: a `#+BEGIN_SRC` under {parent_bare:?} \
-                 carries `:id {src_id}`. Refusing the file rather than filing the block under \
+                "org source block id is not usable: a `#+BEGIN_SRC` carries `:id {src_id}`. Refusing the file rather than filing the block under \
                  an id it does not name."
             )
         })?;
@@ -1013,7 +1064,7 @@ fn emit_section_children(
                 .iter()
                 .map(|(k, v)| (k.as_str(), v.as_str()))
                 .collect();
-            match resolve_dependency_edge(&dep_refs, src_block.id.as_str(), template)? {
+            match resolve_dependency_edge(&dep_refs, template).map_err(in_source_header)? {
                 Some(DependencyEdge::Typed(ids)) => {
                     for uri in ids {
                         if !src_block.requires.contains(&uri) {
@@ -1035,7 +1086,8 @@ fn emit_section_children(
                     // Resolved as a group above (canonical `REQUIRES`).
                 } else if k.eq_ignore_ascii_case("contributes-to") {
                     if let Some(s) = v.as_string() {
-                        let targets = parse_edge_targets(s, &k, src_block.id.as_str(), template)?;
+                        let targets =
+                            parse_edge_targets(s, &k, template).map_err(in_source_header)?;
                         match edge_ids(&targets) {
                             Some(ids) => src_block.contributes_to = ids,
                             None => src_block.set_property(
@@ -1118,343 +1170,26 @@ fn process_headlines(
     sequence_counter: &mut i64,
     output: &mut Vec<Block>,
     needs_id: &mut Vec<String>,
+    drawers: &mut HashMap<EntityUri, Vec<(String, String)>>,
     done_keywords: &[String],
     classifier: &holon_api::link_parser::LinkTargetClassifier,
     template: Option<&TemplateVars>,
 ) -> Result<()> {
     for headline in headlines {
-        // Extract headline level (number of stars)
-        let level = headline.level() as i64;
-
-        // Assign sequence number
-        let sequence = *sequence_counter;
-        *sequence_counter += 1;
-
-        // An authored `:ID:` is text a person typed; one that is not a bare
-        // block id is a content error in this file, refused by name.
-        let (id, needs_write) = extract_or_generate_id(&headline);
-        let id = crate::drawer::DrawerId::parse(&id)
-            .with_context(|| {
-                format!(
-                    "org heading id in {} is not usable: headline {:?} carries `:ID: {:?}`. \
-                     Refusing the file rather than filing the heading under an id it does \
-                     not name.",
-                    file_id.as_str(),
-                    headline.title_raw().trim(),
-                    id,
-                )
-            })?
-            .as_str()
-            .to_string();
-        if needs_write {
-            needs_id.push(id.clone());
-        }
-
-        let HeadlineReading {
-            keyword,
-            cookie,
-            title,
-            tags,
-        } = read_headline(&headline);
-        let task_state = keyword.map(|k| TaskState::from_keyword_with_done_list(&k, done_keywords));
-
-        // A letter outside the A/B/C default is data — org's accepted range is
-        // configurable — but a non-letter cookie has no rank and refuses the
-        // parse rather than taking the app down, as this once did.
-        let cookie_priority =
-            match cookie {
-                Some(t) => Some(t.parse::<holon_api::Priority>().with_context(|| {
-                    format!("org headline {id:?} has an unusable priority cookie")
-                })?),
-                None => None,
-            };
-
-        let tags = holon_api::Tags::from_tag_iter(tags);
-
-        // Extract section content with source blocks
-        let section = extract_section_content(headline.section(), SectionRead::Headline);
-        let body = section.body;
-        let authored_body = section.authored_body;
-        let keyword_lines = section.keyword_lines;
-        let blank_lines_before_body = if body.is_some() || !keyword_lines.is_empty() {
-            blank_lines_before_body(&headline)
-        } else {
-            Vec::new()
-        };
-
-        // Extract planning (SCHEDULED, DEADLINE).
-        // Fall back to values extracted from paragraph text when orgize
-        // misclassifies planning as PARAGRAPH (properties drawer before planning).
-        let (scheduled, deadline) = {
-            let (s, d) = extract_planning(&headline);
-            (
-                s.or(section.scheduled_fallback),
-                d.or(section.deadline_fallback),
-            )
-        };
-
-        // Parse planning timestamps up front. The raw planning line has already
-        // been stripped from the body, so an unparseable timestamp must be
-        // preserved as a literal body line — dropping it would silently delete
-        // the user's SCHEDULED/DEADLINE line on the next write-back.
-        let mut preserved_planning: Vec<String> = Vec::new();
-        let scheduled = scheduled.and_then(|s| match holon_api::types::Timestamp::parse(&s) {
-            Ok(ts) => Some(ts),
-            Err(e) => {
-                tracing::warn!("Unparseable SCHEDULED timestamp {s:?} preserved in body: {e}");
-                preserved_planning.push(format!("SCHEDULED: {s}"));
-                None
-            }
-        });
-        let deadline = deadline.and_then(|s| match holon_api::types::Timestamp::parse(&s) {
-            Ok(ts) => Some(ts),
-            Err(e) => {
-                tracing::warn!("Unparseable DEADLINE timestamp {s:?} preserved in body: {e}");
-                preserved_planning.push(format!("DEADLINE: {s}"));
-                None
-            }
-        });
-        let body = if preserved_planning.is_empty() {
-            body
-        } else {
-            let mut merged = preserved_planning.join("\n");
-            if let Some(b) = body {
-                merged.push('\n');
-                merged.push_str(&b);
-            }
-            Some(merged)
-        };
-
-        // Extract properties as JSON
-        let string_properties = extract_properties(&headline);
-        // A `:TEMPLATE:` headline opens a template scope for itself and its
-        // whole subtree; everything else inherits the enclosing one.
-        let scope = template_scope(&string_properties, template, id.as_str())?;
-        let scope = scope.as_deref();
-
-        // `:priority: A` is the DRAWER spelling of the same cookie. Org drawer
-        // keys are case-insensitive, so `:PRIORITY:` is that same carrier and
-        // normalises onto the canonical lowercase key rather than becoming a
-        // second one. The key collides with the internal `priority` property,
-        // so it is resolved here into the typed field — letting the generic
-        // drawer loop below reach it would overwrite the typed value with the
-        // raw letter, which is how 41 vault blocks came to store a string
-        // SQLite sorts last.
-        let mut drawer_priority: Option<(&str, holon_api::Priority)> = None;
-        for (k, v) in string_properties
-            .iter()
-            .filter(|(k, _)| k.eq_ignore_ascii_case(crate::models::org_props::PRIORITY))
-        {
-            let parsed = v
-                .parse::<holon_api::Priority>()
-                .with_context(|| format!("block {id}: drawer key {k:?} is not an org priority"))?;
-            if let Some((seen_key, seen)) = drawer_priority {
-                if seen != parsed {
-                    anyhow::bail!(
-                        "block {id}: the drawer keys `:{seen_key}: {}` and `:{k}: {}` disagree — \
-                         author the priority once",
-                        seen.letter(),
-                        parsed.letter()
-                    );
-                }
-            }
-            drawer_priority = Some((k.as_str(), parsed));
-        }
-        let drawer_priority = drawer_priority.map(|(_, p)| p);
-
-        // Two carriers that disagree is an authoring mistake with no correct
-        // answer; picking one would make the file mean what nobody wrote.
-        let priority = match (cookie_priority, drawer_priority) {
-            (Some(cookie), Some(drawer)) if cookie != drawer => anyhow::bail!(
-                "block {id}: the priority cookie `[#{}]` and the drawer key `:priority: {}` \
-                 disagree — author the priority once",
-                cookie.letter(),
-                drawer.letter()
-            ),
-            (Some(p), _) | (None, Some(p)) => Some(p),
-            (None, None) => None,
-        };
-        let priority_drawer_only = cookie_priority.is_none() && drawer_priority.is_some();
-
-        let (content, marks) = block_content(&title, body.as_deref(), classifier);
-
-        let now = holon_api::clock::now_millis();
-        let mut block = Block {
-            id: EntityUri::block(&id),
-            // ALLOW(entity_uri_from_raw): org parser output: parent headline raw org slug
-            parent_id: EntityUri::from_raw(parent_id),
-            content,
-            marks,
-            created_at: now,
-            updated_at: now,
-            ..Block::default()
-        };
-
-        // Set org-specific properties using extension trait
-        block.set_level(level);
-        if level != parent_level + 1 {
-            block.set_property(crate::models::org_props::STARS, level.to_string());
-        }
-        if let Some(end) = headline_line_end(&headline) {
-            block.set_property(
-                crate::models::org_props::HEADLINE_END,
-                serde_json::to_string(&end).expect("a string serializes"),
-            );
-        }
-        block.set_sequence(sequence);
-        block.set_task_state(task_state);
-        block.set_priority(priority);
-        if priority_drawer_only {
-            block.set_property(
-                crate::models::org_props::PRIORITY_DRAWER_ONLY,
-                holon_api::Value::String("t".to_string()),
-            );
-        }
-        block.set_tags(tags);
-        block.set_scheduled(scheduled);
-        block.set_deadline(deadline);
-
-        // Store drawer properties as flat keys in block properties, after the
-        // edge-typed ones are lifted into their typed edge fields.
-        let other_properties = lift_edge_properties(&mut block, &string_properties, scope)?;
-        for (key, value) in other_properties.iter() {
-            match TypedDrawerKey::parse(key) {
-                // Already parsed into the typed field; the renderer rebuilds
-                // this drawer line from it.
-                Some(TypedDrawerKey::Priority) => {}
-                // Outline fold state is document state (Martin ruling
-                // 2026-07-11), so it round-trips through org the same as any
-                // other block field — a plain drawer property, following
-                // org-mode's own boolean-drawer convention (LogSeq's
-                // `collapsed:: true`; org-mode itself uses `t`/`nil` for
-                // drawer booleans, e.g. `:VISIBILITY:`). Absent means
-                // expanded (Block::default() already sets `collapsed: false`).
-                Some(TypedDrawerKey::Collapsed) => block.collapsed = is_drawer_true(value),
-                // Same boolean-drawer grammar as `:COLLAPSED:`, but a present
-                // value outside the accepted spellings is a hard parse error:
-                // silently defaulting a render-mode flag to false would hide
-                // the authored intent behind a correct-looking page.
-                Some(TypedDrawerKey::WidgetOnly) => {
-                    if is_drawer_true(value) {
-                        block.widget_only = true;
-                    } else {
-                        anyhow::bail!(
-                            "block {id}: :WIDGET_ONLY: must be `t` or `true` (case-insensitive), \
-                             got {value:?}"
-                        );
-                    }
-                }
-                Some(TypedDrawerKey::TaskState) => anyhow::bail!(
-                    "block {id}: drawer key :{key}: is refused; a task state is written as the \
-                     headline keyword (`* TODO …`), never as a property"
-                ),
-                Some(
-                    typed @ (TypedDrawerKey::Id
-                    | TypedDrawerKey::Dependency
-                    | TypedDrawerKey::Edge(_)),
-                ) => unreachable!("drawer key :{key}: ({typed:?}) is lifted before this loop"),
-                None => block.set_property(
-                    crate::drawer::AuthoredKey::new(key).property(),
-                    holon_api::Value::String(value.to_string()),
-                ),
-            }
-        }
-        // Record the authored drawer key order so the renderer replays it
-        // instead of alphabetizing — a reordered drawer is pure write-back
-        // churn. `:BLOCKED-BY:` folds onto the canonical `:REQUIRES:` spelling
-        // so the slot it occupied is the one `:REQUIRES:` gets back.
-        let mut drawer_order: Vec<String> = Vec::new();
-        for (key, _) in string_properties.iter() {
-            let canonical = if key.eq_ignore_ascii_case("BLOCKED-BY") {
-                "REQUIRES".to_string()
-            } else {
-                key.clone()
-            };
-            // Exact-match dedupe: `:Effort:` and `:effort:` are DISTINCT drawer
-            // keys and both round-trip, so collapsing them by case would hand
-            // one of them the other's slot.
-            if !drawer_order.contains(&canonical) {
-                drawer_order.push(canonical);
-            }
-        }
-        if !drawer_order.is_empty() {
-            block.set_property(
-                crate::models::org_props::DRAWER_ORDER,
-                holon_api::Value::String(
-                    serde_json::to_string(&drawer_order)
-                        .expect("drawer key order is a Vec<String> — always serializable"),
-                ),
-            );
-        }
-
-        if let Some(authored) = authored_body {
-            block.set_property(
-                crate::models::org_props::AUTHORED_TEXT,
-                serde_json::Value::String(authored).to_string(),
-            );
-        }
-        let drawer_raw = drawer_raw_values(&headline);
-        if !drawer_raw.is_empty() {
-            block.set_property(
-                crate::models::org_props::DRAWER_RAW,
-                serde_json::Value::Object(drawer_raw).to_string(),
-            );
-        }
-        block.set_keyword_lines(keyword_lines);
-        if section.text_after_source {
-            block.set_property(crate::models::org_props::TEXT_AFTER_SOURCE, "t");
-        }
-        block.set_blank_lines(crate::models::BlankLines {
-            before_body: blank_lines_before_body,
-            after: blank_lines_after_headline(&headline),
-        });
-
-        // Store ID in properties (extract_properties filters it out since it's used for
-        // block.id)
-        block.set_property("ID", holon_api::Value::String(id.clone()));
-        match properties_drawer(&headline).map(|d| drawer_text(&d)) {
-            Some(authored) => {
-                let mut written = block.clone();
-                crate::OrgRenderer::prepare_block_for_org(&mut written, level);
-                if crate::models::canonical_drawer(&written)?.as_deref() != Some(authored.as_str())
-                {
-                    block.set_property(
-                        crate::models::org_props::DRAWER_TEXT,
-                        serde_json::Value::String(authored).to_string(),
-                    );
-                }
-            }
-            // The id came from a drawer in the body: the file wrote none.
-            None if !needs_write => block.set_property(
-                crate::models::org_props::DRAWER_TEXT,
-                serde_json::Value::String(String::new()).to_string(),
-            ),
-            None => {}
-        }
-
-        // With no body before it, the blank lines after the head stand before
-        // the first source block.
-        let mut sources = section.sources;
-        if block.body().is_none() && block.keyword_lines()?.is_empty() {
-            if let Some(first) = sources.first_mut().filter(|s| s.blank_before.is_empty()) {
-                first.blank_before = self::blank_lines_before_body(&headline);
-            }
-        }
-
-        output.push(block);
-
-        // Source-block + image children (shared with the document top-level
-        // pass in `parse_org_file`).
-        emit_section_children(
-            sources,
-            section.image_paths,
-            &EntityUri::block(&id),
+        let (id, level, scope) = headline_rows(
+            &headline,
+            parent_id,
+            parent_level,
+            file_id,
             sequence_counter,
             output,
-            scope,
-        )?;
-
-        // Recursively process children
+            needs_id,
+            drawers,
+            done_keywords,
+            classifier,
+            template,
+        )
+        .map_err(|cause| HeadlineRefused::new(&headline, cause))?;
         process_headlines(
             headline.headlines(),
             &id,
@@ -1463,13 +1198,367 @@ fn process_headlines(
             sequence_counter,
             output,
             needs_id,
+            drawers,
             done_keywords,
             classifier,
-            scope,
+            scope.as_deref(),
         )?;
     }
 
     Ok(())
+}
+
+/// The rows one headline writes, without its child headlines: its block and
+/// the source and image blocks of its section. Returns the headline's id,
+/// level and the template scope its children inherit.
+#[allow(clippy::too_many_arguments)]
+fn headline_rows<'t>(
+    headline: &Headline,
+    parent_id: &str,
+    parent_level: i64,
+    file_id: &EntityUri,
+    sequence_counter: &mut i64,
+    output: &mut Vec<Block>,
+    needs_id: &mut Vec<String>,
+    drawers: &mut HashMap<EntityUri, Vec<(String, String)>>,
+    done_keywords: &[String],
+    classifier: &holon_api::link_parser::LinkTargetClassifier,
+    template: Option<&'t TemplateVars>,
+) -> Result<(String, i64, Option<std::borrow::Cow<'t, TemplateVars>>)> {
+    // Extract headline level (number of stars)
+    let level = headline.level() as i64;
+
+    // Assign sequence number
+    let sequence = *sequence_counter;
+    *sequence_counter += 1;
+
+    // An authored `:ID:` is text a person typed; one that is not a bare
+    // block id is a content error in this file, refused by name.
+    let (id, needs_write) = extract_or_generate_id(headline);
+    let id = crate::drawer::DrawerId::parse(&id)
+        .with_context(|| {
+            format!(
+                "org heading id in {} is not usable: the headline carries `:ID: {id:?}`. \
+                 Refusing the file rather than filing the heading under an id it does \
+                 not name.",
+                file_id.as_str(),
+            )
+        })?
+        .as_str()
+        .to_string();
+    if needs_write {
+        needs_id.push(id.clone());
+    }
+
+    let HeadlineReading {
+        keyword,
+        cookie,
+        title,
+        tags,
+    } = read_headline(headline);
+    let task_state = keyword.map(|k| TaskState::from_keyword_with_done_list(&k, done_keywords));
+
+    // A letter outside the A/B/C default is data — org's accepted range is
+    // configurable — but a non-letter cookie has no rank and refuses the
+    // parse rather than taking the app down, as this once did.
+    let cookie_priority = match cookie {
+        Some(t) => Some(
+            t.parse::<holon_api::Priority>()
+                .with_context(|| format!("the priority cookie `[#{t}]` is unusable"))?,
+        ),
+        None => None,
+    };
+
+    let tags = holon_api::Tags::from_tag_iter(tags);
+
+    // Extract section content with source blocks
+    let section = extract_section_content(headline.section(), SectionRead::Headline);
+    let body = section.body;
+    let authored_body = section.authored_body;
+    let keyword_lines = section.keyword_lines;
+    let blank_lines_before_body = if body.is_some() || !keyword_lines.is_empty() {
+        blank_lines_before_body(headline)
+    } else {
+        Vec::new()
+    };
+
+    // Extract planning (SCHEDULED, DEADLINE).
+    // Fall back to values extracted from paragraph text when orgize
+    // misclassifies planning as PARAGRAPH (properties drawer before planning).
+    let (scheduled, deadline) = {
+        let (s, d) = extract_planning(headline);
+        (
+            s.or(section.scheduled_fallback),
+            d.or(section.deadline_fallback),
+        )
+    };
+
+    // Parse planning timestamps up front. The raw planning line has already
+    // been stripped from the body, so an unparseable timestamp must be
+    // preserved as a literal body line — dropping it would silently delete
+    // the user's SCHEDULED/DEADLINE line on the next write-back.
+    let mut preserved_planning: Vec<String> = Vec::new();
+    let scheduled = scheduled.and_then(|s| match holon_api::types::Timestamp::parse(&s) {
+        Ok(ts) => Some(ts),
+        Err(e) => {
+            tracing::warn!("Unparseable SCHEDULED timestamp {s:?} preserved in body: {e}");
+            preserved_planning.push(format!("SCHEDULED: {s}"));
+            None
+        }
+    });
+    let deadline = deadline.and_then(|s| match holon_api::types::Timestamp::parse(&s) {
+        Ok(ts) => Some(ts),
+        Err(e) => {
+            tracing::warn!("Unparseable DEADLINE timestamp {s:?} preserved in body: {e}");
+            preserved_planning.push(format!("DEADLINE: {s}"));
+            None
+        }
+    });
+    let body = if preserved_planning.is_empty() {
+        body
+    } else {
+        let mut merged = preserved_planning.join("\n");
+        if let Some(b) = body {
+            merged.push('\n');
+            merged.push_str(&b);
+        }
+        Some(merged)
+    };
+
+    // Extract properties as JSON
+    let string_properties = extract_properties(headline);
+    // A `:TEMPLATE:` headline opens a template scope for itself and its
+    // whole subtree; everything else inherits the enclosing one.
+    let inherited = template_scope(&string_properties, template)?;
+    let scope = inherited.as_deref();
+
+    // `:priority: A` is the DRAWER spelling of the same cookie. Org drawer
+    // keys are case-insensitive, so `:PRIORITY:` is that same carrier and
+    // normalises onto the canonical lowercase key rather than becoming a
+    // second one. The key collides with the internal `priority` property,
+    // so it is resolved here into the typed field — letting the generic
+    // drawer loop below reach it would overwrite the typed value with the
+    // raw letter, which is how 41 vault blocks came to store a string
+    // SQLite sorts last.
+    let mut drawer_priority: Option<(&str, holon_api::Priority)> = None;
+    for (k, v) in string_properties
+        .iter()
+        .filter(|(k, _)| k.eq_ignore_ascii_case(crate::models::org_props::PRIORITY))
+    {
+        let parsed = v
+            .parse::<holon_api::Priority>()
+            .with_context(|| format!("drawer key {k:?} is not an org priority"))?;
+        if let Some((seen_key, seen)) = drawer_priority {
+            if seen != parsed {
+                anyhow::bail!(
+                    "the drawer keys `:{seen_key}: {}` and `:{k}: {}` disagree — \
+                     author the priority once",
+                    seen.letter(),
+                    parsed.letter()
+                );
+            }
+        }
+        drawer_priority = Some((k.as_str(), parsed));
+    }
+    let drawer_priority = drawer_priority.map(|(_, p)| p);
+
+    // Two carriers that disagree is an authoring mistake with no correct
+    // answer; picking one would make the file mean what nobody wrote.
+    let priority = match (cookie_priority, drawer_priority) {
+        (Some(cookie), Some(drawer)) if cookie != drawer => anyhow::bail!(
+            "the priority cookie `[#{}]` and the drawer key `:priority: {}` \
+             disagree — author the priority once",
+            cookie.letter(),
+            drawer.letter()
+        ),
+        (Some(p), _) | (None, Some(p)) => Some(p),
+        (None, None) => None,
+    };
+    let priority_drawer_only = cookie_priority.is_none() && drawer_priority.is_some();
+
+    let (content, marks) = block_content(&title, body.as_deref(), classifier);
+
+    let now = holon_api::clock::now_millis();
+    let mut block = Block {
+        id: EntityUri::block(&id),
+        // ALLOW(entity_uri_from_raw): org parser output: parent headline raw org slug
+        parent_id: EntityUri::from_raw(parent_id),
+        content,
+        marks,
+        created_at: now,
+        updated_at: now,
+        ..Block::default()
+    };
+
+    // Set org-specific properties using extension trait
+    block.set_level(level);
+    if level != parent_level + 1 {
+        block.set_property(crate::models::org_props::STARS, level.to_string());
+    }
+    if let Some(end) = headline_line_end(headline) {
+        block.set_property(
+            crate::models::org_props::HEADLINE_END,
+            serde_json::to_string(&end).expect("a string serializes"),
+        );
+    }
+    block.set_sequence(sequence);
+    block.set_task_state(task_state);
+    block.set_priority(priority);
+    if priority_drawer_only {
+        block.set_property(
+            crate::models::org_props::PRIORITY_DRAWER_ONLY,
+            holon_api::Value::String("t".to_string()),
+        );
+    }
+    block.set_tags(tags);
+    block.set_scheduled(scheduled);
+    block.set_deadline(deadline);
+
+    // Store drawer properties as flat keys in block properties, after the
+    // edge-typed ones are lifted into their typed edge fields.
+    let other_properties = lift_edge_properties(&mut block, &string_properties, scope)?;
+    for (key, value) in other_properties.iter() {
+        match TypedDrawerKey::parse(key) {
+            // Already parsed into the typed field; the renderer rebuilds
+            // this drawer line from it.
+            Some(TypedDrawerKey::Priority) => {}
+            // Outline fold state is document state (Martin ruling
+            // 2026-07-11), so it round-trips through org the same as any
+            // other block field — a plain drawer property, following
+            // org-mode's own boolean-drawer convention (LogSeq's
+            // `collapsed:: true`; org-mode itself uses `t`/`nil` for
+            // drawer booleans, e.g. `:VISIBILITY:`). Absent means
+            // expanded (Block::default() already sets `collapsed: false`).
+            Some(TypedDrawerKey::Collapsed) => block.collapsed = is_drawer_true(value),
+            // Same boolean-drawer grammar as `:COLLAPSED:`, but a present
+            // value outside the accepted spellings is a hard parse error:
+            // silently defaulting a render-mode flag to false would hide
+            // the authored intent behind a correct-looking page.
+            Some(TypedDrawerKey::WidgetOnly) => {
+                if is_drawer_true(value) {
+                    block.widget_only = true;
+                } else {
+                    anyhow::bail!(
+                        ":WIDGET_ONLY: must be `t` or `true` (case-insensitive), \
+                         got {value:?}"
+                    );
+                }
+            }
+            Some(TypedDrawerKey::TaskState) => anyhow::bail!(
+                "drawer key :{key}: is refused; a task state is written as the \
+                 headline keyword (`* TODO …`), never as a property"
+            ),
+            Some(
+                typed @ (TypedDrawerKey::Id | TypedDrawerKey::Dependency | TypedDrawerKey::Edge(_)),
+            ) => unreachable!("drawer key :{key}: ({typed:?}) is lifted before this loop"),
+            None => block.set_property(
+                crate::drawer::AuthoredKey::new(key).property(),
+                holon_api::Value::String(value.to_string()),
+            ),
+        }
+    }
+    // Record the authored drawer key order so the renderer replays it
+    // instead of alphabetizing — a reordered drawer is pure write-back
+    // churn. `:BLOCKED-BY:` folds onto the canonical `:REQUIRES:` spelling
+    // so the slot it occupied is the one `:REQUIRES:` gets back.
+    let mut drawer_order: Vec<String> = Vec::new();
+    for (key, _) in string_properties.iter() {
+        let canonical = if key.eq_ignore_ascii_case("BLOCKED-BY") {
+            "REQUIRES".to_string()
+        } else {
+            key.clone()
+        };
+        // Exact-match dedupe: `:Effort:` and `:effort:` are DISTINCT drawer
+        // keys and both round-trip, so collapsing them by case would hand
+        // one of them the other's slot.
+        if !drawer_order.contains(&canonical) {
+            drawer_order.push(canonical);
+        }
+    }
+    if !drawer_order.is_empty() {
+        block.set_property(
+            crate::models::org_props::DRAWER_ORDER,
+            holon_api::Value::String(
+                serde_json::to_string(&drawer_order)
+                    .expect("drawer key order is a Vec<String> — always serializable"),
+            ),
+        );
+    }
+
+    if let Some(authored) = authored_body {
+        block.set_property(
+            crate::models::org_props::AUTHORED_TEXT,
+            serde_json::Value::String(authored).to_string(),
+        );
+    }
+    let drawer_raw = drawer_raw_values(headline);
+    if !drawer_raw.is_empty() {
+        block.set_property(
+            crate::models::org_props::DRAWER_RAW,
+            serde_json::Value::Object(drawer_raw).to_string(),
+        );
+    }
+    block.set_keyword_lines(keyword_lines);
+    if section.text_after_source {
+        block.set_property(crate::models::org_props::TEXT_AFTER_SOURCE, "t");
+    }
+    block.set_blank_lines(crate::models::BlankLines {
+        before_body: blank_lines_before_body,
+        after: blank_lines_after_headline(headline),
+    });
+
+    let lines: Vec<_> = drawer_entries(headline)
+        .into_iter()
+        .map(|(key, value, _)| (key, value))
+        .collect();
+    if !lines.is_empty() {
+        drawers.insert(block.id.clone(), lines);
+    }
+
+    // Store ID in properties (extract_properties filters it out since it's used for
+    // block.id)
+    block.set_property("ID", holon_api::Value::String(id.clone()));
+    match properties_drawer(headline).map(|d| drawer_text(&d)) {
+        Some(authored) => {
+            let mut written = block.clone();
+            crate::OrgRenderer::prepare_block_for_org(&mut written, level);
+            if crate::models::canonical_drawer(&written)?.as_deref() != Some(authored.as_str()) {
+                block.set_property(
+                    crate::models::org_props::DRAWER_TEXT,
+                    serde_json::Value::String(authored).to_string(),
+                );
+            }
+        }
+        // The id came from a drawer in the body: the file wrote none.
+        None if !needs_write => block.set_property(
+            crate::models::org_props::DRAWER_TEXT,
+            serde_json::Value::String(String::new()).to_string(),
+        ),
+        None => {}
+    }
+
+    // With no body before it, the blank lines after the head stand before
+    // the first source block.
+    let mut sources = section.sources;
+    if block.body().is_none() && block.keyword_lines()?.is_empty() {
+        if let Some(first) = sources.first_mut().filter(|s| s.blank_before.is_empty()) {
+            first.blank_before = self::blank_lines_before_body(headline);
+        }
+    }
+
+    output.push(block);
+
+    // Source-block + image children (shared with the document top-level
+    // pass in `parse_org_file`).
+    emit_section_children(
+        sources,
+        section.image_paths,
+        &EntityUri::block(&id),
+        sequence_counter,
+        output,
+        scope,
+    )?;
+    Ok((id, level, inherited))
 }
 
 /// Extract :ID: property from headline, or generate a new UUID.
@@ -2193,8 +2282,8 @@ fn template_slot_name(slug: &str) -> Option<&str> {
     slug.strip_prefix("{{")?.strip_suffix("}}").map(str::trim)
 }
 
-/// Classify one authored slug of an edge-typed drawer key. `key` and `owner`
-/// label the offending drawer and block in the error.
+/// Classify one authored slug of an edge-typed drawer key. `key` labels the
+/// offending drawer in the error; the caller names the block.
 ///
 /// Org file content is authored outside the system, so a slug that names no
 /// block is rejected here rather than reaching the panicking
@@ -2204,7 +2293,6 @@ fn template_slot_name(slug: &str) -> Option<&str> {
 fn parse_edge_target(
     slug: &str,
     key: &str,
-    owner: &str,
     template: Option<&TemplateVars>,
 ) -> anyhow::Result<EdgeTarget> {
     // `none` is the authored empty-set sentinel for `:contributes-to:` ONLY.
@@ -2217,11 +2305,11 @@ fn parse_edge_target(
         // A slot outside a template subtree names nothing and never will —
         // nothing would ever substitute it, so it stays the error it was.
         let Some(vars) = template else {
-            return Err(edge_slug_error(slug, key, owner));
+            return Err(edge_slug_error(slug, key));
         };
         if !vars.declares(name) {
             anyhow::bail!(
-                "block {owner}: :{key}: uses template variable {name:?} that the enclosing \
+                ":{key}: uses template variable {name:?} that the enclosing \
                  template does not declare — add it to ':TEMPLATE_VARS:' \
                  (docs/Proposals/Templating-2026-07-12.md)"
             );
@@ -2232,19 +2320,19 @@ fn parse_edge_target(
         .map(EdgeTarget::Block)
         .map_err(|e| {
             anyhow::anyhow!(
-                "block {owner}: :{key}: takes bare block IDs, got {slug:?} \
+                ":{key}: takes bare block IDs, got {slug:?} \
                  (docs/Reference/CompassConventions.md): {e}"
             )
         })
 }
 
-fn edge_slug_error(slug: &str, key: &str, owner: &str) -> anyhow::Error {
+fn edge_slug_error(slug: &str, key: &str) -> anyhow::Error {
     let detail = EntityUri::try_from_raw(slug)
         .err()
         .map(|e| e.to_string())
         .unwrap_or_default();
     anyhow::anyhow!(
-        "block {owner}: :{key}: takes bare block IDs, got {slug:?} \
+        ":{key}: takes bare block IDs, got {slug:?} \
          (docs/Reference/CompassConventions.md): {detail}"
     )
 }
@@ -2254,13 +2342,12 @@ fn edge_slug_error(slug: &str, key: &str, owner: &str) -> anyhow::Error {
 fn parse_edge_targets(
     value: &str,
     key: &str,
-    owner: &str,
     template: Option<&TemplateVars>,
 ) -> anyhow::Result<Vec<EdgeTarget>> {
     value
         .split(|c: char| c == ',' || c.is_whitespace())
         .filter(|s| !s.is_empty())
-        .map(|slug| parse_edge_target(slug, key, owner, template))
+        .map(|slug| parse_edge_target(slug, key, template))
         .collect()
 }
 
@@ -2302,13 +2389,12 @@ pub fn lift_edge_properties(
     properties: &[(String, String)],
     template: Option<&TemplateVars>,
 ) -> anyhow::Result<Vec<(String, String)>> {
-    let owner = block.id.id().to_string();
     let dep_entries: Vec<(&str, &str)> = properties
         .iter()
         .filter(|(k, _)| is_dependency_key(k))
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
-    match resolve_dependency_edge(&dep_entries, &owner, template)? {
+    match resolve_dependency_edge(&dep_entries, template)? {
         Some(DependencyEdge::Typed(ids)) => {
             for uri in ids {
                 if !block.requires.contains(&uri) {
@@ -2345,7 +2431,7 @@ pub fn lift_edge_properties(
                 }
             }
             holon_api::EdgeField::ContributesTo | holon_api::EdgeField::AdviceSuppressed => {
-                let targets = parse_edge_targets(value, key, &owner, template)?;
+                let targets = parse_edge_targets(value, key, template)?;
                 match edge_ids(&targets) {
                     Some(ids) if edge == holon_api::EdgeField::ContributesTo => {
                         block.contributes_to = ids
@@ -2392,7 +2478,6 @@ enum DependencyEdge {
 /// only an all-real group becomes the typed edge.
 fn resolve_dependency_edge(
     entries: &[(&str, &str)],
-    owner: &str,
     template: Option<&TemplateVars>,
 ) -> anyhow::Result<Option<DependencyEdge>> {
     if entries.is_empty() {
@@ -2400,7 +2485,7 @@ fn resolve_dependency_edge(
     }
     let mut targets = Vec::new();
     for (key, value) in entries {
-        targets.extend(parse_edge_targets(value, key, owner, template)?);
+        targets.extend(parse_edge_targets(value, key, template)?);
     }
     if targets.iter().any(|t| matches!(t, EdgeTarget::Slot(_))) {
         let merged = entries
@@ -2427,7 +2512,6 @@ fn resolve_dependency_edge(
 fn template_scope<'a>(
     properties: &[(String, String)],
     enclosing: Option<&'a TemplateVars>,
-    owner: &str,
 ) -> anyhow::Result<Option<std::borrow::Cow<'a, TemplateVars>>> {
     let keys: Vec<&str> = properties.iter().map(|(k, _)| k.as_str()).collect();
     if holon_api::template::find_template_marker_key(
@@ -2445,8 +2529,7 @@ fn template_scope<'a>(
     .and_then(|k| properties.iter().find(|(pk, _)| pk == k))
     .map(|(_, v)| v.as_str())
     .unwrap_or("");
-    let vars = TemplateVars::parse(declared)
-        .with_context(|| format!("block {owner}: invalid ':TEMPLATE_VARS:'"))?;
+    let vars = TemplateVars::parse(declared).context("invalid ':TEMPLATE_VARS:'")?;
     Ok(Some(std::borrow::Cow::Owned(vars)))
 }
 

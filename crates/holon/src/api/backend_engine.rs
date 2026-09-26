@@ -1527,6 +1527,20 @@ impl BackendEngine {
         params: StorageEntity,
         origin: holon_api::OpOrigin,
     ) -> Result<holon_api::OpOutcome> {
+        self.execute_with_parsed_carriers(entity_name, op_name, params, &[], origin)
+            .await
+    }
+
+    /// [`Self::execute_operation`] with `carriers` the org parser read from the
+    /// author's own text written alongside `params`.
+    pub async fn execute_with_parsed_carriers(
+        &self,
+        entity_name: &EntityName,
+        op_name: &str,
+        params: StorageEntity,
+        carriers: &[holon_org_format::ParsedCarrier],
+        origin: holon_api::OpOrigin,
+    ) -> Result<holon_api::OpOutcome> {
         use tracing::Instrument;
         use tracing::info;
 
@@ -1553,7 +1567,7 @@ impl BackendEngine {
             // (over the same dispatcher). Span context propagates via the
             // tracing-opentelemetry bridge.
             self.op_engine
-                .execute_operation(entity_name, op_name, params, origin)
+                .execute_with_parsed_carriers(entity_name, op_name, params, carriers, origin)
                 .await
         }
         .instrument(span)
@@ -1612,13 +1626,7 @@ impl BackendEngine {
         )
         .await?
         .with_history_store(history)
-        .with_write_authority(self.block_write_authority.clone())
-        .with_task_vocabulary_source(Arc::new(
-            crate::api::task_vocabulary_source::SqlTaskVocabularySource::new(
-                self.db_handle.clone(),
-                crate::storage::BLOCK_WRITE_TABLE,
-            ),
-        ));
+        .with_write_authority(self.block_write_authority.clone());
         Ok(())
     }
 

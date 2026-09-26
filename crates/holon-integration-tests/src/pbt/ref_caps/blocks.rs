@@ -268,6 +268,14 @@ impl RefBlockTreeMut for ReferenceState {
         ReferenceState::push_undo_snapshot(self);
     }
 
+    fn carry_block_text_across_history(&mut self, id: &EntityUri) {
+        ReferenceState::carry_block_text_across_history(self, &parse_id_must(id));
+    }
+
+    fn carry_block_placement_across_history(&mut self, id: &EntityUri) {
+        ReferenceState::carry_block_placement_across_history(self, &parse_id_must(id));
+    }
+
     fn set_block_content(&mut self, id: &EntityUri, text: &str) {
         let uri = parse_id_must(id);
         if let Some(b) = self.domain.block_state.blocks.get_mut(&uri) {
@@ -282,6 +290,34 @@ impl RefBlockTreeMut for ReferenceState {
                 super::super::types::normalize_content_for_org_roundtrip(text, b.content_type);
             b.content = content;
             b.marks = marks;
+        }
+    }
+
+    fn set_block_task_state(&mut self, id: &EntityUri, keyword: Option<&str>) {
+        match keyword {
+            Some(keyword) => self.apply_mutation(&holon_pbt_core::types::MutationEvent {
+                source: holon_pbt_core::types::MutationSource::UI,
+                mutation: holon_pbt_core::types::Mutation::Update {
+                    id: id.clone(),
+                    fields: [(
+                        "task_state".to_string(),
+                        holon_api::Value::String(keyword.to_string()),
+                    )]
+                    .into(),
+                },
+            }),
+            // Prod clears a keyword by removing the property, not by storing "".
+            None => {
+                let uri = parse_id_must(id);
+                let block = self
+                    .domain
+                    .block_state
+                    .blocks
+                    .get_mut(&uri)
+                    .unwrap_or_else(|| panic!("set_block_task_state: {id} is not in the ref"));
+                block.properties.remove("task_state");
+                block.properties.remove("task_state_category");
+            }
         }
     }
 
@@ -399,7 +435,13 @@ impl RefBlockTreeMut for ReferenceState {
         block.properties.insert(
             "task_state_category".to_string(),
             holon_api::Value::String(
-                holon_api::TaskState::category_str_for_keyword(&keyword).to_string(),
+                holon_api::TaskState::from_keyword_with_done_list(
+                    &keyword,
+                    vocabulary.done_keywords(),
+                )
+                .category
+                .as_str()
+                .to_string(),
             ),
         );
     }

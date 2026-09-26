@@ -10,10 +10,10 @@ pub(crate) enum CommaEscape {
     /// line, which the parser keeps as text below a headline.
     Body,
     /// A page's text before its first headline. In paragraph text: a line org
-    /// reads as a headline (stars at the line's start, then a blank or the
-    /// line's end) or a line whose text starts with `#+`, except the
-    /// delimiters of a block the parser keeps as text (`#+begin_example`,
-    /// `#+end_quote`, ...). `*bold*` at the start of a line stays as written.
+    /// reads as a headline ([`is_headline`]) or a line whose text starts with
+    /// `#+`, except the delimiters of a block the parser keeps as text
+    /// (`#+begin_example`, `#+end_quote`, ...). `*bold*` at the start of a
+    /// line stays as written.
     Preamble,
     /// The lines between `#+BEGIN_SRC` and `#+END_SRC`.
     Source,
@@ -186,13 +186,17 @@ pub(crate) fn page_id_keyword_value(line: &str) -> Option<&str> {
         .map(|_| line[5..].trim())
 }
 
-pub(crate) fn is_page_id_keyword(line: &str) -> bool {
+/// Whether `line` is a `#+ID:` keyword line; org reads it as the page id only
+/// in the text before the first headline.
+pub fn is_page_id_keyword(line: &str) -> bool {
     page_id_keyword_value(line).is_some()
 }
 
-fn is_headline(line: &str) -> bool {
+/// Whether org reads `line` as a headline: stars at the line's start, then a
+/// space (emacs 30.2 and orgize; a tab or the line's end makes it text).
+pub fn is_headline(line: &str) -> bool {
     let rest = line.trim_start_matches('*');
-    rest.len() < line.len() && (rest.is_empty() || rest.starts_with([' ', '\t']))
+    rest.len() < line.len() && rest.starts_with(' ')
 }
 
 /// `#+BEGIN: name` or `#+END:`, the delimiters of a dynamic block, which the

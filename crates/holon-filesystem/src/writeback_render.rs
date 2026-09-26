@@ -118,6 +118,70 @@ impl WritebackRenderer {
         self.render_blocks(doc_id, path, &blocks).await
     }
 
+    /// The page file `id`'s name chain routes to under `root`: where write-back
+    /// puts a document it holds no alias for. `None` when `id` names no
+    /// document, or a document that owns no page file.
+    pub async fn page_file(
+        &self,
+        id: &EntityUri,
+        root: &Path,
+    ) -> Result<Option<std::path::PathBuf>> {
+        if self.doc_manager.get_by_id(id).await?.is_none() {
+            return Ok(None);
+        }
+        let chain = self.doc_manager.name_chain(id).await?;
+        if chain.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(
+            crate::VaultPath::page_file_from_name_chain(root, &chain)?.into_path_buf(),
+        ))
+    }
+
+    /// `doc_id`'s document and blocks as its file holds them once write-back
+    /// renders the write authority's current state: that render parsed back by
+    /// the same format, with the stored values the render leaves out.
+    pub async fn as_the_file_holds(
+        &self,
+        doc_id: &EntityUri,
+        path: &Path,
+    ) -> Result<(
+        holon_core::FileFormatParseResult,
+        Vec<holon_api::RenderLoss>,
+    )> {
+        let blocks = self.read_blocks(doc_id).await?;
+        self.as_a_render_holds(doc_id, path, &blocks).await
+    }
+
+    /// `doc_id`'s document and `blocks` as its file holds them once write-back
+    /// renders `blocks` in its place: that render parsed back by the same
+    /// format, with the stored values the render leaves out.
+    pub async fn as_a_render_holds(
+        &self,
+        doc_id: &EntityUri,
+        path: &Path,
+        blocks: &[Block],
+    ) -> Result<(
+        holon_core::FileFormatParseResult,
+        Vec<holon_api::RenderLoss>,
+    )> {
+        let rendered = self.render_blocks(doc_id, path, blocks).await?;
+        let root = path
+            .parent()
+            .with_context(|| format!("{} has no parent directory", path.display()))?;
+        let parsed = self
+            .writable_adapter(path)?
+            .parse(path, &rendered.text, &EntityUri::no_parent(), root)
+            .with_context(|| {
+                format!(
+                    "the write-back render of {} does not parse back:\n{}",
+                    path.display(),
+                    rendered.text
+                )
+            })?;
+        Ok((parsed, rendered.losses))
+    }
+
     /// Render with an explicitly supplied document block, so a caller reading
     /// blocks from a non-authoritative store (the Loro tree) can render that
     /// store's header rather than the write authority's.
