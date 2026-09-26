@@ -1,9 +1,9 @@
-//! An `:ID:` drawer line is a block's identity, not free text. The engine
-//! refuses a write that puts an id org cannot carry into any property route,
+//! An `:ID:` drawer line is a block's bare id, not free text. The engine
+//! refuses a write that puts any other id on a route that reaches the line,
 //! and the org file keeps the block intact.
 //!
 //! @pbt kind harness
-//! @pbt covers drawer-id-write-boundary — an id that is not a URI-safe token
+//! @pbt covers drawer-id-write-boundary — an id that is not a bare block id
 //!   is refused before it reaches the store or the org file
 
 use std::sync::Arc;
@@ -220,6 +220,114 @@ fn a_bad_carrier_id_past_the_engine_does_not_freeze_the_file() {
                 .iter()
                 .any(|w| w.message.contains(&format!("{BAD_ID:?}"))),
             "the dropped carrier id was not disclosed; warnings: {warnings:#?}"
+        );
+    });
+}
+
+/// Ids that are not a bare block id: a schemed URI, a drawer delimiter, org's
+/// append or headline syntax, a non-URI-safe character, an overlong token.
+const NOT_BARE_IDS: &[&str] = &[
+    "block:n-scheme",
+    "doc:n-scheme",
+    "file:n-scheme",
+    "sentinel:no_parent",
+    ":END:",
+    ":PROPERTIES:",
+    "#+ID:",
+    "*kid",
+    "a:b",
+    "kid+",
+];
+
+/// `(op, route, params)`.
+type Route = (&'static str, &'static str, Vec<(&'static str, Value)>);
+
+#[test]
+fn an_id_that_is_not_a_bare_block_id_is_refused_on_every_route() {
+    let rt = runtime();
+    rt.clone().block_on(async move {
+        let t = booted(rt.clone()).await;
+        let overlong = "x".repeat(5000);
+        let ids: Vec<&str> = NOT_BARE_IDS
+            .iter()
+            .copied()
+            .chain([overlong.as_str()])
+            .collect();
+        let mut accepted = Vec::new();
+        for id in ids {
+            let routes: Vec<Route> = vec![
+                (
+                    "set_field",
+                    "org_properties",
+                    vec![
+                        ("id", text(TARGET_ID)),
+                        ("field", text("org_properties")),
+                        (
+                            "value",
+                            text(&serde_json::json!({ "ID": id, "note": "keep" }).to_string()),
+                        ),
+                    ],
+                ),
+                (
+                    "set_field",
+                    "ID",
+                    vec![
+                        ("id", text(TARGET_ID)),
+                        ("field", text("ID")),
+                        ("value", text(id)),
+                    ],
+                ),
+                (
+                    "set_field",
+                    "file_properties",
+                    vec![
+                        ("id", text("block:page-notes")),
+                        ("field", text("file_properties")),
+                        ("value", text(&serde_json::json!({ "ID": id }).to_string())),
+                    ],
+                ),
+                (
+                    "create",
+                    "id",
+                    vec![
+                        ("id", text(&format!("block:{id}"))),
+                        ("parent_id", text(TARGET_ID)),
+                        ("content", text("child")),
+                    ],
+                ),
+            ];
+            for (op, route, params) in routes {
+                let before = org_file_after_settle(&t).await;
+                let mut p = holon_api::StorageEntity::new();
+                for (k, v) in params {
+                    p.insert(k.into(), v);
+                }
+                let result = t
+                    .engine()
+                    .execute_operation(&EntityName::new("block"), op, p, OpOrigin::User)
+                    .await;
+                let file = org_file_after_settle(&t).await;
+                let shown: String = id.chars().take(40).collect();
+                match result {
+                    Ok(_) => accepted.push(format!("{route}: {shown:?} accepted")),
+                    Err(e) if file != before => accepted.push(format!(
+                        "{route}: {shown:?} refused ({e:#}) but the file changed"
+                    )),
+                    Err(e) => {
+                        let err = format!("{e:#}");
+                        if !err.contains(&format!("{id:?}")) {
+                            accepted.push(format!(
+                                "{route}: {shown:?} refused without naming it: {err}"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            accepted.is_empty(),
+            "ids that are not bare block ids got through:\n{}",
+            accepted.join("\n")
         );
     });
 }

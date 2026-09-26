@@ -239,28 +239,46 @@ file-level drawer, and a source block's header arguments
   would write.** A quoted value that a person types, such as
   `:title: "The Book"`, is not such a literal, so it stays as typed, quotes
   included. Every string goes into the file and comes back byte-equal.
-- **A key must read back as itself** (`DrawerKey`). Holon cannot escape a
-  key, so a key is refused when it:
-  - is empty, or holds whitespace, `:` or a control character (orgize ends the
-    key at the first space and needs a `:` after it; a bad key makes orgize
-    reject the whole drawer);
-  - is `PROPERTIES` or `END` in any case (the drawer delimiters);
-  - ends in `+` (org's append syntax `:KEY+: value`; orgize reads it as `KEY`);
-  - is `ID` in any case (`id`, `Id`, `iD`): the parser takes the first of these
-    as the block's identity and drops the others from the properties.
+- **A key must read back as itself, by the reader of its own carrier**
+  (`ValueCarrier::key`, `DrawerKey`). Holon cannot escape a key, and each
+  carrier has its own reader, so each has its own key rule:
+  - **Headline drawer** (orgize): not empty; no whitespace, `:` or control
+    character (orgize ends the key at the first space and needs a `:` after
+    it; a bad key makes orgize reject the whole drawer); not `PROPERTIES` or
+    `END` in any case; no trailing `+` (org's append syntax `:KEY+: value`,
+    which orgize reads as `KEY`); not `ID` in any case (`id`, `Id`, `iD`: the
+    parser takes the first of these as the block's identity and drops the
+    others).
+  - **File-level drawer** (Holon's own line reader, `parse_drawer_line`): not
+    empty; no whitespace or `:`; not `PROPERTIES` or `END` in any case. The
+    reader keeps a trailing `+` and control characters, so these keys are
+    written back as authored. `ID` in any case is the identity line (below).
+  - **Source-block header arguments** (`parse_header_args_from_str`): one
+    whitespace-free token after the `:`, and not `id`, which is the source
+    block's own id.
 
-  The engine refuses a write under such a key, and the renderer leaves such a
-  property out of the file (with a warning) and keeps the rest of the block.
-- **The `:ID:` line holds a block id, not a value** (`DrawerId`). It is not
-  encoded: the parser reads it verbatim and turns it into the block's URI. An
-  id must be non-empty and form a URI (no whitespace, no line break, no `"`).
-  The engine refuses any other id on every route that can carry one: the `ID`
-  property, the `properties` bag, the `org_properties` carrier and the
-  `file_properties` carrier (where an empty `:ID:` is allowed, since it is
-  authored text and not an identity). If such an id still reaches the
-  renderer, the drawer gets the block's own id and a warning names the
-  dropped value. A source block's `:id` header argument follows the same
-  rule; the parser refuses a file whose source block `:id` forms no URI.
+  The engine refuses a write under a key the carrier cannot hold: the
+  headline rule for the `ID`/`properties`/`org_properties` routes (a block's
+  properties may render as a headline drawer or as header arguments, and the
+  headline rule is the stricter one), the file-level rule for
+  `file_properties`. The renderer leaves such a property out of the file (with
+  a warning) and keeps the rest of the block.
+- **The `:ID:` line holds a bare block id, not a value** (`DrawerId`). It is
+  not encoded: the parser reads it verbatim and turns it into `block:<id>`.
+  An id is at most 255 characters from the RFC 3986 unreserved set
+  (`A-Z a-z 0-9 - . _ ~`), in parts joined by `:` or `::` (so it neither
+  starts nor ends with `:`), and it names no URI scheme of its own: `doc:x`,
+  `block:x`, `sentinel:no_parent` and `a:b` are refused, while `12:34` (a
+  scheme cannot start with a digit) and `x::src::0` are bare. The engine
+  refuses any other id on every route that can carry one: the `ID` property,
+  the `properties` bag, the `org_properties` carrier, the `file_properties`
+  carrier (where an empty `:ID:` is allowed, since it is authored text and not
+  an identity), and the `id` of a `create` whose id is a `block:` URI or bare.
+  If such an id still reaches the renderer, the drawer gets the block's own id
+  and a warning names the dropped value. The parser still accepts any
+  authored `:ID:` that forms a URI; it does not apply this rule to text an
+  external editor wrote. A source block's `:id` header argument is the same
+  kind of id; the parser refuses a file whose source block `:id` forms no URI.
 - **Keys the parser lifts into typed fields are not plain properties.**
   `PRIORITY`, `COLLAPSED`, `WIDGET_ONLY`, `REQUIRES`, `BLOCKED-BY`,
   `ADVICE_SUPPRESSED` and `contributes-to` (any case) become typed block

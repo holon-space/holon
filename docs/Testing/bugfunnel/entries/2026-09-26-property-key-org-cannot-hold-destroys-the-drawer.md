@@ -28,7 +28,8 @@ The keystone draws property keys from a fixed list of plain names, so no
 generated case could reach an illegal key.
 
 ## Remedy
-`DrawerKey::parse` (`crates/holon-org-format/src/drawer.rs`): one token, no
+`ValueCarrier::key` (`crates/holon-org-format/src/drawer.rs`): a key the
+carrier's own reader reads back as itself; for a headline drawer one token, no
 whitespace, no `:`, no control character, not `PROPERTIES`/`END`. The engine
 refuses a write under such a key (`refuse_undrawable_property_key`,
 `crates/holon/src/api/operation_engine.rs`; pinned by

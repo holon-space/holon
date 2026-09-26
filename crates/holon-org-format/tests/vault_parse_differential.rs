@@ -9,6 +9,10 @@
 //! HOLON_VAULT_SIM=/path/to/vault HOLON_VAULT_DUMP=/tmp/parse.jsonl \
 //!   cargo test -p holon-org-format --test vault_parse_differential -- --ignored
 //! ```
+//!
+//! `write_rules_census` counts, without printing any content, the ids and
+//! keys of a vault that the write rules (`DrawerId`, `ValueCarrier::key`)
+//! would refuse.
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -91,4 +95,69 @@ fn dump_parsed_vault() {
     sink.flush().unwrap();
     eprintln!("dumped {} files, {blocks} blocks", files.len());
     assert!(blocks > 0, "the vault parsed into no blocks");
+}
+
+#[test]
+#[ignore = "needs HOLON_VAULT_SIM"]
+fn write_rules_census() {
+    use holon_org_format::DrawerId;
+    use holon_org_format::ValueCarrier;
+
+    let root = PathBuf::from(std::env::var("HOLON_VAULT_SIM").expect("HOLON_VAULT_SIM"));
+    let files = org_files(&root);
+    assert!(!files.is_empty(), "no org files under {}", root.display());
+    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+    for path in &files {
+        let source = std::fs::read_to_string(path).unwrap();
+        let parsed = match parse_org_file(path, &source, &EntityUri::no_parent(), &root) {
+            Ok(p) => p,
+            Err(_) => {
+                *counts.entry("files refused by the parser").or_default() += 1;
+                continue;
+            }
+        };
+        *counts.entry("files").or_default() += 1;
+        for block in std::iter::once(&parsed.document).chain(&parsed.blocks) {
+            if !block.id.is_block() {
+                *counts.entry("ids with a non-block scheme").or_default() += 1;
+                continue;
+            }
+            *counts.entry("block ids").or_default() += 1;
+            if DrawerId::parse(block.id.id()).is_err() {
+                *counts.entry("block ids DrawerId refuses").or_default() += 1;
+            }
+        }
+        for block in &parsed.blocks {
+            let carrier = if block.content_type == holon_api::ContentType::Source {
+                ValueCarrier::HeaderArg
+            } else {
+                ValueCarrier::HeadlineDrawer
+            };
+            for key in block.drawer_properties().keys() {
+                *counts.entry("block keys").or_default() += 1;
+                if carrier.key(key).is_err() {
+                    *counts
+                        .entry("block keys their carrier refuses")
+                        .or_default() += 1;
+                }
+            }
+        }
+        for (key, value) in
+            holon_org_format::parser::parse_file_drawer_from_content(&source).unwrap_or_default()
+        {
+            *counts.entry("file-drawer keys").or_default() += 1;
+            if key.eq_ignore_ascii_case("ID") {
+                if !value.is_empty() && DrawerId::parse(&value).is_err() {
+                    *counts
+                        .entry("file-drawer ids DrawerId refuses")
+                        .or_default() += 1;
+                }
+            } else if ValueCarrier::FileDrawer.key(&key).is_err() {
+                *counts
+                    .entry("file-drawer keys FileDrawer refuses")
+                    .or_default() += 1;
+            }
+        }
+    }
+    eprintln!("write-rules census: {counts:?}");
 }

@@ -10,60 +10,59 @@
 use std::borrow::Cow;
 use std::fmt;
 
-/// A property key org can write on a `:key: value` line and read back as the
-/// same key: one token with no whitespace, no `:`, no control character; not
-/// a drawer delimiter; not ending in `+` (org's append syntax, which orgize
-/// reads as the key without it); and not a spelling of `ID`, which the parser
-/// takes as the block's identity (see [`DrawerId`]).
+/// A property key one carrier's reader reads back as the same key, and not as
+/// the carrier's identity. Each carrier has its own reader, so a key is only
+/// valid for the carrier it was parsed for: see [`ValueCarrier::key`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct DrawerKey(String);
+pub struct DrawerKey {
+    carrier: ValueCarrier,
+    key: String,
+}
+
+impl DrawerKey {
+    pub fn as_str(&self) -> &str {
+        &self.key
+    }
+
+    /// `value` as this key's carrier writes it.
+    pub fn encode<'a>(&self, value: &'a str) -> Cow<'a, str> {
+        self.carrier.encode(value)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnrepresentableKey {
     pub key: String,
+    pub carrier: ValueCarrier,
 }
 
 impl fmt::Display for UnrepresentableKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "property key {:?} cannot be written to an org drawer: a key is one token with no \
-             whitespace, no ':', no control character, no trailing '+', and is not PROPERTIES, \
-             END or a spelling of ID",
-            self.key
-        )
+        let rule = match self.carrier {
+            ValueCarrier::HeadlineDrawer => {
+                "a headline :PROPERTIES: drawer: a key there is one token with no whitespace, no \
+                 ':', no control character, no trailing '+', and is not PROPERTIES, END or a \
+                 spelling of ID"
+            }
+            ValueCarrier::FileDrawer => {
+                "the file-level :PROPERTIES: drawer: a key there is one token with no whitespace \
+                 and no ':', and is not PROPERTIES, END or a spelling of ID"
+            }
+            ValueCarrier::HeaderArg => {
+                "a source block's header arguments: a key there is one token with no whitespace, \
+                 and is not `id`"
+            }
+        };
+        write!(f, "property key {:?} cannot be written to {rule}", self.key)
     }
 }
 
 impl std::error::Error for UnrepresentableKey {}
 
-impl DrawerKey {
-    pub fn parse(raw: &str) -> Result<DrawerKey, UnrepresentableKey> {
-        let legal = !raw.is_empty()
-            && !raw
-                .chars()
-                .any(|c| c.is_whitespace() || c.is_control() || c == ':')
-            && !raw.ends_with('+')
-            && !["PROPERTIES", "END", "ID"]
-                .iter()
-                .any(|reserved| raw.eq_ignore_ascii_case(reserved));
-        if legal {
-            Ok(DrawerKey(raw.to_string()))
-        } else {
-            Err(UnrepresentableKey {
-                key: raw.to_string(),
-            })
-        }
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-/// The value of an `:ID:` line: a block's bare id as the org parser reads it
-/// back, a non-empty token that forms a URI. It is written raw, never through
-/// the value codec, because the parser takes the id line verbatim.
+/// The value of an `:ID:` line: a block's bare id, which the org parser reads
+/// back as `block:<id>`. It is at most [`DrawerId::MAX_LEN`] bytes of RFC 3986
+/// unreserved characters (`A-Z a-z 0-9 - . _ ~`) in parts joined by `:` or
+/// `::`, and it names no URI scheme of its own (`doc:x`, `sentinel:no_parent`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DrawerId(String);
 
@@ -76,9 +75,11 @@ impl fmt::Display for UnrepresentableId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "the id {:?} cannot be written to an org :ID: line: an id is one non-empty token \
-             that forms a URI (no whitespace, no line break)",
-            self.value
+            "the id {:?} cannot be written to an org :ID: line: an id is a bare block id of at \
+             most {} characters from A-Z a-z 0-9 - . _ ~, in parts joined by ':' or '::', that \
+             names no URI scheme",
+            self.value,
+            DrawerId::MAX_LEN
         )
     }
 }
@@ -86,10 +87,19 @@ impl fmt::Display for UnrepresentableId {
 impl std::error::Error for UnrepresentableId {}
 
 impl DrawerId {
+    pub const MAX_LEN: usize = 255;
+
     pub fn parse(raw: &str) -> Result<DrawerId, UnrepresentableId> {
-        let legal = !raw.is_empty()
-            && ValueCarrier::HeadlineDrawer.encode(raw) == raw
-            && holon_api::EntityUri::try_from_raw(raw).is_ok();
+        let unreserved = |c: char| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | '~');
+        let parts: Vec<&str> = raw.split(':').collect();
+        let joined_by_colons = parts.first().is_some_and(|p| !p.is_empty())
+            && parts.last().is_some_and(|p| !p.is_empty())
+            && !parts.windows(2).any(|w| w[0].is_empty() && w[1].is_empty());
+        let legal = raw.len() <= Self::MAX_LEN
+            && joined_by_colons
+            && raw.chars().all(|c| c == ':' || unreserved(c))
+            && holon_api::EntityUri::schemed(raw).is_none()
+            && holon_api::EntityUri::try_from_raw(raw).is_ok_and(|u| u.is_block() && u.id() == raw);
         if legal {
             Ok(DrawerId(raw.to_string()))
         } else {
@@ -104,9 +114,9 @@ impl DrawerId {
     }
 }
 
-/// A place org writes a property value. Each has its own parser, so each
-/// has its own set of texts that survive raw.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A place org writes a property. Each has its own reader, so each has its
+/// own set of keys and of value texts that survive raw.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ValueCarrier {
     /// A headline's `:PROPERTIES:` drawer: orgize trims the value and drops
     /// a line whose value is empty.
@@ -120,6 +130,44 @@ pub enum ValueCarrier {
 }
 
 impl ValueCarrier {
+    pub fn key(self, raw: &str) -> Result<DrawerKey, UnrepresentableKey> {
+        let reads_back = match self {
+            ValueCarrier::HeadlineDrawer => {
+                !raw.is_empty()
+                    && !raw
+                        .chars()
+                        .any(|c| c.is_whitespace() || c.is_control() || c == ':')
+                    && !raw.ends_with('+')
+                    && !["PROPERTIES", "END", "ID"]
+                        .iter()
+                        .any(|reserved| raw.eq_ignore_ascii_case(reserved))
+            }
+            ValueCarrier::FileDrawer => {
+                crate::parser::parse_drawer_line(&format!(":{raw}: v"))
+                    .is_some_and(|(key, _)| key == raw)
+                    && !raw.eq_ignore_ascii_case("ID")
+            }
+            ValueCarrier::HeaderArg => {
+                !raw.is_empty()
+                    && raw != "id"
+                    && crate::models::parse_header_args_from_str(&format!(":{raw} v"))
+                        .into_iter()
+                        .eq([(raw.to_string(), "v".to_string())])
+            }
+        };
+        if reads_back {
+            Ok(DrawerKey {
+                carrier: self,
+                key: raw.to_string(),
+            })
+        } else {
+            Err(UnrepresentableKey {
+                key: raw.to_string(),
+                carrier: self,
+            })
+        }
+    }
+
     pub fn encode(self, value: &str) -> Cow<'_, str> {
         if self.survives_raw(value) && self.decode(value) == value {
             Cow::Borrowed(value)
@@ -173,30 +221,75 @@ impl ValueCarrier {
 #[cfg(test)]
 mod tests {
     use super::DrawerId;
-    use super::DrawerKey;
     use super::ValueCarrier::*;
 
     #[test]
-    fn keys_that_read_back_as_another_key_are_refused() {
-        for key in ["note+", "+", "ID", "id", "Id", "iD", "end", "Properties"] {
-            assert!(DrawerKey::parse(key).is_err(), "{key:?} was accepted");
-        }
-        for key in ["note", "IDENT", "a+b", "Effort"] {
-            assert!(DrawerKey::parse(key).is_ok(), "{key:?} was refused");
+    fn each_carrier_takes_the_keys_its_reader_reads_back() {
+        let cases: [(&str, [bool; 3]); 12] = [
+            ("note", [true, true, true]),
+            ("IDENT", [true, true, true]),
+            ("a+b", [true, true, true]),
+            ("note+", [false, true, true]),
+            ("+", [false, true, true]),
+            ("Id", [false, false, true]),
+            ("ID", [false, false, true]),
+            ("id", [false, false, false]),
+            ("end", [false, false, true]),
+            ("a:b", [false, false, true]),
+            ("a b", [false, false, false]),
+            ("", [false, false, false]),
+        ];
+        for (key, [headline, file, header]) in cases {
+            assert_eq!(
+                HeadlineDrawer.key(key).is_ok(),
+                headline,
+                "headline {key:?}"
+            );
+            assert_eq!(FileDrawer.key(key).is_ok(), file, "file drawer {key:?}");
+            assert_eq!(
+                HeaderArg.key(key).is_ok(),
+                header,
+                "header argument {key:?}"
+            );
         }
     }
 
     #[test]
-    fn an_id_is_a_non_empty_uri_token() {
+    fn an_id_is_a_bare_block_id() {
         for id in [
             "abc-123",
             "550e8400-e29b-41d4-a716-446655440000",
             "12:34",
-            "block:abc",
+            "journals::auto-create",
+            "lessons_for_tasks::rule::0",
+            "a.b_c~d",
         ] {
             assert!(DrawerId::parse(id).is_ok(), "{id:?} was refused");
         }
-        for id in ["", "a b", "kid\n* Evil", " kid", "a\"b", "\"kid\""] {
+        let too_long = "x".repeat(5000);
+        for id in [
+            "",
+            "a b",
+            "kid\n* Evil",
+            " kid",
+            "a\"b",
+            "\"kid\"",
+            "block:abc",
+            "doc:abc",
+            "file:abc",
+            "sentinel:no_parent",
+            "block::split-0",
+            ":END:",
+            ":PROPERTIES:",
+            "#+ID:",
+            "a:b",
+            "kid+",
+            "*kid",
+            "kid:",
+            "a:::b",
+            "caf\u{e9}",
+            too_long.as_str(),
+        ] {
             assert!(DrawerId::parse(id).is_err(), "{id:?} was accepted");
         }
     }

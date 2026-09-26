@@ -451,18 +451,18 @@ mod tests {
     #[test]
     fn test_render_simple_block() {
         let mut block = Block::new_text(
-            EntityUri::parse("local://test-uuid").unwrap(),
+            EntityUri::block("test-uuid"),
             test_doc_uri(),
             "Test Title\nBody content here",
         );
-        block.set_property("ID", Value::String("local://test-uuid".to_string()));
+        block.set_property("ID", Value::String("test-uuid".to_string()));
 
         let file_path = Path::new("/test/file.org");
         let org_text = OrgRenderer::render_entitys(&[block], file_path, &test_doc_uri());
 
         assert!(org_text.contains("* Test Title"));
         assert!(org_text.contains("Body content here"));
-        assert!(org_text.contains(":ID: local://test-uuid"));
+        assert!(org_text.contains(":ID: test-uuid"));
     }
 
     // WP-F: dangling parent must fail loud, not silently drop the block.

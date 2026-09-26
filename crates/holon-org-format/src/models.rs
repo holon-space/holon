@@ -200,16 +200,16 @@ fn format_properties_drawer(properties_json: &str, block_id: &str) -> String {
 }
 
 /// One `:key: value` drawer line, the value encoded by the drawer codec.
-/// Empty for a key org cannot hold, which is left out of the file.
+/// Empty for a key the carrier cannot hold, which is left out of the file.
 fn drawer_line(key: &str, value: &serde_json::Value, carrier: ValueCarrier) -> String {
-    let key = match crate::drawer::DrawerKey::parse(key) {
+    let key = match carrier.key(key) {
         Ok(key) => key,
         Err(e) => {
             tracing::warn!("org drawer: {e}; the property is left out of the file");
             return String::new();
         }
     };
-    format!(":{}: {}\n", key.as_str(), carrier.encode(&json_text(value)))
+    format!(":{}: {}\n", key.as_str(), key.encode(&json_text(value)))
 }
 
 /// The text a drawer line holds for a carrier value: a string as is, any
@@ -1555,7 +1555,7 @@ fn source_block_to_org(block: &Block) -> String {
     let mut drawer_props: Vec<_> = block.drawer_properties().into_iter().collect();
     drawer_props.sort_by(|(a, _), (b, _)| a.cmp(b));
     for (k, v) in &drawer_props {
-        let key = match crate::drawer::DrawerKey::parse(k) {
+        let key = match ValueCarrier::HeaderArg.key(k) {
             Ok(key) => key,
             Err(e) => {
                 tracing::warn!("org header argument: {e}; the property is left out of the file");
@@ -1565,7 +1565,7 @@ fn source_block_to_org(block: &Block) -> String {
         result.push_str(" :");
         result.push_str(key.as_str());
         result.push(' ');
-        result.push_str(&ValueCarrier::HeaderArg.encode(v));
+        result.push_str(&key.encode(v));
     }
 
     // Tags: a Source block has no headline to carry `:tag:` notation, so route

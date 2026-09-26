@@ -3,7 +3,7 @@ id: 2026-09-26-carrier-id-bypasses-the-drawer-codec
 date: 2026-09-26
 gap: COVERAGE
 secondary: null
-status: FIXED
+status: PARTIAL
 summary: >-
   A multi-line `ID` in a drawer carrier was written raw onto the `:ID:` line:
   the drawer broke, the engine accepted the write, and write-back of the whole
@@ -31,12 +31,21 @@ The codec PBT drew keys from `k[a-z0-9-]{0,6}`, and the keystone cases used a
 clean `ID`, so no generated case put a hostile value on the `:ID:` line.
 
 ## Remedy
-`DrawerId` (`crates/holon-org-format/src/drawer.rs`): a non-empty token that
-forms a URI and is written raw. The engine refuses any other id on the `ID`
-property, the `properties` bag, `org_properties` and `file_properties`
+Store to file through the engine: fixed. `DrawerId`
+(`crates/holon-org-format/src/drawer.rs`) is a bare block id; the engine
+refuses any other id on the `ID` property, the `properties` bag,
+`org_properties`, `file_properties` and a `create`'s `block:` id
 (`crates/holon-integration-tests/tests/editing_suite/drawer_id_write_boundary.rs`).
-The renderer writes the block's own id with a warning when a bad id reaches
-it past the engine; the rest of the file is written
-(`a_bad_carrier_id_past_the_engine_does_not_freeze_the_file`). The codec PBT
-key generator now reaches `ID`, its case variants, `x+` and the delimiters.
-The visible disclosure of that warning (`WritebackDegraded`) is group B work.
+The codec PBT key generator reaches `ID`, its case variants, `x+` and the
+delimiters. The bare-id rule is
+`2026-09-26-schemed-or-reserved-id-accepted-on-the-id-line.md`.
+
+Open:
+- A bad id that reaches the renderer past the engine (sync, peer merge,
+  ingest) makes the renderer write the block's own id and log a warning
+  (`a_bad_carrier_id_past_the_engine_does_not_freeze_the_file`); a vetoed
+  write-back is quarantined with an ERROR log. Neither is disclosed to the
+  user yet (`WritebackDegraded`, org-faithful group B).
+- The parser still accepts any authored `:ID:` that forms a URI, so an
+  external editor's `:ID: doc:x` files a headline as a foreign entity, and a
+  duplicate or case-variant `:ID:` line is dropped on read.

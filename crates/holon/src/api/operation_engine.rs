@@ -1696,6 +1696,8 @@ impl DispatchingOperationEngine {
     /// Refuse a block write that names a property under a key an org drawer
     /// cannot hold, or gives a block an id an org `:ID:` line cannot carry.
     /// The renderer would leave such a key, or such an id, out of the file.
+    /// A block's properties may render as a headline drawer or as source
+    /// header arguments; the headline drawer's key rule is the stricter one.
     fn refuse_undrawable_property_key(
         entity_name: &EntityName,
         op_name: &str,
@@ -1715,16 +1717,30 @@ impl DispatchingOperationEngine {
             "create" | "update" => params.iter().map(|(k, v)| (k.as_ref(), v)).collect(),
             _ => return Ok(()),
         };
-        let block = params
-            .get("id")
-            .and_then(|v| v.as_string())
-            .unwrap_or("<no id>");
+        let id = params.get("id").and_then(|v| v.as_string());
+        if let (Some(id), "create") = (id, op_name) {
+            let bare = match EntityUri::schemed(id) {
+                None => Some(id),
+                Some(_) => id.strip_prefix("block:"),
+            };
+            if let Some(bare) = bare
+                && let Err(e) = holon_org_format::DrawerId::parse(bare)
+            {
+                bail!("create: refusing block id {id:?}: {e}");
+            }
+        }
+        let block = id.unwrap_or("<no id>");
         for (field, value) in written {
             let file_drawer = field == holon_org_format::org_props::FILE_PROPERTIES;
+            let carrier = if file_drawer {
+                holon_org_format::ValueCarrier::FileDrawer
+            } else {
+                holon_org_format::ValueCarrier::HeadlineDrawer
+            };
             for (key, value) in Self::drawer_entries(field, value)? {
                 let names_the_id = key == "ID" || (file_drawer && key.eq_ignore_ascii_case("ID"));
                 if !names_the_id {
-                    if let Err(e) = holon_org_format::DrawerKey::parse(&key) {
+                    if let Err(e) = carrier.key(&key) {
                         bail!("{op_name}: refusing a property of block {block} via `{field}`: {e}");
                     }
                     continue;
@@ -4038,7 +4054,7 @@ mod instantiate_template_tests {
         )
         .await;
         // Template block WITH an org "ID" property, exactly as the org parser
-        // lifts `:ID:` (block_params.rs).
+        // lifts `:ID:` (block_params.rs): the bare id.
         create_block(
             &engine,
             &[
@@ -4047,8 +4063,7 @@ mod instantiate_template_tests {
                 (
                     "properties",
                     Value::String(
-                        r#"{"template":"daily","template_vars":"","ID":"block:tpl","keep":"y"}"#
-                            .into(),
+                        r#"{"template":"daily","template_vars":"","ID":"tpl","keep":"y"}"#.into(),
                     ),
                 ),
             ],

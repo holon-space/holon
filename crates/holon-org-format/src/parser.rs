@@ -189,7 +189,7 @@ fn newline_len_at(content: &str, at: usize) -> usize {
 /// One `:KEY:` or `:KEY: value` line of a property drawer. `None` for the
 /// `:PROPERTIES:` / `:END:` delimiters and for anything that is not a property
 /// line. The value is optional on purpose — see [`split_file_drawer`].
-fn parse_drawer_line(line: &str) -> Option<(String, String)> {
+pub(crate) fn parse_drawer_line(line: &str) -> Option<(String, String)> {
     let rest = line.trim_start().strip_prefix(':')?;
     let (key, value) = rest.split_once(':')?;
     if key.is_empty() || key.contains(char::is_whitespace) {

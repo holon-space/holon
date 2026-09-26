@@ -65,6 +65,31 @@ fn key() -> impl Strategy<Value = String> {
     ]
 }
 
+/// A key Holon's file-drawer line reader reads back as itself: one token
+/// with no whitespace and no `:`, not a drawer delimiter.
+fn file_reader_key(k: &str) -> bool {
+    !k.is_empty()
+        && !k.chars().any(|c| c.is_whitespace() || c == ':')
+        && !["PROPERTIES", "END"]
+            .iter()
+            .any(|d| k.eq_ignore_ascii_case(d))
+}
+
+/// A key the source-block header-argument reader reads back as itself: one
+/// whitespace-free token after the `:`, and not `id`, which names the block.
+fn header_reader_key(k: &str) -> bool {
+    !k.is_empty() && !k.chars().any(char::is_whitespace) && k != "id"
+}
+
+fn file_key() -> impl Strategy<Value = String> {
+    prop_oneof![
+        2 => key(),
+        2 => "[a-zA-Z0-9_+*#.,=\u{e9}\u{1b}-]{1,8}",
+        1 => prop_oneof![Just("note+"), Just("*k"), Just("#+k"), Just("k+v")]
+            .prop_map(str::to_string),
+    ]
+}
+
 /// The property keys the parser gives `kid` with nothing set on it.
 fn parse_kid(document: &Block, blocks: &[Block], kid: Block) -> Vec<String> {
     let mut blocks = blocks.to_vec();
@@ -77,12 +102,12 @@ fn parse_kid(document: &Block, blocks: &[Block], kid: Block) -> Vec<String> {
     kid.properties.keys().cloned().collect()
 }
 
-/// The block id an `:ID:` line with this value reads back as: a non-empty
-/// token that forms a URI.
+/// The block an `:ID:` line with this value reads back as, when the value is
+/// a bare block id the renderer writes.
 fn carried_id(v: &str) -> Option<EntityUri> {
-    (!v.is_empty())
-        .then(|| EntityUri::try_from_raw(v).ok())
-        .flatten()
+    holon_org_format::DrawerId::parse(v)
+        .is_ok()
+        .then(|| EntityUri::block(v))
 }
 
 /// The file's lines of the form `:<k>:` or `:<k>: ...`, so a key the renderer
@@ -178,7 +203,7 @@ proptest! {
     }
 
     #[test]
-    fn file_drawer_value_round_trips(k in key(), v in value()) {
+    fn file_drawer_value_round_trips(k in file_key(), v in value()) {
         let (mut document, blocks) = skeleton();
         let mut drawer = serde_json::Map::new();
         drawer.insert(k.clone(), serde_json::Value::String(v.clone()));
@@ -188,11 +213,11 @@ proptest! {
         prop_assert_eq!(back_blocks.len(), 1, "the value grew or ate blocks:\n{}", text);
         prop_assert_eq!(&back.id, &document.id, "the document lost its id:\n{}", text);
         let got = back.file_drawer().and_then(|d| d.get(&k).cloned());
-        if plain_key(&k) {
-            prop_assert_eq!(got, Some(serde_json::Value::String(v)), "file:\n{}", text);
-        } else if k.eq_ignore_ascii_case("ID") {
+        if k.eq_ignore_ascii_case("ID") {
             let want = if v.is_empty() { v } else { document.id.id().to_string() };
             prop_assert_eq!(got, Some(serde_json::Value::String(want)), "file:\n{}", text);
+        } else if file_reader_key(&k) {
+            prop_assert_eq!(got, Some(serde_json::Value::String(v)), "file:\n{}", text);
         } else {
             prop_assert!(!has_line_for(&text, &k), "key {:?} was written:\n{}", k, text);
         }
@@ -214,12 +239,16 @@ proptest! {
         prop_assert_eq!(back.len(), 2, "the value grew or ate blocks:\n{}", text);
         let src = back.iter().find(|b| b.id.id() == "src");
         prop_assert!(src.is_some(), "block:src lost its id:\n{}", text);
-        if plain_key(&k) {
+        if header_reader_key(&k) && k != "ID" {
             prop_assert_eq!(
                 src.unwrap().get_property(&k),
                 Some(Value::String(v)),
                 "file:\n{}", text
             );
+        } else {
+            let head = format!(" :{k} ");
+            let own_id_line = usize::from(k == "id");
+            prop_assert_eq!(text.matches(&head).count(), own_id_line, "key {:?} was written:\n{}", k, text);
         }
     }
 
@@ -230,6 +259,18 @@ proptest! {
         let text = render(&document, &blocks);
         let line = format!(":note: {t}\n");
         prop_assert!(text.contains(&line), "{:?} was rewritten:\n{}", t, text);
+    }
+
+    #[test]
+    fn an_authored_file_drawer_is_written_back_byte_equal(
+        k in file_key().prop_filter("the reader keeps a plain key", |k| {
+            file_reader_key(k) && !k.eq_ignore_ascii_case("ID")
+        }),
+        t in typed_value(),
+    ) {
+        let source = format!(":PROPERTIES:\n:ID: p\n:{k}: {t}\n:END:\n* Topic\n:PROPERTIES:\n:ID: topic\n:END:\n");
+        let (document, blocks) = parse(&source);
+        prop_assert_eq!(render(&document, &blocks), source);
     }
 
     #[test]

@@ -1,6 +1,7 @@
-//! A drawer key is one token of org that reads back as itself: no
+//! A headline drawer key is one token of org that reads back as itself: no
 //! whitespace, no `:`, not a drawer delimiter, no trailing `+`, not a
-//! spelling of `ID`. The engine refuses a property write under a key org
+//! spelling of `ID`. The file-level drawer has its own reader and its own
+//! key rule. The engine refuses a property write under a key its carrier
 //! cannot hold, and the org file keeps the block intact.
 //!
 //! @pbt kind harness
@@ -207,4 +208,33 @@ fn an_org_drawer_carrier_key_spelled_id_in_mixed_case_is_refused() {
             ),
         ],
     );
+}
+
+/// The file-level drawer has its own reader, which keeps a trailing `+` in a
+/// key; the engine accepts such a key there and it reaches the file.
+#[test]
+fn a_file_drawer_key_ending_in_plus_is_written() {
+    let rt = runtime();
+    rt.clone().block_on(async move {
+        let t = booted(rt.clone()).await;
+        let mut p = holon_api::StorageEntity::new();
+        p.insert("id".into(), text("block:page-notes"));
+        p.insert("field".into(), text("file_properties"));
+        p.insert(
+            "value".into(),
+            text(&serde_json::json!({ "note+": "v" }).to_string()),
+        );
+        let result = t
+            .engine()
+            .execute_operation(&EntityName::new("block"), "set_field", p, OpOrigin::User)
+            .await;
+        let file = org_file_after_settle(&t).await;
+        if let Err(e) = result {
+            panic!("the file-drawer key \"note+\" was refused: {e:#}\nnotes.org:\n{file}");
+        }
+        assert!(
+            file.starts_with(":PROPERTIES:\n") && file.contains("\n:note+: v\n"),
+            "the file-drawer key \"note+\" did not reach notes.org:\n{file}"
+        );
+    });
 }
