@@ -19,6 +19,9 @@ use holon_integration_tests::TestEnvironment;
 
 const ADOPTED: &str = "block:adopted-h";
 
+/// A `_`-prefixed app key: org write-back strips it, so no file carries it.
+const APP_KEY: &str = "_app_note";
+
 const BETA_STRIPPED: &str = "\
 #+TITLE: Beta
 #+ID: page-beta
@@ -80,6 +83,8 @@ fn adopted_block_loses_what_the_file_does_not_author(loro: bool) {
                 Value::String("<2026-01-01 Thu>".to_string()),
             ),
             ("aisle".to_string(), Value::String("3".to_string())),
+            ("ui_only_key".to_string(), Value::String("x".to_string())),
+            (APP_KEY.to_string(), Value::String("kept".to_string())),
         ]);
         t.execute_operation("block", "create", params)
             .await
@@ -88,7 +93,7 @@ fn adopted_block_loses_what_the_file_does_not_author(loro: bool) {
         loop {
             if stored_row(&t)
                 .await
-                .is_some_and(|(_, bag)| bag.contains_key("aisle"))
+                .is_some_and(|(_, bag)| bag.contains_key("aisle") && bag.contains_key(APP_KEY))
             {
                 break;
             }
@@ -123,7 +128,9 @@ fn adopted_block_loses_what_the_file_does_not_author(loro: bool) {
         let (_, bag_after_settle) = stored_row(&t).await.expect("the adopted block is gone");
         assert_eq!(bag, bag_after_settle, "the stored bag was still changing");
 
-        for key in ["priority", "scheduled", "aisle"] {
+        // `ui_only_key` was set by the app, not a file, but a file can carry it:
+        // once adopted, the file is authoritative for it.
+        for key in ["priority", "scheduled", "aisle", "ui_only_key"] {
             assert_eq!(
                 bag.get(key),
                 None,
@@ -131,6 +138,12 @@ fn adopted_block_loses_what_the_file_does_not_author(loro: bool) {
                  (parent {parent:?}): {bag:?}"
             );
         }
+        assert_eq!(
+            bag.get(APP_KEY),
+            Some(&Value::String("kept".to_string())),
+            "loro={loro}: no org file can carry `{APP_KEY}`, so adopting the block must not \
+             erase it: {bag:?}"
+        );
         t.stop_app().await.expect("stop_app");
     });
 }

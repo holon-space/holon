@@ -1017,78 +1017,14 @@ fn process_headlines(
         block.set_scheduled(scheduled);
         block.set_deadline(deadline);
 
-        // Store drawer properties as flat keys in block properties.
-        // `REQUIRES` is the only edge-typed drawer key — it gets pulled out
-        // into block.requires (Vec<String>) so SqlOperationProvider's edge
-        // partition can route it to the block_requires junction. Values may
-        // be either comma- or whitespace-separated (org-edna convention is
-        // space-separated; we accept both for ergonomics). Bare slugs are
-        // promoted to `block:` URIs at the boundary so block_requires.required_id
-        // matches block.id (per docs/Reference/ORG_SYNTAX.md). Anything else stays as
-        // a flat string property on block.properties.
-        // `:REQUIRES:` and `:BLOCKED-BY:` are two spellings of the SAME
-        // `block_requires` edge (block_requires.sql). Resolve the whole group as
-        // a UNIT so exactly one writer owns the canonical `REQUIRES` drawer key:
-        // an all-real group becomes the typed edge, a group holding any slot is
-        // carried verbatim (authored order). Handled here, skipped in the loop.
-        let dep_entries: Vec<(&str, &str)> = string_properties
-            .iter()
-            .filter(|(k, _)| is_dependency_key(k))
-            .map(|(k, v)| (k.as_str(), v.as_str()))
-            .collect();
-        match resolve_dependency_edge(&dep_entries, id.as_str(), scope)? {
-            Some(DependencyEdge::Typed(ids)) => {
-                for uri in ids {
-                    if !block.requires.contains(&uri) {
-                        block.requires.push(uri);
-                    }
-                }
-            }
-            Some(DependencyEdge::CarriedSlot(merged)) => {
-                block.set_property("REQUIRES", holon_api::Value::String(merged));
-            }
-            None => {}
-        }
-
-        for (key, value) in string_properties.iter() {
-            if is_dependency_key(key) {
-                // Resolved as a group above (canonical `REQUIRES`).
-                continue;
-            } else if key.eq_ignore_ascii_case(crate::models::org_props::PRIORITY) {
+        // Store drawer properties as flat keys in block properties, after the
+        // edge-typed ones are lifted into their typed edge fields.
+        let other_properties = lift_edge_properties(&mut block, &string_properties, scope)?;
+        for (key, value) in other_properties.iter() {
+            if key.eq_ignore_ascii_case(crate::models::org_props::PRIORITY) {
                 // Already parsed into the typed field; the renderer rebuilds
                 // this drawer line from it.
                 continue;
-            } else if key.eq_ignore_ascii_case("contributes-to") {
-                // `:contributes-to:` is the Compass CONTRIBUTION edge — same
-                // bare-ID grammar as `:REQUIRES:`, routed to the
-                // `block_contributes_to` junction. `none` is the authored
-                // sentinel for "advances nothing"; it names no block, so it
-                // parses to the empty set and the renderer omits the key.
-                let targets = parse_edge_targets(value, key, id.as_str(), scope)?;
-                match edge_ids(&targets) {
-                    Some(ids) => block.contributes_to = ids,
-                    // Slot-bearing: carry the authored text through as a plain
-                    // drawer property so it reaches disk and the store intact,
-                    // and `template_instantiation` still sees `{{var}}`.
-                    None => block.set_property(key, holon_api::Value::String(value.to_string())),
-                }
-            } else if key.eq_ignore_ascii_case("ADVICE_SUPPRESSED") {
-                // `:ADVICE_SUPPRESSED:` is the authored advice-suppression
-                // exclusion set (ADR 0021): identical bare-ID grammar to
-                // REQUIRES, pulled into block.advice_suppressed so the SQL edge
-                // partition routes it to the advice_suppressed junction.
-                // Closure kept deliberately: archlint's rule matches the call
-                // form, so point-free would drop this boundary from the ledger.
-                #[allow(clippy::redundant_closure)]
-                {
-                    block.advice_suppressed = value
-                        .split(|c: char| c == ',' || c.is_whitespace())
-                        .filter(|s| !s.is_empty())
-                        // ALLOW(entity_uri_from_raw): org drawer ADVICE_SUPPRESSED bare slug at
-                        // parse boundary
-                        .map(|s| EntityUri::from_raw(s))
-                        .collect();
-                }
             } else if key.eq_ignore_ascii_case("COLLAPSED") {
                 // Outline fold state is document state (Martin ruling
                 // 2026-07-11), so it round-trips through org the same as any
@@ -1622,6 +1558,80 @@ fn edge_ids(targets: &[EdgeTarget]) -> Option<Vec<EntityUri>> {
             })
             .collect(),
     )
+}
+
+/// Lift the edge-spelled entries of one block's flat `(key, value)` property
+/// list into `block`'s typed edge fields, and return the other entries in
+/// order. A key is edge-spelled when `EdgeField::from_drawer_key` names it, or
+/// it is `BLOCKED-BY`. Ingest params skip every such key as a property, so
+/// each format with flat key/value properties must pass them through here.
+///
+/// Block-referencing values take bare block ids; a value naming no block is an
+/// error. A value holding a `{{var}}` slot inside `template` is carried
+/// verbatim as a property instead (see [`edge_ids`]). Tags are added to the
+/// block's tag set.
+pub fn lift_edge_properties(
+    block: &mut Block,
+    properties: &[(String, String)],
+    template: Option<&TemplateVars>,
+) -> anyhow::Result<Vec<(String, String)>> {
+    let owner = block.id.id().to_string();
+    let dep_entries: Vec<(&str, &str)> = properties
+        .iter()
+        .filter(|(k, _)| is_dependency_key(k))
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    match resolve_dependency_edge(&dep_entries, &owner, template)? {
+        Some(DependencyEdge::Typed(ids)) => {
+            for uri in ids {
+                if !block.requires.contains(&uri) {
+                    block.requires.push(uri);
+                }
+            }
+        }
+        Some(DependencyEdge::CarriedSlot(merged)) => {
+            block.set_property("REQUIRES", holon_api::Value::String(merged));
+        }
+        None => {}
+    }
+
+    let mut other = Vec::new();
+    for (key, value) in properties {
+        if is_dependency_key(key) {
+            continue;
+        }
+        let Some(edge) = holon_api::EdgeField::from_drawer_key(key) else {
+            other.push((key.clone(), value.clone()));
+            continue;
+        };
+        match edge {
+            holon_api::EdgeField::Requires => {
+                unreachable!("`{key}` is a dependency key, resolved as a group above")
+            }
+            holon_api::EdgeField::Tags => {
+                for tag in value
+                    .split(|c: char| c == ',' || c.is_whitespace())
+                    .filter(|s| !s.is_empty())
+                {
+                    block.tags.insert(tag);
+                }
+            }
+            holon_api::EdgeField::ContributesTo | holon_api::EdgeField::AdviceSuppressed => {
+                let targets = parse_edge_targets(value, key, &owner, template)?;
+                match edge_ids(&targets) {
+                    Some(ids) if edge == holon_api::EdgeField::ContributesTo => {
+                        block.contributes_to = ids
+                    }
+                    Some(ids) => block.advice_suppressed = ids,
+                    // Slot-bearing: carry the authored text through as a plain
+                    // property so it reaches disk and the store intact, and
+                    // `template_instantiation` still sees `{{var}}`.
+                    None => block.set_property(key, holon_api::Value::String(value.clone())),
+                }
+            }
+        }
+    }
+    Ok(other)
 }
 
 /// The two org-drawer spellings of the `block_requires` dependency edge. Both

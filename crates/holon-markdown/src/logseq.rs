@@ -258,6 +258,7 @@ impl FileFormatAdapter for LogseqMarkdownAdapter {
             } else {
                 text_block(block_id.clone(), parent.clone(), &full)
             };
+            let props = holon_org_format::parser::lift_edge_properties(&mut block, &props, None)?;
             for (k, v) in &props {
                 if k.eq_ignore_ascii_case("id") {
                     continue;

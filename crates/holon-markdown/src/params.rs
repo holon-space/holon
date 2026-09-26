@@ -20,7 +20,7 @@ use holon_org_format::OrgBlockExt;
 pub fn content_differs(a: &Block, b: &Block) -> bool {
     a.content != b.content
         || a.marks != b.marks
-        || a.tags != b.tags
+        || holon_api::EdgeField::ALL.iter().any(|f| f.differs(a, b))
         || a.task_state() != b.task_state()
         || a.priority() != b.priority()
         || a.scheduled() != b.scheduled()
@@ -68,15 +68,10 @@ pub fn build_block_params(
     params.insert("updated_at".into(), Value::Integer(now));
 
     // Edge-typed fields, over the closed set so a new one cannot be omitted.
-    // Markdown expresses tags and nothing else, so every block-referencing edge
-    // is emitted EMPTY: the file is authoritative, and an absent syntax means
-    // the edge is gone, not merely unmentioned.
+    // Emitted even when empty: the file is authoritative, and an absent
+    // property means the edge is gone, not merely unmentioned.
     for field in holon_api::EdgeField::ALL {
-        let value = match field {
-            holon_api::EdgeField::Tags => field.param_value(block),
-            _ => Value::Array(Vec::new()),
-        };
-        params.insert(field.column().into(), value);
+        params.insert(field.column().into(), field.param_value(block));
     }
 
     if let Some(task_state) = block.task_state() {

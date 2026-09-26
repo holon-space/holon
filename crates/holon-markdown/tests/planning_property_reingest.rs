@@ -162,10 +162,61 @@ fn an_unchanged_block_emits_no_op() {
     assert!(!adapter.content_differs(&old, &new));
 }
 
+/// `contributes-to::` and `tags::` spell typed edges: the parser lifts them
+/// into the edge, and the params carry them there, not as properties.
 #[test]
-fn an_edge_spelled_property_is_not_stored_as_a_property() {
+fn edge_spelled_properties_reach_their_typed_edges() {
     let adapter = LogseqMarkdownAdapter::new();
-    let (block, doc) = parse_one(&adapter, "- buy milk\n  contributes-to:: groceries\n");
+    let (block, doc) = parse_one(
+        &adapter,
+        "- buy milk\n  contributes-to:: groceries\n  Tags:: work\n",
+    );
+    assert_eq!(
+        block.contributes_to,
+        vec![EntityUri::block("groceries")],
+        "{block:?}"
+    );
+    assert!(block.tags.contains("work"), "{block:?}");
     let create = adapter.build_block_params(&block, &doc, &doc, None);
-    assert!(!create.contains_key("contributes-to"), "{create:?}");
+    assert_param(
+        &create,
+        "contributes_to",
+        Value::Array(vec![Value::String("block:groceries".into())]),
+    );
+    assert_param(
+        &create,
+        "tags",
+        Value::Array(vec![Value::String("work".into())]),
+    );
+    for spelled in ["contributes-to", "Tags"] {
+        assert!(!create.contains_key(spelled), "{spelled} in {create:?}");
+    }
+}
+
+#[test]
+fn logseq_removed_edge_property_clears_the_edge() {
+    let op = reingest(
+        &LogseqMarkdownAdapter::new(),
+        "- buy milk\n  contributes-to:: groceries\n",
+        "- buy milk\n",
+    );
+    assert_param(&op, "contributes_to", Value::Array(Vec::new()));
+}
+
+/// An edge value that names no block refuses the file rather than vanishing.
+#[test]
+fn an_unparseable_edge_value_refuses_the_file() {
+    let adapter = LogseqMarkdownAdapter::new();
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let path = root.join("Groceries.md");
+    let source = "- buy milk\n  contributes-to:: {{aisle}}\n";
+    std::fs::write(&path, source).unwrap();
+    let Err(err) = adapter.parse(&path, source, &EntityUri::no_parent(), &root) else {
+        panic!("a slot outside a template names no block, yet the file parsed");
+    };
+    assert!(
+        format!("{err:#}").contains("contributes-to"),
+        "the error must name the key: {err:#}"
+    );
 }

@@ -67,5 +67,19 @@ the create, no `aisle` param). Green in `lane-logs/h2-green-markdown.log`.
   column is dropped with a warning, as on the org leg, because
   `partition_params` would write it into that column.
 
+- Edge-spelled properties (`contributes-to::`, `tags::`, `requires::`,
+  `advice-suppressed::`, any case) go to the typed edges through
+  `holon_org_format::parser::lift_edge_properties`, the function the org
+  headline parser also uses. The params skip those keys as properties, and
+  they emit every edge field. An intermediate revision of this fix skipped the
+  keys without lifting them, so both values vanished silently (lane verifier,
+  `lane-logs/ingest-r2-verify.md`). Red: `lane-logs/r3-edge-red.log`
+  (`edge_spelled_properties_reach_their_typed_edges`,
+  `an_unparseable_edge_value_refuses_the_file`). Green:
+  `lane-logs/r3-edge-green.log`. A value that names no block refuses the file.
+  On the org leg the shared lifter now also accepts `:tags:`,
+  `:contributes_to:` and `:advice-suppressed:`. Before this, org dropped them
+  silently in the same way.
+
 Adapter-level only, like `task_marker_reingest.rs`: the keystone cannot drive
 Markdown vaults (D56.a), so there is no hand-authored case.

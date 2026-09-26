@@ -4232,9 +4232,9 @@ impl FileSyncController {
                     &block.parent_id
                 };
                 // Absent from the diff base. A block another document holds is
-                // adopted with its stored state as the baseline, so what this
-                // file does not author is cleared; a new block has nothing to
-                // clear.
+                // adopted with its stored state as the baseline: a key a file
+                // can carry but this one does not author is cleared, even one
+                // the app set; a `_`-prefixed key no file can carry is kept.
                 let adopted = adopted_from_store.get(&block.id);
                 let mut params =
                     ingest_adapter.build_block_params(block, parent_id, &document_uri, adopted);
