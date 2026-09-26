@@ -111,10 +111,6 @@ impl BlockState {
     /// off-disk-ness as a per-block flag instead would need every create,
     /// split and move to propagate it — and the one that forgot would put a
     /// child back on disk in a file whose tree no longer contains it.
-    ///
-    /// Walking also makes the answer self-correcting: move a re-homed block
-    /// back under a document and it (and its subtree) are on disk again with
-    /// nothing to update.
     pub fn is_off_disk(&self, id: &EntityUri) -> bool {
         let mut cursor = id.clone();
         // The block count bounds an acyclic walk; `inv-no-parent-cycles` owns
@@ -292,6 +288,81 @@ impl BlockState {
         false
     }
 
+    /// `id` and every block below it.
+    pub fn subtree_ids(&self, id: &EntityUri) -> Vec<EntityUri> {
+        let mut out = vec![id.clone()];
+        let mut i = 0;
+        while i < out.len() {
+            let parent = out[i].clone();
+            out.extend(
+                self.blocks
+                    .values()
+                    .filter(|b| b.parent_id == parent)
+                    .map(|b| b.id.clone()),
+            );
+            i += 1;
+        }
+        out
+    }
+
+    /// Re-parent `id` (with its subtree) under the page `target_doc` at
+    /// `placement`, and record the subtree as that document's. A no-op when
+    /// this state does not hold `id`, which is how an undo snapshot taken
+    /// before the block existed stays untouched.
+    pub fn move_subtree_to_document(
+        &mut self,
+        id: &EntityUri,
+        target_doc: &EntityUri,
+        placement: &Placement,
+    ) {
+        use holon_orgmode::models::OrgBlockExt;
+        if !self.blocks.contains_key(id) {
+            return;
+        }
+        let siblings: Vec<EntityUri> = self
+            .blocks
+            .values()
+            .filter(|b| b.parent_id == *target_doc && b.id != *id)
+            .map(|b| b.id.clone())
+            .collect();
+        let first = siblings
+            .iter()
+            .map(|s| self.blocks[s].sequence())
+            .min()
+            .map_or(0, |s| s - 1);
+        let sequence = match placement {
+            Placement::First => first,
+            Placement::LastInFile(file_members) => {
+                let file_tail = siblings
+                    .iter()
+                    .filter(|s| file_members.contains(*s))
+                    .map(|s| self.blocks[s].sequence())
+                    .max();
+                match file_tail {
+                    None => first,
+                    Some(tail) => {
+                        for s in &siblings {
+                            let sibling = self.blocks.get_mut(s).expect("collected above");
+                            if sibling.sequence() > tail {
+                                sibling.set_sequence(sibling.sequence() + 1);
+                            }
+                        }
+                        tail + 1
+                    }
+                }
+            }
+        };
+        let block = self.blocks.get_mut(id).expect("presence checked above");
+        block.parent_id = target_doc.clone();
+        block.set_sequence(sequence);
+        for moved in self.subtree_ids(id) {
+            self.block_documents.insert(moved, target_doc.clone());
+        }
+        let mut blocks: Vec<Block> = self.blocks.values().cloned().collect();
+        crate::assign_reference_sequences_canonical(&mut blocks);
+        self.blocks = blocks.into_iter().map(|b| (b.id.clone(), b)).collect();
+    }
+
     /// Depth-first collection of text-block descendants of `parent_id`, in
     /// canonical child order, recording each visited block's parent (skipping
     /// the synthetic `no_parent` root). Backs `build_reference_navigator`'s
@@ -314,4 +385,15 @@ impl BlockState {
             self.collect_dfs_order(&child.id, dfs_order, parent_map);
         }
     }
+}
+
+/// Where a moved subtree lands among its new siblings.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Placement {
+    First,
+    /// After the last of the given children, which the caller derived as
+    /// "in the target's own file" (`RefDocuments::file_home_of`), before the
+    /// child pages that have files of their own: the ingest places a heading
+    /// after its predecessor in the file (`BlockDelta::Upsert::prev`).
+    LastInFile(HashSet<EntityUri>),
 }

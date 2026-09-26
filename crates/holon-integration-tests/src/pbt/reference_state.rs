@@ -952,6 +952,79 @@ impl ReferenceState {
         let resolve = |u: &EntityUri| map.get(u).cloned().unwrap_or_else(|| u.clone());
         let mut resolved = self.clone();
         resolved.domain.block_state = self.domain.block_state.remapped_doc_uris(map);
+        // The copy map is keyed by block ids, which a split or a creation may
+        // have minted under a synthetic key.
+        resolved.files.copies = self
+            .files
+            .copies
+            .iter()
+            .map(|(id, copy)| {
+                let blocks = |blocks: &[Block]| -> Vec<Block> {
+                    blocks
+                        .iter()
+                        .map(|block| {
+                            let mut block = block.clone();
+                            block.id = resolve(&block.id);
+                            block.parent_id = resolve(&block.parent_id);
+                            block
+                        })
+                        .collect()
+                };
+                (
+                    resolve(id),
+                    crate::pbt::file_adapter_state::PastedCopy {
+                        pasted: blocks(&copy.pasted),
+                        files: copy
+                            .files
+                            .iter()
+                            .map(|(doc, on_disk)| {
+                                (
+                                    resolve(doc),
+                                    crate::pbt::file_adapter_state::CopyOnDisk {
+                                        blocks: blocks(&on_disk.blocks),
+                                        disk_task_state: on_disk.disk_task_state.clone(),
+                                    },
+                                )
+                            })
+                            .collect(),
+                        conflict: copy.conflict,
+                        base_known: copy.base_known,
+                        undone: copy
+                            .undone
+                            .iter()
+                            .map(|(member, undone)| {
+                                (
+                                    resolve(member),
+                                    crate::pbt::file_adapter_state::UndoneMember {
+                                        holders: undone.holders.iter().map(&resolve).collect(),
+                                        put_back: blocks(std::slice::from_ref(&undone.put_back))
+                                            .remove(0),
+                                    },
+                                )
+                            })
+                            .collect(),
+                    },
+                )
+            })
+            .collect();
+        resolved.files.kept_after_delete = self
+            .files
+            .kept_after_delete
+            .iter()
+            .map(|(id, doc)| (resolve(id), resolve(doc)))
+            .collect();
+        resolved.files.deletions_ended_by_edit = self
+            .files
+            .deletions_ended_by_edit
+            .iter()
+            .map(|(id, file)| (resolve(id), file.clone()))
+            .collect();
+        // A block-keyed condition's subject is a block id.
+        resolved.conditions = self.conditions.with_subjects_resolved(|subject| {
+            map.iter()
+                .find(|(from, _)| from.as_str() == subject)
+                .map(|(_, to)| to.as_str().to_string())
+        });
 
         // Fields the matview/ViewModel bodies read alongside `block_state`
         // can themselves reference synthetic doc URIs (a pinned page's
@@ -2645,6 +2718,14 @@ impl ReferenceState {
             .get_mut(page_id)
             .expect("apply_page_rename: page block must exist (precondition)");
         block.content = new_title.to_string();
+        // A page that owns its file (a journal day page) takes it along: the
+        // file is named by the title.
+        if let Some(file) = self.files.documents.get_mut(page_id) {
+            *file = std::path::Path::new(file.as_str())
+                .with_file_name(format!("{new_title}.org"))
+                .to_string_lossy()
+                .into_owned();
+        }
         self.renamed_away_page_paths.push(old_path);
         self.recanon_and_rebuild();
     }

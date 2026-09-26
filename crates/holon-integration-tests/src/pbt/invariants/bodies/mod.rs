@@ -40,6 +40,7 @@ pub mod view_model_matches_store;
 // in holon-pbt-core (auto-derived `inv-navigation-focus`); body file deleted.
 pub mod companion_has_no_child_page_headings;
 pub mod conditions_match_ref;
+pub mod copies_stay_on_disk;
 pub mod display_placement_canonical_inert;
 pub mod drawer_open_matches_ref;
 pub mod embedded_page_collapsed_lazy;

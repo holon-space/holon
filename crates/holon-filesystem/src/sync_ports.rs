@@ -24,6 +24,11 @@ use holon_api::block::Block;
 /// One row shape, written by one statement: a skip that takes the hash must
 /// also take the membership, because it never parses the file and the row is
 /// then its whole account of which blocks that file owns.
+/// The statement that records the hash of the bytes a write-back wrote, once
+/// the sync is idle or stops. Its own text, so a per-interaction write budget
+/// can tell this deferred write from the interaction's own.
+pub const RECORD_FILE_HASH_SQL: &str = "UPDATE file SET content_hash = ? WHERE id = ?";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileProjection {
     pub content_hash: String,
@@ -153,6 +158,18 @@ pub trait BlockReader: Send + Sync {
         _: &FileProjection,
     ) -> Result<()> {
         Ok(())
+    }
+
+    /// Set the content hash of the existing `file` row `file_id`, leaving its
+    /// document and membership as they are. A missing row is an error. Its
+    /// statement is [`RECORD_FILE_HASH_SQL`], which no other write uses.
+    /// The default records nothing and fails, so a backend that does not
+    /// implement it discloses the written files as unrecorded.
+    async fn record_file_hash(&self, file_id: &EntityUri, _: &str) -> Result<()> {
+        anyhow::bail!(
+            "{} does not implement record_file_hash, so the hash of {file_id} is not recorded",
+            std::any::type_name::<Self>()
+        )
     }
 
     /// Phase 5 keystone: wait until the convergent block feed
@@ -527,6 +544,83 @@ pub trait WritebackDisclosure: Send + Sync {
     /// All-clear for [`writeback_lossy`](Self::writeback_lossy): a render of
     /// `path` holds every stored value. Called on every such render.
     fn writeback_faithful(&self, path: &Path);
+
+    /// Signal that `block_id` is on disk in `owner_file`, whose page
+    /// `owner_doc` owns it and stays authoritative, and in every one of
+    /// `copy_files`. `owner_file` is `None` when that page resolves to no file.
+    /// All copies are kept. `conflict`: the owner's file let the block go,
+    /// but a copy and the store were both edited apart, so no copy was
+    /// adopted. Re-raised whenever the files or `conflict` change.
+    ///
+    /// Sticky, keyed by `block_id`. Lifted by
+    /// [`block_in_one_file_again`](Self::block_in_one_file_again).
+    fn block_in_two_files(
+        &self,
+        block_id: &EntityUri,
+        owner_doc: &EntityUri,
+        owner_file: Option<&Path>,
+        copy_files: &[&Path],
+        conflict: bool,
+    );
+
+    /// All-clear for [`block_in_two_files`](Self::block_in_two_files): an
+    /// ingest adopted the block or found the last copy gone.
+    fn block_in_one_file_again(&self, block_id: &EntityUri);
+
+    /// Signal that `block_id` was deleted in Holon while `file` held a copy of
+    /// it, and that `file` brought it back as its own block.
+    ///
+    /// Sticky, keyed by `block_id`. Lifted by
+    /// [`deleted_block_gone_from_file`](Self::deleted_block_gone_from_file).
+    fn deleted_block_kept_in_file(&self, block_id: &EntityUri, file: &Path);
+
+    /// All-clear for
+    /// [`deleted_block_kept_in_file`](Self::deleted_block_kept_in_file): the
+    /// block left that file, or was deleted or moved in Holon again.
+    fn deleted_block_gone_from_file(&self, block_id: &EntityUri);
+
+    /// Signal that `block_id` was deleted from `file`, the file that owns it,
+    /// and Holon wrote it back, because each of `copy_files` holds a copy of
+    /// the heading it is under.
+    ///
+    /// Sticky, keyed by `block_id`. Lifted by
+    /// [`undone_deletion_resolved`](Self::undone_deletion_resolved).
+    fn deletion_undone(&self, block_id: &EntityUri, file: &Path, copy_files: &[&Path]);
+
+    /// All-clear for [`deletion_undone`](Self::deletion_undone): the copy of
+    /// the heading is adopted or gone.
+    fn undone_deletion_resolved(&self, block_id: &EntityUri);
+
+    /// Signal that `block_id`, whose deletion from `file` Holon undid, was
+    /// edited since: the deletion no longer stands, and the block stays.
+    /// Sticky for the rest of the process.
+    fn deletion_ended_by_edit(&self, block_id: &EntityUri, file: &Path);
+
+    /// Signal that the file-sync controller of `vault` failed before it
+    /// watched the vault, so nothing syncs; `cause` names the failure. Sticky
+    /// for the rest of the process.
+    fn vault_sync_not_started(&self, vault: &Path, cause: &str);
+
+    /// Signal that `file`, a record Holon keeps in the vault, could not be
+    /// read, whole or in part (`reason`), and was kept as it was at `kept_as`.
+    /// Sticky for the rest of the process.
+    fn vault_state_unreadable(&self, file: &Path, kept_as: &Path, reason: &str);
+
+    /// Signal that `step` of the start of `vault` failed (`cause`) after the
+    /// sync itself started. Sticky for the rest of the process.
+    fn vault_start_incomplete(&self, vault: &Path, step: &str, cause: &str);
+
+    /// Signal that Holon wrote each of `files` in `vault` but could not record
+    /// which bytes it wrote (`cause`), so the next start reads them again.
+    ///
+    /// Sticky, keyed by `vault`. Lifted by
+    /// [`written_files_recorded`](Self::written_files_recorded).
+    fn written_files_unrecorded(&self, vault: &Path, files: &[&Path], cause: &str);
+
+    /// All-clear for
+    /// [`written_files_unrecorded`](Self::written_files_unrecorded): every
+    /// file of `vault` Holon wrote has its bytes recorded.
+    fn written_files_recorded(&self, vault: &Path);
 }
 
 /// Authoritative "is this block id a registered shared-subtree mount?" seam.

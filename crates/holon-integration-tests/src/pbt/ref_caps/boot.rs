@@ -168,11 +168,17 @@ impl holon_pbt_core::capabilities::RefReboot for ReferenceState {
     ///   (`inv-sql-budget`'s first-visit allowance).
     /// - `warm_focus_watchers` / `seated_caret_targets` — the frontend's
     ///   watchers and seated editors died with the process.
+    /// - the `edit-refused-read-only-format` disclosure —
+    ///   `AllClear::UntilRestart`, raised by a refused write only, so the new
+    ///   boot shows it again only after the next refusal.
     fn reboot_drops_in_memory_state(&mut self) {
         self.ui.tab.active_editor = None;
         self.ui.tab.focused_cursor.clear();
         self.ui.tab.seen_focus_targets.clear();
         self.ui.tab.warm_focus_watchers.clear();
         self.ui.tab.seated_caret_targets.clear();
+        self.conditions
+            .clear_kind(holon_api::ConditionKind::EDIT_REFUSED_READ_ONLY_FORMAT);
+        self.restart_forgets_copy_state();
     }
 }

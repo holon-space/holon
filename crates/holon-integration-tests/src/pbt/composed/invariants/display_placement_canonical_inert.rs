@@ -28,7 +28,7 @@ pub fn wire() -> Box<dyn CapInvariant> {
                 CapId::of::<dyn SutRenderer>(),
             ],
             sut_absent: Vec::new(),
-            ref_present: Vec::new(),
+            ref_present: vec![CapId::of::<dyn holon_pbt_core::capabilities::RefCopies>()],
         },
         Attribution::at(Layer::ViewModel, file!()),
     ))

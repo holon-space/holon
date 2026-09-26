@@ -149,6 +149,32 @@ impl holon_filesystem::WritebackDisclosure for Disclosures {
     fn vault_file_emptied(&self, _: &std::path::Path) {}
     fn writeback_lossy(&self, _: &std::path::Path, _: &str) {}
     fn writeback_faithful(&self, _: &std::path::Path) {}
+    fn block_in_two_files(
+        &self,
+        _: &holon_api::EntityUri,
+        _: &holon_api::EntityUri,
+        _: Option<&std::path::Path>,
+        _: &[&std::path::Path],
+        _: bool,
+    ) {
+    }
+    fn block_in_one_file_again(&self, _: &holon_api::EntityUri) {}
+    fn deleted_block_kept_in_file(&self, _: &holon_api::EntityUri, _: &std::path::Path) {}
+    fn deletion_undone(
+        &self,
+        _: &holon_api::EntityUri,
+        _: &std::path::Path,
+        _: &[&std::path::Path],
+    ) {
+    }
+    fn undone_deletion_resolved(&self, _: &holon_api::EntityUri) {}
+    fn deletion_ended_by_edit(&self, _: &holon_api::EntityUri, _: &std::path::Path) {}
+    fn vault_sync_not_started(&self, _: &std::path::Path, _: &str) {}
+    fn vault_state_unreadable(&self, _: &std::path::Path, _: &std::path::Path, _: &str) {}
+    fn vault_start_incomplete(&self, _: &std::path::Path, _: &str, _: &str) {}
+    fn written_files_unrecorded(&self, _: &std::path::Path, _: &[&std::path::Path], _: &str) {}
+    fn written_files_recorded(&self, _: &std::path::Path) {}
+    fn deleted_block_gone_from_file(&self, _: &holon_api::EntityUri) {}
 }
 
 struct Vault {

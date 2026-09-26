@@ -141,6 +141,13 @@ pub enum Reason {
     /// nothing and would burn a tick the sequence needs for syncing.
     VaultAlreadyShared,
 
+    // ---------- external cut & paste ----------
+    /// A block is on disk in two files, and the model does not describe this
+    /// transition while one is (D229.b).
+    CopyStands,
+    /// No block is on disk in two files.
+    NoCopyStands,
+
     // ---------- catch-all buckets ----------
     // Used when a transition's gate is hard to name in one variant; prefer a
     // specific variant whenever possible. Both still appear in the histogram

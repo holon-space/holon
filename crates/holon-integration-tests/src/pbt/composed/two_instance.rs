@@ -905,7 +905,7 @@ async fn backend_ids(backend: &Arc<dyn SutBackend>) -> BTreeSet<EntityUri> {
 async fn org_ids(org: Option<&Arc<dyn SutOrgRead>>) -> BTreeSet<EntityUri> {
     match org {
         Some(org) => org
-            .org_block_snapshot()
+            .org_block_snapshot(&Default::default())
             .await
             .into_iter()
             .map(|b| b.id)

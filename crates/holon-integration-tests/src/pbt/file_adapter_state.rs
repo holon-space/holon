@@ -23,6 +23,7 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
+use holon_api::block::Block;
 use holon_api::entity_uri::EntityUri;
 
 /// File-adapter file-state extracted from `ReferenceState` (ADR 0004 Phase 5).
@@ -57,6 +58,57 @@ pub struct FileAdapterState {
 
     /// Number of pre-startup org files created (for weighting StartApp).
     pub pre_startup_file_count: usize,
+
+    /// Blocks an external editor pasted into a second file while the file
+    /// that owns them still holds them (D229.b), by the pasted heading.
+    pub copies: BTreeMap<EntityUri, PastedCopy>,
+
+    /// Blocks deleted in Holon that a file holding a copy brought back, and
+    /// that file's document.
+    pub kept_after_delete: BTreeMap<EntityUri, EntityUri>,
+
+    /// Blocks whose undone deletion an edit ended in this process, and the
+    /// name of the file the deletion was undone in.
+    pub deletions_ended_by_edit: BTreeMap<EntityUri, String>,
+}
+
+/// A heading on disk in other files beside its owner's (D229.b).
+#[derive(Debug, Clone)]
+pub struct PastedCopy {
+    /// The subtree as the editor first pasted it, heading first: the common
+    /// ancestor of every copy and the store.
+    pub pasted: Vec<Block>,
+    /// Each document whose file holds a copy, and what that copy holds.
+    pub files: BTreeMap<EntityUri, CopyOnDisk>,
+    /// A copy and the store were edited apart; the user's next deletion of
+    /// one of them decides.
+    pub conflict: bool,
+    /// The app holds `pasted` as the common ancestor: the paste happened in
+    /// this session. A restart forgets it.
+    pub base_known: bool,
+    /// Members the user deleted from the owner's file, which Holon put back.
+    pub undone: BTreeMap<EntityUri, UndoneMember>,
+}
+
+/// A member of a copied heading whose deletion from the owner's file Holon
+/// undid.
+#[derive(Debug, Clone)]
+pub struct UndoneMember {
+    /// The documents whose copy still holds it.
+    pub holders: std::collections::BTreeSet<EntityUri>,
+    /// The member as Holon put it back. The deletion removes only this
+    /// version.
+    pub put_back: Block,
+}
+
+/// One file's copy of a pasted heading.
+#[derive(Debug, Clone)]
+pub struct CopyOnDisk {
+    /// The subtree as the editor pasted it into this file, heading first,
+    /// less the members deleted from it since.
+    pub blocks: Vec<Block>,
+    /// The copy's task keyword as the editor last saved it.
+    pub disk_task_state: Option<String>,
 }
 
 impl FileAdapterState {

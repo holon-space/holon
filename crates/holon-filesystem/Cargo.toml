@@ -10,6 +10,11 @@ publish = false
 [package.metadata.cargo-machete]
 ignored = ["workspace-hack"]
 
+[features]
+# Named points where a test makes the file-sync controller die (a crash or a
+# power loss). Off by default; the integration tests' `test-infra` enables it.
+crash-injection = []
+
 [dependencies]
 anyhow.workspace = true
 tokio = { workspace = true, features = ["sync"] }

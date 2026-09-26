@@ -115,6 +115,15 @@ pub enum BlockDelta {
     Remove(EntityUri),
 }
 
+impl BlockDelta {
+    pub fn block_id(&self) -> &EntityUri {
+        match self {
+            Self::Upsert { block, .. } => &block.id,
+            Self::Remove(id) => id,
+        }
+    }
+}
+
 /// One block as the holder knows it: the value, plus the document-relative
 /// previous sibling that fixes its position in its sibling group.
 #[derive(Debug, Clone)]
@@ -688,6 +697,13 @@ pub struct FileSyncController {
     /// hashes, then compares — no SQL writes when the hash matches).
     last_projection_hash: HashMap<CanonicalPath, String>,
 
+    /// The files whose `file` row this session wrote with the empty hash and
+    /// no read-only members. A write-back records the empty hash before it
+    /// writes, so a crash before the real hash is recorded leaves a row that
+    /// arms no boot skip; [`stamp_written_hashes`](Self::stamp_written_hashes)
+    /// records the real one when the loop is idle and at a clean stop.
+    empty_hash_rows: HashMap<CanonicalPath, EmptyHashRow>,
+
     /// The document each file projected to, as the last ingest recorded it.
     /// Loaded from the same `file` rows as the hashes above, and read ONLY for
     /// a format whose content embeds no id
@@ -999,6 +1015,80 @@ pub struct FileSyncController {
     /// map. Replaced wholesale per file on every ingest, so a block that moved
     /// out of a file stops being claimed by it.
     block_home: HashMap<EntityUri, CanonicalPath>,
+
+    /// Blocks on disk in more than one file (D229.b), keyed by block id. Every
+    /// copy stays on disk and a `block_in_two_files` condition stands until an
+    /// ingest leaves the block in one file.
+    copies: HashMap<EntityUri, BlockCopies>,
+
+    /// The blocks the owner's own ingest saw leave its file (or its file
+    /// deleted), while the files holding their copies are ingested to adopt
+    /// them. The only evidence of a release: a block Holon never wrote to a
+    /// file cannot leave it.
+    released: HashMap<EntityUri, Release>,
+
+    /// Set while a file that released blocks runs the ingests of the files
+    /// that adopt them. Such an ingest queues the adopters of its own
+    /// releases in `adopt_queue` instead of starting them.
+    adopting: bool,
+    adopt_queue: Vec<(Vec<CanonicalPath>, HashMap<EntityUri, Release>)>,
+
+    /// Blocks deleted in Holon that a file with a copy of them brought back,
+    /// by that file. Disclosed until the block leaves the file.
+    kept_after_delete: HashMap<EntityUri, CanonicalPath>,
+
+    /// Blocks whose deletion from their own file Holon undid because another
+    /// file holds a copy of them. Disclosed until the block is in no copy file
+    /// any more, whatever the reason; then the deletion stands.
+    undone_deletions: HashMap<EntityUri, UndoneDeletion>,
+    /// Undone deletions that ended while one of their files, as Holon last
+    /// wrote or read it, still holds the block: the change that ends them has
+    /// not reached that file yet. The vault record keeps them until it has,
+    /// so the boot after a crash settles them again.
+    ending_undone: HashMap<EntityUri, EndingUndone>,
+    /// The undone deletions as last written beside the Loro snapshot.
+    persisted_undone: Vec<crate::undone_deletions_file::UndoneDeletionRecord>,
+
+    /// During the initial scan: the vault files by each block id their text
+    /// carries, read once when an ingest first releases blocks.
+    scan_id_index: Option<HashMap<String, Vec<CanonicalPath>>>,
+}
+
+/// The files other than its owner's that hold a block on disk.
+struct BlockCopies {
+    owner_doc: EntityUri,
+    /// `None` when the owner's page resolves to no file.
+    owner_file: Option<PathBuf>,
+    copy_files: Vec<CanonicalPath>,
+    /// The subtree as the owner's file held it when the copy was pasted, in
+    /// document order, in this session: the common ancestor of every copy and
+    /// the store. `None` when the paste predates what Holon read of both files.
+    base: Option<Vec<Block>>,
+    /// A copy and the store were both edited apart; the user's next deletion
+    /// of one of them decides.
+    conflict: bool,
+    /// The block was deleted in Holon; the first file holding a copy brings
+    /// it back.
+    owner_deleted: bool,
+}
+
+/// A block's owner let it go, and what a copy's adoption does when the copy
+/// and the store were edited apart.
+#[derive(Clone)]
+struct Release {
+    /// The document whose file let the block go.
+    by: EntityUri,
+    on_conflict: OnConflict,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OnConflict {
+    /// Keep both, the owner keeps the block, and disclose.
+    Refuse,
+    /// The user deleted the owner's copy: the file's copy wins.
+    TakeDisk,
+    /// The user moved the store's version into the file's page in Holon.
+    TakeStore,
 }
 
 impl FileSyncController {
@@ -1025,6 +1115,7 @@ impl FileSyncController {
         Self {
             last_projection: HashMap::new(),
             last_projection_hash: HashMap::new(),
+            empty_hash_rows: HashMap::new(),
             last_projection_doc: HashMap::new(),
             persisted_read_only_blocks: HashMap::new(),
             disk_signatures: HashMap::new(),
@@ -1068,6 +1159,15 @@ impl FileSyncController {
             empty_since: HashMap::new(),
             duplicate_id_disclosed: HashSet::new(),
             block_home: HashMap::new(),
+            copies: HashMap::new(),
+            released: HashMap::new(),
+            adopting: false,
+            adopt_queue: Vec::new(),
+            kept_after_delete: HashMap::new(),
+            undone_deletions: HashMap::new(),
+            ending_undone: HashMap::new(),
+            persisted_undone: Vec::new(),
+            scan_id_index: None,
         }
     }
 
@@ -1126,6 +1226,63 @@ impl FileSyncController {
             .is_none_or(|pristine| pristine == rendered)
     }
 
+    /// The vault files Holon has not read in this session, other than
+    /// `except`, whose text carries the `:ID:` of a block in `released`.
+    async fn unread_files_holding(
+        &mut self,
+        released: &HashMap<EntityUri, Release>,
+        except: &CanonicalPath,
+    ) -> Result<Vec<CanonicalPath>> {
+        if self.scan_id_index.is_none() {
+            let index = self.vault_id_index().await?;
+            self.scan_id_index = Some(index);
+        }
+        let index = self.scan_id_index.as_ref().expect("built above");
+        let mut holders: Vec<CanonicalPath> = released
+            .keys()
+            .filter_map(|id| index.get(id.id()))
+            .flatten()
+            .filter(|file| *file != except && !self.last_projection.contains_key(*file))
+            .cloned()
+            .collect();
+        holders.sort_by(|a, b| a.as_path_buf().cmp(b.as_path_buf()));
+        holders.dedup();
+        Ok(holders)
+    }
+
+    /// Every vault file a format reads, by each `:ID:` value its text carries.
+    async fn vault_id_index(&self) -> Result<HashMap<String, Vec<CanonicalPath>>> {
+        let scanned = self
+            .fs
+            .scan_directory(&self.root_dir)
+            .await
+            .with_context(|| format!("list the vault {}", self.root_dir.display()))?;
+        let mut index: HashMap<String, Vec<CanonicalPath>> = HashMap::new();
+        for file in scanned.files {
+            if self.formats.adapter_for(&file).is_none() {
+                continue;
+            }
+            let text = self
+                .fs
+                .read_to_string(&file)
+                .await
+                .with_context(|| format!("read {}", file.display()))?;
+            let canonical = CanonicalPath::new(&file);
+            for line in text.lines() {
+                let Some((key, value)) = line.trim().split_at_checked(4) else {
+                    continue;
+                };
+                if key.eq_ignore_ascii_case(":ID:") && !value.trim().is_empty() {
+                    index
+                        .entry(value.trim().to_string())
+                        .or_default()
+                        .push(canonical.clone());
+                }
+            }
+        }
+        Ok(index)
+    }
+
     /// Whether the controller is currently in initial-scan (feed-barrier
     /// batching) mode. `false` in steady state — used by tests to prove the
     /// scan flag does not leak past `finish_initial_scan`.
@@ -1143,6 +1300,7 @@ impl FileSyncController {
     /// old fixed budget expired early under load, BugFunnel 2026-07-12).
     /// Called before `signal_ready` so a genuine stall becomes a scan failure.
     pub async fn finish_initial_scan(&mut self, stall_ms: u64) -> Result<()> {
+        self.scan_id_index = None;
         let mut ids = self.scan_feed_ids.take().unwrap_or_default();
         ids.sort();
         ids.dedup();
@@ -1467,6 +1625,30 @@ impl FileSyncController {
             );
             self.last_projection_hash.clear();
         }
+
+        let records =
+            match crate::undone_deletions_file::load(self.fs.as_ref(), &self.root_dir).await {
+                Ok(records) => records,
+                Err(e) => {
+                    self.set_aside_unreadable_undone_deletions(&format!("{e:#}"))
+                        .await?;
+                    Vec::new()
+                }
+            };
+        let mut refused = Vec::new();
+        for record in &records {
+            match self.undone_from_record(record) {
+                Ok((block, undone)) => {
+                    self.undone_deletions.insert(block, undone);
+                }
+                Err(e) => refused.push(format!("{e:#}")),
+            }
+        }
+        if !refused.is_empty() {
+            self.keep_refused_undone_deletions(&refused.join("; "))
+                .await?;
+        }
+        self.persisted_undone = records;
 
         // last_projection (full rendered string) is intentionally NOT eagerly
         // populated by walking every block — it's a session-only cache used
@@ -1801,6 +1983,41 @@ impl FileSyncController {
     /// the diff-ingestion delete pass uses.
     #[tracing::instrument(skip(self, canonical), name = "org.on_file_deleted", fields(path = %path.display()))]
     async fn on_file_deleted(&mut self, path: &Path, canonical: &CanonicalPath) -> Result<()> {
+        self.on_file_deleted_unsettled(path, canonical).await?;
+        self.apply_standing_deletions().await
+    }
+
+    /// A deleted file drops the copies it held; an undone deletion that no
+    /// copy file holds any more stands.
+    async fn apply_standing_deletions(&mut self) -> Result<()> {
+        let standing = self.take_standing_deletions().await?;
+        if standing.is_empty() {
+            return Ok(());
+        }
+        for id in standing {
+            let Some(owner_doc) = self.resolve_authoritative_doc(&id).await? else {
+                continue;
+            };
+            let mut params: holon_api::StorageEntity = HashMap::new();
+            params.insert("id".into(), Value::String(id.to_string()));
+            params.insert(
+                ROUTING_DOC_URI_KEY.into(),
+                Value::String(owner_doc.to_string()),
+            );
+            self.ordering.delete_in_tree(params).await.map_err(|e| {
+                anyhow::anyhow!(
+                    "delete_in_tree({id}) whose deletion from its own file stands: {e:#}"
+                )
+            })?;
+        }
+        self.flush_downstream("after standing deletions").await
+    }
+
+    async fn on_file_deleted_unsettled(
+        &mut self,
+        path: &Path,
+        canonical: &CanonicalPath,
+    ) -> Result<()> {
         // Resolve the vanished file's document. The disk bytes are gone, so
         // identity comes from the last projected content's `#+ID:` (survives
         // renames, same authority as the ingest path); when this session never
@@ -1942,6 +2159,26 @@ impl FileSyncController {
             self.forget_file_state(canonical);
             return Ok(());
         }
+
+        // Deleting the file releases every block in it: the files holding
+        // copies adopt theirs before the cascade, and the user's deletion is
+        // their choice where a copy and the store were edited apart.
+        let released: HashMap<EntityUri, Release> = self
+            .copies
+            .iter()
+            .filter(|(_, copies)| copies.owner_doc == document_uri)
+            .map(|(id, _)| {
+                (
+                    id.clone(),
+                    Release {
+                        by: document_uri.clone(),
+                        on_conflict: OnConflict::TakeDisk,
+                    },
+                )
+            })
+            .collect();
+        let adopters = self.adopters_of(&released, canonical);
+        self.ingest_adopters(adopters, released, path).await?;
 
         let blocks = self.block_reader.get_blocks(&document_uri).await?;
         info!(
@@ -2168,12 +2405,10 @@ impl FileSyncController {
     /// authority does not already route to that same file.
     ///
     /// When the authority DOES name the claimant's document the slug is a
-    /// stale on-disk copy rather than a contested identity: the
-    /// cross-doc-membership guard skips it and this file's own honest
-    /// re-render prunes it, so refusing the file would strand that copy on
-    /// disk at every boot. The document's own root is excluded: its identity
-    /// is the `#+ID:`, which the duplicate-document refusal upstream already
-    /// settled.
+    /// second copy or half of a move rather than a contested identity, and
+    /// the cross-doc-membership guard decides which. The document's own root is
+    /// excluded: its identity is the `#+ID:`, which the duplicate-document
+    /// refusal upstream already settled.
     async fn colliding_block_slug(
         &self,
         blocks: &[Block],
@@ -2415,8 +2650,38 @@ impl FileSyncController {
         }
         self.doc_home.retain(|_, home| home != canonical);
         self.block_home.retain(|_, home| home != canonical);
+        let gone: Vec<EntityUri> = self
+            .copies
+            .iter()
+            .filter(|(_, copies)| copies.copy_files.contains(canonical))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in gone {
+            self.drop_copy(&id, canonical);
+        }
+        // A copy file the boot could not read holds its undone deletions
+        // outside `copies`.
+        let undone: Vec<EntityUri> = self
+            .undone_deletions
+            .iter()
+            .filter(|(_, undone)| undone.copy_files.contains(canonical))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in undone {
+            self.undone_leaves_file(&id, canonical);
+        }
+        let kept: Vec<EntityUri> = self
+            .kept_after_delete
+            .iter()
+            .filter(|(_, file)| *file == canonical)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in kept {
+            self.forget_kept_after_delete(&id);
+        }
         self.last_projection.remove(canonical);
         self.last_projection_hash.remove(canonical);
+        self.empty_hash_rows.remove(canonical);
         self.persisted_read_only_blocks.remove(canonical);
         self.disk_signatures.remove(canonical);
         self.base_source.remove(canonical);
@@ -2459,6 +2724,8 @@ impl FileSyncController {
         if let Some(v) = self.last_projection_hash.remove(from) {
             self.last_projection_hash.insert(to.clone(), v);
         }
+        // The row of `to` is another row: it holds what it held before.
+        self.empty_hash_rows.remove(from);
         if let Some(v) = self.disk_signatures.remove(from) {
             self.disk_signatures.insert(to.clone(), v);
         }
@@ -2639,6 +2906,260 @@ impl FileSyncController {
     /// `Err` is still propagated so the caller's degraded-mode
     /// banner / survival logic is unchanged.
     pub async fn on_file_changed(&mut self, path: &Path) -> Result<IngestOutcome> {
+        let outcome = self.on_file_changed_unpersisted(path).await;
+        self.persist_undone_deletions().await?;
+        outcome
+    }
+
+    /// The undone-deletions record could not be read: it is moved aside for
+    /// recovery, never deleted, the user is told, and Holon starts without it.
+    /// The put-back lines it tracked are still in their files, so nothing is
+    /// lost; only the pending deletions are no longer tracked.
+    async fn set_aside_unreadable_undone_deletions(&self, reason: &str) -> Result<()> {
+        let path = crate::undone_deletions_file::path(&self.root_dir);
+        let kept_as = self.unreadable_undone_deletions_path();
+        self.fs.rename(&path, &kept_as).await.with_context(|| {
+            format!(
+                "move the unreadable {} aside to {}",
+                path.display(),
+                kept_as.display()
+            )
+        })?;
+        tracing::error!(
+            file = %path.display(),
+            kept_as = %kept_as.display(),
+            reason,
+            "[FileSyncController] the undone deletions could not be read; moved aside, starting \
+             without them"
+        );
+        if let Some(disclosure) = &self.writeback_disclosure {
+            disclosure.vault_state_unreadable(&path, &kept_as, reason);
+        }
+        Ok(())
+    }
+
+    /// Some records of the undone deletions could not be used (`reason`): the
+    /// file is copied aside as it is, the user is told, and Holon keeps the
+    /// rest.
+    async fn keep_refused_undone_deletions(&self, reason: &str) -> Result<()> {
+        let path = crate::undone_deletions_file::path(&self.root_dir);
+        let kept_as = self.unreadable_undone_deletions_path();
+        let text = self
+            .fs
+            .read_to_string(&path)
+            .await
+            .with_context(|| format!("read {} to keep a copy of it", path.display()))?;
+        self.fs
+            .write(&kept_as, text.as_bytes())
+            .await
+            .with_context(|| {
+                format!("keep a copy of {} at {}", path.display(), kept_as.display())
+            })?;
+        tracing::error!(
+            file = %path.display(),
+            kept_as = %kept_as.display(),
+            reason,
+            "[FileSyncController] undone deletions refused; the file is kept as it was, and \
+             Holon starts with the rest"
+        );
+        if let Some(disclosure) = &self.writeback_disclosure {
+            disclosure.vault_state_unreadable(&path, &kept_as, reason);
+        }
+        Ok(())
+    }
+
+    fn unreadable_undone_deletions_path(&self) -> PathBuf {
+        crate::undone_deletions_file::path(&self.root_dir).with_file_name(format!(
+            "{}.unreadable-{}",
+            crate::undone_deletions_file::FILE_NAME,
+            self.clock.now_millis()
+        ))
+    }
+
+    /// A record read from the vault, with its paths inside the vault.
+    fn undone_from_record(
+        &self,
+        record: &crate::undone_deletions_file::UndoneDeletionRecord,
+    ) -> Result<(EntityUri, UndoneDeletion)> {
+        let in_vault = |path: &Path| -> Result<PathBuf> {
+            anyhow::ensure!(
+                path.components().next().is_some()
+                    && path
+                        .components()
+                        .all(|c| matches!(c, std::path::Component::Normal(_))),
+                "the undone deletion of {} names {}, which is not a path inside the vault",
+                record.block,
+                path.display()
+            );
+            Ok(self.root_dir.join(path))
+        };
+        let block = EntityUri::parse(&record.block)
+            .with_context(|| format!("the undone deletion of {:?}", record.block))?;
+        let undone = UndoneDeletion {
+            root: EntityUri::parse(&record.root)
+                .with_context(|| format!("the root of the undone deletion of {block}"))?,
+            file: in_vault(&record.file)?,
+            copy_files: record
+                .copy_files
+                .iter()
+                .map(|f| in_vault(f).map(CanonicalPath::new))
+                .collect::<Result<_>>()?,
+            put_back: record.put_back.clone(),
+        };
+        Ok((block, undone))
+    }
+
+    /// Tells the user that `step` of the vault's start failed, after the sync
+    /// itself started.
+    pub fn disclose_start_incomplete(&self, step: &str, cause: &anyhow::Error) {
+        if let Some(disclosure) = &self.writeback_disclosure {
+            disclosure.vault_start_incomplete(&self.root_dir, step, &format!("{cause:#}"));
+        }
+    }
+
+    /// Tells the user the vault is not synced, naming the cause: for a failure
+    /// before the controller watches the vault, which its loop cannot report.
+    pub fn sync_not_started_disclosure(&self) -> impl Fn(&str) + Send + 'static {
+        let disclosure = self.writeback_disclosure.clone();
+        let root = self.root_dir.clone();
+        move |cause| {
+            if let Some(disclosure) = &disclosure {
+                disclosure.vault_sync_not_started(&root, cause);
+            }
+        }
+    }
+
+    /// Write the undone deletions beside the Loro snapshot when they changed.
+    async fn persist_undone_deletions(&mut self) -> Result<()> {
+        let mut reached = Vec::new();
+        for (block, ending) in &self.ending_undone {
+            if !self.any_last_bytes_hold(&ending.files, block)? {
+                reached.push(block.clone());
+            }
+        }
+        for block in reached {
+            self.ending_undone.remove(&block);
+        }
+        let relative = |path: &Path| -> Result<PathBuf> {
+            Ok(path
+                .strip_prefix(&self.root_dir)
+                .with_context(|| {
+                    format!(
+                        "{} is outside the vault {}",
+                        path.display(),
+                        self.root_dir.display()
+                    )
+                })?
+                .to_path_buf())
+        };
+        let mut records = Vec::new();
+        let ending = self
+            .ending_undone
+            .iter()
+            .map(|(block, ending)| (block, &ending.undone));
+        for (block, undone) in self.undone_deletions.iter().chain(ending) {
+            let mut copy_files = undone
+                .copy_files
+                .iter()
+                .map(|f| relative(f.as_path_buf()))
+                .collect::<Result<Vec<_>>>()?;
+            copy_files.sort();
+            records.push(crate::undone_deletions_file::UndoneDeletionRecord {
+                block: block.as_str().to_string(),
+                root: undone.root.as_str().to_string(),
+                file: relative(&undone.file)?,
+                copy_files,
+                put_back: undone.put_back.clone(),
+            });
+        }
+        records.sort_by(|a, b| a.block.cmp(&b.block));
+        if records == self.persisted_undone {
+            return Ok(());
+        }
+        #[cfg(feature = "crash-injection")]
+        crate::crash_injection::reached("before_undone_deletions_written");
+        crate::undone_deletions_file::save(self.fs.as_ref(), &self.root_dir, &records).await?;
+        self.persisted_undone = records;
+        Ok(())
+    }
+
+    /// Whether one of `files`, as Holon last wrote or read it, holds `block`.
+    fn any_last_bytes_hold(&self, files: &[CanonicalPath], block: &EntityUri) -> Result<bool> {
+        for file in files {
+            let Some(text) = self.last_projection.get(file) else {
+                continue;
+            };
+            let path = file.as_path_buf();
+            // Bytes the parser refuses may hold the block: the record stays.
+            let Ok(parsed) =
+                self.adapter(path)?
+                    .parse(path, text, &EntityUri::no_parent(), &self.root_dir)
+            else {
+                return Ok(true);
+            };
+            if parsed.blocks.iter().any(|b| b.id == *block) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// After the initial scan: each undone deletion read at boot is checked
+    /// against the vault as it is now. A block gone from the store is
+    /// resolved, and its put-back leaves the files that still hold it; a block
+    /// no copy file holds any more has its deletion stand. A copy file on disk
+    /// that the scan did not read may still hold it.
+    pub async fn settle_undone_deletions(&mut self) -> Result<()> {
+        #[cfg(feature = "crash-injection")]
+        if crate::crash_injection::fires("settle_undone_deletions") {
+            anyhow::bail!("[crash-injection] settling the undone deletions fails");
+        }
+        self.end_edited_undone_deletions().await?;
+        let ids: Vec<EntityUri> = self.undone_deletions.keys().cloned().collect();
+        let mut gone_from_store: HashSet<String> = HashSet::new();
+        for id in ids {
+            if self.resolve_authoritative_doc(&id).await?.is_none() {
+                gone_from_store.insert(id.as_str().to_string());
+                self.end_undone_deletion(&id, None);
+                continue;
+            }
+            let undone = &self.undone_deletions[&id];
+            let before = undone.copy_files.clone();
+            let mut holders: HashSet<CanonicalPath> = if self.copies.contains_key(&undone.root) {
+                let root = undone.root.clone();
+                self.copy_files_holding(&root, &id)?
+                    .into_iter()
+                    .filter(|f| before.contains(f))
+                    .collect()
+            } else {
+                HashSet::new()
+            };
+            holders.extend(before.into_iter().filter(|f| self.unread_at_boot(f)));
+            self.undone_deletions
+                .get_mut(&id)
+                .expect("present above")
+                .copy_files = holders;
+            if !self.undone_deletions[&id].copy_files.is_empty() {
+                self.disclose_undone(&id);
+            }
+        }
+        self.apply_standing_deletions().await?;
+        // A crash after the store change and before its write-back leaves the
+        // put-back on disk, and the scan skips a file whose bytes it wrote.
+        if !gone_from_store.is_empty() {
+            self.re_render_all_tracked(&gone_from_store).await?;
+        }
+        self.persist_undone_deletions().await
+    }
+
+    /// `file` is on disk, and the initial scan holds no successful read of it.
+    fn unread_at_boot(&self, file: &CanonicalPath) -> bool {
+        self.fs.exists(file.as_path_buf())
+            && (!self.last_projection.contains_key(file)
+                || self.quarantined.get(file) == Some(&QuarantineCause::Ingest))
+    }
+
+    async fn on_file_changed_unpersisted(&mut self, path: &Path) -> Result<IngestOutcome> {
         let canonical = CanonicalPath::new(path);
         // Post-boot pre-ingest steps, in INVARIANT ORDER. A vanished file reads
         // as `None` — that is an external deletion, which `ingest_file` handles.
@@ -2812,7 +3333,7 @@ impl FileSyncController {
     /// the split root instead of compounding it. Scoped to the parent each
     /// ID-less headline would actually be created under, so an unrelated stale
     /// cross-doc copy elsewhere in the file (which the cross-doc-membership
-    /// guard already prunes) does not block ingest.
+    /// guard already handles) does not block ingest.
     async fn assert_mint_parents_inside_doc_anchor(
         &self,
         document_uri: &EntityUri,
@@ -3027,6 +3548,835 @@ impl FileSyncController {
         .map(|page| page.id))
     }
 
+    /// The file `owner_doc`'s page lives in, or `None` when it has none.
+    async fn owner_file_of(&self, owner_doc: &EntityUri) -> Result<Option<PathBuf>> {
+        Ok(self
+            .doc_id_to_path(owner_doc, PathIntent::LookupResidence)
+            .await?
+            .map(|path| path.into_path_buf()))
+    }
+
+    fn holds_copy(&self, canonical: &CanonicalPath) -> bool {
+        self.copies
+            .values()
+            .any(|copies| copies.copy_files.contains(canonical))
+    }
+
+    /// The blocks `canonical` holds as copies of blocks other files own.
+    fn copies_held_by(&self, canonical: &CanonicalPath) -> Vec<EntityUri> {
+        self.copies
+            .iter()
+            .filter(|(_, copies)| copies.copy_files.contains(canonical))
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    fn disclose_copies(&self, id: &EntityUri) {
+        let copies = &self.copies[id];
+        let mut files: Vec<&Path> = copies
+            .copy_files
+            .iter()
+            .map(|file| file.as_path_buf().as_path())
+            .collect();
+        files.sort();
+        if let Some(disclosure) = &self.writeback_disclosure {
+            disclosure.block_in_two_files(
+                id,
+                &copies.owner_doc,
+                copies.owner_file.as_deref(),
+                &files,
+                copies.conflict,
+            );
+        }
+    }
+
+    /// The subtree of `id` as `owner_file`'s last known bytes hold it, when
+    /// the paste into `file` happened in this session: Holon knew `file`
+    /// without the block, or `file` appeared after the initial scan. That is
+    /// what was copied.
+    fn copy_base(
+        &self,
+        id: &EntityUri,
+        owner_file: Option<&Path>,
+        file: &Path,
+    ) -> Result<Option<Vec<Block>>> {
+        let Some(owner_file) = owner_file else {
+            return Ok(None);
+        };
+        let Some(owner_bytes) = self.last_projection.get(&CanonicalPath::new(owner_file)) else {
+            return Ok(None);
+        };
+        let parse = |path: &Path, bytes: &str| -> Result<Vec<Block>> {
+            Ok(self
+                .adapter(path)?
+                .parse(path, bytes, &EntityUri::no_parent(), &self.root_dir)
+                .with_context(|| format!("parse Holon's last bytes of {}", path.display()))?
+                .blocks)
+        };
+        let pasted_this_session = match self.last_projection.get(&CanonicalPath::new(file)) {
+            Some(file_bytes) => !parse(file, file_bytes)?.iter().any(|b| b.id == *id),
+            None => !self.in_initial_scan(),
+        };
+        if !pasted_this_session {
+            return Ok(None);
+        }
+        let owner_blocks = parse(owner_file, owner_bytes)?;
+        let mut members: HashSet<EntityUri> = HashSet::new();
+        let mut subtree: Vec<Block> = Vec::new();
+        for block in owner_blocks {
+            if block.id == *id || members.contains(&block.parent_id) {
+                members.insert(block.id.clone());
+                subtree.push(block);
+            }
+        }
+        Ok((!subtree.is_empty()).then_some(subtree))
+    }
+
+    /// `file` holds a copy of `id`, whose owner is `owner_doc`. The block's
+    /// first record takes `base`.
+    fn record_copy(
+        &mut self,
+        id: &EntityUri,
+        owner_doc: EntityUri,
+        owner_file: Option<PathBuf>,
+        file: &CanonicalPath,
+        base: Option<Vec<Block>>,
+    ) {
+        let copies = self
+            .copies
+            .entry(id.clone())
+            .or_insert_with(|| BlockCopies {
+                owner_doc: owner_doc.clone(),
+                owner_file: owner_file.clone(),
+                copy_files: Vec::new(),
+                base,
+                conflict: false,
+                owner_deleted: false,
+            });
+        let changed = copies.owner_doc != owner_doc
+            || copies.owner_file != owner_file
+            || copies.owner_deleted
+            || !copies.copy_files.contains(file);
+        copies.owner_doc = owner_doc;
+        copies.owner_file = owner_file;
+        copies.owner_deleted = false;
+        if !copies.copy_files.contains(file) {
+            copies.copy_files.push(file.clone());
+        }
+        if changed {
+            self.disclose_copies(id);
+        }
+    }
+
+    /// `file` adopted `id`: it is the owner now, and holds no copy of it.
+    fn adopt_copy(&mut self, id: &EntityUri, owner_doc: &EntityUri, file: &CanonicalPath) {
+        let copies = self
+            .copies
+            .get_mut(id)
+            .unwrap_or_else(|| panic!("{id} was adopted but no file held a copy of it"));
+        copies.owner_doc = owner_doc.clone();
+        copies.owner_file = Some(file.as_path_buf().clone());
+        copies.conflict = false;
+        // The adoption plan deleted every undone member of the copy.
+        let undone: Vec<EntityUri> = self
+            .undone_deletions
+            .iter()
+            .filter(|(_, undone)| undone.root == *id)
+            .map(|(block, _)| block.clone())
+            .collect();
+        for block in undone {
+            self.end_undone_deletion(&block, Some(file));
+        }
+        self.drop_copy(id, file);
+    }
+
+    /// `file` no longer holds a copy of `id`.
+    fn drop_copy(&mut self, id: &EntityUri, file: &CanonicalPath) {
+        let Some(copies) = self.copies.get_mut(id) else {
+            return;
+        };
+        copies.copy_files.retain(|f| f != file);
+        let members: Vec<EntityUri> = self
+            .undone_deletions
+            .iter()
+            .filter(|(_, undone)| undone.root == *id)
+            .map(|(block, _)| block.clone())
+            .collect();
+        for block in members {
+            self.undone_leaves_file(&block, file);
+        }
+        if !self.copies[id].copy_files.is_empty() {
+            self.disclose_copies(id);
+            return;
+        }
+        self.copies.remove(id);
+        info!("[FileSyncController] block {id} is in one file again");
+        if let Some(disclosure) = &self.writeback_disclosure {
+            disclosure.block_in_one_file_again(id);
+        }
+    }
+
+    /// The files holding copies of the blocks in `released`, except `except`.
+    fn adopters_of(
+        &self,
+        released: &HashMap<EntityUri, Release>,
+        except: &CanonicalPath,
+    ) -> Vec<CanonicalPath> {
+        let mut adopters: Vec<CanonicalPath> = self
+            .copies
+            .iter()
+            .filter(|(id, _)| released.contains_key(*id))
+            .flat_map(|(_, copies)| copies.copy_files.iter().cloned())
+            .filter(|file| file != except)
+            .collect();
+        adopters.sort_by(|a, b| a.as_path_buf().cmp(b.as_path_buf()));
+        adopters.dedup();
+        adopters
+    }
+
+    /// Ingest `adopters` so they adopt the blocks in `released`. An adopting
+    /// ingest that releases blocks itself queues their adopters, and the
+    /// outermost call runs them: no ingest nests more than one level deep.
+    async fn ingest_adopters(
+        &mut self,
+        adopters: Vec<CanonicalPath>,
+        released: HashMap<EntityUri, Release>,
+        released_by: &Path,
+    ) -> Result<()> {
+        if adopters.is_empty() {
+            return Ok(());
+        }
+        if self.adopting {
+            self.adopt_queue.push((adopters, released));
+            return Ok(());
+        }
+        self.adopting = true;
+        let result = self.run_adoptions(adopters, released, released_by).await;
+        self.adopting = false;
+        self.released.clear();
+        self.adopt_queue.clear();
+        result
+    }
+
+    async fn run_adoptions(
+        &mut self,
+        adopters: Vec<CanonicalPath>,
+        released: HashMap<EntityUri, Release>,
+        released_by: &Path,
+    ) -> Result<()> {
+        // Every round adopts or refuses at least one copy, and a refused copy
+        // is never released again without a new save.
+        let bound = self.copies.len() + 1;
+        let mut work = vec![(adopters, released)];
+        let mut rounds = 0;
+        while let Some((adopters, released)) = work.pop() {
+            rounds += 1;
+            anyhow::ensure!(
+                rounds <= bound,
+                "adopting the blocks {} released did not settle after {bound} rounds of \
+                 adopting ingests",
+                released_by.display(),
+            );
+            self.released = released;
+            for adopter in adopters {
+                let adopter_path = adopter.as_path_buf().clone();
+                match Box::pin(self.ingest_file(&adopter_path)).await {
+                    Ok(IngestOutcome::Ingested) => {}
+                    Ok(outcome) => tracing::warn!(
+                        adopter = %adopter_path.display(),
+                        released_by = %released_by.display(),
+                        ?outcome,
+                        "[FileSyncController] the file holding released blocks was not ingested; \
+                         their owner keeps them until it is"
+                    ),
+                    Err(e) => {
+                        return Err(e).with_context(|| {
+                            format!(
+                                "{} holds blocks {} released; ingesting it to adopt them",
+                                adopter_path.display(),
+                                released_by.display(),
+                            )
+                        });
+                    }
+                }
+            }
+            work.append(&mut self.adopt_queue);
+        }
+        Ok(())
+    }
+
+    /// Merge a released `subtree` this file holds with the store's version of
+    /// it, owned by `owner_doc`, against the pasted ancestor: each member's
+    /// fields, whether it exists, its parent, and its siblings' order. `Err`
+    /// names what both sides changed apart, when `on_conflict` refuses.
+    async fn plan_adoption(
+        &self,
+        subtree: &[&Block],
+        owner_doc: &EntityUri,
+        path: &Path,
+        document_uri: &EntityUri,
+        on_conflict: OnConflict,
+    ) -> Result<std::result::Result<AdoptionPlan, Vec<String>>> {
+        let root = subtree[0].id.clone();
+        let base: Option<&Vec<Block>> = self
+            .copies
+            .get(&root)
+            .and_then(|copies| copies.base.as_ref());
+        let base_blocks: Option<HashMap<EntityUri, &Block>> =
+            base.map(|base| base.iter().map(|b| (b.id.clone(), b)).collect());
+        let disk: HashMap<EntityUri, &Block> = subtree.iter().map(|b| (b.id.clone(), *b)).collect();
+
+        let mut stored: HashMap<EntityUri, Block> = HashMap::new();
+        for block in self.block_reader.get_blocks(owner_doc).await? {
+            stored.insert(block.id.clone(), block);
+        }
+        let root_stored = self
+            .block_reader
+            .get_block_authoritative(&root)
+            .await?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "block {root} was released by {owner_doc} but the store no longer holds it"
+                )
+            })?;
+        stored.insert(root.clone(), root_stored);
+        let mut in_store: HashSet<EntityUri> = HashSet::from([root.clone()]);
+        let mut grew = true;
+        while grew {
+            grew = false;
+            for block in stored.values() {
+                if !in_store.contains(&block.id) && in_store.contains(&block.parent_id) {
+                    in_store.insert(block.id.clone());
+                    grew = true;
+                }
+            }
+        }
+        stored.retain(|id, _| in_store.contains(id));
+        // A member whose deletion from the owner's file was undone is deleted
+        // on the owner's side: the put-back is not an edit. Its put-back
+        // version is what the copy held when the deletion was undone.
+        let undone: Vec<EntityUri> = self
+            .undone_deletions
+            .iter()
+            .filter(|(_, undone)| undone.root == root)
+            .map(|(id, _)| id.clone())
+            .collect();
+        let mut undone_base: HashMap<EntityUri, Block> = HashMap::new();
+        for id in &undone {
+            if let Some(put_back) = stored.remove(id) {
+                undone_base.insert(
+                    id.clone(),
+                    self.in_file_terms(path, document_uri, &put_back)?,
+                );
+            }
+            in_store.remove(id);
+        }
+
+        let positional = self.adapter(path)?.positional_property_keys();
+        let mut plan = Planner {
+            on_conflict,
+            conflicts: Vec::new(),
+        };
+        let mut kept: HashMap<EntityUri, Block> = HashMap::new();
+        let mut adopted_stored: HashMap<EntityUri, Block> = HashMap::new();
+        let mut dropped = Vec::new();
+        let mut deleted_in_holon = Vec::new();
+        let mut ids: Vec<EntityUri> = subtree.iter().map(|b| b.id.clone()).collect();
+        let mut store_only: Vec<EntityUri> = in_store
+            .iter()
+            .filter(|id| !disk.contains_key(*id))
+            .cloned()
+            .collect();
+        store_only.sort();
+        ids.extend(store_only);
+        for id in &ids {
+            let known = base_blocks.is_some();
+            let base_block = match &base_blocks {
+                Some(base) => base.get(id).copied(),
+                None => undone_base.get(id),
+            };
+            match (disk.get(id), stored.get(id)) {
+                (Some(disk_block), Some(stored_block)) => {
+                    let store_terms = self.in_file_terms(path, document_uri, stored_block)?;
+                    let (mut merged, field_conflicts) = merge_adopted(
+                        base_block,
+                        disk_block,
+                        &store_terms,
+                        positional,
+                        self.text_merge.as_deref(),
+                        on_conflict,
+                    )?;
+                    merged.created_at = stored_block.created_at;
+                    plan.conflicts.extend(
+                        field_conflicts
+                            .into_iter()
+                            .map(|field| format!("{id}: {field}")),
+                    );
+                    adopted_stored.insert(id.clone(), stored_block.clone());
+                    kept.insert(id.clone(), merged);
+                }
+                (Some(disk_block), None) => {
+                    let keep = match base_block {
+                        Some(base_block) if !fields_differ(base_block, disk_block, positional) => {
+                            false
+                        }
+                        Some(_) => {
+                            plan.decide(format!("{id}: edited in the copy, deleted in Holon"), true)
+                        }
+                        None if known => true,
+                        None => plan.decide(format!("{id}: only in the copy"), true),
+                    };
+                    if keep {
+                        kept.insert(id.clone(), (*disk_block).clone());
+                    } else {
+                        deleted_in_holon.push(id.clone());
+                    }
+                }
+                (None, Some(stored_block)) => {
+                    let store_terms = self.in_file_terms(path, document_uri, stored_block)?;
+                    let keep = match base_block {
+                        Some(base_block)
+                            if !fields_differ(base_block, &store_terms, positional) =>
+                        {
+                            false
+                        }
+                        Some(_) => plan.decide(
+                            format!("{id}: edited in Holon, deleted from the copy"),
+                            false,
+                        ),
+                        None if known => true,
+                        None => plan.decide(format!("{id}: only in Holon"), false),
+                    };
+                    if keep {
+                        let mut block = store_terms;
+                        block.created_at = stored_block.created_at;
+                        adopted_stored.insert(id.clone(), stored_block.clone());
+                        kept.insert(id.clone(), block);
+                    } else {
+                        dropped.push(id.clone());
+                    }
+                }
+                (None, None) => unreachable!("{id} comes from the copy or the store"),
+            }
+        }
+
+        // Parents: the root stays where the copy put it; a member's parent is
+        // merged like a field.
+        let root_parent = subtree[0].parent_id.clone();
+        let parent_of = |blocks: &HashMap<EntityUri, &Block>, id: &EntityUri| {
+            blocks.get(id).map(|b| b.parent_id.clone())
+        };
+        let stored_refs: HashMap<EntityUri, &Block> =
+            stored.iter().map(|(id, b)| (id.clone(), b)).collect();
+        let mut parents: HashMap<EntityUri, EntityUri> = HashMap::new();
+        for id in kept.keys() {
+            if *id == root {
+                continue;
+            }
+            let base_parent = base_blocks.as_ref().and_then(|b| parent_of(b, id));
+            let disk_parent = parent_of(&disk, id);
+            let store_parent = parent_of(&stored_refs, id);
+            let parent = match (disk_parent, store_parent) {
+                (Some(d), Some(s)) => match &base_parent {
+                    Some(b) if d == *b => s,
+                    Some(b) if s == *b => d,
+                    _ if d == s => d,
+                    _ => {
+                        if plan.decide(format!("{id}: moved apart"), true) {
+                            d
+                        } else {
+                            s
+                        }
+                    }
+                },
+                (Some(d), None) => d,
+                (None, Some(s)) => s,
+                (None, None) => unreachable!("{id} is kept"),
+            };
+            parents.insert(id.clone(), parent);
+        }
+        for (id, parent) in &parents {
+            if *parent != root && !kept.contains_key(parent) {
+                plan.conflicts.push(format!(
+                    "{id}: its parent {parent} is gone from the subtree"
+                ));
+            }
+        }
+
+        // Sibling order, per parent: the side that reordered wins.
+        let children_in = |blocks: &[&Block], parent: &EntityUri| -> Vec<EntityUri> {
+            blocks
+                .iter()
+                .filter(|b| b.parent_id == *parent && b.id != root)
+                .map(|b| b.id.clone())
+                .collect()
+        };
+        let base_list: Option<Vec<&Block>> = base.map(|b| b.iter().collect());
+        let mut tree: Vec<Block> = Vec::new();
+        let mut stack: Vec<EntityUri> = vec![root.clone()];
+        while let Some(id) = stack.pop() {
+            let mut block = kept
+                .get(&id)
+                .unwrap_or_else(|| panic!("{id} is in the merged tree but was not kept"))
+                .clone();
+            block.parent_id = if id == root {
+                root_parent.clone()
+            } else {
+                parents[&id].clone()
+            };
+            let mine: HashSet<EntityUri> = parents
+                .iter()
+                .filter(|(_, p)| **p == id)
+                .map(|(c, _)| c.clone())
+                .collect();
+            let disk_order = children_in(subtree, &id);
+            let store_order: Vec<EntityUri> = self
+                .ordering
+                .children(&id)
+                .await
+                .map_err(|e| anyhow::anyhow!("children of {id} in the store: {e}"))?
+                .into_iter()
+                .filter(|c| in_store.contains(c))
+                .collect();
+            let base_order = base_list.as_ref().map(|b| children_in(b, &id));
+            let order =
+                plan.merge_order(&id, base_order.as_deref(), &disk_order, &store_order, &mine);
+            tree.push(block);
+            for child in order.into_iter().rev() {
+                stack.push(child);
+            }
+        }
+        if !plan.conflicts.is_empty() && on_conflict == OnConflict::Refuse {
+            return Ok(Err(plan.conflicts));
+        }
+        let merged = tree
+            .iter()
+            .filter_map(|b| {
+                adopted_stored
+                    .get(&b.id)
+                    .map(|stored| (b.id.clone(), (stored.clone(), b.clone())))
+            })
+            .collect();
+        // The store still holds the undone members the merge keeps deleted.
+        dropped.extend(
+            deleted_in_holon
+                .iter()
+                .filter(|id| undone.contains(*id))
+                .cloned(),
+        );
+        Ok(Ok(AdoptionPlan {
+            tree,
+            merged,
+            dropped,
+            deleted_in_holon,
+        }))
+    }
+
+    /// `id` was deleted from `file`, its own file, and Holon wrote it back:
+    /// the copy of `root` another file holds still has it.
+    fn disclose_undone_deletion(
+        &mut self,
+        id: &EntityUri,
+        root: &EntityUri,
+        file: &Path,
+        holders: HashSet<CanonicalPath>,
+        put_back: String,
+    ) {
+        tracing::warn!(
+            block_id = %id,
+            file = %file.display(),
+            ?holders,
+            "[FileSyncController] a block deleted from its own file is written back: another \
+             file holds a copy of it"
+        );
+        self.ending_undone.remove(id);
+        self.undone_deletions.insert(
+            id.clone(),
+            UndoneDeletion {
+                root: root.clone(),
+                file: file.to_path_buf(),
+                copy_files: holders,
+                put_back,
+            },
+        );
+        self.disclose_undone(id);
+    }
+
+    fn disclose_undone(&self, id: &EntityUri) {
+        let undone = &self.undone_deletions[id];
+        let mut copy_files: Vec<&Path> = undone
+            .copy_files
+            .iter()
+            .map(|f| f.as_path_buf().as_path())
+            .collect();
+        copy_files.sort();
+        if let Some(disclosure) = &self.writeback_disclosure {
+            disclosure.deletion_undone(id, &undone.file, &copy_files);
+        }
+    }
+
+    /// `file` no longer holds `id`, whose deletion from its own file was
+    /// undone. The disclosure names the files that still do; with none left
+    /// the deletion stands at the next [`take_standing_deletions`].
+    fn undone_leaves_file(&mut self, id: &EntityUri, file: &CanonicalPath) {
+        let Some(undone) = self.undone_deletions.get_mut(id) else {
+            return;
+        };
+        if undone.copy_files.remove(file) && !self.undone_deletions[id].copy_files.is_empty() {
+            self.disclose_undone(id);
+        }
+    }
+
+    /// The undone deletions no copy file holds any more: they stand now, and
+    /// their disclosure clears.
+    async fn take_standing_deletions(&mut self) -> Result<Vec<EntityUri>> {
+        // A record read at boot is settled after the scan, against every file.
+        if self.in_initial_scan() {
+            return Ok(Vec::new());
+        }
+        self.end_edited_undone_deletions().await?;
+        let standing: Vec<EntityUri> = self
+            .undone_deletions
+            .iter()
+            .filter(|(_, undone)| undone.copy_files.is_empty())
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &standing {
+            info!(
+                "[FileSyncController] {id} is in no copy file any more; its deletion from its \
+                 own file stands"
+            );
+            self.end_undone_deletion(id, None);
+        }
+        Ok(standing)
+    }
+
+    /// The undone deletions whose block is no longer the version Holon put
+    /// back: the user edited it since, so the deletion ends and the block
+    /// stays.
+    async fn end_edited_undone_deletions(&mut self) -> Result<()> {
+        // An ended deletion uncovers its block in its ancestors' fingerprints.
+        loop {
+            let covered: HashSet<EntityUri> = self.undone_deletions.keys().cloned().collect();
+            let mut ended = false;
+            for id in covered.iter() {
+                let Some(block) = self.block_reader.get_block_authoritative(id).await? else {
+                    continue;
+                };
+                let undone = &self.undone_deletions[id];
+                if self
+                    .put_back_fingerprint(&undone.file, &undone.root, &block, &covered)
+                    .await?
+                    == undone.put_back
+                {
+                    continue;
+                }
+                let undone = self.undone_deletions.remove(id).expect("present above");
+                info!(
+                    "[FileSyncController] {id} was edited, moved or given new children since \
+                     Holon put it back into {}; its deletion no longer stands",
+                    undone.file.display()
+                );
+                if let Some(disclosure) = &self.writeback_disclosure {
+                    disclosure.undone_deletion_resolved(id);
+                    disclosure.deletion_ended_by_edit(id, &undone.file);
+                }
+                ended = true;
+                break;
+            }
+            if !ended {
+                return Ok(());
+            }
+        }
+    }
+
+    /// What a standing deletion of `block` removes, hashed: its parent, and
+    /// the block with every descendant outside `covered` as `file`'s format
+    /// writes them. Equal for two versions the file cannot tell apart.
+    /// `covered` holds the blocks whose own undone deletion decides them.
+    async fn put_back_fingerprint(
+        &self,
+        file: &Path,
+        root: &EntityUri,
+        block: &Block,
+        covered: &HashSet<EntityUri>,
+    ) -> Result<String> {
+        use sha2::Digest;
+        let owner = self
+            .resolve_authoritative_doc(&block.id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("{} is under no page in the store", block.id))?;
+        let mut children: HashMap<EntityUri, Vec<Block>> = HashMap::new();
+        for b in self.block_reader.get_blocks(&owner).await? {
+            children.entry(b.parent_id.clone()).or_default().push(b);
+        }
+        let mut terms = self.in_file_terms(file, root, block)?;
+        terms.parent_id = root.clone();
+        let mut subtree = vec![terms];
+        let mut stack: Vec<&Block> = children
+            .get(&block.id)
+            .into_iter()
+            .flatten()
+            .rev()
+            .collect();
+        while let Some(member) = stack.pop() {
+            if covered.contains(&member.id) {
+                continue;
+            }
+            let mut terms = self.in_file_terms(file, root, member)?;
+            terms.parent_id = member.parent_id.clone();
+            subtree.push(terms);
+            stack.extend(children.get(&member.id).into_iter().flatten().rev());
+        }
+        let text = self
+            .adapter(file)?
+            .render_blocks(&subtree, file, root)
+            .with_context(|| format!("render the put-back version of {}", block.id))?
+            .text;
+        Ok(format!(
+            "{:x}",
+            sha2::Sha256::digest(format!("{}\n{text}", block.parent_id).as_bytes())
+        ))
+    }
+
+    /// The copy files of `root` whose copy holds `id`, as they were last read.
+    fn copy_files_holding(
+        &self,
+        root: &EntityUri,
+        id: &EntityUri,
+    ) -> Result<HashSet<CanonicalPath>> {
+        let mut holders = HashSet::new();
+        for file in &self.copies[root].copy_files {
+            let path = file.as_path_buf();
+            let text = self.last_projection.get(file).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "{} holds a copy of {root} but was never read this session",
+                    path.display()
+                )
+            })?;
+            let parsed = self
+                .adapter(path)?
+                .parse(path, text, &EntityUri::no_parent(), &self.root_dir)
+                .with_context(|| format!("re-read the copy of {root} in {}", path.display()))?;
+            let parents: HashMap<&EntityUri, &EntityUri> = parsed
+                .blocks
+                .iter()
+                .map(|b| (&b.id, &b.parent_id))
+                .collect();
+            let mut cursor = id;
+            while let Some(parent) = parents.get(cursor) {
+                if *parent == root {
+                    holders.insert(file.clone());
+                    break;
+                }
+                cursor = parent;
+            }
+        }
+        Ok(holders)
+    }
+
+    /// The undone deletion of `id` ends: its disclosure clears. Its record
+    /// stays in the vault while its own file, or `adopted_by`, still holds
+    /// the block.
+    fn end_undone_deletion(&mut self, id: &EntityUri, adopted_by: Option<&CanonicalPath>) {
+        let undone = self
+            .undone_deletions
+            .remove(id)
+            .unwrap_or_else(|| panic!("{id} has no undone deletion to end"));
+        let files = std::iter::once(CanonicalPath::new(&undone.file))
+            .chain(adopted_by.cloned())
+            .collect();
+        self.ending_undone
+            .insert(id.clone(), EndingUndone { undone, files });
+        if let Some(disclosure) = &self.writeback_disclosure {
+            disclosure.undone_deletion_resolved(id);
+        }
+    }
+
+    /// Holon deleted `id`, and `file`, which held a copy of it, brought it
+    /// back as its own block.
+    fn keep_after_delete(&mut self, id: &EntityUri, file: &CanonicalPath) {
+        info!(
+            "[FileSyncController] block {id} was deleted in Holon but {} still holds it; it is \
+             that file's block now",
+            file.as_path_buf().display(),
+        );
+        self.kept_after_delete.insert(id.clone(), file.clone());
+        if let Some(disclosure) = &self.writeback_disclosure {
+            disclosure.deleted_block_kept_in_file(id, file.as_path_buf());
+        }
+    }
+
+    fn forget_kept_after_delete(&mut self, id: &EntityUri) {
+        if self.kept_after_delete.remove(id).is_some() {
+            if let Some(disclosure) = &self.writeback_disclosure {
+                disclosure.deleted_block_gone_from_file(id);
+            }
+        }
+    }
+
+    /// `rendered` with every copy `canonical` holds kept where `disk` has it
+    /// (D229.b): a render from the store would drop them.
+    fn keep_copies(
+        &self,
+        path: &Path,
+        canonical: &CanonicalPath,
+        rendered: String,
+        disk: &str,
+    ) -> Result<String> {
+        let held = self.copies_held_by(canonical);
+        if held.is_empty() {
+            return Ok(rendered);
+        }
+        let adapter = self.adapter(path)?;
+        let rendered_ids: HashSet<EntityUri> = adapter
+            .parse(path, &rendered, &EntityUri::no_parent(), &self.root_dir)
+            .with_context(|| format!("re-read the render of {}", path.display()))?
+            .blocks
+            .into_iter()
+            .map(|b| b.id)
+            .collect();
+        let doubled: Vec<&EntityUri> = held
+            .iter()
+            .filter(|id| rendered_ids.contains(*id))
+            .collect();
+        anyhow::ensure!(
+            doubled.is_empty(),
+            "{} holds copies of {doubled:?}, and the store renders them into it as well; \
+             writing both would put one id twice in the file",
+            path.display(),
+        );
+        let bare: Vec<String> = held.iter().map(|id| id.id().to_string()).collect();
+        adapter
+            .keep_subtrees(disk, &rendered, &bare)
+            .with_context(|| format!("keep the copies {held:?} in {}", path.display()))
+    }
+
+    /// `block` as the format writes and re-reads it, so a field the file
+    /// cannot carry never reads as an edit.
+    fn in_file_terms(&self, path: &Path, doc: &EntityUri, block: &Block) -> Result<Block> {
+        let adapter = self.adapter(path)?;
+        let mut alone = block.clone();
+        alone.parent_id = doc.clone();
+        let text = adapter
+            .render_blocks(&[alone], path, doc)
+            .with_context(|| format!("render block {} as {} writes it", block.id, path.display()))?
+            .text;
+        adapter
+            .parse(path, &text, &EntityUri::no_parent(), &self.root_dir)
+            .with_context(|| format!("re-read block {} as {} writes it", block.id, path.display()))?
+            .blocks
+            .into_iter()
+            .find(|b| b.id == block.id)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "block {} is not in its own rendering for {}: {text:?}",
+                    block.id,
+                    path.display()
+                )
+            })
+    }
+
     /// Whether Holon's own record says this path last held NON-EMPTY content —
     /// i.e. whether an empty parse of it would delete anything.
     ///
@@ -3215,7 +4565,11 @@ impl FileSyncController {
         // Echo suppression: skip if we have a prior projection and content matches.
         // An absent entry means "first time seeing this file" — always process it
         // to create the document entity (needed for block→file sync).
-        if self.last_projection.get(&canonical) == Some(&disk_content) {
+        // A file holding a second copy of a block is re-read whatever its
+        // bytes: the owner's file may have released the block since.
+        if self.last_projection.get(&canonical) == Some(&disk_content)
+            && !self.holds_copy(&canonical)
+        {
             debug!(
                 "[FileSyncController] Skipping {} — matches last_projection",
                 path.display()
@@ -3298,8 +4652,14 @@ impl FileSyncController {
             root = ?disk_root,
             "[FileSyncController] cold-boot skip candidate"
         );
-        if let (Some(stored), Some(root)) = (self.last_projection_hash.get(&canonical), &disk_root)
-        {
+        // Only a file not yet read this session: after that, `last_projection`
+        // is what Holon last wrote or read, and the check above decides.
+        let first_sight = !self.last_projection.contains_key(&canonical);
+        if let (true, Some(stored), Some(root)) = (
+            first_sight,
+            self.last_projection_hash.get(&canonical),
+            &disk_root,
+        ) {
             // Invariant: fast-path skip requires the content present in EVERY
             // active store, not just SQL. The matching hash proves the SQL side;
             // `content_present_in_all_stores` additionally proves the Loro side
@@ -3674,6 +5034,9 @@ impl FileSyncController {
             self.base_source.insert(canonical.clone(), last.to_string());
             seed
         };
+        // A copy this file holds never became this document's block, so the
+        // diff meets it as new once the copy resolves.
+        let old_blocks = without_subtrees(old_blocks, &self.copies_held_by(&canonical));
 
         // The ingest contract for document metadata: the adapter's parsed
         // document title and property bag reach the persisted document block,
@@ -3704,6 +5067,64 @@ impl FileSyncController {
                 .await
                 .with_context(|| format!("write the declared-type rows of {}", path.display()))?;
         }
+
+        // The blocks that left this file are released (D229.b): a file holding
+        // a copy adopts its copy first, so the delete pass below finds it moved
+        // away or kept there. A conflict the user already saw ends with this
+        // deletion: the copy wins.
+        let parsed_ids: HashSet<&EntityUri> = new_parse.blocks.iter().map(|b| &b.id).collect();
+        let released: HashMap<EntityUri, Release> = old_blocks
+            .keys()
+            .filter(|id| **id != document_uri && !parsed_ids.contains(id))
+            .map(|id| {
+                let on_conflict = match self.copies.get(id) {
+                    Some(copies) if copies.conflict => OnConflict::TakeDisk,
+                    _ => OnConflict::Refuse,
+                };
+                (
+                    id.clone(),
+                    Release {
+                        by: document_uri.clone(),
+                        on_conflict,
+                    },
+                )
+            })
+            .collect();
+        drop(parsed_ids);
+        // At boot a file the scan has not read yet may hold a released block
+        // (it moved while Holon was closed): it is read now, so it records
+        // its copy and adopts the block below, whichever file the scan
+        // happens to read first.
+        if self.in_initial_scan() && !released.is_empty() {
+            for holder in self.unread_files_holding(&released, &canonical).await? {
+                info!(
+                    "[FileSyncController] {} released blocks that {} holds: reading it before \
+                     the rest of the initial scan",
+                    path.display(),
+                    holder.as_path_buf().display(),
+                );
+                let outcome = Box::pin(self.ingest_file(holder.as_path_buf()))
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "read {} early: it holds blocks {} released",
+                            holder.as_path_buf().display(),
+                            path.display(),
+                        )
+                    })?;
+                if !matches!(outcome, IngestOutcome::Ingested) {
+                    tracing::warn!(
+                        holder = %holder.as_path_buf().display(),
+                        released_by = %path.display(),
+                        ?outcome,
+                        "[FileSyncController] the file holding released blocks was not ingested; \
+                         it does not adopt them"
+                    );
+                }
+            }
+        }
+        let adopters = self.adopters_of(&released, &canonical);
+        self.ingest_adopters(adopters, released, path).await?;
 
         let mut new_blocks_vec = new_parse.blocks;
 
@@ -3908,11 +5329,6 @@ impl FileSyncController {
             }
         }
 
-        let new_blocks: HashMap<EntityUri, Block> = new_blocks_vec
-            .iter()
-            .map(|b| (b.id.clone(), b.clone()))
-            .collect();
-
         // Intra-file liveness. Everything below is per-block work on ONE file;
         // for a vault's dominant file that is tens of thousands of blocks, and
         // without this the whole span is silent and a wedge inside it is
@@ -3936,7 +5352,7 @@ impl FileSyncController {
             &document_uri,
         )
         .await?;
-        let adopted_from_store: HashMap<EntityUri, Block> = conflicts
+        let mut adopted_from_store: HashMap<EntityUri, Block> = conflicts
             .iter()
             .map(|(block, _)| (block.id.clone(), block.clone()))
             .collect();
@@ -4021,65 +5437,184 @@ impl FileSyncController {
             );
         }
 
-        // Blocks the post-ingest gate must NOT expect from `get_blocks(doc)`:
-        // its recursive walk stops at `Page`-tagged boundaries, so the skipped
-        // foreign subtrees AND any parsed block that itself carries a `Page`
-        // tag (plus its parsed descendants) are structurally invisible to the
-        // doc walk even when their rows land. Counting them made the gate
-        // unsatisfiable and quarantined the file forever.
-        // Cross-doc-membership guard — arm (b) of the journals phantom
-        // (on-disk STALE cross-doc copy). A block parsed into THIS file whose
-        // AUTHORITATIVE routing (`block_raw` Page-walk, never a matview) lands
-        // under a DIFFERENT document is a stale copy left on disk by a past
-        // mis-route / crash / external edit. The matview-based
-        // `find_foreign_blocks` re-parent above would ADOPT it (author a Move
-        // into this file's doc); the day-page then re-adopts on its next
-        // writeback and the org fixed-point oscillates forever. Instead: never
-        // adopt it (fold into the skip set so no create/update/place/gate pass
-        // touches it), disclose loudly (block + both docs), and let THIS file's
-        // own honest re-render — which reads `block_raw` and routes the block
-        // back to its real owner — PRUNE it from disk (sanctioned below so the
-        // writeback-lossless guard does not read the prune as data loss).
-        //
-        // Fail-loud, never fake, never touches USER content: only fires when the
-        // id ALREADY exists in the store (`get_block_authoritative` = `Some`)
-        // under a resolvable page that is NOT this file's doc. An id-less /
-        // brand-new / unknown block resolves to `None` → normal ingest. Foreign
-        // PAGE inlines (`foreign_subtree_ids`) are the de-inline workstream's
-        // concern (deferred, not pruned) and are excluded here.
-        let mut stale_cross_doc_ids: HashSet<EntityUri> = HashSet::new();
-        for block in &new_blocks_vec {
+        // Cross-doc membership (D229.b). A parsed block whose AUTHORITATIVE
+        // owner (`block_raw` routing, never a matview) is a different document
+        // is either half of a move or a second copy. Only the owner's own
+        // ingest can release it (`self.released`): then this file adopts it,
+        // merged with the store. Otherwise the owner stays authoritative, both
+        // copies stay on disk, and the pair is disclosed until an ingest of
+        // this file resolves it. Foreign PAGE inlines (`foreign_subtree_ids`)
+        // are excluded: their owning page-file is authoritative.
+        let inlines_foreign_pages = !foreign_subtree_ids.is_empty();
+        let mut copies_here: HashSet<EntityUri> = HashSet::new();
+        let mut copy_subtrees: HashSet<EntityUri> = HashSet::new();
+        let mut adopted_subtrees: HashSet<EntityUri> = HashSet::new();
+        // Adopted blocks: the stored version, and the merged block to write.
+        let mut moved_in: HashMap<EntityUri, (Block, Block)> = HashMap::new();
+        let mut brought_back: HashSet<EntityUri> = HashSet::new();
+        // Each adopted subtree's place in the parse, and the merged subtree the
+        // ingest takes in its stead.
+        let mut adopted_trees: Vec<(usize, usize, Vec<Block>)> = Vec::new();
+        let mut dropped_by_copies: Vec<EntityUri> = Vec::new();
+        let mut deleted_in_holon: HashSet<String> = HashSet::new();
+        for (index, block) in new_blocks_vec.iter().enumerate() {
             if block.id == document_uri
                 || block.id == new_parse.document.id
                 || foreign_subtree_ids.contains(&block.id)
             {
                 continue;
             }
-            if let Some(auth_doc) = self.resolve_authoritative_doc(&block.id).await? {
-                if auth_doc != document_uri && auth_doc != new_parse.document.id {
-                    tracing::warn!(
-                        block_id = %block.id,
-                        ingesting_doc = %document_uri,
-                        authoritative_doc = %auth_doc,
-                        path = %path.display(),
-                        "[FileSyncController] cross-doc membership: a block parsed into this \
-                         file is authoritatively owned by a DIFFERENT document (block_raw \
-                         routing) — NOT adopting the stale on-disk copy; pruning it from this \
-                         file's writeback so it converges to its real owner."
-                    );
-                    stale_cross_doc_ids.insert(block.id.clone());
+            // A heading's subtree goes with it, and is disclosed once, by the
+            // heading.
+            if copy_subtrees.contains(&block.parent_id) {
+                copy_subtrees.insert(block.id.clone());
+                continue;
+            }
+            if adopted_subtrees.contains(&block.parent_id) {
+                adopted_subtrees.insert(block.id.clone());
+                continue;
+            }
+            let held_here = self
+                .copies
+                .get(&block.id)
+                .filter(|copies| copies.copy_files.contains(&canonical));
+            let Some(owner_doc) = self.resolve_authoritative_doc(&block.id).await? else {
+                if held_here.is_some_and(|copies| copies.owner_deleted) {
+                    brought_back.insert(block.id.clone());
+                }
+                continue;
+            };
+            let release = if owner_doc == document_uri || owner_doc == new_parse.document.id {
+                // Holon moved a block this file holds a copy of into this
+                // file's own page: the copy is this file's to adopt.
+                match held_here {
+                    Some(_) => Some(OnConflict::TakeStore),
+                    None => continue,
+                }
+            } else {
+                self.released
+                    .get(&block.id)
+                    .filter(|release| release.by == owner_doc)
+                    .map(|release| release.on_conflict)
+            };
+            let subtree = parsed_subtree(&new_blocks_vec, index);
+            let mut refused = false;
+            if let Some(on_conflict) = release {
+                match self
+                    .plan_adoption(&subtree, &owner_doc, path, &document_uri, on_conflict)
+                    .await?
+                {
+                    Ok(plan) => {
+                        info!(
+                            "[FileSyncController] {} adopts block {} released by {owner_doc}",
+                            path.display(),
+                            block.id,
+                        );
+                        moved_in.extend(plan.merged);
+                        dropped_by_copies.extend(plan.dropped);
+                        deleted_in_holon.extend(
+                            plan.deleted_in_holon
+                                .iter()
+                                .map(|id| id.as_str().to_string()),
+                        );
+                        adopted_trees.push((index, subtree.len(), plan.tree));
+                        adopted_subtrees.insert(block.id.clone());
+                        continue;
+                    }
+                    Err(conflicts) => {
+                        tracing::warn!(
+                            block_id = %block.id,
+                            owner_doc = %owner_doc,
+                            copy_file = %path.display(),
+                            ?conflicts,
+                            "[FileSyncController] REFUSED to adopt a released block: the copy and \
+                             Holon's version were both edited apart; both stay, and the user's \
+                             next deletion of one decides"
+                        );
+                        if let Some(copies) = self.copies.get_mut(&block.id) {
+                            copies.conflict = true;
+                        }
+                        refused = true;
+                    }
+                }
+            } else {
+                tracing::warn!(
+                    block_id = %block.id,
+                    owner_doc = %owner_doc,
+                    other_file = %path.display(),
+                    "[FileSyncController] block is in more than one file; its owner stays \
+                     authoritative and no copy is removed"
+                );
+            }
+            copies_here.insert(block.id.clone());
+            copy_subtrees.insert(block.id.clone());
+            let owner_file = self.owner_file_of(&owner_doc).await?;
+            // The owner's file keeps its claim on the whole copied subtree, or
+            // its next ingest is refused as declaring this file's ids.
+            if let Some(owner_file) = &owner_file {
+                for member in &subtree {
+                    self.block_home
+                        .insert(member.id.clone(), CanonicalPath::new(owner_file));
+                }
+            }
+            let base = if self.copies.contains_key(&block.id) {
+                None
+            } else {
+                self.copy_base(&block.id, owner_file.as_deref(), path)?
+            };
+            self.record_copy(&block.id, owner_doc, owner_file, &canonical, base);
+            if refused {
+                self.disclose_copies(&block.id);
+            }
+        }
+        let released_here: Vec<EntityUri> = self
+            .copies_held_by(&canonical)
+            .into_iter()
+            .filter(|id| !copies_here.contains(id))
+            .collect();
+        for id in &released_here {
+            if moved_in.contains_key(id) {
+                self.adopt_copy(id, &document_uri, &canonical);
+            } else {
+                self.drop_copy(id, &canonical);
+                if brought_back.contains(id) {
+                    self.keep_after_delete(id, &canonical);
                 }
             }
         }
-        // Fold into the skip set so every create/update/place/gate pass leaves
-        // these blocks untouched (identical handling to a foreign page subtree).
-        foreign_subtree_ids.extend(stale_cross_doc_ids.iter().cloned());
-        // String ids for the writeback-lossless sanctioned-removals seam
-        // (`as_str()` form, matching the guard's `block.id.as_str()` compare).
-        let stale_removals: HashSet<String> = stale_cross_doc_ids
+        let parsed_here: HashSet<&EntityUri> = new_blocks_vec.iter().map(|b| &b.id).collect();
+        let gone_from_here: Vec<EntityUri> = self
+            .kept_after_delete
             .iter()
-            .map(|u| u.as_str().to_string())
+            .filter(|(id, file)| **file == canonical && !parsed_here.contains(id))
+            .map(|(id, _)| id.clone())
             .collect();
+        drop(parsed_here);
+        for id in gone_from_here {
+            self.forget_kept_after_delete(&id);
+        }
+        // The ingest takes each adopted subtree as merged, not as the copy
+        // holds it: Holon's deletions, additions and moves inside it stand.
+        for (index, len, tree) in adopted_trees.into_iter().rev() {
+            new_blocks_vec.splice(index..index + len, tree);
+        }
+        let new_blocks: HashMap<EntityUri, Block> = new_blocks_vec
+            .iter()
+            .map(|b| (b.id.clone(), b.clone()))
+            .collect();
+        foreign_subtree_ids.extend(copy_subtrees);
+        adopted_from_store.extend(
+            moved_in
+                .iter()
+                .map(|(id, (stored, _))| (id.clone(), stored.clone())),
+        );
+
+        // Blocks the post-ingest gate must NOT expect from `get_blocks(doc)`:
+        // its recursive walk stops at `Page`-tagged boundaries, so the skipped
+        // foreign subtrees AND any parsed block that itself carries a `Page`
+        // tag (plus its parsed descendants) are structurally invisible to the
+        // doc walk even when their rows land. Counting them made the gate
+        // unsatisfiable and quarantined the file forever.
         let mut gate_excluded_ids = foreign_subtree_ids.clone();
         for block in &new_blocks_vec {
             if block.id == document_uri || block.id == new_parse.document.id {
@@ -4175,6 +5710,86 @@ impl FileSyncController {
             last_block_per_parent.insert(parent_id.clone(), block.id.clone());
         }
 
+        // A block this file dropped that a copy holds stays where it was
+        // (R1.5, R2.3): its store siblings are ordered around it, not over it.
+        let copy_roots: Vec<EntityUri> = self
+            .copies
+            .iter()
+            .filter(|(_, copies)| !copies.copy_files.is_empty())
+            .map(|(id, _)| id.clone())
+            .collect();
+        // Each block under a copied heading, and that heading.
+        let held_elsewhere: HashMap<EntityUri, EntityUri> = old_blocks
+            .keys()
+            .filter_map(|id| {
+                let mut cur = id;
+                loop {
+                    if copy_roots.contains(cur) {
+                        return Some((id.clone(), cur.clone()));
+                    }
+                    match old_blocks.get(cur) {
+                        Some(block) if block.parent_id != *cur => cur = &block.parent_id,
+                        _ => return None,
+                    }
+                }
+            })
+            .collect();
+        let mut kept_order: HashMap<EntityUri, Vec<EntityUri>> = HashMap::new();
+        for id in held_elsewhere.keys() {
+            if new_blocks.contains_key(id) {
+                continue;
+            }
+            let parent = &old_blocks[id].parent_id;
+            if kept_order.contains_key(parent) {
+                continue;
+            }
+            let store: Vec<EntityUri> = self
+                .ordering
+                .children(parent)
+                .await
+                .map_err(|e| anyhow::anyhow!("ordering.children failed: {e}"))?;
+            let mut order: Vec<EntityUri> = new_blocks_vec
+                .iter()
+                .filter(|b| {
+                    let p = if b.parent_id == new_parse.document.id {
+                        &document_uri
+                    } else {
+                        &b.parent_id
+                    };
+                    p == parent
+                        && !foreign_subtree_ids.contains(&b.id)
+                        && matches!(b.content_type, holon_api::ContentType::Text)
+                })
+                .map(|b| b.id.clone())
+                .collect();
+            for (at, sibling) in store.iter().enumerate() {
+                if order.contains(sibling)
+                    || new_blocks.contains_key(sibling)
+                    || !held_elsewhere.contains_key(sibling)
+                    || !old_blocks
+                        .get(sibling)
+                        .is_some_and(|b| matches!(b.content_type, holon_api::ContentType::Text))
+                {
+                    continue;
+                }
+                let slot = store[..at]
+                    .iter()
+                    .rev()
+                    .find_map(|before| order.iter().position(|o| o == before))
+                    .map_or(0, |i| i + 1);
+                order.insert(slot, sibling.clone());
+            }
+            for pair in order.windows(2) {
+                if new_blocks.contains_key(&pair[1]) {
+                    predecessors.insert(pair[1].clone(), Some(pair[0].clone()));
+                }
+            }
+            if let Some(first) = order.first().filter(|f| new_blocks.contains_key(*f)) {
+                predecessors.insert(first.clone(), None);
+            }
+            kept_order.insert(parent.clone(), order);
+        }
+
         // Creates pass. A block create is an INTENT to the consolidator: the
         // ordering authority's `create_in_tree` persists the block and the
         // downstream feed writes the SQL sink row — org never writes that sink
@@ -4244,7 +5859,7 @@ impl FileSyncController {
                 });
                 continue;
             }
-            if !old_blocks.contains_key(&block.id) {
+            if !old_blocks.contains_key(&block.id) || moved_in.contains_key(&block.id) {
                 let parent_id = if block.parent_id == new_parse.document.id {
                     &document_uri
                 } else {
@@ -4255,8 +5870,10 @@ impl FileSyncController {
                 // can carry but this one does not author is cleared, even one
                 // the app set; a `_`-prefixed key no file can carry is kept.
                 let adopted = adopted_from_store.get(&block.id);
+                // A released copy is written as merged with the store.
+                let written = moved_in.get(&block.id).map_or(block, |(_, merged)| merged);
                 let mut params =
-                    ingest_adapter.build_block_params(block, parent_id, &document_uri, adopted);
+                    ingest_adapter.build_block_params(written, parent_id, &document_uri, adopted);
                 if let Some(Some(prev)) = predecessors.get(&block.id) {
                     params.insert(
                         POSITION_AFTER_BLOCK_ID_PARAM.into(),
@@ -4332,7 +5949,7 @@ impl FileSyncController {
             // authoritative — never emit an update that would strip the root's
             // `Page` tag, rewrite identities/parents, or clobber descendant
             // content.
-            if foreign_subtree_ids.contains(id) {
+            if foreign_subtree_ids.contains(id) || moved_in.contains_key(id) {
                 continue;
             }
             if let Some(old_block) = old_blocks.get(id) {
@@ -4402,9 +6019,23 @@ impl FileSyncController {
             }
         }
 
-        // Deletes
+        // Deletes. A block another file holds on disk is never deleted: its
+        // owner keeps it until a copy is adopted, and this file's write-back
+        // puts it back.
+        let mut puts_back = false;
+        let mut put_back: Vec<(EntityUri, EntityUri, HashSet<CanonicalPath>)> = Vec::new();
         for id in old_blocks.keys() {
             if !new_blocks.contains_key(id) {
+                // The file that adopted it already deleted it as its copy's
+                // choice.
+                if self
+                    .block_reader
+                    .get_block_authoritative(id)
+                    .await?
+                    .is_none()
+                {
+                    continue;
+                }
                 // Never delete a foreign page doc-root. If a companion file
                 // stops inlining a page's heading, that page still lives in its
                 // own page-file — its deletion is that file's concern, not ours.
@@ -4419,6 +6050,35 @@ impl FileSyncController {
                     );
                     continue;
                 }
+                // Another file adopted it: gone from here is a move, not a delete.
+                if let Some(owner_doc) = self.resolve_authoritative_doc(id).await? {
+                    if owner_doc != document_uri && owner_doc != new_parse.document.id {
+                        info!(
+                            "[FileSyncController] NOT deleting {id} on ingest of {} — it moved \
+                             to {owner_doc}",
+                            path.display(),
+                        );
+                        continue;
+                    }
+                }
+                if let Some(root) = held_elsewhere.get(id) {
+                    // A released heading that no copy adopted stays here whole.
+                    let holders = if !new_blocks.contains_key(root) {
+                        self.copies[root].copy_files.iter().cloned().collect()
+                    } else {
+                        self.copy_files_holding(root, id)?
+                    };
+                    if !holders.is_empty() {
+                        info!(
+                            "[FileSyncController] NOT deleting {id} on ingest of {} — another \
+                             file holds a copy of it and did not adopt it; it stays here",
+                            path.display(),
+                        );
+                        puts_back = true;
+                        put_back.push((id.clone(), root.clone(), holders));
+                        continue;
+                    }
+                }
                 has_structural_changes = true;
                 let mut params: holon_api::StorageEntity = HashMap::new();
                 params.insert("id".into(), Value::String(id.to_string()));
@@ -4430,6 +6090,49 @@ impl FileSyncController {
                 );
                 operations.push(("delete".to_string(), params));
             }
+        }
+        // A deletion from this file that another file's copy undid is said, not
+        // silent. A refused adoption says so on its own heading.
+        put_back.retain(|(id, root, _)| {
+            id != root && !self.copies.get(root).is_some_and(|copies| copies.conflict)
+        });
+        // A block whose deletion Holon undid, gone now from every copy file
+        // too: the user's deletion stands.
+        let parsed_ids: HashSet<&EntityUri> = new_blocks_vec.iter().map(|b| &b.id).collect();
+        let left: Vec<EntityUri> = self
+            .undone_deletions
+            .iter()
+            .filter(|(id, undone)| {
+                undone.copy_files.contains(&canonical) && !parsed_ids.contains(id)
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &left {
+            self.undone_leaves_file(id, &canonical);
+        }
+        for id in self.take_standing_deletions().await? {
+            let Some(owner_doc) = self.resolve_authoritative_doc(&id).await? else {
+                continue;
+            };
+            has_structural_changes = true;
+            let mut params: holon_api::StorageEntity = HashMap::new();
+            params.insert("id".into(), Value::String(id.to_string()));
+            params.insert(
+                ROUTING_DOC_URI_KEY.into(),
+                Value::String(owner_doc.to_string()),
+            );
+            operations.push(("delete".to_string(), params));
+        }
+        // The members an adopted copy no longer holds.
+        for id in &dropped_by_copies {
+            has_structural_changes = true;
+            let mut params: holon_api::StorageEntity = HashMap::new();
+            params.insert("id".into(), Value::String(id.to_string()));
+            params.insert(
+                ROUTING_DOC_URI_KEY.into(),
+                Value::String(document_uri.to_string()),
+            );
+            operations.push(("delete".to_string(), params));
         }
 
         // Apply each operation through `BlockOrdering` — the single org→block
@@ -4461,10 +6164,20 @@ impl FileSyncController {
         // a create that was never in the count) — the row-137 subdir fileless
         // journals topology tripped exactly that. This double-filter cannot
         // underflow and equals `expected_present_ids.len()` by construction.
+        // An adopted block's new parent reaches `block_raw` with the downstream
+        // flush when the consolidator is upstream; it is checked after that
+        // flush instead.
+        let moves_land_downstream: HashSet<EntityUri> =
+            if matches!(self.ordering.consolidator(), Consolidator::Upstream) {
+                moved_in.keys().cloned().collect()
+            } else {
+                HashSet::new()
+            };
         let expected_block_count = new_blocks_vec
             .iter()
             .filter(|b| !gate_excluded_ids.contains(&b.id))
             .filter(|b| !consolidator_create_ids.contains(&b.id.to_string()))
+            .filter(|b| !moves_land_downstream.contains(&b.id))
             .count();
         tracing::info!(
             target: "holon_latency",
@@ -4521,6 +6234,7 @@ impl FileSyncController {
             let expected_present_ids: Vec<String> = new_blocks_vec
                 .iter()
                 .filter(|b| !gate_excluded_ids.contains(&b.id))
+                .filter(|b| !moves_land_downstream.contains(&b.id))
                 .map(|b| b.id.to_string())
                 .filter(|id| !consolidator_create_ids.contains(id))
                 .collect();
@@ -4762,6 +6476,11 @@ impl FileSyncController {
                     });
                     per_parent[slot].1.push(new_block.id.clone());
                 }
+                for (parent_key, ordered_ids) in per_parent.iter_mut() {
+                    if let Some(order) = kept_order.get(parent_key) {
+                        *ordered_ids = order.clone();
+                    }
+                }
                 progress.begin_phase();
                 for (parent_key, ordered_ids) in &per_parent {
                     progress.advance("place_all (per parent)");
@@ -4808,6 +6527,27 @@ impl FileSyncController {
                 }
             }
         }
+        if !moves_land_downstream.is_empty() {
+            let landed: HashSet<EntityUri> = self
+                .block_reader
+                .get_blocks(&document_uri)
+                .await?
+                .into_iter()
+                .map(|b| b.id)
+                .collect();
+            let missing: Vec<&EntityUri> = moves_land_downstream
+                .iter()
+                .filter(|id| !landed.contains(*id))
+                .collect();
+            if !missing.is_empty() {
+                anyhow::bail!(
+                    "[on_file_changed] {} adopted {} block(s) from other files, but after the \
+                     downstream flush {missing:?} are still not under {document_uri}",
+                    path.display(),
+                    moves_land_downstream.len(),
+                );
+            }
+        }
         if !created_ids.is_empty() {
             // Phase 5 cutover (site B): wait on the positional `LiveData<Block>`
             // catch-up — every just-created id visible in the convergent feed —
@@ -4831,6 +6571,36 @@ impl FileSyncController {
             }
         }
 
+        // Fingerprinted after this ingest's ops, so the put-back version holds
+        // what the store keeps of the block, not the descendants it deleted.
+        let covered: HashSet<EntityUri> = self
+            .undone_deletions
+            .keys()
+            .chain(put_back.iter().map(|(id, _, _)| id))
+            .cloned()
+            .collect();
+        for (id, root, holders) in put_back {
+            let block = self
+                .block_reader
+                .get_block_authoritative(&id)
+                .await?
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "{id}, put back into {}, is not in the store",
+                        path.display()
+                    )
+                })?;
+            let put_back = self
+                .put_back_fingerprint(path, &root, &block, &covered)
+                .await?;
+            self.disclose_undone_deletion(&id, &root, path, holders, put_back);
+        }
+        // Write-ahead: the record of an undone deletion reaches the vault before
+        // the put-back line does, so a crash in between leaves a record the
+        // boot settles, never a put-back nobody remembers.
+        self.persist_undone_deletions().await?;
+        #[cfg(feature = "crash-injection")]
+        crate::crash_injection::reached("after_undone_deletions_persisted");
         // Ingest image files from disk into the image data provider (if any).
         // At this point blocks are in the store and image files are on disk.
         self.ingest_images(&document_uri).await?;
@@ -4853,11 +6623,14 @@ impl FileSyncController {
         // projection and returning would strand the merged text (disk would
         // never converge). The re-render below reads the merged store content
         // and writes it back to disk.
+        // An adopted copy becomes this file's block, and a released block
+        // that stayed with this file goes back into it: both re-render.
         if !has_structural_changes
             && !needs_id_writeback
             && !needs_block_id_writeback
             && !did_text_merge
-            && stale_cross_doc_ids.is_empty()
+            && released_here.is_empty()
+            && !puts_back
         {
             self.last_projection
                 .insert(canonical.clone(), disk_content.to_string());
@@ -4868,7 +6641,7 @@ impl FileSyncController {
                 &document_uri,
                 &read_only_members,
             )
-            .await;
+            .await?;
             return Ok(IngestOutcome::Ingested);
         }
 
@@ -4879,7 +6652,7 @@ impl FileSyncController {
         // not this ingest's. Defer the write-back: disk already reflects every
         // block this ingest processed (the ops came FROM this parse), so
         // recording it as the projection is sound. ALLOW(fallback): disclosed.
-        if !foreign_subtree_ids.is_empty() && stale_cross_doc_ids.is_empty() && !did_text_merge {
+        if inlines_foreign_pages && !did_text_merge {
             info!(
                 "[FileSyncController] Deferring write-back of {} — it inlines {} block(s) owned \
                  by other page-files; rewriting now would de-inline them. Disk left as-is; DB \
@@ -4896,7 +6669,7 @@ impl FileSyncController {
                 &document_uri,
                 &read_only_members,
             )
-            .await;
+            .await?;
             return Ok(IngestOutcome::Ingested);
         }
 
@@ -4917,13 +6690,14 @@ impl FileSyncController {
                 &document_uri,
                 &read_only_members,
             )
-            .await;
+            .await?;
             return Ok(IngestOutcome::Ingested);
         }
 
         // Structural changes occurred — re-project from cache so the file reflects
         // any merges (e.g. conflict re-parenting, seed layout integration).
         let rendered = self.render_file_by_doc_id(&document_uri, path).await?;
+        let rendered = self.keep_copies(path, &canonical, rendered, &disk_content)?;
         assert!(
             new_blocks.is_empty() || !rendered.trim().is_empty(),
             "[FileSyncController] BUG: Just created/updated {} blocks for doc_id={} but \
@@ -4951,7 +6725,7 @@ impl FileSyncController {
         // very ingest, so the render legitimately stops at them — while a block
         // the authority no longer holds still reads as loss.
         let (loss, unresolvable) = self
-            .writeback_drops(path, &disk_content, &rendered, &stale_removals)
+            .writeback_drops(path, &disk_content, &rendered, &deleted_in_holon)
             .await?;
         if !loss.dropped.is_empty() || !unresolvable.is_empty() {
             // Inc 3 carry-forward (risk-register #2). If the SOLE reason we left the
@@ -4984,7 +6758,7 @@ impl FileSyncController {
                     &document_uri,
                     &read_only_members,
                 )
-                .await;
+                .await?;
                 return Ok(IngestOutcome::Ingested);
             }
             // Checked BEFORE the drop verdict, mirroring the block-driven
@@ -5053,6 +6827,8 @@ impl FileSyncController {
                     }
                     self.fs.write(target.as_path(), rendered.as_bytes()).await?;
                     self.run_post_write_hook(path);
+                    #[cfg(feature = "crash-injection")]
+                    crate::crash_injection::reached("after_ingest_write_back");
                     info!(
                         "[FileSyncController] Wrote merged content to {}",
                         path.display()
@@ -5085,7 +6861,7 @@ impl FileSyncController {
             &document_uri,
             &read_only_members,
         )
-        .await;
+        .await?;
 
         // Update last_projection
         self.last_projection.insert(canonical.clone(), rendered);
@@ -5098,10 +6874,9 @@ impl FileSyncController {
     /// will need — to the `file` row via the BlockReader's raw-SQL write-back.
     /// The hash alone cannot arm the next boot's fast path: a `ByRecordedHome`
     /// format has no other way to name its document, and a read-only home has
-    /// no other way to learn which blocks it owns. Best-effort: a failure to
-    /// persist does not abort the ingest — we've already committed the block
-    /// ops and don't want to bail the controller. Logged at warn so the case
-    /// is observable.
+    /// no other way to learn which blocks it owns. A failed write is an error:
+    /// the stale row would let the next boot skip a restore of older bytes and
+    /// render the store over it.
     ///
     /// `read_only_members` is empty for every writable file, and persisting it
     /// clears what the row held — a file whose format turned writable is no
@@ -5113,9 +6888,48 @@ impl FileSyncController {
         hash: &str,
         document_id: &EntityUri,
         read_only_members: &[EntityUri],
-    ) {
-        self.last_projection_hash
-            .insert(canonical.clone(), hash.to_string());
+    ) -> Result<()> {
+        let hash = self.note_projection_hash(canonical, hash);
+        self.write_file_row(canonical, rel_path, &hash, document_id, read_only_members)
+            .await
+    }
+
+    /// Record `hash` in memory as the bytes of `canonical`, and return the
+    /// hash its `file` row may hold. A file holding a copy keeps no hash (an
+    /// empty one arms no skip), so the next boot re-reads it and records the
+    /// copy again.
+    fn note_projection_hash(&mut self, canonical: &CanonicalPath, hash: &str) -> String {
+        if self.holds_copy(canonical) {
+            self.last_projection_hash.remove(canonical);
+            String::new()
+        } else {
+            self.last_projection_hash
+                .insert(canonical.clone(), hash.to_string());
+            hash.to_string()
+        }
+    }
+
+    /// Write the `file` row of `canonical`. A row this session already wrote
+    /// with the empty hash, the same document and no members is not written
+    /// again.
+    async fn write_file_row(
+        &mut self,
+        canonical: &CanonicalPath,
+        rel_path: &Path,
+        hash: &str,
+        document_id: &EntityUri,
+        read_only_members: &[EntityUri],
+    ) -> Result<()> {
+        let empty_row = hash.is_empty() && read_only_members.is_empty();
+        if empty_row
+            && self
+                .empty_hash_rows
+                .get(canonical)
+                .is_some_and(|row| row.document_id == *document_id)
+        {
+            return Ok(());
+        }
+        self.empty_hash_rows.remove(canonical);
         if read_only_members.is_empty() {
             self.persisted_read_only_blocks.remove(canonical);
         } else {
@@ -5143,19 +6957,82 @@ impl FileSyncController {
             document_id: Some(document_id.clone()),
             read_only_blocks: read_only_members.to_vec(),
         };
-        if let Err(e) = self
-            .block_reader
+        self.block_reader
             .persist_file_projection(&file_uri, &name, &parent_dir, &projection)
             .await
-        {
-            warn!(
-                "[FileSyncController] persist_file_projection failed for {} ({}): {} (in-memory \
-                 hash updated; next boot will re-ingest)",
-                file_uri,
-                canonical.as_path_buf().display(),
-                e
+            .with_context(|| {
+                format!(
+                    "store the content hash of {} in the file row {file_uri}",
+                    canonical.as_path_buf().display()
+                )
+            })?;
+        if empty_row {
+            self.empty_hash_rows.insert(
+                canonical.clone(),
+                EmptyHashRow {
+                    rel_path: rel_path.to_path_buf(),
+                    document_id: document_id.clone(),
+                },
             );
         }
+        Ok(())
+    }
+
+    /// The files whose row holds the empty hash while Holon knows the hash of
+    /// the bytes it wrote last. A file holding a copy keeps the empty hash.
+    fn owed_hash_stamps(&self) -> Vec<(CanonicalPath, EmptyHashRow, String)> {
+        self.empty_hash_rows
+            .iter()
+            .filter(|(canonical, _)| !self.holds_copy(canonical))
+            .filter_map(|(canonical, row)| {
+                self.last_projection_hash
+                    .get(canonical)
+                    .map(|hash| (canonical.clone(), row.clone(), hash.clone()))
+            })
+            .collect()
+    }
+
+    /// Whether [`stamp_written_hashes`](Self::stamp_written_hashes) has a row
+    /// to write.
+    pub fn owes_hash_stamps(&self) -> bool {
+        !self.owed_hash_stamps().is_empty()
+    }
+
+    /// Record in each `file` row the write-back left with the empty hash the
+    /// hash of the bytes Holon wrote last, so the next boot skips the file
+    /// while it holds them. A failure is disclosed on the vault, naming every
+    /// file still unrecorded; those files are read again at the next boot.
+    pub async fn stamp_written_hashes(&mut self) -> Result<()> {
+        let owed = self.owed_hash_stamps();
+        for (i, (canonical, row, hash)) in owed.iter().enumerate() {
+            let file_uri = EntityUri::file(&row.rel_path.to_string_lossy());
+            let recorded = self
+                .block_reader
+                .record_file_hash(&file_uri, hash)
+                .await
+                .with_context(|| {
+                    format!(
+                        "record the hash of {} in the file row {file_uri}",
+                        canonical.as_path_buf().display()
+                    )
+                });
+            if let Err(e) = recorded {
+                let cause = format!("{e:#}");
+                if let Some(disclosure) = &self.writeback_disclosure {
+                    let files: Vec<&Path> = owed[i..]
+                        .iter()
+                        .map(|(canonical, _, _)| canonical.as_path_buf().as_path())
+                        .collect();
+                    disclosure.written_files_unrecorded(&self.root_dir, &files, &cause);
+                }
+                return Err(e).context("record the hashes of the files Holon wrote");
+            }
+            self.empty_hash_rows.remove(canonical);
+        }
+        if let Some(disclosure) = &self.writeback_disclosure {
+            disclosure.written_files_recorded(&self.root_dir);
+        }
+        Ok(())
     }
 
     /// A page starts its OWN document. When THIS delta upserts a block
@@ -5285,7 +7162,13 @@ impl FileSyncController {
                 }
             }
 
-            let verdict = self.on_block_changed_memoized(&doc, last, &mut rows).await;
+            let mut verdict = self.on_block_changed_memoized(&doc, last, &mut rows).await;
+            if verdict.is_ok() {
+                let ids: Vec<EntityUri> = deltas.iter().map(|d| d.block_id().clone()).collect();
+                if let Err(e) = self.follow_copies(&ids).await {
+                    verdict = Err(e);
+                }
+            }
             // `on_block_changed` only re-materializes images for the delta it
             // was handed; an image folded earlier in this burst would otherwise
             // never reach disk.
@@ -5314,8 +7197,90 @@ impl FileSyncController {
         doc_id: &EntityUri,
         delta: &BlockDelta,
     ) -> Result<bool> {
-        self.on_block_changed_memoized(doc_id, delta, &mut crate::sync_ports::BlockRowMemo::new())
-            .await
+        let rendered = self
+            .on_block_changed_memoized(doc_id, delta, &mut crate::sync_ports::BlockRowMemo::new())
+            .await?;
+        self.follow_copies(std::slice::from_ref(delta.block_id()))
+            .await?;
+        Ok(rendered)
+    }
+
+    /// Holon deleted or moved blocks that other files hold copies of
+    /// (D229.b). A deleted block ends its copies' relation: the files are
+    /// ingested at once and the first brings it back as its own block. A moved
+    /// block has a new owner, whose file its release now takes.
+    async fn follow_copies(&mut self, ids: &[EntityUri]) -> Result<()> {
+        self.end_edited_undone_deletions().await?;
+        for id in ids {
+            if self.undone_deletions.contains_key(id)
+                && self
+                    .block_reader
+                    .get_block_authoritative(id)
+                    .await?
+                    .is_none()
+            {
+                self.end_undone_deletion(id, None);
+            }
+            if let Some(file) = self.kept_after_delete.get(id).cloned() {
+                let still_there = match self.resolve_authoritative_doc(id).await? {
+                    Some(doc) => self
+                        .owner_file_of(&doc)
+                        .await?
+                        .is_some_and(|owner_file| CanonicalPath::new(&owner_file) == file),
+                    None => false,
+                };
+                if !still_there {
+                    self.forget_kept_after_delete(id);
+                }
+            }
+            let Some(copies) = self.copies.get(id) else {
+                continue;
+            };
+            let owner_doc = copies.owner_doc.clone();
+            match self.resolve_authoritative_doc(id).await? {
+                None if !copies.owner_deleted => {
+                    let mut files = copies.copy_files.clone();
+                    files.sort_by(|a, b| a.as_path_buf().cmp(b.as_path_buf()));
+                    info!(
+                        "[FileSyncController] block {id} was deleted in Holon; {} file(s) hold a \
+                         copy of it, and the first brings it back",
+                        files.len(),
+                    );
+                    self.copies
+                        .get_mut(id)
+                        .expect("present above")
+                        .owner_deleted = true;
+                    for file in files {
+                        let path = file.as_path_buf().clone();
+                        let outcome =
+                            Box::pin(self.ingest_file(&path)).await.with_context(|| {
+                                format!(
+                                    "ingest {} to bring back block {id}, deleted in Holon",
+                                    path.display()
+                                )
+                            })?;
+                        if !matches!(outcome, IngestOutcome::Ingested) {
+                            tracing::warn!(
+                                file = %path.display(),
+                                block_id = %id,
+                                ?outcome,
+                                "[FileSyncController] the file holding a copy of a block deleted \
+                                 in Holon was not ingested; it brings the block back when it is"
+                            );
+                        }
+                    }
+                }
+                Some(doc) if doc != owner_doc => {
+                    let owner_file = self.owner_file_of(&doc).await?;
+                    let copies = self.copies.get_mut(id).expect("present above");
+                    copies.owner_doc = doc;
+                    copies.owner_file = owner_file;
+                    self.disclose_copies(id);
+                }
+                _ => {}
+            }
+        }
+        self.persist_undone_deletions().await
     }
 
     /// As [`on_block_changed`](Self::on_block_changed), sharing `rows` with the
@@ -5404,7 +7369,16 @@ impl FileSyncController {
             .get(&canonical)
             .map(|s| s.as_str())
             .unwrap_or("");
-        if self.last_projection.contains_key(&canonical) && disk_content != last {
+        // Holon moved a block this file holds a copy of into this file's own
+        // page: the ingest adopts the copy, merged, before any render.
+        let adopts_own_copy = self.holder.get(doc_id).is_some_and(|held| {
+            self.copies_held_by(&canonical)
+                .iter()
+                .any(|id| held.blocks.contains_key(id))
+        });
+        if self.last_projection.contains_key(&canonical)
+            && (disk_content != last || adopts_own_copy)
+        {
             info!(
                 "[FileSyncController] Processing pending external change for {} before re-render",
                 path.display()
@@ -5434,6 +7408,7 @@ impl FileSyncController {
         }
 
         let rendered = self.render_doc_from_holder(doc_id, &path).await?;
+        let rendered = self.keep_copies(&path, &canonical, rendered, &disk_content)?;
 
         let current_last = self
             .last_projection
@@ -5535,7 +7510,7 @@ impl FileSyncController {
         // survives) but does NOT stamp `last_projection`, so a later-writable
         // path re-attempts.
         if !self
-            .write_back_or_skip_readonly(doc_id, &vault_path, rendered.as_bytes())
+            .write_back_or_skip_readonly(doc_id, &vault_path, &rendered)
             .await?
         {
             return Ok(true);
@@ -6304,6 +8279,7 @@ impl FileSyncController {
                     continue;
                 }
             };
+            let rendered = self.keep_copies(&path, &canonical, rendered, &disk_content)?;
 
             let current_last = self
                 .last_projection
@@ -6360,7 +8336,7 @@ impl FileSyncController {
 
             // EROFS row 346: skip-with-one-loud-error (see on_block_changed).
             if !self
-                .write_back_or_skip_readonly(&doc.id, &vault_path, rendered.as_bytes())
+                .write_back_or_skip_readonly(&doc.id, &vault_path, &rendered)
                 .await?
             {
                 continue;
@@ -6556,7 +8532,7 @@ impl FileSyncController {
         // registering the alias — a path that could not be written does not own
         // a file to advertise.
         if !self
-            .write_back_or_skip_readonly(page_id, &vault_path, rendered.as_bytes())
+            .write_back_or_skip_readonly(page_id, &vault_path, &rendered)
             .await?
         {
             return Ok(());
@@ -6820,7 +8796,7 @@ impl FileSyncController {
             }
             // EROFS row 346: skip-with-one-loud-error (see on_block_changed).
             if !self
-                .write_back_or_skip_readonly(&doc_id, &vault_path, rendered.as_bytes())
+                .write_back_or_skip_readonly(&doc_id, &vault_path, &rendered)
                 .await?
             {
                 continue;
@@ -7544,10 +9520,17 @@ impl FileSyncController {
         &mut self,
         doc_id: &EntityUri,
         vault_path: &VaultPath,
-        rendered: &[u8],
+        rendered: &str,
     ) -> Result<bool> {
         let path = vault_path.as_path();
         let canonical = CanonicalPath::new(path);
+        let rel_path = path.strip_prefix(&self.root_dir).with_context(|| {
+            format!(
+                "write-back target {} is not under the vault root {}",
+                path.display(),
+                self.root_dir.display()
+            )
+        })?;
 
         // Write-tier gate. FOUR of the five projection write sites funnel here;
         // the fifth is the ingest-normalization write, which writes through
@@ -7601,8 +9584,37 @@ impl FileSyncController {
                 }
             }
         }
-        match self.fs.write(path, rendered).await {
+        // The next boot skips a file whose bytes match the stored hash, so the
+        // row holds no hash from before this write until the stamp records
+        // the bytes written: a crash in between leaves a row that arms no skip.
+        if let Err(e) = self
+            .write_file_row(&canonical, rel_path, "", doc_id, &[])
+            .await
+        {
+            let cause = format!("{e:#}");
+            if let Some(disclosure) = &self.writeback_disclosure {
+                disclosure.writeback_stalled(
+                    path,
+                    &format!(
+                        "Holon did not write this file: it cannot record in the file row \
+                         which bytes it would write ({cause})"
+                    ),
+                );
+            }
+            self.refused_writebacks.refused(doc_id, path, &cause);
+            return Err(e).with_context(|| {
+                format!(
+                    "org write-back to {} not written: its file row cannot be recorded",
+                    path.display()
+                )
+            });
+        }
+        match self.fs.write(path, rendered.as_bytes()).await {
             Ok(()) => {
+                #[cfg(feature = "crash-injection")]
+                crate::crash_injection::reached("after_write_back");
+                let hash = self.projection_hash(rendered);
+                self.note_projection_hash(&canonical, &hash);
                 self.refused_writebacks.written(doc_id);
                 if let Some(disclosure) = &self.writeback_disclosure {
                     disclosure.writeback_resumed(path);
@@ -7615,7 +9627,7 @@ impl FileSyncController {
                 // returned before this write, so this only ever records a
                 // writable home (which drops any membership).
                 self.note_doc_home(doc_id, path, HomeMembership::Untouched)?;
-                self.disclose_share_inlined_into(doc_id, path, rendered)
+                self.disclose_share_inlined_into(doc_id, path, rendered.as_bytes())
                     .await;
                 Ok(true)
             }
@@ -7841,13 +9853,22 @@ impl FileSyncController {
     }
 }
 
-/// Documents whose last write-back the file system refused, so their file is
-/// behind the store. A document leaves the record when a write of it succeeds.
+/// A `file` row holding the empty hash, the document it names and no members.
+#[derive(Debug, Clone)]
+struct EmptyHashRow {
+    rel_path: PathBuf,
+    document_id: EntityUri,
+}
+
+/// Documents whose last write-back the file system refused, or that Holon did
+/// not write because it could not record the bytes in the `file` row, so their
+/// file is behind the store. A document leaves the record when a write of it
+/// succeeds.
 #[derive(Debug, Default)]
 pub struct RefusedWritebacks(std::sync::Mutex<std::collections::BTreeMap<String, String>>);
 
 impl RefusedWritebacks {
-    fn refused(&self, doc_id: &EntityUri, path: &Path, err: &std::io::Error) {
+    fn refused(&self, doc_id: &EntityUri, path: &Path, err: &dyn std::fmt::Display) {
         self.0
             .lock()
             .expect("refused write-backs poisoned")
@@ -8002,6 +10023,344 @@ fn three_way_text_content(
         .merge_text(base, theirs, mine)
         .with_context(|| "3-way text merge of concurrent file-vs-UI edit failed")?;
     Ok((merged, true))
+}
+
+/// The block at `index` of a parse in document order, and its descendants.
+fn parsed_subtree(blocks: &[Block], index: usize) -> Vec<&Block> {
+    let mut ids: HashSet<&EntityUri> = HashSet::from([&blocks[index].id]);
+    let mut out = vec![&blocks[index]];
+    for block in &blocks[index + 1..] {
+        if ids.contains(&block.parent_id) {
+            ids.insert(&block.id);
+            out.push(block);
+        }
+    }
+    out
+}
+
+/// `blocks` without the subtrees rooted at `roots`.
+fn without_subtrees(
+    blocks: HashMap<EntityUri, Block>,
+    roots: &[EntityUri],
+) -> HashMap<EntityUri, Block> {
+    if roots.is_empty() {
+        return blocks;
+    }
+    let under_root = |id: &EntityUri| {
+        let mut cur = id;
+        loop {
+            if roots.contains(cur) {
+                return true;
+            }
+            match blocks.get(cur) {
+                Some(block) if block.parent_id != *cur => cur = &block.parent_id,
+                _ => return false,
+            }
+        }
+    };
+    let dropped: HashSet<EntityUri> = blocks.keys().filter(|id| under_root(id)).cloned().collect();
+    blocks
+        .into_iter()
+        .filter(|(id, _)| !dropped.contains(id))
+        .collect()
+}
+
+/// A deletion from a block's own file that Holon undid.
+struct UndoneDeletion {
+    /// The copied heading the block is under.
+    root: EntityUri,
+    /// The block's own file, whose deletion of it was undone.
+    file: PathBuf,
+    /// The files whose copy still holds the block. Empty: the deletion stands.
+    copy_files: HashSet<CanonicalPath>,
+    /// [`FileSyncController::put_back_fingerprint`] of the block Holon put
+    /// back. The deletion removes only that version.
+    put_back: String,
+}
+
+struct EndingUndone {
+    undone: UndoneDeletion,
+    /// The files that lose the block when the change that ends it is done.
+    files: Vec<CanonicalPath>,
+}
+
+struct AdoptionPlan {
+    /// The adopted subtree in document order, as the ingest takes it in place
+    /// of the copy as parsed: merged fields, parents and sibling order.
+    tree: Vec<Block>,
+    /// Each block of `tree` the store holds: its stored and its merged version.
+    merged: HashMap<EntityUri, (Block, Block)>,
+    /// Members the copy no longer holds and Holon did not change: deleted.
+    dropped: Vec<EntityUri>,
+    /// Members Holon deleted and the copy did not change: they stay deleted,
+    /// and the copy's file loses them.
+    deleted_in_holon: Vec<EntityUri>,
+}
+
+/// The decisions of one adoption, and what both sides changed apart.
+struct Planner {
+    on_conflict: OnConflict,
+    conflicts: Vec<String>,
+}
+
+impl Planner {
+    /// Both sides changed something apart: the copy's choice when the copy
+    /// wins (or the caller discards the result), else the store's.
+    fn decide(&mut self, conflict: String, copy_choice: bool) -> bool {
+        self.conflicts.push(conflict);
+        match self.on_conflict {
+            OnConflict::Refuse | OnConflict::TakeDisk => copy_choice,
+            OnConflict::TakeStore => !copy_choice,
+        }
+    }
+
+    /// The children of `parent` in merged order. The side whose relative
+    /// order of the shared children differs from the pasted one wins; each
+    /// side's own additions keep their place after their predecessor there.
+    fn merge_order(
+        &mut self,
+        parent: &EntityUri,
+        base: Option<&[EntityUri]>,
+        disk: &[EntityUri],
+        store: &[EntityUri],
+        kept: &HashSet<EntityUri>,
+    ) -> Vec<EntityUri> {
+        let shared = |list: &[EntityUri]| -> Vec<EntityUri> {
+            list.iter()
+                .filter(|id| disk.contains(id) && store.contains(id))
+                .cloned()
+                .collect()
+        };
+        let (disk_seq, store_seq) = (shared(disk), shared(store));
+        let disk_first = match base {
+            Some(base) => {
+                let base_seq: Vec<EntityUri> = base
+                    .iter()
+                    .filter(|id| disk_seq.contains(id))
+                    .cloned()
+                    .collect();
+                let disk_moved = disk_seq != base_seq;
+                if disk_moved && store_seq != base_seq && disk_seq != store_seq {
+                    self.decide(format!("children of {parent}: reordered apart"), true)
+                } else {
+                    disk_moved
+                }
+            }
+            None if disk_seq != store_seq => {
+                self.decide(format!("children of {parent}: order differs"), true)
+            }
+            None => false,
+        };
+        let (primary, other) = if disk_first {
+            (disk, store)
+        } else {
+            (store, disk)
+        };
+        let mut order: Vec<EntityUri> = primary
+            .iter()
+            .filter(|id| kept.contains(*id))
+            .cloned()
+            .collect();
+        for (at, id) in other.iter().enumerate() {
+            if !kept.contains(id) || order.contains(id) {
+                continue;
+            }
+            let after = other[..at].iter().rev().find(|p| order.contains(p));
+            let slot = after.map_or(0, |p| order.iter().position(|o| o == p).unwrap() + 1);
+            order.insert(slot, id.clone());
+        }
+        let mut rest: Vec<EntityUri> = kept
+            .iter()
+            .filter(|id| !order.contains(*id))
+            .cloned()
+            .collect();
+        rest.sort();
+        order.extend(rest);
+        order
+    }
+}
+
+/// Whether two versions of a block, in file terms, differ in anything but
+/// their position.
+fn fields_differ(a: &Block, b: &Block, positional: &[&str]) -> bool {
+    let props = |block: &Block| -> std::collections::BTreeMap<String, Value> {
+        block
+            .properties
+            .iter()
+            .filter(|(k, _)| !positional.contains(&k.as_str()))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    };
+    a.content != b.content
+        || a.marks != b.marks
+        || a.content_type != b.content_type
+        || a.source_language != b.source_language
+        || a.source_name != b.source_name
+        || a.tags != b.tags
+        || a.requires != b.requires
+        || a.advice_suppressed != b.advice_suppressed
+        || a.contributes_to != b.contributes_to
+        || a.collapsed != b.collapsed
+        || a.widget_only != b.widget_only
+        || props(a) != props(b)
+}
+
+/// Merge the copy `disk` a file adopts with the store's version `store`, both
+/// in file terms, against their common ancestor `base`. Per field (the text
+/// with its marks, each property key, every other field whole), the side that
+/// changed wins; unmarked text both sides changed is 3-way merged. Without a
+/// known `base`, the two must agree. A field both sides changed apart is a
+/// conflict, and takes the side `on_conflict` names (`Refuse` takes the copy's,
+/// for a result the caller discards). Position (the parent, `positional` keys)
+/// is not merged here: [`AdoptionPlan`] merges the subtree's structure.
+fn merge_adopted(
+    base: Option<&Block>,
+    disk: &Block,
+    store: &Block,
+    positional: &[&str],
+    merger: Option<&dyn ThreeWayTextMerge>,
+    on_conflict: OnConflict,
+) -> Result<(Block, Vec<String>)> {
+    struct Picker {
+        take_store: bool,
+        conflicts: Vec<String>,
+    }
+    impl Picker {
+        fn pick<T: PartialEq + Clone>(
+            &mut self,
+            field: &str,
+            base: Option<&T>,
+            disk: &T,
+            store: &T,
+        ) -> T {
+            match base {
+                Some(base) if disk == base => store.clone(),
+                Some(base) if store == base => disk.clone(),
+                _ if disk == store => disk.clone(),
+                _ => {
+                    self.conflicts.push(field.to_string());
+                    if self.take_store {
+                        store.clone()
+                    } else {
+                        disk.clone()
+                    }
+                }
+            }
+        }
+    }
+    let mut picker = Picker {
+        take_store: on_conflict == OnConflict::TakeStore,
+        conflicts: Vec::new(),
+    };
+    let mut merged = disk.clone();
+
+    // Marks index into the text, so the two are one field. Only unmarked text
+    // both sides changed is 3-way merged; marked text both sides changed is a
+    // conflict, since the merged text matches neither side's spans.
+    let text = |b: &Block| (b.content.clone(), b.marks.clone());
+    let unmarked =
+        |b: Option<&Block>| b.is_none_or(|b| b.marks.as_ref().is_none_or(|m| m.is_empty()));
+    match (base, merger) {
+        (Some(b), Some(merger))
+            if disk.content != b.content
+                && store.content != b.content
+                && disk.content != store.content
+                && unmarked(Some(b))
+                && unmarked(Some(disk))
+                && unmarked(Some(store)) =>
+        {
+            merged.content = merger
+                .merge_text(&b.content, &disk.content, &store.content)
+                .with_context(|| format!("3-way merge of the text of adopted block {}", disk.id))?;
+            merged.marks = None;
+        }
+        _ => {
+            let (content, marks) = picker.pick(
+                "content",
+                base.map(text).as_ref(),
+                &text(disk),
+                &text(store),
+            );
+            merged.content = content;
+            merged.marks = marks;
+        }
+    }
+    merged.content_type = picker.pick(
+        "content_type",
+        base.map(|b| &b.content_type),
+        &disk.content_type,
+        &store.content_type,
+    );
+    merged.source_language = picker.pick(
+        "source_language",
+        base.map(|b| &b.source_language),
+        &disk.source_language,
+        &store.source_language,
+    );
+    merged.source_name = picker.pick(
+        "source_name",
+        base.map(|b| &b.source_name),
+        &disk.source_name,
+        &store.source_name,
+    );
+    merged.tags = picker.pick("tags", base.map(|b| &b.tags), &disk.tags, &store.tags);
+    merged.requires = picker.pick(
+        "requires",
+        base.map(|b| &b.requires),
+        &disk.requires,
+        &store.requires,
+    );
+    merged.advice_suppressed = picker.pick(
+        "advice_suppressed",
+        base.map(|b| &b.advice_suppressed),
+        &disk.advice_suppressed,
+        &store.advice_suppressed,
+    );
+    merged.contributes_to = picker.pick(
+        "contributes_to",
+        base.map(|b| &b.contributes_to),
+        &disk.contributes_to,
+        &store.contributes_to,
+    );
+    merged.collapsed = picker.pick(
+        "collapsed",
+        base.map(|b| &b.collapsed),
+        &disk.collapsed,
+        &store.collapsed,
+    );
+    merged.widget_only = picker.pick(
+        "widget_only",
+        base.map(|b| &b.widget_only),
+        &disk.widget_only,
+        &store.widget_only,
+    );
+
+    let keys: std::collections::BTreeSet<String> = disk
+        .properties
+        .keys()
+        .chain(store.properties.keys())
+        .chain(base.into_iter().flat_map(|b| b.properties.keys()))
+        .filter(|k| !positional.contains(&k.as_str()))
+        .cloned()
+        .collect();
+    for key in keys {
+        let base_value = base.map(|b| b.properties.get(&key).cloned());
+        let value = picker.pick(
+            &key,
+            base_value.as_ref(),
+            &disk.properties.get(&key).cloned(),
+            &store.properties.get(&key).cloned(),
+        );
+        match value {
+            Some(v) => {
+                merged.properties.insert(key, v);
+            }
+            None => {
+                merged.properties.remove(&key);
+            }
+        }
+    }
+    Ok((merged, picker.conflicts))
 }
 
 /// Outcome of the ID-less content+position reconcile.
@@ -9060,6 +11419,75 @@ mod three_way_text_tests {
         fn merge_text(&self, base: &str, theirs: &str, mine: &str) -> Result<String> {
             Ok(format!("MERGED({base}|{theirs}|{mine})"))
         }
+    }
+
+    fn text_block(content: &str, bold: bool) -> Block {
+        let mut block = Block::new_text(EntityUri::block("x"), EntityUri::block("page"), content);
+        if bold {
+            block.marks = Some(vec![holon_api::MarkSpan::new(
+                0,
+                1,
+                holon_api::InlineMark::Bold,
+            )]);
+        }
+        block
+    }
+
+    /// Marks index into the text, so they travel with the side whose text
+    /// wins.
+    #[test]
+    fn an_adopted_blocks_marks_follow_its_text() {
+        let base = text_block("abc", false);
+        let disk = text_block("abc", false);
+        let store = text_block("abcd", true);
+        let (merged, conflicts) = merge_adopted(
+            Some(&base),
+            &disk,
+            &store,
+            &[],
+            Some(&StubMerge),
+            OnConflict::Refuse,
+        )
+        .unwrap();
+        assert!(conflicts.is_empty());
+        assert_eq!(
+            (merged.content.as_str(), merged.marks),
+            ("abcd", store.marks)
+        );
+    }
+
+    /// A 3-way text merge produces a text neither side's spans index, so
+    /// marked text both sides changed is a conflict, not a merge.
+    #[test]
+    fn marked_text_both_sides_changed_is_a_conflict() {
+        let base = text_block("abc", false);
+        let disk = text_block("Xabc", false);
+        let store = text_block("abcY", true);
+        let (_, conflicts) = merge_adopted(
+            Some(&base),
+            &disk,
+            &store,
+            &[],
+            Some(&StubMerge),
+            OnConflict::Refuse,
+        )
+        .unwrap();
+        assert_eq!(conflicts, vec!["content".to_string()]);
+
+        let (merged, conflicts) = merge_adopted(
+            Some(&base),
+            &disk,
+            &text_block("abcY", false),
+            &[],
+            Some(&StubMerge),
+            OnConflict::Refuse,
+        )
+        .unwrap();
+        assert!(conflicts.is_empty());
+        assert_eq!(
+            (merged.content.as_str(), merged.marks),
+            ("MERGED(abc|Xabc|abcY)", None)
+        );
     }
 
     #[test]

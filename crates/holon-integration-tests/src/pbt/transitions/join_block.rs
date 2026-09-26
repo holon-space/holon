@@ -59,6 +59,15 @@ pub fn join_block_preconditions<R: RefBlockTree + RefFocus + RefLifecycle>(
     let mut checks: Vec<Validated<(), Reason>> = vec![
         check(state.app_started(), Reason::AppNotStarted),
         check(state.is_properly_setup(), Reason::NotProperlySetup),
+        // Joining a copied heading away moves its children out of the copy
+        // (D229.b); the model describes deleting a childless one that one
+        // other file holds.
+        check(
+            !state.is_copied(block_id)
+                || (state.sorted_children(block_id).is_empty()
+                    && state.copy_file_count(block_id) == 1),
+            Reason::CopyStands,
+        ),
         // Block-interaction transitions need the block to render as an
         // interactive widget (ops/draggable) reactively over the navigated
         // focus. Only the default layout does; custom `index.org` query

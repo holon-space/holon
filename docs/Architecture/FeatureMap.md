@@ -36,7 +36,7 @@ The one-page answer to *"which features could this change impact?"*. Rows are us
 | **Ruled by** | An ADR under [`docs/adr/`](../adr/), or an invariant number from [Model.md](Model.md). |
 | **Mode axes** | Which of [Model.md](Model.md)'s four orthogonal axes the feature's behaviour varies on: **Storage** (Loro store on/off), **File adapter** (org/none), **Merge fidelity** (op-CRDT / base-3-way / LWW), **Transport** (iroh P2P on/off). `—` means the feature behaves the same everywhere. *Headless vs windowed* is a test-slice axis, not a product mode; it is called out in prose where it matters. |
 
-The composed keystone is [`general_e2e_composed_pbt.rs`](../../crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs). Its alphabet is 89 transitions; the repo declares 85 invariant ids plus 17 correspondence-family ids. Open reds are registered in [KeystoneKnownReds.md](../Testing/KeystoneKnownReds.md) — a red listed there is a pass-with-note, anything else is a regression.
+The composed keystone is [`general_e2e_composed_pbt.rs`](../../crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs). Its alphabet is 94 transitions; the repo declares 86 invariant ids plus 17 correspondence-family ids. Open reds are registered in [KeystoneKnownReds.md](../Testing/KeystoneKnownReds.md) — a red listed there is a pass-with-note, anything else is a regression.
 
 ---
 
@@ -247,14 +247,19 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `AttemptIngestCompoundOnReadOnly` — a compound's constituents must be judged under the COMPOUND's provenance, not re-judged as a user's edit
 - `AttemptReadOnlyEdit` — the write the dispatcher must refuse, without which `inv-read-only-home-refuses-writes` can only prove that nothing tried
 - `CreateBlockUnderFocus` — creation-slot gesture mint under focus root
+- `DeleteLineFromFile` — a child deleted from its own file is put back while a copy holds it, and the put-back is disclosed; the same deletion in the copy lets it stand (D229.b)
 - `DeletePlacedRoot` — a recipient delete of a placed page, which leaves the share on the receiver and never deletes the owner's page.
 - `DeletePlacementParent` — a recipient delete of a block the placed page hangs under, which leaves the page's share exactly as a delete of the page does and never deletes the owner's page.
 - `DeletePlacementRecord` — a recipient delete naming a page's mount rather than the page, which leaves the page's share exactly as a delete of the page does and never deletes the owner's page.
 - `DispatchUnschemedBlockId` — the id form that let the write leg and the read legs key on different strings
+- `EditBlockCopy` — a copy edited on disk while Holon edits the same block: the later release merges both, or refuses and discloses when both changed the keyword apart (D229.b)
+- `FinishCutPaste` — the later save resolves a block held by two files: adopted and merged with Holon's edits, refused when both were edited apart (the next deletion decides), or left with its owner (D229.b)
 - `FullSync` — a full re-sync leaves every live watch rendering the synced state
 - `JoinPlacedRoot` — a join that takes a placed page off the receiver without leaving its share, and an undo that brings the page back as a local block carrying the owner's id.
 - `JumpToSearchHit` — after a jump the caret is live INSIDE the new root: on the destination's first child, or on the destination's creation affordance when it has no children. Never on the destination itself, which renders through the editor-less `page_title` variant and leaves the keyboard dead (docs/Testing/bugfunnel/entries/ 2026-09-08-quick-open-enter-navigation-leaves-no-editable-focus.md).
+- `MoveBlockBetweenFiles` — no save order loses the block; a block held by two files at once stays in both, is disclosed naming both, and is resolved by the later save (D229.b)
 - `Nothing` — no-op interleaving for schedule diversity
+- `PasteBlockCopy` — the invariants run while both files hold the block: both copies stay on disk, Holon's edits reach both files, and a condition names the block, its owner's file and the file with the copy (D229.b)
 - `PressKey` — raw key chord -> bubble_input resolution
 - `Reboot` — what survives a real restart
 - `RebuildViews` — a watch opened before a `rebuild_views` keeps receiving changes after it and holds what its rebuilt view holds
@@ -271,6 +276,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `inv-block-ids-match-ref` — SQL projection block-id set vs ref non-seed block ids (coarse set equality)
 - `inv-boundary-respected` — a cross-instance sharpening of `inv-audience-never-over-approximates`: that one asserts alignment inside ONE model, this one asserts it across a real second SUT.
 - `inv-conditions-match-ref` — a transition that fails on purpose must leave a condition raised, not merely decline to write
+- `inv-copies-stay-on-disk` — the state between the two saves of a cut & paste, where both files hold the block, with Holon writing to both (D229.b)
 - `inv-decompiled-rows-rendered`
 - `inv-editable-text-has-draggable` — every editable_text/rendered_text in a block-profile subtree paired with a same-id draggable
 - `inv-editor-caret-matches-ref`
@@ -327,6 +333,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `undo-prod-session-stale-dropped`
 - `vault-scale-main-panel-delivery`
 - `windowed-splitblock-no-editable-surface`
+- `writeorgfile-sql-reads-budget`
 
 ## Sources
 

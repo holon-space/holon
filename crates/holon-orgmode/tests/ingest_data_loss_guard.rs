@@ -75,6 +75,8 @@ struct FakeStore {
     /// `load_file_projections` so a later controller boots the cold-boot fast
     /// path on the hash an earlier one actually wrote.
     hashes: Arc<Mutex<Vec<(EntityUri, String)>>>,
+    /// The `file` table refuses every projection write.
+    refuse_projection: bool,
 }
 
 impl FakeStore {
@@ -350,6 +352,9 @@ impl BlockReader for FakeStore {
         _: &str,
         projection: &holon_filesystem::FileProjection,
     ) -> anyhow::Result<()> {
+        if self.refuse_projection {
+            anyhow::bail!("the file table refused the write");
+        }
         let mut hashes = self.hashes.lock().unwrap();
         hashes.retain(|(u, _)| u != uri);
         hashes.push((uri.clone(), projection.content_hash.clone()));
@@ -460,6 +465,41 @@ async fn the_same_file_ingests_cleanly_when_nothing_is_swallowed() {
     assert!(
         on_disk.contains("first body") && on_disk.contains("last body"),
         "the host's own blocks must survive the de-inline; got:\n{on_disk}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The stored hash decides whether the next boot reads the file. A hash that
+// could not be stored makes a later restore of these bytes look unchanged at
+// boot, so the failure must reach the caller.
+// ---------------------------------------------------------------------------
+
+const PLAIN_SOURCE: &str = "\
+#+ID: lossy-doc
+#+TITLE: Lossy Doc
+* First
+:PROPERTIES:
+:ID: first-block
+:END:
+first body
+";
+
+#[tokio::test]
+async fn a_content_hash_the_store_refuses_fails_the_ingest() {
+    let store = FakeStore {
+        refuse_projection: true,
+        ..FakeStore::default()
+    };
+    let (result, on_disk) = ingest_file(store, PLAIN_SOURCE, &[]).await;
+    let err = result.expect_err("a content hash that was not stored must fail the ingest");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("Lossy Doc.org") && msg.contains("the file table refused the write"),
+        "the error must name the file and carry the store's reason; got: {msg}"
+    );
+    assert!(
+        on_disk.contains("first body"),
+        "the user's lines must survive on disk; got:\n{on_disk}"
     );
 }
 

@@ -209,6 +209,14 @@ impl RefBlockTree for ReferenceState {
         })
     }
 
+    fn is_copied(&self, id: &EntityUri) -> bool {
+        self.files.copies.contains_key(id)
+    }
+
+    fn copy_file_count(&self, id: &EntityUri) -> usize {
+        self.files.copies.get(id).map_or(0, |copy| copy.files.len())
+    }
+
     fn is_collapsed(&self, id: &EntityUri) -> bool {
         let Some(uri) = parse_id(id) else {
             return false;

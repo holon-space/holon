@@ -2809,7 +2809,7 @@ entities:
         let org = bundle
             .caps
             .expect::<dyn SutOrgRead>()
-            .org_block_snapshot()
+            .org_block_snapshot(&Default::default())
             .await;
         let editor = bundle.caps.expect::<dyn SutEditorMirrorRead>();
         let content_of = |blocks: &[holon_api::Block], sid: &str| {

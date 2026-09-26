@@ -26,6 +26,7 @@ pub mod models;
 pub mod org_renderer;
 mod page_keywords;
 pub mod parser;
+pub mod subtree;
 pub mod task_keyword;
 
 // Flat re-exports — mirrors what holon-orgmode used to export directly

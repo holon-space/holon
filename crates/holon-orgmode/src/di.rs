@@ -411,6 +411,12 @@ async fn scan_vault_files(
     dir: &std::path::Path,
     formats: &holon_core::FormatRegistry,
 ) -> std::io::Result<Vec<PathBuf>> {
+    #[cfg(feature = "crash-injection")]
+    if holon_filesystem::crash_injection::fires("scan_vault_files") {
+        return Err(std::io::Error::other(
+            "[crash-injection] walking the vault fails",
+        ));
+    }
     Ok(crate::file_watcher::scan_directory(fs, dir, formats)
         .await?
         .files)
@@ -1220,12 +1226,19 @@ pub async fn run_file_sync_controller(
     use tracing::error;
     use tracing::info;
 
+    let disclose_sync_not_started = controller.sync_not_started_disclosure();
     let init_result = async { controller.initialize().await }
         .instrument(tracing::info_span!("org.startup.controller_initialize"))
         .await;
     if let Err(e) = init_result {
-        let msg = format!("FileSyncController initialization failed: {}", e);
+        let msg = format!("FileSyncController initialization failed: {e:#}");
         error!("[OrgMode] {}", msg);
+        // The loop below never runs: nothing syncs for the rest of the
+        // process, and the user is told so.
+        disclose_sync_not_started(&format!(
+            "the file sync could not start, so changes to the files do not reach Holon and \
+             edits in Holon do not reach the files: {e:#}"
+        ));
         if let Some(sender) = ready_sender.lock().unwrap().take() {
             sender.signal_error(msg);
         }
@@ -1259,11 +1272,10 @@ pub async fn run_file_sync_controller(
         let org_files = match scan_vault_files(fs.as_ref(), &root_directory, &formats).await {
             Ok(files) => files,
             Err(e) => {
-                return vec![(
-                    root_directory.clone(),
-                    anyhow::Error::from(e)
-                        .context(format!("initial scan of {}", root_directory.display())),
-                )];
+                let e = anyhow::Error::from(e)
+                    .context(format!("initial scan of {}", root_directory.display()));
+                controller.disclose_start_incomplete("reading the vault's files", &e);
+                return vec![(root_directory.clone(), e)];
             }
         };
         let fs_warm = fs.clone();
@@ -1313,9 +1325,19 @@ pub async fn run_file_sync_controller(
         // scan failure routed through the existing `signal_error` path below.
         if let Err(e) = controller.finish_initial_scan(30_000).await {
             error!("[OrgMode] initial-scan feed convergence failed: {}", e);
+            controller.disclose_start_incomplete("the initial scan", &e);
             failures.push((root_directory.clone(), e));
         } else if let Err(e) = controller.materialize_missing_page_files().await {
             error!("[OrgMode] fileless-page materialization failed: {}", e);
+            controller.disclose_start_incomplete("writing the files of pages that have none", &e);
+            failures.push((root_directory.clone(), e));
+        }
+        if let Err(e) = controller.settle_undone_deletions().await {
+            error!(
+                "[OrgMode] settling the undone deletions read at boot failed: {:#}",
+                e
+            );
+            controller.disclose_start_incomplete("settling the deletions Holon undid", &e);
             failures.push((root_directory.clone(), e));
         }
         // Store-health sweep (BugFunnel row 295): repair title-less
@@ -1330,6 +1352,7 @@ pub async fn run_file_sync_controller(
                 "[OrgMode] title-less doc-root store-health sweep failed: {}",
                 e
             );
+            controller.disclose_start_incomplete("repairing pages without a title", &e);
             failures.push((root_directory.clone(), e));
         }
         // Boot seed/re-seed phase is over. From here a runtime user edit to a
@@ -1421,9 +1444,17 @@ pub async fn run_file_sync_controller(
                 }
                 Ok((_, Err(e))) => {
                     error!("[OrgMode] watch_recursive failed: {}", e);
+                    disclose_sync_not_started(&format!(
+                        "the vault could not be watched, so changes to its files do not reach \
+                         Holon: {e}"
+                    ));
                 }
                 Err(e) => {
                     error!("[OrgMode] arm spawn_blocking panicked: {}", e);
+                    disclose_sync_not_started(&format!(
+                        "watching the vault panicked, so changes to its files do not reach \
+                         Holon: {e}"
+                    ));
                 }
             }
         }
@@ -1466,6 +1497,11 @@ pub async fn run_file_sync_controller(
     let mut pending_full_rerender = false;
     let mut rerender_flush_tick = tokio::time::interval(tokio::time::Duration::from_millis(50));
     rerender_flush_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // The loop is idle when a whole discovery period processed nothing; the
+    // hashes of the files it wrote are recorded then, and at a clean stop.
+    // A failed record is retried only after the loop processes something.
+    let mut tick_at_last_discovery = None;
+    let mut tick_at_last_stamp = None;
     loop {
         // Session-alive check: if the strong refs to
         // OrgSyncIdleSignal have all been dropped, the
@@ -1479,6 +1515,9 @@ pub async fn run_file_sync_controller(
             // than mid-write, and a busy vault cannot starve the shutdown.
             biased;
             () = shutdown.cancelled() => {
+                if let Err(e) = controller.stamp_written_hashes().await {
+                    error!("[OrgMode] at stop: {:#}", e);
+                }
                 info!("[OrgMode] file-watcher loop exiting (session shutdown)");
                 return;
             }
@@ -1539,6 +1578,17 @@ pub async fn run_file_sync_controller(
                 }
             }
             _ = discovery_tick.tick() => {
+                let tick = Some(idle_signal_for_task.current_tick());
+                if tick == tick_at_last_discovery
+                    && tick != tick_at_last_stamp
+                    && controller.owes_hash_stamps()
+                    && idle_signal_for_task.writeback_unsettled().is_empty()
+                {
+                    tick_at_last_stamp = tick;
+                    if let Err(e) = controller.stamp_written_hashes().await {
+                        error!("[OrgMode] at idle: {:#}", e);
+                    }
+                }
                 match controller.poll_new_files().await {
                     Ok(n) if n > 0 => {
                         tracing::debug!("[ORGSYNC_TRACE] discovery ingested {} new file(s)", n);
@@ -1550,6 +1600,7 @@ pub async fn run_file_sync_controller(
                         error!("[OrgMode] poll_new_files error: {}", e);
                     }
                 }
+                tick_at_last_discovery = Some(idle_signal_for_task.current_tick());
             }
             Some(first) = rerender_rx.recv() => {
                 // Drain everything the channel already holds before doing any
@@ -1664,6 +1715,32 @@ mod writeback_panic_tests {
         fn ingest_refused(&self, _: &std::path::Path, _: &str, _: &str) {}
         fn ingest_recovered(&self, _: &std::path::Path) {}
         fn vault_file_emptied(&self, _: &std::path::Path) {}
+        fn block_in_two_files(
+            &self,
+            _: &holon_api::EntityUri,
+            _: &holon_api::EntityUri,
+            _: Option<&std::path::Path>,
+            _: &[&std::path::Path],
+            _: bool,
+        ) {
+        }
+        fn block_in_one_file_again(&self, _: &holon_api::EntityUri) {}
+        fn deleted_block_kept_in_file(&self, _: &holon_api::EntityUri, _: &std::path::Path) {}
+        fn deletion_undone(
+            &self,
+            _: &holon_api::EntityUri,
+            _: &std::path::Path,
+            _: &[&std::path::Path],
+        ) {
+        }
+        fn undone_deletion_resolved(&self, _: &holon_api::EntityUri) {}
+        fn deletion_ended_by_edit(&self, _: &holon_api::EntityUri, _: &std::path::Path) {}
+        fn vault_sync_not_started(&self, _: &std::path::Path, _: &str) {}
+        fn vault_state_unreadable(&self, _: &std::path::Path, _: &std::path::Path, _: &str) {}
+        fn vault_start_incomplete(&self, _: &std::path::Path, _: &str, _: &str) {}
+        fn written_files_unrecorded(&self, _: &std::path::Path, _: &[&std::path::Path], _: &str) {}
+        fn written_files_recorded(&self, _: &std::path::Path) {}
+        fn deleted_block_gone_from_file(&self, _: &holon_api::EntityUri) {}
     }
 
     #[tokio::test]

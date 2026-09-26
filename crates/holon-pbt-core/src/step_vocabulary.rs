@@ -583,6 +583,14 @@ step_field_via_serde_string!(
     crate::types::CycleTarget,
     crate::types::CycleTarget::ALL.to_vec()
 );
+step_field_via_serde_string!(
+    crate::types::CutPasteSaveOrder,
+    crate::types::CutPasteSaveOrder::ALL.to_vec()
+);
+step_field_via_serde_string!(
+    crate::types::CutPasteFinish,
+    crate::types::CutPasteFinish::ALL.to_vec()
+);
 step_field_via_json!(
     crate::types::LoroCorruptionType,
     vec![

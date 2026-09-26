@@ -241,7 +241,10 @@ pub fn org_blocks() -> Correspondence<OrgBlocks> {
             needs: Needs {
                 sut_present: vec![CapId::of::<dyn SutOrgRead>()],
                 sut_absent: Vec::new(),
-                ref_present: vec![CapId::of::<dyn RefBackend>()],
+                ref_present: vec![
+                    CapId::of::<dyn RefBackend>(),
+                    CapId::of::<dyn holon_pbt_core::capabilities::RefCopies>(),
+                ],
             },
             extract: extract_org_snapshot,
             compare: NamedCompare {
@@ -275,8 +278,11 @@ fn extract_org_snapshot<'a>(
     // user blocks) is NOT in `seed_block_ids`, so it is still compared.
     Box::pin(async move {
         let seed_block_ids = RefBackend::seed_block_ids(refs);
+        let copies = holon_pbt_core::capabilities::copies_by_file(
+            &holon_pbt_core::capabilities::RefCopies::model_copies(refs),
+        );
         Extraction::Value(
-            sut.org_block_snapshot()
+            sut.org_block_snapshot(&copies)
                 .await
                 .into_iter()
                 .filter(|b| !seed_block_ids.contains(&b.id))

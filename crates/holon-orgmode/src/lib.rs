@@ -32,6 +32,7 @@ pub use holon_org_format::link_parser;
 pub use holon_org_format::models;
 pub use holon_org_format::org_renderer;
 pub use holon_org_format::parser;
+pub use holon_org_format::subtree;
 
 // Disk I/O modules (native only)
 pub mod block_params;

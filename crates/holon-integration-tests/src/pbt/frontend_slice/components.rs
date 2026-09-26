@@ -296,9 +296,13 @@ pub struct HeadlessFrontendComponent {
     /// [`Self::snapshot_read_only_ingest`]; the invariant reads it as the
     /// baseline the file — not the store — authored.
     read_only_ingest: Mutex<Option<Vec<(String, String)>>>,
+    /// The subtree the external editor last wrote as a pasted copy of a
+    /// block (bare id) into a vault file.
+    pasted_copies: Mutex<HashMap<(PathBuf, String), String>>,
     /// `(writes aimed at a read-only-homed block, writes the dispatcher
-    /// refused)`. Counted separately so a run that attempted nothing is
-    /// distinguishable from a run whose refusals all fired.
+    /// refused)` since the current boot. Counted separately so a run that
+    /// attempted nothing is distinguishable from a run whose refusals all
+    /// fired.
     read_only_attempts: Mutex<(usize, usize)>,
     /// `(attempts, refusals)` for the ingest-origin compound rung — the
     /// constituent-provenance half of the same gate.
@@ -838,6 +842,7 @@ impl HeadlessFrontendComponent {
             render_snapshot_cache: Mutex::new(None),
             render_cache_enabled: std::sync::atomic::AtomicBool::new(false),
             read_only_ingest: Mutex::new(None),
+            pasted_copies: Mutex::new(HashMap::new()),
             read_only_attempts: Mutex::new((0, 0)),
             read_only_ingest_compound: Mutex::new((0, 0)),
         }
@@ -1144,6 +1149,11 @@ impl HeadlessFrontendComponent {
 
         let booted = Self::boot_session(&self.store, &self.boot_params).await;
         *self.boot.write().expect("boot cell poisoned") = Some(Arc::new(booted));
+        // The refusals' disclosure lived on the dead process's bus.
+        *self
+            .read_only_attempts
+            .lock()
+            .expect("read_only_attempts poisoned") = (0, 0);
 
         // The boot settle is a tolerant 300ms (see `boot_session`) — enough for
         // the first boot, whose caller then converges fail-loud, but on its own
@@ -2737,7 +2747,10 @@ impl SutWatch for HeadlessFrontendComponent {
 /// `inv-blocks-match-ref/org` (org-parsed blocks vs the ref's org view).
 #[async_trait::async_trait(?Send)]
 impl SutOrgRead for HeadlessFrontendComponent {
-    async fn org_block_snapshot(&self) -> Vec<Block> {
+    async fn org_block_snapshot(
+        &self,
+        copies: &holon_pbt_core::capabilities::CopiesByFile,
+    ) -> Vec<Block> {
         use holon_filesystem::FileSystem;
         use holon_orgmode::parser::parse_org_file;
 
@@ -2771,7 +2784,11 @@ impl SutOrgRead for HeadlessFrontendComponent {
                 .expect("SutOrgRead: read org file");
             let result = parse_org_file(path, &raw, &EntityUri::no_parent(), self.org_root())
                 .expect("SutOrgRead: parse org file");
-            all_blocks.extend(result.blocks);
+            all_blocks.extend(crate::pbt::copies_model::without_copy_blocks(
+                path,
+                result.blocks,
+                copies,
+            ));
         }
         all_blocks
     }
@@ -2878,7 +2895,10 @@ impl SutHomeProfile for HeadlessFrontendComponent {
 
 #[async_trait::async_trait(?Send)]
 impl SutOrgRender for HeadlessFrontendComponent {
-    async fn snapshot_org_render_pairs(&self) -> Vec<(String, String, String)> {
+    async fn snapshot_org_render_pairs(
+        &self,
+        copies: &holon_pbt_core::capabilities::CopiesByFile,
+    ) -> Vec<(String, String, String)> {
         use holon_app::turso_seams::CacheBlockReader;
         use holon_filesystem::BlockReader;
         use holon_filesystem::FileSystem;
@@ -2926,13 +2946,14 @@ impl SutOrgRender for HeadlessFrontendComponent {
                 .get_blocks(doc_id)
                 .await
                 .expect("SutOrgRender: get_blocks failed");
+            let disk = FileSystem::read_to_string(self.org_fs().as_ref(), path)
+                .await
+                .expect("SutOrgRender: read org file");
+            let disk = crate::pbt::copies_model::without_copy_sections(path, &disk, copies);
             let rendered =
                 OrgRenderer::render_document(doc_block, &descendants, path, &doc_block.id)
                     .expect("org render")
                     .text;
-            let disk = FileSystem::read_to_string(self.org_fs().as_ref(), path)
-                .await
-                .expect("SutOrgRender: read org file");
             emitted_paths.insert(path.clone());
             out.push((path.to_string_lossy().to_string(), disk, rendered));
         }
@@ -2955,13 +2976,14 @@ impl SutOrgRender for HeadlessFrontendComponent {
                 .get_blocks(&doc_uri)
                 .await
                 .expect("SutOrgRender: get_blocks (materialized page) failed");
+            let disk = FileSystem::read_to_string(self.org_fs().as_ref(), &path)
+                .await
+                .expect("SutOrgRender: read materialized org file");
+            let disk = crate::pbt::copies_model::without_copy_sections(&path, &disk, copies);
             let rendered =
                 OrgRenderer::render_document(doc_block, &descendants, &path, &doc_block.id)
                     .expect("org render")
                     .text;
-            let disk = FileSystem::read_to_string(self.org_fs().as_ref(), &path)
-                .await
-                .expect("SutOrgRender: read materialized org file");
             out.push((path.to_string_lossy().to_string(), disk, rendered));
         }
         out
@@ -4474,6 +4496,316 @@ impl SutSeamMutate for HeadlessFrontendComponent {
             });
         self.settle_block_ids_stable(Duration::from_secs(5)).await;
     }
+
+    async fn move_block_between_files(
+        &self,
+        block_id: &EntityUri,
+        source_doc: &EntityUri,
+        target_doc: &EntityUri,
+        order: holon_pbt_core::types::CutPasteSaveOrder,
+    ) {
+        use holon_pbt_core::types::CutPasteSaveOrder;
+        const SEAM: &str = "move_block_between_files";
+        let cut = self.cut_paste(block_id, source_doc, target_doc, SEAM).await;
+        match order {
+            CutPasteSaveOrder::SourceFirst => {
+                self.write_org_file_and_await_ingest(&cut.source_path, &cut.source_without, SEAM)
+                    .await;
+                self.write_org_file_and_await_ingest(&cut.target_path, &cut.target_with, SEAM)
+                    .await;
+            }
+            CutPasteSaveOrder::TargetFirst => {
+                self.write_org_file(&cut.target_path, &cut.target_with, SEAM)
+                    .await;
+                self.write_org_file_and_await_ingest(&cut.source_path, &cut.source_without, SEAM)
+                    .await;
+            }
+        }
+        self.settle_block_ids_stable(Duration::from_secs(5)).await;
+        if order == CutPasteSaveOrder::TargetFirst {
+            let bare = self.resolve_id(block_id).id().to_string();
+            let back = holon_orgmode::subtree::cut_subtree(
+                &self.read_vault_file(&cut.source_path, SEAM).await,
+                &bare,
+            )
+            .is_some();
+            eprintln!(
+                "[copies-reach] {bare}: {}",
+                if back {
+                    "kept by its owner"
+                } else {
+                    "adopted by its copy"
+                }
+            );
+        }
+    }
+
+    async fn paste_block_copy(
+        &self,
+        block_id: &EntityUri,
+        source_doc: &EntityUri,
+        target_doc: &EntityUri,
+    ) {
+        const SEAM: &str = "paste_block_copy";
+        let block_id = self.resolve_id(block_id);
+        let bare = block_id.id().to_string();
+        let source_path = self.doc_file(source_doc, SEAM).await;
+        let target_path = self.doc_file(target_doc, SEAM).await;
+        // What the editor copies: the block as its owner's file holds it, or,
+        // when Holon has not written it there, as the store renders it (a
+        // template or a synced file carrying the id).
+        let section = match holon_orgmode::subtree::cut_subtree(
+            &self.read_vault_file(&source_path, SEAM).await,
+            &bare,
+        ) {
+            Some((_, section)) => section,
+            None => {
+                let rendered = self.render_doc_from_store(source_doc, SEAM).await;
+                holon_orgmode::subtree::cut_subtree(&rendered, &bare)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "[{SEAM}] {block_id} is neither in {source_path:?} nor in its render"
+                        )
+                    })
+                    .1
+            }
+        };
+        let section = holon_orgmode::subtree::relevel(&section, 1);
+        let target = self.read_vault_file(&target_path, SEAM).await;
+        let pasted = holon_orgmode::subtree::prepend_subtree(&target, &section);
+        self.pasted_copies
+            .lock()
+            .expect("pasted_copies lock")
+            .insert((target_path.clone(), bare), section);
+        self.write_org_file_and_await_ingest(&target_path, &pasted, SEAM)
+            .await;
+        self.settle_block_ids_stable(Duration::from_secs(5)).await;
+    }
+
+    async fn finish_cut_paste(
+        &self,
+        block_id: &EntityUri,
+        source_doc: &EntityUri,
+        target_doc: &EntityUri,
+        finish: holon_pbt_core::types::CutPasteFinish,
+    ) {
+        use holon_pbt_core::types::CutPasteFinish;
+        const SEAM: &str = "finish_cut_paste";
+        let bare = self.resolve_id(block_id).id().to_string();
+        let path = match finish {
+            CutPasteFinish::SourceSaved => self.doc_file(source_doc, SEAM).await,
+            CutPasteFinish::CopyDeletedFromTarget => self.doc_file(target_doc, SEAM).await,
+        };
+        let disk = self.read_vault_file(&path, SEAM).await;
+        let (without, _) = holon_orgmode::subtree::cut_subtree(&disk, &bare)
+            .unwrap_or_else(|| panic!("[{SEAM}] {path:?} does not hold {bare}:\n{disk}"));
+        if finish == CutPasteFinish::CopyDeletedFromTarget {
+            self.pasted_copies
+                .lock()
+                .expect("pasted_copies lock")
+                .remove(&(path.clone(), bare.clone()));
+        }
+        self.write_org_file_and_await_ingest(&path, &without, SEAM)
+            .await;
+        self.settle_block_ids_stable(Duration::from_secs(5)).await;
+        if finish == CutPasteFinish::SourceSaved {
+            let back = holon_orgmode::subtree::cut_subtree(
+                &self.read_vault_file(&path, SEAM).await,
+                &bare,
+            )
+            .is_some();
+            // Default runs log no INFO, so the reach report reads this line.
+            eprintln!(
+                "[copies-reach] {bare}: {}",
+                if back {
+                    "kept by its owner"
+                } else {
+                    "adopted by its copy"
+                }
+            );
+        }
+    }
+
+    async fn edit_block_copy(
+        &self,
+        block_id: &EntityUri,
+        copy_doc: &EntityUri,
+        state: holon_pbt_core::types::CycleTarget,
+    ) {
+        const SEAM: &str = "edit_block_copy";
+        let bare = self.resolve_id(block_id).id().to_string();
+        let path = self.doc_file(copy_doc, SEAM).await;
+        let disk = self.read_vault_file(&path, SEAM).await;
+        let keywords: Vec<&str> = holon_pbt_core::types::TASK_STATE_CYCLE
+            .iter()
+            .copied()
+            .filter(|k| !k.is_empty())
+            .collect();
+        let edited =
+            holon_orgmode::subtree::set_headline_keyword(&disk, &bare, state.keyword(), &keywords)
+                .unwrap_or_else(|| panic!("[{SEAM}] {path:?} does not hold {bare}:\n{disk}"));
+        let (_, section) = holon_orgmode::subtree::cut_subtree(&edited, &bare)
+            .expect("the edit keeps the subtree");
+        self.pasted_copies
+            .lock()
+            .expect("pasted_copies lock")
+            .insert(
+                (path.clone(), bare),
+                holon_orgmode::subtree::relevel(&section, 1),
+            );
+        self.write_org_file_and_await_ingest(&path, &edited, SEAM)
+            .await;
+        self.settle_block_ids_stable(Duration::from_secs(5)).await;
+    }
+
+    async fn delete_line_from_file(&self, block_id: &EntityUri, root: &EntityUri, doc: &EntityUri) {
+        const SEAM: &str = "delete_line_from_file";
+        let bare = self.resolve_id(block_id).id().to_string();
+        let root_bare = self.resolve_id(root).id().to_string();
+        let path = self.doc_file(doc, SEAM).await;
+        let disk = self.read_vault_file(&path, SEAM).await;
+        let (without, _) = holon_orgmode::subtree::cut_subtree(&disk, &bare)
+            .unwrap_or_else(|| panic!("[{SEAM}] {path:?} does not hold {bare}:\n{disk}"));
+        {
+            let key = (path.clone(), root_bare.clone());
+            let mut pasted = self.pasted_copies.lock().expect("pasted_copies lock");
+            if pasted.contains_key(&key) {
+                let (_, section) = holon_orgmode::subtree::cut_subtree(&without, &root_bare)
+                    .unwrap_or_else(|| panic!("[{SEAM}] {path:?} lost the copy of {root_bare}"));
+                pasted.insert(key, holon_orgmode::subtree::relevel(&section, 1));
+            }
+        }
+        self.write_org_file_and_await_ingest(&path, &without, SEAM)
+            .await;
+        self.settle_block_ids_stable(Duration::from_secs(5)).await;
+    }
+}
+
+/// The two files of an external cut & paste of a block, rendered from the
+/// store: each with the block's subtree and without it.
+struct CutPaste {
+    source_path: PathBuf,
+    target_path: PathBuf,
+    source_without: String,
+    target_with: String,
+}
+
+impl HeadlessFrontendComponent {
+    async fn doc_file(&self, doc: &EntityUri, seam: &str) -> PathBuf {
+        let doc = self.resolve_id(doc);
+        self.resolve_doc_file_path(&doc)
+            .await
+            .unwrap_or_else(|| panic!("[{seam}] no file for doc {doc}"))
+    }
+
+    async fn read_vault_file(&self, path: &Path, seam: &str) -> String {
+        use holon_filesystem::FileSystem;
+        FileSystem::read_to_string(self.org_fs().as_ref(), path)
+            .await
+            .unwrap_or_else(|e| panic!("[{seam}] read {path:?}: {e}"))
+    }
+
+    /// `doc`'s file as the store renders it.
+    async fn render_doc_from_store(&self, doc: &EntityUri, seam: &str) -> String {
+        let doc = self.resolve_id(doc);
+        let mut stored = self.live_block_snapshot().await;
+        self.stamp_sequence_from_sort_key(&mut stored).await;
+        let grouped = holon_api::blocks_by_document(&stored);
+        let doc_blocks = doc_blocks_of(&grouped, &doc, seam);
+        let doc_block = stored.iter().find(|b| b.id == doc && b.is_page());
+        crate::serialize_blocks_to_org_with_doc(&doc_blocks, &doc, doc_block)
+    }
+
+    /// Render `source_doc`'s and `target_doc`'s files as an editor would save
+    /// them around a cut & paste of `block_id` to the end of the target. The
+    /// store must still hold the block under `source_doc`.
+    async fn cut_paste(
+        &self,
+        block_id: &EntityUri,
+        source_doc: &EntityUri,
+        target_doc: &EntityUri,
+        seam: &str,
+    ) -> CutPaste {
+        use holon_orgmode::models::OrgBlockExt;
+        let block_id = self.resolve_id(block_id);
+        let source_doc = self.resolve_id(source_doc);
+        let target_doc = self.resolve_id(target_doc);
+        let source_path = self.doc_file(&source_doc, seam).await;
+        let target_path = self.doc_file(&target_doc, seam).await;
+
+        let mut moved = self.live_block_snapshot().await;
+        self.stamp_sequence_from_sort_key(&mut moved).await;
+        let render = |blocks: &[Block], doc: &EntityUri| {
+            let grouped = holon_api::blocks_by_document(blocks);
+            let doc_blocks = doc_blocks_of(&grouped, doc, seam);
+            let doc_block = blocks.iter().find(|b| b.id == *doc && b.is_page());
+            crate::serialize_blocks_to_org_with_doc(&doc_blocks, doc, doc_block)
+        };
+        let last = moved
+            .iter()
+            .filter(|b| b.parent_id == target_doc)
+            .map(|b| b.sequence())
+            .max()
+            .map_or(0, |s| s + 1);
+        let block = moved
+            .iter_mut()
+            .find(|b| b.id == block_id)
+            .unwrap_or_else(|| panic!("[{seam}] {block_id} is not in the block snapshot"));
+        block.parent_id = target_doc.clone();
+        block.set_sequence(last);
+        CutPaste {
+            source_without: render(&moved, &source_doc),
+            target_with: render(&moved, &target_doc),
+            source_path,
+            target_path,
+        }
+    }
+
+    async fn write_org_file(&self, path: &Path, org: &str, seam: &str) {
+        use holon_filesystem::FileSystem;
+        FileSystem::write(self.org_fs().as_ref(), path, org.as_bytes())
+            .await
+            .unwrap_or_else(|e| panic!("[{seam}] write {path:?} failed: {e:#}"));
+    }
+
+    /// Write, then wait until the file-sync controller has processed every
+    /// change up to this write — the ingest ran to completion, write-back
+    /// included.
+    async fn write_org_file_and_await_ingest(&self, path: &Path, org: &str, seam: &str) {
+        self.write_org_file(path, org, seam).await;
+        let seq = self.org_fs().last_change_seq();
+        let idle = self
+            .org_idle_signal()
+            .unwrap_or_else(|| panic!("[{seam}] this draw wires no org file-sync"));
+        assert!(
+            idle.wait_for_change_seq(seq, Duration::from_secs(10)).await,
+            "[{seam}] the ingest of {path:?} (change seq {seq}) never completed; processed up \
+             to {}",
+            idle.processed_change_seq(),
+        );
+    }
+}
+
+#[async_trait::async_trait(?Send)]
+impl holon_pbt_core::capabilities::SutEditorSaves for HeadlessFrontendComponent {
+    async fn on_disk(&self, doc: &EntityUri) -> Option<String> {
+        use holon_filesystem::FileSystem;
+        let path = self.doc_file(doc, "SutEditorSaves").await;
+        match FileSystem::read_to_string(self.org_fs().as_ref(), &path).await {
+            Ok(content) => Some(content),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => panic!("SutEditorSaves: read {path:?}: {e}"),
+        }
+    }
+
+    async fn pasted_copy(&self, doc: &EntityUri, block_bare: &str) -> Option<String> {
+        let path = self.doc_file(doc, "SutEditorSaves").await;
+        self.pasted_copies
+            .lock()
+            .expect("pasted_copies lock")
+            .get(&(path, block_bare.to_string()))
+            .cloned()
+    }
 }
 
 /// Strip every block `:ID:` drawer entry (and `:id X` src-header arg) from
@@ -5553,7 +5885,7 @@ mod tests {
                     .any(|r| r.get("tag").and_then(|v| v.as_string()) == Some("Page")),
                 "boot journal must be Page-tagged (place: page(journals)); tags={tag_rows:?}"
             );
-            let pairs = comp.snapshot_org_render_pairs().await;
+            let pairs = comp.snapshot_org_render_pairs(&Default::default()).await;
             let (_, _, journals_render) = pairs
                 .iter()
                 .find(|(path, _, _)| path.ends_with("Journals.org"))
@@ -5995,7 +6327,7 @@ mod tests {
 
         // DISK TRUTH: the child must be in the date page's OWN file, and the
         // `Journals.org` companion must NOT swallow it (it is a child of a Page).
-        let pairs = comp.snapshot_org_render_pairs().await;
+        let pairs = comp.snapshot_org_render_pairs(&Default::default()).await;
         let (day_path, day_disk, _) = pairs
             .iter()
             .find(|(p, _, _)| p.ends_with(&format!("{boot_date}.org")))
@@ -6028,7 +6360,7 @@ mod tests {
         // page doc-ROOT is not in `parse_org_file`'s `result.blocks` — only its
         // children — so it is not compared here.)
         use holon_pbt_core::capabilities::SutOrgRead;
-        let org_blocks = comp.org_block_snapshot().await;
+        let org_blocks = comp.org_block_snapshot(&Default::default()).await;
         let child = org_blocks
             .iter()
             .find(|b| b.content == child_content)
@@ -7355,6 +7687,39 @@ impl HeadlessFrontendComponent {
     }
 }
 
+/// The final path components of the files `kind` names, in its order.
+fn named_file_names(kind: &holon_api::ConditionKind) -> Vec<String> {
+    let name = |path: &str| {
+        Path::new(path)
+            .file_name()
+            .unwrap_or_else(|| panic!("condition names a file with no name: {path}"))
+            .to_string_lossy()
+            .into_owned()
+    };
+    match kind {
+        holon_api::ConditionKind::BlockInTwoFiles {
+            owner_file,
+            copy_files,
+        }
+        | holon_api::ConditionKind::BlockEditedInTwoFiles {
+            owner_file,
+            copy_files,
+        } => std::iter::once(owner_file)
+            .chain(copy_files)
+            .map(|f| name(f))
+            .collect(),
+        holon_api::ConditionKind::DeletedBlockKeptInFile { file }
+        | holon_api::ConditionKind::DeletionEndedByEdit { file } => vec![name(file)],
+        holon_api::ConditionKind::DeletionUndoneBlockInOtherFile { file, copy_files } => {
+            std::iter::once(file)
+                .chain(copy_files)
+                .map(|f| name(f))
+                .collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
 /// The conditions this session's production writers have actually raised.
 ///
 /// Reads `ConditionBus::current()` — the very object the frontends subscribe
@@ -7369,8 +7734,9 @@ impl holon_pbt_core::capabilities::SutConditions for HeadlessFrontendComponent {
         bus.current()
             .into_iter()
             .map(|c| holon_pbt_core::capabilities::RaisedCondition {
-                subject: c.subject,
                 kind: c.reason.condition_kind().to_string(),
+                files: named_file_names(&c.reason),
+                subject: c.subject,
             })
             .collect()
     }

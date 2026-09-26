@@ -12,6 +12,8 @@
 //! `sut.rs:1266-1292` (SUT apply), and
 //! `transition_budgets.rs:165-172` (expected SQL).
 
+use std::collections::BTreeSet;
+
 use holon_api::EntityUri;
 use holon_api::Region;
 use holon_pbt_core::TransitionFactory;
@@ -111,6 +113,36 @@ impl<R: RefLifecycle + RefBlockTree + RefLayout + RefFocusRoots + RefNavHistoryM
                     && state.is_descendant_of_any(id, &main_focus_roots)
             });
             let weight = if main_has_text_descendant { 3 } else { 100 };
+
+            // A page holding a copied block that Main does not show is
+            // focused more often, so Holon can edit that block while the copy
+            // stands (D229.b).
+            let hidden_copies: Vec<EntityUri> = state
+                .all_block_ids()
+                .into_iter()
+                .filter(|id| {
+                    state.is_copied(id) && !state.is_descendant_of_any(id, &main_focus_roots)
+                })
+                .collect();
+            let homes: Vec<EntityUri> = candidates
+                .iter()
+                .filter(|page| {
+                    let page = BTreeSet::from([(*page).clone()]);
+                    hidden_copies
+                        .iter()
+                        .any(|id| state.is_descendant_of_any(id, &page))
+                })
+                .cloned()
+                .collect();
+            if !homes.is_empty() {
+                let strat = prop::sample::select(homes)
+                    .prop_map(|block_id| NavigateFocus {
+                        region: Region::Main,
+                        block_id,
+                    })
+                    .boxed();
+                return (24, strat);
+            }
 
             let strat = prop::sample::select(candidates)
                 .prop_map(|block_id| NavigateFocus {

@@ -3957,6 +3957,38 @@ mod intermediate_ancestor_writeback_hole {
             fn vault_file_emptied(&self, _: &std::path::Path) {}
             fn writeback_lossy(&self, _: &std::path::Path, _: &str) {}
             fn writeback_faithful(&self, _: &std::path::Path) {}
+            fn block_in_two_files(
+                &self,
+                _: &holon_api::EntityUri,
+                _: &holon_api::EntityUri,
+                _: Option<&std::path::Path>,
+                _: &[&std::path::Path],
+                _: bool,
+            ) {
+            }
+            fn block_in_one_file_again(&self, _: &holon_api::EntityUri) {}
+            fn deleted_block_kept_in_file(&self, _: &holon_api::EntityUri, _: &std::path::Path) {}
+            fn deletion_undone(
+                &self,
+                _: &holon_api::EntityUri,
+                _: &std::path::Path,
+                _: &[&std::path::Path],
+            ) {
+            }
+            fn undone_deletion_resolved(&self, _: &holon_api::EntityUri) {}
+            fn deletion_ended_by_edit(&self, _: &holon_api::EntityUri, _: &std::path::Path) {}
+            fn vault_sync_not_started(&self, _: &std::path::Path, _: &str) {}
+            fn vault_state_unreadable(&self, _: &std::path::Path, _: &std::path::Path, _: &str) {}
+            fn vault_start_incomplete(&self, _: &std::path::Path, _: &str, _: &str) {}
+            fn written_files_unrecorded(
+                &self,
+                _: &std::path::Path,
+                _: &[&std::path::Path],
+                _: &str,
+            ) {
+            }
+            fn written_files_recorded(&self, _: &std::path::Path) {}
+            fn deleted_block_gone_from_file(&self, _: &holon_api::EntityUri) {}
         }
 
         let temp_dir = tempfile::tempdir().unwrap();
@@ -4032,6 +4064,38 @@ mod intermediate_ancestor_writeback_hole {
             fn vault_file_emptied(&self, _: &std::path::Path) {}
             fn writeback_lossy(&self, _: &std::path::Path, _: &str) {}
             fn writeback_faithful(&self, _: &std::path::Path) {}
+            fn block_in_two_files(
+                &self,
+                _: &holon_api::EntityUri,
+                _: &holon_api::EntityUri,
+                _: Option<&std::path::Path>,
+                _: &[&std::path::Path],
+                _: bool,
+            ) {
+            }
+            fn block_in_one_file_again(&self, _: &holon_api::EntityUri) {}
+            fn deleted_block_kept_in_file(&self, _: &holon_api::EntityUri, _: &std::path::Path) {}
+            fn deletion_undone(
+                &self,
+                _: &holon_api::EntityUri,
+                _: &std::path::Path,
+                _: &[&std::path::Path],
+            ) {
+            }
+            fn undone_deletion_resolved(&self, _: &holon_api::EntityUri) {}
+            fn deletion_ended_by_edit(&self, _: &holon_api::EntityUri, _: &std::path::Path) {}
+            fn vault_sync_not_started(&self, _: &std::path::Path, _: &str) {}
+            fn vault_state_unreadable(&self, _: &std::path::Path, _: &std::path::Path, _: &str) {}
+            fn vault_start_incomplete(&self, _: &std::path::Path, _: &str, _: &str) {}
+            fn written_files_unrecorded(
+                &self,
+                _: &std::path::Path,
+                _: &[&std::path::Path],
+                _: &str,
+            ) {
+            }
+            fn written_files_recorded(&self, _: &std::path::Path) {}
+            fn deleted_block_gone_from_file(&self, _: &holon_api::EntityUri) {}
         }
 
         let temp_dir = tempfile::tempdir().unwrap();
@@ -4130,6 +4194,38 @@ mod intermediate_ancestor_writeback_hole {
             fn vault_file_emptied(&self, _: &std::path::Path) {}
             fn writeback_lossy(&self, _: &std::path::Path, _: &str) {}
             fn writeback_faithful(&self, _: &std::path::Path) {}
+            fn block_in_two_files(
+                &self,
+                _: &holon_api::EntityUri,
+                _: &holon_api::EntityUri,
+                _: Option<&std::path::Path>,
+                _: &[&std::path::Path],
+                _: bool,
+            ) {
+            }
+            fn block_in_one_file_again(&self, _: &holon_api::EntityUri) {}
+            fn deleted_block_kept_in_file(&self, _: &holon_api::EntityUri, _: &std::path::Path) {}
+            fn deletion_undone(
+                &self,
+                _: &holon_api::EntityUri,
+                _: &std::path::Path,
+                _: &[&std::path::Path],
+            ) {
+            }
+            fn undone_deletion_resolved(&self, _: &holon_api::EntityUri) {}
+            fn deletion_ended_by_edit(&self, _: &holon_api::EntityUri, _: &std::path::Path) {}
+            fn vault_sync_not_started(&self, _: &std::path::Path, _: &str) {}
+            fn vault_state_unreadable(&self, _: &std::path::Path, _: &std::path::Path, _: &str) {}
+            fn vault_start_incomplete(&self, _: &std::path::Path, _: &str, _: &str) {}
+            fn written_files_unrecorded(
+                &self,
+                _: &std::path::Path,
+                _: &[&std::path::Path],
+                _: &str,
+            ) {
+            }
+            fn written_files_recorded(&self, _: &std::path::Path) {}
+            fn deleted_block_gone_from_file(&self, _: &holon_api::EntityUri) {}
         }
 
         let temp_dir = tempfile::tempdir().unwrap();
@@ -4353,6 +4449,32 @@ impl holon_filesystem::WritebackDisclosure for RefusalLog {
     fn vault_file_emptied(&self, _: &std::path::Path) {}
     fn writeback_lossy(&self, _: &std::path::Path, _: &str) {}
     fn writeback_faithful(&self, _: &std::path::Path) {}
+    fn block_in_two_files(
+        &self,
+        _: &holon_api::EntityUri,
+        _: &holon_api::EntityUri,
+        _: Option<&std::path::Path>,
+        _: &[&std::path::Path],
+        _: bool,
+    ) {
+    }
+    fn block_in_one_file_again(&self, _: &holon_api::EntityUri) {}
+    fn deleted_block_kept_in_file(&self, _: &holon_api::EntityUri, _: &std::path::Path) {}
+    fn deletion_undone(
+        &self,
+        _: &holon_api::EntityUri,
+        _: &std::path::Path,
+        _: &[&std::path::Path],
+    ) {
+    }
+    fn undone_deletion_resolved(&self, _: &holon_api::EntityUri) {}
+    fn deletion_ended_by_edit(&self, _: &holon_api::EntityUri, _: &std::path::Path) {}
+    fn vault_sync_not_started(&self, _: &std::path::Path, _: &str) {}
+    fn vault_state_unreadable(&self, _: &std::path::Path, _: &std::path::Path, _: &str) {}
+    fn vault_start_incomplete(&self, _: &std::path::Path, _: &str, _: &str) {}
+    fn written_files_unrecorded(&self, _: &std::path::Path, _: &[&std::path::Path], _: &str) {}
+    fn written_files_recorded(&self, _: &std::path::Path) {}
+    fn deleted_block_gone_from_file(&self, _: &holon_api::EntityUri) {}
 }
 
 /// D102.a — two vault files that both declare the same block `:ID:`.
@@ -4544,14 +4666,14 @@ mod duplicate_block_slug_tests {
 
     /// The OTHER leg of the authority check: when the colliding slug's store
     /// authority resolves to the document whose own file IS the on-disk
-    /// claimant, the two names agree and the slug is a stale copy rather than a
-    /// contested identity — the second file is ADMITTED minus that block, and
-    /// the stale copy is pruned off it so the vault converges.
+    /// claimant, the two names agree and the slug is a second copy rather than
+    /// a contested identity — the second file is ADMITTED minus that block,
+    /// and the copy stays on its disk (D229.b).
     ///
     /// One row has to be planted for that: see `seed_authority_page_root` for
     /// why a unit fixture otherwise only ever reaches the unknown leg.
     #[tokio::test]
-    async fn a_slug_the_store_routes_to_the_claimant_is_pruned_not_refused() {
+    async fn a_slug_the_store_routes_to_the_claimant_is_kept_not_refused() {
         let temp_dir = tempfile::tempdir().unwrap();
         let mut fixture = TestFixture::new_with(temp_dir.path(), vec!["First".to_string()], false);
         fixture.controller.initialize().await.expect("initialize");
@@ -4576,8 +4698,8 @@ mod duplicate_block_slug_tests {
         assert_eq!(
             fixture.controller.on_file_changed(&second).await.unwrap(),
             IngestOutcome::Ingested,
-            "the store routes the slug to the claimant's own file, so the second file must ingest \
-             and prune the stale copy, not be refused"
+            "the store routes the slug to the claimant's own file, so the second file must ingest, \
+             not be refused"
         );
 
         assert!(
@@ -4604,11 +4726,10 @@ mod duplicate_block_slug_tests {
             FIRST,
             "the claimant's bytes must be untouched"
         );
-        let second_disk = tokio::fs::read_to_string(&second).await.unwrap();
-        assert!(
-            !second_disk.contains("dupblk-shared"),
-            "the stale copy must be pruned from the second file's own write-back so it converges \
-             to its real owner:\n{second_disk}"
+        assert_eq!(
+            tokio::fs::read_to_string(&second).await.unwrap(),
+            SECOND,
+            "the second file keeps its copy while the claimant still holds the slug"
         );
     }
 

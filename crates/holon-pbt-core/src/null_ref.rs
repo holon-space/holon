@@ -189,11 +189,17 @@ impl RefClock for NullRef {
 
 #[allow(unused_variables)]
 impl RefConditions for NullRef {
-    fn expected_conditions(&self) -> Vec<(String, &'static str)> {
+    fn expected_conditions(&self) -> Vec<crate::capabilities::ExpectedDisclosure> {
         panic!("class-2: invariant read RefConditions::expected_conditions")
     }
     fn governed_condition_kinds(&self) -> BTreeSet<&'static str> {
         panic!("class-2: invariant read RefConditions::governed_condition_kinds")
+    }
+}
+
+impl crate::capabilities::RefCopies for NullRef {
+    fn model_copies(&self) -> Vec<crate::capabilities::ModelCopy> {
+        panic!("class-2: invariant read RefCopies::model_copies")
     }
 }
 
@@ -476,6 +482,7 @@ pub fn null_ref_caps() -> CapMap {
     caps.insert(nr.clone() as Arc<dyn RefBlockTree>);
     caps.insert(nr.clone() as Arc<dyn RefClock>);
     caps.insert(nr.clone() as Arc<dyn RefConditions>);
+    caps.insert(nr.clone() as Arc<dyn crate::capabilities::RefCopies>);
     caps.insert(nr.clone() as Arc<dyn RefDocuments>);
     caps.insert(nr.clone() as Arc<dyn RefEditorMirror>);
     caps.insert(nr.clone() as Arc<dyn RefFocus>);
@@ -504,6 +511,7 @@ pub fn null_ref_cap_ids() -> Vec<CapId> {
         CapId::of::<dyn RefBlockTree>(),
         CapId::of::<dyn RefClock>(),
         CapId::of::<dyn RefConditions>(),
+        CapId::of::<dyn crate::capabilities::RefCopies>(),
         CapId::of::<dyn RefDocuments>(),
         CapId::of::<dyn RefEditorMirror>(),
         CapId::of::<dyn RefFocus>(),

@@ -110,17 +110,20 @@ pub mod create_typed_entity;
 mod declare_typed_schema;
 pub mod delete_backward;
 mod delete_document;
+mod delete_line_from_file;
 pub mod delete_placed_root;
 pub mod delete_placement_parent;
 pub mod delete_placement_record;
 mod dense_projection_edit;
 mod dispatch_unschemed_block_id;
 mod drag_drop_block;
+mod edit_block_copy;
 mod emit_mcp_data;
 mod epoch_flip_rejected;
 mod expand_toggle;
 pub mod external_write_same_block_focused;
 pub mod external_write_while_focused;
+mod finish_cut_paste;
 pub mod focus_editable_text;
 mod full_sync;
 mod git_init;
@@ -130,6 +133,7 @@ mod jj_git_init;
 pub mod join_block;
 pub mod join_placed_root;
 mod jump_to_search_hit;
+pub mod move_block_between_files;
 pub mod move_cursor;
 pub mod move_down;
 pub mod move_placed_root;
@@ -141,6 +145,7 @@ mod navigate_home;
 mod nothing;
 mod open_tab_via_modifier_click;
 pub mod outdent;
+mod paste_block_copy;
 mod pin_block;
 mod press_key;
 mod reboot;
@@ -198,6 +203,7 @@ pub use create_typed_entity::CreateTypedEntity;
 pub use declare_typed_schema::DeclareTypedSchema;
 pub use delete_backward::DeleteBackward;
 pub use delete_document::DeleteDocument;
+pub use delete_line_from_file::DeleteLineFromFile;
 pub use delete_placed_root::DeletePlacedRoot;
 pub use delete_placement_parent::DeletePlacementParent;
 pub use delete_placement_record::DeletePlacementRecord;
@@ -205,11 +211,13 @@ pub use deliver_block_content::DeliverBlockContent;
 pub use dense_projection_edit::DenseProjectionEdit;
 pub use dispatch_unschemed_block_id::DispatchUnschemedBlockId;
 pub use drag_drop_block::DragDropBlock;
+pub use edit_block_copy::EditBlockCopy;
 pub use emit_mcp_data::EmitMcpData;
 pub use epoch_flip_rejected::EpochFlipRejected;
 pub use expand_toggle::ExpandToggle;
 pub use external_write_same_block_focused::ExternalWriteSameBlockFocused;
 pub use external_write_while_focused::ExternalWriteWhileFocused;
+pub use finish_cut_paste::FinishCutPaste;
 pub use focus_editable_text::FocusEditableText;
 pub use full_sync::FullSync;
 pub use git_init::GitInit;
@@ -229,6 +237,7 @@ pub use jj_git_init::JjGitInit;
 pub use join_block::JoinBlock;
 pub use join_placed_root::JoinPlacedRoot;
 pub use jump_to_search_hit::JumpToSearchHit;
+pub use move_block_between_files::MoveBlockBetweenFiles;
 pub use move_cursor::MoveCursor;
 pub use move_down::MoveDown;
 pub use move_placed_root::MovePlacedRoot;
@@ -240,6 +249,7 @@ pub use navigate_home::NavigateHome;
 pub use nothing::Nothing;
 pub use open_tab_via_modifier_click::OpenTabViaModifierClick;
 pub use outdent::Outdent;
+pub use paste_block_copy::PasteBlockCopy;
 pub use pin_block::PinBlock;
 pub use press_key::PressKey;
 pub use reboot::Reboot;
@@ -292,6 +302,11 @@ crate::declare_e2e_transitions! {
         NavigateBack(NavigateBack),
         BulkExternalAdd(BulkExternalAdd),
         StaleExternalRewrite(StaleExternalRewrite),
+        MoveBlockBetweenFiles(MoveBlockBetweenFiles),
+        PasteBlockCopy(PasteBlockCopy),
+        FinishCutPaste(FinishCutPaste),
+        EditBlockCopy(EditBlockCopy),
+        DeleteLineFromFile(DeleteLineFromFile),
         ExternalWriteWhileFocused(ExternalWriteWhileFocused),
         ExternalWriteSameBlockFocused(ExternalWriteSameBlockFocused),
         ClickBlock(ClickBlock),

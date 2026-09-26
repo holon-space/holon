@@ -194,6 +194,12 @@ impl BlockReader for LoroBlockReader {
         Ok(())
     }
 
+    /// No SQL `file` table under Loro — no row holds a hash a boot could skip
+    /// on, so there is nothing to record.
+    async fn record_file_hash(&self, _: &EntityUri, _: &str) -> AnyhowResult<()> {
+        Ok(())
+    }
+
     /// No `LiveData<Block>` CDC feed under Loro: writes are synchronous against
     /// the tree, so every id should already be resolvable. Verify presence via
     /// `get_block` rather than blindly returning `true`.
@@ -715,6 +721,146 @@ impl holon_filesystem::WritebackDisclosure for WritebackDegradedDisclosure {
         self.bus.clear(&holon_api::ConditionKey {
             subject: file_subject(path),
             kind: holon_api::ConditionKind::WRITEBACK_LOSSY,
+        });
+    }
+
+    fn block_in_two_files(
+        &self,
+        block_id: &EntityUri,
+        owner_doc: &EntityUri,
+        owner_file: Option<&Path>,
+        copy_files: &[&Path],
+        conflict: bool,
+    ) {
+        let owner_file = match owner_file {
+            Some(path) => path.display().to_string(),
+            None => format!("{owner_doc} (its page has no file)"),
+        };
+        let copy_files = copy_files.iter().map(|p| p.display().to_string()).collect();
+        let (reason, other) = if conflict {
+            (
+                holon_api::ConditionKind::BlockEditedInTwoFiles {
+                    owner_file,
+                    copy_files,
+                },
+                holon_api::ConditionKind::BLOCK_IN_TWO_FILES,
+            )
+        } else {
+            (
+                holon_api::ConditionKind::BlockInTwoFiles {
+                    owner_file,
+                    copy_files,
+                },
+                holon_api::ConditionKind::BLOCK_EDITED_IN_TWO_FILES,
+            )
+        };
+        self.bus.clear(&holon_api::ConditionKey {
+            subject: block_id.as_str().to_string(),
+            kind: other,
+        });
+        self.bus.emit(holon_api::Condition {
+            subject: block_id.as_str().to_string(),
+            reason,
+        });
+    }
+
+    fn block_in_one_file_again(&self, block_id: &EntityUri) {
+        for kind in [
+            holon_api::ConditionKind::BLOCK_IN_TWO_FILES,
+            holon_api::ConditionKind::BLOCK_EDITED_IN_TWO_FILES,
+        ] {
+            self.bus.clear(&holon_api::ConditionKey {
+                subject: block_id.as_str().to_string(),
+                kind,
+            });
+        }
+    }
+
+    fn deleted_block_kept_in_file(&self, block_id: &EntityUri, file: &Path) {
+        self.bus.emit(holon_api::Condition {
+            subject: block_id.as_str().to_string(),
+            reason: holon_api::ConditionKind::DeletedBlockKeptInFile {
+                file: file.display().to_string(),
+            },
+        });
+    }
+
+    fn deletion_undone(&self, block_id: &EntityUri, file: &Path, copy_files: &[&Path]) {
+        self.bus.emit(holon_api::Condition {
+            subject: block_id.as_str().to_string(),
+            reason: holon_api::ConditionKind::DeletionUndoneBlockInOtherFile {
+                file: file.display().to_string(),
+                copy_files: copy_files.iter().map(|p| p.display().to_string()).collect(),
+            },
+        });
+    }
+
+    fn deletion_ended_by_edit(&self, block_id: &EntityUri, file: &Path) {
+        self.bus.emit(holon_api::Condition {
+            subject: block_id.as_str().to_string(),
+            reason: holon_api::ConditionKind::DeletionEndedByEdit {
+                file: file.display().to_string(),
+            },
+        });
+    }
+
+    fn vault_sync_not_started(&self, vault: &Path, cause: &str) {
+        self.bus.emit(holon_api::Condition {
+            subject: vault.display().to_string(),
+            reason: holon_api::ConditionKind::VaultSyncNotStarted {
+                cause: cause.to_string(),
+            },
+        });
+    }
+
+    fn vault_state_unreadable(&self, file: &Path, kept_as: &Path, reason: &str) {
+        self.bus.emit(holon_api::Condition {
+            subject: file.display().to_string(),
+            reason: holon_api::ConditionKind::VaultStateUnreadable {
+                kept_as: kept_as.display().to_string(),
+                reason: reason.to_string(),
+            },
+        });
+    }
+
+    fn vault_start_incomplete(&self, vault: &Path, step: &str, cause: &str) {
+        self.bus.emit(holon_api::Condition {
+            subject: vault.display().to_string(),
+            reason: holon_api::ConditionKind::VaultStartIncomplete {
+                step: step.to_string(),
+                cause: cause.to_string(),
+            },
+        });
+    }
+
+    fn written_files_unrecorded(&self, vault: &Path, files: &[&Path], cause: &str) {
+        self.bus.emit(holon_api::Condition {
+            subject: vault.display().to_string(),
+            reason: holon_api::ConditionKind::WrittenFilesUnrecorded {
+                files: files.iter().map(|f| f.display().to_string()).collect(),
+                cause: cause.to_string(),
+            },
+        });
+    }
+
+    fn written_files_recorded(&self, vault: &Path) {
+        self.bus.clear(&holon_api::ConditionKey {
+            subject: vault.display().to_string(),
+            kind: holon_api::ConditionKind::WRITTEN_FILES_UNRECORDED,
+        });
+    }
+
+    fn undone_deletion_resolved(&self, block_id: &EntityUri) {
+        self.bus.clear(&holon_api::ConditionKey {
+            subject: block_id.as_str().to_string(),
+            kind: holon_api::ConditionKind::DELETION_UNDONE_BLOCK_IN_OTHER_FILE,
+        });
+    }
+
+    fn deleted_block_gone_from_file(&self, block_id: &EntityUri) {
+        self.bus.clear(&holon_api::ConditionKey {
+            subject: block_id.as_str().to_string(),
+            kind: holon_api::ConditionKind::DELETED_BLOCK_KEPT_IN_FILE,
         });
     }
 }

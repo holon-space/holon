@@ -27,7 +27,8 @@
 //! COMPONENT, never a raw string suffix — an unanchored `ends_with` lets a
 //! different file called `a-keystone-recipe.cook` satisfy an expectation for
 //! `keystone-recipe.cook`, so the pinned file's refusal goes undisclosed and
-//! this invariant reports a clean run. See [`subject_matches_expected`] and
+//! this invariant reports a clean run. See
+//! [`holon_pbt_core::capabilities::subject_matches_expected`] and
 //! bugfunnel entry
 //! `2026-09-15-conditions-invariant-matches-subject-by-raw-suffix`.
 
@@ -36,7 +37,6 @@ use std::collections::BTreeSet;
 use holon_pbt_core::capabilities::RaisedCondition;
 use holon_pbt_core::capabilities::RefConditions;
 use holon_pbt_core::capabilities::SutConditions;
-use holon_pbt_core::capabilities::subject_matches_expected;
 use holon_pbt_core::invariant::Invariant;
 use holon_pbt_core::invariant::InvariantId;
 use holon_pbt_core::invariant::InvariantResult;
@@ -76,13 +76,16 @@ where
 
         let missing: Vec<String> = expected
             .iter()
-            .filter(|(name, kind)| {
-                !raised
-                    .iter()
-                    .any(|r| r.kind == *kind && subject_matches_expected(&r.subject, name))
-            })
-            .map(|(name, kind)| {
-                format!("{kind} on a subject whose final path component is `{name}`")
+            .filter(|e| !raised.iter().any(|r| e.is_met_by(r)))
+            .map(|e| match &e.files {
+                None => format!(
+                    "{} on a subject whose final path component is `{}`",
+                    e.kind, e.subject_name
+                ),
+                Some(files) => format!(
+                    "{} on a subject whose final path component is `{}`, naming the files {files:?}",
+                    e.kind, e.subject_name
+                ),
             })
             .collect();
         if !missing.is_empty() {
@@ -98,11 +101,7 @@ where
 
         let spurious: Vec<&RaisedCondition> = raised
             .iter()
-            .filter(|r| {
-                !expected.iter().any(|(name, kind)| {
-                    r.kind == *kind && subject_matches_expected(&r.subject, name)
-                })
-            })
+            .filter(|r| !expected.iter().any(|e| e.is_met_by(r)))
             .collect();
         if !spurious.is_empty() {
             return InvariantResult::Fail(format!(
@@ -124,6 +123,7 @@ where
 mod tests {
     use std::collections::BTreeSet;
 
+    use holon_pbt_core::capabilities::ExpectedDisclosure;
     use holon_pbt_core::capabilities::RaisedCondition;
     use holon_pbt_core::capabilities::RefConditions;
     use holon_pbt_core::capabilities::SutConditions;
@@ -143,7 +143,7 @@ mod tests {
     const COLLIDING_PATH: &str = "/tmp/vault/a-keystone-recipe.cook";
 
     struct RefStub {
-        expected: Vec<(String, &'static str)>,
+        expected: Vec<ExpectedDisclosure>,
         governed: BTreeSet<&'static str>,
     }
 
@@ -151,14 +151,18 @@ mod tests {
         /// The `AttemptReadOnlyEdit` shape: one pinned name, one governed kind.
         fn pinning_the_recipe() -> Self {
             Self {
-                expected: vec![(PINNED_NAME.to_string(), KIND)],
+                expected: vec![ExpectedDisclosure {
+                    subject_name: PINNED_NAME.to_string(),
+                    kind: KIND,
+                    files: None,
+                }],
                 governed: [KIND].into_iter().collect(),
             }
         }
     }
 
     impl RefConditions for RefStub {
-        fn expected_conditions(&self) -> Vec<(String, &'static str)> {
+        fn expected_conditions(&self) -> Vec<ExpectedDisclosure> {
             self.expected.clone()
         }
 
@@ -179,6 +183,7 @@ mod tests {
                     .map(|subject| RaisedCondition {
                         subject: (*subject).to_string(),
                         kind: KIND.to_string(),
+                        files: Vec::new(),
                     })
                     .collect(),
             }
@@ -252,6 +257,26 @@ mod tests {
             message.contains("does not expect"),
             "the colliding sibling must surface on the SPURIOUS side; got: {message}"
         );
+    }
+
+    /// A condition the model states files for is met only by a raise naming
+    /// exactly those files in that order: a swapped owner and copy is a
+    /// different disclosure.
+    #[tokio::test]
+    async fn a_raise_naming_other_files_does_not_meet_the_expectation() {
+        let expected = |files: &[&str]| ExpectedDisclosure {
+            subject_name: "block:moved".to_string(),
+            kind: KIND,
+            files: Some(files.iter().map(|f| f.to_string()).collect()),
+        };
+        let raised = RaisedCondition {
+            subject: "block:moved".to_string(),
+            kind: KIND.to_string(),
+            files: vec!["Overview.org".to_string(), "DayPage.org".to_string()],
+        };
+        assert!(expected(&["Overview.org", "DayPage.org"]).is_met_by(&raised));
+        assert!(!expected(&["DayPage.org", "Overview.org"]).is_met_by(&raised));
+        assert!(!expected(&["Overview.org"]).is_met_by(&raised));
     }
 
     /// The rule itself, stated once: identity at a path-component boundary.

@@ -16,6 +16,8 @@
 // surface is the port traits + sync base store consumed by holon-loro.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod change_source;
+#[cfg(all(feature = "crash-injection", not(target_arch = "wasm32")))]
+pub mod crash_injection;
 pub mod error;
 pub mod file;
 #[cfg(not(target_arch = "wasm32"))]
@@ -29,6 +31,8 @@ pub mod ingest_progress;
 pub mod sync_base_store;
 pub mod sync_conflict;
 pub mod sync_ports;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod undone_deletions_file;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod vault_filter;
 pub mod vault_path;
@@ -96,6 +100,7 @@ pub use sync_ports::MemoSeam;
 pub use sync_ports::MountRegistry;
 pub use sync_ports::PageAncestor;
 pub use sync_ports::PageWalkBreak;
+pub use sync_ports::RECORD_FILE_HASH_SQL;
 pub use sync_ports::ShareWritebackDisclosure;
 pub use sync_ports::ThreeWayTextMerge;
 pub use sync_ports::WritebackDisclosure;

@@ -89,6 +89,17 @@ impl FileFormatAdapter for OrgFormatAdapter {
         OrgRenderer::render_entitys(blocks, file_path, file_id)
     }
 
+    fn positional_property_keys(&self) -> &'static [&'static str] {
+        &[
+            crate::models::org_props::SEQUENCE,
+            crate::models::org_props::LEVEL,
+        ]
+    }
+
+    fn keep_subtrees(&self, disk: &str, rendered: &str, bare_ids: &[String]) -> Result<String> {
+        crate::subtree::keep_subtrees(disk, rendered, bare_ids)
+    }
+
     fn doc_id_from_content(&self, content: &str) -> Result<Option<EntityUri>> {
         // BOTH carriers, not just `#+ID:`. The controller treats `None` as "no
         // stable identity" and force-writes `#+ID: <name-chain uuid>` onto the

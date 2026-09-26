@@ -363,6 +363,70 @@ pub enum ConditionKind {
     /// All-clear: the next successful load of the same block. A deleted block's
     /// condition stands until restart.
     ProfileRefused { error: String },
+    /// One block id is on disk in two or more org files. `subject` is the
+    /// block id; `owner_file` belongs to the page that owns the block and stays
+    /// authoritative, `copy_files` hold the other copies. Holon deletes none:
+    /// a copy is half of a move whose source is not saved yet, or a stale copy
+    /// only the user can judge.
+    ///
+    /// All-clear: [`BlockInOneFile`](crate::condition_profile::AllClear).
+    BlockInTwoFiles {
+        owner_file: String,
+        copy_files: Vec<String>,
+    },
+    /// [`BlockInTwoFiles`](Self::BlockInTwoFiles) where the owner's file let
+    /// the block go, but a copy and Holon's version were both edited apart, so
+    /// no copy was adopted. The user's next deletion of one of them decides.
+    ///
+    /// All-clear: [`BlockInOneFile`](crate::condition_profile::AllClear).
+    BlockEditedInTwoFiles {
+        owner_file: String,
+        copy_files: Vec<String>,
+    },
+    /// `subject`, a block id, was deleted in Holon while `file` held a copy of
+    /// it; `file` brought it back as its own block.
+    ///
+    /// All-clear: the block leaves `file`, or is deleted or moved in Holon.
+    DeletedBlockKeptInFile { file: String },
+    /// `subject`, a block id, was deleted from `file`, the file that owns it,
+    /// and Holon wrote it back: each of `copy_files` holds a copy of the
+    /// heading it is under, and a block another file holds is never deleted.
+    ///
+    /// All-clear: [`BlockInOneFile`](crate::condition_profile::AllClear) of
+    /// that heading.
+    DeletionUndoneBlockInOtherFile {
+        file: String,
+        copy_files: Vec<String>,
+    },
+    /// `subject`, a block id, was deleted from `file` and put back by Holon
+    /// (see [`DeletionUndoneBlockInOtherFile`](Self::DeletionUndoneBlockInOtherFile)),
+    /// and it was edited since: the deletion no longer stands, and the block
+    /// stays.
+    ///
+    /// All-clear: none in this process.
+    DeletionEndedByEdit { file: String },
+    /// `subject`, a vault root, is not synced: the file sync failed before it
+    /// watched the vault. `cause` names the failure and what no longer syncs.
+    ///
+    /// All-clear: none in this process; a restart starts the controller again.
+    VaultSyncNotStarted { cause: String },
+    /// `subject`, a record Holon keeps in the vault, could not be read. It was
+    /// kept as it was at `kept_as`, and Holon started without what it could
+    /// not read.
+    ///
+    /// All-clear: none in this process.
+    VaultStateUnreadable { kept_as: String, reason: String },
+    /// `subject`, a vault root, is synced, but `step` of its start failed
+    /// (`cause`), so what that step does was not done this run.
+    ///
+    /// All-clear: none in this process; a restart runs the step again.
+    VaultStartIncomplete { step: String, cause: String },
+    /// `subject`, a vault root, holds `files` Holon wrote without recording
+    /// which bytes it wrote (`cause`), so the next start reads them again.
+    ///
+    /// All-clear:
+    /// [`WrittenHashRecord`](crate::condition_profile::ClearingEvent).
+    WrittenFilesUnrecorded { files: Vec<String>, cause: String },
 }
 
 /// Subject of the device-wide conditions on this bus, which have no share to
@@ -405,6 +469,16 @@ impl ConditionKind {
     pub const DUPLICATE_MOUNT: &'static str = "duplicate-mount";
     pub const WATCH_VIEWS_REBUILDING: &'static str = "watch-views-rebuilding";
     pub const PROFILE_REFUSED: &'static str = "profile-refused";
+    pub const BLOCK_IN_TWO_FILES: &'static str = "block-in-two-files";
+    pub const BLOCK_EDITED_IN_TWO_FILES: &'static str = "block-edited-in-two-files";
+    pub const DELETED_BLOCK_KEPT_IN_FILE: &'static str = "deleted-block-kept-in-file";
+    pub const DELETION_UNDONE_BLOCK_IN_OTHER_FILE: &'static str =
+        "deletion-undone-block-in-other-file";
+    pub const DELETION_ENDED_BY_EDIT: &'static str = "deletion-ended-by-edit";
+    pub const VAULT_SYNC_NOT_STARTED: &'static str = "vault-sync-not-started";
+    pub const VAULT_STATE_UNREADABLE: &'static str = "vault-state-unreadable";
+    pub const VAULT_START_INCOMPLETE: &'static str = "vault-start-incomplete";
+    pub const WRITTEN_FILES_UNRECORDED: &'static str = "written-files-unrecorded";
 
     /// The condition's stable identity, paired with the subject to form a
     /// [`ConditionKey`]. Total: every degradation is a sticky
@@ -444,6 +518,17 @@ impl ConditionKind {
             Self::DuplicateMount { .. } => Self::DUPLICATE_MOUNT,
             Self::WatchViewsRebuilding => Self::WATCH_VIEWS_REBUILDING,
             Self::ProfileRefused { .. } => Self::PROFILE_REFUSED,
+            Self::BlockInTwoFiles { .. } => Self::BLOCK_IN_TWO_FILES,
+            Self::BlockEditedInTwoFiles { .. } => Self::BLOCK_EDITED_IN_TWO_FILES,
+            Self::DeletedBlockKeptInFile { .. } => Self::DELETED_BLOCK_KEPT_IN_FILE,
+            Self::DeletionUndoneBlockInOtherFile { .. } => {
+                Self::DELETION_UNDONE_BLOCK_IN_OTHER_FILE
+            }
+            Self::DeletionEndedByEdit { .. } => Self::DELETION_ENDED_BY_EDIT,
+            Self::VaultSyncNotStarted { .. } => Self::VAULT_SYNC_NOT_STARTED,
+            Self::VaultStateUnreadable { .. } => Self::VAULT_STATE_UNREADABLE,
+            Self::VaultStartIncomplete { .. } => Self::VAULT_START_INCOMPLETE,
+            Self::WrittenFilesUnrecorded { .. } => Self::WRITTEN_FILES_UNRECORDED,
         }
     }
 }

@@ -854,20 +854,15 @@ impl FrontendInjectorExt for Injector {
                                 }
                             };
                             if let Some(msg) = scan_error {
-                                // A per-file initial-scan failure. Do NOT panic
-                                // this detached worker — that left the window
-                                // looking healthy with file sync silently dead
-                                // (dogfood 2026-07-10 ship-blocker). The org
-                                // watch loop is already armed (holon-orgmode
-                                // di.rs no longer early-returns on failure), so
-                                // the OTHER files keep syncing. The user-facing
-                                // banner is raised (and cleared) per refused
-                                // file by the controller's
-                                // `WritebackDisclosure`, naming the format that
-                                // refused it.
+                                // Do NOT panic this detached worker — that left
+                                // the window looking healthy with file sync
+                                // silently dead (dogfood 2026-07-10
+                                // ship-blocker). The controller discloses each
+                                // refused file, a failed start step, and a
+                                // controller that never started, through its
+                                // `WritebackDisclosure`.
                                 tracing::error!(
-                                    "OrgMode initial scan degraded — some vault files were not \
-                                     ingested; other files continue syncing: {msg}"
+                                    "OrgMode initial scan or controller start failed: {msg}"
                                 );
                             }
                         }

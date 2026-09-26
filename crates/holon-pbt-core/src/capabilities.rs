@@ -301,6 +301,17 @@ pub trait RefBlockTree {
         false
     }
 
+    /// True if another file holds a copy of `id` (D229.b). Substrates without
+    /// files → `false`.
+    fn is_copied(&self, _: &EntityUri) -> bool {
+        false
+    }
+
+    /// How many other files hold a copy of `id`.
+    fn copy_file_count(&self, _: &EntityUri) -> usize {
+        0
+    }
+
     /// All block ids tracked by the reference model, EXCLUDING seed
     /// blocks (those with sentinel/no_parent docs — they're inserted
     /// via direct SQL, never reverse-synced to Loro, and don't appear
@@ -2421,7 +2432,12 @@ pub trait SutOrgRender {
     /// Used by `inv-org-render-fixed-point` to assert `disk == rendered`
     /// — required so the echo-suppression loop in `re_render_all_tracked`
     /// doesn't spin on a permanent disagreement.
-    async fn snapshot_org_render_pairs(&self) -> Vec<(String, String, String)>;
+    /// `copies` names, per file, the copied headings whose subtrees the disk
+    /// text leaves out: the store renders them into their owner's file.
+    async fn snapshot_org_render_pairs(
+        &self,
+        copies: &CopiesByFile,
+    ) -> Vec<(String, String, String)>;
 }
 
 // ─── The home-profile binding ────────────────────────────────────────
@@ -2460,7 +2476,9 @@ pub trait SutOrgRead {
     /// `block:<uuid>` parents for `#+ID:`-resolved docs
     /// and `file:<filename>` parents for unresolved ones — the reference side
     /// (`RefBackend::org_blocks`) mirrors that same parent resolution.
-    async fn org_block_snapshot(&self) -> Vec<holon_api::Block>;
+    /// `copies` names, per file, the copied headings whose subtrees are left
+    /// out: their blocks are the owner file's.
+    async fn org_block_snapshot(&self, copies: &CopiesByFile) -> Vec<holon_api::Block>;
 }
 
 // ─── Phase 6f'' — FsWrites cluster ───────────────────────────────────
@@ -2474,6 +2492,53 @@ pub trait SutFsWrites {
     /// target that escaped the root is a defect even if the write then failed
     /// or the file was removed again.
     async fn vault_write_targets(&self) -> (String, Vec<String>);
+}
+
+// Binds: `inv-copies-stay-on-disk`.
+
+#[holon_macros::capmap_adapter]
+pub trait SutEditorSaves {
+    /// The file of document `doc` as it is on disk now; `None` when it is not
+    /// on disk.
+    async fn on_disk(&self, doc: &EntityUri) -> Option<String>;
+    /// The subtree of block `block_bare` as the external editor last wrote it
+    /// into the file of document `doc`; `None` when it wrote none there.
+    async fn pasted_copy(&self, doc: &EntityUri, block_bare: &str) -> Option<String>;
+}
+
+/// A block the model says is on disk in a second file (D229.b).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ModelCopy {
+    pub block_bare: String,
+    /// The page that owns the block, and the final path component of its file.
+    pub owner_doc: EntityUri,
+    pub owner_file: String,
+    /// The page whose file holds the copy, and that file's final path
+    /// component.
+    pub copy_doc: EntityUri,
+    pub copy_file: String,
+}
+
+/// The copied headings each file holds, by final path component: what an
+/// org observation leaves out, so the store's blocks are compared once.
+pub type CopiesByFile = BTreeMap<String, BTreeSet<String>>;
+
+/// Binds: the org observations of `inv-org-render-fixed-point` and
+/// `inv-blocks-match-ref/org`, and `inv-copies-stay-on-disk`.
+#[holon_macros::capmap_adapter] // sync trait → no async-trait
+pub trait RefCopies {
+    fn model_copies(&self) -> Vec<ModelCopy>;
+}
+
+pub fn copies_by_file(copies: &[ModelCopy]) -> CopiesByFile {
+    let mut by_file = CopiesByFile::new();
+    for copy in copies {
+        by_file
+            .entry(copy.copy_file.clone())
+            .or_default()
+            .insert(copy.block_bare.clone());
+    }
+    by_file
 }
 
 // ─── Read-only-home cluster ──────────────────────────────────────────
@@ -2496,13 +2561,14 @@ pub trait SutReadOnlyHomes {
     /// The same blocks, read out of `block_raw` NOW.
     async fn read_only_blocks_now(&self) -> Vec<ReadOnlyBlock>;
 
-    /// How many store-origin writes this run aimed at a read-only-homed block,
-    /// and how many of them the dispatcher refused. A refusal that did not
-    /// happen is the defect; a write that never happened is a vacuous pass, and
-    /// the two must be told apart.
+    /// How many store-origin writes the current boot aimed at a read-only-homed
+    /// block, and how many of them the dispatcher refused. A refusal that did
+    /// not happen is the defect; a write that never happened is a vacuous
+    /// pass, and the two must be told apart.
     async fn read_only_write_attempts(&self) -> (usize, usize);
 
-    /// The `condition_kind`s the degraded-signal bus raised over the run.
+    /// The `condition_kind`s in effect on the current boot's degraded-signal
+    /// bus.
     async fn raised_degraded_conditions(&self) -> Vec<String>;
 
     /// How many NON-user-origin compounds this run aimed at a read-only-homed
@@ -2569,6 +2635,32 @@ pub trait SutUnschemedIdDispatch {
 pub struct RaisedCondition {
     pub subject: String,
     pub kind: String,
+    /// The final path components of the files the condition names, in its
+    /// own order. Empty for a kind that names none.
+    pub files: Vec<String>,
+}
+
+/// One condition the model expects in effect.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ExpectedDisclosure {
+    /// The file name the raise site's subject must end in, as its final path
+    /// component. See [`subject_matches_expected`].
+    pub subject_name: String,
+    pub kind: &'static str,
+    /// The file names the condition must name, in order, when the model
+    /// states them; `None` leaves them unjudged.
+    pub files: Option<Vec<String>>,
+}
+
+impl ExpectedDisclosure {
+    pub fn is_met_by(&self, raised: &RaisedCondition) -> bool {
+        raised.kind == self.kind
+            && subject_matches_expected(&raised.subject, &self.subject_name)
+            && self
+                .files
+                .as_ref()
+                .is_none_or(|files| *files == raised.files)
+    }
 }
 
 /// The conditions in effect on the production `ConditionBus` — the object the
@@ -2605,15 +2697,16 @@ pub fn subject_matches_expected(subject: &str, expected: &str) -> bool {
 /// authority over.
 #[holon_macros::capmap_adapter] // sync trait → no async-trait
 pub trait RefConditions {
-    /// `(subject file name, kind)` pairs the model expects in effect.
+    /// The conditions the model expects in effect.
     ///
-    /// The NAME, not the whole subject and not a raw string suffix: most raise
+    /// Subjects are pinned by NAME, not the whole subject and not a raw string
+    /// suffix: most raise
     /// sites carry an absolute path inside the run's temp vault, which no
     /// constant can know, so the model pins the file name rather than pinning
     /// nothing — and [`subject_matches_expected`] anchors the comparison to the
     /// final path component, so a different file whose name merely ENDS with
     /// the pinned one cannot satisfy it.
-    fn expected_conditions(&self) -> Vec<(String, &'static str)>;
+    fn expected_conditions(&self) -> Vec<ExpectedDisclosure>;
 
     /// The kinds the invariant may judge. Everything else on the bus is the
     /// app's own business (boot-time disclosures no transition caused).
@@ -3527,6 +3620,51 @@ pub trait SutSeamMutate {
     /// the ids) would. Re-ingest must reconcile the id-less blocks against the
     /// store's current children -- NOT duplicate them (the PR #81 bug class).
     async fn stale_external_rewrite(&self, doc_uri: &holon_api::EntityUri);
+    /// An external editor's cut & paste between two org pages: rewrite
+    /// `source_doc`'s file without `block_id`'s subtree and `target_doc`'s
+    /// file with it as the last top-level heading, saving them in `order`.
+    async fn move_block_between_files(
+        &self,
+        block_id: &holon_api::EntityUri,
+        source_doc: &holon_api::EntityUri,
+        target_doc: &holon_api::EntityUri,
+        order: crate::types::CutPasteSaveOrder,
+    );
+    /// The first half of a cut & paste whose source is not saved yet: rewrite
+    /// `target_doc`'s file with a copy of `block_id`'s subtree as its last
+    /// top-level heading, and wait for its ingest. `source_doc`'s file still
+    /// holds the block.
+    async fn paste_block_copy(
+        &self,
+        block_id: &holon_api::EntityUri,
+        source_doc: &holon_api::EntityUri,
+        target_doc: &holon_api::EntityUri,
+    );
+    /// The second half: save `source_doc`'s file without the block, or
+    /// delete the copy from `target_doc`'s file, and wait for the ingest.
+    async fn finish_cut_paste(
+        &self,
+        block_id: &holon_api::EntityUri,
+        source_doc: &holon_api::EntityUri,
+        target_doc: &holon_api::EntityUri,
+        finish: crate::types::CutPasteFinish,
+    );
+    /// The external editor sets the task keyword of the copy of `block_id`
+    /// that `copy_doc`'s file holds, saves it, and waits for the ingest.
+    async fn edit_block_copy(
+        &self,
+        block_id: &holon_api::EntityUri,
+        copy_doc: &holon_api::EntityUri,
+        state: CycleTarget,
+    );
+    /// The external editor deletes `block_id`'s section, under the copied
+    /// heading `root`, from `doc`'s file, saves it, and waits for the ingest.
+    async fn delete_line_from_file(
+        &self,
+        block_id: &holon_api::EntityUri,
+        root: &holon_api::EntityUri,
+        doc: &holon_api::EntityUri,
+    );
 }
 
 /// SUT capability: create a block through the focused panel's creation slot

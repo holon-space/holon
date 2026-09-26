@@ -228,6 +228,25 @@ pub trait FileFormatAdapter: Send + Sync {
         DocumentIdentity::Embedded
     }
 
+    /// The property keys a parse derives from a block's position in the file
+    /// (org: `sequence`, `level`). They describe where the block is, not an
+    /// edit to it.
+    fn positional_property_keys(&self) -> &'static [&'static str] {
+        &[]
+    }
+
+    /// Insert into `rendered` each subtree `disk` holds for an id in
+    /// `bare_ids`, at the position `disk` gives it, so a render from the store
+    /// keeps a block the store routes to another file. Only a format whose
+    /// subtrees are contiguous byte ranges can; the default refuses.
+    fn keep_subtrees(&self, disk: &str, rendered: &str, bare_ids: &[String]) -> Result<String> {
+        let _ = (disk, rendered);
+        anyhow::bail!(
+            "{} files cannot keep a copy of blocks {bare_ids:?} while rendering",
+            self.format_name()
+        )
+    }
+
     /// Build the operation-params `StorageEntity` for a create/update of
     /// `block`, as handed to `OperationProvider::execute_operation`. The
     /// `document_uri` is recorded under `ROUTING_DOC_URI_KEY` so the consumer

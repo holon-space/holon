@@ -1016,6 +1016,56 @@ impl holon_filesystem::WritebackDisclosure for DisclosureLog {
     }
     fn writeback_lossy(&self, _: &std::path::Path, _: &str) {}
     fn writeback_faithful(&self, _: &std::path::Path) {}
+
+    fn block_in_two_files(
+        &self,
+        block_id: &holon_api::EntityUri,
+        _: &holon_api::EntityUri,
+        _: Option<&Path>,
+        copy_files: &[&Path],
+        conflict: bool,
+    ) {
+        self.entries.lock().unwrap().push(format!(
+            "two files {block_id} {copy_files:?} conflict={conflict}"
+        ));
+    }
+
+    fn deleted_block_kept_in_file(&self, block_id: &holon_api::EntityUri, file: &Path) {
+        self.entries
+            .lock()
+            .unwrap()
+            .push(format!("kept {block_id} {}", file.display()));
+    }
+
+    fn deletion_undone(
+        &self,
+        _: &holon_api::EntityUri,
+        _: &std::path::Path,
+        _: &[&std::path::Path],
+    ) {
+    }
+
+    fn undone_deletion_resolved(&self, _: &holon_api::EntityUri) {}
+    fn deletion_ended_by_edit(&self, _: &holon_api::EntityUri, _: &std::path::Path) {}
+    fn vault_sync_not_started(&self, _: &std::path::Path, _: &str) {}
+    fn vault_state_unreadable(&self, _: &std::path::Path, _: &std::path::Path, _: &str) {}
+    fn vault_start_incomplete(&self, _: &std::path::Path, _: &str, _: &str) {}
+    fn written_files_unrecorded(&self, _: &std::path::Path, _: &[&std::path::Path], _: &str) {}
+    fn written_files_recorded(&self, _: &std::path::Path) {}
+
+    fn deleted_block_gone_from_file(&self, block_id: &holon_api::EntityUri) {
+        self.entries
+            .lock()
+            .unwrap()
+            .push(format!("kept gone {block_id}"));
+    }
+
+    fn block_in_one_file_again(&self, block_id: &holon_api::EntityUri) {
+        self.entries
+            .lock()
+            .unwrap()
+            .push(format!("one file {block_id}"));
+    }
 }
 
 /// Entry `the-degraded-toast-is-stale-and-calls-cook-files-org`: the refusal

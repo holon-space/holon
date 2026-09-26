@@ -105,6 +105,7 @@ pub enum ClearingEvent {
     IntegrationConnect,
     PairReimport,
     ProfileLoad,
+    WrittenHashRecord,
 }
 
 /// The named moment that clears a condition.
@@ -120,6 +121,12 @@ pub enum AllClear {
     /// The next write-back render of the file the instance names that holds
     /// every stored value.
     NextFaithfulRender,
+    /// The ingest that leaves the block the instance names in one file: the
+    /// owner's file released it and a copy was adopted, or the copies are gone.
+    BlockInOneFile,
+    /// The block the instance names leaves the file it names, or is deleted
+    /// or moved in Holon.
+    BlockLeavesFile,
     RemedyApplied,
     /// Info only. See [`ConditionProfile::new`].
     Elapsed(Duration),
@@ -550,6 +557,87 @@ const PROFILE_REFUSED: ConditionProfile = ConditionProfile::new(
     &[],
 );
 
+const BLOCK_IN_TWO_FILES: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Warning,
+    "Block is in more than one file",
+    icons::WARN,
+    ConditionPlacement::Toast,
+    AllClear::BlockInOneFile,
+    &[],
+);
+
+const BLOCK_EDITED_IN_TWO_FILES: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Warning,
+    "Block was edited in two files",
+    icons::WARN,
+    ConditionPlacement::Toast,
+    AllClear::BlockInOneFile,
+    &[],
+);
+
+const DELETED_BLOCK_KEPT_IN_FILE: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Warning,
+    "Deleted block is still in a file",
+    icons::WARN,
+    ConditionPlacement::Toast,
+    AllClear::BlockLeavesFile,
+    &[],
+);
+
+const DELETION_UNDONE_BLOCK_IN_OTHER_FILE: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Warning,
+    "A deletion was undone",
+    icons::WARN,
+    ConditionPlacement::Toast,
+    AllClear::BlockInOneFile,
+    &[],
+);
+
+const DELETION_ENDED_BY_EDIT: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Info,
+    "An edit ended a deletion",
+    icons::INFO,
+    ConditionPlacement::Toast,
+    AllClear::UntilRestart,
+    &[],
+);
+
+const VAULT_SYNC_NOT_STARTED: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Error,
+    "Files are not synced",
+    icons::BLOCKED,
+    ConditionPlacement::Modal,
+    AllClear::UntilRestart,
+    &[],
+);
+
+const VAULT_STATE_UNREADABLE: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Warning,
+    "A Holon record in the vault could not be read",
+    icons::WARN,
+    ConditionPlacement::Toast,
+    AllClear::UntilRestart,
+    &[],
+);
+
+const VAULT_START_INCOMPLETE: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Error,
+    "Holon did not finish starting the file sync",
+    icons::WARN,
+    ConditionPlacement::Toast,
+    AllClear::UntilRestart,
+    &[],
+);
+
+const WRITTEN_FILES_UNRECORDED: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Warning,
+    "Holon could not record what it wrote",
+    icons::WARN,
+    ConditionPlacement::Toast,
+    AllClear::NextSuccessOf(ClearingEvent::WrittenHashRecord),
+    &[],
+);
+
 impl ConditionKind {
     /// This kind's profile. Total, like
     /// [`condition_kind`](ConditionKind::condition_kind): a new variant cannot
@@ -587,6 +675,15 @@ impl ConditionKind {
             Self::DuplicateMount { .. } => DUPLICATE_MOUNT,
             Self::WatchViewsRebuilding => WATCH_VIEWS_REBUILDING,
             Self::ProfileRefused { .. } => PROFILE_REFUSED,
+            Self::BlockInTwoFiles { .. } => BLOCK_IN_TWO_FILES,
+            Self::BlockEditedInTwoFiles { .. } => BLOCK_EDITED_IN_TWO_FILES,
+            Self::DeletedBlockKeptInFile { .. } => DELETED_BLOCK_KEPT_IN_FILE,
+            Self::DeletionUndoneBlockInOtherFile { .. } => DELETION_UNDONE_BLOCK_IN_OTHER_FILE,
+            Self::DeletionEndedByEdit { .. } => DELETION_ENDED_BY_EDIT,
+            Self::VaultSyncNotStarted { .. } => VAULT_SYNC_NOT_STARTED,
+            Self::VaultStateUnreadable { .. } => VAULT_STATE_UNREADABLE,
+            Self::VaultStartIncomplete { .. } => VAULT_START_INCOMPLETE,
+            Self::WrittenFilesUnrecorded { .. } => WRITTEN_FILES_UNRECORDED,
         }
     }
 }

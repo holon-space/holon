@@ -207,6 +207,34 @@ pub struct MutationEvent {
 /// The production task-state cycle, in click order.
 pub const TASK_STATE_CYCLE: &[&str] = &["", "TODO", "DOING", "DONE"];
 
+/// The order in which an external editor saves the two files of a cut &
+/// paste between org pages, when both saves land before anything else happens.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum CutPasteSaveOrder {
+    /// The source (cut) is saved and ingested before the target (paste).
+    SourceFirst,
+    /// Both are saved back to back, target first, and ingested in whatever
+    /// order the watcher delivers them.
+    TargetFirst,
+}
+
+impl CutPasteSaveOrder {
+    pub const ALL: [CutPasteSaveOrder; 2] = [Self::SourceFirst, Self::TargetFirst];
+}
+
+/// How a pasted copy whose source is not saved yet is resolved.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum CutPasteFinish {
+    /// The source is saved without the block: the copy is adopted.
+    SourceSaved,
+    /// The user deletes the pasted copy: the block stays in the source.
+    CopyDeletedFromTarget,
+}
+
+impl CutPasteFinish {
+    pub const ALL: [CutPasteFinish; 2] = [Self::SourceSaved, Self::CopyDeletedFromTarget];
+}
+
 /// Parse-don't-validate target state for `ToggleState`: clicking the
 /// state_toggle widget can only ever land on a production-cycle member, so the
 /// type makes off-cycle targets unrepresentable. Serialized as the keyword

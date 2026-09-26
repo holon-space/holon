@@ -21,6 +21,9 @@ test-infra = [
     # The SLO gate rungs prove their own teeth by slowing the real CDC apply
     # path; nothing else in the workspace enables this.
     "holon-api?/slo-fault-injection",
+    # The D229 write-ahead test crashes the file-sync controller mid-ingest.
+    "holon-filesystem?/crash-injection",
+    "holon-orgmode?/crash-injection",
     "dep:holon",
     "dep:holon-frontend",
     "dep:holon-secrets",

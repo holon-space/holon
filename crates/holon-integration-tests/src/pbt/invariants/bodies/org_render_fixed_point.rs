@@ -22,9 +22,13 @@
 //! the reference model never generates (e.g. `:share-role: mount`).
 //!
 //! Capability: `SutOrgRender::snapshot_org_render_pairs` returns
-//! `(path, disk, rendered)` triples.
+//! `(path, disk, rendered)` triples, with the copies the model names left out
+//! of the disk text (D229.b: the store renders a copied block into its
+//! owner's file only).
 
+use holon_pbt_core::capabilities::RefCopies;
 use holon_pbt_core::capabilities::SutOrgRender;
+use holon_pbt_core::capabilities::copies_by_file;
 use holon_pbt_core::invariant::Invariant;
 use holon_pbt_core::invariant::InvariantId;
 use holon_pbt_core::invariant::InvariantResult;
@@ -38,16 +42,18 @@ impl InvOrgRenderFixedPoint {
 #[allow(async_fn_in_trait)]
 impl<R, S> Invariant<R, S> for InvOrgRenderFixedPoint
 where
+    R: RefCopies,
     S: SutOrgRender,
 {
     fn id(&self) -> InvariantId {
         Self::ID
     }
 
-    async fn check(&self, _: &R, sut: &S) -> InvariantResult {
+    async fn check(&self, reference: &R, sut: &S) -> InvariantResult {
+        let copies = copies_by_file(&reference.model_copies());
         // Fast path: already at the fixed point (the settle converged). This is
         // the overwhelming common case, so it must add no latency.
-        if Self::first_mismatch(&sut.snapshot_org_render_pairs().await).is_none() {
+        if Self::first_mismatch(&sut.snapshot_org_render_pairs(&copies).await).is_none() {
             return InvariantResult::Ok;
         }
 
@@ -75,7 +81,7 @@ where
                 ));
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
-            let pairs = sut.snapshot_org_render_pairs().await;
+            let pairs = sut.snapshot_org_render_pairs(&copies).await;
             match Self::first_mismatch(&pairs) {
                 None => match stable_since {
                     Some(t) if t.elapsed() >= stable_for => return InvariantResult::Ok,

@@ -214,7 +214,7 @@ impl ReferenceState {
     }
 
     /// The nearest `Page` ancestor of `block_id`, the block itself included.
-    fn owning_page(&self, block_id: &EntityUri) -> Option<&holon_api::block::Block> {
+    pub(crate) fn owning_page(&self, block_id: &EntityUri) -> Option<&holon_api::block::Block> {
         let mut cursor = block_id.clone();
         // The ref tree is finite and acyclic; the bound turns a fixture that
         // broke that into a failed lookup instead of a hung test.

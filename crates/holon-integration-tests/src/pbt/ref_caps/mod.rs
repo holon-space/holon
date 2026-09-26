@@ -239,6 +239,7 @@ impl holon_pbt_core::composition::CapProvider for ReferenceState {
         // exercises no failing transition deselects the invariant rather than
         // asserting the app is silent.
         caps.insert(self.clone() as Arc<dyn holon_pbt_core::capabilities::RefConditions>);
+        caps.insert(self.clone() as Arc<dyn holon_pbt_core::capabilities::RefCopies>);
         caps.insert(self as Arc<dyn holon_pbt_core::capabilities::RefSharedView>);
     }
 }

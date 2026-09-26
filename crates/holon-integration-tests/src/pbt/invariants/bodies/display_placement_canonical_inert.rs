@@ -48,13 +48,14 @@ impl InvDisplayPlacementCanonicalInert {
 #[allow(async_fn_in_trait)]
 impl<R, S> Invariant<R, S> for InvDisplayPlacementCanonicalInert
 where
+    R: holon_pbt_core::capabilities::RefCopies,
     S: SutBackend + SutOrgRender + SutRenderer,
 {
     fn id(&self) -> InvariantId {
         Self::ID
     }
 
-    async fn check(&self, _: &R, sut: &S) -> InvariantResult {
+    async fn check(&self, reference: &R, sut: &S) -> InvariantResult {
         // ── F8: selection paired with the injection seam's env gate ──
         // The display-placed node is only injected when HOLON_PBT_DISPLAY_PLACED
         // is set (`frontend_slice::components::inject_display_placed`, keyed off
@@ -94,7 +95,8 @@ where
         // The org render reads from SQL, not the widget tree, so a display-placed
         // node cannot perturb it. The `InvOrgRenderFixedPoint` body's first pass
         // is a fast Ok; re-run it here for this invariant's self-containment.
-        for (path, disk, rendered) in &sut.snapshot_org_render_pairs().await {
+        let copies = holon_pbt_core::capabilities::copies_by_file(&reference.model_copies());
+        for (path, disk, rendered) in &sut.snapshot_org_render_pairs(&copies).await {
             if disk != rendered {
                 return InvariantResult::Fail(format!(
                     "[inv-display-placement-canonical-inert] org render diverged from disk for \

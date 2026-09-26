@@ -272,6 +272,114 @@ impl ConditionKind {
                 format!("the entity profile in {subject} is not applied — fix it:"),
                 vec![error.clone()],
             ),
+
+            // The paths are BODY lines: the user opens one of them to delete a
+            // copy, so they must survive the headline cap.
+            Self::BlockInTwoFiles {
+                owner_file,
+                copy_files,
+            } => ConditionDetail::with_body(
+                format!(
+                    "{subject} is in {} files. The first stays authoritative; delete the copy \
+                     you do not want:",
+                    1 + copy_files.len()
+                ),
+                std::iter::once(owner_file.clone())
+                    .chain(copy_files.iter().cloned())
+                    .collect(),
+            ),
+
+            Self::BlockEditedInTwoFiles {
+                owner_file,
+                copy_files,
+            } => ConditionDetail::with_body(
+                format!(
+                    "{subject} was edited in Holon and in a copy in another file. Both are kept; \
+                     delete the one you do not want:",
+                ),
+                std::iter::once(owner_file.clone())
+                    .chain(copy_files.iter().cloned())
+                    .collect(),
+            ),
+
+            Self::DeletedBlockKeptInFile { file } => ConditionDetail::with_body(
+                format!("{subject} was deleted in Holon, but a copy of it is still in:"),
+                vec![file.clone()],
+            ),
+
+            Self::DeletionUndoneBlockInOtherFile { file, copy_files } => {
+                ConditionDetail::with_body(
+                    format!(
+                        "{subject} was deleted from {file}, and Holon put it back because the \
+                         files listed hold a copy of it. Delete it from them too, and the \
+                         deletion stands:"
+                    ),
+                    copy_files.clone(),
+                )
+            }
+
+            Self::DeletionEndedByEdit { file } => ConditionDetail::with_body(
+                format!(
+                    "{subject} was deleted from {file}, and Holon put it back because another \
+                     file held a copy of it. It was edited since, so the deletion no longer \
+                     stands and the block stays. Delete it again where you want it gone."
+                ),
+                vec![file.clone()],
+            ),
+
+            Self::VaultSyncNotStarted { cause } => ConditionDetail::with_body(
+                format!(
+                    "Holon is not syncing the files in {subject}: {cause}. Restart Holon after \
+                     fixing the cause."
+                ),
+                vec![],
+            ),
+
+            Self::VaultStateUnreadable { kept_as, reason } => ConditionDetail::with_body(
+                format!(
+                    "{subject} could not be read ({reason}). Holon kept it as it was at \
+                     {kept_as} and started without what it could not read. It lists deletions \
+                     Holon undid because another file held a copy; those lines are back in \
+                     their files. Delete them again where you want them gone."
+                ),
+                vec![kept_as.clone()],
+            ),
+
+            Self::VaultStartIncomplete { step, cause } => ConditionDetail::with_body(
+                format!(
+                    "Holon syncs the files in {subject}, but {step} failed at start: {cause}. \
+                     Restart Holon after fixing the cause."
+                ),
+                vec![],
+            ),
+
+            Self::WrittenFilesUnrecorded { files, cause } => ConditionDetail::with_body(
+                format!(
+                    "Holon wrote these files in {subject} but could not record what it wrote \
+                     ({cause}); the next start reads them again."
+                ),
+                files.clone(),
+            ),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The user deletes a copy by hand, so every file stays in the body.
+    #[test]
+    fn a_block_in_two_files_names_every_file() {
+        let detail = ConditionKind::BlockInTwoFiles {
+            owner_file: "/vault/DayPage.org".into(),
+            copy_files: vec!["/vault/Overview.org".into()],
+        }
+        .detail("block:bulk-0-0");
+        assert!(
+            detail.body.iter().any(|l| l.ends_with("Overview.org"))
+                && detail.body.iter().any(|l| l.ends_with("DayPage.org")),
+            "every file stays in the body: {detail:?}"
+        );
     }
 }

@@ -1257,19 +1257,8 @@ pub async fn boot_and_seed_wide_with_peer_id(
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         frontend.snapshot_read_only_ingest().await;
-        // Only the invariant's read cap is inserted here: it reports against the
-        // baseline the line above takes, so it cannot exist before the ingest
-        // settles. The write-attempt cap is registered in `compose_sut`, where
-        // generation can see it.
-        caps.insert(
-            frontend.clone() as std::sync::Arc<dyn holon_pbt_core::capabilities::SutReadOnlyHomes>
-        );
-        // The disclosure side of the same story: the write-tier gate refuses,
-        // and `inv-conditions-match-ref` judges whether it also TOLD anyone.
-        caps.insert(
-            frontend.clone() as std::sync::Arc<dyn holon_pbt_core::capabilities::SutConditions>
-        );
     }
+    insert_frontend_read_caps(&mut caps, &handle, ref_state);
 
     install_observability_caps(&mut caps, None);
 
@@ -1354,6 +1343,31 @@ pub async fn boot_and_seed_wide_with_peer_id(
     (caps, handle, scaffold)
 }
 
+/// The read caps a booted frontend serves beyond the builder's map. The first
+/// boot and every reboot insert them here, so the two cannot drift apart.
+///
+/// The read-only-home read reports against the baseline the component took
+/// once the first boot's ingest settled; a reboot keeps the component and so
+/// its baseline.
+fn insert_frontend_read_caps(caps: &mut CapMap, handle: &WideHandle, ref_state: &ReferenceState) {
+    let Some(frontend) = &handle.frontend else {
+        return;
+    };
+    if !ref_state.read_only.homes().is_empty() {
+        caps.insert(
+            frontend.clone() as std::sync::Arc<dyn holon_pbt_core::capabilities::SutReadOnlyHomes>
+        );
+    }
+    // What the app discloses (`inv-conditions-match-ref`) and what the external
+    // editor saved (`inv-copies-stay-on-disk`).
+    caps.insert(
+        frontend.clone() as std::sync::Arc<dyn holon_pbt_core::capabilities::SutConditions>
+    );
+    caps.insert(
+        frontend.clone() as std::sync::Arc<dyn holon_pbt_core::capabilities::SutEditorSaves>
+    );
+}
+
 /// Restart the booted app over its RETAINED store and rebuild the SUT around
 /// the new boot — the composed keystone's real `persist → drop the engine →
 /// boot again` step (`SimulateRestart` only touches org files).
@@ -1405,6 +1419,7 @@ pub async fn reboot_wide(
     let bundle = compose_sut_over_existing(&set, resolver, frontend).await;
     let handle = WideHandle::from_bundle(&bundle);
     let mut caps = bundle.caps;
+    insert_frontend_read_caps(&mut caps, &handle, ref_state);
     install_observability_caps(&mut caps, Some(carry));
     converge_projections(&handle, crate::pbt::composed::soak_seed::soak_settle()).await;
     (caps, handle)

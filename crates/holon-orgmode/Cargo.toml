@@ -13,6 +13,9 @@ ignored = ["workspace-hack"]
 [features]
 default = []
 di = []
+# The file-sync failure points (`holon-filesystem/crash-injection`), and the
+# boot walk's own.
+crash-injection = ["holon-filesystem/crash-injection"]
 
 [dependencies]
 holon-org-format.workspace = true

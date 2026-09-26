@@ -350,6 +350,12 @@ impl FileChangeSource for InMemoryFileSystem {
     }
 
     fn arm(&self, _: &Path) -> std::io::Result<()> {
+        #[cfg(feature = "crash-injection")]
+        if crate::crash_injection::fires("arm_watcher") {
+            return Err(std::io::Error::other(
+                "[crash-injection] arming the watcher fails",
+            ));
+        }
         // Always armed: writes notify synchronously.
         Ok(())
     }

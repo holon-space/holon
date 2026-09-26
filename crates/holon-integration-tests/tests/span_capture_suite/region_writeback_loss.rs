@@ -17,9 +17,9 @@
 //!
 //! Two further cases pin the write-back's two exits when a file's blocks do NOT
 //! all land under it: a PARTIAL ingest (`Err`) must quarantine the file so its
-//! truncated DB state is never rendered over disk, while a fully-absorbed
-//! cross-doc stale copy (`Ok`) must be pruned — and neither may take an
-//! authored line with it.
+//! truncated DB state is never rendered over disk, while a second copy of a
+//! block another file still owns (`Ok`) is kept on disk, since D229.b — and
+//! neither may take an authored line with it.
 //!
 //! @pbt kind harness
 //! @pbt covers region-writeback-loss — region-writeback data-loss P0 repro
@@ -491,12 +491,11 @@ fn companion_inlining_a_foreign_page_root_keeps_its_blocks() {
     });
 }
 
-// ── Sanctioned cross-doc prune ──────────────────────────────────────────────
+// ── Cross-doc copy kept ─────────────────────────────────────────────────────
 // The complement of the quarantine: an ingest that the cross-doc membership
-// guard fully absorbs is NOT a partial ingest. It returns `Ok`, so the file is
-// re-rendered — legitimately WITHOUT the stale copy of the foreign-owned block,
-// which converges to its real owner. Everything this file actually owns must
-// survive that rewrite.
+// guard fully absorbs is NOT a partial ingest. It returns `Ok`, and the copy of
+// the block the owner's file still holds stays on disk with everything else
+// this file carries (D229.b).
 
 /// `aaa_owner.org` OWNS `block:shared-child` under its own root.
 const OWNER_FILE: &str = "\
@@ -510,8 +509,7 @@ const OWNER_FILE: &str = "\
 :END:
 ";
 
-/// `zzz_stale.org` carries a stale on-disk copy of `shared-child`. Its own
-/// blocks (`stale-top`, the parent, `stale-tail`) must survive the prune.
+/// `zzz_stale.org` carries a stale on-disk copy of `shared-child`.
 const STALE_FILE: &str = "\
 * Stale Top
 :PROPERTIES:
@@ -535,29 +533,8 @@ Placeholder body for stale-top.
 Placeholder body that must survive on disk.
 ";
 
-/// `STALE_FILE` minus the foreign-owned `Shared` headline — everything the
-/// prune is NOT allowed to take with it.
-const STALE_OWNED: &str = "\
-* Stale Top
-:PROPERTIES:
-:ID: stale-top
-:END:
-Placeholder body for stale-top.
-
-** Parent
-:PROPERTIES:
-:ID: 77777777-7777-7777-7777-777777777777
-:END:
-
-* Stale Tail
-:PROPERTIES:
-:ID: stale-tail
-:END:
-Placeholder body that must survive on disk.
-";
-
 #[test]
-fn writeback_stale_cross_doc_prune() {
+fn writeback_keeps_a_stale_cross_doc_copy() {
     let rt = runtime();
     rt.clone().block_on(async {
         // Alphabetical scan order puts `aaa_owner.org` first, so `shared-child`
@@ -575,29 +552,12 @@ fn writeback_stale_cross_doc_prune() {
             env.wait_for_block("stale-top", SYNC_TIMEOUT).await,
             "the stale file's own blocks must ingest"
         );
-        let stale_path = env.org_file_path("zzz_stale.org");
-
-        // The foreign-owned copy is pruned from this file's write-back so it
-        // converges to its real owner. Waited on rather than slept for — the
-        // prune IS the write-back this test is about.
-        let pruned = wait_until(async || {
-            !env.org_fs
-                .read_to_string(&stale_path)
-                .await
-                .expect("read stale")
-                .contains("shared-child")
-        })
-        .await;
+        env.wait_for_org_files_stable(25, SYNC_TIMEOUT).await;
         let on_disk = env
             .org_fs
-            .read_to_string(&stale_path)
+            .read_to_string(&env.org_file_path("zzz_stale.org"))
             .await
             .expect("read stale");
-        assert!(
-            pruned,
-            "the stale cross-doc copy must be pruned from this file's write-back so it converges \
-             to its real owner. On disk:\n{on_disk}"
-        );
 
         // The guard ABSORBED it: an absorbed stale copy is not a partial
         // ingest, so THIS file must not be quarantined. Scoped to the file
@@ -608,7 +568,7 @@ fn writeback_stale_cross_doc_prune() {
              it must NOT quarantine. Captured ERRORs:\n{}",
             captured_errors()
         );
-        // ...and NOTHING this file owns is lost with it.
-        assert_nothing_lost(STALE_OWNED, &on_disk, "cross-doc-prune");
+        // The owner's file still holds `shared-child`, so its copy here stays.
+        assert_nothing_lost(STALE_FILE, &on_disk, "cross-doc-copy");
     });
 }

@@ -71,7 +71,7 @@ where
     async fn check(&self, ref_: &R, sut: &S) -> InvariantResult {
         let mut violations: Vec<String> = Vec::new();
 
-        for (path, disk, _rendered) in sut.snapshot_org_render_pairs().await {
+        for (path, disk, _rendered) in sut.snapshot_org_render_pairs(&Default::default()).await {
             let root_id = file_root_id(&disk);
             for inlined in heading_drawer_ids(&disk) {
                 // The file's OWN doc-root (a page owning this very file) is not an

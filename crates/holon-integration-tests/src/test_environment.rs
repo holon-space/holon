@@ -1159,11 +1159,14 @@ impl TestEnvironment {
         *self.all_blocks.borrow_mut() = None;
         *self.all_blocks_stream.borrow_mut() = None;
         self.seed_count.set(None);
-        if let Some(injector) = self.injector.get() {
-            holon_app::shutdown_session(injector)
+        // `shutdown_session` runs every step before it returns an error, so the
+        // session is down either way and the fields below reset either way.
+        let shut_down = match self.injector.get() {
+            Some(injector) => holon_app::shutdown_session(injector)
                 .await
-                .map_err(|e| anyhow::anyhow!("stop_app: {e:#}"))?;
-        }
+                .map_err(|e| anyhow::anyhow!("stop_app: {e:#}")),
+            None => Ok(()),
+        };
         // `&mut self` here is what lets `OnceCell::take` reset these build-once
         // fields for the rare config-change restart (the `&self` `start_app`
         // re-latches them afterwards).
@@ -1177,7 +1180,7 @@ impl TestEnvironment {
         self.loro_backend.take();
         self.loro_org_idle.take();
         self.ctx.take();
-        Ok(())
+        shut_down
     }
 
     /// Assemble a `LoroMemory` (no-Turso) session entirely through DI

@@ -39,6 +39,9 @@ pub struct ExpectedCondition {
     /// [`holon_pbt_core::capabilities::subject_matches_expected`].
     pub subject_name: String,
     pub kind: &'static str,
+    /// The file names the condition names, in its order, when the model
+    /// states them.
+    pub files: Option<Vec<String>>,
 }
 
 impl ExpectedCondition {
@@ -64,10 +67,33 @@ impl ConditionsRefState {
     /// `subject_name` is the FILE NAME the raise site's subject will carry as
     /// its final path component — not a string suffix.
     pub fn raise(&mut self, subject_name: impl Into<String>, kind: &'static str) {
+        self.raise_expecting(subject_name.into(), kind, None);
+    }
+
+    /// [`raise`](Self::raise) for a condition that names files: `files` are
+    /// the file names it must name, in its order.
+    pub fn raise_naming_files(
+        &mut self,
+        subject_name: impl Into<String>,
+        kind: &'static str,
+        files: Vec<String>,
+    ) {
+        self.raise_expecting(subject_name.into(), kind, Some(files));
+    }
+
+    fn raise_expecting(
+        &mut self,
+        subject_name: String,
+        kind: &'static str,
+        files: Option<Vec<String>>,
+    ) {
         self.governed.insert(kind);
+        self.expected
+            .retain(|c| !(c.kind == kind && c.subject_name == subject_name));
         self.expected.insert(ExpectedCondition {
-            subject_name: subject_name.into(),
+            subject_name,
             kind,
+            files,
         });
     }
 
@@ -87,6 +113,23 @@ impl ConditionsRefState {
     pub fn clear_kind(&mut self, kind: &'static str) {
         self.governed.insert(kind);
         self.expected.retain(|c| c.kind != kind);
+    }
+
+    /// This state with every subject `resolve` maps replaced, for a view
+    /// whose ids live in the SUT's id space.
+    pub fn with_subjects_resolved(&self, resolve: impl Fn(&str) -> Option<String>) -> Self {
+        Self {
+            expected: self
+                .expected
+                .iter()
+                .map(|c| ExpectedCondition {
+                    subject_name: resolve(&c.subject_name)
+                        .unwrap_or_else(|| c.subject_name.clone()),
+                    ..c.clone()
+                })
+                .collect(),
+            governed: self.governed.clone(),
+        }
     }
 
     pub fn expected(&self) -> &BTreeSet<ExpectedCondition> {

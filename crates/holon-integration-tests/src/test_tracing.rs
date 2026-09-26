@@ -854,9 +854,18 @@ impl SpanCollector {
         let spans = self.finished_spans();
 
         let sql_read_count = spans.iter().filter(|s| s.name.as_ref() == "query").count();
+        let is_hash_stamp = |s: &&SpanData| {
+            sql_attr(s).is_some_and(|sql| sql.starts_with(holon_filesystem::RECORD_FILE_HASH_SQL))
+        };
         let sql_write_count = spans
             .iter()
             .filter(|s| s.name.as_ref() == "execute")
+            .filter(|s| !is_hash_stamp(s))
+            .count();
+        let hash_stamp_write_count = spans
+            .iter()
+            .filter(|s| s.name.as_ref() == "execute")
+            .filter(is_hash_stamp)
             .count();
         let sql_ddl_count = spans
             .iter()
@@ -946,6 +955,7 @@ impl SpanCollector {
         TransitionMetrics {
             sql_read_count,
             sql_write_count,
+            hash_stamp_write_count,
             sql_ddl_count,
             max_query_duration,
             total_query_duration,
@@ -1116,8 +1126,13 @@ fn find_duplicate_sql(all_spans: &[SpanData], names: &[&str]) -> Vec<DuplicateSq
 pub struct TransitionMetrics {
     /// SQL SELECT queries (`"query"` spans from turso.rs)
     pub sql_read_count: usize,
-    /// SQL INSERT/UPDATE/DELETE (`"execute"` spans from turso.rs)
+    /// SQL INSERT/UPDATE/DELETE (`"execute"` spans from turso.rs), without
+    /// [`Self::hash_stamp_write_count`]
     pub sql_write_count: usize,
+    /// Writes of [`holon_filesystem::RECORD_FILE_HASH_SQL`]: the org sync
+    /// records the hashes of earlier write-backs when it is idle, so these
+    /// belong to no interaction in the window.
+    pub hash_stamp_write_count: usize,
     /// DDL statements (`"execute_ddl"` + `"execute_ddl_with_deps"`)
     pub sql_ddl_count: usize,
     /// Slowest individual SQL operation

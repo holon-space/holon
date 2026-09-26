@@ -504,6 +504,30 @@ impl BlockReader for CacheBlockReader {
             })?;
         Ok(())
     }
+
+    async fn record_file_hash(
+        &self,
+        file_id: &holon_api::EntityUri,
+        hash: &str,
+    ) -> anyhow::Result<()> {
+        let updated = self
+            .cache
+            .db_handle()
+            .execute_values(
+                holon_filesystem::RECORD_FILE_HASH_SQL,
+                vec![
+                    holon_api::Value::String(hash.to_string()),
+                    holon_api::Value::String(file_id.to_string()),
+                ],
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("[CacheBlockReader] record_file_hash failed: {e}"))?;
+        anyhow::ensure!(
+            updated == 1,
+            "[CacheBlockReader] record_file_hash updated {updated} rows of {file_id}, expected its one row"
+        );
+        Ok(())
+    }
 }
 
 /// DocumentManager backed by CDC-driven LiveData over page blocks.

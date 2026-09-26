@@ -55,7 +55,6 @@ use holon_pbt_core::null_ref::null_ref_caps;
 const CLASS_ONE: &[&str] = &[
     "inv-birth-contract-satisfied",
     "inv-complexity-class-trend",
-    "inv-display-placement-canonical-inert",
     "inv-filter-spec-resolves",
     "inv-frontend-engine",
     "inv-frontend-no-error-widgets",
@@ -75,7 +74,6 @@ const CLASS_ONE: &[&str] = &[
     "inv-no-parent-cycles",
     "inv-no-steady-reseed-leak",
     "inv-no-write-outside-vault-root",
-    "inv-org-render-fixed-point",
     "inv-paint-text-styling",
     "inv-settle-budget",
     "inv-source-language-iff-source",

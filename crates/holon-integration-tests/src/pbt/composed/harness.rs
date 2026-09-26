@@ -698,6 +698,11 @@ pub struct ComposedSut<S: ComposedSlice> {
     /// occurrences of one masked kind draw two different pump budgets from the
     /// same seed. Bumped once per `apply`, read nowhere else.
     tick: std::cell::Cell<u64>,
+    /// The invariants the last checked tick selected, and whether a `Reboot`
+    /// ran since: a reboot rebuilds the cap map, and an invariant it
+    /// deselects must fail the run, not vanish from it.
+    last_selected: std::cell::RefCell<Option<BTreeSet<&'static str>>>,
+    reboot_pending: std::cell::Cell<bool>,
     _slice: PhantomData<S>,
 }
 
@@ -910,8 +915,11 @@ impl<S: ComposedSlice> ComposedSut<S> {
             engaged,
             telemetry,
             tick,
+            last_selected,
+            reboot_pending,
             _slice,
         } = self;
+        reboot_pending.set(true);
         let action = action_label(transition);
         let record_label = super::telemetry::telemetry_enabled().then(|| action.clone());
         tick.set(tick.get() + 1);
@@ -976,6 +984,8 @@ impl<S: ComposedSlice> ComposedSut<S> {
             engaged,
             telemetry,
             tick,
+            last_selected,
+            reboot_pending,
             _slice,
         };
         // The same post-apply path every transition takes. The id reconcile is a
@@ -1029,6 +1039,8 @@ impl<S: ComposedSlice> ComposedSut<S> {
             engaged: std::cell::RefCell::new(std::collections::BTreeMap::new()),
             telemetry: std::cell::RefCell::new(super::telemetry::new_case()),
             tick: std::cell::Cell::new(0),
+            last_selected: std::cell::RefCell::new(None),
+            reboot_pending: std::cell::Cell::new(false),
             _slice: PhantomData,
         }
     }
@@ -1197,6 +1209,8 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
             engaged: std::cell::RefCell::new(std::collections::BTreeMap::new()),
             telemetry: std::cell::RefCell::new(super::telemetry::new_case()),
             tick: std::cell::Cell::new(0),
+            last_selected: std::cell::RefCell::new(None),
+            reboot_pending: std::cell::Cell::new(false),
             _slice: PhantomData,
         }
     }
@@ -1336,6 +1350,18 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
             &unmodeled,
             ref_state,
         ));
+        let selected: BTreeSet<&'static str> = report.ran_ids().into_iter().collect();
+        if sut.reboot_pending.replace(false)
+            && let Some(before) = sut.last_selected.borrow().as_ref()
+        {
+            let lost: Vec<&&'static str> = before.difference(&selected).collect();
+            assert!(
+                lost.is_empty(),
+                "[reboot] the Reboot deselected {lost:?}: every invariant selected before a \
+                 reboot must stay selected after it (the rebuilt cap map lost its caps)"
+            );
+        }
+        *sut.last_selected.borrow_mut() = Some(selected);
         // `HOLON_PBT_INVARIANTS` disclosed softening: a matched `warn`/`skip` failure
         // is logged loudly and made non-fatal (a DISCLOSED degraded run, not a
         // clean pass); unmatched failures stay fatal. The composed home of the

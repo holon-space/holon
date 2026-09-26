@@ -72,6 +72,7 @@ pub mod wheel_two_mode_motion_law;
 // }` in holon-pbt-core (`inv_pair_focus_current_focus_rows`); its hand-written
 // wiring + body files were deleted.
 pub mod conditions_match_ref;
+pub mod copies_stay_on_disk;
 pub mod net_totality;
 pub mod no_errors;
 pub mod no_machine_keychain_access;

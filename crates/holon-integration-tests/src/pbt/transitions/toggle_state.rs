@@ -121,43 +121,59 @@ impl<
         // The candidate set — blocks rendering an interactive `state_toggle`
         // widget in Main — is computed by interpreting the render expr, which
         // lives in `RefTaskStateToggle::rendered_state_toggle_ids`.
+        // A custom doc keyword (off-cycle, axis 5) never equals a cycle
+        // member, so all four targets remain candidates.
         let pairs: Vec<(EntityUri, CycleTarget)> = state
             .rendered_state_toggle_ids()
             .into_iter()
-            .filter(|id| {
+            .flat_map(|id| CycleTarget::ALL.into_iter().map(move |t| (id.clone(), t)))
+            .filter(|(id, t)| {
                 ToggleState {
                     block_id: id.clone(),
-                    new_state: CycleTarget::Clear, // dummy for preconditions check
+                    new_state: *t,
                 }
                 .preconditions(state)
                 .is_good()
             })
-            .flat_map(|id| {
-                let current_state = state.task_state_of(&id).unwrap_or_default();
-                let bid = id.clone();
-                // A custom doc keyword (off-cycle, axis 5) never equals a
-                // cycle member, so all four targets remain candidates.
-                CycleTarget::ALL
-                    .into_iter()
-                    .filter(move |t| t.keyword() != current_state)
-                    .map(move |t| (bid.clone(), t))
-            })
             .collect();
 
         check(!pairs.is_empty(), Reason::NoTogglableStates).map(|_| {
-            let strat = super::select_bias::select_with_edge_bias(pairs)
+            // A block another file holds a copy of is toggled more often, so a
+            // Holon edit meets the copy's own edit at adoption (D229.b).
+            let copied: Vec<(EntityUri, CycleTarget)> = pairs
+                .iter()
+                .filter(|(id, _)| state.is_copied(id))
+                .cloned()
+                .collect();
+            let all = super::select_bias::select_with_edge_bias(pairs);
+            let (weight, pick) = if copied.is_empty() {
+                (1, all.boxed())
+            } else {
+                (
+                    60,
+                    prop_oneof![1 => all, 6 => prop::sample::select(copied)].boxed(),
+                )
+            };
+            let strat = pick
                 .prop_map(|(block_id, new_state)| ToggleState {
                     block_id,
                     new_state,
                 })
                 .boxed();
-            (1, strat)
+            (weight, strat)
         })
     }
 }
 
-impl<R: RefLifecycle + RefFocus + RefFocusRoots + RefBlockTree + RefLayout + RefTaskStateToggle>
-    TransitionRef<R> for ToggleState
+impl<
+    R: RefLifecycle
+        + RefFocus
+        + RefFocusRoots
+        + RefBlockTree
+        + RefLayout
+        + RefTaskState
+        + RefTaskStateToggle,
+> TransitionRef<R> for ToggleState
 {
     type Reason = Reason;
 
@@ -209,6 +225,11 @@ impl<R: RefLifecycle + RefFocus + RefFocusRoots + RefBlockTree + RefLayout + Ref
             // ToggleState whenever a custom block profile is loaded.
             check(
                 !state.has_blocks_profile(),
+                Reason::StateToggleNotApplicable,
+            ),
+            // A shrink can drop the transition that set the current state.
+            check(
+                self.new_state.keyword() != state.task_state_of(&self.block_id).unwrap_or_default(),
                 Reason::StateToggleNotApplicable,
             ),
         ];

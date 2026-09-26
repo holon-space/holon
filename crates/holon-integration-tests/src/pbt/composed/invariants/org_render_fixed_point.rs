@@ -2,13 +2,14 @@
 //! `SutOrgRender` relocation onto the production render path): every tracked
 //! org file rendered from the current SQL state must equal its on-disk bytes,
 //! else the next `FileSyncController::re_render_all_tracked` would rewrite it
-//! and risk the FSEvent echo-suppression loop. `Needs SutOrgRender` only — no
-//! reference cap (it compares the SUT's render against the SUT's disk).
+//! and risk the FSEvent echo-suppression loop. It compares the SUT's render
+//! against the SUT's disk; `RefCopies` names the copies left out of the disk.
 //! Selected only by a slice supplying `SutOrgRender` — today the frontend slice
 //! over its real `CacheBlockReader`
 //! + `OrgRenderer`.
 
 use holon_pbt_core::RunMode;
+use holon_pbt_core::capabilities::RefCopies;
 use holon_pbt_core::capabilities::SutOrgRender;
 use holon_pbt_core::composition::Attribution;
 use holon_pbt_core::composition::BridgedInvariant;
@@ -26,7 +27,7 @@ pub fn wire() -> Box<dyn CapInvariant> {
         Needs {
             sut_present: vec![CapId::of::<dyn SutOrgRender>()],
             sut_absent: Vec::new(),
-            ref_present: Vec::new(),
+            ref_present: vec![CapId::of::<dyn RefCopies>()],
         },
         Attribution::at(Layer::OrgRoundTrip, file!()),
     ))

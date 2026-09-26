@@ -374,8 +374,11 @@ impl<'a, S: SutLayout> SutLayout for CachingProxy<'a, S> {
 
 #[async_trait::async_trait(?Send)]
 impl<'a, S: SutOrgRender> SutOrgRender for CachingProxy<'a, S> {
-    async fn snapshot_org_render_pairs(&self) -> Vec<(String, String, String)> {
-        self.inner.snapshot_org_render_pairs().await
+    async fn snapshot_org_render_pairs(
+        &self,
+        copies: &crate::capabilities::CopiesByFile,
+    ) -> Vec<(String, String, String)> {
+        self.inner.snapshot_org_render_pairs(copies).await
     }
 }
 
@@ -383,8 +386,11 @@ impl<'a, S: SutOrgRender> SutOrgRender for CachingProxy<'a, S> {
 
 #[async_trait::async_trait(?Send)]
 impl<'a, S: SutOrgRead> SutOrgRead for CachingProxy<'a, S> {
-    async fn org_block_snapshot(&self) -> Vec<holon_api::Block> {
-        self.inner.org_block_snapshot().await
+    async fn org_block_snapshot(
+        &self,
+        copies: &crate::capabilities::CopiesByFile,
+    ) -> Vec<holon_api::Block> {
+        self.inner.org_block_snapshot(copies).await
     }
 }
 

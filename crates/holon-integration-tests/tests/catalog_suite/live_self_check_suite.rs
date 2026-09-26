@@ -97,13 +97,13 @@ fn clean_snapshot_passes_the_orphan_check() {
 fn unavailable_checks_are_present_and_reasoned() {
     let report = run(orphaned_snapshot());
 
-    // Needs `SutOrgRender`, which the live snapshot does not host.
-    match outcome_of(&report, "inv-org-render-fixed-point") {
+    // Needs `SutFsWrites`, which the live snapshot does not host.
+    match outcome_of(&report, "inv-no-write-outside-vault-root") {
         CheckOutcome::Skipped { reason } => assert!(
-            reason.contains("SutOrgRender"),
+            reason.contains("SutFsWrites"),
             "the skip reason must name the missing cap; got: {reason}"
         ),
-        other => panic!("inv-org-render-fixed-point must be Skipped; got {other:?}"),
+        other => panic!("inv-no-write-outside-vault-root must be Skipped; got {other:?}"),
     }
 
     // The write-side surface is refused, not faked — the refusal reaches the

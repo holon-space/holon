@@ -459,7 +459,10 @@ impl SutLoroLog for LiveMcp {
 
 #[async_trait::async_trait(?Send)]
 impl SutOrgRead for LiveMcp {
-    async fn org_block_snapshot(&self) -> Vec<Block> {
+    async fn org_block_snapshot(
+        &self,
+        copies: &holon_pbt_core::capabilities::CopiesByFile,
+    ) -> Vec<Block> {
         use holon_orgmode::parser::parse_org_file;
         let mut all = Vec::new();
         for (alias, _) in self.oracle_org_aliases().await {
@@ -467,7 +470,11 @@ impl SutOrgRead for LiveMcp {
             let root = path.parent().unwrap_or_else(|| Path::new(""));
             let result = parse_org_file(&path, &content, &EntityUri::no_parent(), root)
                 .unwrap_or_else(|e| panic!("SutOrgRead: parse {} failed: {e:#}", path.display()));
-            all.extend(result.blocks);
+            all.extend(crate::pbt::copies_model::without_copy_blocks(
+                &path,
+                result.blocks,
+                copies,
+            ));
         }
         all
     }
@@ -475,10 +482,14 @@ impl SutOrgRead for LiveMcp {
 
 #[async_trait::async_trait(?Send)]
 impl SutOrgRender for LiveMcp {
-    async fn snapshot_org_render_pairs(&self) -> Vec<(String, String, String)> {
+    async fn snapshot_org_render_pairs(
+        &self,
+        copies: &holon_pbt_core::capabilities::CopiesByFile,
+    ) -> Vec<(String, String, String)> {
         let mut out = Vec::new();
         for (alias, _) in self.list_org_aliases().await {
             let (path, disk) = self.read_org(&alias).await;
+            let disk = crate::pbt::copies_model::without_copy_sections(&path, &disk, copies);
             let resp = self
                 .driver
                 .call_tool_json(

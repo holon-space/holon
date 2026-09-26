@@ -65,7 +65,7 @@ where
     async fn check(&self, ref_: &R, sut: &S) -> InvariantResult {
         // Index every on-disk file by its own doc-root `#+ID:` (bare).
         let mut files_by_root: HashMap<String, Vec<String>> = HashMap::new();
-        for (path, disk, _rendered) in sut.snapshot_org_render_pairs().await {
+        for (path, disk, _rendered) in sut.snapshot_org_render_pairs(&Default::default()).await {
             if let Some(root) = file_root_id(&disk) {
                 files_by_root.entry(root).or_default().push(path);
             }
@@ -204,7 +204,10 @@ mod tests {
     }
     #[async_trait::async_trait(?Send)]
     impl SutOrgRender for OrgRenderStub {
-        async fn snapshot_org_render_pairs(&self) -> Vec<(String, String, String)> {
+        async fn snapshot_org_render_pairs(
+            &self,
+            _: &holon_pbt_core::capabilities::CopiesByFile,
+        ) -> Vec<(String, String, String)> {
             self.pairs.clone()
         }
     }
