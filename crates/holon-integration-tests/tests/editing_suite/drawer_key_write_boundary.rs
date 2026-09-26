@@ -1,6 +1,7 @@
-//! A drawer key is one token of org: no whitespace, no `:`, not a drawer
-//! delimiter. The engine refuses a property write under a key org cannot
-//! hold, and the org file keeps the block intact.
+//! A drawer key is one token of org that reads back as itself: no
+//! whitespace, no `:`, not a drawer delimiter, no trailing `+`, not a
+//! spelling of `ID`. The engine refuses a property write under a key org
+//! cannot hold, and the org file keeps the block intact.
 //!
 //! @pbt kind harness
 //! @pbt covers drawer-key-write-boundary — a property key org cannot hold is
@@ -144,6 +145,65 @@ fn a_properties_bag_key_with_a_colon_is_refused() {
             (
                 "properties",
                 Value::Object([("a:b".to_string(), text("v"))].into()),
+            ),
+        ],
+    );
+}
+
+#[test]
+fn set_field_under_an_append_key_is_refused() {
+    refused_case(
+        "set_field",
+        "note+",
+        vec![
+            ("id", text(TARGET_ID)),
+            ("field", text("note+")),
+            ("value", text("v")),
+        ],
+    );
+}
+
+#[test]
+fn set_field_under_a_case_variant_of_id_is_refused() {
+    refused_case(
+        "set_field",
+        "Id",
+        vec![
+            ("id", text(TARGET_ID)),
+            ("field", text("Id")),
+            ("value", text("v")),
+        ],
+    );
+}
+
+#[test]
+fn a_properties_bag_key_spelled_id_in_lower_case_is_refused() {
+    refused_case(
+        "create",
+        "id",
+        vec![
+            ("id", text("block:n-child")),
+            ("parent_id", text(TARGET_ID)),
+            ("content", text("child")),
+            (
+                "properties",
+                Value::Object([("id".to_string(), text("v"))].into()),
+            ),
+        ],
+    );
+}
+
+#[test]
+fn an_org_drawer_carrier_key_spelled_id_in_mixed_case_is_refused() {
+    refused_case(
+        "set_field",
+        "iD",
+        vec![
+            ("id", text(TARGET_ID)),
+            ("field", text("org_properties")),
+            (
+                "value",
+                text(&serde_json::json!({ "ID": "n-target", "iD": "v" }).to_string()),
             ),
         ],
     );

@@ -643,8 +643,15 @@ fn emit_section_children(
         let src_sequence = *sequence_counter;
         *sequence_counter += 1;
 
+        let id = EntityUri::parse(&format!("block:{src_id}")).with_context(|| {
+            format!(
+                "org source block id is not usable: a `#+BEGIN_SRC` under {parent_bare:?} \
+                 carries `:id {src_id}`, which forms no URI. Refusing the file rather than \
+                 filing the block under an id it does not name."
+            )
+        })?;
         let mut src_block = Block {
-            id: EntityUri::block(&src_id),
+            id,
             // ALLOW(entity_uri_from_raw): org parser output: parent headline raw org slug
             parent_id: EntityUri::from_raw(parent_bare),
             content: source_block.source,

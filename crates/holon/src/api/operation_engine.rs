@@ -1694,7 +1694,8 @@ impl DispatchingOperationEngine {
     }
 
     /// Refuse a block write that names a property under a key an org drawer
-    /// cannot hold. The renderer would leave such a property out of the file.
+    /// cannot hold, or gives a block an id an org `:ID:` line cannot carry.
+    /// The renderer would leave such a key, or such an id, out of the file.
     fn refuse_undrawable_property_key(
         entity_name: &EntityName,
         op_name: &str,
@@ -1714,23 +1715,41 @@ impl DispatchingOperationEngine {
             "create" | "update" => params.iter().map(|(k, v)| (k.as_ref(), v)).collect(),
             _ => return Ok(()),
         };
+        let block = params
+            .get("id")
+            .and_then(|v| v.as_string())
+            .unwrap_or("<no id>");
         for (field, value) in written {
-            for key in Self::drawer_keys(field, value)? {
-                if let Err(e) = holon_org_format::DrawerKey::parse(&key) {
-                    let id = params
-                        .get("id")
-                        .and_then(|v| v.as_string())
-                        .unwrap_or("<no id>");
-                    bail!("{op_name}: refusing a property of block {id} via `{field}`: {e}");
+            let file_drawer = field == holon_org_format::org_props::FILE_PROPERTIES;
+            for (key, value) in Self::drawer_entries(field, value)? {
+                let names_the_id = key == "ID" || (file_drawer && key.eq_ignore_ascii_case("ID"));
+                if !names_the_id {
+                    if let Err(e) = holon_org_format::DrawerKey::parse(&key) {
+                        bail!("{op_name}: refusing a property of block {block} via `{field}`: {e}");
+                    }
+                    continue;
+                }
+                let Some(text) = value.as_str() else {
+                    bail!(
+                        "{op_name}: refusing `{key}` of block {block} via `{field}`: an id is \
+                         text, got {value}"
+                    );
+                };
+                // An empty `:ID:` in the file drawer is authored text, not an identity.
+                if file_drawer && text.is_empty() {
+                    continue;
+                }
+                if let Err(e) = holon_org_format::DrawerId::parse(text) {
+                    bail!("{op_name}: refusing `{key}` of block {block} via `{field}`: {e}");
                 }
             }
         }
         Ok(())
     }
 
-    /// The property keys `field = value` puts into an org drawer. The
-    /// property bag and the drawer carriers hold one per entry.
-    fn drawer_keys(field: &str, value: &Value) -> Result<Vec<String>> {
+    /// The `(key, value)` entries `field = value` puts into an org drawer.
+    /// The property bag and the drawer carriers hold one per entry.
+    fn drawer_entries(field: &str, value: &Value) -> Result<Vec<(String, serde_json::Value)>> {
         use anyhow::Context;
         use holon_org_format::org_props;
         if field.starts_with('_') {
@@ -1754,8 +1773,7 @@ impl DispatchingOperationEngine {
             };
             return Ok(object
                 .into_iter()
-                .map(|(k, _)| k)
-                .filter(|k| !k.starts_with('_'))
+                .filter(|(k, _)| !k.starts_with('_'))
                 .collect());
         }
         let is_property = matches!(
@@ -1763,7 +1781,7 @@ impl DispatchingOperationEngine {
             Ok(holon_api::BlockWriteField::Property(_))
         );
         Ok(if is_property {
-            vec![field.to_string()]
+            vec![(field.to_string(), serde_json::Value::from(value.clone()))]
         } else {
             Vec::new()
         })

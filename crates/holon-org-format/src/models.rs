@@ -21,6 +21,7 @@ use holon_api::types::Timestamp;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::drawer::DrawerId;
 use crate::drawer::ValueCarrier;
 
 /// Property keys for org-specific fields stored in properties JSON.
@@ -165,8 +166,9 @@ pub trait ToOrg {
 
 /// Format properties drawer from JSON
 /// Input: JSON string -> Output: ":PROPERTIES:\n:KEY: VALUE\n:END:"
-/// The `:ID:` line comes first. A carrier without `ID` gets the block's own
-/// id, since the drawer is what keeps the block's identity in the file.
+/// The `:ID:` line comes first. A carrier without a writable `ID` gets the
+/// block's own id, since the drawer is what keeps the block's identity in the
+/// file.
 fn format_properties_drawer(properties_json: &str, block_id: &str) -> String {
     let props: serde_json::Map<String, serde_json::Value> = serde_json::from_str(properties_json)
         .unwrap_or_else(|e| {
@@ -176,9 +178,12 @@ fn format_properties_drawer(properties_json: &str, block_id: &str) -> String {
             )
         });
 
-    let id = match props.get("ID") {
-        Some(serde_json::Value::String(s)) => s.clone(),
-        Some(other) => other.to_string(),
+    let id = match props.get("ID").map(|v| DrawerId::parse(&json_text(v))) {
+        Some(Ok(id)) => id.as_str().to_string(),
+        Some(Err(e)) => {
+            tracing::warn!("org drawer of block {block_id}: {e}; the block's own id is written");
+            block_id.to_string()
+        }
         None => block_id.to_string(),
     };
     let mut result = format!(":PROPERTIES:\n:ID: {id}\n");
@@ -204,11 +209,16 @@ fn drawer_line(key: &str, value: &serde_json::Value, carrier: ValueCarrier) -> S
             return String::new();
         }
     };
-    let text = match value {
+    format!(":{}: {}\n", key.as_str(), carrier.encode(&json_text(value)))
+}
+
+/// The text a drawer line holds for a carrier value: a string as is, any
+/// other JSON value as its JSON text.
+fn json_text(value: &serde_json::Value) -> String {
+    match value {
         serde_json::Value::String(s) => s.clone(),
         _ => value.to_string(),
-    };
-    format!(":{}: {}\n", key.as_str(), carrier.encode(&text))
+    }
 }
 
 /// Format a properties drawer with the `:ID:` line omitted (dense projection).
@@ -513,6 +523,8 @@ pub fn render_document_header(doc_block: &Block) -> String {
                 if key.eq_ignore_ascii_case("ID") && !authored.is_empty() {
                     carries_id = true;
                     result.push_str(&format!(":{key}: {}\n", doc_block.id.id()));
+                } else if key.eq_ignore_ascii_case("ID") {
+                    result.push_str(&format!(":{key}: \n"));
                 } else {
                     result.push_str(&drawer_line(key, value, ValueCarrier::FileDrawer));
                 }

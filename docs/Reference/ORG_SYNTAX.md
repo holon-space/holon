@@ -239,10 +239,36 @@ file-level drawer, and a source block's header arguments
   would write.** A quoted value that a person types, such as
   `:title: "The Book"`, is not such a literal, so it stays as typed, quotes
   included. Every string goes into the file and comes back byte-equal.
-- **A key must be one token**: not empty, no whitespace, no `:`, no control
-  character, and not `PROPERTIES` or `END`. Holon cannot escape a key. The
-  engine refuses a write under such a key, and the renderer leaves such a
+- **A key must read back as itself** (`DrawerKey`). Holon cannot escape a
+  key, so a key is refused when it:
+  - is empty, or holds whitespace, `:` or a control character (orgize ends the
+    key at the first space and needs a `:` after it; a bad key makes orgize
+    reject the whole drawer);
+  - is `PROPERTIES` or `END` in any case (the drawer delimiters);
+  - ends in `+` (org's append syntax `:KEY+: value`; orgize reads it as `KEY`);
+  - is `ID` in any case (`id`, `Id`, `iD`): the parser takes the first of these
+    as the block's identity and drops the others from the properties.
+
+  The engine refuses a write under such a key, and the renderer leaves such a
   property out of the file (with a warning) and keeps the rest of the block.
+- **The `:ID:` line holds a block id, not a value** (`DrawerId`). It is not
+  encoded: the parser reads it verbatim and turns it into the block's URI. An
+  id must be non-empty and form a URI (no whitespace, no line break, no `"`).
+  The engine refuses any other id on every route that can carry one: the `ID`
+  property, the `properties` bag, the `org_properties` carrier and the
+  `file_properties` carrier (where an empty `:ID:` is allowed, since it is
+  authored text and not an identity). If such an id still reaches the
+  renderer, the drawer gets the block's own id and a warning names the
+  dropped value. A source block's `:id` header argument follows the same
+  rule; the parser refuses a file whose source block `:id` forms no URI.
+- **Keys the parser lifts into typed fields are not plain properties.**
+  `PRIORITY`, `COLLAPSED`, `WIDGET_ONLY`, `REQUIRES`, `BLOCKED-BY`,
+  `ADVICE_SUPPRESSED` and `contributes-to` (any case) become typed block
+  fields, and the parser refuses `task_state` and `task_state_category` as
+  drawer keys. A plain property under one of these keys does not come back as
+  that property, and a value the typed field cannot parse makes the whole
+  file fail to parse (open:
+  `docs/Testing/bugfunnel/entries/2026-09-26-typed-drawer-key-under-a-plain-property-makes-the-file-unparseable.md`).
 
 ### Why bare IDs?
 

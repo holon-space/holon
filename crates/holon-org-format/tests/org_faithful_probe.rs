@@ -183,3 +183,44 @@ fn a_drawer_carrier_without_an_id_keeps_the_block_id() {
         "{text}"
     );
 }
+
+#[test]
+fn a_carrier_id_org_cannot_hold_leaves_the_block_intact() {
+    let mut b = kid("Kid");
+    b.set_org_properties(Some(
+        serde_json::json!({
+            "ID": "kid\nline one\n* Evil heading\n:PROPERTIES:\n:ID: hijack\n:END:",
+            "note": "keep",
+        })
+        .to_string(),
+    ));
+    let (text, back) = round_trip(b);
+    let back = back.unwrap_or_else(|| panic!("block:kid lost its id:\n{text}"));
+    assert_eq!(
+        back.get_property("note"),
+        Some(Value::String("keep".into())),
+        "{text}"
+    );
+    assert!(!text.contains("hijack"), "{text}");
+}
+
+#[test]
+fn a_source_block_id_that_forms_no_uri_is_refused_by_name() {
+    let source = "#+ID: p\n* Topic\n:PROPERTIES:\n:ID: topic\n:END:\n\
+                  #+BEGIN_SRC python :id a\"b\nprint(1)\n#+END_SRC\n";
+    let parsed = std::panic::catch_unwind(|| {
+        parse_org_file(
+            Path::new(FILE),
+            source,
+            &EntityUri::no_parent(),
+            Path::new("/vault"),
+        )
+        .map(|_| ())
+        .map_err(|e| format!("{e:#}"))
+    });
+    match parsed {
+        Ok(Err(e)) => assert!(e.contains("a\"b"), "the refusal must name the id: {e}"),
+        Ok(Ok(())) => panic!("the id `a\"b` was accepted"),
+        Err(_) => panic!("the parser panicked on an authored source block id"),
+    }
+}

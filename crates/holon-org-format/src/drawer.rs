@@ -10,8 +10,11 @@
 use std::borrow::Cow;
 use std::fmt;
 
-/// A property key org can write: one token with no whitespace, no `:`, no
-/// control character, and not a drawer delimiter.
+/// A property key org can write on a `:key: value` line and read back as the
+/// same key: one token with no whitespace, no `:`, no control character; not
+/// a drawer delimiter; not ending in `+` (org's append syntax, which orgize
+/// reads as the key without it); and not a spelling of `ID`, which the parser
+/// takes as the block's identity (see [`DrawerId`]).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DrawerKey(String);
 
@@ -25,7 +28,8 @@ impl fmt::Display for UnrepresentableKey {
         write!(
             f,
             "property key {:?} cannot be written to an org drawer: a key is one token with no \
-             whitespace, no ':', no control character, and is not PROPERTIES or END",
+             whitespace, no ':', no control character, no trailing '+', and is not PROPERTIES, \
+             END or a spelling of ID",
             self.key
         )
     }
@@ -39,13 +43,58 @@ impl DrawerKey {
             && !raw
                 .chars()
                 .any(|c| c.is_whitespace() || c.is_control() || c == ':')
-            && !raw.eq_ignore_ascii_case("PROPERTIES")
-            && !raw.eq_ignore_ascii_case("END");
+            && !raw.ends_with('+')
+            && !["PROPERTIES", "END", "ID"]
+                .iter()
+                .any(|reserved| raw.eq_ignore_ascii_case(reserved));
         if legal {
             Ok(DrawerKey(raw.to_string()))
         } else {
             Err(UnrepresentableKey {
                 key: raw.to_string(),
+            })
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// The value of an `:ID:` line: a block's bare id as the org parser reads it
+/// back, a non-empty token that forms a URI. It is written raw, never through
+/// the value codec, because the parser takes the id line verbatim.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DrawerId(String);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnrepresentableId {
+    pub value: String,
+}
+
+impl fmt::Display for UnrepresentableId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "the id {:?} cannot be written to an org :ID: line: an id is one non-empty token \
+             that forms a URI (no whitespace, no line break)",
+            self.value
+        )
+    }
+}
+
+impl std::error::Error for UnrepresentableId {}
+
+impl DrawerId {
+    pub fn parse(raw: &str) -> Result<DrawerId, UnrepresentableId> {
+        let legal = !raw.is_empty()
+            && ValueCarrier::HeadlineDrawer.encode(raw) == raw
+            && holon_api::EntityUri::try_from_raw(raw).is_ok();
+        if legal {
+            Ok(DrawerId(raw.to_string()))
+        } else {
+            Err(UnrepresentableId {
+                value: raw.to_string(),
             })
         }
     }
@@ -123,7 +172,34 @@ impl ValueCarrier {
 
 #[cfg(test)]
 mod tests {
+    use super::DrawerId;
+    use super::DrawerKey;
     use super::ValueCarrier::*;
+
+    #[test]
+    fn keys_that_read_back_as_another_key_are_refused() {
+        for key in ["note+", "+", "ID", "id", "Id", "iD", "end", "Properties"] {
+            assert!(DrawerKey::parse(key).is_err(), "{key:?} was accepted");
+        }
+        for key in ["note", "IDENT", "a+b", "Effort"] {
+            assert!(DrawerKey::parse(key).is_ok(), "{key:?} was refused");
+        }
+    }
+
+    #[test]
+    fn an_id_is_a_non_empty_uri_token() {
+        for id in [
+            "abc-123",
+            "550e8400-e29b-41d4-a716-446655440000",
+            "12:34",
+            "block:abc",
+        ] {
+            assert!(DrawerId::parse(id).is_ok(), "{id:?} was refused");
+        }
+        for id in ["", "a b", "kid\n* Evil", " kid", "a\"b", "\"kid\""] {
+            assert!(DrawerId::parse(id).is_err(), "{id:?} was accepted");
+        }
+    }
 
     #[test]
     fn plain_text_is_written_raw() {

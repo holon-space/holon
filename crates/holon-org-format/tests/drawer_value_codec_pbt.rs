@@ -35,8 +35,63 @@ fn skeleton() -> (Block, Vec<Block>) {
     parse("#+ID: p\n* Topic\n:PROPERTIES:\n:ID: topic\n:END:\n")
 }
 
+/// A key that is one plain token always round-trips.
+fn plain_key(k: &str) -> bool {
+    k.starts_with('k')
+        && k.chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
 fn key() -> impl Strategy<Value = String> {
-    "k[a-z0-9-]{0,6}"
+    prop_oneof![
+        3 => "k[a-z0-9-]{0,6}",
+        1 => prop_oneof![
+            Just("ID"),
+            Just("id"),
+            Just("Id"),
+            Just("iD"),
+            Just("x+"),
+            Just("+"),
+            Just("PROPERTIES"),
+            Just("properties"),
+            Just("END"),
+            Just("end"),
+            Just("a b"),
+            Just("a:b"),
+            Just(""),
+            Just("k\n* Evil"),
+        ]
+        .prop_map(str::to_string),
+    ]
+}
+
+/// The property keys the parser gives `kid` with nothing set on it.
+fn parse_kid(document: &Block, blocks: &[Block], kid: Block) -> Vec<String> {
+    let mut blocks = blocks.to_vec();
+    blocks.push(kid);
+    let (_, back) = parse(&render(document, &blocks));
+    let kid = back
+        .iter()
+        .find(|b| b.id.id() == "kid")
+        .expect("a plain kid round-trips");
+    kid.properties.keys().cloned().collect()
+}
+
+/// The block id an `:ID:` line with this value reads back as: a non-empty
+/// token that forms a URI.
+fn carried_id(v: &str) -> Option<EntityUri> {
+    (!v.is_empty())
+        .then(|| EntityUri::try_from_raw(v).ok())
+        .flatten()
+}
+
+/// The file's lines of the form `:<k>:` or `:<k>: ...`, so a key the renderer
+/// left out is visibly absent rather than silently misread.
+fn has_line_for(file: &str, k: &str) -> bool {
+    let head = format!(":{k}:");
+    let delimiter = k.eq_ignore_ascii_case("PROPERTIES") || k.eq_ignore_ascii_case("END");
+    file.lines()
+        .any(|l| (l == head && !delimiter) || l.starts_with(&format!("{head} ")))
 }
 
 fn value() -> impl Strategy<Value = String> {
@@ -97,18 +152,29 @@ proptest! {
             EntityUri::block("topic"),
             "Kid".to_string(),
         );
+        let baseline = parse_kid(&document, &blocks, kid.clone());
         kid.set_property(&k, Value::String(v.clone()));
         blocks.push(kid);
         let text = render(&document, &blocks);
         let (_, back) = parse(&text);
-        let kid = back.iter().find(|b| b.id.id() == "kid");
-        prop_assert!(kid.is_some(), "block:kid lost its id:\n{}", text);
-        prop_assert_eq!(
-            kid.unwrap().get_property(&k),
-            Some(Value::String(v)),
-            "file:\n{}", text
-        );
         prop_assert_eq!(back.len(), 2, "the value grew or ate blocks:\n{}", text);
+        let written_id = (k == "ID").then(|| carried_id(&v)).flatten();
+        let id = written_id.clone().unwrap_or_else(|| EntityUri::block("kid"));
+        let kid = back.iter().find(|b| b.id == id);
+        prop_assert!(kid.is_some(), "{} lost its id:\n{}", id, text);
+        let kid = kid.unwrap();
+        if plain_key(&k) || written_id.is_some() {
+            prop_assert_eq!(kid.get_property(&k), Some(Value::String(v)), "file:\n{}", text);
+        } else if k != "ID" {
+            prop_assert!(!has_line_for(&text, &k), "key {:?} was written:\n{}", k, text);
+        }
+        let stray: Vec<String> = kid
+            .properties
+            .keys()
+            .filter(|p| !p.starts_with('_') && !baseline.contains(*p) && p.as_str() != "ID" && **p != k)
+            .cloned()
+            .collect();
+        prop_assert!(stray.is_empty(), "key {:?} read back as {:?}:\n{}", k, stray, text);
     }
 
     #[test]
@@ -119,9 +185,17 @@ proptest! {
         document.set_file_drawer(Some(drawer));
         let text = render(&document, &blocks);
         let (back, back_blocks) = parse(&text);
-        let got = back.file_drawer().and_then(|d| d.get(&k).cloned());
-        prop_assert_eq!(got, Some(serde_json::Value::String(v)), "file:\n{}", text);
         prop_assert_eq!(back_blocks.len(), 1, "the value grew or ate blocks:\n{}", text);
+        prop_assert_eq!(&back.id, &document.id, "the document lost its id:\n{}", text);
+        let got = back.file_drawer().and_then(|d| d.get(&k).cloned());
+        if plain_key(&k) {
+            prop_assert_eq!(got, Some(serde_json::Value::String(v)), "file:\n{}", text);
+        } else if k.eq_ignore_ascii_case("ID") {
+            let want = if v.is_empty() { v } else { document.id.id().to_string() };
+            prop_assert_eq!(got, Some(serde_json::Value::String(want)), "file:\n{}", text);
+        } else {
+            prop_assert!(!has_line_for(&text, &k), "key {:?} was written:\n{}", k, text);
+        }
     }
 
     #[test]
@@ -137,13 +211,16 @@ proptest! {
         blocks.push(src);
         let text = render(&document, &blocks);
         let (_, back) = parse(&text);
+        prop_assert_eq!(back.len(), 2, "the value grew or ate blocks:\n{}", text);
         let src = back.iter().find(|b| b.id.id() == "src");
         prop_assert!(src.is_some(), "block:src lost its id:\n{}", text);
-        prop_assert_eq!(
-            src.unwrap().get_property(&k),
-            Some(Value::String(v)),
-            "file:\n{}", text
-        );
+        if plain_key(&k) {
+            prop_assert_eq!(
+                src.unwrap().get_property(&k),
+                Some(Value::String(v)),
+                "file:\n{}", text
+            );
+        }
     }
 
     #[test]
