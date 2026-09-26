@@ -227,6 +227,19 @@ pub fn content_strategy() -> BoxedStrategy<String> {
     prop_oneof![6 => base, 4 => extended_content_arm()].boxed()
 }
 
+/// A drawer property value. Mostly plain words; the rest are values org
+/// cannot hold raw on a drawer line and that must still round-trip.
+pub fn drawer_value_strategy() -> BoxedStrategy<String> {
+    prop_oneof![
+        6 => "[a-zA-Z0-9]{1,10}".prop_map(|s| s),
+        1 => ("[a-z]{1,6}", "[a-z]{1,6}").prop_map(|(a, b)| format!("{a}\n* {b}\n:END:")),
+        1 => "[a-z]{1,6}".prop_map(|s| format!(" {s} ")),
+        1 => Just(String::new()),
+        1 => "[a-z]{1,6}".prop_map(|s| format!("\"{s}\"")),
+    ]
+    .boxed()
+}
+
 /// Same as `content_strategy` but for edit mutations (lowercase start).
 pub fn edit_content_strategy() -> BoxedStrategy<String> {
     let base = prop_oneof![
@@ -1139,7 +1152,7 @@ pub fn generate_mutation(
                 "ideal-width",
                 "column-priority",
             ]),
-            "[a-zA-Z0-9]{1,10}",
+            drawer_value_strategy(),
         )
             .prop_map(|(id, prop_name, prop_value)| Mutation::Update {
                 id,

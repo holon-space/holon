@@ -198,7 +198,8 @@ fn parse_drawer_line(line: &str) -> Option<(String, String)> {
     if key.eq_ignore_ascii_case("PROPERTIES") || key.eq_ignore_ascii_case("END") {
         return None;
     }
-    Some((key.to_string(), value.trim().to_string()))
+    let value = crate::drawer::ValueCarrier::FileDrawer.decode(value.trim());
+    Some((key.to_string(), value.into_owned()))
 }
 
 /// A file-level drawer's `:ID:` when it carries a usable one.
@@ -757,7 +758,8 @@ fn emit_section_children(
                         );
                     }
                 } else if let Some(s) = v.as_string() {
-                    src_block.set_property(&k, holon_api::Value::String(s.to_string()));
+                    let value = crate::drawer::ValueCarrier::HeaderArg.decode(s);
+                    src_block.set_property(&k, holon_api::Value::String(value.into_owned()));
                 }
             }
             if !standard_args.is_empty() {
@@ -1175,7 +1177,10 @@ fn extract_properties(headline: &Headline) -> Vec<(String, String)> {
             if key.eq_ignore_ascii_case("ID") {
                 return None;
             }
-            let value = value_token.to_string().trim().to_string();
+            let raw = value_token.to_string();
+            let value = crate::drawer::ValueCarrier::HeadlineDrawer
+                .decode(raw.trim())
+                .into_owned();
             Some((key, value))
         })
         .collect()

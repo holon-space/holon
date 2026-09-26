@@ -77,8 +77,10 @@ the vault as a topic-doc headline with a slug `:ID:` (see
 Note (measured 2026-08-11, ratified by Martin): underscored identifiers
 round-trip byte-stable — the old "mangles underscored identifiers" claim is
 refuted. The REAL round-trip hazards: `_`-prefixed property KEYS are silently
-erased from disk on write-back (crates/holon-org-format/src/models.rs:886,908),
-and an empty property value drops its key entirely. Authored drawer order
+erased from disk on write-back (crates/holon-org-format/src/models.rs:886,908).
+A value org cannot hold raw (a line break, surrounding space, an empty value)
+is written as a JSON string literal and reads back byte-equal
+(docs/Reference/ORG_SYNTAX.md). Authored drawer order
 SURVIVES the store on BOTH production write legs — the Loro projection writer
 and the org-ingest param builder: the `_drawer_order` carrier persists in the
 stored properties bag and the renderer replays it. Pinned by

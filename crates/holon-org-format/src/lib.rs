@@ -18,6 +18,7 @@
 //! crate so older import paths keep resolving.
 
 pub mod dense;
+pub mod drawer;
 pub mod inline_marks;
 pub mod link_parser;
 pub mod models;
@@ -34,6 +35,9 @@ pub use dense::DenseParse;
 pub use dense::parse_dense;
 pub use dense::parse_dense_with;
 pub use dense::render_dense;
+pub use drawer::DrawerKey;
+pub use drawer::UnrepresentableKey;
+pub use drawer::ValueCarrier;
 pub use inline_marks::SourceContentOffsets;
 pub use inline_marks::expected_reparse;
 pub use inline_marks::extract_inline_marks;

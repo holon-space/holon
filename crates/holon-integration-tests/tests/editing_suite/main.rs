@@ -1,6 +1,7 @@
 //! Block editing operations: split, merge, undo/redo, task-state cycling.
 
 mod cycle_task_state_cold_boot_reingest;
+mod drawer_key_write_boundary;
 mod editor_pure_pbt;
 mod empty_question_loro_arm;
 mod merge_blocks_pbt;

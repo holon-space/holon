@@ -21,6 +21,8 @@ use holon_api::types::Timestamp;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::drawer::ValueCarrier;
+
 /// Property keys for org-specific fields stored in properties JSON.
 pub mod org_props {
     pub const TITLE: &str = "title";
@@ -163,8 +165,9 @@ pub trait ToOrg {
 
 /// Format properties drawer from JSON
 /// Input: JSON string -> Output: ":PROPERTIES:\n:KEY: VALUE\n:END:"
-/// Ensures :ID: property is rendered first.
-fn format_properties_drawer(properties_json: &str) -> String {
+/// The `:ID:` line comes first. A carrier without `ID` gets the block's own
+/// id, since the drawer is what keeps the block's identity in the file.
+fn format_properties_drawer(properties_json: &str, block_id: &str) -> String {
     let props: serde_json::Map<String, serde_json::Value> = serde_json::from_str(properties_json)
         .unwrap_or_else(|e| {
             panic!(
@@ -173,34 +176,39 @@ fn format_properties_drawer(properties_json: &str) -> String {
             )
         });
 
-    if props.is_empty() {
-        return String::new();
-    }
-
-    let mut result = String::from(":PROPERTIES:\n");
-
-    // Render :ID: first if present
-    if let Some(id_value) = props.get("ID") {
-        let value_str = match id_value {
-            serde_json::Value::String(s) => s.clone(),
-            _ => id_value.to_string(),
-        };
-        result.push_str(&format!(":ID: {}\n", value_str));
-    }
+    let id = match props.get("ID") {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(other) => other.to_string(),
+        None => block_id.to_string(),
+    };
+    let mut result = format!(":PROPERTIES:\n:ID: {id}\n");
 
     // Render other properties (excluding ID which we already rendered) in the
     // JSON's own key order — serde_json::Map is an IndexMap (preserve_order
     // enabled by a transitive dependency), and the renderer built that order
     // from the author's drawer.
     for (key, value) in props.iter().filter(|(k, _)| k.as_str() != "ID") {
-        let value_str = match value {
-            serde_json::Value::String(s) => s.clone(),
-            _ => value.to_string(),
-        };
-        result.push_str(&format!(":{}: {}\n", key, value_str));
+        result.push_str(&drawer_line(key, value, ValueCarrier::HeadlineDrawer));
     }
     result.push_str(":END:");
     result
+}
+
+/// One `:key: value` drawer line, the value encoded by the drawer codec.
+/// Empty for a key org cannot hold, which is left out of the file.
+fn drawer_line(key: &str, value: &serde_json::Value, carrier: ValueCarrier) -> String {
+    let key = match crate::drawer::DrawerKey::parse(key) {
+        Ok(key) => key,
+        Err(e) => {
+            tracing::warn!("org drawer: {e}; the property is left out of the file");
+            return String::new();
+        }
+    };
+    let text = match value {
+        serde_json::Value::String(s) => s.clone(),
+        _ => value.to_string(),
+    };
+    format!(":{}: {}\n", key.as_str(), carrier.encode(&text))
 }
 
 /// Format a properties drawer with the `:ID:` line omitted (dense projection).
@@ -215,21 +223,15 @@ fn format_properties_drawer_without_id(properties_json: &str) -> String {
             )
         });
 
-    let drawer_props: Vec<_> = props.iter().filter(|(k, _)| k.as_str() != "ID").collect();
-    if drawer_props.is_empty() {
+    let lines: String = props
+        .iter()
+        .filter(|(k, _)| k.as_str() != "ID")
+        .map(|(key, value)| drawer_line(key, value, ValueCarrier::HeadlineDrawer))
+        .collect();
+    if lines.is_empty() {
         return String::new();
     }
-
-    let mut result = String::from(":PROPERTIES:\n");
-    for (key, value) in drawer_props {
-        let value_str = match value {
-            serde_json::Value::String(s) => s.clone(),
-            _ => value.to_string(),
-        };
-        result.push_str(&format!(":{}: {}\n", key, value_str));
-    }
-    result.push_str(":END:");
-    result
+    format!(":PROPERTIES:\n{lines}:END:")
 }
 
 /// Format the planning line (SCHEDULED/DEADLINE).
@@ -508,19 +510,12 @@ pub fn render_document_header(doc_block: &Block) -> String {
                 // the parser's `drawer_id`, which rejects an empty value for the
                 // same reason; the two guards must agree or write-back invents
                 // an identity the parse will not accept back.
-                let rendered = if key.eq_ignore_ascii_case("ID") && !authored.is_empty() {
+                if key.eq_ignore_ascii_case("ID") && !authored.is_empty() {
                     carries_id = true;
-                    doc_block.id.id().to_string()
+                    result.push_str(&format!(":{key}: {}\n", doc_block.id.id()));
                 } else {
-                    authored
-                };
-                // The space after the key is REQUIRED, empty value or not:
-                // orgize's `node_property_node` matches `space1` between key and
-                // value, so `:KEY:` with nothing after it does not parse as a
-                // property — and one unparsable line makes the WHOLE drawer fail
-                // to parse and decay into body text. The trailing space on an
-                // empty value is the cost of the drawer surviving re-ingest.
-                result.push_str(&format!(":{key}: {rendered}\n"));
+                    result.push_str(&drawer_line(key, value, ValueCarrier::FileDrawer));
+                }
             }
             result.push_str(":END:\n");
             carries_id
@@ -1420,7 +1415,7 @@ pub(crate) fn render_headline_block(block: &Block, identity: HeadlineIdentity) -
     // emitted, and a drawer that held only `:ID:` collapses to nothing.
     if let Some(props_json) = block.org_properties() {
         let props_drawer = match identity {
-            HeadlineIdentity::Drawer => format_properties_drawer(&props_json),
+            HeadlineIdentity::Drawer => format_properties_drawer(&props_json, block.id.id()),
             HeadlineIdentity::DenseToken { .. } => format_properties_drawer_without_id(&props_json),
         };
         if !props_drawer.is_empty() {
@@ -1548,10 +1543,17 @@ fn source_block_to_org(block: &Block) -> String {
     let mut drawer_props: Vec<_> = block.drawer_properties().into_iter().collect();
     drawer_props.sort_by(|(a, _), (b, _)| a.cmp(b));
     for (k, v) in &drawer_props {
+        let key = match crate::drawer::DrawerKey::parse(k) {
+            Ok(key) => key,
+            Err(e) => {
+                tracing::warn!("org header argument: {e}; the property is left out of the file");
+                continue;
+            }
+        };
         result.push_str(" :");
-        result.push_str(k);
+        result.push_str(key.as_str());
         result.push(' ');
-        result.push_str(v);
+        result.push_str(&ValueCarrier::HeaderArg.encode(v));
     }
 
     // Tags: a Source block has no headline to carry `:tag:` notation, so route

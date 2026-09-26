@@ -874,6 +874,10 @@ impl CrudOperations<Block> for LoroBlockOperations {
             .and_then(|v| v.as_string())
             .map(|s| s.to_string())
             .ok_or("parent_id is required for block creation")?;
+        let bag = match fields.get("properties") {
+            Some(value) => properties_bag(value)?,
+            None => HashMap::new(),
+        };
 
         // All blocks live in the single global tree
         let doc_id = String::new();
@@ -1092,21 +1096,11 @@ impl CrudOperations<Block> for LoroBlockOperations {
                 props.insert(key.to_string(), value.clone());
             }
         }
-        // `properties` arrives as a JSON-object string. Flatten it into individual
-        // keys, exactly like `SqlOperationProvider` — storing the raw string under a
-        // literal `properties` key would diverge the Loro store from Turso on every
-        // create-with-properties. Explicit per-key params win over the blob
-        // (`or_insert`), matching Turso's merge order. Fail loud on a malformed blob.
-        if let Some(props_val) = fields.get("properties") {
-            let json = props_val.as_string().unwrap_or_else(|| {
-                panic!("block.create 'properties' param must be a JSON string, got {props_val:?}")
-            });
-            let map: HashMap<String, Value> = serde_json::from_str(json).unwrap_or_else(|e| {
-                panic!("block.create 'properties' is not a valid JSON object ({json:?}): {e}")
-            });
-            for (k, v) in map {
-                props.entry(k).or_insert(v);
-            }
+        // The bag is flattened into individual keys, exactly like
+        // `SqlOperationProvider`. Explicit per-key params win over the bag
+        // (`or_insert`), matching Turso's merge order.
+        for (k, v) in bag {
+            props.entry(k).or_insert(v);
         }
         if !props.is_empty() {
             backend
@@ -2038,6 +2032,19 @@ impl OperationProvider for LoroBlockOperations {
 
         // Try task operations
         __operations_task_operations::dispatch_operation::<_, Block>(self, op_name, &params).await
+    }
+}
+
+/// The `properties` param of a block write as the per-key map it stands for.
+/// Callers send it as a JSON-object string or as an Object.
+fn properties_bag(value: &Value) -> std::result::Result<HashMap<String, Value>, String> {
+    match value {
+        Value::Object(map) => Ok(map.clone()),
+        Value::String(json) => serde_json::from_str(json)
+            .map_err(|e| format!("block.create 'properties' is not a JSON object ({json:?}): {e}")),
+        other => Err(format!(
+            "block.create 'properties' must be an object or a JSON-object string, got {other:?}"
+        )),
     }
 }
 
@@ -3546,5 +3553,41 @@ mod tag_op_tests {
             .await
             .expect_err("add_tag on a missing block must fail loud");
         assert!(err.to_string().contains("not found"), "got: {err}");
+    }
+
+    async fn create_with_bag(ops: &LoroBlockOperations, bag: Value) -> anyhow::Result<()> {
+        let mut params: StorageEntity = HashMap::new();
+        params.insert("id".into(), Value::String("block:bagged".to_string()));
+        params.insert("parent_id".into(), Value::String("root".to_string()));
+        params.insert("content".into(), Value::String("bagged".to_string()));
+        params.insert("properties".into(), bag);
+        ops.execute_operation(&EntityName::new("block"), "create", params)
+            .await
+            .map(|_| ())
+            .map_err(|e| anyhow::anyhow!("{e}"))
+    }
+
+    #[tokio::test]
+    async fn create_takes_the_properties_bag_as_an_object() {
+        let (ops, _dir, backend) = ops_and_backend().await;
+        let bag = Value::Object([("note".to_string(), Value::String("v".into()))].into());
+        create_with_bag(&ops, bag)
+            .await
+            .expect("an Object bag is a valid shape");
+        let block = backend.get_block("block:bagged").await.expect("created");
+        assert_eq!(block.get_property("note"), Some(Value::String("v".into())));
+    }
+
+    #[tokio::test]
+    async fn create_refuses_a_properties_bag_that_is_no_object() {
+        let (ops, _dir, backend) = ops_and_backend().await;
+        let err = create_with_bag(&ops, Value::Integer(3))
+            .await
+            .expect_err("an Integer bag must be refused");
+        assert!(err.to_string().contains("'properties'"), "got: {err}");
+        assert!(
+            backend.get_block("block:bagged").await.is_err(),
+            "a refused create must not leave a block behind"
+        );
     }
 }

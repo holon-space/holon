@@ -102,10 +102,9 @@ Holon preserves it. The rules:
   point. No key and no value is lost — but do not expect a padded file to come
   back byte-for-byte, because it will not. If the padding matters to you, the
   fix is to preserve the authored whitespace per key, which this does not do.
-- **An empty value keeps a trailing space** (`:KEY: `). That is not cosmetic:
-  orgize's property grammar requires whitespace between key and value, and a
-  bare `:KEY:` line makes the WHOLE drawer fail to parse and decay into body
-  text. The space is what lets an empty-valued key survive re-ingest.
+- **An empty value keeps a trailing space** (`:KEY: `) in the file-level
+  drawer. Holon's own reader keeps an empty value, so no literal is needed
+  there (a headline drawer writes `""`, see below).
 - **Indentation is allowed on input and CANONICALIZED on write.** Org's
   `drawer_begin_node` accepts leading horizontal space, so `  :PROPERTIES:` is
   still the file's drawer; Holon re-emits it at column 0. Same disclosure as the
@@ -223,6 +222,27 @@ parent heading's section:
   (org ⇄ SQL ⇄ Loro) must preserve. In Loro this is a first-class
   `BlockContent::Image { path }` variant so the create/read round-trip cannot
   silently collapse it to `Text`.
+
+### Property values and keys that org cannot hold raw
+
+One rule applies to every place org writes a property: a headline drawer, the
+file-level drawer, and a source block's header arguments
+(`crates/holon-org-format/src/drawer.rs`, `ValueCarrier`).
+
+- **A value is written as it is when the parser reads it back unchanged.**
+  Otherwise Holon writes it as a JSON string literal on one line, for example
+  `:note: "line one\n* not a heading"`. This covers a line break, a value
+  with space at the start or end, and (in a headline drawer) an empty value,
+  which is written `""`. In header arguments, the literal also escapes each
+  space, so it stays one token.
+- **The parser decodes a quoted value only when it is exactly the literal Holon
+  would write.** A quoted value that a person types, such as
+  `:title: "The Book"`, is not such a literal, so it stays as typed, quotes
+  included. Every string goes into the file and comes back byte-equal.
+- **A key must be one token**: not empty, no whitespace, no `:`, no control
+  character, and not `PROPERTIES` or `END`. Holon cannot escape a key. The
+  engine refuses a write under such a key, and the renderer leaves such a
+  property out of the file (with a warning) and keeps the rest of the block.
 
 ### Why bare IDs?
 

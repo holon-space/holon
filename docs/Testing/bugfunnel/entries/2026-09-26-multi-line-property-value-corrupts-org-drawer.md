@@ -3,13 +3,13 @@ id: 2026-09-26-multi-line-property-value-corrupts-org-drawer
 date: 2026-09-26
 gap: COVERAGE
 secondary: null
-status: PARTIAL
+status: FIXED
 summary: >-
   A property value that holds a line break reaches the org write-back raw:
   the drawer closes early, the rest of the value becomes a heading and a
-  drawer of its own, and the block loses its id on the next parse. The engine
-  refuses it now; the peer-merge and foreign-ingest legs and the renderer
-  itself still let it through.
+  drawer of its own, and the block loses its id on the next parse. The org
+  codec now writes such a value as one JSON string literal and reads it back
+  byte-equal, on every write path.
 ---
 
 ## Bug
@@ -55,19 +55,26 @@ and the External source goes through the org file, which cannot carry a
 multi-line property at all.
 
 ## Remedy
-Mitigated at one seam only. `OperationEngine::refuse_multi_line_property`
-(`crates/holon/src/api/operation_engine.rs`) refuses a block `create` /
-`update` / `set_field` that puts a line break into a drawer text: a loose
-user property, any text value in the `properties` bag (object or JSON
-string, also as the `set_field` field), and the `org_properties` /
-`file_properties` drawer carriers. Typed values (`Json`, `Object`, `Array`,
-`DateTime`) never reach the drawer
-(`crates/holon-org-format/tests/typed_property_values_stay_out_of_the_drawer.rs`).
+Fixed at the point every write path meets: the org value codec
+(`crates/holon-org-format/src/drawer.rs`, `ValueCarrier`; rule in
+`docs/Reference/ORG_SYNTAX.md`). The renderer writes a value that its parser
+would not read back unchanged as a JSON string literal on one line, and the
+parser decodes only the exact literal the renderer writes. This covers the
+headline drawer, the file-level drawer, the dense projection (same drawer
+formatter) and source-block header arguments, so the engine, Loro/peer merge,
+Markdown/Obsidian ingest and every other seam reach the file through the same
+rule. The engine guard `refuse_multi_line_property` is removed; the engine now
+refuses only a property KEY org cannot hold (`DrawerKey`).
 
-Still open, for a separate lane:
-- Loro / peer merge: a peer or an older build that stores a multi-line
-  property never meets the engine, and its value reaches the org write-back.
-- Foreign ingest: Markdown/Obsidian ingest sets properties on the `Block`
-  directly (`crates/holon-markdown/src/obsidian.rs`) and bypasses the engine.
-- The renderer is the last line: it should refuse or escape a value it cannot
-  write, whatever path the value took.
+Pinned by:
+- `crates/holon-org-format/tests/drawer_value_codec_pbt.rs` (render -> parse
+  identity on all three carriers; user-typed values written back as typed).
+- The keystone: the External `update_custom_prop` generator
+  (`drawer_value_strategy` in `crates/holon-integration-tests/src/pbt/generators.rs`)
+  draws multi-line, padded, empty and quoted values, and the hand-authored
+  cases `external-drawer-values-round-trip-{loro,sqlonly}-arm` replay the
+  injection deterministically (red log `lane-logs/groupA-red-keystone-hand-authored.log`:
+  the injected `:ID: hijack` minted a real block).
+- `crates/holon-integration-tests/tests/editing_suite/multiline_property_write_boundary.rs`
+  now asserts the engine write shapes are accepted and the file carries the
+  value byte-equal.

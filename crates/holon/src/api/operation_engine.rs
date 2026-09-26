@@ -1693,10 +1693,9 @@ impl DispatchingOperationEngine {
         Ok(())
     }
 
-    /// Refuse a block write that puts a line break into a value the org
-    /// drawer writes: a drawer line holds one line, and the rest of the value
-    /// would land in the file as headings and drawers of its own.
-    fn refuse_multi_line_property(
+    /// Refuse a block write that names a property under a key an org drawer
+    /// cannot hold. The renderer would leave such a property out of the file.
+    fn refuse_undrawable_property_key(
         entity_name: &EntityName,
         op_name: &str,
         params: &StorageEntity,
@@ -1715,29 +1714,26 @@ impl DispatchingOperationEngine {
             "create" | "update" => params.iter().map(|(k, v)| (k.as_ref(), v)).collect(),
             _ => return Ok(()),
         };
-        for (key, value) in written {
-            for (path, text) in Self::drawer_texts(key, value)? {
-                if text.contains(['\n', '\r']) {
+        for (field, value) in written {
+            for key in Self::drawer_keys(field, value)? {
+                if let Err(e) = holon_org_format::DrawerKey::parse(&key) {
                     let id = params
                         .get("id")
                         .and_then(|v| v.as_string())
                         .unwrap_or("<no id>");
-                    bail!(
-                        "{op_name}: refusing property `{path}` on block {id}: its value {text:?} \
-                         holds a line break, and an org property drawer holds one line"
-                    );
+                    bail!("{op_name}: refusing a property of block {id} via `{field}`: {e}");
                 }
             }
         }
         Ok(())
     }
 
-    /// The text values `key = value` puts into an org drawer, each named by
-    /// its path. The property bag and the drawer carriers hold one per key.
-    fn drawer_texts(key: &str, value: &Value) -> Result<Vec<(String, String)>> {
+    /// The property keys `field = value` puts into an org drawer. The
+    /// property bag and the drawer carriers hold one per entry.
+    fn drawer_keys(field: &str, value: &Value) -> Result<Vec<String>> {
         use anyhow::Context;
         use holon_org_format::org_props;
-        if key.starts_with('_') {
+        if field.starts_with('_') {
             return Ok(Vec::new());
         }
         if [
@@ -1745,7 +1741,7 @@ impl DispatchingOperationEngine {
             org_props::ORG_PROPERTIES,
             org_props::FILE_PROPERTIES,
         ]
-        .contains(&key)
+        .contains(&field)
         {
             let object: serde_json::Map<String, serde_json::Value> = match value {
                 Value::Object(_) => match serde_json::Value::from(value.clone()) {
@@ -1753,22 +1749,23 @@ impl DispatchingOperationEngine {
                     other => unreachable!("an Object converts to a JSON object, got {other}"),
                 },
                 Value::String(json) | Value::Json(json) => serde_json::from_str(json)
-                    .with_context(|| format!("`{key}` is not a JSON object: {json:?}"))?,
-                other => bail!("`{key}` must be an object or a JSON object, got {other:?}"),
+                    .with_context(|| format!("`{field}` is not a JSON object: {json:?}"))?,
+                other => bail!("`{field}` must be an object or a JSON object, got {other:?}"),
             };
             return Ok(object
                 .into_iter()
-                .filter(|(k, _)| !k.starts_with('_'))
-                .filter_map(|(k, v)| Some((format!("{key}.{k}"), v.as_str()?.to_string())))
+                .map(|(k, _)| k)
+                .filter(|k| !k.starts_with('_'))
                 .collect());
         }
         let is_property = matches!(
-            holon_api::BlockWriteField::parse(key),
+            holon_api::BlockWriteField::parse(field),
             Ok(holon_api::BlockWriteField::Property(_))
         );
-        Ok(match value.as_string() {
-            Some(text) if is_property => vec![(key.to_string(), text.to_string())],
-            _ => Vec::new(),
+        Ok(if is_property {
+            vec![field.to_string()]
+        } else {
+            Vec::new()
         })
     }
 
@@ -3113,7 +3110,7 @@ impl OperationEngine for DispatchingOperationEngine {
         let params = self.stamp_provenance(op_name, params, &origin)?;
         self.refuse_empty_question(entity_name, op_name, &params)
             .await?;
-        Self::refuse_multi_line_property(entity_name, op_name, &params)?;
+        Self::refuse_undrawable_property_key(entity_name, op_name, &params)?;
 
         // Keyword convergence (ruling 2026-08-10): a write that would leave the
         // block as keyword-headed plain text is rewritten to the task it

@@ -258,23 +258,13 @@ fidelity_axes:
     # (parser.rs:975,1018 close the loop: every drawer value is read back as
     # Value::String.)
     types: [string]
-    # CERTIFIED (2b.1), symmetrically: a false `dropped` is caught too — the
-    # certifier probes the empty value on BOTH arms and raises a tightening
-    # prompt if a leg carries it.
+    # CERTIFIED, symmetrically: a false `dropped` is caught too — the
+    # certifier probes the empty value on BOTH legs.
     #
-    # MEASURED 2b.1, and it CORRECTS the draft's §0 correction: an empty value
-    # survives the RENDER leg exactly as documented (`:KEY: ` with the required
-    # trailing space — models.rs:202, docs/Reference/ORG_SYNTAX.md:103-106) but
-    # does NOT survive INGEST. orgize's `headline.properties()` does not yield
-    # the pair at all, with or without the trailing space, so
-    # `extract_properties` (parser.rs:1124-1141, which filters nothing) never
-    # sees it. Net over the full round trip: dropped.
-    #
-    # SCOPE: certified for the HEADLINE drawer, which is what 2b.1 probes. The
-    # file-level drawer has its own hand-rolled reader (`parse_drawer_line`,
-    # parser.rs:192-203) that does NOT drop an empty value, so it may well
-    # differ — 2b.2 adds that carrier and the certifier will say so.
-    empty_string: dropped
+    # The drawer codec (src/drawer.rs, docs/Reference/ORG_SYNTAX.md) writes an
+    # empty value as `""` on a headline drawer line, whose orgize reader would
+    # drop an empty value, and reads it back as the empty string.
+    empty_string: representable
     # NOT YET CERTIFIED (2b.2) — citation is evidence, not a gate.
     # The `Null` KIND is driven by `types` above; this clause, which is about
     # the null INHABITANT, is read by nothing today.
@@ -286,8 +276,8 @@ fidelity_axes:
       # is the Unicode property, not ASCII space. Every MEASURED delimiter is
       # declared: comma, space, TAB and NBSP (U+00A0), each found by the
       # certifier's negative arm rather than by reading the predicate.
-      # `\n`/`\r` are NOT delimiters here — they TERMINATE the drawer line, so
-      # the field is destroyed rather than split (measured: empty readback).
+      # `\n`/`\r` are NOT delimiters: the drawer codec writes a value holding
+      # them as one JSON string literal.
       # Naming one of several true delimiters was a claim nothing could
       # falsify.
       separators: [",", " ", "\t", "\u00a0"]

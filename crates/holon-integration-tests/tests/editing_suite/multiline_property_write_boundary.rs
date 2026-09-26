@@ -1,9 +1,10 @@
-//! A drawer property is one line of org. The engine refuses a property write
-//! whose value holds a line break, and the org file keeps the block intact.
+//! A drawer property is one line of org. A property value that holds a line
+//! break is accepted through every engine write shape, reaches the org file
+//! encoded on one line, and reads back from the file unchanged.
 //!
 //! @pbt kind harness
 //! @pbt covers multiline-property-write-boundary — a line break in a
-//!   property value is refused before it reaches the store or the org file
+//!   property value round-trips through the org file and never breaks it
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -84,27 +85,45 @@ async fn org_file_after_settle(t: &TestEnvironment) -> String {
         .expect("read notes.org")
 }
 
-fn assert_refused_and_intact(result: anyhow::Result<()>, file: &str, block: &str) {
-    let err = match result {
-        Ok(()) => panic!("a line break in a property landed; notes.org now:\n{file}"),
-        Err(e) => format!("{e:#}"),
-    };
-    assert!(
-        err.contains(block) && err.contains("note"),
-        "the refusal must name the block and the key: {err}"
-    );
+fn assert_round_tripped(result: anyhow::Result<()>, file: &str, block: &str) {
+    if let Err(e) = result {
+        panic!("the write was refused: {e:#}");
+    }
     assert!(
         file.contains(":ID: n-target"),
         "notes.org lost the block:\n{file}"
     );
     assert!(
-        !file.contains("Evil heading"),
-        "notes.org took the value:\n{file}"
+        !file.lines().any(|l| l.starts_with("* Evil")),
+        "the value broke out of its drawer line:\n{file}"
+    );
+    let parsed = holon_org_format::parse_org_file(
+        std::path::Path::new("/vault/notes.org"),
+        file,
+        &holon_api::EntityUri::no_parent(),
+        std::path::Path::new("/vault"),
+    )
+    .expect("notes.org parses");
+    let written = parsed
+        .blocks
+        .iter()
+        .find(|b| b.id.as_str() == block)
+        .unwrap_or_else(|| panic!("{block} is not in notes.org:\n{file}"));
+    assert_eq!(
+        written.get_property("note"),
+        Some(Value::String(INJECTION.into())),
+        "the file does not carry the value:\n{file}"
+    );
+    let expected_blocks = if block == TARGET_ID { 1 } else { 2 };
+    assert_eq!(
+        parsed.blocks.len(),
+        expected_blocks,
+        "the value grew blocks:\n{file}"
     );
 }
 
 #[test]
-fn set_field_of_a_multi_line_property_is_refused() {
+fn set_field_of_a_multi_line_property_round_trips() {
     let rt = runtime();
     rt.clone().block_on(async move {
         let t = booted(rt.clone()).await;
@@ -115,12 +134,12 @@ fn set_field_of_a_multi_line_property_is_refused() {
         )
         .await;
         let file = org_file_after_settle(&t).await;
-        assert_refused_and_intact(result, &file, TARGET_ID);
+        assert_round_tripped(result, &file, TARGET_ID);
     });
 }
 
 #[test]
-fn create_with_a_multi_line_property_is_refused() {
+fn create_with_a_multi_line_property_round_trips() {
     let rt = runtime();
     rt.clone().block_on(async move {
         let t = booted(rt.clone()).await;
@@ -136,7 +155,7 @@ fn create_with_a_multi_line_property_is_refused() {
         )
         .await;
         let file = org_file_after_settle(&t).await;
-        assert_refused_and_intact(result, &file, "block:n-child");
+        assert_round_tripped(result, &file, "block:n-child");
     });
 }
 
@@ -167,19 +186,23 @@ fn text(s: &str) -> Value {
     Value::String(s.to_string())
 }
 
-fn refused_case(op: &'static str, block: &'static str, params: fn() -> Vec<(&'static str, Value)>) {
+fn round_trip_case(
+    op: &'static str,
+    block: &'static str,
+    params: fn() -> Vec<(&'static str, Value)>,
+) {
     let rt = runtime();
     rt.clone().block_on(async move {
         let t = booted(rt.clone()).await;
         let result = write_values(&t, op, params()).await;
         let file = org_file_after_settle(&t).await;
-        assert_refused_and_intact(result, &file, block);
+        assert_round_tripped(result, &file, block);
     });
 }
 
 #[test]
-fn create_with_a_multi_line_value_in_the_properties_object_is_refused() {
-    refused_case("create", "block:n-child", || {
+fn create_with_a_multi_line_value_in_the_properties_object_round_trips() {
+    round_trip_case("create", "block:n-child", || {
         vec![
             ("id", text("block:n-child")),
             ("parent_id", text(TARGET_ID)),
@@ -190,8 +213,8 @@ fn create_with_a_multi_line_value_in_the_properties_object_is_refused() {
 }
 
 #[test]
-fn create_with_a_multi_line_value_in_the_properties_json_is_refused() {
-    refused_case("create", "block:n-child", || {
+fn create_with_a_multi_line_value_in_the_properties_json_round_trips() {
+    round_trip_case("create", "block:n-child", || {
         vec![
             ("id", text("block:n-child")),
             ("parent_id", text(TARGET_ID)),
@@ -202,19 +225,22 @@ fn create_with_a_multi_line_value_in_the_properties_json_is_refused() {
 }
 
 #[test]
-fn set_field_of_the_whole_properties_bag_with_a_multi_line_value_is_refused() {
-    refused_case("set_field", TARGET_ID, || {
+fn set_field_of_the_org_drawer_carrier_with_a_multi_line_value_round_trips() {
+    round_trip_case("set_field", TARGET_ID, || {
         vec![
             ("id", text(TARGET_ID)),
-            ("field", text("properties")),
-            ("value", bag()),
+            ("field", text("org_properties")),
+            (
+                "value",
+                text(&serde_json::json!({ "ID": "n-target", "note": INJECTION }).to_string()),
+            ),
         ]
     });
 }
 
 #[test]
-fn set_field_of_the_org_drawer_carrier_with_a_multi_line_value_is_refused() {
-    refused_case("set_field", TARGET_ID, || {
+fn set_field_of_the_org_drawer_carrier_without_an_id_keeps_the_block_identity() {
+    round_trip_case("set_field", TARGET_ID, || {
         vec![
             ("id", text(TARGET_ID)),
             ("field", text("org_properties")),
