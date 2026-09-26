@@ -217,3 +217,15 @@ holon-api's Cargo.toml must not declare a storage-backend dependency \
 holon-api. \
 To suppress: # ALLOW(api-storage-backend-manifest): <reason>
 """
+
+[[smell]]
+id = "decision-core-no-home"
+pattern = '\b(Block|decision_block|task_state)\b|crate::block\b'
+files = "crates/holon-api/src/decision.rs"
+case_sensitive = true
+message = """
+The decision core is storage-neutral (ADR 0004 domain tier): it knows no \
+block, keyword or drawer. A home's adapter (the block tree's is \
+`decision_block.rs`) depends on the core, never the reverse. \
+To suppress: // ALLOW(decision-core-no-home): <reason>
+"""

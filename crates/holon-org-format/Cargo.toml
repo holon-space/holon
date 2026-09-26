@@ -29,6 +29,7 @@ workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 
 [dev-dependencies]
 anyhow.workspace = true
+chrono.workspace = true
 # Test-only BY DESIGN: the profile is an independent statement ABOUT this
 # format, so the lib must never read it. See tests/profile_certification.rs.
 holon-capability.workspace = true

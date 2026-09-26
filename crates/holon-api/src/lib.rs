@@ -31,6 +31,7 @@ pub mod condition_profile;
 pub mod condition_source;
 pub mod content_canonical;
 pub mod decision;
+pub mod decision_block;
 pub mod edge_field;
 pub mod effect_id;
 pub mod entity;
