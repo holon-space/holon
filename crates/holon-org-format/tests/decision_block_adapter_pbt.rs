@@ -22,7 +22,10 @@ use holon_api::decision::DecisionError;
 use holon_api::decision::DecisionRef;
 use holon_api::decision::DraftQuestion;
 use holon_api::decision::OptionKey;
+use holon_api::decision::Prose;
 use holon_api::decision::Rule;
+use holon_api::decision::Status;
+use holon_api::decision::TextSite;
 use holon_api::decision_block;
 use holon_api::decision_block::BlockDecisionError;
 use holon_api::types::TaskState;
@@ -30,6 +33,7 @@ use holon_org_format::OrgBlockExt;
 use holon_org_format::OrgRenderer;
 use holon_org_format::parse_org_file;
 use proptest::prelude::*;
+use proptest::test_runner::TestCaseError;
 
 const ROOT: &str = "/vault";
 const FILE: &str = "/vault/decisions.org";
@@ -38,6 +42,7 @@ const DECISION_ID: &str = "dq-1";
 
 const KEYS: &[&str] = &["a", "b", "c", "rename-2"];
 const ANSWERERS: &[&str] = &["person:martin", "person:eve", "agent:orch", "model:jev-1"];
+const HAZARD_ANSWERERS: &[&str] = &["person:eve\n* evil", "person: spaced "];
 const DECIDERS: &[&str] = &["person:martin", "agent:orch"];
 
 fn allowed() -> AllowedDeciders {
@@ -235,24 +240,87 @@ fn words(first: &'static str) -> impl Strategy<Value = String> + Clone {
     (first, "( [a-z]{1,8}){0,3}").prop_map(|(a, b)| format!("{a}{b}"))
 }
 
+/// Lines a block body holds verbatim.
+const PLAIN_LINES: &[&str] = &[
+    "Keep it short",
+    "  indented line",
+    ":END:",
+    ":PROPERTIES:",
+    "- [ ] item",
+    "|a|b|",
+    "*x marks",
+];
+/// Lines org reads as structure, trims, or rewrites.
+const HAZARD_LINES: &[&str] = &[
+    "",
+    "   ",
+    "* heading",
+    "** heading",
+    "#+TITLE: x",
+    "# comment",
+    "DEADLINE: <2026-01-01 Thu>",
+    "SCHEDULED: <2026-01-01 Thu>",
+    "see [[x]]",
+    "trailing  ",
+    " leading",
+];
+
+fn line(hazard: bool) -> BoxedStrategy<String> {
+    let plain = prop_oneof![
+        words("[A-Z][a-z]{1,8}"),
+        prop::sample::select(PLAIN_LINES).prop_map(str::to_string),
+    ];
+    if hazard {
+        prop_oneof![
+            plain,
+            prop::sample::select(HAZARD_LINES).prop_map(str::to_string)
+        ]
+        .boxed()
+    } else {
+        plain.boxed()
+    }
+}
+
+fn lines(hazard: bool) -> BoxedStrategy<String> {
+    prop::collection::vec(line(hazard), 1..4)
+        .prop_map(|ls| ls.join("\n"))
+        .boxed()
+}
+
+/// A headline or a property value: one line of words, or any text.
+fn title(hazard: bool) -> BoxedStrategy<String> {
+    if hazard {
+        prop_oneof![words("[A-Z][a-z]{1,8}"), lines(true)].boxed()
+    } else {
+        words("[A-Z][a-z]{1,8}").boxed()
+    }
+}
+
+fn prose(text: BoxedStrategy<String>, site: TextSite) -> impl Strategy<Value = Prose> {
+    text.prop_filter_map("blank text is no prose", move |t| {
+        Prose::parse(&t, site).ok()
+    })
+}
+
 #[derive(Debug, Clone)]
 struct Shape {
     keys: Vec<&'static str>,
     labels: Vec<String>,
     bounds: (u8, u8),
     written_choose: Option<String>,
+    hazard: bool,
 }
 
-fn shape() -> impl Strategy<Value = Shape> {
+fn shape(hazard: bool) -> impl Strategy<Value = Shape> {
     prop::sample::subsequence(KEYS, 1..=KEYS.len())
         .prop_shuffle()
-        .prop_flat_map(|keys| {
+        .prop_flat_map(move |keys| {
             let n = keys.len() as u8;
-            let labels = prop::collection::vec(words("[A-Z][a-z]{1,8}"), keys.len());
+            let labels = prop::collection::vec(title(hazard), keys.len());
             let bounds = (1..=n).prop_flat_map(|max| (0..=max, Just(max)));
             (Just(keys), labels, bounds, 0..3u8)
         })
-        .prop_map(|(keys, labels, (min, max), form)| {
+        .prop_map(move |(keys, labels, (min, max), form)| {
             let written_choose = match form {
                 0 if (min, max) == (1, 1) => None,
                 1 if min == max => Some(max.to_string()),
@@ -263,6 +331,7 @@ fn shape() -> impl Strategy<Value = Shape> {
                 labels,
                 bounds: (min, max),
                 written_choose,
+                hazard,
             }
         })
 }
@@ -284,8 +353,18 @@ fn command(shape: &Shape) -> impl Strategy<Value = Command> {
     let keys = shape.keys.clone();
     let n = keys.len();
     let bounds = shape.bounds;
-    let answerer = prop::sample::select(ANSWERERS).prop_map(|a| Answerer::parse(a).unwrap());
-    let rationale = prop::option::of(words("[A-Z][a-z]{1,8}"));
+    let mut pool = ANSWERERS.to_vec();
+    if shape.hazard {
+        pool.extend(HAZARD_ANSWERERS);
+    }
+    let answerer = prop::sample::select(pool).prop_map(|a| Answerer::parse(a).unwrap());
+    let note_text = if shape.hazard {
+        lines(true)
+    } else {
+        words("[A-Z][a-z]{1,8}").boxed()
+    };
+    let rationale = prop::option::of(prose(lines(shape.hazard), TextSite::Rationale));
+    let note = prop::option::of(prose(note_text, TextSite::Note));
     let probabilities = move |cap: u32| {
         prop::sample::subsequence(keys.clone(), 0..=n)
             .prop_flat_map(move |ks| {
@@ -306,10 +385,10 @@ fn command(shape: &Shape) -> impl Strategy<Value = Command> {
         probabilities(300).prop_map(AnswerInput::Marginals),
     ];
     prop_oneof![
-        3 => (answerer.clone(), body, rationale.clone()).prop_map(|(by, body, rationale)| {
+        3 => (answerer.clone(), body, rationale).prop_map(|(by, body, rationale)| {
             Command::Answer { by, body, rationale }
         }),
-        2 => (subset(&shape.keys, bounds), answerer.clone(), rationale).prop_map(
+        2 => (subset(&shape.keys, bounds), answerer.clone(), note).prop_map(
             |(chosen, decider, note)| Command::Decide {
                 chosen: keys_of(chosen),
                 decider,
@@ -321,26 +400,27 @@ fn command(shape: &Shape) -> impl Strategy<Value = Command> {
 }
 
 /// A legal decision: asked, then the legal ones of a few random commands.
-fn decision() -> impl Strategy<Value = (Decision, Shape)> {
-    shape()
+/// With `hazard`, its texts include what the block tree cannot hold.
+fn decision_with(hazard: bool) -> impl Strategy<Value = (Decision, Shape)> {
+    shape(hazard)
         .prop_flat_map(|shape| {
             let recommend = prop::option::of(subset(&shape.keys, shape.bounds));
             let supersedes = prop::option::of(prop::sample::select(vec![
                 "block:sharing-7",
                 "github-issue:owner/repo/7",
             ]));
-            let commands = prop::collection::vec((command(&shape), 0..1000u32), 0..6);
+            let commands = prop::collection::vec((command(&shape), 0..1000u32), 0..8);
             (
+                title(shape.hazard),
                 Just(shape),
-                words("[A-Z][a-z]{1,8}"),
                 recommend,
                 supersedes,
                 commands,
             )
         })
-        .prop_map(|(shape, question, recommend, supersedes, commands)| {
+        .prop_map(|(question, shape, recommend, supersedes, commands)| {
             let q = DraftQuestion {
-                question: format!("{question}?"),
+                question,
                 options: shape
                     .keys
                     .iter()
@@ -362,32 +442,92 @@ fn decision() -> impl Strategy<Value = (Decision, Shape)> {
         })
 }
 
-fn stored(d: &Decision) -> Vault {
+fn decision() -> impl Strategy<Value = (Decision, Shape)> {
+    any::<bool>().prop_flat_map(decision_with)
+}
+
+fn try_stored(d: &Decision) -> Result<Vault, BlockDecisionError> {
     let mut vault = Vault::new();
     let topic = vault.topic();
     let mut minted = 0;
     let ops = decision_block::ask_ops(d, &topic, None, || {
         minted += 1;
         EntityUri::block(&format!("{DECISION_ID}-k{minted}"))
-    })
-    .expect("a block decision encodes");
+    })?;
     vault.apply(&ops);
     vault.round_trip_org();
-    vault
+    Ok(vault)
+}
+
+fn stored(d: &Decision) -> Vault {
+    try_stored(d).expect("a decision of plain text encodes")
+}
+
+/// Every text a decision holds that the block tree writes verbatim.
+fn texts_of(d: &Decision) -> Vec<String> {
+    let mut texts = vec![d.question().to_string()];
+    texts.extend(d.options().iter().map(|o| o.label.clone()));
+    match d.status() {
+        Status::Open => {}
+        Status::Decided(r) => {
+            texts.push(r.decider().to_string());
+            texts.extend(r.note().map(Prose::to_string));
+        }
+        Status::Withdrawn { by, .. } => texts.push(by.to_string()),
+    }
+    for a in d.answers() {
+        texts.push(a.by().to_string());
+        texts.extend(a.rationale().map(Prose::to_string));
+    }
+    texts
+}
+
+/// A refusal is legal only for a decision with hazardous text, and it names
+/// one of that decision's texts.
+fn check_refusal(e: &BlockDecisionError, d: &Decision, hazard: bool) -> Result<(), TestCaseError> {
+    prop_assert!(hazard, "a decision of plain text was refused: {}", e);
+    let BlockDecisionError::Unencodable { text, .. } = e else {
+        return Err(TestCaseError::fail(format!(
+            "not an Unencodable refusal: {e}"
+        )));
+    };
+    prop_assert!(
+        texts_of(d).contains(text),
+        "the refusal names {:?}, no text of the decision",
+        text
+    );
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy)]
+enum OddAnswer {
+    NoAnswered,
+    TwoBodies,
+    NoAnswerer,
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(256))]
+    #![proptest_config(ProptestConfig {
+        cases: ProptestConfig::default().cases.max(512),
+        max_global_rejects: 100_000,
+        ..ProptestConfig::default()
+    })]
 
     #[test]
-    fn a_stored_decision_reads_back_equal((d, _shape) in decision()) {
-        let vault = stored(&d);
-        prop_assert_eq!(vault.read(), Ok(d));
+    fn a_stored_decision_reads_back_equal((d, shape) in decision()) {
+        match try_stored(&d) {
+            Ok(vault) => prop_assert_eq!(vault.read(), Ok(d)),
+            Err(e) => check_refusal(&e, &d, shape.hazard)?,
+        }
     }
 
     #[test]
     fn a_change_reads_back_as_the_committed_decision(
-        (d, c) in decision().prop_flat_map(|(d, shape)| (Just(d), command(&shape))),
+        (d, shape, c) in (decision_with(false), any::<bool>())
+            .prop_flat_map(|((d, mut shape), hazard)| {
+                shape.hazard = hazard;
+                (Just(d), Just(shape.clone()), command(&shape))
+            }),
         millis in 0..1000u32,
     ) {
         let change = d.apply(c, instant(99, millis), &allowed());
@@ -396,16 +536,20 @@ proptest! {
         let mut vault = stored(&d);
         let (_, children) = vault.decision();
         let mint = vault.mint();
-        let ops = decision_block::change_ops(&change, &children, || mint)
-            .expect("a block decision's change encodes");
-        vault.apply(&ops);
-        vault.round_trip_org();
-        prop_assert_eq!(vault.read(), Ok(d.commit(change).unwrap()));
+        let next = d.commit(change.clone()).unwrap();
+        match decision_block::change_ops(&change, &children, || mint) {
+            Ok(ops) => {
+                vault.apply(&ops);
+                vault.round_trip_org();
+                prop_assert_eq!(vault.read(), Ok(next));
+            }
+            Err(e) => check_refusal(&e, &next, shape.hazard)?,
+        }
     }
 
     #[test]
     fn an_illegal_subtree_reads_as_its_named_error(
-        (d, _shape) in decision(),
+        (d, _shape) in decision_with(false),
         breach in prop::sample::select(Breach::ALL),
     ) {
         let mut vault = stored(&d);
@@ -416,28 +560,69 @@ proptest! {
 
     #[test]
     fn an_unreadable_answer_is_refused_and_disclosed(
-        (d, _shape) in decision(),
-        answered in any::<bool>(),
+        (d, _shape) in decision_with(false),
+        odd in prop::sample::select(vec![
+            OddAnswer::NoAnswered,
+            OddAnswer::TwoBodies,
+            OddAnswer::NoAnswerer,
+        ]),
     ) {
         let mut vault = stored(&d);
         let (_, children) = vault.decision();
         let id = vault.mint();
-        let mut odd = Block::new_text(id.clone(), vault.decision_id(), "Odd answer".to_string());
-        odd.set_property("answerer", Value::String("person:eve".into()));
-        if answered {
-            odd.set_property("answered", Value::String("2026-09-25T10:04:00Z".into()));
-            odd.set_property("pick", Value::String(KEYS[0].into()));
-            odd.set_property("p", Value::String(format!("{}=0.5", KEYS[0])));
+        let mut block = Block::new_text(id.clone(), vault.decision_id(), "Odd answer".to_string());
+        let mut set = |k: &str, v: &str| block.set_property(k, Value::String(v.into()));
+        match odd {
+            OddAnswer::NoAnswered => set("answerer", "person:eve"),
+            OddAnswer::TwoBodies => {
+                set("answerer", "person:eve");
+                set("answered", DONE_TIME);
+                set("pick", KEYS[0]);
+                set("p", &format!("{}=0.5", KEYS[0]));
+            }
+            OddAnswer::NoAnswerer => {
+                set("answered", DONE_TIME);
+                set("pick", KEYS[0]);
+            }
         }
-        insert_last_child(&mut vault, &children, odd);
+        insert_last_child(&mut vault, &children, block);
         vault.round_trip_org();
         let read = vault.read();
         prop_assert!(read.is_ok(), "{:?}", read);
         let read = read.unwrap();
         prop_assert_eq!(read.answers(), d.answers());
-        prop_assert_eq!(read.refused().len(), 1);
+        prop_assert_eq!(read.refused().len(), 1, "{:?} was not disclosed", odd);
         prop_assert_eq!(&read.refused()[0].item, &id.to_string());
+        prop_assert!(!read.refused()[0].reason.is_empty());
     }
+}
+
+/// A store may type a property value; org ingest never does, so this skips
+/// the org trip.
+#[test]
+fn a_typed_property_value_is_a_named_error() {
+    let d = Decision::ask(
+        DecisionRef::parse(&format!("block:{DECISION_ID}")).unwrap(),
+        DECISION_ID.to_string(),
+        DraftQuestion {
+            question: "Which?".into(),
+            options: vec![("a".into(), "A".into()), ("b".into(), "B".into())],
+            choose: None,
+            recommend: None,
+            supersedes: None,
+        },
+    )
+    .unwrap();
+    let mut vault = stored(&d);
+    let id = vault.decision_id();
+    vault
+        .block_mut(&id)
+        .set_property("choose", Value::Integer(2));
+    let got = vault.read();
+    assert!(
+        matches!(got, Err(BlockDecisionError::NotText { key: "choose", .. })),
+        "{got:?}"
+    );
 }
 
 fn insert_last_child(vault: &mut Vault, children: &[Block], block: Block) {
@@ -459,6 +644,7 @@ enum Breach {
     NoKeyword,
     TodoKeyword,
     OptionAndAnswer,
+    AnswerKeysOnOption,
     RulingOnOpen,
     WithdrawalOnDecided,
     NoOptions,
@@ -478,6 +664,7 @@ impl Breach {
         Breach::NoKeyword,
         Breach::TodoKeyword,
         Breach::OptionAndAnswer,
+        Breach::AnswerKeysOnOption,
         Breach::RulingOnOpen,
         Breach::WithdrawalOnDecided,
         Breach::NoOptions,
@@ -527,6 +714,9 @@ impl Breach {
             Breach::OptionAndAnswer => vault
                 .block_mut(&options[0])
                 .set_property("answerer", Value::String("person:eve".into())),
+            Breach::AnswerKeysOnOption => vault
+                .block_mut(&options[0])
+                .set_property("answered", Value::String(DONE_TIME.into())),
             Breach::RulingOnOpen => {
                 keyword(vault, Some("?"));
                 clear(vault, RULING);
@@ -597,6 +787,7 @@ impl Breach {
             Breach::NoTag => matches!(e, B::NotTagged { .. }),
             Breach::NoKeyword | Breach::TodoKeyword => matches!(e, B::UnknownKeyword { .. }),
             Breach::OptionAndAnswer => matches!(e, B::OptionAndAnswer { .. }),
+            Breach::AnswerKeysOnOption => matches!(e, B::AnswerKeysOnOption { .. }),
             Breach::RulingOnOpen | Breach::WithdrawalOnDecided => {
                 matches!(e, B::StrayKey { .. })
             }
@@ -617,4 +808,89 @@ impl Breach {
             Breach::ModelDecides => matches!(e, B::Core(D::ModelCannotDecide(_))),
         }
     }
+}
+
+fn open_decision() -> Decision {
+    Decision::ask(
+        DecisionRef::parse(&format!("block:{DECISION_ID}")).unwrap(),
+        DECISION_ID.to_string(),
+        DraftQuestion {
+            question: "Which?".into(),
+            options: vec![("a".into(), "A".into())],
+            choose: None,
+            recommend: None,
+            supersedes: None,
+        },
+    )
+    .unwrap()
+}
+
+fn answered(rationale: &str) -> Result<Decision, BlockDecisionError> {
+    let d = open_decision();
+    let change = d
+        .apply(
+            Command::Answer {
+                by: Answerer::parse("person:eve").unwrap(),
+                body: AnswerInput::Pick(keys_of(vec!["a".into()])),
+                rationale: Some(Prose::parse(rationale, TextSite::Rationale).unwrap()),
+            },
+            instant(1, 0),
+            &allowed(),
+        )
+        .unwrap();
+    let mut vault = stored(&d);
+    let (_, children) = vault.decision();
+    let mint = vault.mint();
+    let ops = decision_block::change_ops(&change, &children, || mint)?;
+    vault.apply(&ops);
+    vault.round_trip_org();
+    let next = d.commit(change).unwrap();
+    assert_eq!(vault.read(), Ok(next.clone()));
+    Ok(next)
+}
+
+#[test]
+fn a_rationale_keeps_drawer_lines_indentation_and_inner_blank_lines() {
+    answered("Because\n:PROPERTIES:\n:ID: x\n:END:\n\n  indented").expect("encodable");
+}
+
+#[test]
+fn a_rationale_with_a_heading_line_is_refused() {
+    let got = answered("Because\n* not a heading");
+    assert!(
+        matches!(
+            got,
+            Err(BlockDecisionError::Unencodable {
+                field: "rationale",
+                ..
+            })
+        ),
+        "{got:?}"
+    );
+}
+
+#[test]
+fn a_multi_line_note_is_refused() {
+    let d = open_decision();
+    let change = d
+        .apply(
+            Command::Decide {
+                chosen: keys_of(vec!["a".into()]),
+                decider: Answerer::parse("person:martin").unwrap(),
+                note: Some(Prose::parse("line one\n* Evil heading", TextSite::Note).unwrap()),
+            },
+            instant(1, 0),
+            &allowed(),
+        )
+        .unwrap();
+    let vault = stored(&d);
+    let (_, children) = vault.decision();
+    let got = decision_block::change_ops(&change, &children, || unreachable!());
+    assert!(
+        matches!(
+            got,
+            Err(BlockDecisionError::Unencodable { field: "note", .. })
+        ),
+        "{got:?}"
+    );
 }

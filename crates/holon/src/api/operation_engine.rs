@@ -1693,6 +1693,42 @@ impl DispatchingOperationEngine {
         Ok(())
     }
 
+    /// Refuse a block write whose property value holds a line break: an org
+    /// property drawer holds one line, and the rest of the value would land in
+    /// the file as headings and drawers of its own.
+    fn refuse_multi_line_property(
+        entity_name: &EntityName,
+        op_name: &str,
+        params: &StorageEntity,
+    ) -> Result<()> {
+        if entity_name.as_str() != "block" {
+            return Ok(());
+        }
+        let text = |key: &str| params.get(key).and_then(|v| v.as_string());
+        let written: Vec<(&str, &str)> = match op_name {
+            "set_field" => text("field").zip(text("value")).into_iter().collect(),
+            "create" | "update" => params
+                .iter()
+                .filter_map(|(k, v)| Some((k.as_ref(), v.as_string()?)))
+                .collect(),
+            _ => return Ok(()),
+        };
+        for (key, value) in written {
+            let is_property = matches!(
+                holon_api::BlockWriteField::parse(key),
+                Ok(holon_api::BlockWriteField::Property(_))
+            );
+            if is_property && !key.starts_with('_') && value.contains(['\n', '\r']) {
+                let id = text("id").unwrap_or("<no id>");
+                bail!(
+                    "{op_name}: refusing property `{key}` on block {id}: its value {value:?} \
+                     holds a line break, and an org property drawer holds one line"
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// Whether a content write left block `id` a `?` question with no text,
     /// which the same gesture then demotes.
     async fn leaves_empty_question(&self, id: &str, content: &str) -> Result<bool> {
@@ -3034,6 +3070,7 @@ impl OperationEngine for DispatchingOperationEngine {
         let params = self.stamp_provenance(op_name, params, &origin)?;
         self.refuse_empty_question(entity_name, op_name, &params)
             .await?;
+        Self::refuse_multi_line_property(entity_name, op_name, &params)?;
 
         // Keyword convergence (ruling 2026-08-10): a write that would leave the
         // block as keyword-headed plain text is rewritten to the task it

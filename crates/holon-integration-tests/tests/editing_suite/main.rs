@@ -4,6 +4,7 @@ mod cycle_task_state_cold_boot_reingest;
 mod editor_pure_pbt;
 mod empty_question_loro_arm;
 mod merge_blocks_pbt;
+mod multiline_property_write_boundary;
 mod schedule_boundary_observables;
 mod split_block_content_pbt;
 mod split_undo_redo_reconcile;

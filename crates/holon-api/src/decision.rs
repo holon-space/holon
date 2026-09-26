@@ -82,6 +82,46 @@ impl fmt::Display for OptionKey {
     }
 }
 
+/// Free text with at least one non-whitespace character: a ruling's note or
+/// an answer's rationale.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Prose(String);
+
+impl Prose {
+    pub fn parse(raw: &str, site: TextSite) -> Result<Self, DecisionError> {
+        if raw.trim().is_empty() {
+            return Err(DecisionError::BlankText(site));
+        }
+        Ok(Prose(raw.to_string()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for Prose {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Where a [`Prose`] sits in a decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextSite {
+    Note,
+    Rationale,
+}
+
+impl fmt::Display for TextSite {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            TextSite::Note => "note",
+            TextSite::Rationale => "rationale",
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecisionOption {
     pub key: OptionKey,
@@ -419,7 +459,7 @@ pub struct Answer {
     by: Answerer,
     at: DateTime<Utc>,
     body: AnswerBody,
-    rationale: Option<String>,
+    rationale: Option<Prose>,
 }
 
 impl Answer {
@@ -435,8 +475,8 @@ impl Answer {
         &self.body
     }
 
-    pub fn rationale(&self) -> Option<&str> {
-        self.rationale.as_deref()
+    pub fn rationale(&self) -> Option<&Prose> {
+        self.rationale.as_ref()
     }
 }
 
@@ -452,7 +492,7 @@ pub struct Ruling {
     chosen: Selection,
     decider: Decider,
     at: DateTime<Utc>,
-    note: Option<String>,
+    note: Option<Prose>,
 }
 
 impl Ruling {
@@ -468,8 +508,8 @@ impl Ruling {
         self.at
     }
 
-    pub fn note(&self) -> Option<&str> {
-        self.note.as_deref()
+    pub fn note(&self) -> Option<&Prose> {
+        self.note.as_ref()
     }
 }
 
@@ -552,13 +592,13 @@ pub enum Command {
     Answer {
         by: Answerer,
         body: AnswerInput<OptionKey>,
-        rationale: Option<String>,
+        rationale: Option<Prose>,
     },
     /// Legal on `Open` and `Decided`.
     Decide {
         chosen: Vec<OptionKey>,
         decider: Answerer,
-        note: Option<String>,
+        note: Option<Prose>,
     },
     /// Legal on `Open` only; a ruling is reversed by deciding again.
     Withdraw { by: Answerer },
@@ -687,6 +727,8 @@ pub enum DecisionError {
     DeciderNotAllowed(Decider),
     #[error("answerer {0:?} is not person:<name>, agent:<name> or model:<name>")]
     MalformedAnswerer(String),
+    #[error("a {0} holds no text")]
+    BlankText(TextSite),
     #[error("time {raw:?} is not RFC 3339: {reason}")]
     MalformedTime { raw: String, reason: String },
     #[error("a change made for a state of {0} other than the one it is committed to")]
@@ -712,7 +754,7 @@ impl DecisionError {
             | ProbabilitySumAboveOne(_) => Rule::Dc5,
             MalformedRef { .. } | SupersedesItself(_) => Rule::Dc7,
             ModelCannotDecide(_) | DeciderNotAllowed(_) => Rule::Dc8,
-            MalformedAnswerer(_) | MalformedTime { .. } => Rule::Syntax,
+            MalformedAnswerer(_) | MalformedTime { .. } | BlankText(_) => Rule::Syntax,
             StaleChange(_) => Rule::Stale,
         }
     }
@@ -729,6 +771,10 @@ fn parse_time(raw: &str) -> Result<DateTime<Utc>, DecisionError> {
 
 fn format_time(t: &DateTime<Utc>) -> String {
     t.to_rfc3339_opts(SecondsFormat::AutoSi, true)
+}
+
+fn prose(raw: Option<&str>, site: TextSite) -> Result<Option<Prose>, DecisionError> {
+    raw.map(|r| Prose::parse(r, site)).transpose()
 }
 
 fn parse_status(
@@ -752,7 +798,7 @@ fn parse_status(
                 chosen,
                 decider,
                 at,
-                note: r.note.clone(),
+                note: prose(r.note.as_deref(), TextSite::Note)?,
             }))
         }
         (None, Some(w)) => {
@@ -795,7 +841,7 @@ impl Decision {
                     by: Answerer::parse(&a.by)?,
                     at: parse_time(&a.at)?,
                     body: AnswerBody::parse(&a.body, &options, choose)?,
-                    rationale: a.rationale.clone(),
+                    rationale: prose(a.rationale.as_deref(), TextSite::Rationale)?,
                 })
             })
             .collect::<Result<_, DecisionError>>()?;
@@ -906,7 +952,7 @@ impl Decision {
                     chosen: Some(r.chosen.to_raw()),
                     decider: Some(r.decider.to_string()),
                     at: Some(format_time(&r.at)),
-                    note: r.note.clone(),
+                    note: r.note.as_ref().map(ToString::to_string),
                 }),
                 None,
             ),
@@ -941,7 +987,7 @@ impl Decision {
                     by: a.by.to_string(),
                     at: format_time(&a.at),
                     body: a.body.to_raw(),
-                    rationale: a.rationale.clone(),
+                    rationale: a.rationale.as_ref().map(ToString::to_string),
                 })
                 .collect(),
             refused: self.refused.clone(),

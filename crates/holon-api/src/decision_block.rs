@@ -60,11 +60,14 @@ const CATEGORICAL: &str = "p";
 /// Independent per-option probabilities, written like [`CATEGORICAL`].
 const MARGINAL: &str = "marginal";
 const ANSWER_BODY_KEYS: &[&str] = &[PICK, CATEGORICAL, MARGINAL];
+const ANSWER_KEYS: &[&str] = &[ANSWERED, PICK, CATEGORICAL, MARGINAL];
 
 /// A key set with no members. An empty property value is not stored at all.
 const EMPTY_SET: &str = "()";
 
 const ANSWER_TITLE: &str = "Answer";
+/// Held in the answer block's body, below its title.
+const RATIONALE: &str = "rationale";
 
 /// B4: the task keyword of a decision block is its status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,6 +141,17 @@ pub enum BlockDecisionError {
         key: &'static str,
         value: String,
     },
+    #[error("B6: option child {child} carries answer keys {keys:?}")]
+    AnswerKeysOnOption {
+        child: EntityUri,
+        keys: Vec<&'static str>,
+    },
+    #[error("the block tree cannot hold the {field} {text:?}: {reason}")]
+    Unencodable {
+        field: &'static str,
+        text: String,
+        reason: &'static str,
+    },
     #[error("decision {0} does not live in the block tree")]
     ForeignHome(DecisionRef),
     #[error(transparent)]
@@ -194,7 +208,16 @@ pub fn read(decision: &Block, children: &[Block]) -> Result<DecisionDraft, Block
                     child: child.id.clone(),
                 });
             }
-            (Some(key), None) => options.push((key.to_string(), child.title())),
+            (Some(key), None) => {
+                let keys = answer_keys(child);
+                if !keys.is_empty() {
+                    return Err(BlockDecisionError::AnswerKeysOnOption {
+                        child: child.id.clone(),
+                        keys,
+                    });
+                }
+                options.push((key.to_string(), child.title()))
+            }
             (None, Some(by)) => match read_answer(child, by) {
                 Ok(answer) => answers.push(answer),
                 Err(reason) => refused.push(RefusedInput {
@@ -202,7 +225,15 @@ pub fn read(decision: &Block, children: &[Block]) -> Result<DecisionDraft, Block
                     reason,
                 }),
             },
-            (None, None) => {}
+            (None, None) => {
+                let keys = answer_keys(child);
+                if !keys.is_empty() {
+                    refused.push(RefusedInput {
+                        item: child.id.to_string(),
+                        reason: format!("carries answer keys {keys:?} but no `{ANSWERER}`"),
+                    });
+                }
+            }
         }
     }
 
@@ -255,8 +286,8 @@ pub fn ask_ops(
     }
     match decision.status() {
         Status::Open => {}
-        Status::Decided(r) => props.extend(ruling_props(r)),
-        Status::Withdrawn { by, at } => props.extend(withdrawal_props(&by.to_string(), at)),
+        Status::Decided(r) => props.extend(ruling_props(r)?),
+        Status::Withdrawn { by, at } => props.extend(withdrawal_props(&by.to_string(), at)?),
     }
     props.push((
         TASK_STATE,
@@ -264,7 +295,8 @@ pub fn ask_ops(
     ));
     props.push(("tags", Value::Array(vec![text_value(DECISION_TAG)])));
 
-    let mut ops = vec![create(&id, parent, after, decision.question(), props)];
+    let question = headline("question", decision.question())?;
+    let mut ops = vec![create(&id, parent, after, question, props)];
     let mut last: Option<EntityUri> = None;
     for option in decision.options().iter() {
         let child = mint();
@@ -272,14 +304,14 @@ pub fn ask_ops(
             &child,
             &id,
             last.as_ref(),
-            &option.label,
+            headline("option label", &option.label)?,
             vec![(OPTION, text_value(option.key.as_str()))],
         ));
         last = Some(child);
     }
     for answer in decision.answers() {
         let child = mint();
-        ops.push(answer_create(&child, &id, last.as_ref(), answer));
+        ops.push(answer_create(&child, &id, last.as_ref(), answer)?);
         last = Some(child);
     }
     Ok(ops)
@@ -303,7 +335,7 @@ pub fn change_ops(
     let ops = match change.effect() {
         Effect::Answered(answer) => {
             let after = children.last().map(|c| &c.id);
-            vec![answer_create(&mint(), &id, after, answer)]
+            vec![answer_create(&mint(), &id, after, answer)?]
         }
         Effect::Decided { ruling, replaces } => {
             let mut ops = Vec::new();
@@ -315,7 +347,7 @@ pub fn change_ops(
                 ));
             }
             ops.extend(
-                ruling_props(ruling)
+                ruling_props(ruling)?
                     .into_iter()
                     .map(|(k, v)| set_field(&id, k, v)),
             );
@@ -331,7 +363,7 @@ pub fn change_ops(
                 text_value(Keyword::Withdrawn.as_str()),
             )];
             ops.extend(
-                withdrawal_props(&by.to_string(), at)
+                withdrawal_props(&by.to_string(), at)?
                     .into_iter()
                     .map(|(k, v)| set_field(&id, k, v)),
             );
@@ -351,6 +383,14 @@ fn text<'b>(block: &'b Block, key: &'static str) -> Result<Option<&'b str>, Bloc
             value: format!("{other:?}"),
         }),
     }
+}
+
+fn answer_keys(child: &Block) -> Vec<&'static str> {
+    ANSWER_KEYS
+        .iter()
+        .copied()
+        .filter(|k| child.properties.contains_key(*k))
+        .collect()
 }
 
 /// An answer child the core can read, or why it cannot.
@@ -459,20 +499,101 @@ fn text_value(s: impl Into<String>) -> Value {
     Value::String(s.into())
 }
 
-fn ruling_props(r: &Ruling) -> Vec<(&'static str, Value)> {
+type Props = Vec<(&'static str, Value)>;
+
+fn ruling_props(r: &Ruling) -> Result<Props, BlockDecisionError> {
     let mut props = vec![
         (CHOSEN, key_set(r.chosen().keys())),
-        (DECIDER, text_value(r.decider().to_string())),
+        (DECIDER, one_line(DECIDER, &r.decider().to_string())?),
         (DECIDED, time(&r.at())),
     ];
     if let Some(note) = r.note() {
-        props.push((NOTE, text_value(note)));
+        props.push((NOTE, one_line(NOTE, note.as_str())?));
     }
-    props
+    Ok(props)
 }
 
-fn withdrawal_props(by: &str, at: &DateTime<Utc>) -> Vec<(&'static str, Value)> {
-    vec![(WITHDRAWER, text_value(by)), (WITHDRAWN, time(at))]
+fn withdrawal_props(by: &str, at: &DateTime<Utc>) -> Result<Props, BlockDecisionError> {
+    Ok(vec![
+        (WITHDRAWER, one_line(WITHDRAWER, by)?),
+        (WITHDRAWN, time(at)),
+    ])
+}
+
+fn unencodable(field: &'static str, text: &str, reason: &'static str) -> BlockDecisionError {
+    BlockDecisionError::Unencodable {
+        field,
+        text: text.to_string(),
+        reason,
+    }
+}
+
+/// A property value: org keeps one trimmed, non-empty line.
+fn one_line(field: &'static str, text: &str) -> Result<Value, BlockDecisionError> {
+    if text.contains(['\n', '\r']) {
+        return Err(unencodable(field, text, "a property value is one line"));
+    }
+    if text.trim().is_empty() {
+        return Err(unencodable(
+            field,
+            text,
+            "an empty property value is not stored",
+        ));
+    }
+    if text.trim() != text {
+        return Err(unencodable(field, text, "org trims a property value"));
+    }
+    Ok(text_value(text))
+}
+
+/// A headline title: one line, and org rewrites a link in it into marks.
+fn headline<'t>(field: &'static str, text: &'t str) -> Result<&'t str, BlockDecisionError> {
+    one_line(field, text)?;
+    if text.contains("[[") {
+        return Err(unencodable(field, text, "org stores a link as marks"));
+    }
+    let last_word = text.rsplit(' ').next().unwrap_or(text);
+    if last_word.len() > 1 && last_word.starts_with(':') && last_word.ends_with(':') {
+        return Err(unencodable(
+            field,
+            text,
+            "org reads a trailing :word: as tags",
+        ));
+    }
+    Ok(text)
+}
+
+/// Text org keeps verbatim as the lines of a block body.
+fn body(field: &'static str, text: &str) -> Result<(), BlockDecisionError> {
+    let refuse = |reason| Err(unencodable(field, text, reason));
+    let lines: Vec<&str> = text.split('\n').collect();
+    if text.contains('\r') {
+        return refuse("org has no carriage return");
+    }
+    if lines.first().is_some_and(|l| l.trim().is_empty())
+        || lines.last().is_some_and(|l| l.trim().is_empty())
+    {
+        return refuse("org drops blank lines at the edges of a body");
+    }
+    for line in lines {
+        if line.trim_end() != line {
+            return refuse("org trims the end of a body line");
+        }
+        if line.starts_with('*') && line.trim_start_matches('*').starts_with(' ') {
+            return refuse("a line of stars and a space starts a heading");
+        }
+        if line.starts_with('#') {
+            return refuse("a line that starts with # is an org keyword or comment");
+        }
+        let planning = ["SCHEDULED:", "DEADLINE:", "CLOSED:"];
+        if planning.iter().any(|p| line.trim_start().starts_with(p)) {
+            return refuse("a planning line belongs to the heading");
+        }
+        if line.contains("[[") {
+            return refuse("org stores a link as marks");
+        }
+    }
+    Ok(())
 }
 
 fn answer_create(
@@ -480,27 +601,30 @@ fn answer_create(
     decision: &EntityUri,
     after: Option<&EntityUri>,
     answer: &Answer,
-) -> Operation {
-    let body = match answer.body() {
+) -> Result<Operation, BlockDecisionError> {
+    let answer_body = match answer.body() {
         AnswerBody::Pick(s) => (PICK, key_set(s.keys())),
         AnswerBody::Categorical(d) => (CATEGORICAL, distribution(d)),
         AnswerBody::Marginals(d) => (MARGINAL, distribution(d)),
     };
     let content = match answer.rationale() {
-        Some(r) => format!("{ANSWER_TITLE}\n{r}"),
+        Some(r) => {
+            body(RATIONALE, r.as_str())?;
+            format!("{ANSWER_TITLE}\n{r}")
+        }
         None => ANSWER_TITLE.to_string(),
     };
-    create(
+    Ok(create(
         id,
         decision,
         after,
         &content,
         vec![
-            (ANSWERER, text_value(answer.by().to_string())),
+            (ANSWERER, one_line(ANSWERER, &answer.by().to_string())?),
             (ANSWERED, time(&answer.at())),
-            body,
+            answer_body,
         ],
-    )
+    ))
 }
 
 fn create(

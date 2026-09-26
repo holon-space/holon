@@ -21,12 +21,14 @@ use holon_api::decision::DecisionRef;
 use holon_api::decision::DraftQuestion;
 use holon_api::decision::Effect;
 use holon_api::decision::OptionKey;
+use holon_api::decision::Prose;
 use holon_api::decision::RawAnswer;
 use holon_api::decision::RawRuling;
 use holon_api::decision::RawWithdrawal;
 use holon_api::decision::RefusedInput;
 use holon_api::decision::Rule;
 use holon_api::decision::Status;
+use holon_api::decision::TextSite;
 use proptest::prelude::*;
 use proptest::test_runner::TestCaseError;
 use proptest::test_runner::TestRunner;
@@ -192,7 +194,7 @@ fn raw_draft() -> impl Strategy<Value = DecisionDraft> {
         prop::option::weighted(0.9, raw_keys()),
         prop::option::weighted(0.9, raw_answerer()),
         prop::option::weighted(0.9, raw_time()),
-        prop::option::of("[a-z ]{0,8}"),
+        prop::option::of("[a-z \n]{0,8}"),
     )
         .prop_map(|(chosen, decider, at, note)| RawRuling {
             chosen,
@@ -209,7 +211,7 @@ fn raw_draft() -> impl Strategy<Value = DecisionDraft> {
         raw_answerer(),
         raw_time(),
         answer_input(key_pool()),
-        prop::option::of("[a-z ]{0,8}"),
+        prop::option::of("[a-z \n]{0,8}"),
     )
         .prop_map(|(by, at, body, rationale)| RawAnswer {
             by,
@@ -337,6 +339,10 @@ fn question_violations(id: &str, q: &DraftQuestion) -> (BTreeSet<Rule>, Option<(
     (v, choose)
 }
 
+fn blank(text: &str) -> bool {
+    text.trim().is_empty()
+}
+
 fn draft_violations(d: &DecisionDraft) -> BTreeSet<Rule> {
     let (mut v, choose) = question_violations(d.id.uri().as_str(), &d.question);
     let options: Vec<String> = d.question.options.iter().map(|(k, _)| k.clone()).collect();
@@ -362,6 +368,9 @@ fn draft_violations(d: &DecisionDraft) -> BTreeSet<Rule> {
         if let Some(chosen) = &r.chosen {
             selection_violations(chosen, &options, choose, &mut v);
         }
+        if r.note.as_deref().is_some_and(blank) {
+            v.insert(Rule::Syntax);
+        }
     }
     if let Some(w) = &d.withdrawn {
         if w.by.is_none() || w.at.is_none() {
@@ -374,7 +383,10 @@ fn draft_violations(d: &DecisionDraft) -> BTreeSet<Rule> {
         }
     }
     for a in &d.answers {
-        if answerer_kind(&a.by).is_none() || !time_ok(&a.at) {
+        if answerer_kind(&a.by).is_none()
+            || !time_ok(&a.at)
+            || a.rationale.as_deref().is_some_and(blank)
+        {
             v.insert(Rule::Syntax);
         }
         body_violations(&a.body, &options, choose, &mut v);
@@ -443,7 +455,7 @@ fn assert_matches_draft(d: &Decision, draft: &DecisionDraft) {
             );
             assert_eq!(Some(r.decider().to_string()), raw.decider);
             assert_eq!(r.at(), instant(raw.at.as_deref().unwrap()));
-            assert_eq!(r.note(), raw.note.as_deref());
+            assert_eq!(r.note().map(Prose::as_str), raw.note.as_deref());
         }
         (Status::Withdrawn { by, at }, None, Some(raw)) => {
             assert_eq!(Some(by.to_string()), raw.by);
@@ -455,7 +467,7 @@ fn assert_matches_draft(d: &Decision, draft: &DecisionDraft) {
     for (a, raw) in d.answers().iter().zip(&draft.answers) {
         assert_eq!(a.by().to_string(), raw.by);
         assert_eq!(a.at(), instant(&raw.at));
-        assert_eq!(a.rationale(), raw.rationale.as_deref());
+        assert_eq!(a.rationale().map(Prose::as_str), raw.rationale.as_deref());
         match (a.body(), &raw.body) {
             (AnswerBody::Pick(s), AnswerInput::Pick(k)) => {
                 assert_eq!(selection_strings(s.keys()), k.iter().cloned().collect())
@@ -655,6 +667,12 @@ fn legal_question() -> impl Strategy<Value = DraftQuestion> {
         })
 }
 
+fn prose(site: TextSite) -> impl Strategy<Value = Prose> {
+    "[a-z \n]{1,8}".prop_filter_map("blank text is no prose", move |s| {
+        Prose::parse(&s, site).ok()
+    })
+}
+
 fn command() -> impl Strategy<Value = Command> {
     let answerer = prop::sample::select(
         ANSWERERS
@@ -666,9 +684,9 @@ fn command() -> impl Strategy<Value = Command> {
     .prop_map(|s| Answerer::parse(s).expect("ANSWERERS marks it well-formed"));
     let key = key_pool().prop_map(|k| OptionKey::parse(&k).expect("pool keys are well-formed"));
     prop_oneof![
-        3 => (answerer.clone(), answer_input(key.clone()), prop::option::of("[a-z ]{0,8}"))
+        3 => (answerer.clone(), answer_input(key.clone()), prop::option::of(prose(TextSite::Rationale)))
             .prop_map(|(by, body, rationale)| Command::Answer { by, body, rationale }),
-        3 => (prop::collection::vec(key, 0..4), answerer.clone(), prop::option::of("[a-z ]{0,8}"))
+        3 => (prop::collection::vec(key, 0..4), answerer.clone(), prop::option::of(prose(TextSite::Note)))
             .prop_map(|(chosen, decider, note)| Command::Decide { chosen, decider, note }),
         1 => answerer.prop_map(|by| Command::Withdraw { by }),
     ]
@@ -753,14 +771,14 @@ fn command_sequences_match_the_model() {
                             (Effect::Answered(a), Command::Answer { by, rationale, .. }, _) => {
                                 prop_assert_eq!(a.by(), by);
                                 prop_assert_eq!(a.at(), now);
-                                prop_assert_eq!(a.rationale(), rationale.as_deref());
+                                prop_assert_eq!(a.rationale(), rationale.as_ref());
                             }
                             (
                                 Effect::Decided { ruling, replaces },
                                 Command::Decide { note, .. },
                                 prior,
                             ) => {
-                                prop_assert_eq!(ruling.note(), note.as_deref());
+                                prop_assert_eq!(ruling.note(), note.as_ref());
                                 let replaced = replaces.as_ref().map(|r| ModelStatus::Decided {
                                     chosen: selection_strings(r.chosen().keys()),
                                     decider: r.decider().to_string(),
