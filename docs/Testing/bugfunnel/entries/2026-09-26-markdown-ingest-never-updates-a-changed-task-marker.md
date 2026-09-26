@@ -3,7 +3,7 @@ id: 2026-09-26-markdown-ingest-never-updates-a-changed-task-marker
 date: 2026-09-26
 gap: COVERAGE
 secondary: null
-status: OPEN
+status: FIXED
 summary: >-
   On the LogSeq and Obsidian legs, removing or changing a block's task marker
   in the file leaves the stored task_state unchanged: unchecking an Obsidian
@@ -45,11 +45,21 @@ Two independent causes, both live:
 
 ## Missing piece
 No keystone transition or hand-authored case edits a task marker in an
-existing LogSeq or Obsidian file.
+existing LogSeq or Obsidian file. The keystone cannot drive Markdown vaults at
+all: the markdown adapters are not in the production format registry
+(`crates/holon-app/src/wiring.rs`, D56.a: both claim `md`, and the registry
+refuses that until a vault-flavor discriminator exists). The bug is latent for
+the same reason.
 
 ## Remedy
-OPEN, routed to another lane. The fix needs both: `content_differs` must
-compare the task state, and the params builder must clear `task_state` and
-`task_state_category` when `previous` had one and the file no longer does, as
-`crates/holon-orgmode/src/block_params.rs` does. Red first with a case per
-adapter for a removed marker and for `- [x]` to `- [ ]`.
+FIXED. The markdown `content_differs` (LogSeq and Obsidian) now
+compares `task_state`, so a changed or removed marker produces an update op.
+The markdown `build_block_params` now reads `previous` and emits
+`Value::REMOVED` for `task_state` and `task_state_category` when the file
+dropped the marker, the same as the org leg's eraser. Pinned by
+`crates/holon-markdown/tests/task_marker_reingest.rs` (5 bug shapes + 3
+negatives). Teeth: removing either fix turns the matching tests red.
+Coverage gap: the keystone cannot drive Markdown vaults, because the adapters
+are not in the production registry (D56.a). The same gate misses other
+planning fields and properties:
+`2026-09-26-markdown-ingest-never-updates-planning-or-property-changes`.
