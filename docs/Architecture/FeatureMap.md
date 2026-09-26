@@ -303,19 +303,25 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `iroh-nat-traversal-address-set`
 - `lib-type-chars-home-profile-derived`
 - `loro-backend-change-count`
+- `loro-owning-page-types-share-removal`
+- `metamorphic-undo-facet-unchanged`
+- `metamorphic-undo-snapshot-missing`
 - `opentab-sql-reads-budget`
 - `pinblock-lazy-day-page-shell`
 - `proptest-sm-shrink-seen-transitions`
+- `quick-open-vault-scale-timeout`
 - `read-model-never-seeded-sql-rows`
 - `ref-diverge-content-ref-empty`
 - `ref-diverge-content-text-drift`
 - `ref-diverge-parent-reparent`
+- `settle-budget-reboot-under-load`
 - `shopping-mapping-cost-slo`
 - `text-undo-manager-load`
 - `toggle-state-sql-read-repeat-budget`
 - `tui-inline-row-mount-unsettled-frame`
 - `turso-block-query-source-round-trip`
 - `typechars-sql-reads-budget`
+- `undo-prod-session-stale-dropped`
 - `vault-scale-main-panel-delivery`
 - `windowed-splitblock-no-editable-surface`
 
