@@ -385,11 +385,10 @@ impl BlockReader for CacheBlockReader {
                 anyhow::anyhow!("[CacheBlockReader] file.id={id:?} not a valid EntityUri: {e}")
             })?;
             let document_id = match row.get("document_id") {
-                Some(holon_api::Value::String(s)) if !s.is_empty() => {
-                    // ALLOW(entity_uri_from_raw): `file.document_id` is stored
-                    // bare (a UUID), so `from_raw` gives it its scheme back.
-                    Some(holon_api::EntityUri::from_raw(s))
-                }
+                Some(holon_api::Value::String(s)) if !s.is_empty() => Some(
+                    File::parse_document_id(s)
+                        .map_err(|e| anyhow::anyhow!("[CacheBlockReader] file {id}: {e:#}"))?,
+                ),
                 _ => None,
             };
             // A malformed membership must not read as "this file has none":
@@ -458,10 +457,8 @@ impl BlockReader for CacheBlockReader {
         parent_dir: &str,
         projection: &holon_filesystem::FileProjection,
     ) -> anyhow::Result<()> {
-        // `file.document_id` is stored bare, matching how
-        // `load_file_projections` reads it back.
         let document_id = match &projection.document_id {
-            Some(uri) => holon_api::Value::String(uri.id().to_string()),
+            Some(uri) => holon_api::Value::String(File::document_id_text(uri)?),
             None => holon_api::Value::Null,
         };
         // One statement for hash AND membership: the next boot's fast path

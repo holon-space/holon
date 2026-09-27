@@ -264,3 +264,53 @@ async fn the_tracked_re_render_writes_the_other_files_when_one_render_is_refused
     );
     assert_disclosed(&cap);
 }
+
+#[tokio::test]
+async fn the_tracked_re_render_writes_the_other_files_when_one_page_id_on_disk_is_refused() {
+    let cap = ErrorCapture::default();
+    let _guard = tracing::subscriber::set_default(tracing_subscriber::registry().with(cap.clone()));
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let store = Store::default();
+    store.page("a-bad", "Bad Page", EntityUri::block("bad-kid"), "bad body");
+    for n in 0..4 {
+        store.page(
+            &format!("good-{n}"),
+            &format!("Good Page {n}"),
+            EntityUri::block(&format!("good-kid-{n}")),
+            "good body",
+        );
+    }
+    let mut sync = controller(&store, &root);
+    sync.materialize_missing_page_files()
+        .await
+        .unwrap_or_else(|e| panic!("{e:#}"));
+
+    let bad_path = root.join("Bad Page.org");
+    let bad_on_disk = "#+ID: block:a-bad\n* bad body\n";
+    std::fs::write(&bad_path, bad_on_disk).unwrap();
+    for n in 0..4 {
+        store.page(
+            &format!("good-{n}"),
+            &format!("Good Page {n}"),
+            EntityUri::block(&format!("good-kid-{n}")),
+            "good body edited",
+        );
+    }
+    sync.re_render_all_tracked(&HashSet::new())
+        .await
+        .unwrap_or_else(|e| panic!("one refused page id aborted the re-render: {e:#}"));
+
+    for n in 0..4 {
+        let good = std::fs::read_to_string(root.join(format!("Good Page {n}.org"))).unwrap();
+        assert!(good.contains("good body edited"), "Good Page {n}: {good}");
+    }
+    assert_eq!(std::fs::read_to_string(&bad_path).unwrap(), bad_on_disk);
+    let errors = cap.0.lock().unwrap().clone();
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.contains("block:a-bad") && e.contains(&bad_path.display().to_string())),
+        "the refused file must be disclosed with its id and path; captured: {errors:?}"
+    );
+}

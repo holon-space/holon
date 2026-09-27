@@ -31,6 +31,15 @@ pub const TASK_MARKERS: &[&str] = &[
 ];
 const DONE_MARKERS: &[&str] = &["DONE", "CANCELED", "CANCELLED"];
 
+/// The block id a file declares (`carrier` names where), refused by name
+/// unless an org id line could carry it as the same id: a declared block can
+/// be moved into an org file.
+pub fn declared_block_id(carrier: &str, value: &str) -> anyhow::Result<EntityUri> {
+    let id = holon_org_format::DrawerId::parse(value)
+        .map_err(|e| anyhow::anyhow!("{carrier} declares an unusable id: {e}"))?;
+    Ok(EntityUri::block(id.as_str()))
+}
+
 /// Build a text/rich block from raw inline content, extracting marks, tags,
 /// a leading task marker, and a `[#A]` priority. `content` is the block body
 /// (already stripped of the bullet / heading prefix by the caller).

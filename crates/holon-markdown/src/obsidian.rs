@@ -9,6 +9,7 @@
 
 use std::path::Path;
 
+use anyhow::Context;
 use anyhow::Result;
 use holon_api::EntityUri;
 use holon_api::StorageEntity;
@@ -17,6 +18,7 @@ use holon_core::file_format::FileFormatAdapter;
 use holon_core::file_format::FileFormatParseResult;
 use holon_core::file_format::WriteTier;
 
+use crate::build::declared_block_id;
 use crate::build::opaque_block;
 use crate::build::text_block;
 use crate::params::build_block_params;
@@ -200,13 +202,17 @@ impl FileFormatAdapter for ObsidianMarkdownAdapter {
         let mut heading_stack: Vec<(usize, EntityUri)> = Vec::new();
         let mut i = 0;
 
-        let mint = |seq: &mut usize, file_id: &EntityUri, explicit: Option<String>| -> EntityUri {
+        let mint = |seq: &mut usize,
+                    file_id: &EntityUri,
+                    explicit: Option<String>|
+         -> anyhow::Result<EntityUri> {
             let id = match explicit {
-                Some(e) => EntityUri::block(&e),
+                Some(e) => declared_block_id("a `^` block anchor", &e)
+                    .with_context(|| path.display().to_string())?,
                 None => EntityUri::block(&format!("{}::b::{}", file_id.id(), seq)),
             };
             *seq += 1;
-            id
+            Ok(id)
         };
 
         while i < body.len() {
@@ -232,7 +238,7 @@ impl FileFormatAdapter for ObsidianMarkdownAdapter {
                     .last()
                     .map(|(_, id)| id.clone())
                     .unwrap_or_else(|| file_id.clone());
-                let id = mint(&mut seq, &file_id, anchor);
+                let id = mint(&mut seq, &file_id, anchor)?;
                 let block = text_block(id.clone(), parent, &text);
                 heading_stack.push((level, id));
                 blocks.push(block);
@@ -253,7 +259,7 @@ impl FileFormatAdapter for ObsidianMarkdownAdapter {
                     src.push(body[j].to_string());
                     j += 1;
                 }
-                let id = mint(&mut seq, &file_id, None);
+                let id = mint(&mut seq, &file_id, None)?;
                 blocks.push(opaque_block(id, parent, "callout", &src.join("\n")));
                 i = j;
                 continue;
@@ -273,7 +279,7 @@ impl FileFormatAdapter for ObsidianMarkdownAdapter {
                         j += 1;
                     }
                 }
-                let id = mint(&mut seq, &file_id, None);
+                let id = mint(&mut seq, &file_id, None)?;
                 blocks.push(opaque_block(id, parent, "comment", &src.join("\n")));
                 i = j + 1;
                 continue;
@@ -281,7 +287,7 @@ impl FileFormatAdapter for ObsidianMarkdownAdapter {
 
             // --- Embed `![[...]]` on its own line → opaque
             if trimmed.starts_with("![[") {
-                let id = mint(&mut seq, &file_id, None);
+                let id = mint(&mut seq, &file_id, None)?;
                 blocks.push(opaque_block(id, parent, "embed", trimmed));
                 i += 1;
                 continue;
@@ -291,7 +297,7 @@ impl FileFormatAdapter for ObsidianMarkdownAdapter {
             if let Some(rest) = list_item_body(trimmed) {
                 let (text, task) = checkbox_state(rest);
                 let (text, anchor) = split_block_anchor(&text);
-                let id = mint(&mut seq, &file_id, anchor);
+                let id = mint(&mut seq, &file_id, anchor)?;
                 let mut block = text_block(id, parent, &prefix_task(task, &text));
                 // checkbox already encoded as TODO/DONE marker in prefix_task
                 let _ = &mut block;
@@ -311,7 +317,7 @@ impl FileFormatAdapter for ObsidianMarkdownAdapter {
                     }
                     j += 1;
                 }
-                let id = mint(&mut seq, &file_id, None);
+                let id = mint(&mut seq, &file_id, None)?;
                 blocks.push(opaque_block(id, parent, "code", &src.join("\n")));
                 i = j + 1;
                 continue;
@@ -336,7 +342,7 @@ impl FileFormatAdapter for ObsidianMarkdownAdapter {
             }
             let joined = para.join("\n");
             let (text, anchor) = split_block_anchor(joined.trim_end());
-            let id = mint(&mut seq, &file_id, anchor);
+            let id = mint(&mut seq, &file_id, anchor)?;
             blocks.push(text_block(id, parent, &text));
             i = j;
         }

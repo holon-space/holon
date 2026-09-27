@@ -293,6 +293,7 @@ const IDENTITY_PREFLIGHT_SITE: &str = "identity-file-preflight";
 const PATH_DERIVATION_SITE: &str = "page-file-path-derivation";
 const IMAGE_PATH_SITE: &str = "image-file-path-derivation";
 const BATCH_RENDER_SITE: &str = "batch-pass-render";
+const BATCH_READ_SITE: &str = "batch-pass-read";
 /// Identity-refusal disclosure conditions, kept apart so one does not mute
 /// the other for the same file.
 const DUPLICATE_ID_SITE: &str = "duplicate-doc-id";
@@ -6179,7 +6180,10 @@ impl FileSyncController {
                      re-render",
                     path.display()
                 );
-                let _ = self.on_file_changed(&path).await?;
+                if let Err(e) = self.on_file_changed(&path).await {
+                    self.disclose_batch_read_failure(&path, &e, "re_render_all_tracked");
+                    continue;
+                }
             }
 
             // A read-only-tier format is not a re-render candidate: its file is
@@ -6220,11 +6224,17 @@ impl FileSyncController {
             // minted a placeholder page with the file's title, so it can pick the
             // wrong page and re-mint the file's `#+ID` on write-back (data loss).
             // The disk bytes carry the id, so prefer it whenever present.
-            let doc = match self
-                .adapter(&path)?
-                .doc_id_from_content(&disk_content)
-                .with_context(|| format!("[re_render_all_tracked] {}", path.display()))?
-            {
+            let declared = match self.adapter(&path)?.doc_id_from_content(&disk_content) {
+                Ok(declared) => {
+                    self.clear_failure(&batch_file_key(&path), BATCH_READ_SITE);
+                    declared
+                }
+                Err(e) => {
+                    self.disclose_batch_read_failure(&path, &e, "re_render_all_tracked");
+                    continue;
+                }
+            };
+            let doc = match declared {
                 Some(id) => match self.doc_manager.get_by_id(&id).await {
                     Ok(Some(doc)) => Some(doc),
                     Ok(None) => None,
@@ -7724,6 +7734,30 @@ impl FileSyncController {
         }
     }
 
+    /// Disclose that a batch pass could not read `path` as a document, ONCE per
+    /// file until it reads again: the pass leaves that file untouched and goes
+    /// on.
+    fn disclose_batch_read_failure(&self, path: &Path, err: &anyhow::Error, pass: &str) {
+        if self.first_failure_for_doc(&batch_file_key(path), BATCH_READ_SITE) {
+            tracing::error!(
+                path = %path.display(),
+                error = %format!("{err:#}"),
+                pass,
+                "[FileSyncController] could not read this file as a document — it is left \
+                 untouched on disk; every other file of the pass is still written. Repeats \
+                 for this file log at DEBUG until it reads again.",
+            );
+        } else {
+            tracing::debug!(
+                path = %path.display(),
+                error = %format!("{err:#}"),
+                pass,
+                "[FileSyncController] file still does not read as a document (already \
+                 disclosed once at ERROR)",
+            );
+        }
+    }
+
     /// Record `path` as read-only for write-back and emit the ONE loud ERROR
     /// (Fail Loud, Never Fake: disclose the degraded mode, then skip quietly).
     fn mark_readonly_writeback(
@@ -7742,6 +7776,11 @@ impl FileSyncController {
             );
         }
     }
+}
+
+/// The key a per-file batch disclosure is recorded under.
+fn batch_file_key(path: &Path) -> EntityUri {
+    EntityUri::file(&path.to_string_lossy())
 }
 
 /// True when an IO error is a persistent read-only-filesystem condition

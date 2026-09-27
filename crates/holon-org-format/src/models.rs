@@ -186,14 +186,10 @@ fn headline_drawer_id(block: &Block) -> Result<DrawerId, UnrepresentableId> {
     }
 }
 
-/// `id` as an org id line writes it. An id with another scheme than `block:`
-/// is checked whole, so it is refused rather than written without its scheme.
+/// `id` as an org id line writes it. The whole URI text is checked, so a
+/// scheme, fragment or query the line cannot carry is refused, not dropped.
 fn own_drawer_id(id: &EntityUri) -> Result<DrawerId, UnrepresentableId> {
-    if id.is_block() {
-        DrawerId::parse(id.id())
-    } else {
-        DrawerId::parse(id.as_str())
-    }
+    DrawerId::parse(id.as_str().strip_prefix("block:").unwrap_or(id.as_str()))
 }
 
 /// Format properties drawer from JSON, the `:ID:` line first.

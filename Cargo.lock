@@ -5971,6 +5971,7 @@ dependencies = [
  "holon-block-roundtrip-testing",
  "holon-core",
  "holon-filesystem",
+ "holon-markdown",
  "holon-org-format",
  "proptest 1.11.0",
  "proptest-state-machine",

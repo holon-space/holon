@@ -24,7 +24,7 @@ fn try_parse(source: &str) -> anyhow::Result<holon_org_format::ParseResult> {
 }
 
 fn page() -> Block {
-    try_parse("#+ID: p\n")
+    try_parse("#+ID: page-under-test\n")
         .unwrap_or_else(|e| panic!("{e:#}"))
         .document
 }
@@ -124,7 +124,76 @@ fn unwritable_id() -> impl Strategy<Value = String> {
     ]
 }
 
+/// Any text, weighted towards what a URI or an org line treats specially.
+fn any_text() -> impl Strategy<Value = String> {
+    prop_oneof![
+        "[ -~]{1,12}",
+        "[a-z0-9#?%&=+:/. -]{1,10}",
+        "(?s).{1,6}",
+        "[a-z]{1,4}[\\x00-\\x1f\\x7f\u{a0}\u{2028}][a-z]{0,4}",
+    ]
+}
+
+#[derive(Debug, Clone, Copy)]
+enum AnyCarrier {
+    Block(Carrier),
+    Page,
+}
+
+const ALL_CARRIERS: [AnyCarrier; 3] = [
+    AnyCarrier::Block(Carrier::Headline),
+    AnyCarrier::Block(Carrier::Source),
+    AnyCarrier::Page,
+];
+
+#[derive(Debug, Clone, PartialEq)]
+enum Written {
+    Refused,
+    Same,
+    Rewritten(String),
+}
+
+/// What `id` comes back as after render -> parse on `carrier`.
+fn write_and_read(carrier: AnyCarrier, id: &EntityUri) -> Written {
+    let mut doc = page();
+    let rendered = match carrier {
+        AnyCarrier::Block(c) => render(&doc, &[kid(c, id.clone(), &doc)]),
+        AnyCarrier::Page => {
+            doc.id = id.clone();
+            render(&doc, &[])
+        }
+    };
+    let Ok(file) = rendered else {
+        return Written::Refused;
+    };
+    let read = match try_parse(&file) {
+        Ok(parsed) => match carrier {
+            AnyCarrier::Block(_) => parsed.blocks.first().map(|b| b.id.clone()),
+            AnyCarrier::Page => Some(parsed.document.id),
+        },
+        Err(e) => return Written::Rewritten(format!("unreadable: {e:#}\n{file}")),
+    };
+    match read {
+        Some(read) if &read == id => Written::Same,
+        other => Written::Rewritten(format!("{other:?}\n{file}")),
+    }
+}
+
 proptest! {
+    #[test]
+    fn any_text_is_accepted_exactly_when_every_carrier_keeps_it(raw in any_text()) {
+        let accepted = DrawerId::parse(&raw).is_ok();
+        match EntityUri::parse(&format!("block:{raw}")) {
+            Err(_) => prop_assert!(!accepted, "{raw:?} forms no block URI but was accepted"),
+            Ok(id) => {
+                let expected = if accepted { Written::Same } else { Written::Refused };
+                for carrier in ALL_CARRIERS {
+                    prop_assert_eq!(write_and_read(carrier, &id), expected.clone(), "{:?} {}", carrier, id);
+                }
+            }
+        }
+    }
+
     #[test]
     fn every_minted_id_is_carried_as_itself(id in minted_id()) {
         prop_assert!(DrawerId::parse(&id).is_ok(), "{id:?} refused: {}", DrawerId::parse(&id).unwrap_err());
@@ -143,6 +212,21 @@ proptest! {
     fn an_unwritable_id_is_refused_by_name(id in unwritable_id()) {
         let err = DrawerId::parse(&id).expect_err("an unwritable id is refused");
         prop_assert!(err.to_string().contains(&format!("{id:?}")), "{err}");
+    }
+}
+
+/// A URI fragment or query is part of the id, so an id line cannot drop it.
+#[test]
+fn an_id_with_a_fragment_or_query_is_refused_on_every_carrier() {
+    for raw in ["block:a#b", "block:a?b", "block:a#b?c"] {
+        let id = EntityUri::parse(raw).unwrap();
+        for carrier in ALL_CARRIERS {
+            assert_eq!(
+                write_and_read(carrier, &id),
+                Written::Refused,
+                "{carrier:?} {raw}"
+            );
+        }
     }
 }
 

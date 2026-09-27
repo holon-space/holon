@@ -9,6 +9,7 @@
 
 use std::path::Path;
 
+use anyhow::Context;
 use anyhow::Result;
 use holon_api::EntityUri;
 use holon_api::StorageEntity;
@@ -18,6 +19,7 @@ use holon_core::file_format::FileFormatParseResult;
 use holon_core::file_format::WriteTier;
 
 use crate::build::apply_planning;
+use crate::build::declared_block_id;
 use crate::build::opaque_block;
 use crate::build::text_block;
 use crate::params::build_block_params;
@@ -61,12 +63,12 @@ fn parse_property(line: &str) -> Option<(String, String)> {
     Some((key.to_string(), val.to_string()))
 }
 
-fn doc_id_for(path: &Path, root: &Path, page_id: Option<&str>) -> EntityUri {
+fn doc_id_for(path: &Path, root: &Path, page_id: Option<&str>) -> Result<EntityUri> {
     match page_id {
-        Some(id) => EntityUri::block(id),
+        Some(id) => declared_block_id("the page's `id::`", id),
         None => {
             let rel = path.strip_prefix(root).unwrap_or(path);
-            EntityUri::file(&rel.to_string_lossy())
+            Ok(EntityUri::file(&rel.to_string_lossy()))
         }
     }
 }
@@ -134,7 +136,8 @@ impl FileFormatAdapter for LogseqMarkdownAdapter {
                     .to_string()
             });
 
-        let file_id = doc_id_for(path, root, page_id.as_deref());
+        let file_id = doc_id_for(path, root, page_id.as_deref())
+            .with_context(|| path.display().to_string())?;
         let mut document = Block::new_text(file_id.clone(), parent_dir_id.clone(), title);
         document.set_page(true);
         for (k, v) in &page_props {
@@ -242,7 +245,8 @@ impl FileFormatAdapter for LogseqMarkdownAdapter {
                 .find(|(k, _)| k.eq_ignore_ascii_case("id"))
                 .map(|(_, v)| v.clone());
             let block_id = match explicit_id {
-                Some(id) => EntityUri::block(&id),
+                Some(id) => declared_block_id("a block's `id::`", &id)
+                    .with_context(|| format!("{} line {}", path.display(), idx + 1))?,
                 None => EntityUri::block(&format!("{}::b::{}", file_id.id(), seq)),
             };
 
@@ -314,7 +318,7 @@ impl FileFormatAdapter for LogseqMarkdownAdapter {
             }
             if let Some((k, v)) = parse_property(l) {
                 if k.eq_ignore_ascii_case("id") {
-                    return Ok(Some(EntityUri::block(&v)));
+                    return declared_block_id("the page's `id::`", &v).map(Some);
                 }
             }
         }

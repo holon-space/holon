@@ -43,7 +43,7 @@ use tokio::sync::broadcast;
 
 use crate::parser::compute_content_hash;
 use crate::parser::generate_file_id;
-use crate::parser::parse_doc_id_any_carrier;
+use crate::parser::parse_doc_uri_any_carrier;
 
 /// `File::parent_id` value for a file sitting directly in the vault root.
 /// A plain relative path, not an entity id — see `File::parent_id`.
@@ -221,13 +221,22 @@ impl OrgModeSyncProvider {
                 // here erases the document the ingest recorded for this file.
                 // An org file names its document in its own content, which is
                 // the same carrier the ingest resolves identity from.
+                let document = match parse_doc_uri_any_carrier(&content) {
+                    Ok(document) => document,
+                    // The ingest refuses this file by name; its row names no document.
+                    Err(e) => {
+                        tracing::debug!(path = %path.display(), error = %format!("{e:#}"), "[OrgModeSyncProvider] file declares an unusable document id");
+                        None
+                    }
+                };
                 let file = File::new(
                     file_id.clone(),
                     file_name.clone(),
                     parent_id.clone(),
                     content_hash.clone(),
-                    parse_doc_id_any_carrier(&content),
-                );
+                    document.as_ref(),
+                )
+                .map_err(|e| format!("{}: {e:#}", path.display()))?;
                 let is_new = !old_state.file_hashes.contains_key(&file_id);
                 if is_new {
                     file_changes.push(Change::Created {
@@ -789,5 +798,25 @@ mod tests {
             "the scan emitted document_id {:?} for a file whose content names `notes-doc`",
             data.document_id
         );
+    }
+
+    /// The row records only a document id the ingest can take: text the org
+    /// id contract refuses is never stored for a later boot to restore.
+    #[tokio::test]
+    async fn a_scanned_org_file_whose_id_is_refused_records_no_document() {
+        for id in ["block:abc", ":x", "a b", "café", "a%zz", "a#b"] {
+            let dir = tempdir().unwrap();
+            std::fs::write(dir.path().join("notes.org"), format!("#+ID: {id}\n* A\n")).unwrap();
+
+            let provider = provider_for(dir.path());
+            let mut file_rx = provider.subscribe_files();
+            provider.sync(StreamPosition::Beginning).await.unwrap();
+
+            let change = file_rx.try_recv().unwrap().inner.remove(0);
+            let Change::Created { data, .. } = change else {
+                panic!("a first scan emits Created, got {change:?}");
+            };
+            assert_eq!(data.document_id, None, "`#+ID: {id}` was recorded");
+        }
     }
 }

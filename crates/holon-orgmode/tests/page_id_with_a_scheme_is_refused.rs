@@ -1,11 +1,12 @@
-//! A page file whose `#+ID:` names a scheme (`#+ID: block:abc`) is refused
-//! by name through the controller, like a bad heading `:ID:`: the ingest
-//! fails, the file is disclosed as refused, and no document is keyed by a
-//! double-schemed id. Ruling 2026-09-27.
+//! A page file whose `#+ID:` (or LogSeq `id::`) names a scheme (`block:abc`)
+//! is refused by name through the controller, like a bad heading `:ID:`: the
+//! ingest fails, the file is disclosed as refused, and no document is keyed by
+//! a double-schemed id. Ruling 2026-09-27.
 
 #![cfg(feature = "di")]
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -13,11 +14,13 @@ use async_trait::async_trait;
 use holon_api::block::Block;
 use holon_api::entity_uri::EntityUri;
 use holon_core::block_ordering::BlockOrdering;
+use holon_core::file_format::FormatRegistry;
 use holon_core::traits::Result as OrderingResult;
 use holon_filesystem::BlockReader;
 use holon_filesystem::DocumentManager;
 use holon_filesystem::FileSyncController;
 use holon_filesystem::RealFileSystem;
+use holon_markdown::LogseqMarkdownAdapter;
 use holon_orgmode::file_sync_controller::new_org_sync_controller;
 
 /// A page and its blocks.
@@ -148,28 +151,47 @@ struct Vault {
     sync: FileSyncController,
     store: Store,
     disclosures: Arc<Disclosures>,
-    path: std::path::PathBuf,
+    path: PathBuf,
     _tmp: tempfile::TempDir,
 }
 
 fn vault() -> Vault {
+    vault_of("Notes.org", |store, root| {
+        new_org_sync_controller(
+            Arc::new(store.clone()),
+            Arc::new(store.clone()),
+            root,
+            Arc::new(NoopOrdering),
+            Arc::new(RealFileSystem),
+        )
+    })
+}
+
+fn logseq_vault() -> Vault {
+    vault_of("Notes.md", |store, root| {
+        let formats = FormatRegistry::new(vec![Arc::new(LogseqMarkdownAdapter::new())]).unwrap();
+        FileSyncController::with_formats(
+            Arc::new(store.clone()),
+            Arc::new(store.clone()),
+            root,
+            Arc::new(formats),
+            Arc::new(NoopOrdering),
+            Arc::new(RealFileSystem),
+        )
+    })
+}
+
+fn vault_of(file: &str, controller: impl FnOnce(&Store, PathBuf) -> FileSyncController) -> Vault {
     let tmp = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(tmp.path()).unwrap();
     let store = Store::default();
     let disclosures = Arc::new(Disclosures::default());
-    let sync = new_org_sync_controller(
-        Arc::new(store.clone()),
-        Arc::new(store.clone()),
-        root.clone(),
-        Arc::new(NoopOrdering),
-        Arc::new(RealFileSystem),
-    )
-    .with_writeback_disclosure(disclosures.clone());
+    let sync = controller(&store, root.clone()).with_writeback_disclosure(disclosures.clone());
     Vault {
         sync,
         store,
         disclosures,
-        path: root.join("Notes.org"),
+        path: root.join(file),
         _tmp: tmp,
     }
 }
@@ -181,7 +203,7 @@ fn assert_refused_by_name(v: &Vault, result: anyhow::Result<impl std::fmt::Debug
     assert!(
         disclosed
             .iter()
-            .any(|d| d.contains("Notes.org") && d.contains("block:abc")),
+            .any(|d| d.contains("Notes.") && d.contains("block:abc")),
         "the file is disclosed as refused, naming the id: {disclosed:?}"
     );
     let ids: Vec<String> = v
@@ -230,6 +252,15 @@ async fn a_tracked_page_file_edited_to_a_schemed_id_is_refused_by_name() {
     );
     let path = v.path.clone();
     std::fs::write(&v.path, "#+ID: block:abc\n* A\n").unwrap();
+    let result = v.sync.on_file_changed(&path).await;
+    assert_refused_by_name(&v, result);
+}
+
+#[tokio::test]
+async fn a_logseq_page_whose_id_names_a_scheme_is_refused_by_name() {
+    let mut v = logseq_vault();
+    std::fs::write(&v.path, "id:: block:abc\n\n- A\n").unwrap();
+    let path = v.path.clone();
     let result = v.sync.on_file_changed(&path).await;
     assert_refused_by_name(&v, result);
 }
