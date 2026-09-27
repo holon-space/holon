@@ -49,6 +49,7 @@ fn reemit(org: &str) -> String {
         &parsed.document.id,
     )
     .expect("org render")
+    .text
 }
 
 /// CONTROL: the same file shape carrying its identity as `#+ID:` is already a

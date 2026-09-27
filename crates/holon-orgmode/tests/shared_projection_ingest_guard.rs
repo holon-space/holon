@@ -302,6 +302,7 @@ fn mount_page_org(path: &std::path::Path) -> String {
     OrgFormatAdapter::new()
         .render_document(&mount, &[child], path, &doc_uri)
         .expect("org render")
+        .text
 }
 
 /// A temp vault holding exactly one mount-shaped org file, with a controller

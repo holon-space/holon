@@ -572,17 +572,13 @@ fn headline<'t>(
         return refuse("org reads a leading [#x] as the priority cookie");
     }
     match headline {
-        Headline::Decision if text.ends_with(':') => {
-            refuse("org reads a title that ends in `:` into the `:decision:` tag")
-        }
         Headline::Decision => Ok(text),
         Headline::Option => {
             let first = text.split(' ').next().unwrap_or(text);
             if DEFAULT_ACTIVE_KEYWORDS.contains(&first) || DEFAULT_DONE_KEYWORDS.contains(&first) {
                 return refuse("org reads a leading task keyword as the block's state");
             }
-            let last = text.rsplit(' ').next().unwrap_or(text);
-            if is_tag_group(last) {
+            if !crate::types::Tags::split_org_headline(text).1.is_empty() {
                 return refuse("org reads a trailing :tag: group as tags");
             }
             Ok(text)
@@ -604,16 +600,6 @@ fn starts_with_priority_cookie(text: &str) -> bool {
     rest.next().is_some() && rest.as_str().starts_with(']')
 }
 
-/// `:a:` or `:a:b:`, each tag non-empty.
-fn is_tag_group(word: &str) -> bool {
-    word.len() >= 3
-        && word.starts_with(':')
-        && word.ends_with(':')
-        && word[1..word.len() - 1]
-            .split(':')
-            .all(|tag| !tag.is_empty())
-}
-
 /// Text org keeps verbatim as the lines of a block body.
 fn body(field: &'static str, text: &str) -> Result<(), BlockDecisionError> {
     let refuse = |reason| Err(unencodable(field, text, reason));
@@ -629,31 +615,9 @@ fn body(field: &'static str, text: &str) -> Result<(), BlockDecisionError> {
     if has_link(text) {
         return refuse("org stores a link as marks");
     }
-    let lower: Vec<String> = lines.iter().map(|l| l.to_ascii_lowercase()).collect();
-    let src_block = lower
-        .iter()
-        .position(|l| l.starts_with("#+begin_src"))
-        .is_some_and(|begin| {
-            lower[begin + 1..]
-                .iter()
-                .any(|l| l.starts_with("#+end_src"))
-        });
-    if src_block {
-        return refuse("org reads a #+begin_src … #+end_src pair as a source block");
-    }
     for (i, line) in lines.iter().enumerate() {
         if !line.trim().is_empty() && line.trim_end() != *line {
             return refuse("org trims the end of a body line");
-        }
-        if line.starts_with('*') && line.trim_start_matches('*').starts_with(' ') {
-            return refuse("a line of stars and a space starts a heading");
-        }
-        if line
-            .strip_prefix("#+")
-            .and_then(|rest| rest.split_once(':'))
-            .is_some_and(|(name, _)| !name.is_empty() && !name.contains(char::is_whitespace))
-        {
-            return refuse("org reads a #+name: line as a keyword of the block");
         }
         if is_planning(i, line, lines.get(i + 1).copied()) {
             return refuse("org reads a SCHEDULED: or DEADLINE: line as the heading's planning");

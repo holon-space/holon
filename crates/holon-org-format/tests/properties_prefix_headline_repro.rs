@@ -28,7 +28,8 @@ fn render_parse(blocks: &[Block]) -> Vec<Block> {
     let file_id = EntityUri::from_raw("file:test.org");
     let doc = Block::new_text(file_id.clone(), EntityUri::no_parent(), "test.org");
     let rendered = OrgRenderer::render_document(&doc, blocks, Path::new("test.org"), &file_id)
-        .expect("org render");
+        .expect("org render")
+        .text;
     eprintln!("--- rendered ---\n{rendered}\n----------------");
     parse_org_file(
         Path::new("test.org"),

@@ -2,6 +2,7 @@ use holon_api::EntityUri;
 use holon_api::Value;
 use holon_api::block::Block;
 use holon_api::types::ContentType;
+use holon_org_format::TypedDrawerKey;
 
 use crate::models::OrgBlockExt;
 
@@ -153,7 +154,7 @@ pub fn build_block_params(
     params.insert("ID".into(), Value::String(id));
 
     for (k, v) in block.drawer_properties() {
-        if holon_api::EdgeField::is_edge_drawer_key(&k) || is_typed_field_drawer_key(&k) {
+        if TypedDrawerKey::parse(&k).is_some() {
             continue;
         }
         if holon_api::schema::is_block_column(&k) {
@@ -174,6 +175,9 @@ pub fn build_block_params(
     if let Some(flag) = block.get_property(crate::models::org_props::PRIORITY_DRAWER_ONLY) {
         params.insert(crate::models::org_props::PRIORITY_DRAWER_ONLY.into(), flag);
     }
+    if let Some(blank_lines) = block.get_property(crate::models::org_props::BLANK_LINES) {
+        params.insert(crate::models::org_props::BLANK_LINES.into(), blank_lines);
+    }
 
     // `priority`, `scheduled` and `deadline` are stored in the properties bag,
     // where a Null is a stored JSON null rather than a clear, and the two `_`
@@ -185,6 +189,7 @@ pub fn build_block_params(
             crate::models::org_props::DEADLINE,
             crate::models::org_props::DRAWER_ORDER,
             crate::models::org_props::PRIORITY_DRAWER_ONLY,
+            crate::models::org_props::BLANK_LINES,
         ] {
             if !params.contains_key(key) && previous.get_property(key).is_some() {
                 params.insert(key.into(), Value::REMOVED);
@@ -204,8 +209,7 @@ pub fn build_block_params(
             // and a removal is not a loss of authored data — it is a refusal to
             // write `SET <column> = NULL` over row state this builder does not
             // own (`sort_key` is the consolidator's order key).
-            if holon_api::EdgeField::is_edge_drawer_key(&k)
-                || is_typed_field_drawer_key(&k)
+            if TypedDrawerKey::parse(&k).is_some()
                 || holon_api::schema::is_block_column(&k)
                 || params.contains_key(&*k)
             {
@@ -216,24 +220,6 @@ pub fn build_block_params(
     }
 
     params
-}
-
-/// True for the drawer keys `drawer_properties()` reconstructs from a typed
-/// SCALAR `Block` field, the way `EdgeField::is_edge_drawer_key` covers the
-/// ones it reconstructs from a typed EDGE field. Both are already carried as
-/// typed params (`collapsed` / `widget_only`, emitted above); re-ingesting the
-/// drawer spelling would ALSO park a stray uppercase string in
-/// `block.properties`, which the reference model never has.
-///
-/// This is a narrow allowlist of the two keys Holon itself serializes, NOT a
-/// case-insensitive match against the schema: matching case-insensitively would
-/// over-refuse an ordinary user property such as `:Sort_Key:`.
-fn is_typed_field_drawer_key(key: &str) -> bool {
-    // `priority` joins the list case-INSENSITIVELY, unlike the two uppercase
-    // spellings Holon itself serializes: the vault authors it lowercase, and
-    // either casing is reconstructed from the typed `Priority` on write-back.
-    matches!(key, "COLLAPSED" | "WIDGET_ONLY")
-        || key.eq_ignore_ascii_case(crate::models::org_props::PRIORITY)
 }
 
 /// Disclose a refused drawer key. The value IS being dropped, so this must be

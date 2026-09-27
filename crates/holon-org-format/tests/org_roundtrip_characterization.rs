@@ -30,8 +30,9 @@ fn doc_root() -> Block {
 /// Returns `(rendered_org, parsed_blocks)`.
 fn roundtrip(blocks: &[Block]) -> (String, Vec<Block>) {
     let doc = doc_root();
-    let org =
-        OrgRenderer::render_document(&doc, blocks, Path::new(FILE), &doc.id).expect("org render");
+    let org = OrgRenderer::render_document(&doc, blocks, Path::new(FILE), &doc.id)
+        .expect("org render")
+        .text;
     let parsed = parse_org_file(
         Path::new(FILE),
         &org,
@@ -270,8 +271,9 @@ fn empty_title_with_body_survives_roundtrip() {
 fn assert_render_is_fixed_point(blocks: &[Block]) {
     let (org1, parsed1) = roundtrip(blocks);
     let doc = doc_root();
-    let org2 =
-        OrgRenderer::render_document(&doc, &parsed1, Path::new(FILE), &doc.id).expect("org render");
+    let org2 = OrgRenderer::render_document(&doc, &parsed1, Path::new(FILE), &doc.id)
+        .expect("org render")
+        .text;
     assert_eq!(
         org1, org2,
         "render(parse(render(x))) must equal render(x) — otherwise every \
@@ -323,7 +325,8 @@ fn headline_title_with_internal_link_is_render_fixed_point() {
         Path::new(FILE),
         &parsed.document.id,
     )
-    .expect("org render");
+    .expect("org render")
+    .text;
     assert_eq!(
         org1, org2,
         "a link-bearing headline title must re-render to the same bytes"
@@ -345,8 +348,9 @@ fn preamble_after_roundtrip(preamble: &str) -> String {
         EntityUri::block("page-root"),
         "heading",
     );
-    let org =
-        OrgRenderer::render_document(&doc, &[child], Path::new(FILE), &doc.id).expect("org render");
+    let org = OrgRenderer::render_document(&doc, &[child], Path::new(FILE), &doc.id)
+        .expect("org render")
+        .text;
     let parsed = parse_org_file(
         Path::new(FILE),
         &org,

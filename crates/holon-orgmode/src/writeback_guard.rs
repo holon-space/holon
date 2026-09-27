@@ -274,6 +274,7 @@ Command palette body.
             &parsed.document.id,
         )
         .expect("org render")
+        .text
     }
 
     /// Per-file surviving set from a rendered projection — the shape every
@@ -311,21 +312,17 @@ Command palette body.
 
     #[test]
     fn canonical_reformat_passes() {
-        // Non-canonical disk formatting: extra blank lines, trailing spaces.
+        // Non-canonical disk formatting: a list body directly above the next
+        // headline, which the renderer closes with a blank line.
         // The projection is the canonical render — byte-different but block-
         // preserving. The guard MUST allow it (legal first-boot canonicalization).
         let noisy = "\
 #+ID: gpui-doc
-
-
-
 * Flow mode shell
 :PROPERTIES:
 :ID: flow-mode-shell
 :END:
-   The shell hosts the flow.
-
-
+- The shell hosts the flow.
 * Capture overlay
 :PROPERTIES:
 :ID: capture-mode-overlay

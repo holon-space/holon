@@ -101,7 +101,7 @@ mod tests {
             "the profile's label: text={text}"
         );
         assert!(
-            text.contains("notes.org: unreadable"),
+            text.contains("notes.org") && text.contains("unreadable"),
             "the instance detail: text={text}"
         );
         assert!(

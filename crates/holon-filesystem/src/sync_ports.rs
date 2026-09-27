@@ -512,6 +512,17 @@ pub trait WritebackDisclosure: Send + Sync {
     /// for exactly that long.
     fn writeback_degraded(&self, detail: &str);
 
+    /// Signal that write-back of `path` has stalled: its document's holder
+    /// stopped converging with the authority, so edits to it reach Loro + SQL
+    /// but not the file. `detail` names the difference that does not resolve.
+    /// Sticky, keyed by `path`. Lifted by
+    /// [`writeback_resumed`](Self::writeback_resumed).
+    fn writeback_stalled(&self, path: &Path, detail: &str);
+
+    /// All-clear for [`writeback_stalled`](Self::writeback_stalled): write-back
+    /// wrote `path`. Called on every such write.
+    fn writeback_resumed(&self, path: &Path);
+
     /// Signal that one vault file was REFUSED by its format adapter, so
     /// nothing of it is in the store. `format` is the refusing adapter's own
     /// [`format_name`](holon_core::FileFormatAdapter::format_name).
@@ -537,6 +548,18 @@ pub trait WritebackDisclosure: Send + Sync {
     /// Sticky, keyed by `path`, and raised at most once per emptiness episode.
     /// Lifted by [`ingest_recovered`](Self::ingest_recovered).
     fn vault_file_emptied(&self, path: &Path);
+
+    /// Signal that write-back of `path` refused the file, or wrote it without
+    /// some stored values. `detail` names each block and what of it the file
+    /// does not hold. The store keeps every value.
+    ///
+    /// Sticky, keyed by `path`. Lifted by
+    /// [`writeback_faithful`](Self::writeback_faithful).
+    fn writeback_lossy(&self, path: &Path, detail: &str);
+
+    /// All-clear for [`writeback_lossy`](Self::writeback_lossy): a render of
+    /// `path` holds every stored value. Called on every such render.
+    fn writeback_faithful(&self, path: &Path);
 }
 
 /// Authoritative "is this block id a registered shared-subtree mount?" seam.

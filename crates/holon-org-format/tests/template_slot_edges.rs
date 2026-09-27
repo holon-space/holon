@@ -142,7 +142,8 @@ fn a_slot_survives_the_write_back_round_trip_verbatim() {
         Path::new(FILE),
         &parsed.document.id,
     )
-    .expect("org render");
+    .expect("org render")
+    .text;
     assert!(
         rendered.contains(":contributes-to: {{mission}}"),
         "the authored slot must survive write-back verbatim, else instantiation loses it and the \
@@ -360,7 +361,8 @@ fn instantiating_the_shipped_compass_problem_yields_a_real_contributes_to_edge()
         Path::new(FILE),
         &page.id,
     )
-    .expect("org render");
+    .expect("org render")
+    .text;
     assert!(
         rendered.contains(":contributes-to: the-mission-block"),
         "the rendered instance must carry the substituted id, not a slot:\n{rendered}"
@@ -419,7 +421,8 @@ from x
         Path::new(FILE),
         &parsed.document.id,
     )
-    .expect("org render");
+    .expect("org render")
+    .text;
     assert!(
         rendered.contains("{{mission}}"),
         "the authored slot must survive write-back — dropping it rewrites the template file \
@@ -489,7 +492,8 @@ fn a_headline_requires_slot_inside_a_template_survives_the_round_trip() {
             Path::new(FILE),
             &parsed.document.id,
         )
-        .expect("org render");
+        .expect("org render")
+        .text;
         assert!(
             rendered.contains("{{dep}}"),
             "the authored `:{key}:` slot must survive write-back — dropping it rewrites the \
@@ -532,7 +536,8 @@ from x
         Path::new(FILE),
         &parsed.document.id,
     )
-    .expect("org render");
+    .expect("org render")
+    .text;
     assert!(
         rendered.contains("{{dep}}"),
         "the authored src-block `:REQUIRES` slot must survive write-back. Rendered:\n{rendered}"
@@ -581,7 +586,8 @@ fn every_edge_key_and_block_kind_reaches_a_slot_preserving_fixed_point() {
             Path::new(FILE),
             &first.document.id,
         )
-        .expect("org render");
+        .expect("org render")
+        .text;
         assert!(
             r1.contains("{{mission}}"),
             "{name}: the slot was dropped on the first write-back:\n{r1}"
@@ -594,7 +600,8 @@ fn every_edge_key_and_block_kind_reaches_a_slot_preserving_fixed_point() {
             Path::new(FILE),
             &second.document.id,
         )
-        .expect("org render");
+        .expect("org render")
+        .text;
         assert_eq!(
             r1, r2,
             "{name}: write -> read -> write is not a fixed point, so the file drifts on every \
@@ -683,7 +690,8 @@ fn a_cross_key_slot_and_real_id_survive_the_round_trip() {
             Path::new(FILE),
             &first.document.id,
         )
-        .expect("org render");
+        .expect("org render")
+        .text;
         assert!(
             r1.contains("{{mission}}"),
             "{label}: the slot was clobbered by the typed edge on the first write-back:\n{r1}"
@@ -705,7 +713,8 @@ fn a_cross_key_slot_and_real_id_survive_the_round_trip() {
             Path::new(FILE),
             &second.document.id,
         )
-        .expect("org render");
+        .expect("org render")
+        .text;
         assert_eq!(
             r1, r2,
             "{label}: write -> read -> write is not a fixed point:\n{r1}\n---\n{r2}"
@@ -749,7 +758,8 @@ fn a_cross_key_slot_and_real_id_on_a_source_block_survive_the_round_trip() {
             Path::new(FILE),
             &first.document.id,
         )
-        .expect("org render");
+        .expect("org render")
+        .text;
         assert!(
             r1.contains("{{mission}}") && r1.contains("real-dep"),
             "{label}: slot or real id dropped on first write-back:\n{r1}"
@@ -762,7 +772,8 @@ fn a_cross_key_slot_and_real_id_on_a_source_block_survive_the_round_trip() {
             Path::new(FILE),
             &second.document.id,
         )
-        .expect("org render");
+        .expect("org render")
+        .text;
         assert_eq!(
             r1, r2,
             "{label}: write -> read -> write is not a fixed point:\n{r1}\n---\n{r2}"
@@ -794,7 +805,8 @@ fn a_mixed_list_in_one_value_yields_no_edge_and_round_trips() {
         Path::new(FILE),
         &first.document.id,
     )
-    .expect("org render");
+    .expect("org render")
+    .text;
     assert!(
         r1.contains(":REQUIRES: {{mission}} real-dep"),
         "the mixed list must be carried verbatim:\n{r1}"
@@ -806,7 +818,8 @@ fn a_mixed_list_in_one_value_yields_no_edge_and_round_trips() {
         Path::new(FILE),
         &second.document.id,
     )
-    .expect("org render");
+    .expect("org render")
+    .text;
     assert_eq!(r1, r2, "mixed list is not a fixed point:\n{r1}\n---\n{r2}");
 }
 

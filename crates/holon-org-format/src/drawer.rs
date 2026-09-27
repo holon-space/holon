@@ -10,6 +10,8 @@
 use std::borrow::Cow;
 use std::fmt;
 
+use holon_api::EdgeField;
+
 /// A property key one carrier's reader reads back as the same key, and not as
 /// the carrier's identity. Each carrier has its own reader, so a key is only
 /// valid for the carrier it was parsed for: see [`ValueCarrier::key`].
@@ -109,6 +111,63 @@ impl DrawerId {
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+/// A headline drawer key the org parser reads into a typed block field, never
+/// into the block's properties. Org drawer keys are case-insensitive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypedDrawerKey {
+    Id,
+    /// `:REQUIRES:` and `:BLOCKED-BY:`, one `requires` edge.
+    Dependency,
+    /// Any other edge field, in its column or kebab spelling.
+    Edge(EdgeField),
+    Priority,
+    Collapsed,
+    WidgetOnly,
+    /// Refuses the file: a task state is the headline keyword.
+    TaskState,
+}
+
+impl TypedDrawerKey {
+    pub fn parse(key: &str) -> Option<Self> {
+        Self::spellings()
+            .iter()
+            .find(|(spelling, _)| key.eq_ignore_ascii_case(spelling))
+            .map(|(_, typed)| *typed)
+    }
+
+    /// Every key [`Self::parse`] names, each in one case.
+    pub fn spellings() -> &'static [(String, Self)] {
+        static SPELLINGS: std::sync::LazyLock<Vec<(String, TypedDrawerKey)>> =
+            std::sync::LazyLock::new(|| {
+                let mut all: Vec<(String, TypedDrawerKey)> = [
+                    ("ID", TypedDrawerKey::Id),
+                    ("REQUIRES", TypedDrawerKey::Dependency),
+                    ("BLOCKED-BY", TypedDrawerKey::Dependency),
+                    (crate::models::org_props::PRIORITY, TypedDrawerKey::Priority),
+                    ("COLLAPSED", TypedDrawerKey::Collapsed),
+                    ("WIDGET_ONLY", TypedDrawerKey::WidgetOnly),
+                    ("task_state", TypedDrawerKey::TaskState),
+                    ("task_state_category", TypedDrawerKey::TaskState),
+                ]
+                .into_iter()
+                .map(|(spelling, typed)| (spelling.to_string(), typed))
+                .collect();
+                for edge in EdgeField::ALL {
+                    if edge == EdgeField::Requires {
+                        continue;
+                    }
+                    let column = edge.column();
+                    all.push((column.to_string(), TypedDrawerKey::Edge(edge)));
+                    if column.contains('_') {
+                        all.push((column.replace('_', "-"), TypedDrawerKey::Edge(edge)));
+                    }
+                }
+                all
+            });
+        &SPELLINGS
     }
 }
 

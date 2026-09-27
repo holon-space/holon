@@ -1737,11 +1737,20 @@ impl DispatchingOperationEngine {
             } else {
                 holon_org_format::ValueCarrier::HeadlineDrawer
             };
+            let headline_bag =
+                ["properties", holon_org_format::org_props::ORG_PROPERTIES].contains(&field);
             for (key, value) in Self::drawer_entries(field, value)? {
                 let names_the_id = key == "ID" || (file_drawer && key.eq_ignore_ascii_case("ID"));
                 if !names_the_id {
                     if let Err(e) = carrier.key(&key) {
                         bail!("{op_name}: refusing a property of block {block} via `{field}`: {e}");
+                    }
+                    if !file_drawer && Self::reads_back_as_a_typed_field(&key, headline_bag) {
+                        bail!(
+                            "{op_name}: refusing property key {key:?} of block {block} via \
+                             `{field}`: the org parser reads that drawer key back as the block's \
+                             typed field (an edge or a storage column), not as a property"
+                        );
                     }
                     continue;
                 }
@@ -1761,6 +1770,22 @@ impl DispatchingOperationEngine {
             }
         }
         Ok(())
+    }
+
+    /// Whether a headline drawer key reads back as a typed block field, as the
+    /// org ingest decides it ([`holon_org_format::TypedDrawerKey`]), or as a
+    /// storage column. A flat write naming an edge column, and `priority`,
+    /// which the store keeps in the properties bag, are that field's own write.
+    fn reads_back_as_a_typed_field(key: &str, in_properties_bag: bool) -> bool {
+        use holon_org_format::TypedDrawerKey;
+        match TypedDrawerKey::parse(key) {
+            None => in_properties_bag && holon_api::schema::is_block_column(key),
+            Some(TypedDrawerKey::Priority) => key != holon_org_format::org_props::PRIORITY,
+            Some(TypedDrawerKey::Dependency | TypedDrawerKey::Edge(_)) => {
+                in_properties_bag || !holon_api::EdgeField::is_edge_column(key)
+            }
+            Some(_) => true,
+        }
     }
 
     /// The `(key, value)` entries `field = value` puts into an org drawer.

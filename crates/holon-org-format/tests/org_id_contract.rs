@@ -30,7 +30,7 @@ fn page() -> Block {
 }
 
 fn render(document: &Block, blocks: &[Block]) -> anyhow::Result<String> {
-    OrgRenderer::render_document(document, blocks, Path::new(FILE), &document.id)
+    OrgRenderer::render_document(document, blocks, Path::new(FILE), &document.id).map(|r| r.text)
 }
 
 #[derive(Debug, Clone, Copy)]

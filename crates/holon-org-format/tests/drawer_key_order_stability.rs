@@ -32,6 +32,7 @@ fn write_back(source: &str) -> String {
         &parsed.document.id,
     )
     .expect("org render")
+    .text
 }
 
 fn assert_stable(source: &str) {

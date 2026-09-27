@@ -57,12 +57,19 @@ impl ConditionKind {
             | Self::RehydrationFailed(detail)
             | Self::SqlProjectionFailed(detail)
             | Self::ForeignIdCollision(detail)
-            | Self::WritebackDegraded(detail) => ConditionDetail::prose(detail.clone()),
+            | Self::WritebackDegraded(detail)
+            | Self::WritebackLossy { detail } => ConditionDetail::prose(detail.clone()),
 
-            // The file, so the headline can name it and the condition clears
-            // per file rather than per scan.
+            // `subject` is the file. The capped headline names it; the path
+            // and the reason, an error chain whose cause comes last, go whole.
             Self::VaultIngestFailed { reason, .. } => {
-                ConditionDetail::prose(format!("{subject}: {reason}"))
+                let name = std::path::Path::new(subject)
+                    .file_name()
+                    .map_or(subject.into(), |name| name.to_string_lossy());
+                ConditionDetail::with_body(
+                    format!("{name} was not read into Holon. The file and why:"),
+                    vec![subject.to_string(), reason.clone()],
+                )
             }
 
             Self::VaultFileEmptied => ConditionDetail::prose(format!(

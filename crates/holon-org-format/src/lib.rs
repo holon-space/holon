@@ -17,6 +17,7 @@
 //! ALLOW(compatibility): see holon-orgmode crate header everything from this
 //! crate so older import paths keep resolving.
 
+mod comma_escape;
 pub mod dense;
 pub mod drawer;
 pub mod inline_marks;
@@ -37,6 +38,7 @@ pub use dense::parse_dense_with;
 pub use dense::render_dense;
 pub use drawer::DrawerId;
 pub use drawer::DrawerKey;
+pub use drawer::TypedDrawerKey;
 pub use drawer::UnrepresentableId;
 pub use drawer::UnrepresentableKey;
 pub use drawer::ValueCarrier;

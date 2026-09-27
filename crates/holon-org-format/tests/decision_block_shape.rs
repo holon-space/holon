@@ -30,6 +30,7 @@ fn parse(source: &str) -> (Block, Vec<Block>) {
 fn render(document: &Block, blocks: &[Block]) -> String {
     OrgRenderer::render_document(document, blocks, Path::new(FILE), &document.id)
         .expect("org render")
+        .text
 }
 
 fn block_titled<'a>(blocks: &'a [Block], title: &str) -> &'a Block {

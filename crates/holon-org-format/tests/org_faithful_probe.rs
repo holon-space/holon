@@ -30,7 +30,8 @@ fn round_trip(kid: Block) -> (String, Option<Block>) {
     let id = kid.id.clone();
     blocks.push(kid);
     let text = OrgRenderer::render_document(&document, &blocks, Path::new(FILE), &document.id)
-        .expect("org render");
+        .expect("org render")
+        .text;
     let (_, reparsed) = parse(&text);
     let back = reparsed.into_iter().find(|b| b.id == id);
     (text, back)
@@ -64,16 +65,13 @@ fn hazard1_multi_line_text_property_reaches_the_drawer_raw() {
 }
 
 #[test]
-#[ignore = "known red: the headline tag split eats a title that ends in colons"]
-fn hazard2_title_ending_in_colons_before_tags_loses_text() {
+fn hazard2a_title_ending_in_colons_before_tags_round_trips() {
     let mut failures = Vec::new();
     for (title, tags) in [
         ("Pick ::", vec!["decision"]),
         ("Pick :", vec!["decision"]),
         ("Pick:", vec!["decision"]),
         ("a ::", vec!["t"]),
-        ("Meeting :urgent:", vec![]),
-        ("Meeting :urgent:", vec!["later"]),
         ("Ratio 1:2:", vec!["t"]),
     ] {
         let mut b = kid(title);
@@ -94,6 +92,29 @@ fn hazard2_title_ending_in_colons_before_tags_loses_text() {
         }
     }
     assert!(failures.is_empty(), "hazard 2 losses: {failures:#?}");
+}
+
+/// Emacs reads the tag group as the last blank-separated `:tag:…:` token, so
+/// the text before it stays title text.
+#[test]
+fn an_emacs_written_headline_keeps_the_colons_before_its_tag_group() {
+    for (line, title, tags) in [
+        ("Pick :: :decision:", "Pick ::", vec!["decision"]),
+        ("Pick: :decision:", "Pick:", vec!["decision"]),
+        ("Ratio 1:2: :t:", "Ratio 1:2:", vec!["t"]),
+        ("x : :a:b:", "x :", vec!["a", "b"]),
+    ] {
+        let (_, blocks) = parse(&format!("#+ID: p\n* {line}\n:PROPERTIES:\n:ID: h\n:END:\n"));
+        let h = &blocks[0];
+        assert_eq!(
+            (h.content.as_str(), h.tags.to_vec()),
+            (
+                title,
+                tags.iter().map(|t| t.to_string()).collect::<Vec<_>>()
+            ),
+            "{line:?}"
+        );
+    }
 }
 
 #[test]
@@ -188,6 +209,7 @@ fn a_drawer_carrier_without_an_id_keeps_the_block_id() {
 fn render(blocks: &[Block]) -> Result<String, String> {
     let (document, _) = parse("#+ID: p\n");
     OrgRenderer::render_document(&document, blocks, Path::new(FILE), &document.id)
+        .map(|r| r.text)
         .map_err(|e| format!("{e:#}"))
 }
 
@@ -255,4 +277,48 @@ fn a_source_block_id_that_forms_no_uri_is_refused_by_name() {
         Ok(Ok(())) => panic!("the id `a\"b` was accepted"),
         Err(_) => panic!("the parser panicked on an authored source block id"),
     }
+}
+
+/// A title that ends in a tag group reads back as tags; org has no escape for
+/// it. The render keeps it and reports the block as a loss, as it does for a
+/// key the drawer cannot hold.
+#[test]
+fn a_value_the_file_cannot_hold_is_a_render_loss() {
+    let (document, _) = parse("#+ID: p\n");
+    let tagged = Block::new_text(
+        EntityUri::block("tagged"),
+        document.id.clone(),
+        "Meeting :urgent:".to_string(),
+    );
+    let mut tagged_later = Block::new_text(
+        EntityUri::block("tagged-later"),
+        document.id.clone(),
+        "Meeting :urgent:".to_string(),
+    );
+    tagged_later.set_tags(Tags::from(vec!["later".to_string()]));
+    let mut keyed = Block::new_text(
+        EntityUri::block("keyed"),
+        document.id.clone(),
+        "Kid".to_string(),
+    );
+    keyed.set_property("a b", Value::String("v".into()));
+    let plain = Block::new_text(
+        EntityUri::block("plain"),
+        document.id.clone(),
+        "Pick ::".to_string(),
+    );
+    let rendered = OrgRenderer::render_document(
+        &document,
+        &[tagged, tagged_later, keyed, plain],
+        Path::new(FILE),
+        &document.id,
+    )
+    .expect("org render");
+    let lost: Vec<&str> = rendered.losses.iter().map(|l| l.block.as_str()).collect();
+    assert_eq!(
+        lost,
+        ["block:tagged", "block:keyed"],
+        "{:#?}",
+        rendered.losses
+    );
 }

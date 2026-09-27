@@ -39,6 +39,7 @@ pub mod entity_profile;
 pub mod entity_reference;
 pub mod entity_uri;
 pub mod expr_parser;
+pub mod file_render;
 pub mod filter;
 mod hashmap_value_conversions;
 pub mod history;
@@ -247,6 +248,8 @@ pub use entity_reference::validate_entity_references;
 pub use entity_uri::EntityUri;
 pub use entity_uri::ForeignEntityReference;
 pub use entity_uri::UnschemedEntityReference;
+pub use file_render::RenderLoss;
+pub use file_render::Rendered;
 // Re-export CompiledExpr from holon-expr for FieldLifetime::Computed
 pub use holon_expr::CompiledExpr;
 // The engine `ComputedSpec::parse` expects, re-exported so a caller declaring a

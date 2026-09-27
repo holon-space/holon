@@ -6,13 +6,31 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use anyhow::Context;
 use holon_api::EntityUri;
+use holon_api::RenderLoss;
+use holon_api::Rendered;
 use holon_api::block::Block;
+use holon_api::types::ContentType;
 
 use crate::models::OrgBlockExt;
 use crate::models::OrgDocumentExt;
 use crate::models::render_document_header;
 use crate::task_keyword::TaskKeywordVocabulary;
+
+/// Refuses org text the parser would not read back: writing it would take
+/// every block of the page out of Holon on the next ingest.
+fn refuse_unreadable(path: &Path, text: &str) -> anyhow::Result<()> {
+    let root = path.parent().unwrap_or(Path::new(""));
+    crate::parse_org_file(path, text, &EntityUri::no_parent(), root)
+        .map(|_| ())
+        .with_context(|| {
+            format!(
+                "org render of {} refused: the parser does not read the rendered file back",
+                path.display()
+            )
+        })
+}
 
 /// Render a Loro document (represented as blocks) to org-mode format.
 ///
@@ -27,10 +45,11 @@ impl OrgRenderer {
     pub fn render_document(
         doc_block: &Block,
         blocks: &[Block],
-        _: &Path,
+        path: &Path,
         file_id: &EntityUri,
-    ) -> anyhow::Result<String> {
-        let mut result = render_document_header(doc_block)?;
+    ) -> anyhow::Result<Rendered> {
+        let mut losses = Vec::new();
+        let mut result = render_document_header(doc_block, &mut losses)?;
         if !result.is_empty() && !result.ends_with('\n') {
             result.push('\n');
         }
@@ -50,31 +69,42 @@ impl OrgRenderer {
         );
         if !preamble.is_empty() {
             result.push('\n');
-            result.push_str(preamble);
+            result.push_str(&crate::comma_escape::CommaEscape::Preamble.escape(preamble));
             result.push('\n');
         }
         // The document's OWN `#+TODO:` declaration governs what its headlines
         // may spell — the same chain (`from_declared`) the editor's surface
         // projection resolves. Rendering a keyword this document does not
         // declare emits bytes the next parse reads as ordinary title text.
+        let mut last_section_blank_lines = doc_block.blank_lines().after;
+        end_with_blank_lines(&mut result, &last_section_blank_lines);
         let vocabulary = TaskKeywordVocabulary::from_declared(doc_block.todo_keywords());
         result.push_str(&Self::render_walk(
             blocks,
             file_id,
-            Some(&vocabulary),
-            &crate::models::block_to_org,
+            &mut |block: &Block| {
+                let mut block = block.clone();
+                if block.content_type == ContentType::Text {
+                    last_section_blank_lines = block.blank_lines().after;
+                }
+                if let Some(loss) = Self::refuse_undeclared_task_state(&mut block, &vocabulary) {
+                    losses.push(loss);
+                }
+                crate::models::block_to_org(&block, &vocabulary, &mut losses)
+            },
         )?);
-        // Every org file ends with exactly one '\n'. Strip any trailing
-        // whitespace/newlines and re-add one — keeps disk content stable across
-        // render → parse → render so PBT round-trips converge to a fixed point.
-        while matches!(
-            result.chars().last(),
-            Some('\n') | Some(' ') | Some('\t') | Some('\r')
-        ) {
-            result.pop();
+        // The file ends with a line break and then exactly the blank lines its
+        // last section had: a list body's closing blank line is dropped there.
+        if !result.ends_with('\n') {
+            result.push('\n');
         }
-        result.push('\n');
-        Ok(result)
+        let extra = trailing_blank_lines(&result).saturating_sub(last_section_blank_lines.len());
+        result.truncate(result.len() - extra);
+        refuse_unreadable(path, &result)?;
+        Ok(Rendered {
+            text: result,
+            losses,
+        })
     }
 
     /// Render blocks to org-mode format.
@@ -86,18 +116,23 @@ impl OrgRenderer {
     ///
     /// # Returns
     /// Org-mode formatted string
-    /// No document accompanies these blocks, so no vocabulary is KNOWN — which
-    /// is not the same as "declares nothing", and must not be substituted with
-    /// the defaults (the representability rule the editor's `Surface::Pending`
-    /// encodes). Task states therefore render as stored here; the refusal in
+    /// No document accompanies these blocks, so no declaration is known. Task
+    /// states therefore render as stored here; the refusal in
     /// [`Self::refuse_undeclared_task_state`] applies only where the owning
     /// document is in hand, i.e. [`Self::render_document`].
     pub fn render_entitys(
         blocks: &[Block],
-        _: &Path,
+        path: &Path,
         file_id: &EntityUri,
-    ) -> anyhow::Result<String> {
-        Self::render_walk(blocks, file_id, None, &crate::models::block_to_org)
+    ) -> anyhow::Result<Rendered> {
+        let mut losses = Vec::new();
+        // A file with no `#+TODO:` line reads with the default keywords.
+        let vocabulary = TaskKeywordVocabulary::default();
+        let text = Self::render_walk(blocks, file_id, &mut |block: &Block| {
+            crate::models::block_to_org(block, &vocabulary, &mut losses)
+        })?;
+        refuse_unreadable(path, &text)?;
+        Ok(Rendered { text, losses })
     }
 
     /// Dense projection variant of [`Self::render_entitys`]: identical tree
@@ -111,17 +146,16 @@ impl OrgRenderer {
         alias_table: &crate::dense::AliasTable,
         gap_ids: &std::collections::HashSet<String>,
     ) -> String {
-        let Ok(text) = Self::render_walk(blocks, file_id, None, &|b: &Block| {
+        let Ok(text) = Self::render_walk(blocks, file_id, &mut |b: &Block| {
             Ok::<_, std::convert::Infallible>(crate::dense::to_org_dense(b, alias_table, gap_ids))
         });
         text
     }
 
-    fn render_walk<E, F: Fn(&Block) -> Result<String, E>>(
+    fn render_walk<E, F: FnMut(&Block) -> Result<String, E>>(
         blocks: &[Block],
         file_id: &EntityUri,
-        vocabulary: Option<&TaskKeywordVocabulary>,
-        render_block: &F,
+        render_block: &mut F,
     ) -> Result<String, E> {
         let mut result = String::new();
 
@@ -186,7 +220,6 @@ impl OrgRenderer {
                     &mut result,
                     0,
                     &mut visited,
-                    vocabulary,
                     render_block,
                 )?;
             }
@@ -224,14 +257,13 @@ impl OrgRenderer {
     }
 
     /// Render a block and its children recursively.
-    fn render_entity_tree<'b, E, F: Fn(&Block) -> Result<String, E>>(
+    fn render_entity_tree<'b, E, F: FnMut(&Block) -> Result<String, E>>(
         block: &'b Block,
         children_by_parent: &HashMap<&'b str, Vec<&'b Block>>,
         result: &mut String,
         depth: usize,
         visited: &mut std::collections::HashSet<&'b str>,
-        vocabulary: Option<&TaskKeywordVocabulary>,
-        render_block: &F,
+        render_block: &mut F,
     ) -> Result<(), E> {
         // Record reachability for the WP-F cycle/disconnected-component assertion
         // in `render_entitys` — free, we are already walking every reachable node.
@@ -240,27 +272,66 @@ impl OrgRenderer {
         // Prepare block for org rendering - transfer Loro properties to org_props
         // format
         let mut prepared_block = block.clone();
-        Self::prepare_block_for_org(&mut prepared_block, depth, vocabulary);
+        Self::prepare_block_for_org(&mut prepared_block, depth);
 
         // Render via the caller-supplied per-block renderer (canonical
         // `Block::to_org` or the dense token form). Both guarantee a trailing
         // newline.
         result.push_str(&render_block(&prepared_block)?);
 
+        let blank_lines_after = prepared_block.blank_lines().after;
+        let mut section_ended = false;
         if let Some(kids) = children_by_parent.get(block.id.as_str()) {
             for child_block in kids {
+                if child_block.content_type == ContentType::Text && !section_ended {
+                    end_with_blank_lines(result, &blank_lines_after);
+                    section_ended = true;
+                }
                 Self::render_entity_tree(
                     child_block,
                     children_by_parent,
                     result,
                     depth + 1,
                     visited,
-                    vocabulary,
                     render_block,
                 )?;
             }
         }
+        if !section_ended {
+            end_with_blank_lines(result, &blank_lines_after);
+        }
         Ok(())
+    }
+
+    /// Drop a `task_state` this document's vocabulary does not declare from the
+    /// render (the block is a CLONE; the store keeps its column), and return
+    /// the loss.
+    ///
+    /// The same refusal the editable surface makes
+    /// (`SourceProjection::Refused` / `Surface::Refused`): rendering `* TODO x`
+    /// into a `#+TODO: NEXT | DONE` document emits bytes the next parse reads
+    /// as ordinary title text, so the keyword would land in `content` and the
+    /// file grow one more of them on every cold boot. Declaring the keyword in
+    /// the document's `#+TODO:` line makes the state renderable.
+    fn refuse_undeclared_task_state(
+        block: &mut Block,
+        vocabulary: &TaskKeywordVocabulary,
+    ) -> Option<RenderLoss> {
+        let state = block.task_state()?;
+        if vocabulary.all_keywords().contains(&state.keyword) {
+            return None;
+        }
+        block.set_task_state(None);
+        let detail = format!(
+            "its task state {:?} is not written: the file's `#+TODO:` keywords are {:?}",
+            state.keyword,
+            vocabulary.all_keywords()
+        );
+        tracing::warn!(target: "org.render", block = %block.id, "org render: {detail}");
+        Some(RenderLoss {
+            block: block.id.clone(),
+            detail,
+        })
     }
 
     /// Prepare a block for org rendering by transferring Loro properties to
@@ -269,49 +340,7 @@ impl OrgRenderer {
     /// Public so a caller that owns its own tree walk (the integration-test
     /// serializer) can reach `Block::to_org` through the SAME preparation
     /// write-back uses instead of re-deriving the drawer.
-    /// Drop a `task_state` this document's vocabulary does not declare from the
-    /// render (the block is a CLONE; the store keeps its column).
-    ///
-    /// The same refusal the editable surface makes
-    /// (`SourceProjection::Refused` / `Surface::Refused`): a surface that
-    /// cannot SHOW the keyword must not write it. Rendering `* TODO x` into a
-    /// `#+TODO: NEXT | DONE` document emits bytes the very next parse reads as
-    /// ordinary title text, so the keyword lands in `content` and the file
-    /// grows one more of them on every cold boot.
-    ///
-    /// The state is therefore not durable on disk for as long as it stays
-    /// undeclared — a loss, but a DISCLOSED one, and strictly smaller than the
-    /// alternative, which also loses the state and corrupts the user's text
-    /// with it. Declaring the keyword in the document's `#+TODO:` line makes
-    /// the state renderable and the loss disappears.
-    fn refuse_undeclared_task_state(block: &mut Block, vocabulary: Option<&TaskKeywordVocabulary>) {
-        let (Some(vocabulary), Some(state)) = (vocabulary, block.task_state()) else {
-            return;
-        };
-        if vocabulary.all_keywords().contains(&state.keyword) {
-            return;
-        }
-        tracing::warn!(
-            target: "org.render",
-            block = %block.id,
-            keyword = %state.keyword,
-            declared = ?vocabulary.all_keywords(),
-            "task_state is not declared by this document's `#+TODO:` vocabulary — the headline \
-             keyword is NOT written. Rendering it would re-ingest as ordinary title text and add \
-             one keyword per cold boot. Declare the keyword in the document to make the state \
-             durable on disk."
-        );
-        block.set_task_state(None);
-    }
-
-    /// `vocabulary` is the owning document's declaration (the parser's defaults
-    /// when it declares none); a `task_state` it does not admit is dropped from
-    /// the RENDER — see [`Self::refuse_undeclared_task_state`].
-    pub fn prepare_block_for_org(
-        block: &mut Block,
-        depth: usize,
-        vocabulary: Option<&TaskKeywordVocabulary>,
-    ) {
+    pub fn prepare_block_for_org(block: &mut Block, depth: usize) {
         let properties = block.properties_map();
 
         // Set level from depth (level = depth + 1)
@@ -323,7 +352,6 @@ impl OrgRenderer {
                 block.set_task_state(Some(holon_api::TaskState::from_keyword(todo)));
             }
         }
-        Self::refuse_undeclared_task_state(block, vocabulary);
 
         // Lift a legacy uppercase `PRIORITY` property into the typed field. The
         // org parser resolves both spellings itself, so this only ever sees
@@ -414,6 +442,26 @@ impl OrgRenderer {
     }
 }
 
+/// Ends `text`, which is empty or ends with a line break, with the blank lines
+/// `blank_lines` holds, byte for byte. Blank lines the renderer already wrote
+/// there (a list body's closing one) are replaced, and kept where `text` has
+/// more of them.
+fn end_with_blank_lines(text: &mut String, blank_lines: &[String]) {
+    let present = trailing_blank_lines(text);
+    text.truncate(text.len() - present);
+    for i in 0..present.max(blank_lines.len()) {
+        text.push_str(blank_lines.get(i).map_or("", String::as_str));
+        text.push('\n');
+    }
+}
+
+/// The number of empty lines at the end of `text`, which the renderer writes as
+/// bare line breaks after the last line.
+fn trailing_blank_lines(text: &str) -> usize {
+    let content = text.trim_end_matches('\n');
+    (text.len() - content.len()).saturating_sub(usize::from(!content.is_empty()))
+}
+
 #[cfg(test)]
 mod tests {
     use holon_api::EntityUri;
@@ -460,8 +508,9 @@ mod tests {
         block.set_property("ID", Value::String("test-uuid".to_string()));
 
         let file_path = Path::new("/test/file.org");
-        let org_text =
-            OrgRenderer::render_entitys(&[block], file_path, &test_doc_uri()).expect("org render");
+        let org_text = OrgRenderer::render_entitys(&[block], file_path, &test_doc_uri())
+            .expect("org render")
+            .text;
 
         assert!(org_text.contains("* Test Title"));
         assert!(org_text.contains("Body content here"));
@@ -481,7 +530,8 @@ mod tests {
         );
         orphan.set_property("ID", Value::String("orphan".to_string()));
         let _ = OrgRenderer::render_entitys(&[orphan], Path::new("/test/file.org"), &doc)
-            .expect("org render");
+            .expect("org render")
+            .text;
     }
 
     // WP-F: a parent cycle (present parents, unreachable from the file root)
@@ -495,7 +545,8 @@ mod tests {
         let mut b = Block::new_text(EntityUri::block("b"), EntityUri::block("a"), "B");
         b.set_property("ID", Value::String("b".to_string()));
         let _ = OrgRenderer::render_entitys(&[a, b], Path::new("/test/file.org"), &doc)
-            .expect("org render");
+            .expect("org render")
+            .text;
     }
 
     // WP-F guard against false positives: a normal tree (roots parented to the
@@ -509,7 +560,8 @@ mod tests {
             Block::new_text(EntityUri::block("child"), EntityUri::block("root"), "Child");
         child.set_property("ID", Value::String("child".to_string()));
         let out = OrgRenderer::render_entitys(&[root, child], Path::new("/test/file.org"), &doc)
-            .expect("org render");
+            .expect("org render")
+            .text;
         assert!(out.contains("Root"));
         assert!(out.contains("Child"));
     }
@@ -530,7 +582,8 @@ mod tests {
         );
         sentinel.set_property("ID", Value::String("selfanchor".to_string()));
         let out = OrgRenderer::render_entitys(&[root, sentinel], Path::new("/test/file.org"), &doc)
-            .expect("org render");
+            .expect("org render")
+            .text;
         assert!(out.contains("Root"));
     }
 
@@ -543,8 +596,9 @@ mod tests {
         block.set_property("PRIORITY", Value::String("A".to_string()));
 
         let file_path = Path::new("/test/file.org");
-        let org_text =
-            OrgRenderer::render_entitys(&[block], file_path, &test_doc_uri()).expect("org render");
+        let org_text = OrgRenderer::render_entitys(&[block], file_path, &test_doc_uri())
+            .expect("org render")
+            .text;
 
         assert!(org_text.contains("* TODO [#A] Task headline"));
     }
@@ -569,8 +623,9 @@ mod tests {
 
         let file_path = Path::new("/test/file.org");
         let blocks = vec![parent, child_heading, source_block];
-        let org_text =
-            OrgRenderer::render_entitys(&blocks, file_path, &test_doc_uri()).expect("org render");
+        let org_text = OrgRenderer::render_entitys(&blocks, file_path, &test_doc_uri())
+            .expect("org render")
+            .text;
 
         let src_pos = org_text
             .find("#+BEGIN_SRC")
@@ -605,8 +660,9 @@ mod tests {
 
         let file_path = Path::new("/test/file.org");
         let blocks = vec![parent, child, src1, src2];
-        let org_text =
-            OrgRenderer::render_entitys(&blocks, file_path, &test_doc_uri()).expect("org render");
+        let org_text = OrgRenderer::render_entitys(&blocks, file_path, &test_doc_uri())
+            .expect("org render")
+            .text;
 
         let src1_pos = org_text
             .find("#+BEGIN_SRC holon_sql")
@@ -639,8 +695,9 @@ mod tests {
         // Deliberately put text_child before src_child in the input vec
         let file_path = Path::new("/test/file.org");
         let blocks = vec![parent, text_child, src_child];
-        let org_text =
-            OrgRenderer::render_entitys(&blocks, file_path, &test_doc_uri()).expect("org render");
+        let org_text = OrgRenderer::render_entitys(&blocks, file_path, &test_doc_uri())
+            .expect("org render")
+            .text;
 
         let src_pos = org_text.find("#+BEGIN_SRC python").expect("source block");
         let sub_pos = org_text.find("** Sub Heading").expect("sub heading");

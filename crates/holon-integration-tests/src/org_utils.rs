@@ -48,8 +48,8 @@ pub fn serialize_blocks_to_org_with_doc(
     let mut result = String::new();
 
     if let Some(doc) = doc_block {
-        let header =
-            holon_orgmode::models::render_document_header(doc).unwrap_or_else(|e| panic!("{e:#}"));
+        let header = holon_orgmode::models::render_document_header(doc, &mut Vec::new())
+            .unwrap_or_else(|e| panic!("{e:#}"));
         result.push_str(&header);
     }
 
@@ -75,9 +75,7 @@ pub fn serialize_block_recursive(
     // keys such as `_drawer_order` reach disk and made the expected file
     // disagree with what write-back actually writes.
     let mut prepared = block.clone();
-    // No owning document in hand here, so no vocabulary is known — the same
-    // `None` production's document-less render path passes.
-    OrgRenderer::prepare_block_for_org(&mut prepared, level - 1, None);
+    OrgRenderer::prepare_block_for_org(&mut prepared, level - 1);
     result.push_str(&prepared.to_org());
 
     let mut children: Vec<&&Block> = all_blocks

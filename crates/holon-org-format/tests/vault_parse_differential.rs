@@ -1,5 +1,5 @@
 //! Dumps what the parser reads from every org file of a vault: per block its
-//! title, tags and drawer properties, one JSON line each. Two dumps taken
+//! title, body, tags and drawer properties, one JSON line each. Two dumps taken
 //! with two builds of this crate diff into the exact set of items a parser
 //! change moves.
 //!
@@ -79,7 +79,13 @@ fn dump_parsed_vault() {
         writeln!(
             sink,
             "{}",
-            serde_json::json!({ "file": rel, "file_drawer": file_drawer })
+            serde_json::json!({
+                "file": rel,
+                "file_drawer": file_drawer,
+                "doc_id": parsed.document.id.as_str(),
+                "text": parsed.document.content,
+                "blank_lines": parsed.document.get_property("_blank_lines"),
+            })
         )
         .unwrap();
         for (index, block) in parsed.blocks.iter().enumerate() {
@@ -88,8 +94,11 @@ fn dump_parsed_vault() {
                 "file": rel,
                 "index": index,
                 "title": block.content.lines().next().unwrap_or(""),
+                "body": block.content.split_once('\n').map(|(_, body)| body),
                 "tags": block.tags.to_vec(),
                 "props": props,
+                "marks": block.marks,
+                "blank_lines": block.get_property("_blank_lines"),
             });
             writeln!(sink, "{line}").unwrap();
             blocks += 1;

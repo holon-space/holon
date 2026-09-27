@@ -235,6 +235,7 @@ fn parse(source: &str) -> (Block, Vec<Block>) {
 fn render(document: &Block, blocks: &[Block]) -> String {
     OrgRenderer::render_document(document, blocks, Path::new(FILE), &document.id)
         .expect("org render")
+        .text
 }
 
 fn words(first: &'static str) -> impl Strategy<Value = String> + Clone {
@@ -262,13 +263,6 @@ const PLAIN_LINES: &[&str] = &[
     "x SCHEDULED: <2026-01-01 Thu>",
     "x [y]",
     "x [[",
-];
-/// Lines a body holds verbatim only as its first line.
-const PLAIN_FIRST_LINES: &[&str] = &["SCHEDULED: tomorrow", "DEADLINE: soon"];
-/// Lines org reads as structure, trims, moves, or rewrites.
-const HAZARD_LINES: &[&str] = &[
-    "",
-    "   ",
     "* heading",
     "** heading",
     "*  x",
@@ -276,6 +270,13 @@ const HAZARD_LINES: &[&str] = &[
     "#+NAME: x",
     "#+RESULTS:",
     "#+begin_src\nfn\n#+end_src",
+];
+/// Lines a body holds verbatim only as its first line.
+const PLAIN_FIRST_LINES: &[&str] = &["SCHEDULED: tomorrow", "DEADLINE: soon"];
+/// Lines org reads as structure, trims, moves, or rewrites.
+const HAZARD_LINES: &[&str] = &[
+    "",
+    "   ",
     "DEADLINE: <2026-01-01 Thu>",
     "SCHEDULED: <2026-01-01 Thu>",
     "SCHEDULED: tomorrow",
@@ -339,7 +340,7 @@ const PLAIN_TITLES: &[&str] = &[
 /// Kept verbatim by an option headline, which carries no keyword or tag.
 const PLAIN_LABELS: &[&str] = &["Pick ::", "x ::", "x:y:", "x :"];
 /// Kept verbatim by the decision headline, which carries its own keyword.
-const PLAIN_QUESTIONS: &[&str] = &["? x", "TODO x", "DONE x"];
+const PLAIN_QUESTIONS: &[&str] = &["? x", "TODO x", "DONE x", "Pick ::", "x:y:"];
 /// Titles org reads as a cookie, keyword, tags or link, or refuses to parse.
 const HAZARD_TITLES: &[&str] = &[
     "[#A] which one?",
@@ -944,18 +945,9 @@ fn a_rationale_keeps_drawer_lines_indentation_and_inner_blank_lines() {
 }
 
 #[test]
-fn a_rationale_with_a_heading_line_is_refused() {
-    let got = answered("Because\n* not a heading");
-    assert!(
-        matches!(
-            got,
-            Err(BlockDecisionError::Unencodable {
-                field: "rationale",
-                ..
-            })
-        ),
-        "{got:?}"
-    );
+fn a_rationale_with_heading_and_keyword_lines_round_trips() {
+    answered("Because\n* not a heading\n#+TITLE: nor a title\n#+begin_src\nfn\n#+end_src")
+        .expect("encodable");
 }
 
 #[test]
@@ -1015,11 +1007,11 @@ fn a_question_with_a_priority_cookie_is_refused() {
     );
 }
 
-/// The decision headline ends in its `:decision:` tag, and org reads a title
-/// that ends in `:` into it.
+/// The decision headline ends in its `:decision:` tag, which is the tag group
+/// org reads, so a question that ends in colons keeps them.
 #[test]
-fn a_question_ending_in_a_colon_does_not_survive_org() {
-    let mut vault = stored(&asking("Pick one"));
+fn a_question_ending_in_colons_survives_org() {
+    let mut vault = stored(&asking("Pick ::"));
     let id = vault.decision_id();
     vault.block_mut(&id).content = "Pick ::".into();
     let text = render(&vault.document, &vault.blocks);
@@ -1028,12 +1020,33 @@ fn a_question_ending_in_a_colon_does_not_survive_org() {
         .iter()
         .find(|b| b.id == id)
         .map(|b| b.content.clone());
-    assert_ne!(question.as_deref(), Some("Pick ::"), "{text}");
-    assert!(matches!(
-        try_stored(&asking("Pick ::")),
-        Err(BlockDecisionError::Unencodable {
-            field: "question",
-            ..
-        })
-    ));
+    assert_eq!(question.as_deref(), Some("Pick ::"), "{text}");
+}
+
+#[test]
+fn an_option_label_ending_in_a_tab_separated_tag_group_is_refused() {
+    let d = Decision::ask(
+        DecisionRef::parse(&format!("block:{DECISION_ID}")).unwrap(),
+        DECISION_ID.to_string(),
+        DraftQuestion {
+            question: "Which one?".into(),
+            options: vec![("a".into(), "x\t:a:".into())],
+            choose: None,
+            recommend: None,
+            supersedes: None,
+        },
+    )
+    .unwrap();
+    let got = try_stored(&d);
+    assert!(
+        matches!(
+            &got,
+            Err(BlockDecisionError::Unencodable {
+                field: "option label",
+                ..
+            })
+        ),
+        "{:?}",
+        got.map(|v| v.read())
+    );
 }

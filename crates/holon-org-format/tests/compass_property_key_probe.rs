@@ -20,6 +20,7 @@ fn write_back(source: &str) -> String {
         .expect("fixture must parse");
     OrgRenderer::render_document(&parsed.document, &parsed.blocks, path, &parsed.document.id)
         .expect("org render")
+        .text
 }
 
 /// A single-headline document carrying exactly one drawer property.
@@ -278,7 +279,9 @@ fn store_origin_content_and_property_round_trip() {
             content,
         );
         let path = Path::new(FILE);
-        let org = OrgRenderer::render_document(&doc, &[block], path, &doc.id).expect("org render");
+        let org = OrgRenderer::render_document(&doc, &[block], path, &doc.id)
+            .expect("org render")
+            .text;
         let parsed = parse_org_file(path, &org, &EntityUri::no_parent(), Path::new(ROOT))
             .expect("parse own render");
         parsed
@@ -333,7 +336,9 @@ fn store_origin_content_and_property_round_trip() {
         );
         block.set_property(key, holon_api::Value::String("explicit".to_string()));
         let path = Path::new(FILE);
-        let org = OrgRenderer::render_document(&doc, &[block], path, &doc.id).expect("org render");
+        let org = OrgRenderer::render_document(&doc, &[block], path, &doc.id)
+            .expect("org render")
+            .text;
         let line = org
             .lines()
             .map(str::trim)
@@ -381,7 +386,9 @@ fn drawer_order_without_authored_order() {
         block.set_property(k, holon_api::Value::String(v.to_string()));
     }
     let path = Path::new(FILE);
-    let org = OrgRenderer::render_document(&doc, &[block], path, &doc.id).expect("org render");
+    let org = OrgRenderer::render_document(&doc, &[block], path, &doc.id)
+        .expect("org render")
+        .text;
     println!("=== NO _drawer_order (post-store shape) ===\n{org}");
 }
 

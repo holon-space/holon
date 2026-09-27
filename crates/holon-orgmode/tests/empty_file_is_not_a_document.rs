@@ -235,6 +235,8 @@ impl Disclosures {
 
 impl holon_filesystem::WritebackDisclosure for Disclosures {
     fn writeback_degraded(&self, _: &str) {}
+    fn writeback_stalled(&self, _: &std::path::Path, _: &str) {}
+    fn writeback_resumed(&self, _: &std::path::Path) {}
     fn ingest_refused(&self, path: &std::path::Path, _: &str, _: &str) {
         self.0
             .lock()
@@ -253,6 +255,8 @@ impl holon_filesystem::WritebackDisclosure for Disclosures {
             .unwrap()
             .push(format!("emptied {}", path.display()));
     }
+    fn writeback_lossy(&self, _: &std::path::Path, _: &str) {}
+    fn writeback_faithful(&self, _: &std::path::Path) {}
 }
 
 struct Vault {

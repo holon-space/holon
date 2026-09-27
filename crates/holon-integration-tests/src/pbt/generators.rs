@@ -240,19 +240,104 @@ pub fn drawer_value_strategy() -> BoxedStrategy<String> {
     .boxed()
 }
 
+/// Block text of a title line and 1–3 body lines. A body line starting with
+/// `*` is a headline in org, and one starting with `#+` a keyword, unless the
+/// renderer comma-escapes it.
+fn multi_line_content_strategy() -> BoxedStrategy<String> {
+    let body_line = prop_oneof![
+        8 => "[a-z][a-zA-Z0-9 ]{3,15}",
+        1 => "[a-z]{1,8}".prop_map(|w| format!("* {w}")),
+        1 => "[a-z]{1,8}".prop_map(|w| format!(",* {w}")),
+        1 => "[a-z]{1,8}".prop_map(|w| format!("#+TITLE: {w}")),
+        1 => ("[a-z]{1,6}", "[a-z]{1,6}").prop_map(|(k, v)| format!("#+{k}: {v}")),
+        1 => "[a-z]{1,8}".prop_map(|w| format!(",#+{w}: x")),
+    ];
+    (
+        "[a-z][a-zA-Z0-9 ]{3,15}",
+        prop::collection::vec(body_line, 1..=3),
+    )
+        .prop_map(|(first, rest)| {
+            let mut lines = vec![first];
+            lines.extend(rest);
+            lines.join("\n")
+        })
+        .boxed()
+}
+
+/// Logs one `[reach] body-star-line` / `[reach] body-keyword-line` line per
+/// applied content write whose body has a line starting with `*` / `#+`,
+/// after any commas.
+pub fn note_escaped_body_line_reach(transition: &str, content: &str) {
+    let starts = |prefix: &str| {
+        content
+            .lines()
+            .skip(1)
+            .any(|l| l.trim_start_matches(',').starts_with(prefix))
+    };
+    if starts("*") {
+        eprintln!("[reach] body-star-line: {transition}");
+    }
+    if starts("#+") {
+        eprintln!("[reach] body-keyword-line: {transition}");
+    }
+}
+
+/// Whether the org file writes this line of block text comma-escaped: stars
+/// at the line's start then a blank or the line's end, or `#+` after the
+/// indentation and any commas, except a `#+ID:` line and the delimiters of a
+/// block the parser keeps as text.
+pub fn is_escaped_line(line: &str) -> bool {
+    let at_start = line.trim_start_matches(',');
+    let stars = at_start.trim_start_matches('*');
+    if stars.len() < at_start.len() && (stars.is_empty() || stars.starts_with([' ', '\t'])) {
+        return true;
+    }
+    let keyword = line.trim_start_matches([' ', '\t']).trim_start_matches(',');
+    let lower = keyword.to_ascii_lowercase();
+    let text_block = ["#+begin_", "#+end_"].iter().any(|p| {
+        lower
+            .strip_prefix(p)
+            .is_some_and(|rest| !rest.is_empty() && !rest.starts_with("src"))
+    });
+    keyword.starts_with("#+") && !keyword.starts_with("#+ID:") && !text_block
+}
+
+/// Whether `content` has a body line the org file writes comma-escaped.
+pub fn has_escaped_body_line(content: &str) -> bool {
+    content.lines().skip(1).any(is_escaped_line)
+}
+
+/// Logs one `[reach] mark-across-escaped-line` line per mark in `marks` that
+/// covers the start of a body line of `content` the org file writes
+/// comma-escaped. Offsets are Unicode scalars, as in `MarkSpan`.
+pub fn note_mark_across_escaped_line_reach(
+    transition: &str,
+    content: &str,
+    marks: &[holon_api::MarkSpan],
+) {
+    let mut line_starts = Vec::new();
+    let mut offset = 0usize;
+    for (i, line) in content.split('\n').enumerate() {
+        if i > 0 && is_escaped_line(line) {
+            line_starts.push(offset);
+        }
+        offset += line.chars().count() + 1;
+    }
+    for mark in marks {
+        if line_starts
+            .iter()
+            .any(|s| mark.start <= *s && *s < mark.end)
+        {
+            eprintln!("[reach] mark-across-escaped-line: {transition}");
+        }
+    }
+}
+
 /// Same as `content_strategy` but for edit mutations (lowercase start).
 pub fn edit_content_strategy() -> BoxedStrategy<String> {
     let base = prop_oneof![
         7 => "[a-zA-Z][a-zA-Z0-9 ]{0,20}".prop_map(|s| s),
-        3 => (
-            "[a-z][a-zA-Z0-9 ]{3,15}",
-            prop::collection::vec("[a-z][a-zA-Z0-9 ]{3,15}", 1..=3),
-        )
-            .prop_map(|(first, rest)| {
-                let mut lines = vec![first];
-                lines.extend(rest);
-                lines.join("\n")
-            }),
+        3 => multi_line_content_strategy(),
     ]
     .boxed();
     prop_oneof![6 => base, 4 => extended_content_arm()].boxed()
@@ -311,7 +396,21 @@ pub fn typing_text_strategy() -> BoxedStrategy<String> {
 /// the full extended-content arm via the external write path.
 pub fn bulk_content_strategy() -> BoxedStrategy<String> {
     let base = "[a-zA-Z][a-zA-Z0-9 ]{0,20}".prop_map(|s| s).boxed();
-    prop_oneof![6 => base, 4 => extended_content_arm()].boxed()
+    prop_oneof![
+        6 => base,
+        4 => extended_content_arm(),
+        6 => multi_line_content_strategy(),
+        2 => linked_multi_line_content_strategy(),
+    ]
+    .boxed()
+}
+
+/// Raw link syntax around multi-line text: the file reads it back as one link
+/// mark over every line, comma-escaped ones included.
+fn linked_multi_line_content_strategy() -> BoxedStrategy<String> {
+    ("[a-z]{1,8}", multi_line_content_strategy())
+        .prop_map(|(page, text)| format!("[[https://example.com/{page}][{text}]]"))
+        .boxed()
 }
 
 /// Build the blocks for an index.org heading with a query source + render
@@ -1341,6 +1440,38 @@ mod default_vocabulary_tests {
             .into_iter()
             .collect();
         assert_eq!(drawn, expected);
+    }
+}
+
+#[cfg(test)]
+mod star_body_line_tests {
+    use super::*;
+
+    #[test]
+    fn edit_content_draws_star_and_keyword_body_lines() {
+        use proptest::strategy::ValueTree;
+        use proptest::test_runner::TestRunner;
+        let mut runner = TestRunner::deterministic();
+        let strat = edit_content_strategy();
+        let draws: Vec<String> = (0..500)
+            .map(|_| strat.new_tree(&mut runner).expect("draw").current())
+            .collect();
+        let with = |prefix: &str| {
+            draws
+                .iter()
+                .filter(|c| c.lines().skip(1).any(|l| l.starts_with(prefix)))
+                .count()
+        };
+        let counts = [
+            ("* ", with("* ")),
+            (",* ", with(",* ")),
+            ("#+", with("#+")),
+            (",#+", with(",#+")),
+        ];
+        assert!(
+            counts.iter().all(|(_, n)| *n > 5),
+            "500 edit-content draws, body lines per prefix: {counts:?}"
+        );
     }
 }
 

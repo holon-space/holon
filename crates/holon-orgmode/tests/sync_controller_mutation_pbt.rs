@@ -1521,7 +1521,9 @@ fn stabilize_blocks(
     root_dir: &std::path::Path,
 ) -> Vec<Block> {
     let file_path = root_dir.join("test.org");
-    let org_text = OrgRenderer::render_entitys(blocks, &file_path, doc_id).expect("org render");
+    let org_text = OrgRenderer::render_entitys(blocks, &file_path, doc_id)
+        .expect("org render")
+        .text;
     let org_text = format!("#+ID: {}\n{}", doc_id.id(), org_text);
     let parse_result = parse_org_file(&file_path, &org_text, &EntityUri::no_parent(), root_dir)
         .expect("stabilize: parse must succeed");
@@ -1568,7 +1570,7 @@ proptest! {
             fixture.controller.initialize().await.expect("initialize must succeed");
 
             let initial_org =
-                OrgRenderer::render_entitys(&baseline, &fixture.file_path(), &fixture.doc_id).expect("org render");
+                OrgRenderer::render_entitys(&baseline, &fixture.file_path(), &fixture.doc_id).expect("org render").text;
             tokio::fs::write(&fixture.file_path(), &initial_org)
                 .await
                 .unwrap();
@@ -1645,7 +1647,7 @@ proptest! {
             // branch that creates a new Page from a bare `#+ID:` — the one
             // that must honor the directory chain for `parent_id`.
             let mut initial_org =
-                OrgRenderer::render_entitys(&baseline, &fixture.file_path(), &fixture.doc_id).expect("org render");
+                OrgRenderer::render_entitys(&baseline, &fixture.file_path(), &fixture.doc_id).expect("org render").text;
             if inject_id_directive {
                 initial_org = format!("#+ID: {}\n{}", fixture.doc_id.id(), initial_org);
             }
@@ -3063,7 +3065,8 @@ mod atomic_rename_tests {
         let baseline = vec![child.clone()];
         fx.seed_blocks(&baseline);
         let org_children = OrgRenderer::render_entitys(&baseline, &fx.file_path(), &fx.doc_id)
-            .expect("org render");
+            .expect("org render")
+            .text;
         let org = format!("#+ID: {}\n{}", fx.doc_id.id(), org_children);
         tokio::fs::write(&fx.file_path(), org.as_bytes())
             .await
@@ -3409,7 +3412,8 @@ mod intermediate_ancestor_writeback_hole {
             .await
             .unwrap();
         let pm_body = OrgRenderer::render_entitys(&[n_moved, x_edited.clone()], &pm_path, &p_m)
-            .expect("org render");
+            .expect("org render")
+            .text;
         tokio::fs::write(&pm_path, format!("#+ID: la-pm\n{pm_body}"))
             .await
             .unwrap();
@@ -3917,12 +3921,19 @@ mod intermediate_ancestor_writeback_hole {
         #[derive(Default)]
         struct Recorder(std::sync::Mutex<Vec<String>>);
         impl holon_filesystem::WritebackDisclosure for Recorder {
-            fn writeback_degraded(&self, detail: &str) {
-                self.0.lock().unwrap().push(detail.to_string());
+            fn writeback_degraded(&self, _: &str) {}
+            fn writeback_stalled(&self, path: &std::path::Path, detail: &str) {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push(format!("{}|{detail}", path.display()));
             }
+            fn writeback_resumed(&self, _: &std::path::Path) {}
             fn ingest_refused(&self, _: &std::path::Path, _: &str, _: &str) {}
             fn ingest_recovered(&self, _: &std::path::Path) {}
             fn vault_file_emptied(&self, _: &std::path::Path) {}
+            fn writeback_lossy(&self, _: &std::path::Path, _: &str) {}
+            fn writeback_faithful(&self, _: &std::path::Path) {}
         }
 
         let temp_dir = tempfile::tempdir().unwrap();
@@ -3963,9 +3974,104 @@ mod intermediate_ancestor_writeback_hole {
              storm the once-per-episode latch exists to prevent. Raised: {raised:?}"
         );
         assert!(
+            raised[0].starts_with(&format!("{}|", fixture.file_path().display())),
+            "the stall is the document's own file's condition. Raised: {raised:?}"
+        );
+        assert!(
             raised[0].contains("la-ghost") && raised[0].contains("STOP REACHING DISK"),
             "the disclosure must name the member that never folded and say plainly what the \
              user loses. Raised: {raised:?}"
+        );
+    }
+
+    /// A stall is lifted by the file's next write, so the banner never names a
+    /// file whose edits reach disk again.
+    #[tokio::test]
+    async fn a_stalled_file_is_cleared_by_its_next_write() {
+        #[derive(Default)]
+        struct Recorder(std::sync::Mutex<Vec<String>>);
+        impl holon_filesystem::WritebackDisclosure for Recorder {
+            fn writeback_degraded(&self, _: &str) {}
+            fn writeback_stalled(&self, path: &std::path::Path, _: &str) {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push(format!("stalled|{}", path.display()));
+            }
+            fn writeback_resumed(&self, path: &std::path::Path) {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push(format!("resumed|{}", path.display()));
+            }
+            fn ingest_refused(&self, _: &std::path::Path, _: &str, _: &str) {}
+            fn ingest_recovered(&self, _: &std::path::Path) {}
+            fn vault_file_emptied(&self, _: &std::path::Path) {}
+            fn writeback_lossy(&self, _: &std::path::Path, _: &str) {}
+            fn writeback_faithful(&self, _: &std::path::Path) {}
+        }
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut fixture = TestFixture::new(temp_dir.path());
+        let p_a = fixture.doc_id.clone();
+        let a = text_block("rs-a", &p_a, "rs-a-outer", 1, 0);
+        let ghost = text_block("rs-ghost", &p_a, "rs-ghost", 1, 1);
+        fixture.seed_blocks(&[a, ghost.clone()]);
+
+        let recorder = Arc::new(Recorder::default());
+        fixture.controller = fixture
+            .controller
+            .with_writeback_disclosure(recorder.clone());
+        fixture.controller.initialize().await.expect("initialize");
+        recorder.0.lock().unwrap().clear();
+
+        let edit = |i: u32| holon_filesystem::BlockDelta::Upsert {
+            block: text_block("rs-a", &p_a, &format!("rs-a-edit-{i}"), 1, 0),
+            prev: None,
+        };
+        for i in 0..(GATE_SKIPS_BEFORE_DEGRADED_FOR_TEST + 2) {
+            fixture
+                .controller
+                .on_block_changed(&p_a, &edit(i))
+                .await
+                .expect("a skipped render is not an error");
+        }
+        let file = fixture.file_path().display().to_string();
+        assert_eq!(
+            recorder.0.lock().unwrap().clone(),
+            vec![format!("stalled|{file}")],
+            "the stall must be raised before it can be cleared"
+        );
+
+        fixture
+            .controller
+            .on_block_changed(
+                &p_a,
+                &holon_filesystem::BlockDelta::Upsert {
+                    block: ghost,
+                    prev: None,
+                },
+            )
+            .await
+            .expect("the fold converges");
+        fixture
+            .controller
+            .on_block_changed(&p_a, &edit(1000))
+            .await
+            .expect("a converged fold renders");
+
+        let events = recorder.0.lock().unwrap().clone();
+        assert_eq!(
+            events.last(),
+            Some(&format!("resumed|{file}")),
+            "the file's next write must lift its stall. Events: {events:?}"
+        );
+        let on_disk = tokio::fs::read_to_string(fixture.file_path())
+            .await
+            .unwrap();
+        assert!(
+            on_disk.contains("rs-a-edit-1000"),
+            "the edit reached disk:\n{on_disk}"
         );
     }
 
@@ -3988,12 +4094,19 @@ mod intermediate_ancestor_writeback_hole {
         #[derive(Default)]
         struct Recorder(std::sync::Mutex<Vec<String>>);
         impl holon_filesystem::WritebackDisclosure for Recorder {
-            fn writeback_degraded(&self, detail: &str) {
-                self.0.lock().unwrap().push(detail.to_string());
+            fn writeback_degraded(&self, _: &str) {}
+            fn writeback_stalled(&self, path: &std::path::Path, detail: &str) {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push(format!("{}|{detail}", path.display()));
             }
+            fn writeback_resumed(&self, _: &std::path::Path) {}
             fn ingest_refused(&self, _: &std::path::Path, _: &str, _: &str) {}
             fn ingest_recovered(&self, _: &std::path::Path) {}
             fn vault_file_emptied(&self, _: &std::path::Path) {}
+            fn writeback_lossy(&self, _: &std::path::Path, _: &str) {}
+            fn writeback_faithful(&self, _: &std::path::Path) {}
         }
 
         let temp_dir = tempfile::tempdir().unwrap();
@@ -4205,6 +4318,8 @@ struct RefusalLog(Mutex<Vec<String>>);
 
 impl holon_filesystem::WritebackDisclosure for RefusalLog {
     fn writeback_degraded(&self, _: &str) {}
+    fn writeback_stalled(&self, _: &std::path::Path, _: &str) {}
+    fn writeback_resumed(&self, _: &std::path::Path) {}
     fn ingest_refused(&self, path: &std::path::Path, _: &str, reason: &str) {
         self.0
             .lock()
@@ -4213,6 +4328,8 @@ impl holon_filesystem::WritebackDisclosure for RefusalLog {
     }
     fn ingest_recovered(&self, _: &std::path::Path) {}
     fn vault_file_emptied(&self, _: &std::path::Path) {}
+    fn writeback_lossy(&self, _: &std::path::Path, _: &str) {}
+    fn writeback_faithful(&self, _: &std::path::Path) {}
 }
 
 /// D102.a — two vault files that both declare the same block `:ID:`.

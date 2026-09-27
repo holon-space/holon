@@ -20,6 +20,8 @@ use sha2::Digest;
 use sha2::Sha256;
 use uuid::Uuid;
 
+use crate::comma_escape::CommaEscape;
+use crate::drawer::TypedDrawerKey;
 use crate::models::DEFAULT_ACTIVE_KEYWORDS;
 use crate::models::DEFAULT_DONE_KEYWORDS;
 use crate::models::OrgBlockExt;
@@ -102,20 +104,24 @@ fn parse_title(content: &str) -> Option<String> {
     None
 }
 
-/// Parse `#+ID: <bare-id>` from file content. The bare id is wrapped into
-/// `block:<id>` at the boundary by callers — the file format stores bare ids
-/// per the org syntax convention. Returns None when no directive is present.
+/// Parse `#+ID: <bare-id>` from the `#+ID:` keywords of the text before the
+/// first headline, as org structures that text: a line inside a block there is
+/// no keyword, and below a headline the line is block text. The bare id is
+/// wrapped into `block:<id>` at the boundary by callers — the file format
+/// stores bare ids per the org syntax convention. Returns None when no
+/// directive is present.
 pub fn parse_doc_id(content: &str) -> Option<String> {
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("#+ID:") {
-            let id = rest.trim();
-            if !id.is_empty() {
-                return Some(id.to_string());
-            }
-        }
-    }
-    None
+    let org = ParseConfig::default().parse(content);
+    let section = org.document().section()?;
+    section
+        .syntax()
+        .children()
+        .filter(|child| child.kind() == SyntaxKind::KEYWORD)
+        .find_map(|keyword| {
+            let text = keyword.to_string();
+            let id = text.trim().strip_prefix("#+ID:")?.trim().to_string();
+            (!id.is_empty()).then_some(id)
+        })
 }
 
 /// The FILE-LEVEL `:PROPERTIES:` drawer, split off the front of raw file
@@ -469,7 +475,13 @@ pub fn parse_org_file_with(
     // block owning a `holon_rule`) renders that child as a top-level
     // `#+BEGIN_SRC` under the file `#+ID:` header; `process_headlines` only
     // walks headlines, so without this pass the block is dropped on round-trip.
-    let top_section = extract_section_content(doc.section());
+    document.set_blank_lines(crate::models::BlankLines {
+        before_body: Vec::new(),
+        after: doc.section().map_or(Vec::new(), |section| {
+            trailing_blank_lines(&section.syntax().to_string())
+        }),
+    });
+    let top_section = extract_section_content(doc.section(), CommaEscape::Preamble);
     // The pre-first-headline body belongs to the doc-root, stored exactly as a
     // headline stores its own: `title\nbody`. Dropping it here is what let the
     // renderer delete it from disk on every write-back.
@@ -602,9 +614,164 @@ pub fn split_headline_tags(line: &str) -> (String, Vec<String>) {
         .document()
         .first_headline()
         .unwrap_or_else(|| panic!("synthetic headline must parse: {line:?}"));
-    let title = headline.title_raw().trim().to_string();
-    let tags = headline.tags().map(|t| t.to_string()).collect();
-    (title, tags)
+    holon_api::Tags::split_org_headline(&headline_title_text(&headline))
+}
+
+/// A headline as the org parser reads it.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct HeadlineReading {
+    pub(crate) keyword: Option<String>,
+    /// The priority cookie's text: `A` for `[#A]`.
+    pub(crate) cookie: Option<String>,
+    pub(crate) title: String,
+    pub(crate) tags: Vec<String>,
+}
+
+fn read_headline(headline: &Headline) -> HeadlineReading {
+    // orgize takes the keyword into its own token before the title node, so
+    // `* TODO TODO x` is a TODO task whose text is `TODO x`.
+    let (title, tags) = holon_api::Tags::split_org_headline(&headline_title_text(headline));
+    let keyword = headline.todo_keyword().map(|t| t.to_string());
+    let (keyword, title) = match keyword {
+        Some(k) if crate::task_keyword::asks_nothing(&k, &title) => (None, k),
+        keyword => (keyword, title),
+    };
+    HeadlineReading {
+        keyword,
+        cookie: headline.priority().map(|t| t.to_string()),
+        title,
+        tags,
+    }
+}
+
+/// A block's own org text as the org parser reads it.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct BlockReading {
+    pub(crate) headline: HeadlineReading,
+    pub(crate) body: Option<String>,
+    /// Source and image blocks the parser takes out of the text.
+    pub(crate) children: usize,
+}
+
+/// How one headline block's org text (headline, planning, drawer, body; no
+/// child headlines) reads back in a file whose task keywords are
+/// `vocabulary`.
+pub(crate) fn read_block_text(
+    text: &str,
+    vocabulary: &crate::task_keyword::TaskKeywordVocabulary,
+) -> BlockReading {
+    let config = ParseConfig {
+        todo_keywords: (
+            vocabulary.active_keywords().to_vec(),
+            vocabulary.done_keywords().to_vec(),
+        ),
+        ..Default::default()
+    };
+    let org = config.parse(text);
+    let headline = org
+        .document()
+        .first_headline()
+        .unwrap_or_else(|| panic!("a block's org text starts with its headline: {text:?}"));
+    let section = extract_section_content(headline.section(), CommaEscape::Body);
+    BlockReading {
+        headline: read_headline(&headline),
+        body: section.body,
+        children: section.source_blocks.len() + section.image_paths.len(),
+    }
+}
+
+/// The blank lines at the end of `text`, after its last line with any text,
+/// each without its line break.
+fn trailing_blank_lines(text: &str) -> Vec<String> {
+    let mut lines: Vec<String> = text
+        .strip_suffix('\n')
+        .unwrap_or(text)
+        .split('\n')
+        .rev()
+        .take_while(|line| line.trim().is_empty())
+        .map(str::to_string)
+        .collect();
+    lines.reverse();
+    lines
+}
+
+/// The blank lines at the end of a headline's own text, before its first child
+/// headline or the next headline.
+fn blank_lines_after_headline(headline: &Headline) -> Vec<String> {
+    let node = headline.syntax();
+    let start = node.text_range().start();
+    let end = node
+        .children()
+        .find(|child| child.kind() == SyntaxKind::HEADLINE)
+        .map_or(node.text_range().end(), |child| child.text_range().start());
+    trailing_blank_lines(&node.to_string()[..usize::from(end - start)])
+}
+
+/// The blank lines between a headline's head (its line, planning and drawer)
+/// and the first line of its body.
+fn blank_lines_before_body(headline: &Headline) -> Vec<String> {
+    let node = headline.syntax();
+    let base = usize::from(node.text_range().start());
+    let head: Vec<(usize, usize)> = node
+        .descendants()
+        .filter(|n| matches!(n.kind(), SyntaxKind::PROPERTY_DRAWER | SyntaxKind::PLANNING))
+        .map(|n| {
+            let r = n.text_range();
+            (usize::from(r.start()) - base, usize::from(r.end()) - base)
+        })
+        .collect();
+    let text = node.to_string();
+    let mut lines = text.split_inclusive('\n');
+    let mut start = lines.next().map_or(0, str::len);
+    let mut blank = Vec::new();
+    for line in lines {
+        let in_head = head.iter().any(|(s, e)| *s <= start && start < *e);
+        start += line.len();
+        let t = line.trim();
+        if t.is_empty() {
+            blank.push(line.strip_suffix('\n').unwrap_or(line).to_string());
+        } else if in_head || t.starts_with("SCHEDULED:") || t.starts_with("DEADLINE:") {
+            blank.clear();
+        } else {
+            return blank;
+        }
+    }
+    Vec::new()
+}
+
+/// A headline block's content and inline marks from its title and body text.
+/// Content without inline markup is kept byte-identical, with no marks.
+pub(crate) fn block_content(
+    title: &str,
+    body: Option<&str>,
+    classifier: &holon_api::link_parser::LinkTargetClassifier,
+) -> (String, Option<Vec<holon_api::MarkSpan>>) {
+    let raw = match body {
+        Some(b) => format!("{title}\n{b}"),
+        None => title.to_string(),
+    };
+    let (rendered, spans) = crate::inline_marks::extract_inline_marks_with(&raw, classifier);
+    if spans.is_empty() {
+        (raw, None)
+    } else {
+        (rendered, Some(spans))
+    }
+}
+
+/// The headline text after its stars, keyword and priority cookie, tags
+/// included, as written.
+fn headline_title_text(headline: &Headline) -> String {
+    headline
+        .syntax()
+        .children()
+        .filter(|n| {
+            matches!(
+                n.kind(),
+                SyntaxKind::HEADLINE_TITLE | SyntaxKind::HEADLINE_TAGS
+            )
+        })
+        .map(|n| n.to_string())
+        .collect()
 }
 
 /// Parse keywords config string "TODO,INPROGRESS|DONE,CANCELLED" into
@@ -852,43 +1019,35 @@ fn process_headlines(
             needs_id.push(id.clone());
         }
 
-        // `title_raw()` is the HEADLINE_TITLE node, and the parser consumes the
-        // TODO keyword into its own token BEFORE building that node — so the
-        // keyword is already gone. Stripping it again here would delete a
-        // keyword the title legitimately OWNS: `* TODO TODO x` is a TODO task
-        // whose text is `TODO x`, and re-stripping turns it into `x` on every
-        // read of the file.
-        let title = headline.title_raw().trim().to_string();
-        let keyword = headline.todo_keyword().map(|t| t.to_string());
-        let (task_state, title) = match keyword {
-            Some(k) if crate::task_keyword::asks_nothing(&k, &title) => (None, k),
-            Some(k) => (
-                Some(TaskState::from_keyword_with_done_list(&k, done_keywords)),
-                title,
-            ),
-            None => (None, title),
-        };
+        let HeadlineReading {
+            keyword,
+            cookie,
+            title,
+            tags,
+        } = read_headline(&headline);
+        let task_state = keyword.map(|k| TaskState::from_keyword_with_done_list(&k, done_keywords));
 
-        // The priority COOKIE (`[#A]`); the token carries just the letter. A
-        // letter outside the A/B/C default is data — org's accepted range is
+        // A letter outside the A/B/C default is data — org's accepted range is
         // configurable — but a non-letter cookie has no rank and refuses the
         // parse rather than taking the app down, as this once did.
         let cookie_priority =
-            match headline.priority() {
-                Some(t) => Some(t.to_string().parse::<holon_api::Priority>().with_context(
-                    || format!("org headline {id:?} has an unusable priority cookie"),
-                )?),
+            match cookie {
+                Some(t) => Some(t.parse::<holon_api::Priority>().with_context(|| {
+                    format!("org headline {id:?} has an unusable priority cookie")
+                })?),
                 None => None,
             };
 
-        // Extract tags
-        let tags = holon_api::Tags::from_tag_iter(
-            headline.tags().map(|t| t.to_string()).collect::<Vec<_>>(),
-        );
+        let tags = holon_api::Tags::from_tag_iter(tags);
 
         // Extract section content with source blocks
-        let section = extract_section_content(headline.section());
+        let section = extract_section_content(headline.section(), CommaEscape::Body);
         let body = section.body;
+        let blank_lines_before_body = if body.is_some() {
+            blank_lines_before_body(&headline)
+        } else {
+            Vec::new()
+        };
         let source_blocks = section.source_blocks;
 
         // Extract planning (SCHEDULED, DEADLINE).
@@ -985,28 +1144,7 @@ fn process_headlines(
         };
         let priority_drawer_only = cookie_priority.is_none() && drawer_priority.is_some();
 
-        // Create Block entity - content is title + body combined
-        let raw_content = if let Some(ref b) = body {
-            format!("{}\n{}", title, b)
-        } else {
-            title.clone()
-        };
-
-        // Extract inline marks (Bold/Italic/Link/etc) from the raw org text.
-        // When marks are present, we store the rendered (delimiter-stripped)
-        // text in `block.content` and the spans in `block.marks`. When the
-        // paragraph contains no inline markup, both `extract_inline_marks`
-        // returns empty marks and we keep the raw content byte-identical to
-        // preserve today's behavior for non-rich blocks.
-        let (content, marks) = {
-            let (rendered, spans) =
-                crate::inline_marks::extract_inline_marks_with(&raw_content, classifier);
-            if spans.is_empty() {
-                (raw_content, None)
-            } else {
-                (rendered, Some(spans))
-            }
-        };
+        let (content, marks) = block_content(&title, body.as_deref(), classifier);
 
         let now = holon_api::clock::now_millis();
         let mut block = Block {
@@ -1039,11 +1177,10 @@ fn process_headlines(
         // edge-typed ones are lifted into their typed edge fields.
         let other_properties = lift_edge_properties(&mut block, &string_properties, scope)?;
         for (key, value) in other_properties.iter() {
-            if key.eq_ignore_ascii_case(crate::models::org_props::PRIORITY) {
+            match TypedDrawerKey::parse(key) {
                 // Already parsed into the typed field; the renderer rebuilds
                 // this drawer line from it.
-                continue;
-            } else if key.eq_ignore_ascii_case("COLLAPSED") {
+                Some(TypedDrawerKey::Priority) => {}
                 // Outline fold state is document state (Martin ruling
                 // 2026-07-11), so it round-trips through org the same as any
                 // other block field — a plain drawer property, following
@@ -1051,30 +1188,34 @@ fn process_headlines(
                 // `collapsed:: true`; org-mode itself uses `t`/`nil` for
                 // drawer booleans, e.g. `:VISIBILITY:`). Absent means
                 // expanded (Block::default() already sets `collapsed: false`).
-                block.collapsed =
-                    value.eq_ignore_ascii_case("t") || value.eq_ignore_ascii_case("true");
-            } else if key.eq_ignore_ascii_case("WIDGET_ONLY") {
+                Some(TypedDrawerKey::Collapsed) => {
+                    block.collapsed =
+                        value.eq_ignore_ascii_case("t") || value.eq_ignore_ascii_case("true");
+                }
                 // Same boolean-drawer grammar as `:COLLAPSED:`, but a present
                 // value outside the accepted spellings is a hard parse error:
                 // silently defaulting a render-mode flag to false would hide
                 // the authored intent behind a correct-looking page.
-                if value.eq_ignore_ascii_case("t") || value.eq_ignore_ascii_case("true") {
-                    block.widget_only = true;
-                } else {
-                    anyhow::bail!(
-                        "block {id}: :WIDGET_ONLY: must be `t` or `true` (case-insensitive), got \
-                         {value:?}"
-                    );
+                Some(TypedDrawerKey::WidgetOnly) => {
+                    if value.eq_ignore_ascii_case("t") || value.eq_ignore_ascii_case("true") {
+                        block.widget_only = true;
+                    } else {
+                        anyhow::bail!(
+                            "block {id}: :WIDGET_ONLY: must be `t` or `true` (case-insensitive), \
+                             got {value:?}"
+                        );
+                    }
                 }
-            } else if key.eq_ignore_ascii_case("task_state")
-                || key.eq_ignore_ascii_case("task_state_category")
-            {
-                anyhow::bail!(
+                Some(TypedDrawerKey::TaskState) => anyhow::bail!(
                     "block {id}: drawer key :{key}: is refused; a task state is written as the \
                      headline keyword (`* TODO …`), never as a property"
-                );
-            } else {
-                block.set_property(key, holon_api::Value::String(value.to_string()));
+                ),
+                Some(
+                    typed @ (TypedDrawerKey::Id
+                    | TypedDrawerKey::Dependency
+                    | TypedDrawerKey::Edge(_)),
+                ) => unreachable!("drawer key :{key}: ({typed:?}) is lifted before this loop"),
+                None => block.set_property(key, holon_api::Value::String(value.to_string())),
             }
         }
         // Record the authored drawer key order so the renderer replays it
@@ -1104,6 +1245,11 @@ fn process_headlines(
                 ),
             );
         }
+
+        block.set_blank_lines(crate::models::BlankLines {
+            before_body: blank_lines_before_body,
+            after: blank_lines_after_headline(&headline),
+        });
 
         // Store ID in properties (extract_properties filters it out since it's used for
         // block.id)
@@ -1145,7 +1291,7 @@ fn process_headlines(
 fn extract_or_generate_id(headline: &Headline) -> (String, bool) {
     if let Some(drawer) = headline.properties() {
         if let Some(id_token) = drawer.iter().find_map(|(k, v)| {
-            if k.trim().eq_ignore_ascii_case("ID") {
+            if TypedDrawerKey::parse(k.trim()) == Some(TypedDrawerKey::Id) {
                 Some(v)
             } else {
                 None
@@ -1190,7 +1336,7 @@ fn extract_properties(headline: &Headline) -> Vec<(String, String)> {
         .iter()
         .filter_map(|(key_token, value_token)| {
             let key = key_token.to_string().trim().to_string();
-            if key.eq_ignore_ascii_case("ID") {
+            if TypedDrawerKey::parse(&key) == Some(TypedDrawerKey::Id) {
                 return None;
             }
             let raw = value_token.to_string();
@@ -1219,7 +1365,7 @@ struct SectionContent {
     deadline_fallback: Option<String>,
 }
 
-fn extract_section_content(section_opt: Option<Section>) -> SectionContent {
+fn extract_section_content(section_opt: Option<Section>, codec: CommaEscape) -> SectionContent {
     let section = match section_opt {
         Some(s) => s,
         None => {
@@ -1264,8 +1410,7 @@ fn extract_section_content(section_opt: Option<Section>) -> SectionContent {
                 // source text — round-trip fidelity, not a presentation artifact.
                 let raw = src_block.value();
                 let trimmed = raw.strip_suffix('\n').unwrap_or(&raw);
-                // Invert the renderer's comma-escape on '*' / '#+' lines.
-                let source = unescape_source_lines(trimmed);
+                let source = CommaEscape::Source.unescape(trimmed);
                 let parameters = src_block.parameters().map(|t| t.to_string());
 
                 let mut source_block =
@@ -1328,7 +1473,11 @@ fn extract_section_content(section_opt: Option<Section>) -> SectionContent {
     let section_start = usize::from(section_syntax.text_range().start());
     let mut ranges_to_remove: Vec<(usize, usize)> = Vec::new();
     for child in section_syntax.children() {
+        let text_keyword = matches!(codec, CommaEscape::Body)
+            && child.kind() == SyntaxKind::KEYWORD
+            && crate::comma_escape::is_page_id_keyword(&child.to_string());
         match child.kind() {
+            SyntaxKind::KEYWORD if text_keyword => {}
             SyntaxKind::SOURCE_BLOCK
             | SyntaxKind::KEYWORD
             | SyntaxKind::PROPERTY_DRAWER
@@ -1361,7 +1510,7 @@ fn extract_section_content(section_opt: Option<Section>) -> SectionContent {
     let (plain_text, image_paths) = extract_image_links(&body_text);
 
     SectionContent {
-        body: plain_text,
+        body: plain_text.map(|text| codec.unescape(&text)),
         source_blocks,
         image_paths,
         scheduled_fallback,
@@ -1425,26 +1574,6 @@ fn strip_planning_lines(text: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-/// Invert the renderer's comma-escape inside source/example block bodies:
-/// strip exactly one leading ',' from any line that, after the strip, starts
-/// with '*' or '#+'. Mirrors `models.rs::escape_source_lines`.
-fn unescape_source_lines(content: &str) -> String {
-    let mut out = String::with_capacity(content.len());
-    for (i, line) in content.split('\n').enumerate() {
-        if i > 0 {
-            out.push('\n');
-        }
-        let unescaped = line.strip_prefix(',').filter(|&rest| {
-            rest.starts_with('*')
-                || rest.starts_with("#+")
-                || rest.starts_with(",*")
-                || rest.starts_with(",#+")
-        });
-        out.push_str(unescaped.unwrap_or(line));
-    }
-    out
 }
 
 /// Extract #+NAME: from block text (orgize includes it in SOURCE_BLOCK node)
@@ -1583,8 +1712,8 @@ fn edge_ids(targets: &[EdgeTarget]) -> Option<Vec<EntityUri>> {
 
 /// Lift the edge-spelled entries of one block's flat `(key, value)` property
 /// list into `block`'s typed edge fields, and return the other entries in
-/// order. A key is edge-spelled when `EdgeField::from_drawer_key` names it, or
-/// it is `BLOCKED-BY`. Ingest params skip every such key as a property, so
+/// order. A key is edge-spelled when [`TypedDrawerKey`] names it a dependency
+/// or an edge. Ingest params skip every such key as a property, so
 /// each format with flat key/value properties must pass them through here.
 ///
 /// Block-referencing values take bare block ids; a value naming no block is an
@@ -1618,12 +1747,13 @@ pub fn lift_edge_properties(
 
     let mut other = Vec::new();
     for (key, value) in properties {
-        if is_dependency_key(key) {
-            continue;
-        }
-        let Some(edge) = holon_api::EdgeField::from_drawer_key(key) else {
-            other.push((key.clone(), value.clone()));
-            continue;
+        let edge = match TypedDrawerKey::parse(key) {
+            Some(TypedDrawerKey::Dependency) => continue,
+            Some(TypedDrawerKey::Edge(edge)) => edge,
+            _ => {
+                other.push((key.clone(), value.clone()));
+                continue;
+            }
         };
         match edge {
             holon_api::EdgeField::Requires => {
@@ -1659,7 +1789,7 @@ pub fn lift_edge_properties(
 /// name the SAME junction, so a block's `:REQUIRES:` and `:BLOCKED-BY:` values
 /// are resolved together by [`resolve_dependency_edge`] rather than key-by-key.
 fn is_dependency_key(key: &str) -> bool {
-    key.eq_ignore_ascii_case("REQUIRES") || key.eq_ignore_ascii_case("BLOCKED-BY")
+    TypedDrawerKey::parse(key) == Some(TypedDrawerKey::Dependency)
 }
 
 /// How a block's whole `:REQUIRES:`/`:BLOCKED-BY:` group resolves.
@@ -1891,6 +2021,16 @@ mod tests {
     }
 
     /// A well-formed file (distinct ids, no `#+ID:` collision) still parses.
+    #[test]
+    fn the_headline_tag_split_uses_the_tag_characters_of_the_org_grammar() {
+        let orgize = ParseConfig::default().is_tag_char;
+        let differ: Vec<char> = (0..0x3100u32)
+            .filter_map(char::from_u32)
+            .filter(|&c| orgize(c) != holon_api::Tags::is_org_tag_char(c))
+            .collect();
+        assert!(differ.is_empty(), "{differ:?}");
+    }
+
     #[test]
     fn parse_accepts_distinct_ids() {
         let content = "#+ID: doc-root\n* A\n:PROPERTIES:\n:ID: a1\n:END:\n* B\n:PROPERTIES:\n:ID: b1\n:END:\n";
@@ -2201,8 +2341,9 @@ mod tests {
             ":BLOCKED-BY: must lift into block.requires"
         );
 
-        let rendered =
-            OrgRenderer::render_entitys(&result.blocks, &path, &file_id).expect("org render");
+        let rendered = OrgRenderer::render_entitys(&result.blocks, &path, &file_id)
+            .expect("org render")
+            .text;
         // Canonical key :REQUIRES:, targets sorted (set-valued edge):
         // "now-query-mcp" < "orient-daily-view".
         assert!(
@@ -2243,8 +2384,9 @@ mod tests {
         let h = result.blocks.iter().find(|b| b.id.id() == "t2").unwrap();
         assert_eq!(h.requires, vec![EntityUri::parse("block:dep-a").unwrap()]);
 
-        let rendered =
-            OrgRenderer::render_entitys(&result.blocks, &path, &file_id).expect("org render");
+        let rendered = OrgRenderer::render_entitys(&result.blocks, &path, &file_id)
+            .expect("org render")
+            .text;
         assert!(
             rendered.contains(":REQUIRES: dep-a") && !rendered.contains(":BLOCKED-BY:"),
             ":BLOCKED-BY: input must render back as canonical :REQUIRES:; got:\n{rendered}"
@@ -2369,8 +2511,9 @@ mod tests {
             "bare slugs must normalise to block: URIs in the typed field"
         );
 
-        let rendered =
-            OrgRenderer::render_entitys(&result.blocks, &path, &file_id).expect("org render");
+        let rendered = OrgRenderer::render_entitys(&result.blocks, &path, &file_id)
+            .expect("org render")
+            .text;
         assert!(
             rendered.contains(":ADVICE_SUPPRESSED: id1 id2"),
             "renderer must emit the bare space-joined list, got:\n{rendered}"
@@ -2407,8 +2550,9 @@ mod tests {
             "COLLAPSED: t must parse to block.collapsed = true"
         );
 
-        let rendered =
-            OrgRenderer::render_entitys(&result.blocks, &path, &file_id).expect("org render");
+        let rendered = OrgRenderer::render_entitys(&result.blocks, &path, &file_id)
+            .expect("org render")
+            .text;
         assert!(
             rendered.contains(":COLLAPSED: t"),
             "renderer must emit the drawer property for a folded block, got:\n{rendered}"
@@ -2433,7 +2577,8 @@ mod tests {
         assert!(!e.collapsed);
         let expanded_rendered =
             OrgRenderer::render_entitys(&expanded_result.blocks, &path, &file_id)
-                .expect("org render");
+                .expect("org render")
+                .text;
         assert!(
             !expanded_rendered.contains("COLLAPSED"),
             "an expanded block must not gain a :COLLAPSED: drawer line, got:\n{expanded_rendered}"
@@ -2459,8 +2604,9 @@ mod tests {
             "WIDGET_ONLY: t must parse to block.widget_only = true"
         );
 
-        let rendered =
-            OrgRenderer::render_entitys(&result.blocks, &path, &file_id).expect("org render");
+        let rendered = OrgRenderer::render_entitys(&result.blocks, &path, &file_id)
+            .expect("org render")
+            .text;
         assert!(
             rendered.contains(":WIDGET_ONLY: t"),
             "renderer must emit the drawer property, got:\n{rendered}"
@@ -2481,8 +2627,9 @@ mod tests {
             .find(|b| b.id.id() == "w2")
             .unwrap();
         assert!(!p.widget_only);
-        let plain_rendered =
-            OrgRenderer::render_entitys(&plain_result.blocks, &path, &file_id).expect("org render");
+        let plain_rendered = OrgRenderer::render_entitys(&plain_result.blocks, &path, &file_id)
+            .expect("org render")
+            .text;
         assert!(
             !plain_rendered.contains("WIDGET_ONLY"),
             "a plain block must not gain a :WIDGET_ONLY: drawer line, got:\n{plain_rendered}"
@@ -3014,8 +3161,9 @@ select {id, parent_id, content, content_type}
         assert_eq!(img2.content, "img/b.png");
 
         // Round-trip: render back to org text
-        let rendered =
-            OrgRenderer::render_entitys(&result.blocks, &path, &file_id).expect("org render");
+        let rendered = OrgRenderer::render_entitys(&result.blocks, &path, &file_id)
+            .expect("org render")
+            .text;
 
         // Re-parse the rendered text
         let result2 = parse_org_file(&path, &rendered, &EntityUri::no_parent(), &root).unwrap();

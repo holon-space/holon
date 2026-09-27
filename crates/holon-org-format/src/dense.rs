@@ -167,12 +167,15 @@ pub(crate) fn to_org_dense(
         )
     });
     let gap = gap_ids.contains(block.id.as_str());
+    // A projection for reading, not a file: a key it cannot show is logged by
+    // the renderer and reaches no disk.
     render_headline_block(
         block,
         HeadlineIdentity::DenseToken {
             alias: alias.as_str(),
             gap,
         },
+        &mut Vec::new(),
     )
 }
 
@@ -192,7 +195,7 @@ pub fn render_dense(
     alias_table: &AliasTable,
     gap_ids: &HashSet<String>,
 ) -> anyhow::Result<String> {
-    let mut result = render_document_header(doc_block)?;
+    let mut result = render_document_header(doc_block, &mut Vec::new())?;
     if !result.is_empty() && !result.ends_with('\n') {
         result.push('\n');
     }

@@ -43,7 +43,8 @@ fn a_typed_value_with_a_line_break_leaves_the_drawer_intact() {
         kid.set_property("note", value.clone());
         blocks.push(kid);
         let text = OrgRenderer::render_document(&document, &blocks, Path::new(FILE), &document.id)
-            .expect("org render");
+            .expect("org render")
+            .text;
         assert!(
             !text.contains("Evil heading"),
             "{value:?} reached the file:\n{text}"

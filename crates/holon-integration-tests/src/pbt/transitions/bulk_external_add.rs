@@ -156,6 +156,18 @@ impl<R: RefLifecycle + RefDocuments + RefLayoutInteract + RefLayoutMutate> Trans
         // The whole bulk-add reference effect (org round-trip normalization, doc
         // ownership, canonical re-sequencing, block-id counter advance) lives in
         // `RefLayoutMutate::bulk_add_blocks`.
+        for block in &self.blocks {
+            crate::pbt::generators::note_escaped_body_line_reach("BulkExternalAdd", &block.content);
+            let (content, marks) = crate::pbt::types::normalize_content_for_org_roundtrip(
+                &block.content,
+                block.content_type,
+            );
+            crate::pbt::generators::note_mark_across_escaped_line_reach(
+                "BulkExternalAdd",
+                &content,
+                marks.as_deref().unwrap_or(&[]),
+            );
+        }
         state.bulk_add_blocks(&self.doc_uri, &self.blocks);
     }
 }

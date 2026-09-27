@@ -26,6 +26,7 @@ use anyhow::Result;
 use holon_api::EntityUri;
 use holon_api::POSITION_AFTER_BLOCK_ID_PARAM;
 use holon_api::ROUTING_DOC_URI_KEY;
+use holon_api::Rendered;
 use holon_api::SnapshotBlock;
 use holon_api::Value;
 use holon_api::block::Block;
@@ -5409,7 +5410,7 @@ impl FileSyncController {
         // it would compare the holder against a pre-ingest snapshot and wave
         // through exactly the render that drops the just-ingested blocks.
         match self
-            .holder_fold_is_complete(doc_id, delta_brings_new_content)
+            .holder_fold_is_complete(doc_id, &path, delta_brings_new_content)
             .await?
         {
             FoldVerdict::Complete => {}
@@ -5666,6 +5667,7 @@ impl FileSyncController {
     async fn holder_fold_is_complete(
         &mut self,
         doc: &EntityUri,
+        path: &Path,
         delta_brings_new_content: bool,
     ) -> Result<FoldVerdict> {
         let authority: HashSet<(String, String)> = self
@@ -5791,7 +5793,7 @@ impl FileSyncController {
             );
             tracing::error!(doc = %doc, %difference, "[FileSyncController] {detail}");
             if let Some(disclosure) = &self.writeback_disclosure {
-                disclosure.writeback_degraded(&detail);
+                disclosure.writeback_stalled(path, &detail);
             }
         }
 
@@ -6522,10 +6524,12 @@ impl FileSyncController {
         // emits `#+ID: <id>` for a block-scheme doc-root, so a childless page
         // renders NON-empty — its identity file exists.
         let children = self.block_reader.get_blocks(page_id).await?;
-        let rendered = self
-            .renderer
-            .render_document_block(&page_block, &children, &path)
-            .await?;
+        let rendered = self.disclose_render(
+            &path,
+            self.renderer
+                .render_document_block(&page_block, &children, &path)
+                .await,
+        )?;
         if rendered.trim().is_empty() {
             return Ok(());
         }
@@ -6822,7 +6826,7 @@ impl FileSyncController {
 
     /// Render a document from the authoritative doc-scoped read.
     async fn render_file_by_doc_id(&self, doc_id: &EntityUri, path: &Path) -> Result<String> {
-        self.renderer.render_document(doc_id, path).await
+        self.disclose_render(path, self.renderer.render_document(doc_id, path).await)
     }
 
     /// Render an already-resolved, ordered block slice for `doc_id`. Shared by
@@ -6835,7 +6839,43 @@ impl FileSyncController {
         path: &Path,
         blocks: &[Block],
     ) -> Result<String> {
-        self.renderer.render_blocks(doc_id, path, blocks).await
+        self.disclose_render(
+            path,
+            self.renderer.render_blocks(doc_id, path, blocks).await,
+        )
+    }
+
+    /// The text of a write-back render of `path`. A render that leaves stored
+    /// values out of the file, or refuses it, raises the file's write-back
+    /// condition; a faithful one lifts it.
+    fn disclose_render(&self, path: &Path, rendered: Result<Rendered>) -> Result<String> {
+        let Some(disclosure) = &self.writeback_disclosure else {
+            return rendered.map(|r| r.text);
+        };
+        match rendered {
+            Ok(Rendered { text, losses }) if losses.is_empty() => {
+                disclosure.writeback_faithful(path);
+                Ok(text)
+            }
+            Ok(Rendered { text, losses }) => {
+                let lost: Vec<String> = losses.iter().map(|l| l.to_string()).collect();
+                disclosure.writeback_lossy(
+                    path,
+                    &format!(
+                        "{} is written without {} stored value(s), which stay in Holon: {}",
+                        path.display(),
+                        losses.len(),
+                        lost.join("; ")
+                    ),
+                );
+                Ok(text)
+            }
+            Err(e) => {
+                disclosure
+                    .writeback_lossy(path, &format!("{} is not written: {e:#}", path.display()));
+                Err(e)
+            }
+        }
     }
 
     /// Write image files to disk for all image blocks in this document.
@@ -7550,6 +7590,13 @@ impl FileSyncController {
         }
         match self.fs.write(path, rendered).await {
             Ok(()) => {
+                if let Some(disclosure) = &self.writeback_disclosure {
+                    disclosure.writeback_resumed(path);
+                }
+                // A stall after this write is a new one and is disclosed again.
+                if let Some(skips) = self.gate_skips.get_mut(doc_id) {
+                    skips.escalated = false;
+                }
                 // Unreachable for a read-only home: the tier gate above
                 // returned before this write, so this only ever records a
                 // writable home (which drops any membership).

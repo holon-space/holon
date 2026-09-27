@@ -68,7 +68,9 @@ fn document_order() -> Vec<Block> {
 }
 
 fn render(blocks: &[Block]) -> String {
-    OrgRenderer::render_entitys(blocks, Path::new("/test/Renest.org"), &root()).expect("org render")
+    OrgRenderer::render_entitys(blocks, Path::new("/test/Renest.org"), &root())
+        .expect("org render")
+        .text
 }
 
 /// Reorder `document_order()` by id, panicking on any id that is not in the

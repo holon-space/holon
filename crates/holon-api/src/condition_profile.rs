@@ -117,6 +117,9 @@ pub enum AllClear {
     NextSuccessOf(ClearingEvent),
     /// The next ingest of the file the instance names that reports no problem.
     NextCleanIngest,
+    /// The next write-back render of the file the instance names that holds
+    /// every stored value.
+    NextFaithfulRender,
     RemedyApplied,
     /// Info only. See [`ConditionProfile::new`].
     Elapsed(Duration),
@@ -373,6 +376,15 @@ const LOCAL_EDIT_NOT_APPLIED: ConditionProfile = ConditionProfile::new(
     &[],
 );
 
+const WRITEBACK_LOSSY: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Warning,
+    "Some values of this file could not be written to it",
+    icons::WARN,
+    ConditionPlacement::Toast,
+    AllClear::NextFaithfulRender,
+    &[],
+);
+
 const WRITEBACK_DEGRADED: ConditionProfile = ConditionProfile::new(
     ConditionSeverity::Error,
     "Edits are not reaching disk",
@@ -546,6 +558,7 @@ impl ConditionKind {
             Self::EditRefusedReadOnlyFormat { .. } => EDIT_REFUSED_READ_ONLY_FORMAT,
             Self::LocalEditNotApplied { .. } => LOCAL_EDIT_NOT_APPLIED,
             Self::WritebackDegraded(_) => WRITEBACK_DEGRADED,
+            Self::WritebackLossy { .. } => WRITEBACK_LOSSY,
             Self::IntegrationConnectFailed { .. } => INTEGRATION_CONNECT_FAILED,
             Self::IntegrationNeedsAuth { .. } => INTEGRATION_NEEDS_AUTH,
             Self::IntegrationSidecarSuperseded { .. } => INTEGRATION_SIDECAR_SUPERSEDED,

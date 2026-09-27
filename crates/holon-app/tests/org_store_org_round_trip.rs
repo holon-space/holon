@@ -183,11 +183,13 @@ async fn render_both_ways(source: &str, leg: WriteLeg) -> (String, String) {
 
     let from_parser =
         OrgRenderer::render_document(&parsed.document, &parsed.blocks, path, &parsed.document.id)
-            .expect("org render");
+            .expect("org render")
+            .text;
     let restored = through_the_store(&parsed.document, &parsed.blocks, leg).await;
     let after_store =
         OrgRenderer::render_document(&parsed.document, &restored, path, &parsed.document.id)
-            .expect("org render");
+            .expect("org render")
+            .text;
 
     (from_parser, after_store)
 }
@@ -255,7 +257,8 @@ async fn non_alphabetical_drawer_order_survives_the_store() {
 
     let after_store =
         OrgRenderer::render_document(&parsed.document, &restored, path, &parsed.document.id)
-            .expect("org render");
+            .expect("org render")
+            .text;
     assert_eq!(
         after_store, NON_ALPHABETICAL,
         "a non-alphabetically authored drawer must round-trip org → store → org byte-identical: \
@@ -278,7 +281,8 @@ async fn non_alphabetical_drawer_order_survives_the_store() {
         .collect();
     let without_carrier =
         OrgRenderer::render_document(&parsed.document, &stripped, path, &parsed.document.id)
-            .expect("org render");
+            .expect("org render")
+            .text;
     assert_eq!(
         without_carrier, ALPHABETICAL,
         "without `_drawer_order` the renderer falls back to its alphabetical tiebreak — so the \
@@ -316,7 +320,8 @@ async fn non_alphabetical_drawer_order_survives_the_ingest_leg() {
 
     let after_store =
         OrgRenderer::render_document(&parsed.document, &restored, path, &parsed.document.id)
-            .expect("org render");
+            .expect("org render")
+            .text;
     assert_eq!(
         after_store, NON_ALPHABETICAL,
         "a non-alphabetically authored drawer must round-trip org → ingest → store → org \
@@ -760,5 +765,347 @@ async fn every_authored_carrier_stores_the_same_canonical_rank() {
                 leg.name()
             );
         }
+    }
+}
+
+/// A page and its blocks.
+type Page = (Block, Vec<Block>);
+
+/// Pages as the store returned them, served to the write-back controller.
+#[derive(Clone, Default)]
+struct StoredPages(Arc<std::sync::Mutex<HashMap<EntityUri, Page>>>);
+
+#[async_trait::async_trait]
+impl BlockReader for StoredPages {
+    async fn get_blocks(&self, doc_id: &EntityUri) -> anyhow::Result<Vec<Block>> {
+        Ok(self
+            .0
+            .lock()
+            .unwrap()
+            .get(doc_id)
+            .map(|(_, kids)| kids.clone())
+            .unwrap_or_default())
+    }
+
+    async fn doc_block_topology(
+        &self,
+        doc_id: &EntityUri,
+    ) -> anyhow::Result<Vec<(EntityUri, EntityUri)>> {
+        Ok(self
+            .get_blocks(doc_id)
+            .await?
+            .into_iter()
+            .map(|b| (b.id, b.parent_id))
+            .collect())
+    }
+
+    async fn get_block_authoritative(&self, id: &EntityUri) -> anyhow::Result<Option<Block>> {
+        let pages = self.0.lock().unwrap();
+        Ok(pages.values().find_map(|(page, kids)| {
+            std::iter::once(page)
+                .chain(kids)
+                .find(|b| &b.id == id)
+                .cloned()
+        }))
+    }
+
+    async fn iter_documents_with_blocks(&self) -> anyhow::Result<Vec<(EntityUri, Vec<Block>)>> {
+        let mut docs: Vec<_> = self
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(id, (_, kids))| (id.clone(), kids.clone()))
+            .collect();
+        docs.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
+        Ok(docs)
+    }
+}
+
+#[async_trait::async_trait]
+impl holon_filesystem::DocumentManager for StoredPages {
+    async fn find_by_parent_and_name(
+        &self,
+        _: &EntityUri,
+        _: &str,
+    ) -> anyhow::Result<Option<Block>> {
+        Ok(None)
+    }
+    async fn create(&self, doc: Block) -> anyhow::Result<Block> {
+        Ok(doc)
+    }
+    async fn get_by_id(&self, id: &EntityUri) -> anyhow::Result<Option<Block>> {
+        Ok(self.0.lock().unwrap().get(id).map(|(page, _)| page.clone()))
+    }
+    async fn update_metadata(&self, _: &Block) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+struct NoOrdering;
+
+#[async_trait::async_trait]
+impl holon_core::block_ordering::BlockOrdering for NoOrdering {
+    async fn place(
+        &self,
+        _: &EntityUri,
+        _: &EntityUri,
+        _: Option<&EntityUri>,
+    ) -> holon_core::traits::Result<()> {
+        Ok(())
+    }
+    async fn prev_sibling(&self, _: &EntityUri) -> holon_core::traits::Result<Option<EntityUri>> {
+        Ok(None)
+    }
+    async fn next_sibling(&self, _: &EntityUri) -> holon_core::traits::Result<Option<EntityUri>> {
+        Ok(None)
+    }
+    async fn first_child(&self, _: &EntityUri) -> holon_core::traits::Result<Option<EntityUri>> {
+        Ok(None)
+    }
+    async fn last_child(&self, _: &EntityUri) -> holon_core::traits::Result<Option<EntityUri>> {
+        Ok(None)
+    }
+    async fn children(&self, _: &EntityUri) -> holon_core::traits::Result<Vec<EntityUri>> {
+        Ok(Vec::new())
+    }
+    async fn update_in_tree(&self, _: holon_api::StorageEntity) -> holon_core::traits::Result<()> {
+        Ok(())
+    }
+    async fn delete_in_tree(&self, _: holon_api::StorageEntity) -> holon_core::traits::Result<()> {
+        Ok(())
+    }
+}
+
+/// A block whose value its file cannot hold, on a page of its own.
+fn lossy_page(title: &str, kid_id: EntityUri, lossy: impl FnOnce(&mut Block)) -> (Block, Block) {
+    let mut page = Block::new_text(
+        EntityUri::block(&format!("{}-page", title.to_lowercase())),
+        EntityUri::no_parent(),
+        title,
+    );
+    page.set_page(true);
+    let mut kid = Block::new_text(kid_id, page.id.clone(), "Kid");
+    lossy(&mut kid);
+    (page, kid)
+}
+
+/// Each value write-back cannot put in the file raises a `WritebackLossy`
+/// condition for that file, naming the block; a render that holds every value
+/// lifts it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_value_the_file_cannot_hold_raises_the_files_writeback_condition() {
+    let cases = [
+        lossy_page("Tagged", EntityUri::block("tagged-kid"), |kid| {
+            kid.content = "Meeting :urgent:".to_string();
+        }),
+        lossy_page("Keyed", EntityUri::block("keyed-kid"), |kid| {
+            kid.set_property("a b", holon_api::Value::String("v".into()));
+        }),
+        lossy_page(
+            "Refused",
+            EntityUri::parse("block:a#b").expect("a block URI"),
+            |_| {},
+        ),
+    ];
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let pages = StoredPages::default();
+    for (page, kid) in &cases {
+        let restored = through_the_store(page, std::slice::from_ref(kid), WriteLeg::Loro).await;
+        let back = restored
+            .iter()
+            .find(|b| b.id == kid.id)
+            .unwrap_or_else(|| panic!("{} must come back from the store", kid.id));
+        assert_eq!(
+            (&back.content, back.properties_map().get("a b")),
+            (&kid.content, kid.properties_map().get("a b")),
+            "mechanism: the store keeps the value the file cannot hold"
+        );
+        pages
+            .0
+            .lock()
+            .unwrap()
+            .insert(page.id.clone(), (page.clone(), restored));
+    }
+
+    let bus = Arc::new(holon_api::ConditionBus::new());
+    let mut sync = holon_orgmode::file_sync_controller::new_org_sync_controller(
+        Arc::new(pages.clone()),
+        Arc::new(pages.clone()),
+        root.clone(),
+        Arc::new(NoOrdering),
+        Arc::new(holon_filesystem::RealFileSystem),
+    )
+    .with_writeback_disclosure(Arc::new(
+        holon_app::loro_seams::WritebackDegradedDisclosure { bus: bus.clone() },
+    ));
+    sync.materialize_missing_page_files()
+        .await
+        .unwrap_or_else(|e| panic!("{e:#}"));
+
+    let degraded = |file: &str| {
+        let subject = holon_core::CanonicalPath::new(root.join(file))
+            .display()
+            .to_string();
+        bus.current().into_iter().find_map(|c| match c.reason {
+            holon_api::ConditionKind::WritebackLossy { detail } if c.subject == subject => {
+                Some(detail)
+            }
+            _ => None,
+        })
+    };
+    let mut missing = Vec::new();
+    for ((page, kid), file) in cases.iter().zip(["Tagged.org", "Keyed.org", "Refused.org"]) {
+        match degraded(file) {
+            Some(detail) if detail.contains(kid.id.as_str()) && detail.contains(file) => {}
+            Some(detail) => missing.push(format!("{file}: does not name {}: {detail}", kid.id)),
+            None => missing.push(format!(
+                "{file}: no condition for {} of {}",
+                kid.id, page.id
+            )),
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "each lossy file raises a condition naming the block and the file: {missing:#?}\n\
+         conditions: {:?}",
+        bus.current()
+    );
+
+    for (page, kid) in &cases {
+        let mut fixed = Block::new_text(
+            EntityUri::block(&format!("{}-kid-fixed", page.content.to_lowercase())),
+            page.id.clone(),
+            "Kid",
+        );
+        if kid.id.as_str() != "block:a#b" {
+            fixed.id = kid.id.clone();
+        }
+        pages
+            .0
+            .lock()
+            .unwrap()
+            .insert(page.id.clone(), (page.clone(), vec![fixed]));
+    }
+    sync.re_render_all_tracked(&std::collections::HashSet::new())
+        .await
+        .unwrap_or_else(|e| panic!("{e:#}"));
+    sync.materialize_missing_page_files()
+        .await
+        .unwrap_or_else(|e| panic!("{e:#}"));
+    for file in ["Tagged.org", "Keyed.org", "Refused.org"] {
+        assert_eq!(
+            degraded(file),
+            None,
+            "{file}: a render that holds every value lifts the condition"
+        );
+    }
+}
+
+/// A render the org parser would refuse is not written: a new page gets no
+/// file, an existing page keeps its old, readable bytes, and each file's
+/// `WritebackLossy` condition says why.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_render_the_parser_would_refuse_leaves_the_page_readable() {
+    let (page, kid) = lossy_page("Cookie", EntityUri::block("cookie-kid"), |_| {});
+    let (fresh, fresh_kid) = lossy_page("Fresh", EntityUri::block("fresh-kid"), |kid| {
+        kid.content = "[#a] lowercase cookie".to_string();
+    });
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let pages = StoredPages::default();
+    pages
+        .0
+        .lock()
+        .unwrap()
+        .insert(page.id.clone(), (page.clone(), vec![kid.clone()]));
+
+    let bus = Arc::new(holon_api::ConditionBus::new());
+    let mut sync = holon_orgmode::file_sync_controller::new_org_sync_controller(
+        Arc::new(pages.clone()),
+        Arc::new(pages.clone()),
+        root.clone(),
+        Arc::new(NoOrdering),
+        Arc::new(holon_filesystem::RealFileSystem),
+    )
+    .with_writeback_disclosure(Arc::new(
+        holon_app::loro_seams::WritebackDegradedDisclosure { bus: bus.clone() },
+    ));
+    sync.materialize_missing_page_files()
+        .await
+        .unwrap_or_else(|e| panic!("{e:#}"));
+    let file = root.join("Cookie.org");
+    let before = std::fs::read_to_string(&file).expect("the page file is written");
+
+    let mut cookie = kid.clone();
+    cookie.content = "[#1] numeric cookie".to_string();
+    pages
+        .0
+        .lock()
+        .unwrap()
+        .insert(page.id.clone(), (page.clone(), vec![cookie]));
+    pages
+        .0
+        .lock()
+        .unwrap()
+        .insert(fresh.id.clone(), (fresh.clone(), vec![fresh_kid]));
+    let rerender = sync
+        .re_render_all_tracked(&std::collections::HashSet::new())
+        .await;
+    let materialize = sync.materialize_missing_page_files().await;
+    let outcomes = format!("re-render {rerender:?}, materialize {materialize:?}");
+
+    let after = std::fs::read_to_string(&file).unwrap();
+    assert_eq!(
+        after, before,
+        "the refused render must not reach disk ({outcomes})"
+    );
+    let fresh_file = root.join("Fresh.org");
+    if let Ok(written) = std::fs::read_to_string(&fresh_file) {
+        holon_orgmode::parser::parse_org_file(
+            &fresh_file,
+            &written,
+            &EntityUri::no_parent(),
+            &root,
+        )
+        .unwrap_or_else(|e| panic!("a written page must be readable: {e:#}\n{written}"));
+    }
+    let condition = |file: &Path| {
+        let subject = holon_core::CanonicalPath::new(file).display().to_string();
+        bus.current().into_iter().find_map(|c| match c.reason {
+            holon_api::ConditionKind::WritebackLossy { detail } if c.subject == subject => {
+                Some(detail)
+            }
+            _ => None,
+        })
+    };
+    for f in [&file, &fresh_file] {
+        let detail = condition(f);
+        assert!(
+            detail.as_deref().is_some_and(|d| d.contains("refused")),
+            "{}: the condition names the refusal: {detail:?} ({outcomes})",
+            f.display()
+        );
+    }
+}
+
+const BLANK_LINES: &str = "#+ID: blank-page\n\n* Topic\n:PROPERTIES:\n:ID: \
+     blank-topic\n:END:\n\nbody\n\n\n** Kid\n:PROPERTIES:\n:ID: blank-kid\n:END:\n\n* Next\n\
+     :PROPERTIES:\n:ID: blank-next\n:END:\nend\n";
+
+/// The blank lines an author put around a headline's text come back after the
+/// store, on both write legs.
+#[tokio::test(flavor = "multi_thread")]
+async fn blank_lines_survive_the_store() {
+    for leg in [WriteLeg::Loro, WriteLeg::OrgIngest] {
+        let (from_parser, after_store) = render_both_ways(BLANK_LINES, leg).await;
+        assert_eq!(
+            (from_parser.as_str(), after_store.as_str()),
+            (BLANK_LINES, BLANK_LINES),
+            "{}",
+            leg.name()
+        );
     }
 }

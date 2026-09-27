@@ -238,3 +238,145 @@ fn a_file_drawer_key_ending_in_plus_is_written() {
         );
     });
 }
+
+/// A key the parser reads back as a typed field, not as a property: an edge
+/// in any spelling the drawer lifts, or a storage column.
+#[test]
+fn a_properties_bag_key_spelling_an_edge_is_refused() {
+    refused_case(
+        "create",
+        "Contributes-To",
+        vec![
+            ("id", text("block:n-child")),
+            ("parent_id", text(TARGET_ID)),
+            ("content", text("child")),
+            (
+                "properties",
+                Value::Object([("Contributes-To".to_string(), text("n-target"))].into()),
+            ),
+        ],
+    );
+}
+
+#[test]
+fn a_properties_bag_key_naming_a_storage_column_is_refused() {
+    refused_case(
+        "set_field",
+        "sort_key",
+        vec![
+            ("id", text(TARGET_ID)),
+            ("field", text("org_properties")),
+            (
+                "value",
+                text(&serde_json::json!({ "ID": "n-target", "sort_key": "a0" }).to_string()),
+            ),
+        ],
+    );
+}
+
+#[test]
+fn set_field_under_a_drawer_spelling_of_an_edge_is_refused() {
+    refused_case(
+        "set_field",
+        "REQUIRES",
+        vec![
+            ("id", text(TARGET_ID)),
+            ("field", text("REQUIRES")),
+            ("value", text("n-target")),
+        ],
+    );
+}
+
+/// Every key the org ingest lifts into a typed field, in the cases a person
+/// may type it.
+fn typed_field_spellings() -> Vec<String> {
+    let mut all: Vec<String> = holon_org_format::TypedDrawerKey::spellings()
+        .iter()
+        .flat_map(|(spelling, _)| {
+            let mut title = spelling.to_ascii_lowercase();
+            title[..1].make_ascii_uppercase();
+            [
+                spelling.clone(),
+                spelling.to_ascii_lowercase(),
+                spelling.to_ascii_uppercase(),
+                title,
+            ]
+        })
+        .collect();
+    all.sort();
+    all.dedup();
+    all
+}
+
+/// A write under a key the org ingest lifts into a typed field that is that
+/// field's own write: `ID` (checked as an id), `priority`, a flat edge column.
+fn is_own_write(key: &str, in_bag: bool) -> bool {
+    key == "ID"
+        || key == holon_org_format::org_props::PRIORITY
+        || (!in_bag && holon_api::EdgeField::is_edge_column(key))
+}
+
+#[test]
+fn every_spelling_the_ingest_lifts_is_refused_as_a_property() {
+    let rt = runtime();
+    rt.clone().block_on(async move {
+        let t = booted(rt.clone()).await;
+        let mut accepted = Vec::new();
+        for (i, key) in typed_field_spellings().into_iter().enumerate() {
+            let flat_is_property = matches!(
+                holon_api::BlockWriteField::parse(&key),
+                Ok(holon_api::BlockWriteField::Property(_))
+            );
+            let bag = (
+                "create",
+                "properties",
+                [
+                    ("id", text(&format!("block:n-child-{i}"))),
+                    ("parent_id", text(TARGET_ID)),
+                    ("content", text("child")),
+                    (
+                        "properties",
+                        Value::Object([(key.clone(), text("n-target"))].into()),
+                    ),
+                ]
+                .to_vec(),
+            );
+            let flat = (
+                "set_field",
+                key.as_str(),
+                [
+                    ("id", text(TARGET_ID)),
+                    ("field", text(&key)),
+                    ("value", text("n-target")),
+                ]
+                .to_vec(),
+            );
+            for (in_bag, (op, via, params)) in [(true, bag), (false, flat)] {
+                if is_own_write(&key, in_bag) || (!in_bag && !flat_is_property) {
+                    continue;
+                }
+                let mut p = holon_api::StorageEntity::new();
+                for (k, v) in params {
+                    p.insert(k.into(), v);
+                }
+                match t
+                    .engine()
+                    .execute_operation(&EntityName::new("block"), op, p, OpOrigin::User)
+                    .await
+                {
+                    Ok(_) => accepted.push(format!("{key:?} via {op} `{via}`")),
+                    Err(e) => assert!(
+                        format!("{e:#}").contains(&format!("{key:?}")),
+                        "the refusal of {key:?} via {op} `{via}` must name the key: {e:#}"
+                    ),
+                }
+            }
+        }
+        let file = org_file_after_settle(&t).await;
+        assert!(
+            accepted.is_empty(),
+            "accepted as a property although the org ingest reads the key as a typed field: \
+             {accepted:?}\nnotes.org:\n{file}"
+        );
+    });
+}

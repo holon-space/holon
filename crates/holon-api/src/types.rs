@@ -1001,6 +1001,35 @@ impl Tags {
             .find(|c| *c == ',' || *c == ':' || c.is_whitespace())
     }
 
+    /// Split org headline text into its title and its tags, the way the org
+    /// parser reads them (docs/Reference/ORG_SYNTAX.md): the tags are the last
+    /// blank-separated token when it is `:`, tag characters or colons, and `:`,
+    /// and it names at least one tag. That token may be the whole text.
+    pub fn split_org_headline(text: &str) -> (String, Vec<String>) {
+        let text = text.trim_end_matches([' ', '\t']);
+        let start = text.rfind([' ', '\t']).map_or(0, |blank| blank + 1);
+        let token = &text[start..];
+        let tags: Vec<String> = token
+            .split(':')
+            .filter(|tag| !tag.is_empty())
+            .map(str::to_string)
+            .collect();
+        let is_tag_group = token.len() > 2
+            && token.starts_with(':')
+            && token.ends_with(':')
+            && token.chars().all(|c| c == ':' || Self::is_org_tag_char(c))
+            && !tags.is_empty();
+        if !is_tag_group {
+            return (text.trim().to_string(), Vec::new());
+        }
+        (text[..start].trim().to_string(), tags)
+    }
+
+    /// A character an org headline tag holds: alphanumeric, `_@#%`, and `-`.
+    pub fn is_org_tag_char(c: char) -> bool {
+        c.is_alphanumeric() || matches!(c, '_' | '@' | '#' | '%' | '-')
+    }
+
     /// Org-mode tag format: `:tag1:tag2:`
     pub fn to_org(&self) -> String {
         if self.0.is_empty() {

@@ -7,6 +7,7 @@ use anyhow::Context;
 use anyhow::Result;
 use holon_api::Block;
 use holon_api::EntityUri;
+use holon_api::Rendered;
 use holon_core::FileFormatAdapter;
 use holon_core::FormatRegistry;
 use holon_core::WriteTier;
@@ -81,7 +82,7 @@ impl WritebackRenderer {
     }
 
     /// Render `blocks` — already in authoritative document order — as
-    /// `doc_id`'s file text.
+    /// `doc_id`'s file text, with the stored values that text does not hold.
     ///
     /// A known document renders with its header (`#+TITLE:`, `#+ID:`); an
     /// unknown one renders body-only.
@@ -90,12 +91,12 @@ impl WritebackRenderer {
         doc_id: &EntityUri,
         path: &Path,
         blocks: &[Block],
-    ) -> Result<String> {
+    ) -> Result<Rendered> {
         let rendered = match self.doc_manager.get_by_id(doc_id).await? {
             Some(doc) => self.render_with_document_block(&doc, blocks, path)?,
             None => self.render_body_raw(doc_id, path, blocks)?,
         };
-        assert_rendered(doc_id, blocks, &rendered);
+        assert_rendered(doc_id, blocks, &rendered.text);
         Ok(rendered)
     }
 
@@ -106,13 +107,13 @@ impl WritebackRenderer {
         document: &Block,
         blocks: &[Block],
         path: &Path,
-    ) -> Result<String> {
+    ) -> Result<Rendered> {
         self.render_with_document_block(document, blocks, path)
     }
 
     /// The authoritative full render: read `doc_id`'s blocks from the write
     /// authority, then render them.
-    pub async fn render_document(&self, doc_id: &EntityUri, path: &Path) -> Result<String> {
+    pub async fn render_document(&self, doc_id: &EntityUri, path: &Path) -> Result<Rendered> {
         let blocks = self.read_blocks(doc_id).await?;
         self.render_blocks(doc_id, path, &blocks).await
     }
@@ -128,7 +129,7 @@ impl WritebackRenderer {
         document: &Block,
         blocks: &[Block],
         path: &Path,
-    ) -> Result<String> {
+    ) -> Result<Rendered> {
         self.writable_adapter(path)?
             .render_document(document, blocks, path, &document.id)
             .with_context(|| format!("write-back render of {} refused", path.display()))
@@ -140,11 +141,16 @@ impl WritebackRenderer {
         doc_id: &EntityUri,
         path: &Path,
         blocks: &[Block],
-    ) -> Result<String> {
+    ) -> Result<Rendered> {
         self.render_body_raw(doc_id, path, blocks)
     }
 
-    fn render_body_raw(&self, doc_id: &EntityUri, path: &Path, blocks: &[Block]) -> Result<String> {
+    fn render_body_raw(
+        &self,
+        doc_id: &EntityUri,
+        path: &Path,
+        blocks: &[Block],
+    ) -> Result<Rendered> {
         self.writable_adapter(path)?
             .render_blocks(blocks, path, doc_id)
             .with_context(|| format!("write-back render of {} refused", path.display()))

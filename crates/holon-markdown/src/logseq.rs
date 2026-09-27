@@ -296,7 +296,7 @@ impl FileFormatAdapter for LogseqMarkdownAdapter {
         _: &[Block],
         path: &Path,
         _: &EntityUri,
-    ) -> anyhow::Result<String> {
+    ) -> anyhow::Result<holon_api::Rendered> {
         panic!(
             "LogseqMarkdownAdapter is read-only (Tier R/O): refused to render {} — a write to a \
              foreign vault is loss under ADR 0025 until anchored write-back lands",
@@ -304,7 +304,12 @@ impl FileFormatAdapter for LogseqMarkdownAdapter {
         );
     }
 
-    fn render_blocks(&self, _: &[Block], path: &Path, _: &EntityUri) -> anyhow::Result<String> {
+    fn render_blocks(
+        &self,
+        _: &[Block],
+        path: &Path,
+        _: &EntityUri,
+    ) -> anyhow::Result<holon_api::Rendered> {
         panic!(
             "LogseqMarkdownAdapter is read-only: refused to render {}",
             path.display()

@@ -121,10 +121,12 @@ fn within_parent_relative_order_survives_so_rendering_is_unaffected() {
 
     let from_doc_order =
         OrgRenderer::render_entitys(&doc_order, Path::new("/test/Journals.org"), &file_id)
-            .expect("org render");
+            .expect("org render")
+            .text;
     let from_flat_order =
         OrgRenderer::render_entitys(&flat_order, Path::new("/test/Journals.org"), &file_id)
-            .expect("org render");
+            .expect("org render")
+            .text;
 
     assert_eq!(
         from_doc_order, from_flat_order,

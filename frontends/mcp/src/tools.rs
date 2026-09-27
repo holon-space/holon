@@ -3444,7 +3444,8 @@ impl HolonMcpServer {
             "file_path": file_path.display().to_string(),
             "source": params.source,
             "scope": params.scope,
-            "rendered": rendered,
+            "rendered": rendered.text,
+            "losses": rendered.losses.iter().map(|l| l.to_string()).collect::<Vec<_>>(),
             "block_count": blocks.len(),
         });
 

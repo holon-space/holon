@@ -1567,6 +1567,10 @@ mod writeback_panic_tests {
         fn writeback_degraded(&self, detail: &str) {
             self.0.lock().unwrap().push(detail.to_string());
         }
+        fn writeback_stalled(&self, _: &std::path::Path, _: &str) {}
+        fn writeback_resumed(&self, _: &std::path::Path) {}
+        fn writeback_lossy(&self, _: &std::path::Path, _: &str) {}
+        fn writeback_faithful(&self, _: &std::path::Path) {}
         fn ingest_refused(&self, _: &std::path::Path, _: &str, _: &str) {}
         fn ingest_recovered(&self, _: &std::path::Path) {}
         fn vault_file_emptied(&self, _: &std::path::Path) {}

@@ -183,7 +183,7 @@ impl FileFormatAdapter for FixtureAdapter {
         blocks: &[Block],
         path: &Path,
         id: &EntityUri,
-    ) -> anyhow::Result<String> {
+    ) -> anyhow::Result<holon_api::Rendered> {
         self.org.render_document(document, blocks, path, id)
     }
 
@@ -192,7 +192,7 @@ impl FileFormatAdapter for FixtureAdapter {
         blocks: &[Block],
         path: &Path,
         id: &EntityUri,
-    ) -> anyhow::Result<String> {
+    ) -> anyhow::Result<holon_api::Rendered> {
         self.org.render_blocks(blocks, path, id)
     }
 
@@ -990,6 +990,8 @@ impl DisclosureLog {
 
 impl holon_filesystem::WritebackDisclosure for DisclosureLog {
     fn writeback_degraded(&self, _: &str) {}
+    fn writeback_stalled(&self, _: &std::path::Path, _: &str) {}
+    fn writeback_resumed(&self, _: &std::path::Path) {}
 
     fn ingest_refused(&self, path: &Path, format: &str, reason: &str) {
         self.subjects.lock().unwrap().push(path.to_path_buf());
@@ -1012,6 +1014,8 @@ impl holon_filesystem::WritebackDisclosure for DisclosureLog {
             .unwrap()
             .push(format!("emptied {}", path.display()));
     }
+    fn writeback_lossy(&self, _: &std::path::Path, _: &str) {}
+    fn writeback_faithful(&self, _: &std::path::Path) {}
 }
 
 /// Entry `the-degraded-toast-is-stale-and-calls-cook-files-org`: the refusal

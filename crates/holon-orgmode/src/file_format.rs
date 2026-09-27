@@ -76,7 +76,7 @@ impl FileFormatAdapter for OrgFormatAdapter {
         blocks: &[Block],
         file_path: &Path,
         file_id: &EntityUri,
-    ) -> anyhow::Result<String> {
+    ) -> anyhow::Result<holon_api::Rendered> {
         OrgRenderer::render_document(document, blocks, file_path, file_id)
     }
 
@@ -85,7 +85,7 @@ impl FileFormatAdapter for OrgFormatAdapter {
         blocks: &[Block],
         file_path: &Path,
         file_id: &EntityUri,
-    ) -> anyhow::Result<String> {
+    ) -> anyhow::Result<holon_api::Rendered> {
         OrgRenderer::render_entitys(blocks, file_path, file_id)
     }
 
@@ -120,6 +120,7 @@ impl FileFormatAdapter for OrgFormatAdapter {
             || a.scheduled() != b.scheduled()
             || a.deadline() != b.deadline()
             || a.drawer_properties() != b.drawer_properties()
+            || a.blank_lines() != b.blank_lines()
             || a.sequence() != b.sequence()
         // Sibling order is no longer a per-block field (ADR 0005): it is
         // derived from document position and applied via `place_all`,
@@ -189,6 +190,10 @@ impl FileFormatAdapter for OrgFormatAdapter {
                         .remove(crate::models::org_props::FILE_ID_KEYWORD);
                 }
             }
+            changed = true;
+        }
+        if parsed.blank_lines() != persisted.blank_lines() {
+            persisted.set_blank_lines(parsed.blank_lines());
             changed = true;
         }
         changed
@@ -280,7 +285,8 @@ mod tests {
 
         let org = adapter
             .render_document(&mount, &[child], &path, &doc_uri)
-            .expect("org render");
+            .expect("org render")
+            .text;
         // (a) the shared content is actually on disk.
         assert!(
             org.contains("Child under P"),
@@ -315,9 +321,11 @@ mod tests {
         let parsed = adapter.parse(&path, content, &parent, &root).unwrap();
         let via_adapter = adapter
             .render_blocks(&parsed.blocks, &path, &parsed.document.id)
-            .expect("org render");
+            .expect("org render")
+            .text;
         let via_direct = OrgRenderer::render_entitys(&parsed.blocks, &path, &parsed.document.id)
-            .expect("org render");
+            .expect("org render")
+            .text;
         assert_eq!(via_adapter, via_direct);
     }
 

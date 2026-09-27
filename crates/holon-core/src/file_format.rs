@@ -18,6 +18,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use anyhow::bail;
 use holon_api::EntityUri;
+use holon_api::Rendered;
 use holon_api::StorageEntity;
 use holon_api::block::Block;
 
@@ -193,14 +194,15 @@ pub trait FileFormatAdapter: Send + Sync {
     ) -> Result<FileFormatParseResult>;
 
     /// Render a complete file: document header + all blocks. Returns the
-    /// exact bytes that should be written to disk.
+    /// exact bytes that should be written to disk, and every stored value
+    /// those bytes do not hold.
     fn render_document(
         &self,
         document: &Block,
         blocks: &[Block],
         file_path: &Path,
         file_id: &EntityUri,
-    ) -> Result<String>;
+    ) -> Result<Rendered>;
 
     /// Render only the block tree, without document header. Used when the
     /// controller has blocks but no `Block` for the document entity itself
@@ -210,7 +212,7 @@ pub trait FileFormatAdapter: Send + Sync {
         blocks: &[Block],
         file_path: &Path,
         file_id: &EntityUri,
-    ) -> Result<String>;
+    ) -> Result<Rendered>;
 
     /// The document's id as raw file content declares it, if the format embeds
     /// one (e.g. org's `#+ID:` header). `Ok(None)` when the file carries no

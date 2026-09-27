@@ -28,7 +28,7 @@ fn parse(source: &str) -> (Block, Vec<Block>) {
 }
 
 fn try_render(document: &Block, blocks: &[Block]) -> anyhow::Result<String> {
-    OrgRenderer::render_document(document, blocks, Path::new(FILE), &document.id)
+    OrgRenderer::render_document(document, blocks, Path::new(FILE), &document.id).map(|r| r.text)
 }
 
 fn render(document: &Block, blocks: &[Block]) -> String {

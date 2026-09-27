@@ -53,7 +53,8 @@ fn write_back(path: &Path, source: &str, root: &Path) -> anyhow::Result<String> 
     let parsed = parse_org_file(path, source, &EntityUri::no_parent(), root)?;
     Ok(
         OrgRenderer::render_document(&parsed.document, &parsed.blocks, path, &parsed.document.id)
-            .expect("org render"),
+            .expect("org render")
+            .text,
     )
 }
 
@@ -112,6 +113,16 @@ fn vault_is_byte_stable_under_writeback() {
             }
         };
         let diff = changed_lines(&source, &rendered);
+        if diff.is_empty() && rendered != source {
+            unstable += 1;
+            total_changed_lines += 1;
+            println!(
+                "UNSTABLE {} (same lines, other bytes: {} -> {} bytes)",
+                path.display(),
+                source.len(),
+                rendered.len()
+            );
+        }
         if !diff.is_empty() {
             let allowed = pre_existing_allowance(path);
             let counted = diff.len().saturating_sub(allowed);

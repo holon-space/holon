@@ -141,6 +141,102 @@ Holon preserves it. The rules:
 - Parser wraps with `EntityUri::from_raw("abc-123")` → `block:abc-123`
 - Renderer writes `block.id.id()` (path part only) or `block.get_block_id()` (the stored "ID" property)
 
+### Headline text: keyword, cookie, title, tags
+
+The parser reads a headline as `stars [KEYWORD] [[#P]] title [:tags:]`
+(`parser.rs`, `read_headline`). The tags are the last blank-separated token
+when it is `:`, tag characters or colons, and `:`, and it names at least one
+tag (`Tags::split_org_headline`, `crates/holon-api/src/types.rs`). Two
+differences from org-element.el are deliberate:
+
+- **`-` is a tag character.** Emacs' class is `[[:alnum:]_@#%]`; the orgize
+  fork adds `-` for Logseq/Orgzly/Org-roam tags, so `* Foo :a-b:` has the tag
+  `a-b` here and the title `Foo :a-b:` in Emacs.
+- **The tag token may be the whole title.** `* :t:` and `* :a:b:` are an empty
+  title with tags here. Emacs needs a blank inside the title before the
+  token, so it reads them as the title `:t:` / `:a:b:`.
+- **A token that names no tag is title text.** `* :::` and `* Foo :::` keep
+  the title `:::` / `Foo :::`. Emacs reads `Foo :::` as the title `Foo` with
+  no tags, which would destroy the text.
+
+Org has no escape for any of these parts. When the renderer writes a headline
+that reads back with another keyword, cookie, title or tag set than the block
+holds (`TODO buy milk` stored as text with no task state, `[#A] plan` with no
+priority, a title `:t:` with no tags), the render records a loss, and
+write-back raises `WritebackLossy` for that file
+(`models.rs`, `check_headline_reads_back`). The keywords are the ones the file
+declares in `#+TODO:`, else the defaults.
+
+### Block text
+
+A block's text after its title line, and a page's text before its first
+headline, is written below the headline. A line that org would read as a
+headline (stars at the start of the line, then a blank or the end of the
+line) or whose text starts with `#+` (after its indentation and any commas)
+gets one more comma before that syntax, and the parser removes one. The comma
+goes after the indentation, as org puts it: `  #+x: y` is written
+`  ,#+x: y`. A line such as `*bold* text` is not a headline and is written as
+it is. The block text `Shopping\n* milk\n#+TITLE: x` is written
+
+```org
+** Shopping
+:PROPERTIES:
+:ID: abc
+:END:
+,* milk
+,#+TITLE: x
+```
+
+This is org's own escape inside source blocks
+(`crates/holon-org-format/src/comma_escape.rs`). The delimiters of a block the
+parser keeps as text (`#+begin_example`, `#+end_quote`, ...) are not escaped:
+the parser keeps such a pair in the block's text, so it round-trips as
+written, and vault pages use them, so escaping would turn their blocks into
+literal text in Emacs. `#+begin_src`/`#+end_src` are escaped:
+unescaped, the pair would become a source block child. A line `,* x` or
+`,#+x` that a person writes in Emacs reads as `* x` / `#+x`.
+
+The page id is read only from a `#+ID:` keyword before the first headline, as
+org structures that text: a `#+ID:` line inside a block there (`#+begin_src`,
+`#+begin_example`, ...) is not a keyword, and a line org reads as a headline
+(`* x`, also inside such a block, as in Emacs) ends that text. Below a
+headline, a `#+ID:` line is block text: the parser keeps it, so it is written
+without a comma. Every other `#+` keyword line that a person writes below a
+headline in Emacs (`#+TITLE:`, `#+TODO:`, ...) is a document keyword, as org
+reads it.
+
+Inline marks see the text as the file holds it: a mark (a link, bold) may span
+an escaped line and reads back with the same offsets and the same link target.
+
+The renderer compares what it wrote with what the parser reads back, content
+and inline marks included, and records a loss (`WritebackLossy`) for text the
+file cannot hold: a title with leading or trailing blanks, a carriage return,
+blank lines at the start or end of the text, a trailing line break, a body
+line the parser takes as a child block (`[[file:x.png]]`), a mark org cannot
+place (a link across a list item line). A render the parser would refuse (a title that
+starts with `[#1]`) is not written at all, and the file keeps its old bytes.
+
+`:PROPERTIES:`, `:END:` and `-----` lines in block text read back as text, and
+the last line of a file keeps its trailing blanks.
+
+Blank lines between a headline's drawer and its body, after a headline's
+section (before the next headline, or at the end of the file), and before a
+page's first headline are not block text. The parser records each such line's
+bytes (a line of spaces or tabs included) in the block's `_blank_lines`
+property (`BlankLines` in `models.rs`), and the renderer writes them back
+where they were. Not kept, with no loss raised:
+
+- blank lines between a body and a source block child, between two source
+  block children, and between a headline and a source block child when the
+  headline has no body;
+- a list body followed directly by a headline or a source block child gains
+  the blank line that closes the list (not at the end of the file);
+- the text between a page's `#+` header lines and its first headline is
+  written after exactly one blank line;
+- a file without a final line break gains one;
+- a file with CRLF line breaks: the carriage return of a body's last line is
+  dropped.
+
 ### Source blocks
 
 ```org
@@ -286,14 +382,17 @@ file-level drawer, and a source block's header arguments
   ERROR, while the other files of the pass are written; no id is ever written
   in its place. A page with a `file:` id keeps its path identity and gets no
   id line.
-- **Keys the parser lifts into typed fields are not plain properties.**
-  `PRIORITY`, `COLLAPSED`, `WIDGET_ONLY`, `REQUIRES`, `BLOCKED-BY`,
-  `ADVICE_SUPPRESSED` and `contributes-to` (any case) become typed block
-  fields, and the parser refuses `task_state` and `task_state_category` as
-  drawer keys. A plain property under one of these keys does not come back as
-  that property, and a value the typed field cannot parse makes the whole
-  file fail to parse (open:
-  `docs/Testing/bugfunnel/entries/2026-09-26-typed-drawer-key-under-a-plain-property-makes-the-file-unparseable.md`).
+- **Keys the parser lifts into typed fields are not plain properties.** The
+  headline drawer keys `ID`, `REQUIRES`, `BLOCKED-BY`, the other edge fields
+  in column or kebab spelling (`tags`, `advice_suppressed`,
+  `contributes-to`, ...), `priority`, `COLLAPSED` and `WIDGET_ONLY` (any case)
+  become typed block fields, and the parser refuses `task_state` and
+  `task_state_category` as drawer keys (`drawer.rs`, `TypedDrawerKey`). The
+  engine refuses a property write under any of these spellings, through a
+  properties bag or as a flat property field, and names the key. A flat write
+  of an edge column (`requires`, `contributes_to`) and of `priority` (which
+  the store keeps in the properties bag) is that field's own write. The
+  file-level drawer is read verbatim, so these keys are plain there.
 
 ### Why bare IDs?
 

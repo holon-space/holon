@@ -134,14 +134,20 @@ pub enum ConditionKind {
     ///
     /// All-clear: the op returns, whatever its outcome.
     WatchViewsRebuilding,
-    /// The org write-back stream died and its supervisor could not keep it
-    /// alive — edits reach Loro + SQL but stop reaching disk. String carries
-    /// the supervisor's escalation summary (what died, how often).
-    /// `subject` is the sentinel `"org-writeback"`.
+    /// Edits reach Loro + SQL but stop reaching disk. Two emitters: the org
+    /// write-back stream died and its supervisor gave up (`subject` is the
+    /// sentinel `"org-writeback"`), or one document's write-back fold stalled
+    /// (`subject` is its file). The string says which and why.
     ///
-    /// All-clear: a successful stream respawn. No emitter of either half yet —
-    /// the let-it-die supervisor owns both.
+    /// All-clear: for a stalled file, its next write; for the stream, a
+    /// successful respawn, which nothing emits yet.
     WritebackDegraded(String),
+    /// Write-back refused one file, or wrote it without some stored values.
+    /// The store keeps every value. `detail` names each block and what the
+    /// file lacks; `subject` is the file.
+    ///
+    /// All-clear: the next render of that file that holds every value.
+    WritebackLossy { detail: String },
     /// An MCP integration provider did not come up at boot — its sidecar
     /// command is missing/dead, or its `${VAR}` credentials are unresolved. The
     /// integration's `cc_*` cache tables are never created, so every page that
@@ -377,6 +383,7 @@ impl ConditionKind {
     pub const VAULT_INGEST_FAILED: &'static str = "vault-ingest-failed";
     pub const VAULT_FILE_EMPTIED: &'static str = "vault-file-emptied";
     pub const WRITEBACK_DEGRADED: &'static str = "writeback-degraded";
+    pub const WRITEBACK_LOSSY: &'static str = "writeback-lossy";
     pub const EDIT_REFUSED_READ_ONLY_FORMAT: &'static str = "edit-refused-read-only-format";
     pub const LOCAL_EDIT_NOT_APPLIED: &'static str = "local-edit-not-applied";
     pub const BEARER_TICKET_ENROLLMENT: &'static str = "bearer-ticket-enrollment";
@@ -410,6 +417,7 @@ impl ConditionKind {
             Self::VaultFileEmptied => Self::VAULT_FILE_EMPTIED,
             Self::SharedSubtreeNotMaterialized { .. } => Self::SHARED_SUBTREE_NOT_MATERIALIZED,
             Self::WritebackDegraded(_) => Self::WRITEBACK_DEGRADED,
+            Self::WritebackLossy { .. } => Self::WRITEBACK_LOSSY,
             Self::PairingReimportedLocalContent { .. } => Self::PAIRING_REIMPORTED_LOCAL_CONTENT,
             Self::LeftSharedPage { .. } => Self::LEFT_SHARED_PAGE,
             Self::DeletedSharedPage { .. } => Self::DELETED_SHARED_PAGE,

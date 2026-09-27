@@ -635,7 +635,8 @@ async fn cold_boot(store: &FakeStore, root: &std::path::Path) -> String {
         &path,
         &doc.id,
     )
-    .expect("org render");
+    .expect("org render")
+    .text;
     ingest(store, root, &rendered).await;
     rendered
 }

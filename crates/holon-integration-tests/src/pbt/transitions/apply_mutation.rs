@@ -610,6 +610,12 @@ impl<
         // the ref must model the file-parse tag reinterpretation; `UI` mutations
         // stay in-store (echo-suppressed) and keep raw content.
         let crosses_org_boundary = self.event.source == MutationSource::External;
+        if let Mutation::Create { fields, .. } | Mutation::Update { fields, .. } =
+            &self.event.mutation
+            && let Some(content) = fields.get("content").and_then(|v| v.as_string())
+        {
+            crate::pbt::generators::note_escaped_body_line_reach("ApplyMutation", content);
+        }
         state.apply_content_mutation(&self.event.mutation, crosses_org_boundary);
 
         if let Mutation::Delete { id, .. } = &self.event.mutation {

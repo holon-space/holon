@@ -3,7 +3,7 @@ id: 2026-09-26-typed-drawer-key-under-a-plain-property-makes-the-file-unparseabl
 date: 2026-09-26
 gap: COVERAGE
 secondary: null
-status: OPEN
+status: PARTIAL
 summary: >-
   A plain property whose key names a field the org parser lifts into a typed
   field (`widget_only`, `TASK_STATE`, `Priority`, `REQUIRES`, ...) is written
@@ -34,7 +34,12 @@ No generator writes a plain property under a lifted key, and the engine key
 guard does not know the lifted keys.
 
 ## Remedy
-Open. Needs a ruling: refuse such a key as a plain property at the engine and
-skip it in the renderer, or validate the value against the typed field. The
-store legitimately holds some of these as flat properties (`REQUIRES`), so a
-blanket refusal is not safe without a survey of writers.
+The engine refuses a property write under every spelling the ingest lifts,
+through a properties bag or as a flat field, and names the key. Both ask one
+predicate, `TypedDrawerKey` (`crates/holon-org-format/src/drawer.rs`), which
+the parser's drawer loop also dispatches on. A flat edge column
+(`requires`, `contributes_to`) and `priority` stay their own field's write.
+Pinned by `editing_suite::drawer_key_write_boundary::every_spelling_the_ingest_lifts_is_refused_as_a_property`,
+whose spellings come from `TypedDrawerKey::spellings()`. Open: a block that
+already holds such a property still renders it, and the file then fails to
+parse on a bad value; `drawer_properties` excludes only the exact-case keys.

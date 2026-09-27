@@ -74,7 +74,7 @@ proptest! {
         let path = PathBuf::from("/test/test.org");
         let root = PathBuf::from("/test");
 
-        let org_text = adapter.render_document(&doc, &blocks, &path, &doc.id).expect("org render");
+        let org_text = adapter.render_document(&doc, &blocks, &path, &doc.id).expect("org render").text;
 
         let parsed = adapter
             .parse(&path, &org_text, &EntityUri::no_parent(), &root)

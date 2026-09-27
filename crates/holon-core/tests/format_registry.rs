@@ -54,10 +54,15 @@ impl FileFormatAdapter for StubAdapter {
         _: &[Block],
         _: &Path,
         _: &EntityUri,
-    ) -> anyhow::Result<String> {
+    ) -> anyhow::Result<holon_api::Rendered> {
         unimplemented!("routing-only stub")
     }
-    fn render_blocks(&self, _: &[Block], _: &Path, _: &EntityUri) -> anyhow::Result<String> {
+    fn render_blocks(
+        &self,
+        _: &[Block],
+        _: &Path,
+        _: &EntityUri,
+    ) -> anyhow::Result<holon_api::Rendered> {
         unimplemented!("routing-only stub")
     }
     fn doc_id_from_content(&self, _: &str) -> anyhow::Result<Option<EntityUri>> {

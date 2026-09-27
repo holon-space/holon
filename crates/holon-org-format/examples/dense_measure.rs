@@ -69,7 +69,8 @@ fn main() {
     }
 
     let canonical = OrgRenderer::render_document(&doc, &blocks, Path::new("usage.org"), &file_id)
-        .expect("org render");
+        .expect("org render")
+        .text;
 
     let alias_table = AliasTable::assign(blocks.iter().map(|b| b.id.clone()));
     let gap_ids = HashSet::new();

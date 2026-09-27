@@ -662,9 +662,23 @@ impl holon_filesystem::WritebackDisclosure for WritebackDegradedDisclosure {
         });
     }
 
+    fn writeback_stalled(&self, path: &Path, detail: &str) {
+        self.bus.emit(holon_api::Condition {
+            subject: file_subject(path),
+            reason: holon_api::ConditionKind::WritebackDegraded(detail.to_string()),
+        });
+    }
+
+    fn writeback_resumed(&self, path: &Path) {
+        self.bus.clear(&holon_api::ConditionKey {
+            subject: file_subject(path),
+            kind: holon_api::ConditionKind::WRITEBACK_DEGRADED,
+        });
+    }
+
     fn ingest_refused(&self, path: &Path, format: &str, reason: &str) {
         self.bus.emit(holon_api::Condition {
-            subject: ingest_subject(path),
+            subject: file_subject(path),
             reason: holon_api::ConditionKind::VaultIngestFailed {
                 format: format.to_string(),
                 reason: reason.to_string(),
@@ -678,7 +692,7 @@ impl holon_filesystem::WritebackDisclosure for WritebackDegradedDisclosure {
             holon_api::ConditionKind::VAULT_FILE_EMPTIED,
         ] {
             self.bus.clear(&holon_api::ConditionKey {
-                subject: ingest_subject(path),
+                subject: file_subject(path),
                 kind,
             });
         }
@@ -686,18 +700,34 @@ impl holon_filesystem::WritebackDisclosure for WritebackDegradedDisclosure {
 
     fn vault_file_emptied(&self, path: &Path) {
         self.bus.emit(holon_api::Condition {
-            subject: ingest_subject(path),
+            subject: file_subject(path),
             reason: holon_api::ConditionKind::VaultFileEmptied,
+        });
+    }
+
+    fn writeback_lossy(&self, path: &Path, detail: &str) {
+        self.bus.emit(holon_api::Condition {
+            subject: file_subject(path),
+            reason: holon_api::ConditionKind::WritebackLossy {
+                detail: detail.to_string(),
+            },
+        });
+    }
+
+    fn writeback_faithful(&self, path: &Path) {
+        self.bus.clear(&holon_api::ConditionKey {
+            subject: file_subject(path),
+            kind: holon_api::ConditionKind::WRITEBACK_LOSSY,
         });
     }
 }
 
-/// The subject an ingest condition is keyed by: the file, so a repaired file
-/// lifts its own banner and leaves the other refused files' standing.
+/// The subject a file's condition is keyed by: the file, so a repaired file
+/// lifts its own banner and leaves the other files' standing.
 /// Canonicalized because the controller's own per-file state is keyed by
 /// `CanonicalPath` — two spellings of one file would otherwise raise a banner
 /// its own repair cannot clear.
-fn ingest_subject(path: &Path) -> String {
+fn file_subject(path: &Path) -> String {
     holon_core::CanonicalPath::new(path).display().to_string()
 }
 

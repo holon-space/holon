@@ -515,3 +515,25 @@ async fn a_value_less_key_survives_the_seam_without_voiding_the_drawer() {
         out.disk
     );
 }
+
+/// Blank lines the author put before the first headline, between a headline and
+/// its body, and after the body survive the write-back that mints the ids.
+#[tokio::test]
+async fn blank_lines_survive_a_real_write_back() {
+    let content = format!(
+        ":PROPERTIES:\n:ID: {DRAWER_ID}\n:END:\n#+TITLE: Seam\n\n* A heading with no id\n\nbody\n\n** \
+         A child\n"
+    );
+    let out = ingest_content(true, &content).await;
+
+    for kept in [
+        "#+TITLE: Seam\n\n* A heading with no id\n",
+        ":END:\n\nbody\n\n** A child\n",
+    ] {
+        assert!(
+            out.disk.contains(kept),
+            "{kept:?} must survive write-back; got:\n---\n{}---",
+            out.disk
+        );
+    }
+}

@@ -72,6 +72,7 @@ pub fn extract_inline_marks_with(
 fn extract_state(text: &str, classifier: &LinkTargetClassifier, src_base: usize) -> ExtractState {
     let mut state = ExtractState {
         classifier: classifier.clone(),
+        source: text.to_string(),
         src_base,
         whole_text_len: text.len(),
         ..Default::default()
@@ -91,6 +92,7 @@ fn extract_state_within(
 ) -> ExtractState {
     let mut state = ExtractState {
         classifier: outer.classifier.clone(),
+        source: text.to_string(),
         keep_emphasis_raw: outer.keep_emphasis_raw,
         src_base,
         whole_text_len: text.len(),
@@ -218,12 +220,24 @@ impl SourceContentOffsets {
     }
 }
 
+/// `text` as org reads it inside a block: a line the file writes
+/// comma-escaped is paragraph text here too, so a mark may span it. The tree's
+/// ranges index `text`; its token text does not, see [`source_text`].
 fn parse_inline(text: &str) -> SyntaxNode {
     let config = ParseConfig {
         use_sub_superscript: UseSubSuperscript::Brace,
         ..Default::default()
     };
-    config.parse(text).document().syntax().clone()
+    config
+        .parse(crate::comma_escape::CommaEscape::Preamble.inert(text))
+        .document()
+        .syntax()
+        .clone()
+}
+
+/// The bytes of `text` a node or token of [`parse_inline`]`(text)` covers.
+fn source_text(text: &str, range: orgize::rowan::TextRange) -> &str {
+    &text[usize::from(range.start())..usize::from(range.end())]
 }
 
 /// Delimiters tried, in order, to quote a markup-shaped literal. `=` is
@@ -575,6 +589,8 @@ struct ExtractState {
     /// `keep_emphasis_raw` field without a lifetime rippling through
     /// `walk_node` / `emit_mark` / `push_with_inner_marks`.
     classifier: LinkTargetClassifier,
+    /// The string being walked.
+    source: String,
     out: String,
     marks: Vec<MarkSpan>,
     char_pos: usize,
@@ -651,7 +667,7 @@ fn walk_node(node: &SyntaxNode, state: &mut ExtractState) {
             NodeOrToken::Node(child_node) => match inline_mark_kind(child_node.kind()) {
                 Some(kind_hint) => {
                     if state.keep_emphasis_raw && kind_hint != MarkKindHint::Link {
-                        let raw = child_node.text().to_string();
+                        let raw = source_text(&state.source, child_node.text_range()).to_string();
                         let src = node_source_range(&child_node, state);
                         push_text(state, &raw, src, true);
                     } else {
@@ -662,7 +678,8 @@ fn walk_node(node: &SyntaxNode, state: &mut ExtractState) {
             },
             NodeOrToken::Token(tok) => {
                 let tok_start = state.src_base + usize::from(tok.text_range().start());
-                scan_text_for_block_refs(tok.text(), tok_start, state);
+                let text = source_text(&state.source, tok.text_range()).to_string();
+                scan_text_for_block_refs(&text, tok_start, state);
             }
         }
     }
@@ -795,7 +812,7 @@ fn stripped_byte_range(
 }
 
 fn emit_mark(node: SyntaxNode, kind_hint: MarkKindHint, state: &mut ExtractState) {
-    let raw = node.text().to_string();
+    let raw = source_text(&state.source, node.text_range()).to_string();
     let node_src = node_source_range(&node, state);
 
     match kind_hint {
