@@ -357,10 +357,10 @@ impl FileFormatAdapter for ObsidianMarkdownAdapter {
 
     fn render_document(
         &self,
-        _d: &Block,
-        _b: &[Block],
+        _: &Block,
+        _: &[Block],
         path: &Path,
-        _id: &EntityUri,
+        _: &EntityUri,
     ) -> anyhow::Result<String> {
         panic!(
             "ObsidianMarkdownAdapter is read-only (Tier R/O): refused to render {} — a write to a \
@@ -369,14 +369,14 @@ impl FileFormatAdapter for ObsidianMarkdownAdapter {
         );
     }
 
-    fn render_blocks(&self, _b: &[Block], path: &Path, _id: &EntityUri) -> anyhow::Result<String> {
+    fn render_blocks(&self, _: &[Block], path: &Path, _: &EntityUri) -> anyhow::Result<String> {
         panic!(
             "ObsidianMarkdownAdapter is read-only: refused to render {}",
             path.display()
         );
     }
 
-    fn doc_id_from_content(&self, _content: &str) -> anyhow::Result<Option<EntityUri>> {
+    fn doc_id_from_content(&self, _: &str) -> anyhow::Result<Option<EntityUri>> {
         Ok(None) // Obsidian identity is path/basename; no embedded stable id by
         // default.
     }

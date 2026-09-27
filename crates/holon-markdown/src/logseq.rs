@@ -292,10 +292,10 @@ impl FileFormatAdapter for LogseqMarkdownAdapter {
 
     fn render_document(
         &self,
-        _d: &Block,
-        _b: &[Block],
+        _: &Block,
+        _: &[Block],
         path: &Path,
-        _id: &EntityUri,
+        _: &EntityUri,
     ) -> anyhow::Result<String> {
         panic!(
             "LogseqMarkdownAdapter is read-only (Tier R/O): refused to render {} — a write to a \
@@ -304,7 +304,7 @@ impl FileFormatAdapter for LogseqMarkdownAdapter {
         );
     }
 
-    fn render_blocks(&self, _b: &[Block], path: &Path, _id: &EntityUri) -> anyhow::Result<String> {
+    fn render_blocks(&self, _: &[Block], path: &Path, _: &EntityUri) -> anyhow::Result<String> {
         panic!(
             "LogseqMarkdownAdapter is read-only: refused to render {}",
             path.display()

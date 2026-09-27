@@ -5,7 +5,7 @@
 # as debt-free. Ratchet DOWN: as violations are fixed, regenerate with
 #   ./archlint/archlint --update-baseline
 # See archlint/BURNDOWN.md for the category table and burn-down priority.
-# Snapshot total: 80 violation(s) across 10 rule(s).
+# Snapshot total: 69 violation(s) across 10 rule(s).
 #
 #   deleted_cell_symbol: 2
 #   entity_uri_from_raw: 9
@@ -13,7 +13,7 @@
 #   frontend-provider-dep: 1
 #   frontend-raw-sql: 3
 #   loro_doc_escape: 17
-#   no-underscore-params: 33
+#   no-underscore-params: 22
 #   ok: 4
 #   raw_sql_in_frontend: 3
 #   sole_block_writer: 1
@@ -73,22 +73,11 @@ no-underscore-params	crates/holon-markdown/src/logseq.rs	_root: &Path,
 no-underscore-params	crates/holon-markdown/src/logseq.rs	_sanctioned_removals: &std::collections::HashSet<String>,
 no-underscore-params	crates/holon-markdown/src/logseq.rs	_sibling_renders: &[(&Path, &str)],
 no-underscore-params	crates/holon-markdown/src/logseq.rs	_source: &str,
-no-underscore-params	crates/holon-markdown/src/logseq.rs	fn render_blocks(&self, _b: &[Block], path: &Path, _id: &EntityUri) -> String {
-no-underscore-params	crates/holon-markdown/src/logseq.rs	fn render_blocks(&self, _b: &[Block], path: &Path, _id: &EntityUri) -> String {
-no-underscore-params	crates/holon-markdown/src/logseq.rs	fn render_document(&self, _d: &Block, _b: &[Block], path: &Path, _id: &EntityUri) -> String {
-no-underscore-params	crates/holon-markdown/src/logseq.rs	fn render_document(&self, _d: &Block, _b: &[Block], path: &Path, _id: &EntityUri) -> String {
-no-underscore-params	crates/holon-markdown/src/logseq.rs	fn render_document(&self, _d: &Block, _b: &[Block], path: &Path, _id: &EntityUri) -> String {
 no-underscore-params	crates/holon-markdown/src/obsidian.rs	_rendered: &str,
 no-underscore-params	crates/holon-markdown/src/obsidian.rs	_root: &Path,
 no-underscore-params	crates/holon-markdown/src/obsidian.rs	_sanctioned_removals: &std::collections::HashSet<String>,
 no-underscore-params	crates/holon-markdown/src/obsidian.rs	_sibling_renders: &[(&Path, &str)],
 no-underscore-params	crates/holon-markdown/src/obsidian.rs	_source: &str,
-no-underscore-params	crates/holon-markdown/src/obsidian.rs	fn doc_id_from_content(&self, _content: &str) -> Option<String> {
-no-underscore-params	crates/holon-markdown/src/obsidian.rs	fn render_blocks(&self, _b: &[Block], path: &Path, _id: &EntityUri) -> String {
-no-underscore-params	crates/holon-markdown/src/obsidian.rs	fn render_blocks(&self, _b: &[Block], path: &Path, _id: &EntityUri) -> String {
-no-underscore-params	crates/holon-markdown/src/obsidian.rs	fn render_document(&self, _d: &Block, _b: &[Block], path: &Path, _id: &EntityUri) -> String {
-no-underscore-params	crates/holon-markdown/src/obsidian.rs	fn render_document(&self, _d: &Block, _b: &[Block], path: &Path, _id: &EntityUri) -> String {
-no-underscore-params	crates/holon-markdown/src/obsidian.rs	fn render_document(&self, _d: &Block, _b: &[Block], path: &Path, _id: &EntityUri) -> String {
 no-underscore-params	frontends/gpui/src/render/builders/divider.rs	pub fn render(_node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
 ok	crates/holon-frontend/src/advice_weaver.rs	let rows = query_engine
 ok	crates/holon-loro/src/multi_peer.rs	let meta = tree.get_meta(node).ok()?;
