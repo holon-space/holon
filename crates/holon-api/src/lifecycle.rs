@@ -88,6 +88,23 @@ impl SessionShutdown {
             .push((name, handle));
     }
 
+    /// [`Self::spawn`] for a task whose death stops something the user relies
+    /// on. A panic only reaches the log and the unobserved `JoinHandle`, so
+    /// `on_panic` receives the panic message before the panic unwinds on.
+    pub fn spawn_disclosing_panic<F, P>(&self, name: impl Into<String>, future: F, on_panic: P)
+    where
+        F: Future<Output = ()> + Send + 'static,
+        P: FnOnce(&str) + Send + 'static,
+    {
+        use futures::FutureExt;
+        self.spawn(name, async move {
+            if let Err(payload) = std::panic::AssertUnwindSafe(future).catch_unwind().await {
+                on_panic(&panic_message(payload.as_ref()));
+                std::panic::resume_unwind(payload);
+            }
+        });
+    }
+
     /// The tasks registered and not yet joined, by name.
     ///
     /// Exists so a test can assert that a family it cares about is actually
@@ -150,6 +167,16 @@ impl SessionShutdown {
     }
 }
 
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        s.to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "a panic without a string payload".to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -189,5 +216,23 @@ mod tests {
             .await
             .expect_err("a task that never observes cancellation must NOT be detached silently");
         assert_eq!(err.still_running, vec!["deaf-loop".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn a_panicking_task_reports_its_panic_before_it_dies() {
+        let shutdown = SessionShutdown::new();
+        let (reported_tx, reported_rx) = tokio::sync::oneshot::channel::<String>();
+
+        shutdown.spawn_disclosing_panic(
+            "doomed",
+            async { panic!("the task panicked mid-flight") },
+            move |message| reported_tx.send(message.to_string()).unwrap(),
+        );
+
+        let reported = tokio::time::timeout(DEFAULT_SHUTDOWN_TIMEOUT, reported_rx)
+            .await
+            .expect("the panic report must arrive")
+            .expect("the task died without calling its panic report");
+        assert_eq!(reported, "the task panicked mid-flight");
     }
 }

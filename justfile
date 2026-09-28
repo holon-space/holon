@@ -1343,6 +1343,10 @@ gate-arch:
     set -euo pipefail
     mkdir -p target/gate-logs
     cargo nextest run {{CANON}} --test architecture_rules 2>&1 | tee target/gate-logs/gate-arch.log
+    # clippy.toml lists the tracing span guards; one held across `.await` leaves
+    # its span current on the worker thread and panics an unrelated task.
+    cargo clippy {{CANON}} --all-targets -- -A clippy::all -D clippy::await_holding_invalid_type \
+        2>&1 | tee target/gate-logs/gate-arch-await-span-guard.log
 
 # Tier 1 pre-commit gate: gate-integrity lints, defensive-code ratchet, typecheck.
 # The justfile guard runs FIRST and costs ~10ms: a never-fail recipe invalidates

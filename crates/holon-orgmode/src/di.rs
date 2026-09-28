@@ -743,103 +743,101 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                                 .home_by_with_progress(authority.clone(), fold_progress.clone())
                         },
                         move |component, restarts, err| {
-                            // A spent restart budget means edits stop reaching
-                            // disk for the rest of the process — exactly the
-                            // persistent-failure case let-it-die exists to
-                            // disclose, so it must be audible outside the log.
-                            match degraded.as_deref() {
-                                Some(d) => d.writeback_degraded(&format!(
-                                    "{component} gave up after {restarts} restarts: {err:#}"
-                                )),
-                                None => tracing::error!(
-                                    "[{component}] gave up after {restarts} restarts ({err:#}) — \
-                                     org write-back is DOWN for the rest of this process and no \
-                                     disclosure seam is wired in this container"
-                                ),
-                            }
+                            disclose_writeback_down(
+                                degraded.as_deref(),
+                                &format!("{component} gave up after {restarts} restarts: {err:#}"),
+                            )
                         },
                         &shutdown,
                     );
 
                     let writeback_cancel = shutdown.token();
-                    shutdown.spawn("org-writeback-consumer", async move {
-                        use holon_api::live_data::home_by::HomedDiff;
-                        use holon_api::live_data::supervision::Supervised;
+                    spawn_writeback_task(
+                        &shutdown,
+                        "org-writeback-consumer",
+                        writeback_disclosure.clone(),
+                        async move {
+                            use holon_api::live_data::home_by::HomedDiff;
+                            use holon_api::live_data::supervision::Supervised;
 
-                        // The initial snapshot fans out one `Upsert` per block.
-                        // Rendering each of them would be N per-block boot
-                        // renders, which destabilises the cold-boot matview (the
-                        // frontend's creation slot then resolves NO parent). So
-                        // snapshot blocks SEED the holder and one debounced bulk
-                        // pass renders them together; the set drains as the
-                        // snapshot is consumed, after which everything routes
-                        // per block.
-                        let mut snapshot_pending: std::collections::HashSet<String> =
-                            std::collections::HashSet::new();
+                            // The initial snapshot fans out one `Upsert` per block.
+                            // Rendering each of them would be N per-block boot
+                            // renders, which destabilises the cold-boot matview (the
+                            // frontend's creation slot then resolves NO parent). So
+                            // snapshot blocks SEED the holder and one debounced bulk
+                            // pass renders them together; the set drains as the
+                            // snapshot is consumed, after which everything routes
+                            // per block.
+                            let mut snapshot_pending: std::collections::HashSet<String> =
+                                std::collections::HashSet::new();
 
-                        // `biased`: shutdown wins over a backlog. Draining the
-                        // rest would render documents off a store that is about
-                        // to close, which is the failure this ordering exists to
-                        // prevent.
-                        while let Some(item) = tokio::select! {
-                            biased;
-                            () = writeback_cancel.cancelled() => None,
-                            item = supervised.recv() => item,
-                        } {
-                            // The interaction that wrote this block, taken from
-                            // the feed rather than from the ambient span: this
-                            // task is spawned at container construction, so its
-                            // span is the process boot.
-                            let origins = match &item {
-                                Supervised::Diff(HomedDiff::Upsert { key, .. })
-                                | Supervised::Diff(HomedDiff::Remove { key, .. }) => {
-                                    feed.take_provenance(key)
+                            // `biased`: shutdown wins over a backlog. Draining the
+                            // rest would render documents off a store that is about
+                            // to close, which is the failure this ordering exists to
+                            // prevent.
+                            while let Some(item) = tokio::select! {
+                                biased;
+                                () = writeback_cancel.cancelled() => None,
+                                item = supervised.recv() => item,
+                            } {
+                                // The interaction that wrote this block, taken from
+                                // the feed rather than from the ambient span: this
+                                // task is spawned at container construction, so its
+                                // span is the process boot.
+                                let origins = match &item {
+                                    Supervised::Diff(HomedDiff::Upsert { key, .. })
+                                    | Supervised::Diff(HomedDiff::Remove { key, .. }) => {
+                                        feed.take_provenance(key)
+                                    }
+                                    Supervised::Reset => Vec::new(),
+                                };
+                                // `None` routes nothing at all — see
+                                // [`route_homed_block`].
+                                let msg: Option<OrgRerender> = match item {
+                                    Supervised::Reset => {
+                                        snapshot_pending = feed.read().keys().cloned().collect();
+                                        // Drop the dead incarnation's derived state,
+                                        // then cover the incoming seed with one bulk
+                                        // render off the authority.
+                                        let _ =
+                                            tx.send(RerenderMsg::unattributed(OrgRerender::Reset));
+                                        Some(OrgRerender::All)
+                                    }
+                                    Supervised::Diff(HomedDiff::Upsert {
+                                        doc,
+                                        key,
+                                        prev,
+                                        value,
+                                    }) => {
+                                        let seeding = snapshot_pending.remove(&key);
+                                        route_upsert(&doc, &value, prev.as_deref(), seeding)
+                                    }
+                                    Supervised::Diff(HomedDiff::Remove { doc, key }) => {
+                                        // The DEPARTURE. A retraction always lands
+                                        // before the matching `Upsert` at the new
+                                        // document, so the source document
+                                        // re-renders WITHOUT the block whether it
+                                        // was deleted or merely re-homed — one
+                                        // uniform path, and no authoritative
+                                        // presence-check that would short-circuit a
+                                        // move.
+                                        snapshot_pending.remove(&key);
+                                        route_remove(&doc, &key)
+                                    }
+                                };
+                                if let Some(rerender) = msg {
+                                    let _ = tx.send(RerenderMsg { rerender, origins });
                                 }
-                                Supervised::Reset => Vec::new(),
-                            };
-                            // `None` routes nothing at all — see
-                            // [`route_homed_block`].
-                            let msg: Option<OrgRerender> = match item {
-                                Supervised::Reset => {
-                                    snapshot_pending = feed.read().keys().cloned().collect();
-                                    // Drop the dead incarnation's derived state,
-                                    // then cover the incoming seed with one bulk
-                                    // render off the authority.
-                                    let _ = tx.send(RerenderMsg::unattributed(OrgRerender::Reset));
-                                    Some(OrgRerender::All)
-                                }
-                                Supervised::Diff(HomedDiff::Upsert {
-                                    doc,
-                                    key,
-                                    prev,
-                                    value,
-                                }) => {
-                                    let seeding = snapshot_pending.remove(&key);
-                                    route_upsert(&doc, &value, prev.as_deref(), seeding)
-                                }
-                                Supervised::Diff(HomedDiff::Remove { doc, key }) => {
-                                    // The DEPARTURE. A retraction always lands
-                                    // before the matching `Upsert` at the new
-                                    // document, so the source document
-                                    // re-renders WITHOUT the block whether it
-                                    // was deleted or merely re-homed — one
-                                    // uniform path, and no authoritative
-                                    // presence-check that would short-circuit a
-                                    // move.
-                                    snapshot_pending.remove(&key);
-                                    route_remove(&doc, &key)
-                                }
-                            };
-                            if let Some(rerender) = msg {
-                                let _ = tx.send(RerenderMsg { rerender, origins });
                             }
-                        }
-                    });
+                        },
+                    );
                 }
                 drop(rerender_tx);
 
-                shutdown.spawn(
+                spawn_writeback_task(
+                    &shutdown,
                     "file-sync-controller",
+                    writeback_disclosure.clone(),
                     run_file_sync_controller(
                         controller,
                         config.root_directory.clone(),
@@ -859,6 +857,39 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
     }
 
     Ok(())
+}
+
+/// Spawn one task of the org write-back chain. When it panics, edits stop
+/// reaching disk, so the panic is disclosed as degraded write-back.
+fn spawn_writeback_task<F>(
+    shutdown: &holon_api::lifecycle::SessionShutdown,
+    component: &'static str,
+    disclosure: Option<Arc<dyn holon_filesystem::WritebackDisclosure>>,
+    task: F,
+) where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    shutdown.spawn_disclosing_panic(component, task, move |message| {
+        disclose_writeback_down(
+            disclosure.as_deref(),
+            &format!("{component} panicked: {message}"),
+        )
+    });
+}
+
+/// Org write-back is down for the rest of the process: edits still reach Loro
+/// and SQL but no longer disk.
+fn disclose_writeback_down(
+    disclosure: Option<&dyn holon_filesystem::WritebackDisclosure>,
+    detail: &str,
+) {
+    match disclosure {
+        Some(d) => d.writeback_degraded(detail),
+        None => tracing::error!(
+            "{detail} — org write-back is DOWN for the rest of this process and no disclosure \
+             seam is wired in this container"
+        ),
+    }
 }
 
 /// Marker resolved to start the backend-blind `FileSyncController`.
@@ -1520,5 +1551,47 @@ pub async fn run_file_sync_controller(
                 idle_signal_for_task.mark_progress();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod writeback_panic_tests {
+    use std::sync::Mutex;
+
+    use super::*;
+
+    #[derive(Default)]
+    struct Recorder(Mutex<Vec<String>>);
+
+    impl holon_filesystem::WritebackDisclosure for Recorder {
+        fn writeback_degraded(&self, detail: &str) {
+            self.0.lock().unwrap().push(detail.to_string());
+        }
+        fn ingest_refused(&self, _: &std::path::Path, _: &str, _: &str) {}
+        fn ingest_recovered(&self, _: &std::path::Path) {}
+        fn vault_file_emptied(&self, _: &std::path::Path) {}
+    }
+
+    #[tokio::test]
+    async fn a_panicking_writeback_consumer_raises_writeback_degraded() {
+        let shutdown = holon_api::lifecycle::SessionShutdown::new();
+        let recorder = Arc::new(Recorder::default());
+
+        spawn_writeback_task(
+            &shutdown,
+            "org-writeback-consumer",
+            Some(recorder.clone() as Arc<dyn holon_filesystem::WritebackDisclosure>),
+            async { panic!("the consumer panicked on a diff") },
+        );
+        shutdown
+            .shutdown(holon_api::lifecycle::DEFAULT_SHUTDOWN_TIMEOUT)
+            .await
+            .expect("a panicked task has stopped");
+
+        assert_eq!(
+            *recorder.0.lock().unwrap(),
+            vec!["org-writeback-consumer panicked: the consumer panicked on a diff".to_string()],
+            "a dead write-back consumer must raise WritebackDegraded"
+        );
     }
 }

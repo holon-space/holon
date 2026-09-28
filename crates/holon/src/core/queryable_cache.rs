@@ -19,6 +19,7 @@ use holon_core::storage::types::StorageEntity;
 use tokio::sync::broadcast;
 use tokio_stream::Stream;
 use tracing;
+use tracing::Instrument;
 
 use super::traits::IntoEntity;
 use super::traits::Result;
@@ -413,18 +414,18 @@ where
                             "table_name" = %table_name,
                             "change_count" = change_count,
                         );
-                        let _ingestion_guard = ingestion_span.enter();
-
                         // Process all changes in a single batch transaction
-                        if let Err(e) = Self::apply_batch_to_cache(
+                        let applied = Self::apply_batch_to_cache(
                             &db_handle,
                             &type_def,
                             &table_name,
                             &id_field,
                             &changes,
                         )
-                        .await
-                        {
+                        .instrument(ingestion_span.clone())
+                        .await;
+                        let _ingestion_guard = ingestion_span.enter();
+                        if let Err(e) = applied {
                             tracing::error!(
                                 "[QueryableCache] Error ingesting batch into cache: {}",
                                 e
@@ -556,10 +557,8 @@ where
                             "change_count" = change_count,
                             "has_sync_token" = sync_token.is_some(),
                         );
-                        let _ingestion_guard = ingestion_span.enter();
-
                         // Process all changes AND sync token in a single atomic transaction
-                        if let Err(e) = Self::apply_batch_to_cache_with_token(
+                        let applied = Self::apply_batch_to_cache_with_token(
                             &db_handle,
                             &type_def,
                             &table_name,
@@ -567,8 +566,10 @@ where
                             changes,
                             sync_token.as_ref(),
                         )
-                        .await
-                        {
+                        .instrument(ingestion_span.clone())
+                        .await;
+                        let _ingestion_guard = ingestion_span.enter();
+                        if let Err(e) = applied {
                             tracing::error!(
                                 "[QueryableCache] Error ingesting batch into cache: {}",
                                 e

@@ -15,18 +15,20 @@ use std::sync::Arc;
 use holon_loro::LoroSyncControllerHandle;
 
 /// Wait until [`LoroSyncControllerHandle::is_settled`], bounded by `timeout`.
+#[tracing::instrument(
+    name = "wait_for_loro_quiescence",
+    skip_all,
+    fields(
+        timeout_ms = timeout.as_millis() as u64,
+        attempts = tracing::field::Empty,
+        timed_out = tracing::field::Empty,
+    )
+)]
 pub async fn wait_for_loro_quiescence_on(
     handle: &Arc<LoroSyncControllerHandle>,
     timeout: std::time::Duration,
 ) -> Result<(), String> {
-    use tracing::field;
-    let span = tracing::info_span!(
-        "wait_for_loro_quiescence",
-        timeout_ms = timeout.as_millis() as u64,
-        attempts = field::Empty,
-        timed_out = field::Empty,
-    );
-    let _enter = span.enter();
+    let span = tracing::Span::current();
     let deadline = tokio::time::Instant::now() + timeout;
     let mut attempts: u32 = 0;
     loop {

@@ -497,17 +497,30 @@ impl LoroSyncController {
         let watcher = gate.watcher();
         let shutdown_for_task = shutdown.clone();
         let cancelled_at_gate = shutdown.cancelled();
-        shutdown.spawn("loro-outbound-reconcile", async move {
-            // The boot gate can outlive the session (a scan that never
-            // completes), so cancellation has to reach the task here too.
-            tokio::select! {
-                biased;
-                () = cancelled_at_gate => return,
-                _outcome = wait_for_boot_gate(watcher, BOOT_GATE_WARN_EVERY, BOOT_GATE_WATCHDOG) => {}
-            }
-            started_for_task.store(true, Ordering::SeqCst);
-            self.run_loop(shutdown_for_task).await;
-        });
+        let degraded_on_panic = self.degraded.clone();
+        shutdown.spawn_disclosing_panic(
+            "loro-outbound-reconcile",
+            async move {
+                // The boot gate can outlive the session (a scan that never
+                // completes), so cancellation has to reach the task here too.
+                tokio::select! {
+                    biased;
+                    () = cancelled_at_gate => return,
+                    _outcome = wait_for_boot_gate(watcher, BOOT_GATE_WARN_EVERY, BOOT_GATE_WATCHDOG) => {}
+                }
+                started_for_task.store(true, Ordering::SeqCst);
+                self.run_loop(shutdown_for_task).await;
+            },
+            move |message| {
+                degraded_on_panic.emit(holon_api::condition_bus::Condition {
+                    subject: GLOBAL_PROJECTION_SUBJECT.to_string(),
+                    reason: holon_api::condition_bus::ConditionKind::SqlProjectionFailed(format!(
+                        "the Loro→SQL reconcile loop panicked, so SQL (what the UI reads) and the \
+                         org files no longer follow Loro: {message}"
+                    )),
+                })
+            },
+        );
 
         Ok(LoroSyncControllerHandle {
             projection,

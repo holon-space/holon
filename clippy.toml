@@ -1,0 +1,4 @@
+await-holding-invalid-types = [
+  { path = "tracing::span::Entered", reason = "a span entered across .await stays current on the worker thread after the task moves; the registry then panics in an unrelated task. Use tracing::Instrument" },
+  { path = "tracing::span::EnteredSpan", reason = "a span entered across .await stays current on the worker thread after the task moves; the registry then panics in an unrelated task. Use tracing::Instrument" },
+]

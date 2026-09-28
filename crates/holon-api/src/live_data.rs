@@ -159,21 +159,23 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
     ///
     /// Returns silently if the overall `timeout` fires — callers treat that
     /// as a probe failure, not a hard fault.
+    #[tracing::instrument(
+        name = "live_data.wait_for_quiescent",
+        skip_all,
+        fields(
+            quiet_for_ms = quiet_for.as_millis() as u64,
+            timeout_ms = timeout.as_millis() as u64,
+            batches_seen = tracing::field::Empty,
+            final_seq = tracing::field::Empty,
+            timed_out = tracing::field::Empty,
+        )
+    )]
     pub async fn wait_for_quiescent(
         &self,
         quiet_for: std::time::Duration,
         timeout: std::time::Duration,
     ) {
-        use tracing::field;
-        let span = tracing::info_span!(
-            "live_data.wait_for_quiescent",
-            quiet_for_ms = quiet_for.as_millis() as u64,
-            timeout_ms = timeout.as_millis() as u64,
-            batches_seen = field::Empty,
-            final_seq = field::Empty,
-            timed_out = field::Empty,
-        );
-        let _enter = span.enter();
+        let span = tracing::Span::current();
         let overall = tokio::time::sleep(timeout);
         tokio::pin!(overall);
         let mut batches_seen: u64 = 0;
@@ -496,13 +498,13 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
             + Unpin
             + 'static,
     {
+        use tracing::Instrument;
         let live = Arc::clone(self);
         let feed = crate::latency_e2e::Feed::fresh();
-        tokio::spawn(async move {
+        let actor_span =
+            tracing::info_span!(parent: None, "live_data.subscribe_actor", source = source_name);
+        let actor = async move {
             use tokio_stream::StreamExt;
-            use tracing::Instrument;
-            let span = tracing::info_span!("live_data.subscribe_actor", source = source_name);
-            let _enter = span.enter();
             let mut batches_seen: u64 = 0;
             loop {
                 let next = async { stream.next().await }
@@ -607,7 +609,8 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
                     );
                 }
             }
-        });
+        };
+        tokio::spawn(actor.instrument(actor_span));
     }
 }
 
@@ -836,6 +839,149 @@ mod tests {
             live.read().get("bad").is_none(),
             "the poison row must have been dropped"
         );
+    }
+
+    fn current_span_name() -> Option<&'static str> {
+        tracing::Span::current().metadata().map(|m| m.name())
+    }
+
+    fn string_live_data() -> Arc<LiveData<String>> {
+        LiveData::new(
+            vec![],
+            |row| Ok(row.get("id").unwrap().as_string().unwrap().to_string()),
+            |row| Ok(row.get("content").unwrap().as_string().unwrap().to_string()),
+        )
+    }
+
+    /// A span a task keeps entered while it is parked stays current on the
+    /// worker thread. Once the task resumes on another worker, that thread's
+    /// span stack holds the id after the span closes, and tracing-subscriber's
+    /// registry panics ("tried to clone a span ... that already closed") in
+    /// whichever task next opens a span there.
+    #[tokio::test]
+    async fn a_parked_subscribe_actor_leaves_no_span_current_on_its_thread() {
+        let _subscriber = tracing::subscriber::set_default(tracing_subscriber::registry());
+        let live = string_live_data();
+
+        live.subscribe(
+            "test_feed",
+            tokio_stream::pending::<crate::streaming::BatchWithMetadata<Change<StorageEntity>>>(),
+        );
+        tokio::task::yield_now().await;
+
+        assert_eq!(
+            current_span_name(),
+            None,
+            "the actor is parked on its stream, yet its span is current for the next task \
+             on this thread"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_parked_quiescence_wait_leaves_no_span_current_on_its_thread() {
+        let _subscriber = tracing::subscriber::set_default(tracing_subscriber::registry());
+        let live = string_live_data();
+
+        let waiter = tokio::spawn({
+            let live = Arc::clone(&live);
+            async move {
+                live.wait_for_quiescent(
+                    std::time::Duration::from_secs(60),
+                    std::time::Duration::from_secs(60),
+                )
+                .await
+            }
+        });
+        tokio::task::yield_now().await;
+
+        let leaked = current_span_name();
+        waiter.abort();
+        assert_eq!(
+            leaked, None,
+            "the quiescence wait is parked, yet its span is current for the next task on \
+             this thread"
+        );
+    }
+
+    /// Holds the closing of `live_data.wait_for_quiescent` open until the test
+    /// has opened a span on the thread the wait first ran on: the registry
+    /// frees a closed span only after every layer's `on_close` returns.
+    struct PauseOnQuiescenceClose {
+        closing: std::sync::mpsc::SyncSender<()>,
+        resume: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl<S> tracing_subscriber::Layer<S> for PauseOnQuiescenceClose
+    where
+        S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+    {
+        fn on_close(&self, id: tracing::span::Id, ctx: tracing_subscriber::layer::Context<'_, S>) {
+            let name = ctx
+                .span(&id)
+                .expect("closing span is still registered")
+                .name();
+            if name == "live_data.wait_for_quiescent" {
+                self.closing.send(()).unwrap();
+                self.resume.lock().unwrap().recv().unwrap();
+            }
+        }
+    }
+
+    /// The production shape of the leak: the wait parks on one worker thread,
+    /// resumes and finishes on another, and a task on the first thread opens a
+    /// span while the finished wait's span closes.
+    #[test]
+    fn a_quiescence_wait_that_migrates_threads_does_not_panic_the_next_span_on_the_old_thread() {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let (closing_tx, closing_rx) = std::sync::mpsc::sync_channel(1);
+        let (resume_tx, resume_rx) = std::sync::mpsc::sync_channel(1);
+        let dispatch =
+            tracing::Dispatch::new(tracing_subscriber::registry().with(PauseOnQuiescenceClose {
+                closing: closing_tx,
+                resume: std::sync::Mutex::new(resume_rx),
+            }));
+        let _subscriber = tracing::dispatcher::set_default(&dispatch);
+        let rt = Arc::new(
+            tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()
+                .unwrap(),
+        );
+        let live = string_live_data();
+
+        let mut wait = Box::pin(async move {
+            live.wait_for_quiescent(
+                std::time::Duration::from_millis(10),
+                std::time::Duration::from_secs(60),
+            )
+            .await
+        });
+        {
+            let _rt = rt.enter();
+            let mut cx = Context::from_waker(std::task::Waker::noop());
+            assert!(std::future::Future::poll(wait.as_mut(), &mut cx).is_pending());
+        }
+
+        let finisher = std::thread::spawn({
+            let rt = Arc::clone(&rt);
+            let dispatch = dispatch.clone();
+            move || tracing::dispatcher::with_default(&dispatch, || rt.block_on(wait))
+        });
+        closing_rx.recv().unwrap();
+        let next_span = std::panic::catch_unwind(|| {
+            drop(tracing::info_span!("next_task_on_the_old_thread"));
+        });
+        resume_tx.send(()).unwrap();
+        finisher.join().unwrap();
+
+        if let Err(payload) = next_span {
+            let message = payload
+                .downcast_ref::<String>()
+                .cloned()
+                .unwrap_or_else(|| format!("{payload:?}"));
+            panic!("opening a span on the thread the wait left panicked: {message}");
+        }
     }
 
     #[test]

@@ -167,12 +167,76 @@ where
     D: Send + 'static,
     S: Stream<Item = anyhow::Result<D>> + Send,
     F: FnMut() -> S + Send + 'static,
-    G: Fn(&'static str, u32, &Error) + Send + 'static,
+    G: Fn(&'static str, u32, &Error) + Send + Sync + 'static,
 {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let cancel = shutdown.token();
-    shutdown.spawn(format!("supervisor:{component}"), async move {
-        run_supervised(component, make_stream, tx, on_gave_up, cancel).await;
-    });
+    let on_gave_up = std::sync::Arc::new(on_gave_up);
+    let on_panic = std::sync::Arc::clone(&on_gave_up);
+    shutdown.spawn_disclosing_panic(
+        format!("supervisor:{component}"),
+        async move {
+            run_supervised(
+                component,
+                make_stream,
+                tx,
+                move |c, n, e: &Error| on_gave_up(c, n, e),
+                cancel,
+            )
+            .await;
+        },
+        move |message| {
+            on_panic(
+                component,
+                0,
+                &anyhow::anyhow!("the supervisor panicked: {message}"),
+            )
+        },
+    );
     rx
+}
+
+#[cfg(test)]
+mod tests {
+    use std::task::Poll;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn a_panicking_stream_reaches_the_give_up_seam() {
+        let shutdown = SessionShutdown::new();
+        let (gave_up_tx, gave_up_rx) = std::sync::mpsc::channel::<String>();
+        let gave_up_tx = std::sync::Mutex::new(gave_up_tx);
+
+        let mut consumer = spawn_supervised::<(), _, _, _>(
+            "panicking-feed",
+            || {
+                futures::stream::poll_fn(|_| -> Poll<Option<anyhow::Result<()>>> {
+                    panic!("the feed panicked while polled")
+                })
+            },
+            move |component, _, err| {
+                gave_up_tx
+                    .lock()
+                    .unwrap()
+                    .send(format!("{component}: {err:#}"))
+                    .unwrap();
+            },
+            &shutdown,
+        );
+
+        assert_eq!(consumer.recv().await, Some(Supervised::Reset));
+        assert_eq!(
+            consumer.recv().await,
+            None,
+            "the supervisor must be gone after its stream panicked"
+        );
+        let disclosed = gave_up_rx.try_recv();
+        assert!(
+            disclosed
+                .as_ref()
+                .is_ok_and(|m| m.contains("the feed panicked while polled")),
+            "the supervisor died by panic without calling the give-up seam: {disclosed:?}"
+        );
+    }
 }
