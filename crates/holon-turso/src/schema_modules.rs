@@ -137,6 +137,8 @@ impl SchemaModule for CoreSchemaModule {
             Resource::schema("block_raw"),
             Resource::schema("file"),
             Resource::schema("clock"),
+            Resource::schema("clock_reader"),
+            Resource::schema("integration_cache"),
         ]
     }
 
@@ -192,6 +194,10 @@ impl SchemaModule for CoreSchemaModule {
             )
             .await?;
         tracing::debug!("[CoreSchemaModule] clock table created + day row seeded");
+
+        for stmt in sql_statements(include_str!("../sql/schema/integration_cache.sql")) {
+            db_handle.execute_ddl(stmt).await?;
+        }
 
         tracing::info!("[CoreSchemaModule] Core tables created successfully");
         Ok(())

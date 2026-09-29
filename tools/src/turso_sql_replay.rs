@@ -1879,7 +1879,7 @@ async fn cmd_replay(args: &ReplayArgs, replay_file: &str) -> anyhow::Result<()> 
         }
     }
 
-    let db = turso::Builder::new_local(db_path)
+    let db = holon::storage::scalar_fns::register_on_builder(turso::Builder::new_local(db_path))
         .experimental_materialized_views(true)
         .build()
         .await?;

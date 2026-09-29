@@ -513,6 +513,52 @@ pub(crate) async fn cleanup_orphaned_dbsp_state_on_conn(
 // in holon-core so providers implement it without naming the Turso backend.
 use holon_core::MatviewHook;
 
+/// The fine grains a query reads from the `clock` relation, given the query's
+/// FROM and JOIN `sources`. A query reads the relation when `clock` is one of
+/// its sources, and it reads each
+/// grain it names as a string literal (`'minute'`). A query that reads the
+/// relation but names no grain is refused: nothing tells which rows to tick.
+fn fine_clock_grains(sources: &[Resource], sql: &str) -> Result<Vec<holon_api::clock::Grain>> {
+    use holon_api::clock::Grain;
+    let reads_clock = sources
+        .iter()
+        .any(|table| table.name().eq_ignore_ascii_case("clock"));
+    if !reads_clock {
+        return Ok(Vec::new());
+    }
+    let literals: Vec<String> =
+        sqlparser::tokenizer::Tokenizer::new(&sqlparser::dialect::SQLiteDialect {}, sql)
+            .tokenize()
+            .with_context(|| format!("tokenize the query to find its grain literals: {sql}"))?
+            .into_iter()
+            .filter_map(|token| match token {
+                sqlparser::tokenizer::Token::SingleQuotedString(literal) => Some(literal),
+                _ => None,
+            })
+            .collect();
+    let named: Vec<Grain> = [Grain::Day, Grain::Hour, Grain::Minute]
+        .into_iter()
+        .filter(|grain| literals.iter().any(|literal| literal == grain.as_str()))
+        .collect();
+    if named.is_empty() {
+        return Err(anyhow::Error::new(holon_api::QueryRefused(format!(
+            "the query reads `clock` but names no grain as a literal ('day', 'hour' or \
+             'minute'), so nothing can keep its rows ticking: {sql}"
+        ))));
+    }
+    Ok(named
+        .into_iter()
+        .filter(|grain| *grain != Grain::Day)
+        .collect())
+}
+
+/// Makes a fine clock grain's row exist and tick, so a view that reads it has
+/// rows from its first read on. The clock scheduler implements it.
+#[async_trait::async_trait]
+pub trait ClockGrainSeeder: Send + Sync {
+    async fn seed(&self, grain: holon_api::clock::Grain) -> anyhow::Result<()>;
+}
+
 /// Result of watching a query — initial data + CDC stream.
 pub struct WatchResult {
     pub initial_rows: Vec<StorageEntity>,
@@ -552,6 +598,9 @@ pub struct MatviewManager {
     fdw_backed_tables: Arc<tokio::sync::RwLock<HashSet<String>>>,
     /// Optional hook called after FDW cache priming.
     hook: Arc<tokio::sync::RwLock<Option<Arc<dyn MatviewHook>>>>,
+    /// Seeds the fine clock grains a watch reads. Set once, when the session's
+    /// clock scheduler exists.
+    clock_seeder: Arc<std::sync::OnceLock<Arc<dyn ClockGrainSeeder>>>,
     /// Cache of view names known to exist in `sqlite_master`, the SQL each
     /// was ensured from, and the DDL mutex guarding create-if-absent. All come
     /// from [`shared_for_database`], so every manager on one database sees one
@@ -688,6 +737,7 @@ impl MatviewManager {
             ddl_mutex: shared.ddl_mutex,
             fdw_backed_tables: Arc::new(tokio::sync::RwLock::new(HashSet::new())),
             hook: Arc::new(tokio::sync::RwLock::new(None)),
+            clock_seeder: Arc::new(std::sync::OnceLock::new()),
             known_views: shared.known_views,
             view_sql: shared.view_sql,
             subscriptions: shared.subscriptions,
@@ -720,6 +770,14 @@ impl MatviewManager {
     /// Set the hook called after successful FDW cache priming.
     pub async fn set_hook(&self, hook: Arc<dyn MatviewHook>) {
         *self.hook.write().await = Some(hook);
+    }
+
+    /// Install the session's clock-grain seeder. Once per manager.
+    pub fn set_clock_seeder(&self, seeder: Arc<dyn ClockGrainSeeder>) {
+        assert!(
+            self.clock_seeder.set(seeder).is_ok(),
+            "the clock seeder is installed once per matview manager"
+        );
     }
 
     /// Spawn the single CDC demultiplexer task.
@@ -975,6 +1033,10 @@ impl MatviewManager {
     /// Steps: prime FDW cache (if applicable) → check existence → acquire DDL
     /// mutex → double-check → clean orphaned DBSP state tables → strip
     /// ORDER BY → CREATE MATERIALIZED VIEW with dependency tracking.
+    ///
+    /// A query that reads a fine `clock` grain gets that grain's row seeded
+    /// before its view exists, and a `clock_reader` row per grain, so each
+    /// keeps ticking while the view lives.
     #[tracing::instrument(skip(self, sql), fields(view_name = tracing::field::Empty))]
     pub async fn ensure_view(&self, sql: &str) -> Result<String> {
         self.prime_fdw_caches(sql).await?;
@@ -1050,15 +1112,26 @@ impl MatviewManager {
         // Fail loud: a parse failure here silently became "no dependencies",
         // which mis-orders matview creation and manifests as a boot HANG
         // ("waiting for dependencies") rather than an error. Surface it.
-        let requires = parse_sql(&sql_for_view)
-            .map(|stmts| extract_table_refs(&stmts))
-            .with_context(|| {
-                format!(
-                    "MatviewManager::ensure_view: failed to parse SELECT SQL for matview \
-                     '{view_name}' while extracting table dependencies; mis-ordered DDL would \
-                     hang on missing deps. SQL: {sql_for_view}"
-                )
+        let stmts = parse_sql(&sql_for_view).with_context(|| {
+            format!(
+                "MatviewManager::ensure_view: failed to parse SELECT SQL for matview \
+                 '{view_name}' while extracting table dependencies; mis-ordered DDL would hang \
+                 on missing deps. SQL: {sql_for_view}"
+            )
+        })?;
+        let requires = extract_table_refs(&stmts);
+        let grains = fine_clock_grains(&requires, &sql_for_view)?;
+        if !grains.is_empty() {
+            let seeder = self.clock_seeder.get().ok_or_else(|| {
+                anyhow::Error::new(holon_api::QueryRefused(format!(
+                    "the query reads the clock grains {grains:?}, but this session has no clock \
+                     scheduler to keep them ticking: {sql}"
+                )))
             })?;
+            for grain in &grains {
+                seeder.seed(*grain).await?;
+            }
+        }
 
         tracing::debug!(
             "[MatviewManager] DDL deps — provides: {:?}, requires: {:?}",
@@ -1086,6 +1159,24 @@ impl MatviewManager {
                 "materialized view {view_name} was dropped while it was being created; a \
                  subscriber to it would receive nothing"
             );
+        }
+        for grain in grains {
+            self.db_handle
+                .execute_values(
+                    "INSERT INTO clock_reader (view, grain) VALUES (?, ?) ON CONFLICT(view, grain) \
+                     DO NOTHING",
+                    vec![
+                        holon_api::Value::String(view_name.clone()),
+                        holon_api::Value::String(grain.as_str().to_string()),
+                    ],
+                )
+                .await
+                .with_context(|| {
+                    format!(
+                        "record that view {view_name} reads the '{}' clock grain",
+                        grain.as_str()
+                    )
+                })?;
         }
         // The one choke point every mint passes through, whichever watch API
         // asked for it. Attributing a mint to its SQL from any other place
@@ -1568,6 +1659,60 @@ fn holon_turso_select_tokens(select_sql: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_query_reads_the_clock_grains_its_sources_and_literals_name() {
+        use holon_api::clock::Grain;
+        let grains_of = |sql: &str| {
+            fine_clock_grains(&extract_table_refs(&parse_sql(sql).expect("parses")), sql)
+        };
+        for mentions_only in [
+            "SELECT id FROM block_raw WHERE content LIKE '%clock%'",
+            "SELECT id, content FROM block_raw WHERE title = 'clock'",
+            "SELECT id FROM block_raw WHERE content LIKE '%Clock%' ORDER BY id",
+            "SELECT id FROM block_raw WHERE content = 'CLOCK' AND state = 'minute'",
+            "SELECT id AS clock, clock_grain FROM block_raw",
+            "WITH clock AS (SELECT id FROM block_raw) SELECT id FROM clock",
+        ] {
+            assert_eq!(grains_of(mentions_only).unwrap(), vec![], "{mentions_only}");
+        }
+        for (reads, grains) in [
+            (
+                "SELECT m.id FROM msg m JOIN clock c ON c.grain = m.g WHERE c.grain = 'minute'",
+                vec![Grain::Minute],
+            ),
+            (
+                "SELECT today FROM CLOCK WHERE grain = 'hour'",
+                vec![Grain::Hour],
+            ),
+            (
+                "SELECT today FROM \"Clock\" WHERE grain = 'hour'",
+                vec![Grain::Hour],
+            ),
+            (
+                "SELECT today FROM clock WHERE grain IN ('hour', 'minute')",
+                vec![Grain::Hour, Grain::Minute],
+            ),
+            ("SELECT today FROM clock WHERE grain = 'day'", vec![]),
+            (
+                "SELECT id FROM msg WHERE ts > (SELECT updated_at FROM clock WHERE grain = \
+                 'minute')",
+                vec![Grain::Minute],
+            ),
+        ] {
+            assert_eq!(grains_of(reads).unwrap(), grains, "{reads}");
+        }
+        for names_no_grain in [
+            "SELECT m.id FROM msg m JOIN clock c ON c.grain = m.g",
+            "SELECT m.id FROM msg m JOIN clock c ON c.grain = m.g WHERE m.note = '%minute%'",
+        ] {
+            let refused = grains_of(names_no_grain).unwrap_err();
+            assert!(
+                refused.downcast_ref::<holon_api::QueryRefused>().is_some(),
+                "a query that reads clock with no grain must be refused for good: {refused:#}"
+            );
+        }
+    }
 
     #[test]
     fn ivm_maintainable_flags_every_subquery_predicate_spelling() {

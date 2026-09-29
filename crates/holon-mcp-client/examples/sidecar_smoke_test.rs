@@ -42,10 +42,6 @@ use holon_mcp_client::mcp_vtable::VtableConfig;
 use rmcp::model::CallToolRequestParam;
 use serde_json::Value as JsonValue;
 use turso_core::Connection as CoreConnection;
-use turso_core::Database;
-use turso_core::DatabaseOpts;
-use turso_core::MemoryIO;
-use turso_core::OpenFlags;
 use turso_core::StepResult;
 use turso_core::Value;
 use turso_core::foreign::ForeignDataWrapper;
@@ -474,17 +470,8 @@ fn execute_sql(conn: &Arc<CoreConnection>, sql: &str) -> Result<()> {
 }
 
 fn open_memory_conn() -> Arc<CoreConnection> {
-    let io = Arc::new(MemoryIO::new());
-    let opts = DatabaseOpts::default().with_views(true);
-    let db = Database::open_file_with_flags(
-        io,
-        ":memory:",
-        OpenFlags::default(),
-        opts,
-        None,
-        Arc::new(turso_core::SqliteDialect),
-    )
-    .expect("open in-memory database");
+    let db = holon_turso::turso::TursoBackend::open_database(":memory:")
+        .expect("open in-memory database");
     db.connect().expect("connect")
 }
 

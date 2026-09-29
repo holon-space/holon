@@ -85,6 +85,29 @@ pub struct ClockSchedulerHandle {
     clock: Arc<dyn Clock>,
 }
 
+impl ClockSchedulerHandle {
+    /// Seeds a grain's row for a watch that reads it; `clock_reader` then
+    /// keeps it ticking while the watch's view lives.
+    pub fn grain_seeder(&self) -> Arc<dyn holon_turso::matview_manager::ClockGrainSeeder> {
+        Arc::new(GrainSeeder {
+            db_handle: self.db_handle.clone(),
+            clock: self.clock.clone(),
+        })
+    }
+}
+
+struct GrainSeeder {
+    db_handle: DbHandle,
+    clock: Arc<dyn Clock>,
+}
+
+#[async_trait::async_trait]
+impl holon_turso::matview_manager::ClockGrainSeeder for GrainSeeder {
+    async fn seed(&self, grain: Grain) -> Result<()> {
+        ensure_grain_row(&self.db_handle, self.clock.as_ref(), grain).await
+    }
+}
+
 /// A live reader of a fine clock grain. While one exists the scheduler ticks
 /// that grain; dropping the last one lets it fall idle (the row keeps its last
 /// value — no reader observes it, and a re-subscribe reconciles it forward).
@@ -196,9 +219,16 @@ pub async fn reconcile_grain(
 }
 
 /// Create a fine grain's `clock` row at the current instant if absent, then
-/// reconcile it forward. Idempotent (`INSERT OR IGNORE`), so a re-subscribe
-/// after idle finds the stale row and advances it via the following reconcile.
+/// reconcile it forward. Idempotent, so a re-subscribe after idle finds the
+/// stale row and advances it via the following reconcile.
 async fn ensure_grain_row(db_handle: &DbHandle, clock: &dyn Clock, grain: Grain) -> Result<()> {
+    seed_grain_row(db_handle, clock, grain).await?;
+    reconcile_grain(db_handle, clock, grain).await?;
+    Ok(())
+}
+
+/// Create a grain's `clock` row at the current instant if absent.
+async fn seed_grain_row(db_handle: &DbHandle, clock: &dyn Clock, grain: Grain) -> Result<()> {
     let sample = grain.sample(clock);
     let updated_at = chrono::DateTime::from_timestamp_millis(clock.now_millis())
         .ok_or_else(|| anyhow!("clock now_millis out of DateTime range"))?
@@ -215,7 +245,6 @@ async fn ensure_grain_row(db_handle: &DbHandle, clock: &dyn Clock, grain: Grain)
         )
         .await
         .with_context(|| format!("inserting the clock row for grain '{}'", grain.as_str()))?;
-    reconcile_grain(db_handle, clock, grain).await?;
     Ok(())
 }
 
@@ -236,6 +265,19 @@ pub async fn spawn_clock_scheduler(
     tracing::info!(?first, "[ClockScheduler] boot reconcile complete");
 
     let subs = Arc::new(GrainSubscriptions::default());
+    let handle = ClockSchedulerHandle {
+        subs: subs.clone(),
+        db_handle: db_handle.clone(),
+        clock: clock.clone(),
+    };
+
+    // A view that joins a fine grain must have rows from the first read on,
+    // whether or not anything subscribes the grain.
+    for grain in stored_reader_grains(&db_handle).await? {
+        ensure_grain_row(&db_handle, clock.as_ref(), grain)
+            .await
+            .with_context(|| format!("seeding the clock row a stored view reads ({grain:?})"))?;
+    }
 
     // Registered with the session, not merely guarded by the handle: the handle
     // lives on the `BackendEngine`, which is dropped AFTER the storage actor
@@ -258,10 +300,38 @@ pub async fn spawn_clock_scheduler(
                     () = &mut cancelled => return,
                     _ = ticker.tick() => {}
                 }
-                // Reconcile only the grains with a live reader (Day always). A
-                // fine grain with no subscriber is never touched — the C6
-                // write-amplification gate.
-                for grain in subs.active() {
+                // Reconcile only the grains something reads: Day always, a
+                // subscribed grain, and a grain a stored view reads (read again
+                // each tick, so a dropped view stops its grain). A fine grain
+                // nothing reads is never touched — the C6 write-amplification
+                // gate.
+                let mut grains = subs.active();
+                match stored_reader_grains(&db_handle).await {
+                    Ok(stored) => {
+                        for grain in stored {
+                            if grains.contains(&grain) {
+                                continue;
+                            }
+                            // A sidecar view records its grain at connect, before
+                            // anything seeds that grain's row.
+                            if let Err(e) = seed_grain_row(&db_handle, clock.as_ref(), grain).await
+                            {
+                                tracing::error!(
+                                    grain = grain.as_str(),
+                                    error = %format!("{e:#}"),
+                                    "[ClockScheduler] seeding a grain a stored view reads failed"
+                                );
+                            }
+                            grains.push(grain);
+                        }
+                    }
+                    Err(e) => tracing::error!(
+                        error = %format!("{e:#}"),
+                        "[ClockScheduler] reading the grains stored views read failed; only \
+                         subscribed grains tick this round"
+                    ),
+                }
+                for grain in grains {
                     match reconcile_grain(&db_handle, clock.as_ref(), grain).await {
                         Ok(ClockTick::Advanced { today, epoch_day }) => {
                             tracing::info!(
@@ -285,11 +355,22 @@ pub async fn spawn_clock_scheduler(
         });
     }
 
-    Ok(ClockSchedulerHandle {
-        subs,
-        db_handle,
-        clock,
-    })
+    Ok(handle)
+}
+
+/// The fine grains that stored views read, as `clock_reader` records them.
+async fn stored_reader_grains(db_handle: &DbHandle) -> Result<Vec<Grain>> {
+    let rows = db_handle
+        .query("SELECT DISTINCT grain FROM clock_reader", HashMap::new())
+        .await
+        .context("reading the grains stored views read (clock_reader)")?;
+    rows.iter()
+        .map(|row| match row.get("grain") {
+            Some(holon_api::Value::String(raw)) => Grain::parse(raw),
+            other => Err(anyhow!("clock_reader.grain is {other:?}, not text")),
+        })
+        .filter(|grain| !matches!(grain, Ok(Grain::Day)))
+        .collect()
 }
 
 #[cfg(test)]
@@ -426,6 +507,45 @@ mod tests {
         assert_eq!(tick, ClockTick::Unchanged);
     }
 
+    /// The scheduler's per-tick pair for a stored grain no subscriber holds
+    /// (`seed_grain_row` then `reconcile_grain`) must write nothing when the
+    /// grain's sample has not changed — the same no-write contract
+    /// `no_change_tick_writes_nothing` pins for `day`, extended to a fine
+    /// grain a stored view reads.
+    #[tokio::test]
+    async fn no_change_tick_writes_nothing_for_a_stored_fine_grain_either() {
+        let handle = booted_clock_db().await;
+        let clock = TestClock::with_utc_offset(noon_utc_millis(2026, 7, 10), 0);
+        ensure_grain_row(&handle, &clock, Grain::Hour)
+            .await
+            .unwrap();
+
+        handle
+            .execute_ddl(
+                "CREATE MATERIALIZED VIEW clock_hour_mirror AS SELECT grain, today, epoch_day, \
+                 updated_at FROM clock WHERE grain = 'hour'",
+            )
+            .await
+            .unwrap();
+        let mut cdc_rx = handle.subscribe_cdc("clock_hour_mirror").await.unwrap();
+
+        // Exactly the pair the scheduler runs each tick for a stored grain
+        // nothing subscribes, with no time change.
+        seed_grain_row(&handle, &clock, Grain::Hour).await.unwrap();
+        let tick = reconcile_grain(&handle, &clock, Grain::Hour).await.unwrap();
+        assert_eq!(tick, ClockTick::Unchanged);
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let mut events = 0usize;
+        while let Ok(batch) = cdc_rx.try_recv() {
+            events += batch.inner.items.len();
+        }
+        assert_eq!(
+            events, 0,
+            "a stored fine grain's unchanged tick must write nothing"
+        );
+    }
+
     // --- C6: fine grains + recurrence -----------------------------------------
 
     async fn hour_rows_query(handle: &DbHandle) -> usize {
@@ -455,6 +575,300 @@ mod tests {
         assert!(subs.active().contains(&Grain::Hour), "still one reader");
         assert_eq!(subs.decr(Grain::Hour), 0);
         assert_eq!(subs.active(), vec![Grain::Day], "last reader gone -> idle");
+    }
+
+    /// A stored view that joins a fine grain keeps working in a session where
+    /// nothing subscribes that grain (its integration did not connect): the
+    /// scheduler itself ticks every grain `clock_reader` records.
+    #[tokio::test]
+    async fn a_grain_a_stored_view_reads_ticks_with_no_subscriber() {
+        let handle = booted_clock_db().await;
+        for ddl in [
+            "CREATE TABLE msg (id TEXT PRIMARY KEY, ts TEXT)",
+            "CREATE MATERIALIZED VIEW msg_clock AS SELECT id, ts, 'minute' AS clock_grain FROM msg",
+            "CREATE MATERIALIZED VIEW msg_recent AS SELECT m.id, iif(m.ts > \
+             strftime('%Y-%m-%dT%H:%M:%S', c.updated_at, '-10 minutes'), 'recent', 'old') AS \
+             state FROM msg_clock m JOIN clock c ON c.grain = m.clock_grain",
+        ] {
+            handle.execute_ddl(ddl).await.unwrap();
+        }
+        handle
+            .execute(
+                "INSERT INTO msg (id, ts) VALUES ('m1', '2026-07-11T11:55:00')",
+                vec![],
+            )
+            .await
+            .unwrap();
+        handle
+            .execute(
+                "INSERT INTO clock_reader (view, grain) VALUES ('msg_recent', 'minute')",
+                vec![],
+            )
+            .await
+            .unwrap();
+
+        let clock = TestClock::with_utc_offset(noon_utc_millis(2026, 7, 11), 0);
+        let _scheduler = spawn_clock_scheduler(
+            handle.clone(),
+            Arc::new(clock.clone()) as Arc<dyn Clock>,
+            Duration::from_millis(20),
+            &holon_api::lifecycle::SessionShutdown::new(),
+        )
+        .await
+        .unwrap();
+
+        let state = || async {
+            handle
+                .query("SELECT state FROM msg_recent", HashMap::new())
+                .await
+                .unwrap()
+                .iter()
+                .map(|r| format!("{:?}", r.get("state")))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            state().await,
+            vec![format!(
+                "{:?}",
+                Some(holon_api::Value::String("recent".into()))
+            )],
+            "a view that joins a grain a stored view reads must hold its rows with no subscriber"
+        );
+
+        clock.advance(11 * 60_000);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let now = state().await;
+            if now
+                == vec![format!(
+                    "{:?}",
+                    Some(holon_api::Value::String("old".into()))
+                )]
+            {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the minute grain did not tick with no subscriber; the view still holds {now:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// A user watch over a fine grain has rows at once and keeps ticking with
+    /// no subscriber, and stops ticking when its view goes.
+    #[tokio::test]
+    async fn a_watch_over_a_fine_grain_has_rows_and_ticks_with_no_subscriber() {
+        let handle = booted_clock_db().await;
+        let clock = TestClock::with_utc_offset(noon_utc_millis(2026, 7, 11), 0);
+        let scheduler = spawn_clock_scheduler(
+            handle.clone(),
+            Arc::new(clock.clone()) as Arc<dyn Clock>,
+            Duration::from_millis(20),
+            &holon_api::lifecycle::SessionShutdown::new(),
+        )
+        .await
+        .unwrap();
+        let manager =
+            crate::sync::MatviewManager::new(handle.clone(), Arc::new(tokio::sync::Mutex::new(())));
+        manager.set_clock_seeder(scheduler.grain_seeder());
+
+        let watch = manager
+            .watch("SELECT grain, epoch_day FROM clock WHERE grain = 'minute'")
+            .await
+            .expect("a watch that names its grain");
+        assert_eq!(
+            watch.initial_rows.len(),
+            1,
+            "a watch over the minute grain must have its row from the first read"
+        );
+        let tick = || async {
+            handle
+                .query(
+                    &format!("SELECT epoch_day FROM {}", watch.view_name),
+                    HashMap::new(),
+                )
+                .await
+                .unwrap()[0]
+                .get("epoch_day")
+                .and_then(|v| v.as_i64())
+                .unwrap()
+        };
+        let first = tick().await;
+        clock.advance(3 * 60_000);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while tick().await == first {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the minute grain a watch reads did not tick with no subscriber"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_watch_that_reads_clock_without_naming_a_grain_is_refused() {
+        let handle = booted_clock_db().await;
+        handle
+            .execute_ddl("CREATE TABLE wants (id TEXT PRIMARY KEY, g TEXT)")
+            .await
+            .unwrap();
+        let manager =
+            crate::sync::MatviewManager::new(handle.clone(), Arc::new(tokio::sync::Mutex::new(())));
+        let err = manager
+            .watch("SELECT w.id, c.updated_at FROM wants w JOIN clock c ON c.grain = w.g")
+            .await
+            .err()
+            .expect("a watch that cannot say which grain it reads must be refused");
+        assert!(
+            format!("{err:#}").contains("names no grain"),
+            "the refusal must say why: {err:#}"
+        );
+        assert!(
+            err.downcast_ref::<holon_api::QueryRefused>().is_some(),
+            "the refusal must be final, so no watcher retries it: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_watch_that_only_mentions_clock_is_not_refused() {
+        let handle = booted_clock_db().await;
+        handle
+            .execute_ddl("CREATE TABLE wants (id TEXT PRIMARY KEY, g TEXT)")
+            .await
+            .unwrap();
+        let manager =
+            crate::sync::MatviewManager::new(handle.clone(), Arc::new(tokio::sync::Mutex::new(())));
+        for sql in [
+            "SELECT id FROM wants WHERE g LIKE '%clock%'",
+            "SELECT id, g FROM wants WHERE g = 'clock'",
+            "SELECT id FROM wants WHERE g LIKE '%Clock%'",
+            "SELECT id FROM wants WHERE g = 'CLOCK' OR g = 'minute'",
+            "SELECT id AS clock FROM wants",
+            "SELECT \"clock\".id FROM wants AS \"clock\" WHERE \"clock\".g = 'day'",
+        ] {
+            manager
+                .watch(sql)
+                .await
+                .unwrap_or_else(|e| panic!("a query that reads no clock row was refused: {e:#}"));
+        }
+    }
+
+    /// A view naming `clock` in another case must resolve on the real create
+    /// path (`MatviewManager::watch`), not only in the SQL-parse unit test:
+    /// the dependency it waits on and the resource `clock`'s schema module
+    /// marks available must be the SAME Resource regardless of spelling.
+    #[tokio::test]
+    async fn a_watch_that_reads_clock_in_another_case_still_works() {
+        let handle = booted_clock_db().await;
+        let manager =
+            crate::sync::MatviewManager::new(handle.clone(), Arc::new(tokio::sync::Mutex::new(())));
+        // Names only the `day` grain — no fine grain, so no clock seeder is
+        // needed and the only thing under test is whether the DDL dependency
+        // resolves.
+        for sql in [
+            "SELECT grain, epoch_day FROM CLOCK WHERE grain = 'day'",
+            "SELECT grain, epoch_day FROM \"Clock\" WHERE grain = 'day'",
+        ] {
+            tokio::time::timeout(Duration::from_secs(5), manager.watch(sql))
+                .await
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "{sql}: creating the view hung waiting for its `clock` dependency — the \
+                         case-differing table name did not resolve to the same Resource"
+                    )
+                })
+                .unwrap_or_else(|e| panic!("{sql}: {e:#}"));
+        }
+    }
+
+    /// A watch reads the grains its query names, however it spells the
+    /// relation, and records every one of them.
+    #[tokio::test]
+    async fn a_watch_over_a_clock_join_records_each_grain_it_names() {
+        let handle = booted_clock_db().await;
+        handle
+            .execute_ddl("CREATE TABLE wants (id TEXT PRIMARY KEY, g TEXT)")
+            .await
+            .unwrap();
+        let clock = TestClock::with_utc_offset(noon_utc_millis(2026, 7, 11), 0);
+        let scheduler = spawn_clock_scheduler(
+            handle.clone(),
+            Arc::new(clock.clone()) as Arc<dyn Clock>,
+            Duration::from_secs(3600),
+            &holon_api::lifecycle::SessionShutdown::new(),
+        )
+        .await
+        .unwrap();
+        let manager =
+            crate::sync::MatviewManager::new(handle.clone(), Arc::new(tokio::sync::Mutex::new(())));
+        manager.set_clock_seeder(scheduler.grain_seeder());
+
+        let recorded = |view: String| {
+            let handle = handle.clone();
+            async move {
+                handle
+                    .query(
+                        &format!(
+                            "SELECT grain FROM clock_reader WHERE view = '{view}' ORDER BY grain"
+                        ),
+                        HashMap::new(),
+                    )
+                    .await
+                    .unwrap()
+                    .iter()
+                    .map(|r| format!("{:?}", r.get("grain")))
+                    .collect::<Vec<_>>()
+            }
+        };
+        let text = |g: &str| format!("{:?}", Some(holon_api::Value::String(g.into())));
+
+        let joined = manager
+            .watch("SELECT w.id, c.today FROM wants w JOIN clock c ON c.grain = w.g WHERE c.grain = 'minute'")
+            .await
+            .expect("a join on the minute grain");
+        assert_eq!(recorded(joined.view_name).await, vec![text("minute")]);
+
+        let both = manager
+            .watch("SELECT grain, today FROM clock WHERE grain IN ('hour', 'minute')")
+            .await
+            .expect("a watch over two grains");
+        assert_eq!(
+            recorded(both.view_name).await,
+            vec![text("hour"), text("minute")],
+            "a view that reads two grains must keep both recorded, or the next session ticks one"
+        );
+    }
+
+    /// A grain recorded after the scheduler started (a sidecar view created
+    /// at connect) has no `clock` row yet; the next tick makes it.
+    #[tokio::test]
+    async fn a_grain_recorded_after_spawn_gets_its_row_at_the_next_tick() {
+        let handle = booted_clock_db().await;
+        let clock = TestClock::with_utc_offset(noon_utc_millis(2026, 7, 11), 0);
+        let _scheduler = spawn_clock_scheduler(
+            handle.clone(),
+            Arc::new(clock.clone()) as Arc<dyn Clock>,
+            Duration::from_millis(20),
+            &holon_api::lifecycle::SessionShutdown::new(),
+        )
+        .await
+        .unwrap();
+        handle
+            .execute(
+                "INSERT INTO clock_reader (view, grain) VALUES ('later_view', 'hour')",
+                vec![],
+            )
+            .await
+            .unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while hour_rows_query(&handle).await == 0 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "a recorded grain with no clock row was never seeded by the tick"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 
     /// End-to-end write gate: a fine grain has no `clock` row until subscribed;

@@ -197,6 +197,27 @@ impl ConditionKind {
                 ConditionDetail::with_body(why.clone(), seed_path.iter().cloned().collect())
             }
 
+            Self::DatabaseRebuiltAtBoot {
+                reason,
+                lost,
+                caches,
+            } => ConditionDetail::with_body(
+                format!(
+                    "The database was rebuilt because {reason}. Blocks and views came back from \
+                     the vault; the integration caches re-sync from their sources, without the \
+                     rows a source no longer holds; this local state did not come back"
+                ),
+                lost.iter()
+                    .map(|l| format!("{}: {} ({} rows)", l.table, l.what, l.rows))
+                    .chain(caches.iter().map(|c| {
+                        format!(
+                            "{}: {} cache, re-syncing ({} rows)",
+                            c.table, c.provider, c.rows
+                        )
+                    }))
+                    .collect(),
+            ),
+
             Self::UndoHistoryClearedAtBoot { entries } => ConditionDetail::prose(format!(
                 "{entries} step{} from the previous session were discarded",
                 if *entries == 1 { "" } else { "s" }

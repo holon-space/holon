@@ -93,13 +93,19 @@ pub fn open_and_register_core(
     match storage {
         StorageSelector::Turso => {
             tracing::debug!("[DI] Opening database at {:?}...", db_path);
-            let db = TursoBackend::open_database(&db_path).map_err(|e| {
-                anyhow::anyhow!(
-                    "Failed to open Turso database at {}: {e}",
-                    db_path.display()
-                )
-            })?;
+            let (db, rebuild) =
+                TursoBackend::open_database_reporting_rebuild(&db_path).map_err(|e| {
+                    anyhow::anyhow!(
+                        "Failed to open Turso database at {}: {e}",
+                        db_path.display()
+                    )
+                })?;
             tracing::debug!("[DI] Database opened successfully");
+            injector.provide::<holon_turso::table_classes::BootRebuild>(fluxdi::Provider::root(
+                move |_| {
+                    fluxdi::Shared::new(holon_turso::table_classes::BootRebuild(rebuild.clone()))
+                },
+            ));
 
             let (cdc_tx, _) = tokio::sync::broadcast::channel(1024);
 
@@ -120,6 +126,9 @@ pub fn open_and_register_core(
             tracing::debug!(
                 "[DI] LoroMemory storage — skipping Turso, registering Turso-free core"
             );
+            injector.provide::<holon_turso::table_classes::BootRebuild>(fluxdi::Provider::root(
+                |_| fluxdi::Shared::new(holon_turso::table_classes::BootRebuild(None)),
+            ));
             register_core_services_no_turso(injector, db_path)?;
         }
     }

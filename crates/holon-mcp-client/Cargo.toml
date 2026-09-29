@@ -53,6 +53,8 @@ turso_ext.workspace = true
 workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 
 [dev-dependencies]
+# examples/clock_tick_cost.rs binds DbHandle parameters.
+turso.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util"] }
 tempfile.workspace = true
 # Redaction tests assert on what the transport actually emits to a subscriber.

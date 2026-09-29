@@ -493,16 +493,22 @@ fn resolve_query_table_inner(
 // =============================================================================
 
 pub(crate) fn normalize_table_name(name: &str) -> String {
-    name.trim()
+    let trimmed = name
+        .trim()
         .trim_matches('"')
         .trim_matches('\'')
         .trim_matches('`')
         .trim_matches('[')
-        .trim_matches(']')
+        .trim_matches(']');
+    // SQLite matches unquoted and ASCII-quoted identifiers case-insensitively,
+    // so this is the identifier's canonical form: two spellings of the same
+    // table must produce the same Resource, or dependency tracking (a DDL's
+    // `provides` vs another's `requires`) silently never satisfies.
+    trimmed
         .split('.')
         .next_back()
-        .unwrap_or(name)
-        .to_string()
+        .unwrap_or(trimmed)
+        .to_ascii_lowercase()
 }
 
 fn extract_refs_from_statement(stmt: &Statement, refs: &mut Vec<Resource>) {

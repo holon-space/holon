@@ -237,6 +237,18 @@ pub enum ConditionKind {
     ///
     /// All-clear: none — it is a one-shot notice about this boot.
     UndoHistoryClearedAtBoot { entries: usize },
+    /// The database was deleted and rebuilt at boot, because this binary
+    /// could not use it (Martin: no migration). The replicas rebuild the
+    /// blocks and views; `lost` names each table only the database held, and
+    /// `caches` each integration cache that re-syncs from its source, with the
+    /// rows each held.
+    ///
+    /// All-clear: none — it is a one-shot notice about this boot.
+    DatabaseRebuiltAtBoot {
+        reason: String,
+        lost: Vec<LostTableRows>,
+        caches: Vec<ClearedCacheRows>,
+    },
     /// A file NAMES a connection but cannot be used, so the connection does
     /// not exist: a stale `schema_version`, a file that will not parse, a
     /// reference to another connection's secret, or two files claiming one
@@ -376,6 +388,7 @@ impl ConditionKind {
     pub const REHYDRATION_FAILED: &'static str = "rehydration-failed";
     pub const SECRETS_HELD_IN_MEMORY: &'static str = "secrets-held-in-memory";
     pub const UNDO_HISTORY_CLEARED_AT_BOOT: &'static str = "undo-history-cleared-at-boot";
+    pub const DATABASE_REBUILT_AT_BOOT: &'static str = "database-rebuilt-at-boot";
     pub const SHARED_SUBTREE_NOT_MATERIALIZED: &'static str = "shared-subtree-not-materialized";
     pub const SNAPSHOT_LOAD_FAILED: &'static str = "snapshot-load-failed";
     pub const SNAPSHOT_SAVE_FAILED: &'static str = "snapshot-save-failed";
@@ -408,6 +421,7 @@ impl ConditionKind {
             Self::IntegrationSidecarUnusable { .. } => Self::INTEGRATION_SIDECAR_UNUSABLE,
             Self::SecretsHeldInMemory { .. } => Self::SECRETS_HELD_IN_MEMORY,
             Self::UndoHistoryClearedAtBoot { .. } => Self::UNDO_HISTORY_CLEARED_AT_BOOT,
+            Self::DatabaseRebuiltAtBoot { .. } => Self::DATABASE_REBUILT_AT_BOOT,
             Self::SnapshotSaveFailed(_) => Self::SNAPSHOT_SAVE_FAILED,
             Self::SnapshotLoadFailed(_) => Self::SNAPSHOT_LOAD_FAILED,
             Self::RehydrationFailed(_) => Self::REHYDRATION_FAILED,
@@ -432,6 +446,24 @@ impl ConditionKind {
             Self::ProfileRefused { .. } => Self::PROFILE_REFUSED,
         }
     }
+}
+
+/// A table a database rebuild deleted and no replica restores, with the rows
+/// it held.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LostTableRows {
+    pub table: String,
+    pub what: String,
+    pub rows: u64,
+}
+
+/// An integration cache a database rebuild cleared, with the rows it held.
+/// Its provider re-syncs it; a row the source no longer holds is gone.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClearedCacheRows {
+    pub table: String,
+    pub provider: String,
+    pub rows: u64,
 }
 
 #[derive(Clone, Debug)]

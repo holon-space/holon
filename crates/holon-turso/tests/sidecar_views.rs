@@ -1,7 +1,8 @@
 //! Sidecar-declared derived views go through `reconcile_named_view` — the same
-//! code path `finish_integration` uses for the YAML `views:` section. This
-//! test creates the shipped `session_status` view shape over a cache-style
-//! table and verifies IVM keeps it correct through writes.
+//! code path `finish_integration` uses for the YAML `views:` section. These
+//! tests create the shipped view shapes over cache-style tables and verify IVM
+//! keeps them correct through writes and through clock ticks: the views read
+//! the current time from the `clock` relation, never from `'now'`.
 
 use std::collections::HashMap;
 
@@ -15,11 +16,47 @@ use holon_turso::turso::TursoBackend;
 /// CASE over aggregate expressions at CREATE; the CASE lives in the second,
 /// non-aggregating view over the first.
 const SESSION_LAST_MESSAGE_SQL: &str = "SELECT 'cc-session:' || session_id AS session_id, MAX(timestamp) AS last_ts, \
-     substr(MAX(timestamp || '|' || role), 26) AS last_role FROM cc_message GROUP BY session_id";
+     substr(MAX(timestamp || '|' || role), 26) AS last_role, 'minute' AS clock_grain FROM \
+     cc_message GROUP BY session_id";
 
-const SESSION_STATUS_SQL: &str = "SELECT session_id, last_ts, last_role, iif(last_role = 'user', 'working', iif(last_role = \
-     'assistant' AND last_ts > strftime('%Y-%m-%dT%H:%M:%S', 'now', '-10 minutes'), \
-     'waiting-on-user', 'idle')) AS status FROM cc_session_last_message";
+const SESSION_STATUS_SQL: &str = "SELECT m.session_id, m.last_ts, m.last_role, iif(m.last_role = 'user', 'working', \
+     iif(m.last_role = 'assistant' AND m.last_ts > strftime('%Y-%m-%dT%H:%M:%S', c.updated_at, \
+     '-10 minutes'), 'waiting-on-user', 'idle')) AS status FROM cc_session_last_message m JOIN \
+     clock c ON c.grain = m.clock_grain";
+
+/// The `clock` relation with one row for `grain`, whose tick instant is `utc`.
+async fn with_clock(handle: &DbHandle, grain: &str, utc: &str) {
+    holon_turso::schema_module::SchemaModule::ensure_schema(
+        &holon_turso::schema_modules::CoreSchemaModule,
+        handle,
+    )
+    .await
+    .expect("core schema with the clock relation");
+    handle
+        .execute(
+            "INSERT INTO clock (grain, today, epoch_day, updated_at) VALUES (?, 'label', 0, ?)",
+            vec![
+                turso::Value::Text(grain.into()),
+                turso::Value::Text(utc.into()),
+            ],
+        )
+        .await
+        .expect("seed clock row");
+}
+
+/// What the clock scheduler writes when `grain` ticks at the UTC instant `utc`.
+async fn tick(handle: &DbHandle, grain: &str, utc: &str) {
+    handle
+        .execute(
+            "UPDATE clock SET epoch_day = epoch_day + 1, updated_at = ? WHERE grain = ?",
+            vec![
+                turso::Value::Text(utc.into()),
+                turso::Value::Text(grain.into()),
+            ],
+        )
+        .await
+        .expect("tick the clock");
+}
 
 async fn setup() -> DbHandle {
     let (_backend, handle) = TursoBackend::new_in_memory().await.expect("in-memory db");
@@ -32,6 +69,7 @@ async fn setup() -> DbHandle {
         )
         .await
         .expect("create cache table");
+    with_clock(&handle, "minute", "2026-09-29T12:00:00+00:00").await;
     handle
 }
 
@@ -48,6 +86,15 @@ async fn insert(handle: &DbHandle, uuid: &str, sid: &str, role: &str, ts: &str) 
         )
         .await
         .expect("insert message");
+}
+
+async fn status_of(handle: &DbHandle, session_id: &str) -> String {
+    read_status(handle)
+        .await
+        .into_iter()
+        .find(|(id, _, _)| id == session_id)
+        .unwrap_or_else(|| panic!("no status row for {session_id}"))
+        .2
 }
 
 async fn read_status(handle: &DbHandle) -> Vec<(String, String, String)> {
@@ -123,6 +170,20 @@ async fn session_status_view_creates_and_tracks_writes() {
     insert(&handle, "m5", "s3", "user", "2999-02-01T00:00:00.000Z").await;
     assert_eq!(read_status(&handle).await.len(), 3);
 
+    // Assistant answered at 11:55; at the 12:00 tick that is recent.
+    insert(&handle, "m6", "s4", "user", "2026-09-29T11:50:00.000Z").await;
+    insert(&handle, "m7", "s4", "assistant", "2026-09-29T11:55:00.000Z").await;
+    assert_eq!(status_of(&handle, "cc-session:s4").await, "waiting-on-user");
+
+    // No write touches s4. Ten minutes later the clock alone makes it idle.
+    tick(&handle, "minute", "2026-09-29T12:10:00+00:00").await;
+    assert_eq!(
+        status_of(&handle, "cc-session:s4").await,
+        "idle",
+        "a session with no new message must go idle once the minute clock passes its \
+         10-minute window"
+    );
+
     // Reconcile again with identical SQL: no-op
     let recreated = reconcile_named_view(&handle, "cc_session_status", SESSION_STATUS_SQL)
         .await
@@ -135,15 +196,17 @@ async fn session_status_view_creates_and_tracks_writes() {
 // ---------------------------------------------------------------------------
 
 /// The exact chained SELECTs shipped in assets/integrations/gcal.yaml (`views:`
-/// entries `upcoming_flagged` + `upcoming`). Keep in sync with the YAML. Two
-/// chained views because Turso IVM drops every row when strftime('now') sits in
-/// a WHERE — but strftime IN THE SELECT projection works. The column is
-/// `end_time` (not `end`) because END is a SQL keyword and the cache-table DDL
-/// builder does not quote identifiers.
-const GCAL_UPCOMING_FLAGGED_SQL: &str = "SELECT id, calendar_id, summary, start, end_time, all_day, location, status, updated, \
-     iif(start >= strftime('%Y-%m-%dT%H:%M:%S', 'now') \
-         AND start < strftime('%Y-%m-%dT%H:%M:%S', 'now', '+7 days'), 1, 0) AS is_upcoming \
-     FROM gcal_event";
+/// entries `upcoming_flagged` + `upcoming`). Keep in sync with the YAML. The
+/// window is a flag in the SELECT list and the chained view filters the plain
+/// column. The column is `end_time` (not `end`) because END is a SQL keyword
+/// and the cache-table DDL builder does not quote identifiers.
+const GCAL_EVENT_CLOCK_SQL: &str = "SELECT id, calendar_id, summary, start, end_time, all_day, location, status, \
+     updated, 'hour' AS clock_grain FROM gcal_event";
+
+const GCAL_UPCOMING_FLAGGED_SQL: &str = "SELECT e.id, e.calendar_id, e.summary, e.start, e.end_time, e.all_day, e.location, \
+     e.status, e.updated, iif(e.start >= strftime('%Y-%m-%dT%H:%M:%S', c.updated_at) AND e.start \
+     < strftime('%Y-%m-%dT%H:%M:%S', c.updated_at, '+7 days'), 1, 0) AS is_upcoming FROM \
+     gcal_event_clock e JOIN clock c ON c.grain = e.clock_grain";
 
 const GCAL_UPCOMING_SQL: &str = "SELECT id, calendar_id, summary, start, end_time, all_day, location, status, updated \
      FROM gcal_upcoming_flagged WHERE is_upcoming = 1";
@@ -158,15 +221,18 @@ async fn setup_gcal() -> DbHandle {
         )
         .await
         .expect("create gcal_event cache table");
+    with_clock(&handle, "hour", HOUR_TICK).await;
     handle
 }
 
-/// Insert an event whose `start` is computed relative to `now` via strftime, so
-/// the test anchors deterministically inside/outside the +7d window.
+const HOUR_TICK: &str = "2026-09-29T12:00:00+00:00";
+
+/// Insert an event whose `start` is `start_modifier` away from [`HOUR_TICK`].
 async fn insert_event(handle: &DbHandle, id: &str, summary: &str, start_modifier: &str) {
     let sql = format!(
         "INSERT INTO gcal_event (id, summary, start, end_time, all_day, status) \
-         VALUES (?, ?, strftime('%Y-%m-%dT%H:%M:%S','now','{start_modifier}'), '', 0, 'confirmed')"
+         VALUES (?, ?, strftime('%Y-%m-%dT%H:%M:%S','{HOUR_TICK}','{start_modifier}'), '', 0, \
+         'confirmed')"
     );
     handle
         .execute(
@@ -196,8 +262,8 @@ async fn read_upcoming(handle: &DbHandle) -> Vec<String> {
         .collect()
 }
 
-/// gcal_upcoming filters to events starting within now..+7d, and IVM keeps it
-/// correct as new events are written.
+/// gcal_upcoming filters to events starting within now..+7d of the hour clock,
+/// and IVM keeps it correct as new events are written and as the clock ticks.
 #[tokio::test]
 async fn gcal_upcoming_view_creates_and_tracks_writes() {
     let handle = setup_gcal().await;
@@ -207,6 +273,9 @@ async fn gcal_upcoming_view_creates_and_tracks_writes() {
     insert_event(&handle, "e_soon", "in 3 days", "+3 days").await;
     insert_event(&handle, "e_far", "in 30 days", "+30 days").await;
 
+    reconcile_named_view(&handle, "gcal_event_clock", GCAL_EVENT_CLOCK_SQL)
+        .await
+        .expect("clock-grain view DDL must succeed — shipped views: SQL");
     let created = reconcile_named_view(&handle, "gcal_upcoming_flagged", GCAL_UPCOMING_FLAGGED_SQL)
         .await
         .expect("flagged view DDL must succeed — shipped views: SQL");
@@ -230,9 +299,74 @@ async fn gcal_upcoming_view_creates_and_tracks_writes() {
         "IVM must add the new in-window event, ordered by start"
     );
 
+    // No write touches the events. Two hours later "tomorrow" has not started,
+    // but an event starting in one hour has; and a day later "tomorrow" is past.
+    insert_event(&handle, "e_hour", "in 1 hour", "+1 hour").await;
+    assert_eq!(read_upcoming(&handle).await.len(), 3);
+    tick(&handle, "hour", "2026-09-29T14:00:00+00:00").await;
+    assert_eq!(
+        read_upcoming(&handle).await,
+        vec!["tomorrow".to_string(), "in 3 days".to_string()],
+        "an event whose start the hour clock passed must leave the upcoming window"
+    );
+    tick(&handle, "hour", "2026-10-01T12:00:00+00:00").await;
+    assert_eq!(
+        read_upcoming(&handle).await,
+        vec!["in 3 days".to_string()],
+        "the window moves with the clock, with no write to the event"
+    );
+
     // Reconcile again with identical SQL: no-op.
     let recreated = reconcile_named_view(&handle, "gcal_upcoming", GCAL_UPCOMING_SQL)
         .await
         .expect("reconcile");
     assert!(!recreated, "unchanged SQL must not recreate the view");
+}
+
+/// The production order: an integration creates its views at connect, and the
+/// clock row of their grain appears after that, when the session starts
+/// ticking the grain. The views must fill in when the row arrives.
+#[tokio::test]
+async fn views_created_before_their_clock_row_fill_in_when_the_row_arrives() {
+    let (backend, handle) = TursoBackend::new_in_memory().await.expect("in-memory db");
+    std::mem::forget(backend);
+    holon_turso::schema_module::SchemaModule::ensure_schema(
+        &holon_turso::schema_modules::CoreSchemaModule,
+        &handle,
+    )
+    .await
+    .expect("core schema with the clock relation");
+    handle
+        .execute_ddl(
+            "CREATE TABLE cc_message (uuid TEXT PRIMARY KEY, session_id TEXT, role TEXT, \
+             timestamp TEXT, content TEXT)",
+        )
+        .await
+        .expect("create cache table");
+    insert(&handle, "m1", "s1", "user", "2026-09-29T11:50:00.000Z").await;
+    insert(&handle, "m2", "s1", "assistant", "2026-09-29T11:55:00.000Z").await;
+
+    reconcile_named_view(&handle, "cc_session_last_message", SESSION_LAST_MESSAGE_SQL)
+        .await
+        .expect("rollup view");
+    reconcile_named_view(&handle, "cc_session_status", SESSION_STATUS_SQL)
+        .await
+        .expect("status view");
+    assert!(
+        read_status(&handle).await.is_empty(),
+        "with no minute row there is no `now` to classify against"
+    );
+
+    handle
+        .execute(
+            "INSERT INTO clock (grain, today, epoch_day, updated_at) VALUES ('minute', 'label', 0, \
+             '2026-09-29T12:00:00+00:00')",
+            vec![],
+        )
+        .await
+        .expect("seed the minute row after the views exist");
+    assert_eq!(status_of(&handle, "cc-session:s1").await, "waiting-on-user");
+
+    tick(&handle, "minute", "2026-09-29T12:10:00+00:00").await;
+    assert_eq!(status_of(&handle, "cc-session:s1").await, "idle");
 }

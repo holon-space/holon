@@ -3742,7 +3742,8 @@ impl ReactiveEngine {
                 // A watch target can be missing merely because it has not been
                 // BUILT yet — an MCP integration creating its tables takes
                 // minutes — so a failure is disclosed and then retried forever,
-                // never given up on. `unwatch` aborts this task at either await.
+                // unless the engine refused the query itself, which no retry
+                // changes. `unwatch` aborts this task at either await.
                 let mut backoff = Duration::from_millis(250);
                 loop {
                     match session
@@ -3778,6 +3779,11 @@ impl ReactiveEngine {
                                     apply_epoch.fetch_add(1, std::sync::atomic::Ordering::Release);
                                 }
                             }
+                            return;
+                        }
+                        Err(e) if e.downcast_ref::<holon_api::QueryRefused>().is_some() => {
+                            tracing::warn!("watch_query refused: {e:#}");
+                            reactive.set_error(format!("query refused: {e:#}"));
                             return;
                         }
                         Err(e) => {

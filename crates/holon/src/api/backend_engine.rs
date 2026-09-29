@@ -283,6 +283,9 @@ pub struct BackendEngine {
     /// `create_initialized_engine`; the boot guard there fails loud if it
     /// stays `None`.
     _clock_scheduler: Option<Arc<crate::sync::clock_scheduler::ClockSchedulerHandle>>,
+    /// Fine clock grains the session reads for its whole life (a sidecar view
+    /// that joins the `clock` row of its grain).
+    session_clock_grains: std::sync::Mutex<Vec<crate::sync::clock_scheduler::GrainSubscription>>,
 }
 
 impl BackendEngine {
@@ -337,6 +340,7 @@ impl BackendEngine {
             watch_release_failures: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             _advice_reconciler: None,
             _clock_scheduler: None,
+            session_clock_grains: std::sync::Mutex::new(Vec::new()),
         })
     }
 
@@ -394,7 +398,22 @@ impl BackendEngine {
         &mut self,
         handle: crate::sync::clock_scheduler::ClockSchedulerHandle,
     ) {
+        self.matview_manager.set_clock_seeder(handle.grain_seeder());
         self._clock_scheduler = Some(Arc::new(handle));
+    }
+
+    /// Keep `grain`'s `clock` row ticking for the rest of the session.
+    pub async fn hold_clock_grain(&self, grain: holon_api::clock::Grain) -> anyhow::Result<()> {
+        let scheduler = self
+            ._clock_scheduler
+            .as_ref()
+            .expect("the clock scheduler is installed during engine initialization");
+        let subscription = scheduler.subscribe(grain).await?;
+        self.session_clock_grains
+            .lock()
+            .expect("session clock grains poisoned")
+            .push(subscription);
+        Ok(())
     }
 
     /// Apply all registered SQL-level transformers to a SQL string.

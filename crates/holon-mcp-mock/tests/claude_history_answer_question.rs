@@ -64,6 +64,12 @@ impl SyncTokenStore for InMemorySyncTokenStore {
 async fn setup_db() -> DbHandle {
     let (backend, handle) = TursoBackend::new_in_memory().await.expect("in-memory db");
     std::mem::forget(backend);
+    holon_turso::schema_module::SchemaModule::ensure_schema(
+        &holon_turso::schema_modules::CoreSchemaModule,
+        &handle,
+    )
+    .await
+    .expect("core schema");
     handle
 }
 

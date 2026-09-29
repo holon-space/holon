@@ -1948,23 +1948,16 @@ fn op_wire_response<'a>(
 #[cfg(feature = "browser")]
 #[napi]
 pub fn open_db(path: String) -> napi::Result<()> {
-    // NOTE: the Turso IO loop inside open_file_with_flags drives IO
-    // completions via `Completion::wait`, which on the OPFS shim returns to
-    // JS via `ioNotifier.waitForCompletion()` — already async-safe inside a
-    // Web Worker because the worker can block synchronously.
-    let io: Arc<dyn turso_core::IO> = turso_browser_shim::opfs();
-    let core_opts = turso_core::DatabaseOpts::new();
-    let flags = turso_core::OpenFlags::Create;
-
-    let db = turso_core::Database::open_file_with_flags(
-        io.clone(),
-        &path,
-        flags,
-        core_opts,
-        None,
-        Arc::new(turso_core::SqliteDialect),
-    )
-    .map_err(|e| nerr("open_file_with_flags", e))?;
+    // NOTE: the Turso IO loop inside the open drives IO completions via
+    // `Completion::wait`, which on the OPFS shim returns to JS via
+    // `ioNotifier.waitForCompletion()` — already async-safe inside a Web
+    // Worker because the worker can block synchronously.
+    if holon::storage::turso::wasm_io::registered().is_none() {
+        holon::storage::turso::wasm_io::register(turso_browser_shim::opfs());
+    }
+    let io = holon::storage::turso::wasm_io::registered().expect("registered just above");
+    let db = holon::storage::turso::TursoBackend::open_database(&path)
+        .map_err(|e| nerr("open_database", e))?;
 
     let conn = db.connect().map_err(|e| nerr("connect", e))?;
 

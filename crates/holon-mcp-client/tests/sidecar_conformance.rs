@@ -27,7 +27,6 @@ use std::path::PathBuf;
 
 use holon_mcp_client::IntegrationFileConfig;
 use holon_mcp_client::McpSidecar;
-use holon_turso::matview_manager::reconcile_named_view;
 use holon_turso::turso::DbHandle;
 use holon_turso::turso::TursoBackend;
 
@@ -71,6 +70,24 @@ async fn fresh_db() -> DbHandle {
     let (backend, handle) = TursoBackend::new_in_memory().await.expect("in-memory db");
     // Leak the backend so its actor outlives the handle for the test.
     std::mem::forget(backend);
+    // Integrations connect after the core schema, which owns the `clock`
+    // relation that time-dependent views join.
+    holon_turso::schema_module::SchemaModule::ensure_schema(
+        &holon_turso::schema_modules::CoreSchemaModule,
+        &handle,
+    )
+    .await
+    .expect("core schema");
+    for grain in ["minute", "hour"] {
+        handle
+            .execute(
+                "INSERT INTO clock (grain, today, epoch_day, updated_at) VALUES (?, 'seed', 0, \
+                 '2026-09-29T12:00:00+00:00')",
+                vec![turso::Value::Text(grain.to_string())],
+            )
+            .await
+            .expect("seed clock grain");
+    }
     handle
 }
 
@@ -129,21 +146,44 @@ async fn every_sidecar_view_is_ivm_valid() {
         }
         let db = fresh_db().await;
         create_all_cache_tables(&file, &sidecar, &db).await;
-        // Reconcile in declared order so chained views resolve — mirrors
-        // finish_integration::reconcile_sidecar_views.
+        holon_mcp_client::mcp_integration::reconcile_sidecar_views(&sidecar, &db, &file)
+            .await
+            .unwrap_or_else(|e| panic!("[{file}] a view is not IVM-valid: {e:#}"));
+        let recorded: std::collections::BTreeMap<String, String> = db
+            .query("SELECT view, grain FROM clock_reader", Default::default())
+            .await
+            .expect("read clock_reader")
+            .iter()
+            .map(|row| {
+                (
+                    format!("{:?}", row.get("view")),
+                    format!("{:?}", row.get("grain")),
+                )
+            })
+            .collect();
         for view in &sidecar.views {
             let view_name = sidecar.prefixed_name(&view.name).table_name();
-            let created = reconcile_named_view(&db, &view_name, &view.sql)
+            let exists = db
+                .query(
+                    &format!(
+                        "SELECT 1 FROM sqlite_schema WHERE type = 'view' AND name = '{view_name}'"
+                    ),
+                    Default::default(),
+                )
                 .await
-                .unwrap_or_else(|e| {
-                    panic!(
-                        "[{file}] view '{}' (matview '{view_name}') is not IVM-valid: {e}\nSQL: {}",
-                        view.name, view.sql
-                    )
-                });
-            assert!(
-                created,
-                "[{file}] first reconcile of '{view_name}' must create it"
+                .expect("read schema");
+            assert_eq!(exists.len(), 1, "[{file}] view '{view_name}' must exist");
+            let expected = view.clock.map(|grain| {
+                format!(
+                    "{:?}",
+                    Some(holon_api::Value::String(grain.as_str().to_string()))
+                )
+            });
+            let key = format!("{:?}", Some(holon_api::Value::String(view_name.clone())));
+            assert_eq!(
+                recorded.get(&key),
+                expected.as_ref(),
+                "[{file}] clock_reader must record exactly the declared grain of '{view_name}'"
             );
         }
     }

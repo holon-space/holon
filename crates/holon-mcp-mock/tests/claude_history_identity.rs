@@ -453,6 +453,12 @@ async fn the_declared_identity_is_a_key_over_an_unpinned_fan_out() {
             eprintln!("[real-provider arm] driving {cmd}");
             let (backend, db) = TursoBackend::new_in_memory().await.expect("in-memory db");
             std::mem::forget(backend);
+            holon_turso::schema_module::SchemaModule::ensure_schema(
+                &holon_turso::schema_modules::CoreSchemaModule,
+                &db,
+            )
+            .await
+            .expect("core schema");
             connect_real(cfg.clone(), &db).await;
 
             let session = scan_identity(&db, &cfg, "session", "cc_session_fdw").await;
@@ -528,6 +534,12 @@ async fn connect_fixture(fixture: &str) -> anyhow::Result<McpConnectionResult> {
 
     let (backend, db) = TursoBackend::new_in_memory().await.expect("in-memory db");
     std::mem::forget(backend);
+    holon_turso::schema_module::SchemaModule::ensure_schema(
+        &holon_turso::schema_modules::CoreSchemaModule,
+        &db,
+    )
+    .await
+    .expect("core schema");
     let mcp_config = cfg.into_mcp_config(
         "mock".to_string(),
         &holon_mcp_client::CredentialRoot::new("/tmp/holon-mcp-mock-config"),
@@ -652,6 +664,12 @@ async fn an_unpinned_scan_of_a_uuid_keyed_entity_fails_loud_today() {
     };
     let (backend, db) = TursoBackend::new_in_memory().await.expect("in-memory db");
     std::mem::forget(backend);
+    holon_turso::schema_module::SchemaModule::ensure_schema(
+        &holon_turso::schema_modules::CoreSchemaModule,
+        &db,
+    )
+    .await
+    .expect("core schema");
     connect_real(cfg, &db).await;
     // Warm cc_agent so agent_message has parents to enumerate.
     db.query("SELECT id FROM cc_agent_fdw", HashMap::new())

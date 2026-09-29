@@ -12,4 +12,5 @@ mod turso_ivm_index_bug;
 mod watch_guard_raii;
 mod watch_query_ordering_spec_wiring;
 mod watch_recovers_when_table_appears;
+mod watch_refusal_is_final;
 mod watch_ui;

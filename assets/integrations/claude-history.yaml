@@ -658,21 +658,26 @@ views:
     sql: >-
       SELECT 'cc-session:' || session_id AS session_id,
              MAX(timestamp) AS last_ts,
-             substr(MAX(timestamp || '|' || role), 26) AS last_role
+             substr(MAX(timestamp || '|' || role), 26) AS last_role,
+             'minute' AS clock_grain
       FROM cc_message GROUP BY session_id
   # Status classification, chained on the rollup (IVM rejects conditionals
   # over aggregate expressions in one view; matview-on-matview is supported).
   #   user spoke last                       -> working (agent is chewing)
   #   assistant spoke last, recent activity -> waiting-on-user
   #   otherwise                             -> idle
-  # CAVEAT: strftime('now') is evaluated when IVM recomputes a row (i.e. when
-  # that session's data changes), not continuously — a session that stops
-  # changing keeps its last classification until its next write.
+  # "Recent" is measured against the `minute` row of the `clock` relation (time
+  # as data, ADR 0024 P5): a materialized view cannot call strftime('now').
+  # `updated_at` is the UTC instant the scheduler saw the minute change, so every row is
+  # re-classified within 30 s after each minute starts (the scheduler checks the
+  # clock every 30 s), including a session that stopped changing.
+  # IVM joins only on column equality, so the rollup carries the grain name.
   - name: session_status
+    clock: minute
     sql: >-
-      SELECT session_id, last_ts, last_role,
-             iif(last_role = 'user', 'working',
-                 iif(last_role = 'assistant'
-                     AND last_ts > strftime('%Y-%m-%dT%H:%M:%S', 'now', '-10 minutes'),
+      SELECT m.session_id, m.last_ts, m.last_role,
+             iif(m.last_role = 'user', 'working',
+                 iif(m.last_role = 'assistant'
+                     AND m.last_ts > strftime('%Y-%m-%dT%H:%M:%S', c.updated_at, '-10 minutes'),
                      'waiting-on-user', 'idle')) AS status
-      FROM cc_session_last_message
+      FROM cc_session_last_message m JOIN clock c ON c.grain = m.clock_grain

@@ -496,6 +496,37 @@ impl FrontendInjectorExt for Injector {
                     .await;
                 tracing::info!("[FrontendSession] factory: BackendEngine resolved");
 
+                // A database this binary could not use was deleted at open;
+                // say which local state went with it.
+                let rebuild = resolver.resolve::<holon::storage::table_classes::BootRebuild>();
+                if let Some(rebuild) = &rebuild.0 {
+                    let bus = resolver.resolve::<Arc<holon_api::ConditionBus>>();
+                    bus.emit(holon_api::Condition {
+                        subject: "database".to_string(),
+                        reason: holon_api::ConditionKind::DatabaseRebuiltAtBoot {
+                            reason: rebuild.reason.clone(),
+                            lost: rebuild
+                                .lost
+                                .iter()
+                                .map(|l| holon_api::LostTableRows {
+                                    table: l.table.clone(),
+                                    what: l.what.to_string(),
+                                    rows: l.rows,
+                                })
+                                .collect(),
+                            caches: rebuild
+                                .caches
+                                .iter()
+                                .map(|c| holon_api::ClearedCacheRows {
+                                    table: c.table.clone(),
+                                    provider: c.provider.clone(),
+                                    rows: c.rows,
+                                })
+                                .collect(),
+                        },
+                    });
+                }
+
                 // D116.a: undo does not survive a restart. The engine cleared
                 // the previous session's journal as it read it; disclose that,
                 // because a person who typed before the restart would otherwise
@@ -540,6 +571,17 @@ impl FrontendInjectorExt for Injector {
                     if let Ok(mcp_registry) = mcp_result {
                         for table in mcp_registry.fdw_backed_tables() {
                             engine.register_fdw_table(&table).await;
+                        }
+                        for (name, integration) in mcp_registry.named_integrations() {
+                            for grain in &integration.clock_grains {
+                                engine.hold_clock_grain(*grain).await.unwrap_or_else(|e| {
+                                    panic!(
+                                        "integration '{name}' reads the '{}' clock grain, \
+                                         which could not be started: {e:#}",
+                                        grain.as_str()
+                                    )
+                                });
+                            }
                         }
                         let hooks = mcp_registry
                             .integrations()

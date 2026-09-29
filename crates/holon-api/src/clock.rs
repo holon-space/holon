@@ -126,7 +126,8 @@ impl Clock for TestClock {
 /// A parse-don't-validate enum, never a stringly `grain` column: the only way
 /// to name a grain is a variant, and [`Grain::sample`] is the single place that
 /// maps a wall-clock instant to the `(epoch_day, today)` the relation stores.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Grain {
     Day,
     Hour,
@@ -150,6 +151,16 @@ pub struct GrainSample {
 }
 
 impl Grain {
+    /// The inverse of [`Grain::as_str`].
+    pub fn parse(raw: &str) -> anyhow::Result<Self> {
+        match raw {
+            "day" => Ok(Grain::Day),
+            "hour" => Ok(Grain::Hour),
+            "minute" => Ok(Grain::Minute),
+            other => anyhow::bail!("{other:?} is no clock grain (day, hour or minute)"),
+        }
+    }
+
     /// The `grain` primary-key value stored in the `clock` relation.
     pub fn as_str(self) -> &'static str {
         match self {

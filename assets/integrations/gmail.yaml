@@ -118,8 +118,8 @@ default_view: gmail-view
 # * **Time windows live in the Gmail query, not in SQL.** Gmail returns no
 #   timestamp on list responses, so there is nothing to filter a matview on;
 #   `q` operators (`newer_than:`, `after:`) are evaluated server-side per poll
-#   instead. This sidecar therefore needs none of gcal's two-view chained
-#   `strftime('now')` workaround.
+#   instead. This sidecar therefore needs no `clock`-joined window view like
+#   gcal's.
 # * The synced set is **unread inbox mail** (`q` below). Archived, read, spam
 #   and trash mail is out of scope; widen `q` to change that.
 # * Threads carry only their id/snippet/historyId. Message bodies, MIME parts

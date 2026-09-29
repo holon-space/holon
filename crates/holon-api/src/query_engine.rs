@@ -25,6 +25,19 @@ use crate::QueryLanguage;
 use crate::Value;
 use crate::query_context::QueryContext;
 
+/// A watch the engine refuses for good: the same query can never succeed, so
+/// a watcher discloses it once and stops.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryRefused(pub String);
+
+impl std::fmt::Display for QueryRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for QueryRefused {}
+
 /// Everything an editor mount reads off the block's row to build its editable
 /// surface.
 ///

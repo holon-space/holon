@@ -138,6 +138,9 @@ pub struct McpIntegration {
     pub resource_capabilities: ProbedResourceCapabilities,
     /// Cache table names that have an associated FDW table.
     pub fdw_backed_tables: Vec<String>,
+    /// The `clock` grains the integration's views read; the session keeps
+    /// each one ticking while the integration runs.
+    pub clock_grains: Vec<holon_api::clock::Grain>,
     /// Producer handle into the sync event loop.
     sync_event_tx: mpsc::UnboundedSender<SyncEvent>,
 }
@@ -752,7 +755,7 @@ async fn finish_integration(
 
     // Build caches and strategies.
     let (caches, entity_readers) =
-        build_entity_caches(&sidecar, &provider_name, &cache_factory).await?;
+        build_entity_caches(&sidecar, &provider_name, &cache_factory, &db_handle).await?;
 
     // Build sync strategies with disclosed degradation: one entity whose
     // `SyncConfig` cannot form a strategy is skipped and reported loudly, so a
@@ -952,6 +955,7 @@ async fn finish_integration(
         poll_entities,
         Some(receiver),
         sync_gate,
+        sidecar.clock_grains(),
     ))
 }
 
@@ -959,10 +963,13 @@ async fn finish_integration(
 /// names and ID schemes use prefixed names (e.g. "cc_session"); the returned
 /// maps are keyed by original entity name (e.g. "session"). Shared by the MCP
 /// and `rest` finalizers.
-async fn build_entity_caches(
+/// Create the cache table of every entity with a schema, and record each in
+/// `integration_cache` so a rebuild can say which caches it cleared.
+pub async fn build_entity_caches(
     sidecar: &McpSidecar,
     provider_name: &str,
     cache_factory: &Arc<dyn CacheFactory>,
+    db_handle: &DbHandle,
 ) -> anyhow::Result<(
     HashMap<String, Arc<dyn EntityCache<DynamicEntity>>>,
     HashMap<String, Arc<dyn EntityFieldReader>>,
@@ -982,6 +989,19 @@ async fn build_entity_caches(
                 .create_dynamic_cache(td)
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
+            db_handle
+                .execute_values(
+                    "INSERT INTO integration_cache (table_name, provider) VALUES (?, ?) ON \
+                     CONFLICT(table_name) DO UPDATE SET provider = excluded.provider",
+                    vec![
+                        holon_api::Value::String(table_name.clone()),
+                        holon_api::Value::String(provider_name.to_string()),
+                    ],
+                )
+                .await
+                .with_context(|| {
+                    format!("record that provider '{provider_name}' caches into '{table_name}'")
+                })?;
             entity_readers.insert(
                 entity_name.clone(),
                 Arc::new(DynamicEntityFieldReader(cache.clone())) as Arc<dyn EntityFieldReader>,
@@ -1082,8 +1102,10 @@ fn names_identifier(text: &str, identifier: &str) -> bool {
 /// Reconcile every sidecar-declared derived view into a materialized view. A
 /// view that fails DDL is a hard, loud config error naming the view and the
 /// provider — never skip-and-continue (parse, don't validate, at connect).
+/// A view that reads a clock grain is recorded in `clock_reader`, so later
+/// sessions tick that grain even when this integration does not connect.
 /// Shared by the MCP and `rest` finalizers.
-async fn reconcile_sidecar_views(
+pub async fn reconcile_sidecar_views(
     sidecar: &McpSidecar,
     db_handle: &DbHandle,
     provider_name: &str,
@@ -1099,6 +1121,41 @@ async fn reconcile_sidecar_views(
                      (IVM dialect: single-level GROUP BY aggregates incl. substr(MAX(ts || '|' || \
                      col), N); no correlated subqueries, self-joins, or non-equijoin LEFT JOINs)",
                     view.name
+                )
+            })?;
+        let kept_grain = view.clock.map(|grain| grain.as_str()).unwrap_or("");
+        if let Some(grain) = view.clock {
+            db_handle
+                .execute_values(
+                    "INSERT INTO clock_reader (view, grain) VALUES (?, ?) ON CONFLICT(view, grain) \
+                     DO NOTHING",
+                    vec![
+                        holon_api::Value::String(view_name.clone()),
+                        holon_api::Value::String(grain.as_str().to_string()),
+                    ],
+                )
+                .await
+                .with_context(|| {
+                    format!(
+                        "record that sidecar view '{view_name}' of provider '{provider_name}' \
+                         reads the '{}' clock grain",
+                        grain.as_str()
+                    )
+                })?;
+        }
+        db_handle
+            .execute_values(
+                "DELETE FROM clock_reader WHERE view = ? AND grain != ?",
+                vec![
+                    holon_api::Value::String(view_name.clone()),
+                    holon_api::Value::String(kept_grain.to_string()),
+                ],
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "forget the clock grains sidecar view '{view_name}' of provider \
+                     '{provider_name}' no longer declares"
                 )
             })?;
         info!(
@@ -1124,6 +1181,7 @@ fn spawn_runner(
     poll_entities: Vec<(String, Duration)>,
     notification_receiver: Option<ResourceUpdateReceiver>,
     sync_gate: SyncGate,
+    clock_grains: Vec<holon_api::clock::Grain>,
 ) -> McpIntegration {
     // One serialized consumer per integration: initial sync, notification
     // resyncs, and poll ticks all flow through the same channel, so per-entity
@@ -1176,6 +1234,7 @@ fn spawn_runner(
         background_tasks,
         resource_capabilities,
         fdw_backed_tables,
+        clock_grains,
         sync_event_tx,
     }
 }
@@ -1237,7 +1296,7 @@ async fn finish_rest_integration(
     // Build caches + readers, then strategies (disclosed degradation on a bad
     // entity, same as the MCP path).
     let (caches, entity_readers) =
-        build_entity_caches(&sidecar, &provider_name, &cache_factory).await?;
+        build_entity_caches(&sidecar, &provider_name, &cache_factory, &db_handle).await?;
     let (strategies, strategy_failures) = build_entity_strategies(&sidecar.entities);
     for (entity_name, err) in &strategy_failures {
         error!(
@@ -1308,6 +1367,7 @@ async fn finish_rest_integration(
         poll_entities,
         None,
         sync_gate,
+        sidecar.clock_grains(),
     ))
 }
 

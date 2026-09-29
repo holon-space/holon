@@ -60,6 +60,12 @@ pub struct ViewConfig {
     pub name: String,
     /// The SELECT statement (IVM-supported dialect, see [`McpSidecar::views`]).
     pub sql: String,
+    /// The `clock` grain the SQL reads the current time from (ADR 0024 P5).
+    /// A materialized view cannot call `'now'`; it joins the grain's `clock`
+    /// row instead, and the integration keeps that grain ticking while it
+    /// runs.
+    #[serde(default)]
+    pub clock: Option<holon_api::clock::Grain>,
 }
 
 /// The columns one entity mirrors.
@@ -849,7 +855,53 @@ impl McpSidecar {
         let mut sidecar: McpSidecar = serde_yaml::from_str(yaml)?;
         sidecar.validate_write_policy()?;
         sidecar.parse_entity_schemas()?;
+        sidecar.validate_view_clocks()?;
         Ok(sidecar)
+    }
+
+    /// The clock grains the views read, each once.
+    pub fn clock_grains(&self) -> Vec<holon_api::clock::Grain> {
+        let mut grains: Vec<_> = self.views.iter().filter_map(|v| v.clock).collect();
+        grains.sort_by_key(|g| g.as_str());
+        grains.dedup();
+        grains
+    }
+
+    /// A view that reads `clock` must name its grain, and a named grain must
+    /// be the one the SQL reads: otherwise the grain's row never ticks and the
+    /// view silently holds nothing.
+    fn validate_view_clocks(&self) -> anyhow::Result<()> {
+        for view in &self.views {
+            let reads_clock = view
+                .sql
+                .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .any(|word| word.eq_ignore_ascii_case("clock"));
+            match (reads_clock, view.clock) {
+                (false, None) => {}
+                (true, None) => anyhow::bail!(
+                    "sidecar view '{}' reads `clock` but declares no `clock:` grain",
+                    view.name
+                ),
+                (false, Some(grain)) => anyhow::bail!(
+                    "sidecar view '{}' declares `clock: {}` but its SQL does not read `clock`",
+                    view.name,
+                    grain.as_str()
+                ),
+                (true, Some(grain)) => {
+                    // IVM joins on column equality, so the grain name may be a
+                    // literal column of a view this one reads.
+                    let literal = format!("'{}'", grain.as_str());
+                    anyhow::ensure!(
+                        self.views.iter().any(|v| v.sql.contains(&literal)),
+                        "sidecar view '{}' declares `clock: {}` but no view of the sidecar \
+                         names the clock row {literal}",
+                        view.name,
+                        grain.as_str()
+                    );
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Parse what deserialization read, entity by entity, so a refusal names
@@ -1330,6 +1382,55 @@ views:
         assert_eq!(
             sidecar.prefixed_name(&sidecar.views[0].name).table_name(),
             "cc_session_status"
+        );
+    }
+
+    fn sidecar_with_view(view: &str) -> anyhow::Result<McpSidecar> {
+        McpSidecar::from_yaml(&format!(
+            "entity_prefix: \"cc_\"\nentities:\n  session:\n    sync:\n      list_resource: \
+             \"history://sessions\"\nviews:\n{view}"
+        ))
+    }
+
+    #[test]
+    fn a_view_that_reads_the_clock_names_its_grain() {
+        let sidecar = sidecar_with_view(
+            "  - name: recent\n    clock: minute\n    sql: \"SELECT m.id FROM cc_session m JOIN \
+             clock c ON c.grain = 'minute'\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            sidecar.clock_grains(),
+            vec![holon_api::clock::Grain::Minute]
+        );
+
+        let err = sidecar_with_view(
+            "  - name: recent\n    sql: \"SELECT m.id FROM cc_session m JOIN clock c ON c.grain \
+             = 'minute'\"\n",
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("declares no `clock:` grain"),
+            "{err:#}"
+        );
+
+        let err = sidecar_with_view(
+            "  - name: recent\n    clock: hour\n    sql: \"SELECT m.id FROM cc_session m JOIN \
+             clock c ON c.grain = 'minute'\"\n",
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("names the clock row 'hour'"),
+            "{err:#}"
+        );
+
+        let err = sidecar_with_view(
+            "  - name: plain\n    clock: hour\n    sql: \"SELECT id FROM cc_session\"\n",
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("does not read `clock`"),
+            "{err:#}"
         );
     }
 

@@ -18,35 +18,12 @@
 use std::sync::Arc;
 
 use turso_core::Database;
-use turso_core::DatabaseOpts;
-use turso_core::OpenFlags;
-use turso_core::UnixIO;
 
 fn open_db(path: &str) -> (Arc<Database>, turso::Connection) {
-    let io = Arc::new(UnixIO::new().expect("UnixIO"));
-    let opts = DatabaseOpts::default().with_views(true);
-    let db = Database::open_file_with_flags(
-        io,
-        path,
-        OpenFlags::default(),
-        opts,
-        None,
-        Arc::new(turso_core::SqliteDialect),
-    )
-    .expect("open database");
+    let db = holon::storage::turso::TursoBackend::open_database(path).expect("open database");
     let conn_core = db.connect().expect("connect");
-    let config = turso_sdk_kit::rsapi::TursoDatabaseConfig {
-        path: String::new(),
-        experimental_features: None,
-        async_io: false,
-        encryption: None,
-        vfs: turso_sdk_kit::IoBackend::Default,
-        io: None,
-        db_file: None,
-        page_codec: None,
-        open_flags: OpenFlags::default(),
-    };
-    let turso_conn = turso_sdk_kit::rsapi::TursoConnection::new(&config, conn_core);
+    let turso_conn =
+        turso_sdk_kit::rsapi::TursoConnection::new(&holon::storage::turso::sdk_config(), conn_core);
     let conn = turso::Connection::create(turso_conn, None);
     (db, conn)
 }

@@ -98,9 +98,37 @@ impl Subscriber {
     }
 }
 
+static STALE_SUFFIX: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Registered as deterministic, but its result follows [`STALE_SUFFIX`]: a
+/// change of the suffix makes every row the view already holds stale.
+fn stale_tag(args: &[turso_core::Value]) -> Result<turso_core::Value, String> {
+    let suffix = STALE_SUFFIX.load(std::sync::atomic::Ordering::SeqCst);
+    match args {
+        [turso_core::Value::Text(t)] => Ok(turso_core::Value::build_text(format!(
+            "{}-{suffix}",
+            t.as_str()
+        ))),
+        other => Err(format!("stale_tag takes one text, got {other:?}")),
+    }
+}
+
 #[tokio::test]
 async fn a_rebuild_leaves_each_subscriber_holding_exactly_its_rebuilt_view() {
-    let handle = live_database().await;
+    let (backend, handle) =
+        TursoBackend::new_in_memory_with_scalar_fns(&[holon_turso::scalar_fns::ScalarFn {
+            name: "stale_tag",
+            arg_count: 1,
+            version: 1,
+            func: stale_tag,
+        }])
+        .await
+        .expect("in-memory db");
+    std::mem::forget(backend);
+    handle
+        .execute_ddl("CREATE TABLE t2 (id TEXT PRIMARY KEY, extra TEXT)")
+        .await
+        .expect("create table");
     for n in 0..20 {
         run(
             &handle,
@@ -109,11 +137,11 @@ async fn a_rebuild_leaves_each_subscriber_holding_exactly_its_rebuilt_view() {
         .await;
     }
     let manager = manager(&handle);
-    // Every IVM-corruption shape known in the fork is fixed, so `random()`
-    // stands in for a stale view: rebuilding it changes which rows it holds
-    // and what they say.
-    let sql = "SELECT id, CAST(random() AS TEXT) AS extra FROM t2 WHERE random() % 2 = 0";
-    let (view, mut subscriber) = Subscriber::open(&manager, sql).await;
+    let (view, mut subscriber) =
+        Subscriber::open(&manager, "SELECT id, stale_tag(extra) AS extra FROM t2").await;
+    STALE_SUFFIX.store(1, std::sync::atomic::Ordering::SeqCst);
+    subscriber.drain().await;
+    let stale = project(manager.query_view(&view).await.expect("read stale view"));
 
     self::manager(&handle)
         .rebuild_watch_views()
@@ -122,6 +150,10 @@ async fn a_rebuild_leaves_each_subscriber_holding_exactly_its_rebuilt_view() {
     subscriber.drain().await;
 
     let rebuilt = project(manager.query_view(&view).await.expect("read rebuilt view"));
+    assert_ne!(
+        stale, rebuilt,
+        "changing the suffix must leave {view} stale, or this test proves nothing"
+    );
     assert_eq!(
         subscriber.rows, rebuilt,
         "after the rebuild the subscriber of {view} must hold exactly the rebuilt view's rows"

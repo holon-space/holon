@@ -15,11 +15,7 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio_stream::wrappers::ReceiverStream;
 use turso_core::Database;
-use turso_core::DatabaseOpts;
-use turso_core::MemoryIO;
 use turso_core::OpenFlags;
-#[cfg(target_family = "unix")]
-use turso_core::UnixIO;
 use turso_core::types::RelationChangeEvent;
 use turso_sdk_kit::rsapi::DatabaseChangeType;
 use turso_sdk_kit::rsapi::TursoConnection;
@@ -1647,7 +1643,8 @@ fn normalize_known_json_columns(
 // Original turso.rs types
 // ============================================================================
 
-pub(crate) fn default_turso_config() -> TursoDatabaseConfig {
+/// The SDK config for wrapping a core connection in a `TursoConnection`.
+pub fn sdk_config() -> TursoDatabaseConfig {
     TursoDatabaseConfig {
         path: String::new(),
         experimental_features: None,
@@ -1665,6 +1662,7 @@ pub(crate) fn default_turso_config() -> TursoDatabaseConfig {
         db_file: None,
         page_codec: None,
         open_flags: OpenFlags::default(),
+        scalar_functions: crate::scalar_fns::sdk_functions(),
     }
 }
 
@@ -2009,108 +2007,22 @@ impl std::fmt::Debug for TursoBackend {
 /// rewrite. Rewriting SQLite in Rust started as an unassuming experiment, and
 /// due to its incredible success, replaces libSQL as our intended direction.
 impl TursoBackend {
-    /// Open a Turso database file and return the Database handle.
-    ///
-    /// This is used internally by `new()` to create the database before setting
-    /// up the actor.
-    ///
-    /// # Platform Support
-    /// - **Unix-like systems** (macOS, Linux, BSD, iOS): Full file-based
-    ///   storage support via UnixIO
-    /// - **Windows**: Not yet supported
-    #[cfg(target_family = "unix")]
+    /// Open a Turso database file (or `:memory:`) and return the Database
+    /// handle. Every Holon open goes through here, so every database gets the
+    /// same [`crate::scalar_fns::ALL`]. A file this binary cannot use is
+    /// deleted and opened fresh; the org files rebuild it.
     pub fn open_database<P: AsRef<Path>>(db_path: P) -> Result<Arc<Database>> {
-        let db_path_str = db_path
-            .as_ref()
-            .to_str()
-            .ok_or_else(|| StorageError::DatabaseError("Invalid path".to_string()))?;
-
-        // `with_index_method(true)` unlocks the experimental `CREATE INDEX ..
-        // USING <method>` surface (the Tantivy-backed `fts` method and the
-        // sparse-vector method). Native-only: this block is `cfg(unix)`; the
-        // wasm `open_database` below leaves it off (fts is cfg'd out of
-        // turso_core on wasm anyway).
-        let opts = DatabaseOpts::default()
-            .with_views(true)
-            .with_index_method(true);
-
-        let db = if db_path_str.starts_with(":memory:") {
-            let io = Arc::new(MemoryIO::new());
-            Database::open_file_with_flags(
-                io,
-                db_path_str,
-                OpenFlags::default(),
-                opts,
-                None,
-                Arc::new(turso_core::SqliteDialect),
-            )
-        } else {
-            let io =
-                Arc::new(UnixIO::new().map_err(|e| StorageError::DatabaseError(e.to_string()))?);
-            Database::open_file_with_flags(
-                io,
-                db_path_str,
-                OpenFlags::default(),
-                opts,
-                None,
-                Arc::new(turso_core::SqliteDialect),
-            )
-        }
-        .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
-
-        tracing::info!("Turso database opened at: {}", db_path_str);
-        Ok(db)
+        Ok(Self::open_database_reporting_rebuild(db_path)?.0)
     }
 
-    #[cfg(all(not(target_family = "unix"), target_family = "wasm"))]
-    pub fn open_database<P: AsRef<Path>>(db_path: P) -> Result<Arc<Database>> {
-        // wasm32: `:memory:` uses MemoryIO; any other path requires a host IO
-        // registered via `register_wasm_io` (the browser worker registers its
-        // OPFS shim before engine init). Fail loud if a file path is requested
-        // without one — silently falling back to memory would fake persistence.
-        let db_path_str = db_path
-            .as_ref()
-            .to_str()
-            .ok_or_else(|| StorageError::DatabaseError("Invalid path".to_string()))?;
-        let opts = DatabaseOpts::default().with_views(true);
-        let db = if db_path_str.starts_with(":memory:") {
-            let io = Arc::new(MemoryIO::new());
-            Database::open_file_with_flags(
-                io,
-                db_path_str,
-                OpenFlags::default(),
-                opts,
-                None,
-                Arc::new(turso_core::SqliteDialect),
-            )
-            .map_err(|e| StorageError::DatabaseError(e.to_string()))?
-        } else {
-            let io = wasm_io::registered().ok_or_else(|| {
-                StorageError::DatabaseError(format!(
-                    "open_database('{db_path_str}'): no wasm IO registered — call \
-                     holon_turso::register_wasm_io (e.g. with the OPFS shim) before opening a \
-                     file-backed database on wasm32"
-                ))
-            })?;
-            Database::open_file_with_flags(
-                io,
-                db_path_str,
-                OpenFlags::Create,
-                opts,
-                None,
-                Arc::new(turso_core::SqliteDialect),
-            )
-            .map_err(|e| StorageError::DatabaseError(e.to_string()))?
-        };
-        tracing::info!("Turso database opened (wasm32) at: {}", db_path_str);
-        Ok(db)
-    }
-
-    #[cfg(all(not(target_family = "unix"), not(target_family = "wasm")))]
-    pub fn open_database<P: AsRef<Path>>(_: P) -> Result<Arc<Database>> {
-        Err(StorageError::DatabaseError(
-            "File-based storage not yet supported on this platform".to_string(),
-        ))
+    /// [`Self::open_database`], plus the rebuild the open did, for a boot that
+    /// discloses the lost state to the user.
+    pub fn open_database_reporting_rebuild<P: AsRef<Path>>(
+        db_path: P,
+    ) -> Result<(Arc<Database>, Option<crate::table_classes::Rebuild>)> {
+        let opened = crate::db_open::open(db_path.as_ref(), crate::scalar_fns::ALL)?;
+        tracing::info!("Turso database opened at: {}", db_path.as_ref().display());
+        Ok(opened)
     }
 
     /// Create a new TursoBackend, spawning an internal actor for database
@@ -2258,6 +2170,18 @@ impl TursoBackend {
         Self::new(db, cdc_tx)
     }
 
+    /// An in-memory database that registers `fns` in place of
+    /// [`crate::scalar_fns::ALL`]. For tests that need a function the product
+    /// does not ship.
+    #[cfg(any(test, feature = "unguarded-writes"))]
+    pub async fn new_in_memory_with_scalar_fns(
+        fns: &[crate::scalar_fns::ScalarFn],
+    ) -> Result<(Self, DbHandle)> {
+        let (db, _) = crate::db_open::open(Path::new(":memory:"), fns)?;
+        let (cdc_tx, _cdc_rx) = broadcast::channel(1024);
+        Self::new(db, cdc_tx)
+    }
+
     /// Get a handle to send commands to the database actor.
     pub fn handle(&self) -> DbHandle {
         DbHandle {
@@ -2293,7 +2217,7 @@ impl TursoBackend {
         // actually enforced on writes.
         conn_core.set_foreign_keys_enabled(true);
 
-        let turso_conn = TursoConnection::new(&default_turso_config(), conn_core);
+        let turso_conn = TursoConnection::new(&sdk_config(), conn_core);
         let conn = turso::Connection::create(turso_conn, None);
 
         // Set busy timeout to prevent indefinite hangs on lock contention
@@ -3424,6 +3348,18 @@ impl TursoBackend {
         );
         tracing::debug!("[TursoBackend::Actor] DDL completed successfully");
         Self::note_statement(conn, catalog, sql).await;
+
+        // A clock grain ticks while `clock_reader` names a view that reads it;
+        // a dropped view must stop that, whoever dropped it.
+        if dropped_view_name(sql).is_some() && catalog.declares_column("clock_reader", "view") {
+            let prune = "DELETE FROM clock_reader WHERE view NOT IN (SELECT name FROM \
+                         sqlite_schema WHERE type = 'view')";
+            conn.execute(prune, ()).await.map_err(|e| {
+                StorageError::DatabaseError(format!(
+                    "prune clock_reader after `{sql}`: {prune}: {e}"
+                ))
+            })?;
+        }
 
         Ok(())
     }

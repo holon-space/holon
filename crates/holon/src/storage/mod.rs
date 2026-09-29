@@ -8,9 +8,11 @@ pub mod resource;
 pub use holon_turso::block_table_names;
 pub use holon_turso::dynamic_schema_module;
 pub use holon_turso::graph_schema;
+pub use holon_turso::scalar_fns;
 pub use holon_turso::schema_module;
 pub use holon_turso::sql_parser;
 pub use holon_turso::sql_utils;
+pub use holon_turso::table_classes;
 pub use holon_turso::turso;
 pub use holon_turso::turso_actor_stats;
 

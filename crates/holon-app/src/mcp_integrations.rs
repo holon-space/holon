@@ -328,6 +328,14 @@ pub struct McpIntegrationRegistry {
 }
 
 impl McpIntegrationRegistry {
+    /// Each connected integration with its provider name.
+    pub fn named_integrations(&self) -> impl Iterator<Item = (&str, &McpIntegration)> {
+        self.names
+            .iter()
+            .map(String::as_str)
+            .zip(self.integrations.iter())
+    }
+
     pub fn integrations(&self) -> &[McpIntegration] {
         &self.integrations
     }

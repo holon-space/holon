@@ -16,6 +16,7 @@
 //! is one of four storage adapters).
 
 pub mod block_table_names;
+mod db_open;
 pub mod derived_reconciler;
 pub mod durable_state;
 pub mod dynamic_schema_module;
@@ -23,11 +24,13 @@ pub mod engine_functions;
 pub mod graph_schema;
 pub mod matview_lease;
 pub mod matview_manager;
+pub mod scalar_fns;
 pub mod schema_catalog;
 pub mod schema_module;
 pub mod schema_modules;
 pub mod sql_parser;
 pub mod sql_utils;
+pub mod table_classes;
 pub mod turso;
 pub mod turso_actor_stats;
 pub mod turso_adapter;

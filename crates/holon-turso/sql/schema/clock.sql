@@ -22,3 +22,13 @@ CREATE TABLE IF NOT EXISTS clock (
     epoch_day INTEGER NOT NULL,
     updated_at TEXT NOT NULL
 );
+
+-- Which fine grains each stored view reads. The scheduler ticks every grain
+-- listed here for the whole session, so a view that joins its grain's row
+-- keeps its rows even when nothing subscribes the grain. A row lives and dies
+-- with the database that holds its view.
+CREATE TABLE IF NOT EXISTS clock_reader (
+    view TEXT NOT NULL,
+    grain TEXT NOT NULL,
+    PRIMARY KEY (view, grain)
+);

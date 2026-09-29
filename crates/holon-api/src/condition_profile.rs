@@ -466,6 +466,15 @@ const UNDO_HISTORY_CLEARED_AT_BOOT: ConditionProfile = ConditionProfile::new(
     &[],
 );
 
+const DATABASE_REBUILT_AT_BOOT: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Warning,
+    "The database was rebuilt; some local state was lost",
+    icons::WARN,
+    ConditionPlacement::Banner,
+    AllClear::UntilRestart,
+    &[],
+);
+
 const LEFT_SHARED_PAGE: ConditionProfile = ConditionProfile::new(
     ConditionSeverity::Info,
     "You left a shared page",
@@ -567,6 +576,7 @@ impl ConditionKind {
             Self::IntegrationSidecarUnusable { .. } => INTEGRATION_SIDECAR_UNUSABLE,
             Self::SecretsHeldInMemory { .. } => SECRETS_HELD_IN_MEMORY,
             Self::UndoHistoryClearedAtBoot { .. } => UNDO_HISTORY_CLEARED_AT_BOOT,
+            Self::DatabaseRebuiltAtBoot { .. } => DATABASE_REBUILT_AT_BOOT,
             Self::PairingReimportedLocalContent { .. } => PAIRING_REIMPORTED_LOCAL_CONTENT,
             Self::LeftSharedPage { .. } => LEFT_SHARED_PAGE,
             Self::DeletedSharedPage { .. } => DELETED_SHARED_PAGE,

@@ -1,24 +1,17 @@
-//! Contract: opening a database whose PERSISTED matview definitions were
-//! written by an EARLIER binary version must still boot.
+//! Contract: a database whose PERSISTED matview definitions this binary cannot
+//! load is deleted and rebuilt at open (Martin: no migration; the org files
+//! rebuild the derived database).
 //!
 //! A stored matview whose SELECT no longer type-checks against the current
-//! base-table schema (a column the newer schema dropped) is a *degraded* view,
-//! not a corrupt database: the engine already has the `incompatible_views`
-//! channel for exactly this, and Holon's `reconcile_named_view` DROP+CREATEs
-//! any view whose stored SQL differs from the module's canonical SQL — but it
-//! only ever runs if `Database::open_file_with_flags` returns.
-//!
-//! It does not. `populate_materialized_views` classifies the *dependents* of
-//! the failed view as a circular dependency and returns a fatal error, because
-//! it tests dependency with a raw substring match (`view.sql.contains(other)`)
-//! — every view selecting `FROM block` "references" the pending name `block`.
-//! Boot dies with "possible circular dependency" over an acyclic graph, and no
-//! reconciliation can run. See bugfunnel entry
-//! `2026-08-28-matview-version-skew-false-cycle-boot-fail`.
+//! base-table schema (a column the newer schema dropped) lands in the engine's
+//! `incompatible_views`, and the engine then refuses every write to the tables
+//! that feed it. Boot writes to those tables before any schema module could
+//! replace the view, so the database cannot be used as it is.
 //!
 //! This is the shape of Martin's production database (three real dependents of
-//! a `block` view stored with a dropped `depth` column). The DDL here is the
-//! extracted shape, not a checked-in database blob.
+//! a `block` view stored with a dropped `depth` column; bugfunnel entry
+//! `2026-08-28-matview-version-skew-false-cycle-boot-fail`). The DDL here is
+//! the extracted shape, not a checked-in database blob.
 
 use std::sync::Arc;
 
@@ -126,67 +119,46 @@ fn fold_wal_into_db(path: &std::path::Path) -> Vec<u8> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn boot_survives_matview_definition_written_by_older_binary() {
+async fn a_database_with_a_view_this_binary_cannot_load_is_rebuilt_at_open() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("skew.db");
 
     write_old_shape_db(&path).await;
     rename_base_column_at_rest(&path);
-
-    // The whole contract: reopening must return. A view whose stored SELECT no
-    // longer type-checks is degraded, and so are its dependents — none of that
-    // is a circular dependency, and none of it may take the database down.
-    let reopened = TursoBackend::open_database(&path);
-    let err = match reopened {
-        Ok(db) => {
-            assert_skew_survived(&db).await;
-            return;
-        }
-        Err(e) => e.to_string(),
-    };
+    let on_disk = std::fs::read(&path).expect("read skewed file");
     assert!(
-        !err.contains("circular dependency"),
-        "boot reported a circular dependency over an acyclic fan-out (block -> three independent \
-         dependents); the stale `block` definition must degrade to an incompatible view instead: \
-         {err}"
+        on_disk.windows(b"b.depth".len()).any(|w| w == b"b.depth"),
+        "the stale `block` definition must be in the file before the open"
     );
-    panic!("reopening a version-skewed database failed: {err}");
-}
 
-/// A successful open only proves the contract if the skew is still in the file.
-/// Without this, a hand-checkpoint that dropped the schema would read as a
-/// pass.
-async fn assert_skew_survived(db: &Arc<turso_core::Database>) {
-    let (backend, handle) =
-        TursoBackend::new(db.clone(), broadcast::channel(64).0).expect("backend");
+    let db = TursoBackend::open_database(&path).unwrap_or_else(|e| {
+        panic!("opening a database with an unusable view must rebuild it, not fail: {e}")
+    });
+    let (backend, handle) = TursoBackend::new(db, broadcast::channel(64).0).expect("backend");
     let rows = handle
         .query(
-            "SELECT name, sql FROM sqlite_master WHERE name IN ('block_raw', 'block')",
+            "SELECT name FROM sqlite_master WHERE name IN ('block_raw', 'block', \
+             'block_with_path', 'block_requirement_edges', 'watch_view_896c82d172bdae55')",
             std::collections::HashMap::new(),
         )
         .await
         .expect("read schema");
-    let sql: String = rows
+    let names: Vec<String> = rows
         .iter()
-        .filter_map(|r| r.get("sql"))
+        .filter_map(|r| r.get("name"))
         .map(|v| format!("{v:?}"))
         .collect();
     assert!(
-        sql.contains("xepth INTEGER"),
-        "the renamed base column is gone — the skew did not survive: {sql}"
-    );
-    assert!(
-        sql.contains("b.depth"),
-        "the stale `block` definition is gone — nothing was skewed: {sql}"
+        names.is_empty(),
+        "the database must be rebuilt from scratch, but it still holds {names:?}"
     );
     handle.shutdown().await.expect("shutdown");
     drop(backend);
 }
 
-/// Keeps the diagnosis honest: the failure above must be caused by the stale
-/// `block` definition alone. With `block` still satisfiable, the identical
-/// fan-out of dependents opens fine — so nothing about these three views is
-/// inherently circular.
+/// The rebuild above must be caused by the stale `block` definition alone:
+/// with `block` still satisfiable, the identical fan-out of dependents opens
+/// and keeps every object.
 #[tokio::test(flavor = "multi_thread")]
 async fn same_fanout_without_skew_opens_cleanly() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -194,7 +166,6 @@ async fn same_fanout_without_skew_opens_cleanly() {
 
     let db = TursoBackend::open_database(&path).expect("open for seeding");
     let (backend, handle) = TursoBackend::new(db, broadcast::channel(64).0).expect("backend");
-    std::mem::forget(backend);
     handle
         .execute_ddl("CREATE TABLE block_raw (id TEXT PRIMARY KEY, parent_id TEXT)")
         .await
@@ -216,69 +187,24 @@ async fn same_fanout_without_skew_opens_cleanly() {
         .await
         .expect("create watch_view");
     handle.shutdown().await.expect("shutdown seeding actor");
+    drop(handle);
+    drop(backend);
 
     let reopened: Arc<_> = TursoBackend::open_database(&path).expect("reopen unskewed database");
-    drop(reopened);
-}
-
-/// The second half of the contract: booting is only worth anything if the
-/// database then repairs itself. `reconcile_named_view` is what every schema
-/// module runs on startup, so the stale `block` must survive a DROP+CREATE with
-/// the CURRENT canonical SELECT even though the engine has parked it in
-/// `incompatible_views`, and its dependents must come back with it.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_view_the_engine_marked_incompatible_is_repaired_by_reconcile() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("repair.db");
-
-    write_old_shape_db(&path).await;
-    rename_base_column_at_rest(&path);
-
-    let db = TursoBackend::open_database(&path).expect("reopen version-skewed database");
-    let (backend, handle) = TursoBackend::new(db, broadcast::channel(64).0).expect("backend");
-
-    // `depth` is gone from the base table (renamed to `xepth`), so this is the
-    // shape a current binary's schema module would declare.
-    let repaired = holon_turso::matview_manager::reconcile_named_view(
-        &handle,
-        "block",
-        "SELECT b.id, b.parent_id FROM block_raw b",
-    )
-    .await
-    .expect("reconcile the stale view");
-    assert!(repaired, "the stale definition should have been replaced");
-
-    for (name, select) in [
-        ("block_with_path", "SELECT id, parent_id FROM block"),
-        ("block_requirement_edges", "SELECT id FROM block"),
-        ("watch_view_896c82d172bdae55", "SELECT * FROM block"),
-    ] {
-        holon_turso::matview_manager::reconcile_named_view(&handle, name, select)
-            .await
-            .unwrap_or_else(|e| panic!("reconcile dependent '{name}': {e:#}"));
-    }
-
+    let (backend, handle) = TursoBackend::new(reopened, broadcast::channel(64).0).expect("backend");
     let rows = handle
         .query(
-            "SELECT name, sql FROM sqlite_master WHERE type='view'",
+            "SELECT name FROM sqlite_master WHERE name IN ('block_raw', 'block', \
+             'block_with_path', 'block_requirement_edges', 'watch_view_896c82d172bdae55')",
             std::collections::HashMap::new(),
         )
         .await
-        .expect("read schema back");
-    let schema: String = rows
-        .iter()
-        .filter_map(|r| r.get("sql"))
-        .map(|v| format!("{v:?}"))
-        .collect();
-    assert!(
-        !schema.contains("b.depth"),
-        "the stale definition is still on disk: {schema}"
+        .expect("read schema");
+    assert_eq!(
+        rows.len(),
+        5,
+        "a usable database must keep every object, but it holds only {rows:?}"
     );
-
     handle.shutdown().await.expect("shutdown");
     drop(backend);
-
-    // The repair must hold across a restart, with no degraded views left.
-    let reopened = TursoBackend::open_database(&path).expect("reopen after repair");
-    drop(reopened);
 }
