@@ -661,6 +661,23 @@ pub enum Rule {
     Stale,
 }
 
+impl Rule {
+    /// The rule's name as its error messages spell it.
+    pub fn code(self) -> &'static str {
+        match self {
+            Rule::Dc1 => "DC1",
+            Rule::Dc2 => "DC2",
+            Rule::Dc3 => "DC3",
+            Rule::Dc4 => "DC4",
+            Rule::Dc5 => "DC5",
+            Rule::Dc7 => "DC7",
+            Rule::Dc8 => "DC8",
+            Rule::Syntax => "syntax",
+            Rule::Stale => "stale",
+        }
+    }
+}
+
 /// Where a key set sits in a decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Site {

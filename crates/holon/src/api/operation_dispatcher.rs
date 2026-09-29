@@ -74,6 +74,8 @@ pub struct OperationDispatcher {
     net_guard: Option<Arc<dyn crate::api::net_guard::NetGuard>>,
     /// Whether the file behind a block's document accepts writes at all.
     write_tier: Option<Arc<dyn holon_core::WriteTierAuthority>>,
+    /// Whether a block write leaves every tagged block in its shape.
+    shape_gate: Option<ShapeGate>,
     /// Classifies `[[…]]` targets in live-edit content. Built from the
     /// `TypeRegistry` at wiring time so a UI-authored `[[<entity>:<id>]]`
     /// resolves for exactly the entities that exist; the `Default` value knows
@@ -84,6 +86,71 @@ pub struct OperationDispatcher {
     /// states — "no such entity" and "this build turned it off" — and only the
     /// composition root can tell them apart, so it says which one this is.
     unavailable_entities: UnavailableEntities,
+}
+
+/// What the shape gate (Model.md invariant 17) judges with: the registered
+/// validators, the store they read the pre-write state from, and the bus a
+/// user's refused edit is disclosed on.
+struct ShapeGate {
+    validators: Arc<holon_core::ShapeValidators>,
+    authority: Arc<dyn holon_core::WriteAuthorityReads>,
+    bus: Arc<holon_api::ConditionBus>,
+}
+
+/// One op of an admitted plan that has not been dispatched yet: its name and
+/// every param but the engine's own stamps, sorted by key. A dispatch rides
+/// the admission only when it IS that op.
+type JudgedOp = (String, Vec<(String, holon_api::Value)>);
+
+tokio::task_local! {
+    /// The ops of the plan this task is executing that the shape gate already
+    /// judged as part of the whole plan. Each is judged once: a dispatch that
+    /// matches one consumes it.
+    static JUDGED_PLAN: std::cell::RefCell<Vec<JudgedOp>>;
+    /// Set while the task dispatches the editor's keystroke writes.
+    static KEYSTROKE: ();
+}
+
+/// How often a judged write may find its shape claim grown at re-judgement.
+const MAX_SHAPE_CLAIMS: usize = 3;
+
+/// The test hold after a judged op's judgement, inside its claims.
+async fn judged_checkpoint(op: &str) -> Result<()> {
+    #[cfg(feature = "dispatch-hold")]
+    if let Some(write) = crate::api::running_write::RunningWrite::current() {
+        write.judged_checkpoint("block", op).await?;
+    }
+    #[cfg(not(feature = "dispatch-hold"))]
+    let _ = op;
+    Ok(())
+}
+
+/// A user's gesture that leaves or would leave a broken shape is disclosed;
+/// an agent or a rule gets the error alone.
+fn disclose_shape(
+    gate: &ShapeGate,
+    broken: &holon_core::shape_gate::ShapeRefused,
+    origin: &OpOrigin,
+) {
+    if origin.is_user() {
+        gate.bus.emit(holon_api::Condition {
+            subject: broken.root.to_string(),
+            reason: holon_api::ConditionKind::EditRefusedByShape {
+                tag: broken.tag.clone(),
+                rule: broken.rule.clone(),
+            },
+        });
+    }
+}
+
+fn judged_key(op_name: &str, params: &StorageEntity) -> JudgedOp {
+    let mut authored: Vec<(String, holon_api::Value)> = params
+        .iter()
+        .filter(|(k, _)| !holon_api::ENGINE_OWNED_PARAM_KEYS.contains(&k.as_ref()))
+        .map(|(k, v)| (k.to_string(), v.clone()))
+        .collect();
+    authored.sort_by(|a, b| a.0.cmp(&b.0));
+    (op_name.to_string(), authored)
 }
 
 /// Why an entity has no provider in THIS container, keyed by entity name. Built
@@ -199,6 +266,21 @@ impl OperationDispatcher {
     /// format accepts edits its files can never take.
     pub fn set_write_tier_authority(&mut self, authority: Arc<dyn holon_core::WriteTierAuthority>) {
         self.write_tier = Some(authority);
+    }
+
+    /// Install the shape gate. Without it a write may leave a tagged block in a
+    /// shape no reader accepts.
+    pub fn set_shape_gate(
+        &mut self,
+        validators: Arc<holon_core::ShapeValidators>,
+        authority: Arc<dyn holon_core::WriteAuthorityReads>,
+        bus: Arc<holon_api::ConditionBus>,
+    ) {
+        self.shape_gate = Some(ShapeGate {
+            validators,
+            authority,
+            bus,
+        });
     }
 
     pub fn set_net_guard(&mut self, guard: Arc<dyn crate::api::net_guard::NetGuard>) {
@@ -683,6 +765,344 @@ impl OperationDispatcher {
         Ok(())
     }
 
+    /// The shape-gate decision for a plan of block operations: every tagged
+    /// block the WHOLE plan touches must pass its validators afterwards.
+    ///
+    /// Only writes that ORIGINATE in Holon are judged. `Ingest` is a file
+    /// telling the store what it says and `Sync` a peer's merged history: both
+    /// are foreign input, never refused. Nothing discloses a broken shape they
+    /// store yet (Model.md invariant 17).
+    async fn judge_shape(
+        &self,
+        ops: &[(&str, &StorageEntity)],
+        origin: &OpOrigin,
+    ) -> Result<holon_core::shape_gate::Judgement> {
+        let unjudged = || holon_core::shape_gate::Judgement {
+            verdict: Ok(()),
+            simulated: Vec::new(),
+            touched: Vec::new(),
+            created: Default::default(),
+        };
+        let Some(gate) = &self.shape_gate else {
+            return Ok(unjudged());
+        };
+        if matches!(origin, OpOrigin::Ingest | OpOrigin::Sync) {
+            return Ok(unjudged());
+        }
+        let plan: Vec<holon_core::shape_gate::PlanOp<'_>> = ops
+            .iter()
+            .map(|(op_name, params)| holon_core::shape_gate::PlanOp { op_name, params })
+            .collect();
+        let judgement =
+            holon_core::shape_gate::judge_plan(&gate.validators, gate.authority.clone(), &plan)
+                .await?;
+        match &judgement.verdict {
+            Ok(()) => Ok(judgement),
+            Err(refusal) => {
+                disclose_shape(gate, refusal, origin);
+                Err(Box::new(refusal.clone()))
+            }
+        }
+    }
+
+    /// The error of an admitted plan that stopped part way. Its applied ops
+    /// stay applied unless the plan rolled them back, so the blocks it touched
+    /// are judged as stored: a broken one is named and disclosed.
+    async fn stopped_part_way(
+        &self,
+        failure: Box<dyn std::error::Error + Send + Sync>,
+        touched: &[holon_api::EntityUri],
+        origin: &OpOrigin,
+    ) -> Box<dyn std::error::Error + Send + Sync> {
+        let Some(gate) = &self.shape_gate else {
+            return failure;
+        };
+        match holon_core::shape_gate::judge_stored(
+            &gate.validators,
+            gate.authority.as_ref(),
+            touched,
+        )
+        .await
+        {
+            Ok(Ok(())) => failure,
+            Ok(Err(broken)) => {
+                disclose_shape(gate, &broken, origin);
+                format!(
+                    "{failure}; the ops that ran before it left the `{}` block {} breaking rule \
+                     {}: {}",
+                    broken.tag, broken.root, broken.rule, broken.message
+                )
+                .into()
+            }
+            Err(read) => {
+                format!("{failure}; the shape of what its ops left could not be read: {read}")
+                    .into()
+            }
+        }
+    }
+
+    /// The shape gate for ONE dispatched block operation: a plan of one, unless
+    /// the task is executing a plan whose admission already judged this op.
+    async fn enforce_shape(
+        &self,
+        resolved_entity_name: &str,
+        op_name: &str,
+        params: &StorageEntity,
+        key: JudgedOp,
+        origin: &OpOrigin,
+    ) -> Result<Vec<holon_core::shape_gate::Simulated>> {
+        if resolved_entity_name != "block" {
+            return Ok(Vec::new());
+        }
+        if KEYSTROKE.try_with(|_| ()).is_ok() {
+            return Ok(Vec::new());
+        }
+        let admitted = JUDGED_PLAN
+            .try_with(|plan| {
+                let mut plan = plan.borrow_mut();
+                plan.iter()
+                    .position(|op| *op == key)
+                    .map(|at| plan.remove(at))
+                    .is_some()
+            })
+            .unwrap_or(false);
+        if admitted {
+            return Ok(Vec::new());
+        }
+        let ops = [(op_name, params)];
+        let judgement = self.judge_shape(&ops, origin).await?;
+        let judgement = self.hold_shape(&ops, origin, judgement).await?;
+        judged_checkpoint(op_name).await?;
+        Ok(judgement.simulated)
+    }
+
+    /// Claim, for the running write, every tagged block `judgement` shapes,
+    /// then judge `ops` again under that claim: only that verdict holds
+    /// until the ops run. A claim that grows past
+    /// [`MAX_SHAPE_CLAIMS`] judgements, or that closes a wait cycle, is a
+    /// named error.
+    async fn hold_shape(
+        &self,
+        ops: &[(&str, &StorageEntity)],
+        origin: &OpOrigin,
+        mut judgement: holon_core::shape_gate::Judgement,
+    ) -> Result<holon_core::shape_gate::Judgement> {
+        let Some(write) = crate::api::running_write::RunningWrite::current() else {
+            return Ok(judgement);
+        };
+        let op = ops.first().expect("a judged plan has an op").0;
+        for _ in 0..MAX_SHAPE_CLAIMS {
+            let wanted = write.unheld(&judgement);
+            if wanted.is_empty() {
+                return Ok(judgement);
+            }
+            match write.claim_shape(&wanted, op).await {
+                Ok(crate::api::running_write::ShapeClaim::Covered) => return Ok(judgement),
+                Ok(crate::api::running_write::ShapeClaim::Waited) => {
+                    judgement = self.judge_shape(ops, origin).await?;
+                }
+                Err(refused) => {
+                    tracing::warn!(
+                        admission = write.seq(),
+                        through = refused.through,
+                        ran = write.ran(),
+                        "[admission] the shape claim of block.{op} was refused: {refused}"
+                    );
+                    let landed = if write.ran() {
+                        "; an earlier write of the same gesture already landed"
+                    } else {
+                        ""
+                    };
+                    return Err(format!(
+                        "block.{op} could not claim the tagged blocks it shapes: {refused}{landed}"
+                    )
+                    .into());
+                }
+            }
+        }
+        let wanted = write.unheld(&judgement);
+        if wanted.is_empty() {
+            return Ok(judgement);
+        }
+        Err(format!(
+            "block.{op} shaped more tagged blocks at each of {MAX_SHAPE_CLAIMS} judgements; \
+             last wanted {wanted:?}"
+        )
+        .into())
+    }
+
+    /// Judge `ops`, which the running write dispatches one by one, as a whole
+    /// and claim what they shape before the first of them runs, so a later
+    /// one finds its blocks held instead of claiming them after an earlier
+    /// one landed.
+    pub(crate) async fn claim_shape_of(
+        &self,
+        ops: &[(&str, &StorageEntity)],
+        origin: &OpOrigin,
+    ) -> Result<()> {
+        let judgement = self.judge_shape(ops, origin).await?;
+        self.hold_shape(ops, origin, judgement).await.map(drop)
+    }
+
+    /// Claim, for the running write, the [`neighbourhood`] of `targets` and
+    /// `subtrees` before its first op runs: for a write whose follow-up writes
+    /// are known only after it ran, so none of them needs a claim that could
+    /// be refused once part of the write landed. A claim waited for is read
+    /// again, at most [`MAX_SHAPE_CLAIMS`] times.
+    ///
+    /// [`neighbourhood`]: holon_core::shape_gate::neighbourhood
+    pub(crate) async fn claim_neighbourhood(
+        &self,
+        op: &str,
+        targets: &[holon_api::EntityUri],
+        subtrees: &[holon_api::EntityUri],
+        origin: &OpOrigin,
+    ) -> Result<()> {
+        let Some(gate) = &self.shape_gate else {
+            return Ok(());
+        };
+        if matches!(origin, OpOrigin::Ingest | OpOrigin::Sync) {
+            return Ok(());
+        }
+        let Some(write) = crate::api::running_write::RunningWrite::current() else {
+            return Ok(());
+        };
+        for _ in 0..MAX_SHAPE_CLAIMS {
+            let wanted = holon_core::shape_gate::neighbourhood(
+                &gate.validators,
+                gate.authority.as_ref(),
+                targets,
+                subtrees,
+            )
+            .await?;
+            if wanted.is_empty() || write.holds(&wanted) {
+                return Ok(());
+            }
+            match write.claim_shape(&wanted, op).await {
+                Ok(crate::api::running_write::ShapeClaim::Covered) => return Ok(()),
+                Ok(crate::api::running_write::ShapeClaim::Waited) => {}
+                Err(refused) => {
+                    return Err(format!(
+                        "block.{op} could not claim the tagged blocks its follow-up writes \
+                         shape: {refused}"
+                    )
+                    .into());
+                }
+            }
+        }
+        Err(format!(
+            "block.{op} found more tagged blocks around its target at each of \
+             {MAX_SHAPE_CLAIMS} claims"
+        )
+        .into())
+    }
+
+    /// Hand the simulator's prediction to the shape audit, when one is
+    /// enabled.
+    async fn audit_shape(
+        &self,
+        what: &str,
+        simulated: &[holon_core::shape_gate::Simulated],
+    ) -> Result<()> {
+        let audit = holon_core::shape_gate::ShapeAudit::global();
+        match &self.shape_gate {
+            Some(gate) if audit.is_enabled() => {
+                audit
+                    .compare(gate.authority.as_ref(), what, simulated)
+                    .await
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Run `keystroke`, whose writes are the editor's typing, without the shape
+    /// gate: refusing a keystroke mid-word is hostile, so a keystroke that
+    /// breaks a tagged shape lands, and nothing discloses it yet (Model.md
+    /// invariant 17).
+    pub(crate) async fn as_keystroke<F: std::future::Future>(&self, keystroke: F) -> F::Output {
+        KEYSTROKE.scope((), keystroke).await
+    }
+
+    /// Judge `ops` as ONE plan, then run `execute` with them admitted, so each
+    /// op it dispatches in this task is not judged again on its own. A plan
+    /// that is legal only as a whole — a decision created before its options,
+    /// a new `choose` together with a ruling of that size — lands; a plan whose
+    /// result breaks a shape writes nothing.
+    pub async fn execute_judged<F, T>(
+        &self,
+        ops: &[Operation],
+        origin: &OpOrigin,
+        execute: F,
+    ) -> Result<T>
+    where
+        F: std::future::Future<Output = Result<T>>,
+    {
+        let params: Vec<StorageEntity> = ops
+            .iter()
+            .map(|op| {
+                op.params
+                    .iter()
+                    .map(|(k, v)| (Arc::from(k.as_str()), v.clone()))
+                    .collect()
+            })
+            .collect();
+        let blocks: Vec<(&str, &StorageEntity)> = ops
+            .iter()
+            .zip(&params)
+            .filter(|(op, _)| op.entity_name.as_str() == "block")
+            .map(|(op, p)| (op.op_name.as_str(), p))
+            .collect();
+        let judgement = self.judge_shape(&blocks, origin).await?;
+        let judgement = if blocks.is_empty() {
+            judgement
+        } else {
+            let judgement = self.hold_shape(&blocks, origin, judgement).await?;
+            judged_checkpoint(blocks[0].0).await?;
+            judgement
+        };
+        let admitted: Vec<JudgedOp> = blocks
+            .iter()
+            .map(|(op_name, p)| judged_key(op_name, p))
+            .collect();
+        let done = match JUDGED_PLAN
+            .scope(std::cell::RefCell::new(admitted), execute)
+            .await
+        {
+            Ok(done) => done,
+            Err(failure) => {
+                return Err(self
+                    .stopped_part_way(failure, &judgement.touched, origin)
+                    .await);
+            }
+        };
+        let names: Vec<&str> = blocks.iter().map(|(op_name, _)| *op_name).collect();
+        self.audit_shape(&format!("plan {names:?}"), &judgement.simulated)
+            .await?;
+        Ok(done)
+    }
+
+    /// Fail-loud guard that a composed backend actually installed the shape
+    /// gate (Model.md invariant 17). A dispatcher without one lets any write
+    /// leave a tagged block in a shape no reader accepts.
+    pub fn assert_shape_gate_installed(&self) -> Result<()> {
+        let Some(gate) = &self.shape_gate else {
+            return Err(
+                "OperationDispatcher has no shape gate installed: every tagged block \
+                        (decision, ...) is writable into shapes its readers refuse"
+                    .into(),
+            );
+        };
+        let missing = gate.validators.missing_registered();
+        if !missing.is_empty() {
+            return Err(format!(
+                "OperationDispatcher's shape gate has no validator for {missing:?}: blocks with \
+                 those tags are writable into shapes their readers refuse"
+            )
+            .into());
+        }
+        Ok(())
+    }
+
     /// Fail-loud guard that a composed backend actually installed the ADR 0032
     /// net gate.
     ///
@@ -1130,6 +1550,10 @@ impl OperationDispatcher {
                 };
                 tracing::Span::current().record("operation.resolved_entity", resolved_entity_name);
 
+                // The shape gate's admission key is the op AS DISPATCHED, before
+                // this dispatcher rewrites any param below.
+                let judged_key = judged_key(op_name, &params);
+
                 // THE entity-reference seam: every id this operation names is
                 // parsed here, once, and an unschemed one is refused.
                 Self::parse_entity_references(
@@ -1323,6 +1747,12 @@ impl OperationDispatcher {
                 self.enforce_write_tier(resolved_entity_name, &params, &origin)
                     .await?;
 
+                // THE shape gate: a block write may not leave a tagged block in
+                // a shape its validator refuses.
+                let shape_simulated = self
+                    .enforce_shape(resolved_entity_name, op_name, &params, judged_key, &origin)
+                    .await?;
+
                 info!(
                     "[OperationDispatcher] Routing operation to provider: entity={}, op={}",
                     resolved_entity_name, op_name
@@ -1413,6 +1843,9 @@ impl OperationDispatcher {
                         None
                     };
 
+                if let Some(write) = crate::api::running_write::RunningWrite::current() {
+                    write.mark_ran();
+                }
                 // Execute operation and get result with changes and undo action
                 let mut operation_result = provider
                     .execute_operation(&resolved_entity_name_typed, op_name, params)
@@ -1512,6 +1945,11 @@ impl OperationDispatcher {
                     .map_err(|e| format!("Follow-up {fu_entity}.{fu_op} failed: {e}"))?;
                 }
 
+                self.audit_shape(
+                    &format!("{resolved_entity_name}.{op_name}"),
+                    &shape_simulated,
+                )
+                .await?;
                 Ok(operation_result)
             }
         }
@@ -2159,6 +2597,23 @@ impl Module for OperationModule {
                 dispatcher.set_write_tier_authority(authority);
             }
 
+            // The shape gate. A composition root that registers tagged shapes
+            // gets it; it reads the pre-write state from the block write
+            // authority, which is the SQL tables when no separate one exists.
+            {
+                let validators = r.resolve_async::<holon_core::ShapeValidators>().await;
+                let authority = match r
+                    .optional_resolve_async::<dyn holon_core::WriteAuthorityReads>()
+                    .await
+                {
+                    Some(authority) => authority,
+                    None => Arc::new(crate::core::sql_write_authority::SqlWriteAuthority::new(
+                        db_handle_provider.handle(),
+                    )) as Arc<dyn holon_core::WriteAuthorityReads>,
+                };
+                dispatcher.set_shape_gate(validators, authority, (*bus).clone());
+            }
+
             // A container that switched an entity off says which setting did
             // it; one that registers nothing keeps the plain not-found answer.
             if let Some(unavailable) = r.optional_resolve_async::<UnavailableEntities>().await {
@@ -2239,6 +2694,9 @@ impl Module for OperationModule {
             dispatcher
                 .assert_net_guard_installed()
                 .expect("[OperationModule] net-gate startup check failed");
+            dispatcher
+                .assert_shape_gate_installed()
+                .expect("[OperationModule] shape-gate startup check failed");
             // Every in-tree descriptor's arcs already passed the macro's
             // compile-time parse; this is the gate for the ones that did not —
             // a descriptor deserialized from a sidecar or a created entity
@@ -2326,6 +2784,51 @@ mod tests {
             guard: holon_api::pattern::OpGuard::None,
             arcs: holon_api::arcs::TransitionArcs::Undeclared,
         }
+    }
+
+    /// The guard never reads the authority: it checks what is installed.
+    struct Unread;
+
+    use holon_api::EntityUri;
+
+    #[async_trait]
+    impl holon_core::WriteAuthorityReads for Unread {
+        async fn block_exists(&self, _: &EntityUri) -> Result<bool> {
+            unreachable!("the install guard reads no block")
+        }
+        async fn block_is_page(&self, _: &EntityUri) -> Result<bool> {
+            unreachable!("the install guard reads no block")
+        }
+        async fn block(&self, _: &EntityUri) -> Result<Option<holon_api::StoredBlock>> {
+            unreachable!("the install guard reads no block")
+        }
+        async fn subtree(&self, _: &EntityUri) -> Result<Option<Vec<holon_api::StoredBlock>>> {
+            unreachable!("the install guard reads no block")
+        }
+        async fn children(&self, _: &EntityUri) -> Result<Vec<EntityUri>> {
+            unreachable!("the install guard reads no block")
+        }
+    }
+
+    fn gated(validators: holon_core::ShapeValidators) -> OperationDispatcher {
+        let mut dispatcher = OperationDispatcher::new(vec![]);
+        dispatcher.set_shape_gate(
+            Arc::new(validators),
+            Arc::new(Unread),
+            Arc::new(holon_api::ConditionBus::new()),
+        );
+        dispatcher
+    }
+
+    #[test]
+    fn a_shape_gate_without_the_registered_validators_fails_the_install_guard() {
+        let err = gated(holon_core::ShapeValidators::new(vec![]))
+            .assert_shape_gate_installed()
+            .expect_err("an empty registry judges nothing and must not pass as installed");
+        assert!(err.to_string().contains("decision"), "{err}");
+        gated(holon_core::ShapeValidators::registered())
+            .assert_shape_gate_installed()
+            .expect("the registered validators pass");
     }
 
     #[tokio::test]

@@ -110,6 +110,18 @@ impl OpOutcome {
     }
 }
 
+/// One commit of the editor's source channel: the block's whole vault source
+/// line as the user typed it. It has no operation name, so no caller that
+/// dispatches operations by name (MCP, a rule, a remote peer) can produce one.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SourceKeystroke {
+    pub id: String,
+    pub source: String,
+    /// The editor's ordering token, forwarded to the content write so the
+    /// editor recognises its own echo.
+    pub write_seq: Option<i64>,
+}
+
 /// Execute, discover, and undo/redo operations.
 #[async_trait]
 pub trait OperationEngine: Send + Sync {
@@ -144,6 +156,15 @@ pub trait OperationEngine: Send + Sync {
             Err(e) => Box::pin(std::future::ready(Err(e))),
         }
     }
+
+    /// Commit the editor's typed source line as the user's gesture. Unlike a
+    /// `set_field("source_text")`, which is judged like any other write, a
+    /// keystroke lands even when it leaves a tagged shape broken (Model.md
+    /// invariant 17): refusing a keystroke mid-word is hostile. Nothing
+    /// discloses the broken shape yet. Admitted at the call, like
+    /// [`Self::execute_operation`].
+    fn commit_keystroke(&self, keystroke: SourceKeystroke)
+    -> BoxFuture<'static, Result<OpOutcome>>;
 
     /// The operations registered for `entity_name`.
     async fn available_operations(&self, entity_name: &str) -> Vec<OperationDescriptor>;

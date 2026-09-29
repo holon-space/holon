@@ -415,6 +415,11 @@ impl holon_core::WriteAuthorityReads for LoroBlockOperations {
         let backend = self.get_backend("").await?;
         Ok(backend.owning_page(id.as_str())?)
     }
+
+    async fn is_share_root(&self, id: &holon_api::EntityUri) -> Result<bool> {
+        let backend = self.get_backend("").await?;
+        Ok(backend.is_page_share_root(id.as_str()).await?)
+    }
 }
 
 #[async_trait]

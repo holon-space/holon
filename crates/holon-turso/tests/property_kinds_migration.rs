@@ -33,13 +33,15 @@ async fn a_pre_nv1_block_raw_gains_property_kinds_on_boot() {
     let path = dir.path().join("pre-nv1.db");
 
     // A pre-NV-1 `block_raw`: a properties bag and no kind map beside it.
+    // `sort_key` is as old as the table.
     {
         let db = TursoBackend::open_database(&path).expect("open for seeding");
         let (_backend, handle) =
             TursoBackend::new(db, broadcast::channel(64).0).expect("backend for seeding");
         handle
             .execute_ddl(
-                "CREATE TABLE block_raw (id TEXT PRIMARY KEY, parent_id TEXT, properties TEXT)",
+                "CREATE TABLE block_raw (id TEXT PRIMARY KEY, parent_id TEXT, sort_key TEXT, \
+                 properties TEXT)",
             )
             .await
             .expect("create the old-shape block_raw");

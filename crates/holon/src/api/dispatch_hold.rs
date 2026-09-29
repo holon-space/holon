@@ -6,6 +6,10 @@
 //!
 //! A second hook delays admission itself, so a dispatch that admits on a
 //! spawned task instead of at its call is reordered on purpose.
+//!
+//! A third parks a judged write after its shape judgement, holding every claim
+//! the judgement took, and a fourth refuses a judged write's shape claim as if
+//! it closed a wait cycle.
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -22,6 +26,8 @@ use tokio::sync::watch;
 enum Effect {
     Park,
     Fail,
+    ParkJudged,
+    RefuseNest,
 }
 
 #[derive(Debug)]
@@ -65,6 +71,20 @@ impl DispatchHold {
     /// provider.
     pub fn fail_next(&self, entity: &str, op: &str) {
         self.add_rule(entity, op, Effect::Fail);
+    }
+
+    /// Park the next judged run of `entity.op` after its shape judgement, until
+    /// [`Self::release`].
+    pub fn hold_next_judged(&self, entity: &str, op: &str) {
+        self.add_rule(entity, op, Effect::ParkJudged);
+    }
+
+    /// Refuse the shape claim of each of the next `times` judged runs of
+    /// `entity.op` that nest one, as a wait cycle would.
+    pub fn refuse_next_nests(&self, entity: &str, op: &str, times: usize) {
+        for _ in 0..times {
+            self.add_rule(entity, op, Effect::RefuseNest);
+        }
     }
 
     /// Runs of `entity.op` parked at the hook right now.
@@ -148,7 +168,9 @@ impl DispatchHold {
             "dispatch hold: admission delays never reached: {:?}",
             state.admission_delays
         );
-        state.rules.retain(|r| r.effect == Effect::Fail);
+        state
+            .rules
+            .retain(|r| matches!(r.effect, Effect::Fail | Effect::RefuseNest));
         for (_, resume) in state.parked.drain(..) {
             // A parked run whose task was dropped has nothing left to resume.
             let _ = resume.send(());
@@ -159,13 +181,34 @@ impl DispatchHold {
 
     /// The hook itself: a no-op unless a rule names this run.
     pub(crate) async fn checkpoint(&self, entity: &EntityName, op: &str) -> Result<()> {
+        self.park_on(entity, op, &[Effect::Park, Effect::Fail])
+            .await
+    }
+
+    /// The judged-run hook: a no-op unless a judged-run rule names this run.
+    pub(crate) async fn judged_checkpoint(&self, entity: &EntityName, op: &str) -> Result<()> {
+        self.park_on(entity, op, &[Effect::ParkJudged]).await
+    }
+
+    /// Whether a rule refuses this judged run's shape claim; consumes it.
+    pub(crate) fn refuses_nest(&self, entity: &EntityName, op: &str) -> bool {
+        let mut state = self.state.lock().unwrap();
+        let Some(at) = state.rules.iter().position(|r| {
+            r.effect == Effect::RefuseNest && r.entity == entity.as_str() && r.op == op
+        }) else {
+            return false;
+        };
+        state.rules.remove(at);
+        tracing::info!("dispatch hold refuses the shape claim of {entity}.{op}");
+        true
+    }
+
+    async fn park_on(&self, entity: &EntityName, op: &str, effects: &[Effect]) -> Result<()> {
         let resumed = {
             let mut state = self.state.lock().unwrap();
-            let Some(at) = state
-                .rules
-                .iter()
-                .position(|r| r.entity == entity.as_str() && r.op == op)
-            else {
+            let Some(at) = state.rules.iter().position(|r| {
+                effects.contains(&r.effect) && r.entity == entity.as_str() && r.op == op
+            }) else {
                 return Ok(());
             };
             let rule = state.rules.remove(at);

@@ -122,6 +122,14 @@ pub enum ConditionKind {
     /// All-clear: none. The file is read-only for as long as its format is, so
     /// the condition is true for the session.
     EditRefusedReadOnlyFormat { format: String },
+    /// An edit would have left a tagged block in a shape its validator refuses,
+    /// so the operation dispatcher refused it and the store never took it.
+    /// `subject` is the tagged block; `rule` is the shape's name for the rule
+    /// the edit would break.
+    ///
+    /// All-clear: none, like every refusal notice. The refused edit is gone;
+    /// the notice stands for the session.
+    EditRefusedByShape { tag: String, rule: String },
     /// A typed edit never reached the store because the editor could not take
     /// the document's write lock. `subject` is the block being typed into, and
     /// `detail` is the lock's own account of why. The keystroke is lost: the
@@ -522,6 +530,7 @@ impl ConditionKind {
     pub const WRITEBACK_DEGRADED: &'static str = "writeback-degraded";
     pub const WRITEBACK_LOSSY: &'static str = "writeback-lossy";
     pub const EDIT_REFUSED_READ_ONLY_FORMAT: &'static str = "edit-refused-read-only-format";
+    pub const EDIT_REFUSED_BY_SHAPE: &'static str = "edit-refused-by-shape";
     pub const LOCAL_EDIT_NOT_APPLIED: &'static str = "local-edit-not-applied";
     pub const BEARER_TICKET_ENROLLMENT: &'static str = "bearer-ticket-enrollment";
     pub const OWNER_RECOVERY_CODE_NOT_SHOWN: &'static str = "owner-recovery-code-not-shown";
@@ -577,6 +586,7 @@ impl ConditionKind {
             Self::DeletedSharedPage { .. } => Self::DELETED_SHARED_PAGE,
             Self::PairingReimportDeferred { .. } => Self::PAIRING_REIMPORT_DEFERRED,
             Self::EditRefusedReadOnlyFormat { .. } => Self::EDIT_REFUSED_READ_ONLY_FORMAT,
+            Self::EditRefusedByShape { .. } => Self::EDIT_REFUSED_BY_SHAPE,
             Self::LocalEditNotApplied { .. } => Self::LOCAL_EDIT_NOT_APPLIED,
             Self::BearerTicketEnrollment { .. } => Self::BEARER_TICKET_ENROLLMENT,
             Self::OwnerRecoveryCodeNotShown => Self::OWNER_RECOVERY_CODE_NOT_SHOWN,

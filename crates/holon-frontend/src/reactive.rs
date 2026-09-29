@@ -4238,6 +4238,7 @@ impl BuilderServices for ReactiveEngine {
         let (focused_block, caret_seed) = self.ui_state.focus_handles();
         let entity_name = intent.entity_name.clone();
         let op_name = intent.op_name.clone();
+        let keystroke = intent.keystroke();
         let params = intent.params;
         // End-to-end latency: start the interaction clock at the dispatch
         // entry point; `holon_api::latency_e2e` closes it when the target's
@@ -4272,8 +4273,8 @@ impl BuilderServices for ReactiveEngine {
         let stage_block = latency_block.clone();
         let stage_action = op_name.clone();
         let t_dispatch = std::time::Instant::now();
-        let run =
-            dispatch_span.in_scope(|| session.execute_operation(&entity_name, &op_name, params));
+        let run = dispatch_span
+            .in_scope(|| session.execute_intent_parts(keystroke, &entity_name, &op_name, params));
         self.runtime_handle.spawn(
             async move {
                 match run.await {
@@ -4336,11 +4337,11 @@ impl BuilderServices for ReactiveEngine {
     ) {
         let matched = crate::operation_matcher::try_match_from_context(&op, &ctx_params);
         if matched.missing_params.is_empty() {
-            self.dispatch_intent(crate::operations::OperationIntent {
-                entity_name: op.entity_name.clone(),
-                op_name: op.name.clone(),
-                params: matched.resolved_params,
-            });
+            self.dispatch_intent(crate::operations::OperationIntent::new(
+                op.entity_name.clone(),
+                op.name.clone(),
+                matched.resolved_params,
+            ));
             return;
         }
         // op_button sites gather still-missing params through their own inline
@@ -4394,10 +4395,12 @@ impl BuilderServices for ReactiveEngine {
         let session = self.session.clone();
         let (focused_block, caret_seed) = self.ui_state.focus_handles();
         let dispatch_span = interaction_span(intent.entity_name.as_str(), &intent.op_name);
+        let keystroke = intent.keystroke();
         let crate::operations::OperationIntent {
             entity_name,
             op_name,
             params,
+            ..
         } = intent;
         // Latency stage (dispatch->op-applied): a user action enters the
         // pipeline here. `block` is the entity the op targets; `action` the
@@ -4432,8 +4435,8 @@ impl BuilderServices for ReactiveEngine {
             );
         }
         let t_dispatch = std::time::Instant::now();
-        let run =
-            dispatch_span.in_scope(|| session.execute_operation(&entity_name, &op_name, params));
+        let run = dispatch_span
+            .in_scope(|| session.execute_intent_parts(keystroke, &entity_name, &op_name, params));
         Box::pin(
             async move {
                 let outcome = run.await;
@@ -4493,6 +4496,7 @@ impl BuilderServices for ReactiveEngine {
         let (focused_block, caret_seed) = self.ui_state.focus_handles();
         let entity_name = intent.entity_name.clone();
         let op_name = intent.op_name.clone();
+        let keystroke = intent.keystroke();
         let params = intent.params;
         let latency_target = params
             // ALLOW(raw_row_id_column): param-map — an op intent's params, read to start the
@@ -4511,8 +4515,8 @@ impl BuilderServices for ReactiveEngine {
             );
         }
         let dispatch_span = interaction_span(entity_name.as_str(), &op_name);
-        let run =
-            dispatch_span.in_scope(|| session.execute_operation(&entity_name, &op_name, params));
+        let run = dispatch_span
+            .in_scope(|| session.execute_intent_parts(keystroke, &entity_name, &op_name, params));
         Box::pin(
             async move {
                 match run.await {
@@ -4570,6 +4574,7 @@ impl BuilderServices for ReactiveEngine {
         let (focused_block, caret_seed) = self.ui_state.focus_handles();
         let entity_name = intent.entity_name.clone();
         let op_name = intent.op_name.clone();
+        let keystroke = intent.keystroke();
         let params = intent.params;
         let latency_target = params
             // ALLOW(raw_row_id_column): param-map — an op intent's params, read to start the
@@ -4588,8 +4593,8 @@ impl BuilderServices for ReactiveEngine {
             );
         }
         let dispatch_span = interaction_span(entity_name.as_str(), &op_name);
-        let run =
-            dispatch_span.in_scope(|| session.execute_operation(&entity_name, &op_name, params));
+        let run = dispatch_span
+            .in_scope(|| session.execute_intent_parts(keystroke, &entity_name, &op_name, params));
         Box::pin(
             async move {
                 match run.await {

@@ -37,6 +37,7 @@ pub mod operation_dispatcher;
 pub mod operation_engine;
 pub mod query_engine;
 pub mod rule_status;
+pub(crate) mod running_write;
 pub mod task_vocabulary_source;
 pub mod ui_watcher;
 pub mod undo_persistence;

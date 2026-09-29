@@ -85,6 +85,8 @@ pub mod org_render_fixed_point;
 pub mod overlay_placement_local;
 pub mod read_only_home_refuses_writes;
 pub mod settle_budget;
+pub mod shape_gate_refuses_illegal_writes;
+pub mod shape_sim_matches_authority;
 pub mod share_mount_carries_page_identity;
 pub mod sidebar_page_tag_preserved;
 pub mod source_language;

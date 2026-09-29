@@ -60,6 +60,7 @@ pub mod run_result;
 pub use holon_loro_testing::shadow_mesh;
 pub mod conditions_state;
 pub mod read_only_state;
+pub mod shape_state;
 pub mod sharing_state;
 pub mod sql_loro_slice;
 pub mod sql_slice;

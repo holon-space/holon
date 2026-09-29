@@ -121,6 +121,8 @@ mod dense_projection_edit;
 mod dispatch_unschemed_block_id;
 mod drag_drop_block;
 mod edit_block_copy;
+mod edit_decision_pair_held;
+pub mod edit_decision_subtree;
 mod emit_mcp_data;
 mod epoch_flip_rejected;
 mod expand_toggle;
@@ -226,6 +228,8 @@ pub use dense_projection_edit::DenseProjectionEdit;
 pub use dispatch_unschemed_block_id::DispatchUnschemedBlockId;
 pub use drag_drop_block::DragDropBlock;
 pub use edit_block_copy::EditBlockCopy;
+pub use edit_decision_pair_held::EditDecisionPairHeld;
+pub use edit_decision_subtree::EditDecisionSubtree;
 pub use emit_mcp_data::EmitMcpData;
 pub use epoch_flip_rejected::EpochFlipRejected;
 pub use expand_toggle::ExpandToggle;
@@ -318,6 +322,8 @@ crate::declare_e2e_transitions! {
         ArrowNavigate(ArrowNavigate),
         AttemptIngestCompoundOnReadOnly(AttemptIngestCompoundOnReadOnly),
         AttemptReadOnlyEdit(AttemptReadOnlyEdit),
+        EditDecisionSubtree(EditDecisionSubtree),
+        EditDecisionPairHeld(EditDecisionPairHeld),
         BlockToPage(BlockToPage),
         RenamePage(RenamePage),
         CreatePageAtFreedPath(CreatePageAtFreedPath),

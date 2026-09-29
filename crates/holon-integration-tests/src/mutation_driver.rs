@@ -79,9 +79,13 @@ impl DirectUserDriver {
             .into_iter()
             .map(|(k, v)| (k.to_string(), v))
             .collect();
-        self.synthetic_dispatch("block", op, params)
-            .await
-            .unwrap_or_else(|e| panic!("[DirectUserDriver floor] block/{op} failed: {e:#}"));
+        if let Err(e) = self.synthetic_dispatch("block", op, params).await {
+            let msg = format!("{e:#}");
+            assert!(
+                crate::pbt::shape_state::is_expected_refusal(&msg),
+                "[DirectUserDriver floor] block/{op} failed: {msg}"
+            );
+        }
     }
 
     fn id_only(&self, id: &EntityUri) -> StorageEntity {
@@ -128,7 +132,8 @@ impl SutBlockTreeWrite for DirectUserDriver {
         if let Err(e) = self.synthetic_dispatch("block", "outdent", params).await {
             let msg = format!("{e:#}");
             assert!(
-                crate::pbt::op_write_cap::is_page_boundary_outdent_refusal(&msg),
+                crate::pbt::op_write_cap::is_page_boundary_outdent_refusal(&msg)
+                    || crate::pbt::shape_state::is_expected_refusal(&msg),
                 "[DirectUserDriver floor] block/outdent failed: {msg}"
             );
         }
@@ -521,7 +526,8 @@ impl SutBlockToPage for DirectUserDriver {
             // `IdentityCollision` type is erased by the dispatch chain's wrappers).
             let msg = format!("{e:#}");
             assert!(
-                msg.contains(holon_api::IDENTITY_COLLISION_MARKER),
+                msg.contains(holon_api::IDENTITY_COLLISION_MARKER)
+                    || crate::pbt::shape_state::is_expected_refusal(&msg),
                 "[DirectUserDriver floor] block/convert_block_to_page failed: {msg}"
             );
         }

@@ -154,7 +154,8 @@ crate::cap_transition! {
     where R: [ RefLifecycle + RefBlockTree + RefDocuments ],
     |me, state, sut| {
         let outcome = sut.rehome_entity(&me.block_id, HOLON_NATIVE).await;
-        let expected_refusal = state.is_rule_machinery(&me.block_id);
+        let expected_refusal = state.is_rule_machinery(&me.block_id)
+            || crate::pbt::shape_state::refusal_armed();
         match (&outcome, expected_refusal) {
             (holon_pbt_core::capabilities::RehomeOutcome::Moved, false) => {}
             (holon_pbt_core::capabilities::RehomeOutcome::Refused(_), true) => {}
@@ -162,7 +163,8 @@ crate::cap_transition! {
                 "re-homing {} : expected {}, got {outcome:?}",
                 me.block_id,
                 if expected_refusal {
-                    "a refusal, because the block is rule machinery"
+                    "a refusal, because the block is rule machinery or its leaving breaks a \
+                     tagged shape"
                 } else {
                     "the move to succeed"
                 },

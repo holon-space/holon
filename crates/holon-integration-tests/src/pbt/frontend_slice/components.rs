@@ -309,6 +309,8 @@ pub struct HeadlessFrontendComponent {
     /// `(attempts, refusals)` for the ingest-origin compound rung — the
     /// constituent-provenance half of the same gate.
     read_only_ingest_compound: Mutex<(usize, usize)>,
+    /// The outcome of every `EditDecisionSubtree`, in dispatch order.
+    shape_edit_outcomes: Mutex<Vec<Result<(), String>>>,
 }
 
 /// Does this defining SELECT carry a real BIND PLACEHOLDER (so
@@ -846,6 +848,7 @@ impl HeadlessFrontendComponent {
             read_only_ingest: Mutex::new(None),
             pasted_copies: Mutex::new(HashMap::new()),
             read_only_attempts: Mutex::new((0, 0)),
+            shape_edit_outcomes: Mutex::new(Vec::new()),
             read_only_ingest_compound: Mutex::new((0, 0)),
         }
     }
@@ -8179,6 +8182,101 @@ impl holon_pbt_core::capabilities::SutPrivateFieldWriteAttempt for HeadlessFront
             "[private field] {what} was refused for the wrong reason.\n expected: \
              {expected}\n got: {message}"
         );
+    }
+}
+
+#[async_trait::async_trait(?Send)]
+impl holon_pbt_core::capabilities::SutShapeEdit for HeadlessFrontendComponent {
+    async fn apply_shape_edit(
+        &self,
+        ops: Vec<holon_api::Operation>,
+        origin: holon_api::OpOrigin,
+    ) -> Result<(), String> {
+        let compared_before = holon_core::shape_gate::ShapeAudit::global().log().compared;
+        let outcome = self
+            .engine()
+            .execute_plan(ops, origin)
+            .await
+            .map_err(|e| format!("{e:#}"));
+        crate::pbt::invariants::bodies::shape_sim_matches_authority::record_edit(
+            outcome.is_ok(),
+            holon_core::shape_gate::ShapeAudit::global().log().compared - compared_before,
+        );
+        self.shape_edit_outcomes
+            .lock()
+            .expect("shape_edit_outcomes poisoned")
+            .push(outcome.clone());
+        outcome
+    }
+
+    async fn apply_held_shape_pair(
+        &self,
+        first: (holon_api::Operation, holon_api::OpOrigin),
+        second: (holon_api::Operation, holon_api::OpOrigin),
+    ) {
+        let engine = self.engine();
+        let spawn = |(op, origin): (holon_api::Operation, holon_api::OpOrigin)| {
+            let params: holon_api::StorageEntity = op
+                .params
+                .into_iter()
+                .map(|(k, v)| (Arc::from(k.as_str()), v))
+                .collect();
+            tokio::spawn(engine.execute_operation(&op.entity_name, &op.op_name, params, origin))
+        };
+        let hold = engine.dispatch_hold();
+        let held = first.0.op_name.clone();
+        hold.hold_next_judged("block", &held);
+        let first = spawn(first);
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while hold.parked_runs("block", &held) != 1 {
+                assert!(
+                    !first.is_finished(),
+                    "[SutShapeEdit::apply_held_shape_pair] the first write finished without \
+                     parking after its judgement"
+                );
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("[SutShapeEdit::apply_held_shape_pair] the first write never parked");
+        let waiting_before = engine.admission().census().waiting;
+        let second = spawn(second);
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !second.is_finished() && engine.admission().census().waiting == waiting_before {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect(
+            "[SutShapeEdit::apply_held_shape_pair] the second write neither waited nor finished",
+        );
+        hold.release(1, Duration::from_secs(10))
+            .await
+            .unwrap_or_else(|e| panic!("[SutShapeEdit::apply_held_shape_pair] {e:#}"));
+        for write in [first, second] {
+            let outcome = tokio::time::timeout(Duration::from_secs(30), write)
+                .await
+                .expect("[SutShapeEdit::apply_held_shape_pair] a write never finished")
+                .expect("[SutShapeEdit::apply_held_shape_pair] a write's task panicked")
+                .map(|_| ())
+                .map_err(|e| format!("{e:#}"));
+            self.shape_edit_outcomes
+                .lock()
+                .expect("shape_edit_outcomes poisoned")
+                .push(outcome);
+        }
+    }
+
+    async fn shape_audit(&self) -> (usize, Vec<String>) {
+        let log = holon_core::shape_gate::ShapeAudit::global().log();
+        (log.compared, log.divergences)
+    }
+
+    async fn shape_edit_outcomes(&self) -> Vec<Result<(), String>> {
+        self.shape_edit_outcomes
+            .lock()
+            .expect("shape_edit_outcomes poisoned")
+            .clone()
     }
 }
 

@@ -152,18 +152,22 @@ pub fn register_loro_operation_engine(
             Err(_) => block_ops,
         }
     };
-    let engine = loro_operation_engine(block_ops);
+    let bus = injector.resolve::<Arc<holon_api::ConditionBus>>();
+    let engine = loro_operation_engine(block_ops, (*bus).clone());
     injector.provide::<dyn OperationEngine>(Provider::root(move |_| engine.clone()));
 }
 
 /// The operation engine a no-Turso session dispatches through, over
 /// `block_ops`.
-pub fn loro_operation_engine(block_ops: LoroBlockOperations) -> Arc<dyn OperationEngine> {
+pub fn loro_operation_engine(
+    block_ops: LoroBlockOperations,
+    bus: Arc<holon_api::ConditionBus>,
+) -> Arc<dyn OperationEngine> {
+    let block_ops = Arc::new(block_ops);
     // Navigation ops (focus / back / forward / home) have no Turso substrate in
     // a Loro-only session; an in-memory provider keeps per-device focus history
     // so click / arrow / back-forward navigation dispatches succeed.
     let nav_ops = holon::navigation::InMemoryNavigationProvider::new();
-    let block_ops = Arc::new(block_ops);
     let mut dispatcher = OperationDispatcher::new(vec![
         block_ops.clone() as Arc<dyn OperationProvider>,
         Arc::new(nav_ops) as Arc<dyn OperationProvider>,
@@ -186,9 +190,19 @@ pub fn loro_operation_engine(block_ops: LoroBlockOperations) -> Arc<dyn Operatio
     dispatcher
         .assert_boundary_seam_installed()
         .expect("[loro_block_query_source] boundary-seam assembly check failed");
+    // The shape gate (Model.md invariant 17) reads the pre-write state from
+    // the Loro block store, which is this session's write authority.
+    dispatcher.set_shape_gate(
+        Arc::new(holon_core::ShapeValidators::registered()),
+        block_ops.clone() as Arc<dyn holon_core::WriteAuthorityReads>,
+        bus,
+    );
     dispatcher
         .assert_net_guard_installed()
         .expect("[loro_block_query_source] net-gate assembly check failed");
+    dispatcher
+        .assert_shape_gate_installed()
+        .expect("[loro_block_query_source] shape-gate assembly check failed");
     dispatcher
         .assert_declared_arcs_match_schema(&holon_api::schema::BuiltinSchemas)
         .expect("[loro_block_query_source] arc-schema assembly check failed");
@@ -546,7 +560,10 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         let store = Arc::new(RwLock::new(LoroDocumentStore::new(tmp.keep())));
-        let engine = loro_operation_engine(LoroBlockOperations::new(store.clone()));
+        let engine = loro_operation_engine(
+            LoroBlockOperations::new(store.clone()),
+            Arc::new(holon_api::ConditionBus::new()),
+        );
         let run = |op: &'static str, params: Vec<(&'static str, String)>| {
             let engine = engine.clone();
             async move {

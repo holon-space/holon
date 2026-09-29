@@ -668,7 +668,7 @@ impl EditorViewModel {
         params.insert("field".into(), Value::String(field.to_string()));
         params.insert("value".into(), Value::String(new_text.to_string()));
         params.insert("write_seq".into(), Value::Integer(seq.get()));
-        Ok(Some(OperationIntent::new(
+        Ok(Some(OperationIntent::from_editor(
             "block".into(),
             "set_field".into(),
             params,
@@ -999,7 +999,7 @@ impl EditorViewModel {
                 ..
             }) => {
                 self.route_commit_channel(&mut params);
-                Some(OperationIntent::new(entity_name, op_name, params))
+                Some(OperationIntent::from_editor(entity_name, op_name, params))
             }
             _ => None,
         }
@@ -1201,7 +1201,7 @@ impl EditorViewModel {
                 params,
                 strip_prefix_start,
             } => {
-                let intent = OperationIntent::new(entity_name, op_name, params);
+                let intent = OperationIntent::from_editor(entity_name, op_name, params);
                 match strip_prefix_start {
                     Some(strip_prefix_start) => EditorAction::ExecuteAndStripCommand {
                         intent,

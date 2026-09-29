@@ -310,7 +310,11 @@ impl<R: RefLifecycle + RefBlockTree + RefLayoutInteract + RefWiring + RefLayoutM
 
 crate::cap_transition! {
     SetEdgeField: SutEdgeFieldWrite,
-    where R: [ RefLifecycle + RefBlockTree + RefLayoutInteract + RefWiring + RefLayoutMutate ],
+    where R: [ RefLifecycle
+        + RefBlockTree
+        + RefLayoutInteract
+        + RefWiring
+        + RefLayoutMutate ],
     |me, _state, sut| {
         sut.apply_set_edge_field(&me.block_id, &me.update).await;
     }

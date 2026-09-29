@@ -70,6 +70,7 @@ use tokio::sync::RwLock;
 use crate::api::BackendEngine;
 use crate::api::operation_dispatcher::AuthoredInput;
 use crate::api::operation_dispatcher::OperationDispatcher;
+use crate::api::running_write::RunningWrite;
 use crate::core::sql_operation_provider::WriteSchema;
 
 #[async_trait]
@@ -80,6 +81,13 @@ impl OperationEngine for BackendEngine {
 
     fn run(&self, ticket: Ticket) -> BoxFuture<'static, Result<OpOutcome>> {
         self.run_ticket(ticket)
+    }
+
+    fn commit_keystroke(
+        &self,
+        keystroke: holon_api::SourceKeystroke,
+    ) -> BoxFuture<'static, Result<OpOutcome>> {
+        BackendEngine::commit_keystroke(self, keystroke)
     }
 
     async fn available_operations(&self, entity_name: &str) -> Vec<OperationDescriptor> {
@@ -303,6 +311,66 @@ fn state_in_ring(
 /// The id of the child that parks a merged-away block's body when BOTH sides
 /// carried content. Derived from the duplicate's id so a merge is idempotent
 /// in the id it mints and the block is greppable back to its origin.
+/// The writes one source line stands for. See
+/// `DispatchingOperationEngine::plan_source_write`.
+struct SourceWrite {
+    content: String,
+    keyword: String,
+    content_params: StorageEntity,
+    keyword_params: Option<StorageEntity>,
+    keyword_changed: bool,
+}
+
+/// Who is writing a block's source line: the editor's keystroke surface, or
+/// any other caller. Only [`OperationEngine::commit_keystroke`] names the
+/// first.
+#[derive(Clone, Copy)]
+enum SourceChannel {
+    Keystroke,
+    Write,
+}
+
+/// Which undo bucket a merge constituent's inverse belongs to.
+enum MergeStep {
+    Field,
+    Move,
+    DedupeMove,
+    DedupeField,
+    DedupeDelete,
+    Redirect,
+    Rewrite,
+    Delete,
+}
+
+#[derive(Default)]
+struct MergeBuckets {
+    forwards: Vec<Operation>,
+    all_changes: Vec<FieldDelta>,
+    field_invs: Vec<Operation>,
+    move_invs: Vec<Operation>,
+    dedupe_move_invs: Vec<Operation>,
+    dedupe_field_invs: Vec<Operation>,
+    dedupe_delete_invs: Vec<Operation>,
+    redirect_inv: Option<Operation>,
+    rewrite_inv: Option<Operation>,
+    delete_inv: Option<Operation>,
+}
+
+/// The write of `absorbed` as `to_id`'s merge provenance. This ONE property
+/// write is both the replicated redirect record and the `:merged-from:` the
+/// org round-trip carries; the `block_redirects` index is re-derived from it at
+/// the SQL write boundary, so the `set_field` inverse retracts both.
+fn merged_from_params(to_id: &str, absorbed: &[(String, i64)]) -> StorageEntity {
+    use crate::core::merge_blocks_plan::MERGED_FROM_FIELD;
+    use crate::core::merge_blocks_plan::render_merged_from;
+
+    let mut p = StorageEntity::new();
+    p.insert("id".into(), Value::String(to_id.to_string()));
+    p.insert("field".into(), Value::String(MERGED_FROM_FIELD.into()));
+    p.insert("value".into(), Value::String(render_merged_from(absorbed)));
+    p
+}
+
 fn merged_body_child_id(duplicate_id: &str) -> String {
     format!("{duplicate_id}-merged-body")
 }
@@ -767,6 +835,201 @@ impl DispatchingOperationEngine {
         Ok(())
     }
 
+    /// [`OperationDispatcher::execute_judged`] over `ops` as the run hands
+    /// them to the dispatcher, task-state writes classified: the judgement
+    /// sees, and then matches, the op that runs.
+    async fn judged_run<F, T>(
+        &self,
+        ops: &[Operation],
+        origin: &OpOrigin,
+        execute: F,
+    ) -> holon_core::Result<T>
+    where
+        F: std::future::Future<Output = holon_core::Result<T>>,
+    {
+        let classified = self.classified(ops).await?;
+        self.dispatcher
+            .execute_judged(&classified, origin, execute)
+            .await
+    }
+
+    /// `ops` with the task-state category each keyword write gets from its
+    /// document. A create under a block the same plan creates is classified
+    /// by the nearest ancestor that exists already.
+    async fn classified(&self, ops: &[Operation]) -> Result<Vec<Operation>> {
+        let mut planned_parents: HashMap<String, String> = HashMap::new();
+        let mut out = Vec::with_capacity(ops.len());
+        for op in ops {
+            let mut params: StorageEntity = op
+                .params
+                .iter()
+                .map(|(k, v)| (Arc::from(k.as_str()), v.clone()))
+                .collect();
+            if op.op_name == "create" {
+                let text = |key: &str| op.params.get(key).and_then(|v| v.as_string());
+                if let (Some(id), Some(parent)) = (text("id"), text("parent_id")) {
+                    let mut anchor = parent.to_string();
+                    while let Some(up) = planned_parents.get(&anchor) {
+                        anchor = up.clone();
+                    }
+                    params.insert("parent_id".into(), Value::String(anchor));
+                    planned_parents.insert(id.to_string(), parent.to_string());
+                }
+            }
+            let mut classified = self
+                .classify_task_state(&op.entity_name, &op.op_name, params)
+                .await?;
+            if let Some(parent) = op.params.get("parent_id") {
+                classified.insert("parent_id".into(), parent.clone());
+            }
+            out.push(Operation::new(
+                op.entity_name.clone(),
+                &op.op_name,
+                &op.display_name,
+                classified
+                    .into_iter()
+                    .map(|(k, v)| (k.to_string(), v))
+                    .collect(),
+            ));
+        }
+        Ok(out)
+    }
+
+    /// Run `execute`, which dispatches exactly `ops`, with the shape gate
+    /// judging them once as a whole. See
+    /// [`OperationDispatcher::execute_judged`].
+    pub async fn execute_judged<F, T>(
+        &self,
+        ops: &[Operation],
+        origin: &OpOrigin,
+        execute: F,
+    ) -> Result<T>
+    where
+        F: std::future::Future<Output = Result<T>>,
+    {
+        self.fenced_judged_run(ops, origin, async { execute.await.map_err(Into::into) })
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))
+    }
+
+    /// [`Self::judged_run`] holding a fence from the judgement to the plan's
+    /// last op, so no other write lands between what was judged and what
+    /// runs.
+    async fn fenced_judged_run<F, T>(
+        &self,
+        ops: &[Operation],
+        origin: &OpOrigin,
+        execute: F,
+    ) -> holon_core::Result<T>
+    where
+        F: std::future::Future<Output = holon_core::Result<T>>,
+    {
+        assert!(
+            !self.runs_fenced_plan(),
+            "a judged plan nested in another of the same engine would wait on its own fence"
+        );
+        let mut fence = self.admission.admit(Footprint::Fence);
+        fence.released().await;
+        // Boxed where it is built: every scope and combinator around it then
+        // moves a pointer, not the plan's future.
+        let plan = Box::pin(self.judged_run(ops, origin, execute));
+        let (outcome, _) = FENCED_PLAN
+            .scope(self.identity(), self.running_write(&fence).run(plan))
+            .await;
+        drop(fence);
+        outcome
+    }
+
+    /// [`Self::execute_admitted`] on the heap, built outside the caller's
+    /// frame: the caller wraps it in a running write per attempt, and a debug
+    /// build keeps a copy of the future per wrapper in that frame.
+    #[inline(never)]
+    fn boxed_admitted<'a>(
+        &'a self,
+        request: &'a OpRequest,
+    ) -> std::pin::Pin<Box<impl std::future::Future<Output = Result<OpOutcome>> + 'a>> {
+        Box::pin(self.execute_admitted(
+            &request.entity_name,
+            &request.op_name,
+            request.params.clone(),
+            request.origin.clone(),
+        ))
+    }
+
+    fn running_write(&self, claim: &holon_api::admission::Claim) -> RunningWrite {
+        RunningWrite::new(
+            claim.handle(),
+            #[cfg(feature = "dispatch-hold")]
+            Arc::clone(&self.dispatch_hold),
+        )
+    }
+
+    fn identity(&self) -> usize {
+        Arc::as_ptr(&self.state) as usize
+    }
+
+    /// Whether this task runs a judged plan of this engine, under its fence.
+    pub(crate) fn runs_fenced_plan(&self) -> bool {
+        FENCED_PLAN
+            .try_with(|engine| *engine == self.identity())
+            .unwrap_or(false)
+    }
+
+    /// Dispatch `ops` as ONE gesture: the shape gate judges them as one plan
+    /// (so a plan legal only as a whole lands, and an illegal one writes
+    /// nothing), and a user's plan is one undo entry.
+    pub async fn execute_plan(&self, ops: Vec<Operation>, origin: OpOrigin) -> Result<()> {
+        // A source-line write is judged as the content and keyword writes it
+        // stands for; the gate sees the writes, not the compound.
+        let mut expanded = Vec::with_capacity(ops.len());
+        for op in ops {
+            let is_source = op.entity_name.as_str() == "block"
+                && op.op_name == "set_field"
+                && op.params.get("field").and_then(|v| v.as_string()) == Some(SOURCE_TEXT_FIELD);
+            if !is_source {
+                expanded.push(op);
+                continue;
+            }
+            let params: StorageEntity = op
+                .params
+                .iter()
+                .map(|(k, v)| (Arc::from(k.as_str()), v.clone()))
+                .collect();
+            let write = self.plan_source_write(&params).await?;
+            for p in std::iter::once(write.content_params).chain(write.keyword_params) {
+                expanded.push(Operation::new(
+                    op.entity_name.clone(),
+                    "set_field",
+                    "set_field",
+                    p.iter().map(|(k, v)| (k.to_string(), v.clone())).collect(),
+                ));
+            }
+        }
+        let ops = expanded;
+        self.fenced_judged_run(&ops, &origin, async {
+            self.begin_undo_group().await;
+            let mut run: Result<()> = Ok(());
+            for op in &ops {
+                let params: StorageEntity = op
+                    .params
+                    .iter()
+                    .map(|(k, v)| (Arc::from(k.as_str()), v.clone()))
+                    .collect();
+                if let Err(e) = self
+                    .execute_nested(&op.entity_name, &op.op_name, params, origin.clone())
+                    .await
+                {
+                    run = Err(e);
+                    break;
+                }
+            }
+            self.end_undo_group().await?;
+            run.map_err(Into::into)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))
+    }
+
     /// Open a composite-undo group (Inc1). While open, every User-origin op
     /// dispatched through [`execute_operation`](Self::execute_operation) is
     /// buffered into ONE composite [`UndoEntry`] instead of pushing its own —
@@ -1024,6 +1287,14 @@ impl DispatchingOperationEngine {
         let rehomed = self
             .rehomed_root(&op.entity_name, &op.op_name, &params)
             .await?;
+        self.claim_follow_ups(
+            &op.entity_name,
+            &op.op_name,
+            &params,
+            rehomed.as_ref(),
+            &OpOrigin::User,
+        )
+        .await?;
         let mut result = self
             .dispatcher
             .execute_operation(&op.entity_name, &op.op_name, params)
@@ -1126,32 +1397,58 @@ impl DispatchingOperationEngine {
         // leaf-first deletes, so one undo removes every instance block). A
         // Rule/Sync-origin instantiation buffers nothing (the push is
         // User-gated), so its group materializes NOTHING.
-        self.begin_undo_group().await;
-        let fanout: Result<()> = async {
-            for create_params in creates {
-                // A nested instantiate cannot occur: the plan only emits `create`.
-                self.execute_nested(&block_entity, "create", create_params, origin.clone())
-                    .await?;
-            }
-            // Empty→in-place placement (frontend picker): the instance is created,
-            // now delete the empty block it supersedes. Ordered AFTER the creates
-            // so a failed instantiation never destroys the target (the block is
-            // empty, so this never touches existing content). Routed through the
-            // normal `delete` op → provenance/history/undo classification apply.
-            if let Some(replace_id) = &replace_block {
-                let mut del_params: StorageEntity = StorageEntity::default();
-                del_params.insert(Arc::from("id"), Value::String(replace_id.clone()));
-                self.execute_nested(&block_entity, "delete", del_params, origin.clone())
-                    .await?;
-            }
-            Ok(())
+        let mut plan: Vec<Operation> = creates
+            .iter()
+            .map(|p| {
+                Operation::new(
+                    block_entity.clone(),
+                    "create",
+                    "create",
+                    p.iter().map(|(k, v)| (k.to_string(), v.clone())).collect(),
+                )
+            })
+            .collect();
+        if let Some(replace_id) = &replace_block {
+            plan.push(Operation::new(
+                block_entity.clone(),
+                "delete",
+                "delete",
+                std::collections::HashMap::from([(
+                    "id".to_string(),
+                    Value::String(replace_id.clone()),
+                )]),
+            ));
         }
-        .await;
-        // ALWAYS close the group — even on a mid-fan-out failure — so a partial
-        // instantiation is ONE undoable composite (of the sub-ops that landed)
-        // and never leaks an open group into the next operation.
-        self.end_undo_group().await?;
-        fanout?;
+        self.judged_run(&plan, origin, async {
+            self.begin_undo_group().await;
+            let fanout: Result<()> = async {
+                for create_params in creates {
+                    // A nested instantiate cannot occur: the plan only emits `create`.
+                    self.execute_nested(&block_entity, "create", create_params, origin.clone())
+                        .await?;
+                }
+                // Empty→in-place placement (frontend picker): the instance
+                // is created, now delete the empty block it supersedes.
+                // Ordered AFTER the creates so a failed instantiation never
+                // destroys the target.
+                if let Some(replace_id) = &replace_block {
+                    let mut del_params: StorageEntity = StorageEntity::default();
+                    del_params.insert(Arc::from("id"), Value::String(replace_id.clone()));
+                    self.execute_nested(&block_entity, "delete", del_params, origin.clone())
+                        .await?;
+                }
+                Ok(())
+            }
+            .await;
+            // ALWAYS close the group — even on a mid-fan-out failure — so a
+            // partial instantiation is ONE undoable composite (of the sub-ops
+            // that landed) and never leaks an open group into the next
+            // operation.
+            self.end_undo_group().await?;
+            fanout.map_err(Into::into)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("instantiate_template: {e}"))?;
         Ok(Some(Value::String(root_id)))
     }
 
@@ -1204,6 +1501,8 @@ impl DispatchingOperationEngine {
         let block = EntityName::new("block");
         let params = self.classify_task_state(&block, op_name, params).await?;
         let rehomed = self.rehomed_root(&block, op_name, &params).await?;
+        self.claim_follow_ups(&block, op_name, &params, rehomed.as_ref(), origin)
+            .await?;
         let result = self
             .dispatcher
             .execute_operation_with_provenance(
@@ -1363,24 +1662,17 @@ impl DispatchingOperationEngine {
         // order (each child's move-back anchors on its original predecessor, so
         // C1 must land before C2), and delete the hierarchy leaf→root.
         let page_tag = || Value::Array(vec![Value::String(PAGE_TAG.to_string())]);
-        let mut forwards: Vec<Operation> = Vec::new();
-        let mut seg_invs: Vec<Operation> = Vec::new();
-        let mut child_invs: Vec<Operation> = Vec::new();
-        let mut all_changes: Vec<FieldDelta> = Vec::new();
 
         // 2. Create any missing destination-hierarchy pages, root→leaf. Each is an
         //    invertible `create` (inverse: delete).
+        let mut seg_params = Vec::new();
         for seg in &plan.missing_segments {
             let mut p = StorageEntity::new();
             p.insert("id".into(), Value::String(seg.id.clone()));
             p.insert("content".into(), Value::String(seg.name.clone()));
             p.insert("parent_id".into(), Value::String(seg.parent_id.clone()));
             p.insert("tags".into(), page_tag());
-            let p = self.stamp_provenance("create", p, origin)?;
-            let (fwd, inv, ch) = self.dispatch_constituent("create", p, origin).await?;
-            forwards.push(fwd);
-            seg_invs.push(inv);
-            all_changes.extend(ch);
+            seg_params.push(self.stamp_provenance("create", p, origin)?);
         }
 
         // 3. Create the new page P, moving the origin's content (+ marks) onto it.
@@ -1404,13 +1696,11 @@ impl DispatchingOperationEngine {
             pc.insert("marks".into(), Value::String(marks.clone()));
         }
         let pc = self.stamp_provenance("create", pc, origin)?;
-        let (fwd, p_inv, ch) = self.dispatch_constituent("create", pc, origin).await?;
-        forwards.push(fwd);
-        all_changes.extend(ch);
 
         // 4. Re-home each child under P, preserving sibling order (after_block_id = the
         //    previous child). move_block inverse restores the child's original parent +
         //    predecessor exactly.
+        let mut move_params = Vec::new();
         let mut prev: Option<String> = None;
         for child in &plan.child_ids {
             let mut mp = StorageEntity::new();
@@ -1436,10 +1726,7 @@ impl DispatchingOperationEngine {
                     mp.insert("after_block_id".into(), Value::Null);
                 }
             }
-            let (fwd, inv, ch) = self.dispatch_constituent("move_block", mp, origin).await?;
-            forwards.push(fwd);
-            child_invs.push(inv);
-            all_changes.extend(ch);
+            move_params.push(mp);
             prev = Some(child.clone());
         }
 
@@ -1469,20 +1756,75 @@ impl DispatchingOperationEngine {
         sf.insert("id".into(), Value::String(plan.origin_id.clone()));
         sf.insert("field".into(), Value::String("marks".into()));
         sf.insert("value".into(), Value::String(marks_to_json(&link_marks)));
-        let (fwd, marks_inv, ch) = self.dispatch_constituent("set_field", sf, origin).await?;
-        forwards.push(fwd);
-        all_changes.extend(ch);
 
         // 6. Re-point inbound backlinks origin → P (exact capture-based inverse
         //    `restore_link_resolution`).
         let mut rw = StorageEntity::new();
         rw.insert("from".into(), Value::String(plan.origin_id.clone()));
         rw.insert("to".into(), Value::String(plan.page_id.clone()));
-        let (fwd, rewrite_inv, ch) = self
-            .dispatch_constituent("rewrite_link_resolution", rw, origin)
-            .await?;
-        forwards.push(fwd);
-        all_changes.extend(ch);
+
+        // The whole transform is ONE plan to the shape gate.
+        let as_op = |name: &str, p: &StorageEntity| {
+            Operation::new(
+                block.clone(),
+                name,
+                name,
+                p.iter().map(|(k, v)| (k.to_string(), v.clone())).collect(),
+            )
+        };
+        let mut plan_ops: Vec<Operation> = seg_params.iter().map(|p| as_op("create", p)).collect();
+        plan_ops.push(as_op("create", &pc));
+        plan_ops.extend(move_params.iter().map(|p| as_op("move_block", p)));
+        plan_ops.push(as_op("set_field", &sf));
+        plan_ops.push(as_op("rewrite_link_resolution", &rw));
+
+        // Inverses are bucketed per step, NOT blanket-reversed: the undo order
+        // must reverse the STEPS while keeping the child re-homes in FORWARD
+        // order (each child's move-back anchors on its original predecessor, so
+        // C1 must land before C2), and delete the hierarchy leaf→root.
+        let (forwards, mut seg_invs, p_inv, child_invs, marks_inv, rewrite_inv, all_changes) = self
+            .judged_run(&plan_ops, origin, async {
+                let mut forwards: Vec<Operation> = Vec::new();
+                let mut seg_invs: Vec<Operation> = Vec::new();
+                let mut child_invs: Vec<Operation> = Vec::new();
+                let mut all_changes: Vec<FieldDelta> = Vec::new();
+                for p in seg_params {
+                    let (fwd, inv, ch) = self.dispatch_constituent("create", p, origin).await?;
+                    forwards.push(fwd);
+                    seg_invs.push(inv);
+                    all_changes.extend(ch);
+                }
+                let (fwd, p_inv, ch) = self.dispatch_constituent("create", pc, origin).await?;
+                forwards.push(fwd);
+                all_changes.extend(ch);
+                for mp in move_params {
+                    let (fwd, inv, ch) =
+                        self.dispatch_constituent("move_block", mp, origin).await?;
+                    forwards.push(fwd);
+                    child_invs.push(inv);
+                    all_changes.extend(ch);
+                }
+                let (fwd, marks_inv, ch) =
+                    self.dispatch_constituent("set_field", sf, origin).await?;
+                forwards.push(fwd);
+                all_changes.extend(ch);
+                let (fwd, rewrite_inv, ch) = self
+                    .dispatch_constituent("rewrite_link_resolution", rw, origin)
+                    .await?;
+                forwards.push(fwd);
+                all_changes.extend(ch);
+                Ok::<_, Box<dyn std::error::Error + Send + Sync>>((
+                    forwards,
+                    seg_invs,
+                    p_inv,
+                    child_invs,
+                    marks_inv,
+                    rewrite_inv,
+                    all_changes,
+                ))
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
 
         // Compose ONE undo entry. Redo re-executes the forward constituents in
         // order. Undo replays the STEPS in reverse: restore inbound links →
@@ -2022,6 +2364,45 @@ impl DispatchingOperationEngine {
         Ok(())
     }
 
+    /// Claim, before `op_name` runs, the tagged blocks its follow-up writes
+    /// can shape: the categories [`Self::recategorize`] re-derives below
+    /// `rehomed`, and the keyword repair [`Self::converge_after_write`] makes
+    /// of a text the provider computes. Those writes are known only after the
+    /// op landed, and a claim refused then would leave it landed in part.
+    async fn claim_follow_ups(
+        &self,
+        entity_name: &EntityName,
+        op_name: &str,
+        params: &StorageEntity,
+        rehomed: Option<&EntityUri>,
+        origin: &OpOrigin,
+    ) -> Result<()> {
+        if entity_name.as_str() != "block" {
+            return Ok(());
+        }
+        let targets = match op_name {
+            "split_block" | "join_block" => {
+                let id = params
+                    .get("id")
+                    .and_then(|v| v.as_string())
+                    .ok_or_else(|| anyhow::anyhow!("{op_name}: no `id` param"))?;
+                // ALLOW(entity_uri_from_raw): the operation's own block id.
+                vec![EntityUri::from_raw(id)]
+            }
+            _ => Vec::new(),
+        };
+        let subtrees: Vec<EntityUri> = rehomed.into_iter().cloned().collect();
+        if targets.is_empty() && subtrees.is_empty() {
+            return Ok(());
+        }
+        self.dispatcher
+            .claim_neighbourhood(op_name, &targets, &subtrees, origin)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!("Operation '{op_name}' on entity '{entity_name}' failed: {e}")
+            })
+    }
+
     /// Re-derive the stored `task_state_category` of every task block at or
     /// below `root` from its document's ring, read from the write authority.
     /// The category is derived data, so the write takes no undo step: every
@@ -2539,15 +2920,12 @@ impl DispatchingOperationEngine {
         promotion: &holon_org_format::Promotion,
         origin: &OpOrigin,
     ) -> Result<(Operation, Operation, Vec<FieldDelta>)> {
-        let mut p = StorageEntity::new();
-        p.insert("id".into(), Value::String(id.to_string()));
-        p.insert("field".into(), Value::String("task_state".into()));
-        p.insert(
-            "value".into(),
-            Value::String(promotion.keyword.keyword.clone()),
-        );
-        self.dispatch_task_keyword_constituent(CONVERGE_TASK_KEYWORD_OP, p, origin)
-            .await
+        self.dispatch_task_keyword_constituent(
+            CONVERGE_TASK_KEYWORD_OP,
+            converged_task_state(id, promotion),
+            origin,
+        )
+        .await
     }
 
     /// Write a block's full vault source: parse [`SOURCE_TEXT_FIELD`] under the
@@ -2560,11 +2938,9 @@ impl DispatchingOperationEngine {
     /// yields the task it spells; source that is not yields plain content AND
     /// clears any `task_state` the block carried, which is how a user deletes
     /// the keyword out of the editable surface and demotes the block.
-    async fn run_set_source_text(
-        &self,
-        params: &StorageEntity,
-        origin: &OpOrigin,
-    ) -> Result<Option<Value>> {
+    /// The writes a source line stands for: its content, and its keyword when
+    /// it has one or the block had one to clear.
+    async fn plan_source_write(&self, params: &StorageEntity) -> Result<SourceWrite> {
         use holon_org_format::converge_keyword_headed;
 
         let id = params
@@ -2616,30 +2992,80 @@ impl DispatchingOperationEngine {
         // The provider reports property writes without a field delta, so the
         // delta-only vacuity test would judge that gesture unundoable.
         let keyword_changed = prior_keyword.unwrap_or_default() != keyword;
+        Ok(SourceWrite {
+            content_params: constituent("content", &content),
+            keyword_params: (!clears_nothing).then(|| constituent("task_state", &keyword)),
+            content,
+            keyword,
+            keyword_changed,
+        })
+    }
 
-        let (c_fwd, c_inv, mut changes) = self
-            .dispatch_task_keyword_constituent(
-                SOURCE_TEXT_FIELD,
-                constituent("content", &content),
-                origin,
-            )
-            .await?;
-        let mut forwards = vec![c_fwd];
-        // Leaf-first: undo drops the task state before restoring the text it
-        // was derived from.
-        let mut inverses = vec![c_inv];
-        if !clears_nothing {
-            let (t_fwd, t_inv, t_changes) = self
+    async fn run_set_source_text(
+        &self,
+        params: &StorageEntity,
+        origin: &OpOrigin,
+        channel: SourceChannel,
+    ) -> Result<Option<Value>> {
+        let SourceWrite {
+            content,
+            keyword,
+            content_params,
+            keyword_params,
+            keyword_changed,
+        } = self.plan_source_write(params).await?;
+        let clears_nothing = keyword_params.is_none();
+
+        let write = async {
+            let (c_fwd, c_inv, mut changes) = self
                 .dispatch_task_keyword_constituent(
                     SOURCE_TEXT_FIELD,
-                    constituent("task_state", &keyword),
+                    content_params.clone(),
                     origin,
                 )
                 .await?;
-            changes.extend(t_changes);
-            forwards.push(t_fwd);
-            inverses.insert(0, t_inv);
+            let mut forwards = vec![c_fwd];
+            // Leaf-first: undo drops the task state before restoring the
+            // text it was derived from.
+            let mut inverses = vec![c_inv];
+            if !clears_nothing {
+                let (t_fwd, t_inv, t_changes) = self
+                    .dispatch_task_keyword_constituent(
+                        SOURCE_TEXT_FIELD,
+                        keyword_params.clone().expect("a keyword write is planned"),
+                        origin,
+                    )
+                    .await?;
+                changes.extend(t_changes);
+                forwards.push(t_fwd);
+                inverses.insert(0, t_inv);
+            }
+            Ok::<_, Box<dyn std::error::Error + Send + Sync>>((forwards, inverses, changes))
+        };
+        let (forwards, inverses, changes) = match channel {
+            // The editor's typing surface: a keystroke is never refused by a
+            // tagged shape (Model.md invariant 17).
+            SourceChannel::Keystroke => self.dispatcher.as_keystroke(write).await,
+            // Any other caller's source write is judged like any other write:
+            // its content and keyword writes as one plan.
+            SourceChannel::Write => {
+                let block = EntityName::new("block");
+                let as_op = |p: &StorageEntity| {
+                    Operation::new(
+                        block.clone(),
+                        "set_field",
+                        "set_field",
+                        p.iter().map(|(k, v)| (k.to_string(), v.clone())).collect(),
+                    )
+                };
+                let plan: Vec<Operation> = std::iter::once(&content_params)
+                    .chain(keyword_params.as_ref())
+                    .map(as_op)
+                    .collect();
+                self.judged_run(&plan, origin, write).await
+            }
         }
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
 
         if origin.is_user() && (keyword_changed || !Self::changes_are_vacuous(&changes)) {
             let entry = UndoEntry {
@@ -2768,19 +3194,12 @@ impl DispatchingOperationEngine {
         #[cfg(feature = "test-yield")]
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
-        // Inverses are bucketed per STEP so undo can replay the steps in reverse,
-        // each bucket in strict LIFO of its own forward ops (see the assembly).
-        let mut forwards: Vec<Operation> = Vec::new();
-        let mut move_invs: Vec<Operation> = Vec::new();
-        let mut dedupe_move_invs: Vec<Operation> = Vec::new();
-        let mut dedupe_field_invs: Vec<Operation> = Vec::new();
-        let mut dedupe_delete_invs: Vec<Operation> = Vec::new();
-        let mut field_invs: Vec<Operation> = Vec::new();
-        let mut all_changes: Vec<FieldDelta> = Vec::new();
-        // Rows this merge REMOVES. Their deltas must stay out of the staleness
-        // fingerprint: the guard reads the field back from `block_raw`, and a
-        // deleted row answers nothing, so fingerprinting it would make every
-        // merge's undo read as stale.
+        // Every constituent is planned first, so the shape gate judges the whole
+        // merge as ONE plan. Rows this merge REMOVES are collected too: their
+        // deltas must stay out of the staleness fingerprint, since the guard
+        // reads the field back from `block_raw` and a deleted row answers
+        // nothing.
+        let mut steps: Vec<(MergeStep, &'static str, StorageEntity)> = Vec::new();
         let mut removed: Vec<String> = vec![plan.duplicate_id.clone()];
 
         // 2. Content: the canonical wins. An empty canonical adopts the duplicate's
@@ -2807,12 +3226,7 @@ impl DispatchingOperationEngine {
                 "value".into(),
                 Value::String(plan.duplicate_content.clone()),
             );
-            let (fwd, inv, ch) = self
-                .dispatch_merge_constituent("set_field", sf, origin)
-                .await?;
-            forwards.push(fwd);
-            field_invs.push(inv);
-            all_changes.extend(ch);
+            steps.push((MergeStep::Field, "set_field", sf));
         } else if !duplicate_norm.is_empty()
             && duplicate_norm != canonical_norm
             && !body_already_present
@@ -2829,12 +3243,7 @@ impl DispatchingOperationEngine {
             cp.insert("parent_id".into(), Value::String(plan.canonical_id.clone()));
             cp.insert("after_block_id".into(), Value::Null);
             let cp = self.stamp_provenance("create", cp, origin)?;
-            let (fwd, inv, ch) = self
-                .dispatch_merge_constituent("create", cp, origin)
-                .await?;
-            forwards.push(fwd);
-            field_invs.push(inv);
-            all_changes.extend(ch);
+            steps.push((MergeStep::Field, "create", cp));
         }
 
         // 3. Move the duplicate's children under the canonical, appended after its last
@@ -2877,12 +3286,7 @@ impl DispatchingOperationEngine {
                         .to_string(),
                 ),
             );
-            let (fwd, inv, ch) = self
-                .dispatch_merge_constituent("move_block", mp, origin)
-                .await?;
-            forwards.push(fwd);
-            move_invs.push(inv);
-            all_changes.extend(ch);
+            steps.push((MergeStep::Move, "move_block", mp));
         }
 
         // 4. One-level dedupe: each loser's children are re-homed under the keeper
@@ -2917,12 +3321,7 @@ impl DispatchingOperationEngine {
                                 .to_string(),
                         ),
                     );
-                    let (fwd, inv, ch) = self
-                        .dispatch_merge_constituent("move_block", mp, origin)
-                        .await?;
-                    forwards.push(fwd);
-                    dedupe_move_invs.push(inv);
-                    all_changes.extend(ch);
+                    steps.push((MergeStep::DedupeMove, "move_block", mp));
                 }
                 // The next loser's orphans append after this loser's, which now
                 // sit at the keeper's tail.
@@ -2931,21 +3330,15 @@ impl DispatchingOperationEngine {
                 }
                 // The loser's id keeps resolving, to the keeper.
                 absorbed.push((loser.id.clone(), plan.merged_at));
-                let (fwd, inv, ch) = self
-                    .write_merged_from(&group.keeper, &absorbed, origin)
-                    .await?;
-                forwards.push(fwd);
-                dedupe_field_invs.push(inv);
-                all_changes.extend(ch);
+                steps.push((
+                    MergeStep::DedupeField,
+                    "set_field",
+                    merged_from_params(&group.keeper, &absorbed),
+                ));
 
                 let mut dp = StorageEntity::new();
                 dp.insert("id".into(), Value::String(loser.id.clone()));
-                let (fwd, inv, ch) = self
-                    .dispatch_merge_constituent("delete", dp, origin)
-                    .await?;
-                forwards.push(fwd);
-                dedupe_delete_invs.push(inv);
-                all_changes.extend(ch);
+                steps.push((MergeStep::DedupeDelete, "delete", dp));
                 removed.push(loser.id.clone());
             }
         }
@@ -2964,24 +3357,14 @@ impl DispatchingOperationEngine {
                     .collect(),
             ),
         );
-        let (fwd, inv, ch) = self
-            .dispatch_merge_constituent("set_field", tp, origin)
-            .await?;
-        forwards.push(fwd);
-        field_invs.push(inv);
-        all_changes.extend(ch);
+        steps.push((MergeStep::Field, "set_field", tp));
 
         for (key, value) in &plan.adopted_properties {
             let mut pp = StorageEntity::new();
             pp.insert("id".into(), Value::String(plan.canonical_id.clone()));
             pp.insert("field".into(), Value::String(key.clone()));
             pp.insert("value".into(), value.clone());
-            let (fwd, inv, ch) = self
-                .dispatch_merge_constituent("set_field", pp, origin)
-                .await?;
-            forwards.push(fwd);
-            field_invs.push(inv);
-            all_changes.extend(ch);
+            steps.push((MergeStep::Field, "set_field", pp));
         }
 
         // 6. Provenance + redirect in ONE write: `merged_from` is the replicated fact,
@@ -2989,31 +3372,79 @@ impl DispatchingOperationEngine {
         //    undo's property removal retracts the redirect too).
         let mut absorbed = plan.existing_merged_from.clone();
         absorbed.push((plan.duplicate_id.clone(), plan.merged_at));
-        let (fwd, redirect_inv, ch) = self
-            .write_merged_from(&plan.canonical_id, &absorbed, origin)
-            .await?;
-        forwards.push(fwd);
-        all_changes.extend(ch);
+        steps.push((
+            MergeStep::Redirect,
+            "set_field",
+            merged_from_params(&plan.canonical_id, &absorbed),
+        ));
 
         // 7. Re-point inbound links duplicate → canonical (exact capture-based
         //    inverse).
         let mut rw = StorageEntity::new();
         rw.insert("from".into(), Value::String(plan.duplicate_id.clone()));
         rw.insert("to".into(), Value::String(plan.canonical_id.clone()));
-        let (fwd, rewrite_inv, ch) = self
-            .dispatch_merge_constituent("rewrite_link_resolution", rw, origin)
-            .await?;
-        forwards.push(fwd);
-        all_changes.extend(ch);
+        steps.push((MergeStep::Rewrite, "rewrite_link_resolution", rw));
 
         // 8. The duplicate is now childless and its id redirects; delete it.
         let mut dp = StorageEntity::new();
         dp.insert("id".into(), Value::String(plan.duplicate_id.clone()));
-        let (fwd, delete_inv, ch) = self
-            .dispatch_merge_constituent("delete", dp, origin)
-            .await?;
-        forwards.push(fwd);
-        all_changes.extend(ch);
+        steps.push((MergeStep::Delete, "delete", dp));
+
+        let plan_ops: Vec<Operation> = steps
+            .iter()
+            .map(|(_, name, p)| {
+                Operation::new(
+                    block.clone(),
+                    *name,
+                    *name,
+                    p.iter().map(|(k, v)| (k.to_string(), v.clone())).collect(),
+                )
+            })
+            .collect();
+
+        // Inverses are bucketed per STEP so undo can replay the steps in reverse,
+        // each bucket in strict LIFO of its own forward ops (see the assembly).
+        let mut buckets = self
+            .judged_run(&plan_ops, origin, async {
+                let mut buckets = MergeBuckets::default();
+                for (step, name, p) in steps {
+                    let (fwd, inv, ch) = self.dispatch_merge_constituent(name, p, origin).await?;
+                    buckets.forwards.push(fwd);
+                    buckets.all_changes.extend(ch);
+                    match step {
+                        MergeStep::Field => buckets.field_invs.push(inv),
+                        MergeStep::Move => buckets.move_invs.push(inv),
+                        MergeStep::DedupeMove => buckets.dedupe_move_invs.push(inv),
+                        MergeStep::DedupeField => buckets.dedupe_field_invs.push(inv),
+                        MergeStep::DedupeDelete => buckets.dedupe_delete_invs.push(inv),
+                        MergeStep::Redirect => buckets.redirect_inv = Some(inv),
+                        MergeStep::Rewrite => buckets.rewrite_inv = Some(inv),
+                        MergeStep::Delete => buckets.delete_inv = Some(inv),
+                    }
+                }
+                Ok::<_, Box<dyn std::error::Error + Send + Sync>>(buckets)
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let forwards = std::mem::take(&mut buckets.forwards);
+        let all_changes = std::mem::take(&mut buckets.all_changes);
+        let mut field_invs = std::mem::take(&mut buckets.field_invs);
+        let mut move_invs = std::mem::take(&mut buckets.move_invs);
+        let mut dedupe_move_invs = std::mem::take(&mut buckets.dedupe_move_invs);
+        let mut dedupe_field_invs = std::mem::take(&mut buckets.dedupe_field_invs);
+        let mut dedupe_delete_invs = std::mem::take(&mut buckets.dedupe_delete_invs);
+        let redirect_inv = buckets
+            .redirect_inv
+            .take()
+            .expect("the merge plan always writes the redirect");
+        let rewrite_inv = buckets
+            .rewrite_inv
+            .take()
+            .expect("the merge plan always rewrites inbound links");
+        let delete_inv = buckets
+            .delete_inv
+            .take()
+            .expect("the merge plan always deletes the duplicate");
 
         // Undo replays the steps in reverse: re-create the duplicate → restore
         // inbound links → drop the redirect → restore fields → undo the dedupe
@@ -3115,27 +3546,6 @@ impl DispatchingOperationEngine {
             carry_confirmation(&forward_params, inverse),
             result.changes,
         ))
-    }
-
-    /// Write `absorbed` as `to_id`'s merge provenance. This ONE property write
-    /// is both the replicated redirect record and the `:merged-from:` the org
-    /// round-trip carries; the `block_redirects` index is re-derived from it at
-    /// the SQL write boundary, so the `set_field` inverse retracts both.
-    async fn write_merged_from(
-        &self,
-        to_id: &str,
-        absorbed: &[(String, i64)],
-        origin: &OpOrigin,
-    ) -> Result<(Operation, Operation, Vec<FieldDelta>)> {
-        use crate::core::merge_blocks_plan::MERGED_FROM_FIELD;
-        use crate::core::merge_blocks_plan::render_merged_from;
-
-        let mut p = StorageEntity::new();
-        p.insert("id".into(), Value::String(to_id.to_string()));
-        p.insert("field".into(), Value::String(MERGED_FROM_FIELD.into()));
-        p.insert("value".into(), Value::String(render_merged_from(absorbed)));
-        self.dispatch_merge_constituent("set_field", p, origin)
-            .await
     }
 
     /// The synthetic descriptor advertising the engine-level `merge_blocks` op
@@ -3619,7 +4029,7 @@ impl DispatchingOperationEngine {
 /// `params` of a block `op_name` with `carriers` written alongside: a `create`
 /// takes each carrier the text gives as a property, and a `set_field` names
 /// its one carrier as the field.
-fn with_parsed_carriers(
+pub fn with_parsed_carriers(
     entity_name: &EntityName,
     op_name: &str,
     mut params: StorageEntity,
@@ -3671,6 +4081,29 @@ fn with_parsed_carriers(
     Ok(params)
 }
 
+tokio::task_local! {
+    /// The engine (by [`DispatchingOperationEngine::identity`]) whose judged
+    /// plan this task runs under that engine's fence: the plan's own ops run
+    /// inside the fence instead of queueing behind it.
+    static FENCED_PLAN: usize;
+}
+
+/// How often a write whose shape claim closes a wait cycle runs before its
+/// error stands.
+const SHAPE_CLAIM_ATTEMPTS: usize = 3;
+
+/// The `task_state` write that pairs a converged content write.
+fn converged_task_state(id: &str, promotion: &holon_org_format::Promotion) -> StorageEntity {
+    let mut p = StorageEntity::new();
+    p.insert("id".into(), Value::String(id.to_string()));
+    p.insert("field".into(), Value::String("task_state".into()));
+    p.insert(
+        "value".into(),
+        Value::String(promotion.keyword.keyword.clone()),
+    );
+    p
+}
+
 /// Refuse what no caller may send and fold the parser's `carriers` into the
 /// params.
 fn prepare_request(
@@ -3696,7 +4129,8 @@ fn prepare_request(
 }
 
 /// What `request` may write, as admission orders it: the entities its params
-/// name. Compounds and whole-source writes reach past those, so they run alone.
+/// name. Compounds reach past those, so they run alone. A source-line write
+/// writes only its own block's content and keyword.
 fn footprint_of(request: &OpRequest) -> Footprint {
     const FENCED_OPS: [&str; 8] = [
         "delete_subtree",
@@ -3708,12 +4142,7 @@ fn footprint_of(request: &OpRequest) -> Footprint {
         ACCEPT_PROPOSAL_OP,
         REJECT_PROPOSAL_OP,
     ];
-    let writes_source_text = request.op_name == "set_field"
-        && request.params.get("field").and_then(Value::as_string) == Some(SOURCE_TEXT_FIELD);
-    if request.entity_name.is_wildcard()
-        || FENCED_OPS.contains(&request.op_name.as_str())
-        || writes_source_text
-    {
+    if request.entity_name.is_wildcard() || FENCED_OPS.contains(&request.op_name.as_str()) {
         return Footprint::Fence;
     }
     let subjects: std::collections::BTreeSet<EntityUri> = request
@@ -3764,6 +4193,11 @@ impl DispatchingOperationEngine {
         carriers: &[ParsedCarrier],
         origin: OpOrigin,
     ) -> Result<Ticket> {
+        anyhow::ensure!(
+            !self.runs_fenced_plan(),
+            "'{op_name}' on '{entity_name}' asks for a ticket inside a judged plan, which would \
+             wait on the plan's own fence; dispatch it with `execute_with_parsed_carriers`"
+        );
         let request = prepare_request(entity_name, op_name, params, carriers, origin)?;
         #[cfg(feature = "dispatch-hold")]
         self.dispatch_hold
@@ -3781,6 +4215,21 @@ impl DispatchingOperationEngine {
         carriers: &[ParsedCarrier],
         origin: OpOrigin,
     ) -> BoxFuture<'static, Result<OpOutcome>> {
+        if self.runs_fenced_plan() {
+            let engine = self.share();
+            let request = prepare_request(entity_name, op_name, params, carriers, origin);
+            return Box::pin(async move {
+                let request = request?;
+                engine
+                    .execute_admitted(
+                        &request.entity_name,
+                        &request.op_name,
+                        request.params,
+                        request.origin,
+                    )
+                    .await
+            });
+        }
         match self.admit_with_parsed_carriers(entity_name, op_name, params, carriers, origin) {
             Ok(ticket) => OperationEngine::run(self, ticket),
             Err(e) => Box::pin(std::future::ready(Err(e))),
@@ -3795,19 +4244,43 @@ impl DispatchingOperationEngine {
             claim.seq(),
             request.op_name
         );
-        claim.released().await;
-        let OpRequest {
-            entity_name,
-            op_name,
-            params,
-            origin,
-        } = request;
         // The claim is held until the journal entry and history record landed.
-        let outcome = self
-            .execute_admitted(&entity_name, &op_name, params, origin)
-            .await;
-        drop(claim);
-        outcome
+        // A write whose shape claim closed a wait cycle before it wrote
+        // anything gives up its place and is admitted again; the write it
+        // waited on then goes first.
+        for attempt in 1..=SHAPE_CLAIM_ATTEMPTS {
+            claim.released().await;
+            let (outcome, run) = self
+                .running_write(&claim)
+                .run(self.boxed_admitted(&request))
+                .await;
+            let retry = outcome.is_err() && run.refused && !run.ran;
+            if !retry {
+                drop(claim);
+                return outcome;
+            }
+            if attempt == SHAPE_CLAIM_ATTEMPTS {
+                drop(claim);
+                return anyhow::Context::with_context(outcome, || {
+                    format!(
+                        "'{}' on '{}' had its shape claim refused {SHAPE_CLAIM_ATTEMPTS} times \
+                         and wrote nothing",
+                        request.op_name, request.entity_name
+                    )
+                });
+            }
+            let refused = claim.seq();
+            drop(claim);
+            claim = self.admission.admit(footprint_of(&request));
+            tracing::warn!(
+                refused,
+                readmitted = claim.seq(),
+                "[admission] '{}' on '{}' closed a wait cycle at its shape claim; admitted again",
+                request.op_name,
+                request.entity_name
+            );
+        }
+        unreachable!("the last attempt returns")
     }
 
     /// Dispatch an op from inside a run, whose admission already covers it.
@@ -3916,7 +4389,7 @@ impl DispatchingOperationEngine {
             && params.get("field").and_then(|v| v.as_string()) == Some(SOURCE_TEXT_FIELD)
         {
             return self
-                .run_set_source_text(&params, &origin)
+                .run_set_source_text(&params, &origin, SourceChannel::Write)
                 .await
                 .map(OpOutcome::proven);
         }
@@ -3985,7 +4458,27 @@ impl DispatchingOperationEngine {
                 .collect(),
         );
 
+        // The converged keyword lands after the write itself: what the two
+        // shape together is claimed first, so the keyword write cannot be
+        // refused its claim once the text landed.
+        if let Some((id, promotion)) = &converged {
+            let keyword = self
+                .classify_task_state(
+                    entity_name,
+                    "set_field",
+                    converged_task_state(id, promotion),
+                )
+                .await?;
+            self.dispatcher
+                .claim_shape_of(&[(op_name, &params), ("set_field", &keyword)], &origin)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!("Operation '{op_name}' on entity '{entity_name}' failed: {e}")
+                })?;
+        }
         let rehomed = self.rehomed_root(entity_name, op_name, &params).await?;
+        self.claim_follow_ups(entity_name, op_name, &params, rehomed.as_ref(), &origin)
+            .await?;
         let mut result = self
             .dispatcher
             .execute_operation_with_provenance(entity_name, op_name, params, input, origin.clone())
@@ -4122,6 +4615,36 @@ impl OperationEngine for DispatchingOperationEngine {
         Box::pin(async move { engine.run_ticket(ticket).await })
     }
 
+    fn commit_keystroke(
+        &self,
+        keystroke: holon_api::SourceKeystroke,
+    ) -> BoxFuture<'static, Result<OpOutcome>> {
+        let mut params = StorageEntity::new();
+        params.insert("id".into(), Value::String(keystroke.id));
+        params.insert("field".into(), Value::String(SOURCE_TEXT_FIELD.into()));
+        params.insert("value".into(), Value::String(keystroke.source));
+        if let Some(seq) = keystroke.write_seq {
+            params.insert("write_seq".into(), Value::Integer(seq));
+        }
+        let mut claim = self.admission.admit(footprint_of(&OpRequest {
+            entity_name: EntityName::new("block"),
+            op_name: "set_field".into(),
+            params: params.clone(),
+            origin: OpOrigin::User,
+        }));
+        let engine = self.share();
+        Box::pin(async move {
+            claim.released().await;
+            let params = engine.stamp_provenance("set_field", params, &OpOrigin::User)?;
+            let outcome = engine
+                .run_set_source_text(&params, &OpOrigin::User, SourceChannel::Keystroke)
+                .await
+                .map(OpOutcome::proven);
+            drop(claim);
+            outcome
+        })
+    }
+
     async fn available_operations(&self, entity_name: &str) -> Vec<OperationDescriptor> {
         let mut ops: Vec<OperationDescriptor> = self
             .dispatcher
@@ -4201,16 +4724,37 @@ impl OperationEngine for DispatchingOperationEngine {
         // the undo stack, un-committed, so the loud error is the single source of
         // truth about the partial state.)
         let inverse_count = entry.inverse_ops().len();
-        for (idx, op) in entry.inverse_ops().iter().enumerate() {
-            let replayed = self.replay(op).await.map_err(|e| {
-                anyhow::anyhow!(
-                    "undo: composite inverse op {idx} of {inverse_count} ('{}' on '{}') failed — \
-                     stopping (partial undo, earlier inverses already applied): {e}",
-                    op.op_name,
-                    op.entity_name
-                )
-            })?;
-            changes.extend(replayed);
+        let replay_all = async {
+            for (idx, op) in entry.inverse_ops().iter().enumerate() {
+                let replayed = self.replay(op).await.map_err(|e| {
+                    anyhow::anyhow!(
+                        "undo: composite inverse op {idx} of {inverse_count} ('{}' on '{}') \
+                         failed — stopping (partial undo, earlier inverses already applied): {e}",
+                        op.op_name,
+                        op.entity_name
+                    )
+                })?;
+                changes.extend(replayed);
+            }
+            Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+        };
+        // A step the shape gate refuses wrote nothing; it is dropped like a
+        // stale one, so it cannot stay on top and refuse every later press.
+        if let Err(e) = self
+            .judged_run(entry.inverse_ops(), &OpOrigin::User, replay_all)
+            .await
+        {
+            if e.downcast_ref::<holon_core::shape_gate::ShapeRefused>()
+                .is_none()
+            {
+                return Err(anyhow::anyhow!("undo refused: {e}"));
+            }
+            self.undo_stack.write().await.drop_undo();
+            self.persist().await?;
+            tracing::error!("undo: dropped shape-refused entry ({e})");
+            return Ok(UndoOutcome::StaleDropped {
+                reason: e.to_string(),
+            });
         }
         // Fail-loud (CLAUDE.md): the entry is consumed either way — a stale-top
         // poison entry must not be re-attempted — but if the inverse replay
@@ -4253,16 +4797,37 @@ impl OperationEngine for DispatchingOperationEngine {
         // Symmetric partial-failure discipline (Inc1): a composite redo replays
         // N forwards in order; the first failure stops and names its index.
         let forward_count = entry.ops().len();
-        for (idx, op) in entry.ops().iter().enumerate() {
-            let replayed = self.replay(op).await.map_err(|e| {
-                anyhow::anyhow!(
-                    "redo: composite forward op {idx} of {forward_count} ('{}' on '{}') failed — \
-                     stopping (partial redo, earlier ops already applied): {e}",
-                    op.op_name,
-                    op.entity_name
-                )
-            })?;
-            changes.extend(replayed);
+        let replay_all = async {
+            for (idx, op) in entry.ops().iter().enumerate() {
+                let replayed = self.replay(op).await.map_err(|e| {
+                    anyhow::anyhow!(
+                        "redo: composite forward op {idx} of {forward_count} ('{}' on '{}') \
+                         failed — stopping (partial redo, earlier ops already applied): {e}",
+                        op.op_name,
+                        op.entity_name
+                    )
+                })?;
+                changes.extend(replayed);
+            }
+            Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+        };
+        // A step the shape gate refuses wrote nothing; it is dropped like a
+        // stale one, so it cannot stay on top and refuse every later press.
+        if let Err(e) = self
+            .judged_run(entry.ops(), &OpOrigin::User, replay_all)
+            .await
+        {
+            if e.downcast_ref::<holon_core::shape_gate::ShapeRefused>()
+                .is_none()
+            {
+                return Err(anyhow::anyhow!("redo refused: {e}"));
+            }
+            self.undo_stack.write().await.drop_redo();
+            self.persist().await?;
+            tracing::error!("redo: dropped shape-refused entry ({e})");
+            return Ok(UndoOutcome::StaleDropped {
+                reason: e.to_string(),
+            });
         }
         self.undo_stack.write().await.commit_redo();
         self.persist().await?;
@@ -4304,6 +4869,27 @@ mod instantiate_template_tests {
                     BLOCK_WRITE_TABLE.to_string(),
                     "block".to_string(),
                     "block".to_string(),
+                ))
+            })
+        })
+        .await
+        .unwrap()
+    }
+
+    /// [`block_engine`] whose provider stores tags, so a block can carry a
+    /// shape.
+    async fn tagging_block_engine() -> Arc<BackendEngine> {
+        use crate::storage::schema_module::SchemaModule;
+        create_test_engine_with_providers(":memory:".into(), |module| {
+            module.with_operation_provider_factory(|backend| {
+                let db_handle =
+                    tokio::task::block_in_place(|| backend.blocking_read().handle().clone());
+                Arc::new(SqlOperationProvider::with_edge_fields(
+                    db_handle,
+                    BLOCK_WRITE_TABLE.to_string(),
+                    "block".to_string(),
+                    "block".to_string(),
+                    holon_turso::schema_modules::BlockSchemaModule.edge_fields(),
                 ))
             })
         })
@@ -4789,15 +5375,21 @@ mod instantiate_template_tests {
         )
         .await;
 
-        // inverse[0] deletes a real block (ok); inverse[1] is a `block.delete`
-        // with NO `id` param ⇒ the provider rejects it loud ("Missing 'id'
-        // parameter"). undo() must stop at index 1.
+        // inverse[0] deletes a real block (ok); inverse[1] is a
+        // `rewrite_link_resolution` with no `from` ⇒ the provider rejects it
+        // loud. The shape gate admits the plan (a link rewrite changes no
+        // block), so the failure happens mid-replay: undo() must stop at 1.
         let entry = UndoEntry {
             kind: holon_core::EntryKind::Ops {
                 ops: vec![id_op("block", "create", "block:keep")],
                 inverse_ops: vec![
                     id_op("block", "delete", "block:keep"),
-                    Operation::new("block", "delete", "Delete", HashMap::new()),
+                    Operation::new(
+                        "block",
+                        "rewrite_link_resolution",
+                        "Rewrite",
+                        HashMap::new(),
+                    ),
                 ],
             },
             origin: OpOrigin::User,
@@ -4817,7 +5409,7 @@ mod instantiate_template_tests {
             "error must name the failing inverse index (1): {msg}"
         );
         assert!(
-            msg.contains("Missing 'id'"),
+            msg.contains("missing 'from' parameter"),
             "error must carry the underlying cause: {msg}"
         );
         // Disclosed partial state: inverse[0] applied before the failure.
@@ -4826,6 +5418,197 @@ mod instantiate_template_tests {
             0,
             "the earlier inverse applied before the failure (partial undo, disclosed)"
         );
+    }
+
+    /// An inverse the shape gate cannot even simulate refuses the WHOLE undo
+    /// before any inverse runs: nothing is half-applied.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unsimulatable_inverse_refuses_the_whole_undo() {
+        let engine = block_engine().await;
+        create_block(
+            &engine,
+            &[
+                ("id", Value::String("block:keep".into())),
+                ("content", Value::String("k".into())),
+            ],
+        )
+        .await;
+        let entry = UndoEntry {
+            kind: holon_core::EntryKind::Ops {
+                ops: vec![id_op("block", "create", "block:keep")],
+                inverse_ops: vec![
+                    id_op("block", "delete", "block:keep"),
+                    Operation::new("block", "delete", "Delete", HashMap::new()),
+                ],
+            },
+            origin: OpOrigin::User,
+            group_id: 0,
+            precondition: Precondition::default(),
+            redo_precondition: Precondition::default(),
+        };
+        engine.push_undo_entry_for_test(entry).await;
+
+        let err = engine.undo().await.expect_err("the undo is refused");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("could not be simulated"), "{msg}");
+        assert_eq!(
+            ids_present(&engine, &["block:keep"]).await,
+            1,
+            "no inverse ran"
+        );
+    }
+
+    /// An undo whose result would break a tagged shape is dropped like a
+    /// stale one, so the press after it reaches the step below.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_shape_refused_undo_is_dropped_and_the_next_undo_runs() {
+        let engine = tagging_block_engine().await;
+        for (id, parent, extra) in [
+            (
+                "block:d",
+                EntityUri::no_parent().to_string(),
+                vec![
+                    ("task_state", Value::String("?".into())),
+                    ("tags", Value::Array(vec![Value::String("decision".into())])),
+                ],
+            ),
+            (
+                "block:d-a",
+                "block:d".to_string(),
+                vec![(
+                    "properties",
+                    Value::Object(HashMap::from([(
+                        "option".to_string(),
+                        Value::String("a".into()),
+                    )])),
+                )],
+            ),
+            ("block:keep", EntityUri::no_parent().to_string(), vec![]),
+        ] {
+            let mut params: StorageEntity = HashMap::from([
+                (Arc::from("id"), Value::String(id.into())),
+                (Arc::from("parent_id"), Value::String(parent)),
+                (Arc::from("content"), Value::String(id.into())),
+            ]);
+            params.extend(extra.into_iter().map(|(k, v)| (Arc::from(k), v)));
+            engine
+                .execute_operation(&EntityName::new("block"), "create", params, OpOrigin::Sync)
+                .await
+                .unwrap_or_else(|e| panic!("seed {id}: {e:#}"));
+        }
+        let entry = |created: &str| UndoEntry {
+            kind: holon_core::EntryKind::Ops {
+                ops: vec![id_op("block", "create", created)],
+                inverse_ops: vec![id_op("block", "delete", created)],
+            },
+            origin: OpOrigin::User,
+            group_id: 0,
+            precondition: Precondition::default(),
+            redo_precondition: Precondition::default(),
+        };
+        engine.push_undo_entry_for_test(entry("block:keep")).await;
+        engine.push_undo_entry_for_test(entry("block:d-a")).await;
+
+        match engine.undo().await.expect("a refused step is an outcome") {
+            UndoOutcome::StaleDropped { reason } => {
+                assert!(reason.contains("DC1"), "{reason}")
+            }
+            other => panic!("expected the refused step dropped, got {other:?}"),
+        }
+        assert_eq!(ids_present(&engine, &["block:d-a"]).await, 1);
+        assert_eq!(
+            engine.undo().await.expect("the step below runs"),
+            UndoOutcome::Applied
+        );
+        assert_eq!(ids_present(&engine, &["block:keep"]).await, 0);
+    }
+
+    /// A write that arrives between a plan's judgement and its ops waits for
+    /// the plan, then is judged against what the plan left.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_write_racing_a_judged_plan_is_judged_after_it() {
+        let engine = tagging_block_engine().await;
+        for (id, parent, option) in [
+            ("block:d", EntityUri::no_parent().to_string(), None),
+            ("block:d-a", "block:d".to_string(), Some("a")),
+            ("block:d-b", "block:d".to_string(), Some("b")),
+        ] {
+            let mut params: StorageEntity = HashMap::from([
+                (Arc::from("id"), Value::String(id.into())),
+                (Arc::from("parent_id"), Value::String(parent)),
+                (Arc::from("content"), Value::String(id.into())),
+            ]);
+            match option {
+                Some(key) => params.insert(
+                    Arc::from("properties"),
+                    Value::Object(HashMap::from([(
+                        "option".to_string(),
+                        Value::String(key.into()),
+                    )])),
+                ),
+                None => {
+                    params.insert(Arc::from("task_state"), Value::String("?".into()));
+                    params.insert(
+                        Arc::from("tags"),
+                        Value::Array(vec![Value::String("decision".into())]),
+                    )
+                }
+            };
+            engine
+                .execute_operation(&EntityName::new("block"), "create", params, OpOrigin::Sync)
+                .await
+                .unwrap_or_else(|e| panic!("seed {id}: {e:#}"));
+        }
+        let delete = |id: &str| -> StorageEntity {
+            HashMap::from([(Arc::from("id"), Value::String(id.into()))])
+        };
+        let (judged_tx, judged_rx) = tokio::sync::oneshot::channel::<()>();
+        let (landed_tx, landed_rx) = tokio::sync::oneshot::channel::<()>();
+        let racer = tokio::spawn({
+            let engine = engine.clone();
+            let delete_b = delete("block:d-b");
+            async move {
+                judged_rx.await.expect("the plan was judged");
+                let outcome = engine
+                    .execute_operation(
+                        &EntityName::new("block"),
+                        "delete",
+                        delete_b,
+                        OpOrigin::User,
+                    )
+                    .await;
+                let _ = landed_tx.send(());
+                outcome
+            }
+        });
+        engine
+            .execute_judged(
+                &[id_op("block", "delete", "block:d-a")],
+                &OpOrigin::User,
+                async {
+                    judged_tx.send(()).expect("the racer waits");
+                    let _ = tokio::time::timeout(std::time::Duration::from_millis(500), landed_rx)
+                        .await;
+                    engine
+                        .execute_operation(
+                            &EntityName::new("block"),
+                            "delete",
+                            delete("block:d-a"),
+                            OpOrigin::User,
+                        )
+                        .await
+                        .map(drop)
+                },
+            )
+            .await
+            .expect("the plan alone leaves option b");
+        let raced = racer.await.expect("the racer ran");
+        let refusal = format!(
+            "{:#}",
+            raced.expect_err("deleting the last option is refused")
+        );
+        assert!(refusal.contains("DC1"), "{refusal}");
+        assert_eq!(ids_present(&engine, &["block:d-b"]).await, 1);
     }
 
     #[tokio::test(flavor = "multi_thread")]

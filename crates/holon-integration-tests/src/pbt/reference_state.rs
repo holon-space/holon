@@ -489,6 +489,9 @@ pub struct ReferenceState {
     /// them. Empty on an org-only draw; read by `AttemptReadOnlyEdit`
     /// through the `RefReadOnlyHomes` cap.
     pub read_only: super::read_only_state::ReadOnlyRefState,
+    /// The outcome the model expects of each `EditDecisionSubtree`; read by
+    /// `inv-shape-gate-refuses-illegal-writes` through `RefShapeEdits`.
+    pub shape: super::shape_state::ShapeRefState,
     /// What the model expects the app to be DISCLOSING. A transition that
     /// fails on purpose records its condition here, so the keystone can judge
     /// whether the user was told — not only whether the write was refused.
@@ -1151,6 +1154,7 @@ impl ReferenceState {
             clock: ClockState::new(),
             sharing: super::sharing_state::SharingRefState::default(),
             read_only: super::read_only_state::ReadOnlyRefState::default(),
+            shape: super::shape_state::ShapeRefState::default(),
             conditions: super::conditions_state::ConditionsRefState::default(),
             refused_recipes: BTreeSet::new(),
             history_ever_created: BTreeSet::new(),

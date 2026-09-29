@@ -168,6 +168,10 @@ pub struct OperationIntent {
     pub entity_name: EntityName,
     pub op_name: String,
     pub params: HashMap<String, Value>,
+    /// Set only by the editor, for a commit of its source channel. Private,
+    /// so no other caller can claim the keystroke exemption of Model.md
+    /// invariant 17.
+    keystroke: bool,
 }
 
 impl OperationIntent {
@@ -176,7 +180,46 @@ impl OperationIntent {
             entity_name,
             op_name,
             params,
+            keystroke: false,
         }
+    }
+
+    /// An intent the editor built from its own text. A `set_field` of the
+    /// source line is the editor's keystroke; anything else is an ordinary
+    /// intent.
+    pub(crate) fn from_editor(
+        entity_name: EntityName,
+        op_name: String,
+        params: HashMap<String, Value>,
+    ) -> Self {
+        let keystroke = op_name == "set_field"
+            && params.get("field").and_then(|v| v.as_string())
+                == Some(holon_api::SOURCE_TEXT_FIELD);
+        Self {
+            entity_name,
+            op_name,
+            params,
+            keystroke,
+        }
+    }
+
+    /// The editor keystroke this intent carries, if it is one.
+    pub fn keystroke(&self) -> Option<holon_api::SourceKeystroke> {
+        if !self.keystroke {
+            return None;
+        }
+        let text = |key: &str| {
+            self.params
+                .get(key)
+                .and_then(|v| v.as_string())
+                .map(str::to_string)
+                .unwrap_or_else(|| panic!("an editor keystroke intent carries its `{key}`"))
+        };
+        Some(holon_api::SourceKeystroke {
+            id: text("id"),
+            source: text("value"),
+            write_seq: self.params.get("write_seq").and_then(|v| v.as_i64()),
+        })
     }
 
     /// Convert from an `Operation` (the value returned by macro-generated
@@ -185,11 +228,7 @@ impl OperationIntent {
     /// once an op is built and ready to dispatch, only `(entity_name,
     /// op_name, params)` matter to the executor.
     pub fn from_operation(op: holon_api::Operation) -> Self {
-        Self {
-            entity_name: op.entity_name,
-            op_name: op.op_name,
-            params: op.params,
-        }
+        Self::new(op.entity_name, op.op_name, op.params)
     }
 }
 
@@ -209,11 +248,11 @@ impl OperationIntent {
     ) -> Self {
         let mut params = HashMap::new();
         params.insert("id".to_string(), Value::String(row_id.to_string()));
-        Self {
-            entity_name: entity_name_override.unwrap_or(&op.entity_name).clone(),
-            op_name: op.name.clone(),
+        Self::new(
+            entity_name_override.unwrap_or(&op.entity_name).clone(),
+            op.name.clone(),
             params,
-        }
+        )
     }
 
     /// Build a `set_field` intent (used by state_toggle, editable_text on blur,
@@ -232,11 +271,48 @@ impl OperationIntent {
         params.insert("id".to_string(), Value::String(row_id.to_string()));
         params.insert("field".to_string(), Value::String(field.to_string()));
         params.insert("value".to_string(), value);
-        Ok(Self {
-            entity_name: entity_name.clone(),
-            op_name: op_name.to_string(),
-            params,
+        Ok(Self::new(entity_name.clone(), op_name.to_string(), params))
+    }
+
+    /// The web editor's flush of a block's text. It writes the `content`
+    /// column, never the source line, so the web frontend has no keystroke
+    /// channel (Model.md invariant 17).
+    pub fn content_edit(block_id: &str, content: &str) -> Self {
+        Self::set_field(
+            &EntityName::new("block"),
+            "set_field",
+            block_id,
+            "content",
+            Value::String(content.to_string()),
+        )
+        .expect("content is a writable field")
+    }
+
+    /// The `{entity, op, params}` object the web frontend posts to its worker.
+    pub fn to_wire(&self) -> serde_json::Value {
+        serde_json::json!({
+            "entity": self.entity_name.to_string(),
+            "op": self.op_name,
+            "params": self.params,
         })
+    }
+
+    /// The worker's read of [`Self::to_wire`]. A wire intent is never a
+    /// keystroke.
+    pub fn from_wire(item: &serde_json::Value) -> anyhow::Result<Self> {
+        let field = |key: &str| {
+            item.get(key)
+                .ok_or_else(|| anyhow::anyhow!("intent missing '{key}': {item}"))
+        };
+        let entity = field("entity")?
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("intent 'entity' is not text: {item}"))?;
+        let op = field("op")?
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("intent 'op' is not text: {item}"))?;
+        let params: HashMap<String, Value> = serde_json::from_value(field("params")?.clone())
+            .map_err(|e| anyhow::anyhow!("parse intent params of {item}: {e}"))?;
+        Ok(Self::new(EntityName::from(entity), op.to_string(), params))
     }
 }
 
@@ -267,11 +343,7 @@ pub fn parse_action_expr(
                 }
             }
 
-            return Ok(Some(OperationIntent {
-                entity_name,
-                op_name,
-                params,
-            }));
+            return Ok(Some(OperationIntent::new(entity_name, op_name, params)));
         }
     }
     Ok(None)
@@ -454,5 +526,31 @@ mod tests {
         )
         .expect("content is writable");
         assert_eq!(intent.op_name, "set_field");
+    }
+
+    /// Only the editor can mark a source-line write as its keystroke; the
+    /// same params built by anyone else stay an ordinary, judged intent.
+    #[test]
+    fn only_the_editor_marks_a_source_write_as_a_keystroke() {
+        let params = HashMap::from([
+            ("id".to_string(), Value::String("block:d".into())),
+            (
+                "field".to_string(),
+                Value::String(holon_api::SOURCE_TEXT_FIELD.into()),
+            ),
+            ("value".to_string(), Value::String("TODO x".into())),
+            ("write_seq".to_string(), Value::Integer(7)),
+        ]);
+        let by_name = OperationIntent::new("block".into(), "set_field".into(), params.clone());
+        assert_eq!(by_name.keystroke(), None);
+        let from_editor = OperationIntent::from_editor("block".into(), "set_field".into(), params);
+        assert_eq!(
+            from_editor.keystroke(),
+            Some(holon_api::SourceKeystroke {
+                id: "block:d".into(),
+                source: "TODO x".into(),
+                write_seq: Some(7),
+            })
+        );
     }
 }

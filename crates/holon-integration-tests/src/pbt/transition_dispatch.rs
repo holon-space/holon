@@ -200,11 +200,15 @@ macro_rules! declare_e2e_transitions {
                 let before: ::std::collections::BTreeSet<::holon_api::EntityUri> =
                     state.domain.block_state.blocks.keys().cloned().collect();
                 let copies_before = state.snapshot_copies();
+                // The shape gate refuses a Holon-side write that leaves a
+                // decision broken; the model refuses it the same way.
+                let snapshot = $crate::pbt::shape_state::before_step(self.variant_name(), state);
                 match self {
                     $( $enum_name::$variant(v) => <$ty as ::holon_pbt_core::TransitionRef<
                         $crate::pbt::reference_state::ReferenceState,
                     >>::apply_to_ref(v, state), )*
                 }
+                $crate::pbt::shape_state::after_step(snapshot, state);
                 state.follow_copies(copies_before);
                 state.record_removed_blocks(before);
                 // E-solid shadow-mesh centralized primary catch-up: after every
@@ -257,6 +261,7 @@ macro_rules! declare_e2e_transitions {
             + ::holon_pbt_core::capabilities::SutFullSync
             + ::holon_pbt_core::capabilities::SutRebuildViews
             + ::holon_pbt_core::capabilities::SutReadOnlyEditAttempt
+            + ::holon_pbt_core::capabilities::SutShapeEdit
             + ::holon_pbt_core::capabilities::SutUnschemedIdDispatch
             + ::holon_pbt_core::capabilities::SutCyclicPlaceAttempt
             + ::holon_pbt_core::capabilities::SutPrivateFieldWriteAttempt
@@ -271,12 +276,14 @@ macro_rules! declare_e2e_transitions {
                 state: &$crate::pbt::reference_state::ReferenceState,
                 sut: &mut S,
             ) {
+                $crate::pbt::shape_state::arm(state.shape.step_refusal());
                 match self {
                     $( $enum_name::$variant(v) => <$ty as ::holon_pbt_core::TransitionImpl<
                         $crate::pbt::reference_state::ReferenceState,
                         S,
                     >>::apply_to_sut(v, state, sut).await, )*
                 }
+                $crate::pbt::shape_state::arm(None);
             }
         }
 

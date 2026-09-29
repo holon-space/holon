@@ -25,6 +25,8 @@ use holon_api::EntityName;
 use holon_api::OpOrigin;
 use holon_api::OperationDescriptor;
 use holon_api::PAGE_TAG;
+use holon_api::SOURCE_TEXT_FIELD;
+use holon_api::SourceKeystroke;
 use holon_api::Value;
 use holon_api::block::Block;
 use holon_api::marking::ExistenceFlow;
@@ -86,6 +88,7 @@ const GESTURE_OPS: &[&str] = &[
     "merge_blocks",
     "undo",
     "redo",
+    "commit_keystroke",
 ];
 
 async fn block_engine() -> Arc<BackendEngine> {
@@ -833,6 +836,60 @@ async fn footprint_census_report_only() {
         };
         let mut row = judge(&d, &created, &fixture.prefix, &before, &after, fired);
         row.declared = "none (fence)".to_string();
+        rows.push(row);
+    }
+
+    // The typing channel's source-line writes, on a block with a child: one
+    // keyword-headed line, and a multi-line source whose last line has the
+    // shape of a child heading.
+    let sources = [
+        ("commit_keystroke", "TODO bravo typed"),
+        (
+            "commit_keystroke(multi-line)",
+            "bravo typed\nsecond line\n** looks like a child",
+        ),
+        ("set_field(source_text)", "DONE bravo written"),
+    ];
+    for (i, (op, source)) in sources.into_iter().enumerate() {
+        let fixture = Fixture {
+            prefix: format!("o{}-", catalog.len() + 1 + i),
+        };
+        fixture.seed(&engine).await;
+        let mut params: StorageEntity = HashMap::new();
+        params.insert("id".into(), Value::String(fixture.id("b")));
+        params.insert("field".into(), Value::String(SOURCE_TEXT_FIELD.into()));
+        params.insert("value".into(), Value::String(source.into()));
+        let before = snapshot(&engine).await;
+        let outcome = if op.starts_with("commit_keystroke") {
+            engine
+                .commit_keystroke(SourceKeystroke {
+                    id: fixture.id("b"),
+                    source: source.into(),
+                    write_seq: None,
+                })
+                .await
+        } else {
+            engine
+                .execute_operation(
+                    &EntityName::new(BLOCK),
+                    "set_field",
+                    params.clone(),
+                    OpOrigin::User,
+                )
+                .await
+        };
+        let fired = match outcome {
+            Ok(_) => Fired::Engine,
+            Err(e) => Fired::Failed(format!("{e:#}")),
+        };
+        let after = snapshot(&engine).await;
+        let d = OperationDescriptor {
+            name: op.to_string(),
+            marking_delta: MarkingDelta::Undeclared,
+            ..fence.clone()
+        };
+        let mut row = judge(&d, &params, &fixture.prefix, &before, &after, fired);
+        row.declared = "none (source line)".to_string();
         rows.push(row);
     }
 

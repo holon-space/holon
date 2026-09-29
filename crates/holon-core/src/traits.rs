@@ -893,6 +893,89 @@ pub trait WriteAuthorityReads: MaybeSendSync {
     async fn owning_page(&self, id: &EntityUri) -> Result<OwningPage> {
         owning_page_by_hops(self, id).await
     }
+    /// Whether `id` is the root of a page share on this device, which every
+    /// removing op but a delete refuses. Only an authority that holds shares
+    /// answers `true`.
+    async fn is_share_root(&self, _: &EntityUri) -> Result<bool> {
+        Ok(false)
+    }
+    /// Each of `around`, the sibling before `previous_of`, and each of their
+    /// parents: its parent and whether it or its parent carries one of `tags`,
+    /// read in a cost bounded by `around` rather than the store. `None` when
+    /// the authority has no such read; the shape gate then simulates every
+    /// plan that is not text-only.
+    async fn tagged_neighbourhood(
+        &self,
+        _: &[&str],
+        _: &[EntityUri],
+        _: Option<&EntityUri>,
+    ) -> Result<Option<TaggedNeighbourhood>> {
+        Ok(None)
+    }
+}
+
+/// What a write authority read of the blocks around a plan
+/// ([`WriteAuthorityReads::tagged_neighbourhood`]). A question about a block
+/// the read did not cover is an `Err`.
+#[derive(Debug, Default, Clone)]
+pub struct TaggedNeighbourhood {
+    previous_sibling: Option<EntityUri>,
+    parents: HashMap<EntityUri, Option<EntityUri>>,
+    absent: std::collections::HashSet<EntityUri>,
+    tagged: std::collections::HashSet<EntityUri>,
+}
+
+impl TaggedNeighbourhood {
+    /// The sibling before the block the read was asked `previous_of`.
+    pub fn previous_sibling(&self) -> Option<&EntityUri> {
+        self.previous_sibling.as_ref()
+    }
+
+    pub fn set_previous_sibling(&mut self, before: EntityUri) {
+        self.previous_sibling = Some(before);
+    }
+
+    /// A block the read found, with its parent; `None` for a block stored
+    /// without one.
+    pub fn found(&mut self, id: EntityUri, parent: Option<EntityUri>) {
+        self.parents.insert(id, parent);
+    }
+
+    /// A block asked about that the authority does not hold.
+    pub fn missing(&mut self, id: EntityUri) {
+        self.absent.insert(id);
+    }
+
+    /// A block among those read, or their parents, that carries a tag.
+    pub fn tagged(&mut self, id: EntityUri) {
+        self.tagged.insert(id);
+    }
+
+    /// Whether the read answered for `id`: found it, or found it missing.
+    pub fn covers(&self, id: &EntityUri) -> bool {
+        self.parents.contains_key(id) || self.absent.contains(id)
+    }
+
+    /// The parent of a block the read covered; `None` when the block has no
+    /// parent or the authority does not hold it.
+    pub fn parent(&self, id: &EntityUri) -> Result<Option<&EntityUri>> {
+        if !self.covers(id) {
+            return Err(format!("{id} is outside the tagged neighbourhood that was read").into());
+        }
+        Ok(self.parents.get(id).and_then(Option::as_ref))
+    }
+
+    pub fn is_tagged(&self, id: &EntityUri) -> Result<bool> {
+        self.parent(id)?;
+        Ok(self.tagged.contains(id))
+    }
+
+    /// Whether `id` is a direct child of a tagged block.
+    pub fn is_under_tagged(&self, id: &EntityUri) -> Result<bool> {
+        Ok(self
+            .parent(id)?
+            .is_some_and(|parent| self.tagged.contains(parent)))
+    }
 }
 
 /// Deeper than any real outline; reaching it means the chain cannot end.

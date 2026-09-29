@@ -425,6 +425,71 @@ pub fn seed_read_only_recipe(state: &mut ReferenceState) {
     }
 }
 
+/// The `#+ID:` page id of the decision corpus.
+pub fn decision_page() -> EntityUri {
+    EntityUri::block("decision-page")
+}
+
+pub const DECISION_FILE: &str = "decision-page.org";
+
+/// One open `decision`-tagged block with three options. The shape gate judges
+/// every Holon-side write that touches it; `EditDecisionSubtree` aims legal
+/// and illegal edits at it.
+pub const DECISION_ORG: &str = "#+ID: decision-page\n\
+     * ? Which store holds the decision? :decision:\n\
+     :PROPERTIES:\n:ID: kd-1\n:choose: 1\n:END:\n\
+     ** Loro\n:PROPERTIES:\n:ID: kd-1-a\n:option: a\n:END:\n\
+     ** Turso\n:PROPERTIES:\n:ID: kd-1-b\n:option: b\n:END:\n\
+     ** Both\n:PROPERTIES:\n:ID: kd-1-c\n:option: c\n:END:\n";
+
+/// The non-page ids of [`DECISION_ORG`], in file order.
+pub const DECISION_IDS: [&str; 4] = ["kd-1", "kd-1-a", "kd-1-b", "kd-1-c"];
+
+/// Seed the decision corpus into `state`: the page seed-classified like the
+/// forward-edge page, the decision and its options as NON-seed working blocks,
+/// so every block invariant compares them. The blocks are the org parser's
+/// reading of [`DECISION_ORG`], the same reading the ingest stores.
+pub fn seed_decision_corpus(state: &mut ReferenceState) {
+    let parsed = holon_org_format::parse_org_file(
+        std::path::Path::new("/vault/decision-page.org"),
+        DECISION_ORG,
+        &EntityUri::no_parent(),
+        std::path::Path::new("/vault"),
+    )
+    .expect("the decision corpus parses");
+    let page = decision_page();
+    assert_eq!(parsed.document.id, page, "the corpus names its page");
+    let mut page_block = Block::new_text(page.clone(), EntityUri::no_parent(), "decision-page");
+    page_block.set_page(true);
+    state
+        .domain
+        .block_state
+        .blocks
+        .insert(page.clone(), page_block);
+    state
+        .domain
+        .block_state
+        .block_documents
+        .insert(page.clone(), EntityUri::no_parent());
+    state
+        .files
+        .documents
+        .insert(page.clone(), DECISION_FILE.to_string());
+    let ids: Vec<EntityUri> = parsed.blocks.iter().map(|b| b.id.clone()).collect();
+    assert_eq!(
+        ids,
+        DECISION_IDS.map(EntityUri::block).to_vec(),
+        "the corpus parses to exactly its declared blocks"
+    );
+    for block in parsed.blocks {
+        state
+            .domain
+            .block_state
+            .blocks
+            .insert(block.id.clone(), block);
+    }
+}
+
 /// The steps' text as `CookFormatAdapter` de-sugars it (`@eggs{2}` → `eggs`).
 /// A hand-copy on purpose: if the adapter's de-sugaring changes, the oracles
 /// say so instead of quietly adopting the new output.
@@ -1178,6 +1243,9 @@ pub fn wide_seed_files(
     if blocks.contains_key(&forward_edge_page()) {
         files.push(("forward-edge-page.org", FORWARD_EDGE_ORG));
     }
+    if blocks.contains_key(&decision_page()) {
+        files.push((DECISION_FILE, DECISION_ORG));
+    }
     files
 }
 
@@ -1406,6 +1474,35 @@ pub async fn boot_and_seed_wide_with_peer_id(
         }
     }
 
+    // The decision corpus ingests through the same file-sync controller; a
+    // snapshot taken before it lands would miss the blocks the shape edits aim
+    // at.
+    if has_frontend
+        && ref_state
+            .domain
+            .block_state
+            .blocks
+            .contains_key(&decision_page())
+    {
+        let expected: BTreeSet<EntityUri> =
+            DECISION_IDS.into_iter().map(EntityUri::block).collect();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            converge_projections(&handle, Duration::from_millis(300)).await;
+            let seen = sut_ids(&caps).await;
+            if expected.is_subset(&seen) {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "[decision corpus] {DECISION_FILE} did not ingest {:?} within budget",
+                expected.difference(&seen).collect::<Vec<_>>()
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        crate::pbt::invariants::bodies::shape_sim_matches_authority::record_decision_case();
+    }
+
     // The read-only-home rung. The recipe ingests through the SAME file-sync
     // controller as the org files, so wait for its steps in `block_raw` before
     // snapshotting: a baseline taken mid-ingest would be empty and the
@@ -1481,6 +1578,7 @@ pub async fn boot_and_seed_wide_with_peer_id(
     let tree: BTreeSet<EntityUri> = [ids.parent.clone(), ids.c1.clone(), ids.c2.clone()]
         .into_iter()
         .chain(FORWARD_EDGE_IDS.into_iter().map(EntityUri::block))
+        .chain(DECISION_IDS.into_iter().map(EntityUri::block))
         .chain([
             EntityUri::parse(holon_frontend::JOURNALS_AUTO_CREATE_ID).expect("auto-create id"),
             EntityUri::parse(holon_frontend::JOURNALS_ACTION_ID).expect("holon_rule id"),
@@ -1692,6 +1790,15 @@ pub async fn boot_and_seed_wide_windowed_base(
     {
         start_expected.insert(forward_edge_page());
         start_expected.extend(FORWARD_EDGE_IDS.into_iter().map(EntityUri::block));
+    }
+    if ref_state
+        .domain
+        .block_state
+        .blocks
+        .contains_key(&decision_page())
+    {
+        start_expected.insert(decision_page());
+        start_expected.extend(DECISION_IDS.into_iter().map(EntityUri::block));
     }
     start_expected.insert(crate::pbt::frontend_slice::components::keystone_boot_journal_id());
     start_expected.extend(ref_state.read_only.homes().iter().cloned());
@@ -1947,6 +2054,7 @@ pub fn wide_e2e_ref_for(wiring: &Wiring) -> ReferenceState {
         seed_forward_edge_corpus(&mut state);
         seed_boot_filler(&mut state);
         seed_read_only_recipe(&mut state);
+        seed_decision_corpus(&mut state);
         // Companion page-tag demotion closure (dogfood 2026-07-12): a top-level
         // page-file (`2026-07-10.org`) whose `Page` doc-root is inlined as a plain
         // heading in the `Journals.org` companion. Frontend-only (a Turso org-
@@ -3184,6 +3292,14 @@ mod tests {
                         .new_tree(&mut runner)
                         .expect("aggregate_transitions must produce a value")
                         .current();
+                    if !<_ as holon_pbt_core::TransitionRef<ReferenceState>>::preconditions(
+                        &transition,
+                        &state,
+                    )
+                    .is_good()
+                    {
+                        continue;
+                    }
                     let typing = transition.variant_name() == "TypeChars";
                     let before = typing.then(|| ref_block_contents(&state));
                     transition.apply_to_ref(&mut state);

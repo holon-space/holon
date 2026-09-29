@@ -105,6 +105,11 @@ impl ConditionKind {
                 "what you typed into {subject} is not in the store — retype it. {detail}"
             )),
 
+            Self::EditRefusedByShape { tag, rule } => ConditionDetail::prose(format!(
+                "the edit would leave the {tag} block {subject} breaking rule {rule}, so it was \
+                 not made"
+            )),
+
             Self::EditRefusedReadOnlyFormat { format } => ConditionDetail::prose(format!(
                 "{subject} is {format}, which Holon reads but cannot write — edit the file on disk"
             )),

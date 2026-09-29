@@ -247,6 +247,84 @@ for any field is: op-fidelity (store) → base-limited 3-way (transient) → LWW
     `SqlOperationProvider` (ingest, the Loro→SQL projection,
     `place_all`) still write the columns directly
     (`2026-10-02-stored-parent-cycle-spins-turso-ivm-commit-forever`).
+17. **A tagged shape is a write boundary** — a tag may register a
+    `ShapeValidator` (`crates/holon-core/src/shape_gate.rs`; `decision` is
+    the first). The operation dispatcher (invariant 4's one writer) admits a
+    Holon-side write only when every tagged block it touches, with its direct
+    children, still passes its validator AFTER the write. The post-write state
+    is SIMULATED over the write authority's reads — the structural ops run
+    their own default `BlockOperations` code on an overlay store — so a
+    refused write stores nothing, and the refusal names the shape's rule
+    (`DC2`, `B4`, ...) and is disclosed (`EDIT_REFUSED_BY_SHAPE`). A plan
+    that provably touches no tagged block and no tagged block's direct child
+    is admitted without simulation: per write the authority answers one
+    read of the blocks the plan names, their parents and grandparents, and
+    which of them are tagged (`WriteAuthorityReads::tagged_neighbourhood`,
+    no stored index), so its cost does not grow with the number of tagged
+    blocks. A lone indent also reads its block's previous sibling, one index
+    seek that does not grow with the sibling count. An op
+    that read cannot place — no id, an unknown op, an indent or outdent
+    inside a longer plan — is simulated, and an authority without that read
+    (Loro) simulates every plan that is not text-only. The unit is the PLAN,
+    not the op: a compound, an undo entry, a template instantiation, a
+    block→page conversion, a merge and an MCP `dense_patch` batch are each
+    judged once as a whole (`OperationDispatcher::execute_judged`), so a
+    state legal only as a whole lands. A plan that fails part way keeps the
+    ops it ran unless its writer rolls them back (a `dense_patch` over Loro
+    does; undo/redo and the SqlOnly authority do not). The dispatcher then
+    judges what is STORED for every block the plan touched, and a broken
+    shape is named in the plan's error (its tag, block and rule) and
+    disclosed like a refusal. So a failed plan can leave a broken shape, but
+    never a silent one. An op the simulator cannot apply is an `Err`, never
+    an admission. Three writers are not judged, each for a reason: `Ingest`
+    and `Sync` origins are foreign input (never refused), and the editor's
+    keystroke channel lands every keystroke. NOT YET (Inc 10 part B): nothing
+    discloses a broken shape these three writers leave — no reader reads a
+    stored decision, so it stays broken with no signal until the read
+    model's `error` column exists. The
+    exemption is the CHANNEL, not a field: only
+    `OperationEngine::commit_keystroke` takes it, and it has no operation
+    name, so every write dispatched by name — an MCP `set_field` or
+    `dense_patch`, a rule, a peer — is judged. In the frontend only the
+    editor marks an `OperationIntent` as a keystroke. A driver that types
+    into a live editor acts as the user, so its typing IS keystrokes and
+    lands unjudged: MCP `type_text` and `insert_text` into a window, a test's
+    user driver. Its structural gestures (Enter, Tab) are ordinary intents
+    and are judged. The same source line written as
+    `set_field("source_text")` by anyone is judged as the content and keyword
+    writes it stands for. The web editor writes a block's `content`, never
+    its source line (`OperationIntent::content_edit`), so its typing is
+    text-only and is never refused. The one keystroke that can break a
+    decision is an edit of the decision block's own task keyword in its title
+    (a demotion, or a keyword its ruling keys do not match); it lands
+    undisclosed (NOT YET disclosed: Inc 10 part B). Tagging a block
+    `decision` by hand is refused unless the block already has the whole
+    shape: a decision is made in one step (ruling D231.a), and the refusal
+    names the route — one `dense_patch` batch that creates the question and
+    its options (the `ask` command of Inc 9 becomes the route later). A plan
+    is judged as the run dispatches it, its task-state writes classified.
+    A judged write CLAIMS what its judgement shapes — each tagged root and
+    that root's direct children, but no block the write itself creates — and
+    is judged again under that claim, so a write with a disjoint admission
+    claim cannot change the same decision between the judgement and the
+    write (`RunningWrite`, `ClaimRef::nest`). Order then holds per footprint
+    at nest time: a later write that does not overlap may run first and is
+    judged against what it finds. A nest that would close a wait cycle is
+    refused; a write that has run nothing is admitted again, at most three
+    times, then fails by name and writes nothing. A write whose follow-up
+    writes are known only after it ran — the category re-derivation of a
+    move, the keyword repair of a split or join — claims the tagged blocks
+    around its target and in its moved subtree BEFORE it runs, and a child
+    of a root the write holds counts as held, so no follow-up needs a claim
+    that could be refused after part of the write landed. Pinned by
+    `crates/holon/tests/decision_shape_claims.rs`. A composition whose gate lacks a
+    registered tag's validator fails its install guard. Pinned by
+    `inv-shape-gate-refuses-illegal-writes` and, for the simulator itself,
+    `inv-shape-sim-matches-authority` in the composed keystone, whose
+    end-of-run reach floor fails a run of 8 or more cases, passing or not, in
+    which a case carried a decision and the gate admitted no decision edit or the simulator was compared on
+    none; a case that carries a decision draws a legal edit of it within its
+    first steps.
 
 ## Conditions: how a degradation reaches the user (ADR 0035)
 

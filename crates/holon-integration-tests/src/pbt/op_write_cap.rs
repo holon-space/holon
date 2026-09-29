@@ -133,7 +133,11 @@ impl OpDispatchWriter {
 
     async fn execute(&self, op: &str, params: StorageEntity) {
         if let Err(e) = self.try_execute(op, params).await {
-            panic!("block/{op} operation failed: {e:#}");
+            let msg = format!("{e:#}");
+            assert!(
+                crate::pbt::shape_state::is_expected_refusal(&msg),
+                "block/{op} operation failed: {msg}"
+            );
         }
     }
 
@@ -202,7 +206,8 @@ impl SutBlockTreeWrite for OpDispatchWriter {
         if let Err(e) = self.try_execute("outdent", self.id_only(id)).await {
             let msg = format!("{e:#}");
             assert!(
-                is_page_boundary_outdent_refusal(&msg),
+                is_page_boundary_outdent_refusal(&msg)
+                    || crate::pbt::shape_state::is_expected_refusal(&msg),
                 "block/outdent operation failed: {msg}"
             );
         }
@@ -293,12 +298,13 @@ impl KeystrokeBlockTreeWriter {
     /// Send one raw keystroke through the driver, fail-loud with the gesture
     /// context.
     async fn key(&self, keystroke: &str, modifiers: &[&str], ctx: &str) {
-        self.driver
-            .send_raw_keystroke(keystroke, modifiers)
-            .await
-            .unwrap_or_else(|e| {
-                panic!("[{ctx}/keystroke] {keystroke} {modifiers:?} failed: {e:#}")
-            });
+        if let Err(e) = self.driver.send_raw_keystroke(keystroke, modifiers).await {
+            let msg = format!("{e:#}");
+            assert!(
+                crate::pbt::shape_state::is_expected_refusal(&msg),
+                "[{ctx}/keystroke] {keystroke} {modifiers:?} failed: {msg}"
+            );
+        }
     }
 
     /// Drive a block-reorder op (`move_up`/`move_down`) through the production
@@ -322,13 +328,21 @@ impl KeystrokeBlockTreeWriter {
             .unwrap_or_else(|| panic!("[{ctx}/chord] no keybinding registered for op {op:?}"));
         let root_id = holon_api::root_layout_block_uri();
         let root_tree = self.reactive.snapshot_reactive(&root_id);
-        let dispatched = self
+        let dispatched = match self
             .driver
             .send_key_chord(&root_id, &root_tree, resolved, &chord, HashMap::new())
             .await
-            .unwrap_or_else(|e| {
-                panic!("[{ctx}/chord] send_key_chord {chord:?} on {resolved} failed: {e:#}")
-            });
+        {
+            Ok(dispatched) => dispatched,
+            Err(e) => {
+                let msg = format!("{e:#}");
+                assert!(
+                    crate::pbt::shape_state::is_expected_refusal(&msg),
+                    "[{ctx}/chord] send_key_chord {chord:?} on {resolved} failed: {msg}"
+                );
+                return;
+            }
+        };
         assert!(
             dispatched,
             "[{ctx}/chord] chord {chord:?} did not dispatch op {op:?} on {resolved}"
@@ -497,10 +511,17 @@ impl SutEdgeFieldWrite for EdgeFieldWriter {
         params.insert("field".into(), Value::String(field.to_string()));
         params.insert("value".into(), value);
         let entity = "block".to_string().into();
-        self.engine
+        if let Err(e) = self
+            .engine
             .execute_operation(&entity, "set_field", params, holon_api::OpOrigin::User)
             .await
-            .unwrap_or_else(|e| panic!("block/set_field({field}) on {rid} failed: {e:#}"));
+        {
+            let msg = format!("{e:#}");
+            assert!(
+                crate::pbt::shape_state::is_expected_refusal(&msg),
+                "block/set_field({field}) on {rid} failed: {msg}"
+            );
+        }
     }
 }
 

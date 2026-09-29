@@ -375,6 +375,15 @@ const EDIT_REFUSED_READ_ONLY_FORMAT: ConditionProfile = ConditionProfile::new(
     &[],
 );
 
+const EDIT_REFUSED_BY_SHAPE: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Error,
+    "Edit refused — it would break a tagged block",
+    icons::BLOCKED,
+    ConditionPlacement::Toast,
+    AllClear::UntilRestart,
+    &[],
+);
+
 const LOCAL_EDIT_NOT_APPLIED: ConditionProfile = ConditionProfile::new(
     ConditionSeverity::Error,
     "Your edit was not saved",
@@ -708,6 +717,7 @@ impl ConditionKind {
             Self::VaultFileEmptied => VAULT_FILE_EMPTIED,
             Self::SharedSubtreeNotMaterialized { .. } => SHARED_SUBTREE_NOT_MATERIALIZED,
             Self::EditRefusedReadOnlyFormat { .. } => EDIT_REFUSED_READ_ONLY_FORMAT,
+            Self::EditRefusedByShape { .. } => EDIT_REFUSED_BY_SHAPE,
             Self::LocalEditNotApplied { .. } => LOCAL_EDIT_NOT_APPLIED,
             Self::WritebackDegraded(_) => WRITEBACK_DEGRADED,
             Self::WritebackLossy { .. } => WRITEBACK_LOSSY,

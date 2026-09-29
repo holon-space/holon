@@ -225,6 +225,15 @@ impl HolonService {
 
     // ── Operation dispatch ────────────────────────────────────────────
 
+    /// Run `execute`, which dispatches exactly `ops` through this facade, with
+    /// the shape gate judging them once as a whole.
+    pub async fn execute_judged<F, T>(&self, ops: &[holon_api::Operation], execute: F) -> Result<T>
+    where
+        F: std::future::Future<Output = Result<T>>,
+    {
+        self.engine.execute_judged(ops, &self.origin, execute).await
+    }
+
     /// Execute an operation on an entity, returning its response value and
     /// whether its effect is proven to have landed.
     pub async fn execute_operation(

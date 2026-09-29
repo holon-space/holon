@@ -160,6 +160,22 @@ pub enum BlockDecisionError {
     Core(#[from] DecisionError),
 }
 
+impl BlockDecisionError {
+    /// The rule this error enforces: a block rule (`B4`, `B6`), a core rule
+    /// ([`crate::decision::Rule::code`]), `encoding` or `home`.
+    pub fn code(&self) -> &'static str {
+        use BlockDecisionError::*;
+        match self {
+            NotTagged { .. } | UnknownKeyword { .. } | StrayKey { .. } => "B4",
+            OptionAndAnswer { .. } | AnswerKeysOnOption { .. } => "B6",
+            NotText { .. } => "syntax",
+            Unencodable { .. } => "encoding",
+            ForeignHome(_) => "home",
+            Core(e) => e.rule().code(),
+        }
+    }
+}
+
 /// `children` are the decision block's direct children in tree order.
 pub fn read(decision: &Block, children: &[Block]) -> Result<DecisionDraft, BlockDecisionError> {
     if !decision.tags.contains(DECISION_TAG) {
@@ -420,10 +436,13 @@ fn read_answer(child: &Block, by: &str) -> Result<RawAnswer, String> {
         by: by.to_string(),
         at: at.to_string(),
         body,
+        // A blank body is no rationale: org keeps no difference between an
+        // empty body and none.
         rationale: child
             .content
             .split_once('\n')
-            .map(|(_, rest)| rest.to_string()),
+            .map(|(_, rest)| rest.to_string())
+            .filter(|rest| !rest.trim().is_empty()),
     })
 }
 

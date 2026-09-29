@@ -405,6 +405,39 @@ pub fn platform_keychain_forbidden() -> bool {
     !holon_secrets::login_keychain_granted()
 }
 
+/// Execute an intent as the user's gesture: an editor keystroke through the
+/// engine's keystroke channel, anything else by its operation name.
+pub fn execute_gesture(
+    engine: &dyn holon_api::OperationEngine,
+    intent: crate::operations::OperationIntent,
+) -> BoxFuture<'static, Result<holon_api::OpOutcome>> {
+    execute_gesture_parts(
+        engine,
+        intent.keystroke(),
+        &intent.entity_name,
+        &intent.op_name,
+        intent.params,
+    )
+}
+
+fn execute_gesture_parts(
+    engine: &dyn holon_api::OperationEngine,
+    keystroke: Option<holon_api::SourceKeystroke>,
+    entity_name: &EntityName,
+    op_name: &str,
+    params: HashMap<String, Value>,
+) -> BoxFuture<'static, Result<holon_api::OpOutcome>> {
+    match keystroke {
+        Some(keystroke) => engine.commit_keystroke(keystroke),
+        None => engine.execute_operation(
+            entity_name,
+            op_name,
+            params.into_iter().map(|(k, v)| (k.into(), v)).collect(),
+            holon_api::OpOrigin::User,
+        ),
+    }
+}
+
 /// Everything a wiring crate (holon-app) supplies to construct a
 /// [`FrontendSession`]: the five capabilities plus the session context.
 /// Keeps the session's fields private while letting all backend assembly
@@ -1074,6 +1107,37 @@ impl<T> FrontendSession<T> {
         params: HashMap<String, Value>,
     ) -> BoxFuture<'static, Result<holon_api::OpOutcome>> {
         self.execute_operation_with_origin(entity_name, op_name, params, holon_api::OpOrigin::User)
+    }
+
+    /// [`execute_gesture`] on this session's engine.
+    pub fn execute_intent(
+        &self,
+        intent: crate::operations::OperationIntent,
+    ) -> BoxFuture<'static, Result<holon_api::OpOutcome>> {
+        match self.require_operation_engine() {
+            Ok(engine) => execute_gesture(engine.as_ref(), intent),
+            Err(e) => Box::pin(std::future::ready(Err(e))),
+        }
+    }
+
+    /// [`Self::execute_intent`] for a dispatch site that has already taken the
+    /// intent apart: `keystroke` is what [`OperationIntent::keystroke`]
+    /// returned for it.
+    ///
+    /// [`OperationIntent::keystroke`]: crate::operations::OperationIntent::keystroke
+    pub fn execute_intent_parts(
+        &self,
+        keystroke: Option<holon_api::SourceKeystroke>,
+        entity_name: &EntityName,
+        op_name: &str,
+        params: HashMap<String, Value>,
+    ) -> BoxFuture<'static, Result<holon_api::OpOutcome>> {
+        match self.require_operation_engine() {
+            Ok(engine) => {
+                execute_gesture_parts(engine.as_ref(), keystroke, entity_name, op_name, params)
+            }
+            Err(e) => Box::pin(std::future::ready(Err(e))),
+        }
     }
 
     /// Execute an operation the session itself authored on the user's behalf

@@ -5,6 +5,7 @@ mod loro_completed_and_block_type_reach_sql;
 mod loro_create_persists_prod_session;
 mod loro_delete_races_file_edit;
 mod loro_engine_versions_equal_the_authority;
+mod loro_keystroke_footprint;
 mod loro_kind_fidelity_through_projection;
 mod loro_live_entity_wiring;
 mod loro_memory_holds_the_vault;

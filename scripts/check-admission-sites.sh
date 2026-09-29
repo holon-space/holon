@@ -27,7 +27,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 inventory=scripts/admission-sites.inventory
-entries='execute_operation(_with_origin)?|execute_with_parsed_carriers|dispatch_intent(_sync|_awaitable|_awaiting_result|_chain)?'
+entries='execute_operation(_with_origin)?|execute_with_parsed_carriers|execute_intent(_parts)?|execute_gesture(_parts)?|commit_keystroke|dispatch_intent(_sync|_awaitable|_awaiting_result|_chain)?'
 admits="$entries|admit"
 
 observed() {

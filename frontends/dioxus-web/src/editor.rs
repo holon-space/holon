@@ -395,24 +395,11 @@ fn flush_pending_now(entity_id: &str) -> bool {
 }
 
 pub(crate) fn update_wire(entity_id: &str, content: &str) -> serde_json::Value {
-    // `set_field`, not `update`: the block OperationProvider registered by
-    // EventInfraModule (`SqlBlockOperations`) exposes set_field / create /
-    // delete + structural ops — it has NO "update" op, and a dispatched
-    // "update" dies as UnknownOperation inside the worker. Same wire GPUI's
-    // editor and state_toggle produce.
-    serde_json::json!({
-        "entity": "block",
-        "op": "set_field",
-        "params": { "id": entity_id, "field": "content", "value": content },
-    })
+    OperationIntent::content_edit(entity_id, content).to_wire()
 }
 
 pub(crate) fn intent_to_wire(intent: &OperationIntent) -> serde_json::Value {
-    serde_json::json!({
-        "entity": intent.entity_name.to_string(),
-        "op": intent.op_name,
-        "params": intent.params,
-    })
+    intent.to_wire()
 }
 
 /// Send BOTH legs of a chevron click, in order: the view-local expansion

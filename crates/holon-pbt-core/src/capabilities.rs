@@ -2686,6 +2686,50 @@ pub trait RefReadOnlyHomes {
     fn read_only_page_titles(&self) -> BTreeMap<EntityUri, String>;
 }
 
+/// What the model expects of one edit of a tagged subtree: the write lands,
+/// or the shape gate refuses it naming `rule` (`B4`, `DC2`, ...).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExpectedShapeOutcome {
+    Applied,
+    Refused { rule: String },
+}
+
+#[holon_macros::capmap_adapter]
+pub trait SutShapeEdit {
+    /// Dispatch `ops` as ONE gesture of `origin` through the production engine
+    /// and record how it went. `Err` carries the refusal message.
+    async fn apply_shape_edit(
+        &self,
+        ops: Vec<holon_api::Operation>,
+        origin: holon_api::OpOrigin,
+    ) -> Result<(), String>;
+
+    /// Dispatch `first` and `second`, each a single-op gesture with its
+    /// origin, concurrently: `first` is parked after its shape judgement
+    /// until `second` either waits on admission or has finished. Records
+    /// `first`'s outcome, then `second`'s.
+    async fn apply_held_shape_pair(
+        &self,
+        first: (holon_api::Operation, holon_api::OpOrigin),
+        second: (holon_api::Operation, holon_api::OpOrigin),
+    );
+
+    /// Every recorded outcome, in dispatch order.
+    async fn shape_edit_outcomes(&self) -> Vec<Result<(), String>>;
+
+    /// The production shape audit: how many admitted plans touched a tagged
+    /// block, and every place the simulator's prediction differed from what
+    /// the write authority stored.
+    async fn shape_audit(&self) -> (usize, Vec<String>);
+}
+
+/// Reference-side twin of [`SutShapeEdit`]: the outcome the model expects of
+/// each edit, in the same order.
+#[holon_macros::capmap_adapter]
+pub trait RefShapeEdits {
+    fn expected_shape_outcomes(&self) -> Vec<ExpectedShapeOutcome>;
+}
+
 #[holon_macros::capmap_adapter]
 pub trait SutUnschemedIdDispatch {
     /// Dispatch a user-origin block `set_field` whose `id` param carries the

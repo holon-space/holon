@@ -11,7 +11,7 @@ base table except ["block_derived", "block_history", "clock", "clock_reader", "f
 - `unreported`: observed effects missing from `result.changes` (what D1 alone would miss).
 - Not covered: the Loro write leg (Text/Mark ops such as `insert_text` are not in this catalog).
 
-Counts: 70 ops; inside 4; outside 2; undeclared 64 (of which 22 failed on the fixture binding, so their effect is unmeasured).
+Counts: 73 ops; inside 4; outside 2; undeclared 67 (of which 22 failed on the fixture binding, so their effect is unmeasured).
 
 ## Gesture ops of the slot
 
@@ -31,6 +31,7 @@ Counts: 70 ops; inside 4; outside 2; undeclared 64 (of which 22 failed on the fi
 | block.merge_blocks | none | block:a[text:properties]; block:c[existence:block_raw- text:block_redirects+]; block:c-merged-body[existence:block_raw+] | Undeclared |  | misses block:c-merged-body[existence:block_raw+] | n/a (engine compound) |
 | engine.undo | none (fence) | block:n[existence:block_raw-] | Undeclared |  | covers | n/a (engine compound) |
 | engine.redo | none (fence) | block:n[existence:block_raw+] | Undeclared |  | covers | n/a (engine compound) |
+| engine.commit_keystroke | none (source line) | block:b[text:content text:properties] | Undeclared |  | covers | n/a (engine compound) |
 
 ## Every op
 
@@ -58,7 +59,7 @@ Counts: 70 ops; inside 4; outside 2; undeclared 64 (of which 22 failed on the fi
 | block.move_up | none | block:a[structural:sort_key]; block:b[structural:sort_key]; block:c[structural:sort_key] | Undeclared |  | misses block:a[structural:sort_key]; block:c[structural:sort_key] | block:a[structural:sort_key]; block:b[structural:sort_key]; block:c[structural:sort_key] |
 | block.outdent | none | block:a[structural:sort_key]; block:b[structural:sort_key]; block:b1[structural:parent_id structural:sort_key]; block:c[structural:sort_key] | Undeclared |  | misses block:a[structural:sort_key]; block:b[structural:sort_key]; block:c[structural:sort_key] | block:a[structural:sort_key]; block:b[structural:sort_key]; block:b1[structural:sort_key]; block:c[structural:sort_key] |
 | block.remove_tag | none | block:a[text:block_tags-] | Undeclared |  | covers | block:a[text:block_tags-] |
-| block.restore_join | none | ERROR: restore_join: block block:j not found | Undeclared |  | covers | - |
+| block.restore_join | none | ERROR: shape gate: `block.restore_join` could not be simulated, so its result cannot be judged: restore_join: block block:j not found | Undeclared |  | covers | - |
 | block.restore_link_resolution | none | ERROR: restore_link_resolution: 'rows' must be an Array, got Some(String("[]")) | Undeclared |  | covers | - |
 | block.restore_split | none | block:a[structural:sort_key text:content]; block:b[structural:sort_key]; block:c[structural:sort_key] | Undeclared |  | misses block:b[structural:sort_key] | block:a[structural:sort_key]; block:b[structural:sort_key]; block:c[structural:sort_key] |
 | block.rewrite_link_resolution | none | (none) | Undeclared |  | covers | - |
@@ -106,3 +107,6 @@ Counts: 70 ops; inside 4; outside 2; undeclared 64 (of which 22 failed on the fi
 | shopping-item.update | none | (none) | Undeclared |  | covers | - |
 | engine.undo | none (fence) | block:n[existence:block_raw-] | Undeclared |  | covers | n/a (engine compound) |
 | engine.redo | none (fence) | block:n[existence:block_raw+] | Undeclared |  | covers | n/a (engine compound) |
+| engine.commit_keystroke | none (source line) | block:b[text:content text:properties] | Undeclared |  | covers | n/a (engine compound) |
+| engine.commit_keystroke(multi-line) | none (source line) | block:b[text:content] | Undeclared |  | covers | n/a (engine compound) |
+| engine.set_field(source_text) | none (source line) | block:b[text:content text:properties] | Undeclared |  | covers | n/a (engine compound) |

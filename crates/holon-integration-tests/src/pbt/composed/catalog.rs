@@ -55,6 +55,12 @@ fn central_invariants() -> Vec<Box<dyn CapInvariant>> {
         invariants::conditions_match_ref::wire(),
         invariants::copies_stay_on_disk::wire(),
         invariants::read_only_home_refuses_writes::wire(),
+        // A tagged subtree is a write boundary: every edit is accepted or refused
+        // as the block adapter decides for the model's post-edit subtree.
+        invariants::shape_gate_refuses_illegal_writes::wire(),
+        // The shape gate judges a SIMULATED post-write state; every judged write
+        // must read back from the write authority as the simulator predicted.
+        invariants::shape_sim_matches_authority::wire(),
         invariants::source_language::wire(),
         // FLT-1.b: every `holon_filter` source block resolves to a typed
         // FilterSpec over the projected block set. SutBackend only, no ref.

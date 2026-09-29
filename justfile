@@ -187,8 +187,21 @@ pbt name='general' cases='64' *FLAGS:
 # In-lane agent gate: single-sequence keystone smoke. Agents run THIS, never the
 # full sweep (it exceeds the 600s foreground cap under parallel-lane load); the
 # full sweep is the orchestrator's weave-time gate (keystone-full).
+#
+# One drawn case may carry no decision, so the smoke also replays one
+# hand-authored case in which the shape gate refuses one edit and admits one.
 keystone-smoke:
+    #!/usr/bin/env bash
+    set -euo pipefail
     just pbt general 1
+    L=target/gate-logs/keystone-smoke-shape.log
+    HOLON_PERF_BUDGET=${HOLON_PERF_BUDGET-1} HOLON_HAND_AUTHORED_CASE=shape-gate-refuses-then-admits-in-one-case \
+        cargo test {{CANON}} --test hand_authored_regressions hand_authored_keystone_regressions \
+        -- --nocapture 2>&1 | tee "$L"
+    grep -qE '^\[shape reach\] tagged-subtree edits admitted=[1-9][0-9]* refused=[1-9][0-9]* simulator comparisons=[1-9]' "$L" || {
+        echo "FAIL: the shape case did not reach both shape invariants (see $L)."
+        exit 1
+    }
 
 # Land-gate battery member: the Loro consolidator suite (projection atomicity,
 # kind fidelity, unseeded-vault split, consolidator-epoch restart). It was in no

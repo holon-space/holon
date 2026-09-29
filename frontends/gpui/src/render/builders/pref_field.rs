@@ -26,14 +26,14 @@ const SECRET_MASK: &str = "••••••••";
 const SECRET_STORED: &str = "•••••••• Stored in the keychain";
 
 fn dispatch_set_preference(services: &Arc<dyn BuilderServices>, key: &str, value: Value) {
-    services.dispatch_intent(OperationIntent {
-        entity_name: "preferences".into(),
-        op_name: "set".into(),
-        params: HashMap::from([
+    services.dispatch_intent(OperationIntent::new(
+        "preferences".into(),
+        "set".into(),
+        HashMap::from([
             ("key".into(), Value::String(key.into())),
             ("value".into(), value),
         ]),
-    });
+    ));
 }
 
 /// Persist a preference and, on failure, surface a visible degraded-mode toast

@@ -32,6 +32,7 @@ use crate::capabilities::RefLayout;
 use crate::capabilities::RefNavHistory;
 use crate::capabilities::RefReadOnlyHomes;
 use crate::capabilities::RefRemoteListSync;
+use crate::capabilities::RefShapeEdits;
 use crate::capabilities::RefSharedView;
 use crate::capabilities::RefTaskState;
 use crate::capabilities::RefToggle;
@@ -48,7 +49,7 @@ pub struct NullRef;
 /// The trait names `NullRef` answers for — the ref caps the classifier
 /// can host. Asserted by the classifier test so a newly registered ref
 /// capability cannot silently escape classification.
-pub const NULL_REF_CAPS: [&str; 23] = [
+pub const NULL_REF_CAPS: [&str; 24] = [
     "RefAdvice",
     "RefAudience",
     "RefBackend",
@@ -65,6 +66,7 @@ pub const NULL_REF_CAPS: [&str; 23] = [
     "RefNavHistory",
     "RefReadOnlyHomes",
     "RefRemoteListSync",
+    "RefShapeEdits",
     "RefSharedView",
     "RefTaskState",
     "RefToggle",
@@ -231,6 +233,12 @@ impl RefDocuments for NullRef {
     }
     fn file_home_of(&self, block_id: &EntityUri) -> DrawnHome {
         panic!("class-2: invariant read RefDocuments::file_home_of")
+    }
+}
+
+impl RefShapeEdits for NullRef {
+    fn expected_shape_outcomes(&self) -> Vec<crate::capabilities::ExpectedShapeOutcome> {
+        panic!("class-2: invariant read RefShapeEdits::expected_shape_outcomes")
     }
 }
 
@@ -500,6 +508,7 @@ pub fn null_ref_caps() -> CapMap {
     caps.insert(nr.clone() as Arc<dyn RefNavHistory>);
     caps.insert(nr.clone() as Arc<dyn RefReadOnlyHomes>);
     caps.insert(nr.clone() as Arc<dyn RefRemoteListSync>);
+    caps.insert(nr.clone() as Arc<dyn RefShapeEdits>);
     caps.insert(nr.clone() as Arc<dyn RefSharedView>);
     caps.insert(nr.clone() as Arc<dyn RefTaskState>);
     caps.insert(nr.clone() as Arc<dyn RefToggle>);
@@ -529,6 +538,7 @@ pub fn null_ref_cap_ids() -> Vec<CapId> {
         CapId::of::<dyn RefNavHistory>(),
         CapId::of::<dyn RefReadOnlyHomes>(),
         CapId::of::<dyn RefRemoteListSync>(),
+        CapId::of::<dyn RefShapeEdits>(),
         CapId::of::<dyn RefSharedView>(),
         CapId::of::<dyn RefTaskState>(),
         CapId::of::<dyn RefToggle>(),

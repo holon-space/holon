@@ -521,36 +521,6 @@ async fn set_field(
     Ok(())
 }
 
-/// Move a block under `parent_id`, positioned after `after_id` (`None` =
-/// first child). Used by the dense_patch applier.
-///
-/// `parent_id` is REQUIRED (the `move_block` op's param bridge rejects its
-/// absence) and the anchor key MUST be `after_block_id` — the op's macro
-/// bridge maps params by exact arg name, so the former
-/// `position_after_block_id` key was SILENTLY dropped and every "positioned"
-/// move landed first-child (BugFunnel 2026-07-27, both dense_patch defects).
-async fn move_block_after(
-    service: &HolonService,
-    id: &str,
-    parent_id: &str,
-    after_id: Option<&str>,
-) -> Result<(), rmcp::ErrorData> {
-    let mut storage: StorageEntity = HashMap::new();
-    storage.insert("id".into(), Value::String(id.to_string()));
-    storage.insert("parent_id".into(), Value::String(parent_id.to_string()));
-    match after_id {
-        Some(a) => storage.insert("after_block_id".into(), Value::String(a.to_string())),
-        None => storage.insert("after_block_id".into(), Value::Null),
-    };
-    service
-        .execute_operation(&EntityName::new("block"), "move_block", storage)
-        .await
-        .map_err(|e| {
-            rmcp::ErrorData::internal_error(format!("move_block on {id} failed: {e:#}"), None)
-        })?;
-    Ok(())
-}
-
 /// What one `dense_patch` batch did, counted per op kind.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct AppliedCounts {
@@ -647,7 +617,38 @@ async fn apply_plan(
     file_id: &EntityUri,
 ) -> Result<AppliedCounts, rmcp::ErrorData> {
     let new_ids = plan_block_ids(plan)?;
+    let calls = plan
+        .ops
+        .iter()
+        .map(|op| patch_op_calls(op, &new_ids, file_id))
+        .collect::<Result<Vec<_>, _>>()?;
+    let judged: Vec<holon_api::Operation> = calls
+        .iter()
+        .flat_map(|(calls, _)| calls)
+        .map(PatchCall::judged)
+        .collect::<anyhow::Result<_>>()
+        .map_err(|e| rmcp::ErrorData::invalid_params(format!("dense_patch: {e:#}"), None))?;
+    // The shape gate judges the plan's end state, not each op's: a batch that
+    // passes through an illegal shape on its way to a legal one lands.
+    service
+        .execute_judged(&judged, async {
+            Ok(dispatch_calls(service, files, plan, &new_ids, file_id, &calls).await)
+        })
+        .await
+        .map_err(|e| rmcp::ErrorData::invalid_params(format!("dense_patch: {e:#}"), None))?
+}
 
+/// Dispatch a plan's engine calls in order as one batch, taking the batch
+/// back at the write authority when an op fails or the store does not read
+/// back as planned.
+async fn dispatch_calls(
+    service: &HolonService,
+    files: Option<&OrgFiles>,
+    plan: &crate::dense_patch::PatchPlan,
+    new_ids: &HashMap<usize, MintedBlock>,
+    file_id: &EntityUri,
+    calls: &[(Vec<PatchCall>, AppliedKind)],
+) -> Result<AppliedCounts, rmcp::ErrorData> {
     let batch = match service.batch_rollback() {
         Some(authority) => Some(authority.open().await.map_err(|e| {
             rmcp::ErrorData::internal_error(
@@ -659,8 +660,8 @@ async fn apply_plan(
     };
     let dispatch_all = async {
         let mut counts = AppliedCounts::default();
-        for (index, op) in plan.ops.iter().enumerate() {
-            match dispatch_patch_op(service, op, &new_ids, file_id).await {
+        for (index, (op, (op_calls, kind))) in plan.ops.iter().zip(calls).enumerate() {
+            match dispatch_patch_op(service, op_calls, *kind).await {
                 Ok(AppliedKind::Created) => counts.created += 1,
                 Ok(AppliedKind::Updated) => counts.updated += 1,
                 Ok(AppliedKind::Moved) => counts.moved += 1,
@@ -681,13 +682,13 @@ async fn apply_plan(
         Ok(counts) => counts,
         Err((index, cause)) => {
             let outcome = roll_back(batch, index).await;
-            return Err(partial_apply_error(plan, &new_ids, index, cause, outcome));
+            return Err(partial_apply_error(plan, new_ids, index, cause, outcome));
         }
     };
 
     // A check that cannot finish leaves the writes unverified: they are taken
     // back like a mismatch.
-    let mismatched = match read_back(service, files, plan, &new_ids, file_id).await {
+    let mismatched = match read_back(service, files, plan, new_ids, file_id).await {
         Ok(mismatched) => mismatched,
         Err(e) => vec![format!(
             "the check after the writes failed, so no row is verified: {}",
@@ -696,7 +697,7 @@ async fn apply_plan(
     };
     if !mismatched.is_empty() {
         let outcome = roll_back(batch, plan.ops.len()).await;
-        return Err(readback_error(plan, &new_ids, mismatched, outcome));
+        return Err(readback_error(plan, new_ids, mismatched, outcome));
     }
 
     Ok(counts)
@@ -1926,14 +1927,71 @@ fn partial_apply_error(
     )
 }
 
-/// Dispatch ONE plan op, resolving its references against the plan's minted
-/// ids.
-async fn dispatch_patch_op(
-    service: &HolonService,
+/// One engine call a plan op stands for.
+struct PatchCall {
+    op_name: &'static str,
+    params: StorageEntity,
+    /// The org parser's carriers the author's text gives this call.
+    carriers: Vec<holon_org_format::ParsedCarrier>,
+    /// What a failure names, e.g. `move_block on block:x`.
+    what: String,
+}
+
+impl PatchCall {
+    fn new(op_name: &'static str, what: String, params: Vec<(&str, Value)>) -> Self {
+        Self {
+            op_name,
+            params: params.into_iter().map(|(k, v)| (k.into(), v)).collect(),
+            carriers: Vec::new(),
+            what,
+        }
+    }
+
+    fn carrying(self, carriers: &[holon_org_format::ParsedCarrier]) -> Self {
+        Self {
+            carriers: carriers.to_vec(),
+            ..self
+        }
+    }
+
+    /// The op the engine dispatches for this call: its params with the
+    /// carriers written in, as the shape gate must judge it.
+    fn judged(&self) -> anyhow::Result<holon_api::Operation> {
+        let entity = EntityName::new("block");
+        let params = holon::api::operation_engine::with_parsed_carriers(
+            &entity,
+            self.op_name,
+            self.params.clone(),
+            &self.carriers,
+        )?;
+        Ok(holon_api::Operation::from_params(
+            "block",
+            self.op_name,
+            self.op_name,
+            params.into_iter().map(|(k, v)| (k.to_string(), v)),
+        ))
+    }
+
+    fn set_field(id: &str, field: &str, value: Value) -> Self {
+        Self::new(
+            "set_field",
+            format!("set_field({field}) on {id}"),
+            vec![
+                ("id", Value::String(id.to_string())),
+                ("field", Value::String(field.to_string())),
+                ("value", value),
+            ],
+        )
+    }
+}
+
+/// The engine calls of ONE plan op, its references resolved against the
+/// plan's minted ids.
+fn patch_op_calls(
     op: &crate::dense_patch::PatchOp,
     new_ids: &HashMap<usize, MintedBlock>,
     file_id: &EntityUri,
-) -> Result<AppliedKind, rmcp::ErrorData> {
+) -> Result<(Vec<PatchCall>, AppliedKind), rmcp::ErrorData> {
     use crate::dense_patch::PatchOp;
     use crate::dense_patch::Ref as PRef;
 
@@ -1953,7 +2011,7 @@ async fn dispatch_patch_op(
         })
     };
 
-    match op {
+    Ok(match op {
         PatchOp::Create {
             temp,
             parent,
@@ -1964,152 +2022,159 @@ async fn dispatch_patch_op(
             carriers,
         } => {
             let minted = minted(*temp)?;
-            let parent_id = resolve(parent)?;
-            let mut storage: StorageEntity = HashMap::new();
-            storage.insert("id".into(), Value::String(minted.uri.clone()));
-            storage.insert("parent_id".into(), Value::String(parent_id));
-            storage.insert("content".into(), Value::String(content.text.clone()));
-            storage.insert("marks".into(), create_marks_value(content));
-            storage.insert("content_type".into(), Value::String("text".to_string()));
-            storage.insert("ID".into(), Value::String(minted.bare.clone()));
+            let mut params = vec![
+                ("id", Value::String(minted.uri.clone())),
+                ("parent_id", Value::String(resolve(parent)?)),
+                ("content", Value::String(content.text.clone())),
+                ("marks", create_marks_value(content)),
+                ("content_type", Value::String("text".to_string())),
+                ("ID", Value::String(minted.bare.clone())),
+            ];
             if let Some(st) = task_state {
-                storage.insert("task_state".into(), Value::String(st.keyword.clone()));
+                params.push(("task_state", Value::String(st.keyword.clone())));
             }
             // An empty Array would issue a junction-clearing DELETE for a row
             // that cannot have tags yet.
             if !attributes.tags.is_empty() {
-                storage.insert(
-                    EdgeField::Tags.column().into(),
-                    tags_value(&attributes.tags),
-                );
+                params.push((EdgeField::Tags.column(), tags_value(&attributes.tags)));
             }
-            for (key, value) in &attributes.properties {
-                let displaced = storage.insert(
-                    holon_org_format::AuthoredKey::new(key).property().into(),
-                    Value::String(value.clone()),
-                );
+            let keys: Vec<String> = attributes
+                .properties
+                .keys()
+                .map(|key| holon_org_format::AuthoredKey::new(key).property())
+                .collect();
+            for ((key, value), column) in attributes.properties.iter().zip(&keys) {
                 assert!(
-                    displaced.is_none(),
+                    params.iter().all(|(k, _)| k != column),
                     "plan_patch refuses property keys that name a create param; `{key}` got through"
                 );
+                params.push((column.as_str(), Value::String(value.clone())));
             }
-            // Create AND position in one op via the canonical positional
-            // key: `after_block_id` places the new block immediately after
-            // its predecessor sibling atomically across both providers.
             // `Null` is "the first child": an absent key would append.
             let anchor = match after {
                 Some(a) => Value::String(resolve(a)?),
                 None => Value::Null,
             };
-            storage.insert(POSITION_AFTER_BLOCK_ID_PARAM.into(), anchor);
-            service
-                .execute_with_parsed_carriers(
-                    &EntityName::new("block"),
-                    "create",
-                    storage,
-                    carriers,
-                )
-                .await
-                .map_err(|e| {
-                    rmcp::ErrorData::internal_error(format!("create failed: {e:#}"), None)
-                })?;
-            Ok(AppliedKind::Created)
+            params.push((POSITION_AFTER_BLOCK_ID_PARAM, anchor));
+            (
+                vec![PatchCall::new("create", "create".to_string(), params).carrying(carriers)],
+                AppliedKind::Created,
+            )
         }
-        PatchOp::SetContent { block_id, content } => {
-            set_field(
-                service,
+        PatchOp::SetContent { block_id, content } => (
+            vec![PatchCall::set_field(
                 block_id.as_str(),
                 "content",
                 rich_content_value(content),
-            )
-            .await?;
-            Ok(AppliedKind::Updated)
-        }
+            )],
+            AppliedKind::Updated,
+        ),
+        // The authority writes the category with the keyword and clears both
+        // on REMOVED.
         PatchOp::SetState {
             block_id,
             task_state,
-        } => {
-            // The authority writes the category with the keyword and clears both
-            // on REMOVED.
-            match task_state {
-                Some(st) => {
-                    set_field(
-                        service,
-                        block_id.as_str(),
-                        "task_state",
-                        Value::String(st.keyword.clone()),
-                    )
-                    .await?;
-                }
-                None => {
-                    set_field(service, block_id.as_str(), "task_state", Value::REMOVED).await?;
-                }
-            }
-            Ok(AppliedKind::Updated)
-        }
-        PatchOp::SetTags { block_id, tags } => {
-            set_field(
-                service,
+        } => (
+            vec![PatchCall::set_field(
+                block_id.as_str(),
+                "task_state",
+                match task_state {
+                    Some(st) => Value::String(st.keyword.clone()),
+                    None => Value::REMOVED,
+                },
+            )],
+            AppliedKind::Updated,
+        ),
+        PatchOp::SetTags { block_id, tags } => (
+            vec![PatchCall::set_field(
                 block_id.as_str(),
                 EdgeField::Tags.column(),
                 tags_value(tags),
-            )
-            .await?;
-            Ok(AppliedKind::Updated)
-        }
+            )],
+            AppliedKind::Updated,
+        ),
         PatchOp::SetProperty {
             block_id,
             key,
             value,
-        } => {
-            let value = match value {
-                Some(v) => Value::String(v.clone()),
-                None => Value::REMOVED,
-            };
-            set_field(service, block_id.as_str(), &key.property(), value).await?;
-            Ok(AppliedKind::Updated)
-        }
-        PatchOp::SetCarrier { block_id, carrier } => {
-            let mut storage: StorageEntity = HashMap::new();
-            storage.insert("id".into(), Value::String(block_id.as_str().to_string()));
-            service
-                .execute_with_parsed_carriers(
-                    &EntityName::new("block"),
+        } => (
+            vec![PatchCall::set_field(
+                block_id.as_str(),
+                &key.property(),
+                match value {
+                    Some(v) => Value::String(v.clone()),
+                    None => Value::REMOVED,
+                },
+            )],
+            AppliedKind::Updated,
+        ),
+        PatchOp::SetCarrier { block_id, carrier } => (
+            vec![
+                PatchCall::new(
                     "set_field",
-                    storage,
-                    std::slice::from_ref(carrier),
+                    format!("set_field({}) on {block_id}", carrier.key()),
+                    vec![("id", Value::String(block_id.as_str().to_string()))],
                 )
-                .await
-                .map_err(|e| {
-                    rmcp::ErrorData::internal_error(
-                        format!("set_field({}) on {block_id} failed: {e:#}", carrier.key()),
-                        None,
-                    )
-                })?;
-            Ok(AppliedKind::Updated)
-        }
+                .carrying(std::slice::from_ref(carrier)),
+            ],
+            AppliedKind::Updated,
+        ),
+        // `parent_id` is REQUIRED (the `move_block` op's param bridge rejects
+        // its absence) and the anchor key MUST be `after_block_id`: the op's
+        // macro bridge maps params by exact arg name and drops any other key.
         PatchOp::Move {
             block_id,
             parent,
             after,
         } => {
-            let parent_id = resolve(parent)?;
-            let after_id = after.as_ref().map(&resolve).transpose()?;
-            move_block_after(service, block_id.as_str(), &parent_id, after_id.as_deref()).await?;
-            Ok(AppliedKind::Moved)
+            let after_id = match after {
+                Some(a) => Value::String(resolve(a)?),
+                None => Value::Null,
+            };
+            (
+                vec![PatchCall::new(
+                    "move_block",
+                    format!("move_block on {}", block_id.as_str()),
+                    vec![
+                        ("id", Value::String(block_id.as_str().to_string())),
+                        ("parent_id", Value::String(resolve(parent)?)),
+                        ("after_block_id", after_id),
+                    ],
+                )],
+                AppliedKind::Moved,
+            )
         }
-        PatchOp::Delete { block_id } => {
-            let mut storage: StorageEntity = HashMap::new();
-            storage.insert("id".into(), Value::String(block_id.as_str().to_string()));
-            service
-                .execute_operation(&EntityName::new("block"), "delete_subtree", storage)
-                .await
-                .map_err(|e| {
-                    rmcp::ErrorData::internal_error(format!("delete failed: {e:#}"), None)
-                })?;
-            Ok(AppliedKind::Deleted)
-        }
+        PatchOp::Delete { block_id } => (
+            vec![PatchCall::new(
+                "delete_subtree",
+                "delete".to_string(),
+                vec![("id", Value::String(block_id.as_str().to_string()))],
+            )],
+            AppliedKind::Deleted,
+        ),
+    })
+}
+
+/// Dispatch the engine calls of ONE plan op.
+async fn dispatch_patch_op(
+    service: &HolonService,
+    calls: &[PatchCall],
+    kind: AppliedKind,
+) -> Result<AppliedKind, rmcp::ErrorData> {
+    for call in calls {
+        service
+            .execute_with_parsed_carriers(
+                &EntityName::new("block"),
+                call.op_name,
+                call.params.clone(),
+                &call.carriers,
+            )
+            .await
+            .map_err(|e| {
+                rmcp::ErrorData::internal_error(format!("{} failed: {e:#}", call.what), None)
+            })?;
     }
+    Ok(kind)
 }
 
 /// The `tags` edge param: a string Array, the carrier both write legs read.
@@ -8998,6 +9063,7 @@ mod dense_patch_rollback_tests {
     use holon_loro::loro_document_store::DocScope;
 
     use super::apply_plan;
+    use super::dispatch_calls;
     use super::engine_harness::fresh_loro_engine;
     use super::engine_harness::fresh_loro_engine_with_concurrent_writes;
     use super::engine_harness::server;
@@ -9061,6 +9127,24 @@ mod dense_patch_rollback_tests {
             .len()
     }
 
+    /// `dispatch_calls` without `apply_plan`'s whole-plan admission: each op is
+    /// judged on its own, so the ghost move is refused mid-batch and fails the
+    /// batch like any failed op. Through `apply_plan` the gate refuses that
+    /// plan before any write.
+    async fn dispatch_unadmitted(
+        service: &holon::api::holon_service::HolonService,
+        plan: &PatchPlan,
+    ) -> Result<super::AppliedCounts, rmcp::ErrorData> {
+        let file_id = EntityUri::block("root");
+        let new_ids = super::plan_block_ids(plan)?;
+        let calls = plan
+            .ops
+            .iter()
+            .map(|op| super::patch_op_calls(op, &new_ids, &file_id))
+            .collect::<Result<Vec<_>, _>>()?;
+        dispatch_calls(service, None, plan, &new_ids, &file_id, &calls).await
+    }
+
     async fn seed_root(backend: &LoroBackend) {
         backend
             .create_block_with_properties(
@@ -9112,6 +9196,47 @@ mod dense_patch_rollback_tests {
         assert_eq!(projected_children(&engine, "block:root").await, 2);
     }
 
+    /// The shape gate simulates the whole plan first, so a plan whose op 3
+    /// moves a block the write authority does not hold is refused by name
+    /// with nothing dispatched.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_patch_whose_op_cannot_apply_is_refused_before_any_write() {
+        let dir = tempfile::tempdir().expect("temp storage");
+        let (engine, store, _projection) = fresh_loro_engine(dir.path(), false).await;
+        let backend = backend_of(&store).await;
+        seed_root(&backend).await;
+        let before = stored_ids(&backend).await;
+        let server = server(engine.clone());
+
+        let plan = labelled(PatchPlan {
+            ops: vec![
+                create(0, "first"),
+                create(1, "second"),
+                PatchOp::Move {
+                    block_id: EntityUri::block("ghost"),
+                    parent: PRef::Root,
+                    after: None,
+                },
+            ],
+            ..PatchPlan::default()
+        });
+        let err = apply_plan(&server.service(), None, &plan, &EntityUri::block("root"))
+            .await
+            .expect_err("op 3 moves a block that does not exist");
+
+        assert!(
+            err.message.contains(
+                &holon_core::BlockNotInWriteAuthority {
+                    block: EntityUri::block("ghost"),
+                }
+                .to_string()
+            ),
+            "{}",
+            err.message
+        );
+        assert_eq!(stored_ids(&backend).await, before);
+    }
+
     /// A plan whose op 3 fails leaves ops 1-2 dispatched. Under the CRDT
     /// authority they are undone, so the caller may re-apply the whole
     /// corrected patch instead of reconciling rows by hand.
@@ -9140,7 +9265,7 @@ mod dense_patch_rollback_tests {
             ..PatchPlan::default()
         });
 
-        let err = apply_plan(&server.service(), None, &plan, &EntityUri::block("root"))
+        let err = dispatch_unadmitted(&server.service(), &plan)
             .await
             .expect_err("op 3 moves a block that does not exist");
 
@@ -9233,14 +9358,9 @@ mod dense_patch_rollback_tests {
         seed_other(&backend).await;
         let server = server(engine.clone());
 
-        let err = apply_plan(
-            &server.service(),
-            None,
-            &create_then_fail(),
-            &EntityUri::block("root"),
-        )
-        .await
-        .expect_err("op 2 moves a block that does not exist");
+        let err = dispatch_unadmitted(&server.service(), &create_then_fail())
+            .await
+            .expect_err("op 2 moves a block that does not exist");
 
         assert!(
             fired.load(std::sync::atomic::Ordering::SeqCst),
@@ -9278,14 +9398,9 @@ mod dense_patch_rollback_tests {
         seed_other(&backend).await;
         let server = server(engine.clone());
 
-        let err = apply_plan(
-            &server.service(),
-            None,
-            &create_then_fail(),
-            &EntityUri::block("root"),
-        )
-        .await
-        .expect_err("op 2 moves a block that does not exist");
+        let err = dispatch_unadmitted(&server.service(), &create_then_fail())
+            .await
+            .expect_err("op 2 moves a block that does not exist");
 
         assert!(fired.load(std::sync::atomic::Ordering::SeqCst));
         let data = err.data.expect("the report carries its rows");
@@ -9309,21 +9424,32 @@ mod dense_patch_rollback_tests {
         );
     }
 
-    /// The same failure with a peer's op imported inside the window: the undo
-    /// takes back only the batch's own ops, so the peer's block survives.
+    /// An op the gate admits and the engine then fails, with a peer's op
+    /// imported inside the window: the undo takes back only the batch's own
+    /// ops, so the peer's block survives.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_peers_write_inside_the_window_survives_the_rollback() {
         let dir = tempfile::tempdir().expect("temp storage");
         let (engine, store, _projection) = fresh_loro_engine(dir.path(), true).await;
         let backend = backend_of(&store).await;
         seed_root(&backend).await;
+        backend
+            .create_block_with_properties(
+                EntityUri::no_parent(),
+                BlockContent::text("anchor"),
+                Some(EntityUri::block("anchor")),
+                &HashMap::new(),
+                &BlockEdges::default(),
+            )
+            .await
+            .expect("seed the block op 2 moves");
         let server = server(engine.clone());
 
         let plan = labelled(PatchPlan {
             ops: vec![
                 create(0, "first"),
                 PatchOp::Move {
-                    block_id: EntityUri::block("ghost"),
+                    block_id: EntityUri::block("anchor"),
                     parent: PRef::Root,
                     after: None,
                 },
@@ -9343,9 +9469,476 @@ mod dense_patch_rollback_tests {
         assert_eq!(data["partial_apply"], serde_json::json!(false));
         assert_eq!(
             stored_ids(&backend).await,
-            vec!["block:root", "block:theirs"],
+            vec!["block:anchor", "block:root", "block:theirs"],
             "our create is undone and the peer's block survives"
         );
+    }
+}
+
+/// `dense_patch` is judged by the shape gate as ONE plan (Model.md invariant
+/// 16): its end state must keep every tagged block in shape, its steps need
+/// not.
+#[cfg(test)]
+mod dense_patch_shape_gate_tests {
+    use std::collections::HashMap;
+
+    use holon_api::BlockContent;
+    use holon_api::BlockEdges;
+    use holon_api::EntityUri;
+    use holon_api::Value;
+    use holon_api::repository::CoreOperations;
+    use holon_loro::LoroBackend;
+    use holon_loro::loro_document_store::DocScope;
+    use rmcp::handler::server::wrapper::Parameters;
+
+    use super::apply_plan;
+    use super::engine_harness::fresh_loro_engine;
+    use super::engine_harness::server;
+    use crate::dense_patch::PatchOp;
+    use crate::dense_patch::PatchPlan;
+    use crate::dense_patch::Ref as PRef;
+    use crate::types::DensePatchParams;
+    use crate::types::DenseQueryParams;
+
+    async fn put(
+        backend: &LoroBackend,
+        id: &str,
+        parent: EntityUri,
+        title: &str,
+        props: &[(&str, &str)],
+        tags: &[&str],
+    ) {
+        backend
+            .create_block_with_properties(
+                parent,
+                BlockContent::text(title),
+                Some(EntityUri::block(id)),
+                &props
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), Value::String(v.to_string())))
+                    .collect::<HashMap<_, _>>(),
+                &BlockEdges {
+                    tags: tags.iter().map(|t| t.to_string()).collect(),
+                    ..BlockEdges::default()
+                },
+            )
+            .await
+            .unwrap_or_else(|e| panic!("seed {id}: {e}"));
+    }
+
+    /// Two open decisions under `root`, each with ONE option: `d1` holds `a`,
+    /// `d2` holds `c`. Written straight into the authority, which the gate
+    /// never judges.
+    async fn two_decisions(backend: &LoroBackend) {
+        put(backend, "root", EntityUri::no_parent(), "root", &[], &[]).await;
+        for (d, option, key) in [("d1", "o-a", "a"), ("d2", "o-c", "c")] {
+            put(
+                backend,
+                d,
+                EntityUri::block("root"),
+                "Which store?",
+                &[("task_state", "?"), ("task_state_category", "active")],
+                &["decision"],
+            )
+            .await;
+            put(
+                backend,
+                option,
+                EntityUri::block(d),
+                key,
+                &[("option", key)],
+                &[],
+            )
+            .await;
+        }
+    }
+
+    async fn children(backend: &LoroBackend, parent: &str) -> Vec<String> {
+        backend
+            .list_children(EntityUri::block(parent).as_str())
+            .await
+            .expect("list children")
+    }
+
+    fn mv(block: &str, parent: &str, after: Option<&str>) -> PatchOp {
+        PatchOp::Move {
+            block_id: EntityUri::block(block),
+            parent: PRef::Existing(EntityUri::block(parent)),
+            after: after.map(|a| PRef::Existing(EntityUri::block(a))),
+        }
+    }
+
+    /// Swapping the two options passes through `d2` with no option (DC1)
+    /// after the first move; the plan's end state is legal, so it lands.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_batch_legal_only_as_a_whole_lands() {
+        let dir = tempfile::tempdir().expect("temp storage");
+        let (engine, store, projection) = fresh_loro_engine(dir.path(), false).await;
+        let backend =
+            LoroBackend::from_document(store.get_doc(DocScope::Global).await.expect("doc"));
+        two_decisions(&backend).await;
+        projection.flush().await.expect("project the seed");
+        let server = server(engine.clone());
+
+        let plan = crate::dense_patch::labelled(PatchPlan {
+            ops: vec![mv("o-c", "d1", Some("o-a")), mv("o-a", "d2", None)],
+            ..PatchPlan::default()
+        });
+        apply_plan(&server.service(), None, &plan, &EntityUri::block("root"))
+            .await
+            .unwrap_or_else(|e| panic!("the swap ends legal and must land: {}", e.message));
+
+        assert_eq!(
+            children(&backend, "d1").await,
+            vec!["block:o-c".to_string()]
+        );
+        assert_eq!(
+            children(&backend, "d2").await,
+            vec!["block:o-a".to_string()]
+        );
+    }
+
+    /// The control: the same first move alone ends with `d2` optionless, is
+    /// refused with its rule and writes nothing. Without it the swap above
+    /// would also pass against a gate that judges nothing.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_batch_that_ends_in_a_broken_decision_is_refused_and_writes_nothing() {
+        let dir = tempfile::tempdir().expect("temp storage");
+        let (engine, store, projection) = fresh_loro_engine(dir.path(), false).await;
+        let backend =
+            LoroBackend::from_document(store.get_doc(DocScope::Global).await.expect("doc"));
+        two_decisions(&backend).await;
+        projection.flush().await.expect("project the seed");
+        let server = server(engine.clone());
+
+        let plan = crate::dense_patch::labelled(PatchPlan {
+            ops: vec![mv("o-c", "d1", Some("o-a"))],
+            ..PatchPlan::default()
+        });
+        let err = apply_plan(&server.service(), None, &plan, &EntityUri::block("root"))
+            .await
+            .expect_err("d2 ends with no option");
+        assert!(err.message.contains("DC1"), "{}", err.message);
+        assert_eq!(
+            children(&backend, "d2").await,
+            vec!["block:o-c".to_string()]
+        );
+    }
+
+    fn text_of(result: &rmcp::model::CallToolResult) -> String {
+        match &result.content[0].raw {
+            rmcp::model::RawContent::Text(t) => t.text.clone(),
+            other => panic!("expected a text result, got {other:?}"),
+        }
+    }
+
+    /// The creation route the D231.a refusal names: the decision and its
+    /// options written by one `dense_patch`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_legal_decision_is_created_by_one_dense_patch() {
+        let dir = tempfile::tempdir().expect("temp storage");
+        let (engine, store, projection) = fresh_loro_engine(dir.path(), false).await;
+        let backend =
+            LoroBackend::from_document(store.get_doc(DocScope::Global).await.expect("doc"));
+        // A projection renders under its roots' parent; the sentinel cannot be one.
+        put(&backend, "page", EntityUri::no_parent(), "page", &[], &[]).await;
+        put(&backend, "root", EntityUri::block("page"), "root", &[], &[]).await;
+        // The patch reads its writes back from the projection.
+        let flusher = {
+            let projection = projection.clone();
+            tokio::spawn(async move {
+                loop {
+                    projection.flush().await.expect("project the store");
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+        };
+        super::engine_harness::await_projected(&engine, &["block:root"]).await;
+        let server = server(engine.clone());
+
+        let queried = server
+            .dense_query(Parameters(DenseQueryParams {
+                query: "SELECT * FROM block WHERE id = 'block:root'".to_string(),
+                language: "holon_sql".to_string(),
+                params: HashMap::new(),
+                context_id: None,
+                context_parent_id: None,
+            }))
+            .await
+            .expect("dense_query");
+        let queried: serde_json::Value =
+            serde_json::from_str(&text_of(&queried)).expect("dense_query output is JSON");
+        let handle = queried["projection_handle"]
+            .as_str()
+            .expect("a projection handle")
+            .to_string();
+        let text = format!(
+            "{}\n** ? Which store? :decision:\n:PROPERTIES:\n:choose: 1\n:END:\n\
+             *** Loro\n:PROPERTIES:\n:option: loro\n:END:\n\
+             *** Turso\n:PROPERTIES:\n:option: turso\n:END:\n",
+            queried["dense_org"]
+                .as_str()
+                .expect("dense text")
+                .trim_end()
+        );
+        server
+            .dense_patch(Parameters(DensePatchParams {
+                handle,
+                text,
+                delete: Vec::new(),
+                dry_run: false,
+            }))
+            .await
+            .unwrap_or_else(|e| panic!("a legal decision must land: {}", e.message));
+        flusher.abort();
+
+        let under_root = children(&backend, "root").await;
+        assert_eq!(under_root.len(), 1, "{under_root:?}");
+        let decision = backend
+            .get_block(&under_root[0])
+            .await
+            .expect("the new decision");
+        let options = backend
+            .get_blocks(
+                backend
+                    .list_children(&under_root[0])
+                    .await
+                    .expect("options"),
+            )
+            .await
+            .expect("the new options");
+        holon_api::decision_block::parse(&decision, &options)
+            .unwrap_or_else(|e| panic!("the created subtree is a decision: {e}"));
+    }
+}
+
+/// `split_block`, `join_block` and `delete_subtree` read and write through the
+/// structural provider's cell registry, which the shape gate's simulator does
+/// not have. On a decision's options, what each authority stores must still
+/// be what the simulator predicted.
+#[cfg(test)]
+mod shape_sim_cell_branch_tests {
+    use std::collections::HashMap;
+
+    use holon::api::BackendEngine;
+    use holon_api::BlockContent;
+    use holon_api::BlockEdges;
+    use holon_api::EntityName;
+    use holon_api::EntityUri;
+    use holon_api::OpOrigin;
+    use holon_api::Value;
+    use holon_core::shape_gate::ShapeAudit;
+    use holon_core::storage::types::StorageEntity;
+    use holon_loro::LoroBackend;
+    use holon_loro::loro_document_store::DocScope;
+    use holon_turso::schema_module::SchemaModule;
+    use holon_turso::schema_modules::BlockSchemaModule;
+
+    use super::engine_harness::await_projected;
+    use super::engine_harness::child_ids;
+    use super::engine_harness::fresh_loro_engine;
+
+    const OPTIONS: [(&str, &str, &str); 3] = [
+        ("block:o-a", "alpha", "a"),
+        ("block:o-b", "beta", "b"),
+        ("block:o-c", "gamma", "c"),
+    ];
+
+    /// `engine_harness::fresh_engine` with the production block CRUD provider,
+    /// which writes `tags` to its edge table.
+    async fn sql_only_engine() -> std::sync::Arc<BackendEngine> {
+        use fluxdi::Module;
+        holon::di::create_backend_engine_with_extras(
+            ":memory:".into(),
+            |injector| {
+                holon_loro_wiring::EventInfraModule
+                    .configure(injector)
+                    .map_err(|e| anyhow::anyhow!("configure EventInfraModule: {e}"))?;
+                injector.provide_into_set::<dyn holon_core::OperationProvider>(
+                    fluxdi::Provider::root(|resolver| {
+                        let db = resolver
+                            .resolve::<dyn holon::di::DbHandleProvider>()
+                            .handle();
+                        std::sync::Arc::new(holon::core::SqlOperationProvider::with_edge_fields(
+                            db,
+                            holon::storage::BLOCK_WRITE_TABLE.to_string(),
+                            "block".to_string(),
+                            "block".to_string(),
+                            BlockSchemaModule.edge_fields(),
+                        ))
+                            as std::sync::Arc<dyn holon_core::OperationProvider>
+                    }),
+                );
+                Ok(())
+            },
+            |_| async {},
+        )
+        .await
+        .map(|(engine, _)| engine)
+        .expect("SqlOnly DI graph must build")
+    }
+
+    fn s(v: &str) -> Value {
+        Value::String(v.to_string())
+    }
+
+    async fn seed_sql(engine: &BackendEngine) {
+        let create = |id: &str, parent: &str, content: &str, props: &[(&str, &str)]| {
+            let mut p: StorageEntity = HashMap::new();
+            p.insert("id".into(), s(id));
+            p.insert("parent_id".into(), s(parent));
+            p.insert("content".into(), s(content));
+            p.insert(
+                "properties".into(),
+                Value::Object(props.iter().map(|(k, v)| (k.to_string(), s(v))).collect()),
+            );
+            p
+        };
+        let mut decision = create("block:d", "block:page", "Which store?", &[]);
+        decision.insert("task_state".into(), s("?"));
+        decision.insert("tags".into(), Value::Array(vec![s("decision")]));
+        let mut rows = vec![
+            create("block:page", "sentinel:no_parent", "page", &[]),
+            decision,
+        ];
+        for (id, label, key) in OPTIONS {
+            rows.push(create(id, "block:d", label, &[("option", key)]));
+        }
+        for params in rows {
+            engine
+                .execute_operation(&EntityName::new("block"), "create", params, OpOrigin::Sync)
+                .await
+                .unwrap_or_else(|e| panic!("seed: {e:#}"));
+        }
+        await_projected(
+            engine,
+            &[
+                "block:page",
+                "block:d",
+                "block:o-a",
+                "block:o-b",
+                "block:o-c",
+            ],
+        )
+        .await;
+    }
+
+    async fn seed_loro(backend: &LoroBackend) {
+        let put =
+            |id: &str, parent: EntityUri, title: &str, props: &[(&str, &str)], tags: &[&str]| {
+                let props: HashMap<String, Value> =
+                    props.iter().map(|(k, v)| (k.to_string(), s(v))).collect();
+                let edges = BlockEdges {
+                    tags: tags.iter().map(|t| t.to_string()).collect(),
+                    ..BlockEdges::default()
+                };
+                let id = EntityUri::parse(id).expect("a schemed block id");
+                let title = title.to_string();
+                async move {
+                    backend
+                        .create_block_with_properties(
+                            parent,
+                            BlockContent::text(title),
+                            Some(id.clone()),
+                            &props,
+                            &edges,
+                        )
+                        .await
+                        .unwrap_or_else(|e| panic!("seed {id}: {e}"));
+                }
+            };
+        put("block:page", EntityUri::no_parent(), "page", &[], &[]).await;
+        put(
+            "block:d",
+            EntityUri::block("page"),
+            "Which store?",
+            &[("task_state", "?"), ("task_state_category", "active")],
+            &["decision"],
+        )
+        .await;
+        for (id, label, key) in OPTIONS {
+            put(id, EntityUri::block("d"), label, &[("option", key)], &[]).await;
+        }
+    }
+
+    /// Run one structural op as the user and require the shape audit to have
+    /// compared it with no divergence.
+    async fn judged(engine: &BackendEngine, op: &str, params: &[(&str, Value)]) {
+        let audit = ShapeAudit::global();
+        let before = audit.log();
+        engine
+            .execute_operation(
+                &EntityName::new("block"),
+                op,
+                params
+                    .iter()
+                    .map(|(k, v)| ((*k).into(), v.clone()))
+                    .collect(),
+                OpOrigin::User,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{op} on an option is legal: {e:#}"));
+        let after = audit.log();
+        assert!(
+            after.compared > before.compared,
+            "{op} touched the decision, so the audit must compare it"
+        );
+        assert_eq!(
+            after.divergences[before.divergences.len()..],
+            [] as [String; 0],
+            "{op}: the authority stored something other than the simulator predicted"
+        );
+    }
+
+    /// `projection` is the Loro engine's projection into `block_raw`, which
+    /// `child_ids` reads.
+    async fn split_join_delete(
+        engine: &BackendEngine,
+        projection: Option<&dyn holon_core::DownstreamProjection>,
+    ) {
+        ShapeAudit::global().enable();
+        judged(
+            engine,
+            "split_block",
+            &[("id", s("block:o-a")), ("position", Value::Integer(2))],
+        )
+        .await;
+        if let Some(projection) = projection {
+            projection.flush().await.expect("project the split");
+        }
+        let born: Vec<String> = child_ids(engine, "block:d")
+            .await
+            .into_iter()
+            .filter(|id| !OPTIONS.iter().any(|(o, _, _)| o == id))
+            .collect();
+        let [born] = born.as_slice() else {
+            panic!("the split makes exactly one new option-less child: {born:?}");
+        };
+        judged(
+            engine,
+            "join_block",
+            &[("id", s(born)), ("position", Value::Integer(0))],
+        )
+        .await;
+        judged(engine, "delete_subtree", &[("id", s("block:o-c"))]).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_simulator_predicts_the_sql_only_cell_branch() {
+        let engine = sql_only_engine().await;
+        seed_sql(&engine).await;
+        split_join_delete(&engine, None).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_simulator_predicts_the_loro_cell_branch() {
+        let dir = tempfile::tempdir().expect("temp storage");
+        let (engine, store, projection) = fresh_loro_engine(dir.path(), false).await;
+        let backend =
+            LoroBackend::from_document(store.get_doc(DocScope::Global).await.expect("doc"));
+        seed_loro(&backend).await;
+        projection.flush().await.expect("project the seed");
+        split_join_delete(&engine, Some(projection.as_ref())).await;
     }
 }
 

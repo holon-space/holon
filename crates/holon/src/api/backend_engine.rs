@@ -1559,6 +1559,15 @@ impl BackendEngine {
         carriers: &[holon_org_format::ParsedCarrier],
         origin: holon_api::OpOrigin,
     ) -> BoxFuture<'static, Result<holon_api::OpOutcome>> {
+        if self.op_engine.runs_fenced_plan() {
+            return self.op_engine.execute_with_parsed_carriers(
+                entity_name,
+                op_name,
+                params,
+                carriers,
+                origin,
+            );
+        }
         match self.op_engine.admit_with_parsed_carriers(
             entity_name,
             op_name,
@@ -1759,6 +1768,40 @@ impl BackendEngine {
     /// Check if redo is available
     pub async fn can_redo(&self) -> bool {
         self.op_engine.can_redo().await
+    }
+
+    /// Commit one editor keystroke of the source channel. See
+    /// [`holon_api::OperationEngine::commit_keystroke`].
+    pub fn commit_keystroke(
+        &self,
+        keystroke: holon_api::SourceKeystroke,
+    ) -> futures::future::BoxFuture<'static, Result<holon_api::OpOutcome>> {
+        holon_api::OperationEngine::commit_keystroke(&self.op_engine, keystroke)
+    }
+
+    /// Run `execute`, which dispatches exactly `ops`, with the shape gate
+    /// judging them once as a whole. See
+    /// [`DispatchingOperationEngine::execute_judged`].
+    pub async fn execute_judged<F, T>(
+        &self,
+        ops: &[holon_api::Operation],
+        origin: &holon_api::OpOrigin,
+        execute: F,
+    ) -> Result<T>
+    where
+        F: std::future::Future<Output = Result<T>>,
+    {
+        self.op_engine.execute_judged(ops, origin, execute).await
+    }
+
+    /// Dispatch `ops` as ONE gesture. See
+    /// [`DispatchingOperationEngine::execute_plan`].
+    pub async fn execute_plan(
+        &self,
+        ops: Vec<holon_api::Operation>,
+        origin: holon_api::OpOrigin,
+    ) -> Result<()> {
+        self.op_engine.execute_plan(ops, origin).await
     }
 
     /// Open a composite-undo group (Inc1): buffer subsequent User-origin ops

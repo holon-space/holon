@@ -749,9 +749,6 @@ mod backend {
     /// the page's `engine_tick` pump. Failures abort the remaining chain
     /// and are disclosed via the session error tracker + logs.
     pub(super) fn dispatch_intents(intents_json: String) -> napi::Result<()> {
-        // Hand-rolled decode: `holon-worker` deliberately has no direct
-        // `serde` derive dep (own mini-workspace, see Cargo.toml header),
-        // and each field is required — fail loud on a malformed intent.
         let wire: serde_json::Value =
             serde_json::from_str(&intents_json).map_err(|e| super::nerr("parse intents", e))?;
         let serde_json::Value::Array(items) = wire else {
@@ -766,28 +763,8 @@ mod backend {
         let intents = items
             .iter()
             .map(|item| {
-                let entity = item.get("entity").and_then(|v| v.as_str()).ok_or_else(|| {
-                    super::nerr(
-                        "dispatch_intents",
-                        format!("intent missing 'entity': {item}"),
-                    )
-                })?;
-                let op = item.get("op").and_then(|v| v.as_str()).ok_or_else(|| {
-                    super::nerr("dispatch_intents", format!("intent missing 'op': {item}"))
-                })?;
-                let params_val = item.get("params").cloned().ok_or_else(|| {
-                    super::nerr(
-                        "dispatch_intents",
-                        format!("intent missing 'params': {item}"),
-                    )
-                })?;
-                let params: HashMap<String, holon_api::Value> = serde_json::from_value(params_val)
-                    .map_err(|e| super::nerr("parse intent params", e))?;
-                Ok(holon_frontend::OperationIntent::new(
-                    EntityName::from(entity),
-                    op.to_string(),
-                    params,
-                ))
+                holon_frontend::OperationIntent::from_wire(item)
+                    .map_err(|e| super::nerr("dispatch_intents", format!("{e:#}")))
             })
             .collect::<napi::Result<Vec<_>>>()?;
         let (reactive, _runtime) = reactive_and_rt("dispatch_intents")?;
@@ -1908,7 +1885,10 @@ fn op_wire_response<'a>(
 
 /// A `watch_view` emission as the JSON the page receives. An envelope with no
 /// JSON form arrives as an error ViewModel naming the cause.
-fn watch_envelope_json(envelope: &holon_frontend::view_model::WatchEnvelope, handle: u32) -> String {
+fn watch_envelope_json(
+    envelope: &holon_frontend::view_model::WatchEnvelope,
+    handle: u32,
+) -> String {
     serde_json::to_string(envelope).unwrap_or_else(|e| {
         let message = format!("[watch_view handle={handle}] WatchEnvelope serialize failed: {e}");
         tracing::error!("{message}");

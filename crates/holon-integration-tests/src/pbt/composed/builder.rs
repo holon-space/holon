@@ -595,6 +595,13 @@ async fn compose_sut_seeded_impl(
         // methods off its own engine and store, so nothing here needs the
         // ingest baseline (`SutReadOnlyHomes` does, and stays where it is).
         caps.insert(comp.clone() as Arc<dyn holon_pbt_core::capabilities::SutReadOnlyEditAttempt>);
+        // Tagged-subtree edits (`EditDecisionSubtree`) dispatch through the
+        // component's own engine; registered here so generation sees the cap.
+        caps.insert(comp.clone() as Arc<dyn holon_pbt_core::capabilities::SutShapeEdit>);
+        // Every admitted block write this case makes is replayed against the
+        // simulator's prediction; the audit starts empty per case.
+        holon_core::shape_gate::ShapeAudit::global().enable();
+        holon_core::shape_gate::ShapeAudit::global().reset();
         // The operation-boundary refusal probe (`DispatchUnschemedBlockId`)
         // needs nothing but the component's own engine: it dispatches at the
         // production dispatcher and is answered above every provider.
@@ -830,7 +837,10 @@ async fn compose_sut_seeded_impl(
             let block_ops =
                 holon_loro::loro_block_operations::LoroBlockOperations::new(doc_store.clone());
             loro_caps.insert(Arc::new(crate::pbt::op_write_cap::EdgeFieldWriter::new(
-                holon_loro_wiring::loro_block_query_source::loro_operation_engine(block_ops),
+                holon_loro_wiring::loro_block_query_source::loro_operation_engine(
+                    block_ops,
+                    Arc::new(holon_api::ConditionBus::new()),
+                ),
                 resolver.clone(),
             )) as Arc<dyn SutEdgeFieldWrite>);
         }

@@ -347,6 +347,12 @@ fn register_shared_services(injector: &Injector) -> Result<()> {
 
     register_condition_bus(injector);
 
+    // The tagged block shapes the dispatcher's shape gate keeps every Holon-side
+    // write inside (Model.md invariant 17).
+    injector.provide::<holon_core::ShapeValidators>(Provider::root(|_| {
+        Shared::new(holon_core::ShapeValidators::registered())
+    }));
+
     OperationModule
         .configure(injector)
         .map_err(|e| anyhow::anyhow!("Failed to register OperationModule: {}", e))?;

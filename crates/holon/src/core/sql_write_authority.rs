@@ -50,6 +50,41 @@ impl SqlWriteAuthority {
             })
             .collect()
     }
+
+    /// The sibling before `id` in its parent's order; `None` for a first
+    /// child.
+    async fn previous_sibling(&self, id: &EntityUri) -> Result<Option<EntityUri>> {
+        // One seek on `idx_block_raw_parent_sort_id` to `id`'s slot, stepping
+        // back over sort-key ties only.
+        let t = |column: &str| format!("(SELECT {column} FROM {BLOCK_WRITE_TABLE} WHERE id = $id)");
+        let sql = format!(
+            "SELECT id FROM {BLOCK_WRITE_TABLE} WHERE parent_id = {parent} AND id != parent_id \
+             AND sort_key <= {sort_key} AND (sort_key < {sort_key} OR id < $id) \
+             ORDER BY sort_key DESC, id DESC LIMIT 1",
+            parent = t("parent_id"),
+            sort_key = t("sort_key"),
+        );
+        let params = HashMap::from([("id".to_string(), Value::String(id.to_string()))]);
+        let rows = self
+            .db_handle
+            .query(&sql, params)
+            .await
+            .map_err(|e| format!("previous sibling of {id}: {e}"))?;
+        match rows.first().map(|row| row.get("id")) {
+            None => {
+                if !self.block_exists(id).await? {
+                    return Err(format!("previous sibling of {id}: no such block").into());
+                }
+                Ok(None)
+            }
+            Some(Some(Value::String(before))) => {
+                Ok(Some(EntityUri::parse(before).map_err(|e| {
+                    format!("previous sibling `{before}` of {id}: {e}")
+                })?))
+            }
+            Some(other) => Err(format!("previous sibling of {id}: row id is {other:?}").into()),
+        }
+    }
 }
 
 #[async_trait]
@@ -108,6 +143,102 @@ impl WriteAuthorityReads for SqlWriteAuthority {
             level = start..nodes.len();
         }
         Ok(Some(nodes))
+    }
+
+    async fn tagged_neighbourhood(
+        &self,
+        tags: &[&str],
+        around: &[EntityUri],
+        previous_of: Option<&EntityUri>,
+    ) -> Result<Option<holon_core::TaggedNeighbourhood>> {
+        let mut near = holon_core::TaggedNeighbourhood::default();
+        let mut around = around.to_vec();
+        if let Some(block) = previous_of
+            && let Some(before) = self.previous_sibling(block).await?
+        {
+            around.push(before.clone());
+            near.set_previous_sibling(before);
+        }
+        if around.is_empty() {
+            return Ok(Some(near));
+        }
+        let ids = (0..around.len())
+            .map(|i| format!("$id{i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let tag_names = (0..tags.len())
+            .map(|i| format!("$tag{i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT b.id AS id, b.parent_id AS parent_id, p.id AS parent_found, \
+             p.parent_id AS grandparent_id, tb.block_id AS tagged, tp.block_id AS parent_tagged, \
+             tg.block_id AS grandparent_tagged \
+             FROM {BLOCK_WRITE_TABLE} b \
+             LEFT JOIN {BLOCK_WRITE_TABLE} p ON p.id = b.parent_id \
+             LEFT JOIN block_tags tb ON tb.block_id = b.id AND tb.tag IN ({tag_names}) \
+             LEFT JOIN block_tags tp ON tp.block_id = b.parent_id AND tp.tag IN ({tag_names}) \
+             LEFT JOIN block_tags tg ON tg.block_id = p.parent_id AND tg.tag IN ({tag_names}) \
+             WHERE b.id IN ({ids})"
+        );
+        let params = around
+            .iter()
+            .enumerate()
+            .map(|(i, id)| (format!("id{i}"), Value::String(id.to_string())))
+            .chain(
+                tags.iter()
+                    .enumerate()
+                    .map(|(i, t)| (format!("tag{i}"), Value::String(t.to_string()))),
+            )
+            .collect();
+        let rows = self
+            .db_handle
+            .query(&sql, params)
+            .await
+            .map_err(|e| format!("tagged neighbourhood of {around:?}: {e}"))?;
+        for row in rows {
+            let uri = |key: &str| match row.get(key) {
+                Some(Value::Null) | None => Ok(None),
+                Some(Value::String(raw)) => EntityUri::parse(raw)
+                    .map(Some)
+                    .map_err(|e| format!("tagged neighbourhood row {key} `{raw}`: {e}")),
+                Some(other) => Err(format!("tagged neighbourhood row {key} is {other:?}")),
+            };
+            let id = uri("id")?.ok_or("tagged neighbourhood row without an id")?;
+            let parent = uri("parent_id")?;
+            if uri("tagged")?.is_some() {
+                near.tagged(id.clone());
+            }
+            if let Some(parent) = &parent {
+                if uri("parent_found")?.is_some() {
+                    near.found(parent.clone(), uri("grandparent_id")?);
+                }
+                if uri("parent_tagged")?.is_some() {
+                    near.tagged(parent.clone());
+                }
+                if let Some(grandparent) = uri("grandparent_id")?
+                    && uri("grandparent_tagged")?.is_some()
+                {
+                    near.tagged(grandparent);
+                }
+            }
+            near.found(id, parent);
+        }
+        for id in &around {
+            if !near.covers(id) {
+                near.missing(id.clone());
+            }
+        }
+        let parents = around
+            .iter()
+            .map(|id| Ok(near.parent(id)?.cloned()))
+            .collect::<Result<Vec<_>>>()?;
+        for parent in parents.into_iter().flatten() {
+            if !near.covers(&parent) {
+                near.missing(parent);
+            }
+        }
+        Ok(Some(near))
     }
 
     async fn children(&self, parent: &EntityUri) -> Result<Vec<EntityUri>> {

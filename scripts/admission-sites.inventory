@@ -13,7 +13,7 @@
 1 crates/holon-core/src/operation_subset.rs below
 1 crates/holon-core/src/operation_wrapper.rs below
 5 crates/holon-frontend/src/headless_editor_mirror.rs entry
-2 crates/holon-frontend/src/lib.rs entry
+7 crates/holon-frontend/src/lib.rs entry
 1 crates/holon-frontend/src/operations.rs entry
 16 crates/holon-frontend/src/reactive.rs entry
 5 crates/holon-frontend/src/user_driver.rs entry
@@ -21,11 +21,11 @@
 5 crates/holon-loro/src/loro_share_backend.rs below
 1 crates/holon-mcp-client/src/mcp_provider.rs below
 1 crates/holon/src/api/action_watcher.rs entry
-1 crates/holon/src/api/backend_engine.rs entry
+3 crates/holon/src/api/backend_engine.rs entry
 1 crates/holon/src/api/holon_rule_watcher.rs entry
 2 crates/holon/src/api/holon_service.rs entry
 4 crates/holon/src/api/operation_dispatcher.rs below
-4 crates/holon/src/api/operation_engine.rs below
+5 crates/holon/src/api/operation_engine.rs below
 6 crates/holon/src/core/sql_block_operations.rs below
 3 crates/holon/src/core/sql_operation_provider.rs below
 1 frontends/gpui/src/lib.rs entry
@@ -51,6 +51,6 @@
 1 frontends/gpui/src/views/rich_text_editor.rs entry
 4 frontends/holon-worker/src/lib.rs entry
 1 frontends/holon-worker/src/seed.rs entry
-8 frontends/mcp/src/tools.rs entry
+5 frontends/mcp/src/tools.rs entry
 6 frontends/tui/src/app_main.rs entry
 1 frontends/tui/src/user_driver.rs entry

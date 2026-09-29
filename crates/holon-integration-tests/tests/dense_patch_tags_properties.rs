@@ -199,7 +199,7 @@ const DECISION: &str = "\
 :choose: 1
 :recommend: a
 :END:
-** Turso
+** Sled
 :PROPERTIES:
 :option: a
 :END:
@@ -246,7 +246,7 @@ fn dense_patch_writes_tags_and_properties() {
         (Some("1"), Some("a")),
         "the decision's drawer properties must reach block_raw; got {props}"
     );
-    for (title, key) in [("Turso", "a"), ("SQLite", "b")] {
+    for (title, key) in [("Sled", "a"), ("SQLite", "b")] {
         let (_, props) = block_by_content(&sut, &driver, title);
         assert_eq!(
             props["option"].as_str(),

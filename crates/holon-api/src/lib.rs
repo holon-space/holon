@@ -132,6 +132,7 @@ pub use operation_engine::Delivery;
 pub use operation_engine::OpOrigin;
 pub use operation_engine::OpOutcome;
 pub use operation_engine::OperationEngine;
+pub use operation_engine::SourceKeystroke;
 pub use operation_engine::UndoOutcome;
 pub use operation_engine::undo_step_dropped_detail;
 pub use proposal::ACCEPT_PROPOSAL_OP;

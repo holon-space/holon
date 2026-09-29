@@ -2911,6 +2911,17 @@ impl LoroBackend {
         })
     }
 
+    /// Whether removing `id` is refused for a share or takes a share off this
+    /// device.
+    pub async fn removal_touches_share(&self, id: &str) -> Result<bool, ApiError> {
+        let target = match self.resolve_write_target(id).await {
+            Ok(target) => target,
+            Err(ApiError::BlockNotFound { .. }) => return Ok(false),
+            Err(e) => return Err(e),
+        };
+        Ok(!self.shares_removed_with(&target, id)?.is_empty())
+    }
+
     /// Whether `id` is the root of a page share on this device, of either
     /// side. Only a delete removes one: a recipient's leaves the share, an
     /// owner's revokes it.

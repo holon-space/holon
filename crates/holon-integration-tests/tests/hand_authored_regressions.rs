@@ -75,9 +75,12 @@ use holon_integration_tests::pbt::composed::wide_e2e::WideE2E;
 use holon_integration_tests::pbt::composed::wide_e2e::wide_e2e_ref;
 use holon_integration_tests::pbt::hand_authored::CapturedInitialState;
 use holon_integration_tests::pbt::hand_authored::HandAuthoredCase;
+use holon_integration_tests::pbt::hand_authored::SIDECAR_ENV;
+use holon_integration_tests::pbt::hand_authored::case_filter;
 use holon_integration_tests::pbt::hand_authored::load_cases;
 use holon_integration_tests::pbt::hand_authored::parse_case;
 use holon_integration_tests::pbt::hand_authored::sidecar_path;
+use holon_integration_tests::pbt::invariants::bodies::shape_sim_matches_authority;
 use proptest::test_runner::Config;
 use proptest_state_machine::StateMachineTest;
 
@@ -137,6 +140,13 @@ fn hand_authored_keystone_regressions() {
             None,
         );
         eprintln!("[hand-authored regression] PASSED case {:?}", case.name);
+    }
+    // Another sidecar or a name filter may hold no decision edit, so only the
+    // whole committed sidecar owes shape reach.
+    if case_filter().is_none() && std::env::var_os(SIDECAR_ENV).is_none() {
+        shape_sim_matches_authority::assert_fully_reached();
+    } else {
+        shape_sim_matches_authority::report_reach();
     }
 }
 

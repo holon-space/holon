@@ -36,3 +36,5 @@ CREATE TABLE IF NOT EXISTS block_raw (
 );
 
 CREATE INDEX IF NOT EXISTS idx_block_raw_parent_id ON block_raw(parent_id);
+-- A block's previous sibling, read by the shape gate on every lone indent.
+CREATE INDEX IF NOT EXISTS idx_block_raw_parent_sort_id ON block_raw(parent_id, sort_key, id);

@@ -59,6 +59,8 @@ pub mod org_render_fixed_point;
 pub mod read_only_home_refuses_writes;
 pub mod remote_list_mirror_matches_ref;
 pub mod settle_budget;
+pub mod shape_gate_refuses_illegal_writes;
+pub mod shape_sim_matches_authority;
 pub mod sidebar_page_tag_preserved;
 pub mod source_language_iff_source;
 pub mod sql_budget;
