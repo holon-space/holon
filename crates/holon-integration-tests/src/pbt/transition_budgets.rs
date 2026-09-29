@@ -805,9 +805,8 @@ pub fn max_rss_delta_bytes(transition: &crate::pbt::transitions::E2ETransition) 
         "StartApp" => 1500 * MB,
         "ConcurrentSchemaInit" => 1500 * MB,
         "WriteOrgFile" | "CreateDirectory" | "GitInit" | "JjGitInit" | "CreateStaleLoro" => 5 * MB,
-        // Builds a full DI container + opens a second Turso connection before the
-        // wiring guard rejects the flipped consolidator (no matviews/CDC/spans of a
-        // full boot, but a fresh backend + DI allocations); budget alongside StartApp.
+        // A reboot, plus a flipped boot's DI container and Turso connection
+        // until the wiring guard rejects it; budget alongside StartApp.
         "EpochFlipRejected" => 1500 * MB,
         "BulkExternalAdd" | "CreateDocument" | "DeleteDocument" => 200 * MB,
         "SimulateRestart" => 80 * MB,

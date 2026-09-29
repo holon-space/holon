@@ -5,6 +5,7 @@ mod loro_completed_and_block_type_reach_sql;
 mod loro_create_persists_prod_session;
 mod loro_kind_fidelity_through_projection;
 mod loro_live_entity_wiring;
+mod loro_memory_holds_the_vault;
 mod loro_memory_start_app;
 mod loro_projection_atomic_advance;
 mod loro_projection_settle;

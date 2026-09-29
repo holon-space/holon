@@ -210,51 +210,30 @@ async fn run_http_server_standalone(
     debug: std::sync::Arc<DebugServices>,
     type_registry: Option<std::sync::Arc<holon_profiles::TypeRegistry>>,
     bind_address: SocketAddr,
+    stop: impl std::future::Future<Output = holon_app::stop_signal::StopSignal>,
 ) -> Result<()> {
-    use tokio_util::sync::CancellationToken;
-
-    // Create cancellation token that will be cancelled on Ctrl+C
-    let cancellation_token = CancellationToken::new();
-    let token_for_signal = cancellation_token.clone();
-
-    let stop = stop_signals()?;
-    tokio::spawn(async move {
-        let signal = stop.await;
-        tracing::info!("Received {signal}, shutting down HTTP server...");
-        token_for_signal.cancel();
-    });
+    let cancellation_token = tokio_util::sync::CancellationToken::new();
 
     tracing::info!("Holon MCP HTTP server starting on http://{}", bind_address);
     tracing::info!("MCP endpoint: http://{}/mcp", bind_address);
 
-    // Use the shared run_http_server from di module
-    holon_mcp::di::run_http_server(
+    let server = holon_mcp::di::run_http_server(
         Some(engine),
         debug,
         None,
         type_registry,
         bind_address,
-        cancellation_token,
-    )
-    .await
-}
-
-/// Install the Ctrl-C and SIGTERM (launchd's stop) handlers now, so a signal
-/// that arrives before the returned future is first polled is not the
-/// default kill. The future resolves with the one that arrived.
-fn stop_signals() -> Result<impl std::future::Future<Output = &'static str>> {
-    use tokio::signal::unix::SignalKind;
-    use tokio::signal::unix::signal;
-    let mut interrupt = signal(SignalKind::interrupt())
-        .map_err(|e| anyhow::anyhow!("installing the Ctrl-C handler: {e}"))?;
-    let mut terminate = signal(SignalKind::terminate())
-        .map_err(|e| anyhow::anyhow!("installing the SIGTERM handler: {e}"))?;
-    Ok(async move {
-        tokio::select! {
-            _ = interrupt.recv() => "Ctrl+C",
-            _ = terminate.recv() => "SIGTERM",
+        cancellation_token.clone(),
+    );
+    tokio::pin!(server);
+    tokio::select! {
+        served = &mut server => served,
+        signal = stop => {
+            tracing::info!("Received {signal}, shutting down HTTP server...");
+            cancellation_token.cancel();
+            server.await
         }
-    })
+    }
 }
 
 fn main() -> Result<()> {
@@ -439,6 +418,10 @@ async fn run() -> Result<()> {
 
     let orgmode_root_for_debug = holon_config.vault.root.clone();
 
+    // A stop during boot waits for the boot to finish and then takes the one
+    // shutdown path, so the vault is left as a clean quit leaves it.
+    let mut stop = holon_app::stop_signal::StopSignals::install()?;
+
     let app = {
         use fluxdi::Injector;
         use fluxdi::Module;
@@ -459,6 +442,10 @@ async fn run() -> Result<()> {
 
         impl Module for McpStandaloneModule {
             fn configure(&self, injector: &Injector) -> std::result::Result<(), fluxdi::Error> {
+                let vault = holon_app::vault_lock::SessionVault::acquire(
+                    self.holon_config.vault.root.as_deref(),
+                )
+                .map_err(|e| to_di_err("configure", &format!("{e:#}")))?;
                 let db_path = self.holon_config.resolve_db_path(&self.config_dir);
 
                 holon::di::open_and_register_core(
@@ -467,6 +454,7 @@ async fn run() -> Result<()> {
                     holon::di::StorageSelector::Turso,
                 )
                 .map_err(|e| to_di_err("configure", &e))?;
+                vault.register(injector);
 
                 injector
                     .add_frontend(
@@ -518,6 +506,7 @@ async fn run() -> Result<()> {
             config_dir,
             orgmode_root: orgmode_root_for_debug,
         });
+        tracing::info!("holon-mcp: booting the session");
         app.bootstrap()
             .await
             .map_err(|e| anyhow::anyhow!("Bootstrap failed: {e}"))?;
@@ -525,6 +514,10 @@ async fn run() -> Result<()> {
     };
 
     let injector = app.injector();
+    if let Some(signal) = stop.arrived() {
+        tracing::info!("Received {signal} during boot, shutting the session down unserved");
+        return holon_app::shutdown_session(&injector).await;
+    }
     // Resolve the BackendEngine directly — `FrontendSession` no longer exposes
     // `engine()` (ADR 0004 Phase 9). The MCP binary is a Turso wiring, so the
     // engine is registered in the container.
@@ -535,43 +528,13 @@ async fn run() -> Result<()> {
     // unknown-scheme link and loses its `block_links` row.
     let type_registry = Some(injector.resolve::<holon_profiles::TypeRegistry>());
 
-    // Shutdown flush: spawn a task that awaits Ctrl+C and flushes any
-    // in-flight shared-doc saves before the process exits. The 150ms
-    // debounce window in `SaveWorker` would otherwise drop pending
-    // edits on SIGINT. HTTP mode already has its own ctrl_c handler
-    // for the cancellation token — this one targets the flush side
-    // only and does not exit (the server future completes naturally
-    // once cancellation propagates).
-    //
-    // Relies on `holon` being compiled with its default `iroh-sync`
-    // feature; `try_resolve` returns Err if the backend isn't
-    // registered (e.g. iroh-sync disabled) so this is a no-op then.
-    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-    {
-        let injector_for_signal = injector.clone();
-        tokio::spawn(async move {
-            if let Err(e) = tokio::signal::ctrl_c().await {
-                tracing::warn!("ctrl_c handler install failed: {e}");
-                return;
-            }
-            tracing::info!("Ctrl+C received — flushing shared-tree snapshots");
-            if let Ok(backend) = injector_for_signal
-                .try_resolve::<std::sync::Arc<holon_loro::loro_share_backend::LoroShareBackend>>()
-            {
-                backend.flush_all().await;
-                tracing::info!("flush_all complete");
-            }
-        });
-    }
-
     // Run server based on transport mode
     let served = match transport_mode {
         TransportMode::Stdio => {
-            let stop = stop_signals()?;
             tracing::info!("holon-mcp: session booted, serving stdio");
             tokio::select! {
                 r = run_stdio_server(engine, debug, type_registry) => r,
-                signal = stop => {
+                signal = stop.recv() => {
                     tracing::info!("Received {signal}, stopping the stdio server");
                     Ok(())
                 }
@@ -579,12 +542,19 @@ async fn run() -> Result<()> {
         }
         TransportMode::Http { bind_address } => {
             tracing::info!("Starting Holon MCP server in HTTP mode on {}", bind_address);
-            run_http_server_standalone(engine, debug, type_registry, bind_address).await
+            run_http_server_standalone(engine, debug, type_registry, bind_address, stop.recv())
+                .await
         }
     };
 
     // The server no longer takes calls, so nothing new can be written: the
     // session writes back what it owes, saves, closes and gives up the vault.
+    // `SaveWorker` debounces shared-doc saves by 150 ms.
+    if let Ok(backend) =
+        injector.try_resolve::<std::sync::Arc<holon_loro::loro_share_backend::LoroShareBackend>>()
+    {
+        backend.flush_all().await;
+    }
     let shut_down = holon_app::shutdown_session(&injector).await;
     served?;
     shut_down

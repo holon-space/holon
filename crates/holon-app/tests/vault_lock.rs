@@ -96,16 +96,54 @@ async fn a_second_writer_on_a_held_vault_is_refused_by_name() {
         .expect("tear down the first writer");
 }
 
+fn listing(dir: &Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(dir).expect("list the vault") {
+        let path = entry.expect("read a vault entry").path();
+        if path.is_dir() {
+            out.extend(listing(&path));
+        } else {
+            out.push(path);
+        }
+    }
+    out.sort();
+    out
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_writer_creates_nothing_in_the_vault() {
+    let vault = vault_with_page();
+    let state_a = tempfile::tempdir().expect("state dir A");
+    let a = boot(vault.path(), state_a.path())
+        .await
+        .expect("the first writer boots");
+    let before = listing(vault.path());
+
+    // The second writer's DB lives inside the vault, so opening it before the
+    // lock would leave a file behind.
+    let refused = boot(vault.path(), vault.path()).await;
+    let after = listing(vault.path());
+    if let Ok(b) = refused {
+        holon_app::shutdown_session(&b.injector)
+            .await
+            .expect("tear down the second writer");
+        panic!("a second session booted on a held vault");
+    }
+    let created: Vec<_> = after.iter().filter(|p| !before.contains(p)).collect();
+    assert!(
+        created.is_empty(),
+        "a refused writer created files in the vault it may not write: {created:?}"
+    );
+
+    holon_app::shutdown_session(&a.injector)
+        .await
+        .expect("tear down the first writer");
+}
+
 /// The holder's teardown is what lets the next writer in, while the holder's
 /// container is still alive: a lock only the container drop releases would
 /// keep every restart path (the keystone `Reboot`, a quit that leaks the
 /// container) locked out.
-///
-/// That the first writer's edits survive this hand-over is NOT asserted here:
-/// a fresh-DB boot currently deletes an edit whose write-back the teardown
-/// dropped (bugfunnel
-/// `2026-09-29-a-fresh-db-boot-deletes-an-edit-whose-write-back-shutdown-dropped`),
-/// which the release sequence of dogfooding phase 1 Increment 2 fixes.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_next_writer_boots_once_the_holder_has_shut_down() {
     let vault = vault_with_page();

@@ -5,25 +5,24 @@
 //! @pbt covers consolidator-epoch-flip-reject — stale epoch flip must be
 //! rejected
 //!
-//! Spec 0008 §4.2(b): with the app already running, a SECOND in-process boot
-//! over the SAME vault/db/config paths but with the consolidator flipped (Loro
-//! ⇄ SQL) must fail with Model.md invariant 10's hard error, fired through the
-//! REAL boot path (`holon_app::new_from_config_with_di` → wiring guard) BEFORE
-//! any higher store opens — the live app and the persisted epoch marker stay
-//! untouched.
+//! Spec 0008 §4.2(b): the live session shuts down, a boot over the SAME
+//! vault/db/config paths but with the consolidator flipped (Loro ⇄ SQL) must
+//! fail with Model.md invariant 10's hard error, fired through the REAL boot
+//! path (`holon_app::new_from_config_with_di` → wiring guard) and leaving the
+//! epoch marker untouched, then the live session boots again as in `Reboot`.
+//! The shutdown comes first because a second session on a held vault is
+//! refused by the writer lock before the guard runs (`SecondWriterRefused`).
 //!
-//! Mid-run, `SutAppLifecycle`-bound, `ref_state`-free (mirrors
-//! `SimulateRestart`): the assertion lives inside the SUT apply
-//! (`assert_epoch_flip_rejected`), not a new invariant — the transition IS the
-//! teeth. Turso-gated because the flip needs a durable db so the epoch marker
+//! Turso-gated because the flip needs a durable db so the epoch marker
 //! genuinely exists (the SUT method fails loud if it selected without one).
 
 use holon_pbt_core::TransitionFactory;
 use holon_pbt_core::TransitionRef;
+use holon_pbt_core::capabilities::RefLayout;
 use holon_pbt_core::capabilities::RefLifecycle;
+use holon_pbt_core::capabilities::RefReboot;
 use holon_pbt_core::capabilities::SutAppLifecycle;
 use holon_pbt_core::validation::Reason;
-use holon_pbt_core::validation::check;
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use validated::Validated;
@@ -31,13 +30,13 @@ use validated::Validated;
 #[cfg(feature = "otel-testing")]
 use crate::pbt::transition_budgets::ExpectedSql;
 
-/// Attempt to boot a second consolidator over the running app's durable state
-/// and assert the invariant-10 epoch guard rejects it.
+/// Reboot the app, attempting a flipped-consolidator boot in between, and
+/// assert the invariant-10 epoch guard rejects it.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
 #[step_template("an epoch flip is rejected")]
 pub struct EpochFlipRejected;
 
-impl<R: RefLifecycle> TransitionFactory<R> for EpochFlipRejected {
+impl<R: RefLifecycle + RefLayout + RefReboot> TransitionFactory<R> for EpochFlipRejected {
     fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
         Self::declared_caps()
     }
@@ -57,38 +56,35 @@ impl<R: RefLifecycle> TransitionFactory<R> for EpochFlipRejected {
     }
 }
 
-impl<R: RefLifecycle> TransitionRef<R> for EpochFlipRejected {
+impl<R: RefLifecycle + RefLayout + RefReboot> TransitionRef<R> for EpochFlipRejected {
     type Reason = Reason;
 
     fn preconditions(&self, state: &R) -> Validated<(), Reason> {
-        // App must be running: the flip re-boots over the live app's own paths.
-        check(state.app_started(), Reason::AppNotStarted)
+        crate::pbt::transitions::Reboot.preconditions(state)
     }
 
-    fn apply_to_ref(&self, _: &mut R) {
-        // A REJECTED boot changes nothing: the live app and its durable state
-        // are untouched, so the reference state is unchanged.
+    fn apply_to_ref(&self, state: &mut R) {
+        // The rejected boot changes nothing; the reboot around it is a `Reboot`.
+        state.reboot_drops_in_memory_state();
     }
 }
 
 crate::cap_transition! {
     EpochFlipRejected: SutAppLifecycle,
-    where R: [ RefLifecycle ],
+    where R: [ RefLifecycle + RefLayout + RefReboot ],
     |_me, _state, sut| {
+        // The composed harness intercepts this like `Reboot`
+        // (`ComposedSlice::is_reboot`); this arm serves the non-composed ones.
         sut.assert_epoch_flip_rejected().await;
     }
-    sql_budget: |_me, _state| {
-        // The flip dies at the wiring guard BEFORE `BackendEngine`/matview/CDC
-        // resolution, so no SQL flows through the LIVE (traced) engine. The
-        // transient second Turso connection `open_and_register_core` opens ahead of
-        // the guard is a separate, untraced handle. Small tolerance in case an
-        // open-time PRAGMA is ever attributed to the traced engine; if the real
-        // attempt is observed issuing SQL here, that itself is worth reporting.
+    sql_budget: |_me, state| {
+        // The window opens after the reboot, so only `Reboot`'s bookkeeping is
+        // inside it.
         ExpectedSql {
             reads: 0,
             writes: 0,
             ddl: 0,
-            tolerance: 4,
+            tolerance: 4 + crate::pbt::transition_budgets::docs_tolerance(state),
         }
     }
 }

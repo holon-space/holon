@@ -37,9 +37,21 @@ impl VaultLock {
     /// Take the writer lock of `vault_root`, or refuse because another
     /// session holds it.
     pub fn acquire(vault_root: &Path) -> Result<Self> {
+        if !vault_root.is_dir() {
+            return Err(anyhow!(
+                "refusing to start: vault {} does not exist or is not a directory",
+                vault_root.display()
+            ));
+        }
         let dir = vault_root.join(VAULT_STATE_DIR);
-        std::fs::create_dir_all(&dir)
-            .with_context(|| format!("creating the vault state dir {}", dir.display()))?;
+        match std::fs::create_dir(&dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => {
+                return Err(e)
+                    .with_context(|| format!("creating the vault state dir {}", dir.display()));
+            }
+        }
         let path = dir.join(WRITER_LOCK_FILE);
         let mut file = OpenOptions::new()
             .read(true)
@@ -54,7 +66,7 @@ impl VaultLock {
                 return Err(anyhow!(
                     "refusing to start: vault {} is held by {}. Quit that instance first.",
                     vault_root.display(),
-                    describe_holder(&path)?
+                    describe_holder(&path)
                 ));
             }
             Err(TryLockError::Error(e)) => {
@@ -89,14 +101,11 @@ impl VaultLock {
     }
 
     /// Give the vault to the next writer. Called once the session wrote its
-    /// last byte into the vault; a second call is a logic error.
+    /// last byte into the vault; a later call does nothing.
     pub fn release(&self) -> Result<()> {
-        let file = self
-            .file
-            .lock()
-            .expect("vault lock mutex poisoned")
-            .take()
-            .expect("the vault writer lock is released once");
+        let Some(file) = self.file.lock().expect("vault lock mutex poisoned").take() else {
+            return Ok(());
+        };
         file.unlock().with_context(|| {
             format!(
                 "releasing the writer lock of vault {}",
@@ -106,9 +115,16 @@ impl VaultLock {
     }
 }
 
-fn describe_holder(path: &Path) -> Result<String> {
-    let raw = std::fs::read_to_string(path)
-        .with_context(|| format!("reading the holder of {}", path.display()))?;
+fn describe_holder(path: &Path) -> String {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(e) => {
+            return format!(
+                "an instance whose record in {} cannot be read ({e})",
+                path.display()
+            );
+        }
+    };
     let recorded = serde_json::from_str::<serde_json::Value>(raw.trim())
         .ok() // ALLOW(ok): an unparseable record is reported verbatim below
         .and_then(|v| {
@@ -118,13 +134,48 @@ fn describe_holder(path: &Path) -> Result<String> {
                 v.get("started_at")?.as_str()?.to_string(),
             ))
         });
-    Ok(match recorded {
+    match recorded {
         Some((pid, binary, started_at)) => format!("pid {pid} ({binary}, since {started_at})"),
         None => format!(
             "a Holon instance that has not recorded itself yet ({} holds {raw:?})",
             path.display()
         ),
-    })
+    }
+}
+
+/// The vault a session writes, held from before its DB opens until
+/// `shutdown_session` releases it. Every composition that boots a session
+/// registers one.
+#[derive(Debug)]
+pub enum SessionVault {
+    /// The session is configured without a vault.
+    Absent,
+    Held(VaultLock),
+}
+
+impl SessionVault {
+    pub fn acquire(vault_root: Option<&Path>) -> Result<Self> {
+        Ok(match vault_root {
+            Some(root) => Self::Held(VaultLock::acquire(root)?),
+            None => Self::Absent,
+        })
+    }
+
+    pub fn assert_holds(&self, vault_root: Option<&Path>) {
+        let held = match self {
+            Self::Absent => None,
+            Self::Held(lock) => Some(lock.vault_root.as_path()),
+        };
+        assert_eq!(
+            held, vault_root,
+            "the session vault the composition acquired is not the configured one"
+        );
+    }
+
+    pub fn register(self, injector: &fluxdi::Injector) {
+        let vault = fluxdi::Shared::new(self);
+        injector.provide::<SessionVault>(fluxdi::Provider::root(move |_| vault.clone()));
+    }
 }
 
 #[cfg(test)]
@@ -149,6 +200,47 @@ mod tests {
         let vault = tempfile::tempdir().unwrap();
         drop(VaultLock::acquire(vault.path()).unwrap());
         VaultLock::acquire(vault.path()).expect("a dropped holder frees the vault");
+    }
+
+    #[test]
+    fn a_missing_vault_root_is_refused_without_creating_it() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("mistyped");
+        let err = format!("{:#}", VaultLock::acquire(&root).unwrap_err());
+        assert!(
+            err.contains(&root.display().to_string()),
+            "the refusal must name the missing vault: {err}"
+        );
+        assert!(
+            !root.exists(),
+            "acquiring a missing vault created {}",
+            root.display()
+        );
+    }
+
+    #[test]
+    fn an_unreadable_holder_record_keeps_the_refusal() {
+        let vault = tempfile::tempdir().unwrap();
+        let _held = VaultLock::acquire(vault.path()).unwrap();
+        std::fs::write(
+            vault.path().join(VAULT_STATE_DIR).join(WRITER_LOCK_FILE),
+            [0xff, 0xfe, 0xfd],
+        )
+        .unwrap();
+        let err = format!("{:#}", VaultLock::acquire(vault.path()).unwrap_err());
+        assert!(
+            err.contains("refusing to start") && err.contains(&vault.path().display().to_string()),
+            "an unreadable holder record must not hide the refusal: {err}"
+        );
+    }
+
+    #[test]
+    fn a_second_release_is_harmless() {
+        let vault = tempfile::tempdir().unwrap();
+        let held = VaultLock::acquire(vault.path()).unwrap();
+        held.release().unwrap();
+        held.release()
+            .expect("a released lock releases again without effect");
     }
 
     #[test]

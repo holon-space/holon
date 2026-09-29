@@ -59,6 +59,8 @@ where
     T: Send + 'static,
 {
     let db_path = holon_config.resolve_db_path(&config_dir);
+    #[cfg(not(target_arch = "wasm32"))]
+    let vault = crate::vault_lock::SessionVault::acquire(holon_config.vault.root.as_deref())?;
 
     // `create_backend_engine_with_extras` resolves the `BackendEngine` ONCE
     // (root_async, cached) and returns it. Thread that exact instance back to
@@ -68,6 +70,8 @@ where
     let (engine, (session, extra, types)) = holon::di::create_backend_engine_with_extras(
         db_path,
         move |injector| {
+            #[cfg(not(target_arch = "wasm32"))]
+            vault.register(injector);
             injector.add_frontend(holon_config, session_config, config_dir, locked_keys)?;
             extra_setup(injector)?;
             Ok(())
@@ -114,16 +118,27 @@ where
 /// [`DEFAULT_SHUTDOWN_TIMEOUT`](holon_api::lifecycle::DEFAULT_SHUTDOWN_TIMEOUT)
 /// is an `Err` naming it — never a silent detach.
 pub async fn shutdown_session(injector: &fluxdi::Injector) -> Result<()> {
+    #[cfg(not(target_arch = "wasm32"))]
+    let vault = injector
+        .try_resolve::<crate::vault_lock::SessionVault>()
+        .map_err(|e| {
+            anyhow::anyhow!("shutdown: the container registers no SessionVault to release: {e}")
+        })?;
+
     // Before anything stops: the write-back loop lets shutdown win over its
     // backlog, so an edit still on its way to disk would stay only in the
     // store, and the next boot with another DB reads the stale file as a user
     // edit that deletes it. A write-back that does not settle does not stop
     // the shutdown; its error is returned once the rest has run.
-    let settled = if injector.resolve::<HolonConfig>().vault.root.is_some() {
-        wait_for_writeback(injector, WRITEBACK_SETTLE_BUDGET).await
-    } else {
-        Ok(())
+    #[cfg(not(target_arch = "wasm32"))]
+    let settled = match &*vault {
+        crate::vault_lock::SessionVault::Held(_) => {
+            wait_for_writeback(injector, WRITEBACK_SETTLE_BUDGET).await
+        }
+        crate::vault_lock::SessionVault::Absent => Ok(()),
     };
+    #[cfg(target_arch = "wasm32")]
+    let settled: Result<()> = Ok(());
 
     injector
         .resolve::<holon_api::lifecycle::SessionShutdown>()
@@ -169,14 +184,12 @@ pub async fn shutdown_session(injector: &fluxdi::Injector) -> Result<()> {
     }
 
     // Last: nothing of this session writes the vault any more, so the next
-    // writer may take it. A session with a vault holds the lock by
-    // construction (`add_frontend`).
+    // writer may take it.
     #[cfg(not(target_arch = "wasm32"))]
-    if injector.resolve::<HolonConfig>().vault.root.is_some() {
-        injector
-            .resolve::<crate::vault_lock::VaultLock>()
-            .release()?;
+    if let crate::vault_lock::SessionVault::Held(lock) = &*vault {
+        lock.release()?;
     }
+    tracing::info!("session shut down");
     settled
 }
 
@@ -249,13 +262,26 @@ async fn wait_for_writeback(
             })
         }
     };
-    settle(
+    let settled = settle(
         probe,
         || idle.queued_renders().documents(),
         budget,
         WRITEBACK_QUIET_FLOOR,
     )
-    .await
+    .await;
+    let refused = idle.refused_writebacks().documents();
+    if refused.is_empty() {
+        return settled;
+    }
+    let refusal = format!(
+        "shutdown: the file system refused the org write-back, so edits are in the store but \
+         not in these files: {}",
+        refused.join("; ")
+    );
+    Err(match settled {
+        Ok(()) => anyhow::anyhow!(refusal),
+        Err(e) => e.context(refusal),
+    })
 }
 
 #[derive(Debug, PartialEq, Eq)]

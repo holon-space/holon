@@ -40,10 +40,14 @@ pub struct TuiModule {
 
 impl Module for TuiModule {
     fn configure(&self, injector: &Injector) -> Result<(), fluxdi::Error> {
+        let vault =
+            holon_app::vault_lock::SessionVault::acquire(self.holon_config.vault.root.as_deref())
+                .map_err(|e| to_di_err("configure", &format!("{e:#}")))?;
         let db_path = self.holon_config.resolve_db_path(&self.config_dir);
 
         holon::di::open_and_register_core(injector, db_path, holon::di::StorageSelector::Turso)
             .map_err(|e| to_di_err("configure", &e))?;
+        vault.register(injector);
 
         injector
             .add_frontend(

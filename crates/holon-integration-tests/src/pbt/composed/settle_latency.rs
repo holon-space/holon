@@ -25,6 +25,7 @@ use holon_pbt_core::invariant::InvariantId;
 use holon_pbt_core::invariant::InvariantResult;
 
 use crate::pbt::invariants::bodies::settle_budget::InvSettleBudget;
+use crate::pbt::invariants::bodies::settle_budget::SettleClass;
 use crate::pbt::invariants::bodies::settle_budget::SettleSample;
 use crate::pbt::invariants::bodies::settle_budget::verdict;
 
@@ -40,6 +41,8 @@ pub trait SettleLatency {
 #[holon_macros::capmap_adapter]
 pub trait SettleLatencyLifecycle {
     fn note_settle(&self, action: &str, opened: SystemTime, elapsed: Duration);
+    /// For a transition that restarted the session.
+    fn note_boot(&self, action: &str, elapsed: Duration);
 }
 
 #[derive(Default)]
@@ -61,6 +64,14 @@ impl SettleLatencyLifecycle for ComposedSettleLatency {
             class: crate::pbt::invariants::bodies::settle_budget::settle_class(
                 &crate::pbt::net_cap::fired_operations_since(opened),
             ),
+        });
+    }
+
+    fn note_boot(&self, action: &str, elapsed: Duration) {
+        *self.last.borrow_mut() = Some(SettleSample {
+            action: action.to_string(),
+            elapsed,
+            class: SettleClass::Boot,
         });
     }
 }
@@ -115,15 +126,21 @@ mod tests {
         settle.note_settle("RebuildViews", rebuild_opened, Duration::from_millis(900));
         assert_eq!(
             settle.last_settle().expect("noted").class,
-            OpClass::Maintenance
+            SettleClass::Op(OpClass::Maintenance)
         );
 
-        let reboot_opened = SystemTime::now();
-        settle.note_settle("Reboot", reboot_opened, Duration::from_millis(795));
+        let navigate_opened = SystemTime::now();
+        settle.note_settle("NavigateFocus", navigate_opened, Duration::from_millis(40));
         assert_eq!(
             settle.last_settle().expect("noted").class,
-            OpClass::Interaction,
-            "a Reboot dispatches no op, so the rebuild_views before it must not class it"
+            SettleClass::Op(OpClass::Interaction),
+            "a transition that dispatched no op must not be classed by the rebuild_views before it"
+        );
+
+        settle.note_boot("Reboot", Duration::from_millis(795));
+        assert_eq!(
+            settle.last_settle().expect("noted").class,
+            SettleClass::Boot
         );
     }
 }

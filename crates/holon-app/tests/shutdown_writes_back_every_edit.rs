@@ -68,12 +68,13 @@ async fn boot(vault: &Path, state: &Path) -> Booted {
 }
 
 async fn create_block(engine: &holon::api::BackendEngine, bare_id: &str) {
+    create_block_under(engine, "hand-over-page", bare_id).await;
+}
+
+async fn create_block_under(engine: &holon::api::BackendEngine, parent: &str, bare_id: &str) {
     let mut params: StorageEntity = HashMap::new();
     params.insert("id".into(), Value::String(format!("block:{bare_id}")));
-    params.insert(
-        "parent_id".into(),
-        Value::String("block:hand-over-page".to_string()),
-    );
+    params.insert("parent_id".into(), Value::String(format!("block:{parent}")));
     params.insert("content".into(), Value::String(bare_id.to_string()));
     engine
         .execute_operation(&EntityName::new("block"), "create", params, OpOrigin::User)
@@ -129,5 +130,46 @@ async fn an_edit_made_just_before_shutdown_survives_a_hand_over_to_a_fresh_db() 
         page_file(vault.path()).contains(":ID: written-by-a"),
         "the hand-over to a fresh DB removed the first writer's edit from its org file:\n{}",
         page_file(vault.path())
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_write_back_fails_the_shutdown_by_name() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let vault = tempfile::tempdir().expect("create the vault dir");
+    let locked = vault.path().join("locked");
+    std::fs::create_dir(&locked).expect("create the page's dir");
+    std::fs::write(
+        locked.join("locked.org"),
+        "* Locked page\n:PROPERTIES:\n:ID: locked-page\n:END:\n",
+    )
+    .expect("write the locked page");
+    let state = tempfile::tempdir().expect("state dir");
+
+    let a = boot(vault.path(), state.path()).await;
+    // The atomic write cannot create its temp file beside the page.
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555))
+        .expect("make the page's dir read-only");
+    create_block_under(&a.engine, "locked-page", "refused-edit").await;
+    let shut_down = holon_app::shutdown_session(&a.injector).await;
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755))
+        .expect("make the page's dir writable again");
+
+    let on_disk = std::fs::read_to_string(locked.join("locked.org")).expect("read the page");
+    assert!(
+        !on_disk.contains("refused-edit"),
+        "the write-back was not refused, so this test proves nothing:\n{on_disk}"
+    );
+    let err = match shut_down {
+        Ok(()) => panic!(
+            "shutdown returned Ok with an acknowledged edit in the store but not in \
+             locked/locked.org: a refused write-back was counted as written"
+        ),
+        Err(e) => format!("{e:#}"),
+    };
+    assert!(
+        err.contains("locked.org") && err.contains("Permission denied"),
+        "the shutdown error must name the document not written and why: {err}"
     );
 }

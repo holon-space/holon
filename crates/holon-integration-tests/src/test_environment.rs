@@ -632,12 +632,89 @@ pub(crate) fn publish_reactive_builder_services(
     engine
 }
 
-/// Spec 0008 §4.2(b) — re-boot the app IN-PROCESS with the consolidator flipped
-/// against the persisted epoch marker and assert Model.md invariant 10's hard
-/// error fires through the REAL boot path (`holon_app::new_from_config_with_di`
-/// → `wiring::add_frontend` → `guard_consolidator_epoch`).
+/// One writer per vault (Model.md invariant 4): while a session holds the vault
+/// at `temp_path`, a second boot over it is refused by the writer lock, names
+/// the holder, and writes nothing into the vault. The second DB lives inside
+/// the vault, so a DB opened before the lock shows up as a new file.
+pub(crate) async fn run_second_writer_refusal_check(temp_path: &std::path::Path) {
+    // The live session's DB is not vault content, and its WAL moves on its own.
+    let is_live_db = |p: &std::path::Path| {
+        p.parent() == Some(temp_path)
+            && p.file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with("test.db"))
+    };
+    let vault_bytes = || {
+        let mut files = std::collections::BTreeMap::new();
+        let mut dirs = vec![temp_path.to_path_buf()];
+        while let Some(dir) = dirs.pop() {
+            for entry in std::fs::read_dir(&dir).expect("[SecondWriterRefused] list the vault") {
+                let path = entry
+                    .expect("[SecondWriterRefused] read a vault entry")
+                    .path();
+                if path.is_dir() {
+                    dirs.push(path);
+                } else if !is_live_db(&path) {
+                    let bytes =
+                        std::fs::read(&path).expect("[SecondWriterRefused] read a vault file");
+                    files.insert(path, bytes);
+                }
+            }
+        }
+        files
+    };
+    let before = vault_bytes();
+
+    let second = holon_frontend::config::HolonConfig {
+        db_path: Some(temp_path.join("second-writer.db")),
+        vault: holon_frontend::config::VaultConfig {
+            root: Some(temp_path.to_path_buf()),
+        },
+        ..Default::default()
+    };
+    let result = holon_app::new_from_config_with_di(
+        second,
+        SessionConfig::new(holon_api::UiInfo::permissive()).without_wait(),
+        temp_path.to_path_buf(),
+        std::collections::HashSet::new(),
+        |_| Ok(()),
+        |_| (),
+    )
+    .await;
+    let err = match result {
+        Ok(_) => panic!(
+            "[SecondWriterRefused] a second session booted on the vault {temp_path:?} that the \
+             live session holds — both now write its .loro and org files"
+        ),
+        Err(e) => format!("{e:#}"),
+    };
+    let holder = format!("pid {}", std::process::id());
+    assert!(
+        err.contains("refusing to start") && err.contains(&holder),
+        "[SecondWriterRefused] the refusal must name the holder ({holder}): {err}"
+    );
+
+    let after = vault_bytes();
+    let changed: Vec<_> = before
+        .keys()
+        .chain(after.keys())
+        .filter(|p| before.get(*p) != after.get(*p))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    assert!(
+        changed.is_empty(),
+        "[SecondWriterRefused] the refused session changed vault files: {changed:?}"
+    );
+}
+
+/// Spec 0008 §4.2(b) — boot IN-PROCESS with the consolidator flipped against
+/// the persisted epoch marker and assert Model.md invariant 10's hard error
+/// fires through the REAL boot path (`holon_app::new_from_config_with_di`
+/// → `wiring::add_frontend` → `guard_consolidator_epoch`). The caller has shut
+/// its session down first: while one holds the vault, the writer lock refuses
+/// the boot before the guard runs.
 ///
-/// `temp_path` is the config/vault/db root the LIVE app booted from — NOT its
+/// `temp_path` is the config/vault/db root the app booted from — NOT its
 /// canonicalized `org_root` (the marker was written under the un-canonicalized
 /// path). `currently_loro_enabled` is the consolidator the live app pinned; we
 /// boot the opposite to force the epoch mismatch.
@@ -652,12 +729,12 @@ pub(crate) async fn run_epoch_flip_rejection_check(
     temp_path: &std::path::Path,
     currently_loro_enabled: bool,
 ) {
-    // A live migrate acknowledgement would make the guard WIPE the running app's
-    // durable state instead of erroring — refuse to run the flip in that case.
+    // A live migrate acknowledgement would make the guard WIPE the app's durable
+    // state instead of erroring — refuse to run the flip in that case.
     assert!(
         std::env::var("HOLON_CONSOLIDATOR_MIGRATE").as_deref() != Ok("1"),
         "[EpochFlipRejected] HOLON_CONSOLIDATOR_MIGRATE=1 is set — a flipped boot would WIPE the \
-         live app's durable state instead of rejecting. Unset it before running this transition."
+         app's durable state instead of rejecting. Unset it before running this transition."
     );
 
     let db_path = temp_path.join("test.db");
@@ -722,7 +799,7 @@ pub(crate) async fn run_epoch_flip_rejection_check(
     );
     tracing::info!(
         marker = %marker_path.display(),
-        "[EpochFlipRejected] invariant-10 hard error fired through the real boot path; live app + marker untouched"
+        "[EpochFlipRejected] invariant-10 hard error fired through the real boot path; marker untouched"
     );
 }
 
@@ -1122,6 +1199,7 @@ impl TestEnvironment {
     /// engine's `LoroBlockOperations` mutates the same `Arc<LoroDocument>`, so
     /// a mutation is immediately visible to the next read.
     async fn start_app_loro_memory(&self) -> Result<()> {
+        let vault = holon_app::vault_lock::SessionVault::acquire(Some(&self.org_root))?;
         let storage_dir = self.temp_dir.path().join("loro-memory");
         std::fs::create_dir_all(&storage_dir)
             .map_err(|e| anyhow::anyhow!("create loro-memory dir: {e}"))?;
@@ -1145,6 +1223,7 @@ impl TestEnvironment {
                 use holon_app::loro_seams::LoroBlockOrdering;
                 use holon_app::loro_seams::LoroBlockReader;
                 use holon_app::loro_seams::LoroDocumentManager;
+                vault.register(injector);
                 register_loro_block_query_source(injector, backend.clone());
                 register_loro_operation_engine(injector, shared_store.clone());
                 register_block_query_frontend(injector);
@@ -2708,15 +2787,6 @@ impl TestEnvironment {
 
     /// Simulate app restart by touching all org files to trigger re-parsing.
     /// This tests that re-parsing doesn't create orphan blocks.
-    /// Spec 0008 §4.2(b) — see [`run_epoch_flip_rejection_check`]. Delegates
-    /// with this env's boot paths: the un-canonicalized `temp_dir` (where
-    /// the marker was written) and the pinned `enable_loro`. Named to match
-    /// the `SutAppLifecycle` cap method so the `E2ESut` impl reaches it via
-    /// `deref()`.
-    pub async fn assert_epoch_flip_rejected(&self) {
-        run_epoch_flip_rejection_check(self.temp_dir.path(), self.enable_loro.get()).await;
-    }
-
     pub async fn simulate_restart(&self, expected_ids: &HashSet<EntityUri>) -> Result<()> {
         use std::time::Duration;
 

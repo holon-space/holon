@@ -88,7 +88,11 @@ impl GpuiModule {
 
 impl Module for GpuiModule {
     fn configure(&self, injector: &Injector) -> Result<(), fluxdi::Error> {
+        let vault =
+            holon_app::vault_lock::SessionVault::acquire(self.holon_config.vault.root.as_deref())
+                .map_err(|e| to_di_err("configure", &format!("{e:#}")))?;
         self.core_module().configure(injector)?;
+        vault.register(injector);
         self.frontend_module().configure(injector)?;
 
         // GPUI-specific: render interpreter + debug services

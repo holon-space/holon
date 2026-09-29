@@ -273,6 +273,7 @@ pub trait ComposedSlice {
         _: CapMap,
         _: &IdResolver,
         _: &ReferenceState,
+        _: &Self::Transition,
     ) -> Option<(CapMap, Self::Handle)> {
         None
     }
@@ -911,7 +912,7 @@ impl<S: ComposedSlice> ComposedSut<S> {
             tick,
             _slice,
         } = self;
-        let action = "Reboot".to_string();
+        let action = action_label(transition);
         let record_label = super::telemetry::telemetry_enabled().then(|| action.clone());
         tick.set(tick.get() + 1);
         let wedge = crate::pbt::invariants::bodies::settle_budget::wedge_deadline();
@@ -919,10 +920,12 @@ impl<S: ComposedSlice> ComposedSut<S> {
         let (before, after, caps, handle, action_us) = rt.block_on(async move {
             let before = sut_ids(&caps).await;
             S::invalidate_render_caches(&handle);
-            let opened = std::time::SystemTime::now();
             let t_action = std::time::Instant::now();
-            let rebuilt =
-                tokio::time::timeout(wedge, S::reboot(handle, caps, resolver_ref, ref_state)).await;
+            let rebuilt = tokio::time::timeout(
+                wedge,
+                S::reboot(handle, caps, resolver_ref, ref_state, transition),
+            )
+            .await;
             let (caps, handle) = rebuilt
                 .unwrap_or_else(|_| {
                     panic!(
@@ -939,7 +942,7 @@ impl<S: ComposedSlice> ComposedSut<S> {
             if let Some(l) =
                 caps.get::<dyn crate::pbt::composed::settle_latency::SettleLatencyLifecycle>()
             {
-                l.note_settle(&action, opened, std::time::Duration::from_micros(action_us));
+                l.note_boot(&action, std::time::Duration::from_micros(action_us));
             }
             tracing::info!(
                 target: "holon_latency",

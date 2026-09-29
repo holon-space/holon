@@ -16,8 +16,13 @@ use r3bl_tui::InputEvent;
 use r3bl_tui::Key;
 use r3bl_tui::KeyPress;
 use r3bl_tui::KeyState;
+use r3bl_tui::OutputDevice;
+use r3bl_tui::RawMode;
 use r3bl_tui::TerminalWindow;
+use r3bl_tui::height;
+use r3bl_tui::lock_output_device_as_mut;
 use r3bl_tui::log::try_initialize_logging_global;
+use r3bl_tui::width;
 
 #[tokio::main]
 async fn main() -> CommonResult<()> {
@@ -41,6 +46,12 @@ async fn main() -> CommonResult<()> {
     let (holon_config, session_config, config_dir, locked) =
         cli::build_session(widgets).map_err(|e| miette::miette!("{}", e))?;
 
+    // A stop during boot waits for the boot to finish and then takes the one
+    // shutdown path, so the vault is left as a clean quit leaves it.
+    let mut stop =
+        holon_app::stop_signal::StopSignals::install().map_err(|e| miette::miette!("{e:#}"))?;
+
+    tracing::info!("Starting TUI frontend...");
     let mut app = fluxdi::Application::new(TuiModule {
         holon_config,
         session_config,
@@ -50,8 +61,13 @@ async fn main() -> CommonResult<()> {
     app.bootstrap()
         .await
         .map_err(|e| miette::miette!("Bootstrap failed: {e}"))?;
+    tracing::info!("Session ready");
 
     let injector = app.injector();
+    if let Some(signal) = stop.arrived() {
+        tracing::info!("Received {signal} during boot, shutting the session down");
+        return shut_down(app).await;
+    }
     let session = injector.resolve::<FrontendSession>();
     let engine = injector.resolve::<ReactiveEngine>();
     let rt_handle = tokio::runtime::Handle::current();
@@ -84,12 +100,29 @@ async fn main() -> CommonResult<()> {
     // The reactive watch task is spawned lazily on the first render so it can
     // grab the main_thread_channel_sender from `GlobalData`. See
     // `app_main::ensure_watch_task_started`.
-    TerminalWindow::main_event_loop(tui_app, exit_keys, initial_state)?.await?;
+    let ran = tokio::select! {
+        ran = async { TerminalWindow::main_event_loop(tui_app, exit_keys, initial_state)?.await } => ran.map(|_| ()),
+        signal = stop.recv() => {
+            tracing::info!("{signal} received, quitting");
+            // The event loop leaves raw mode only on its own exit. Leaving it
+            // reads no window size.
+            RawMode::end(
+                width(0) + height(0),
+                lock_output_device_as_mut!(OutputDevice::new_stdout()),
+                false,
+            );
+            Ok(())
+        }
+    };
+    let session_shut_down = shut_down(app).await;
+    ran?;
+    session_shut_down
+}
 
-    // Stop the session's watchers, then close the store — before the container
-    // teardown below, which drops the handles they read through.
-    // Its error is the process's exit status, returned after the container
-    // teardown below has still run.
+/// Stop the session's watchers, then close the store, then tear the container
+/// down. The session shutdown's error is the process's exit status, returned
+/// after the teardown has still run.
+async fn shut_down(mut app: fluxdi::Application) -> CommonResult<()> {
     let session_shutdown = holon_app::shutdown_session(&app.injector()).await;
 
     // Container teardown — fires TuiModule::on_stop (MCP server stop, etc.)

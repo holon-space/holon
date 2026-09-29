@@ -3647,6 +3647,9 @@ pub trait SutAppLifecycle {
     async fn rename_document(&self, old_file_name: &str, new_file_name: &str);
     async fn concurrent_schema_init(&self);
     async fn assert_epoch_flip_rejected(&self);
+    /// A second session on the live vault is refused by the writer lock,
+    /// names the holder, and leaves the vault's bytes unchanged.
+    async fn assert_second_writer_refused(&self);
 }
 
 /// SUT capability: pre-startup org-filesystem fixture setup — writing org

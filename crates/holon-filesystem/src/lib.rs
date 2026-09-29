@@ -63,6 +63,8 @@ pub use file_sync_controller::IngestOutcome;
 #[cfg(not(target_arch = "wasm32"))]
 pub use file_sync_controller::RENDERER_VERSION;
 #[cfg(not(target_arch = "wasm32"))]
+pub use file_sync_controller::RefusedWritebacks;
+#[cfg(not(target_arch = "wasm32"))]
 pub use file_sync_controller::tiered_match;
 #[cfg(not(target_arch = "wasm32"))]
 pub use fs_port::FileMeta;

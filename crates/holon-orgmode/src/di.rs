@@ -164,6 +164,7 @@ pub struct OrgSyncIdleSignal {
     /// the tick nor `in_pass` sees a request still in the channel, and a
     /// shutdown must name what it would leave unwritten.
     queued_renders: Arc<QueuedRenders>,
+    refused_writebacks: Arc<holon_filesystem::RefusedWritebacks>,
 }
 
 /// Re-render requests in the write-back channel, counted per document.
@@ -222,11 +223,17 @@ impl OrgSyncIdleSignal {
             bulk_pending: std::sync::atomic::AtomicBool::new(false),
             writeback_fold: std::sync::OnceLock::new(),
             queued_renders: Arc::new(QueuedRenders::default()),
+            refused_writebacks: Arc::new(holon_filesystem::RefusedWritebacks::default()),
         })
     }
 
     pub fn queued_renders(&self) -> &QueuedRenders {
         &self.queued_renders
+    }
+
+    /// The documents whose file the write-back could not write.
+    pub fn refused_writebacks(&self) -> &holon_filesystem::RefusedWritebacks {
+        &self.refused_writebacks
     }
 
     /// What the write-back is still doing, empty when it has written every
@@ -750,6 +757,8 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                 if let Some(disclosure) = writeback_disclosure.clone() {
                     controller = controller.with_writeback_disclosure(disclosure);
                 }
+                controller =
+                    controller.with_refused_writebacks(idle_signal.refused_writebacks.clone());
 
                 // Image bytes for `[[file:…]]` blocks, so an image synced from a
                 // peer materializes on disk. Absent in every container today →

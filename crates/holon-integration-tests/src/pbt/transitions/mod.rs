@@ -154,6 +154,7 @@ mod remove_watch;
 mod rename_document;
 pub(crate) mod rename_page;
 mod search;
+mod second_writer_refused;
 mod select_bias;
 pub mod set_edge_field;
 mod setup_watch;
@@ -252,6 +253,7 @@ pub use remove_watch::RemoveWatch;
 pub use rename_document::RenameDocument;
 pub use rename_page::RenamePage;
 pub use search::Search;
+pub use second_writer_refused::SecondWriterRefused;
 pub use set_edge_field::SetEdgeField;
 pub use setup_watch::SetupWatch;
 pub use share_container::ShareContainer;
@@ -309,6 +311,7 @@ crate::declare_e2e_transitions! {
         FullSync(FullSync),
         RebuildViews(RebuildViews),
         EpochFlipRejected(EpochFlipRejected),
+        SecondWriterRefused(SecondWriterRefused),
         ExpandToggle(ExpandToggle),
         FocusEditableText(FocusEditableText),
         GitInit(GitInit),
@@ -667,6 +670,7 @@ mod required_caps_guard {
         one!(DeleteDocument, lc::SutAppLifecycle);
         one!(RenameDocument, lc::SutAppLifecycle);
         one!(EpochFlipRejected, lc::SutAppLifecycle);
+        one!(SecondWriterRefused, lc::SutAppLifecycle);
         one!(Reboot, lc::SutAppLifecycle);
         one!(SimulateRestart, lc::SutAppLifecycle);
         one!(StartApp, lc::SutAppLifecycle);

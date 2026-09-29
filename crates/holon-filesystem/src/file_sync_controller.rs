@@ -962,6 +962,8 @@ pub struct FileSyncController {
     /// writable file to resume write-back to.
     writeback_readonly: HashSet<CanonicalPath>,
 
+    refused_writebacks: Arc<RefusedWritebacks>,
+
     /// Ingest quarantine for NEW-file discovery (`poll_new_files`, Inc 3b). A
     /// freshly-discovered file whose ingest FAILED — or that was REFUSED for a
     /// duplicate `#+ID:` — is recorded here as an [`IngestSkip`], so a single
@@ -1061,6 +1063,7 @@ impl FileSyncController {
             boot_seeding: true,
             seed_pristine: HashMap::new(),
             writeback_readonly: HashSet::new(),
+            refused_writebacks: Arc::new(RefusedWritebacks::default()),
             ingest_quarantine: HashMap::new(),
             empty_since: HashMap::new(),
             duplicate_id_disclosed: HashSet::new(),
@@ -1349,6 +1352,13 @@ impl FileSyncController {
     /// but raises no user-visible banner.
     pub fn with_writeback_disclosure(mut self, disclosure: Arc<dyn WritebackDisclosure>) -> Self {
         self.writeback_disclosure = Some(disclosure);
+        self
+    }
+
+    /// Share the record of refused write-backs with whoever must answer for
+    /// them at shutdown.
+    pub fn with_refused_writebacks(mut self, refused: Arc<RefusedWritebacks>) -> Self {
+        self.refused_writebacks = refused;
         self
     }
 
@@ -7582,6 +7592,7 @@ impl FileSyncController {
                     return Ok(false);
                 }
                 Err(e) => {
+                    self.refused_writebacks.refused(doc_id, path, &e);
                     return Err(e).with_context(|| {
                         format!("create parent dir for org write-back to {}", path.display())
                     });
@@ -7590,6 +7601,7 @@ impl FileSyncController {
         }
         match self.fs.write(path, rendered).await {
             Ok(()) => {
+                self.refused_writebacks.written(doc_id);
                 if let Some(disclosure) = &self.writeback_disclosure {
                     disclosure.writeback_resumed(path);
                 }
@@ -7610,6 +7622,7 @@ impl FileSyncController {
                 Ok(false)
             }
             Err(e) => {
+                self.refused_writebacks.refused(doc_id, path, &e);
                 Err(e).with_context(|| format!("org write-back to {} failed", path.display()))
             }
         }
@@ -7814,6 +7827,7 @@ impl FileSyncController {
         err: &std::io::Error,
         canonical: CanonicalPath,
     ) {
+        self.refused_writebacks.refused(doc_id, path, err);
         if self.writeback_readonly.insert(canonical) {
             tracing::error!(
                 doc_id = %doc_id,
@@ -7822,6 +7836,37 @@ impl FileSyncController {
                 "[FileSyncController] org write-back FAILED on a read-only                  filesystem (EROFS os error 30) — this doc has no writable                  backing file (relay/synthetic doc, or a read-only vault                  mount). DISABLING write-back for this path so subsequent CDC                  events do NOT retry the doomed write; re-enabled when the doc                  (re)gains a writable backing file or on a clean re-ingest.",
             );
         }
+    }
+}
+
+/// Documents whose last write-back the file system refused, so their file is
+/// behind the store. A document leaves the record when a write of it succeeds.
+#[derive(Debug, Default)]
+pub struct RefusedWritebacks(std::sync::Mutex<std::collections::BTreeMap<String, String>>);
+
+impl RefusedWritebacks {
+    fn refused(&self, doc_id: &EntityUri, path: &Path, err: &std::io::Error) {
+        self.0
+            .lock()
+            .expect("refused write-backs poisoned")
+            .insert(doc_id.to_string(), format!("{}: {err}", path.display()));
+    }
+
+    fn written(&self, doc_id: &EntityUri) {
+        self.0
+            .lock()
+            .expect("refused write-backs poisoned")
+            .remove(&doc_id.to_string());
+    }
+
+    /// Each refused document as `<doc> (<path>: <error>)`.
+    pub fn documents(&self) -> Vec<String> {
+        self.0
+            .lock()
+            .expect("refused write-backs poisoned")
+            .iter()
+            .map(|(doc, why)| format!("{doc} ({why})"))
+            .collect()
     }
 }
 

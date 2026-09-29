@@ -59,6 +59,10 @@ pub const SLO: Duration = Duration::from_millis(200);
 /// (a quiet host) drops it to the bare SLO.
 pub const DEFAULT_SLACK: u32 = 25;
 
+/// Hard threshold for a transition that shuts the session down and boots it
+/// again: the test profile measured up to 14.9 s for one reboot at load 40+.
+pub const BOOT_BUDGET: Duration = Duration::from_secs(30);
+
 /// Hard threshold for a transition whose every dispatched op is
 /// [`OpClass::Maintenance`]: release measured 1076 ms (load 97–160) for the
 /// keystone's 26-view rebuild, × ≈11 for the test profile ⇒ 12 s.
@@ -114,15 +118,23 @@ pub fn wedge_deadline() -> Duration {
 pub struct SettleSample {
     pub action: String,
     pub elapsed: Duration,
+    pub class: SettleClass,
+}
+
+/// The budget a settle is judged by.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettleClass {
     /// Read off the ops the transition dispatched, never declared by it.
-    pub class: OpClass,
+    Op(OpClass),
+    /// The transition restarted the session, so it is a boot, not an op.
+    Boot,
 }
 
 /// The class a transition's settle is judged by: Maintenance iff it dispatched
 /// ops and every one is a maintenance op. A maintenance op is a global `*` op
 /// that names no subject, so any other one classed Maintenance is a
 /// misdeclaration.
-pub fn settle_class(dispatched: &std::collections::BTreeSet<(String, String)>) -> OpClass {
+pub fn settle_class(dispatched: &std::collections::BTreeSet<(String, String)>) -> SettleClass {
     let classes: Vec<OpClass> = dispatched
         .iter()
         .map(|(entity, op)| {
@@ -136,9 +148,9 @@ pub fn settle_class(dispatched: &std::collections::BTreeSet<(String, String)>) -
         })
         .collect();
     if !classes.is_empty() && classes.iter().all(|c| *c == OpClass::Maintenance) {
-        OpClass::Maintenance
+        SettleClass::Op(OpClass::Maintenance)
     } else {
-        OpClass::Interaction
+        SettleClass::Op(OpClass::Interaction)
     }
 }
 
@@ -151,7 +163,26 @@ pub fn verdict(sample: Option<&SettleSample>) -> InvariantResult {
         return InvariantResult::Ok;
     };
     let ms = sample.elapsed.as_millis();
-    if sample.class == OpClass::Maintenance {
+    if sample.class == SettleClass::Boot {
+        tracing::warn!(
+            target: "holon_latency",
+            stage = "settle_budget",
+            action = %sample.action,
+            total_ms = ms as u64,
+            budget_ms = BOOT_BUDGET.as_millis() as u64,
+            "boot, judged by the boot budget",
+        );
+        if sample.elapsed > BOOT_BUDGET {
+            return InvariantResult::Fail(format!(
+                "[inv-settle-budget] boot '{}' took {}ms, past the boot budget {}ms.",
+                sample.action,
+                ms,
+                BOOT_BUDGET.as_millis(),
+            ));
+        }
+        return InvariantResult::Ok;
+    }
+    if sample.class == SettleClass::Op(OpClass::Maintenance) {
         tracing::warn!(
             target: "holon_latency",
             stage = "settle_budget",
@@ -211,7 +242,7 @@ mod tests {
         SettleSample {
             action: "NavigateFocus".to_string(),
             elapsed: Duration::from_millis(ms),
-            class: OpClass::Interaction,
+            class: SettleClass::Op(OpClass::Interaction),
         }
     }
 
@@ -250,7 +281,7 @@ mod tests {
             verdict(Some(&SettleSample {
                 action: "Edit".to_string(),
                 elapsed: just_over,
-                class: OpClass::Interaction,
+                class: SettleClass::Op(OpClass::Interaction),
             })),
             InvariantResult::Ok
         ));
@@ -266,17 +297,20 @@ mod tests {
     fn a_transition_is_maintenance_only_if_every_op_it_dispatched_is() {
         assert_eq!(
             settle_class(&dispatched(&[("*", "rebuild_views")])),
-            OpClass::Maintenance
+            SettleClass::Op(OpClass::Maintenance)
         );
         assert_eq!(
             settle_class(&dispatched(&[
                 ("*", "rebuild_views"),
                 ("block", "set_field")
             ])),
-            OpClass::Interaction,
+            SettleClass::Op(OpClass::Interaction),
             "a maintenance op must not shelter an interaction dispatched beside it"
         );
-        assert_eq!(settle_class(&dispatched(&[])), OpClass::Interaction);
+        assert_eq!(
+            settle_class(&dispatched(&[])),
+            SettleClass::Op(OpClass::Interaction)
+        );
     }
 
     #[test]
@@ -284,7 +318,7 @@ mod tests {
         let maintenance = |ms| SettleSample {
             action: "RebuildViews".to_string(),
             elapsed: Duration::from_millis(ms),
-            class: OpClass::Maintenance,
+            class: SettleClass::Op(OpClass::Maintenance),
         };
         assert!(matches!(
             verdict(Some(&maintenance(9_000))),
@@ -294,5 +328,19 @@ mod tests {
             panic!("13s must fail the 12s maintenance budget");
         };
         assert!(msg.contains("13000ms"), "{msg}");
+    }
+
+    #[test]
+    fn a_boot_is_judged_by_the_boot_budget() {
+        let boot = |ms| SettleSample {
+            action: "EpochFlipRejected".to_string(),
+            elapsed: Duration::from_millis(ms),
+            class: SettleClass::Boot,
+        };
+        assert!(matches!(verdict(Some(&boot(9_500))), InvariantResult::Ok));
+        let InvariantResult::Fail(msg) = verdict(Some(&boot(31_000))) else {
+            panic!("31s must fail the 30s boot budget");
+        };
+        assert!(msg.contains("31000ms"), "{msg}");
     }
 }

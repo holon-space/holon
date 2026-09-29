@@ -214,6 +214,15 @@ struct BootParams {
     sidecar_yaml: Option<String>,
 }
 
+/// What a reboot does while the vault is free: after the old session shut
+/// down and before the new one boots.
+#[derive(Clone, Copy, Debug)]
+pub enum RebootGap {
+    Nothing,
+    /// Boot with the consolidator flipped; it must fail with invariant 10.
+    EpochFlipRejected,
+}
+
 /// A composition component wrapping a real headless frontend stack. Owns the
 /// `HeadlessStore` and the current `BootedSession` so background tasks and
 /// the on-disk (in-memory FS) org root stay alive for the component's lifetime.
@@ -1029,7 +1038,13 @@ impl HeadlessFrontendComponent {
     /// — org files included — is untouched, so no content is re-seeded and the
     /// block set must survive unchanged.
     pub(crate) async fn reboot(&self) {
+        self.reboot_through(RebootGap::Nothing).await;
+    }
+
+    /// [`Self::reboot`], running `between` while no session holds the vault.
+    pub(crate) async fn reboot_through(&self, between: RebootGap) {
         let before = self.store_block_ids().await;
+        let loro_enabled = self.loro_doc_store().is_some();
 
         // Drop CDC consumers before the actor goes away (mirrors
         // `TestEnvironment::stop_app`, which this is the composed analogue of).
@@ -1063,6 +1078,16 @@ impl HeadlessFrontendComponent {
              shut-down Turso actor. Every holder must release the old boot BEFORE this point.",
             dead.strong_count()
         );
+        match between {
+            RebootGap::Nothing => {}
+            RebootGap::EpochFlipRejected => {
+                crate::test_environment::run_epoch_flip_rejection_check(
+                    self.store.temp.path(),
+                    loro_enabled,
+                )
+                .await;
+            }
+        }
 
         let booted = Self::boot_session(&self.store, &self.boot_params).await;
         *self.boot.write().expect("boot cell poisoned") = Some(Arc::new(booted));
@@ -4810,15 +4835,11 @@ impl SutAppLifecycle for HeadlessFrontendComponent {
     }
 
     async fn assert_epoch_flip_rejected(&self) {
-        // Spec 0008 §4.2(b). This component boots a REAL windowless session over a
-        // durable on-disk Turso db (`new_with_loro`, un-canonicalized `_temp`), so
-        // its `.holon/consolidator` marker really exists. Loro-on iff a doc store
-        // was resolved. See `run_epoch_flip_rejection_check` for the rejection logic.
-        crate::test_environment::run_epoch_flip_rejection_check(
-            self.store.temp.path(),
-            self.loro_doc_store().is_some(),
-        )
-        .await;
+        self.reboot_through(RebootGap::EpochFlipRejected).await;
+    }
+
+    async fn assert_second_writer_refused(&self) {
+        crate::test_environment::run_second_writer_refusal_check(self.store.temp.path()).await;
     }
 }
 

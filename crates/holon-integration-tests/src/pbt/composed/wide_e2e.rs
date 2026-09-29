@@ -66,6 +66,7 @@ use crate::pbt::composed::seed_primitives::PARENT;
 use crate::pbt::composed::seed_primitives::fixed_ids;
 use crate::pbt::composed::subsystem_seed::build_started_ref;
 use crate::pbt::frontend_slice::components::HeadlessFrontendComponent;
+use crate::pbt::frontend_slice::components::RebootGap;
 use crate::pbt::op_write_cap::IdResolver;
 use crate::pbt::reference_state::ReferenceState;
 use crate::pbt::transitions::E2ETransition;
@@ -1366,6 +1367,7 @@ pub async fn reboot_wide(
     caps: CapMap,
     resolver: &IdResolver,
     ref_state: &ReferenceState,
+    between: RebootGap,
 ) -> (CapMap, WideHandle) {
     let frontend = handle
         .frontend()
@@ -1390,7 +1392,7 @@ pub async fn reboot_wide(
          handle — a reboot must leave exactly this one. Whoever still holds it keeps the dead \
          boot's engine and watcher tasks alive against a shut-down storage actor."
     );
-    frontend.reboot().await;
+    frontend.reboot_through(between).await;
 
     let set = set_for_wiring(&ref_state.harness.wiring);
     let bundle = compose_sut_over_existing(&set, resolver, frontend).await;
@@ -1958,11 +1960,14 @@ impl ComposedSlice for WideE2E {
         boot_and_seed_wide(resolver, ref_state).await
     }
 
-    /// `Reboot` replaces the cap map and the handle wholesale, so the harness
-    /// must intercept it before `apply_transition` — which only borrows
-    /// `&mut CapMap` and never sees the handle.
+    /// `Reboot` and `EpochFlipRejected` replace the cap map and the handle
+    /// wholesale, so the harness must intercept them before `apply_transition`
+    /// — which only borrows `&mut CapMap` and never sees the handle.
     fn is_reboot(t: &E2ETransition) -> bool {
-        matches!(t, E2ETransition::Reboot(_))
+        matches!(
+            t,
+            E2ETransition::Reboot(_) | E2ETransition::EpochFlipRejected(_)
+        )
     }
 
     /// The real restart: drop this boot's engine and boot again over the same
@@ -1972,8 +1977,14 @@ impl ComposedSlice for WideE2E {
         caps: CapMap,
         resolver: &IdResolver,
         ref_state: &ReferenceState,
+        transition: &E2ETransition,
     ) -> Option<(CapMap, WideHandle)> {
-        Some(reboot_wide(handle, caps, resolver, ref_state).await)
+        let between = match transition {
+            E2ETransition::Reboot(_) => RebootGap::Nothing,
+            E2ETransition::EpochFlipRejected(_) => RebootGap::EpochFlipRejected,
+            other => unreachable!("is_reboot admits only reboots, got {other:?}"),
+        };
+        Some(reboot_wide(handle, caps, resolver, ref_state, between).await)
     }
 
     /// Replace the flat post-apply `sleep(SETTLE)` with the 3-projection

@@ -20,7 +20,7 @@ fn main() -> Result<()> {
     #[cfg(feature = "heap-profile")]
     let _heap_guard = holon_frontend::memory_monitor::heap_profile::start();
 
-    let _log_guard = holon_frontend::logging::init();
+    let log_guard = holon_frontend::logging::init();
 
     // Connect to the dx dev server so it can hot-patch via subsecond
     #[cfg(feature = "hot-reload")]
@@ -42,6 +42,12 @@ fn main() -> Result<()> {
     let session_config = session_config.without_wait();
 
     let runtime = tokio::runtime::Runtime::new()?;
+    // A stop during boot waits for the boot to finish and then takes the one
+    // shutdown path, so the vault is left as a clean quit leaves it.
+    let mut stop = {
+        let _entered = runtime.enter();
+        holon_app::stop_signal::StopSignals::install()?
+    };
 
     let boot_result = runtime.block_on(async {
         tracing::info!("Starting GPUI frontend...");
@@ -70,7 +76,7 @@ fn main() -> Result<()> {
     // Boot failed: emit a structured, component-attributed report (which
     // component, which stage, and the full source chain) and exit non-zero.
     // Increment 2 replaces this terminal exit with the recovery shell.
-    let mut app = match boot_result {
+    let app = match boot_result {
         Ok(app) => app,
         Err(boot_err) => {
             eprint!("{}", boot_err.structured_report());
@@ -79,6 +85,16 @@ fn main() -> Result<()> {
     };
 
     let injector = app.injector();
+    let arrived = {
+        let _entered = runtime.enter();
+        stop.arrived()
+    };
+    if let Some(signal) = arrived {
+        tracing::info!("Received {signal} during boot, shutting the session down");
+        let quit_result = runtime.block_on(quit(app, injector));
+        drop(log_guard);
+        return quit_result;
+    }
     let session = injector.resolve::<FrontendSession>();
     let engine = injector.resolve::<ReactiveEngine>();
     let debug = injector.resolve::<DebugServices>();
@@ -106,33 +122,19 @@ fn main() -> Result<()> {
         }
     }
 
-    // Shutdown flush: spawn a tokio task that awaits Ctrl+C and flushes
-    // every in-flight shared-doc save before exit. The 150ms debounce
-    // window in `SaveWorker` means pending edits could otherwise be
-    // lost on SIGINT/Ctrl+C. `gpui_app.run()` below blocks the main
-    // thread and never returns cleanly, so we `std::process::exit`
-    // after flushing — this is the one place it's correct.
-    #[cfg(all(
-        feature = "desktop",
-        not(all(target_arch = "wasm32", target_os = "unknown"))
-    ))]
-    {
-        let injector_for_signal = injector.clone();
+    // A stop signal quits the app like closing its window, so it reaches `quit`.
+    #[cfg(feature = "desktop")]
+    let stopped = {
+        let (tx, rx) = futures::channel::oneshot::channel::<()>();
         rt_handle.spawn(async move {
-            if let Err(e) = tokio::signal::ctrl_c().await {
-                tracing::warn!("ctrl_c handler install failed: {e}");
-                return;
-            }
-            tracing::info!("Ctrl+C received — flushing shared-tree snapshots");
-            if let Ok(backend) = injector_for_signal
-                .try_resolve::<std::sync::Arc<holon_loro::loro_share_backend::LoroShareBackend>>()
-            {
-                backend.flush_all().await;
-                tracing::info!("flush_all complete");
-            }
-            std::process::exit(0);
+            let signal = stop.recv().await;
+            tracing::info!("{signal} received, quitting");
+            tx.send(()).ok(); // ALLOW(ok): the app already quit
         });
-    }
+        rx
+    };
+    #[cfg(not(feature = "desktop"))]
+    drop(stop);
 
     // Resolve the share backend up-front (feature-gated). The bridge is
     // wired inside `launch_holon_window_with_engine_and_share`. fluxdi
@@ -241,8 +243,36 @@ fn main() -> Result<()> {
 
     #[cfg(feature = "desktop")]
     {
+        let quit_rt = runtime.handle().clone();
+        let mut quit_state = Some((app, injector.clone(), log_guard));
         let gpui_app = Application::with_platform(gpui_platform::current_platform(false));
         gpui_app.run(move |cx| {
+            // macOS ends the process right after the quit observers return, so
+            // the session shutdown runs inside one, blocking the quit.
+            cx.on_app_quit(move |_| {
+                let (app, injector, log_guard) = quit_state.take().expect("the app quits once");
+                let (tx, rx) = std::sync::mpsc::channel();
+                quit_rt.spawn(async move {
+                    tx.send(quit(app, injector).await)
+                        .expect("the quitting main thread waits for the shutdown");
+                });
+                let shut_down = rx.recv().expect("the shutdown task reports");
+                // Flushes the log, which the platform's exit would drop.
+                drop(log_guard);
+                if let Err(e) = shut_down {
+                    eprintln!("Session shutdown failed: {e:#}");
+                    std::process::exit(1);
+                }
+                async {}
+            })
+            .detach();
+            cx.spawn(async move |cx| {
+                if stopped.await.is_ok() {
+                    cx.update(|cx| cx.quit());
+                }
+            })
+            .detach();
+
             // Install the pending-write store as a GPUI global so the window
             // wiring can spawn the bus bridge and the render pass can build the
             // approve panel (mirrors the DegradedToastSink/ShareTrigger globals).
@@ -330,24 +360,41 @@ fn main() -> Result<()> {
         tracing::debug!("Mobile builds use android_main/ios_main, not this binary.");
     }
 
-    // Stop the session's watchers, then close the store. One definition, in
-    // `holon_app`, shared with the TUI and the test harness.
-    // Its error is the process's exit status, returned after the container
-    // teardown below has still run.
-    let session_shutdown = runtime.block_on(holon_app::shutdown_session(&injector));
+    #[cfg(not(feature = "desktop"))]
+    let quit_result = runtime.block_on(quit(app, injector));
+    #[cfg(not(feature = "desktop"))]
+    drop(log_guard);
+    #[cfg(not(feature = "desktop"))]
+    return quit_result;
+    #[cfg(feature = "desktop")]
+    Ok(())
+}
+
+/// Stop the session's watchers, then close the store, then tear the
+/// container down. The session shutdown's error is the process's exit
+/// status, returned after the teardown has still run.
+async fn quit(
+    mut app: fluxdi::Application,
+    injector: fluxdi::Shared<fluxdi::Injector>,
+) -> Result<()> {
+    // `SaveWorker` debounces shared-doc saves by 150 ms.
+    if let Ok(backend) =
+        injector.try_resolve::<std::sync::Arc<holon_loro::loro_share_backend::LoroShareBackend>>()
+    {
+        backend.flush_all().await;
+    }
+    let session_shutdown = holon_app::shutdown_session(&injector).await;
     if let Err(e) = &session_shutdown {
         tracing::error!("Session shutdown failed: {e:#}");
     }
 
-    // Container teardown — fires GpuiModule::on_stop (MCP server stop, etc.)
-    runtime.block_on(async {
-        let timeout = std::time::Duration::from_secs(10);
-        match tokio::time::timeout(timeout, app.shutdown()).await {
-            Ok(Ok(())) => tracing::info!("Shutdown complete"),
-            Ok(Err(e)) => tracing::warn!("Shutdown error: {e}"),
-            Err(_) => tracing::warn!("Shutdown timed out after {timeout:?}"),
-        }
-    });
+    // Fires GpuiModule::on_stop (MCP server stop, etc.).
+    let timeout = std::time::Duration::from_secs(10);
+    match tokio::time::timeout(timeout, app.shutdown()).await {
+        Ok(Ok(())) => tracing::info!("Shutdown complete"),
+        Ok(Err(e)) => tracing::warn!("Shutdown error: {e}"),
+        Err(_) => tracing::warn!("Shutdown timed out after {timeout:?}"),
+    }
 
     session_shutdown
 }

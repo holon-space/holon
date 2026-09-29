@@ -6177,6 +6177,7 @@ dependencies = [
  "r3bl_tui",
  "serde",
  "serde_yaml",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-core",

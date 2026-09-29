@@ -62,3 +62,4 @@ holon-integration-tests = { path = "../../crates/holon-integration-tests" }
 holon-pbt-core = { path = "../../crates/holon-pbt-core" }
 proptest.workspace = true
 proptest-state-machine.workspace = true
+tempfile.workspace = true
