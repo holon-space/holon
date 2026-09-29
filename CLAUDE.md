@@ -87,6 +87,22 @@ stored properties bag and the renderer replays it. Pinned by
 crates/holon-app/tests/org_store_org_round_trip.rs. See
 docs/Reference/CompassConventions.md.
 
+# Task tracking (lane state records)
+Every lane keeps its running state record (done / in progress with file:line / next / evidence) in the vault, so a fresh agent can continue it at any moment.
+- **Where:** `/Users/martin/Workspaces/pkm/holon-pkm/Projects/Holon/<topic>.org`. Each lane is ONE task under the backlog item it belongs to. Current lanes:
+
+  | Lane | Page › backlog item |
+  |---|---|
+  | org-drawer-faithful (group B) | `Plain-Text Layer.org` › Keep OrgRenderer + parser bidirectional sync stable |
+  | d229-move | `Plain-Text Layer.org` › Org-mode adapter |
+  | decision Inc 6 / Inc 7 / Inc 10 | `Dogfooding & Agents.org` › Idea 3 › Ask Martin through `?`-question blocks in the vault (D209.a) |
+  | dogfooding phase 1 | `Cross-Cutting Concerns.org` › macOS desktop (GPUI) — the dogfood platform |
+
+  A new lane finds its backlog item with `grep -n '^\*' <page>`; if none fits, the orchestrator picks one.
+- **How:** load and follow the `holon-handoff` skill: imperative titles, details as child blocks, parent state derived from children, each link (commit, report, design note; `file:///` for local files) on its own child line.
+- **Writes:** an agent edits ONLY the task subtree of its own lane, by point edits with the Edit tool (never read the whole file and write it back). When a running Holon instance holds the vault (it holds the `flock` on `{vault}/.holon/writer.lock`; the file stays after exit, so check that the `pid` in it is alive), use the MCP instead (`dense_patch`, `claim_task`, `complete_task`).
+- Never touch other lanes' subtrees or other vault content.
+
 # Development
 See [DEVELOPMENT.md](DEVELOPMENT.md) — testing (nextest, coverage) and log analysis scripts.
 
