@@ -162,7 +162,7 @@ fn a_multi_line_id_in_the_file_drawer_carrier_is_refused() {
     refused_case("set_field", || {
         vec![
             ("id", text("block:page-notes")),
-            ("field", text("file_properties")),
+            ("field", text("_file_properties")),
             (
                 "value",
                 text(&serde_json::json!({ "ID": BAD_ID }).to_string()),
@@ -268,10 +268,10 @@ fn an_id_that_is_not_a_bare_block_id_is_refused_on_every_route() {
                 ),
                 (
                     "set_field",
-                    "file_properties",
+                    "_file_properties",
                     vec![
                         ("id", text("block:page-notes")),
-                        ("field", text("file_properties")),
+                        ("field", text("_file_properties")),
                         ("value", text(&serde_json::json!({ "ID": id }).to_string())),
                     ],
                 ),

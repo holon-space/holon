@@ -335,3 +335,48 @@ fn conflicting_hash_id_and_drawer_id_is_rejected() {
         );
     }
 }
+
+/// A stored file-drawer carrier that is not a JSON object renders the page
+/// without the drawer, keeps the page id as `#+ID:`, and names the loss.
+#[test]
+fn an_unreadable_file_drawer_carrier_is_a_disclosed_loss() {
+    let org = ":PROPERTIES:\n:ID: p\n:NOTE: v\n:END:\n* h\n:PROPERTIES:\n:ID: h1\n:END:\n";
+    for value in [
+        holon_api::Value::String("garbage".into()),
+        holon_api::Value::String(String::new()),
+        holon_api::Value::String("[]".into()),
+        holon_api::Value::String("null".into()),
+        holon_api::Value::String("{".into()),
+        holon_api::Value::Integer(1),
+    ] {
+        let parsed = parse_org_file(
+            Path::new(FILE),
+            org,
+            &EntityUri::no_parent(),
+            Path::new(ROOT),
+        )
+        .expect("fixture parses");
+        let mut document = parsed.document;
+        document.set_property(holon_org_format::org_props::FILE_PROPERTIES, value.clone());
+        let written = std::panic::catch_unwind(|| {
+            OrgRenderer::render_document(&document, &parsed.blocks, Path::new(FILE), &document.id)
+        });
+        let written = match written {
+            Err(_) => panic!("{value:?}: the render panicked"),
+            Ok(r) => r.expect("org render"),
+        };
+        assert!(
+            written.text.starts_with("#+ID: p\n") && written.text.contains(":ID: h1\n"),
+            "{value:?}: {:?}",
+            written.text
+        );
+        assert!(
+            written
+                .losses
+                .iter()
+                .any(|l| l.to_string().contains("_file_properties")),
+            "{value:?}: no loss names the carrier: {:?}",
+            written.losses
+        );
+    }
+}

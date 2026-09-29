@@ -86,7 +86,7 @@ Holon preserves it. The rules:
   order to remember.
 - **Every non-`:ID:` key is preserved verbatim**, in the order the author wrote
   it, whether or not Holon models it (`:ROAM_REFS:`, `:CATEGORY:`, anything).
-  They ride on the doc-root block under the `file_properties` property (a
+  They ride on the doc-root block under the `_file_properties` carrier (a
   JSON object; `serde_json::Map` preserves insertion order), so they survive the
   store round trip and are written back unchanged.
 - **Write-back keeps the author's carrier.** A file whose drawer holds `:ID:` is
@@ -140,6 +140,13 @@ Holon preserves it. The rules:
 - `:ID: abc-123` — bare string, no `block:` prefix
 - Parser wraps with `EntityUri::from_raw("abc-123")` → `block:abc-123`
 - Renderer writes `block.id.id()` (path part only) or `block.get_block_id()` (the stored "ID" property)
+
+### Headline levels
+
+A headline keeps its authored star count (`_stars`, recorded when it is not
+one more than its parent's) while org reads it in the same place: more stars
+than its parent, and at most as many as each earlier sibling. Otherwise, as
+for a block Holon creates or moves, it is written one level below its parent.
 
 ### Headline text: keyword, cookie, title, tags
 
@@ -196,14 +203,76 @@ literal text in Emacs. `#+begin_src`/`#+end_src` are escaped:
 unescaped, the pair would become a source block child. A line `,* x` or
 `,#+x` that a person writes in Emacs reads as `* x` / `#+x`.
 
-The page id is read only from a `#+ID:` keyword before the first headline, as
-org structures that text: a `#+ID:` line inside a block there (`#+begin_src`,
+Org itself removes an escape comma only inside example, export and source
+blocks (measured in `emacs -Q`, `lane-logs/B10-emacs-contexts.log`), and there
+before `*` or `#+` at any indentation: Holon writes and reads those lines the
+same way. Inside any other block (quote, center, verse, comment, a special or
+a dynamic block) and inside a drawer a comma is text: `:LOGBOOK:\n,x\n:END:`
+reads as `,x`, and Holon writes no comma there, except before a headline. A
+headline ends any block or drawer, so a line `* x` there is written `,* x`
+and a line `,* x` there reads in Holon as `* x` (the D230.a rule below; org
+reads `,* x`, measured in `emacs -Q` 30.2). A `#+KEY:` line there,
+which org reads as a keyword, is written as it is, and the render records a
+loss. Keyword lines org reads inside a quote, center or
+special block or a list item are kept beside the block like section keyword
+lines.
+
+In paragraph text Holon deliberately differs from org (ruling D230.a, recorded
+in `docs/Testing/bugfunnel/entries/2026-09-28-block-text-line-starting-with-a-star-becomes-a-new-block.md`):
+org keeps a leading comma there, so Emacs shows Holon's `,* milk` with its
+comma, and a file written in Emacs with a paragraph line `,* x` reads in
+Holon as `* x`. Holon's own round trip is lossless, so no loss is recorded. A text that the renderer would write with
+other bytes than the file holds (a raw `#+TODO:` line inside
+`#+begin_example`, an unescaped `#+` line inside `#+BEGIN_SRC`) keeps its
+authored bytes in the `_authored_text` carrier: the renderer writes them
+while they still read as the block's text, and the escaped form once Holon
+changes the text.
+
+The page id is read only from a `#+ID:` keyword (key in any case: `#+id:`,
+`#+Id:`) before the first headline, as org structures that text: a `#+ID:` line inside a block there (`#+begin_src`,
 `#+begin_example`, ...) is not a keyword, and a line org reads as a headline
 (`* x`, also inside such a block, as in Emacs) ends that text. Below a
 headline, a `#+ID:` line is block text: the parser keeps it, so it is written
-without a comma. Every other `#+` keyword line that a person writes below a
-headline in Emacs (`#+TITLE:`, `#+TODO:`, ...) is a document keyword, as org
-reads it.
+without a comma. The page's title and task keywords are read as org reads
+them (`page_keywords.rs`, key in any case): the title from every `#+TITLE:`
+line of the file, inside any block too (org-get-title scans the file), the
+values joined with one space; the task keywords from every `#+TYP_TODO:`, then
+`#+TODO:`, then `#+SEQ_TODO:` keyword element, above or below any headline and
+inside quote, center or special blocks and list items, but not inside example,
+export, source, verse or comment blocks. Each line adds its keywords; with no
+`|`, its last keyword is a done state; a trailing `(...)` is a fast-access key
+(`NEXT(n)` declares `NEXT`) and stays in the line. Each line stays where it
+was authored. A title Holon changes goes into the first TITLE line Holon keeps
+beside a block or in the header; the other such TITLE lines are removed, and
+the render records a loss naming each. A TITLE line inside a block's text
+stays, so the render records a loss when the title then reads otherwise. Changed
+task keywords rewrite only the lines whose keywords changed, each with its
+own kind and key spelling; a line left with no keyword is removed with a
+loss; a new keyword goes into the first `#+TODO:` or `#+SEQ_TODO:` line, else
+into a new `#+TODO:` header line. Every keyword line that a person writes below a headline in Emacs
+(`#+STARTUP:`, `#+FOO:`, a `#+CAPTION:` above a table, a `#+TITLE:`) is not
+block text: the parser keeps it beside the block (`_keyword_lines`,
+`KeywordLine` in `models.rs`) with the body line it stands before, and the
+renderer writes it back raw in its place. A `#+` line typed into a block's text
+is text and is written comma-escaped, so both forms read back as they were.
+The render's read-back check compares these lines too. A keyword line that
+stands after a source block child is written before it, and the render records
+a loss for the file. A carrier line that is no single keyword line is not
+written, and the render records a loss.
+
+The keyword lines before the first headline are written back as authored, in
+their order and in their place among the text there, with their blank lines:
+`#+FILETAGS:`, `#+STARTUP:`, `#+OPTIONS:`, a second `#+ID:`, any other. A line
+that declares a value Holon keeps (the first `#+ID:`, `#+TITLE:`, `#+TODO:`,
+`#+SEQ_TODO:` or `#+TYP_TODO:`) keeps its bytes while it still reads as that
+value; when Holon changes the value, the line is regenerated in its place with
+its authored key spelling. The renderer re-reads the written header and
+records a loss when the page id, title or task keywords read back differently,
+or when a header line is added, dropped, reordered or moved.
+
+A raw `#+` line inside an example block below or above the first headline is
+block text; it is written back raw while the text is unchanged, and
+comma-escaped once Holon changes the text.
 
 Inline marks see the text as the file holds it: a mark (a link, bold) may span
 an escaped line and reads back with the same offsets and the same link target.
@@ -220,22 +289,26 @@ starts with `[#1]`) is not written at all, and the file keeps its old bytes.
 the last line of a file keeps its trailing blanks.
 
 Blank lines between a headline's drawer and its body, after a headline's
-section (before the next headline, or at the end of the file), and before a
-page's first headline are not block text. The parser records each such line's
-bytes (a line of spaces or tabs included) in the block's `_blank_lines`
-property (`BlankLines` in `models.rs`), and the renderer writes them back
-where they were. Not kept, with no loss raised:
+section (before the next headline, or at the end of the file), before a
+page's first headline, at the start of the file, and before a source block
+(after a body, another source block or the headline's head) are not block
+text. The parser records each such line's bytes (a line of spaces or tabs
+included) in the block's `_blank_lines` property (`BlankLines` in
+`models.rs`; a source block's own are the lines before it), and the renderer
+writes them back where they were. Not kept, with no loss raised:
 
-- blank lines between a body and a source block child, between two source
-  block children, and between a headline and a source block child when the
-  headline has no body;
-- a list body followed directly by a headline or a source block child gains
-  the blank line that closes the list (not at the end of the file);
-- the text between a page's `#+` header lines and its first headline is
-  written after exactly one blank line;
-- a file without a final line break gains one;
-- a file with CRLF line breaks: the carriage return of a body's last line is
-  dropped.
+- a list body followed directly by a headline gains the blank line that
+  closes the list (not at the end of the file);
+- a page created in Holon writes its text after its generated header and
+  exactly one blank line;
+- a file without a final line break gains one.
+
+Text after a source block in the same section is written before the section's
+source blocks; the render records a loss (`_text_after_source`).
+
+A file whose every line ends with CRLF is written with CRLF. A file that mixes
+CRLF and LF line breaks is written with LF, and the render records a loss for
+the file.
 
 ### Source blocks
 
@@ -250,6 +323,13 @@ SELECT * FROM blocks
 - Renderer writes the bare id; an id no org id line holds is refused (see
   `DrawerId` above)
 - Fallback ID (when no `:id` header arg): `{parent_id}::src::{index}` (e.g., `abc-123::src::0`)
+- The `#+NAME:` line (any case, directly above), the `#+BEGIN_SRC` line and
+  the `#+END_SRC` line are written as authored (`_source_lines`) while the
+  block's name, language, header arguments and id read as they did. A block
+  with no `:id` keeps that while it stays where the parser minted its id;
+  elsewhere, or once edited, `:id` is written and the render records a loss.
+- Every line between `#+BEGIN_SRC` and `#+END_SRC` is the block's text, blank
+  lines at its start and end included, as org reads its `:value`.
 
 ### Rule blocks (`holon_rule`)
 
@@ -329,9 +409,63 @@ file-level drawer, and a source block's header arguments
 - **A value is written as it is when the parser reads it back unchanged.**
   Otherwise Holon writes it as a JSON string literal on one line, for example
   `:note: "line one\n* not a heading"`. This covers a line break, a value
-  with space at the start or end, and (in a headline drawer) an empty value,
-  which is written `""`. In header arguments, the literal also escapes each
-  space, so it stays one token.
+  with space at the start or end, and a value that itself has the shape of
+  such a literal. An empty value is written as nothing after `:KEY:`, which
+  org reads as empty; an authored `""` is the two characters `""`, as org
+  reads it. In header arguments, the literal also escapes each space, so it
+  stays one token.
+- **An authored value with the shape of such a literal reads differently in
+  org.** Org reads a drawer value as its raw text. Holon decodes a value that
+  is exactly what its encoder writes: an authored `" a"` reads as ` a`,
+  `"a\nb"` as two lines, `"\t"` as a TAB, where org reads the quoted text
+  (measured in `emacs -Q` 30.2). A quoted value the encoder does not write
+  (`"The Book"`, `"x"`, `""`) reads as typed, as in org. The file bytes stay
+  the same either way. Open:
+  `docs/Testing/bugfunnel/entries/2026-09-30-quoted-empty-drawer-value-read-as-empty.md`.
+- **A headline drawer value keeps the bytes it was authored with** (spacing
+  around it, a whitespace-only value such as `:NOTE: `) while it still reads
+  as the block's value: the parser records such bytes in `_drawer_raw`, and a
+  value Holon changes is written by the rules above. A value-less `:NOTE:` line
+  is valid org and reads as an empty value; the drawer and its `:ID:` are
+  kept. The render re-reads each headline's `:ID:` and records a loss when it
+  differs from the id Holon meant to write.
+- **A headline drawer is read as org reads it** (`read_property_drawer`,
+  measured in `lane-logs/B10-emacs-drawers.log`): every line between
+  `:PROPERTIES:` and `:END:` (any case, indentation allowed) is `:KEY:` then a
+  blank or the line's end; KEY has no whitespace and may hold colons
+  (`:a:b: v` is key `a:b`). A drawer with a blank line, a text line, a key with
+  a space or `:ID:aaa` is no property drawer for org: Holon reads no property
+  from it, keeps the id its first `:ID:` line names (so the block keeps its
+  identity), and every render records a loss saying that org finds no id
+  there. The same holds for a PROPERTIES drawer after blank lines: it is no
+  property drawer for org, and Holon keeps it with its blank lines. With two
+  `:ID:` lines org reads the drawer, and org-entry-get (which org-id links
+  resolve through) takes the last id; Holon takes the last too, keeps the
+  drawer's bytes, and every render records a loss naming both ids. A
+  PROPERTIES drawer after text is text to org (org-entry-get finds no id):
+  Holon keeps the id its first `:ID:` line names, the drawer stays in the
+  body as written, and every render records a loss; once the block holds
+  another drawer value, a property drawer with that id is written above the
+  text.
+- **A drawer key that starts with `_` is a property like any other**, as org
+  reads it (`_NOTE=keep me`), whatever its name: `:_drawer_raw: x` is a
+  property named `_drawer_raw`, never a parser carrier. In the block's
+  property bag, where the keys that start with `_` are Holon's own (the
+  parser carriers, `_provenance`), such a key, and one that starts with `\`,
+  is stored behind a `\` (`AuthoredKey`): `:_note: v` is the property
+  `\_note`. The same holds for a source block's header arguments.
+- **An unedited headline drawer keeps its bytes** (`_drawer_text`): spacing,
+  key case, indentation, the place of `:ID:`, `:END:  `, a key the renderer
+  cannot write. Once Holon changes the block's id or drawer values, the
+  canonical drawer is written; a drawer org does not read then stays below it
+  as text, and each dropped `:ID:` line (all but the last) is recorded as a
+  loss.
+- **Parser carriers are the parser's own** (`org_props::PARSER_CARRIERS`:
+  `_drawer_raw`, `_keyword_lines`, `_header_lines`, `_blank_lines`,
+  `_authored_text`, `_drawer_text`, ...). No file can write one: an authored
+  `_` key is stored behind a `\`. The engine refuses an operation that writes
+  one, unless the ingest or a peer writes it. A stored carrier the renderer
+  cannot read is skipped, and the render records a loss.
 - **The parser decodes a quoted value only when it is exactly the literal Holon
   would write.** A quoted value that a person types, such as
   `:title: "The Book"`, is not such a literal, so it stays as typed, quotes
@@ -358,7 +492,7 @@ file-level drawer, and a source block's header arguments
   headline rule for the `ID`/`properties`/`org_properties` routes (a block's
   properties may render as a headline drawer or as header arguments, and the
   headline rule is the stricter one), the file-level rule for
-  `file_properties`. The renderer leaves such a property out of the file (with
+  `_file_properties`. The renderer leaves such a property out of the file (with
   a warning) and keeps the rest of the block.
 - **Every org id line holds a bare block id, not a value** (`DrawerId`): a
   heading's `:ID:`, a source block's `:id` header argument, and a page's
@@ -372,7 +506,7 @@ file-level drawer, and a source block's header arguments
   scheme cannot start with a digit), `x::src::0`, `Notes/Sub.md::b::0` (the
   Markdown adapters' ids) and `a%20b` are bare. The engine refuses any other
   id on every route that can carry one: the `ID` property, the `properties`
-  bag, the `org_properties` carrier, the `file_properties` carrier (where an
+  bag, the `org_properties` carrier, the `_file_properties` carrier (where an
   empty `:ID:` is allowed, since it is authored text and not an identity), and
   the `id` of a `create`, which must be `block:<id>`. The parser refuses a
   file whose heading `:ID:`, source block `:id` or page id is not a bare block

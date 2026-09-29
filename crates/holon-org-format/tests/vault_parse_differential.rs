@@ -83,8 +83,11 @@ fn dump_parsed_vault() {
                 "file": rel,
                 "file_drawer": file_drawer,
                 "doc_id": parsed.document.id.as_str(),
+                "file_title": parsed.document.get_property("title"),
+                "todo_keywords": parsed.document.get_property("todo_keywords"),
                 "text": parsed.document.content,
                 "blank_lines": parsed.document.get_property("_blank_lines"),
+                "header_places": parsed.document.get_property("_header_places"),
             })
         )
         .unwrap();
@@ -99,6 +102,8 @@ fn dump_parsed_vault() {
                 "props": props,
                 "marks": block.marks,
                 "blank_lines": block.get_property("_blank_lines"),
+                "keyword_lines": block.get_property("_keyword_lines"),
+                "drawer_raw": block.get_property("_drawer_raw"),
             });
             writeln!(sink, "{line}").unwrap();
             blocks += 1;

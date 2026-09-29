@@ -425,7 +425,7 @@ async fn the_drawer_reaches_the_persisted_doc_root() {
         .persisted_doc
         .last()
         .unwrap_or_else(|| panic!("ingest persisted no doc-root metadata at all"));
-    let drawer = doc.file_drawer().unwrap_or_else(|| {
+    let drawer = doc.file_drawer().expect("a readable carrier").unwrap_or_else(|| {
         panic!(
             "the persisted doc-root carries no file-level drawer — write-back renders THIS block, \
              so the drawer is gone from disk on the next write. properties = {:?}",
@@ -536,4 +536,62 @@ async fn blank_lines_survive_a_real_write_back() {
             out.disk
         );
     }
+}
+
+/// Header keyword lines Holon does not read, and CRLF line breaks, survive the
+/// write-back that mints the ids.
+#[tokio::test]
+async fn header_lines_and_line_breaks_survive_a_real_write_back() {
+    let content = format!(
+        ":PROPERTIES:\n:ID: {DRAWER_ID}\n:END:\n#+TITLE: Seam\n#+FILETAGS: :a:\n#+STARTUP: fold\n* A \
+         heading with no id\n"
+    );
+    let out = ingest_content(true, &content).await;
+    assert!(
+        out.disk
+            .contains("#+TITLE: Seam\n#+FILETAGS: :a:\n#+STARTUP: fold\n* A heading with no id\n"),
+        "got:\n---\n{}---",
+        out.disk
+    );
+
+    let crlf = content.replace('\n', "\r\n");
+    let out = ingest_content(true, &crlf).await;
+    assert!(
+        out.disk.contains(":END:\r\n") && !out.disk.replace("\r\n", "").contains('\n'),
+        "got:\n---\n{:?}---",
+        out.disk
+    );
+}
+
+/// A keyword line written in Emacs in a block's text is written back raw, in
+/// its place, by the write-back that mints the ids.
+#[tokio::test]
+async fn a_keyword_line_in_block_text_survives_a_real_write_back() {
+    let content = format!(
+        ":PROPERTIES:\n:ID: {DRAWER_ID}\n:END:\n#+TITLE: Seam\n* A heading with no id\ntext\n#+STARTUP: \
+         fold\nmore\n"
+    );
+    let out = ingest_content(true, &content).await;
+    assert!(
+        out.disk.contains(":END:\ntext\n#+STARTUP: fold\nmore\n"),
+        "got:\n---\n{}---",
+        out.disk
+    );
+}
+
+/// A header keyword line keeps its place after text before the first headline
+/// through the write-back that mints the ids.
+#[tokio::test]
+async fn a_header_line_keeps_its_place_through_a_real_write_back() {
+    let content = format!(
+        ":PROPERTIES:\n:ID: {DRAWER_ID}\n:END:\n#+TITLE: Seam\nsome intro\n#+STARTUP: fold\n* A \
+         heading with no id\n"
+    );
+    let out = ingest_content(true, &content).await;
+    assert!(
+        out.disk
+            .contains("#+TITLE: Seam\nsome intro\n#+STARTUP: fold\n* A heading with no id\n"),
+        "got:\n---\n{}---",
+        out.disk
+    );
 }

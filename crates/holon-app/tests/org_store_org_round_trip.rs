@@ -1109,3 +1109,64 @@ async fn blank_lines_survive_the_store() {
         );
     }
 }
+
+const KEYWORD_LINES: &str = "#+ID: keyword-page\n* Topic\n:PROPERTIES:\n:ID: keyword-topic\n:END:\n\
+     text\n#+STARTUP: fold\n#+CAPTION: cap\n| a |\n";
+
+/// A keyword line written in Emacs in a block's text comes back raw, in its
+/// place, after the store, on both write legs.
+#[tokio::test(flavor = "multi_thread")]
+async fn keyword_lines_in_block_text_survive_the_store() {
+    for leg in [WriteLeg::Loro, WriteLeg::OrgIngest] {
+        let (from_parser, after_store) = render_both_ways(KEYWORD_LINES, leg).await;
+        assert_eq!(
+            (from_parser.as_str(), after_store.as_str()),
+            (KEYWORD_LINES, KEYWORD_LINES),
+            "{}",
+            leg.name()
+        );
+    }
+}
+
+const DRAWER_SPACING: &str = "#+ID: spacing-page\n* Topic\n:PROPERTIES:\n:ID: spacing-topic\n:NOTE: two \
+     \n:LEAD:  lead\n:EMPTY: \n:END:\ntext\n";
+
+/// A drawer value keeps its authored spacing after the store, on both write
+/// legs.
+#[tokio::test(flavor = "multi_thread")]
+async fn drawer_value_spacing_survives_the_store() {
+    for leg in [WriteLeg::Loro, WriteLeg::OrgIngest] {
+        let (from_parser, after_store) = render_both_ways(DRAWER_SPACING, leg).await;
+        assert_eq!(
+            (from_parser.as_str(), after_store.as_str()),
+            (DRAWER_SPACING, DRAWER_SPACING),
+            "{}",
+            leg.name()
+        );
+    }
+}
+
+/// Source-block delimiters as authored, a source block with no `:id`, and a
+/// headline deeper than one level below its parent keep their bytes through
+/// the store on both write legs.
+#[tokio::test(flavor = "multi_thread")]
+async fn authored_source_lines_and_star_counts_survive_the_store() {
+    let head = "#+ID: shapes-page\n* H\n:PROPERTIES:\n:ID: shapes-h\n:END:\n";
+    let deep = "**** deep\n:PROPERTIES:\n:ID: shapes-d\n:END:\n";
+    for source in [
+        format!("{head}#+begin_src sh :id shapes-s1\nx\n#+end_src\n"),
+        format!("{head}#+name: n1\n#+begin_src sh\n\nx\n#+end_src\n"),
+        format!("{head}{deep}"),
+    ] {
+        for leg in [WriteLeg::Loro, WriteLeg::OrgIngest] {
+            let (from_parser, after_store) = render_both_ways(&source, leg).await;
+            assert_eq!(
+                from_parser,
+                source,
+                "[{}] control: format-only leg",
+                leg.name()
+            );
+            assert_eq!(after_store, source, "[{}] after the store", leg.name());
+        }
+    }
+}

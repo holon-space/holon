@@ -120,7 +120,18 @@ impl FileFormatAdapter for OrgFormatAdapter {
             || a.scheduled() != b.scheduled()
             || a.deadline() != b.deadline()
             || a.drawer_properties() != b.drawer_properties()
-            || a.blank_lines() != b.blank_lines()
+            || a.blank_lines().ok() != b.blank_lines().ok() // ALLOW(ok): an unreadable stored carrier differs from the parsed one
+            || a.keyword_lines().ok() != b.keyword_lines().ok() // ALLOW(ok): an unreadable stored carrier differs from the parsed one
+            || a.get_property(crate::models::org_props::DRAWER_RAW)
+                != b.get_property(crate::models::org_props::DRAWER_RAW)
+            || a.get_property(crate::models::org_props::AUTHORED_TEXT)
+                != b.get_property(crate::models::org_props::AUTHORED_TEXT)
+            || a.get_property(crate::models::org_props::DRAWER_TEXT)
+                != b.get_property(crate::models::org_props::DRAWER_TEXT)
+            || a.get_property(crate::models::org_props::SOURCE_LINES)
+                != b.get_property(crate::models::org_props::SOURCE_LINES)
+            || a.get_property(crate::models::org_props::STARS)
+                != b.get_property(crate::models::org_props::STARS)
             || a.sequence() != b.sequence()
         // Sibling order is no longer a per-block field (ADR 0005): it is
         // derived from document position and applied via `place_all`,
@@ -174,8 +185,12 @@ impl FileFormatAdapter for OrgFormatAdapter {
         // doc-root metadata reaches the persisted root, and write-back renders
         // the PERSISTED root — so a drawer left out here is a drawer the very
         // next write-back deletes from the user's file.
-        if parsed.file_drawer() != persisted.file_drawer() {
-            persisted.set_file_drawer(parsed.file_drawer());
+        let file_drawer = parsed
+            .file_drawer()
+            .expect("the parser writes a readable carrier");
+        let stored = persisted.file_drawer().ok(); // ALLOW(ok): an unreadable stored carrier differs from the parsed one
+        if Some(&file_drawer) != stored.as_ref() {
+            persisted.set_file_drawer(file_drawer);
             changed = true;
         }
         let parsed_marker = parsed.get_property(crate::models::org_props::FILE_ID_KEYWORD);
@@ -192,8 +207,39 @@ impl FileFormatAdapter for OrgFormatAdapter {
             }
             changed = true;
         }
-        if parsed.blank_lines() != persisted.blank_lines() {
-            persisted.set_blank_lines(parsed.blank_lines());
+        let blank_lines = parsed
+            .blank_lines()
+            .expect("the parser writes a readable carrier");
+        let stored = persisted.blank_lines().ok(); // ALLOW(ok): an unreadable stored carrier differs from the parsed one
+        if Some(&blank_lines) != stored.as_ref() {
+            persisted.set_blank_lines(blank_lines);
+            changed = true;
+        }
+        let header = parsed
+            .header_keyword_lines()
+            .expect("the parser writes a readable carrier");
+        let stored = persisted.header_keyword_lines().ok(); // ALLOW(ok): an unreadable stored carrier differs from the parsed one
+        if Some(&header) != stored.as_ref() {
+            persisted.set_header_keyword_lines(header);
+            changed = true;
+        }
+        let line_breaks = parsed
+            .line_breaks()
+            .expect("the parser writes a readable carrier");
+        let stored = persisted.line_breaks().ok(); // ALLOW(ok): an unreadable stored carrier differs from the parsed one
+        if Some(&line_breaks) != stored.as_ref() {
+            persisted.set_line_breaks(line_breaks);
+            changed = true;
+        }
+        let authored = crate::models::org_props::AUTHORED_TEXT;
+        let parsed_authored = parsed.get_property(authored);
+        if parsed_authored != persisted.get_property(authored) {
+            match parsed_authored {
+                Some(value) => persisted.set_property(authored, value),
+                None => {
+                    persisted.properties.remove(authored);
+                }
+            }
             changed = true;
         }
         changed

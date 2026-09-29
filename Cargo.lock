@@ -9668,7 +9668,7 @@ dependencies = [
 [[package]]
 name = "orgize"
 version = "0.10.0-alpha.10"
-source = "git+https://github.com/holon-space/orgize.git?branch=holon#690e8e7a7f4a40023630aee7337e7b660c539840"
+source = "git+https://github.com/holon-space/orgize.git?branch=holon#8069e774f6a0eb7b62098c61b5a12e278dd20a7f"
 dependencies = [
  "bytecount",
  "cfg-if",

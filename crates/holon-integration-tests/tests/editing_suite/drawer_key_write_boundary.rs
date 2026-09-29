@@ -219,7 +219,7 @@ fn a_file_drawer_key_ending_in_plus_is_written() {
         let t = booted(rt.clone()).await;
         let mut p = holon_api::StorageEntity::new();
         p.insert("id".into(), text("block:page-notes"));
-        p.insert("field".into(), text("file_properties"));
+        p.insert("field".into(), text("_file_properties"));
         p.insert(
             "value".into(),
             text(&serde_json::json!({ "note+": "v" }).to_string()),

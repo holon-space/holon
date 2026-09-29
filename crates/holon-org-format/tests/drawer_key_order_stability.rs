@@ -79,29 +79,17 @@ fn descending_drawer_keys_survive_write_back() {
     );
 }
 
-/// `:ID:` is authored LAST here but is canonically emitted FIRST — the one
-/// deliberate reordering. The remaining keys keep their authored order.
+/// `:ID:` authored LAST stays last: an unedited drawer keeps its bytes.
 #[test]
-fn id_is_hoisted_first_and_the_rest_keep_authored_order() {
-    let rendered = write_back(
-        "#+ID: doc-root\n\
+fn an_unedited_drawer_keeps_the_place_of_its_id() {
+    let file = "#+ID: doc-root\n\
          * Task\n\
          :PROPERTIES:\n\
          :ZULU: 1\n\
          :ALPHA: 2\n\
          :ID: b1\n\
-         :END:\n",
-    );
-    assert_eq!(
-        rendered,
-        "#+ID: doc-root\n\
-         * Task\n\
-         :PROPERTIES:\n\
-         :ID: b1\n\
-         :ZULU: 1\n\
-         :ALPHA: 2\n\
-         :END:\n",
-    );
+         :END:\n";
+    assert_eq!(write_back(file), file);
 }
 
 /// Two passes must reach the same bytes as one — write-back is idempotent, so

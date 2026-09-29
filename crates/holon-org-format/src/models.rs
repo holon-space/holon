@@ -24,6 +24,7 @@ use serde::Serialize;
 
 use crate::comma_escape::CommaEscape;
 use crate::drawer::DrawerId;
+use crate::drawer::TypedDrawerKey;
 use crate::drawer::UnrepresentableId;
 use crate::drawer::ValueCarrier;
 use crate::parser::BlockReading;
@@ -59,30 +60,136 @@ pub mod org_props {
     /// The block's [`super::BlankLines`] as JSON, present when the file had
     /// any. Underscore prefix keeps it out of the drawer.
     pub const BLANK_LINES: &str = "_blank_lines";
+    /// A headline block's drawer values as authored, by key, as a JSON object:
+    /// only those the renderer would write with other bytes (spacing, an
+    /// empty value). The renderer writes one back while it still reads as the
+    /// block's value.
+    pub const DRAWER_RAW: &str = "_drawer_raw";
+    /// A block's text as the file wrote it (a JSON string), present when the
+    /// renderer would write the same text with other bytes (a raw `#+` line in
+    /// an example or source block). Written back while the text is unchanged.
+    pub const AUTHORED_TEXT: &str = "_authored_text";
+    /// A headline's `:PROPERTIES:` drawer as the file wrote it (a JSON
+    /// string), present when the renderer would write it with other bytes.
+    /// Written back while the block's id and drawer values are unchanged.
+    pub const DRAWER_TEXT: &str = "_drawer_text";
+    /// `"t"` on a block whose section had text after a source block child:
+    /// the renderer writes that text before its source blocks.
+    pub const TEXT_AFTER_SOURCE: &str = "_text_after_source";
+    /// A headline block's [`super::KeywordLine`]s as a JSON array, present
+    /// when its text in the file had any.
+    pub const KEYWORD_LINES: &str = "_keyword_lines";
+    /// A doc-root's keyword lines before its first headline, as a JSON array
+    /// of their authored bytes in file order (each with its line break and
+    /// the blank lines after it). Present only when the file had any.
+    pub const HEADER_LINES: &str = "_header_lines";
+    /// Where each of [`HEADER_LINES`] stands among the text before the first
+    /// headline, as a JSON array of `{before_line, after_source}` in the same
+    /// order. Absent: every line stands before that text.
+    pub const HEADER_PLACES: &str = "_header_places";
+    /// A doc-root's [`super::LineBreaks`] when its file does not use LF.
+    pub const LINE_BREAKS: &str = "_line_breaks";
     /// A doc-root's FILE-LEVEL `:PROPERTIES:` drawer (org 9.0+, org-roam's
     /// identity carrier) as a JSON object in the order the author wrote it,
     /// `ID` included. Present only on a doc-root whose file had one, and its
-    /// presence is what makes the renderer emit the drawer back.
-    ///
-    /// Deliberately NOT `_`-prefixed, unlike [`DRAWER_ORDER`]: `_` keys are
-    /// dropped by `drawer_properties()` and so never reach the store, and a
-    /// drawer that survives only until the first write-back is the very bug
-    /// this carrier exists to fix.
-    pub const FILE_PROPERTIES: &str = "file_properties";
+    /// presence is what makes the renderer emit the drawer back. The one
+    /// carrier an engine write may set, as its own field: it is the page's
+    /// drawer, and the engine checks each key and id in it.
+    pub const FILE_PROPERTIES: &str = "_file_properties";
     /// `"t"` on a doc-root whose file carried a `#+ID:` keyword. It is what
     /// keeps a file that declares its identity BOTH ways (drawer `:ID:` and
     /// `#+ID:`, in agreement) from losing one of the two on write-back.
-    pub const FILE_ID_KEYWORD: &str = "file_id_keyword";
+    pub const FILE_ID_KEYWORD: &str = "_file_id_keyword";
+    /// A source block's [`super::SourceLines`] as JSON, present when the
+    /// renderer would write its delimiter lines with other bytes.
+    pub const SOURCE_LINES: &str = "_source_lines";
+    /// A headline's star count as the file wrote it, present when that is
+    /// not one more than its parent's.
+    pub const STARS: &str = "_stars";
+    /// The carriers only the org parser writes: what a file held that is not
+    /// block data (layout, authored bytes). An engine write from any other
+    /// origin may not name them.
+    pub const PARSER_CARRIERS: &[&str] = &[
+        DRAWER_ORDER,
+        PRIORITY_DRAWER_ONLY,
+        BLANK_LINES,
+        DRAWER_RAW,
+        AUTHORED_TEXT,
+        DRAWER_TEXT,
+        TEXT_AFTER_SOURCE,
+        KEYWORD_LINES,
+        HEADER_LINES,
+        HEADER_PLACES,
+        LINE_BREAKS,
+        FILE_ID_KEYWORD,
+        SOURCE_LINES,
+        STARS,
+    ];
 }
 
 /// Blank lines around a block's own text in its file: between the headline's
-/// drawer and its body, and after its section. Org reads nothing from them,
+/// drawer and its body (before a source block's first line), and after its
+/// section. Org reads nothing from them,
 /// so they are kept beside the block and written back where they were. Each
 /// entry is one line's bytes without its line break: nothing but whitespace.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct BlankLines {
     pub before_body: Vec<String>,
     pub after: Vec<String>,
+}
+
+/// A source block's lines around its text as the file wrote them. The
+/// renderer writes them back while the block's head reads as it did.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SourceLines {
+    /// Its `#+NAME:` line and `#+BEGIN_SRC` line, each with its line break.
+    pub head: String,
+    /// Its `#+END_SRC` line, with its line break if it had one.
+    pub end: String,
+    /// The head the renderer writes for the block as the file declared it.
+    pub written: String,
+    /// The head names no `:id`: the block's id is the one the parser mints
+    /// from its place (`<parent>::src::<index>`).
+    pub minted: bool,
+}
+
+/// A keyword line in a block's text as the file has it (`#+STARTUP: fold`,
+/// `#+CAPTION: x`): org reads it as a keyword, so it is not block text, and it
+/// is written back raw in its place.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct KeywordLine {
+    /// The line of the block's body text it stands before; the body's line
+    /// count when it comes after the last one.
+    pub before_line: usize,
+    /// Its bytes, with the blank lines before it, its line break and the
+    /// blank lines after it.
+    pub raw: String,
+    /// It stood after a source block child in the file, where the renderer
+    /// cannot write it.
+    #[serde(default)]
+    pub after_source: bool,
+}
+
+/// How a file ends its lines.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum LineBreaks {
+    #[default]
+    Lf,
+    /// Every line ends with CR LF.
+    Crlf,
+    /// Some lines end with CR LF and some with LF alone.
+    Mixed,
+}
+
+impl LineBreaks {
+    pub fn of(text: &str) -> Self {
+        let lines = text.matches('\n').count();
+        match text.matches("\r\n").count() {
+            0 => Self::Lf,
+            crlf if crlf == lines => Self::Crlf,
+            _ => Self::Mixed,
+        }
+    }
 }
 
 // =============================================================================
@@ -216,6 +323,7 @@ fn format_properties_drawer(
     properties_json: &str,
     id: &DrawerId,
     owner: &EntityUri,
+    authored: &HashMap<String, String>,
     losses: &mut Vec<RenderLoss>,
 ) -> String {
     let props = drawer_map(properties_json);
@@ -226,16 +334,207 @@ fn format_properties_drawer(
     // enabled by a transitive dependency), and the renderer built that order
     // from the author's drawer.
     for (key, value) in props.iter().filter(|(k, _)| k.as_str() != "ID") {
-        result.push_str(&drawer_line(
-            key,
-            value,
-            ValueCarrier::HeadlineDrawer,
-            owner,
-            losses,
-        ));
+        let raw = authored.get(key).filter(|raw| {
+            !raw.contains(['\n', '\r'])
+                && ValueCarrier::HeadlineDrawer.decode(raw.trim()) == json_text(value)
+        });
+        match raw {
+            Some(raw) => result.push_str(&format!(":{key}:{raw}\n")),
+            None => result.push_str(&drawer_line(
+                key,
+                value,
+                ValueCarrier::HeadlineDrawer,
+                owner,
+                losses,
+            )),
+        }
     }
     result.push_str(":END:");
     result
+}
+
+/// The `:PROPERTIES:` drawer the renderer writes for `block`, prepared for
+/// org; none for a block with no drawer properties.
+pub(crate) fn canonical_drawer(block: &Block) -> anyhow::Result<Option<String>> {
+    let Some(props_json) = block.org_properties() else {
+        return Ok(None);
+    };
+    let Ok(id) = headline_drawer_id(block) else {
+        // ALLOW(ok): an id no :ID: line can carry has no canonical drawer
+        return Ok(None);
+    };
+    let authored = read_carrier(block, org_props::DRAWER_RAW)?.unwrap_or_default();
+    Ok(Some(format_properties_drawer(
+        &props_json,
+        &id,
+        &block.id,
+        &authored,
+        &mut Vec::new(),
+    )))
+}
+
+/// The drawer to write for `block`: the authored drawer while the block's id
+/// and drawer values are what the parser read from it, else `canonical` with
+/// the losses writing it records. Every authored line the file then loses,
+/// and every authored drawer org reads differently from Holon, is recorded in
+/// `losses`.
+fn with_authored_drawer(
+    block: &Block,
+    props_json: &str,
+    id: &DrawerId,
+    (canonical, canonical_losses): (String, Vec<RenderLoss>),
+    losses: &mut Vec<RenderLoss>,
+) -> String {
+    let Some(authored) = carrier_or_loss(
+        read_carrier::<String>(block, org_props::DRAWER_TEXT),
+        &block.id,
+        losses,
+    ) else {
+        losses.extend(canonical_losses);
+        return canonical;
+    };
+    if authored.is_empty() {
+        return drawer_from_body(block, props_json, id, (canonical, canonical_losses), losses);
+    }
+    let reading = crate::parser::read_property_drawer(&authored);
+    let values: std::collections::BTreeMap<String, String> = drawer_map(props_json)
+        .iter()
+        .filter(|(k, _)| TypedDrawerKey::parse(k) != Some(TypedDrawerKey::Id))
+        .map(|(k, v)| (k.clone(), json_text(v)))
+        .collect();
+    let unedited = reading.id.as_deref() == Some(id.as_str()) && reading.values() == values;
+    let id_lines = reading.id_lines();
+    let (text, details) = match (&reading.unread, unedited) {
+        (Some(reason), true) => (
+            authored.clone(),
+            vec![format!(
+                "org reads no property drawer under this headline ({reason}); the drawer is \
+                 written as authored, and org finds no id {} there",
+                id.as_str()
+            )],
+        ),
+        (None, true) if id_lines.len() > 1 => (
+            authored.clone(),
+            vec![format!(
+                "the property drawer has the id lines {id_lines:?}; Holon and org-entry-get \
+                 read the last, {}",
+                id.as_str()
+            )],
+        ),
+        (None, true) => (authored.clone(), Vec::new()),
+        (Some(reason), false) => {
+            losses.extend(canonical_losses);
+            (
+                format!("{canonical}\n{authored}"),
+                vec![format!(
+                    "org reads no property drawer in {authored:?} ({reason}); a new property \
+                     drawer is written above it, and it stays as text"
+                )],
+            )
+        }
+        (None, false) => {
+            losses.extend(canonical_losses);
+            (
+                canonical,
+                id_lines
+                    .iter()
+                    .rev()
+                    .skip(1)
+                    .map(|line| format!("the property drawer line {line:?} is removed"))
+                    .collect(),
+            )
+        }
+    };
+    for detail in details {
+        tracing::warn!(block = %block.id, "org render: {detail}");
+        losses.push(RenderLoss {
+            block: block.id.clone(),
+            detail,
+        });
+    }
+    text
+}
+
+/// The drawer to write for a headline whose file wrote none, its id read from
+/// a `:PROPERTIES:` drawer in its body: none while the body still names `id`
+/// and the block has no other drawer value, else `canonical`. Either is a loss,
+/// since org finds no id under the headline.
+fn drawer_from_body(
+    block: &Block,
+    props_json: &str,
+    id: &DrawerId,
+    (canonical, canonical_losses): (String, Vec<RenderLoss>),
+    losses: &mut Vec<RenderLoss>,
+) -> String {
+    let only_id = drawer_map(props_json)
+        .keys()
+        .all(|k| TypedDrawerKey::parse(k) == Some(TypedDrawerKey::Id));
+    let body_names_id = block
+        .body()
+        .and_then(|body| crate::parser::id_in_body(&body))
+        .is_some_and(|body_id| body_id == id.as_str());
+    let (text, detail) = if only_id && body_names_id {
+        (
+            String::new(),
+            format!(
+                "org reads no property drawer under this headline: its :PROPERTIES: drawer \
+                 follows text. Holon keeps the id {} from it, org finds none",
+                id.as_str()
+            ),
+        )
+    } else {
+        losses.extend(canonical_losses);
+        (
+            canonical,
+            format!(
+                "org reads no property drawer under this headline; a property drawer with the \
+                 id {} is written, and the :PROPERTIES: drawer in the body stays as text",
+                id.as_str()
+            ),
+        )
+    };
+    tracing::warn!(block = %block.id, "org render: {detail}");
+    losses.push(RenderLoss {
+        block: block.id.clone(),
+        detail,
+    });
+    text
+}
+
+/// A parser-owned carrier's stored JSON read as `T`; `None` when the block has
+/// none. The carriers reach the store from the parser, a peer merge or an older
+/// build, so an unreadable one is an error for the caller to disclose.
+pub(crate) fn read_carrier<T: serde::de::DeserializeOwned>(
+    block: &Block,
+    key: &str,
+) -> anyhow::Result<Option<T>> {
+    let Some(value) = block.get_property(key).filter(|v| !v.is_null()) else {
+        return Ok(None);
+    };
+    let json = value
+        .as_string()
+        .ok_or_else(|| anyhow::anyhow!("{key} on block {} is not text: {value:?}", block.id))?;
+    serde_json::from_str(json)
+        .map(Some)
+        .map_err(|e| anyhow::anyhow!("{key} {json:?} on block {} is unreadable: {e}", block.id))
+}
+
+/// `carrier`'s value, or its default after a loss that names the unreadable
+/// carrier: the block is then written as if it had none.
+pub(crate) fn carrier_or_loss<T: Default>(
+    carrier: anyhow::Result<T>,
+    owner: &EntityUri,
+    losses: &mut Vec<RenderLoss>,
+) -> T {
+    carrier.unwrap_or_else(|e| {
+        let detail = format!("{e:#}; the block is written without it");
+        tracing::warn!(block = %owner, "org render: {detail}");
+        losses.push(RenderLoss {
+            block: owner.clone(),
+            detail,
+        });
+        T::default()
+    })
 }
 
 /// One `:key: value` drawer line, the value encoded by the drawer codec.
@@ -376,8 +675,9 @@ pub trait OrgDocumentExt {
     fn set_file_title(&mut self, title: Option<String>);
 
     /// The file-level `:PROPERTIES:` drawer, keys in the order the author
-    /// wrote them and `ID` included. `None` when the file had no such drawer.
-    fn file_drawer(&self) -> Option<serde_json::Map<String, serde_json::Value>>;
+    /// wrote them and `ID` included. `None` when the file had no such drawer;
+    /// an error when the carrier is not a JSON object.
+    fn file_drawer(&self) -> anyhow::Result<Option<serde_json::Map<String, serde_json::Value>>>;
 
     /// Set (or clear) the file-level `:PROPERTIES:` drawer.
     fn set_file_drawer(&mut self, drawer: Option<serde_json::Map<String, serde_json::Value>>);
@@ -393,9 +693,107 @@ pub trait OrgDocumentExt {
 
     /// Check if a keyword is "done" according to this document's configuration
     fn is_done(&self, keyword: &str) -> bool;
+
+    /// The file's keyword lines before its first headline, as authored; empty
+    /// for a page that never came from a file.
+    fn header_lines(&self) -> anyhow::Result<Vec<String>>;
+
+    fn set_header_lines(&mut self, lines: Vec<String>);
+
+    /// The header lines with their places among the text before the first
+    /// headline.
+    fn header_keyword_lines(&self) -> anyhow::Result<Vec<KeywordLine>>;
+
+    fn set_header_keyword_lines(&mut self, lines: Vec<KeywordLine>);
+
+    fn line_breaks(&self) -> anyhow::Result<LineBreaks>;
+
+    fn set_line_breaks(&mut self, line_breaks: LineBreaks);
 }
 
 impl OrgDocumentExt for Block {
+    fn header_lines(&self) -> anyhow::Result<Vec<String>> {
+        Ok(read_carrier(self, org_props::HEADER_LINES)?.unwrap_or_default())
+    }
+
+    fn set_header_lines(&mut self, lines: Vec<String>) {
+        if lines.is_empty() {
+            self.properties.remove(org_props::HEADER_LINES);
+        } else {
+            self.set_property(
+                org_props::HEADER_LINES,
+                serde_json::to_string(&lines).expect("a string list serializes to JSON"),
+            );
+        }
+    }
+
+    fn header_keyword_lines(&self) -> anyhow::Result<Vec<KeywordLine>> {
+        #[derive(serde::Deserialize)]
+        struct Place {
+            before_line: usize,
+            after_source: bool,
+        }
+        let lines = self.header_lines()?;
+        let places: Vec<Place> = match read_carrier(self, org_props::HEADER_PLACES)? {
+            Some(places) => places,
+            None => lines
+                .iter()
+                .map(|_| Place {
+                    before_line: 0,
+                    after_source: false,
+                })
+                .collect(),
+        };
+        anyhow::ensure!(
+            places.len() == lines.len(),
+            "{} and {} of page {} disagree",
+            org_props::HEADER_PLACES,
+            org_props::HEADER_LINES,
+            self.id
+        );
+        Ok(lines
+            .into_iter()
+            .zip(places)
+            .map(|(raw, place)| KeywordLine {
+                before_line: place.before_line,
+                raw,
+                after_source: place.after_source,
+            })
+            .collect())
+    }
+
+    fn set_header_keyword_lines(&mut self, lines: Vec<KeywordLine>) {
+        let places: Vec<serde_json::Value> = lines
+            .iter()
+            .map(|l| serde_json::json!({"before_line": l.before_line, "after_source": l.after_source}))
+            .collect();
+        let placed = lines.iter().any(|l| l.before_line > 0 || l.after_source);
+        self.set_header_lines(lines.into_iter().map(|l| l.raw).collect());
+        if placed {
+            self.set_property(
+                org_props::HEADER_PLACES,
+                serde_json::Value::Array(places).to_string(),
+            );
+        } else {
+            self.properties.remove(org_props::HEADER_PLACES);
+        }
+    }
+
+    fn line_breaks(&self) -> anyhow::Result<LineBreaks> {
+        Ok(read_carrier(self, org_props::LINE_BREAKS)?.unwrap_or_default())
+    }
+
+    fn set_line_breaks(&mut self, line_breaks: LineBreaks) {
+        if line_breaks == LineBreaks::Lf {
+            self.properties.remove(org_props::LINE_BREAKS);
+        } else {
+            self.set_property(
+                org_props::LINE_BREAKS,
+                serde_json::to_string(&line_breaks).expect("LineBreaks serializes to JSON"),
+            );
+        }
+    }
+
     fn file_title(&self) -> Option<String> {
         self.get_property(org_props::TITLE)
             .and_then(|v| v.as_string().map(|s| s.to_string()))
@@ -409,17 +807,8 @@ impl OrgDocumentExt for Block {
         }
     }
 
-    fn file_drawer(&self) -> Option<serde_json::Map<String, serde_json::Value>> {
-        let value = self.get_property(org_props::FILE_PROPERTIES)?;
-        let json = value.as_string()?.to_string();
-        Some(serde_json::from_str(&json).unwrap_or_else(|e| {
-            panic!(
-                "malformed {} {json:?}: {e} — we wrote it, so a parse failure means the \
-                 file-level drawer carrier was corrupted in transit, and rendering on would \
-                 delete the author's drawer",
-                org_props::FILE_PROPERTIES
-            )
-        }))
+    fn file_drawer(&self) -> anyhow::Result<Option<serde_json::Map<String, serde_json::Value>>> {
+        read_carrier(self, org_props::FILE_PROPERTIES)
     }
 
     fn set_file_drawer(&mut self, drawer: Option<serde_json::Map<String, serde_json::Value>>) {
@@ -546,12 +935,15 @@ pub(crate) fn trim_blank_lines(s: &str) -> &str {
     }
 }
 
-/// A page's header, refused when its id is one no `#+ID:` line holds. A page
-/// with a `file:` id keeps its path identity and gets no id line.
-pub fn render_document_header(
+/// A page's file-level drawer, and its keyword lines before the first headline
+/// with their places among the text there; refused when its id is one no
+/// `#+ID:` line holds. A page with a `file:` id keeps its path identity and
+/// gets no id line.
+pub(crate) fn document_head(
     doc_block: &Block,
+    edits: &crate::page_keywords::Edits,
     losses: &mut Vec<RenderLoss>,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<(String, Vec<KeywordLine>)> {
     let id = if doc_block.id.is_file() {
         None
     } else {
@@ -566,7 +958,7 @@ pub fn render_document_header(
     // org-mode (and orgize's `document_node`) only recognize it as the file's
     // own drawer when it is the first element of the file, so any other
     // placement would silently demote it to body text on the next read.
-    let file_drawer = doc_block.file_drawer();
+    let file_drawer = carrier_or_loss(doc_block.file_drawer(), &doc_block.id, losses);
     let drawer_carries_id = match &file_drawer {
         Some(drawer) => {
             let mut carries_id = false;
@@ -625,51 +1017,97 @@ pub fn render_document_header(
     // chose instead of growing a second one on every write-back. A file that
     // authored BOTH (in agreement — the parser rejects disagreement) keeps both.
     let authored_id_keyword = doc_block.get_property(org_props::FILE_ID_KEYWORD).is_some();
-    if let Some(id) = id
-        .as_ref()
-        .filter(|_| !drawer_carries_id || authored_id_keyword)
-    {
-        result.push_str(&format!("#+ID: {}\n", id.as_str()));
-    }
+    let id = id.filter(|_| !drawer_carries_id || authored_id_keyword);
 
-    // File title. A doc-root with no `file_title` — including one PROMOTED from
-    // an inline `:Page:`-tagged headline — deliberately renders none: its name
-    // is carried by its own filename (the page path is built from
-    // `block.title()`), and emitting a synthetic `#+TITLE:` would break
-    // `parse(render(doc)) == doc` for every title-less file.
-    if let Some(title) = doc_block.file_title() {
-        result.push_str(&format!("#+TITLE: {}\n", title));
+    // The page id is Holon's own header value: written in the first `#+ID:`
+    // line while that line still reads as the id, regenerated there otherwise,
+    // and added when the file has none. Title and task keywords follow `edits`.
+    let mut id_line = Some(id.as_ref().map(|id| format!("#+ID: {}\n", id.as_str())));
+    let mut header = Vec::new();
+    let header_lines = carrier_or_loss(doc_block.header_keyword_lines(), &doc_block.id, losses);
+    for (i, mut line) in header_lines.into_iter().enumerate() {
+        if !writable_keyword_line(&line, &doc_block.id, losses) {
+            continue;
+        }
+        if let Some(edit) = edits.lines.get(&crate::page_keywords::LineAt::Header(i)) {
+            match edit {
+                Some(raw) => line.raw = raw.clone(),
+                None => continue,
+            }
+        } else if let Some(authored) = crate::comma_escape::page_id_keyword_value(&line.raw)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string)
+        {
+            match id_line.take() {
+                None => {}
+                Some(Some(_)) if id.as_ref().is_some_and(|id| id.as_str() == authored) => {}
+                Some(Some(regenerated)) => line.raw = in_authored_line(&line.raw, &regenerated),
+                Some(None) => continue,
+            }
+        }
+        header.push(line);
     }
+    header.extend(
+        id_line
+            .flatten()
+            .into_iter()
+            .chain(edits.header_additions.iter().cloned())
+            .map(|raw| KeywordLine {
+                before_line: 0,
+                raw,
+                after_source: false,
+            }),
+    );
+    Ok((result, header))
+}
 
-    // TODO keywords configuration
-    if let Some(states) = doc_block.todo_keywords() {
-        let active: Vec<&str> = states
-            .iter()
-            .filter(|s| s.is_active())
-            .map(|s| s.keyword.as_str())
-            .collect();
-        let done: Vec<&str> = states
-            .iter()
-            .filter(|s| s.is_done())
-            .map(|s| s.keyword.as_str())
-            .collect();
-        if !active.is_empty() || !done.is_empty() {
-            result.push_str("#+TODO:");
-            if !active.is_empty() {
-                result.push_str(&format!(" {}", active.join(" ")));
+/// `regenerated` (`#+KEY: value\n`) in the place of the keyword line in
+/// `authored`: with its blank lines around it, its indentation and the key's
+/// authored spelling.
+pub(crate) fn in_authored_line(authored: &str, regenerated: &str) -> String {
+    let (_, value) = regenerated
+        .split_once(':')
+        .expect("a regenerated header line is `#+KEY: value`");
+    let mut out = String::new();
+    for line in authored.split_inclusive('\n') {
+        match line
+            .split_once(':')
+            .filter(|_| line.trim_start().starts_with("#+"))
+        {
+            Some((key, _)) => {
+                out.push_str(key);
+                out.push(':');
+                out.push_str(value);
             }
-            if !done.is_empty() {
-                result.push_str(&format!(" | {}", done.join(" ")));
-            }
+            None => out.push_str(line),
+        }
+    }
+    out
+}
+
+/// The file-level drawer and the keyword lines before the first headline, in
+/// file order: [`document_head`]'s lines written one after the other.
+pub fn render_document_header(
+    doc_block: &Block,
+    losses: &mut Vec<RenderLoss>,
+) -> anyhow::Result<String> {
+    let lines: Vec<(crate::page_keywords::LineAt, String)> = doc_block
+        .header_keyword_lines()
+        .unwrap_or_default()
+        .into_iter()
+        .enumerate()
+        .map(|(i, l)| (crate::page_keywords::LineAt::Header(i), l.raw))
+        .collect();
+    let current =
+        crate::page_keywords::Reading::of_lines(lines.iter().map(|(_, raw)| raw.as_str()));
+    let edits = crate::page_keywords::edits(doc_block, &current, &lines, losses);
+    let (mut result, header) = document_head(doc_block, &edits, losses)?;
+    for line in header {
+        result.push_str(&line.raw);
+        if !result.ends_with('\n') {
             result.push('\n');
         }
     }
-
-    // Ensure result ends with newline if non-empty
-    if !result.is_empty() && !result.ends_with('\n') {
-        result.push('\n');
-    }
-
     Ok(result)
 }
 
@@ -725,13 +1163,19 @@ pub trait OrgBlockExt {
 
     /// The `:PROPERTIES:` drawer keys in the order the author wrote them, as
     /// recorded by the parser. Empty for blocks that never came from a file.
-    fn authored_drawer_order(&self) -> Vec<String>;
+    fn authored_drawer_order(&self) -> anyhow::Result<Vec<String>>;
 
     /// The blank lines the block's file had around its text; none for a block
     /// that never came from a file.
-    fn blank_lines(&self) -> BlankLines;
+    fn blank_lines(&self) -> anyhow::Result<BlankLines>;
 
     fn set_blank_lines(&mut self, blank_lines: BlankLines);
+
+    /// The keyword lines the block's text had in its file; none for a block
+    /// that never came from a file.
+    fn keyword_lines(&self) -> anyhow::Result<Vec<KeywordLine>>;
+
+    fn set_keyword_lines(&mut self, lines: Vec<KeywordLine>);
 
     /// Get the tags
     fn tags(&self) -> Tags;
@@ -880,47 +1324,24 @@ impl OrgBlockExt for Block {
         }
     }
 
-    fn authored_drawer_order(&self) -> Vec<String> {
-        let Some(json) = self
-            .get_property(org_props::DRAWER_ORDER)
-            .and_then(|v| v.as_string().map(|s| s.to_string()))
-        else {
-            return Vec::new();
-        };
-        serde_json::from_str(&json).unwrap_or_else(|e| {
-            panic!(
-                "malformed {} {json:?}: {e} — we wrote it, so a parse failure means the \
-                 drawer-order carrier was corrupted in transit",
-                org_props::DRAWER_ORDER
-            )
-        })
+    fn authored_drawer_order(&self) -> anyhow::Result<Vec<String>> {
+        Ok(read_carrier(self, org_props::DRAWER_ORDER)?.unwrap_or_default())
     }
 
-    fn blank_lines(&self) -> BlankLines {
-        let Some(json) = self
-            .get_property(org_props::BLANK_LINES)
-            .and_then(|v| v.as_string().map(|s| s.to_string()))
-        else {
-            return BlankLines::default();
-        };
-        let blank_lines: BlankLines = serde_json::from_str(&json).unwrap_or_else(|e| {
-            panic!(
-                "malformed {} {json:?} on block {}: {e}",
-                org_props::BLANK_LINES,
-                self.id
-            )
-        });
-        assert!(
+    fn blank_lines(&self) -> anyhow::Result<BlankLines> {
+        let blank_lines: BlankLines =
+            read_carrier(self, org_props::BLANK_LINES)?.unwrap_or_default();
+        anyhow::ensure!(
             blank_lines
                 .before_body
                 .iter()
                 .chain(&blank_lines.after)
                 .all(|line| line.trim().is_empty() && !line.contains('\n')),
-            "{} {json:?} on block {} holds a line with text",
+            "{} on block {} holds a line with text",
             org_props::BLANK_LINES,
             self.id
         );
-        blank_lines
+        Ok(blank_lines)
     }
 
     fn set_blank_lines(&mut self, blank_lines: BlankLines) {
@@ -931,6 +1352,23 @@ impl OrgBlockExt for Block {
                 org_props::BLANK_LINES,
                 holon_api::Value::String(
                     serde_json::to_string(&blank_lines).expect("BlankLines serializes to JSON"),
+                ),
+            );
+        }
+    }
+
+    fn keyword_lines(&self) -> anyhow::Result<Vec<KeywordLine>> {
+        Ok(read_carrier(self, org_props::KEYWORD_LINES)?.unwrap_or_default())
+    }
+
+    fn set_keyword_lines(&mut self, lines: Vec<KeywordLine>) {
+        if lines.is_empty() {
+            self.properties.remove(org_props::KEYWORD_LINES);
+        } else {
+            self.set_property(
+                org_props::KEYWORD_LINES,
+                holon_api::Value::String(
+                    serde_json::to_string(&lines).expect("KeywordLine serializes to JSON"),
                 ),
             );
         }
@@ -1031,11 +1469,12 @@ impl OrgBlockExt for Block {
 
         let mut result = HashMap::new();
 
-        // First, extract from the org_properties JSON if present
+        // First, extract from the org_properties JSON if present: its keys
+        // are drawer keys.
         if let Some(json) = self.org_properties() {
             if let Ok(props) = serde_json::from_str::<HashMap<String, String>>(&json) {
                 for (k, v) in props {
-                    if k != "ID" && !k.starts_with('_') {
+                    if k != "ID" {
                         result.insert(k, v);
                     }
                 }
@@ -1043,7 +1482,7 @@ impl OrgBlockExt for Block {
                 serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&json)
             {
                 for (k, v) in props {
-                    if k != "ID" && !k.starts_with('_') {
+                    if k != "ID" {
                         let v_str = match &v {
                             serde_json::Value::String(s) => s.clone(),
                             _ => v.to_string(),
@@ -1055,13 +1494,16 @@ impl OrgBlockExt for Block {
         }
 
         // Also include any flat properties that are not internal.
-        // Keys starting with `_` are routing metadata (e.g. _routing_doc_uri)
-        // — never part of the org drawer.
         for (k, v) in &self.properties {
-            if !INTERNAL_KEYS.contains(&k.as_str()) && !k.starts_with('_') {
-                if let Some(s) = v.as_string() {
-                    result.entry(k.clone()).or_insert_with(|| s.to_string());
-                }
+            if INTERNAL_KEYS.contains(&k.as_str()) {
+                continue;
+            }
+            if let (Some(key), Some(s)) =
+                (crate::drawer::AuthoredKey::from_property(k), v.as_string())
+            {
+                result
+                    .entry(key.as_str().to_string())
+                    .or_insert_with(|| s.to_string());
             }
         }
 
@@ -1073,6 +1515,7 @@ impl OrgBlockExt for Block {
         if let Some(priority) = self.priority() {
             let authored_key = self
                 .authored_drawer_order()
+                .unwrap_or_default()
                 .into_iter()
                 .find(|k| k.eq_ignore_ascii_case(org_props::PRIORITY));
             if let Some(key) = authored_key {
@@ -1199,19 +1642,18 @@ pub(crate) enum HeadlineIdentity<'a> {
 
 /// A block's org text, refused when its `:ID:` line cannot carry its id.
 /// `vocabulary` is the task keywords of the file it is written to.
+/// `minted_here` is the id the parser mints for a source block with no
+/// `:id` where `block` is written.
 pub(crate) fn block_to_org(
     block: &Block,
     vocabulary: &TaskKeywordVocabulary,
+    minted_here: Option<&str>,
     losses: &mut Vec<RenderLoss>,
 ) -> anyhow::Result<String> {
     let refused =
         |e: UnrepresentableId| anyhow::anyhow!("org render of block {} refused: {e}", block.id);
     if block.content_type == ContentType::Source {
-        return Ok(source_block_to_org(
-            block,
-            &own_drawer_id(&block.id).map_err(refused)?,
-            losses,
-        ));
+        return source_block_to_org(block, minted_here, losses);
     }
 
     // Image blocks render as [[file:path]] inline link
@@ -1220,6 +1662,9 @@ pub(crate) fn block_to_org(
     }
 
     let id = headline_drawer_id(block).map_err(refused)?;
+    if let Err(e) = read_carrier::<i64>(block, org_props::STARS) {
+        carrier_or_loss::<()>(Err(e), &block.id, losses);
+    }
     Ok(render_headline_block(
         block,
         HeadlineIdentity::Drawer { id, vocabulary },
@@ -1229,8 +1674,13 @@ pub(crate) fn block_to_org(
 
 impl ToOrg for Block {
     fn to_org(&self) -> String {
-        block_to_org(self, &TaskKeywordVocabulary::default(), &mut Vec::new())
-            .unwrap_or_else(|e| panic!("{e:#}"))
+        block_to_org(
+            self,
+            &TaskKeywordVocabulary::default(),
+            None,
+            &mut Vec::new(),
+        )
+        .unwrap_or_else(|e| panic!("{e:#}"))
     }
 }
 
@@ -1503,7 +1953,7 @@ fn disclose_degraded_render(block: &Block, reason: DegradeReason, detail: std::f
 }
 
 /// Records a loss when the block's written org text reads back with another
-/// task keyword, priority cookie, title, tag set, body, content or inline
+/// id, task keyword, priority cookie, title, tag set, body, content or inline
 /// marks than the block meant, or splits into child blocks.
 fn check_block_reads_back(
     block: &Block,
@@ -1520,11 +1970,13 @@ fn check_block_reads_back(
         &Default::default(),
     );
     let tags = |reading: &BlockReading| Tags::from_tag_iter(reading.headline.tags.clone());
-    if read.headline.keyword == meant.headline.keyword
+    if read.id == meant.id
+        && read.headline.keyword == meant.headline.keyword
         && read.headline.cookie == meant.headline.cookie
         && read.headline.title == meant.headline.title
         && tags(&read) == tags(meant)
         && read.body == meant.body
+        && read.keyword_lines == meant.keyword_lines
         && read.children == meant.children
         && read_content == *meant_content
     {
@@ -1630,7 +2082,26 @@ pub(crate) fn render_headline_block(
     if let Some(props_json) = block.org_properties() {
         let props_drawer = match identity {
             HeadlineIdentity::Drawer { ref id, .. } => {
-                format_properties_drawer(&props_json, id, &block.id, losses)
+                let mut canonical_losses = Vec::new();
+                let canonical = format_properties_drawer(
+                    &props_json,
+                    id,
+                    &block.id,
+                    &carrier_or_loss(
+                        read_carrier(block, org_props::DRAWER_RAW),
+                        &block.id,
+                        losses,
+                    )
+                    .unwrap_or_default(),
+                    &mut canonical_losses,
+                );
+                with_authored_drawer(
+                    block,
+                    &props_json,
+                    id,
+                    (canonical, canonical_losses),
+                    losses,
+                )
             }
             HeadlineIdentity::DenseToken { .. } => {
                 format_properties_drawer_without_id(&props_json, &block.id, losses)
@@ -1651,20 +2122,41 @@ pub(crate) fn render_headline_block(
     // `trim_blank_lines` drops it on the way back in, and emitting it makes the
     // renderer permanently unequal to any hand-authored file (the echo-loop
     // `inv-org-render-fixed-point` reports forever).
-    if let Some(body) = body_str {
-        let written_body = CommaEscape::Body.escape(trim_blank_lines(&body));
-        if !written_body.is_empty() {
-            for line in block.blank_lines().before_body {
-                result.push_str(&line);
-                result.push('\n');
-            }
-            result.push_str(&written_body);
-            if !written_body.ends_with('\n') {
-                result.push('\n');
-            }
-            if body_needs_list_terminator(&written_body) {
-                result.push('\n');
-            }
+    let authored = carrier_or_loss(
+        read_carrier::<String>(block, org_props::AUTHORED_TEXT),
+        &block.id,
+        losses,
+    );
+    let written_body = body_str
+        .as_deref()
+        .map(|body| {
+            written_text(
+                CommaEscape::Body,
+                trim_blank_lines(body),
+                authored.as_deref(),
+            )
+        })
+        .unwrap_or_default();
+    if let Err(e) = block.authored_drawer_order() {
+        carrier_or_loss::<()>(Err(e), &block.id, losses);
+    }
+    let keyword_lines: Vec<KeywordLine> = carrier_or_loss(block.keyword_lines(), &block.id, losses)
+        .into_iter()
+        .filter(|k| writable_keyword_line(k, &block.id, losses))
+        .collect();
+    let written_body = with_keyword_lines(&written_body, &keyword_lines);
+    disclose_text_after_source(block, losses);
+    if !written_body.is_empty() {
+        for line in carrier_or_loss(block.blank_lines(), &block.id, losses).before_body {
+            result.push_str(&line);
+            result.push('\n');
+        }
+        result.push_str(&written_body);
+        if !written_body.ends_with('\n') {
+            result.push('\n');
+        }
+        if body_needs_list_terminator(&written_body) {
+            result.push('\n');
         }
     }
 
@@ -1673,8 +2165,9 @@ pub(crate) fn render_headline_block(
         result.push('\n');
     }
 
-    if let HeadlineIdentity::Drawer { vocabulary, .. } = identity {
+    if let HeadlineIdentity::Drawer { id, vocabulary } = &identity {
         let meant = BlockReading {
+            id: Some(id.as_str().to_string()),
             headline: HeadlineReading {
                 keyword: block.task_state().map(|state| state.keyword),
                 cookie,
@@ -1682,6 +2175,7 @@ pub(crate) fn render_headline_block(
                 tags: block.tags().to_vec(),
             },
             body: meant_body.map(str::to_string),
+            keyword_lines: in_body(&keyword_lines, body_str.as_deref()),
             children: 0,
         };
         let meant_content = match fidelity {
@@ -1703,6 +2197,103 @@ pub(crate) fn render_headline_block(
     }
 
     result
+}
+
+/// `body` (the written lines, no final line break) with each keyword line
+/// written raw before the body line it stands before, or after the last one.
+pub(crate) fn with_keyword_lines(body: &str, keyword_lines: &[KeywordLine]) -> String {
+    let lines: Vec<&str> = if body.is_empty() {
+        Vec::new()
+    } else {
+        body.split('\n').collect()
+    };
+    let mut out = String::new();
+    for i in 0..=lines.len() {
+        for keyword in keyword_lines
+            .iter()
+            .filter(|k| k.before_line.min(lines.len()) == i)
+        {
+            out.push_str(&keyword.raw);
+            if !keyword.raw.ends_with('\n') {
+                out.push('\n');
+            }
+        }
+        if let Some(line) = lines.get(i) {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// `text` as `codec` writes it, or as the file `authored` it while that still
+/// reads as `text`.
+pub(crate) fn written_text(codec: CommaEscape, text: &str, authored: Option<&str>) -> String {
+    match authored {
+        Some(authored) if codec.unescape(authored) == text => authored.to_string(),
+        _ => codec.escape(text),
+    }
+}
+
+/// Records a loss when `block`'s file had text after a source block child,
+/// which the renderer writes before its source blocks.
+pub(crate) fn disclose_text_after_source(block: &Block, losses: &mut Vec<RenderLoss>) {
+    if block.get_property(org_props::TEXT_AFTER_SOURCE).is_none() {
+        return;
+    }
+    let detail = "text that stood after a source block is written before it".to_string();
+    tracing::warn!(block = %block.id, "org render: {detail}");
+    losses.push(RenderLoss {
+        block: block.id.clone(),
+        detail,
+    });
+}
+
+/// Whether the renderer writes `keyword_line`: one that is no single keyword
+/// line is left out, and one that stood after a source block child is written
+/// before it; both are recorded in `losses`.
+pub(crate) fn writable_keyword_line(
+    keyword_line: &KeywordLine,
+    owner: &EntityUri,
+    losses: &mut Vec<RenderLoss>,
+) -> bool {
+    let writable = crate::parser::is_keyword_line(&keyword_line.raw);
+    let detail = if !writable {
+        format!(
+            "{:?} is no keyword line; it is not written",
+            keyword_line.raw
+        )
+    } else if keyword_line.after_source {
+        format!(
+            "the keyword line {:?} stood after a source block and is written before it",
+            keyword_line.raw.trim()
+        )
+    } else {
+        return true;
+    };
+    tracing::warn!(block = %owner, "org render: {detail}");
+    losses.push(RenderLoss {
+        block: owner.clone(),
+        detail,
+    });
+    writable
+}
+
+/// `keyword_lines` as the parser reads them back around `body`: one that
+/// stood after the body's end stands at its end.
+fn in_body(keyword_lines: &[KeywordLine], body: Option<&str>) -> Vec<KeywordLine> {
+    let len = body
+        .map(trim_blank_lines)
+        .filter(|b| !b.is_empty())
+        .map_or(0, |b| b.split('\n').count());
+    keyword_lines
+        .iter()
+        .map(|k| KeywordLine {
+            before_line: k.before_line.min(len),
+            raw: k.raw.clone(),
+            after_source: false,
+        })
+        .collect()
 }
 
 /// Does this body need a trailing blank line to close an open list?
@@ -1756,11 +2347,16 @@ fn body_needs_list_terminator(body: &str) -> bool {
     rest.is_empty() || rest.starts_with([' ', '\t'])
 }
 
-/// Render a source-type Block as Org Mode #+BEGIN_SRC ... #+END_SRC
-fn source_block_to_org(block: &Block, id: &DrawerId, losses: &mut Vec<RenderLoss>) -> String {
+/// The line that ends a source block as the renderer writes it.
+pub(crate) const SOURCE_END: &str = "#+END_SRC\n";
+
+/// A source block's `#+NAME:` and `#+BEGIN_SRC` lines as the renderer writes
+/// them, its id as the `:id` header argument.
+pub(crate) fn source_head(block: &Block, losses: &mut Vec<RenderLoss>) -> anyhow::Result<String> {
+    let id = own_drawer_id(&block.id)
+        .map_err(|e| anyhow::anyhow!("org render of block {} refused: {e}", block.id))?;
     let mut result = String::new();
 
-    // #+NAME: if present
     if let Some(ref name) = block.source_name {
         result.push_str("#+NAME: ");
         result.push_str(name);
@@ -1769,18 +2365,14 @@ fn source_block_to_org(block: &Block, id: &DrawerId, losses: &mut Vec<RenderLoss
 
     result.push_str("#+BEGIN_SRC");
 
-    // Language
     if let Some(ref lang) = block.source_language {
         result.push(' ');
         result.push_str(&lang.to_string());
     }
 
-    // Include block ID in header arguments so it survives round-trips
-    // This is critical for preventing orphan blocks when Org files are re-parsed
     result.push_str(" :id ");
     result.push_str(id.as_str());
 
-    // Header arguments (standard known args)
     let header_args = block.get_source_header_args();
     let header_args_str = format_header_args_value(&header_args);
     if !header_args_str.is_empty() {
@@ -1788,9 +2380,7 @@ fn source_block_to_org(block: &Block, id: &DrawerId, losses: &mut Vec<RenderLoss
         result.push_str(&header_args_str);
     }
 
-    // Custom properties stored as flat keys by the parser (non-standard header
-    // args) These were split out during parsing and need to be rendered back as
-    // header args.
+    // Non-standard header args, which the parser stores as properties.
     let mut drawer_props: Vec<_> = block.drawer_properties().into_iter().collect();
     drawer_props.sort_by(|(a, _), (b, _)| a.cmp(b));
     for (k, v) in &drawer_props {
@@ -1807,26 +2397,74 @@ fn source_block_to_org(block: &Block, id: &DrawerId, losses: &mut Vec<RenderLoss
         result.push_str(&key.encode(v));
     }
 
-    // Tags: a Source block has no headline to carry `:tag:` notation, so route
-    // them through a `:TAGS <space-joined>` header arg (symmetric with the
-    // `:REQUIRES`/`:ADVICE_SUPPRESSED` edge-field lift). Without this a tag on a
-    // rule/source block is destroyed on org re-ingest.
+    // A source block has no headline to carry `:tag:` notation.
     if !block.tags.is_empty() {
         result.push_str(" :TAGS ");
         result.push_str(&block.tags.to_vec().join(" "));
     }
 
     result.push('\n');
+    Ok(result)
+}
 
-    let escaped = CommaEscape::Source.escape(&block.content);
-    result.push_str(&escaped);
-    if !escaped.ends_with('\n') {
-        result.push('\n');
+/// Render a source-type Block as Org Mode #+BEGIN_SRC ... #+END_SRC.
+/// `minted_here` is the id the parser mints for a source block with no `:id`
+/// at the place the block is written; `None` when the place is unknown.
+fn source_block_to_org(
+    block: &Block,
+    minted_here: Option<&str>,
+    losses: &mut Vec<RenderLoss>,
+) -> anyhow::Result<String> {
+    if let Err(e) = block.blank_lines() {
+        carrier_or_loss::<()>(Err(e), &block.id, losses);
     }
+    let mut head_losses = Vec::new();
+    let written = source_head(block, &mut head_losses)?;
+    let authored = carrier_or_loss(
+        read_carrier::<SourceLines>(block, org_props::SOURCE_LINES),
+        &block.id,
+        losses,
+    );
+    let (head, end) = match authored {
+        Some(lines)
+            if lines.written == written
+                && (!lines.minted || minted_here == Some(block.id.id())) =>
+        {
+            (lines.head, lines.end)
+        }
+        authored => {
+            if authored.is_some_and(|lines| lines.minted) {
+                let detail = format!(
+                    "the source block names no `:id` in its file; `:id {}` is written into its \
+                     `#+BEGIN_SRC` line so it keeps its identity",
+                    block.id.id()
+                );
+                tracing::warn!(block = %block.id, "org render: {detail}");
+                losses.push(RenderLoss {
+                    block: block.id.clone(),
+                    detail,
+                });
+            }
+            losses.extend(head_losses);
+            (written, SOURCE_END.to_string())
+        }
+    };
 
-    result.push_str("#+END_SRC\n");
-
-    result
+    let authored = carrier_or_loss(
+        read_carrier::<String>(block, org_props::AUTHORED_TEXT),
+        &block.id,
+        losses,
+    );
+    let mut result = head;
+    result.push_str(&written_text(
+        CommaEscape::Source,
+        &block.content,
+        authored.as_deref(),
+    ));
+    // The line break before `#+END_SRC` is not part of the block's text.
+    result.push('\n');
+    result.push_str(&end);
+    Ok(result)
 }
 
 // Note: We re-export SourceBlock from holon_api to use it directly
@@ -1945,6 +2583,27 @@ mod tests {
         let mut doc = Block::new_text(doc_uri(), EntityUri::no_parent(), "test.org");
         doc.set_page(true);
         doc
+    }
+
+    #[test]
+    fn a_block_text_that_reads_back_with_another_id_is_a_loss() {
+        let written = "* K\n:PROPERTIES:\n:ID: k\n:NOTE:\n:END:\nbody\n";
+        let vocabulary = TaskKeywordVocabulary::default();
+        let block = Block::new_text(EntityUri::block("k"), doc_uri(), "K\nbody");
+        let check = |id: &str| {
+            let mut meant = crate::parser::read_block_text(written, &vocabulary);
+            assert_eq!(meant.id.as_deref(), Some("k"));
+            meant.id = Some(id.to_string());
+            let content = crate::parser::block_content(
+                &meant.headline.title,
+                meant.body.as_deref(),
+                &Default::default(),
+            );
+            let mut losses = Vec::new();
+            check_block_reads_back(&block, &meant, &content, written, &vocabulary, &mut losses);
+            losses.len()
+        };
+        assert_eq!((check("k"), check("other")), (0, 1));
     }
 
     #[test]

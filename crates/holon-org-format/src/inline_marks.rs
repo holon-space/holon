@@ -97,6 +97,7 @@ fn extract_state_within(
         src_base,
         whole_text_len: text.len(),
         full_span_active,
+        nesting: outer.nesting + 1,
         ..Default::default()
     };
     walk_node(&parse_inline(text), &mut state);
@@ -582,6 +583,11 @@ fn collect_markup_spans(node: &SyntaxNode, spans: &mut Vec<std::ops::Range<usize
     }
 }
 
+/// Emphasis nested deeper than this keeps its delimiters as literal content.
+/// Each level re-parses its inner string, so the bound caps both the stack
+/// and the parse work a line of markers costs.
+const MAX_MARK_NESTING: usize = 16;
+
 #[derive(Default)]
 struct ExtractState {
     /// Classifies each `[[…]]` target. Owned (a cheap `Option<Arc<…>>` clone)
@@ -610,6 +616,8 @@ struct ExtractState {
     full_span_active: Vec<InlineMark>,
     /// Source→content provenance, in source order — see [`OffsetRun`].
     runs: Vec<OffsetRun>,
+    /// How many emphasis re-parses enclose the string being walked.
+    nesting: usize,
 }
 
 /// Where the bytes an emission appends came from in the source.
@@ -666,7 +674,8 @@ fn walk_node(node: &SyntaxNode, state: &mut ExtractState) {
         match child {
             NodeOrToken::Node(child_node) => match inline_mark_kind(child_node.kind()) {
                 Some(kind_hint) => {
-                    if state.keep_emphasis_raw && kind_hint != MarkKindHint::Link {
+                    let raw_emphasis = state.keep_emphasis_raw || state.nesting >= MAX_MARK_NESTING;
+                    if raw_emphasis && kind_hint != MarkKindHint::Link {
                         let raw = source_text(&state.source, child_node.text_range()).to_string();
                         let src = node_source_range(&child_node, state);
                         push_text(state, &raw, src, true);

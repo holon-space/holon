@@ -75,7 +75,7 @@ pub fn serialize_block_recursive(
     // keys such as `_drawer_order` reach disk and made the expected file
     // disagree with what write-back actually writes.
     let mut prepared = block.clone();
-    OrgRenderer::prepare_block_for_org(&mut prepared, level - 1);
+    OrgRenderer::prepare_block_for_org(&mut prepared, level as i64);
     result.push_str(&prepared.to_org());
 
     let mut children: Vec<&&Block> = all_blocks

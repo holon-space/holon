@@ -13,23 +13,78 @@ use holon_api::Rendered;
 use holon_api::block::Block;
 use holon_api::types::ContentType;
 
+use crate::models::KeywordLine;
+use crate::models::LineBreaks;
 use crate::models::OrgBlockExt;
 use crate::models::OrgDocumentExt;
-use crate::models::render_document_header;
+use crate::models::carrier_or_loss;
 use crate::task_keyword::TaskKeywordVocabulary;
 
 /// Refuses org text the parser would not read back: writing it would take
 /// every block of the page out of Holon on the next ingest.
-fn refuse_unreadable(path: &Path, text: &str) -> anyhow::Result<()> {
+fn refuse_unreadable(path: &Path, text: &str) -> anyhow::Result<crate::ParseResult> {
     let root = path.parent().unwrap_or(Path::new(""));
-    crate::parse_org_file(path, text, &EntityUri::no_parent(), root)
-        .map(|_| ())
-        .with_context(|| {
-            format!(
-                "org render of {} refused: the parser does not read the rendered file back",
-                path.display()
-            )
+    crate::parse_org_file(path, text, &EntityUri::no_parent(), root).with_context(|| {
+        format!(
+            "org render of {} refused: the parser does not read the rendered file back",
+            path.display()
+        )
+    })
+}
+
+/// One render of a page: its text, losses, header lines, and its re-read.
+struct Pass {
+    text: String,
+    losses: Vec<RenderLoss>,
+    header: Vec<KeywordLine>,
+    reread: crate::ParseResult,
+}
+
+/// A block as the renderer writes it: its headline level, and for a source
+/// block the id the parser mints for one with no `:id` at this place.
+struct Place<'b> {
+    block: &'b Block,
+    level: i64,
+    minted_here: Option<String>,
+}
+
+/// `kids` of `parent`, written at `parent_level`, each in its place. A
+/// headline keeps its authored star count while org reads it as a child of
+/// `parent` below its earlier siblings (more stars than the parent, at most
+/// as many as each earlier sibling); else it is written one level below
+/// `parent`.
+fn places<'b>(kids: &[&'b Block], parent: &EntityUri, parent_level: i64) -> Vec<Place<'b>> {
+    let mut ceiling: Option<i64> = None;
+    let mut source_index = 0;
+    kids.iter()
+        .map(|&block| {
+            let mut place = Place {
+                block,
+                level: parent_level + 1,
+                minted_here: None,
+            };
+            match block.content_type {
+                ContentType::Text => {
+                    // block_to_org records the loss for an unreadable carrier.
+                    let authored =
+                        crate::models::read_carrier::<i64>(block, crate::models::org_props::STARS)
+                            .unwrap_or_default();
+                    if let Some(stars) = authored
+                        .filter(|&stars| stars > parent_level && ceiling.is_none_or(|c| stars <= c))
+                    {
+                        place.level = stars;
+                    }
+                    ceiling = Some(place.level);
+                }
+                ContentType::Source => {
+                    place.minted_here = Some(format!("{}::src::{source_index}", parent.id()));
+                    source_index += 1;
+                }
+                _ => {}
+            }
+            place
         })
+        .collect()
 }
 
 /// Render a Loro document (represented as blocks) to org-mode format.
@@ -48,11 +103,51 @@ impl OrgRenderer {
         path: &Path,
         file_id: &EntityUri,
     ) -> anyhow::Result<Rendered> {
+        let lines = Self::page_keyword_lines(doc_block, blocks, file_id)?;
+        let unedited = Self::render_pass(
+            doc_block,
+            blocks,
+            path,
+            file_id,
+            &crate::page_keywords::Edits::default(),
+        )?;
+        let mut edit_losses = Vec::new();
+        let edits = crate::page_keywords::edits(
+            doc_block,
+            &crate::page_keywords::Reading::of(&unedited.reread.document),
+            &lines,
+            &mut edit_losses,
+        );
+        let mut pass = if edits.is_empty() {
+            unedited
+        } else {
+            Self::render_pass(doc_block, blocks, path, file_id, &edits)?
+        };
+        pass.losses.splice(0..0, edit_losses);
+        check_header_reads_back(
+            doc_block,
+            &pass.header,
+            &pass.reread.document,
+            &mut pass.losses,
+        );
+        Ok(Rendered {
+            text: pass.text,
+            losses: pass.losses,
+        })
+    }
+
+    /// The page written with `edits` applied to its keyword lines, and how
+    /// the written file reads back.
+    fn render_pass(
+        doc_block: &Block,
+        blocks: &[Block],
+        path: &Path,
+        file_id: &EntityUri,
+        edits: &crate::page_keywords::Edits,
+    ) -> anyhow::Result<Pass> {
         let mut losses = Vec::new();
-        let mut result = render_document_header(doc_block, &mut losses)?;
-        if !result.is_empty() && !result.ends_with('\n') {
-            result.push('\n');
-        }
+        let (mut result, header) = crate::models::document_head(doc_block, edits, &mut losses)?;
+        let header_lines_authored = doc_block.header_lines().unwrap_or_default();
         // The doc-root's OWN body — the pre-first-headline text. Like a
         // headline, a doc-root stores `title\nbody` in its content; the title
         // went out as `#+TITLE:` above, so everything after the first line is
@@ -67,32 +162,64 @@ impl OrgRenderer {
                 .map(|(_, rest)| rest)
                 .unwrap_or(""),
         );
-        if !preamble.is_empty() {
+        let authored = carrier_or_loss(
+            crate::models::read_carrier::<String>(
+                doc_block,
+                crate::models::org_props::AUTHORED_TEXT,
+            ),
+            &doc_block.id,
+            &mut losses,
+        );
+        let preamble = crate::models::written_text(
+            crate::comma_escape::CommaEscape::Preamble,
+            preamble,
+            authored.as_deref(),
+        );
+        crate::models::disclose_text_after_source(doc_block, &mut losses);
+        let blank_lines = carrier_or_loss(doc_block.blank_lines(), &doc_block.id, &mut losses);
+        for line in &blank_lines.before_body {
+            result.push_str(line);
             result.push('\n');
-            result.push_str(&crate::comma_escape::CommaEscape::Preamble.escape(preamble));
-            result.push('\n');
+        }
+        if header_lines_authored.is_empty() {
+            // A page with no header lines of its own: the text follows its
+            // generated header, if any, after one blank line.
+            result.push_str(&crate::models::with_keyword_lines("", &header));
+            if !preamble.is_empty() {
+                if !header.is_empty() {
+                    result.push('\n');
+                }
+                result.push_str(&preamble);
+                result.push('\n');
+            }
+        } else {
+            result.push_str(&crate::models::with_keyword_lines(&preamble, &header));
         }
         // The document's OWN `#+TODO:` declaration governs what its headlines
         // may spell — the same chain (`from_declared`) the editor's surface
         // projection resolves. Rendering a keyword this document does not
         // declare emits bytes the next parse reads as ordinary title text.
-        let mut last_section_blank_lines = doc_block.blank_lines().after;
-        end_with_blank_lines(&mut result, &last_section_blank_lines);
+        let mut last_section_blank_lines = blank_lines.after;
+        let head_after = last_section_blank_lines.clone();
         let vocabulary = TaskKeywordVocabulary::from_declared(doc_block.todo_keywords());
-        result.push_str(&Self::render_walk(
+        let mut result = Self::render_walk(
             blocks,
             file_id,
-            &mut |block: &Block| {
+            result,
+            &head_after,
+            &mut |block: &Block, minted_here: Option<&str>| {
                 let mut block = block.clone();
                 if block.content_type == ContentType::Text {
-                    last_section_blank_lines = block.blank_lines().after;
+                    // render_headline_block records the loss for an unreadable carrier.
+                    last_section_blank_lines = block.blank_lines().unwrap_or_default().after;
+                    Self::apply_page_keyword_edits(&mut block, edits);
                 }
                 if let Some(loss) = Self::refuse_undeclared_task_state(&mut block, &vocabulary) {
                     losses.push(loss);
                 }
-                crate::models::block_to_org(&block, &vocabulary, &mut losses)
+                crate::models::block_to_org(&block, &vocabulary, minted_here, &mut losses)
             },
-        )?);
+        )?;
         // The file ends with a line break and then exactly the blank lines its
         // last section had: a list body's closing blank line is dropped there.
         if !result.ends_with('\n') {
@@ -100,11 +227,85 @@ impl OrgRenderer {
         }
         let extra = trailing_blank_lines(&result).saturating_sub(last_section_blank_lines.len());
         result.truncate(result.len() - extra);
-        refuse_unreadable(path, &result)?;
-        Ok(Rendered {
+        match carrier_or_loss(doc_block.line_breaks(), &doc_block.id, &mut losses) {
+            LineBreaks::Lf => {}
+            LineBreaks::Crlf => result = result.replace("\r\n", "\n").replace('\n', "\r\n"),
+            LineBreaks::Mixed => {
+                result = result.replace("\r\n", "\n");
+                losses.push(RenderLoss {
+                    block: doc_block.id.clone(),
+                    detail: format!(
+                        "{} mixes CRLF and LF line breaks; every line break is written as LF",
+                        path.display()
+                    ),
+                });
+            }
+        }
+        let reread = refuse_unreadable(path, &result)?;
+        Ok(Pass {
             text: result,
             losses,
+            header,
+            reread,
         })
+    }
+
+    /// The page's keyword lines: its header lines, then each block's in the
+    /// order the file holds them.
+    fn page_keyword_lines(
+        doc_block: &Block,
+        blocks: &[Block],
+        file_id: &EntityUri,
+    ) -> anyhow::Result<Vec<(crate::page_keywords::LineAt, String)>> {
+        use crate::page_keywords::LineAt;
+        let mut lines: Vec<(LineAt, String)> = doc_block
+            .header_keyword_lines()
+            .unwrap_or_default()
+            .into_iter()
+            .enumerate()
+            .map(|(i, l)| (LineAt::Header(i), l.raw))
+            .collect();
+        Self::render_walk(
+            blocks,
+            file_id,
+            String::new(),
+            &[],
+            &mut |block: &Block, _| {
+                lines.extend(
+                    block
+                        .keyword_lines()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .enumerate()
+                        .map(|(j, l)| (LineAt::Block(block.id.clone(), j), l.raw)),
+                );
+                anyhow::Ok(String::new())
+            },
+        )?;
+        Ok(lines)
+    }
+
+    /// `block` with the page-keyword edits to its own keyword lines applied.
+    fn apply_page_keyword_edits(block: &mut Block, edits: &crate::page_keywords::Edits) {
+        let Ok(lines) = block.keyword_lines() else {
+            return;
+        };
+        let edited: Vec<KeywordLine> = lines
+            .into_iter()
+            .enumerate()
+            .filter_map(|(j, mut line)| {
+                match edits
+                    .lines
+                    .get(&crate::page_keywords::LineAt::Block(block.id.clone(), j))
+                {
+                    Some(Some(raw)) => line.raw = raw.clone(),
+                    Some(None) => return None,
+                    None => {}
+                }
+                Some(line)
+            })
+            .collect();
+        block.set_keyword_lines(edited);
     }
 
     /// Render blocks to org-mode format.
@@ -128,9 +329,15 @@ impl OrgRenderer {
         let mut losses = Vec::new();
         // A file with no `#+TODO:` line reads with the default keywords.
         let vocabulary = TaskKeywordVocabulary::default();
-        let text = Self::render_walk(blocks, file_id, &mut |block: &Block| {
-            crate::models::block_to_org(block, &vocabulary, &mut losses)
-        })?;
+        let text = Self::render_walk(
+            blocks,
+            file_id,
+            String::new(),
+            &[],
+            &mut |block: &Block, minted_here: Option<&str>| {
+                crate::models::block_to_org(block, &vocabulary, minted_here, &mut losses)
+            },
+        )?;
         refuse_unreadable(path, &text)?;
         Ok(Rendered { text, losses })
     }
@@ -146,18 +353,28 @@ impl OrgRenderer {
         alias_table: &crate::dense::AliasTable,
         gap_ids: &std::collections::HashSet<String>,
     ) -> String {
-        let Ok(text) = Self::render_walk(blocks, file_id, &mut |b: &Block| {
-            Ok::<_, std::convert::Infallible>(crate::dense::to_org_dense(b, alias_table, gap_ids))
-        });
+        let Ok(text) =
+            Self::render_walk(blocks, file_id, String::new(), &[], &mut |b: &Block, _| {
+                Ok::<_, std::convert::Infallible>(crate::dense::to_org_dense(
+                    b,
+                    alias_table,
+                    gap_ids,
+                ))
+            });
         text
     }
 
-    fn render_walk<E, F: FnMut(&Block) -> Result<String, E>>(
+    /// `head` (the page's text before its blocks) followed by the blocks. The
+    /// blank lines that end the page's own section (`head_after`) stand
+    /// after its source blocks, before its first headline.
+    fn render_walk<E, F: FnMut(&Block, Option<&str>) -> Result<String, E>>(
         blocks: &[Block],
         file_id: &EntityUri,
+        head: String,
+        head_after: &[String],
         render_block: &mut F,
     ) -> Result<String, E> {
-        let mut result = String::new();
+        let mut result = head;
 
         // Sibling order is the caller's responsibility — `blocks` arrives in
         // authoritative order (the ordered read; ADR 0005). The renderer trusts
@@ -212,17 +429,25 @@ impl OrgRenderer {
         }
 
         let mut visited: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let mut head_ended = false;
         if let Some(roots) = children_by_parent.get(file_id.as_str()) {
-            for root_block in roots {
+            for place in places(roots, file_id, 0) {
+                if place.block.content_type == ContentType::Text && !head_ended {
+                    end_with_blank_lines(&mut result, head_after);
+                    head_ended = true;
+                }
                 Self::render_entity_tree(
-                    root_block,
+                    place,
                     &children_by_parent,
                     &mut result,
-                    0,
                     &mut visited,
                     render_block,
                 )?;
             }
+        }
+
+        if !head_ended {
+            end_with_blank_lines(&mut result, head_after);
         }
 
         // WP-F projection assertion (free — `visited` is populated by the walk we
@@ -257,44 +482,46 @@ impl OrgRenderer {
     }
 
     /// Render a block and its children recursively.
-    fn render_entity_tree<'b, E, F: FnMut(&Block) -> Result<String, E>>(
-        block: &'b Block,
+    fn render_entity_tree<'b, E, F: FnMut(&Block, Option<&str>) -> Result<String, E>>(
+        place: Place<'b>,
         children_by_parent: &HashMap<&'b str, Vec<&'b Block>>,
         result: &mut String,
-        depth: usize,
         visited: &mut std::collections::HashSet<&'b str>,
         render_block: &mut F,
     ) -> Result<(), E> {
+        let block = place.block;
         // Record reachability for the WP-F cycle/disconnected-component assertion
         // in `render_entitys` — free, we are already walking every reachable node.
         visited.insert(block.id.as_str());
+        if block.content_type == ContentType::Source {
+            // source_block_to_org records the loss for an unreadable carrier.
+            let before = block.blank_lines().unwrap_or_default().before_body;
+            end_with_blank_lines(result, &before);
+        }
 
         // Prepare block for org rendering - transfer Loro properties to org_props
         // format
         let mut prepared_block = block.clone();
-        Self::prepare_block_for_org(&mut prepared_block, depth);
+        Self::prepare_block_for_org(&mut prepared_block, place.level);
 
         // Render via the caller-supplied per-block renderer (canonical
         // `Block::to_org` or the dense token form). Both guarantee a trailing
         // newline.
-        result.push_str(&render_block(&prepared_block)?);
+        result.push_str(&render_block(
+            &prepared_block,
+            place.minted_here.as_deref(),
+        )?);
 
-        let blank_lines_after = prepared_block.blank_lines().after;
+        // render_headline_block records the loss for an unreadable carrier.
+        let blank_lines_after = prepared_block.blank_lines().unwrap_or_default().after;
         let mut section_ended = false;
         if let Some(kids) = children_by_parent.get(block.id.as_str()) {
-            for child_block in kids {
-                if child_block.content_type == ContentType::Text && !section_ended {
+            for child in places(kids, &block.id, place.level) {
+                if child.block.content_type == ContentType::Text && !section_ended {
                     end_with_blank_lines(result, &blank_lines_after);
                     section_ended = true;
                 }
-                Self::render_entity_tree(
-                    child_block,
-                    children_by_parent,
-                    result,
-                    depth + 1,
-                    visited,
-                    render_block,
-                )?;
+                Self::render_entity_tree(child, children_by_parent, result, visited, render_block)?;
             }
         }
         if !section_ended {
@@ -340,11 +567,10 @@ impl OrgRenderer {
     /// Public so a caller that owns its own tree walk (the integration-test
     /// serializer) can reach `Block::to_org` through the SAME preparation
     /// write-back uses instead of re-deriving the drawer.
-    pub fn prepare_block_for_org(block: &mut Block, depth: usize) {
+    pub fn prepare_block_for_org(block: &mut Block, level: i64) {
         let properties = block.properties_map();
 
-        // Set level from depth (level = depth + 1)
-        block.set_level((depth + 1) as i64);
+        block.set_level(level);
 
         // Transfer TODO to task_state if not already set
         if block.task_state().is_none() {
@@ -417,7 +643,8 @@ impl OrgRenderer {
             // Exact spelling wins, so `:Effort:` and `:effort:` keep their own
             // slots; the case-insensitive probe then catches the lifted keys the
             // renderer re-spells (`:collapsed:` authored, `COLLAPSED` emitted).
-            let authored = block.authored_drawer_order();
+            // An unreadable order carrier leaves the drawer in alphabetical order.
+            let authored = block.authored_drawer_order().unwrap_or_default();
             let rank = |key: &str| {
                 authored
                     .iter()
@@ -440,6 +667,58 @@ impl OrgRenderer {
             block.set_org_properties(Some(json));
         }
     }
+}
+
+/// Records a loss when the written file reads back with another page id,
+/// title or task keywords than `doc_block`, or with other header lines, in
+/// another order or place, than the renderer meant to write (`header`).
+fn check_header_reads_back(
+    doc_block: &Block,
+    header: &[KeywordLine],
+    read: &Block,
+    losses: &mut Vec<RenderLoss>,
+) {
+    let lines = |lines: &[KeywordLine]| -> Vec<(String, usize)> {
+        lines
+            .iter()
+            .map(|l| (l.raw.trim().replace('\r', ""), l.before_line))
+            .collect()
+    };
+    let declared = |block: &Block| -> Vec<(String, bool, bool)> {
+        block
+            .todo_keywords()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|s| s.is_active() || s.is_done())
+            .map(|s| (s.keyword.clone(), s.is_active(), s.is_done()))
+            .collect()
+    };
+    let id_differs = !doc_block.id.is_file() && read.id != doc_block.id;
+    let read_lines = lines(&read.header_keyword_lines().unwrap_or_default());
+    if !id_differs
+        && read.file_title() == doc_block.file_title()
+        && declared(read) == declared(doc_block)
+        && read_lines == lines(header)
+    {
+        return;
+    }
+    let detail = format!(
+        "the page header reads back as id {}, title {:?}, task keywords {:?}, lines {:?}; \
+         the page holds id {}, title {:?}, task keywords {:?}, and the render meant lines {:?}",
+        read.id,
+        read.file_title(),
+        read.todo_keywords(),
+        read_lines,
+        doc_block.id,
+        doc_block.file_title(),
+        doc_block.todo_keywords(),
+        lines(header),
+    );
+    tracing::warn!(page = %doc_block.id, "org render: {detail}");
+    losses.push(RenderLoss {
+        block: doc_block.id.clone(),
+        detail,
+    });
 }
 
 /// Ends `text`, which is empty or ends with a line break, with the blank lines

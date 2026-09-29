@@ -225,7 +225,10 @@ proptest! {
         let (back, back_blocks) = parse(&text);
         prop_assert_eq!(back_blocks.len(), 1, "the value grew or ate blocks:\n{}", text);
         prop_assert_eq!(&back.id, &document.id, "the document lost its id:\n{}", text);
-        let got = back.file_drawer().and_then(|d| d.get(&k).cloned());
+        let got = back
+            .file_drawer()
+            .expect("the parser writes a readable carrier")
+            .and_then(|d| d.get(&k).cloned());
         if k.eq_ignore_ascii_case("ID") {
             let want = if v.is_empty() { v } else { document.id.id().to_string() };
             prop_assert_eq!(got, Some(serde_json::Value::String(want)), "file:\n{}", text);

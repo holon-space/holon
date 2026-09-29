@@ -51,6 +51,6 @@ Open, with no loss raised (also listed in `docs/Reference/ORG_SYNTAX.md`):
 blank lines between a body and a source block child, between two source
 children, or between a headline with no body and its source child are not
 kept; a list body followed directly by a headline or a source child gains one
-blank line; the text between a page's `#+` header lines and its first headline
-is written after exactly one blank line; a file without a final line break
-gains one. The keystone does not draw an Emacs-authored blank line.
+blank line; a page created in Holon, or one with no keyword line before its
+first headline, writes its pre-headline text after exactly one blank line; a
+file without a final line break gains one. The keystone does not draw an Emacs-authored blank line.

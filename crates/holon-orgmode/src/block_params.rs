@@ -2,6 +2,7 @@ use holon_api::EntityUri;
 use holon_api::Value;
 use holon_api::block::Block;
 use holon_api::types::ContentType;
+use holon_org_format::AuthoredKey;
 use holon_org_format::TypedDrawerKey;
 
 use crate::models::OrgBlockExt;
@@ -161,22 +162,15 @@ pub fn build_block_params(
             warn_unrepresentable_drawer_key(&k, block);
             continue;
         }
-        params.insert(k.into(), Value::String(v));
+        params.insert(AuthoredKey::new(&k).property().into(), Value::String(v));
     }
 
-    // `drawer_properties()` hides the `_`-prefixed authored-order carrier, so
-    // the loop above cannot reach it. The renderer reads it back from the store
-    // to replay the order the drawer was authored in.
-    if let Some(order) = block.get_property(crate::models::org_props::DRAWER_ORDER) {
-        params.insert(crate::models::org_props::DRAWER_ORDER.into(), order);
-    }
-    // Same carrier discipline: `_`-prefixed, so `drawer_properties()` hides it
-    // from the drawer and only this explicit forward gets it to the store.
-    if let Some(flag) = block.get_property(crate::models::org_props::PRIORITY_DRAWER_ONLY) {
-        params.insert(crate::models::org_props::PRIORITY_DRAWER_ONLY.into(), flag);
-    }
-    if let Some(blank_lines) = block.get_property(crate::models::org_props::BLANK_LINES) {
-        params.insert(crate::models::org_props::BLANK_LINES.into(), blank_lines);
+    // `drawer_properties()` hides the `_`-prefixed parser carriers, so only
+    // this explicit forward gets them to the store.
+    for carrier in crate::models::org_props::PARSER_CARRIERS {
+        if let Some(value) = block.get_property(carrier) {
+            params.insert((*carrier).into(), value);
+        }
     }
 
     // `priority`, `scheduled` and `deadline` are stored in the properties bag,
@@ -187,10 +181,10 @@ pub fn build_block_params(
             crate::models::org_props::PRIORITY,
             crate::models::org_props::SCHEDULED,
             crate::models::org_props::DEADLINE,
-            crate::models::org_props::DRAWER_ORDER,
-            crate::models::org_props::PRIORITY_DRAWER_ONLY,
-            crate::models::org_props::BLANK_LINES,
-        ] {
+        ]
+        .into_iter()
+        .chain(crate::models::org_props::PARSER_CARRIERS.iter().copied())
+        {
             if !params.contains_key(key) && previous.get_property(key).is_some() {
                 params.insert(key.into(), Value::REMOVED);
             }
@@ -199,9 +193,8 @@ pub fn build_block_params(
 
     // The file is authoritative for its own drawer: a key it USED to declare
     // and no longer does must be cleared from the store, not merged forward.
-    // `drawer_properties()` never yields `_`-prefixed keys, so store-managed
-    // system keys — which no file can express — are structurally out of reach
-    // here and survive untouched.
+    // An authored key is never one of the store-managed system keys, which no
+    // file can express, so those survive untouched.
     if let Some(previous) = previous {
         for k in previous.drawer_properties().into_keys() {
             // A storage-column name is refused SILENTLY here. The emit loop
@@ -209,13 +202,14 @@ pub fn build_block_params(
             // and a removal is not a loss of authored data — it is a refusal to
             // write `SET <column> = NULL` over row state this builder does not
             // own (`sort_key` is the consolidator's order key).
+            let property = AuthoredKey::new(&k).property();
             if TypedDrawerKey::parse(&k).is_some()
                 || holon_api::schema::is_block_column(&k)
-                || params.contains_key(&*k)
+                || params.contains_key(property.as_str())
             {
                 continue;
             }
-            params.insert(k.into(), Value::REMOVED);
+            params.insert(property.into(), Value::REMOVED);
         }
     }
 
@@ -586,8 +580,9 @@ mod tests {
             "content",
         ];
         let drawer: String = columns.iter().map(|c| format!(":{c}: x\n")).collect();
+        // `:id:` is an `:ID:` line; the last one names the headline, as in org.
         let previous = parse_one(&format!(
-            "* P\n:PROPERTIES:\n:ID: p0\n{drawer}:keep: v\n:END:\n"
+            "* P\n:PROPERTIES:\n{drawer}:ID: p0\n:keep: v\n:END:\n"
         ));
 
         // EMIT direction: the authored value must not reach the column.

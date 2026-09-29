@@ -61,6 +61,41 @@ impl fmt::Display for UnrepresentableKey {
 
 impl std::error::Error for UnrepresentableKey {}
 
+/// A property key as a file wrote it. A block's property bag keeps the keys
+/// that start with `_` for Holon's own (the parser's carriers, `_provenance`),
+/// so there an authored key that starts with `_` or `\` is stored behind a `\`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AuthoredKey(String);
+
+impl AuthoredKey {
+    const ESCAPE: char = '\\';
+
+    pub fn new(key: &str) -> Self {
+        Self(key.to_string())
+    }
+
+    /// The authored key a property-bag key stores; `None` for Holon's own.
+    pub fn from_property(key: &str) -> Option<Self> {
+        match key.strip_prefix(Self::ESCAPE) {
+            Some(authored) => Some(Self(authored.to_string())),
+            None => (!key.starts_with('_')).then(|| Self(key.to_string())),
+        }
+    }
+
+    /// The key in a block's property bag.
+    pub fn property(&self) -> String {
+        if self.0.starts_with(['_', Self::ESCAPE]) {
+            format!("{}{}", Self::ESCAPE, self.0)
+        } else {
+            self.0.clone()
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// A block's bare id as org carries it — on a headline's `:ID:` line, a source
 /// block's `:id` header argument, or a page's `#+ID:` — and reads it back as
 /// `block:<id>` with the same id. It names no URI scheme of its own (`doc:x`,
@@ -175,8 +210,8 @@ impl TypedDrawerKey {
 /// own set of keys and of value texts that survive raw.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ValueCarrier {
-    /// A headline's `:PROPERTIES:` drawer: orgize trims the value and drops
-    /// a line whose value is empty.
+    /// A headline's `:PROPERTIES:` drawer: Holon's line reader trims the
+    /// value and keeps an empty one.
     HeadlineDrawer,
     /// The file-level drawer: Holon's own line reader trims the value and
     /// keeps an empty one.
@@ -247,8 +282,9 @@ impl ValueCarrier {
     fn survives_raw(self, s: &str) -> bool {
         let has_control = s.chars().any(|c| c.is_control() && c != '\t');
         match self {
-            ValueCarrier::HeadlineDrawer => !s.is_empty() && s.trim() == s && !has_control,
-            ValueCarrier::FileDrawer => s.trim() == s && !has_control,
+            ValueCarrier::HeadlineDrawer | ValueCarrier::FileDrawer => {
+                s.trim() == s && !has_control
+            }
             ValueCarrier::HeaderArg => {
                 let tokens: Vec<&str> = s.split_whitespace().collect();
                 tokens.join(" ") == s && !tokens.iter().any(|t| t.starts_with(':')) && !has_control
@@ -371,7 +407,8 @@ mod tests {
     fn values_the_carrier_cannot_hold_become_literals() {
         assert_eq!(HeadlineDrawer.encode("a\nb"), "\"a\\nb\"");
         assert_eq!(HeadlineDrawer.encode(" padded "), "\" padded \"");
-        assert_eq!(HeadlineDrawer.encode(""), "\"\"");
+        assert_eq!(HeadlineDrawer.encode(""), "");
+        assert_eq!(HeadlineDrawer.decode("\"\""), "\"\"");
         assert_eq!(FileDrawer.encode(""), "");
         assert_eq!(FileDrawer.decode("\"\""), "\"\"");
         assert_eq!(HeaderArg.encode("a b"), "a b");

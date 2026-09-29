@@ -377,22 +377,28 @@ fn bag_keys(op_name: &str, value: &Value) -> Result<Vec<String>> {
 /// ([`WriteSchema::OVERFLOW_COLUMN`]), not from a list of operations, so a
 /// fourth route cannot be opened by inventing another op name.
 fn authored_property_keys(op_name: &str, params: &StorageEntity) -> Result<Vec<String>> {
-    let bag = WriteSchema::OVERFLOW_COLUMN;
     let mut keys: Vec<String> = params.keys().map(|k| k.to_string()).collect();
+    for (name_param, _) in FIELD_NAMING_PARAMS {
+        if let Some(named) = params.get(*name_param).and_then(|v| v.as_string()) {
+            keys.push(named.to_string());
+        }
+    }
+    keys.extend(bag_property_keys(op_name, params)?);
+    Ok(keys)
+}
 
+/// The property keys `params` would write inside the property BAG.
+fn bag_property_keys(op_name: &str, params: &StorageEntity) -> Result<Vec<String>> {
+    let bag = WriteSchema::OVERFLOW_COLUMN;
+    let mut keys = Vec::new();
     for (name_param, value_param) in FIELD_NAMING_PARAMS {
-        let Some(named) = params.get(*name_param).and_then(|v| v.as_string()) else {
-            continue;
-        };
-        keys.push(named.to_string());
         // The named field IS the overflow column, so `value` is the whole bag.
-        if named == bag
+        if params.get(*name_param).and_then(|v| v.as_string()) == Some(bag)
             && let Some(v) = params.get(*value_param)
         {
             keys.extend(bag_keys(op_name, v)?);
         }
     }
-
     // The bag handed over directly as a param (`create`/`update`).
     if let Some(v) = params.get(bag) {
         keys.extend(bag_keys(op_name, v)?);
@@ -418,6 +424,41 @@ fn reject_engine_owned_keys(op_name: &str, params: &StorageEntity) -> Result<()>
                  from the operation's origin."
             );
         }
+    }
+    Ok(())
+}
+
+/// Refuse an op that would write a carrier only the org parser writes
+/// ([`holon_org_format::org_props::PARSER_CARRIERS`]), unless the org ingest or
+/// a peer merge applies it: from anyone else it is forged file layout.
+fn reject_parser_carriers(op_name: &str, params: &StorageEntity, origin: &OpOrigin) -> Result<()> {
+    if matches!(origin, OpOrigin::Ingest | OpOrigin::Sync) {
+        return Ok(());
+    }
+    for key in authored_property_keys(op_name, params)? {
+        if let Some(carrier) = holon_org_format::org_props::PARSER_CARRIERS
+            .iter()
+            .find(|k| **k == key)
+        {
+            anyhow::bail!(
+                "'{op_name}' from origin '{}' would write '{carrier}', which only the org parser \
+                 writes from a file — the write is REFUSED",
+                origin.tag()
+            );
+        }
+    }
+    let file_drawer = holon_org_format::org_props::FILE_PROPERTIES;
+    if bag_property_keys(op_name, params)?
+        .iter()
+        .any(|k| k == file_drawer)
+    {
+        anyhow::bail!(
+            "'{op_name}' from origin '{}' would write '{file_drawer}' inside the '{}' bag, where \
+             its keys and id go unchecked — the write is REFUSED; write the page drawer as the \
+             '{file_drawer}' field",
+            origin.tag(),
+            WriteSchema::OVERFLOW_COLUMN,
+        );
     }
     Ok(())
 }
@@ -1793,7 +1834,7 @@ impl DispatchingOperationEngine {
     fn drawer_entries(field: &str, value: &Value) -> Result<Vec<(String, serde_json::Value)>> {
         use anyhow::Context;
         use holon_org_format::org_props;
-        if field.starts_with('_') {
+        if field.starts_with('_') && field != org_props::FILE_PROPERTIES {
             return Ok(Vec::new());
         }
         if [
@@ -3059,6 +3100,7 @@ impl OperationEngine for DispatchingOperationEngine {
         // refusal further down would store the reserved key and only reject it
         // at accept time, an operation the author never performed.
         reject_engine_owned_keys(op_name, &params)?;
+        reject_parser_carriers(op_name, &params, &origin)?;
 
         // Trust gate (VisionGapAnalysis C5): a sub-threshold (origin, entity,
         // op) never reaches canonical state — it is coerced into a proposal
@@ -4423,6 +4465,62 @@ mod provenance_stamp_tests {
         ]);
         reject_engine_owned_keys("set_field", &via_set_field)
             .expect("only engine-minted keys are reserved, whichever route names them");
+    }
+
+    #[test]
+    fn a_parser_carrier_is_refused_unless_the_ingest_or_a_peer_writes_it() {
+        let via_set_field = params_with(&[
+            ("id", Value::String("block:x".into())),
+            ("field", Value::String("_drawer_raw".into())),
+            ("value", Value::String("not json".into())),
+        ]);
+        let in_a_bag = params_with(&[
+            ("id", Value::String("block:x".into())),
+            (
+                "properties",
+                Value::String(r#"{"_keyword_lines":"[]"}"#.into()),
+            ),
+        ]);
+        for (op, params) in [("set_field", &via_set_field), ("update", &in_a_bag)] {
+            let err = reject_parser_carriers(op, params, &OpOrigin::User)
+                .expect_err("a user write of a parser carrier must be REFUSED");
+            assert!(format!("{err:#}").contains("REFUSED"), "{err:#}");
+            reject_parser_carriers(op, params, &OpOrigin::Ingest)
+                .expect("the org ingest writes the carriers");
+            reject_parser_carriers(op, params, &OpOrigin::Sync)
+                .expect("a peer merge carries the carriers");
+        }
+    }
+
+    #[test]
+    fn a_file_drawer_in_a_bag_is_refused_unless_the_ingest_or_a_peer_writes_it() {
+        let file_drawer = holon_org_format::org_props::FILE_PROPERTIES;
+        let bag = format!(r#"{{"{file_drawer}":"garbage"}}"#);
+        let in_a_bag = params_with(&[
+            ("id", Value::String("block:x".into())),
+            ("properties", Value::String(bag.clone())),
+        ]);
+        let bag_via_set_field = params_with(&[
+            ("id", Value::String("block:x".into())),
+            ("field", Value::String("properties".into())),
+            ("value", Value::String(bag)),
+        ]);
+        let as_its_field = params_with(&[
+            ("id", Value::String("block:x".into())),
+            ("field", Value::String(file_drawer.into())),
+            ("value", Value::String(r#"{"note":"v"}"#.into())),
+        ]);
+        for (op, params) in [("update", &in_a_bag), ("set_field", &bag_via_set_field)] {
+            let err = reject_parser_carriers(op, params, &OpOrigin::User)
+                .expect_err("a file drawer in a bag must be REFUSED");
+            assert!(format!("{err:#}").contains(file_drawer), "{err:#}");
+            reject_parser_carriers(op, params, &OpOrigin::Ingest)
+                .expect("the org ingest writes the carriers");
+            reject_parser_carriers(op, params, &OpOrigin::Sync)
+                .expect("a peer merge carries the carriers");
+        }
+        reject_parser_carriers("set_field", &as_its_field, &OpOrigin::User)
+            .expect("the page drawer is written as its own field");
     }
 
     #[test]

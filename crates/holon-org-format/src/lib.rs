@@ -24,6 +24,7 @@ pub mod inline_marks;
 pub mod link_parser;
 pub mod models;
 pub mod org_renderer;
+mod page_keywords;
 pub mod parser;
 pub mod task_keyword;
 
@@ -36,6 +37,7 @@ pub use dense::DenseParse;
 pub use dense::parse_dense;
 pub use dense::parse_dense_with;
 pub use dense::render_dense;
+pub use drawer::AuthoredKey;
 pub use drawer::DrawerId;
 pub use drawer::DrawerKey;
 pub use drawer::TypedDrawerKey;
