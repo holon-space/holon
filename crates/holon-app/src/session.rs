@@ -141,7 +141,7 @@ pub async fn shutdown_session(injector: &fluxdi::Injector) -> Result<()> {
     // Which substrate this container holds is a registered value, so a Turso
     // wiring whose engine will not resolve is a failure, not "no actor here".
     match *injector.resolve::<holon::di::StorageSelector>() {
-        holon::di::StorageSelector::LoroMemory => Ok(()),
+        holon::di::StorageSelector::LoroMemory => {}
         holon::di::StorageSelector::Turso => {
             let engine = injector.try_resolve::<BackendEngine>().map_err(|e| {
                 anyhow::anyhow!(
@@ -153,7 +153,18 @@ pub async fn shutdown_session(injector: &fluxdi::Injector) -> Result<()> {
                 .db_handle()
                 .shutdown()
                 .await
-                .map_err(|e| anyhow::anyhow!("Turso actor shutdown failed: {e}"))
+                .map_err(|e| anyhow::anyhow!("Turso actor shutdown failed: {e}"))?;
         }
     }
+
+    // Last: nothing of this session writes the vault any more, so the next
+    // writer may take it. A session with a vault holds the lock by
+    // construction (`add_frontend`).
+    #[cfg(not(target_arch = "wasm32"))]
+    if injector.resolve::<HolonConfig>().vault.root.is_some() {
+        injector
+            .resolve::<crate::vault_lock::VaultLock>()
+            .release()?;
+    }
+    Ok(())
 }

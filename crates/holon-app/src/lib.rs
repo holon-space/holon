@@ -52,6 +52,8 @@ pub mod seed;
 pub mod session;
 pub mod turso_seams;
 pub mod type_admission;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod vault_lock;
 pub mod wiring;
 
 pub use boot_error::BootComponent;

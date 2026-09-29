@@ -79,6 +79,14 @@ impl FrontendInjectorExt for Injector {
         config_dir: PathBuf,
         locked_keys: HashSet<PrefKey>,
     ) -> Result<()> {
+        // First, before anything below reads or writes the vault: one writer
+        // per vault. `shutdown_session` releases it.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(root) = holon_config.vault.root.as_deref() {
+            let lock = Shared::new(crate::vault_lock::VaultLock::acquire(root)?);
+            self.provide::<crate::vault_lock::VaultLock>(Provider::root(move |_| lock.clone()));
+        }
+
         let db_path = holon_config.resolve_db_path(&config_dir);
 
         // Ledger of which boot steps this assembly actually performs. Steps that

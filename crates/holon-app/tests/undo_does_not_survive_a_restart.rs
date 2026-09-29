@@ -103,6 +103,12 @@ async fn a_restart_clears_the_journal_and_discloses_it() {
             0,
             "a fresh replica discards nothing"
         );
+        // The production quit path. Dropping the handles leaves the session's
+        // tasks alive, still writing the vault, and the vault lock refuses the
+        // second session for exactly that reason.
+        holon_app::shutdown_session(&first.injector)
+            .await
+            .expect("the first session shuts down");
     }
 
     // Second session over the SAME replica: the restart.
