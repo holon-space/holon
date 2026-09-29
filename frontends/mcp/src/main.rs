@@ -217,10 +217,10 @@ async fn run_http_server_standalone(
     let cancellation_token = CancellationToken::new();
     let token_for_signal = cancellation_token.clone();
 
-    // Spawn a task to handle Ctrl+C
+    let stop = stop_signals()?;
     tokio::spawn(async move {
-        tokio::signal::ctrl_c().await.ok(); // ALLOW(ok): signal failure is non-fatal
-        tracing::info!("Received Ctrl+C, shutting down HTTP server...");
+        let signal = stop.await;
+        tracing::info!("Received {signal}, shutting down HTTP server...");
         token_for_signal.cancel();
     });
 
@@ -239,8 +239,37 @@ async fn run_http_server_standalone(
     .await
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+/// Install the Ctrl-C and SIGTERM (launchd's stop) handlers now, so a signal
+/// that arrives before the returned future is first polled is not the
+/// default kill. The future resolves with the one that arrived.
+fn stop_signals() -> Result<impl std::future::Future<Output = &'static str>> {
+    use tokio::signal::unix::SignalKind;
+    use tokio::signal::unix::signal;
+    let mut interrupt = signal(SignalKind::interrupt())
+        .map_err(|e| anyhow::anyhow!("installing the Ctrl-C handler: {e}"))?;
+    let mut terminate = signal(SignalKind::terminate())
+        .map_err(|e| anyhow::anyhow!("installing the SIGTERM handler: {e}"))?;
+    Ok(async move {
+        tokio::select! {
+            _ = interrupt.recv() => "Ctrl+C",
+            _ = terminate.recv() => "SIGTERM",
+        }
+    })
+}
+
+fn main() -> Result<()> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| anyhow::anyhow!("building the tokio runtime: {e}"))?;
+    let result = runtime.block_on(run());
+    // The stdio transport reads stdin on a blocking thread that only EOF ends;
+    // a quit by signal must not wait for it.
+    runtime.shutdown_timeout(std::time::Duration::from_secs(1));
+    result
+}
+
+async fn run() -> Result<()> {
     // This process serves a user's own vault, so it may hold the user's
     // credentials. Nothing below reaches the login keychain without it.
     holon_secrets::grant_login_keychain();
@@ -536,17 +565,29 @@ async fn main() -> Result<()> {
     }
 
     // Run server based on transport mode
-    match transport_mode {
+    let served = match transport_mode {
         TransportMode::Stdio => {
-            run_stdio_server(engine, debug, type_registry).await?;
+            let stop = stop_signals()?;
+            tracing::info!("holon-mcp: session booted, serving stdio");
+            tokio::select! {
+                r = run_stdio_server(engine, debug, type_registry) => r,
+                signal = stop => {
+                    tracing::info!("Received {signal}, stopping the stdio server");
+                    Ok(())
+                }
+            }
         }
         TransportMode::Http { bind_address } => {
             tracing::info!("Starting Holon MCP server in HTTP mode on {}", bind_address);
-            run_http_server_standalone(engine, debug, type_registry, bind_address).await?;
+            run_http_server_standalone(engine, debug, type_registry, bind_address).await
         }
-    }
+    };
 
-    Ok(())
+    // The server no longer takes calls, so nothing new can be written: the
+    // session writes back what it owes, saves, closes and gives up the vault.
+    let shut_down = holon_app::shutdown_session(&injector).await;
+    served?;
+    shut_down
 }
 
 #[cfg(test)]

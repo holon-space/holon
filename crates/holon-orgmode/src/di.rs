@@ -160,6 +160,56 @@ pub struct OrgSyncIdleSignal {
     in_pass: std::sync::atomic::AtomicUsize,
     /// A debounced bulk re-render is armed and its 50ms tick has not fired.
     bulk_pending: std::sync::atomic::AtomicBool,
+    /// Re-render requests handed to the loop and not yet processed. Neither
+    /// the tick nor `in_pass` sees a request still in the channel, and a
+    /// shutdown must name what it would leave unwritten.
+    queued_renders: Arc<QueuedRenders>,
+}
+
+/// Re-render requests in the write-back channel, counted per document.
+#[derive(Debug, Default)]
+pub struct QueuedRenders(std::sync::Mutex<std::collections::BTreeMap<String, usize>>);
+
+impl QueuedRenders {
+    fn key(rerender: &OrgRerender) -> String {
+        match rerender {
+            OrgRerender::Block { doc, .. } | OrgRerender::Seed { doc, .. } => doc.to_string(),
+            OrgRerender::Reset => "<write-back restart>".to_string(),
+            OrgRerender::All => "<every tracked file>".to_string(),
+        }
+    }
+
+    fn queued(&self, rerender: &OrgRerender) {
+        *self
+            .0
+            .lock()
+            .expect("queued renders poisoned")
+            .entry(Self::key(rerender))
+            .or_insert(0) += 1;
+    }
+
+    fn done(&self, keys: Vec<String>) {
+        let mut queued = self.0.lock().expect("queued renders poisoned");
+        for key in keys {
+            let count = queued
+                .get_mut(&key)
+                .unwrap_or_else(|| panic!("a processed re-render of {key} was never queued"));
+            *count -= 1;
+            if *count == 0 {
+                queued.remove(&key);
+            }
+        }
+    }
+
+    /// The documents with a queued re-render.
+    pub fn documents(&self) -> Vec<String> {
+        self.0
+            .lock()
+            .expect("queued renders poisoned")
+            .keys()
+            .cloned()
+            .collect()
+    }
 }
 
 impl OrgSyncIdleSignal {
@@ -171,7 +221,32 @@ impl OrgSyncIdleSignal {
             in_pass: std::sync::atomic::AtomicUsize::new(0),
             bulk_pending: std::sync::atomic::AtomicBool::new(false),
             writeback_fold: std::sync::OnceLock::new(),
+            queued_renders: Arc::new(QueuedRenders::default()),
         })
+    }
+
+    pub fn queued_renders(&self) -> &QueuedRenders {
+        &self.queued_renders
+    }
+
+    /// What the write-back is still doing, empty when it has written every
+    /// change handed to it. The upstream legs (the Loro projection, CDC) are
+    /// the caller's to check.
+    pub fn writeback_unsettled(&self) -> Vec<&'static str> {
+        let mut busy = Vec::new();
+        if self.in_pass.load(std::sync::atomic::Ordering::Acquire) > 0 {
+            busy.push("a write-back pass is running");
+        }
+        if self.bulk_pending.load(std::sync::atomic::Ordering::Acquire) {
+            busy.push("a bulk re-render is owed");
+        }
+        if self.writeback_fold_in_flight() {
+            busy.push("the home_by fold is running");
+        }
+        if !self.queued_renders.documents().is_empty() {
+            busy.push("document re-renders are queued");
+        }
+        busy
     }
 
     /// Publish the write-back `home_by` stream's fold state. Called once, at
@@ -707,6 +782,7 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                     tokio::sync::mpsc::unbounded_channel::<RerenderMsg>();
                 if let Some(feed) = block_feed.clone() {
                     let tx = rerender_tx.clone();
+                    let queued = idle_signal.queued_renders.clone();
                     // The authority's reads happen while the combinator is
                     // still folding, so they PEEK: the write-back pass below
                     // is the one that takes the provenance.
@@ -799,6 +875,7 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                                         // Drop the dead incarnation's derived state,
                                         // then cover the incoming seed with one bulk
                                         // render off the authority.
+                                        queued.queued(&OrgRerender::Reset);
                                         let _ =
                                             tx.send(RerenderMsg::unattributed(OrgRerender::Reset));
                                         Some(OrgRerender::All)
@@ -826,6 +903,7 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                                     }
                                 };
                                 if let Some(rerender) = msg {
+                                    queued.queued(&rerender);
                                     let _ = tx.send(RerenderMsg { rerender, origins });
                                 }
                             }
@@ -1481,6 +1559,8 @@ pub async fn run_file_sync_controller(
                 while let Ok(next) = rerender_rx.try_recv() {
                     drained.push(next);
                 }
+                let processed: Vec<String> =
+                    drained.iter().map(|m| QueuedRenders::key(&m.rerender)).collect();
                 let span = block_feed_pass_span(&drained);
                 async {
                     // Order is preserved and `Reset` is a barrier: it means the
@@ -1528,6 +1608,7 @@ pub async fn run_file_sync_controller(
                         }
                     }
                 }.instrument(span).await;
+                idle_signal_for_task.queued_renders.done(processed);
                 idle_signal_for_task.mark_progress();
             }
             _ = rerender_flush_tick.tick(), if pending_full_rerender => {

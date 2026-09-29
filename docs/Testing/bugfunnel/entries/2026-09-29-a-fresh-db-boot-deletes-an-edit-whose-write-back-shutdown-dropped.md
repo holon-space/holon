@@ -3,7 +3,7 @@ id: 2026-09-29-a-fresh-db-boot-deletes-an-edit-whose-write-back-shutdown-dropped
 date: 2026-09-29
 gap: ENVIRONMENT
 secondary: null
-status: OPEN
+status: PARTIAL
 summary: >-
   A block created just before `shutdown_session` is in the `.loro` snapshot but
   not in its org file; the next boot on the same vault with a different (or
@@ -50,7 +50,20 @@ file, so the loss never appears there. No test boots a second DB over a vault
 the first DB's session just left.
 
 ## Remedy
-OPEN. Dogfooding phase 1, Increment 2 (depends on D229): the release sequence
-waits for write-back quiescence before `shutdown_session`, and the keystone
-gets a `HandOver` reboot variant that alternates two DB paths over one vault.
-The red test above moves to that increment.
+PARTIAL (dogfooding phase 1, Increment 1b).
+
+- Fixed for every clean quit: `shutdown_session` first waits, bounded, until
+  the Loro projection has caught up, CDC is still, and the write-back has
+  nothing queued, folding or rendering
+  (`crates/holon-app/src/session.rs`, `wait_for_writeback`). A write-back that
+  does not settle is an error naming the documents not written; the rest of the
+  shutdown still runs. `holon-mcp` now ends through `shutdown_session` on
+  SIGTERM and Ctrl-C (`frontends/mcp/src/main.rs`); the GUI and TUI already did.
+- Pinned by `crates/holon-app/tests/shutdown_writes_back_every_edit.rs` (the
+  hand-over to a fresh DB keeps the edit; red before the fix) and
+  `frontends/mcp/tests/sigterm_shuts_the_session_down.rs` (red before: the
+  process died on signal 15).
+- OPEN: after a crash the backlog is lost anyway, and a fresh-DB boot still
+  reads the stale file as a user edit. The per-file render baseline beside
+  `.loro` closes that (design `lane-logs/dogfood-p1-design.md` §10), aligned
+  with D229's vault-state sidecar.
