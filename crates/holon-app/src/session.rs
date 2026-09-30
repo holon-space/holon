@@ -193,6 +193,39 @@ pub async fn shutdown_session(injector: &fluxdi::Injector) -> Result<()> {
     settled
 }
 
+/// The exit status of a step followed by another that runs whatever the first
+/// returned, such as a frontend's run and then its [`shutdown_session`].
+pub fn first_then(first: Result<()>, then: Result<()>) -> Result<()> {
+    match (first, then) {
+        (Err(first), Err(then)) => Err(anyhow::anyhow!("{first:#}; then {then:#}")),
+        (first, then) => first.and(then),
+    }
+}
+
+#[cfg(test)]
+mod first_then_tests {
+    use super::*;
+
+    #[test]
+    fn the_exit_status_keeps_every_error() {
+        let failed = |what: &str| Err(anyhow::anyhow!("{what} failed"));
+        let cases = [
+            (Ok(()), Ok(()), None),
+            (failed("serving"), Ok(()), Some("serving failed")),
+            (Ok(()), failed("shutdown"), Some("shutdown failed")),
+            (
+                failed("serving"),
+                failed("shutdown"),
+                Some("serving failed; then shutdown failed"),
+            ),
+        ];
+        for (first, then, expected) in cases {
+            let exit = first_then(first, then).map_err(|e| format!("{e:#}"));
+            assert_eq!(exit.err().as_deref(), expected);
+        }
+    }
+}
+
 /// How long a shutdown waits for the org write-back to write what it owes.
 pub const WRITEBACK_SETTLE_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
 

@@ -1,20 +1,22 @@
 //! FluxDI module for the TUI frontend.
 //!
 //! Mirrors the GPUI module structure: `configure()` registers core infra,
-//! frontend services, the render interpreter, and the MCP server;
-//! `on_start()` populates the BuilderServicesSlot with the resolved
-//! ReactiveEngine and starts the MCP server; `on_stop()` shuts the MCP
-//! server down gracefully.
+//! frontend services, the render interpreter, and the MCP server when
+//! `mcp.enabled`; `on_start()` populates the BuilderServicesSlot with the
+//! resolved ReactiveEngine and starts the MCP server; `on_stop()` shuts the
+//! MCP server down gracefully.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use fluxdi::Injector;
 use fluxdi::Module;
 use fluxdi::ModuleLifecycleFuture;
 use fluxdi::Shared;
 use holon_app::FrontendInjectorExt;
+use holon_app::vault_lock::SessionVault;
 use holon_frontend::FrontendSession;
 use holon_frontend::config::HolonConfig;
 use holon_frontend::config::SessionConfig;
@@ -36,13 +38,20 @@ pub struct TuiModule {
     pub session_config: SessionConfig,
     pub config_dir: PathBuf,
     pub locked_keys: HashSet<PrefKey>,
+    /// Acquired before the boot, so a refusal reaches the user as its own
+    /// message. `configure` takes it.
+    pub vault: Mutex<Option<SessionVault>>,
 }
 
 impl Module for TuiModule {
     fn configure(&self, injector: &Injector) -> Result<(), fluxdi::Error> {
-        let vault =
-            holon_app::vault_lock::SessionVault::acquire(self.holon_config.vault.root.as_deref())
-                .map_err(|e| to_di_err("configure", &format!("{e:#}")))?;
+        let vault = self
+            .vault
+            .lock()
+            .expect("TuiModule vault mutex poisoned")
+            .take()
+            .expect("TuiModule is configured once");
+        vault.assert_holds(self.holon_config.vault.root.as_deref());
         let db_path = self.holon_config.resolve_db_path(&self.config_dir);
 
         holon::di::open_and_register_core(injector, db_path, holon::di::StorageSelector::Turso)
@@ -63,6 +72,12 @@ impl Module for TuiModule {
 
         holon_mcp::di::register_debug_services(injector);
 
+        if !self.holon_config.mcp_enabled() {
+            tracing::info!(
+                "MCP server disabled by config (mcp.enabled = false): no MCP server, no listener"
+            );
+            return Ok(());
+        }
         let mcp_port: u16 = std::env::var("MCP_SERVER_PORT")
             .ok() // ALLOW(ok): non-critical env var
             .and_then(|s| s.parse().ok()) // ALLOW(ok): non-critical env var parse
@@ -74,6 +89,7 @@ impl Module for TuiModule {
 
     fn on_start(&self, injector: Shared<Injector>) -> ModuleLifecycleFuture {
         let crdt_enabled = self.holon_config.crdt_enabled();
+        let mcp_enabled = self.holon_config.mcp_enabled();
         Box::pin(async move {
             let _session = injector.resolve_async::<FrontendSession>().await;
 
@@ -94,18 +110,23 @@ impl Module for TuiModule {
                 .await
                 .map_err(|e| to_di_err("on_start", &e))?;
 
-            let mcp = injector.resolve::<McpServerHandle>();
-            mcp.set_builder_services(services);
-            mcp.start().await.map_err(|e| to_di_err("on_start", &e))?;
+            if mcp_enabled {
+                let mcp = injector.resolve::<McpServerHandle>();
+                mcp.set_builder_services(services);
+                mcp.start().await.map_err(|e| to_di_err("on_start", &e))?;
+            }
 
             Ok(())
         })
     }
 
     fn on_stop(&self, injector: Shared<Injector>) -> ModuleLifecycleFuture {
+        let mcp_enabled = self.holon_config.mcp_enabled();
         Box::pin(async move {
-            let mcp = injector.resolve::<McpServerHandle>();
-            mcp.stop().await.map_err(|e| to_di_err("on_stop", &e))?;
+            if mcp_enabled {
+                let mcp = injector.resolve::<McpServerHandle>();
+                mcp.stop().await.map_err(|e| to_di_err("on_stop", &e))?;
+            }
             Ok(())
         })
     }

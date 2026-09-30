@@ -3,7 +3,7 @@ id: 2026-09-30-the-tui-serves-mcp-on-8520-with-mcp-disabled
 date: 2026-09-30
 gap: COVERAGE
 secondary: null
-status: OPEN
+status: FIXED
 summary: >-
   `holon-tui --mcp-enabled false` still starts the embedded MCP server, on
   port 8520 unless MCP_SERVER_PORT is set.
@@ -30,7 +30,8 @@ no MCP server starts. The GUI has that guard; the TUI composition was never
 drawn against it.
 
 ## Remedy
-OPEN. The TUI test now gives each instance its own `MCP_SERVER_PORT`
-(18761-18764), so it no longer touches 8520. The fix is to gate the TUI's MCP
-registration, start and stop on `mcp_enabled()` as `GpuiModule` does, with a
-test that boots the TUI composition with MCP off and finds no listener.
+`TuiModule` registers, starts and stops the MCP server only when
+`mcp_enabled()` (`frontends/tui/src/di.rs`), as `GpuiModule` does, and logs
+that MCP is off. `frontends/tui/tests/boot_refusals.rs::mcp_disabled_serves_no_mcp`
+boots `holon-tui --mcp-enabled false` on its own `MCP_SERVER_PORT` and finds no
+listener; it was red (the port accepted a connection) before the gate.

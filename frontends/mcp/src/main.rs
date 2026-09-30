@@ -242,6 +242,10 @@ fn main() -> Result<()> {
         .build()
         .map_err(|e| anyhow::anyhow!("building the tokio runtime: {e}"))?;
     let result = runtime.block_on(run());
+    // A stdio client that went away takes stderr with it; the log keeps the error.
+    if let Err(e) = &result {
+        tracing::error!("holon-mcp exits with an error: {e:#}");
+    }
     // The stdio transport reads stdin on a blocking thread that only EOF ends;
     // a quit by signal must not wait for it.
     runtime.shutdown_timeout(std::time::Duration::from_secs(1));
@@ -556,8 +560,7 @@ async fn run() -> Result<()> {
         backend.flush_all().await;
     }
     let shut_down = holon_app::shutdown_session(&injector).await;
-    served?;
-    shut_down
+    holon_app::session::first_then(served, shut_down)
 }
 
 #[cfg(test)]

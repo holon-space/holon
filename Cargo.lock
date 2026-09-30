@@ -6173,6 +6173,7 @@ dependencies = [
  "holon-mcp",
  "holon-pbt-core",
  "holon-secrets",
+ "libc",
  "miette",
  "proptest 1.11.0",
  "proptest-state-machine",

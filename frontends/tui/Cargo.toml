@@ -41,6 +41,7 @@ fluxdi.workspace = true
 # Async runtime
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
 futures.workspace = true
+libc = "0.2"
 async-trait.workspace = true
 
 # Error handling

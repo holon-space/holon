@@ -238,8 +238,18 @@ fn init_with_destinations(destinations: &[LogDest]) -> LogGuard {
             }
             #[cfg(not(target_arch = "wasm32"))]
             LogDest::File(path, format) => {
-                let file = std::fs::File::create(path)
-                    .unwrap_or_else(|e| panic!("Cannot create log file '{path}': {e}"));
+                // Append-only: a second instance or a relaunch must not erase
+                // the log of the run before it.
+                let mut options = std::fs::OpenOptions::new();
+                options.create(true).append(true);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    options.mode(0o600);
+                }
+                let file = options
+                    .open(path)
+                    .unwrap_or_else(|e| panic!("Cannot open log file '{path}': {e}"));
                 let (non_blocking, guard) = tracing_appender::non_blocking(file);
                 file_guards.push(guard);
                 match format {

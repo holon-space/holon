@@ -6,7 +6,8 @@
 //!
 //! @pbt kind harness
 //! @pbt covers mcp-sigterm-shutdown — SIGTERM, during boot or while serving,
-//! and SIGHUP end `holon-mcp` through `shutdown_session` with exit status 0
+//! and SIGHUP end `holon-mcp` through `shutdown_session` with exit status 0;
+//! a failed shutdown logs its error, and the exit error, and exits non-zero
 
 use std::io::Read;
 use std::process::Command;
@@ -170,5 +171,116 @@ fn sighup_ends_the_server_through_the_session_shutdown() {
         status.success() && text.contains("Received SIGHUP") && text.contains(SHUT_DOWN),
         "SIGHUP must end holon-mcp through the session shutdown with status 0, got {status}; \
          log:\n{text}"
+    );
+}
+
+/// Initialize a stdio session and set a block's content; the raw response.
+fn set_content_over_stdio(
+    child: &mut std::process::Child,
+    block_id: &str,
+    content: &str,
+) -> String {
+    use std::io::BufRead;
+    use std::io::Write;
+
+    let mut stdin = child.stdin.take().expect("stdin piped");
+    let mut stdout = std::io::BufReader::new(child.stdout.take().expect("stdout piped"));
+    let mut response_to = |id: u32| {
+        let mut line = String::new();
+        loop {
+            line.clear();
+            let read = stdout.read_line(&mut line).expect("read holon-mcp stdout");
+            assert!(
+                read > 0,
+                "holon-mcp closed stdout before answering request {id}"
+            );
+            if line.contains(&format!(r#""id":{id}"#)) {
+                return line.clone();
+            }
+        }
+    };
+    writeln!(
+        stdin,
+        r#"{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{"protocolVersion":"2025-06-18","capabilities":{{}},"clientInfo":{{"name":"sigterm-test","version":"1"}}}}}}"#
+    )
+    .expect("send initialize");
+    response_to(1);
+    writeln!(
+        stdin,
+        r#"{{"jsonrpc":"2.0","method":"notifications/initialized","params":{{}}}}"#
+    )
+    .expect("send initialized");
+    writeln!(
+        stdin,
+        r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"execute_operation","arguments":{{"entity_name":"block","operation":"set_field","params":{{"id":"{block_id}","field":"content","value":"{content}"}}}}}}}}"#
+    )
+    .expect("send the edit");
+    let ack = response_to(2);
+    // A closed stdin ends the stdio server.
+    child.stdin = Some(stdin);
+    ack
+}
+
+#[test]
+fn a_refused_write_back_is_in_the_log() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let vault = tempfile::tempdir().expect("vault dir");
+    std::fs::write(vault.path().join("page.org"), VAULT_ORG).expect("write the page");
+    let locked = vault.path().join("locked");
+    std::fs::create_dir(&locked).expect("create the page's dir");
+    let page = locked.join("locked.org");
+    std::fs::write(
+        &page,
+        "* Locked page\n:PROPERTIES:\n:ID: locked-page\n:END:\n\
+         ** Locked child\n:PROPERTIES:\n:ID: locked-child\n:END:\n",
+    )
+    .expect("write the locked page");
+    let state = tempfile::tempdir().expect("state dir");
+    let log = state.path().join("holon-mcp.log");
+
+    let mut child = spawn_on(vault.path(), state.path());
+    wait_for_log(&mut child, &log, BOOTED);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !std::fs::read_to_string(&page)
+        .expect("read the page")
+        .contains("#+ID:")
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the boot did not write the page's #+ID: line within 60 s"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    // The atomic write cannot create its temp file beside the page.
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555))
+        .expect("make the page's dir read-only");
+    let ack = set_content_over_stdio(&mut child, "block:locked-child", "EDITED-READ-ONLY");
+    signal(&child, "TERM");
+    let status = wait_for_exit(&mut child, &log);
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755))
+        .expect("make the page's dir writable again");
+
+    let text = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        ack.contains(r#""result""#) && !ack.contains(r#""isError":true"#),
+        "the edit was not acknowledged, so this test proves nothing: {ack}\nlog:\n{text}"
+    );
+    let on_disk = std::fs::read_to_string(&page).expect("read the page");
+    assert!(
+        !on_disk.contains("EDITED-READ-ONLY"),
+        "the write-back was not refused, so this test proves nothing:\n{on_disk}"
+    );
+    assert!(
+        !status.success(),
+        "a shutdown that left an edit out of its org file must exit non-zero; log:\n{text}"
+    );
+    assert!(
+        text.contains("refused the org write-back") && text.contains("locked.org"),
+        "the log must name the document the shutdown did not write; log:\n{text}"
+    );
+    assert!(
+        text.contains("holon-mcp exits with an error"),
+        "the log must record the error the process exits with; log:\n{text}"
     );
 }

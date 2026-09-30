@@ -1363,6 +1363,7 @@ precommit:
     set -euo pipefail
     echo "== Tier 1 [1/6]: justfile pipefail guard =="
     ./scripts/check-justfile-pipefail.sh
+    ./scripts/check-unix-cfg.sh
     echo "== Tier 1 [2/6]: defensive-code ratchet =="
     ./scripts/defensive-ratchet.sh
     echo "== Tier 1 [3/6]: workspace typecheck incl. every test target =="

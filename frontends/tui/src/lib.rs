@@ -11,7 +11,9 @@ pub mod geometry;
 pub mod input_pump;
 pub mod keybindings;
 pub mod render;
+pub mod stderr_to_log;
 pub mod stylesheet;
+pub mod terminal_hangup;
 pub mod user_driver;
 
 /// Return the set of widget names this TUI frontend supports.

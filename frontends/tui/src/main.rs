@@ -1,8 +1,13 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicUsize;
 
+use anyhow::Context;
+use holon_app::session::first_then;
+use holon_app::stop_signal::StopSignals;
+use holon_app::vault_lock::SessionVault;
 use holon_frontend::FrontendSession;
 use holon_frontend::ReactiveViewModel;
 use holon_frontend::cli;
@@ -11,6 +16,7 @@ use holon_tui::app_main::AppMain;
 use holon_tui::app_main::NO_FOCUS;
 use holon_tui::app_main::TuiState;
 use holon_tui::di::TuiModule;
+use holon_tui::stderr_to_log::StderrToLog;
 use r3bl_tui::CommonResult;
 use r3bl_tui::InputEvent;
 use r3bl_tui::Key;
@@ -33,34 +39,55 @@ async fn main() -> CommonResult<()> {
     // Disable r3bl logging to prevent breaking TUI display
     try_initialize_logging_global(tracing_core::LevelFilter::OFF).ok(); // ALLOW(ok): best-effort logging init
 
+    let log = tui_log_path().map_err(|e| miette::miette!("{e:#}"))?;
     // TUI defaults to file logging (stderr/stdout would corrupt the terminal).
     // Override with HOLON_LOG env var if set.
     let _log_guard = if std::env::var("HOLON_LOG").is_ok() {
         holon_frontend::logging::init()
     } else {
-        let log_file_path = tui_log_path();
-        holon_frontend::logging::init_from(&format!("file://{}", log_file_path.display()))
+        holon_frontend::logging::init_from(&format!("file://{}", log.display()))
     };
 
+    let stderr = StderrToLog::redirect(&log)
+        .map_err(|e| miette::miette!("pointing stderr at {}: {e}", log.display()))?;
+    let ran = run().await;
+    let restored = stderr
+        .restore()
+        .map_err(|e| anyhow::anyhow!("pointing stderr back at the terminal: {e}"));
+    let result = first_then(ran, restored).map_err(|e| miette::miette!("{e:#}"));
+    // Once the terminal is gone, the log is the only place an error reaches.
+    if let Err(e) = &result {
+        tracing::error!("holon-tui exits with an error: {e}");
+    }
+    result
+}
+
+async fn run() -> anyhow::Result<()> {
     let widgets = holon_tui::render_supported_widgets();
-    let (holon_config, session_config, config_dir, locked) =
-        cli::build_session(widgets).map_err(|e| miette::miette!("{}", e))?;
+    let (holon_config, session_config, config_dir, locked) = cli::build_session(widgets)?;
+    let vault = SessionVault::acquire(holon_config.vault.root.as_deref())?;
 
     // A stop during boot waits for the boot to finish and then takes the one
     // shutdown path, so the vault is left as a clean quit leaves it.
-    let mut stop =
-        holon_app::stop_signal::StopSignals::install().map_err(|e| miette::miette!("{e:#}"))?;
+    let stop = StopSignals::install()?;
 
-    tracing::info!("Starting TUI frontend...");
-    let mut app = fluxdi::Application::new(TuiModule {
+    let module = TuiModule {
         holon_config,
         session_config,
         config_dir,
         locked_keys: locked,
-    });
+        vault: Mutex::new(Some(vault)),
+    };
+    run_session(module, stop).await
+}
+
+/// Boot the session, draw it until a quit, then shut it down.
+async fn run_session(module: TuiModule, mut stop: StopSignals) -> anyhow::Result<()> {
+    tracing::info!("Starting TUI frontend...");
+    let mut app = fluxdi::Application::new(module);
     app.bootstrap()
         .await
-        .map_err(|e| miette::miette!("Bootstrap failed: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("Bootstrap failed: {e}"))?;
     tracing::info!("Session ready");
 
     let injector = app.injector();
@@ -101,7 +128,16 @@ async fn main() -> CommonResult<()> {
     // grab the main_thread_channel_sender from `GlobalData`. See
     // `app_main::ensure_watch_task_started`.
     let ran = tokio::select! {
-        ran = async { TerminalWindow::main_event_loop(tui_app, exit_keys, initial_state)?.await } => ran.map(|_| ()),
+        ran = async { TerminalWindow::main_event_loop(tui_app, exit_keys, initial_state)?.await } => {
+            ran.map(|_| ()).map_err(|e| {
+                let causes: Vec<String> = e.chain().map(ToString::to_string).collect();
+                anyhow::anyhow!("{}", causes.join(": "))
+            })
+        }
+        hung_up = holon_tui::terminal_hangup::hung_up() => {
+            tracing::info!("the terminal hung up, quitting");
+            hung_up.map_err(|e| anyhow::anyhow!("watching the terminal for a hangup failed: {e}"))
+        }
         signal = stop.recv() => {
             tracing::info!("{signal} received, quitting");
             // The event loop leaves raw mode only on its own exit. Leaving it
@@ -115,14 +151,13 @@ async fn main() -> CommonResult<()> {
         }
     };
     let session_shut_down = shut_down(app).await;
-    ran?;
-    session_shut_down
+    first_then(ran, session_shut_down)
 }
 
 /// Stop the session's watchers, then close the store, then tear the container
 /// down. The session shutdown's error is the process's exit status, returned
 /// after the teardown has still run.
-async fn shut_down(mut app: fluxdi::Application) -> CommonResult<()> {
+async fn shut_down(mut app: fluxdi::Application) -> anyhow::Result<()> {
     let session_shutdown = holon_app::shutdown_session(&app.injector()).await;
 
     // Container teardown — fires TuiModule::on_stop (MCP server stop, etc.)
@@ -133,16 +168,13 @@ async fn shut_down(mut app: fluxdi::Application) -> CommonResult<()> {
         Err(_) => tracing::warn!("Shutdown timed out after {timeout:?}"),
     }
 
-    session_shutdown.map_err(|e| miette::miette!("Session shutdown failed: {e:#}"))
+    session_shutdown.map_err(|e| anyhow::anyhow!("Session shutdown failed: {e:#}"))
 }
 
-fn tui_log_path() -> std::path::PathBuf {
-    let mut path = std::env::var_os("HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
-    path.push(".config");
-    path.push("holon");
-    std::fs::create_dir_all(&path).ok(); // ALLOW(ok): best-effort dir creation
-    path.push("tui.log");
-    path
+fn tui_log_path() -> anyhow::Result<PathBuf> {
+    let home = std::env::var_os("HOME")
+        .ok_or_else(|| anyhow::anyhow!("HOME is not set; holon-tui logs to $HOME/.config/holon"))?;
+    let dir = PathBuf::from(home).join(".config").join("holon");
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    Ok(dir.join("tui.log"))
 }
