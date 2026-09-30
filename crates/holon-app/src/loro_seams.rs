@@ -216,9 +216,6 @@ impl BlockReader for LoroBlockReader {
         }
         present
     }
-
-    // find_foreign_blocks: trait default over iter_documents_with_blocks is
-    // correct.
 }
 
 // ============================================================================

@@ -3930,10 +3930,12 @@ impl FileSyncController {
             .filter(|b| !old_blocks.contains_key(&b.id))
             .map(|b| b.id.clone())
             .collect();
-        let conflicts = self
-            .block_reader
-            .find_foreign_blocks(&new_block_ids, &document_uri)
-            .await?;
+        let conflicts = crate::sync_ports::find_foreign_blocks(
+            self.block_reader.as_ref(),
+            &new_block_ids,
+            &document_uri,
+        )
+        .await?;
         let adopted_from_store: HashMap<EntityUri, Block> = conflicts
             .iter()
             .map(|(block, _)| (block.id.clone(), block.clone()))

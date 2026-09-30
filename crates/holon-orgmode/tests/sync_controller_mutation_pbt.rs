@@ -318,8 +318,6 @@ impl BlockReader for InMemoryBlockStore {
             })
             .collect())
     }
-
-    // find_foreign_blocks: uses default implementation from BlockReader trait
 }
 
 fn block_from_params(params: &holon_api::StorageEntity) -> Block {
@@ -1916,6 +1914,14 @@ mod find_foreign_blocks_tests {
         Block::new_text(EntityUri::from_raw(id), EntityUri::from_raw(parent_id), "")
     }
 
+    /// `doc_id`'s page row followed by `blocks`: a block's document is its
+    /// nearest page ancestor, so the page must be a row the store holds.
+    fn with_page(doc_id: &str, blocks: Vec<Block>) -> Vec<Block> {
+        let mut page = make_block(doc_id, "sentinel:no_parent");
+        page.set_page(true);
+        std::iter::once(page).chain(blocks).collect()
+    }
+
     #[tokio::test]
     async fn nested_blocks_not_flagged_as_foreign() {
         // Simulate ClaudeCode.org's structure:
@@ -1926,17 +1932,17 @@ mod find_foreign_blocks_tests {
         //         block:grandchild (parent=block:child-b)
         let store = Arc::new(InMemoryBlockStore::new());
 
-        let mut doc = make_block("block:doc-claude", "sentinel:no_parent");
-        doc.content = "ClaudeCode".to_string();
-        doc.set_page(true);
         store.seed_blocks(
             "block:doc-claude",
-            vec![
-                make_block("block:root", "block:doc-claude"),
-                make_block("block:child-a", "block:root"),
-                make_block("block:child-b", "block:root"),
-                make_block("block:grandchild", "block:child-b"),
-            ],
+            with_page(
+                "block:doc-claude",
+                vec![
+                    make_block("block:root", "block:doc-claude"),
+                    make_block("block:child-a", "block:root"),
+                    make_block("block:child-b", "block:root"),
+                    make_block("block:grandchild", "block:child-b"),
+                ],
+            ),
         );
 
         let doc_uri = EntityUri::from_raw("block:doc-claude");
@@ -1949,8 +1955,7 @@ mod find_foreign_blocks_tests {
             EntityUri::from_raw("block:grandchild"),
         ];
 
-        let conflicts = store
-            .find_foreign_blocks(&query_ids, &doc_uri)
+        let conflicts = holon_filesystem::find_foreign_blocks(store.as_ref(), &query_ids, &doc_uri)
             .await
             .unwrap();
         assert!(
@@ -1965,18 +1970,24 @@ mod find_foreign_blocks_tests {
         let store = Arc::new(InMemoryBlockStore::new());
 
         // Doc A owns block:x
-        store.seed_blocks("block:doc-a", vec![make_block("block:x", "block:doc-a")]);
+        store.seed_blocks(
+            "block:doc-a",
+            with_page("block:doc-a", vec![make_block("block:x", "block:doc-a")]),
+        );
         // Doc B is separate
-        store.seed_blocks("block:doc-b", vec![make_block("block:y", "block:doc-b")]);
+        store.seed_blocks(
+            "block:doc-b",
+            with_page("block:doc-b", vec![make_block("block:y", "block:doc-b")]),
+        );
 
         let doc_b_uri = EntityUri::from_raw("block:doc-b");
 
         // Ask if block:x is foreign to doc-b — it should be
         let query_ids = vec![EntityUri::from_raw("block:x")];
-        let conflicts = store
-            .find_foreign_blocks(&query_ids, &doc_b_uri)
-            .await
-            .unwrap();
+        let conflicts =
+            holon_filesystem::find_foreign_blocks(store.as_ref(), &query_ids, &doc_b_uri)
+                .await
+                .unwrap();
         assert_eq!(conflicts.len(), 1);
         assert_eq!(conflicts[0].0.id, EntityUri::from_raw("block:x"));
     }
@@ -1988,25 +1999,31 @@ mod find_foreign_blocks_tests {
         // Doc A has block:deep nested 3 levels deep
         store.seed_blocks(
             "block:doc-a",
-            vec![
-                make_block("block:l1", "block:doc-a"),
-                make_block("block:l2", "block:l1"),
-                make_block("block:deep", "block:l2"),
-            ],
+            with_page(
+                "block:doc-a",
+                vec![
+                    make_block("block:l1", "block:doc-a"),
+                    make_block("block:l2", "block:l1"),
+                    make_block("block:deep", "block:l2"),
+                ],
+            ),
         );
         store.seed_blocks(
             "block:doc-b",
-            vec![make_block("block:other", "block:doc-b")],
+            with_page(
+                "block:doc-b",
+                vec![make_block("block:other", "block:doc-b")],
+            ),
         );
 
         let doc_b_uri = EntityUri::from_raw("block:doc-b");
 
         // block:deep belongs to doc-a, should be foreign to doc-b
         let query_ids = vec![EntityUri::from_raw("block:deep")];
-        let conflicts = store
-            .find_foreign_blocks(&query_ids, &doc_b_uri)
-            .await
-            .unwrap();
+        let conflicts =
+            holon_filesystem::find_foreign_blocks(store.as_ref(), &query_ids, &doc_b_uri)
+                .await
+                .unwrap();
         assert_eq!(conflicts.len(), 1);
         assert_eq!(conflicts[0].1, EntityUri::from_raw("block:doc-a"));
     }
@@ -2014,11 +2031,17 @@ mod find_foreign_blocks_tests {
     #[tokio::test]
     async fn empty_query_returns_empty() {
         let store = Arc::new(InMemoryBlockStore::new());
-        store.seed_blocks("block:doc-a", vec![make_block("block:x", "block:doc-a")]);
-        let conflicts = store
-            .find_foreign_blocks(&[], &EntityUri::from_raw("block:doc-a"))
-            .await
-            .unwrap();
+        store.seed_blocks(
+            "block:doc-a",
+            with_page("block:doc-a", vec![make_block("block:x", "block:doc-a")]),
+        );
+        let conflicts = holon_filesystem::find_foreign_blocks(
+            store.as_ref(),
+            &[],
+            &EntityUri::from_raw("block:doc-a"),
+        )
+        .await
+        .unwrap();
         assert!(conflicts.is_empty());
     }
 }

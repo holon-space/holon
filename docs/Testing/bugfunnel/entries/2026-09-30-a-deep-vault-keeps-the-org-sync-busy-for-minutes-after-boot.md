@@ -6,10 +6,10 @@ secondary: null
 status: OPEN
 summary: >-
   On a 10,000-block vault (10 docs x 50 chains x depth 20) the session stays
-  busy for more than 14 minutes after its boot is quiescent: the org
-  file-sync controller's home_by fold reads blocks one by one through the
-  Turso actor while IVM maintenance writes, and the first owning-page read
-  of the test never returns.
+  busy for more than 14 minutes after its boot is quiescent, and the first
+  owning-page read of the test never returns. Root cause: the boot ingest is
+  quadratic, because each org file ingest does work in proportion to the
+  whole vault (four O(N)-per-file sites; one fixed).
 ---
 
 ## Bug
@@ -34,14 +34,35 @@ needs a longer nextest cap". That reading is wrong:
   and IVM maintenance without end, and the owning-page read waits behind it.
 
 ## Root cause
-Not established. Hypotheses, most likely first:
-1. The `home_by` fold over a deep vault does one authoritative read for each
-   block for each diff, so the cost is O(N) per change and O(N²) for the boot
-   seed.
-2. A write-back feedback loop: a render changes a projected row, which
-   re-triggers the fold.
-3. IVM maintenance of a matview that joins on depth does too much work per
-   write.
+The boot ingest is quadratic: each org file ingest does work in proportion to
+the whole vault. Measured on a synthetic vault with the shape of the real one
+(`scripts/gen_deep_vault.py`, 400 pages, 17 404 headlines, release
+`holon-mcp`): the per-file ingest time grows from 52 to 297 ms over 400 files.
+The `sample` of the ingest shows these O(N)-per-file sites:
+
+1. `find_foreign_blocks` loaded and hydrated every block of the store on every
+   file ingest (trait default over `iter_documents_with_blocks`).
+2. `LoroDocumentStore::save_all` exports the whole Loro doc and fsyncs it on
+   every projection flush, that is once per file
+   (`crates/holon-loro/src/loro_sync_controller.rs`, `emit_ops`).
+3. `BlockCellRegistry::resolve_node_meta` scans the whole Loro tree on every
+   field write.
+4. `find_tree_id_by_stable_id_sync` scans the whole Loro tree on a cache miss,
+   and every create of a new id misses.
+
+The `home_by` fold (hypothesis 1 of the first triage) is not the dominant cost
+on this shape: 28 of about 6000 samples.
+
+## Fix status
+- Site 1 is fixed: `holon_filesystem::find_foreign_blocks` does one point read
+  per asked id and a memoized walk to the nearest page. Red:
+  `crates/holon-filesystem/tests/find_foreign_blocks_cost.rs` (a rows-read
+  bound and a differential check against the full scan). After the fix, the
+  per-file ingest time grows from 78 to about 140 ms over 400 files.
+- Sites 2-4 are open. Sites 3 and 4 get a complete stable-id index in
+  holon-loro, maintained from Loro doc events (ruling D1.a), so a miss is
+  authoritative and never scans. Site 2 keeps its crash-safety contract and
+  needs a save whose cost is in proportion to the change.
 
 ## Missing piece
 The test has no latency oracle that fails with a message about latency. Its
@@ -49,7 +70,6 @@ only failure is the runner's timeout, and that reads as "the test needs more
 time". No gate runs it.
 
 ## Remedy
-OPEN. First, take a longer sample with `HOLON_OWNING_PAGE_DEPTH` and
-`HOLON_OWNING_PAGE_CHAINS` reduced, to see whether the busy phase grows with N
-or N², then triage with `holon-diagnostics`. The test gets no nextest override
-until it finishes.
+PARTIAL. Site 1 is fixed (see Fix status). Sites 2-4 are open. The test
+`owning_page_cost_on_a_deep_vault` gets no nextest override until it finishes
+in budget; run it again after each fix.

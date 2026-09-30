@@ -184,39 +184,6 @@ pub trait BlockReader: Send + Sync {
     async fn blocks_in_feed_count(&self, block_ids: &[String]) -> usize {
         block_ids.len()
     }
-
-    /// Check if any of the given block IDs already exist under a DIFFERENT
-    /// document. Returns `(stored block, owning_doc_uri)` for each conflict
-    /// found; the stored block is the baseline an adopting ingest clears
-    /// against.
-    ///
-    /// Default implementation uses `iter_documents_with_blocks()` to correctly
-    /// attribute nested blocks to their document root (not just direct parent).
-    async fn find_foreign_blocks(
-        &self,
-        block_ids: &[EntityUri],
-        expected_doc_uri: &EntityUri,
-    ) -> Result<Vec<(Block, EntityUri)>> {
-        if block_ids.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let id_set: std::collections::HashSet<&EntityUri> = block_ids.iter().collect();
-        let documents = self.iter_documents_with_blocks().await?;
-
-        let mut conflicts = Vec::new();
-        for (doc_uri, blocks) in documents {
-            if &doc_uri == expected_doc_uri {
-                continue;
-            }
-            for block in blocks {
-                if id_set.contains(&block.id) {
-                    conflicts.push((block, doc_uri.clone()));
-                }
-            }
-        }
-        Ok(conflicts)
-    }
 }
 
 /// CRUD operations on page blocks (blocks tagged `"Page"`).
@@ -1076,6 +1043,61 @@ impl PageAncestor {
             PageAncestor::NoOwner | PageAncestor::StartAbsent | PageAncestor::Broken(_) => None,
         }
     }
+}
+
+/// Check if any of the given block IDs already exist under a DIFFERENT
+/// document. Returns `(stored block, owning_doc_uri)` for each conflict
+/// found; the stored block is the baseline an adopting ingest clears
+/// against.
+///
+/// A block's document is its nearest `Page` ancestor, as
+/// [`holon_api::blocks_by_document`] attributes it; a page is a document
+/// root and never a conflict, and a block no page owns belongs to
+/// [`EntityUri::no_parent`].
+///
+/// The ancestor walk stops after [`MAX_PAGE_WALK`] blocks. A block that far
+/// below its page is attributed to `no_parent` and so reported as foreign
+/// to any other `expected_doc_uri`, which makes the ingest adopt it as an
+/// update instead of a create; `nearest_page_ancestor` logs the break at
+/// ERROR and the ingest continues.
+///
+/// Each id is answered once, in first-seen order, however often it is asked.
+///
+/// Every file ingest asks this about the file's new ids, so it reads only
+/// those rows and their ancestors: a cost that grows with the store makes
+/// a vault's boot quadratic in its size.
+pub async fn find_foreign_blocks(
+    reader: &dyn BlockReader,
+    block_ids: &[EntityUri],
+    expected_doc_uri: &EntityUri,
+) -> Result<Vec<(Block, EntityUri)>> {
+    let mut rows = BlockRowMemo::new();
+    let mut conflicts = Vec::new();
+    let mut asked = std::collections::BTreeSet::new();
+    for id in block_ids {
+        if !asked.insert(id) {
+            continue;
+        }
+        // A merged-away id answers with its survivor, which is a different
+        // block than the one asked about.
+        let Some(block) = reader
+            .get_block_authoritative(id)
+            .await?
+            .filter(|b| b.id == *id && !b.is_page())
+        else {
+            continue;
+        };
+        let doc = match nearest_page_ancestor(reader, &block.parent_id, &mut rows, None).await? {
+            PageAncestor::Page(page) => page.id,
+            PageAncestor::NoOwner | PageAncestor::StartAbsent | PageAncestor::Broken(_) => {
+                EntityUri::no_parent()
+            }
+        };
+        if doc != *expected_doc_uri {
+            conflicts.push((block, doc));
+        }
+    }
+    Ok(conflicts)
 }
 
 /// Walk `start`'s parent chain upward to the nearest `Page` — the block that

@@ -99,6 +99,7 @@ pub use sync_ports::PageWalkBreak;
 pub use sync_ports::ShareWritebackDisclosure;
 pub use sync_ports::ThreeWayTextMerge;
 pub use sync_ports::WritebackDisclosure;
+pub use sync_ports::find_foreign_blocks;
 pub use sync_ports::nearest_page_ancestor;
 #[cfg(not(target_arch = "wasm32"))]
 pub use vault_filter::VaultFilter;

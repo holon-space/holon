@@ -5429,6 +5429,7 @@ dependencies = [
  "ignore",
  "notify 8.2.0",
  "percent-encoding",
+ "proptest 1.11.0",
  "serde",
  "serde_json",
  "sha2 0.10.9",
