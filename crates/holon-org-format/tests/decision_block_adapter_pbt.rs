@@ -338,7 +338,7 @@ const PLAIN_TITLES: &[&str] = &[
     "x :tag: y",
 ];
 /// Kept verbatim by an option headline, which carries no keyword or tag.
-const PLAIN_LABELS: &[&str] = &["Pick ::", "x ::", "x:y:", "x :"];
+const PLAIN_LABELS: &[&str] = &["Pick ::", "x ::", "x :"];
 /// Kept verbatim by the decision headline, which carries its own keyword.
 const PLAIN_QUESTIONS: &[&str] = &["? x", "TODO x", "DONE x", "Pick ::", "x:y:"];
 /// Titles org reads as a cookie, keyword, tags or link, or refuses to parse.
@@ -641,6 +641,11 @@ proptest! {
             !matches!(breach, Breach::NoKeyword)
                 || !PLAIN_QUESTIONS.iter().any(|q| q.starts_with(first_word)),
             "without its own keyword the headline reads the question's first word as one"
+        );
+        prop_assume!(
+            !matches!(breach, Breach::NoTag)
+                || holon_api::types::Tags::org_tag_group_start(d.question()).is_none(),
+            "without its own tag group the headline reads the question's trailing :y: as one"
         );
         let mut vault = stored(&d);
         breach.apply(&mut vault);

@@ -1002,27 +1002,37 @@ impl Tags {
     }
 
     /// Split org headline text into its title and its tags, the way the org
-    /// parser reads them (docs/Reference/ORG_SYNTAX.md): the tags are the last
-    /// blank-separated token when it is `:`, tag characters or colons, and `:`,
-    /// and it names at least one tag. That token may be the whole text.
+    /// parser reads them: the title is the text before the tag group
+    /// ([`Tags::org_tag_group_start`]), without its surrounding spaces and
+    /// tabs. An empty tag (`:a::`) is not kept.
     pub fn split_org_headline(text: &str) -> (String, Vec<String>) {
         let text = text.trim_end_matches([' ', '\t']);
-        let start = text.rfind([' ', '\t']).map_or(0, |blank| blank + 1);
-        let token = &text[start..];
-        let tags: Vec<String> = token
+        let start = Self::org_tag_group_start(text).unwrap_or(text.len());
+        let tags = text[start..]
             .split(':')
             .filter(|tag| !tag.is_empty())
             .map(str::to_string)
             .collect();
-        let is_tag_group = token.len() > 2
-            && token.starts_with(':')
-            && token.ends_with(':')
-            && token.chars().all(|c| c == ':' || Self::is_org_tag_char(c))
-            && !tags.is_empty();
-        if !is_tag_group {
-            return (text.trim().to_string(), Vec::new());
-        }
-        (text[..start].trim().to_string(), tags)
+        (text[..start].trim_matches([' ', '\t']).to_string(), tags)
+    }
+
+    /// Where the tag group of headline `text` starts, if org reads one.
+    /// `org-element--headline-parse-title` (org 9.7.11) takes the first match
+    /// of `\(:[[:alnum:]_@#%:]+:\)[ \t]*$`: the run of tag characters and
+    /// colons that ends the line, from its first colon on, when that is at
+    /// least three characters and ends in a colon. No blank is needed before
+    /// it.
+    pub fn org_tag_group_start(text: &str) -> Option<usize> {
+        let text = text.trim_end_matches([' ', '\t']);
+        let run = text
+            .char_indices()
+            .rev()
+            .take_while(|&(_, c)| c == ':' || Self::is_org_tag_char(c))
+            .last()?
+            .0;
+        let start = run + text[run..].find(':')?;
+        let group = &text[start..];
+        (group.len() >= 3 && group.ends_with(':')).then_some(start)
     }
 
     /// A character an org headline tag holds: alphanumeric, `_@#%`, and `-`.

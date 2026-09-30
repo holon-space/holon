@@ -653,6 +653,37 @@ pub fn split_headline_tags(line: &str) -> (String, Vec<String>) {
     holon_api::Tags::split_org_headline(&headline_title_text(&headline))
 }
 
+/// The title text of `content`'s first line that a link over it keeps as a
+/// headline title: its char offset in `content` and the text itself. The
+/// tag group org reads at the end of the written headline stays outside the
+/// link: the block's `tags` when it has any, else one typed into `content`.
+///
+/// `None` for a blank title, for a title with surrounding whitespace (a link
+/// label holds none), and for a title an org link description cannot hold:
+/// `org-link-bracket-re` ends a description at its first `]]`, so the text
+/// must not contain `]]` nor end in `]` (docs/Reference/ORG_SYNTAX.md).
+pub fn linkable_title(content: &str, tags: &holon_api::Tags) -> Option<(usize, String)> {
+    let line = content.split_once('\n').map_or(content, |(line, _)| line);
+    // The parser ends the headline at its trailing ASCII whitespace (a `\r` too).
+    let line = line.trim_end_matches(|c: char| c.is_ascii_whitespace());
+    let written = if tags.is_empty() {
+        line.to_string()
+    } else {
+        format!("{line} :t:")
+    };
+    let (title, _) = split_headline_tags(&written);
+    if title.trim() != title || title.is_empty() || title.contains("]]") || title.ends_with(']') {
+        return None;
+    }
+    let head = written[..holon_api::Tags::org_tag_group_start(&written).unwrap_or(written.len())]
+        .trim_end_matches([' ', '\t']);
+    assert!(
+        head.ends_with(&title),
+        "the headline title {title:?} must end the title line {line:?} before its tags"
+    );
+    Some((head[..head.len() - title.len()].chars().count(), title))
+}
+
 /// A headline as the org parser reads it.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct HeadlineReading {
@@ -802,7 +833,7 @@ pub(crate) fn block_content(
         Some(b) => format!("{title}\n{b}"),
         None => title.to_string(),
     };
-    let (rendered, spans) = crate::inline_marks::extract_inline_marks_with(&raw, classifier);
+    let (rendered, spans) = crate::inline_marks::extract_block_marks_with(&raw, classifier);
     if spans.is_empty() {
         (raw, None)
     } else {
@@ -824,6 +855,20 @@ fn headline_title_text(headline: &Headline) -> String {
         })
         .map(|n| n.to_string())
         .collect()
+}
+
+/// The spaces and tabs at the end of the headline's own line, if any.
+fn headline_line_end(headline: &Headline) -> Option<String> {
+    let line: String = headline
+        .syntax()
+        .children_with_tokens()
+        .take_while(|child| {
+            child.kind() != SyntaxKind::NEW_LINE && child.kind() != SyntaxKind::SECTION
+        })
+        .map(|child| child.to_string())
+        .collect();
+    let text_end = line.trim_end_matches([' ', '\t']).len();
+    (text_end < line.len()).then(|| line[text_end..].to_string())
 }
 
 /// Parse keywords config string "TODO,INPROGRESS|DONE,CANCELLED" into
@@ -1249,6 +1294,12 @@ fn process_headlines(
         block.set_level(level);
         if level != parent_level + 1 {
             block.set_property(crate::models::org_props::STARS, level.to_string());
+        }
+        if let Some(end) = headline_line_end(&headline) {
+            block.set_property(
+                crate::models::org_props::HEADLINE_END,
+                serde_json::to_string(&end).expect("a string serializes"),
+            );
         }
         block.set_sequence(sequence);
         block.set_task_state(task_state);
@@ -2555,6 +2606,45 @@ mod tests {
             .filter(|&c| orgize(c) != holon_api::Tags::is_org_tag_char(c))
             .collect();
         assert!(differ.is_empty(), "{differ:?}");
+    }
+
+    #[test]
+    fn a_page_link_covers_the_title_text_org_can_hold() {
+        let cases: [(&str, Option<(usize, &str)>); 9] = [
+            (
+                "Tagged title :work:urgent:\nbody",
+                Some((0, "Tagged title")),
+            ),
+            ("  Single tagged :work:  ", Some((2, "Single tagged"))),
+            ("plain\tline\r\nbody", Some((0, "plain\tline"))),
+            (":work:", None),
+            ("   \nbody", None),
+            ("see [[ here", Some((0, "see [[ here"))),
+            ("a ]] b", None),
+            ("see [x]\nbody", None),
+            ("see [x] :t:", None),
+        ];
+        for (content, expected) in cases {
+            let expected = expected.map(|(start, title)| (start, title.to_string()));
+            assert_eq!(
+                linkable_title(content, &holon_api::Tags::default()),
+                expected,
+                "{content:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_page_link_over_a_tagged_block_covers_a_typed_tag_group() {
+        let tags = holon_api::Tags::from(vec!["b".to_string()]);
+        assert_eq!(
+            linkable_title("x :a:", &tags),
+            Some((0, "x :a:".to_string()))
+        );
+        assert_eq!(
+            linkable_title("x:a:\nbody", &tags),
+            Some((0, "x:a:".to_string()))
+        );
     }
 
     #[test]

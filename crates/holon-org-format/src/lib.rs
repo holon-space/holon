@@ -47,6 +47,8 @@ pub use drawer::UnrepresentableKey;
 pub use drawer::ValueCarrier;
 pub use inline_marks::SourceContentOffsets;
 pub use inline_marks::expected_reparse;
+pub use inline_marks::extract_block_marks;
+pub use inline_marks::extract_block_marks_with;
 pub use inline_marks::extract_inline_marks;
 pub use inline_marks::extract_inline_marks_with;
 pub use inline_marks::render_inline_marks;

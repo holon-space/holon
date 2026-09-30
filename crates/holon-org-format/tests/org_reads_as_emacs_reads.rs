@@ -444,6 +444,7 @@ fn an_underscore_drawer_key_is_a_property() {
         "_provenance",
         "_source_lines",
         "_stars",
+        "_headline_end",
         "_file_properties",
         "_file_id_keyword",
         "\\_note",
@@ -540,4 +541,115 @@ fn a_quoted_empty_drawer_value_is_read_as_org_reads_it() {
         Some(""),
         "{text:?}"
     );
+}
+
+/// A headline's title and its section are two elements, so no link or
+/// emphasis spans them (`lane-logs/r14-f3-emacs.log`).
+#[test]
+fn no_mark_spans_a_title_and_its_body() {
+    let files = [
+        (
+            "* [[u][e 28\n:PROPERTIES:\n:ID: h\n:END:\nuN R9\n,* a]]\n",
+            "[[u][e 28\nuN R9\n* a]]",
+        ),
+        (
+            "* *bold\n:PROPERTIES:\n:ID: h\n:END:\nb* x\n",
+            "*bold\nb* x",
+        ),
+        (
+            "* [[u][a\n:PROPERTIES:\n:ID: h\n:END:\nb]] *c*\n",
+            "[[u][a\nb]] c",
+        ),
+    ];
+    let mut wrong = Vec::new();
+    for (file, content) in files {
+        let (document, blocks) = parse(file);
+        let h = block(&blocks, "h");
+        let crossing: Vec<_> = h
+            .marks
+            .iter()
+            .flatten()
+            .filter(|m| {
+                m.start <= 1 + h.content.split('\n').next().unwrap().chars().count()
+                    && m.end > h.content.split('\n').next().unwrap().chars().count()
+            })
+            .collect();
+        let written = render(&document, &blocks);
+        if h.content != content || !crossing.is_empty() || written != (file.to_string(), vec![]) {
+            wrong.push(format!(
+                "{file:?}: content {:?} marks {:?} written {written:?}",
+                h.content, h.marks
+            ));
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// The link org reads where a run of 0 to 8 backslashes stands before a
+/// bracket in the path, as `emacs -Q` 30.2 (org 9.7.11) reads it (the full
+/// grid is the orgize fork's `src/syntax/link_org_9_7_11.txt`). Holon keeps
+/// the authored path bytes.
+#[test]
+fn a_link_path_holds_an_escaped_bracket() {
+    let cases: [(&str, Option<&str>); 36] = [
+        (r"x [[a[b]] y", None),
+        (r"x [[a\[b]] y", Some(r"a\[b")),
+        (r"x [[a\\[b]] y", None),
+        (r"x [[a\\\[b]] y", Some(r"a\\\[b")),
+        (r"x [[a\\\\[b]] y", Some(r"a\\\\[b")),
+        (r"x [[a\\\\\[b]] y", Some(r"a\\\\\[b")),
+        (r"x [[a\\\\\\[b]] y", Some(r"a\\\\\\[b")),
+        (r"x [[a\\\\\\\[b]] y", Some(r"a\\\\\\\[b")),
+        (r"x [[a\\\\\\\\[b]] y", Some(r"a\\\\\\\\[b")),
+        (r"x [[a]b]] y", None),
+        (r"x [[a\]b]] y", Some(r"a\]b")),
+        (r"x [[a\\]b]] y", None),
+        (r"x [[a\\\]b]] y", Some(r"a\\\]b")),
+        (r"x [[a\\\\]b]] y", Some(r"a\\\\]b")),
+        (r"x [[a\\\\\]b]] y", Some(r"a\\\\\]b")),
+        (r"x [[a\\\\\\]b]] y", Some(r"a\\\\\\]b")),
+        (r"x [[a\\\\\\\]b]] y", Some(r"a\\\\\\\]b")),
+        (r"x [[a\\\\\\\\]b]] y", Some(r"a\\\\\\\\]b")),
+        (r"x [[a]]] y", Some(r"a")),
+        (r"x [[a\]]] y", Some(r"a\]")),
+        (r"x [[a\\]]] y", Some(r"a\\")),
+        (r"x [[a\\\]]] y", Some(r"a\\\]")),
+        (r"x [[a\\\\]]] y", Some(r"a\\\\")),
+        (r"x [[a\\\\\]]] y", Some(r"a\\\\\]")),
+        (r"x [[a\\\\\\]]] y", Some(r"a\\\\\\")),
+        (r"x [[a\\\\\\\]]] y", Some(r"a\\\\\\\]")),
+        (r"x [[a\\\\\\\\]]] y", Some(r"a\\\\\\\\")),
+        (r"x [[a][d]] y", Some(r"d")),
+        (r"x [[a\][d]] y", None),
+        (r"x [[a\\][d]] y", Some(r"d")),
+        (r"x [[a\\\][d]] y", Some(r"d")),
+        (r"x [[a\\\\][d]] y", Some(r"d")),
+        (r"x [[a\\\\\][d]] y", Some(r"d")),
+        (r"x [[a\\\\\\][d]] y", Some(r"d")),
+        (r"x [[a\\\\\\\][d]] y", Some(r"d")),
+        (r"x [[a\\\\\\\\][d]] y", Some(r"d")),
+    ];
+    let mut wrong = Vec::new();
+    for (line, label) in cases {
+        let file = page(&format!("{line}\n"));
+        let (document, blocks) = parse(&file);
+        let h = block(&blocks, "h");
+        let labels: Vec<&str> = h
+            .marks
+            .iter()
+            .flatten()
+            .filter_map(|m| match &m.mark {
+                holon_api::InlineMark::Link { label, .. } => Some(label.as_str()),
+                _ => None,
+            })
+            .collect();
+        let written = render(&document, &blocks);
+        if labels != label.into_iter().collect::<Vec<_>>() || written != (file.clone(), vec![]) {
+            wrong.push(format!(
+                "{line:?}: links {labels:?}, content {:?}, written {written:?}",
+                h.content
+            ));
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }

@@ -206,6 +206,7 @@ fn normalize_seeded(
     for _ in 0..32 {
         // Writeback: what the block looks like on disk (identity while the
         // mark set is empty — an unseeded raw input IS the org text).
+        marks.retain(|m| !spans_title_and_body(&text, m));
         let on_disk = holon_orgmode::inline_marks::render_inline_marks(&text, &marks);
         // Re-ingest: headline-title trim, then mark extraction.
         let trimmed_end = on_disk.trim_end();
@@ -214,7 +215,7 @@ fn normalize_seeded(
             None => trimmed_end.trim_start().to_string(),
         };
         let (rendered, spans) =
-            holon_orgmode::inline_marks::extract_inline_marks_with(&trimmed, classifier);
+            holon_orgmode::inline_marks::extract_block_marks_with(&trimmed, classifier);
         if rendered == text && spans == marks {
             holon_api::canonicalize_marks(&mut marks);
             let marks = if marks.is_empty() { None } else { Some(marks) };
@@ -259,6 +260,33 @@ pub fn apply_org_headline_tag_split(block: &mut Block) {
     };
     for t in tags {
         block.tags.insert(t);
+    }
+}
+
+/// Whether `mark` lies over both the first line of `content` and the rest:
+/// org reads a headline's title and its section as two elements, so no file
+/// holds such a mark.
+fn spans_title_and_body(content: &str, mark: &holon_api::MarkSpan) -> bool {
+    content.split_once('\n').is_some_and(|(title, _)| {
+        let title_end = title.chars().count();
+        mark.start <= title_end && mark.end > title_end
+    })
+}
+
+/// The org ELEMENT lens on a block's marks: a styling or protective mark over
+/// the title and the body is dropped on disk. A link over both stays expected,
+/// so a transition that mints one is a divergence, never a link that silently
+/// goes missing.
+pub fn drop_marks_across_title_and_body(block: &mut Block) {
+    let Some(marks) = block.marks.as_mut() else {
+        return;
+    };
+    marks.retain(|m| {
+        m.mark.class() == holon_api::MarkClass::DataBearing
+            || !spans_title_and_body(&block.content, m)
+    });
+    if marks.is_empty() {
+        block.marks = None;
     }
 }
 

@@ -360,6 +360,42 @@ async fn convert_creates_missing_destination_hierarchy_reversibly() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn convert_links_the_whole_title_org_reads_before_the_block_tags() {
+    let engine = block_engine().await;
+    let origin = "block:tagged-origin";
+    let mut params: StorageEntity = HashMap::new();
+    params.insert("id".into(), Value::String(origin.to_string()));
+    params.insert("content".into(), Value::String("x :a:".to_string()));
+    params.insert(
+        "parent_id".into(),
+        Value::String("sentinel:no_parent".to_string()),
+    );
+    params.insert(
+        "tags".into(),
+        Value::Array(vec![Value::String("b".to_string())]),
+    );
+    engine
+        .execute_operation(&EntityName::new(BLOCK), "create", params, OpOrigin::Sync)
+        .await
+        .unwrap_or_else(|e| panic!("create {origin}: {e:#}"));
+
+    let page = convert(&engine, origin, "").await;
+    let link = MarkSpan::new(
+        0,
+        5,
+        InlineMark::Link {
+            target: EntityRef::from_uri(&EntityUri::from_raw(&page)),
+            label: "x :a:".to_string(),
+        },
+    );
+    assert_eq!(
+        marks_of(&engine, origin).await,
+        Some(marks_to_json(&[link])),
+        "`* x :a: :b:` reads as title `x :a:` and tags `b`"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn convert_at_vault_root_is_allowed() {
     let engine = block_engine().await;
     let origin = "block:root-origin";

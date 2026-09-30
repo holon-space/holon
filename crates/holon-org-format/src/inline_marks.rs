@@ -65,6 +65,81 @@ pub fn extract_inline_marks_with(
     (state.out, state.marks)
 }
 
+/// A text block's content and marks. The first line is the block's headline
+/// title and the rest its section: org reads them as two elements, so no mark
+/// spans both.
+pub fn extract_block_marks_with(
+    text: &str,
+    classifier: &LinkTargetClassifier,
+) -> (String, Vec<MarkSpan>) {
+    let Some((title, body)) = text.split_once('\n') else {
+        return extract_inline_marks_with(text, classifier);
+    };
+    let (mut out, mut marks) = extract_inline_marks_with(title, classifier);
+    let shift = out.chars().count() + 1;
+    let (body_out, body_marks) = extract_inline_marks_with(body, classifier);
+    out.push('\n');
+    out.push_str(&body_out);
+    marks.extend(body_marks.into_iter().map(|m| MarkSpan {
+        start: m.start + shift,
+        end: m.end + shift,
+        mark: m.mark,
+    }));
+    (out, marks)
+}
+
+/// [`extract_block_marks_with`] against the built-in link classifier.
+pub fn extract_block_marks(text: &str) -> (String, Vec<MarkSpan>) {
+    extract_block_marks_with(text, &LinkTargetClassifier::default())
+}
+
+/// A text block's marks split by the element they fall in (see
+/// [`extract_block_marks_with`]): the title's, the body's with offsets into
+/// the body, and those that span both, which no org file can hold.
+pub struct BlockMarks {
+    pub title: Vec<MarkSpan>,
+    pub body: Vec<MarkSpan>,
+    pub spanning: Vec<MarkSpan>,
+}
+
+/// [`expected_reparse`] of a text block, element by element.
+pub fn expected_block_reparse(content: &str, marks: &[MarkSpan]) -> String {
+    let Some((title, body)) = content.split_once('\n') else {
+        return expected_reparse(content, marks);
+    };
+    let split = split_block_marks(content, marks);
+    format!(
+        "{}\n{}",
+        expected_reparse(title, &split.title),
+        expected_reparse(body, &split.body)
+    )
+}
+
+pub fn split_block_marks(content: &str, marks: &[MarkSpan]) -> BlockMarks {
+    let title_len = content
+        .split_once('\n')
+        .map_or(usize::MAX, |(title, _)| title.chars().count());
+    let mut split = BlockMarks {
+        title: Vec::new(),
+        body: Vec::new(),
+        spanning: Vec::new(),
+    };
+    for m in marks {
+        if m.end <= title_len {
+            split.title.push(m.clone());
+        } else if m.start > title_len {
+            split.body.push(MarkSpan {
+                start: m.start - title_len - 1,
+                end: m.end - title_len - 1,
+                mark: m.mark.clone(),
+            });
+        } else {
+            split.spanning.push(m.clone());
+        }
+    }
+    split
+}
+
 /// The one extraction pass. `src_base` is the absolute source byte offset
 /// `text` starts at, so a nested re-parse (the emphasis arm re-parses its
 /// stripped inner string) reports [`OffsetRun`]s in the OUTER source's
@@ -72,7 +147,7 @@ pub fn extract_inline_marks_with(
 fn extract_state(text: &str, classifier: &LinkTargetClassifier, src_base: usize) -> ExtractState {
     let mut state = ExtractState {
         classifier: classifier.clone(),
-        source: text.to_string(),
+        source: text.into(),
         src_base,
         whole_text_len: text.len(),
         ..Default::default()
@@ -81,26 +156,29 @@ fn extract_state(text: &str, classifier: &LinkTargetClassifier, src_base: usize)
     state
 }
 
-/// The emphasis arm's nested re-parse: same classifier and policy as `outer`,
-/// told where `text` sits in the outer source and which marks already cover it
-/// whole — see [`ExtractState::full_span_active`].
-fn extract_state_within(
-    text: &str,
+/// An emphasis node's contents, walked from the tree the outer walk already
+/// holds: same classifier and policy as `outer`, and which marks already
+/// cover the contents whole — see [`ExtractState::full_span_active`].
+fn extract_contents_within(
+    emphasis: &SyntaxNode,
     outer: &ExtractState,
-    src_base: usize,
     full_span_active: Vec<InlineMark>,
 ) -> ExtractState {
+    let children: Vec<_> = emphasis.children_with_tokens().collect();
+    let contents = &children[1..children.len() - 1];
+    let delimiters = usize::from(children[0].text_range().len())
+        + usize::from(children[children.len() - 1].text_range().len());
     let mut state = ExtractState {
         classifier: outer.classifier.clone(),
-        source: text.to_string(),
+        source: outer.source.clone(),
         keep_emphasis_raw: outer.keep_emphasis_raw,
-        src_base,
-        whole_text_len: text.len(),
+        src_base: outer.src_base,
+        whole_text_len: usize::from(emphasis.text_range().len()) - delimiters,
         full_span_active,
         nesting: outer.nesting + 1,
         ..Default::default()
     };
-    walk_node(&parse_inline(text), &mut state);
+    walk_elements(contents.iter().cloned(), &mut state);
     state
 }
 
@@ -137,17 +215,38 @@ pub fn source_content_offsets(source: &str) -> SourceContentOffsets {
     source_content_offsets_with(source, &LinkTargetClassifier::default())
 }
 
-/// Map `source`'s bytes onto the content bytes [`extract_inline_marks_with`]
-/// extracts from it, under the same classifier — one parse, one answer.
+/// Map a text block's `source` bytes onto the content bytes
+/// [`extract_block_marks_with`] extracts from it, under the same classifier.
 pub fn source_content_offsets_with(
     source: &str,
     classifier: &LinkTargetClassifier,
 ) -> SourceContentOffsets {
-    let state = extract_state(source, classifier, 0);
+    let Some((title, body)) = source.split_once('\n') else {
+        let state = extract_state(source, classifier, 0);
+        return SourceContentOffsets {
+            runs: state.runs,
+            source_len: source.len(),
+            content_len: state.out.len(),
+        };
+    };
+    let title_state = extract_state(title, classifier, 0);
+    let body_state = extract_state(body, classifier, title.len() + 1);
+    let newline = title_state.out.len();
+    let shift = newline + 1;
+    let mut runs = title_state.runs;
+    runs.push(OffsetRun {
+        src: title.len()..title.len() + 1,
+        content: newline..shift,
+        verbatim: true,
+    });
+    runs.extend(body_state.runs.into_iter().map(|run| OffsetRun {
+        content: run.content.start + shift..run.content.end + shift,
+        ..run
+    }));
     SourceContentOffsets {
-        runs: state.runs,
+        runs,
         source_len: source.len(),
-        content_len: state.out.len(),
+        content_len: shift + body_state.out.len(),
     }
 }
 
@@ -324,15 +423,27 @@ pub(crate) fn render_candidates(content: &str, emit_marks: &[MarkSpan]) -> Vec<S
 ///   adoption leaves" would mean deleting the bytes, and an erasure nobody is
 ///   told about is worse than the disclosed refusal to settle.
 fn canonicalize_adopted_links(content: &str, marks: &[MarkSpan]) -> (String, Vec<MarkSpan>) {
+    canonicalize_adoptions(content, marks, &link_adoptions(content))
+}
+
+/// [`canonicalize_adopted_links`] after the parse: `adoptions` are
+/// [`link_adoptions`] of `content`.
+fn canonicalize_adoptions(
+    content: &str,
+    marks: &[MarkSpan],
+    adoptions: &[(std::ops::Range<usize>, String)],
+) -> (String, Vec<MarkSpan>) {
     let mut out = String::with_capacity(content.len());
     // (char position at the span's end, chars gained or lost there)
     let mut deltas: Vec<(usize, isize)> = Vec::new();
     let mut cursor = 0usize;
-    for (range, _) in link_adoptions(content) {
+    let mut chars = CharOffsets::new(content);
+    let mut overlapping = OverlapSweep::new(marks.iter().map(|m| (m.start, m.end)));
+    for (range, _) in adoptions {
         let raw = &content[range.clone()];
-        let start = content[..range.start].chars().count();
-        let end = content[..range.end].chars().count();
-        if marks.iter().any(|m| m.start < end && start < m.end) {
+        let start = chars.at(range.start);
+        let end = chars.at(range.end);
+        if overlapping.any_overlaps(start, end) {
             continue;
         }
         let (label, adopted_marks) = extract_inline_marks(raw);
@@ -356,12 +467,19 @@ fn canonicalize_adopted_links(content: &str, marks: &[MarkSpan]) -> (String, Vec
     // No mark boundary lies strictly inside a rewritten span (overlapping spans
     // were skipped), so every boundary is wholly before or wholly after each
     // delta and shifts by the sum of the ones it follows.
+    let ats: Vec<usize> = deltas.iter().map(|(at, _)| *at).collect();
+    let moved_through: Vec<isize> = deltas
+        .iter()
+        .scan(0isize, |sum, (_, d)| {
+            *sum += d;
+            Some(*sum)
+        })
+        .collect();
     let shift = |pos: usize| -> usize {
-        let moved: isize = deltas
-            .iter()
-            .filter(|(at, _)| *at <= pos)
-            .map(|(_, d)| *d)
-            .sum();
+        let moved = match ats.partition_point(|at| *at <= pos) {
+            0 => 0,
+            n => moved_through[n - 1],
+        };
         (pos as isize + moved) as usize
     };
     let shifted = marks
@@ -391,13 +509,14 @@ fn canonicalize_adopted_links(content: &str, marks: &[MarkSpan]) -> (String, Vec
 /// live link to a page that does not exist. A `Link`'s own span holds its
 /// label, which org never re-parses.
 pub fn expected_reparse(content: &str, marks: &[MarkSpan]) -> String {
-    let sealed = sealed_char_ranges(marks);
+    let mut sealed = ContainmentSweep::new(sealed_char_ranges(marks));
+    let mut chars = CharOffsets::new(content);
     let mut out = String::with_capacity(content.len());
     let mut cursor = 0usize;
     for (range, adopted) in link_adoptions(content) {
-        let start = content[..range.start].chars().count();
-        let end = content[..range.end].chars().count();
-        if sealed.iter().any(|(s, e)| *s <= start && end <= *e) {
+        let start = chars.at(range.start);
+        let end = chars.at(range.end);
+        if sealed.any_contains(start, end) {
             continue;
         }
         out.push_str(&content[cursor..range.start]);
@@ -416,19 +535,15 @@ pub fn expected_reparse(content: &str, marks: &[MarkSpan]) -> String {
 /// org encodes the doubled `__x__` form, where the second pair is real syntax
 /// rather than a restatement.
 fn drop_duplicate_protective_marks(marks: &[MarkSpan]) -> Vec<MarkSpan> {
-    let mut seen: Vec<&MarkSpan> = Vec::new();
-    let mut kept = Vec::with_capacity(marks.len());
-    for m in marks {
-        let redundant = m.mark.class() == MarkClass::Protective
-            && seen
-                .iter()
-                .any(|s| s.start == m.start && s.end == m.end && s.mark == m.mark);
-        if !redundant {
-            seen.push(m);
-            kept.push(m.clone());
-        }
-    }
-    kept
+    let mut seen = std::collections::HashSet::new();
+    marks
+        .iter()
+        .filter(|m| {
+            m.mark.class() != MarkClass::Protective
+                || seen.insert((m.start, m.end, m.mark.loro_key()))
+        })
+        .cloned()
+        .collect()
 }
 
 /// Char ranges the store has already assigned a meaning to, so the renderer
@@ -490,25 +605,20 @@ fn quote_spans(
     let mut opens: Vec<usize> = Vec::with_capacity(spans.len());
     let mut closes: Vec<usize> = Vec::with_capacity(spans.len());
     let mut cursor = 0usize;
+    let mut chars = CharOffsets::new(content);
     for span in spans {
         quoted.push_str(&content[cursor..span.start]);
         quoted.push(delim);
         quoted.push_str(&content[span.clone()]);
         quoted.push(delim);
         cursor = span.end;
-        opens.push(content[..span.start].chars().count());
-        closes.push(content[..span.end].chars().count());
+        opens.push(chars.at(span.start));
+        closes.push(chars.at(span.end));
     }
     quoted.push_str(&content[cursor..]);
 
     let shift = |pos: usize| -> usize {
-        let before = opens
-            .iter()
-            .chain(closes.iter())
-            .filter(|p| **p < pos)
-            .count();
-        let closing_here = closes.iter().filter(|p| **p == pos).count();
-        pos + before + closing_here
+        pos + opens.partition_point(|p| *p < pos) + closes.partition_point(|p| *p <= pos)
     };
     let shifted = marks
         .iter()
@@ -538,24 +648,120 @@ fn quote_spans(
 /// delimiters wrap it back into the doubled form the parser reads as this very
 /// content. Quoting it would emit `*=*x*=*` instead, which does not.
 fn quotable_markup_spans(content: &str, marks: &[MarkSpan]) -> Vec<std::ops::Range<usize>> {
-    let sealed = sealed_char_ranges(marks);
+    let mut sealed = ContainmentSweep::new(sealed_char_ranges(marks));
+    let styled: std::collections::HashSet<(usize, usize, String)> = marks
+        .iter()
+        .filter(|m| m.mark.class() == MarkClass::Styling)
+        .map(|m| (m.start, m.end, open_delim(&m.mark)))
+        .collect();
+    let mut chars = CharOffsets::new(content);
     markup_source_spans(content)
         .into_iter()
         .filter(|span| {
-            let start = content[..span.start].chars().count();
-            let end = content[..span.end].chars().count();
-            if sealed.iter().any(|(s, e)| *s <= start && end <= *e) {
-                return false;
-            }
-            let doubled_by = |m: &&MarkSpan| {
-                m.mark.class() == MarkClass::Styling
-                    && m.start == start
-                    && m.end == end
-                    && open_delim(&m.mark) == content[span.clone()][..1]
-            };
-            !marks.iter().any(|m| doubled_by(&m))
+            let start = chars.at(span.start);
+            let end = chars.at(span.end);
+            !sealed.any_contains(start, end)
+                && !styled.contains(&(start, end, content[span.clone()][..1].to_string()))
         })
         .collect()
+}
+
+/// Char offsets of byte offsets into `text`, asked in ascending order, at a
+/// total cost linear in `text`.
+struct CharOffsets<'a> {
+    text: &'a str,
+    byte: usize,
+    chars: usize,
+}
+
+impl<'a> CharOffsets<'a> {
+    fn new(text: &'a str) -> Self {
+        Self {
+            text,
+            byte: 0,
+            chars: 0,
+        }
+    }
+
+    fn at(&mut self, byte: usize) -> usize {
+        assert!(
+            byte >= self.byte,
+            "CharOffsets asked for byte {byte} after byte {}",
+            self.byte
+        );
+        self.chars += self.text[self.byte..byte].chars().count();
+        self.byte = byte;
+        self.chars
+    }
+}
+
+/// Whether some range overlaps `start..end`, for queries whose `end` ascends.
+struct OverlapSweep {
+    by_start: Vec<(usize, usize)>,
+    next: usize,
+    max_end: Option<usize>,
+    last_query: usize,
+}
+
+impl OverlapSweep {
+    fn new(ranges: impl Iterator<Item = (usize, usize)>) -> Self {
+        let mut by_start: Vec<(usize, usize)> = ranges.collect();
+        by_start.sort_unstable();
+        Self {
+            by_start,
+            next: 0,
+            max_end: None,
+            last_query: 0,
+        }
+    }
+
+    fn any_overlaps(&mut self, start: usize, end: usize) -> bool {
+        assert!(
+            self.last_query <= end,
+            "OverlapSweep asked for end {end} after end {}",
+            self.last_query
+        );
+        self.last_query = end;
+        while let Some(&(_, e)) = self.by_start.get(self.next).filter(|(s, _)| *s < end) {
+            self.max_end = self.max_end.max(Some(e));
+            self.next += 1;
+        }
+        self.max_end.is_some_and(|e| start < e)
+    }
+}
+
+/// Whether some range contains `start..end`, for queries whose `start` ascends.
+struct ContainmentSweep {
+    by_start: Vec<(usize, usize)>,
+    next: usize,
+    max_end: Option<usize>,
+    last_query: usize,
+}
+
+impl ContainmentSweep {
+    fn new(mut ranges: Vec<(usize, usize)>) -> Self {
+        ranges.sort_unstable();
+        Self {
+            by_start: ranges,
+            next: 0,
+            max_end: None,
+            last_query: 0,
+        }
+    }
+
+    fn any_contains(&mut self, start: usize, end: usize) -> bool {
+        assert!(
+            self.last_query <= start,
+            "ContainmentSweep asked for start {start} after start {}",
+            self.last_query
+        );
+        self.last_query = start;
+        while let Some(&(_, e)) = self.by_start.get(self.next).filter(|(s, _)| *s <= start) {
+            self.max_end = self.max_end.max(Some(e));
+            self.next += 1;
+        }
+        self.max_end.is_some_and(|e| end <= e)
+    }
 }
 
 /// Byte ranges of the outermost emphasis-markup nodes org finds in `text`, in
@@ -595,8 +801,8 @@ struct ExtractState {
     /// `keep_emphasis_raw` field without a lifetime rippling through
     /// `walk_node` / `emit_mark` / `push_with_inner_marks`.
     classifier: LinkTargetClassifier,
-    /// The string being walked.
-    source: String,
+    /// The string being walked, shared with every emphasis level inside it.
+    source: std::rc::Rc<str>,
     out: String,
     marks: Vec<MarkSpan>,
     char_pos: usize,
@@ -670,7 +876,11 @@ fn push_text(state: &mut ExtractState, text: &str, src: std::ops::Range<usize>, 
 }
 
 fn walk_node(node: &SyntaxNode, state: &mut ExtractState) {
-    for child in node.children_with_tokens() {
+    walk_elements(node.children_with_tokens(), state);
+}
+
+fn walk_elements(children: impl Iterator<Item = orgize::SyntaxElement>, state: &mut ExtractState) {
+    for child in children {
         match child {
             NodeOrToken::Node(child_node) => match inline_mark_kind(child_node.kind()) {
                 Some(kind_hint) => {
@@ -738,14 +948,9 @@ fn scan_text_for_block_refs(text: &str, src_start: usize, state: &mut ExtractSta
             }
             pos = abs_close;
         } else {
-            // No closing `))` — emit `((` as plain text and continue.
-            push_text(
-                state,
-                "((",
-                src_start + abs_open..src_start + abs_open + 2,
-                true,
-            );
-            pos = abs_open + 2;
+            // No `))` follows, so no later `((` closes either.
+            pos = abs_open;
+            break;
         }
     }
     // Emit remaining text.
@@ -902,8 +1107,6 @@ fn emit_mark(node: SyntaxNode, kind_hint: MarkKindHint, state: &mut ExtractState
         }
         _ => {
             // BOLD/ITALIC/UNDERLINE/STRIKE: 1-char delimiter each side.
-            let inner = strip_prefix_suffix(&raw, 1, 1);
-            let inner_src = stripped_byte_range(&raw, 1, 1);
             let outer_mark = match kind_hint {
                 MarkKindHint::Bold => InlineMark::Bold,
                 MarkKindHint::Italic => InlineMark::Italic,
@@ -920,18 +1123,14 @@ fn emit_mark(node: SyntaxNode, kind_hint: MarkKindHint, state: &mut ExtractState
             // over exactly this span, keep the delimiters as literal content
             // instead: one representable mark, and the bytes survive.
             if spans_whole_text(&raw, state) && state.full_span_active.contains(&outer_mark) {
-                emit_delimiters_as_content(&raw, node_src, state);
+                emit_delimiters_as_content(&node, &raw, node_src, state);
                 return;
             }
-            // Recurse into the inner string for nested marks. orgize re-parses
-            // the substring fresh; nested mark offsets are scalar offsets
-            // within `inner`, ready to be shifted by the outer start. The
-            // re-parse is told where `inner` sits in the OUTER source, so the
-            // runs it reports need no rebasing here.
-            let nested = extract_state_within(
-                &inner,
+            // Nested mark offsets are scalar offsets within the contents; the
+            // runs are already in OUTER source coordinates.
+            let nested = extract_contents_within(
+                &node,
                 state,
-                node_src.start + inner_src.start,
                 active_for_inner(&raw, outer_mark.clone(), state),
             );
             // The text from recursion may differ from `inner` if it had nested
@@ -974,6 +1173,7 @@ fn active_for_inner(raw: &str, outer_mark: InlineMark, state: &ExtractState) -> 
 /// The delimiters are content now, so they get verbatim runs of their own over
 /// the source bytes they came from and the run tiling stays total.
 fn emit_delimiters_as_content(
+    node: &SyntaxNode,
     raw: &str,
     node_src: std::ops::Range<usize>,
     state: &mut ExtractState,
@@ -984,9 +1184,8 @@ fn emit_delimiters_as_content(
         .expect("an emphasis node has delimiters")
         .len_utf8();
     let inner_src = stripped_byte_range(raw, 1, 1);
-    let inner = strip_prefix_suffix(raw, 1, 1);
     let active = state.full_span_active.clone();
-    let nested = extract_state_within(&inner, state, node_src.start + inner_src.start, active);
+    let nested = extract_contents_within(node, state, active);
 
     push_text(
         state,
@@ -1160,25 +1359,24 @@ pub fn render_inline_marks(text: &str, marks: &[MarkSpan]) -> String {
         return text.to_string();
     }
 
-    detect_crossing_marks(marks.iter().copied());
+    detect_crossing_marks(&marks);
 
     // Bucket events by char position, then order them so delimiters nest
     // strictly LIFO — every close is the mirror of the most recent open.
     // `nesting_key` is one total order over the marks; opens ascend it
     // (outermost first) and closes descend it (innermost first), so a
     // non-LIFO emit like `*=x*=` is unrepresentable by construction.
-    let mut opens_at: BTreeMap<usize, Vec<&MarkSpan>> = BTreeMap::new();
-    let mut closes_at: BTreeMap<usize, Vec<&MarkSpan>> = BTreeMap::new();
-    for &m in &marks {
-        opens_at.entry(m.start).or_default().push(m);
-        closes_at.entry(m.end).or_default().push(m);
+    let mut opens_at: BTreeMap<usize, Vec<(usize, &MarkSpan)>> = BTreeMap::new();
+    let mut closes_at: BTreeMap<usize, Vec<(usize, &MarkSpan)>> = BTreeMap::new();
+    for (position, &m) in marks.iter().enumerate() {
+        opens_at.entry(m.start).or_default().push((position, m));
+        closes_at.entry(m.end).or_default().push((position, m));
     }
-    let key = |m: &MarkSpan| nesting_key(m, &marks);
     for v in opens_at.values_mut() {
-        v.sort_by_key(|m| key(m));
+        v.sort_by_key(|&(position, m)| nesting_key(m, position));
     }
     for v in closes_at.values_mut() {
-        v.sort_by_key(|m| std::cmp::Reverse(key(m)));
+        v.sort_by_key(|&(position, m)| std::cmp::Reverse(nesting_key(m, position)));
     }
 
     let mut out = String::with_capacity(text.len() + marks.len() * 4);
@@ -1187,12 +1385,12 @@ pub fn render_inline_marks(text: &str, marks: &[MarkSpan]) -> String {
 
     let emit_events = |pos: usize, out: &mut String| {
         if let Some(v) = closes_at.get(&pos) {
-            for m in v {
+            for (_, m) in v {
                 out.push_str(&close_delim(&m.mark));
             }
         }
         if let Some(v) = opens_at.get(&pos) {
-            for m in v {
+            for (_, m) in v {
                 out.push_str(&open_delim(&m.mark));
             }
         }
@@ -1219,18 +1417,15 @@ pub fn render_inline_marks(text: &str, marks: &[MarkSpan]) -> String {
 /// - `Link` must be innermost. Org does not parse emphasis inside a link label,
 ///   so an outer link swallows the emphasis delimiters into the label.
 ///
-/// The final `position` tiebreak keeps the order total (and therefore the
-/// output deterministic) for marks that are identical in every other respect.
-fn nesting_key(m: &MarkSpan, all: &[&MarkSpan]) -> (usize, std::cmp::Reverse<usize>, u8, usize) {
+/// The final `position` (the mark's index in the rendered set) keeps the order
+/// total, and therefore the output deterministic, for marks that are identical
+/// in every other respect.
+fn nesting_key(m: &MarkSpan, position: usize) -> (usize, std::cmp::Reverse<usize>, u8, usize) {
     let depth = match m.mark {
         InlineMark::Link { .. } => 2,
         InlineMark::Verbatim | InlineMark::Code => 1,
         _ => 0,
     };
-    let position = all
-        .iter()
-        .position(|other| std::ptr::eq(*other, m))
-        .unwrap_or(0);
     (m.start, std::cmp::Reverse(m.end), depth, position)
 }
 
@@ -1316,19 +1511,24 @@ fn is_block_ref_link(mark: &InlineMark) -> bool {
     }
 }
 
-/// Log a tracing warning if `marks` contains crossing pairs (A.start <
-/// B.start < A.end < B.end). Org can't represent crossing inline marks.
-fn detect_crossing_marks<'a>(marks: impl Iterator<Item = &'a MarkSpan>) {
-    let marks: Vec<&MarkSpan> = marks.collect();
-    for (i, a) in marks.iter().enumerate() {
-        for b in marks.iter().skip(i + 1) {
-            if a.start < b.start && b.start < a.end && a.end < b.end {
-                tracing::warn!(
-                    "render_inline_marks: crossing marks detected — {a:?} crosses {b:?}; org \
-                     output may be lossy"
-                );
-            }
+/// Log a tracing warning for each mark that crosses one still open where it
+/// starts (A.start < B.start < A.end < B.end). Org can't represent crossing
+/// inline marks.
+fn detect_crossing_marks(marks: &[&MarkSpan]) {
+    let mut by_open = marks.to_vec();
+    by_open.sort_by_key(|m| (m.start, std::cmp::Reverse(m.end)));
+    let mut open: Vec<&MarkSpan> = Vec::new();
+    for b in by_open {
+        while open.last().is_some_and(|a| a.end <= b.start) {
+            open.pop();
         }
+        if let Some(a) = open.last().filter(|a| a.end < b.end) {
+            tracing::warn!(
+                "render_inline_marks: crossing marks detected — {a:?} crosses {b:?}; org \
+                 output may be lossy"
+            );
+        }
+        open.push(b);
     }
 }
 
@@ -1785,20 +1985,13 @@ mod tests {
     }
 
     #[test]
-    fn backslash_escape_lossy_regression() {
-        // Phase 0.3 audit finding: orgize 0.10.0-alpha.10 does NOT honor
-        // `\*…\*` escapes — the `\` is included in the BOLD range. This test
-        // locks the current lossy behavior; a future orgize bump that fixes
-        // this will fail this test as a signal to revisit the docs.
+    fn backslash_before_an_emphasis_marker_makes_no_bold() {
+        // Org 9.7.11 (`emacs -Q --batch`, org-element-parse-buffer) reads
+        // `\*not bold\*` as a plain paragraph with zero bold objects: `\` is
+        // not a valid char before an opening emphasis marker.
         let (out, marks) = extract("\\*not bold\\*");
-        // Bold mark should still be produced (lossy), with `\` chars present
-        // in the inner text.
-        assert!(
-            marks.iter().any(|m| m.mark == InlineMark::Bold),
-            "expected lossy Bold mark to be emitted; got {marks:?}"
-        );
-        // Output retains the inner content including the trailing `\`.
-        assert!(out.contains("not bold"), "got {out:?}");
+        assert!(marks.is_empty(), "expected no marks; got {marks:?}");
+        assert_eq!(out, "\\*not bold\\*");
     }
 
     #[test]
@@ -2245,5 +2438,196 @@ mod source_content_offset_tests {
         assert!(err.contains('4') && err.contains('3'), "{err}");
         let err = map.source_offset(2).unwrap_err().to_string();
         assert!(err.contains('2') && err.contains('1'), "{err}");
+    }
+}
+
+/// Each render pass timed alone, after its parse. Inside the whole render (or a
+/// pass that parses first), the parse costs so much more than the pass's own
+/// loop that the loop can be quadratic and the total still look linear.
+#[cfg(test)]
+mod render_pass_cost_tests {
+    use std::hint::black_box;
+
+    use super::*;
+
+    const UNIT: &str = "x v *a* [[b  ]] ";
+    /// [`UNIT`] with a plain tail: a per-link scan of the text before the link
+    /// then costs more than the link's own work.
+    const LONG_UNIT: &str = "x v *a* [[b  ]] plain words that carry no markup and lengthen \
+                             the line so that a scan of all text before a link costs time ";
+
+    /// `n` units, with a Bold and an Italic on each `x` and a Verbatim on each
+    /// `v`: two marks open and close at one position, the `*a*` needs quoting,
+    /// and the `[[b  ]]` adopts to `[[b]]`.
+    fn line(unit: &str, n: usize) -> (String, Vec<MarkSpan>) {
+        let marks = (0..n)
+            .flat_map(|i| {
+                let at = i * unit.len();
+                [
+                    MarkSpan::new(at, at + 1, InlineMark::Bold),
+                    MarkSpan::new(at, at + 1, InlineMark::Italic),
+                    MarkSpan::new(at + 2, at + 3, InlineMark::Verbatim),
+                ]
+            })
+            .collect();
+        (unit.repeat(n), marks)
+    }
+
+    unsafe extern "C" {
+        fn proc_pid_rusage(pid: i32, flavor: i32, buffer: *mut u64) -> i32;
+    }
+
+    /// Instructions this process has retired: `ri_instructions` of macOS's
+    /// `rusage_info_v4`.
+    fn instructions_retired() -> u64 {
+        const RUSAGE_INFO_V4: i32 = 4;
+        const RI_INSTRUCTIONS: usize = 31;
+        let mut info = [0u64; 64];
+        let pid = std::process::id() as i32;
+        let status = unsafe { proc_pid_rusage(pid, RUSAGE_INFO_V4, info.as_mut_ptr()) };
+        assert_eq!(
+            status,
+            0,
+            "proc_pid_rusage failed: {}",
+            std::io::Error::last_os_error()
+        );
+        info[RI_INSTRUCTIONS]
+    }
+
+    fn fewest_instructions(mut pass: impl FnMut()) -> u64 {
+        (0..3)
+            .map(|_| {
+                let start = instructions_retired();
+                pass();
+                instructions_retired() - start
+            })
+            .min()
+            .expect("three runs")
+    }
+
+    /// Per pass: the instructions it retires on `n` units, and how many items
+    /// it worked on.
+    fn passes(n: usize) -> Vec<(&'static str, u64, usize)> {
+        let (content, marks) = line(UNIT, n);
+        let refs: Vec<&MarkSpan> = marks.iter().collect();
+        let adoptions = link_adoptions(&content);
+        let (canonical, shifted) = canonicalize_adoptions(&content, &marks, &adoptions);
+        let (long_content, long_marks) = line(LONG_UNIT, n);
+        let long_adoptions = link_adoptions(&long_content);
+        let long_canonical = canonicalize_adoptions(&long_content, &long_marks, &long_adoptions).0;
+        let spans = quotable_markup_spans(&canonical, &shifted);
+        let (quoted, quoted_marks) = quote_spans(&canonical, &spans, '=', &shifted);
+        vec![
+            (
+                "drop_duplicate_protective_marks",
+                fewest_instructions(|| {
+                    black_box(drop_duplicate_protective_marks(&marks));
+                }),
+                marks
+                    .iter()
+                    .filter(|m| m.mark.class() == MarkClass::Protective)
+                    .count(),
+            ),
+            (
+                "canonicalize_adoptions",
+                fewest_instructions(|| {
+                    black_box(canonicalize_adoptions(
+                        &long_content,
+                        &long_marks,
+                        &long_adoptions,
+                    ));
+                }),
+                long_content.len() - long_canonical.len(),
+            ),
+            (
+                "expected_reparse",
+                fewest_instructions(|| {
+                    black_box(expected_reparse(&content, &marks));
+                }),
+                adoptions.len(),
+            ),
+            (
+                "quotable_markup_spans",
+                fewest_instructions(|| {
+                    black_box(quotable_markup_spans(&canonical, &shifted));
+                }),
+                spans.len(),
+            ),
+            (
+                "quote_spans",
+                fewest_instructions(|| {
+                    black_box(quote_spans(&canonical, &spans, '=', &shifted));
+                }),
+                quoted.len() - canonical.len(),
+            ),
+            (
+                "detect_crossing_marks",
+                fewest_instructions(|| detect_crossing_marks(black_box(&refs))),
+                refs.len(),
+            ),
+            (
+                "render_inline_marks",
+                fewest_instructions(|| {
+                    black_box(render_inline_marks(&quoted, &quoted_marks));
+                }),
+                quoted_marks.len(),
+            ),
+        ]
+    }
+
+    /// The instruction count is per process, so the measurement runs in a
+    /// process of its own, where no other test retires instructions.
+    #[test]
+    #[cfg_attr(
+        not(target_os = "macos"),
+        ignore = "counts retired instructions through macOS proc_pid_rusage"
+    )]
+    fn each_render_pass_works_linearly_in_its_input() {
+        const ALONE: &str = "HOLON_RENDER_PASS_COST_ALONE";
+        if std::env::var_os(ALONE).is_none() {
+            let alone = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "inline_marks::render_pass_cost_tests::each_render_pass_works_linearly_in_its_input",
+                    "--test-threads=1",
+                    "--nocapture",
+                ])
+                .env(ALONE, "1")
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&alone.stdout);
+            assert!(
+                alone.status.success() && stdout.contains("test result: ok. 1 passed"),
+                "the measuring process did not pass this one test ({}):\n{stdout}\n{}",
+                alone.status,
+                String::from_utf8_lossy(&alone.stderr)
+            );
+            return;
+        }
+
+        const SHORT: usize = 1_000;
+        const LONG: usize = 8_000;
+        let mut wrong = Vec::new();
+        for ((pass, short, short_work), (_, long, long_work)) in
+            passes(SHORT).into_iter().zip(passes(LONG))
+        {
+            if short_work == 0 || long_work * SHORT != short_work * LONG {
+                wrong.push(format!(
+                    "{pass}: worked on {short_work} items for {SHORT} units, {long_work} for {LONG}"
+                ));
+            }
+            // Twice the size ratio: an n log n pass stays under it, and a
+            // quadratic term grows by the size ratio squared.
+            if long > short * (2 * LONG / SHORT) as u64 {
+                wrong.push(format!(
+                    "{pass}: {short} instructions for {SHORT} units, {long} for {LONG}"
+                ));
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "a render pass does not work linearly in its input:\n{}",
+            wrong.join("\n")
+        );
     }
 }

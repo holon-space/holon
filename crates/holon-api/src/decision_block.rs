@@ -578,7 +578,7 @@ fn headline<'t>(
             if DEFAULT_ACTIVE_KEYWORDS.contains(&first) || DEFAULT_DONE_KEYWORDS.contains(&first) {
                 return refuse("org reads a leading task keyword as the block's state");
             }
-            if !crate::types::Tags::split_org_headline(text).1.is_empty() {
+            if crate::types::Tags::org_tag_group_start(text).is_some() {
                 return refuse("org reads a trailing :tag: group as tags");
             }
             Ok(text)

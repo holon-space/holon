@@ -4537,9 +4537,12 @@ impl OriginTaggedWrites for SqlOperationProvider {
 
                 let child_ids = self.read_ordered_children(&origin_id).await?;
 
+                let origin_tags = holon_api::Tags::from(self.read_block_tags(&origin_id).await?);
                 let plan = BlockToPagePlan {
                     origin_id,
-                    origin_content: page_title,
+                    page_title,
+                    origin_content,
+                    origin_tags,
                     origin_marks,
                     page_id,
                     destination_parent_id,

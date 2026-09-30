@@ -3,7 +3,7 @@ id: 2026-09-30-headline-trailing-whitespace-dropped-undisclosed
 date: 2026-09-30
 gap: ORACLE
 secondary: COVERAGE
-status: OPEN
+status: FIXED
 summary: >-
   Trailing whitespace on a headline line is dropped on write-back of an
   unedited file, and no loss is reported.
@@ -26,15 +26,22 @@ The defect exists on main too. The fix in
 covered only part of it.
 
 ## Root cause
-Not yet analysed. The headline line is written from the parsed title, which
-carries no trailing blank, and the read-back check does not compare the
-headline line itself.
+The parser read the headline line into title, tags, keyword and cookie, and
+kept nothing of the blanks after them. The renderer wrote the line from those
+parts only.
 
 ## Missing piece
-No invariant compares the headline line's trailing blanks. The generator in
-`crates/holon-org-format/tests/deep_authored_text_never_aborts.rs:94` applies
-`.trim_end()` to the generated title, so the shape is never drawn.
+No invariant compared the headline line's trailing blanks. The generator in
+`crates/holon-org-format/tests/deep_authored_text_never_aborts.rs` applied
+`.trim_end()` to the generated title, so the shape was never drawn.
 
 ## Remedy
-Open. Either write the trailing blank back, or report it as a loss. Remove the
-`.trim_end()` from the generator.
+The parser keeps the blanks as the carrier `_headline_end`
+(`headline_line_end`, `crates/holon-org-format/src/parser.rs`). The renderer
+writes them at the end of the headline line (`headline_end`,
+`crates/holon-org-format/src/models.rs`); a carrier that is not only spaces
+and tabs is a disclosed loss. Pinned by
+`a_headline_line_keeps_its_trailing_blanks`
+(`crates/holon-org-format/tests/unedited_file_keeps_its_bytes.rs`, red
+`lane-logs/r14-f2-red.log`, green `lane-logs/r14-f2-green.log`). The
+generator no longer trims the title.

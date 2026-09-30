@@ -148,23 +148,55 @@ one more than its parent's) while org reads it in the same place: more stars
 than its parent, and at most as many as each earlier sibling. Otherwise, as
 for a block Holon creates or moves, it is written one level below its parent.
 
+The spaces and tabs at the end of a headline line are not part of the title
+(org reads `* title ` as the title `title`). They are kept beside the block
+(`_headline_end`) and written back at the end of the headline line.
+
+A block's first line is its headline title and the rest is its section. Org
+reads them as two elements, so no link or emphasis spans both: `* [[u][a`
+followed by the body line `b]]` is text, not a link. A stored mark that spans
+both cannot be written; the render drops it and reports a loss.
+
+Converting a block to a page links the title text of its title line to the new
+page (`parser.rs`, `linkable_title`): the trailing tag group stays outside the
+link, so `* [[P][Tagged title]] :work:` keeps its tags. An org link
+description ends at its first `]]` (`org-link-bracket-re`), and org writes a
+`]]` or a final `]` in a description with a zero-width space that the text does
+not hold. So a title that contains `]]` or ends in `]` converts with no page
+link; nothing the file holds is lost. A `[[` in a title is description text to
+org (`[[P][see [[ here]]`, measured with emacs -Q 30.2, org 9.7.11) and keeps
+its link.
+
 ### Headline text: keyword, cookie, title, tags
 
 The parser reads a headline as `stars [KEYWORD] [[#P]] title [:tags:]`
-(`parser.rs`, `read_headline`). The tags are the last blank-separated token
-when it is `:`, tag characters or colons, and `:`, and it names at least one
-tag (`Tags::split_org_headline`, `crates/holon-api/src/types.rs`). Two
-differences from org-element.el are deliberate:
+(`parser.rs`, `read_headline`). The tag group is the one org-element.el reads
+(`org-element--headline-parse-title`, regexp `\(:[[:alnum:]_@#%:]+:\)[ \t]*$`
+searched forward from the title):
 
-- **`-` is a tag character.** Emacs' class is `[[:alnum:]_@#%]`; the orgize
-  fork adds `-` for Logseq/Orgzly/Org-roam tags, so `* Foo :a-b:` has the tag
-  `a-b` here and the title `Foo :a-b:` in Emacs.
-- **The tag token may be the whole title.** `* :t:` and `* :a:b:` are an empty
-  title with tags here. Emacs needs a blank inside the title before the
-  token, so it reads them as the title `:t:` / `:a:b:`.
-- **A token that names no tag is title text.** `* :::` and `* Foo :::` keep
-  the title `:::` / `Foo :::`. Emacs reads `Foo :::` as the title `Foo` with
-  no tags, which would destroy the text.
+- It is the leftmost run of tag characters and colons that ends the line,
+  starting at its first colon, at least `:x:` long and ending in `:`. Only
+  spaces and tabs may follow it: `* x :a:` followed by a form feed or a
+  no-break space has no tags.
+- No blank is needed before it: `* x:a:` is the title `x` with the tag `a`,
+  and `* :a:b:` is an empty title with the tags `a`, `b`.
+- An empty tag is no tag: `:a::b:` names `a` and `b`, and `* Foo :::` is the
+  title `Foo` with no tags.
+- The title is the text before the group with spaces and tabs (only those)
+  trimmed: `* x\f` keeps the form feed.
+
+`Tags::split_org_headline` (`crates/holon-api/src/types.rs`) and the orgize
+fork's `headline_tags_node` implement this rule. Reference: the emacs -Q 30.2 /
+org 9.7.11 fixture `crates/holon-org-format/tests/emacs/headline_tags_org_9_7_11.txt`
+(9819 lines; regenerate with `emacs -Q --batch -l headline_tags_org_9_7_11.el`
+in that directory). One difference is deliberate: **`-` is a tag character**
+(org's class is `[[:alnum:]_@#%]`), for Logseq/Orgzly/Org-roam tags, so
+`* Foo :a-b:` has the tag `a-b` here and the title `Foo :a-b:` in Emacs.
+Rulings D21-D24 replace this with an org-boundary codec (`__`/`___`), under
+which a legacy `:a-b:` refuses the headline; they are not implemented yet.
+
+A title that org would read as ending in a tag group (`Foo :::`, `x:a:` with
+no tags) does not read back as written, so the render records a loss.
 
 Org has no escape for any of these parts. When the renderer writes a headline
 that reads back with another keyword, cookie, title or tag set than the block
@@ -173,6 +205,33 @@ priority, a title `:t:` with no tags), the render records a loss, and
 write-back raises `WritebackLossy` for that file
 (`models.rs`, `check_headline_reads_back`). The keywords are the ones the file
 declares in `#+TODO:`, else the defaults.
+
+### Emphasis borders
+
+Holon reads bold, italic, underline, strike-through, verbatim and code where
+org-element.el does (`org-element--parse-generic-emphasis`):
+
+- **Opening:** the marker is at the start of the line or the start of the
+  object's contents (a link description, another emphasis), or follows one of
+  `[[:space:]] - ( ' " {`. The next character is not `[[:space:]]`.
+- **Closing:** the marker follows a character that is not `[[:space:]]`, and
+  is followed by the end of the line or contents, or by one of
+  `[[:space:]] - . , ; : ! ? ' " ) } \ [`.
+- `[[:space:]]` is org-mode's whitespace class: space, tab, newline, form
+  feed, carriage return, no-break space, U+2000-U+200B, U+202F, U+205F and
+  U+3000. A vertical tab or U+1680 is not.
+- The character before is the one in the text, also when it ends another
+  object: `[[x]]/a/` has no italic, `*a*'/b/'` has one.
+
+Inline source blocks and inline calls (`src_`, `call_`) need org's word start
+`\<` instead: the character before is no word character of the same script
+(`$`, `%`, `'`, Latin letters and digits, combining marks), so `a中src_x{y}`
+holds a source block and `xsrc_x{y}` does not. Reference: the orgize fork's
+emacs -Q 30.2 / org 9.7.11 fixtures `src/syntax/object_pre_org_9_7_11.txt`
+(regenerate with `emacs -Q --batch -l object_pre_org_9_7_11.el` in that
+directory) and `src/syntax/word_chars_org_9_7_11.rs` (generated by
+`word_chars_org_9_7_11.el`), and `an_emphasis_border_is_read_as_org_reads_it`
+in `src/syntax/emphasis.rs`.
 
 ### Block text
 

@@ -152,6 +152,8 @@ fn a_title_the_headline_reads_differently_is_a_loss() {
         (PAGE, "TODO"),
         (PAGE, ":t:"),
         (PAGE, ":a:b:"),
+        (PAGE, ":::"),
+        (PAGE, "Foo :::"),
         (declared, "NEXT x"),
         (PAGE, "trailing space "),
         (PAGE, "  leading spaces"),
@@ -195,8 +197,6 @@ fn a_headline_that_reads_back_as_written_has_no_loss() {
         (PAGE, "URL http://a.b/x", None, vec![]),
         (PAGE, "", Some("TODO"), vec!["t"]),
         (PAGE, "TODO x", Some("TODO"), vec![]),
-        (PAGE, ":::", None, vec![]),
-        (PAGE, "Foo :::", None, vec![]),
         (declared, "TODO x", None, vec![]),
     ];
     let mut false_losses = Vec::new();
@@ -215,16 +215,14 @@ fn a_headline_that_reads_back_as_written_has_no_loss() {
 }
 
 #[test]
-fn a_tag_group_that_names_no_tag_is_title_text() {
-    for title in [":::", "Foo :::", "Foo ::::"] {
-        let (_, blocks) = parse(&format!(
-            "#+ID: p\n* {title}\n:PROPERTIES:\n:ID: k\n:END:\n"
-        ));
+fn a_tag_group_that_names_no_tag_ends_the_title() {
+    for (line, title) in [(":::", ""), ("Foo :::", "Foo"), ("Foo ::::", "Foo")] {
+        let (_, blocks) = parse(&format!("#+ID: p\n* {line}\n:PROPERTIES:\n:ID: k\n:END:\n"));
         let k = blocks.iter().find(|b| b.id.id() == "k").expect("k");
         assert_eq!(
             (k.content.as_str(), k.tags().to_vec()),
             (title, Vec::<String>::new()),
-            "headline `* {title}`"
+            "headline `* {line}`"
         );
     }
 }
@@ -389,8 +387,13 @@ fn a_mark_across_an_escaped_line_reads_back_exactly() {
         ("tail\n#+p: v w", bold(10, 11)),
     ];
     let mut wrong = Vec::new();
-    for (content, marks) in cases {
-        let sent = marked_kid(content, marks);
+    for (body, marks) in cases {
+        let content = format!("T\n{body}");
+        let marks = marks
+            .into_iter()
+            .map(|m| MarkSpan::new(m.start + 2, m.end + 2, m.mark))
+            .collect();
+        let sent = marked_kid(&content, marks);
         let (text, losses, back) = round_trip(PAGE, sent.clone());
         let read = back.iter().find(|b| b.id.id() == "kid");
         let ok = read.is_some_and(|b| b.content == sent.content && b.marks == sent.marks)
@@ -399,6 +402,45 @@ fn a_mark_across_an_escaped_line_reads_back_exactly() {
             wrong.push(format!(
                 "{content:?} {:?} -> {:?}, losses {losses:?}\n{text}",
                 sent.marks,
+                read.map(|b| (&b.content, &b.marks))
+            ));
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n---\n"));
+}
+
+/// Org reads a headline title and its section as two elements
+/// (`lane-logs/r14-f3-emacs.log`).
+#[test]
+fn a_mark_spanning_the_title_and_the_body_is_a_loss() {
+    let bold = |end| vec![MarkSpan::new(0, end, InlineMark::Bold)];
+    let cases = [
+        (
+            "label
+body",
+            link_over(
+                "label
+body",
+            ),
+        ),
+        (
+            "bold
+body",
+            bold(10),
+        ),
+        (
+            "bold
+body",
+            bold(5),
+        ),
+    ];
+    let mut wrong = Vec::new();
+    for (content, marks) in cases {
+        let (text, losses, back) = round_trip(PAGE, marked_kid(content, marks));
+        let read = back.iter().find(|b| b.id.id() == "kid");
+        if losses.is_empty() || read.is_none_or(|b| b.content != content) {
+            wrong.push(format!(
+                "{content:?} -> {:?}, losses {losses:?}\n{text}",
                 read.map(|b| (&b.content, &b.marks))
             ));
         }

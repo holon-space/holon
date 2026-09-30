@@ -1710,7 +1710,7 @@ mod scheme_link_arm_tests {
             .expect("set_field(content) with the typed literal");
         tokio::time::sleep(Duration::from_millis(300)).await;
 
-        let (_, marks) = holon_orgmode::inline_marks::extract_inline_marks(&literal);
+        let (_, marks) = holon_orgmode::inline_marks::extract_block_marks(&literal);
         let expected: Vec<(String, String)> = holon_api::derive_block_links(&marks)
             .into_iter()
             .map(|l| (l.target, l.kind.as_str().to_string()))

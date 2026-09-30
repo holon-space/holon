@@ -40,7 +40,6 @@ pub mod block_params;
 pub mod di;
 pub mod file_format;
 pub mod file_io;
-#[cfg(feature = "di")]
 pub mod file_sync_controller;
 pub mod file_watcher;
 pub mod home_authority;

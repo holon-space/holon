@@ -231,6 +231,30 @@ fn a_headline_keeps_its_star_count() {
     assert!(changed.is_empty(), "{}", changed.join("\n"));
 }
 
+/// Org reads the title without the blanks at the end of a headline line
+/// (`lane-logs/B13v2-emacs.log`).
+#[test]
+fn a_headline_line_keeps_its_trailing_blanks() {
+    let drawer = ":PROPERTIES:\n:ID: h\n:END:\n";
+    let files: Vec<String> = [
+        "* title ",
+        "* title  ",
+        "* title\t",
+        "* title :tag: ",
+        "* TODO title ",
+        "* [#A] title \t",
+        "*  ",
+        "** deep ",
+    ]
+    .iter()
+    .map(|line| format!("{line}\n{drawer}body\n"))
+    .chain([format!("{HEAD}** child \n:PROPERTIES:\n:ID: c\n:END:\n")])
+    .collect();
+    let files: Vec<&str> = files.iter().map(String::as_str).collect();
+    let changed = changed(&files);
+    assert!(changed.is_empty(), "{}", changed.join("\n"));
+}
+
 /// When Holon changes the tree, each headline is written at a level org reads
 /// as its place in the tree.
 #[test]

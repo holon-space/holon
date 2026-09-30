@@ -1318,7 +1318,7 @@ impl DispatchingOperationEngine {
             if let holon_api::Recognition::Collision(collision) = holon_api::recognize_derived_id(
                 &page_uri,
                 holder_title.as_deref(),
-                &plan.origin_content,
+                &plan.page_title,
             ) {
                 return Err(anyhow::Error::new(collision));
             }
@@ -1354,7 +1354,7 @@ impl DispatchingOperationEngine {
         //    before P is deleted on undo).
         let mut pc = StorageEntity::new();
         pc.insert("id".into(), Value::String(plan.page_id.clone()));
-        pc.insert("content".into(), Value::String(plan.origin_content.clone()));
+        pc.insert("content".into(), Value::String(plan.page_title.clone()));
         pc.insert(
             "parent_id".into(),
             Value::String(plan.destination_parent_id.clone()),
@@ -1407,40 +1407,27 @@ impl DispatchingOperationEngine {
         }
 
         // 5. Leave a `[[P]]` link behind. The origin's TEXT is unchanged; only its
-        //    marks gain a full-span Link to P. A DIRECT `set_field(marks=…)` (not a
+        //    marks become the Link to P. A DIRECT `set_field(marks=…)` (not a
         //    `content=Object` write, whose dispatcher-split marks follow-up drops the
         //    marks inverse) yields the exact `set_field(marks=old)` inverse — so undo
         //    restores the origin's original marks faithfully.
         //
-        // The span must match the origin's PERSISTED content. Storage trims
-        // trailing whitespace on every write (SqlOperationProvider::
-        // trimmed_content), so deriving the span from a raw/untrimmed
-        // `origin_content` would mint a Link longer than the text it decorates
-        // — an out-of-bounds mark that aborts EVERY render in
-        // `scalar_range_to_bytes`. Derive both label and span from the trimmed
-        // content (a no-op for the already-trimmed planner read, robust against
-        // any untrimmed source). The span is then in bounds by construction —
-        // it is derived from the very string it decorates.
-        let label = plan.origin_content.trim_end().to_string();
-        // Non-empty by `sanitize_page_title`'s contract, which the planner
-        // enforces by refusing to build a plan without a title
-        // (`sql_operation_provider.rs:3765`). Asserted because that guarantee
-        // lives in another crate, and an empty label would mint a ZERO-WIDTH
-        // Link mark that every read boundary silently DROPS rather than reports.
-        assert!(
-            !label.is_empty(),
-            "convert_block_to_page: origin {} produced an empty page title — \
-             sanitize_page_title must reject it before a plan exists",
-            plan.origin_id
-        );
-        let link_marks = vec![MarkSpan::new(
-            0,
-            label.chars().count(),
-            InlineMark::Link {
-                target: EntityRef::from_uri(&convert_page_uri(&plan.page_id)),
-                label: label.clone(),
-            },
-        )];
+        //    The link covers the title text of the stored title line, when org can
+        //    hold it as a link (`linkable_title`).
+        let link_marks: Vec<MarkSpan> =
+            holon_org_format::parser::linkable_title(&plan.origin_content, &plan.origin_tags)
+                .map(|(start, label)| {
+                    MarkSpan::new(
+                        start,
+                        start + label.chars().count(),
+                        InlineMark::Link {
+                            target: EntityRef::from_uri(&convert_page_uri(&plan.page_id)),
+                            label,
+                        },
+                    )
+                })
+                .into_iter()
+                .collect();
         let mut sf = StorageEntity::new();
         sf.insert("id".into(), Value::String(plan.origin_id.clone()));
         sf.insert("field".into(), Value::String("marks".into()));

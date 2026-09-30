@@ -2576,23 +2576,25 @@ impl ReferenceState {
             stack.extend(grandchildren);
         }
 
-        // 4. Leave a full-span `[[P]]` link on the origin — content unchanged, marks
-        //    replaced by exactly the one Link the backend's `set_field` writes (label =
-        //    origin content).
-        let link_mark = MarkSpan::new(
-            0,
-            origin_content.chars().count(),
-            InlineMark::Link {
-                target: EntityRef::from_uri(&page_id.clone()),
-                label: origin_content.clone(),
-            },
-        );
+        // 4. Leave a `[[P]]` link on the origin: content unchanged, marks replaced by
+        //    exactly what the backend's `set_field` writes.
+        let link_marks = holon_orgmode::parser::linkable_title(&origin_content, &origin_block.tags)
+            .map(|(start, label)| {
+                vec![MarkSpan::new(
+                    start,
+                    start + label.chars().count(),
+                    InlineMark::Link {
+                        target: EntityRef::from_uri(&page_id.clone()),
+                        label,
+                    },
+                )]
+            });
         self.domain
             .block_state
             .blocks
             .get_mut(origin)
             .expect("apply_block_to_page: origin block must exist")
-            .marks = Some(vec![link_mark]);
+            .marks = link_marks;
 
         self.recanon_and_rebuild();
     }

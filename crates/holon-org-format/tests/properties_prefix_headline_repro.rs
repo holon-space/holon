@@ -55,13 +55,16 @@ fn split_headline_tags_mirrors_parser() {
         split_headline_tags("a :t1:t2:"),
         ("a".to_string(), vec!["t1".to_string(), "t2".to_string()])
     );
-    // Not tags per org grammar: empty group, inner space, no leading whitespace.
+    // Not tags per org grammar: empty group, inner space.
     assert_eq!(split_headline_tags("a ::"), ("a ::".to_string(), vec![]));
     assert_eq!(
         split_headline_tags("a :a :"),
         ("a :a :".to_string(), vec![])
     );
-    assert_eq!(split_headline_tags("a:b:"), ("a:b:".to_string(), vec![]));
+    assert_eq!(
+        split_headline_tags("a:b:"),
+        ("a".to_string(), vec!["b".to_string()])
+    );
     // No TODO-keyword stripping in this seam.
     assert_eq!(
         split_headline_tags("TODO x"),

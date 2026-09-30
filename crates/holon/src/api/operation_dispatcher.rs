@@ -1126,7 +1126,7 @@ impl OperationDispatcher {
                             .map(str::to_string)
                         {
                             Some(raw) => {
-                                let (label, marks) = holon_org_format::extract_inline_marks_with(
+                                let (label, marks) = holon_org_format::extract_block_marks_with(
                                     &raw,
                                     &self.link_classifier,
                                 );
@@ -1171,7 +1171,7 @@ impl OperationDispatcher {
                         .map(str::to_string)
                 {
                     let (label, marks) =
-                        holon_org_format::extract_inline_marks_with(&raw, &self.link_classifier);
+                        holon_org_format::extract_block_marks_with(&raw, &self.link_classifier);
                     if !marks.is_empty() {
                         params.insert("content".into(), holon_api::Value::String(label));
                         params.insert(

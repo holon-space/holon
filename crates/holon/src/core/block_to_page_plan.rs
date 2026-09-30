@@ -27,9 +27,13 @@ pub struct PlanSegment {
 pub struct BlockToPagePlan {
     /// The block being converted (stays put, becomes a `[[page_id]]` link).
     pub origin_id: String,
-    /// The origin's stripped-label content text — becomes the page title AND
-    /// the link label left behind.
+    /// The sanitized page title derived from the origin's content.
+    pub page_title: String,
+    /// The origin's stored content text; its first line is what the link left
+    /// behind covers.
     pub origin_content: String,
+    /// The origin's tags, written as the tag group after its title.
+    pub origin_tags: holon_api::Tags,
     /// The origin's `marks` column value (JSON string or `Null`) — carried onto
     /// the new page so the moved content is byte-identical.
     pub origin_marks: Value,
@@ -62,8 +66,21 @@ impl BlockToPagePlan {
             Value::String(self.origin_id.clone()),
         );
         obj.insert(
+            "page_title".to_string(),
+            Value::String(self.page_title.clone()),
+        );
+        obj.insert(
             "origin_content".to_string(),
             Value::String(self.origin_content.clone()),
+        );
+        obj.insert(
+            "origin_tags".to_string(),
+            Value::Array(
+                self.origin_tags
+                    .iter()
+                    .map(|t| Value::String(t.clone()))
+                    .collect(),
+            ),
         );
         obj.insert("origin_marks".to_string(), self.origin_marks.clone());
         obj.insert("page_id".to_string(), Value::String(self.page_id.clone()));
@@ -146,7 +163,24 @@ impl BlockToPagePlan {
         };
         Ok(Self {
             origin_id: get_str(obj, "origin_id")?,
+            page_title: get_str(obj, "page_title")?,
             origin_content: get_str(obj, "origin_content")?,
+            origin_tags: match obj.get("origin_tags") {
+                Some(Value::Array(items)) => items
+                    .iter()
+                    .map(|item| match item {
+                        Value::String(s) => Ok(s.clone()),
+                        other => Err(format!(
+                            "BlockToPagePlan: tag must be String, got {other:?}"
+                        )),
+                    })
+                    .collect::<Result<holon_api::Tags, String>>()?,
+                other => {
+                    return Err(format!(
+                        "BlockToPagePlan: 'origin_tags' must be an Array, got {other:?}"
+                    ));
+                }
+            },
             origin_marks: obj.get("origin_marks").cloned().unwrap_or(Value::Null),
             page_id: get_str(obj, "page_id")?,
             destination_parent_id: get_str(obj, "destination_parent_id")?,

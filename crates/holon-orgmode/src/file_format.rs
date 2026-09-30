@@ -143,6 +143,8 @@ impl FileFormatAdapter for OrgFormatAdapter {
                 != b.get_property(crate::models::org_props::SOURCE_LINES)
             || a.get_property(crate::models::org_props::STARS)
                 != b.get_property(crate::models::org_props::STARS)
+            || a.get_property(crate::models::org_props::HEADLINE_END)
+                != b.get_property(crate::models::org_props::HEADLINE_END)
             || a.sequence() != b.sequence()
         // Sibling order is no longer a per-block field (ADR 0005): it is
         // derived from document position and applied via `place_all`,

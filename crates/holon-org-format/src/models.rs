@@ -106,6 +106,9 @@ pub mod org_props {
     /// A headline's star count as the file wrote it, present when that is
     /// not one more than its parent's.
     pub const STARS: &str = "_stars";
+    /// The spaces and tabs that end a headline line in the file, present when
+    /// there are any. Org reads nothing from them.
+    pub const HEADLINE_END: &str = "_headline_end";
     /// The carriers only the org parser writes: what a file held that is not
     /// block data (layout, authored bytes). An engine write from any other
     /// origin may not name them.
@@ -124,6 +127,7 @@ pub mod org_props {
         FILE_ID_KEYWORD,
         SOURCE_LINES,
         STARS,
+        HEADLINE_END,
     ];
 }
 
@@ -1727,7 +1731,7 @@ pub fn render_block_content(block: &Block) -> String {
 /// one outcome a caller must never treat as routine: the emitted bytes do NOT
 /// re-parse to the stored content. It is also the hook a write-back gate needs
 /// to quarantine the file instead of writing it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum RenderFidelity {
     Exact,
     StylingDropped,
@@ -1806,18 +1810,65 @@ fn is_fixed_point(bytes: &str) -> bool {
     contract_only_emission(&content, &marks).as_deref() == Some(bytes)
 }
 
-/// [`render_block_content`] with the rung it landed on.
+/// [`render_block_content`] with the rung it landed on. The title line and
+/// the body are rendered apart, as org reads them; a mark spanning both is
+/// dropped and disclosed.
 pub fn render_block_content_checked(block: &Block) -> (String, RenderFidelity) {
     let marks = block.marks.as_deref().unwrap_or(&[]);
-    let contract = crate::inline_marks::expected_reparse(&block.content, marks);
+    let Some((title, body)) = block.content.split_once('\n') else {
+        return render_element_checked(block, &block.content, marks);
+    };
+    let split = crate::inline_marks::split_block_marks(&block.content, marks);
+    let (title, title_fidelity) = render_element_checked(block, title, &split.title);
+    let (body, body_fidelity) = render_element_checked(block, body, &split.body);
+    let spanning_fidelity = split
+        .spanning
+        .iter()
+        .map(|m| match m.mark.class() {
+            MarkClass::DataBearing => RenderFidelity::AllMarksDropped,
+            MarkClass::Protective => RenderFidelity::ProtectiveDropped,
+            MarkClass::Styling => RenderFidelity::StylingDropped,
+        })
+        .max();
+    if let Some(fidelity) = spanning_fidelity {
+        let reason = match fidelity {
+            RenderFidelity::AllMarksDropped => DegradeReason::AllMarksDropped,
+            RenderFidelity::ProtectiveDropped => DegradeReason::ProtectiveDropped,
+            _ => DegradeReason::StylingDropped,
+        };
+        disclose_degraded_render(
+            block,
+            reason,
+            format_args!(
+                "DROPPING {:?}: org reads the title line and the body as two elements, so no \
+                 mark spans both",
+                split.spanning
+            ),
+        );
+    }
+    let fidelity = [Some(title_fidelity), Some(body_fidelity), spanning_fidelity]
+        .into_iter()
+        .flatten()
+        .max()
+        .expect("two renders");
+    (format!("{title}\n{body}"), fidelity)
+}
+
+/// One element of a block's text (its title line, or its body) with the rung
+/// it landed on.
+fn render_element_checked(
+    block: &Block,
+    content: &str,
+    marks: &[MarkSpan],
+) -> (String, RenderFidelity) {
+    let contract = crate::inline_marks::expected_reparse(content, marks);
     let rungs = ladder(marks);
 
     // Pass 1 — both conditions. The first rung that keeps the content AND
     // settles wins, so nothing is sacrificed that did not have to be.
     let mut why_not = None;
     for (retained, fidelity, reason, what) in &rungs {
-        let bytes = match crate::inline_marks::render_expecting(&block.content, retained, &contract)
-        {
+        let bytes = match crate::inline_marks::render_expecting(content, retained, &contract) {
             Ok(bytes) => bytes,
             Err(e) => {
                 why_not.get_or_insert(e);
@@ -1849,7 +1900,7 @@ pub fn render_block_content_checked(block: &Block) -> (String, RenderFidelity) {
     // block turns one bad write into an endless argument between write-back and
     // the file watcher.
     for (retained, ..) in &rungs {
-        for candidate in crate::inline_marks::render_candidates(&block.content, retained) {
+        for candidate in crate::inline_marks::render_candidates(content, retained) {
             if is_fixed_point(&candidate) {
                 disclose_degraded_render(
                     block,
@@ -1876,7 +1927,7 @@ pub fn render_block_content_checked(block: &Block) -> (String, RenderFidelity) {
         format_args!("NO emission of this block settles; write-back may loop on it"),
     );
     (
-        crate::inline_marks::render_inline_marks(&block.content, marks),
+        crate::inline_marks::render_inline_marks(content, marks),
         RenderFidelity::ContentUnpreserved,
     )
 }
@@ -1998,6 +2049,19 @@ fn check_block_reads_back(
 /// have already dispatched Source/Image content types (this only handles the
 /// headline case). Free function (not an inherent method) because `Block` is
 /// defined in `holon-api`.
+fn headline_end(block: &Block) -> anyhow::Result<Option<String>> {
+    let end = read_carrier::<String>(block, org_props::HEADLINE_END)?;
+    if let Some(end) = &end {
+        anyhow::ensure!(
+            !end.is_empty() && end.chars().all(|c| c == ' ' || c == '\t'),
+            "{} {end:?} on block {} is not spaces and tabs",
+            org_props::HEADLINE_END,
+            block.id
+        );
+    }
+    Ok(end)
+}
+
 pub(crate) fn render_headline_block(
     block: &Block,
     identity: HeadlineIdentity,
@@ -2008,7 +2072,12 @@ pub(crate) fn render_headline_block(
         Some((title, body)) => (title, Some(body)),
         None => (emitted.as_str(), None),
     };
-    let title_str = emitted.lines().next().unwrap_or("").trim_end().to_string();
+    let title_str = emitted
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim_end_matches([' ', '\t'])
+        .to_string();
     let body_str: Option<String> = {
         let lines: Vec<&str> = emitted.lines().collect();
         if lines.len() > 1 {
@@ -2062,6 +2131,17 @@ pub(crate) fn render_headline_block(
     if let HeadlineIdentity::DenseToken { alias, gap } = identity {
         let flag = if gap { "^" } else { "" };
         result.push_str(&format!(" {{#{}{}}}", alias, flag));
+    }
+
+    if matches!(identity, HeadlineIdentity::Drawer { .. }) {
+        if let Some(end) = carrier_or_loss(headline_end(block), &block.id, losses) {
+            result.truncate(result.trim_end_matches(' ').len());
+            // Org reads stars as a headline only before a space.
+            if result.bytes().all(|b| b == b'*') && !end.starts_with(' ') {
+                result.push(' ');
+            }
+            result.push_str(&end);
+        }
     }
 
     result.push('\n');
@@ -2186,7 +2266,7 @@ pub(crate) fn render_headline_block(
             | RenderFidelity::ProtectiveDropped
             | RenderFidelity::AllMarksDropped
             | RenderFidelity::ContentUnpreserved => (
-                crate::inline_marks::expected_reparse(
+                crate::inline_marks::expected_block_reparse(
                     &block.content,
                     block.marks.as_deref().unwrap_or(&[]),
                 ),

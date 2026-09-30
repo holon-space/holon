@@ -91,3 +91,10 @@ test-group = "vault-scale-latency"
 filter = "binary(hand_authored_regressions)"
 slow-timeout = { period = "60s", terminate-after = 49 }  # 49 min hard cap
 
+
+# The linearity tests compare the wall-clock time of an input with that of one
+# 4x as large, so CPU a neighbour test takes lands in one measurement and not
+# the other. Each needs every test thread to itself.
+[[profile.default.overrides]]
+filter = "package(holon-org-format) & (test(=a_marker_line_costs_time_linear_in_its_length) + test(=a_marked_line_renders_in_time_linear_in_its_length) + test(~each_render_pass_costs_time_linear_in_its_work))"
+threads-required = "num-test-threads"

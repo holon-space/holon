@@ -218,23 +218,6 @@ impl<R: RefLifecycle + RefBlockTree + RefBlockTreeMut + RefLayoutMutate> Transit
         // a single UndoLastMutation must reverse the whole transform. The SUT
         // already assembles ONE composite UndoEntry for convert, so this must
         // stay GREEN across the Inc1-3 refactor.
-        let content = state
-            .block_content(&self.origin_id)
-            .expect("BlockToPage precondition guarantees the origin exists");
-        // The conversion links the origin's whole text to the new page.
-        let link = holon_api::MarkSpan::new(
-            0,
-            content.chars().count(),
-            holon_api::InlineMark::Link {
-                target: holon_api::EntityRef::from_uri(&page_id),
-                label: content.to_string(),
-            },
-        );
-        crate::pbt::generators::note_mark_across_escaped_line_reach(
-            "BlockToPage",
-            content,
-            std::slice::from_ref(&link),
-        );
         state.push_undo_snapshot();
         state.apply_block_to_page(&self.origin_id, page_id, &ancestor);
     }

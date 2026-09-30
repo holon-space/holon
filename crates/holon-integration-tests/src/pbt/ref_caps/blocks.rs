@@ -647,6 +647,7 @@ impl RefBackend for ReferenceState {
             .filter(|b| !b.is_page())
             .cloned()
             .map(|mut b| {
+                crate::pbt::types::drop_marks_across_title_and_body(&mut b);
                 // On disk the first content line is the headline title, so a
                 // trailing `:tag:` group re-parses as org TAGS (the in-memory
                 // stores keep the raw content — e.g. after an editor split

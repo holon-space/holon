@@ -42,3 +42,12 @@ proptest-state-machine.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tracing-subscriber.workspace = true
+
+# These tests drive the write-back routing that lives in the `di` module.
+[[test]]
+name = "proposal_writes_do_not_amplify"
+required-features = ["di"]
+
+[[test]]
+name = "routing_applicability"
+required-features = ["di"]
