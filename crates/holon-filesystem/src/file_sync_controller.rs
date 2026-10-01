@@ -6914,7 +6914,7 @@ impl FileSyncController {
                 }
                 Err(e) => {
                     if self.first_failure_for_doc(&block.id, IMAGE_PATH_SITE) {
-                        tracing::error!(
+                        tracing::warn!(
                             doc_id = %doc_id,
                             block_id = %block.id,
                             error = %format!("{e:#}"),
@@ -6928,7 +6928,7 @@ impl FileSyncController {
                             block_id = %block.id,
                             error = %format!("{e:#}"),
                             "[FileSyncController] image path still outside the vault root \
-                             (already disclosed once at ERROR)",
+                             (already disclosed once at WARN)",
                         );
                     }
                     continue;
