@@ -362,8 +362,8 @@ impl QueryEngine for BackendEngine {
         use crate::storage::BLOCK_WRITE_TABLE;
         let escaped = id.to_string().replace('\'', "''");
         let sql = format!(
-            "SELECT content, marks, json_extract(properties, '$.task_state') AS task_state FROM \
-             {BLOCK_WRITE_TABLE} WHERE id = '{escaped}'"
+            "SELECT content, marks, json_extract(properties, '$.task_state') AS task_state, \
+             write_seq FROM {BLOCK_WRITE_TABLE} WHERE id = '{escaped}'"
         );
         let rows = BackendEngine::execute_query(self, sql, HashMap::new(), None).await?;
         let Some(row) = rows.into_iter().next() else {
@@ -388,6 +388,7 @@ impl QueryEngine for BackendEngine {
             content: field("content"),
             marks,
             task_state: field("task_state"),
+            write_seq: row.get("write_seq").and_then(|v| v.as_i64()),
         })
     }
 

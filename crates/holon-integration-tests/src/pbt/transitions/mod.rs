@@ -123,10 +123,12 @@ mod epoch_flip_rejected;
 mod expand_toggle;
 pub mod external_write_same_block_focused;
 pub mod external_write_while_focused;
+mod fail_next_dispatch;
 mod finish_cut_paste;
 pub mod focus_editable_text;
 mod full_sync;
 mod git_init;
+mod hold_dispatch;
 pub mod indent;
 mod instantiate_template;
 mod jj_git_init;
@@ -154,6 +156,7 @@ pub mod receiver_create_block;
 mod redo;
 pub mod register_entity_scheme;
 mod rehome_entity;
+mod release_held;
 mod remote_list_sync;
 mod remove_watch;
 mod rename_document;
@@ -217,10 +220,12 @@ pub use epoch_flip_rejected::EpochFlipRejected;
 pub use expand_toggle::ExpandToggle;
 pub use external_write_same_block_focused::ExternalWriteSameBlockFocused;
 pub use external_write_while_focused::ExternalWriteWhileFocused;
+pub use fail_next_dispatch::FailNextDispatch;
 pub use finish_cut_paste::FinishCutPaste;
 pub use focus_editable_text::FocusEditableText;
 pub use full_sync::FullSync;
 pub use git_init::GitInit;
+pub use hold_dispatch::HoldDispatch;
 // The peer-sync transitions (`AddPeer`, `PeerEdit`, `PeerCharEdit`,
 // `MergeFromPeer`, `SyncWithPeer`, `CreateStaleLoro`) and their shared helper
 // `deterministic_peer_block_id` are co-located in `holon-loro-testing` /
@@ -258,6 +263,7 @@ pub use receiver_create_block::ReceiverCreateBlock;
 pub use redo::Redo;
 pub use register_entity_scheme::RegisterEntityScheme;
 pub use rehome_entity::RehomeEntity;
+pub use release_held::ReleaseHeld;
 pub use remote_list_sync::RemoteListSync;
 pub use remove_watch::RemoveWatch;
 pub use rename_document::RenameDocument;
@@ -341,6 +347,9 @@ crate::declare_e2e_transitions! {
         CreateStaleLoro(CreateStaleLoro),
         StartApp(StartApp),
         Nothing(Nothing),
+        HoldDispatch(HoldDispatch),
+        ReleaseHeld(ReleaseHeld),
+        FailNextDispatch(FailNextDispatch),
         NavigateFocus(NavigateFocus),
         NavigateForward(NavigateForward),
         NavigateHome(NavigateHome),

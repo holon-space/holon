@@ -248,6 +248,7 @@ macro_rules! declare_e2e_transitions {
             + ::holon_pbt_core::capabilities::SutClockAdvance
             + ::holon_pbt_core::capabilities::SutFixtureFs
             + ::holon_pbt_core::capabilities::SutAppLifecycle
+            + ::holon_pbt_core::capabilities::SutDispatchHold
             + ::holon_pbt_core::capabilities::SutTwoInstance
             + ::holon_pbt_core::capabilities::SutEntityTypeRegister
             + ::holon_pbt_core::capabilities::SutTypedEntity

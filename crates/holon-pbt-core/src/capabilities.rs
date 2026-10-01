@@ -3863,6 +3863,20 @@ pub trait SutAppLifecycle {
     async fn assert_second_writer_refused(&self);
 }
 
+/// SUT capability: the engine's test-only dispatch hold — park or fail the
+/// next run of a named operation (`entity.op`), and later resume every parked
+/// run. Drives ordering races deterministically instead of by scheduler luck.
+#[holon_macros::capmap_adapter]
+pub trait SutDispatchHold {
+    fn hold_next_dispatch(&self, entity: &str, op: &str);
+    fn fail_next_dispatch(&self, entity: &str, op: &str);
+    /// Panics unless exactly `expect_parked` runs are parked.
+    async fn release_held_dispatches(&self, expect_parked: usize);
+    /// Runs of `entity.op` that reached the hold and did not land: parked
+    /// now, or failed.
+    fn withheld_dispatches(&self, entity: &str, op: &str) -> usize;
+}
+
 /// SUT capability: pre-startup org-filesystem fixture setup — writing org
 /// files, creating directories, `git`/`jj` init, and planting a stale/corrupt
 /// Loro snapshot. `E2ESut`-only (no headless filesystem).

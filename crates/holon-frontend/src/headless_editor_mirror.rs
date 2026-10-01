@@ -88,6 +88,10 @@ pub struct HeadlessEditorMirror {
     /// editor has not mounted yet. Prod mounts an editor on the focused
     /// newborn when its row lands; the settle mounts this one's twin.
     newborn_awaiting_mount: Mutex<Option<holon_api::EntityUri>>,
+    /// The caret a Backspace-at-0 dispatched a `join_block` from. The join
+    /// runs detached, so whether it consumed the block is known only at the
+    /// next settle: the caret retires then iff focus has left the block.
+    join_departure: Mutex<Option<CursorKey>>,
 }
 
 impl Default for HeadlessEditorMirror {
@@ -104,6 +108,7 @@ impl HeadlessEditorMirror {
             slash_menus: Mutex::new(HashMap::new()),
             last_focused: Mutex::new(None),
             newborn_awaiting_mount: Mutex::new(None),
+            join_departure: Mutex::new(None),
         }
     }
 
@@ -122,6 +127,23 @@ impl HeadlessEditorMirror {
     /// mounts its editor.
     pub fn note_newborn(&self, block: holon_api::EntityUri) {
         *self.newborn_awaiting_mount.lock().unwrap() = Some(block);
+    }
+
+    /// Keep typing into the slot's editor after its first keystroke birthed
+    /// `born`: GPUI's slot `InputState` stays mounted until the newborn's row
+    /// renders, and its VM already writes to the newborn
+    /// (`ViewEventHandler::edit_target_id`). Keyed by the newborn because the
+    /// focus authority now names it.
+    fn hand_slot_editor_to_newborn(&self, slot_id: &str, born: &holon_api::EntityUri) {
+        let mut eds = self.editors.lock().unwrap();
+        let vm = eds
+            .remove(slot_id)
+            .expect("a keystroke into a creation slot mounted its editor");
+        let previous = eds.insert(born.to_string(), vm);
+        assert!(
+            previous.is_none(),
+            "newborn {born} already had an editor when its slot's first keystroke birthed it"
+        );
     }
 
     /// Whether `block` is the newborn whose editor has not mounted yet.
@@ -271,14 +293,14 @@ impl HeadlessEditorMirror {
 
     /// Apply one user-typed buffer edit through the VM (the single keystroke
     /// sink): mutate the owned buffer to `new_text` and dispatch the resulting
-    /// intent through the real op pipeline (`dispatch_intent_sync`). The lock
-    /// is released BEFORE the await so no VM guard is held across the
-    /// dispatch.
+    /// intent fire-and-forget, as GPUI's text-change handler does
+    /// (`editor_view.rs`, `apply_local_edit` → `dispatch_intent`). A failed
+    /// write surfaces through the op-failure sink, not as this call's `Err`.
     ///
     /// Which intent that is — `set_field("content")` or
     /// `set_field("source_text")` — is the VM's call and depends only on the
     /// text, never on who typed it. See `EditorViewModel::apply_local_edit`.
-    async fn vm_commit_edit(
+    fn vm_commit_edit(
         &self,
         engine: &Arc<ReactiveEngine>,
         block_id: &str,
@@ -301,14 +323,35 @@ impl HeadlessEditorMirror {
             vm.apply_local_edit(new_text)?
         };
         if let Some(intent) = intent {
-            // The keystroke content-commit door. Normally awaiting; the composed
-            // keystone's interleaving mask flips this engine to the
-            // fire-and-forget door production GPUI types through
-            // (`editor_view.rs:1070`), which is what lets two keystrokes of one
-            // `TypeChars` be in flight together.
-            crate::reactive::dispatch_intent_through_armed_door(engine, intent).await?;
+            let services: &dyn BuilderServices = engine.as_ref();
+            services.dispatch_intent(intent);
         }
         Ok(())
+    }
+
+    /// Dispatch a structural key's op as a commit point, as GPUI's
+    /// `dispatch_structural_as_commit_point` does: any text the keystroke sink
+    /// never saw flushes first, both in one detached ordered chain.
+    fn dispatch_structural(
+        &self,
+        engine: &Arc<ReactiveEngine>,
+        block_id: &str,
+        structural: OperationIntent,
+    ) {
+        let commit = {
+            let mut eds = self.editors.lock().unwrap();
+            let vm = eds
+                .get_mut(block_id)
+                .expect("handle_keystroke mounted this block's editor before routing the key");
+            let live = vm.buffer().to_string();
+            vm.chord_commit_intent(&live)
+        };
+        let intents = commit
+            .into_iter()
+            .chain(std::iter::once(structural))
+            .collect();
+        let services: Arc<dyn BuilderServices> = engine.clone();
+        crate::reactive::dispatch_intent_chain(&services, intents);
     }
 
     /// Flush the departing editor's pending text when the focus authority
@@ -326,6 +369,12 @@ impl HeadlessEditorMirror {
         engine: &Arc<ReactiveEngine>,
         focused: Option<&str>,
     ) -> Result<()> {
+        // A consumed join moved focus to its merge target; a refused one left
+        // focus, and in prod the `InputState` caret, where it was.
+        let joined = self.join_departure.lock().unwrap().take();
+        if let Some((block_id, occ)) = joined.filter(|(b, _)| focused != Some(b.as_str())) {
+            self.forget(&block_id, occ);
+        }
         let departed = {
             let mut last = self.last_focused.lock().unwrap();
             let departed = last.take().filter(|prev| Some(prev.as_str()) != focused);
@@ -364,15 +413,20 @@ impl HeadlessEditorMirror {
     /// `content` and runs the VM's `converge_from_data_sync` against its own
     /// `last_local_seq`; a `Converge` directive re-seeds the buffer, while the
     /// own trailing-whitespace echo (`AdoptBaseline`) and in-sync/stale cases
-    /// leave the typed buffer intact. `echo_seq` is the VM's high-water: no
-    /// non-editor writer bumps the `write_seq` column, so the CDC row an echo
-    /// carries always holds exactly this value.
+    /// leave the typed buffer intact. `echo_seq` is the row's own `write_seq`,
+    /// as GPUI's data subscription reads it: keystrokes are in flight at a
+    /// settle, so the row can trail the VM's high-water.
     pub async fn converge_editor(
         &self,
         engine: &Arc<ReactiveEngine>,
         block_id: &str,
     ) -> Result<()> {
         let source = self.sql_editor_source(engine, block_id).await?;
+        // `write_seq` is NOT NULL, so only a vanished row lacks it; GPUI's
+        // data subscription sends no echo for a removed row.
+        let Some(echo_seq) = source.write_seq else {
+            return Ok(());
+        };
         let content = source.content.unwrap_or_default();
         let task_state = source.task_state;
         let mut converged_to = None;
@@ -383,8 +437,7 @@ impl HeadlessEditorMirror {
             // row, not its content column — otherwise every source-channel write
             // reads back as an external change and converges the keyword away.
             let authority = vm.project_authority(&content, &source.marks, task_state.as_deref());
-            let seq = vm.last_local_seq();
-            if let Some(directive) = vm.converge_from_data_sync(&authority, Some(seq)) {
+            if let Some(directive) = vm.converge_from_data_sync(&authority, Some(echo_seq)) {
                 vm.set_buffer_from_authority(&directive.target, directive.seq);
                 converged_to = Some(directive.target);
             }
@@ -559,10 +612,11 @@ impl HeadlessEditorMirror {
     /// `MutableText` directly, Enter / Backspace-at-0 / Tab / Shift+Tab
     /// dispatch their structural intents at the live cursor.
     ///
-    /// Errors propagate from `dispatch_intent_sync`. Char keystrokes with
-    /// no `MutableText` attached (SqlOnly variant) are no-ops on the text
-    /// side but still advance the cursor mirror so subsequent structural
-    /// ops have a position to dispatch against.
+    /// Every op a key dispatches goes out fire-and-forget, as in GPUI: a
+    /// failed op surfaces through the op-failure sink, never as this call's
+    /// `Err`. Char keystrokes with no `MutableText` attached (SqlOnly variant)
+    /// are no-ops on the text side but still advance the cursor mirror so
+    /// subsequent structural ops have a position to dispatch against.
     pub async fn handle_keystroke(
         &self,
         engine: &Arc<ReactiveEngine>,
@@ -585,8 +639,7 @@ impl HeadlessEditorMirror {
         // `set_field("content")`+`write_seq` write through the real op pipeline.
         // No `MutableText` is required — the SqlOnly editor path the composed
         // keystone models has no Loro cell. A block whose create intent has not
-        // landed yet surfaces as a loud `dispatch_intent_sync` error, not a
-        // silent no-op.
+        // landed yet surfaces as a loud op failure, not a silent no-op.
         // SqlOnly variant has no `MutableText` — read the block's
         // SQL-projected `content` directly so the headless cursor walks the
         // same byte string a production GPUI editor would after
@@ -683,15 +736,8 @@ impl HeadlessEditorMirror {
                     self.structural_caret(&block_id, &current_text, 0)?,
                 )
                 .expect("Backspace at caret 0 is the structural join_block");
-                engine.dispatch_intent_sync(intent).await?;
-                // A join that consumed the block moved focus to the merge
-                // target (`apply_structural_focus`); a REFUSED join (page
-                // parent) leaves focus — and, in prod, the GPUI `InputState`
-                // and its caret — untouched. Mirror that: retire the caret only
-                // when focus actually left this block.
-                if engine.focused_block().as_ref() != Some(&block_uri) {
-                    self.forget(&block_id, occ);
-                }
+                self.dispatch_structural(engine, &block_id, intent);
+                *self.join_departure.lock().unwrap() = Some((block_id.clone(), occ));
             }
             "backspace" if cursor_byte > 0 && !has_ctrl_alt_cmd && !has_shift => {
                 // `cursor_byte > 0` guarantees a preceding char, so `move_left`
@@ -699,8 +745,7 @@ impl HeadlessEditorMirror {
                 let new_cursor_byte = editor_caret::move_left(&current_text, cursor_byte);
                 let mut new_text = current_text.clone();
                 new_text.replace_range(new_cursor_byte..cursor_byte, "");
-                self.vm_commit_edit(engine, &block_id, &current_text, &new_text)
-                    .await?;
+                self.vm_commit_edit(engine, &block_id, &current_text, &new_text)?;
                 self.set_cursor(&block_id, occ, new_cursor_byte);
                 self.note_text_changed(engine, &block_uri, &new_text, new_cursor_byte);
             }
@@ -710,7 +755,8 @@ impl HeadlessEditorMirror {
                 // same routing GPUI does via `EditorViewModel`/popup
                 // (`editor_view.rs:578-616`). Otherwise split at the cursor.
                 if let Some(intent) = self.slash_command_selection(engine, &block_uri) {
-                    engine.dispatch_intent_sync(intent).await?;
+                    let services: &dyn BuilderServices = engine.as_ref();
+                    services.dispatch_intent(intent);
                 } else {
                     let intent = structural_block_action(
                         EditorKey::Enter,
@@ -718,7 +764,7 @@ impl HeadlessEditorMirror {
                         self.structural_caret(&block_id, &current_text, cursor_byte)?,
                     )
                     .expect("Enter is the structural split_block");
-                    engine.dispatch_intent_sync(intent).await?;
+                    self.dispatch_structural(engine, &block_id, intent);
                 }
                 self.forget(&block_id, occ);
             }
@@ -729,7 +775,7 @@ impl HeadlessEditorMirror {
                     self.structural_caret(&block_id, &current_text, cursor_byte)?,
                 )
                 .expect("Tab is the structural indent");
-                engine.dispatch_intent_sync(intent).await?;
+                self.dispatch_structural(engine, &block_id, intent);
             }
             "tab" if has_shift && !has_ctrl_alt_cmd => {
                 let intent = structural_block_action(
@@ -738,7 +784,7 @@ impl HeadlessEditorMirror {
                     self.structural_caret(&block_id, &current_text, cursor_byte)?,
                 )
                 .expect("Shift+Tab is the structural outdent");
-                engine.dispatch_intent_sync(intent).await?;
+                self.dispatch_structural(engine, &block_id, intent);
             }
             "escape" => {
                 self.forget(&block_id, occ);
@@ -756,8 +802,9 @@ impl HeadlessEditorMirror {
                 let inserted = ch.to_string();
                 let mut new_text = current_text.clone();
                 new_text.insert_str(cursor_byte, &inserted);
-                self.vm_commit_edit(engine, &block_id, &current_text, &new_text)
-                    .await?;
+                self.vm_commit_edit(engine, &block_id, &current_text, &new_text)?;
+                let new_cursor_byte = cursor_byte + inserted.len();
+                let mut caret_at = (block_id.clone(), occ);
                 if crate::row_origin::RowOrigin::from_id(&block_id).is_creation_placeholder() {
                     match self.slot_birth_of(&block_id) {
                         crate::creation_slot::BirthOutcome::Born(born) => {
@@ -766,13 +813,14 @@ impl HeadlessEditorMirror {
                                 Some(&born),
                                 "a keystroke into a creation slot moves focus to its newborn"
                             );
-                            self.note_newborn(born);
+                            self.hand_slot_editor_to_newborn(&block_id, &born);
+                            self.forget(&block_id, occ);
+                            caret_at = (born.to_string(), engine.focused_occurrence());
                         }
                         crate::creation_slot::BirthOutcome::Refused(_) => {}
                     }
                 }
-                let new_cursor_byte = cursor_byte + inserted.len();
-                self.set_cursor(&block_id, occ, new_cursor_byte);
+                self.set_cursor(&caret_at.0, caret_at.1, new_cursor_byte);
                 self.note_text_changed(engine, &block_uri, &new_text, new_cursor_byte);
             }
             _ => {

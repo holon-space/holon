@@ -154,6 +154,8 @@ pub struct DispatchingOperationEngine {
     /// Per-entity serialization of the write-and-journal step (see
     /// [`EntityWriteLocks`]).
     entity_write_locks: EntityWriteLocks,
+    #[cfg(feature = "dispatch-hold")]
+    dispatch_hold: Arc<crate::api::dispatch_hold::DispatchHold>,
 }
 
 /// Serializes the write-and-journal step per entity.
@@ -688,7 +690,14 @@ impl DispatchingOperationEngine {
             write_authority: None,
             trust_policy: Arc::new(TrustPolicy::trust_all()),
             entity_write_locks: EntityWriteLocks::default(),
+            #[cfg(feature = "dispatch-hold")]
+            dispatch_hold: Arc::default(),
         }
+    }
+
+    #[cfg(feature = "dispatch-hold")]
+    pub fn dispatch_hold(&self) -> &Arc<crate::api::dispatch_hold::DispatchHold> {
+        &self.dispatch_hold
     }
 
     /// Override the provenance-stamp clock (test determinism). Production keeps
@@ -793,6 +802,8 @@ impl DispatchingOperationEngine {
             write_authority: None,
             trust_policy: Arc::new(TrustPolicy::trust_all()),
             entity_write_locks: EntityWriteLocks::default(),
+            #[cfg(feature = "dispatch-hold")]
+            dispatch_hold: Arc::default(),
         })
     }
 
@@ -3839,6 +3850,11 @@ impl DispatchingOperationEngine {
         reject_engine_owned_keys(op_name, &params)?;
         reject_parser_carriers(op_name, &params, &origin)?;
         let params = with_parsed_carriers(entity_name, op_name, params, carriers)?;
+
+        // Before the entity stripe, so a parked op never blocks the op a test
+        // runs while it is parked.
+        #[cfg(feature = "dispatch-hold")]
+        self.dispatch_hold.checkpoint(entity_name, op_name).await?;
 
         // Trust gate (VisionGapAnalysis C5): a sub-threshold (origin, entity,
         // op) never reaches canonical state — it is coerced into a proposal

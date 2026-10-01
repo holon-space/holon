@@ -852,12 +852,23 @@ impl<S: ComposedSlice> ComposedSut<S> {
             .cloned()
             .collect();
         let vanished: Vec<&EntityUri> = before.difference(&after).collect();
+        // A create the dispatch hold parked or failed has a synthetic the SUT
+        // has not minted; it stays unpaired until a later tick lands it.
+        let withheld = sut
+            .caps
+            .get::<dyn holon_pbt_core::capabilities::SutDispatchHold>()
+            .map_or(0, |hold| hold.withheld_dispatches("block", "create"));
+        assert!(
+            withheld == 0 || real_new.is_empty(),
+            "per-tick reconcile: {withheld} withheld create(s) and new real ids {real_new:?} \
+             in one tick cannot be paired with syn={synthetic:?}"
+        );
         assert_eq!(
             synthetic.len(),
-            real_new.len(),
+            real_new.len() + withheld,
             "per-tick reconcile: one synthetic per minted real id (syn={synthetic:?}, \
-             real={real_new:?}); this tick RETIRED {retired:?} and the SUT LOST \
-             {vanished:?} from block_raw"
+             real={real_new:?}, withheld creates={withheld}); this tick RETIRED {retired:?} \
+             and the SUT LOST {vanished:?} from block_raw"
         );
         // Pairing safety for the R2 StaleExternalRewrite CHURN (multiple mints in
         // one tick, unlike the usual one-mint transitions this zip was written for):

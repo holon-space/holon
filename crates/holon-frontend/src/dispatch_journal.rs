@@ -22,7 +22,10 @@
 //! never as success, and never as "nothing ran".
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 
 use anyhow::Result;
 
@@ -72,6 +75,18 @@ pub struct DispatchJournal {
     /// `(entries, total_recorded)` under one lock so a mark taken between a
     /// push and a counter bump can never miss an entry.
     state: Mutex<(VecDeque<DispatchedIntent>, u64)>,
+    open_chains: AtomicUsize,
+}
+
+/// Held while an ordered chain of intents runs. A chain records each intent
+/// only when it reaches it, so between two of them the journal alone shows
+/// nothing pending although the chain has more to dispatch.
+pub struct OpenChain(Arc<DispatchJournal>);
+
+impl Drop for OpenChain {
+    fn drop(&mut self) {
+        self.0.open_chains.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 impl DispatchJournal {
@@ -133,6 +148,26 @@ impl DispatchJournal {
                 Err(e) => DispatchOutcome::Failed(e),
             };
         }
+    }
+
+    pub fn open_chain(self: &Arc<Self>) -> OpenChain {
+        self.open_chains.fetch_add(1, Ordering::SeqCst);
+        OpenChain(self.clone())
+    }
+
+    pub fn open_chains(&self) -> usize {
+        self.open_chains.load(Ordering::SeqCst)
+    }
+
+    /// Retained entries whose outcome is not known yet.
+    pub fn pending(&self) -> Vec<DispatchedIntent> {
+        let state = self.state.lock().unwrap();
+        state
+            .0
+            .iter()
+            .filter(|e| e.outcome.is_pending())
+            .cloned()
+            .collect()
     }
 
     /// Everything dispatched after `mark`.

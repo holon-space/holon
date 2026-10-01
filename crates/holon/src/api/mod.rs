@@ -26,6 +26,8 @@ pub mod types;
 pub mod accepted_rules;
 pub mod backend_engine;
 pub mod block_domain;
+#[cfg(feature = "dispatch-hold")]
+pub mod dispatch_hold;
 pub mod guard_world;
 pub mod history_store;
 pub mod holon_rule_watcher;

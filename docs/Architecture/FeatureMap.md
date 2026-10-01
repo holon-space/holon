@@ -36,7 +36,7 @@ The one-page answer to *"which features could this change impact?"*. Rows are us
 | **Ruled by** | An ADR under [`docs/adr/`](../adr/), or an invariant number from [Model.md](Model.md). |
 | **Mode axes** | Which of [Model.md](Model.md)'s four orthogonal axes the feature's behaviour varies on: **Storage** (Loro store on/off), **File adapter** (org/none), **Merge fidelity** (op-CRDT / base-3-way / LWW), **Transport** (iroh P2P on/off). `—` means the feature behaves the same everywhere. *Headless vs windowed* is a test-slice axis, not a product mode; it is called out in prose where it matters. |
 
-The composed keystone is [`general_e2e_composed_pbt.rs`](../../crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs). Its alphabet is 94 transitions; the repo declares 86 invariant ids plus 17 correspondence-family ids. Open reds are registered in [KeystoneKnownReds.md](../Testing/KeystoneKnownReds.md) — a red listed there is a pass-with-note, anything else is a regression.
+The composed keystone is [`general_e2e_composed_pbt.rs`](../../crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs). Its alphabet is 97 transitions; the repo declares 86 invariant ids plus 17 correspondence-family ids. Open reds are registered in [KeystoneKnownReds.md](../Testing/KeystoneKnownReds.md) — a red listed there is a pass-with-note, anything else is a regression.
 
 ---
 
@@ -253,8 +253,10 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `DeletePlacementRecord` — a recipient delete naming a page's mount rather than the page, which leaves the page's share exactly as a delete of the page does and never deletes the owner's page.
 - `DispatchUnschemedBlockId` — the id form that let the write leg and the read legs key on different strings
 - `EditBlockCopy` — a copy edited on disk while Holon edits the same block: the later release merges both, or refuses and discloses when both changed the keyword apart (D229.b)
+- `FailNextDispatch` — the ops that depend on a failed op are cancelled with one disclosure
 - `FinishCutPaste` — the later save resolves a block held by two files: adopted and merged with Holon's edits, refused when both were edited apart (the next deletion decides), or left with its owner (D229.b)
 - `FullSync` — a full re-sync leaves every live watch rendering the synced state
+- `HoldDispatch` — an op that overlaps a held op waits for it instead of overtaking it
 - `JoinPlacedRoot` — a join that takes a placed page off the receiver without leaving its share, and an undo that brings the page back as a local block carrying the owner's id.
 - `JumpToSearchHit` — after a jump the caret is live INSIDE the new root: on the destination's first child, or on the destination's creation affordance when it has no children. Never on the destination itself, which renders through the editor-less `page_title` variant and leaves the keyboard dead (docs/Testing/bugfunnel/entries/ 2026-09-08-quick-open-enter-navigation-leaves-no-editable-focus.md).
 - `MoveBlockBetweenFiles` — no save order loses the block; a block held by two files at once stays in both, is disclosed naming both, and is resolved by the later save (D229.b)
@@ -264,6 +266,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `Reboot` — what survives a real restart
 - `RebuildViews` — a watch opened before a `rebuild_views` keeps receiving changes after it and holds what its rebuilt view holds
 - `ReceiverCreateBlock` — a peer-authored block under an owner-authored parent, and its arrival on the owner after a reverse round.
+- `ReleaseHeld` — see `HoldDispatch`
 - `RemoteListSync` — the round drives the REAL [`holon_connections::sync_once`] over a fixture peer and the real mirror table; the invariant then asserts the mirror equals the peer's list.
 - `Search` — the hit set equals the reference model's literal substring match over block content and page titles, folded by Unicode simple case folding, with pattern metacharacters matching themselves and an empty query returning nothing.
 - `SecondWriterRefused` — a second session on a held vault is refused by the writer lock, names the holder and writes nothing
@@ -306,10 +309,16 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `cooklang-read-only-write-refusal-any-op`
 - `deletebackward-sql-reads-budget`
 - `external-rewrite-drops-page-body`
+- `failed-slot-create-loro-dispatch-keystrokes-run-anyway`
+- `failed-slot-create-sqlonly-keystrokes-run-anyway`
 - `hand-authored-cap-timeout`
+- `held-slot-create-loro-dispatch-keystroke-races-create`
+- `held-slot-create-sqlonly-keystroke-races-create`
 - `integration-toggle-load`
 - `iroh-nat-traversal-address-set`
+- `join-then-stale-second-join`
 - `jump-typechars-no-row`
+- `keystroke-set-field-store-reorder`
 - `lib-type-chars-home-profile-derived`
 - `loro-backend-change-count`
 - `loro-dispatch-creation-slot-keystroke-races-create`

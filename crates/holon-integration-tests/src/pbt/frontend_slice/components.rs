@@ -50,6 +50,7 @@ use holon_pbt_core::capabilities::SutBackend;
 use holon_pbt_core::capabilities::SutBlockCreate;
 use holon_pbt_core::capabilities::SutBlockTreeWrite;
 use holon_pbt_core::capabilities::SutClockAdvance;
+use holon_pbt_core::capabilities::SutDispatchHold;
 use holon_pbt_core::capabilities::SutEditorMirrorRead;
 use holon_pbt_core::capabilities::SutEditorMirrorWrite;
 use holon_pbt_core::capabilities::SutEntityTypeRegister;
@@ -4943,6 +4944,32 @@ impl SutBlockCreate for HeadlessFrontendComponent {
     }
 }
 
+/// `SutDispatchHold` over the live session's engine. A parked run is often a
+/// task the gesture spawned rather than awaited, so the release waits for it
+/// to arrive instead of racing it.
+#[async_trait::async_trait(?Send)]
+impl SutDispatchHold for HeadlessFrontendComponent {
+    fn hold_next_dispatch(&self, entity: &str, op: &str) {
+        self.engine().dispatch_hold().hold_next(entity, op);
+    }
+
+    fn fail_next_dispatch(&self, entity: &str, op: &str) {
+        self.engine().dispatch_hold().fail_next(entity, op);
+    }
+
+    async fn release_held_dispatches(&self, expect_parked: usize) {
+        self.engine()
+            .dispatch_hold()
+            .release(expect_parked, Duration::from_secs(10))
+            .await
+            .unwrap_or_else(|e| panic!("[SutDispatchHold::release_held_dispatches] {e:#}"));
+    }
+
+    fn withheld_dispatches(&self, entity: &str, op: &str) -> usize {
+        self.engine().dispatch_hold().withheld(entity, op)
+    }
+}
+
 /// `SutAppLifecycle` over the headless component — the seam-rebuild entry
 /// point. Only `create_document` is realized so far: it writes an empty org
 /// file into the session's watched `org_root` (the production
@@ -5484,6 +5511,9 @@ impl HeadlessFrontendComponent {
         // synthetic→real doc-uri mapping is the harness's generic per-tick
         // reconcile, not E2ESut's `block_tree_post_action`.
         caps.insert(self.clone() as Arc<dyn SutAppLifecycle>);
+        // `SutDispatchHold` — a write cap no invariant `Needs`; its transitions
+        // are hand-authored only.
+        caps.insert(self.clone() as Arc<dyn SutDispatchHold>);
         // `SutMatviews` — the IVM-vs-recompute differential read for
         // `inv-matview-consistent-with-recompute`. Registered wherever the
         // block matviews live (this component's real Turso projection) so the

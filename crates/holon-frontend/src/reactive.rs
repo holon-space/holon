@@ -3195,8 +3195,14 @@ impl ReactiveEngine {
         let session = self.session.clone();
         let entity = holon_api::EntityName::new(&entity_type);
         let sink = self.ui_state.op_failure_sink_handle();
+        let journal = self.ui_state.dispatch_journal.clone();
+        let journal_seq = journal.record(&crate::operations::OperationIntent::new(
+            entity.clone(),
+            "create".to_string(),
+            params.clone(),
+        ));
         self.runtime_handle.spawn(async move {
-            if let Err(e) = session
+            match session
                 .execute_operation_with_origin(
                     &entity,
                     "create",
@@ -3207,7 +3213,11 @@ impl ReactiveEngine {
                 )
                 .await
             {
-                surface_op_failure(session.error_tracker(), &sink, "block", "create", &e);
+                Ok(_) => journal.settle(journal_seq, Ok(())),
+                Err(e) => {
+                    journal.settle(journal_seq, Err(format!("{e:#}")));
+                    surface_op_failure(session.error_tracker(), &sink, "block", "create", &e);
+                }
             }
         });
         Ok(BirthOutcome::Born(id))
@@ -5614,7 +5624,9 @@ pub fn dispatch_intent_chain(
     intents: Vec<crate::operations::OperationIntent>,
 ) {
     let services = services.clone();
+    let open = services.dispatch_journal().map(|j| j.open_chain());
     services.clone().runtime_handle().spawn(async move {
+        let _open = open;
         for intent in intents {
             let label = format!("{}.{}", intent.entity_name, intent.op_name);
             if let Err(e) = services.dispatch_intent_sync(intent).await {

@@ -178,6 +178,39 @@ pub async fn converge_handle(handle: &WideHandle, budget: Duration) {
     converge_projections(handle, budget).await
 }
 
+/// Wait until every intent the frontend dispatched has landed or failed, as
+/// production's state is once its fire-and-forget ops complete. A run the
+/// dispatch hold parked stays in flight on purpose and is not waited for.
+async fn drain_dispatches(handle: &WideHandle, budget: Duration) {
+    let Some(reactive) = handle.reactive() else {
+        return;
+    };
+    let journal = reactive.ui_state().dispatch_journal();
+    let hold = handle
+        .engine
+        .as_ref()
+        .expect("a frontend draw boots a backend engine")
+        .dispatch_hold()
+        .clone();
+    let cap = budget.max(CONVERGE_BUDGET);
+    let started = std::time::Instant::now();
+    loop {
+        let chains = journal.open_chains();
+        let pending = journal.pending();
+        if chains == 0 && pending.len() == hold.parked() {
+            return;
+        }
+        assert!(
+            started.elapsed() < cap,
+            "dispatch drain: {chains} intent chain(s) open and {} pending intent(s) {pending:?} \
+             ({} parked at the dispatch hold) after {cap:?}",
+            pending.len(),
+            hold.parked(),
+        );
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+}
+
 async fn converge_projections(handle: &WideHandle, budget: Duration) {
     // The frontend accessors are queried at settle time, not at boot: the sync
     // controller / idle signal resolve on a spawned `post_ready_work` task.
@@ -2015,7 +2048,9 @@ impl ComposedSlice for WideE2E {
     /// lagged and the block/org invariants diverged). Capped at `SETTLE`,
     /// so it never over-waits vs the old sleep.
     async fn settle_after_apply(handle: &WideHandle, _: &CapMap) {
-        converge_projections(handle, crate::pbt::composed::soak_seed::soak_settle()).await;
+        let budget = crate::pbt::composed::soak_seed::soak_settle();
+        drain_dispatches(handle, budget).await;
+        converge_projections(handle, budget).await;
     }
 
     /// The mask's alphabet is the transition enum's own variant names, not a

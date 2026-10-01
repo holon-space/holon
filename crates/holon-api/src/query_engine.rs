@@ -54,6 +54,8 @@ pub struct EditorSource {
     /// The mark spans over `content`, in scalar offsets.
     pub marks: Vec<crate::MarkSpan>,
     pub task_state: Option<String>,
+    /// The row's `write_seq` ordering token — what a data-sync echo carries.
+    pub write_seq: Option<i64>,
 }
 
 /// One open tab in a region: an open `navigation_history` row.

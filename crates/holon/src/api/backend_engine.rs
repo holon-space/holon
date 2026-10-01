@@ -1606,6 +1606,11 @@ impl BackendEngine {
         self.op_engine.text_epoch_count().await
     }
 
+    #[cfg(feature = "dispatch-hold")]
+    pub fn dispatch_hold(&self) -> &Arc<crate::api::dispatch_hold::DispatchHold> {
+        self.op_engine.dispatch_hold()
+    }
+
     pub async fn enable_undo_persistence(&mut self) -> Result<()> {
         use crate::api::undo_persistence::SqlUndoStateReader;
         use crate::api::undo_persistence::SqlUndoStore;

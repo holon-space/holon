@@ -135,6 +135,9 @@ pub enum Reason {
     NoDrawerHandles,
     NoCollapsibleTargets,
     DeliverNotMeaningfulInBackendTests,
+    /// A dispatch hold or injected failure: drawn at random it would park an
+    /// op no later step releases, so only a hand-authored case names one.
+    HandAuthoredOnly,
 
     // ---------- true sharing (two-instance) ----------
     /// The vault is already shared with the receiver — re-sharing changes
