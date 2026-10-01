@@ -476,6 +476,8 @@ mod backend {
                 None => ReactiveViewModel::empty(),
             },
             services_slot.clone(),
+            // The worker mounts no vault files, so no document is read-only.
+            Arc::new(holon_core::NoReadOnlyDocuments),
         ));
         let services: Arc<dyn BuilderServices> = reactive.clone();
         // Ignore the error — if already set, a previous init wired things up.

@@ -86,6 +86,7 @@ pub use sync_gate::SyncGateClosed;
 pub use sync_gate::SyncGateState;
 pub use sync_gate::SyncGateWatcher;
 pub use write_tier_gate::EditRefused;
+pub use write_tier_gate::NoReadOnlyDocuments;
 pub use write_tier_gate::ReadOnlyDocuments;
 pub use write_tier_gate::ReadOnlyHome;
 pub use write_tier_gate::ReadOnlyMembers;

@@ -289,6 +289,30 @@ pub trait WriteTierAuthority: Send + Sync {
     fn disclose(&self, refusal: &EditRefused);
 }
 
+/// The authority of a configuration with no read-only documents: every block
+/// is writable. A session without a vault has no file formats, hence no
+/// read-only home.
+pub struct NoReadOnlyDocuments;
+
+#[async_trait]
+impl WriteTierAuthority for NoReadOnlyDocuments {
+    fn any_read_only_documents(&self) -> bool {
+        false
+    }
+
+    fn refusal_for(&self, _: &str) -> crate::Result<Option<EditRefused>> {
+        Ok(None)
+    }
+
+    async fn adopt_sync_import(&self, _: &str, _: &str) -> crate::Result<bool> {
+        Ok(false)
+    }
+
+    fn disclose(&self, refusal: &EditRefused) {
+        panic!("NoReadOnlyDocuments refused nothing, yet asked to disclose {refusal}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

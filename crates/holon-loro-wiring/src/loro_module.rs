@@ -164,12 +164,16 @@ impl Module for LoroModule {
                     .get_doc(DocScope::Layout)
                     .await
                     .expect("LoroDocumentStore::get_doc(Layout) failed for BlockCellRegistry");
-                let mut registry =
-                    holon_loro::block_cell_registry::BlockCellRegistry::with_loro(collab, layout)
-                        .with_text_undo_arming(
-                            (*doc_store).clone(),
-                            tokio::runtime::Handle::current(),
-                        );
+                // A content cell writes the block's `LoroText` directly, so it
+                // carries the dispatcher's write-tier decision (Model.md
+                // invariant 4); a root without one fails here.
+                let write_tier = resolver
+                    .resolve_async::<dyn holon_core::WriteTierAuthority>()
+                    .await;
+                let mut registry = holon_loro::block_cell_registry::BlockCellRegistry::with_loro(
+                    collab, layout, write_tier,
+                )
+                .with_text_undo_arming((*doc_store).clone(), tokio::runtime::Handle::current());
                 #[cfg(all(
                     feature = "iroh-sync",
                     not(all(target_arch = "wasm32", target_os = "unknown"))
@@ -180,15 +184,6 @@ impl Module for LoroModule {
                     let manager = resolver.resolve::<Arc<SharedTreeSyncManager>>();
                     registry =
                         registry.with_shared_trees((*manager).clone() as Arc<dyn SharedTreeStore>);
-                }
-                // A content cell writes the block's `LoroText` directly, so it
-                // needs the dispatcher's write-tier decision or it becomes a
-                // second, ungated writer (Model.md invariant 4).
-                if let Some(authority) = resolver
-                    .optional_resolve_async::<dyn holon_core::WriteTierAuthority>()
-                    .await
-                {
-                    registry = registry.with_write_tier(authority);
                 }
                 // A keystroke the doc's write lock refuses is a lost edit, and
                 // the frontends only log the error. The cell discloses it
@@ -696,4 +691,23 @@ fn register_subtree_share(injector: &Injector) {
         let pairing = resolver.resolve::<Arc<holon_loro::device_pairing_op::DevicePairing>>();
         (*pairing).clone() as Arc<dyn OperationProvider>
     }));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    #[should_panic(expected = "WriteTierAuthority")]
+    async fn the_cell_registry_cannot_be_resolved_without_a_write_tier_authority() {
+        let dir = tempfile::tempdir().unwrap();
+        let injector = Injector::root();
+        injector.provide::<LoroConfig>(Provider::root(move |_| {
+            Shared::new(LoroConfig::new(dir.path().to_path_buf()))
+        }));
+        LoroModule.configure(&injector).unwrap();
+        injector
+            .resolve_async::<holon_loro::block_cell_registry::BlockCellRegistry>()
+            .await;
+    }
 }

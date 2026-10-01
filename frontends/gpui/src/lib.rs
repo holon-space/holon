@@ -1765,19 +1765,6 @@ impl Render for HolonApp {
     }
 }
 
-/// Launch a Holon window, creating a new `BoundsRegistry` from the session's
-/// theme.
-pub fn launch_holon_window(
-    session: Arc<FrontendSession>,
-    rt_handle: tokio::runtime::Handle,
-    cx: &mut App,
-) -> BoundsRegistry {
-    let bounds_registry = BoundsRegistry::new();
-    let nav = NavigationState::new();
-    launch_holon_window_with_registry(session, rt_handle, nav, bounds_registry.clone(), cx);
-    bounds_registry
-}
-
 /// Launch a Holon window with a pre-created `ReactiveEngine`.
 ///
 /// The engine is shared with the MCP server so `describe_ui` returns real data.
@@ -1820,7 +1807,7 @@ pub fn launch_holon_window_with_engine_and_share(
     nav.set_navigation_debug(debug.navigation_state.clone());
     launch_holon_window_impl(
         session,
-        Some(engine),
+        engine,
         Some(debug),
         share_backend,
         Some(degraded_bus),
@@ -1855,7 +1842,7 @@ pub fn launch_holon_window_with_title(
 ) {
     launch_holon_window_impl(
         session,
-        Some(engine),
+        engine,
         debug,
         None,
         None,
@@ -2123,7 +2110,7 @@ pub fn launch_holon_window_rebindable(
 ) -> Option<RebindHandle> {
     launch_holon_window_impl(
         session,
-        Some(engine),
+        engine,
         debug,
         None,
         degraded_bus,
@@ -2155,29 +2142,7 @@ pub fn launch_holon_window_with_engine_and_registry(
 ) {
     launch_holon_window_impl(
         session,
-        Some(engine),
-        None,
-        None,
-        None,
-        rt_handle,
-        nav,
-        bounds_registry,
-        None,
-        cx,
-    );
-}
-
-/// Launch a Holon window using a pre-created `BoundsRegistry`.
-pub fn launch_holon_window_with_registry(
-    session: Arc<FrontendSession>,
-    rt_handle: tokio::runtime::Handle,
-    nav: NavigationState,
-    bounds_registry: BoundsRegistry,
-    cx: &mut App,
-) {
-    launch_holon_window_impl(
-        session,
-        None,
+        engine,
         None,
         None,
         None,
@@ -2344,8 +2309,7 @@ type LaunchedWindow = (
 
 /// Shared implementation for launching a Holon window.
 ///
-/// If `existing_engine` is `Some`, reuses it (shared with MCP server).
-/// Otherwise creates a fresh `ReactiveEngine` inside the window callback.
+/// `engine` is shared with the MCP server.
 /// `share_backend` gates the share context menu (`ShareTrigger`) only.
 /// `degraded_bus` gates the disclosure bridge and is independent of it: every
 /// production entry point supplies the bus, so the bridge is wired in every
@@ -2356,7 +2320,7 @@ type LaunchedWindow = (
 #[allow(clippy::too_many_arguments)]
 fn launch_holon_window_impl(
     session: Arc<FrontendSession>,
-    existing_engine: Option<Arc<ReactiveEngine>>,
+    engine: Arc<ReactiveEngine>,
     debug: Option<Arc<holon_mcp::server::DebugServices>>,
     share_backend: Option<Arc<holon_loro::loro_share_backend::LoroShareBackend>>,
     degraded_bus: Option<Arc<holon_api::ConditionBus>>,
@@ -2485,9 +2449,7 @@ fn launch_holon_window_impl(
     // the real event arrives on tokio, the GPUI subscription may have
     // already gone quiet, causing BoundsRegistry to stay empty.
     //
-    // Only pre-warm when we were given an existing_engine (PBT / MCP
-    // desktop case) — otherwise the engine doesn't exist yet and has to
-    // be created inside open_window's callback. The pre-warm is driven
+    // The pre-warm is driven
     // synchronously on gpui's background executor so that the call path
     // stays on the main thread and the outer cx.spawn wrapper (which
     // breaks on iOS) can be avoided.
@@ -2501,7 +2463,8 @@ fn launch_holon_window_impl(
     // loading state; the tokio root-layout signal drives the first real
     // repaint asynchronously once the event loop is running.
     #[cfg(not(target_os = "android"))]
-    if let Some(ref engine) = existing_engine {
+    {
+        let engine = &engine;
         use futures::StreamExt;
         use futures::future::Either;
         use futures::future::select;
@@ -2563,7 +2526,6 @@ fn launch_holon_window_impl(
         })
     });
     let entity_cache_for_view = entity_cache.clone();
-    let degraded_bus_for_sources = degraded_bus.clone();
     let window_result = cx.open_window(window_options, move |window, cx| {
         tracing::debug!("[GPUI] Inside open_window callback — building root view");
         let close_persist_dir = persist_config_dir.clone();
@@ -2579,42 +2541,6 @@ fn launch_holon_window_impl(
             cx.quit();
             true
         });
-
-        let engine = if let Some(engine) = existing_engine {
-            engine
-        } else {
-            // Break circular dependency: engine needs interpret_fn, which needs
-            // services (= the engine). Use OnceLock for deferred init.
-            let services_slot: Arc<std::sync::OnceLock<Arc<dyn BuilderServices>>> =
-                Arc::new(std::sync::OnceLock::new());
-
-            let engine = Arc::new(ReactiveEngine::new(
-                Arc::clone(&session_clone),
-                handle_clone.clone(),
-                Arc::new(holon_frontend::shadow_builders::build_shadow_interpreter()),
-                make_interpret_fn(services_slot.clone()),
-                services_slot.clone(),
-            ));
-
-            let services: Arc<dyn BuilderServices> = engine.clone();
-            services_slot.set(services).ok();
-
-            // The named row sources this window's collections may be built
-            // over. Declared here rather than in `ReactiveEngine::new` because
-            // the holders behind them are wired by DI, which runs after the
-            // engine exists. Without a bus there are no sources, and a
-            // `source:` argument is then refused by name.
-            if let Some(bus) = degraded_bus_for_sources.as_ref() {
-                let mut sources = holon_api::row_source::RowSourceRegistry::new();
-                sources
-                    .register(holon_api::condition_source::conditions_source(bus))
-                    .expect("the first registration on a fresh registry cannot collide");
-                engine
-                    .set_row_sources(Arc::new(sources))
-                    .expect("this engine was constructed on the line above");
-            }
-            engine
-        };
 
         let root_uri = holon_api::root_layout_block_uri();
         let root_vm = engine.snapshot_reactive(&root_uri);

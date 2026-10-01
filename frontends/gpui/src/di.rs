@@ -226,3 +226,42 @@ mod mcp_toggle_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod write_tier_wiring_tests {
+    use std::collections::HashSet;
+
+    use fluxdi::Injector;
+    use fluxdi::Module;
+    use holon_frontend::config::HolonConfig;
+    use holon_frontend::config::SessionConfig;
+
+    use super::GpuiModule;
+
+    /// A vault-backed GPUI session must provide the write-tier authority the
+    /// `ReactiveEngine` factory installs; without it a creation slot is drawn
+    /// inside read-only documents.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_vault_backed_session_provides_the_write_tier_authority() {
+        let vault = tempfile::tempdir().expect("temp vault dir");
+        let config_dir = tempfile::tempdir().expect("temp config dir");
+        let mut holon_config = HolonConfig::default();
+        holon_config.vault.root = Some(vault.path().to_path_buf());
+        holon_config.mcp.enabled = Some(false);
+        let module = GpuiModule {
+            holon_config,
+            session_config: SessionConfig::new(holon_api::UiInfo::permissive()),
+            config_dir: config_dir.path().to_path_buf(),
+            locked_keys: HashSet::new(),
+        };
+        let injector = Injector::root();
+        module
+            .configure(&injector)
+            .expect("GpuiModule must configure over a vault root");
+        injector
+            .try_resolve::<dyn holon_core::WriteTierAuthority>()
+            .unwrap_or_else(|e| {
+                panic!("a vault-backed GPUI session provides no WriteTierAuthority: {e}")
+            });
+    }
+}

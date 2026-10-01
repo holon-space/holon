@@ -370,10 +370,20 @@ impl FrontendInjectorExt for Injector {
             ));
         }
 
+        // wasm32 has no vault, hence no read-only document.
+        #[cfg(target_arch = "wasm32")]
+        self.provide::<dyn holon_core::WriteTierAuthority>(Provider::root(|_| {
+            Arc::new(holon_core::NoReadOnlyDocuments) as Arc<dyn holon_core::WriteTierAuthority>
+        }));
+
         // OrgMode (native-only — holon-orgmode uses tokio::fs + tokio::process)
         #[cfg(not(target_arch = "wasm32"))]
         if orgmode_root.is_none() {
             disclosure.absent_by_config(BootStep::OrgModeIngest, "no vault root configured");
+            // No vault means no file formats, so no document is read-only.
+            self.provide::<dyn holon_core::WriteTierAuthority>(Provider::root(|_| {
+                Arc::new(holon_core::NoReadOnlyDocuments) as Arc<dyn holon_core::WriteTierAuthority>
+            }));
         }
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(root) = orgmode_root {

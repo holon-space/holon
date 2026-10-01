@@ -204,7 +204,10 @@ fn shared_doc_writes_address_the_smallest_carrier_listed_last() {
 fn cell_case(small_first: bool) {
     let rt = rt();
     let (doc, large, small) = duplicated(&rt, small_first);
-    let registry = BlockCellRegistry::with_loro_doc(doc.doc());
+    let registry = BlockCellRegistry::with_loro_doc(
+        doc.doc(),
+        std::sync::Arc::new(holon_core::NoReadOnlyDocuments),
+    );
     let written = rt
         .block_on(registry.write_field(
             &EntityUri::block(ID),

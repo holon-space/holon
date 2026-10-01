@@ -146,8 +146,11 @@ fn loro_instance_carries_the_template_block_type_and_completed() {
             .await
             .expect("layout Loro doc");
         drop(store);
-        let registry: Box<dyn EntityCellRegistry> =
-            Box::new(BlockCellRegistry::with_loro(global, layout));
+        let registry: Box<dyn EntityCellRegistry> = Box::new(BlockCellRegistry::with_loro(
+            global,
+            layout,
+            std::sync::Arc::new(holon_core::NoReadOnlyDocuments),
+        ));
         let observed = expected
             .iter()
             .map(|(id, _, _)| {

@@ -63,7 +63,7 @@ pub struct BlockCellRegistry {
     /// they are writers in the sense of Model.md invariant 4 and must carry the
     /// same decision the dispatcher carries — not a second rule
     /// (`ReadOnlyDocuments` answers both).
-    write_tier: Option<Arc<dyn WriteTierAuthority>>,
+    write_tier: Arc<dyn WriteTierAuthority>,
     /// Where an editor cell discloses a keystroke the doc's write lock
     /// refused. Absent in the SqlOnly and test registries, whose cells then
     /// return the error without raising a condition.
@@ -87,7 +87,11 @@ impl BlockCellRegistry {
     /// registry walks the tree on demand to resolve `(block_id, "content")`
     /// to a `LoroText` container, and dispatches non-content writes through
     /// the wrapped [`LoroBackend`] (Phase 2 authority flip).
-    pub fn with_loro(loro_doc: Arc<LoroDocument>, layout: Arc<LoroDocument>) -> Self {
+    pub fn with_loro(
+        loro_doc: Arc<LoroDocument>,
+        layout: Arc<LoroDocument>,
+        write_tier: Arc<dyn WriteTierAuthority>,
+    ) -> Self {
         // ALLOW(loro_doc_escape): the cell backings' retained container handles
         // read single containers of already-born blocks; the scoped-capability
         // ruling keeps them outside the doc-boundary lock.
@@ -100,7 +104,7 @@ impl BlockCellRegistry {
             doc,
             layout_doc: Some(layout_doc),
             backend,
-            write_tier: None,
+            write_tier,
             text_undo_arm: None,
             bus: None,
         }
@@ -117,14 +121,6 @@ impl BlockCellRegistry {
         Arc::get_mut(&mut self.backend)
             .expect("the registry's backend is shared only once construction ends")
             .set_shared_trees(store);
-        self
-    }
-
-    /// Install the dispatcher's write-tier authority. Without it a content cell
-    /// on a read-only-format block would write the vault's CRDT doc behind the
-    /// dispatcher's back.
-    pub fn with_write_tier(mut self, authority: Arc<dyn WriteTierAuthority>) -> Self {
-        self.write_tier = Some(authority);
         self
     }
 
@@ -175,9 +171,7 @@ impl BlockCellRegistry {
     /// The refusal a USER's write to `uri` earns, per the dispatcher's own
     /// authority.
     fn write_tier_refusal(&self, uri: &EntityUri) -> Result<Option<holon_core::EditRefused>> {
-        let Some(authority) = &self.write_tier else {
-            return Ok(None);
-        };
+        let authority = &self.write_tier;
         if !authority.any_read_only_documents() {
             return Ok(None);
         }
@@ -186,12 +180,20 @@ impl BlockCellRegistry {
             .map_err(|e| anyhow!("write-tier lookup for {uri}: {e}"))
     }
 
+    /// The one write-tier check every create leg runs before touching the tree.
+    fn refuse_create_under(&self, parent_id: &EntityUri) -> Result<()> {
+        match self.write_tier_refusal(parent_id)? {
+            Some(refusal) => Err(anyhow::Error::new(refusal)),
+            None => Ok(()),
+        }
+    }
+
     /// Convenience constructor that takes a raw `Arc<LoroDoc>`. Used by
     /// tests and integration test fixtures (`pbt/sut.rs`) that build a
     /// `LoroDoc` directly via the `loro` crate without going through
     /// `LoroDocumentStore`. Production callers should prefer
     /// [`Self::with_loro`].
-    pub fn with_loro_doc(doc: Arc<LoroDoc>) -> Self {
+    pub fn with_loro_doc(doc: Arc<LoroDoc>, write_tier: Arc<dyn WriteTierAuthority>) -> Self {
         let loro_doc = LoroDocument::from_existing(doc.clone(), "test");
         let backend = Arc::new(LoroBackend::from_document(Arc::new(loro_doc)));
         Self {
@@ -199,7 +201,7 @@ impl BlockCellRegistry {
             doc,
             layout_doc: None,
             backend,
-            write_tier: None,
+            write_tier,
             text_undo_arm: None,
             bus: None,
         }
@@ -414,10 +416,7 @@ impl EntityCellRegistry for BlockCellRegistry {
         let Some(refusal) = self.write_tier_refusal(uri)? else {
             return Ok(cell_any);
         };
-        let authority = self
-            .write_tier
-            .as_ref()
-            .expect("a refusal implies an installed authority");
+        let authority = &self.write_tier;
         let cell = cell_any
             .downcast::<holon_core::cell::Cell<String>>()
             .map_err(|_| anyhow!("the `content` cell for {uri} is not a Cell<String>"))?;
@@ -491,9 +490,7 @@ impl EntityCellRegistry for BlockCellRegistry {
         // path, rather than growing a second implementation of the exotic
         // cases (placeholder roots, positional re-anchoring) that would then
         // have to be kept in step.
-        if let Some(refusal) = self.write_tier_refusal(parent_id)? {
-            return Err(anyhow::Error::new(refusal));
-        }
+        self.refuse_create_under(parent_id)?;
         let backend = &self.backend;
         if after_id.is_some() || backend.is_live_anywhere_sync(new_id.id()) {
             return Ok(false);
@@ -525,6 +522,7 @@ impl EntityCellRegistry for BlockCellRegistry {
         properties: &std::collections::HashMap<String, holon_api::Value>,
         edges: &holon_api::BlockEdges,
     ) -> Result<bool> {
+        self.refuse_create_under(parent_id)?;
         let backend = self.backend.clone();
         // The positional anchor must already be under Loro authority. When
         // the after-block has no tree node (unseeded vault, synthetic
@@ -1150,7 +1148,10 @@ mod tests {
     #[test]
     fn loro_mode_resolves_content_cell() -> Result<()> {
         let doc = make_loro_doc_with_block("abc");
-        let registry: Box<dyn EntityCellRegistry> = Box::new(BlockCellRegistry::with_loro_doc(doc));
+        let registry: Box<dyn EntityCellRegistry> = Box::new(BlockCellRegistry::with_loro_doc(
+            doc,
+            Arc::new(holon_core::NoReadOnlyDocuments),
+        ));
         let uri = EntityUri::block("abc");
         let cell: Cell<String> = registry.as_ref().live_field::<String>(&uri, "content")?;
         assert_eq!(cell.current(), "");
@@ -1162,7 +1163,10 @@ mod tests {
         // Phase 2 (invariant 12): scalar block fields now resolve a cell in
         // Full mode. This inverts the old pin that asserted `completed` FAILED.
         let doc = make_loro_doc_with_block("abc");
-        let registry: Box<dyn EntityCellRegistry> = Box::new(BlockCellRegistry::with_loro_doc(doc));
+        let registry: Box<dyn EntityCellRegistry> = Box::new(BlockCellRegistry::with_loro_doc(
+            doc,
+            Arc::new(holon_core::NoReadOnlyDocuments),
+        ));
         let uri = EntityUri::block("abc");
         let cell: Cell<bool> = registry.as_ref().live_field::<bool>(&uri, "completed")?;
         assert!(!cell.current(), "absent property decodes to false");
@@ -1172,7 +1176,8 @@ mod tests {
     #[tokio::test]
     async fn write_field_completed_round_trips_through_cell() -> Result<()> {
         let doc = make_loro_doc_with_block("abc");
-        let registry = BlockCellRegistry::with_loro_doc(doc);
+        let registry =
+            BlockCellRegistry::with_loro_doc(doc, Arc::new(holon_core::NoReadOnlyDocuments));
         let uri = EntityUri::block("abc");
         let routed = registry
             .write_field(&uri, "completed", Value::Boolean(true))
@@ -1187,7 +1192,10 @@ mod tests {
     #[test]
     fn loro_mode_unsupported_scalar_type_errs() {
         let doc = make_loro_doc_with_block("abc");
-        let registry: Box<dyn EntityCellRegistry> = Box::new(BlockCellRegistry::with_loro_doc(doc));
+        let registry: Box<dyn EntityCellRegistry> = Box::new(BlockCellRegistry::with_loro_doc(
+            doc,
+            Arc::new(holon_core::NoReadOnlyDocuments),
+        ));
         let uri = EntityUri::block("abc");
         let res = registry.as_ref().live_field::<f64>(&uri, "completed");
         let err = res
@@ -1210,7 +1218,10 @@ mod tests {
     #[test]
     fn first_slot_position_among_roots_is_expressible_for_a_parentless_split() -> Result<()> {
         let doc = make_loro_doc_with_block("root-a");
-        let registry = BlockCellRegistry::with_loro_doc(doc.clone());
+        let registry = BlockCellRegistry::with_loro_doc(
+            doc.clone(),
+            Arc::new(holon_core::NoReadOnlyDocuments),
+        );
         let rt = tokio::runtime::Runtime::new()?;
         let no_parent = EntityUri::no_parent();
         let minted = EntityUri::block("minted-empty");
@@ -1263,7 +1274,10 @@ mod tests {
     #[test]
     fn create_entity_missing_after_anchor_falls_back_without_tree_mutation() -> Result<()> {
         let doc = make_loro_doc_with_block("parent");
-        let registry = BlockCellRegistry::with_loro_doc(doc.clone());
+        let registry = BlockCellRegistry::with_loro_doc(
+            doc.clone(),
+            Arc::new(holon_core::NoReadOnlyDocuments),
+        );
         let rt = tokio::runtime::Runtime::new()?;
         let wrote = rt.block_on(registry.create_entity(
             &EntityUri::block("parent"),
@@ -1314,8 +1328,7 @@ mod tests {
     #[tokio::test]
     async fn create_entity_sync_under_a_read_only_parent_is_refused_typed() {
         let doc = make_loro_doc_with_block("recipe");
-        let registry =
-            BlockCellRegistry::with_loro_doc(doc.clone()).with_write_tier(Arc::new(RecipeTier));
+        let registry = BlockCellRegistry::with_loro_doc(doc.clone(), Arc::new(RecipeTier));
         let err = registry
             .create_entity_sync(
                 &EntityUri::block("recipe"),
@@ -1340,10 +1353,42 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn create_entity_under_a_read_only_parent_is_refused_typed() {
+        let doc = make_loro_doc_with_block("recipe");
+        let registry = BlockCellRegistry::with_loro_doc(doc.clone(), Arc::new(RecipeTier));
+        let err = registry
+            .create_entity(
+                &EntityUri::block("recipe"),
+                None,
+                &EntityUri::block("newborn"),
+                holon_api::BlockContent::text(""),
+                &std::collections::HashMap::new(),
+                &holon_api::BlockEdges::default(),
+            )
+            .await
+            .expect_err("a create under a read-only-format parent must be refused");
+        assert!(
+            matches!(
+                err.downcast_ref::<holon_core::EditRefused>(),
+                Some(holon_core::EditRefused::ReadOnlyFormat { .. })
+            ),
+            "the refusal must reach the caller as a typed EditRefused, got: {err:#}"
+        );
+        assert_eq!(
+            doc.get_tree(TREE_NAME).get_nodes(false).len(),
+            1,
+            "a refused create minted a tree node"
+        );
+    }
+
     #[test]
     fn loro_mode_block_not_in_tree_errs() {
         let doc = make_loro_doc_with_block("present");
-        let registry: Box<dyn EntityCellRegistry> = Box::new(BlockCellRegistry::with_loro_doc(doc));
+        let registry: Box<dyn EntityCellRegistry> = Box::new(BlockCellRegistry::with_loro_doc(
+            doc,
+            Arc::new(holon_core::NoReadOnlyDocuments),
+        ));
         let uri = EntityUri::block("missing");
         let res = registry.as_ref().live_field::<String>(&uri, "content");
         let err = res.err().expect("expected an error for missing block");
@@ -1365,7 +1410,10 @@ mod tests {
         use std::collections::HashMap;
 
         let doc = make_loro_doc_with_block("parent");
-        let registry = BlockCellRegistry::with_loro_doc(doc.clone());
+        let registry = BlockCellRegistry::with_loro_doc(
+            doc.clone(),
+            Arc::new(holon_core::NoReadOnlyDocuments),
+        );
         let parent = EntityUri::block("parent");
         let child = EntityUri::block("journals");
         let page_tags = Tags::from(vec!["Page".to_string()]);
@@ -1449,7 +1497,10 @@ mod tests {
         use std::collections::HashMap;
 
         let doc = make_loro_doc_with_block("root");
-        let registry = BlockCellRegistry::with_loro_doc(doc.clone());
+        let registry = BlockCellRegistry::with_loro_doc(
+            doc.clone(),
+            Arc::new(holon_core::NoReadOnlyDocuments),
+        );
         let root = EntityUri::block("root");
         let parent = EntityUri::block("headline");
         let child = EntityUri::block("child");
@@ -1519,7 +1570,10 @@ mod tests {
         use std::collections::HashMap;
 
         let doc = make_loro_doc_with_block("parent");
-        let registry = BlockCellRegistry::with_loro_doc(doc.clone());
+        let registry = BlockCellRegistry::with_loro_doc(
+            doc.clone(),
+            Arc::new(holon_core::NoReadOnlyDocuments),
+        );
         let parent = EntityUri::block("parent");
         let child = EntityUri::block("root-layout");
 
@@ -1576,7 +1630,10 @@ mod tests {
     #[test]
     fn on_entity_deleted_prunes_cache() -> Result<()> {
         let doc = make_loro_doc_with_block("zzz");
-        let registry: Arc<dyn EntityCellRegistry> = Arc::new(BlockCellRegistry::with_loro_doc(doc));
+        let registry: Arc<dyn EntityCellRegistry> = Arc::new(BlockCellRegistry::with_loro_doc(
+            doc,
+            Arc::new(holon_core::NoReadOnlyDocuments),
+        ));
         let uri = EntityUri::block("zzz");
         let _cell = registry.as_ref().live_field::<String>(&uri, "content")?;
         registry.on_entity_deleted(&uri);
@@ -1591,7 +1648,10 @@ mod tests {
 
     #[tokio::test]
     async fn ever_seen_separates_a_tombstone_from_a_never() -> Result<()> {
-        let never_registry = BlockCellRegistry::with_loro_doc(make_loro_doc_with_block("seeded"));
+        let never_registry = BlockCellRegistry::with_loro_doc(
+            make_loro_doc_with_block("seeded"),
+            Arc::new(holon_core::NoReadOnlyDocuments),
+        );
         assert_eq!(
             never_registry
                 .entity_ever_seen(&EntityUri::block("unheard-of"))
@@ -1608,7 +1668,10 @@ mod tests {
         );
 
         let doc = make_loro_doc_with_block("deleted");
-        let registry = BlockCellRegistry::with_loro_doc(doc.clone());
+        let registry = BlockCellRegistry::with_loro_doc(
+            doc.clone(),
+            Arc::new(holon_core::NoReadOnlyDocuments),
+        );
         let tree_id = registry
             .backend
             .resolve_to_tree_id("deleted")

@@ -151,6 +151,7 @@ async fn a_vault_with_no_layout_migrates_nothing_and_seeds_into_the_layout_doc()
     let registry = BlockCellRegistry::with_loro(
         store.get_doc(DocScope::Global).await?,
         store.get_doc(DocScope::Layout).await?,
+        std::sync::Arc::new(holon_core::NoReadOnlyDocuments),
     );
     registry
         .create_entity(

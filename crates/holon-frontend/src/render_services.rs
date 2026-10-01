@@ -57,22 +57,38 @@ pub fn register_render_services(injector: &Injector) {
         let services_slot = resolver.resolve::<BuilderServicesSlot>();
         let shutdown = resolver.resolve::<holon_api::lifecycle::SessionShutdown>();
         let f = interpret.0.clone();
-        let mut engine = ReactiveEngine::new(
+        let write_tier = resolve_write_tier(resolver);
+        let engine = ReactiveEngine::new(
             session,
             tokio::runtime::Handle::current(),
             interpreter,
             move |expr, rows| f(expr, rows),
             services_slot.0.clone(),
+            write_tier,
         );
-        match resolver.try_resolve::<dyn holon_core::WriteTierAuthority>() {
-            Ok(authority) => engine = engine.with_write_tier(authority),
-            Err(e) if e.kind == fluxdi::ErrorKind::ServiceNotProvided => {}
-            Err(e) => panic!(
-                "[ReactiveEngine] resolving the write-tier authority failed: {e}. Without it a \
-                 creation-slot birth would create inside a read-only document unrefused."
-            ),
-        }
         engine.stop_watchers_on_shutdown(&shutdown);
         Shared::new(engine)
     }));
+}
+
+fn resolve_write_tier(resolver: &Injector) -> Arc<dyn holon_core::WriteTierAuthority> {
+    resolver
+        .try_resolve::<dyn holon_core::WriteTierAuthority>()
+        .unwrap_or_else(|e| {
+            panic!(
+                "no WriteTierAuthority provided: {e}. Every configuration provides one; a \
+                 configuration without read-only documents provides holon_core::NoReadOnlyDocuments."
+            )
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[should_panic(expected = "no WriteTierAuthority")]
+    fn resolving_without_an_authority_is_an_error() {
+        resolve_write_tier(&Injector::root());
+    }
 }

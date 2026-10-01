@@ -2575,8 +2575,8 @@ pub struct ReactiveEngine {
     /// through it. Set by frontend DI factories that want CRDT-backed editors.
     pub block_cell_registry: Mutex<Option<Arc<dyn crate::cell::EntityCellRegistry>>>,
     /// The dispatcher's write-tier authority, asked before a creation-slot
-    /// birth mints anything. Absent where no vault formats are wired.
-    write_tier: Option<Arc<dyn holon_core::WriteTierAuthority>>,
+    /// birth mints anything.
+    write_tier: Arc<dyn holon_core::WriteTierAuthority>,
     /// Shared slot used to recover an owned `Arc<dyn BuilderServices>` from
     /// inside `&self` methods. Populated by the owning frontend right after
     /// the engine is wrapped in an Arc; `clone_arc()` reads it.
@@ -2623,6 +2623,7 @@ impl ReactiveEngine {
         interpreter: Arc<RenderInterpreter<ReactiveViewModel>>,
         interpret_fn: impl Fn(&RenderExpr, &[Arc<DataRow>]) -> ReactiveViewModel + Send + Sync + 'static,
         services_slot: Arc<std::sync::OnceLock<Arc<dyn BuilderServices>>>,
+        write_tier: Arc<dyn holon_core::WriteTierAuthority>,
     ) -> Self {
         use holon_api::input_types::Key;
 
@@ -2667,7 +2668,7 @@ impl ReactiveEngine {
             key_bindings,
             provider_cache: Arc::new(crate::provider_cache::ProviderCache::new()),
             block_cell_registry: Mutex::new(None),
-            write_tier: None,
+            write_tier,
             services_slot,
             advice_sidecar: Arc::new(Mutex::new(HashMap::new())),
             advice_weaver_started: std::sync::atomic::AtomicBool::new(false),
@@ -2676,11 +2677,6 @@ impl ReactiveEngine {
         };
         engine.register_memstats();
         engine
-    }
-
-    pub fn with_write_tier(mut self, authority: Arc<dyn holon_core::WriteTierAuthority>) -> Self {
-        self.write_tier = Some(authority);
-        self
     }
 
     /// Register the session-scoped task that tears down every UI watch on
@@ -3112,14 +3108,13 @@ impl ReactiveEngine {
                  creation affordance"
             );
         };
-        if let Some(authority) = &self.write_tier {
-            let refusal = authority
-                .refusal_for(parent.as_str())
-                .map_err(|e| anyhow::anyhow!("write-tier lookup for birth parent {parent}: {e}"))?;
-            if let Some(refusal) = refusal {
-                authority.disclose(&refusal);
-                return Ok(BirthOutcome::Refused(refusal));
-            }
+        let refusal = self
+            .write_tier
+            .refusal_for(parent.as_str())
+            .map_err(|e| anyhow::anyhow!("write-tier lookup for birth parent {parent}: {e}"))?;
+        if let Some(refusal) = refusal {
+            self.write_tier.disclose(&refusal);
+            return Ok(BirthOutcome::Refused(refusal));
         }
         // Idempotent: a second focus on the same affordance re-enters the block
         // the first one brought into existence. Without this, every re-click,
@@ -3269,8 +3264,7 @@ impl ReactiveEngine {
                 );
                 return;
             }
-            let Some(target) =
-                navigation_caret_target(first_child, &destination, write_tier.as_deref())
+            let Some(target) = navigation_caret_target(first_child, &destination, &*write_tier)
             else {
                 tracing::info!(
                     %destination,
@@ -4682,7 +4676,7 @@ impl BuilderServices for ReactiveEngine {
     }
 
     fn offers_creation_under(&self, parent: &EntityUri) -> bool {
-        tier_allows_creation_under(self.write_tier.as_deref(), parent)
+        tier_allows_creation_under(&*self.write_tier, parent)
     }
 
     fn focused_block_mutable(&self) -> Option<Mutable<Option<EntityUri>>> {
@@ -5174,12 +5168,9 @@ impl RenderInterpreterInjectorExt for Injector {
 }
 
 fn tier_allows_creation_under(
-    tier: Option<&dyn holon_core::WriteTierAuthority>,
+    tier: &dyn holon_core::WriteTierAuthority,
     parent: &EntityUri,
 ) -> bool {
-    let Some(tier) = tier else {
-        return true;
-    };
     tier.refusal_for(parent.as_str())
         .unwrap_or_else(|e| panic!("write-tier lookup of the parsed uri {parent}: {e}"))
         .is_none()
@@ -5191,7 +5182,7 @@ fn tier_allows_creation_under(
 fn navigation_caret_target(
     first_child: Option<EntityUri>,
     destination: &EntityUri,
-    tier: Option<&dyn holon_core::WriteTierAuthority>,
+    tier: &dyn holon_core::WriteTierAuthority,
 ) -> Option<EntityUri> {
     match first_child {
         Some(child) => Some(child),
@@ -5737,18 +5728,15 @@ mod tests {
     #[test]
     fn navigation_into_an_empty_read_only_page_seats_no_caret() {
         let page = EntityUri::block("recipe-page");
-        assert_eq!(
-            navigation_caret_target(None, &page, Some(&RefusingTier)),
-            None
-        );
+        assert_eq!(navigation_caret_target(None, &page, &RefusingTier), None);
         let step = EntityUri::block("step-1");
         assert_eq!(
-            navigation_caret_target(Some(step.clone()), &page, Some(&RefusingTier)),
+            navigation_caret_target(Some(step.clone()), &page, &RefusingTier),
             Some(step),
             "a read-only page's existing rows still take the caret"
         );
         assert!(
-            navigation_caret_target(None, &page, None)
+            navigation_caret_target(None, &page, &holon_core::NoReadOnlyDocuments)
                 .is_some_and(|slot| crate::row_origin::RowOrigin::from_id(slot.as_str())
                     .is_creation_placeholder()),
             "an empty writable page seats the caret on its creation slot"

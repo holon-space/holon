@@ -58,6 +58,11 @@ pub fn register_block_query_frontend(injector: &Injector) {
         ))
     }));
 
+    // No vault formats are wired here, so no document is read-only.
+    injector.provide::<dyn holon_core::WriteTierAuthority>(Provider::root(|_| {
+        Arc::new(holon_core::NoReadOnlyDocuments) as Arc<dyn holon_core::WriteTierAuthority>
+    }));
+
     // Render stack (slot + shared shadow interpreter + ReactiveEngine
     // factory) — backend-agnostic, lives in holon-frontend.
     register_render_services(injector);

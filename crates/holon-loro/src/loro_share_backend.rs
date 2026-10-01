@@ -7522,6 +7522,7 @@ mod tests {
         crate::block_cell_registry::BlockCellRegistry::with_loro(
             store.get_doc(DocScope::Global).await.unwrap(),
             store.get_doc(DocScope::Layout).await.unwrap(),
+            Arc::new(holon_core::NoReadOnlyDocuments),
         )
         .with_shared_trees(backend.manager.clone() as Arc<dyn SharedTreeStore>)
     }
