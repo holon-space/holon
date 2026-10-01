@@ -85,24 +85,22 @@ pub(crate) fn stable_ids_of(doc: &LoroDoc) -> Option<StableIds> {
         .map(|entry| entry.stable_ids.clone())
 }
 
+/// Drops `doc`'s entry, and with it the doc's stable-id index. For the last
+/// holder of `doc`, which is about to free it.
+pub(crate) fn forget(doc: &Arc<LoroDoc>) {
+    let entry = registry().remove(&(Arc::as_ptr(doc) as DocKey));
+    drop(entry);
+}
+
 impl DocLock {
     /// The lock for `doc`, creating it on first sight. Any two `LoroDocument`s
     /// wrapping the same `Arc<LoroDoc>` receive the same lock.
     pub(crate) fn for_doc(doc: &Arc<LoroDoc>) -> Self {
         let key = Arc::as_ptr(doc) as DocKey;
         let mut map = registry();
-        // A live `Arc` pins its address, so an entry under this key whose
-        // `Weak` is dead belonged to a freed doc that happened to sit at the
-        // same address — dropping it cannot steal a lock still in use.
-        if map.len() > 64 {
-            map.retain(|_, entry| entry.doc.strong_count() > 0);
-        }
-        if map
-            .get(&key)
-            .is_some_and(|entry| entry.doc.strong_count() == 0)
-        {
-            map.remove(&key);
-        }
+        // A doc whose last holder was a raw `Arc` leaves its entry; a live `Arc`
+        // pins its address, so a dead entry never holds a lock still in use.
+        map.retain(|_, entry| entry.doc.strong_count() > 0);
         let entry = map.entry(key).or_insert_with(|| Entry {
             doc: Arc::downgrade(doc),
             lock: Arc::new(RwLock::new(())),
@@ -314,6 +312,39 @@ mod tests {
 
     fn doc() -> Arc<LoroDoc> {
         Arc::new(LoroDoc::new())
+    }
+
+    fn dead_entries() -> usize {
+        registry()
+            .values()
+            .filter(|entry| entry.doc.strong_count() == 0)
+            .count()
+    }
+
+    #[test]
+    fn a_doc_its_last_wrapper_drops_leaves_no_entry() {
+        let wrapper = crate::loro_document::LoroDocument::new("t".into()).unwrap();
+        wrapper.find_by_stable_id("x").unwrap();
+        drop(wrapper);
+        assert_eq!(
+            dead_entries(),
+            0,
+            "the dropped doc's index stays in the registry"
+        );
+    }
+
+    #[test]
+    fn a_doc_dropped_raw_leaves_no_entry_past_the_next_registration() {
+        let d = doc();
+        DocLock::for_doc(&d);
+        drop(d);
+        let live = doc();
+        DocLock::for_doc(&live);
+        assert_eq!(
+            dead_entries(),
+            0,
+            "the dropped doc's index stays in the registry"
+        );
     }
 
     #[test]

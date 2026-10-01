@@ -254,6 +254,12 @@ const DOC_ESCAPES: &[(&str, usize)] = &[
     // Two `UndoManager::new(&doc)` handoffs. The manager is a long-lived
     // observer registered on the document, the same shape as a subscription.
     ("crates/holon-loro/tests/undo_history_trim_probe.rs", 2),
+    // The raw doc handed to a shared-tree store and to a cell registry, the
+    // two holders that take an `Arc<LoroDoc>` in production too.
+    (
+        "crates/holon-loro/tests/stable_id_duplicates_resolve_alike.rs",
+        2,
+    ),
     // A subscription that records each commit's origin, so the measurement can
     // show a failed batch's ops carrying the origin of the batch that made
     // them. Registration only — the callback never reads the doc.
@@ -454,6 +460,8 @@ const PROFILED_FORMAT_CRATES: &[&str] = &["holon-org-format", "holon", "holon-lo
 /// file. Production writes only through the chokepoint, which tells the doc's
 /// stable-id index about a write its commit announces only later. The others
 /// are tests building raw doc states (a peer's write, a merge) on purpose.
+/// The match is lexical (an aliased key passes); the index's
+/// `open_batch_scans` cost tests catch a bypass the match misses.
 const STABLE_ID_WRITERS: &[(&str, usize)] = &[
     // The chokepoint itself.
     ("crates/holon-loro/src/stable_id_index.rs", 1),
@@ -543,9 +551,9 @@ fn stable_ids_are_written_only_through_the_index_chokepoint() {
         diffs.is_empty(),
         "the `STABLE_ID` writer allow-list is out of date:\n{}\n\nA production write of a \
          block's stable id goes through `holon_loro::write_stable_id`, which tells the doc's \
-         stable-id index; a raw `.insert(STABLE_ID, ..)` inside an open batch leaves the index \
-         blind until the commit. A test that builds a raw doc state on purpose extends \
-         STABLE_ID_WRITERS in {}. A count that dropped is a removed writer — lower the entry.\n",
+         stable-id index; after a raw `.insert(STABLE_ID, ..)` inside an open batch, each \
+         lookup that misses in that batch scans the whole tree. A test that builds a raw doc \
+         state on purpose extends STABLE_ID_WRITERS in {}. A count that dropped is a removed writer — lower the entry.\n",
         diffs.join("\n"),
         file!(),
     );

@@ -59,6 +59,12 @@ impl<'a> WriteTxn<'a> {
         self.doc.commit();
     }
 
+    /// Carry the doc back to `version`; the doc's stable-id index rebuilds at
+    /// its next lookup, inside this batch too.
+    pub fn revert_to(&self, version: &loro::Frontiers) -> loro::LoroResult<()> {
+        crate::stable_id_index::revert_to(self.doc, version)
+    }
+
     /// Import an update under the scope's origin.
     ///
     /// The ops in `update` belong to whichever peer authored them; the origin
@@ -89,6 +95,14 @@ impl Drop for FlushOnDrop<'_, '_> {
         // the next thread to commit it — a silently deaf document, which this
         // project ranks below a crash.
         self.txn.commit();
+    }
+}
+
+impl Drop for LoroDocument {
+    fn drop(&mut self) {
+        if Arc::strong_count(&self.doc) == 1 {
+            crate::doc_lock::forget(&self.doc);
+        }
     }
 }
 

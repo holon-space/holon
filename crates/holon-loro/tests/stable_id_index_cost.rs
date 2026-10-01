@@ -104,3 +104,37 @@ proptest! {
         );
     }
 }
+
+/// A batch that creates a chain of blocks resolves each parent it created
+/// itself through the index; a scan would make a batched ingest O(N) per block.
+#[test]
+fn a_batch_resolves_the_parents_it_created_without_a_scan() {
+    use holon_api::EntityUri;
+    use holon_api::repository::CoreOperations;
+    use holon_api::repository::NewBlock;
+
+    let doc = Arc::new(LoroDocument::new("stable-id-cost-batch".into()).unwrap());
+    let backend = LoroBackend::from_document(doc.clone());
+    seed(&doc, 200);
+    let mut parent = EntityUri::block("p0");
+    let blocks: Vec<NewBlock> = (0..50)
+        .map(|k| {
+            let id = EntityUri::block(&format!("chain{k}"));
+            let mut block = NewBlock::text(parent.clone(), "x");
+            block.id = Some(id.clone());
+            parent = id;
+            block
+        })
+        .collect();
+    tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap()
+        .block_on(backend.create_blocks(blocks))
+        .unwrap();
+    assert!(backend.find_tree_id_by_stable_id_sync("chain49").is_some());
+    assert_eq!(
+        doc.stable_id_index_stats().unwrap().open_batch_scans,
+        0,
+        "a lookup inside the batch missed and scanned the tree"
+    );
+}

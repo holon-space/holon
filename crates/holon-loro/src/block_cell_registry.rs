@@ -225,29 +225,24 @@ impl BlockCellRegistry {
         std::iter::once(&self.doc).chain(self.layout_doc.iter())
     }
 
-    /// Walk the Loro tree for the node whose stable id matches `block_id` and
-    /// return its `meta` map — the read/write root shared by the content
-    /// container and every scalar property. Errors loudly if the block isn't
-    /// in the tree (inbound consumer hasn't applied the create yet, or it was
-    /// never imported), never silently falling to SQL.
+    /// The meta map of the canonical node carrying `block_id`, from the
+    /// stable-id index of each doc in probe order — the read/write root shared
+    /// by the content container and every scalar property. Errors loudly if the
+    /// block isn't in the tree (inbound consumer hasn't applied the create yet,
+    /// or it was never imported), never silently falling to SQL.
     fn resolve_node_meta(&self, block_id: &str) -> Result<(Arc<LoroDoc>, loro::LoroMap)> {
         let bare_id = block_id.strip_prefix("block:").unwrap_or(block_id);
         for doc in self.docs() {
-            let tree = doc.get_tree(TREE_NAME);
-            for node in tree.get_nodes(false) {
-                if matches!(
-                    node.parent,
-                    loro::TreeParentId::Deleted | loro::TreeParentId::Unexist
-                ) {
-                    continue;
-                }
-                let meta = tree
-                    .get_meta(node.id)
-                    .map_err(|e| anyhow!("tree.get_meta({:?}) failed: {e:#}", node.id))?;
-                if crate::settled_read::read_stable_id(&meta).is_some_and(|sid| sid == bare_id) {
-                    return Ok((doc.clone(), meta));
-                }
-            }
+            let Some(node) = LoroDocument::from_existing(doc.clone(), "cell-registry")
+                .find_by_stable_id(bare_id)?
+            else {
+                continue;
+            };
+            let meta = doc
+                .get_tree(TREE_NAME)
+                .get_meta(node)
+                .map_err(|e| anyhow!("tree.get_meta({node:?}) for {block_id}: {e:#}"))?;
+            return Ok((doc.clone(), meta));
         }
         Err(anyhow!(
             "Block {block_id} not found in Loro tree (inbound consumer hasn't applied the create \
@@ -771,7 +766,9 @@ impl EntityCellRegistry for BlockCellRegistry {
             if backend
                 .find_tree_id_by_stable_id_sync(request.id.id())
                 .is_some()
-                || backend.is_live_in_a_share(request.id.id())
+                || backend
+                    .is_live_in_a_share(request.id.id())
+                    .map_err(|e| anyhow!("create_entities({}): {e}", request.id))?
             {
                 // Already in the tree: the idempotent reconcile path (placeholder
                 // completion, edge-field reconcile) is subtle and rare on a cold
@@ -1460,6 +1457,11 @@ mod tests {
         assert_eq!(
             stored_parent.content, "headline",
             "the parent node must carry its own content — a placeholder stood up for it is empty"
+        );
+        let stats = LoroDocument::from_existing(doc, "t").stable_id_index_stats()?;
+        assert_eq!(
+            stats.open_batch_scans, 0,
+            "the batch resolved its own parent by a tree scan, not through the index"
         );
         Ok(())
     }

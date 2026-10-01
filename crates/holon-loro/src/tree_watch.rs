@@ -119,6 +119,14 @@ impl TreeWatch {
         self.touched.lock().unwrap().extend([node]);
     }
 
+    /// Asks the next drain for a full rescan: a change the doc reports only at
+    /// the next commit, too wide to name its nodes.
+    pub(crate) fn rescan(&self) {
+        let mut touched = self.touched.lock().unwrap();
+        touched.nodes = Vec::new();
+        touched.rescan = true;
+    }
+
     pub(crate) fn drain(&self) -> Drained {
         let touched = std::mem::take(&mut *self.touched.lock().unwrap());
         if touched.rescan {

@@ -1639,16 +1639,20 @@ impl LoroShareBackend {
     }
 
     /// The loaded shared tree whose doc holds `id`.
-    fn shared_tree_holding(&self, id: &EntityUri) -> Option<String> {
+    fn shared_tree_holding(&self, id: &EntityUri) -> anyhow::Result<Option<String>> {
         use crate::shared_tree::SharedTreeStore;
-        self.manager
-            .shared_tree_ids()
-            .into_iter()
-            .find(|shared_tree_id| {
-                self.manager
-                    .get_doc(shared_tree_id)
-                    .is_some_and(|doc| find_tree_id_by_stable_id(&doc, id).is_some())
-            })
+        for shared_tree_id in self.manager.shared_tree_ids() {
+            let Some(doc) = self.manager.get_doc(&shared_tree_id) else {
+                continue;
+            };
+            if crate::loro_document::LoroDocument::from_existing(doc, shared_tree_id.clone())
+                .find_by_stable_id(id.id())?
+                .is_some()
+            {
+                return Ok(Some(shared_tree_id));
+            }
+        }
+        Ok(None)
     }
 
     /// Test-only access to the shared-tree manager (to fetch shared docs).
@@ -1786,18 +1790,10 @@ impl NestedMountWatch {
     }
 }
 
+/// The canonical live node carrying `stable_id`, from `doc`'s stable-id
+/// index. `doc` is one a `LoroDocument` wraps, read under its lock.
 fn find_tree_id_by_stable_id(doc: &LoroDoc, stable_id: &EntityUri) -> Option<TreeID> {
-    let needle = stable_id.id();
-    let tree = doc.get_tree(crate::loro_backend::TREE_NAME);
-    for node in tree.get_nodes(false) {
-        if matches!(node.parent, TreeParentId::Deleted | TreeParentId::Unexist) {
-            continue;
-        }
-        if read_stable_id(&tree, node.id).as_deref() == Some(needle) {
-            return Some(node.id);
-        }
-    }
-    None
+    crate::stable_id_index::lookup(doc, stable_id.id())
 }
 
 /// Return the first projected op id that collides with a LIVE node in the
@@ -2038,7 +2034,7 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
                 let doc = txn.doc();
 
                 let Some(tid) = find_tree_id_by_stable_id(doc, &id_uri) else {
-                    if let Some(shared_tree_id) = self.shared_tree_holding(&id_uri) {
+                    if let Some(shared_tree_id) = self.shared_tree_holding(&id_uri)? {
                         return Err(anyhow::Error::new(NestedShareRefusal::InsideShare {
                             id: id.to_string(),
                             shared_tree_id,
@@ -2478,7 +2474,7 @@ impl SubtreeShareOperations<()> for LoroShareBackend {
                 let doc = txn.doc();
                 let new_id = format!("block:{}", Uuid::new_v4());
                 let Some(parent_tid) = find_tree_id_by_stable_id(doc, &parent_uri) else {
-                    if let Some(shared_tree_id) = self.shared_tree_holding(&parent_uri) {
+                    if let Some(shared_tree_id) = self.shared_tree_holding(&parent_uri)? {
                         return Err(anyhow::Error::new(NestedShareRefusal::InsideShare {
                             id: parent_uri.to_string(),
                             shared_tree_id,
@@ -8852,7 +8848,8 @@ mod tests {
             seed_page(&b, "host", None, "Host").await;
             seed_block(&b, "gamma", Some("host"), "Gamma").await;
             let global = b.global_doc().await.unwrap();
-            let other_device = global.with_read(|doc| Ok(doc.fork())).unwrap();
+            let other_device =
+                with_stable_id_index(global.with_read(|doc| Ok(doc.fork())).unwrap());
             other_device.set_peer_id(other_peer).unwrap();
             let (m1, st1) = share_ok(&b, "block:gamma").await;
 
@@ -9003,10 +9000,18 @@ mod tests {
     }
 
     /// A paired device whose ops the global doc imports.
-    fn peer_of(d: &DuplicatedShare, peer_id: u64) -> LoroDoc {
+    fn peer_of(d: &DuplicatedShare, peer_id: u64) -> Arc<LoroDoc> {
         let peer = d.global.with_read(|doc| Ok(doc.fork())).unwrap();
         peer.set_peer_id(peer_id).unwrap();
-        peer
+        with_stable_id_index(peer)
+    }
+
+    /// A raw peer doc that `find_tree_id_by_stable_id` can read: the index
+    /// lives in the registry entry a `LoroDocument` makes for the doc.
+    fn with_stable_id_index(doc: LoroDoc) -> Arc<LoroDoc> {
+        let doc = Arc::new(doc);
+        crate::loro_document::LoroDocument::from_existing(doc.clone(), "raw-peer");
+        doc
     }
 
     fn import_from(d: &DuplicatedShare, peer: &LoroDoc) {

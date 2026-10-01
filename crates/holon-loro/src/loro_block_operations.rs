@@ -75,7 +75,6 @@ pub struct LoroBlockOperations {
     /// Handed to every backend likewise, so `owning_page` in a share does not
     /// scan the whole tree for its mount.
     mount_cache: crate::loro_backend::MountCache,
-    shared_id_cache: crate::loro_backend::SharedIdCache,
     condition_bus: Option<Arc<holon_api::ConditionBus>>,
 }
 
@@ -85,7 +84,6 @@ impl LoroBlockOperations {
             doc_store,
             shared_trees: None,
             mount_cache: Default::default(),
-            shared_id_cache: Default::default(),
             condition_bus: None,
         }
     }
@@ -161,8 +159,7 @@ impl LoroBlockOperations {
             .map_err(|e| format!("Failed to get layout doc: {}", e))?;
         let mut backend = LoroBackend::from_document(collab_doc)
             .with_layout_doc(layout_doc)
-            .with_mount_cache(self.mount_cache.clone())
-            .with_shared_id_cache(self.shared_id_cache.clone());
+            .with_mount_cache(self.mount_cache.clone());
         if let Some(bus) = &self.condition_bus {
             backend = backend.with_condition_bus(bus.clone());
         }

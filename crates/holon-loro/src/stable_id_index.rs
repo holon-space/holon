@@ -6,7 +6,11 @@
 //!
 //! It hears committed changes through a [`TreeWatch`]. An open write batch's
 //! own ops are not committed yet; [`write_stable_id`] notes the node it writes,
-//! so a lookup inside the batch sees the batch's new ids.
+//! so a lookup inside the batch sees the batch's new ids, and [`revert_to`]
+//! rebuilds the index. Any other uncommitted op that makes a node carry an id
+//! (a raw move that revives a deleted node) is found by a tree scan when a
+//! lookup misses while ops are pending; until its commit, a lookup that hits
+//! may still name a larger duplicate than the revived node.
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -32,8 +36,11 @@ pub struct StableIdIndexStats {
     /// Walks of the whole tree: the first lookup, and each burst past the
     /// touched-node limit (a large import).
     pub full_builds: u64,
-    /// Nodes read by full builds and by drains of touched subtrees.
+    /// Nodes read by full builds, drains of touched subtrees and open-batch
+    /// scans.
     pub nodes_visited: u64,
+    /// Tree scans of a lookup that missed while the doc had uncommitted ops.
+    pub open_batch_scans: u64,
 }
 
 pub(crate) struct StableIdIndex {
@@ -68,6 +75,16 @@ pub fn write_stable_id(doc: &LoroDoc, node: TreeID, stable_id: &str) -> anyhow::
     // builds from the tree.
     if let Some(index) = crate::doc_lock::stable_ids_of(doc) {
         index.lock().unwrap().watch.note(node);
+    }
+    Ok(())
+}
+
+/// Carry `doc` back to `version` inside an open write batch. The revert can
+/// re-create any node, so the doc's index rebuilds at its next lookup.
+pub(crate) fn revert_to(doc: &LoroDoc, version: &loro::Frontiers) -> loro::LoroResult<()> {
+    doc.revert_to(version)?;
+    if let Some(index) = crate::doc_lock::stable_ids_of(doc) {
+        index.lock().unwrap().watch.rescan();
     }
     Ok(())
 }
@@ -110,16 +127,35 @@ impl StableIdIndex {
                 .copied()
                 .find(|&node| carries(&tree, node, stable_id))
         });
+        if found.is_some() {
+            return found;
+        }
+        if doc.get_pending_txn_len() > 0 {
+            return self.scan_open_batch(&tree, stable_id);
+        }
         #[cfg(debug_assertions)]
-        if found.is_none() {
-            let scanned = scan(&tree).remove(stable_id);
+        {
+            let scanned = carriers(&tree, tree.get_nodes(false), stable_id);
             assert!(
-                scanned.is_none(),
+                scanned.is_empty(),
                 "the stable-id index misses `{stable_id}`, but the tree holds it at {scanned:?}: \
-                 a change to the tree did not reach the index"
+                 a committed change to the tree did not reach the index"
             );
         }
-        found
+        None
+    }
+
+    /// The pending ops reach the index only at their commit, so the tree
+    /// answers; the carriers found are noted for the next drain.
+    fn scan_open_batch(&mut self, tree: &loro::LoroTree, stable_id: &str) -> Option<TreeID> {
+        let nodes = tree.get_nodes(false);
+        self.stats.open_batch_scans += 1;
+        self.stats.nodes_visited += nodes.len() as u64;
+        let found = carriers(tree, nodes, stable_id);
+        for &node in &found {
+            self.watch.note(node);
+        }
+        found.into_iter().min()
     }
 
     fn refresh(&mut self, doc: &LoroDoc, tree: &loro::LoroTree) {
@@ -199,19 +235,18 @@ fn carries(tree: &loro::LoroTree, node: TreeID, stable_id: &str) -> bool {
         && matches!(classify(tree, node), LiveNode::Settled(sid) if sid == stable_id)
 }
 
-#[cfg(debug_assertions)]
-fn scan(tree: &loro::LoroTree) -> HashMap<String, Vec<TreeID>> {
-    let mut found: HashMap<String, Vec<TreeID>> = HashMap::new();
-    for node in tree.get_nodes(false) {
-        if matches!(
-            node.parent,
-            loro::TreeParentId::Deleted | loro::TreeParentId::Unexist
-        ) {
-            continue;
-        }
-        if let LiveNode::Settled(sid) = classify(tree, node.id) {
-            found.entry(sid).or_default().push(node.id);
-        }
-    }
-    found
+fn carriers(tree: &loro::LoroTree, nodes: Vec<loro::TreeNode>, stable_id: &str) -> Vec<TreeID> {
+    nodes
+        .into_iter()
+        .filter(|node| {
+            !matches!(
+                node.parent,
+                loro::TreeParentId::Deleted | loro::TreeParentId::Unexist
+            )
+        })
+        .filter(
+            |node| matches!(classify(tree, node.id), LiveNode::Settled(sid) if sid == stable_id),
+        )
+        .map(|node| node.id)
+        .collect()
 }

@@ -116,6 +116,13 @@ enum BatchOp {
     Delete {
         node: Index,
     },
+    /// A raw move of a deleted node's child to the root, which revives it.
+    Revive {
+        node: Index,
+    },
+    Revert {
+        to: Index,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -190,6 +197,8 @@ impl ReferenceStateMachine for Ref {
             3 => (0..POOL, opt_index()).prop_map(|(sid, parent)| BatchOp::Create { sid, parent }),
             1 => (any::<Index>(), 0..POOL).prop_map(|(node, sid)| BatchOp::Rewrite { node, sid }),
             1 => any::<Index>().prop_map(|node| BatchOp::Delete { node }),
+            1 => any::<Index>().prop_map(|node| BatchOp::Revive { node }),
+            1 => any::<Index>().prop_map(|to| BatchOp::Revert { to }),
         ];
         prop_oneof![
             6 => (0..POOL, opt_index()).prop_map(|(sid, parent)| Transition::Create { sid, parent }),
@@ -512,9 +521,13 @@ impl Sut {
                     taken.insert(id.clone(), Vec::new());
                     id
                 }
-                BatchOp::Delete { .. } => String::new(),
+                BatchOp::Delete { .. } | BatchOp::Revive { .. } | BatchOp::Revert { .. } => {
+                    String::new()
+                }
             })
             .collect();
+        let history = self.history.clone();
+        let mut revived = false;
         let doc = self.doc.clone();
         doc.with_write(WriteOrigin::BlockOps, |d| {
             let tree = d.get_tree(TREE_NAME);
@@ -549,11 +562,30 @@ impl Sut {
                         }
                         tree.delete(n)?;
                     }
+                    BatchOp::Revive { node } => {
+                        let Some(n) = pick(&revivable(&tree), node) else {
+                            continue;
+                        };
+                        tree.mov(n, None)?;
+                        touched.extend(carried_ids_in_subtree(&tree, n));
+                        revived = true;
+                    }
+                    BatchOp::Revert { to } => {
+                        let Some(frontiers) = pick(&history, to) else {
+                            continue;
+                        };
+                        d.revert_to(&frontiers)?;
+                        touched.extend(scan_tree(&tree).into_keys());
+                    }
                 }
                 let scan = scan_tree(&tree);
                 let mut ids: Vec<String> = touched.clone();
                 ids.extend((0..POOL).map(sid));
-                self.check_lookups(&scan, &ids, "inside a write batch");
+                if revived {
+                    self.check_found(&scan, &ids, "inside a write batch after a revive");
+                } else {
+                    self.check_lookups(&scan, &ids, "inside a write batch");
+                }
             }
             Ok(())
         })
@@ -581,6 +613,24 @@ impl Sut {
         }
     }
 
+    /// A raw move that revives a node is heard at its commit: until then a
+    /// lookup finds every revived id, but may name a larger duplicate.
+    fn check_found(&self, scan: &Scan, ids: &[String], when: &str) {
+        for id in ids {
+            let carriers = scan.get(id).cloned().unwrap_or_default();
+            let found = [
+                self.backend.find_tree_id_by_stable_id_sync(id),
+                self.doc.find_by_stable_id(id).unwrap(),
+            ];
+            for node in found {
+                assert!(
+                    node.map_or(carriers.is_empty(), |n| carriers.contains(&n)),
+                    "lookup of `{id}` {when} answered {node:?}: scan holds {carriers:?}"
+                );
+            }
+        }
+    }
+
     fn check(&self) {
         let scan = self.scan();
         let mut ids: Vec<String> = (0..POOL).map(sid).collect();
@@ -595,6 +645,27 @@ impl Sut {
             "the index's live set differs from the full scan"
         );
     }
+}
+
+/// Deleted nodes whose parent is a deleted node, not the deleted marker: a
+/// move to the root revives them.
+fn revivable(tree: &LoroTree) -> Vec<TreeID> {
+    tree.get_nodes(true)
+        .into_iter()
+        .filter(|n| matches!(n.parent, TreeParentId::Node(_)))
+        .filter(|n| matches!(tree.is_node_deleted(&n.id), Ok(true)))
+        .map(|n| n.id)
+        .collect()
+}
+
+fn carried_ids_in_subtree(tree: &LoroTree, root: TreeID) -> Vec<String> {
+    let mut ids = Vec::new();
+    let mut queue = vec![root];
+    while let Some(node) = queue.pop() {
+        ids.extend(carried_id(tree, node));
+        queue.extend(tree.children(node).unwrap_or_default());
+    }
+    ids
 }
 
 fn carried_id(tree: &LoroTree, node: TreeID) -> Option<String> {
@@ -688,4 +759,102 @@ fn a_duplicated_id_answers_its_smallest_carrier() {
             parent: None,
         },
     ]);
+}
+
+#[test]
+fn a_node_revived_inside_a_batch_is_found() {
+    let sut = Sut::new();
+    let create = |parent: EntityUri, id: &str| {
+        sut.rt
+            .block_on(sut.backend.create_block(
+                parent,
+                BlockContent::text("x"),
+                Some(EntityUri::block(id)),
+            ))
+            .unwrap();
+    };
+    create(EntityUri::no_parent(), "p");
+    create(EntityUri::block("p"), "c");
+    let c = sut.doc.find_by_stable_id("c").unwrap().unwrap();
+    sut.rt
+        .block_on(sut.backend.delete_block("block:p"))
+        .unwrap();
+    sut.check();
+    sut.doc
+        .with_write(WriteOrigin::BlockOps, |d| {
+            d.get_tree(TREE_NAME).mov(c, None)?;
+            let scan = scan_tree(&d.get_tree(TREE_NAME));
+            sut.check_lookups(&scan, &["c".to_string()], "after a revive inside the batch");
+            Ok(())
+        })
+        .unwrap();
+    sut.check();
+}
+
+#[test]
+fn a_node_reverted_inside_a_batch_is_found() {
+    let sut = Sut::new();
+    let create = |id: &str| {
+        sut.rt
+            .block_on(sut.backend.create_block(
+                EntityUri::no_parent(),
+                BlockContent::text("x"),
+                Some(EntityUri::block(id)),
+            ))
+            .unwrap();
+    };
+    create("a");
+    let before_b = sut.doc.with_read(|d| Ok(d.state_frontiers())).unwrap();
+    create("b");
+    sut.rt
+        .block_on(sut.backend.delete_block("block:a"))
+        .unwrap();
+    sut.doc
+        .with_write(WriteOrigin::BlockOps, |d| {
+            d.revert_to(&before_b)?;
+            let scan = scan_tree(&d.get_tree(TREE_NAME));
+            let ids = ["a".to_string(), "b".to_string()];
+            sut.check_lookups(&scan, &ids, "after a revert inside the batch");
+            Ok(())
+        })
+        .unwrap();
+    sut.check();
+}
+
+#[test]
+fn a_duplicate_reverted_inside_a_batch_answers_its_smallest_carrier() {
+    let sut = Sut::new();
+    sut.rt
+        .block_on(sut.backend.create_block(
+            EntityUri::no_parent(),
+            BlockContent::text("x"),
+            Some(EntityUri::block("a")),
+        ))
+        .unwrap();
+    let peer = sut.peer();
+    peer.with_write(WriteOrigin::BlockOps, |d| {
+        let node = d.get_tree(TREE_NAME).create(None)?;
+        write_stable_id(d, node, "a")
+    })
+    .unwrap();
+    sut.import_from(&peer);
+    let both = sut.doc.with_read(|d| Ok(d.state_frontiers())).unwrap();
+    sut.rt
+        .block_on(sut.backend.delete_block("block:a"))
+        .unwrap();
+    sut.check();
+    sut.doc
+        .with_write(WriteOrigin::BlockOps, |d| {
+            d.revert_to(&both)?;
+            let scan = scan_tree(&d.get_tree(TREE_NAME));
+            assert_eq!(
+                scan["a"].len(),
+                2,
+                "the revert brings the deleted carrier back"
+            );
+            sut.check_lookups(&scan, &["a".to_string()], "after a revert inside the batch");
+            Ok(())
+        })
+        .unwrap();
+    sut.check();
 }
