@@ -138,6 +138,11 @@ pub mod text_undo;
     not(all(target_arch = "wasm32", target_os = "unknown"))
 ))]
 pub mod ticket;
+#[cfg(test)]
+mod tree_event_delivery_probe;
+/// One subscription on a doc's block tree that collects the nodes changed since
+/// the last drain, for the indexes derived from the tree.
+mod tree_watch;
 pub mod write_origin;
 
 pub use capability::CapabilityProfile;

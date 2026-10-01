@@ -274,6 +274,9 @@ const DOC_ESCAPES: &[(&str, usize)] = &[
     ("crates/holon-loro/src/import_atomicity_probe.rs", 7),
     // cfg(test) probe that measures raw-doc `revert_to` semantics on purpose (D146).
     ("crates/holon-loro/src/revert_to_rollback_probe.rs", 7),
+    // cfg(test) probe of tree-event delivery: subscription registration, and
+    // raw-doc `checkout` / `revert_to` measured on purpose.
+    ("crates/holon-loro/src/tree_event_delivery_probe.rs", 4),
     // +1: `layout_writer`, re-wrapping an existing `Arc<LoroDoc>` via
     // `from_existing` so the wrapper keeps the same boundary lock.
     ("crates/holon-loro/src/loro_backend.rs", 9),

@@ -54,6 +54,8 @@ use crate::settled_read::warn_half_born;
 use crate::shared_tree::SharedTreeStore;
 use crate::shared_tree::is_mount_node;
 use crate::shared_tree::read_mount_info;
+use crate::tree_watch::Drained;
+use crate::tree_watch::TreeWatch;
 use crate::write_origin::WriteOrigin;
 
 // Field name constants
@@ -626,12 +628,11 @@ pub type MountCache = Arc<Mutex<MountIndex>>;
 /// or deletes a mount, itself or inside a subtree, invalidates it, and so does
 /// any edit of a mount meta key: local writes (a batch rollback recreating a
 /// mount) and merges alike.
-#[derive(Default)]
+///
+/// A mount meta key edit asks for a full rescan: Holon writes those keys only
+/// beside the node's create, so a meta-only edit comes from a peer and is rare.
 pub struct MountIndex {
-    /// Address of the `LoroDoc` the subscription watches.
-    doc: usize,
-    subscription: Option<loro::Subscription>,
-    touched: Arc<Mutex<TouchedNodes>>,
+    watch: TreeWatch,
     built: bool,
     canonical: HashMap<String, loro::TreeID>,
     /// Every live mount, in canonical order, of the shared trees that have
@@ -640,68 +641,32 @@ pub struct MountIndex {
     known: HashSet<loro::TreeID>,
 }
 
-/// Targets of the tree events since the last lookup. A burst past the limit
-/// (a large import) or a mount meta key edit only records that a full rescan
-/// is due: Holon writes those keys only beside the node's create, so a
-/// meta-only edit comes from a peer and is rare.
-#[derive(Default)]
-struct TouchedNodes {
-    nodes: Vec<loro::TreeID>,
-    rescan: bool,
+impl Default for MountIndex {
+    fn default() -> Self {
+        Self {
+            watch: TreeWatch::new(&crate::shared_tree::MOUNT_META_KEYS),
+            built: false,
+            canonical: HashMap::new(),
+            duplicated: HashMap::new(),
+            known: HashSet::new(),
+        }
+    }
 }
-
-const TOUCHED_LIMIT: usize = 1024;
 
 impl MountIndex {
     fn watch(&mut self, doc: &loro::LoroDoc, tree: &loro::LoroTree) {
-        let address = std::ptr::from_ref(doc) as usize;
-        if self.subscription.is_some() && self.doc == address {
-            return;
+        if self.watch.watch(doc, tree) {
+            self.built = false;
         }
-        let touched = self.touched.clone();
-        self.subscription = Some(doc.subscribe(
-            &loro::ContainerTrait::id(tree),
-            Arc::new(move |event| {
-                let mut touched = touched.lock().unwrap();
-                for diff in &event.events {
-                    if touched.rescan {
-                        return;
-                    }
-                    match &diff.diff {
-                        loro::event::Diff::Tree(tree_diff) => {
-                            touched
-                                .nodes
-                                .extend(tree_diff.diff.iter().map(|item| item.target));
-                            if touched.nodes.len() > TOUCHED_LIMIT {
-                                touched.nodes = Vec::new();
-                                touched.rescan = true;
-                            }
-                        }
-                        loro::event::Diff::Map(map)
-                            if map.updated.keys().any(|key| {
-                                crate::shared_tree::MOUNT_META_KEYS.contains(&&**key)
-                            }) =>
-                        {
-                            touched.nodes = Vec::new();
-                            touched.rescan = true;
-                        }
-                        _ => {}
-                    }
-                }
-            }),
-        ));
-        self.doc = address;
-        self.built = false;
     }
 
-    /// A delete reports only the subtree root, so a known mount can die with
-    /// an ancestor; a create or move of a subtree can carry a mount inside.
+    /// A known mount can die with a deleted ancestor; a create or move of a
+    /// subtree can carry a mount inside.
     fn mounts_touched(&self, tree: &loro::LoroTree) -> bool {
-        let touched = std::mem::take(&mut *self.touched.lock().unwrap());
-        if touched.rescan {
+        let Drained::Nodes(nodes) = self.watch.drain() else {
             return true;
-        }
-        if touched.nodes.is_empty() {
+        };
+        if nodes.is_empty() {
             return false;
         }
         if self
@@ -711,7 +676,7 @@ impl MountIndex {
         {
             return true;
         }
-        let mut queue = touched.nodes;
+        let mut queue = nodes;
         while let Some(node) = queue.pop() {
             if self.known.contains(&node) || is_mount_node(tree, node) {
                 return true;

@@ -70,6 +70,11 @@ only failure is the runner's timeout, and that reads as "the test needs more
 time". No gate runs it.
 
 ## Remedy
-PARTIAL. Site 1 is fixed (see Fix status). Sites 2-4 are open. The test
+PARTIAL. Site 1 is fixed (see Fix status). Sites 2-4 are open. For the
+complete stable-id index (D1.a), increments 1-2 landed: the probe
+`crates/holon-loro/src/tree_event_delivery_probe.rs` shows that every event
+source reaches a tree subscription, and `TreeWatch`
+(`crates/holon-loro/src/tree_watch.rs`) is the shared watch that `MountIndex`
+uses. The index itself is increment 3. The test
 `owning_page_cost_on_a_deep_vault` gets no nextest override until it finishes
 in budget; run it again after each fix.
