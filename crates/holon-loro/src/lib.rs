@@ -128,6 +128,7 @@ pub mod share_peer_id;
 ))]
 pub mod shared_snapshot_store;
 pub mod shared_tree;
+mod stable_id_index;
 /// The transport seam every true-sharing backend implements. Not iroh-gated and
 /// pure-Rust: Android builds it.
 pub mod sync_transport;
@@ -196,6 +197,8 @@ pub use loro_sync_controller::LoroSyncControllerHandle;
 pub use loro_sync_controller::SinkReader;
 pub use loro_sync_controller::block_to_params;
 pub use loro_sync_controller::projection_stats;
+pub use stable_id_index::StableIdIndexStats;
+pub use stable_id_index::write_stable_id;
 pub use text_merge_provider::TextHandle;
 pub use text_merge_provider::TextMergeProvider;
 pub use text_merge_provider::TransientLoroTextMerge;

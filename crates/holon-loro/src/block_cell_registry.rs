@@ -755,25 +755,22 @@ impl EntityCellRegistry for BlockCellRegistry {
         if requests.is_empty() {
             return Ok(Vec::new());
         }
-        // One tree walk for the whole chunk instead of one per block: after
-        // this, a cache miss IS absence (the ingest is the sole writer while it
-        // runs), so the batched arm below never re-walks.
-        backend.warm_stable_id_cache().await;
-
         let mut out = vec![false; requests.len()];
         let mut fresh: Vec<(usize, NewBlockWithProperties)> = Vec::new();
         // Ids this chunk is about to create. A parent in here is NOT absent —
         // it is created earlier in this same batch (requests arrive in document
-        // order, parents first) and the write loop resolves it from the cache
-        // it populates as it goes. Standing up a placeholder root for one would
-        // mint a SECOND node for the same stable id, which is how a batched
-        // ingest lost blocks.
+        // order, parents first) and the write loop resolves it through the
+        // stable-id index, which hears each node the batch writes. Standing up a
+        // placeholder root for one would mint a SECOND node for the same stable
+        // id, which is how a batched ingest lost blocks.
         let will_create: std::collections::HashSet<&str> =
             requests.iter().map(|r| r.id.id()).collect();
         for (idx, request) in requests.iter().enumerate() {
-            // The cache knows the global tree only; a block of a loaded share
-            // (a received page an org file names) is in the tree too.
-            if backend.peek_id_cache(request.id.id()).is_some()
+            // The global lookup knows the global tree only; a block of a loaded
+            // share (a received page an org file names) is in the tree too.
+            if backend
+                .find_tree_id_by_stable_id_sync(request.id.id())
+                .is_some()
                 || backend.is_live_in_a_share(request.id.id())
             {
                 // Already in the tree: the idempotent reconcile path (placeholder

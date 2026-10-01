@@ -59,9 +59,10 @@ on this shape: 28 of about 6000 samples.
   `crates/holon-filesystem/tests/find_foreign_blocks_cost.rs` (a rows-read
   bound and a differential check against the full scan). After the fix, the
   per-file ingest time grows from 78 to about 140 ms over 400 files.
-- Sites 2-4 are open. Sites 3 and 4 get a complete stable-id index in
-  holon-loro, maintained from Loro doc events (ruling D1.a), so a miss is
-  authoritative and never scans. Site 2 keeps its crash-safety contract and
+- Site 4 is fixed by the complete stable-id index in holon-loro,
+  maintained from Loro doc events (ruling D1.a), so a miss is authoritative
+  and never scans (see Remedy). Sites 2-3 are open; site 3 moves to the same
+  index next. Site 2 keeps its crash-safety contract and
   needs a save whose cost is in proportion to the change.
 
 ## Missing piece
@@ -70,11 +71,23 @@ only failure is the runner's timeout, and that reads as "the test needs more
 time". No gate runs it.
 
 ## Remedy
-PARTIAL. Site 1 is fixed (see Fix status). Sites 2-4 are open. For the
+PARTIAL. Site 1 is fixed (see Fix status). Site 4 uses the index; sites 2-3 are open. For the
 complete stable-id index (D1.a), increments 1-2 landed: the probe
 `crates/holon-loro/src/tree_event_delivery_probe.rs` shows that every event
 source reaches a tree subscription, and `TreeWatch`
 (`crates/holon-loro/src/tree_watch.rs`) is the shared watch that `MountIndex`
-uses. The index itself is increment 3. The test
+uses. Increment 3 landed: the stable-id index
+(`crates/holon-loro/src/stable_id_index.rs`, one per doc in the doc-lock
+registry, fed by tree events and the `write_stable_id` chokepoint) answers
+`find_tree_id_by_stable_id_sync` and `resolve_parent_core`; a miss is
+authoritative and the old cache and both scans are deleted. Pinned by
+`crates/holon-loro/tests/stable_id_index_pbt.rs` (differential against a full
+scan), `stable_id_index_cost.rs` (no rebuild, reads in proportion to the
+change) and the architecture rule
+`stable_ids_are_written_only_through_the_index_chokepoint`. Release dv400
+(synthetic, host load 7-22): the per-file ingest time grows 52 -> 96 ms over
+400 files (fix 1 alone: 78 -> ~150 ms), initial scan 36 s. Remaining: fix 3
+(`resolve_node_meta` through the index, increment 4), shared docs (increment
+5), fix 2 (increment 6). The test
 `owning_page_cost_on_a_deep_vault` gets no nextest override until it finishes
 in budget; run it again after each fix.

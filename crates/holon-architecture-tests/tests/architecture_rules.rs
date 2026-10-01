@@ -450,6 +450,107 @@ const PROFILED_FORMAT_CRATES: &[&str] = &["holon-org-format", "holon", "holon-lo
 /// The other direction (`holon-capability` depending on a format crate) is
 /// covered by the same rule read the other way: the assertion below would fail
 /// on the cycle.
+/// Writes of a block's `STABLE_ID` meta key outside `write_stable_id`, per
+/// file. Production writes only through the chokepoint, which tells the doc's
+/// stable-id index about a write its commit announces only later. The others
+/// are tests building raw doc states (a peer's write, a merge) on purpose.
+const STABLE_ID_WRITERS: &[(&str, usize)] = &[
+    // The chokepoint itself.
+    ("crates/holon-loro/src/stable_id_index.rs", 1),
+    ("crates/holon-loro/src/block_cell_registry.rs", 1),
+    ("crates/holon-loro/src/container_registry.rs", 1),
+    ("crates/holon-loro/src/import_atomicity_probe.rs", 1),
+    ("crates/holon-loro/src/loro_backend.rs", 3),
+    ("crates/holon-loro/src/loro_meta_cell_backing.rs", 1),
+    ("crates/holon-loro/src/loro_share_backend.rs", 14),
+    ("crates/holon-loro/src/multi_peer.rs", 1),
+    ("crates/holon-loro/src/tree_event_delivery_probe.rs", 7),
+    (
+        "crates/holon-integration-tests/tests/loro_suite/loro_projection_settle.rs",
+        1,
+    ),
+    (
+        "crates/holon-integration-tests/tests/loro_suite/loro_projection_share_rows.rs",
+        3,
+    ),
+    (
+        "crates/holon-integration-tests/tests/loro_suite/projection_harness.rs",
+        1,
+    ),
+    ("crates/holon/tests/sync_import_read_only_adoption.rs", 3),
+];
+
+/// `.insert(STABLE_ID` calls in `src` (any path prefix, any whitespace or line
+/// break after the parenthesis), skipping `//` comment lines.
+fn stable_id_inserts(src: &str) -> usize {
+    let code: String = src
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    code.match_indices(".insert(")
+        .filter(|(at, call)| {
+            let arg = code[at + call.len()..].trim_start();
+            let name =
+                arg.trim_start_matches(|c: char| c.is_alphanumeric() || c == '_' || c == ':');
+            let path = &arg[..arg.len() - name.len()];
+            path == "STABLE_ID" || path.ends_with("::STABLE_ID")
+        })
+        .count()
+}
+
+#[test]
+fn stable_ids_are_written_only_through_the_index_chokepoint() {
+    let root = repo_root();
+    let mut files = Vec::new();
+    rust_sources(&root.join("crates"), &mut files);
+    rust_sources(&root.join("frontends"), &mut files);
+
+    let mut found = BTreeMap::new();
+    for file in &files {
+        let rel = file
+            .strip_prefix(&root)
+            .expect("source under repo root")
+            .to_string_lossy()
+            .replace('\\', "/");
+        // This file names the call in its failure message.
+        if rel == file!() {
+            continue;
+        }
+        let count =
+            stable_id_inserts(&std::fs::read_to_string(file).expect("readable rust source"));
+        if count > 0 {
+            found.insert(rel, count);
+        }
+    }
+    let expected: BTreeMap<String, usize> = STABLE_ID_WRITERS
+        .iter()
+        .map(|(f, n)| ((*f).to_string(), *n))
+        .collect();
+
+    let diffs: Vec<String> = expected
+        .keys()
+        .chain(found.keys())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter_map(|file| {
+            let want = expected.get(file).copied().unwrap_or(0);
+            let got = found.get(file).copied().unwrap_or(0);
+            (want != got).then(|| format!("  {file}: allow-listed {want}, found {got}"))
+        })
+        .collect();
+    assert!(
+        diffs.is_empty(),
+        "the `STABLE_ID` writer allow-list is out of date:\n{}\n\nA production write of a \
+         block's stable id goes through `holon_loro::write_stable_id`, which tells the doc's \
+         stable-id index; a raw `.insert(STABLE_ID, ..)` inside an open batch leaves the index \
+         blind until the commit. A test that builds a raw doc state on purpose extends \
+         STABLE_ID_WRITERS in {}. A count that dropped is a removed writer — lower the entry.\n",
+        diffs.join("\n"),
+        file!(),
+    );
+}
+
 #[test]
 fn a_format_crate_never_links_holon_capability_outside_tests() {
     let root = repo_root();

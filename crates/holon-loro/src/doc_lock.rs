@@ -28,6 +28,8 @@ use anyhow::bail;
 use loro::LoroDoc;
 use parking_lot::RwLock;
 
+use crate::stable_id_index::StableIds;
+
 /// A lock wait longer than this is a bug, not contention: writes are
 /// human-scale and short. Report it instead of hanging forever.
 const LOCK_WAIT_BUDGET: Duration = Duration::from_secs(30);
@@ -61,20 +63,34 @@ struct Entry {
     doc: Weak<LoroDoc>,
     lock: Arc<RwLock<()>>,
     waiting: Arc<AtomicUsize>,
+    stable_ids: StableIds,
     #[cfg(any(test, feature = "test-helpers"))]
     after_read: HookSlot,
+}
+
+fn registry() -> std::sync::MutexGuard<'static, HashMap<DocKey, Entry>> {
+    static REGISTRY: OnceLock<Mutex<HashMap<DocKey, Entry>>> = OnceLock::new();
+    REGISTRY
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .expect("doc-lock registry poisoned")
+}
+
+/// The stable-id index of `doc`, or `None` when no lock was made for it yet.
+/// Keyed like [`mutate_guarded`], so a `WriteTxn` reaches its doc's index.
+pub(crate) fn stable_ids_of(doc: &LoroDoc) -> Option<StableIds> {
+    registry()
+        .get(&(std::ptr::from_ref(doc) as DocKey))
+        .filter(|entry| entry.doc.strong_count() > 0)
+        .map(|entry| entry.stable_ids.clone())
 }
 
 impl DocLock {
     /// The lock for `doc`, creating it on first sight. Any two `LoroDocument`s
     /// wrapping the same `Arc<LoroDoc>` receive the same lock.
     pub(crate) fn for_doc(doc: &Arc<LoroDoc>) -> Self {
-        static REGISTRY: OnceLock<Mutex<HashMap<DocKey, Entry>>> = OnceLock::new();
         let key = Arc::as_ptr(doc) as DocKey;
-        let mut map = REGISTRY
-            .get_or_init(|| Mutex::new(HashMap::new()))
-            .lock()
-            .expect("doc-lock registry poisoned");
+        let mut map = registry();
         // A live `Arc` pins its address, so an entry under this key whose
         // `Weak` is dead belonged to a freed doc that happened to sit at the
         // same address — dropping it cannot steal a lock still in use.
@@ -91,6 +107,7 @@ impl DocLock {
             doc: Arc::downgrade(doc),
             lock: Arc::new(RwLock::new(())),
             waiting: Arc::new(AtomicUsize::new(0)),
+            stable_ids: StableIds::default(),
             #[cfg(any(test, feature = "test-helpers"))]
             after_read: HookSlot::default(),
         });

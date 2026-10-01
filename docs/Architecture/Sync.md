@@ -229,9 +229,15 @@ pub struct LoroBackend {
     subscribers: ChangeSubscribers<Block>,
     event_log: Arc<Mutex<EventRing<Change<Block>>>>,
     shared_trees: Option<Arc<dyn SharedTreeStore>>,
-    id_cache: Arc<Mutex<HashMap<String, loro::TreeID>>>,
 }
 ```
+
+Stable id → `TreeID` lookups go through the doc's stable-id index
+(`crates/holon-loro/src/stable_id_index.rs`): one per `LoroDoc`, kept in the
+doc-lock registry entry, complete (a miss means no live node carries the id),
+fed by the doc's tree events plus `write_stable_id` (the only production writer
+of `STABLE_ID`, pinned by an architecture rule); duplicates answer the smallest
+`TreeID`.
 
 **Trait Implementations:**
 

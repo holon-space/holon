@@ -161,7 +161,6 @@ async fn adopt_imported_blocks(
 /// every `entity_name == TREE_ENTITY` comparison against an already-
 /// normalized `EntityName`.
 pub const TREE_ENTITY: &str = "tree";
-use crate::loro_backend::STABLE_ID;
 use crate::settled_read::LiveNode;
 use crate::settled_read::classify;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -1946,11 +1945,11 @@ fn ensure_shared_with_me_root_node(doc: &LoroDoc) -> Result<TreeID> {
     let node = tree
         .create(None)
         .map_err(|e| err(format!("create 'Shared with me' root node: {e:#}")))?;
+    crate::stable_id_index::write_stable_id(doc, node, SHARED_WITH_ME_ROOT_ID)
+        .map_err(|e| err(format!("set 'Shared with me' stable_id: {e:#}")))?;
     let meta = tree
         .get_meta(node)
         .map_err(|e| err(format!("get 'Shared with me' root meta: {e:#}")))?;
-    meta.insert(STABLE_ID, SHARED_WITH_ME_ROOT_ID)
-        .map_err(|e| err(format!("set 'Shared with me' stable_id: {e:#}")))?;
     let text = crate::mergeable_child::ensure_text(&meta, "content_raw")
         .map_err(|e| err(format!("insert 'Shared with me' content: {e:#}")))?;
     text.insert(0, SHARED_WITH_ME_TITLE)
@@ -2000,10 +1999,7 @@ fn set_stable_id(doc: &LoroDoc, tid: TreeID, stable_id: &str) -> anyhow::Result<
     // `set_external_id`) all assume this and strip prefixes on the read
     // side. Strip here too so a single-pass write matches every lookup.
     let bare = stable_id.strip_prefix("block:").unwrap_or(stable_id);
-    let tree = doc.get_tree(crate::loro_backend::TREE_NAME);
-    let meta = tree.get_meta(tid)?;
-    meta.insert(STABLE_ID, bare)?;
-    Ok(())
+    crate::stable_id_index::write_stable_id(doc, tid, bare)
 }
 
 /// True if `e` is the `IrohAdvertiser` "already advertising" error —
@@ -3405,6 +3401,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::loro_backend::STABLE_ID;
     use crate::loro_document_store::LoroDocumentStore;
 
     /// A device's keychain, as a value a restart can be handed again. The
@@ -4416,8 +4413,8 @@ mod tests {
     }
 
     /// Create-family routing: a child created under a SHARED parent lands in
-    /// the shared doc (not the global doc), never pollutes the global
-    /// `id_cache`, and syncs to the peer.
+    /// the shared doc (not the global doc), never resolves through the global
+    /// lookup, and syncs to the peer.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial_test::serial]
     async fn create_under_shared_parent_lands_in_shared_doc() {
@@ -4448,10 +4445,11 @@ mod tests {
                 .is_none(),
             "shared child must not appear in the global tree"
         );
-        // The global id_cache never gained the shared child's id.
         assert!(
-            write_backend.peek_id_cache("shared-new-child").is_none(),
-            "shared child id must not leak into the global id_cache"
+            write_backend
+                .find_tree_id_by_stable_id_sync("shared-new-child")
+                .is_none(),
+            "shared child id must not resolve in the global tree"
         );
 
         // Syncs to B.

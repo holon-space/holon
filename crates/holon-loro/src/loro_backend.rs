@@ -620,8 +620,8 @@ fn walk_to_page(tree: &loro::LoroTree, start: loro::TreeID) -> anyhow::Result<Wa
     Ok(WalkEnd::TooDeep)
 }
 
-/// The global tree's mounts by shared tree id, shared like [`StableIdCache`]
-/// by every backend over that tree.
+/// The global tree's mounts by shared tree id, shared by every backend over
+/// that tree.
 pub type MountCache = Arc<Mutex<MountIndex>>;
 
 /// The canonical mount of each shared tree. A tree event that creates, moves
@@ -644,7 +644,7 @@ pub struct MountIndex {
 impl Default for MountIndex {
     fn default() -> Self {
         Self {
-            watch: TreeWatch::new(&crate::shared_tree::MOUNT_META_KEYS),
+            watch: TreeWatch::new(&crate::shared_tree::MOUNT_META_KEYS, &[]),
             built: false,
             canonical: HashMap::new(),
             duplicated: HashMap::new(),
@@ -1191,99 +1191,18 @@ enum ParentResolution {
     Unresolvable,
 }
 
-/// `stable id -> TreeID` for the global tree. One instance may serve every
-/// backend over that tree, so an entry outlives the backend that wrote it.
-pub type StableIdCache = Arc<Mutex<HashMap<String, loro::TreeID>>>;
-
-/// The cached node for `stable_id` when it is still alive in `tree`; a dead
-/// entry is dropped. A live node that carries another stable id is a cache
-/// the write path failed to invalidate, and serving it would address the
-/// wrong block.
-fn cached_live_node(
-    tree: &loro::LoroTree,
-    id_cache: &StableIdCache,
-    stable_id: &str,
-) -> Option<loro::TreeID> {
-    let tid = id_cache.lock().unwrap().get(stable_id).copied()?;
-    if node_deleted_now(tree, tid) {
-        id_cache.lock().unwrap().remove(stable_id);
-        return None;
-    }
-    match classify(tree, tid) {
-        LiveNode::Settled(sid) if sid == stable_id => Some(tid),
-        LiveNode::Settled(sid) => panic!(
-            "stable-id cache names {tid:?} for `{stable_id}`, but that live node carries \
-             `{sid}` — a STABLE_ID rewrite did not invalidate the cache"
-        ),
-        LiveNode::HalfBorn | LiveNode::MetaUnreadable => panic!(
-            "stable-id cache names {tid:?} for `{stable_id}`, but that live node has no \
-             readable STABLE_ID"
-        ),
-    }
-}
-
-fn resolve_parent_core(
-    tree: &loro::LoroTree,
-    id_cache: &Arc<Mutex<HashMap<String, loro::TreeID>>>,
-    parent_uri: &EntityUri,
-) -> ParentResolution {
+fn resolve_parent_core(doc: &loro::LoroDoc, parent_uri: &EntityUri) -> ParentResolution {
     if parent_uri.is_no_parent() || parent_uri.is_sentinel() {
         return ParentResolution::Root;
     }
-    // Try TreeID format first, then stable ID cache, then walk the tree.
-    // The tree walk handles the seed phase: when blocks are
-    // created in the same batch with dependency chains >1 level deep,
-    // a parent node may already exist in the tree but hasn't been added
-    // to the id_cache yet (cache is populated lazily by create_block).
-    // ALLOW(fallback): seed-time recovery is a deliberate disclosed path;
-    // the alternative (eagerly populating id_cache across the batch) would
-    // need a multi-pass create, which is the larger refactor.
-    let tree_id = uri_to_tree_id(parent_uri)
-        .or_else(|| {
-            if parent_uri.is_block() {
-                // A remote / CRDT-merge delete never runs delete_block's
-                // uncache, so a tombstoned entry is dropped here and the walk
-                // below re-resolves a stable id recreated under a new TreeID.
-                cached_live_node(tree, id_cache, parent_uri.id())
-            } else {
-                None
-            }
-        })
-        .or_else(|| {
-            // ALLOW(fallback): tree walk after id_cache miss covers seed-time
-            // ordering — same disclosed path as the comment block above.
-            if parent_uri.is_block() {
-                for node in tree.get_nodes(false) {
-                    if matches!(
-                        node.parent,
-                        loro::TreeParentId::Deleted | loro::TreeParentId::Unexist
-                    ) {
-                        continue;
-                    }
-                    match classify(tree, node.id) {
-                        LiveNode::Settled(sid) if sid == parent_uri.id() => {
-                            // Found it — also populate the cache for next time
-                            id_cache
-                                .lock()
-                                .unwrap()
-                                .insert(parent_uri.id().to_string(), node.id);
-                            return Some(node.id);
-                        }
-                        // Silent skip, like the other id-lookup scans: this
-                        // walk runs on every cache miss over every node, so a
-                        // warning per non-matching node would drown the real
-                        // disclosures. A half-born parent resolves on the
-                        // caller's next read.
-                        LiveNode::Settled(_) | LiveNode::HalfBorn | LiveNode::MetaUnreadable => {}
-                    }
-                }
-            }
-            None
-        });
+    let tree_id = uri_to_tree_id(parent_uri).or_else(|| {
+        parent_uri
+            .is_block()
+            .then(|| crate::stable_id_index::lookup(doc, parent_uri.id()))
+            .flatten()
+    });
     match tree_id {
-        // Confirm the resolved node actually carries meta (i.e. it is a live
-        // node, not a stale cache hit into a deleted/unexist slot).
-        Some(tid) if tree.get_meta(tid).is_ok() => ParentResolution::Node(tid),
+        Some(tid) if doc.get_tree(TREE_NAME).get_meta(tid).is_ok() => ParentResolution::Node(tid),
         _ => ParentResolution::Unresolvable,
     }
 }
@@ -1291,11 +1210,10 @@ fn resolve_parent_core(
 /// Read/move-path parent resolution: a missing parent is a generic anyhow
 /// error.
 fn resolve_parent_tree_id(
-    tree: &loro::LoroTree,
-    id_cache: &Arc<Mutex<HashMap<String, loro::TreeID>>>,
+    doc: &loro::LoroDoc,
     parent_uri: &EntityUri,
 ) -> anyhow::Result<Option<loro::TreeID>> {
-    match resolve_parent_core(tree, id_cache, parent_uri) {
+    match resolve_parent_core(doc, parent_uri) {
         ParentResolution::Root => Ok(None),
         ParentResolution::Node(tid) => Ok(Some(tid)),
         ParentResolution::Unresolvable => Err(anyhow::anyhow!(
@@ -1308,12 +1226,11 @@ fn resolve_parent_tree_id(
 /// is the shared, typed [`holon_api::ParentNotFound`] — the anyhow *source*, so
 /// callers up the stack can downcast to it (and can add context freely on top).
 fn resolve_parent_tree_id_for_create(
-    tree: &loro::LoroTree,
-    id_cache: &Arc<Mutex<HashMap<String, loro::TreeID>>>,
+    doc: &loro::LoroDoc,
     parent_uri: &EntityUri,
     child_uri: &EntityUri,
 ) -> anyhow::Result<Option<loro::TreeID>> {
-    match resolve_parent_core(tree, id_cache, parent_uri) {
+    match resolve_parent_core(doc, parent_uri) {
         ParentResolution::Root => Ok(None),
         ParentResolution::Node(tid) => Ok(Some(tid)),
         ParentResolution::Unresolvable => Err(anyhow::Error::new(holon_api::ParentNotFound {
@@ -1386,7 +1303,6 @@ fn set_birth_widening_ms(ms: u64) {
 fn write_new_node(
     doc: &loro::LoroDoc,
     tree: &loro::LoroTree,
-    id_cache: &Arc<Mutex<HashMap<String, loro::TreeID>>>,
     request: &NewBlockWithProperties,
     now: i64,
 ) -> anyhow::Result<(Block, loro::TreeID)> {
@@ -1402,13 +1318,12 @@ fn write_new_node(
     )?;
 
     let stable_id = request.id.id().to_string();
-    let parent_tree_id =
-        resolve_parent_tree_id_for_create(tree, id_cache, &request.parent_id, &request.id)?;
+    let parent_tree_id = resolve_parent_tree_id_for_create(doc, &request.parent_id, &request.id)?;
 
     let node = tree.create(parent_tree_id)?;
     widen_birth_window();
+    crate::stable_id_index::write_stable_id(doc, node, &stable_id)?;
     let meta = tree.get_meta(node)?;
-    meta.insert(STABLE_ID, loro::LoroValue::from(stable_id.as_str()))?;
     write_content_to_meta(doc, &meta, &request.content)?;
     replace_properties_in_meta(&meta, &request.properties)?;
     // Tags are edge fields (block_tags), stored in Loro meta as a JSON list
@@ -2375,9 +2290,6 @@ pub struct LoroBackend {
     subscribers: ChangeSubscribers<Block>,
     event_log: Arc<Mutex<EventRing<Change<Block>>>>,
     shared_trees: Option<Arc<dyn SharedTreeStore>>,
-    /// Cache: stable_id (UUID string) → TreeID. Populated eagerly on create,
-    /// lazily on lookup, invalidated on delete.
-    id_cache: Arc<Mutex<HashMap<String, loro::TreeID>>>,
     mount_cache: MountCache,
     shared_id_cache: SharedIdCache,
     condition_bus: Option<Arc<holon_api::ConditionBus>>,
@@ -2392,7 +2304,6 @@ impl Clone for LoroBackend {
             subscribers: self.subscribers.clone(),
             event_log: self.event_log.clone(),
             shared_trees: self.shared_trees.clone(),
-            id_cache: self.id_cache.clone(),
             mount_cache: self.mount_cache.clone(),
             shared_id_cache: self.shared_id_cache.clone(),
             condition_bus: self.condition_bus.clone(),
@@ -2402,12 +2313,6 @@ impl Clone for LoroBackend {
 }
 
 impl LoroBackend {
-    /// Share `cache` with every other backend over the same global tree.
-    pub fn with_id_cache(mut self, cache: StableIdCache) -> Self {
-        self.id_cache = cache;
-        self
-    }
-
     /// Share `cache` with every other backend over the same global tree.
     pub fn with_mount_cache(mut self, cache: MountCache) -> Self {
         self.mount_cache = cache;
@@ -2483,7 +2388,6 @@ impl LoroBackend {
             subscribers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             event_log: Arc::new(Mutex::new(EventRing::new(DEFAULT_EVENT_RING_CAPACITY))),
             shared_trees: None,
-            id_cache: Arc::new(Mutex::new(HashMap::new())),
             mount_cache: MountCache::default(),
             shared_id_cache: SharedIdCache::default(),
             condition_bus: None,
@@ -2627,12 +2531,8 @@ impl LoroBackend {
         LoroDocument::from_existing(layout.doc(), layout.doc_id())
     }
 
-    /// The layout doc's live node for `id`, if the layout doc holds one.
-    ///
-    /// A direct tree walk rather than a cache lookup: the layout is the bundled
-    /// UI shell, tens of nodes, and `id_cache` keys the global tree alone —
-    /// caching both under one map would make the cache's aliveness check
-    /// ambiguous about which doc it consulted.
+    /// The layout doc's live node for `id`, if the layout doc holds one. A
+    /// direct tree walk: the layout is the bundled UI shell, tens of nodes.
     fn resolve_layout(&self, id: &str) -> Option<WriteTarget> {
         let layout = self.layout_doc.as_ref()?;
         // ALLOW(entity_uri_from_raw): backend string-id resolve surface (accepts both
@@ -2738,7 +2638,7 @@ impl LoroBackend {
         }
         // ALLOW(entity_uri_from_raw): backend string-id resolve surface
         let stable_id = EntityUri::from_raw(id).id().to_string();
-        if let Some(tree_id) = self.cached_global_node(&stable_id) {
+        if let Some(tree_id) = self.find_tree_id_by_stable_id_sync(&stable_id) {
             return Ok(WriteTarget::Global(tree_id));
         }
         // Checked before the global scan, which a shared id always misses.
@@ -3978,17 +3878,9 @@ impl LoroBackend {
         };
 
         // Route the create by parent: a child of a shared block is born in the
-        // shared doc. The global `id_cache` must never receive a shared TreeID
-        // (its keys index the global tree only), so the shared arm resolves the
-        // parent against a throwaway cache and skips `cache_stable_id` below.
+        // shared doc.
         let parent_route = self.resolve_write_target_for_parent_sync(&parent_id, id.as_ref())?;
         let write_doc = self.parent_doc(&parent_route.target);
-        let is_global = matches!(parent_route.target, ParentWriteTarget::Global);
-        let id_cache = if is_global {
-            self.id_cache.clone()
-        } else {
-            Arc::new(Mutex::new(HashMap::new()))
-        };
         // The child's URI drives the typed `ParentNotFound` if the parent is
         // absent: use the caller-supplied id, else the freshly-minted stable id.
         // ALLOW(entity_uri_block_panics_on_bad_input): this arm runs only when
@@ -4001,20 +3893,16 @@ impl LoroBackend {
             properties: properties.clone(),
             edges: edges.clone(),
         };
-        let (created_block, tree_id) = write_doc
+        let created_block = write_doc
             .with_write(WriteOrigin::BlockOps, |doc| {
                 let tree = doc.get_tree(TREE_NAME);
-                let (block, node) = write_new_node(doc, &tree, &id_cache, &request, now)?;
+                let (block, _) = write_new_node(doc, &tree, &request, now)?;
                 doc.commit();
-                Ok((block, node))
+                Ok(block)
             })
             .map_err(|e| ApiError::InternalError {
                 message: format!("Failed to create block: {}", e),
             })?;
-
-        if is_global {
-            self.cache_stable_id(&stable_id, tree_id);
-        }
 
         self.emit_change(Change::Created {
             data: created_block.clone(),
@@ -4082,28 +3970,15 @@ impl LoroBackend {
         }
 
         let mut placed: Vec<Option<Block>> = Vec::new();
-        let mut created_global: Vec<(String, loro::TreeID)> = Vec::new();
         for (target, members) in groups {
             let write_doc = self.parent_doc(&target);
-            let is_global = matches!(target, ParentWriteTarget::Global);
-            // Shared arm gets a throwaway cache: a shared TreeID must never
-            // enter the global `id_cache` (its keys index the global tree).
-            let id_cache = if is_global {
-                self.id_cache.clone()
-            } else {
-                Arc::new(Mutex::new(HashMap::new()))
-            };
             let written = write_doc
                 .with_write(WriteOrigin::BlockOps, |doc| {
                     let tree = doc.get_tree(TREE_NAME);
-                    let mut out: Vec<(usize, Block, loro::TreeID)> = Vec::new();
+                    let mut out: Vec<(usize, Block)> = Vec::new();
                     for (idx, request) in &members {
-                        let (block, node) = write_new_node(doc, &tree, &id_cache, request, now)?;
-                        id_cache
-                            .lock()
-                            .unwrap()
-                            .insert(block.id.id().to_string(), node);
-                        out.push((*idx, block, node));
+                        let (block, _) = write_new_node(doc, &tree, request, now)?;
+                        out.push((*idx, block));
                     }
                     doc.commit();
                     Ok(out)
@@ -4111,20 +3986,13 @@ impl LoroBackend {
                 .map_err(|e| ApiError::InternalError {
                     message: format!("Failed to create {} block(s): {e:#}", members.len()),
                 })?;
-            for (idx, block, node) in written {
-                if is_global {
-                    created_global.push((block.id.id().to_string(), node));
-                }
+            for (idx, block) in written {
                 if placed.len() <= idx {
                     placed.resize(idx + 1, None);
                 }
                 placed[idx] = Some(block);
             }
         }
-        for (stable_id, node) in created_global {
-            self.cache_stable_id(&stable_id, node);
-        }
-
         let created: Vec<Block> = placed
             .into_iter()
             .map(|b| {
@@ -4272,16 +4140,11 @@ impl LoroBackend {
             });
         }
         let (write_doc, tree_id) = self.target_doc(&source_target);
-        let id_cache = if source_target.doc_key() == DocKey::Global {
-            self.id_cache.clone()
-        } else {
-            Arc::new(Mutex::new(HashMap::new()))
-        };
 
         write_doc
             .with_write(WriteOrigin::BlockOps, |doc| {
                 let tree = doc.get_tree(TREE_NAME);
-                let new_parent = resolve_parent_tree_id(&tree, &id_cache, &new_parent_uri)?;
+                let new_parent = resolve_parent_tree_id(doc, &new_parent_uri)?;
                 // No-op when the parent is unchanged: `tree.mov` APPENDS the
                 // node to the END of the new parent's children, so an
                 // unchanged-parent "move" (e.g. an org re-ingest update op
@@ -4360,11 +4223,6 @@ impl LoroBackend {
             }
             None => None,
         };
-        let id_cache = if source_target.doc_key() == DocKey::Global {
-            self.id_cache.clone()
-        } else {
-            Arc::new(Mutex::new(HashMap::new()))
-        };
 
         let noop = write_doc
             .with_read(|doc| {
@@ -4374,11 +4232,10 @@ impl LoroBackend {
                 // If the parent can't be resolved yet (not in the tree), treat as a
                 // real move — fall through to the actual mov_after which will error
                 // if the parent truly doesn't exist.
-                let want_parent_tid =
-                    match resolve_parent_tree_id(&tree, &id_cache, want_parent_uri) {
-                        Ok(tid) => tid,
-                        Err(_) => return Ok::<bool, anyhow::Error>(false),
-                    };
+                let want_parent_tid = match resolve_parent_tree_id(doc, want_parent_uri) {
+                    Ok(tid) => tid,
+                    Err(_) => return Ok::<bool, anyhow::Error>(false),
+                };
 
                 // If the parent changed, definitely not a no-op.
                 if current_parent_tid != want_parent_tid {
@@ -4419,7 +4276,7 @@ impl LoroBackend {
                         tree.mov_after(target, pred_id)?;
                     }
                     None => {
-                        let new_parent = resolve_parent_tree_id(&tree, &id_cache, &new_parent_uri)?;
+                        let new_parent = resolve_parent_tree_id(doc, &new_parent_uri)?;
                         match new_parent {
                             Some(p) => tree.mov_to(target, p, 0)?,
                             None => tree.mov_to(target, loro::TreeParentId::Root, 0)?,
@@ -4596,74 +4453,6 @@ impl LoroBackend {
     }
 
     // -- Stable ID (block business identity) --
-
-    /// Resolve a stable ID (UUID) to a TreeID, using the cache.
-    /// Returns `None` if the stable ID is not found.
-    fn resolve_stable_id_cached(&self, stable_id: &str) -> Option<loro::TreeID> {
-        self.id_cache.lock().unwrap().get(stable_id).copied()
-    }
-
-    /// Peek the stable-id cache WITHOUT the O(nodes) tree walk
-    /// `find_tree_id_by_stable_id` performs on a miss.
-    ///
-    /// A miss here means "not cached", NOT "not in the tree" — only sound as an
-    /// existence test right after
-    /// [`warm_stable_id_cache`](Self::warm_stable_id_cache)
-    /// with no concurrent writer, which is exactly the batched ingest's
-    /// situation. Also asserts in tests that a shared child's id never leaks
-    /// into the global `id_cache`.
-    pub fn peek_id_cache(&self, stable_id: &str) -> Option<loro::TreeID> {
-        self.resolve_stable_id_cached(stable_id)
-    }
-
-    /// Insert a stable_id → TreeID mapping into the cache.
-    fn cache_stable_id(&self, stable_id: &str, tree_id: loro::TreeID) {
-        self.id_cache
-            .lock()
-            .unwrap()
-            .insert(stable_id.to_string(), tree_id);
-    }
-
-    /// Remove a stable_id from the cache (on delete).
-    fn uncache_stable_id(&self, stable_id: &str) {
-        self.id_cache.lock().unwrap().remove(stable_id);
-    }
-
-    /// Rebuild the stable ID cache from all alive nodes in the doc.
-    /// Call after `doc.import(delta)` to ensure newly imported nodes are
-    /// resolvable.
-    pub async fn warm_stable_id_cache(&self) {
-        let id_cache = self.id_cache.clone();
-        let _ = self.collab_doc.with_read(|doc| {
-            let tree = doc.get_tree(TREE_NAME);
-            let mut cache = id_cache.lock().unwrap();
-            cache.clear();
-            for node in tree.get_nodes(false) {
-                if matches!(
-                    node.parent,
-                    loro::TreeParentId::Deleted | loro::TreeParentId::Unexist
-                ) {
-                    continue;
-                }
-                match classify(&tree, node.id) {
-                    LiveNode::Settled(sid) => {
-                        cache.insert(sid, node.id);
-                    }
-                    // Uncacheable: there is no id to key it by. The cache is
-                    // re-warmed on every import and the lookup scans fall back
-                    // to a tree walk on a miss, so the node becomes resolvable
-                    // as soon as its meta lands.
-                    LiveNode::HalfBorn => warn_half_born(
-                        "warm_stable_id_cache",
-                        node.id,
-                        &format!("{:?}", tree.parent(node.id)),
-                    ),
-                    LiveNode::MetaUnreadable => {}
-                }
-            }
-            Ok(())
-        });
-    }
 
     // -- Diff-based CDC after remote sync --
 
@@ -4900,7 +4689,6 @@ impl LoroBackend {
 
     /// Compare current state against a pre-import snapshot, emit CDC events
     /// for all Created, Updated, and Deleted blocks, and return the changes.
-    /// Also warms the stable ID cache.
     ///
     /// Call after `doc.import(delta)` with the snapshot from
     /// `snapshot_blocks()`.
@@ -4909,7 +4697,6 @@ impl LoroBackend {
         before: HashMap<String, SnapshotBlock>,
     ) -> Vec<Change<Block>> {
         let after = self.snapshot_blocks().await;
-        self.warm_stable_id_cache().await;
 
         let remote_origin = ChangeOrigin::Remote {
             operation_id: None,
@@ -4957,72 +4744,21 @@ impl LoroBackend {
         changes
     }
 
-    /// Find a tree node's TreeID by its stable ID (UUID).
-    /// Checks cache first, falls back to linear scan + cache population.
+    /// The canonical live node carrying `stable_id` in the global tree.
     pub async fn find_tree_id_by_stable_id(&self, stable_id: &str) -> Option<loro::TreeID> {
         self.find_tree_id_by_stable_id_sync(stable_id)
     }
 
     /// The body of [`Self::find_tree_id_by_stable_id`]. Plain `fn` because it
-    /// is plain work: a cache probe and a tree walk under the doc lock, which
+    /// is plain work: an index probe under the doc lock, which
     /// is a `parking_lot::RwLock`. A caller that must not yield — the frontend
     /// creating a node on the keystroke path — needs this shape, and the async
     /// twin above is the wrapper, not the implementation.
     pub fn find_tree_id_by_stable_id_sync(&self, stable_id: &str) -> Option<loro::TreeID> {
-        let hit = self.cached_global_node(stable_id);
-        if hit.is_some() {
-            return hit;
-        }
-        // A miss pays one whole-tree scan and caches every live node, so the
-        // shared cache is warm after the first miss instead of after one miss
-        // per id.
         self.collab_doc
-            .with_read(|doc| {
-                let tree = doc.get_tree(TREE_NAME);
-                let mut seen: HashMap<String, loro::TreeID> = HashMap::new();
-                for tree_node in tree.get_nodes(false) {
-                    if matches!(
-                        tree_node.parent,
-                        loro::TreeParentId::Deleted | loro::TreeParentId::Unexist
-                    ) {
-                        continue;
-                    }
-                    // Same silent skip as `find_stable_id_in_doc`: a half-born
-                    // or torn node has no id to match or to cache.
-                    match classify(&tree, tree_node.id) {
-                        LiveNode::Settled(sid) => {
-                            seen.entry(sid).or_insert(tree_node.id);
-                        }
-                        LiveNode::HalfBorn | LiveNode::MetaUnreadable => {}
-                    }
-                }
-                let found = seen.get(stable_id).copied();
-                self.id_cache.lock().unwrap().extend(seen);
-                Ok(found)
-            })
-            // ALLOW(ok): returning Option<TreeID> at the API surface; the
-            // with_read error is a "couldn't acquire read lock" diagnostic
-            // that the lookup callers (resolve_to_tree_id) already treat as
-            // "not found" — preserving the Option signature here is the
-            // intended behavior of the resolver.
-            .ok()
-            .flatten()
-    }
-
-    /// The global stable-id cache's live node for `stable_id`. A delete →
-    /// undo(create) resurrects the SAME stable id under a NEW TreeID, so a dead
-    /// hit answers `None` and the caller falls through to a scan.
-    fn cached_global_node(&self, stable_id: &str) -> Option<loro::TreeID> {
-        self.collab_doc
-            .with_read(|doc| {
-                Ok(cached_live_node(
-                    &doc.get_tree(TREE_NAME),
-                    &self.id_cache,
-                    stable_id,
-                ))
-            })
-            // ALLOW(ok): a read-lock timeout answers "not found", the same
-            // contract as the scan in `find_tree_id_by_stable_id_sync`.
+            .with_read(|doc| Ok(crate::stable_id_index::lookup(doc, stable_id)))
+            // ALLOW(ok): a read-lock timeout answers "not found"; the resolver
+            // callers (resolve_to_tree_id) keep the Option signature.
             .ok()
             .flatten()
     }
@@ -5081,22 +4817,12 @@ impl LoroBackend {
             .strip_prefix("block:")
             .unwrap_or(external_id)
             .to_string();
-        let is_global = target.doc_key() == DocKey::Global;
-        let id_cache = self.id_cache.clone();
         write_doc.with_write(WriteOrigin::BlockOps, |doc| {
-            let tree = doc.get_tree(TREE_NAME);
-            let meta = tree.get_meta(tree_id)?;
-            let previous = read_stable_id(&meta);
-            meta.insert(STABLE_ID, loro::LoroValue::from(raw_id.as_str()))?;
-            meta.insert(EXTERNAL_ID, loro::LoroValue::from(ext_id.as_str()))?;
+            crate::stable_id_index::write_stable_id(doc, tree_id, &raw_id)?;
+            doc.get_tree(TREE_NAME)
+                .get_meta(tree_id)?
+                .insert(EXTERNAL_ID, loro::LoroValue::from(ext_id.as_str()))?;
             doc.commit();
-            if is_global {
-                let mut cache = id_cache.lock().unwrap();
-                if let Some(previous) = previous {
-                    cache.remove(&previous);
-                }
-                cache.insert(raw_id.clone(), tree_id);
-            }
             Ok(())
         })
     }
@@ -5107,14 +4833,10 @@ impl LoroBackend {
     /// returned as a `block:` URI.
     pub async fn create_placeholder_root(&self, stable_id: &str) -> anyhow::Result<String> {
         let sid = stable_id.to_string();
-        let id_cache = self.id_cache.clone();
         self.collab_doc.with_write(WriteOrigin::BlockOps, |doc| {
-            let tree = doc.get_tree(TREE_NAME);
-            let node = tree.create(None)?;
-            let meta = tree.get_meta(node)?;
-            meta.insert(STABLE_ID, loro::LoroValue::from(sid.as_str()))?;
+            let node = doc.get_tree(TREE_NAME).create(None)?;
+            crate::stable_id_index::write_stable_id(doc, node, &sid)?;
             doc.commit();
-            id_cache.lock().unwrap().insert(sid.clone(), node);
             Ok(EntityUri::block(&sid).to_string())
         })
     }
@@ -5184,7 +4906,6 @@ impl Lifecycle for LoroBackend {
             subscribers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             event_log: Arc::new(Mutex::new(EventRing::new(DEFAULT_EVENT_RING_CAPACITY))),
             shared_trees: None,
-            id_cache: Arc::new(Mutex::new(HashMap::new())),
             mount_cache: MountCache::default(),
             shared_id_cache: SharedIdCache::default(),
             condition_bus: None,
@@ -5428,7 +5149,6 @@ impl CoreOperations for LoroBackend {
 
     async fn list_children(&self, parent_id: &str) -> Result<Vec<String>, ApiError> {
         let shared_trees = self.shared_trees.clone();
-        let id_cache = self.id_cache.clone();
 
         // The mount stands in for the shared root, so ITS children are the
         // shared root's children. The write path already reads the mount id
@@ -5471,13 +5191,8 @@ impl CoreOperations for LoroBackend {
                 // ALLOW(entity_uri_from_raw): id/parent_id &str backend API param (accepts both
                 // id formats)
                 let parent_uri = EntityUri::from_raw(parent_id);
-                // Use the shared `resolve_parent_tree_id` (TreeID → id_cache → tree-walk,
-                // populating the cache on a hit) rather than a cache-only lookup: a backend
-                // attached via `from_document` (e.g. the composed PBT's Loro read cap over the
-                // frontend's authority doc, or a peer-merged doc) has an EMPTY id_cache, so a
-                // cache-only resolve fails for a block parent that is genuinely present in the
-                // tree. `Ok(None)` ⇒ no_parent/sentinel ⇒ the tree roots.
-                let children_tids = match resolve_parent_tree_id(&tree, &id_cache, &parent_uri)? {
+                // `Ok(None)` ⇒ no_parent/sentinel ⇒ the tree roots.
+                let children_tids = match resolve_parent_tree_id(doc, &parent_uri)? {
                     None => tree.roots(),
                     Some(tree_id) => tree.children(tree_id).unwrap_or_default(),
                 };
@@ -5623,12 +5338,6 @@ impl CoreOperations for LoroBackend {
             })?;
 
         if did_delete {
-            // ALLOW(entity_uri_from_raw): id/parent_id &str backend API param (accepts both
-            // id formats)
-            let uri = EntityUri::from_raw(id);
-            if uri.is_block() {
-                self.uncache_stable_id(uri.id());
-            }
             self.emit_change(Change::Deleted {
                 id: id.to_string(),
                 origin: ChangeOrigin::local_with_current_span(),
@@ -5678,13 +5387,6 @@ impl CoreOperations for LoroBackend {
 
         let block_before = self.get_block(id.as_str()).await?;
         let (write_doc, tree_id) = self.target_doc(&source_target);
-        // Shared arm gets a throwaway cache (the global `id_cache` must not hold
-        // shared TreeIDs); global arm uses the real cache.
-        let id_cache = if source_target.doc_key() == DocKey::Global {
-            self.id_cache.clone()
-        } else {
-            Arc::new(Mutex::new(HashMap::new()))
-        };
 
         // Domain-level precondition (ADR 0005): the primary cycle / structure
         // guard, run before adapter dispatch. `tree.mov` below re-checks cycles
@@ -5707,13 +5409,13 @@ impl CoreOperations for LoroBackend {
         write_doc
             .with_write(WriteOrigin::BlockOps, |doc| {
                 let tree = doc.get_tree(TREE_NAME);
-                let new_parent_tree_id = resolve_parent_tree_id(&tree, &id_cache, &new_parent)?;
+                let new_parent_tree_id = resolve_parent_tree_id(doc, &new_parent)?;
 
                 // LoroTree.mov re-checks cycles natively (defense-in-depth).
                 tree.mov(tree_id, new_parent_tree_id)?;
 
                 if let Some(after_uri) = &after {
-                    let after_tid = resolve_parent_tree_id(&tree, &id_cache, after_uri)?
+                    let after_tid = resolve_parent_tree_id(doc, after_uri)?
                         .ok_or_else(|| anyhow::anyhow!("after-anchor {after_uri} is the root"))?;
                     tree.mov_after(tree_id, after_tid)?;
                 }
@@ -5816,18 +5518,10 @@ impl CoreOperations for LoroBackend {
         }
         let owning = owning.expect("non-empty batch resolves at least one parent target");
         let write_doc = self.parent_doc(&owning);
-        // Shared arm gets a throwaway cache: the global `id_cache` must never
-        // hold a shared TreeID. Global arm uses (and populates) the real cache.
-        let id_cache = if matches!(owning, ParentWriteTarget::Global) {
-            self.id_cache.clone()
-        } else {
-            Arc::new(Mutex::new(HashMap::new()))
-        };
         let created_blocks = write_doc
             .with_write(WriteOrigin::BlockOps, |doc| {
                 let tree = doc.get_tree(TREE_NAME);
                 let mut created = Vec::new();
-                let mut id_cache_entries: Vec<(String, loro::TreeID)> = Vec::new();
 
                 for new_block in blocks {
                     let stable_id = match &new_block.id {
@@ -5841,15 +5535,11 @@ impl CoreOperations for LoroBackend {
                         // runs only when `new_block.id` is None, where
                         // `stable_id` is the UUID minted just above
                         .unwrap_or_else(|| EntityUri::block(&stable_id));
-                    let parent_tree_id = resolve_parent_tree_id_for_create(
-                        &tree,
-                        &id_cache,
-                        &new_block.parent_id,
-                        &child_uri,
-                    )?;
+                    let parent_tree_id =
+                        resolve_parent_tree_id_for_create(doc, &new_block.parent_id, &child_uri)?;
                     let node = tree.create(parent_tree_id)?;
+                    crate::stable_id_index::write_stable_id(doc, node, &stable_id)?;
                     let meta = tree.get_meta(node)?;
-                    meta.insert(STABLE_ID, loro::LoroValue::from(stable_id.as_str()))?;
                     write_content_to_meta(doc, &meta, &new_block.content)?;
                     meta.insert("created_at", loro::LoroValue::from(now))?;
                     meta.insert("updated_at", loro::LoroValue::from(now))?;
@@ -5860,8 +5550,6 @@ impl CoreOperations for LoroBackend {
                     {
                         tree.mov_after(node, after_tid)?;
                     }
-
-                    id_cache_entries.push((stable_id.clone(), node));
 
                     let block_id = EntityUri::block(&stable_id);
                     let parent_uri = match parent_tree_id {
@@ -5880,12 +5568,6 @@ impl CoreOperations for LoroBackend {
                 }
 
                 doc.commit();
-                {
-                    let mut cache = id_cache.lock().unwrap();
-                    for (sid, tid) in id_cache_entries {
-                        cache.insert(sid, tid);
-                    }
-                }
                 Ok(created)
             })
             .map_err(|e| ApiError::InternalError {
@@ -5935,15 +5617,6 @@ impl CoreOperations for LoroBackend {
             .map_err(|e| ApiError::InternalError {
                 message: format!("Failed to delete blocks: {}", e),
             })?;
-
-        for id in &unique_ids {
-            // ALLOW(entity_uri_from_raw): id/parent_id &str backend API param (accepts both
-            // id formats)
-            let uri = EntityUri::from_raw(id);
-            if uri.is_block() {
-                self.uncache_stable_id(uri.id());
-            }
-        }
 
         for id in unique_ids {
             self.emit_change(Change::Deleted {
@@ -6414,24 +6087,17 @@ mod diff_checkout_race_tests {
             .unwrap();
     }
 
-    /// REMOTE-DELETE STALE-PARENT HOLE (verifier finding d): a stable-id cache
-    /// entry tombstoned by a delete that bypasses THIS backend's uncache — a
-    /// remote / CRDT-merge delete, modelled here by deleting through a SECOND
-    /// backend/handle on the same doc — must NOT be served as a live parent.
-    /// loro 1.12's `get_meta` returns Ok for a tombstoned
-    /// (deleted-but-existing) node, so the old `get_meta(tid).is_ok()`
-    /// guard would attach a new child UNDER the dead node. The liveness
-    /// (`node_deleted_now`) guard drops the stale entry and re-resolves;
-    /// here the parent is truly gone, so the create must fail LOUD
-    /// (ParentNotFound), never silently parent under a tombstone.
+    /// A parent deleted through another handle on the same doc (the shape a
+    /// remote / CRDT-merge delete leaves) is never served as a live parent:
+    /// loro's `get_meta` answers Ok for a tombstoned node, so a create under it
+    /// must fail loud with ParentNotFound instead of attaching under the dead
+    /// node.
     #[tokio::test]
-    async fn remote_delete_tombstoned_parent_never_served_from_stale_cache() {
+    async fn remote_delete_tombstoned_parent_never_served_as_parent() {
         let doc = Arc::new(LoroDocument::new("remote-del".to_string()).unwrap());
         let backend_a = LoroBackend::from_document(doc.clone());
         let backend_b = LoroBackend::from_document(doc.clone());
 
-        // A creates the parent — this caches "parent" → its live TreeID in A's
-        // (per-backend) id_cache.
         backend_a
             .create_block_with_properties(
                 EntityUri::no_parent(),
@@ -6442,25 +6108,10 @@ mod diff_checkout_race_tests {
             )
             .await
             .unwrap();
-        assert!(
-            backend_a.peek_id_cache("parent").is_some(),
-            "precondition: A cached the parent's live TreeID"
-        );
+        assert!(backend_a.find_tree_id_by_stable_id_sync("parent").is_some());
 
-        // A REMOTE delete: B removes the parent on the SHARED doc. `delete_block`
-        // uncaches from B's own cache only — A's cache still points at the now-
-        // tombstoned node, exactly the shape a CRDT-merge delete leaves locally.
         backend_b.delete_block("block:parent").await.unwrap();
-        assert!(
-            backend_a.peek_id_cache("parent").is_some(),
-            "the remote delete must NOT touch A's cache — the stale entry is the \
-             hole under test"
-        );
 
-        // A now creates a child under the (dead) parent. With the tombstone-blind
-        // `get_meta().is_ok()` guard this SUCCEEDED, attaching the child under a
-        // deleted node. With the liveness guard the stale entry is evicted, the
-        // tree-walk finds no live parent, and the create fails loud.
         let result = backend_a
             .create_block_with_properties(
                 EntityUri::block("parent"),
@@ -6475,10 +6126,7 @@ mod diff_checkout_race_tests {
             "create under a remotely-tombstoned parent must fail, not attach the \
              child under a dead node; got {result:?}"
         );
-        assert!(
-            backend_a.peek_id_cache("parent").is_none(),
-            "the stale tombstone entry must have been evicted during re-resolution"
-        );
+        assert!(backend_a.find_tree_id_by_stable_id_sync("parent").is_none());
     }
 
     /// PROJECTION-GAP PROBE (2026-07-13): a `set_block_tags` meta-map edit on
@@ -7548,7 +7196,7 @@ mod half_born_node_tests {
 }
 
 #[cfg(test)]
-mod stable_id_cache_tests {
+mod stable_id_lookup_tests {
     use std::sync::Arc;
 
     use super::*;
@@ -7585,21 +7233,20 @@ mod stable_id_cache_tests {
         assert_eq!(
             backend.resolve_to_tree_id("block:before").await,
             None,
-            "the node now carries `after`; the cache must not keep serving it for `before`"
+            "the node now carries `after`; `before` must not resolve to it"
         );
         assert_eq!(backend.resolve_to_tree_id("block:after").await, Some(node));
     }
 
     #[tokio::test]
-    async fn a_node_deleted_behind_a_shared_cache_resolves_to_its_recreation() {
+    async fn a_node_deleted_behind_the_backend_resolves_to_its_recreation() {
         let doc = Arc::new(LoroDocument::new("shared".to_string()).unwrap());
-        let cache = StableIdCache::default();
-        let writer = LoroBackend::from_document(doc.clone()).with_id_cache(cache.clone());
-        let reader = LoroBackend::from_document(doc.clone()).with_id_cache(cache);
+        let writer = LoroBackend::from_document(doc.clone());
+        let reader = LoroBackend::from_document(doc.clone());
         let first = create(&writer, "reborn").await;
         assert_eq!(reader.resolve_to_tree_id("block:reborn").await, Some(first));
 
-        // A peer's delete arrives by merge, which runs no uncache.
+        // A raw delete: the shape a peer's merged delete takes.
         doc.with_write(WriteOrigin::BlockOps, |d| {
             d.get_tree(TREE_NAME).delete(first)?;
             Ok(())
@@ -7616,8 +7263,7 @@ mod stable_id_cache_tests {
     }
 
     #[tokio::test]
-    #[should_panic(expected = "stable-id cache")]
-    async fn a_cached_node_whose_stable_id_changed_behind_the_cache_fails_loud() {
+    async fn a_stable_id_rewritten_behind_the_backend_resolves_to_its_new_id() {
         let doc = Arc::new(LoroDocument::new("rewrite".to_string()).unwrap());
         let backend = LoroBackend::from_document(doc.clone());
         let node = create(&backend, "cached").await;
@@ -7629,6 +7275,10 @@ mod stable_id_cache_tests {
         })
         .unwrap();
 
-        backend.resolve_to_tree_id("block:cached").await;
+        assert_eq!(backend.resolve_to_tree_id("block:cached").await, None);
+        assert_eq!(
+            backend.resolve_to_tree_id("block:someone-else").await,
+            Some(node)
+        );
     }
 }

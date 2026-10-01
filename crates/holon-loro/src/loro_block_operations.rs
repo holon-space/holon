@@ -72,9 +72,6 @@ pub struct LoroBlockOperations {
     /// (no-Turso sessions, wasm, iroh-sync off), where no subtree is ever
     /// shared.
     shared_trees: Option<Arc<dyn SharedTreeStore>>,
-    /// Handed to every backend `get_backend` builds, so a stable id resolved
-    /// once is not re-scanned out of the whole tree on the next call.
-    id_cache: crate::loro_backend::StableIdCache,
     /// Handed to every backend likewise, so `owning_page` in a share does not
     /// scan the whole tree for its mount.
     mount_cache: crate::loro_backend::MountCache,
@@ -87,7 +84,6 @@ impl LoroBlockOperations {
         Self {
             doc_store,
             shared_trees: None,
-            id_cache: Default::default(),
             mount_cache: Default::default(),
             shared_id_cache: Default::default(),
             condition_bus: None,
@@ -165,7 +161,6 @@ impl LoroBlockOperations {
             .map_err(|e| format!("Failed to get layout doc: {}", e))?;
         let mut backend = LoroBackend::from_document(collab_doc)
             .with_layout_doc(layout_doc)
-            .with_id_cache(self.id_cache.clone())
             .with_mount_cache(self.mount_cache.clone())
             .with_shared_id_cache(self.shared_id_cache.clone());
         if let Some(bus) = &self.condition_bus {

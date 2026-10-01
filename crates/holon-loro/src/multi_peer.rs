@@ -322,9 +322,8 @@ pub fn create_block_with_id(
 ) -> TreeID {
     let tree = doc.get_tree(TREE_NAME);
     let node = tree.create(parent).unwrap();
+    crate::stable_id_index::write_stable_id(doc, node, stable_id).unwrap();
     let meta = tree.get_meta(node).unwrap();
-    meta.insert(STABLE_ID, loro::LoroValue::from(stable_id))
-        .unwrap();
     let text: LoroText = meta.ensure_mergeable_text("content_raw").unwrap();
     text.insert(0, content).unwrap();
     doc.commit();

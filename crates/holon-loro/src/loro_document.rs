@@ -245,6 +245,24 @@ impl LoroDocument {
         })
     }
 
+    /// How much tree this doc's stable-id index has read so far.
+    pub fn stable_id_index_stats(&self) -> Result<crate::StableIdIndexStats> {
+        self.with_read(|doc| Ok(crate::stable_id_index::stats(doc)))
+    }
+
+    /// The canonical live node carrying `stable_id` (the smallest `TreeID` of
+    /// its carriers), from this doc's stable-id index. A miss is authoritative.
+    pub fn find_by_stable_id(&self, stable_id: &str) -> Result<Option<loro::TreeID>> {
+        self.with_read(|doc| Ok(crate::stable_id_index::lookup(doc, stable_id)))
+    }
+
+    /// Every live id carrier the stable-id index holds, ascending per id.
+    pub fn stable_id_index_snapshot(
+        &self,
+    ) -> Result<std::collections::BTreeMap<String, Vec<loro::TreeID>>> {
+        self.with_read(|doc| Ok(crate::stable_id_index::snapshot(doc)))
+    }
+
     pub fn with_read<F, R>(&self, f: F) -> Result<R>
     where
         F: FnOnce(&LoroDoc) -> Result<R>,

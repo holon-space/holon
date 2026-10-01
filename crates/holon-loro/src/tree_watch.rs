@@ -19,6 +19,8 @@ const TOUCHED_LIMIT: usize = 1024;
 pub(crate) struct TreeWatch {
     /// A meta write of one of these keys asks for a full rescan.
     rescan_keys: &'static [&'static str],
+    /// A meta write of one of these keys touches the node whose meta it is.
+    touch_keys: &'static [&'static str],
     /// Address of the `LoroDoc` the subscription watches.
     doc: usize,
     subscription: Option<loro::Subscription>,
@@ -31,6 +33,19 @@ struct Touched {
     rescan: bool,
 }
 
+impl Touched {
+    fn extend(&mut self, nodes: impl IntoIterator<Item = TreeID>) {
+        if self.rescan {
+            return;
+        }
+        self.nodes.extend(nodes);
+        if self.nodes.len() > TOUCHED_LIMIT {
+            self.nodes = Vec::new();
+            self.rescan = true;
+        }
+    }
+}
+
 pub(crate) enum Drained {
     /// The targets of the tree events since the last drain; a delete reports
     /// only the subtree root, a create or move can carry a subtree.
@@ -39,9 +54,13 @@ pub(crate) enum Drained {
 }
 
 impl TreeWatch {
-    pub(crate) fn new(rescan_keys: &'static [&'static str]) -> Self {
+    pub(crate) fn new(
+        rescan_keys: &'static [&'static str],
+        touch_keys: &'static [&'static str],
+    ) -> Self {
         Self {
             rescan_keys,
+            touch_keys,
             doc: 0,
             subscription: None,
             touched: Arc::default(),
@@ -57,6 +76,7 @@ impl TreeWatch {
         }
         let touched = self.touched.clone();
         let rescan_keys = self.rescan_keys;
+        let touch_keys = self.touch_keys;
         self.subscription = Some(doc.subscribe(
             &loro::ContainerTrait::id(tree),
             Arc::new(move |event| {
@@ -67,19 +87,22 @@ impl TreeWatch {
                     }
                     match &diff.diff {
                         loro::event::Diff::Tree(tree_diff) => {
-                            touched
-                                .nodes
-                                .extend(tree_diff.diff.iter().map(|item| item.target));
-                            if touched.nodes.len() > TOUCHED_LIMIT {
-                                touched.nodes = Vec::new();
-                                touched.rescan = true;
-                            }
+                            touched.extend(tree_diff.diff.iter().map(|item| item.target));
                         }
                         loro::event::Diff::Map(map)
                             if map.updated.keys().any(|key| rescan_keys.contains(&&**key)) =>
                         {
                             touched.nodes = Vec::new();
                             touched.rescan = true;
+                        }
+                        loro::event::Diff::Map(map)
+                            if map.updated.keys().any(|key| touch_keys.contains(&&**key)) =>
+                        {
+                            // A node's own meta map is the diff target exactly
+                            // when its path ends in the node.
+                            if let Some((_, loro::Index::Node(node))) = diff.path.last() {
+                                touched.extend([*node]);
+                            }
                         }
                         _ => {}
                     }
@@ -88,6 +111,12 @@ impl TreeWatch {
         ));
         self.doc = address;
         true
+    }
+
+    /// Touches `node` without an event: a change the doc reports only at the
+    /// next commit.
+    pub(crate) fn note(&self, node: TreeID) {
+        self.touched.lock().unwrap().extend([node]);
     }
 
     pub(crate) fn drain(&self) -> Drained {
