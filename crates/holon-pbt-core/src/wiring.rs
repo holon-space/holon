@@ -89,12 +89,73 @@ const ORDERING_PRIORITY: [StorageAdapter; 4] = [
     StorageAdapter::Turso,
 ];
 
-/// A typed manifest: which adapters and actors are wired.
+/// How the editor commits typed text: through the per-keystroke CRDT cell
+/// (`BlockCellRegistry`), or through `set_field` intents on the operation
+/// dispatcher. GPUI runs `Dispatch` even with Loro on (D113.a).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum EditorLeg {
+    Cell,
+    Dispatch,
+}
+
+impl EditorLeg {
+    /// The leg of a manifest that names none: the cell whenever Loro is wired.
+    pub fn implied_by(storage_adapters: &BTreeSet<StorageAdapter>) -> Self {
+        if storage_adapters.contains(&StorageAdapter::Loro) {
+            EditorLeg::Cell
+        } else {
+            EditorLeg::Dispatch
+        }
+    }
+}
+
+/// A typed manifest: which adapters and actors are wired, and the editor leg.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "WiringRepr", into = "WiringRepr")]
 pub struct Wiring {
     pub storage_adapters: BTreeSet<StorageAdapter>,
     pub sync_adapters: BTreeSet<SyncAdapter>,
     pub actors: BTreeSet<Actor>,
+    pub editor_leg: EditorLeg,
+}
+
+/// The serialized [`Wiring`]: `editor_leg` is written only when it differs
+/// from [`EditorLeg::implied_by`], so a manifest captured before the leg was
+/// an axis still parses and re-serializes byte-equal.
+#[derive(Serialize, Deserialize)]
+struct WiringRepr {
+    storage_adapters: BTreeSet<StorageAdapter>,
+    sync_adapters: BTreeSet<SyncAdapter>,
+    actors: BTreeSet<Actor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    editor_leg: Option<EditorLeg>,
+}
+
+impl From<WiringRepr> for Wiring {
+    fn from(r: WiringRepr) -> Self {
+        let editor_leg = r
+            .editor_leg
+            .unwrap_or_else(|| EditorLeg::implied_by(&r.storage_adapters));
+        Wiring {
+            storage_adapters: r.storage_adapters,
+            sync_adapters: r.sync_adapters,
+            actors: r.actors,
+            editor_leg,
+        }
+    }
+}
+
+impl From<Wiring> for WiringRepr {
+    fn from(w: Wiring) -> Self {
+        let editor_leg =
+            (w.editor_leg != EditorLeg::implied_by(&w.storage_adapters)).then_some(w.editor_leg);
+        WiringRepr {
+            storage_adapters: w.storage_adapters,
+            sync_adapters: w.sync_adapters,
+            actors: w.actors,
+            editor_leg,
+        }
+    }
 }
 
 /// Why a [`Wiring`] is invalid. Each variant is one violated rule from the
@@ -108,6 +169,8 @@ pub enum WiringError {
     /// `ActionEngine` is wired but no query-capable storage adapter
     /// (see [`StorageAdapter::is_query_capable`]) backs it.
     ActionEngineWithoutQueryAdapter,
+    /// The editor commits through the CRDT cell, but Loro is not wired.
+    CellLegWithoutLoro,
 }
 
 impl std::fmt::Display for WiringError {
@@ -125,6 +188,10 @@ impl std::fmt::Display for WiringError {
             WiringError::ActionEngineWithoutQueryAdapter => write!(
                 f,
                 "Actor::ActionEngine requires a query-capable storage adapter (Turso)"
+            ),
+            WiringError::CellLegWithoutLoro => write!(
+                f,
+                "EditorLeg::Cell requires the Loro storage adapter (the cell is a Loro text)"
             ),
         }
     }
@@ -144,11 +211,19 @@ impl Wiring {
         sync_adapters: impl IntoIterator<Item = SyncAdapter>,
         actors: impl IntoIterator<Item = Actor>,
     ) -> Self {
+        let storage_adapters: BTreeSet<StorageAdapter> = storage_adapters.into_iter().collect();
         Wiring {
-            storage_adapters: storage_adapters.into_iter().collect(),
+            editor_leg: EditorLeg::implied_by(&storage_adapters),
+            storage_adapters,
             sync_adapters: sync_adapters.into_iter().collect(),
             actors: actors.into_iter().collect(),
         }
+    }
+
+    /// This manifest with its editor committing through `editor_leg`.
+    pub fn with_editor_leg(mut self, editor_leg: EditorLeg) -> Self {
+        self.editor_leg = editor_leg;
+        self
     }
 
     // ── Blessed presets (ADR 0007 §"Blessed vs valid manifests") ────────
@@ -249,6 +324,10 @@ impl Wiring {
         {
             return Err(WiringError::ActionEngineWithoutQueryAdapter);
         }
+        // Rule 4: the editor's CRDT cell is a Loro text.
+        if self.editor_leg == EditorLeg::Cell && !self.has_storage(StorageAdapter::Loro) {
+            return Err(WiringError::CellLegWithoutLoro);
+        }
         Ok(())
     }
 }
@@ -331,6 +410,12 @@ const QUERY_ADAPTER_INCLUSION_PROB: f64 = 0.20;
 /// inclusion probability and IT is what the keystone actually runs.
 pub const MIN_QUERY_ADAPTER_DRAW_SHARE: f64 = 1.0 / 3.0;
 
+/// Probability that a Loro-wired draw commits through [`EditorLeg::Dispatch`]
+/// instead of the cell. The leg adds no boot cost, so the split is even; the
+/// weighted bool shrinks `Dispatch → Cell`. A draw without Loro is always
+/// `Dispatch`.
+const DISPATCH_LEG_PROB: f64 = 0.5;
+
 /// The toggleable adapter/actor universe a generated [`Wiring`] may draw from.
 ///
 /// **Default = headless-faithful scope:** storage `{Loro, Org, Turso}`, sync
@@ -369,6 +454,10 @@ fn parse_wiring_axes(spec: &str) -> (Vec<StorageAdapter>, Vec<SyncAdapter>, Vec<
          got {} in {spec:?}",
         sections.len()
     );
+    parse_axis_sections(&sections)
+}
+
+fn parse_axis_sections(sections: &[&str]) -> (Vec<StorageAdapter>, Vec<SyncAdapter>, Vec<Actor>) {
     (
         parse_axis(sections[0], parse_storage_adapter, "storage adapter"),
         parse_axis(sections[1], parse_sync_adapter, "sync adapter"),
@@ -379,11 +468,25 @@ fn parse_wiring_axes(spec: &str) -> (Vec<StorageAdapter>, Vec<SyncAdapter>, Vec<
 /// Parse an EXACT pinned manifest (the `HOLON_PBT_PIN_WIRING` format): the same
 /// `"storage;sync;actors"` spec as `HOLON_PBT_WIRING_AXES`, but interpreted as
 /// the exact component sets of ONE wiring rather than a drawable universe.
+/// An optional fourth section `Cell` or `Dispatch` pins the editor leg;
+/// without it the leg is the one the storage implies.
 /// Fail-loud on a malformed spec or an invalid manifest -- a typo'd pin must
 /// never silently test a different grid point.
 pub fn wiring_from_exact_spec(spec: &str) -> Wiring {
-    let (storage, sync, actors) = parse_wiring_axes(spec);
-    let wiring = Wiring::custom(storage, sync, actors);
+    let sections: Vec<&str> = spec.split(';').collect();
+    let editor_leg = match sections.len() {
+        3 => None,
+        4 => Some(parse_editor_leg(sections[3].trim())),
+        n => panic!(
+            "HOLON_PBT_PIN_WIRING must have 3 or 4 ';'-separated sections \
+             (storage;sync;actors[;Cell|Dispatch]), got {n} in {spec:?}"
+        ),
+    };
+    let (storage, sync, actors) = parse_axis_sections(&sections[..3]);
+    let mut wiring = Wiring::custom(storage, sync, actors);
+    if let Some(editor_leg) = editor_leg {
+        wiring = wiring.with_editor_leg(editor_leg);
+    }
     if let Err(e) = wiring.validate() {
         panic!("pinned wiring {spec:?} is invalid: {e}");
     }
@@ -411,6 +514,14 @@ fn parse_axis<T: Copy + PartialEq>(
         }
     }
     out
+}
+
+fn parse_editor_leg(tok: &str) -> EditorLeg {
+    match tok {
+        "Cell" => EditorLeg::Cell,
+        "Dispatch" => EditorLeg::Dispatch,
+        _ => panic!("HOLON_PBT_PIN_WIRING: unknown editor leg {tok:?} (Cell|Dispatch)"),
+    }
 }
 
 fn parse_storage_adapter(tok: &str) -> Option<StorageAdapter> {
@@ -508,13 +619,21 @@ pub fn any_valid_wiring() -> BoxedStrategy<Wiring> {
     let sync = uniform_subset(&sync_axis);
     let actors = uniform_subset(&actor_axis);
 
-    (cheap, expensive, sync, actors)
-        .prop_map(|(mut storage, query, sync_adapters, actors)| {
+    let dispatch = proptest::bool::weighted(DISPATCH_LEG_PROB);
+
+    (cheap, expensive, sync, actors, dispatch)
+        .prop_map(|(mut storage, query, sync_adapters, actors, dispatch)| {
             storage.extend(query);
+            let editor_leg = if dispatch {
+                EditorLeg::Dispatch
+            } else {
+                EditorLeg::implied_by(&storage)
+            };
             Wiring {
                 storage_adapters: storage,
                 sync_adapters,
                 actors,
+                editor_leg,
             }
         })
         .prop_filter("invalid wiring (Wiring::validate)", |w| {
@@ -628,6 +747,36 @@ mod tests {
         assert!(!req.satisfied_by(&Wiring::org_create_ordering())); // Org only
     }
 
+    #[test]
+    fn exact_spec_pins_the_editor_leg() {
+        assert_eq!(
+            wiring_from_exact_spec("Loro,Turso;;").editor_leg,
+            EditorLeg::Cell
+        );
+        assert_eq!(
+            wiring_from_exact_spec("Loro,Turso;;;Dispatch").editor_leg,
+            EditorLeg::Dispatch
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "is invalid")]
+    fn exact_spec_refuses_a_cell_leg_without_loro() {
+        wiring_from_exact_spec("Turso;;;Cell");
+    }
+
+    #[test]
+    #[should_panic(expected = "HOLON_PBT_PIN_WIRING: unknown editor leg \"dispatch\"")]
+    fn exact_spec_refuses_a_malformed_editor_leg() {
+        wiring_from_exact_spec("Loro,Turso;;;dispatch");
+    }
+
+    #[test]
+    #[should_panic(expected = "HOLON_PBT_PIN_WIRING must have 3 or 4 ';'-separated sections")]
+    fn exact_spec_refuses_a_fifth_section() {
+        wiring_from_exact_spec("Loro,Turso;;;Dispatch;Cell");
+    }
+
     // ── Wiring validity PBT (ADR 0007 item 5) ───────────────────────────
 
     fn any_storage() -> impl Strategy<Value = StorageAdapter> {
@@ -655,13 +804,18 @@ mod tests {
         ]
     }
 
+    fn any_editor_leg() -> impl Strategy<Value = EditorLeg> {
+        prop_oneof![Just(EditorLeg::Cell), Just(EditorLeg::Dispatch)]
+    }
+
     prop_compose! {
         fn any_wiring()(
             storage in prop::collection::btree_set(any_storage(), 0..=4),
             sync in prop::collection::btree_set(any_sync(), 0..=3),
             actors in prop::collection::btree_set(any_actor(), 0..=3),
+            editor_leg in any_editor_leg(),
         ) -> Wiring {
-            Wiring { storage_adapters: storage, sync_adapters: sync, actors }
+            Wiring { storage_adapters: storage, sync_adapters: sync, actors, editor_leg }
         }
     }
 
@@ -681,10 +835,25 @@ mod tests {
                 && !w.storage_adapters.iter().any(|a| a.is_query_capable())
             {
                 Err(WiringError::ActionEngineWithoutQueryAdapter)
+            } else if w.editor_leg == EditorLeg::Cell && !w.has_storage(StorageAdapter::Loro) {
+                Err(WiringError::CellLegWithoutLoro)
             } else {
                 Ok(())
             };
             prop_assert_eq!(w.validate(), expected);
+        }
+
+        /// Serde round-trips every manifest, and writes `editor_leg` only
+        /// when it is not the one the storage set implies.
+        #[test]
+        fn serde_round_trips_and_omits_the_implied_leg(w in any_wiring()) {
+            let json = serde_json::to_value(&w).expect("wiring serializes");
+            prop_assert_eq!(
+                json.get("editor_leg").is_some(),
+                w.editor_leg != EditorLeg::implied_by(&w.storage_adapters)
+            );
+            let back: Wiring = serde_json::from_value(json).expect("wiring deserializes");
+            prop_assert_eq!(back, w);
         }
 
         /// A valid manifest always has an ordering authority; an invalid

@@ -63,9 +63,10 @@ pub struct NamedFixture {
     /// Editor-shape env flags recorded at capture time
     /// (`Fixture.environment.env_flags`, keys from
     /// `holon_pbt_core::fixture::CAPTURE_ENV_FLAGS`). Replaying under
-    /// different flags changes the transition alphabet — preconditions
-    /// like `LoroRequiredForAtomicEditor` consult them — so out-of-process
-    /// replayers (the windowed minimizer) must apply these before stepping.
+    /// different flags changes the starting state (e.g.
+    /// `HOLON_FOLDER_COMPANION_SEED` seeds extra blocks) and with it the
+    /// transition alphabet, so out-of-process replayers (the windowed
+    /// minimizer) must apply these before stepping.
     /// Empty for hand-authored sources.
     pub env_flags: std::collections::BTreeMap<String, String>,
     /// `@wip`: the runner reports this fixture skipped instead of replaying it.

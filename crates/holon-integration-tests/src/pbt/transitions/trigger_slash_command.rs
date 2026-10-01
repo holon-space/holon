@@ -96,11 +96,9 @@ impl<
                 state.renders_block_interactively(&self.block_id),
                 Reason::BlocksNotInteractiveUnderLayout,
             ),
-            // Slash-command input is character typing through the editor's
-            // `on_text_changed` pipeline, which is Loro/MutableText-backed.
-            // SqlOnly has no MutableText, so gate this out exactly like the
-            // other atomic-editor transitions (TypeChars, DeleteBackward, …).
-            check(state.enable_loro(), Reason::LoroRequiredForAtomicEditor),
+            // The driver waits for the focused block's `MutableText` before
+            // typing `/`; only the cell leg attaches one.
+            check(state.editor_cell_attached(), Reason::EditorCellRequired),
         ];
 
         checks.push(check(

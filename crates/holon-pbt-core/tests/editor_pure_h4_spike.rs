@@ -124,6 +124,9 @@ impl RefLifecycle for EditorPureRef {
     fn enable_loro(&self) -> bool {
         false
     }
+    fn editor_cell_attached(&self) -> bool {
+        false
+    }
     fn last_transition_kind(&self) -> Option<&'static str> {
         self.last_transition_kind
     }

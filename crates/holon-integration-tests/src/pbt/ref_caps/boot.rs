@@ -25,6 +25,9 @@ impl RefLifecycle for ReferenceState {
             .wiring
             .has_storage(holon_pbt_core::StorageAdapter::Loro)
     }
+    fn editor_cell_attached(&self) -> bool {
+        self.harness.wiring.editor_leg == holon_pbt_core::EditorLeg::Cell
+    }
     fn has_editor_buffer(&self) -> bool {
         ReferenceState::has_editor_buffer(self)
     }

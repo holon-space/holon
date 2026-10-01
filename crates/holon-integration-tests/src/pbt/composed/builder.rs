@@ -410,27 +410,17 @@ async fn compose_sut_seeded_impl(
         let adopted = existing_frontend.is_some();
         let comp = match existing_frontend {
             Some(comp) => comp,
-            None => Arc::new(match peer_id {
-                Some(peer_id) => {
-                    HeadlessFrontendComponent::new_with_clock_and_peer_id(
-                        frontend_seed_org,
-                        Duration::from_millis(300),
-                        has_editor,
-                        crate::pbt::frontend_slice::components::keystone_boot_clock(),
-                        peer_id,
-                    )
-                    .await
-                }
-                None => {
-                    HeadlessFrontendComponent::new_with_clock(
-                        frontend_seed_org,
-                        Duration::from_millis(300),
-                        has_editor,
-                        crate::pbt::frontend_slice::components::keystone_boot_clock(),
-                    )
-                    .await
-                }
-            }),
+            None => Arc::new(
+                HeadlessFrontendComponent::new_for_wiring(
+                    frontend_seed_org,
+                    Duration::from_millis(300),
+                    has_editor,
+                    set.wiring.editor_leg,
+                    crate::pbt::frontend_slice::components::keystone_boot_clock(),
+                    peer_id,
+                )
+                .await,
+            ),
         };
         let eng = comp.engine();
         // Share the reconcile resolver so the component's id-taking nav/focus caps

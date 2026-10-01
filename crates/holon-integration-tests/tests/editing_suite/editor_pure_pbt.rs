@@ -168,6 +168,9 @@ impl RefLifecycle for EditorPureRef {
     fn enable_loro(&self) -> bool {
         false
     }
+    fn editor_cell_attached(&self) -> bool {
+        false
+    }
     fn has_editor_buffer(&self) -> bool {
         // The pure slice owns an editor buffer — that's the reason it exists.
         true

@@ -880,6 +880,12 @@ pub trait RefLifecycle {
     fn is_properly_setup(&self) -> bool;
     fn enable_loro(&self) -> bool;
 
+    /// Whether the drawn editor leg attaches an editor cell (`MutableText`)
+    /// to focused blocks — `EditorLeg::Cell`. Under `EditorLeg::Dispatch`
+    /// (the GPUI production point) keystrokes commit as `set_field` intents
+    /// and no cell resolves, whether or not Loro holds the blocks.
+    fn editor_cell_attached(&self) -> bool;
+
     /// Whether this reference owns an **editor buffer** carrying uncommitted
     /// text — the headless atomic-editor capability. This is the single gate
     /// for the editor transitions (TypeChars / DeleteBackward / MoveCursor /

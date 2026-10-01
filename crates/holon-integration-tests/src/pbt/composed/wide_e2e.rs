@@ -1124,16 +1124,21 @@ pub async fn boot_and_seed_wide_with_peer_id(
     // per-wiring case counts (grep "wide-e2e wiring") -- the drawn grid is
     // auditable, not assumed.
     let set = set_for_wiring(&ref_state.harness.wiring);
+    let has_frontend = set.has_projection(Projection::ViewModel);
+    let editor_leg = if has_frontend {
+        format!("{:?}", set.wiring.editor_leg)
+    } else {
+        "none(no frontend)".to_string()
+    };
     eprintln!(
         "[wide-e2e wiring] drawn: storage={:?} sync={:?} actors={:?} -> booted storage={:?} \
-         projections={:?}",
+         projections={:?} editor-leg={editor_leg}",
         ref_state.harness.wiring.storage_adapters,
         ref_state.harness.wiring.sync_adapters,
         ref_state.harness.wiring.actors,
         set.wiring.storage_adapters,
         set.projections,
     );
-    let has_frontend = set.has_projection(Projection::ViewModel);
     // Scale-soak inflation: extra synthetic doc files (deep trees, tasks, links,
     // unicode) appended to the SUT boot ONLY. Empty unless `HOLON_SOAK_SEED_BLOCKS`
     // is set, so the keystone is untouched by default. Their ids fold into the
@@ -1887,7 +1892,8 @@ impl ReferenceStateMachine for WideE2EMachine {
         // 0.20 Turso inclusion to ≈0.39 of VALID draws, so a 16-case run misses
         // Turso entirely with probability well under 0.1%. `HOLON_PBT_PIN_WIRING="
         // storage;sync;actors"` pins every draw to ONE exact
-        // manifest (fail-loud on a typo or invalid manifest) — the external-supply seam
+        // manifest (fail-loud on a typo or invalid manifest; an optional
+        // `;Cell` or `;Dispatch` pins the editor leg) — the external-supply seam
         // for bottom-up ladder runs and subset-wiring repros. Mutually exclusive with
         // FORCE_FULL to keep a run's provenance unambiguous.
         if let Ok(spec) = std::env::var("HOLON_PBT_PIN_WIRING") {
@@ -2816,6 +2822,51 @@ mod tests {
              resolve block CRUD to `SqlOperationProvider`, below the \
              {MIN_SQL_CRUD_DRAW_SHARE:.3} floor — the `crdt.enabled = false` mode would run in \
              fewer keystone cases than the floor allows"
+        );
+    }
+
+    /// Every editor-leg point a frontend draw can boot — {Loro + cell},
+    /// {Loro + dispatch} (the GPUI production point) and {Turso + dispatch} —
+    /// is drawn by the live strategy, each in at least 1/32 of accepted draws.
+    #[test]
+    fn every_editor_leg_point_is_drawn() {
+        use holon_pbt_core::EditorLeg;
+        use proptest::strategy::Strategy;
+        use proptest::strategy::ValueTree;
+        use proptest::test_runner::TestRunner;
+
+        let strategy = holon_pbt_core::wiring::any_valid_wiring();
+        let mut runner = TestRunner::deterministic();
+        let draws = 4096;
+        let mut points: BTreeMap<(bool, EditorLeg), usize> = BTreeMap::new();
+        for _ in 0..draws {
+            let w = strategy
+                .new_tree(&mut runner)
+                .expect("any_valid_wiring must always produce a valid manifest")
+                .current();
+            let set = set_for_wiring(&w);
+            if set.has_projection(Projection::ViewModel) {
+                let loro = set.has_projection(Projection::EditorState);
+                *points.entry((loro, set.wiring.editor_leg)).or_default() += 1;
+            }
+        }
+        for point in [
+            (true, EditorLeg::Cell),
+            (true, EditorLeg::Dispatch),
+            (false, EditorLeg::Dispatch),
+        ] {
+            let n = points.get(&point).copied().unwrap_or(0);
+            assert!(
+                n * 32 >= draws,
+                "editor-leg point (loro={}, {:?}) drawn {n}/{draws} times, below 1/32: {points:?}",
+                point.0,
+                point.1
+            );
+        }
+        assert_eq!(
+            points.len(),
+            3,
+            "a frontend draw booted an editor-leg point outside the three valid ones: {points:?}"
         );
     }
 

@@ -98,6 +98,7 @@ pub use observables::NonSeedBlocks;
 pub use observables::ref_non_seed_blocks;
 pub use sibling_order::compare_sibling_order;
 pub use wiring::Actor;
+pub use wiring::EditorLeg;
 pub use wiring::RequiredWiring;
 pub use wiring::StorageAdapter;
 pub use wiring::SyncAdapter;

@@ -299,11 +299,13 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `cooklang-read-only-split-block-refusal`
 - `cooklang-read-only-write-refusal-any-op`
 - `deletebackward-sql-reads-budget`
+- `external-rewrite-drops-page-body`
 - `hand-authored-cap-timeout`
 - `integration-toggle-load`
 - `iroh-nat-traversal-address-set`
 - `lib-type-chars-home-profile-derived`
 - `loro-backend-change-count`
+- `loro-dispatch-creation-slot-keystroke-races-create`
 - `loro-owning-page-types-share-removal`
 - `metamorphic-undo-facet-unchanged`
 - `metamorphic-undo-snapshot-missing`
@@ -316,6 +318,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `ref-diverge-content-text-drift`
 - `ref-diverge-parent-reparent`
 - `shopping-mapping-cost-slo`
+- `sqlonly-creation-slot-keystroke-races-create`
 - `text-undo-manager-load`
 - `toggle-state-sql-read-repeat-budget`
 - `tui-inline-row-mount-unsettled-frame`

@@ -281,7 +281,8 @@ commitments: a future ladder-runner (start from the minimal wiring covering a de
 session’s diff, grow rung by rung; on failure delta-debug down to a minimal
 (wiring, sequence) pair) composes out of them with no representation change.
 `HOLON_PBT_PIN_WIRING="storage;sync;actors"` pins the keystone's generation to ONE
-exact manifest (fail-loud on typo/invalid; mutually exclusive with FORCE_FULL) — the
+exact manifest (fail-loud on typo/invalid; mutually exclusive with FORCE_FULL); an
+optional fourth section `;Cell` or `;Dispatch` pins the editor leg — the
 env-level face of the function-arg seam (`wide_e2e_ref_for(&Wiring)`).
 
 **Draw distribution (default axes, measured).** The validity filter reweights the

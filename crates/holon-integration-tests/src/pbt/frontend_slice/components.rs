@@ -209,6 +209,7 @@ struct BootedSession {
 struct BootParams {
     settle: Duration,
     loro_enabled: bool,
+    editor_leg: holon_pbt_core::EditorLeg,
     clock: Option<Arc<holon_api::TestClock>>,
     peer_id: Option<u64>,
     sidecar_yaml: Option<String>,
@@ -663,6 +664,28 @@ impl HeadlessFrontendComponent {
         .await
     }
 
+    /// The composed keystone's boot: the drawn editor leg decides whether the
+    /// cell registry is installed, independently of `loro_enabled`.
+    pub async fn new_for_wiring(
+        org_files: &[(&str, &str)],
+        settle: Duration,
+        loro_enabled: bool,
+        editor_leg: holon_pbt_core::EditorLeg,
+        clock: Arc<holon_api::TestClock>,
+        peer_id: Option<u64>,
+    ) -> Self {
+        Self::new_impl_with_leg(
+            org_files,
+            settle,
+            loro_enabled,
+            editor_leg,
+            Some(clock),
+            peer_id,
+            None,
+        )
+        .await
+    }
+
     /// `DebugServices` wired to THIS component's session, for backing an
     /// embedded MCP server over it. The test-side twin of
     /// `holon_mcp::di::DebugServicesPopulatorModule`, which cannot run here
@@ -725,6 +748,37 @@ impl HeadlessFrontendComponent {
         peer_id: Option<u64>,
         sidecar_yaml: Option<&str>,
     ) -> Self {
+        let editor_leg = if loro_enabled {
+            holon_pbt_core::EditorLeg::Cell
+        } else {
+            holon_pbt_core::EditorLeg::Dispatch
+        };
+        Self::new_impl_with_leg(
+            org_files,
+            settle,
+            loro_enabled,
+            editor_leg,
+            clock,
+            peer_id,
+            sidecar_yaml,
+        )
+        .await
+    }
+
+    async fn new_impl_with_leg(
+        org_files: &[(&str, &str)],
+        settle: Duration,
+        loro_enabled: bool,
+        editor_leg: holon_pbt_core::EditorLeg,
+        clock: Option<Arc<holon_api::TestClock>>,
+        peer_id: Option<u64>,
+        sidecar_yaml: Option<&str>,
+    ) -> Self {
+        assert!(
+            loro_enabled || editor_leg == holon_pbt_core::EditorLeg::Dispatch,
+            "EditorLeg::Cell needs Loro: the cell is a Loro text, so a SqlOnly boot can only \
+             commit through the dispatcher"
+        );
         let temp = TempDir::new().expect("temp dir");
         let org_root = std::fs::canonicalize(temp.path()).expect("canonicalize temp dir");
         let org_fs = Arc::new(holon_filesystem::InMemoryFileSystem::new());
@@ -765,6 +819,7 @@ impl HeadlessFrontendComponent {
         let boot_params = BootParams {
             settle,
             loro_enabled,
+            editor_leg,
             clock,
             peer_id,
             sidecar_yaml: sidecar_yaml.map(str::to_string),
@@ -891,27 +946,25 @@ impl HeadlessFrontendComponent {
         // real keychain — see `test_environment::bind_test_secret_store`.
         crate::test_environment::bind_test_secret_store(&session);
 
-        // Wire the Loro-backed `BlockCellRegistry` into the reactive engine — the
-        // editor's `MutableText` cells resolve through it. The real GPUI/TUI
-        // frontends do this in their own `on_start`; the windowless build bypasses
-        // that, so `editable_text` would return Err and the keystroke pipeline
-        // would bail ("no MutableText for focused block"). `LoroModule` (enabled by
-        // `loro.enabled`) registers the registry built over the global Loro doc, so
-        // resolving it here gives the SAME doc the op pipeline + `block_raw`
-        // projection share — typed text lands in the projection the invariant reads.
-        // Mirrors `E2ESut`'s `ensure_reactive_engine` registry wiring (`sut.rs`).
-        // Not the same decision as `TestEnvironment::start_app`, where the
-        // registry is opt-in: this slice IS the headless Loro leg, so it always
-        // installs; a windowed fixture defaults to the GPUI app's no-cell leg.
+        // The cell leg wires the Loro-backed `BlockCellRegistry` into the
+        // reactive engine, as the frontends' own `on_start` would; the dispatch
+        // leg leaves it out, as GPUI does (frontends/gpui/src/di.rs), so every
+        // keystroke commits through a `set_field` intent.
         holon_app::loro_seams::install_block_cell_registry(
             injector_slot
                 .get()
                 .expect("DI injector captured during build"),
             &reactive,
-            loro_enabled,
+            params.editor_leg == holon_pbt_core::EditorLeg::Cell,
         )
         .await
-        .expect("installing the editor-cell registry for a loro-enabled slice");
+        .expect("installing the editor-cell registry for the cell leg");
+        assert_eq!(
+            reactive.cell_registry_wired(),
+            params.editor_leg == holon_pbt_core::EditorLeg::Cell,
+            "the booted engine does not run the drawn editor leg {:?} (loro_enabled={loro_enabled})",
+            params.editor_leg
+        );
 
         if settle > Duration::ZERO {
             // Boot settle: tolerate non-convergence (the result is dropped) — the
@@ -5158,11 +5211,11 @@ impl HeadlessFrontendComponent {
         //
         // `KeystrokeBlockTreeWriter::apply_split_block` converts its byte
         // position to `right` presses against the block's editable `MutableText`,
-        // resolved through the `BlockCellRegistry` — which exists only when the
-        // CRDT is on. So a SqlOnly build (`crdt.enabled = false`, the explicit
-        // opt-out) takes the dispatch floor; advertising the keystroke writer
-        // there would fail mid-run with "no editable content cell".
-        let cells_wired = self.loro_doc_store().is_some();
+        // resolved through the `BlockCellRegistry` — which only the cell editor
+        // leg installs. So the dispatch leg (SqlOnly, and Loro under GPUI's
+        // no-cell wiring) takes the dispatch floor; advertising the keystroke
+        // writer there would fail mid-run with "no editable content cell".
+        let cells_wired = self.reactive().cell_registry_wired();
         let block_tree: Arc<dyn SutBlockTreeWrite> = match self.resolver.get() {
             Some(_) if cells_wired => Arc::new(self.keystroke_writer_with(driver.clone())),
             // The dispatch floor still has to share the runner's id map: a

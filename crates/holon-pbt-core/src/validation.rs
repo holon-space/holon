@@ -62,11 +62,12 @@ pub enum Reason {
 
     // ---------- editor / atomic editor ----------
     /// The reference owns no editor buffer (`RefLifecycle::has_editor_buffer`
-    /// is false) — the editor transitions are inapplicable. Replaces the old
-    /// `AtomicEditorDisabled` (env gate) + the editor arm of
-    /// `LoroRequiredForAtomicEditor` (storage gate).
+    /// is false) — the editor transitions are inapplicable. A transition that
+    /// also needs the editor cell gates on `EditorCellRequired`.
     NoEditorBuffer,
-    LoroRequiredForAtomicEditor,
+    /// The drawn editor leg commits through the dispatcher, so no editor
+    /// cell (`MutableText`) resolves (`RefLifecycle::editor_cell_attached`).
+    EditorCellRequired,
     NoActiveEditor,
     EditorContentEmpty,
     AtomicEditorActiveOverride,
