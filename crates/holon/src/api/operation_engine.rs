@@ -565,6 +565,21 @@ pub(crate) fn properties_object(value: &Value) -> Result<std::collections::HashM
     }
 }
 
+/// The inverse of a confirmed constituent replays under the confirmation the
+/// forward was given, so undo is admitted by the same net-gate answer.
+fn carry_confirmation(
+    forward_params: &std::collections::HashMap<String, Value>,
+    mut inverse: Operation,
+) -> Operation {
+    if let Some(confirm) = forward_params.get(crate::api::net_guard::CONFIRM_BREAK_PARAM) {
+        inverse.params.insert(
+            crate::api::net_guard::CONFIRM_BREAK_PARAM.to_string(),
+            confirm.clone(),
+        );
+    }
+    inverse
+}
+
 impl DispatchingOperationEngine {
     /// Build an in-memory engine over the given dispatcher (no persistence, no
     /// staleness reader). Used by Loro-only sessions whose reversible ops carry
@@ -1200,6 +1215,7 @@ impl DispatchingOperationEngine {
                 .map(|(k, v)| (k.to_string(), v.clone()))
                 .collect(),
         );
+        let forward_params = forward.params.clone();
         let result = self
             .dispatch_constituent_op(op_name, params, origin)
             .await
@@ -1217,7 +1233,11 @@ impl DispatchingOperationEngine {
                  classification"
             ),
         };
-        Ok((forward, inverse, result.changes))
+        Ok((
+            forward,
+            carry_confirmation(&forward_params, inverse),
+            result.changes,
+        ))
     }
 
     /// Execute the block → page transform (Option B). See
@@ -2572,6 +2592,7 @@ impl DispatchingOperationEngine {
                 .map(|(k, v)| (k.to_string(), v.clone()))
                 .collect(),
         );
+        let forward_params = forward.params.clone();
         let result = self
             .dispatch_constituent_op(op_name, params, origin)
             .await
@@ -2586,7 +2607,11 @@ impl DispatchingOperationEngine {
                 "merge_blocks: constituent '{op_name}' returned an Undeclared undo classification"
             ),
         };
-        Ok((forward, inverse, result.changes))
+        Ok((
+            forward,
+            carry_confirmation(&forward_params, inverse),
+            result.changes,
+        ))
     }
 
     /// Write `absorbed` as `to_id`'s merge provenance. This ONE property write
