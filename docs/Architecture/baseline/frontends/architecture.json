@@ -816,6 +816,9 @@
                 "name": "left_sidebar_scroll.rs"
               },
               {
+                "name": "list_max_scroll_reaches_tail.rs"
+              },
+              {
                 "name": "list_scroll_spike.rs"
               },
               {
@@ -900,6 +903,9 @@
                 "name": "row_id_boundary_windowed.rs"
               },
               {
+                "name": "screenshot_readback_windowed.rs"
+              },
+              {
                 "name": "secrets_in_memory_banner_windowed.rs"
               },
               {
@@ -964,6 +970,9 @@
               },
               {
                 "name": "sticky_footer_spike.rs"
+              },
+              {
+                "name": "stop_signals_quit_through_the_session_shutdown.rs"
               },
               {
                 "name": "structural_chord_stale_flush_windowed.rs"
@@ -1223,6 +1232,9 @@
               },
               {
                 "name": "describe_ui_geometry.rs"
+              },
+              {
+                "name": "sigterm_shuts_the_session_down.rs"
               }
             ]
           }
@@ -1296,7 +1308,13 @@
                 "name": "main.rs"
               },
               {
+                "name": "stderr_to_log.rs"
+              },
+              {
                 "name": "stylesheet.rs"
+              },
+              {
+                "name": "terminal_hangup.rs"
               },
               {
                 "name": "user_driver.rs"
@@ -1330,11 +1348,32 @@
                     "name": "test_harness.rs"
                   }
                 ]
+              },
+              {
+                "name": "tui_process",
+                "path": "tui/tests/tui_process",
+                "c4_level": "unknown",
+                "description": "`holon-tui` as a process on a pseudo-terminal, since it needs one to start. Every input is a flag or points into the instance's own state dir, so no setting of the developer's own reaches it. `HOLON_LOG` is unset, as in production: the log is `tui.log` under the instance's `HOME`.",
+                "pattern_status": "planned",
+                "content": "`holon-tui` as a process on a pseudo-terminal, since it needs one to start.\nEvery input is a flag or points into the instance's own state dir, so no\nsetting of the developer's own reaches it. `HOLON_LOG` is unset, as in\nproduction: the log is `tui.log` under the instance's `HOME`.\n\nEach test target uses part of it.",
+                "source_file": "tui/tests/tui_process/mod.rs",
+                "parent": "tui",
+                "files": [
+                  {
+                    "name": "mod.rs"
+                  }
+                ]
               }
             ],
             "files": [
               {
+                "name": "boot_refusals.rs"
+              },
+              {
                 "name": "screenshot_painter.rs"
+              },
+              {
+                "name": "stop_signals_quit_through_the_session_shutdown.rs"
               },
               {
                 "name": "tui_ui_pbt.rs"
