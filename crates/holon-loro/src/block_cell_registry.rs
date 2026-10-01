@@ -57,14 +57,13 @@ pub struct BlockCellRegistry {
     /// registry that only knew the global doc would report it missing.
     layout_doc: Option<Arc<LoroDoc>>,
     backend: Arc<LoroBackend>,
-    /// The dispatcher's write-tier authority, and a runtime to ask it on.
+    /// The dispatcher's write-tier authority.
     ///
-    /// A content cell writes the block's `LoroText` container directly, so it
-    /// is a writer in the sense of Model.md invariant 4 and must carry the same
-    /// decision the dispatcher carries — not a second rule (`ReadOnlyDocuments`
-    /// answers both). Resolution is async and `live_field_any` is not, hence
-    /// the handle.
-    write_tier: Option<(Arc<dyn WriteTierAuthority>, tokio::runtime::Handle)>,
+    /// A content cell and `create_entity_sync` write the Loro doc directly, so
+    /// they are writers in the sense of Model.md invariant 4 and must carry the
+    /// same decision the dispatcher carries — not a second rule
+    /// (`ReadOnlyDocuments` answers both).
+    write_tier: Option<Arc<dyn WriteTierAuthority>>,
     /// Where an editor cell discloses a keystroke the doc's write lock
     /// refused. Absent in the SqlOnly and test registries, whose cells then
     /// return the error without raising a condition.
@@ -124,12 +123,8 @@ impl BlockCellRegistry {
     /// Install the dispatcher's write-tier authority. Without it a content cell
     /// on a read-only-format block would write the vault's CRDT doc behind the
     /// dispatcher's back.
-    pub fn with_write_tier(
-        mut self,
-        authority: Arc<dyn WriteTierAuthority>,
-        runtime: tokio::runtime::Handle,
-    ) -> Self {
-        self.write_tier = Some((authority, runtime));
+    pub fn with_write_tier(mut self, authority: Arc<dyn WriteTierAuthority>) -> Self {
+        self.write_tier = Some(authority);
         self
     }
 
@@ -160,8 +155,8 @@ impl BlockCellRegistry {
             return;
         };
         let store = store.clone();
-        // Own thread, same reason as `write_tier_refusal` below: this runs on a
-        // reactor worker, where a bare `block_on` panics.
+        // Own thread: this runs on a reactor worker, where a bare `block_on`
+        // panics.
         let armed = std::thread::scope(|s| {
             s.spawn(|| runtime.block_on(store.ensure_text_undo()))
                 .join()
@@ -179,26 +174,16 @@ impl BlockCellRegistry {
 
     /// The refusal a USER's write to `uri` earns, per the dispatcher's own
     /// authority.
-    ///
-    /// The org-only vault — nearly every vault — settles this on the
-    /// synchronous `any_read_only_documents` read and never leaves the thread.
-    /// A vault that does hold a read-only-format file pays one bridged store
-    /// read per editor mount, on a thread of its own so `block_on` stays legal
-    /// wherever the frontend resolved the cell from.
     fn write_tier_refusal(&self, uri: &EntityUri) -> Result<Option<holon_core::EditRefused>> {
-        let Some((authority, runtime)) = &self.write_tier else {
+        let Some(authority) = &self.write_tier else {
             return Ok(None);
         };
         if !authority.any_read_only_documents() {
             return Ok(None);
         }
-        let id = uri.to_string();
-        std::thread::scope(|s| {
-            s.spawn(|| runtime.block_on(authority.refusal_for(&id)))
-                .join()
-                .map_err(|_| anyhow!("write-tier lookup for {uri} panicked"))?
-                .map_err(|e| anyhow!("write-tier lookup for {uri}: {e}"))
-        })
+        authority
+            .refusal_for(uri.as_str())
+            .map_err(|e| anyhow!("write-tier lookup for {uri}: {e}"))
     }
 
     /// Convenience constructor that takes a raw `Arc<LoroDoc>`. Used by
@@ -429,7 +414,7 @@ impl EntityCellRegistry for BlockCellRegistry {
         let Some(refusal) = self.write_tier_refusal(uri)? else {
             return Ok(cell_any);
         };
-        let (authority, _) = self
+        let authority = self
             .write_tier
             .as_ref()
             .expect("a refusal implies an installed authority");
@@ -506,6 +491,9 @@ impl EntityCellRegistry for BlockCellRegistry {
         // path, rather than growing a second implementation of the exotic
         // cases (placeholder roots, positional re-anchoring) that would then
         // have to be kept in step.
+        if let Some(refusal) = self.write_tier_refusal(parent_id)? {
+            return Err(anyhow::Error::new(refusal));
+        }
         let backend = &self.backend;
         if after_id.is_some() || backend.is_live_anywhere_sync(new_id.id()) {
             return Ok(false);
@@ -1296,6 +1284,60 @@ mod tests {
             "tree must be untouched — no placeholder root or new node minted"
         );
         Ok(())
+    }
+
+    /// Refuses every write under `block:recipe`.
+    struct RecipeTier;
+
+    #[async_trait::async_trait]
+    impl WriteTierAuthority for RecipeTier {
+        fn any_read_only_documents(&self) -> bool {
+            true
+        }
+        fn refusal_for(
+            &self,
+            block_id: &str,
+        ) -> holon_core::Result<Option<holon_core::EditRefused>> {
+            Ok(
+                (block_id == "block:recipe").then(|| holon_core::EditRefused::ReadOnlyFormat {
+                    format: "cooklang".into(),
+                    path: std::path::PathBuf::from("/vault/Pancakes.cook"),
+                }),
+            )
+        }
+        async fn adopt_sync_import(&self, _: &str, _: &str) -> holon_core::Result<bool> {
+            unreachable!("a create never imports")
+        }
+        fn disclose(&self, _: &holon_core::EditRefused) {}
+    }
+
+    #[tokio::test]
+    async fn create_entity_sync_under_a_read_only_parent_is_refused_typed() {
+        let doc = make_loro_doc_with_block("recipe");
+        let registry =
+            BlockCellRegistry::with_loro_doc(doc.clone()).with_write_tier(Arc::new(RecipeTier));
+        let err = registry
+            .create_entity_sync(
+                &EntityUri::block("recipe"),
+                None,
+                &EntityUri::block("newborn"),
+                holon_api::BlockContent::text(""),
+                &std::collections::HashMap::new(),
+                &holon_api::BlockEdges::default(),
+            )
+            .expect_err("a create under a read-only-format parent must be refused");
+        assert!(
+            matches!(
+                err.downcast_ref::<holon_core::EditRefused>(),
+                Some(holon_core::EditRefused::ReadOnlyFormat { .. })
+            ),
+            "the refusal must reach the caller as a typed EditRefused, got: {err:#}"
+        );
+        assert_eq!(
+            doc.get_tree(TREE_NAME).get_nodes(false).len(),
+            1,
+            "a refused create minted a tree node"
+        );
     }
 
     #[test]

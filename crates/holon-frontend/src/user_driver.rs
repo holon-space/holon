@@ -683,8 +683,10 @@ impl ReactiveEngineDriver {
     /// will later call; here it lets the headless keystone drive WP-E's
     /// creation-slot focus-root parenting cross-backend. Fails loud (per the
     /// project's error policy) if the focused main panel resolves no creation
-    /// parent (empty / cold-boot rowset) or the commit yields no intent.
+    /// parent (empty / cold-boot rowset), the write tier refuses a create under
+    /// it (no slot is offered there), or the commit yields no intent.
     pub async fn commit_creation_slot(&self, content: &str) -> Result<EntityUri> {
+        use crate::creation_slot::EditTarget;
         let main_panel = region_panel_block_id(holon_api::Region::Main);
         let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
         let parent = loop {
@@ -719,6 +721,12 @@ impl ReactiveEngineDriver {
             }
             tokio::time::sleep(Duration::from_millis(120)).await;
         };
+        if !crate::reactive::BuilderServices::offers_creation_under(&*self.engine, &parent) {
+            anyhow::bail!(
+                "main panel root {parent} offers no creation slot: the write tier refuses a \
+                 create under it"
+            );
+        }
 
         // Build the affordance id exactly as the render keys it, then drive the
         // PRODUCTION gesture in its two steps: focus SEATS the caret on the
@@ -729,13 +737,17 @@ impl ReactiveEngineDriver {
         let slot_uri = EntityUri::parse(&slot_id)
             .with_context(|| format!("creation-slot id {slot_id:?} is not a valid EntityUri"))?;
         crate::reactive::BuilderServices::set_focus(&*self.engine, Some(slot_uri));
-        let born = crate::reactive::BuilderServices::caret_block_for_edit(&*self.engine)
+        let born = match crate::reactive::BuilderServices::caret_block_for_edit(&*self.engine)
             .with_context(|| format!("birthing creation affordance {slot_id}"))?
-            .with_context(|| {
-                format!(
-                    "the caret did not land on creation affordance {slot_id} — nothing to birth"
-                )
-            })?;
+        {
+            EditTarget::Block(born) => born,
+            EditTarget::Refused(refusal) => anyhow::bail!(
+                "the offered creation affordance {slot_id} refused its birth: {refusal}"
+            ),
+            EditTarget::Unfocused => anyhow::bail!(
+                "the caret did not land on creation affordance {slot_id} — nothing to birth"
+            ),
+        };
 
         // Wait for the newborn to exist before writing into it. This is not a
         // test-only nicety: in the real UI the newborn's editor mounts only

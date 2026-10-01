@@ -1179,7 +1179,8 @@ fn caret_probe() -> bool {
 /// structural op can name it. Otherwise the capture fired on an editor that
 /// does not hold the caret, and the row is its own target.
 ///
-/// `None` means the caret could not be resolved — the caller must not dispatch.
+/// `None` means the caret could not be resolved, or the write tier refused
+/// birthing it — the caller must not dispatch.
 fn structural_target(services: &Arc<dyn BuilderServices>, row_id: &str) -> Option<String> {
     if services
         .focused_block()
@@ -1187,8 +1188,11 @@ fn structural_target(services: &Arc<dyn BuilderServices>, row_id: &str) -> Optio
     {
         return Some(row_id.to_string());
     }
+    use holon_frontend::creation_slot::EditTarget;
     match services.caret_block_for_edit() {
-        Ok(caret) => Some(caret.map_or_else(|| row_id.to_string(), |u| u.as_str().to_string())),
+        Ok(EditTarget::Unfocused) => Some(row_id.to_string()),
+        Ok(EditTarget::Block(u)) => Some(u.as_str().to_string()),
+        Ok(EditTarget::Refused(_)) => None,
         Err(e) => {
             tracing::error!(error = %e, row = %row_id, "structural key: cannot resolve the caret");
             None
@@ -1421,9 +1425,12 @@ impl Render for EditorView {
                     // the caret sits, so Enter in an empty destination splits a
                     // real block instead of an id nothing answers to.
                     let target_id = match services.caret_block_for_edit() {
-                        Ok(caret) => caret
-                            .map(|u| u.as_str().to_string())
-                            .unwrap_or_else(|| row_id.clone()),
+                        Ok(holon_frontend::creation_slot::EditTarget::Unfocused) => row_id.clone(),
+                        Ok(holon_frontend::creation_slot::EditTarget::Block(u)) => {
+                            u.as_str().to_string()
+                        }
+                        // Already disclosed; there is no block to split.
+                        Ok(holon_frontend::creation_slot::EditTarget::Refused(_)) => return,
                         Err(e) => {
                             tracing::error!(error = %e, "Enter: cannot resolve the caret's block");
                             return;

@@ -9,7 +9,8 @@
 //!   or editing (editable_text) variant instead of the page_title h1 variant
 //! @pbt slips-if-removed the "add new block" slot renders above the page
 //!   title, or the title renders as an ordinary editable outline row instead
-//!   of an h1; both dogfood regressions ship (devlog 2026-07-05)
+//!   of an h1; both dogfood regressions ship (devlog 2026-07-05); a read-only
+//!   page offers a creation slot whose every keystroke is refused
 //!
 //! Locks in two GPUI render regressions the app currently exhibits — both
 //! observed during dogfood triage, see
@@ -36,6 +37,10 @@
 //!    the tree collection (not nested widgets), so a focus-root node's subtree
 //!    is that block's own rendering only.
 //!
+//! 3. **Creation slot offered under a read-only parent.** A slot is an offer of
+//!    `block.create(parent)`; under a block of a read-only document that create
+//!    is never enabled, so no such slot may render.
+//!
 //! A tree collection with NO virtual slot is NOT a failure (the original stub
 //! treated an absent creation slot as warn-level); such a container simply has
 //! no `:__virtual:` child and the walk skips it, folding into `Ok`.
@@ -50,6 +55,7 @@
 
 use holon_pbt_core::capabilities::CapRegion;
 use holon_pbt_core::capabilities::RefBlockTree;
+use holon_pbt_core::capabilities::RefReadOnlyHomes;
 use holon_pbt_core::capabilities::SutRenderer;
 use holon_pbt_core::capabilities::WidgetSnapshot;
 use holon_pbt_core::invariant::Invariant;
@@ -84,7 +90,7 @@ fn is_virtual(node: &WidgetSnapshot) -> bool {
 #[allow(async_fn_in_trait)]
 impl<R, S> Invariant<R, S> for InvViewmodelTreeVirtualSlots
 where
-    R: RefBlockTree,
+    R: RefBlockTree + RefReadOnlyHomes,
     S: SutRenderer,
 {
     fn id(&self) -> InvariantId {
@@ -151,6 +157,19 @@ where
                         node.kind,
                     ));
                 }
+            }
+        }
+
+        // ── Bug 3: no creation slot under a read-only parent ────────────────
+        for slot in root.walk().filter_map(|n| n.entity_id.as_deref()) {
+            if let holon_frontend::row_origin::RowOrigin::CreationPlaceholder { parent, .. } =
+                holon_frontend::row_origin::RowOrigin::from_id(slot)
+                && ref_.refuses_creation_under(&parent)
+            {
+                return InvariantResult::Fail(format!(
+                    "[inv-viewmodel-tree-virtual-slots] creation slot '{slot}' is offered under \
+                     '{parent}', whose write tier refuses a create under it"
+                ));
             }
         }
 

@@ -139,13 +139,7 @@ enum SuffixSource {
     /// rebuild, so the slot's parent MUST track it). Emits nothing while the
     /// rowset is not yet resolvable (transient-empty on first load).
     CreationSlot {
-        defaults: std::collections::HashMap<String, holon_api::Value>,
-        container: holon_api::EntityUri,
-        allow_root_creation: bool,
-        /// Author explicitly named `container` via `virtual_parent` — the
-        /// gate that lets an EMPTY collection still afford a creation slot
-        /// (see [`crate::row_origin::resolve_creation_parent`]).
-        parent_is_explicit: bool,
+        slot: Arc<CreationSlotSuffix>,
         inner: Arc<dyn ReactiveRowProvider>,
     },
     /// A LIVE row derived from a canonical block's row cell (ADR 0015 P2
@@ -162,6 +156,34 @@ enum SuffixSource {
         anchor: EntityUri,
         source: futures_signals::signal::ReadOnlyMutable<Arc<holon_api::widget_spec::DataRow>>,
     },
+}
+
+struct CreationSlotSuffix {
+    defaults: std::collections::HashMap<String, holon_api::Value>,
+    container: holon_api::EntityUri,
+    allow_root_creation: bool,
+    /// Author explicitly named `container` via `virtual_parent` — the
+    /// gate that lets an EMPTY collection still afford a creation slot
+    /// (see [`crate::row_origin::resolve_creation_parent`]).
+    parent_is_explicit: bool,
+    services: Arc<dyn crate::reactive::BuilderServices>,
+}
+
+impl CreationSlotSuffix {
+    /// The slot row appended after `rows`, if a slot is offered there.
+    fn slot_row(
+        &self,
+        rows: &[Arc<holon_api::widget_spec::DataRow>],
+    ) -> Option<(holon_api::RowKey, Arc<holon_api::widget_spec::DataRow>)> {
+        crate::row_origin::offered_creation_parent(
+            rows,
+            &self.container,
+            self.allow_root_creation,
+            self.parent_is_explicit,
+            self.services.as_ref(),
+        )
+        .map(|parent| creation_slot_keyed_row(&parent, &self.defaults))
+    }
 }
 
 /// Build the keyed synthetic creation-slot row for a resolved parent. The
@@ -196,22 +218,8 @@ impl SuffixSource {
     /// The current suffix row(s), keyed — for a synchronous snapshot.
     fn current_keyed(&self) -> Vec<(holon_api::RowKey, Arc<holon_api::widget_spec::DataRow>)> {
         match self {
-            SuffixSource::CreationSlot {
-                defaults,
-                container,
-                allow_root_creation,
-                parent_is_explicit,
-                inner,
-            } => {
-                match crate::row_origin::resolve_creation_parent(
-                    &inner.rows_snapshot(),
-                    container,
-                    *allow_root_creation,
-                    *parent_is_explicit,
-                ) {
-                    Some(parent) => vec![creation_slot_keyed_row(&parent, defaults)],
-                    None => vec![],
-                }
+            SuffixSource::CreationSlot { slot, inner } => {
+                slot.slot_row(&inner.rows_snapshot()).into_iter().collect()
             }
             SuffixSource::LiveCell {
                 key,
@@ -242,34 +250,13 @@ impl SuffixSource {
         use futures_signals::signal::SignalExt;
         use futures_signals::signal_vec::SignalVecExt;
         match self {
-            SuffixSource::CreationSlot {
-                defaults,
-                container,
-                allow_root_creation,
-                parent_is_explicit,
-                inner,
-            } => {
-                let defaults = defaults.clone();
-                let container = container.clone();
-                let allow_root_creation = *allow_root_creation;
-                let parent_is_explicit = *parent_is_explicit;
+            SuffixSource::CreationSlot { slot, inner } => {
+                let slot = slot.clone();
                 Box::pin(
                     inner
                         .rows_signal_vec()
                         .to_signal_cloned()
-                        .map(move |rows| {
-                            match crate::row_origin::resolve_creation_parent(
-                                &rows,
-                                &container,
-                                allow_root_creation,
-                                parent_is_explicit,
-                            ) {
-                                Some(parent) => {
-                                    vec![creation_slot_keyed_row(&parent, &defaults)]
-                                }
-                                None => vec![],
-                            }
-                        })
+                        .map(move |rows| slot.slot_row(&rows).into_iter().collect::<Vec<_>>())
                         .to_signal_vec(),
                 )
             }
@@ -322,14 +309,21 @@ impl AppendedRowsProvider {
     /// only as the container hint used to recognise the flat `from children`
     /// shape; the max-scalar `sort_key` that keeps the slot last is applied in
     /// `creation_slot_keyed_row`.
-    fn creation_slot(inner: Arc<dyn ReactiveRowProvider>, slot: &VirtualChildSlot) -> Self {
+    fn creation_slot(
+        inner: Arc<dyn ReactiveRowProvider>,
+        slot: &VirtualChildSlot,
+        services: Arc<dyn crate::reactive::BuilderServices>,
+    ) -> Self {
         Self {
             inner: inner.clone(),
             suffix: SuffixSource::CreationSlot {
-                defaults: slot.defaults.clone(),
-                container: slot.parent_id.clone(),
-                allow_root_creation: slot.allow_root_creation,
-                parent_is_explicit: slot.parent_is_explicit,
+                slot: Arc::new(CreationSlotSuffix {
+                    defaults: slot.defaults.clone(),
+                    container: slot.parent_id.clone(),
+                    allow_root_creation: slot.allow_root_creation,
+                    parent_is_explicit: slot.parent_is_explicit,
+                    services,
+                }),
                 inner,
             },
         }
@@ -385,25 +379,15 @@ impl ReactiveRowProvider for AppendedRowsProvider {
         use futures_signals::signal::SignalExt;
         use futures_signals::signal_vec::SignalVecExt;
         match &self.suffix {
-            SuffixSource::CreationSlot {
-                defaults,
-                container,
-                allow_root_creation,
-                parent_is_explicit,
-                ..
-            } if *parent_is_explicit => {
-                let defaults = defaults.clone();
-                let container = container.clone();
-                let allow = *allow_root_creation;
+            SuffixSource::CreationSlot { slot, .. } if slot.parent_is_explicit => {
+                let slot = slot.clone();
                 Box::pin(
                     self.inner
                         .rows_signal_vec()
                         .to_signal_cloned()
                         .map(move |mut rows| {
-                            if let Some(parent) = crate::row_origin::resolve_creation_parent(
-                                &rows, &container, allow, true,
-                            ) {
-                                rows.push(creation_slot_keyed_row(&parent, &defaults).1);
+                            if let Some((_, row)) = slot.slot_row(&rows) {
+                                rows.push(row);
                             }
                             rows
                         })
@@ -432,16 +416,8 @@ impl ReactiveRowProvider for AppendedRowsProvider {
         use futures_signals::signal::SignalExt;
         use futures_signals::signal_vec::SignalVecExt;
         match &self.suffix {
-            SuffixSource::CreationSlot {
-                defaults,
-                container,
-                allow_root_creation,
-                parent_is_explicit,
-                ..
-            } if *parent_is_explicit => {
-                let defaults = defaults.clone();
-                let container = container.clone();
-                let allow = *allow_root_creation;
+            SuffixSource::CreationSlot { slot, .. } if slot.parent_is_explicit => {
+                let slot = slot.clone();
                 // ATOMIC recompose (derived-data-contracts, Law 3), scoped to the
                 // EXPLICIT-`virtual_parent` path (the journals feed). The appended
                 // creation slot is a function of the CURRENT inner rows,
@@ -468,11 +444,7 @@ impl ReactiveRowProvider for AppendedRowsProvider {
                         .to_signal_cloned()
                         .map(move |mut keyed| {
                             let rows: Vec<_> = keyed.iter().map(|(_, r)| r.clone()).collect();
-                            if let Some(parent) = crate::row_origin::resolve_creation_parent(
-                                &rows, &container, allow, true,
-                            ) {
-                                keyed.push(creation_slot_keyed_row(&parent, &defaults));
-                            }
+                            keyed.extend(slot.slot_row(&rows));
                             keyed
                         })
                         .to_signal_vec(),
@@ -1187,6 +1159,7 @@ impl ReactiveView {
                     Some(slot) => Arc::new(AppendedRowsProvider::creation_slot(
                         data_source.clone(),
                         slot,
+                        services.clone(),
                     )),
                     None => data_source.clone(),
                 };
@@ -2721,9 +2694,14 @@ mod tests {
         Arc::new(r)
     }
 
+    fn stub_services() -> Arc<dyn crate::reactive::BuilderServices> {
+        Arc::new(StubBuilderServices::new())
+    }
+
     fn appended_row_count(inner: Vec<Arc<DataRow>>, slot: &VirtualChildSlot) -> usize {
         let inner_len = inner.len();
-        let provider = AppendedRowsProvider::creation_slot(Arc::new(FixedRows(inner)), slot);
+        let provider =
+            AppendedRowsProvider::creation_slot(Arc::new(FixedRows(inner)), slot, stub_services());
         provider.rows_snapshot().len() - inner_len
     }
 
@@ -2797,8 +2775,11 @@ mod tests {
             parent_is_explicit: false,
         };
         // No panic; no creation slot appended.
-        let provider =
-            AppendedRowsProvider::creation_slot(Arc::new(FixedRows(inner.clone())), &slot);
+        let provider = AppendedRowsProvider::creation_slot(
+            Arc::new(FixedRows(inner.clone())),
+            &slot,
+            stub_services(),
+        );
         let snap = provider.rows_snapshot();
         assert_eq!(snap.len(), inner.len(), "no virtual row appended");
         // Both real pages survive into the rendered rowset.
@@ -2833,6 +2814,7 @@ mod tests {
                 "block:root-layout",
             )])),
             &slot,
+            stub_services(),
         );
         let snap = provider.rows_snapshot();
         let slot_row = snap
@@ -2842,6 +2824,30 @@ mod tests {
         assert_eq!(
             slot_row.get("parent_id").and_then(|v| v.as_string()),
             Some("block:page")
+        );
+    }
+
+    #[test]
+    fn a_read_only_focus_root_appends_no_creation_slot() {
+        let page = holon_api::EntityUri::block("recipe-page");
+        let slot = VirtualChildSlot {
+            defaults: HashMap::new(),
+            parent_id: holon_api::EntityUri::block("default-main-panel"),
+            allow_root_creation: false,
+            parent_is_explicit: false,
+        };
+        let provider = AppendedRowsProvider::creation_slot(
+            Arc::new(FixedRows(vec![
+                row_with_parent("block:recipe-page", "block:root-layout"),
+                row_with_parent("block:step-1", "block:recipe-page"),
+            ])),
+            &slot,
+            Arc::new(StubBuilderServices::new().with_creation_refused_under(page)),
+        );
+        assert_eq!(
+            provider.rows_snapshot().len(),
+            2,
+            "a creation slot was offered under a parent the write tier refuses"
         );
     }
 
@@ -2949,7 +2955,7 @@ mod tests {
             );
             let inner: Arc<dyn ReactiveRowProvider> =
                 Arc::new(FixedRows(vec![Arc::new(child)]));
-            let provider = AppendedRowsProvider::creation_slot(inner, &slot);
+            let provider = AppendedRowsProvider::creation_slot(inner, &slot, stub_services());
             // The creation slot's row is appended after inner's rows; it is the
             // one whose id parses to a `CreationPlaceholder`.
             let snap = provider.rows_snapshot();

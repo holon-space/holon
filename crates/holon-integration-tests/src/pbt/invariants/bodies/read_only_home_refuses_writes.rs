@@ -10,6 +10,8 @@
 //!   compound's decomposition
 //! @pbt slips-if-removed a compound's constituents are re-judged as a user's
 //!   edit, so an ingest cannot re-write the blocks of the file it is reading
+//! @pbt slips-if-removed a block born through the creation slot under a
+//!   read-only page lands in `block_raw` with no writer able to put it on disk
 //! @pbt slips-if-removed a write to a `.cook`-homed block lands in `block_raw`
 //!   with no writer able to put it on disk, so the store says one thing and the
 //!   authoritative file another, and the user is never told
@@ -87,6 +89,17 @@ where
         // user's edit turns the boundary into a refusal of the ingest itself —
         // the file telling the store what it says, rejected because the store
         // may not tell the file.
+        let undeclared = sut.read_only_undeclared_children().await;
+        if !undeclared.is_empty() {
+            return InvariantResult::Fail(format!(
+                "{} block(s) were created INSIDE a read-only document, under a parent the \
+                 production WriteTierAuthority refuses: {undeclared:?} as (id, parent). A create \
+                 is a write naming its parent, so the tier must refuse it before any writer mints \
+                 the block — the store now holds a child no writer can put on disk.",
+                undeclared.len(),
+            ));
+        }
+
         let (compounds, compound_refusals) = sut.read_only_ingest_compound_attempts().await;
         if compound_refusals > 0 {
             return InvariantResult::Fail(format!(

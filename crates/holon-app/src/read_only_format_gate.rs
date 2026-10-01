@@ -41,7 +41,7 @@ impl WriteTierAuthority for ReadOnlyFormatGate {
     /// here made one `.cook` file in a vault cost a tree walk per row per
     /// frame. The registry carries the file's blocks instead, recorded at
     /// ingest.
-    async fn refusal_for(&self, block_id: &str) -> Result<Option<EditRefused>> {
+    fn refusal_for(&self, block_id: &str) -> Result<Option<EditRefused>> {
         if self.documents.is_empty() {
             return Ok(None);
         }

@@ -57,13 +57,21 @@ pub fn register_render_services(injector: &Injector) {
         let services_slot = resolver.resolve::<BuilderServicesSlot>();
         let shutdown = resolver.resolve::<holon_api::lifecycle::SessionShutdown>();
         let f = interpret.0.clone();
-        let engine = ReactiveEngine::new(
+        let mut engine = ReactiveEngine::new(
             session,
             tokio::runtime::Handle::current(),
             interpreter,
             move |expr, rows| f(expr, rows),
             services_slot.0.clone(),
         );
+        match resolver.try_resolve::<dyn holon_core::WriteTierAuthority>() {
+            Ok(authority) => engine = engine.with_write_tier(authority),
+            Err(e) if e.kind == fluxdi::ErrorKind::ServiceNotProvided => {}
+            Err(e) => panic!(
+                "[ReactiveEngine] resolving the write-tier authority failed: {e}. Without it a \
+                 creation-slot birth would create inside a read-only document unrefused."
+            ),
+        }
         engine.stop_watchers_on_shutdown(&shutdown);
         Shared::new(engine)
     }));

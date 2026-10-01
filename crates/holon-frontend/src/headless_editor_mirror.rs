@@ -107,6 +107,17 @@ impl HeadlessEditorMirror {
         }
     }
 
+    fn slot_birth_of(&self, slot_id: &str) -> crate::creation_slot::BirthOutcome {
+        self.editors
+            .lock()
+            .unwrap()
+            .get(slot_id)
+            .expect("a keystroke into a creation slot mounted its editor")
+            .slot_birth()
+            .expect("a keystroke into a creation slot resolves its birth")
+            .clone()
+    }
+
     /// Record that a creation-slot gesture birthed `block`, so the next settle
     /// mounts its editor.
     pub fn note_newborn(&self, block: holon_api::EntityUri) {
@@ -748,11 +759,17 @@ impl HeadlessEditorMirror {
                 self.vm_commit_edit(engine, &block_id, &current_text, &new_text)
                     .await?;
                 if crate::row_origin::RowOrigin::from_id(&block_id).is_creation_placeholder() {
-                    let born = engine
-                        .focused_block()
-                        .filter(|f| f != &block_uri)
-                        .expect("a keystroke into a creation slot moves focus to its newborn");
-                    self.note_newborn(born);
+                    match self.slot_birth_of(&block_id) {
+                        crate::creation_slot::BirthOutcome::Born(born) => {
+                            assert_eq!(
+                                engine.focused_block().as_ref(),
+                                Some(&born),
+                                "a keystroke into a creation slot moves focus to its newborn"
+                            );
+                            self.note_newborn(born);
+                        }
+                        crate::creation_slot::BirthOutcome::Refused(_) => {}
+                    }
                 }
                 let new_cursor_byte = cursor_byte + inserted.len();
                 self.set_cursor(&block_id, occ, new_cursor_byte);

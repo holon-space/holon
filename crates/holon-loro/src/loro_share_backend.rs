@@ -6291,7 +6291,7 @@ mod tests {
             !self.0.is_empty()
         }
 
-        async fn refusal_for(&self, block_id: &str) -> Result<Option<holon_core::EditRefused>> {
+        fn refusal_for(&self, block_id: &str) -> Result<Option<holon_core::EditRefused>> {
             Ok(self.0.refusal_for_block(&EntityUri::parse(block_id)?))
         }
 

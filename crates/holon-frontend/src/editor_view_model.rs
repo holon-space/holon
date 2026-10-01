@@ -635,14 +635,14 @@ impl EditorViewModel {
         }
         let id = self.handler.edit_target_id();
         self.buffer = new_text.to_string();
+        if self.handler.slot_refused() {
+            return Ok(None);
+        }
         let Some(id) = id else {
             return Ok(None);
         };
-        // `edit_target_id` births a caret-on-affordance into a real newborn, so
-        // an affordance id here means a call site skipped that chokepoint. The
-        // write would surface one layer down as "Block not found" against an id
-        // that never existed — the same reason `structural_block_action`
-        // asserts for the structural table.
+        // An affordance id here means a call site skipped `edit_target_id`; the
+        // write would surface one layer down as "Block not found".
         assert!(
             !crate::row_origin::RowOrigin::from_id(id.as_str()).is_creation_placeholder(),
             "text write dispatched against creation-affordance id {id:?} — an affordance is not \
@@ -845,6 +845,10 @@ impl EditorViewModel {
     /// handle to run doc-link SQL queries against a real backend.
     pub fn set_async_context(&mut self, services: Arc<dyn BuilderServices>) {
         self.handler.set_async_context(services);
+    }
+
+    pub fn slot_birth(&self) -> Option<&crate::creation_slot::BirthOutcome> {
+        self.handler.slot_birth()
     }
 
     /// Called when the text content changes (every keystroke).
@@ -1489,7 +1493,7 @@ mod tests {
             Some(holon_api::EntityUri::block("42")),
         );
 
-        let handler = crate::view_event_handler::ViewEventHandler::new(
+        let mut handler = crate::view_event_handler::ViewEventHandler::new(
             Vec::new(),
             row,
             "content".into(),
@@ -1767,10 +1771,7 @@ mod tests {
         fn any_read_only_documents(&self) -> bool {
             true
         }
-        async fn refusal_for(
-            &self,
-            _: &str,
-        ) -> holon_core::Result<Option<holon_core::EditRefused>> {
+        fn refusal_for(&self, _: &str) -> holon_core::Result<Option<holon_core::EditRefused>> {
             Ok(Some(holon_core::EditRefused::ReadOnlyFormat {
                 format: "cooklang".into(),
                 path: std::path::PathBuf::from("/vault/Pancakes.cook"),
@@ -1844,6 +1845,184 @@ mod tests {
             disclosed.lock().unwrap().len(),
             1,
             "the refusal must be disclosed, not only returned"
+        );
+    }
+
+    /// The engine's side of an editor mounted on a creation slot whose parent
+    /// sits in a read-only document: every birth is refused, and the caret is
+    /// whatever the test last focused.
+    struct RefusingSlotServices {
+        stub: crate::reactive::StubBuilderServices,
+        focus: std::sync::Mutex<Option<holon_api::EntityUri>>,
+        birth_asks: std::sync::Mutex<usize>,
+    }
+
+    impl RefusingSlotServices {
+        fn new() -> std::sync::Arc<Self> {
+            std::sync::Arc::new(Self {
+                stub: crate::reactive::StubBuilderServices::new(),
+                focus: std::sync::Mutex::new(None),
+                birth_asks: std::sync::Mutex::new(0),
+            })
+        }
+    }
+
+    impl crate::reactive::BuilderServices for RefusingSlotServices {
+        fn interpret(
+            &self,
+            expr: &holon_api::render_types::RenderExpr,
+            ctx: &crate::RenderContext,
+        ) -> crate::ReactiveViewModel {
+            self.stub.interpret(expr, ctx)
+        }
+        fn clone_arc(&self) -> std::sync::Arc<dyn crate::reactive::BuilderServices> {
+            unreachable!("the commit funnel never clones its services")
+        }
+        fn get_block_data(
+            &self,
+            id: &holon_api::EntityUri,
+        ) -> (
+            holon_api::render_types::RenderExpr,
+            Vec<std::sync::Arc<holon_api::widget_spec::DataRow>>,
+        ) {
+            self.stub.get_block_data(id)
+        }
+        fn link_classifier(&self) -> &holon_api::link_parser::LinkTargetClassifier {
+            self.stub.link_classifier()
+        }
+        fn resolve_profile(
+            &self,
+            row: &holon_api::widget_spec::DataRow,
+        ) -> Option<holon_api::RenderProfile> {
+            self.stub.resolve_profile(row)
+        }
+        fn watch_query(
+            &self,
+            query: &str,
+            lang: holon_api::QueryLanguage,
+            ctx: Option<crate::QueryContext>,
+        ) -> Result<holon_api::EnrichedChangeStream> {
+            self.stub.watch_query(query, lang, ctx)
+        }
+        fn widget_state(&self, id: &str) -> crate::WidgetState {
+            self.stub.widget_state(id)
+        }
+        fn dispatch_intent(&self, intent: OperationIntent) {
+            panic!("a refused slot dispatched {intent:?}")
+        }
+        fn dispatch_intent_awaitable(
+            &self,
+            intent: OperationIntent,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<holon_core::Delivery>> + Send + 'static>,
+        > {
+            panic!("a refused slot dispatched {intent:?}")
+        }
+        fn runtime_handle(&self) -> tokio::runtime::Handle {
+            self.stub.runtime_handle()
+        }
+        fn present_op(&self, op: OperationDescriptor, _: HashMap<String, Value>) {
+            panic!("a refused slot presented {}", op.name)
+        }
+        fn search_link_candidates(
+            &self,
+            filter: &str,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<Vec<holon_api::LinkCandidate>>>
+                    + Send
+                    + 'static,
+            >,
+        > {
+            self.stub.search_link_candidates(filter)
+        }
+        fn focused_block(&self) -> Option<holon_api::EntityUri> {
+            self.focus.lock().unwrap().clone()
+        }
+        fn set_focus(&self, block: Option<holon_api::EntityUri>) {
+            *self.focus.lock().unwrap() = block;
+        }
+        fn birth_affordance(
+            &self,
+            _: &holon_api::EntityUri,
+        ) -> Result<crate::creation_slot::BirthOutcome> {
+            *self.birth_asks.lock().unwrap() += 1;
+            Ok(crate::creation_slot::BirthOutcome::Refused(
+                holon_core::EditRefused::ReadOnlyFormat {
+                    format: "cooklang".into(),
+                    path: std::path::PathBuf::from("/vault/Pancakes.cook"),
+                },
+            ))
+        }
+    }
+
+    /// An editor mounted on the creation slot of a read-only page, typed into
+    /// while the caret is on the slot.
+    fn typed_into_a_refused_slot(
+        services: &std::sync::Arc<RefusingSlotServices>,
+    ) -> EditorViewModel {
+        use crate::reactive::BuilderServices;
+        let page = holon_api::EntityUri::block("recipe-page");
+        let slot = holon_api::EntityUri::parse(
+            &crate::row_origin::RowOrigin::creation_placeholder_id(&page),
+        )
+        .expect("a creation-slot id parses");
+        services.set_focus(Some(slot.clone()));
+        let ops = vec![make_op(
+            "set_field",
+            &["content"],
+            vec![param("id"), param("field"), param("value")],
+        )];
+        let context = HashMap::from([("id".into(), Value::String(slot.to_string()))]);
+        let mut vm = EditorViewModel::new(ops, vec![], context, "content".into(), String::new());
+        vm.set_async_context(services.clone());
+        for text in ["z", "zz"] {
+            let intent = vm
+                .apply_local_edit(text)
+                .expect("a refused keystroke is not an error");
+            assert!(intent.is_none(), "a refused slot emitted {intent:?}");
+        }
+        assert_eq!(
+            vm.buffer(),
+            "zz",
+            "text typed into a refused slot stays visible"
+        );
+        vm
+    }
+
+    #[test]
+    fn text_typed_into_a_refused_slot_never_lands_in_the_block_focus_moved_to() {
+        use crate::reactive::BuilderServices;
+        let services = RefusingSlotServices::new();
+        let mut vm = typed_into_a_refused_slot(&services);
+        services.set_focus(Some(holon_api::EntityUri::block("keep")));
+        let commit = vm.pending_commit_intent("zz");
+        assert!(
+            commit.is_none(),
+            "the focus-leave commit of a refused slot wrote elsewhere: {commit:?}"
+        );
+        assert_eq!(
+            *services.birth_asks.lock().unwrap(),
+            1,
+            "one slot editor asks for its birth (and discloses the refusal) once"
+        );
+    }
+
+    #[test]
+    fn the_focus_leave_commit_of_a_refused_slot_survives_a_cleared_caret() {
+        use crate::reactive::BuilderServices;
+        let services = RefusingSlotServices::new();
+        let mut vm = typed_into_a_refused_slot(&services);
+        services.set_focus(None);
+        let commit = vm.pending_commit_intent("zz");
+        assert!(
+            commit.is_none(),
+            "the focus-leave commit of a refused slot wrote: {commit:?}"
+        );
+        assert_eq!(
+            *services.birth_asks.lock().unwrap(),
+            1,
+            "one slot editor asks for its birth (and discloses the refusal) once"
         );
     }
 

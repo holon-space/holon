@@ -245,9 +245,11 @@ The reason it is not modelled as a marking precondition instead: an existence
 precondition satisfied in-process by the same task that needs it is not an
 ordering problem, and modelling it as one costs a durable row per gesture while
 leaving the CRDT leg — which bypasses the dispatcher by this very section —
-uncovered. The `crdt.enabled = false` (SqlOnly) leg, where no cell route exists
-and the create is dispatched, is a test axis rather than a production wiring
-(`crates/holon-integration-tests/src/pbt/composed/wide_e2e.rs:2764-2790`).
+uncovered. Where no cell route takes the create (no registry installed, or the
+registry declines), the create is dispatched instead; that leg is not only a
+test axis, GPUI production runs it too (D113.a). On both legs the write tier
+(Model.md invariant 14) is asked once, before the id is minted: bypassing the
+dispatcher does not bypass its tier decision.
 
 **Authorization-relevant predicates read the store, never the derived
 projection.** The projection lags its sources — cold start, IVM catch-up — and

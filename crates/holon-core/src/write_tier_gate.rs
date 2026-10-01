@@ -257,10 +257,11 @@ impl ReadOnlyDocuments {
 /// degraded bus.
 ///
 /// Model.md invariant 4 asks that the decision be made ONCE. The dispatcher is
-/// one caller; the editor's text cell
-/// ([`ReadOnlyTextCellBacking`](crate::cell::ReadOnlyTextCellBacking)) is the
-/// other, because it writes the block's `LoroText` container directly. Both
-/// hold this same authority rather than each carrying its own rule.
+/// one caller; the others write the Loro doc directly: the editor's text cell
+/// ([`ReadOnlyTextCellBacking`](crate::cell::ReadOnlyTextCellBacking)), the
+/// cell registry's `create_entity_sync`, and the editor's creation-slot birth,
+/// which asks before it mints an id on either leg. All hold this same
+/// authority rather than each carrying its own rule.
 #[async_trait]
 pub trait WriteTierAuthority: Send + Sync {
     /// Whether ANY document in the vault is homed in a read-only format.
@@ -271,7 +272,10 @@ pub trait WriteTierAuthority: Send + Sync {
 
     /// Decide, without disclosing. The caller discloses when it actually
     /// refuses a user's edit, so a writer may ask ahead of one.
-    async fn refusal_for(&self, block_id: &str) -> crate::Result<Option<EditRefused>>;
+    ///
+    /// Synchronous, so a writer that cannot await decides before it acts:
+    /// the editor's birth decides before minting an id or moving the caret.
+    fn refusal_for(&self, block_id: &str) -> crate::Result<Option<EditRefused>>;
 
     /// Bind a block a peer's import placed under a read-only document into
     /// that document, so the imported block earns the same refusal the file's

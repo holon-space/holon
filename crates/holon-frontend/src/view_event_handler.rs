@@ -12,6 +12,7 @@ use holon_api::Value;
 use holon_api::render_types::OperationWiring;
 
 use crate::command_provider::CommandProvider;
+use crate::creation_slot::BirthOutcome;
 use crate::input_trigger::ViewEvent;
 use crate::link_provider::LinkProvider;
 use crate::operations::find_set_field_op;
@@ -50,6 +51,10 @@ pub struct ViewEventHandler {
     /// content writer and MUST fire — otherwise content edits are silently
     /// lost. Set via [`Self::set_loro_content_writer`] when the cell attaches.
     loro_content_writer: bool,
+    /// An editor on a creation affordance births THAT affordance at its first
+    /// edit and keeps the outcome, so its text never resolves against wherever
+    /// the caret moved since; a refused slot has no edit target for its life.
+    slot_birth: Option<BirthOutcome>,
 }
 
 impl ViewEventHandler {
@@ -73,6 +78,7 @@ impl ViewEventHandler {
             context_params,
             services: None,
             loro_content_writer: false,
+            slot_birth: None,
         }
     }
 
@@ -126,21 +132,39 @@ impl ViewEventHandler {
     ///
     /// A caret seated in an empty destination edits that destination's
     /// creation affordance, a rendered row the backend has no block for. That
-    /// id is birthed through the chokepoint here (idempotently), so no funnel
-    /// can dispatch an op against an affordance.
-    pub fn edit_target_id(&self) -> Option<EntityUri> {
+    /// id is birthed here, so no funnel can dispatch an op against an
+    /// affordance. `None` too when the write tier refuses that birth: the
+    /// refusal is already disclosed, and the edit has nothing to land in.
+    pub fn edit_target_id(&mut self) -> Option<EntityUri> {
         let row_uri = self.context_id()?;
-        match crate::row_origin::Caret::from_focus(Some(&row_uri)) {
-            crate::row_origin::Caret::Slot(_) => Some(
-                self.services
-                    .as_ref()
-                    .expect("a creation affordance can only be edited through BuilderServices")
-                    .caret_block_for_edit()
-                    .expect("birthing the caret's creation affordance")
-                    .expect("a caret sitting on an affordance resolves to a newborn"),
-            ),
-            _ => Some(row_uri),
+        let crate::row_origin::Caret::Slot(affordance) =
+            crate::row_origin::Caret::from_focus(Some(&row_uri))
+        else {
+            return Some(row_uri);
+        };
+        if self.slot_birth.is_none() {
+            let outcome = self
+                .services
+                .as_ref()
+                .expect("a creation affordance can only be edited through BuilderServices")
+                .birth_affordance(&affordance)
+                .expect("birthing the editor's creation affordance");
+            self.slot_birth = Some(outcome);
         }
+        match self.slot_birth.as_ref().expect("filled above") {
+            BirthOutcome::Born(id) => Some(id.clone()),
+            BirthOutcome::Refused(_) => None,
+        }
+    }
+
+    /// What this editor's creation affordance became at its first edit;
+    /// `None` before that edit and for an editor on a real block.
+    pub fn slot_birth(&self) -> Option<&BirthOutcome> {
+        self.slot_birth.as_ref()
+    }
+
+    pub fn slot_refused(&self) -> bool {
+        matches!(self.slot_birth, Some(BirthOutcome::Refused(_)))
     }
 
     /// Process a ViewEvent from the frontend's trigger check.
@@ -220,9 +244,8 @@ impl ViewEventHandler {
     /// Handle Tier 3 text sync (blur). If the value changed and we have a
     /// set_field operation, return Execute with the appropriate params.
     ///
-    /// Every id reaching here is a real block: a creation affordance mounts no
-    /// editor and is born before it can receive input (see
-    /// [`crate::creation_slot`]), so there is no materialize-on-edit case.
+    /// An editor on a refused creation affordance commits nothing: its text
+    /// has no block to land in.
     ///
     /// **Phase 2 (Loro single-writer):** for `content` on real (non-virtual)
     /// entities, when a Loro content writer is active the per-keystroke
@@ -240,11 +263,14 @@ impl ViewEventHandler {
         if new_value == self.original_value {
             return PopupResult::NotActive;
         }
+        let Some(id) = self.edit_target_id() else {
+            assert!(
+                self.slot_refused(),
+                "ViewEventHandler context_params missing 'id'"
+            );
+            return PopupResult::NotActive;
+        };
         self.original_value = new_value.clone();
-
-        let id = self
-            .edit_target_id()
-            .expect("ViewEventHandler context_params missing 'id'");
 
         if self.field == "content" && self.loro_content_writer {
             return PopupResult::NotActive;

@@ -23,6 +23,25 @@ use holon_api::EntityUri;
 pub const BIRTH_TRANSITION_ID: &str = "creation-slot-birth";
 pub const REAP_TRANSITION_ID: &str = "creation-slot-reap";
 
+/// What focus reaching a creation affordance did.
+#[derive(Debug, Clone)]
+pub enum BirthOutcome {
+    Born(EntityUri),
+    /// The parent's write tier refuses the create. Decided before any id is
+    /// minted, so nothing was born and nothing needs undoing.
+    Refused(holon_core::EditRefused),
+}
+
+/// The block an edit made at the caret applies to.
+#[derive(Debug)]
+pub enum EditTarget {
+    Unfocused,
+    Block(EntityUri),
+    /// The caret sits on a creation affordance whose birth the write tier
+    /// refuses: the edit has no target and must not be dispatched.
+    Refused(holon_core::EditRefused),
+}
+
 /// The ids of empty blocks born by a creation affordance that have never
 /// carried content.
 ///

@@ -43,6 +43,7 @@ use holon_pbt_core::capabilities::RefLayout;
 use holon_pbt_core::capabilities::RefLayoutInteract;
 use holon_pbt_core::capabilities::RefLayoutMutate;
 use holon_pbt_core::capabilities::RefLifecycle;
+use holon_pbt_core::capabilities::RefReadOnlyHomes;
 use holon_pbt_core::validation::Reason;
 use holon_pbt_core::validation::check;
 use proptest::prelude::*;
@@ -106,7 +107,8 @@ impl<
         + RefFocusRoots
         + RefLayoutInteract
         + RefLayoutMutate
-        + RefBlockTreeMut,
+        + RefBlockTreeMut
+        + RefReadOnlyHomes,
 > TransitionFactory<R> for CreateBlockUnderFocus
 {
     fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
@@ -127,6 +129,10 @@ impl<
             // uuid). Distinct `gen-` prefix ⇒ no collision with `create-N` /
             // `split-N` / `bulk-N`.
             let next = state.next_block_id();
+            // A root the write tier refuses renders no creation slot, so the
+            // slot gesture (`id: None`) cannot happen under it.
+            let slot_offered = create_under_focus_parent(state)
+                .is_some_and(|root| !state.refuses_creation_under(&root));
             // Short org-safe ASCII words: no trailing whitespace, no org markup,
             // so the created content round-trips through the block store / any
             // org sync unchanged — the ref content matches the SUT verbatim.
@@ -136,7 +142,8 @@ impl<
             let strat = (content, proptest::bool::ANY)
                 .prop_map(move |(content, with_id)| CreateBlockUnderFocus {
                     content,
-                    id: with_id.then(|| EntityUri::block(&format!("gen-{next}"))),
+                    id: (with_id || !slot_offered)
+                        .then(|| EntityUri::block(&format!("gen-{next}"))),
                 })
                 .boxed();
             // Moderate weight: valuable structural growth of the focused page,
@@ -152,7 +159,8 @@ impl<
         + RefFocusRoots
         + RefLayoutInteract
         + RefLayoutMutate
-        + RefBlockTreeMut,
+        + RefBlockTreeMut
+        + RefReadOnlyHomes,
 > TransitionRef<R> for CreateBlockUnderFocus
 {
     type Reason = Reason;
@@ -164,6 +172,12 @@ impl<
             check(!self.content.is_empty(), Reason::PreconditionFailed),
             check(
                 create_under_focus_parent(state).is_some(),
+                Reason::PreconditionFailed,
+            ),
+            check(
+                self.id.is_some()
+                    || create_under_focus_parent(state)
+                        .is_some_and(|root| !state.refuses_creation_under(&root)),
                 Reason::PreconditionFailed,
             ),
         ];
@@ -194,7 +208,7 @@ impl<
 
 crate::cap_transition! {
     CreateBlockUnderFocus: holon_pbt_core::capabilities::SutBlockCreate,
-    where R: [ RefLifecycle + RefLayout + RefFocusRoots + RefLayoutInteract + RefLayoutMutate + RefBlockTreeMut ],
+    where R: [ RefLifecycle + RefLayout + RefFocusRoots + RefLayoutInteract + RefLayoutMutate + RefBlockTreeMut + RefReadOnlyHomes ],
     |me, state, sut| {
         // Resolve the creation-slot focus-root parent from the SAME ref predicate
         // the precondition/generator gate on. The headless UI driver honors the

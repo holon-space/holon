@@ -4547,12 +4547,12 @@ impl SutBlockCreate for HeadlessFrontendComponent {
             // No id: drive the PRODUCTION creation-slot gesture EXACTLY as today —
             // it re-resolves the parent from its own live rendered rowset (WP-E
             // focus-root cross-check preserved) and mints via `block.create`.
-            None => self
-                .driver_concrete()
-                .commit_creation_slot(content)
-                .await
-                .map(|_| ())
-                .unwrap_or_else(|e| panic!("[SutBlockCreate::apply_create_under_focus] {e:#}")),
+            None => {
+                self.driver_concrete()
+                    .commit_creation_slot(content)
+                    .await
+                    .unwrap_or_else(|e| panic!("[SutBlockCreate::apply_create_under_focus] {e:#}"));
+            }
         }
         self.settle_block_ids_stable(Duration::from_secs(5)).await;
     }
@@ -7280,7 +7280,6 @@ impl HeadlessFrontendComponent {
             };
             let refused = authority
                 .refusal_for(&id)
-                .await
                 .unwrap_or_else(|e| panic!("[read-only homes] authority failed for {id}: {e}"))
                 .is_some();
             if refused {
@@ -7340,6 +7339,33 @@ impl holon_pbt_core::capabilities::SutReadOnlyHomes for HeadlessFrontendComponen
 
     async fn read_only_blocks_now(&self) -> Vec<(String, String)> {
         self.read_only_rows().await
+    }
+
+    async fn read_only_undeclared_children(&self) -> Vec<(String, String)> {
+        let Some(authority) = self.write_tier_authority().await else {
+            return Vec::new();
+        };
+        if !authority.any_read_only_documents() {
+            return Vec::new();
+        }
+        let mut children = Vec::new();
+        for row in self.sql_query("SELECT id, parent_id FROM block_raw").await {
+            let (Some(id), Some(parent)) = (Self::cell(&row, "id"), Self::cell(&row, "parent_id"))
+            else {
+                continue;
+            };
+            let refused = |r: holon_core::Result<Option<holon_core::EditRefused>>, of: &str| {
+                r.unwrap_or_else(|e| panic!("[read-only homes] authority failed for {of}: {e}"))
+                    .is_some()
+            };
+            if refused(authority.refusal_for(&parent), &parent)
+                && !refused(authority.refusal_for(&id), &id)
+            {
+                children.push((id, parent));
+            }
+        }
+        children.sort();
+        children
     }
 
     async fn read_only_write_attempts(&self) -> (usize, usize) {

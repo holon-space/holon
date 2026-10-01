@@ -191,10 +191,13 @@ for any field is: op-fidelity (store) → base-limited 3-way (transient) → LWW
     Holon ships no writer for, so no store-origin write may name it. The
     decision is made once, at the writers, against one authority
     (`WriteTierAuthority`, `crates/holon-core/src/write_tier_gate.rs`): the
-    operation dispatcher (invariant 4's one writer) and the editor's text cell
+    operation dispatcher (invariant 4's one writer), the editor's text cell
     (`ReadOnlyTextCellBacking`, which writes the `LoroText` container directly
-    and so bypasses the dispatcher) both consult it and both refuse with the
-    typed `EditRefused`. Only store-origin writes are judged — `OpOrigin::Ingest`
+    and so bypasses the dispatcher), the cell registry's `create_entity_sync`,
+    and the creation-slot birth (`birth_creation_affordance`, which asks before
+    it mints an id, on both legs) all consult it and refuse with the typed
+    `EditRefused`. A create names its parent, so a create under a read-only
+    block is refused. Only store-origin writes are judged — `OpOrigin::Ingest`
     is the file telling the store what it says and `OpOrigin::Sync` is a peer's
     merged history, and refusing either would break the replica it came from.
     A refusal is always DISCLOSED (`EDIT_REFUSED_READ_ONLY_FORMAT` on the

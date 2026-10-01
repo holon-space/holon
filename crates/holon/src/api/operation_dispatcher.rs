@@ -645,7 +645,7 @@ impl OperationDispatcher {
             let Some(subject) = params.get(key).and_then(|v| v.as_string()) else {
                 continue;
             };
-            if let Some(refusal) = authority.refusal_for(subject).await? {
+            if let Some(refusal) = authority.refusal_for(subject)? {
                 authority.disclose(&refusal);
                 return Err(Box::new(refusal));
             }

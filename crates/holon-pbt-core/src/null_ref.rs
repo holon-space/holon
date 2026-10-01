@@ -233,6 +233,9 @@ impl RefReadOnlyHomes for NullRef {
     fn read_only_homed_blocks(&self) -> BTreeSet<EntityUri> {
         panic!("class-2: invariant read RefReadOnlyHomes::read_only_homed_blocks")
     }
+    fn refuses_creation_under(&self, parent: &EntityUri) -> bool {
+        panic!("class-2: invariant read RefReadOnlyHomes::refuses_creation_under")
+    }
 }
 
 #[allow(unused_variables)]

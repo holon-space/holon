@@ -243,6 +243,10 @@ impl RefBlockTree for ReferenceState {
 
 impl RefBlockTreeMut for ReferenceState {
     fn birth_block_via_creation_slot(&mut self, parent: &EntityUri, content: &str) {
+        assert!(
+            self.read_only.refusing_file(parent).is_none(),
+            "no creation slot is offered under {parent}, which the write tier refuses"
+        );
         // This keystroke also creates its target, which costs the newborn's
         // first-write read set. Recorded here rather than read back later
         // because the post-apply state cannot tell this shape from a keystroke

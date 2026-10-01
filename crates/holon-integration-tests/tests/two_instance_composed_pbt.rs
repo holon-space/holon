@@ -2113,7 +2113,6 @@ fn a_pairing_reimport_under_a_read_only_home_inherits_its_refusal() {
         assert!(
             receiver_tier
                 .refusal_for(RECEIVER_RECIPE_STEP)
-                .await
                 .expect("the receiver's authority answers")
                 .is_some(),
             "the receiver's boot did not record `{RECEIVER_RECIPE_STEP}` as read-only-homed, so \
@@ -2135,7 +2134,6 @@ fn a_pairing_reimport_under_a_read_only_home_inherits_its_refusal() {
         assert!(
             receiver_tier
                 .refusal_for(SOLO_RECIPE_NOTE)
-                .await
                 .expect("the receiver's authority answers")
                 .is_some(),
             "`{SOLO_RECIPE_NOTE}` was re-imported under `{RECEIVER_RECIPE_STEP}`, a block of the \
@@ -2166,7 +2164,6 @@ fn a_pairing_reimport_under_a_read_only_home_inherits_its_refusal() {
         assert_eq!(
             receiver_tier
                 .refusal_for(SOLO_ORDINARY_NOTE)
-                .await
                 .expect("the receiver's authority answers"),
             None,
             "`{SOLO_ORDINARY_NOTE}` hangs under an ordinary parent, yet the receiver's authority \

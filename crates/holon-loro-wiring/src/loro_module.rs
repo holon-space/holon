@@ -188,8 +188,7 @@ impl Module for LoroModule {
                     .optional_resolve_async::<dyn holon_core::WriteTierAuthority>()
                     .await
                 {
-                    registry =
-                        registry.with_write_tier(authority, tokio::runtime::Handle::current());
+                    registry = registry.with_write_tier(authority);
                 }
                 // A keystroke the doc's write lock refuses is a lost edit, and
                 // the frontends only log the error. The cell discloses it

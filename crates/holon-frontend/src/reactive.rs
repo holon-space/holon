@@ -433,23 +433,44 @@ pub trait BuilderServices: Send + Sync {
     }
 
     /// The real block an edit applies to, birthing the creation affordance the
-    /// caret sits on when that is what it names. `None` only when nothing is
-    /// focused.
+    /// caret sits on when that is what it names. `Refused` when the write tier
+    /// refuses that birth.
     ///
     /// The ONE place a slot becomes a block. Every edit path resolves through
     /// it — the text sink and the structural-key table alike — so a keystroke
     /// can never reach the backend aimed at an id no block answers to.
+    fn caret_block_for_edit(&self) -> Result<crate::creation_slot::EditTarget> {
+        use crate::creation_slot::BirthOutcome;
+        use crate::creation_slot::EditTarget;
+        match crate::row_origin::Caret::from_focus(self.focused_block().as_ref()) {
+            crate::row_origin::Caret::Unfocused => Ok(EditTarget::Unfocused),
+            crate::row_origin::Caret::Block(id) => Ok(EditTarget::Block(id)),
+            crate::row_origin::Caret::Slot(affordance) => {
+                Ok(match self.birth_affordance(&affordance)? {
+                    BirthOutcome::Born(id) => EditTarget::Block(id),
+                    BirthOutcome::Refused(refusal) => EditTarget::Refused(refusal),
+                })
+            }
+        }
+    }
+
+    /// Birth the creation affordance `affordance` names, or re-enter the block
+    /// already born there.
     ///
     /// The default cannot birth: services with no creation-slot wiring fail
     /// loud rather than hand back an affordance id the backend would reject.
-    fn caret_block_for_edit(&self) -> Result<Option<EntityUri>> {
-        match crate::row_origin::Caret::from_focus(self.focused_block().as_ref()) {
-            crate::row_origin::Caret::Unfocused => Ok(None),
-            crate::row_origin::Caret::Block(id) => Ok(Some(id)),
-            crate::row_origin::Caret::Slot(id) => anyhow::bail!(
-                "caret sits on creation affordance {id}, which these BuilderServices cannot birth"
-            ),
-        }
+    fn birth_affordance(
+        &self,
+        affordance: &EntityUri,
+    ) -> Result<crate::creation_slot::BirthOutcome> {
+        anyhow::bail!("creation affordance {affordance} cannot be birthed by these BuilderServices")
+    }
+
+    /// Whether a creation slot may be offered under `parent`: no slot is drawn
+    /// under a parent the write tier refuses. Advisory — it discloses nothing,
+    /// because the birth asks again and discloses when it refuses.
+    fn offers_creation_under(&self, _: &EntityUri) -> bool {
+        true
     }
 
     /// Cloned handle to the focused-block `Mutable`, when this services
@@ -2553,6 +2574,9 @@ pub struct ReactiveEngine {
     /// resolves `live_field::<String>(EntityUri::block(id), "content")`
     /// through it. Set by frontend DI factories that want CRDT-backed editors.
     pub block_cell_registry: Mutex<Option<Arc<dyn crate::cell::EntityCellRegistry>>>,
+    /// The dispatcher's write-tier authority, asked before a creation-slot
+    /// birth mints anything. Absent where no vault formats are wired.
+    write_tier: Option<Arc<dyn holon_core::WriteTierAuthority>>,
     /// Shared slot used to recover an owned `Arc<dyn BuilderServices>` from
     /// inside `&self` methods. Populated by the owning frontend right after
     /// the engine is wrapped in an Arc; `clone_arc()` reads it.
@@ -2643,6 +2667,7 @@ impl ReactiveEngine {
             key_bindings,
             provider_cache: Arc::new(crate::provider_cache::ProviderCache::new()),
             block_cell_registry: Mutex::new(None),
+            write_tier: None,
             services_slot,
             advice_sidecar: Arc::new(Mutex::new(HashMap::new())),
             advice_weaver_started: std::sync::atomic::AtomicBool::new(false),
@@ -2651,6 +2676,11 @@ impl ReactiveEngine {
         };
         engine.register_memstats();
         engine
+    }
+
+    pub fn with_write_tier(mut self, authority: Arc<dyn holon_core::WriteTierAuthority>) -> Self {
+        self.write_tier = Some(authority);
+        self
     }
 
     /// Register the session-scoped task that tears down every UI watch on
@@ -3060,9 +3090,18 @@ impl ReactiveEngine {
     /// the mount's default. An armed 0 put every later keystroke in front of
     /// the first one.
     ///
+    /// A parent the write tier refuses yields `Refused`, disclosed, decided
+    /// before the id is minted and before the caret or the newborn registry is
+    /// touched — on both legs, so neither can create inside a read-only
+    /// document.
+    ///
     /// Fails loud on a non-affordance id — reaching here with anything else is
     /// a frontend routing bug, not user input.
-    fn birth_creation_affordance(&self, affordance_id: &str) -> Result<EntityUri> {
+    fn birth_creation_affordance(
+        &self,
+        affordance_id: &str,
+    ) -> Result<crate::creation_slot::BirthOutcome> {
+        use crate::creation_slot::BirthOutcome;
         let crate::row_origin::RowOrigin::CreationPlaceholder {
             entity_type,
             parent,
@@ -3073,6 +3112,15 @@ impl ReactiveEngine {
                  creation affordance"
             );
         };
+        if let Some(authority) = &self.write_tier {
+            let refusal = authority
+                .refusal_for(parent.as_str())
+                .map_err(|e| anyhow::anyhow!("write-tier lookup for birth parent {parent}: {e}"))?;
+            if let Some(refusal) = refusal {
+                authority.disclose(&refusal);
+                return Ok(BirthOutcome::Refused(refusal));
+            }
+        }
         // Idempotent: a second focus on the same affordance re-enters the block
         // the first one brought into existence. Without this, every re-click,
         // focus restore and re-render that touches the affordance would mint
@@ -3084,7 +3132,7 @@ impl ReactiveEngine {
         {
             self.reap_untouched_newborns(Some(&already));
             self.ui_state.set_focus(Some(already.clone()));
-            return Ok(already);
+            return Ok(BirthOutcome::Born(already));
         }
 
         let id = EntityUri::parse(&format!("{entity_type}:{}", uuid::Uuid::new_v4()))
@@ -3125,16 +3173,16 @@ impl ReactiveEngine {
                 self.ui_state
                     .ephemeral_newborns
                     .record(affordance_id, id.clone());
-                return Ok(id);
+                return Ok(BirthOutcome::Born(id));
             }
         }
 
-        // No cell route here (SqlOnly, synthetic stores): fall back to the
-        // dispatched create. Ordering on that leg is a separate lane's subject.
+        // Reached when no cell registry is installed or it declines the create;
+        // GPUI production runs this leg too (D113.a).
         tracing::warn!(
             newborn = %id,
-            "creation-slot birth falls back to a DETACHED dispatched create: no cell route is \
-             wired here (CRDT off — the SqlOnly test axis). A write from the same gesture is NOT \
+            "creation-slot birth falls back to a DETACHED dispatched create: no cell route took \
+             the create. A write from the same gesture is NOT \
              ordered after this create, so the first keystroke can reach the store before the \
              block exists."
         );
@@ -3167,7 +3215,7 @@ impl ReactiveEngine {
                 surface_op_failure(session.error_tracker(), &sink, "block", "create", &e);
             }
         });
-        Ok(id)
+        Ok(BirthOutcome::Born(id))
     }
 
     /// Seat the caret in `destination`'s first editable row.
@@ -3190,6 +3238,7 @@ impl ReactiveEngine {
         let generation_at_dispatch = nav.main_nav.get();
         let user_caret_at_dispatch = self.ui_state.user_caret_generation();
         let user_caret = self.ui_state.user_caret_generation_handle();
+        let write_tier = self.write_tier.clone();
         self.runtime_handle.spawn(async move {
             let Some(qe) = session.query_engine() else {
                 tracing::debug!("no query backend in this session; navigation seats no caret");
@@ -3220,14 +3269,14 @@ impl ReactiveEngine {
                 );
                 return;
             }
-            let target = match first_child {
-                Some(child) => child,
-                // ALLOW(entity_uri_from_raw): the destination's creation
-                // affordance id, whose `:__virtual:` infix is what makes the
-                // first keystroke birth a block under `destination`.
-                None => EntityUri::from_raw(
-                    &crate::row_origin::RowOrigin::creation_placeholder_id(&destination),
-                ),
+            let Some(target) =
+                navigation_caret_target(first_child, &destination, write_tier.as_deref())
+            else {
+                tracing::info!(
+                    %destination,
+                    "empty destination offers no creation slot; navigation seats no caret"
+                );
+                return;
             };
             // ALLOW(direct_focus_mutation): this IS the navigation caret seat;
             // it runs in a spawned task that cannot borrow `&UiState`.
@@ -4097,7 +4146,14 @@ impl BuilderServices for ReactiveEngine {
         // the focus instead.
         if let Some(affordance) = affordance_focus_target(&intent) {
             match self.birth_creation_affordance(&affordance) {
-                Ok(_) => journal.settle(journal_seq, Ok(())),
+                Ok(crate::creation_slot::BirthOutcome::Born(_)) => {
+                    journal.settle(journal_seq, Ok(()))
+                }
+                // Expected, and already disclosed by the authority: not an
+                // operation failure, so it is not surfaced as one.
+                Ok(crate::creation_slot::BirthOutcome::Refused(refusal)) => {
+                    journal.settle(journal_seq, Err(refusal.to_string()))
+                }
                 Err(e) => {
                     journal.settle(journal_seq, Err(format!("{e:#}")));
                     surface_op_failure(
@@ -4618,16 +4674,15 @@ impl BuilderServices for ReactiveEngine {
         self.ui_state.focused_block()
     }
 
-    /// The engine is the impl that CAN birth, so a slot caret resolves to a
-    /// real newborn here rather than failing the trait default's way.
-    fn caret_block_for_edit(&self) -> Result<Option<EntityUri>> {
-        match self.ui_state.caret() {
-            crate::row_origin::Caret::Unfocused => Ok(None),
-            crate::row_origin::Caret::Block(id) => Ok(Some(id)),
-            crate::row_origin::Caret::Slot(affordance) => self
-                .birth_creation_affordance(affordance.as_str())
-                .map(Some),
-        }
+    fn birth_affordance(
+        &self,
+        affordance: &EntityUri,
+    ) -> Result<crate::creation_slot::BirthOutcome> {
+        self.birth_creation_affordance(affordance.as_str())
+    }
+
+    fn offers_creation_under(&self, parent: &EntityUri) -> bool {
+        tier_allows_creation_under(self.write_tier.as_deref(), parent)
     }
 
     fn focused_block_mutable(&self) -> Option<Mutable<Option<EntityUri>>> {
@@ -4865,6 +4920,8 @@ pub struct StubBuilderServices {
     /// profile/variant path (`render_entity`) that a profile-less stub leaves
     /// unreachable. `None` keeps the stub's documented "no profile" answer.
     profile: Option<holon_api::RenderProfile>,
+    /// Parents `offers_creation_under` refuses, standing in for a write tier.
+    creation_refused_under: std::collections::HashSet<EntityUri>,
 }
 
 fn stub_runtime_handle() -> tokio::runtime::Handle {
@@ -4895,6 +4952,7 @@ impl StubBuilderServices {
             link_classifier: holon_api::link_parser::LinkTargetClassifier::default(),
             widget_states: std::collections::HashMap::new(),
             profile: None,
+            creation_refused_under: std::collections::HashSet::new(),
         }
     }
 
@@ -4905,6 +4963,7 @@ impl StubBuilderServices {
             link_classifier: holon_api::link_parser::LinkTargetClassifier::default(),
             widget_states: std::collections::HashMap::new(),
             profile: None,
+            creation_refused_under: std::collections::HashSet::new(),
         }
     }
 
@@ -4912,6 +4971,12 @@ impl StubBuilderServices {
     /// (`render_entity` → `pick_active_variant`) is reachable from a test.
     pub fn with_profile(mut self, profile: holon_api::RenderProfile) -> Self {
         self.profile = Some(profile);
+        self
+    }
+
+    /// Refuse a creation slot under `parent`, as a read-only page does.
+    pub fn with_creation_refused_under(mut self, parent: EntityUri) -> Self {
+        self.creation_refused_under.insert(parent);
         self
     }
 
@@ -4950,7 +5015,12 @@ impl BuilderServices for StubBuilderServices {
             link_classifier: holon_api::link_parser::LinkTargetClassifier::default(),
             widget_states: self.widget_states.clone(),
             profile: self.profile.clone(),
+            creation_refused_under: self.creation_refused_under.clone(),
         })
+    }
+
+    fn offers_creation_under(&self, parent: &EntityUri) -> bool {
+        !self.creation_refused_under.contains(parent)
     }
 
     fn get_block_data(&self, _: &EntityUri) -> (RenderExpr, Vec<Arc<DataRow>>) {
@@ -5100,6 +5170,38 @@ impl RenderInterpreterInjectorExt for Injector {
         let f: InterpretFn = Arc::new(interpret_fn);
         let shared = Shared::new(RenderInterpreterFn(f));
         self.provide::<RenderInterpreterFn>(Provider::root(move |_| shared.clone()));
+    }
+}
+
+fn tier_allows_creation_under(
+    tier: Option<&dyn holon_core::WriteTierAuthority>,
+    parent: &EntityUri,
+) -> bool {
+    let Some(tier) = tier else {
+        return true;
+    };
+    tier.refusal_for(parent.as_str())
+        .unwrap_or_else(|e| panic!("write-tier lookup of the parsed uri {parent}: {e}"))
+        .is_none()
+}
+
+/// Where navigation into `destination` seats the caret: its first child, else
+/// its creation affordance — unless the tier refuses a create there, which
+/// offers no slot and so seats nothing.
+fn navigation_caret_target(
+    first_child: Option<EntityUri>,
+    destination: &EntityUri,
+    tier: Option<&dyn holon_core::WriteTierAuthority>,
+) -> Option<EntityUri> {
+    match first_child {
+        Some(child) => Some(child),
+        None if !tier_allows_creation_under(tier, destination) => None,
+        // ALLOW(entity_uri_from_raw): the destination's creation affordance
+        // id, whose `:__virtual:` infix is what makes the first keystroke
+        // birth a block under `destination`.
+        None => Some(EntityUri::from_raw(
+            &crate::row_origin::RowOrigin::creation_placeholder_id(destination),
+        )),
     }
 }
 
@@ -5609,6 +5711,48 @@ mod tests {
         let mut params = HashMap::new();
         params.insert("id".to_string(), Value::String(id.to_string()));
         crate::operations::OperationIntent::new("block".into(), op.to_string(), params)
+    }
+
+    struct RefusingTier;
+
+    #[async_trait::async_trait]
+    impl holon_core::WriteTierAuthority for RefusingTier {
+        fn any_read_only_documents(&self) -> bool {
+            true
+        }
+        fn refusal_for(&self, _: &str) -> holon_core::Result<Option<holon_core::EditRefused>> {
+            Ok(Some(holon_core::EditRefused::ReadOnlyFormat {
+                format: "cooklang".into(),
+                path: std::path::PathBuf::from("/vault/Pancakes.cook"),
+            }))
+        }
+        async fn adopt_sync_import(&self, _: &str, _: &str) -> holon_core::Result<bool> {
+            Ok(false)
+        }
+        fn disclose(&self, refusal: &holon_core::EditRefused) {
+            panic!("asking where the caret goes disclosed {refusal}");
+        }
+    }
+
+    #[test]
+    fn navigation_into_an_empty_read_only_page_seats_no_caret() {
+        let page = EntityUri::block("recipe-page");
+        assert_eq!(
+            navigation_caret_target(None, &page, Some(&RefusingTier)),
+            None
+        );
+        let step = EntityUri::block("step-1");
+        assert_eq!(
+            navigation_caret_target(Some(step.clone()), &page, Some(&RefusingTier)),
+            Some(step),
+            "a read-only page's existing rows still take the caret"
+        );
+        assert!(
+            navigation_caret_target(None, &page, None)
+                .is_some_and(|slot| crate::row_origin::RowOrigin::from_id(slot.as_str())
+                    .is_creation_placeholder()),
+            "an empty writable page seats the caret on its creation slot"
+        );
     }
 
     #[test]

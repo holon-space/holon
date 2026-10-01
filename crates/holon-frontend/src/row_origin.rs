@@ -370,6 +370,19 @@ pub fn resolve_creation_parent(
     }
 }
 
+/// The parent a creation slot is drawn under: [`resolve_creation_parent`],
+/// minus a parent the write tier refuses — a read-only page offers no slot.
+pub fn offered_creation_parent(
+    rows: &[std::sync::Arc<holon_api::widget_spec::DataRow>],
+    container: &EntityUri,
+    allow_root_creation: bool,
+    explicit_container: bool,
+    services: &dyn crate::reactive::BuilderServices,
+) -> Option<EntityUri> {
+    resolve_creation_parent(rows, container, allow_root_creation, explicit_container)
+        .filter(|parent| services.offers_creation_under(parent))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

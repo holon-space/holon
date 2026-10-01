@@ -2505,6 +2505,13 @@ pub trait SutReadOnlyHomes {
     /// was re-judged as a user's edit instead of carrying the compound's own
     /// provenance down.
     async fn read_only_ingest_compound_attempts(&self) -> (usize, usize);
+
+    /// `(id, parent id)` for every `block_raw` row whose parent the production
+    /// authority refuses but whose own id it does not: a block some writer
+    /// created inside a read-only document without the tier deciding first.
+    /// A peer's import is adopted into the document and so refused itself,
+    /// which keeps it out of this list.
+    async fn read_only_undeclared_children(&self) -> Vec<(String, String)>;
 }
 
 #[holon_macros::capmap_adapter]
@@ -2531,6 +2538,9 @@ pub trait SutReadOnlyEditAttempt {
 #[holon_macros::capmap_adapter] // sync trait → no async-trait
 pub trait RefReadOnlyHomes {
     fn read_only_homed_blocks(&self) -> BTreeSet<EntityUri>;
+    /// Whether the write tier refuses a create under `parent`: the read-only
+    /// document's page and its homes alike.
+    fn refuses_creation_under(&self, parent: &EntityUri) -> bool;
 }
 
 #[holon_macros::capmap_adapter]

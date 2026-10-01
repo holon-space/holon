@@ -200,6 +200,11 @@ pub trait EntityCellRegistry: Send + Sync {
     /// for [`create_entity`](Self::create_entity) — including every case this
     /// narrow path declines to handle, such as a parent that is not yet in the
     /// tree. Default impl declines, so a registry opts in deliberately.
+    ///
+    /// A registry that writes directly is a writer under Model.md invariant 4:
+    /// a parent the write tier refuses yields `Err` wrapping
+    /// [`EditRefused`](crate::EditRefused), which a caller can tell apart from
+    /// a defect with `downcast_ref`.
     fn create_entity_sync(
         &self,
         _: &EntityUri,

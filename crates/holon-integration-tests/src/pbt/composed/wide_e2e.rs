@@ -308,7 +308,9 @@ pub fn seed_read_only_recipe(state: &mut ReferenceState) {
     // bookkeeping the home-profile oracle reads, and a recipe is held by no org
     // file. Production resolves the page's profile as `holon-native` for the
     // same reason — the profile axis has no read-only-format value yet.
-    let _ = &page;
+    state
+        .read_only
+        .seed_document(page.clone(), READ_ONLY_RECIPE_FILE);
     // The steps, as the cook adapter de-sugars them. Modeled so the whole-vault
     // watch/query oracles know them; seed-classified like the page, so the
     // block comparison still treats the file as their authority.
@@ -323,7 +325,7 @@ pub fn seed_read_only_recipe(state: &mut ReferenceState) {
             .block_state
             .block_documents
             .insert(uri.clone(), EntityUri::no_parent());
-        state.read_only.seed_home(uri);
+        state.read_only.seed_home(uri, READ_ONLY_RECIPE_FILE);
     }
 }
 

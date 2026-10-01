@@ -128,11 +128,12 @@ pub(crate) fn interpret_virtual_child(
     // Bug 2A: parent the creation slot at the query's focus root (resolved from
     // the rendered rows), not the static container `slot.parent_id`. `None`
     // (empty / not-yet-resolvable) → no slot rather than a silent mis-parent.
-    let Some(parent) = crate::row_origin::resolve_creation_parent(
+    let Some(parent) = crate::row_origin::offered_creation_parent(
         &ba.ctx.data_rows,
         &slot.parent_id,
         slot.allow_root_creation,
         slot.parent_is_explicit,
+        ba.services,
     ) else {
         return Ok(None);
     };

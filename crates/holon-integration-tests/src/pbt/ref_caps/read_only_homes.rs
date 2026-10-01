@@ -12,4 +12,8 @@ impl RefReadOnlyHomes for ReferenceState {
     fn read_only_homed_blocks(&self) -> BTreeSet<EntityUri> {
         self.read_only.homes().clone()
     }
+
+    fn refuses_creation_under(&self, parent: &EntityUri) -> bool {
+        self.read_only.refusing_file(parent).is_some()
+    }
 }

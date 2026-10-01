@@ -130,7 +130,6 @@ fn a_reimported_block_under_a_read_only_document_inherits_its_refusal() {
         assert!(
             authority
                 .refusal_for(RECIPE_STEP)
-                .await
                 .expect("the authority answers")
                 .is_some(),
             "the boot did not record {RECIPE_STEP} as read-only-homed, so this run never armed \
@@ -171,10 +170,7 @@ fn a_reimported_block_under_a_read_only_document_inherits_its_refusal() {
             "the re-import did not write {owed}, so the tier assertion below would be vacuous"
         );
 
-        let refusal = authority
-            .refusal_for(&owed)
-            .await
-            .expect("the authority answers");
+        let refusal = authority.refusal_for(&owed).expect("the authority answers");
         assert!(
             refusal.is_some(),
             "{owed} was re-imported under {RECIPE_STEP}, a block of the read-only file \
