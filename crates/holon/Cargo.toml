@@ -205,3 +205,7 @@ required-features = ["test-helpers"]
 [[test]]
 name = "query_history_mcp"
 required-features = ["test-helpers"]
+
+[[test]]
+name = "admission_footprint_sweep"
+required-features = ["test-helpers"]
