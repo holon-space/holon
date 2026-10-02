@@ -5671,6 +5671,11 @@ pub(crate) mod engine_harness {
                         },
                     ));
                 }
+                // No vault, so no read-only document.
+                injector.provide::<dyn holon_core::WriteTierAuthority>(Provider::root(|_| {
+                    Arc::new(holon_core::NoReadOnlyDocuments)
+                        as Arc<dyn holon_core::WriteTierAuthority>
+                }));
                 holon_loro_wiring::EventInfraModule
                     .configure(injector)
                     .map_err(|e| anyhow::anyhow!("configure EventInfraModule: {e}"))?;
