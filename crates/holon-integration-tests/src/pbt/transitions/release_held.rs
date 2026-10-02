@@ -23,7 +23,7 @@ use validated::Validated;
 use crate::pbt::transition_budgets::ExpectedSql;
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
-#[step_template("the {expect_parked} held dispatches are released")]
+#[step_template("the dispatch hold releases {expect_parked} held dispatches")]
 pub struct ReleaseHeld {
     pub expect_parked: usize,
 }

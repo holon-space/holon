@@ -1,3 +1,3 @@
-# Deterministic lock of the known red `jump-typechars-no-row` (docs/Testing/KeystoneKnownReds.md).
-# RED while the defect stands; it is NOT in keystone.jsonl so the hand-authored gate stays green.
+# Lock of `jump-typechars-no-row` (docs/Testing/KeystoneKnownReds.md, status no-longer-fires).
+# Kept OUT of keystone.jsonl: the creation-slot race it reaches is intermittent.
 {"name": "jump-to-day-page-then-type-on-turso", "description": "Known red `jump-typechars-no-row` (docs/Testing/KeystoneKnownReds.md): on a Turso-only draw, a jump to the keystone's day page followed by one typed character fails with `set_field('content') on '<block>' matched no row in block_raw`. Timing-dependent (4/5 locally). Kept OUT of keystone.jsonl because it is red; replay with HOLON_HAND_AUTHORED_SIDECAR=<this file> HOLON_HAND_AUTHORED_SKIP= just hand-authored.", "initial_state": {"wiring": {"storage_adapters": ["Turso"], "sync_adapters": [], "actors": []}}, "transitions": [{"JumpToSearchHit": {"query": "2026-01-16", "hit": "block:368857d2-b6f5-4a8d-5c03-a6daedd2100f"}}, {"TypeChars": {"text": "€"}}]}

@@ -206,8 +206,8 @@ pub trait QueryEngine: Send + Sync {
     /// One read rather than three because every editor mount needs all of
     /// them, and the keystone budgets count reads per action — extra round
     /// trips per focus would be a measurable regression for facts the first
-    /// row already carried.
-    async fn block_editor_source_by_id(&self, id: &EntityUri) -> Result<EditorSource> {
+    /// row already carried. `None` when no row has `id`.
+    async fn block_editor_source_by_id(&self, id: &EntityUri) -> Result<Option<EditorSource>> {
         let _ = id;
         anyhow::bail!("QueryEngine::block_editor_source_by_id not implemented by this impl")
     }

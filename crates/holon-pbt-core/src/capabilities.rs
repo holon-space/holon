@@ -3872,9 +3872,10 @@ pub trait SutDispatchHold {
     fn fail_next_dispatch(&self, entity: &str, op: &str);
     /// Panics unless exactly `expect_parked` runs are parked.
     async fn release_held_dispatches(&self, expect_parked: usize);
-    /// Runs of `entity.op` that reached the hold and did not land: parked
-    /// now, or failed.
-    fn withheld_dispatches(&self, entity: &str, op: &str) -> usize;
+    /// Runs of `entity.op` parked at the hold right now.
+    fn parked_dispatches(&self, entity: &str, op: &str) -> usize;
+    /// Runs of `entity.op` the hold failed since the last call.
+    fn take_failed_dispatches(&self, entity: &str, op: &str) -> usize;
 }
 
 /// SUT capability: pre-startup org-filesystem fixture setup — writing org

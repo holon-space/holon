@@ -58,14 +58,20 @@ impl DispatchHold {
         self.add_rule(entity, op, Effect::Fail);
     }
 
-    /// Runs of `entity.op` that reached the hook and did not land: parked
-    /// now, or failed.
-    pub fn withheld(&self, entity: &str, op: &str) -> usize {
+    /// Runs of `entity.op` parked at the hook right now.
+    pub fn parked_runs(&self, entity: &str, op: &str) -> usize {
         let name = format!("{entity}.{op}");
         let state = self.state.lock().unwrap();
-        let parked = state.parked.iter().filter(|(n, _)| *n == name).count();
-        let failed = state.failed.iter().filter(|n| **n == name).count();
-        parked + failed
+        state.parked.iter().filter(|(n, _)| *n == name).count()
+    }
+
+    /// Runs of `entity.op` the hook failed since the last call.
+    pub fn take_failed(&self, entity: &str, op: &str) -> usize {
+        let name = format!("{entity}.{op}");
+        let mut state = self.state.lock().unwrap();
+        let before = state.failed.len();
+        state.failed.retain(|n| *n != name);
+        before - state.failed.len()
     }
 
     /// Runs parked at the hook right now, across every `entity.op`.
@@ -135,5 +141,20 @@ impl DispatchHold {
         resumed.await.map_err(|_| {
             anyhow::anyhow!("dispatch hold dropped while {entity}.{op} was parked, never released")
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_failed_run_is_reported_once() {
+        let hold = DispatchHold::default();
+        hold.fail_next("block", "create");
+        let entity = EntityName::new("block");
+        assert!(hold.checkpoint(&entity, "create").await.is_err());
+        assert_eq!(hold.take_failed("block", "create"), 1);
+        assert_eq!(hold.take_failed("block", "create"), 0);
     }
 }

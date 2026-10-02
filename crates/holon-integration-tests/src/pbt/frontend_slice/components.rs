@@ -4965,8 +4965,12 @@ impl SutDispatchHold for HeadlessFrontendComponent {
             .unwrap_or_else(|e| panic!("[SutDispatchHold::release_held_dispatches] {e:#}"));
     }
 
-    fn withheld_dispatches(&self, entity: &str, op: &str) -> usize {
-        self.engine().dispatch_hold().withheld(entity, op)
+    fn parked_dispatches(&self, entity: &str, op: &str) -> usize {
+        self.engine().dispatch_hold().parked_runs(entity, op)
+    }
+
+    fn take_failed_dispatches(&self, entity: &str, op: &str) -> usize {
+        self.engine().dispatch_hold().take_failed(entity, op)
     }
 }
 

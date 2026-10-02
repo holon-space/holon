@@ -358,7 +358,7 @@ impl QueryEngine for BackendEngine {
     async fn block_editor_source_by_id(
         &self,
         id: &EntityUri,
-    ) -> Result<holon_api::query_engine::EditorSource> {
+    ) -> Result<Option<holon_api::query_engine::EditorSource>> {
         use crate::storage::BLOCK_WRITE_TABLE;
         let escaped = id.to_string().replace('\'', "''");
         let sql = format!(
@@ -367,7 +367,7 @@ impl QueryEngine for BackendEngine {
         );
         let rows = BackendEngine::execute_query(self, sql, HashMap::new(), None).await?;
         let Some(row) = rows.into_iter().next() else {
-            return Ok(holon_api::query_engine::EditorSource::default());
+            return Ok(None);
         };
         let field = |key: &str| row.get(key).and_then(|v| v.as_string()).map(str::to_string);
         // Parse at the boundary: a `marks` column this editor cannot read is an
@@ -384,12 +384,12 @@ impl QueryEngine for BackendEngine {
                 })?,
             None => Vec::new(),
         };
-        Ok(holon_api::query_engine::EditorSource {
+        Ok(Some(holon_api::query_engine::EditorSource {
             content: field("content"),
             marks,
             task_state: field("task_state"),
             write_seq: row.get("write_seq").and_then(|v| v.as_i64()),
-        })
+        }))
     }
 
     async fn block_todo_keywords(

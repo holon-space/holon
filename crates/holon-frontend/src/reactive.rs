@@ -297,6 +297,12 @@ pub trait BuilderServices: Send + Sync {
         Box::pin(std::future::ready(Ok(())))
     }
 
+    /// Disclose a failed fire-and-forget op whose caller has no result to
+    /// return. Services without a user-visible surface only log it.
+    fn surface_op_failure(&self, entity_name: &str, op_name: &str, err: &anyhow::Error) {
+        tracing::error!("Operation {entity_name}.{op_name} failed: {err:#}");
+    }
+
     /// Like [`Self::dispatch_intent`] but returns a `'static` future resolving
     /// to the op's result, so a caller (e.g. the GPUI editor) can await it and
     /// surface a BACKEND failure — template-not-found, missing bindings — as a
@@ -3192,35 +3198,53 @@ impl ReactiveEngine {
             .ephemeral_newborns
             .record(affordance_id, id.clone());
 
+        self.spawn_journaled_rule_op(
+            holon_api::EntityName::new(&entity_type),
+            "create",
+            params,
+            crate::creation_slot::BIRTH_TRANSITION_ID,
+        );
+        Ok(BirthOutcome::Born(id))
+    }
+
+    /// Fire-and-forget a rule-originated op: journaled before the spawn,
+    /// settled when it lands, surfaced when it fails.
+    fn spawn_journaled_rule_op(
+        &self,
+        entity: holon_api::EntityName,
+        op_name: &'static str,
+        params: HashMap<String, holon_api::Value>,
+        transition_id: &str,
+    ) {
         let session = self.session.clone();
-        let entity = holon_api::EntityName::new(&entity_type);
         let sink = self.ui_state.op_failure_sink_handle();
         let journal = self.ui_state.dispatch_journal.clone();
         let journal_seq = journal.record(&crate::operations::OperationIntent::new(
             entity.clone(),
-            "create".to_string(),
+            op_name.to_string(),
             params.clone(),
         ));
+        let origin = holon_api::OpOrigin::Rule {
+            transition_id: transition_id.to_string(),
+        };
         self.runtime_handle.spawn(async move {
             match session
-                .execute_operation_with_origin(
-                    &entity,
-                    "create",
-                    params,
-                    holon_api::OpOrigin::Rule {
-                        transition_id: crate::creation_slot::BIRTH_TRANSITION_ID.to_string(),
-                    },
-                )
+                .execute_operation_with_origin(&entity, op_name, params, origin)
                 .await
             {
                 Ok(_) => journal.settle(journal_seq, Ok(())),
                 Err(e) => {
                     journal.settle(journal_seq, Err(format!("{e:#}")));
-                    surface_op_failure(session.error_tracker(), &sink, "block", "create", &e);
+                    surface_op_failure(
+                        session.error_tracker(),
+                        &sink,
+                        entity.as_str(),
+                        op_name,
+                        &e,
+                    );
                 }
             }
         });
-        Ok(BirthOutcome::Born(id))
     }
 
     /// Seat the caret in `destination`'s first editable row.
@@ -3308,23 +3332,12 @@ impl ReactiveEngine {
             }
             let mut params: HashMap<String, holon_api::Value> = HashMap::new();
             params.insert("id".into(), holon_api::Value::String(id.to_string()));
-            let session = self.session.clone();
-            let sink = self.ui_state.op_failure_sink_handle();
-            self.runtime_handle.spawn(async move {
-                if let Err(e) = session
-                    .execute_operation_with_origin(
-                        &holon_api::EntityName::new("block"),
-                        "delete",
-                        params,
-                        holon_api::OpOrigin::Rule {
-                            transition_id: crate::creation_slot::REAP_TRANSITION_ID.to_string(),
-                        },
-                    )
-                    .await
-                {
-                    surface_op_failure(session.error_tracker(), &sink, "block", "delete", &e);
-                }
-            });
+            self.spawn_journaled_rule_op(
+                holon_api::EntityName::new("block"),
+                "delete",
+                params,
+                crate::creation_slot::REAP_TRANSITION_ID,
+            );
         }
     }
 
@@ -4007,6 +4020,16 @@ impl ReactiveEngine {
 }
 
 impl BuilderServices for ReactiveEngine {
+    fn surface_op_failure(&self, entity_name: &str, op_name: &str, err: &anyhow::Error) {
+        surface_op_failure(
+            self.session.error_tracker(),
+            &self.ui_state.op_failure_sink_handle(),
+            entity_name,
+            op_name,
+            err,
+        );
+    }
+
     fn interpret(&self, expr: &RenderExpr, ctx: &RenderContext) -> ReactiveViewModel {
         self.interpreter.interpret(expr, ctx, self)
     }
@@ -4628,11 +4651,26 @@ impl BuilderServices for ReactiveEngine {
         // and the user clicking a dangling link whose page name is taken would
         // see nothing open AND no error — indistinguishable from a dead link.
         let op_failure_sink = self.ui_state.op_failure_sink_handle();
+        let journal = self.ui_state.dispatch_journal.clone();
+        let journal_seq = journal.record(&crate::operations::OperationIntent::new(
+            holon_api::EntityName::new("block"),
+            "create_page_from_link".to_string(),
+            [(
+                "target".to_string(),
+                holon_api::Value::String(target.clone()),
+            )]
+            .into_iter()
+            .collect(),
+        ));
         self.runtime_handle.spawn(async move {
-            if let Err(e) =
+            let followed =
                 create_page_and_navigate(&session, &nav_handles, &target, &region, focus_at_click)
-                    .await
-            {
+                    .await;
+            journal.settle(
+                journal_seq,
+                followed.as_ref().map(|_| ()).map_err(|e| format!("{e:#}")),
+            );
+            if let Err(e) = followed {
                 // Disclose the failed follow: the user clicked a dangling link
                 // and nothing opened, so a dropped error would look like a dead
                 // link. The tracker is the PBT/monitoring seam; the sink routes
@@ -5628,11 +5666,10 @@ pub fn dispatch_intent_chain(
     services.clone().runtime_handle().spawn(async move {
         let _open = open;
         for intent in intents {
-            let label = format!("{}.{}", intent.entity_name, intent.op_name);
+            let entity_name = intent.entity_name.clone();
+            let op_name = intent.op_name.clone();
             if let Err(e) = services.dispatch_intent_sync(intent).await {
-                tracing::error!(
-                    "dispatch_intent_chain: {label} failed — aborting remaining intents: {e:#}"
-                );
+                services.surface_op_failure(entity_name.as_str(), &op_name, &e);
                 return;
             }
         }

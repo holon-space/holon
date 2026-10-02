@@ -12,7 +12,7 @@
 1 crates/holon-core/src/operation_wrapper.rs below
 2 crates/holon-frontend/src/lib.rs entry
 1 crates/holon-frontend/src/operations.rs entry
-8 crates/holon-frontend/src/reactive.rs entry
+7 crates/holon-frontend/src/reactive.rs entry
 1 crates/holon-loro-wiring/src/event_infra_module.rs below
 5 crates/holon-loro/src/loro_share_backend.rs below
 1 crates/holon-mcp-client/src/mcp_provider.rs below

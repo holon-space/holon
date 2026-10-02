@@ -24,6 +24,7 @@ use std::sync::Mutex;
 use anyhow::Context;
 use anyhow::Result;
 use holon_api::Value;
+use holon_api::query_engine::EditorSource;
 
 use crate::editor_caret;
 use crate::editor_view_model::EditorKey;
@@ -59,6 +60,23 @@ fn new_editor_vm(block_id: &str, seed: &str) -> EditorViewModel {
         "content".to_string(),
         seed.to_string(),
     )
+}
+
+/// One data-sync echo of `source` into `vm`, as GPUI's data subscription runs
+/// it; the converged buffer when the VM re-seeded.
+fn converge_vm_to_source(vm: &mut EditorViewModel, source: &EditorSource) -> Option<String> {
+    // The editable surface shows vault syntax, so the authority the echo
+    // discriminator compares against is the PROJECTION of the settled row, not
+    // its content column — otherwise every source-channel write reads back as
+    // an external change and converges the keyword away.
+    let authority = vm.project_authority(
+        source.content.as_deref().unwrap_or_default(),
+        &source.marks,
+        source.task_state.as_deref(),
+    );
+    let directive = vm.converge_from_data_sync(&authority, source.write_seq)?;
+    vm.set_buffer_from_authority(&directive.target, directive.seq);
+    Some(directive.target)
 }
 
 pub struct HeadlessEditorMirror {
@@ -249,7 +267,11 @@ impl HeadlessEditorMirror {
     ) -> Result<EditorViewModel> {
         let block_id = block_uri.to_string();
         let services: &dyn BuilderServices = engine.as_ref();
-        let source = self.sql_editor_source(engine, &block_id).await?;
+        // An absent row (a newborn whose create has not landed) seeds empty.
+        let source = self
+            .sql_editor_source(engine, &block_id)
+            .await?
+            .unwrap_or_default();
         let sql_content = source.content.clone().unwrap_or_default();
         // The surface is rendered from a PAIR, so content and marks must come
         // from ONE authority. The live cell is preferred for content (it cures
@@ -413,36 +435,24 @@ impl HeadlessEditorMirror {
     /// `content` and runs the VM's `converge_from_data_sync` against its own
     /// `last_local_seq`; a `Converge` directive re-seeds the buffer, while the
     /// own trailing-whitespace echo (`AdoptBaseline`) and in-sync/stale cases
-    /// leave the typed buffer intact. `echo_seq` is the row's own `write_seq`,
-    /// as GPUI's data subscription reads it: keystrokes are in flight at a
-    /// settle, so the row can trail the VM's high-water.
+    /// leave the typed buffer intact. The echo carries the row's own
+    /// `write_seq`, as GPUI's data subscription reads it: keystrokes are in
+    /// flight at a settle, so the row can trail the VM's high-water.
     pub async fn converge_editor(
         &self,
         engine: &Arc<ReactiveEngine>,
         block_id: &str,
     ) -> Result<()> {
-        let source = self.sql_editor_source(engine, block_id).await?;
-        // `write_seq` is NOT NULL, so only a vanished row lacks it; GPUI's
-        // data subscription sends no echo for a removed row.
-        let Some(echo_seq) = source.write_seq else {
+        // GPUI's data subscription sends no echo for a removed row.
+        let Some(source) = self.sql_editor_source(engine, block_id).await? else {
             return Ok(());
         };
-        let content = source.content.unwrap_or_default();
-        let task_state = source.task_state;
-        let mut converged_to = None;
-        let mut eds = self.editors.lock().unwrap();
-        if let Some(vm) = eds.get_mut(block_id) {
-            // The editable surface shows vault syntax, so the authority the echo
-            // discriminator compares against is the PROJECTION of the settled
-            // row, not its content column — otherwise every source-channel write
-            // reads back as an external change and converges the keyword away.
-            let authority = vm.project_authority(&content, &source.marks, task_state.as_deref());
-            if let Some(directive) = vm.converge_from_data_sync(&authority, Some(echo_seq)) {
-                vm.set_buffer_from_authority(&directive.target, directive.seq);
-                converged_to = Some(directive.target);
-            }
-        }
-        drop(eds);
+        let converged_to = self
+            .editors
+            .lock()
+            .unwrap()
+            .get_mut(block_id)
+            .and_then(|vm| converge_vm_to_source(vm, &source));
         // A converge can SHORTEN the buffer (the store canonicalizes what it
         // stored), so the caret is clamped onto it — the headless twin of
         // GPUI's `preserved_caret` around the absolute `set_value`.
@@ -589,14 +599,12 @@ impl HeadlessEditorMirror {
     /// non-settling read of the write table (`block_raw`) — the headless mirror
     /// must see exactly what a production editor's read would see, WITHOUT
     /// awaiting CDC quiescence (settling would mask the projection races the
-    /// PBTs hunt). `("", None)` when the row hasn't materialised yet, so a
-    /// just-clicked block's keystrokes no-op until it does; query errors
-    /// propagate (fail loud).
+    /// PBTs hunt). `None` when the row hasn't materialised yet.
     async fn sql_editor_source(
         &self,
         engine: &Arc<ReactiveEngine>,
         block_id: &str,
-    ) -> Result<holon_api::query_engine::EditorSource> {
+    ) -> Result<Option<EditorSource>> {
         let uri = holon_api::EntityUri::parse(block_id)
             .with_context(|| format!("headless mirror got a non-URI block id {block_id:?}"))?;
         let query_engine = engine.session().query_engine().with_context(|| {
@@ -996,5 +1004,51 @@ mod spike_phase_1b_tests {
         m.forget(block, Some(1));
         assert_eq!(m.tracked_cursor_at(block, Some(1)), None);
         assert_eq!(m.tracked_cursor_at(block, None), Some(3));
+    }
+}
+
+#[cfg(test)]
+mod converge_tests {
+    use std::sync::Arc;
+    use std::sync::Mutex;
+
+    use tracing::Subscriber;
+    use tracing_subscriber::layer::Context;
+    use tracing_subscriber::layer::Layer;
+    use tracing_subscriber::prelude::*;
+
+    use super::*;
+
+    #[derive(Clone, Default)]
+    struct DataSyncErrors(Arc<Mutex<usize>>);
+
+    impl<S: Subscriber> Layer<S> for DataSyncErrors {
+        fn on_event(&self, event: &tracing::Event<'_>, _: Context<'_, S>) {
+            let meta = event.metadata();
+            if meta.target() == "editor.data_sync" && *meta.level() == tracing::Level::ERROR {
+                *self.0.lock().unwrap() += 1;
+            }
+        }
+    }
+
+    #[test]
+    fn a_changed_row_without_write_seq_is_dropped_loudly() {
+        let mut vm = new_editor_vm("block:b", "typed");
+        let source = EditorSource {
+            content: Some("changed in the store".to_string()),
+            write_seq: None,
+            ..EditorSource::default()
+        };
+        let errors = DataSyncErrors::default();
+        let converged = tracing::subscriber::with_default(
+            tracing_subscriber::registry().with(errors.clone()),
+            || converge_vm_to_source(&mut vm, &source),
+        );
+        assert_eq!(converged, None, "a seq-less echo must not converge");
+        assert_eq!(
+            *errors.0.lock().unwrap(),
+            1,
+            "a seq-less echo must log the DropNoSeq error, as GPUI's data subscription does"
+        );
     }
 }

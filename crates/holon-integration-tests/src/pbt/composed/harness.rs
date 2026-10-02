@@ -669,6 +669,9 @@ pub struct ComposedSut<S: ComposedSlice> {
     /// retracted): a foreign block the peer later deletes stays excused, which
     /// is correct because the oracle never held it in the first place.
     foreign_ids: BTreeSet<EntityUri>,
+    /// Synthetic ids of creates the dispatch hold failed: the SUT never mints
+    /// them, so they leave the 1:1 pairing for the rest of the run.
+    failed_create_synthetics: BTreeSet<EntityUri>,
     rt: tokio::runtime::Runtime,
     /// Pumps an attached gpui window to a fixed point before each
     /// `check_invariants` read; a no-op for the headless path. See
@@ -852,24 +855,15 @@ impl<S: ComposedSlice> ComposedSut<S> {
             .cloned()
             .collect();
         let vanished: Vec<&EntityUri> = before.difference(&after).collect();
-        // A create the dispatch hold parked or failed has a synthetic the SUT
-        // has not minted; it stays unpaired until a later tick lands it.
-        let withheld = sut
+        let (parked, newly_failed) = sut
             .caps
             .get::<dyn holon_pbt_core::capabilities::SutDispatchHold>()
-            .map_or(0, |hold| hold.withheld_dispatches("block", "create"));
-        assert!(
-            withheld == 0 || real_new.is_empty(),
-            "per-tick reconcile: {withheld} withheld create(s) and new real ids {real_new:?} \
-             in one tick cannot be paired with syn={synthetic:?}"
-        );
-        assert_eq!(
-            synthetic.len(),
-            real_new.len() + withheld,
-            "per-tick reconcile: one synthetic per minted real id (syn={synthetic:?}, \
-             real={real_new:?}, withheld creates={withheld}); this tick RETIRED {retired:?} \
-             and the SUT LOST {vanished:?} from block_raw"
-        );
+            .map_or((0, 0), |hold| {
+                (
+                    hold.parked_dispatches("block", "create"),
+                    hold.take_failed_dispatches("block", "create"),
+                )
+            });
         // Pairing safety for the R2 StaleExternalRewrite CHURN (multiple mints in
         // one tick, unlike the usual one-mint transitions this zip was written for):
         // the churn re-mints only NON-UNIQUE / empty content (unique content remaps
@@ -881,7 +875,22 @@ impl<S: ComposedSlice> ComposedSut<S> {
         // cross-content mispair is possible because all churn mints carry the same
         // content. The oracle predicts the identical churn in `StaleExternalRewrite::
         // apply_to_ref` (shared `tiered_match`), so the two lengths match here.
-        for (syn, real) in synthetic.into_iter().zip(real_new) {
+        let held = HeldCreates {
+            parked,
+            newly_failed,
+        };
+        let pairs = pair_synthetic_creates(
+            synthetic,
+            real_new,
+            held,
+            &mut sut.failed_create_synthetics,
+            || {
+                format!(
+                    "this tick RETIRED {retired:?} and the SUT LOST {vanished:?} from block_raw"
+                )
+            },
+        );
+        for (syn, real) in pairs {
             map.insert(syn, real);
         }
         drop(map);
@@ -921,6 +930,7 @@ impl<S: ComposedSlice> ComposedSut<S> {
             redo_burned,
             scaffold_ids,
             foreign_ids,
+            failed_create_synthetics,
             rt,
             settle,
             engaged,
@@ -990,6 +1000,7 @@ impl<S: ComposedSlice> ComposedSut<S> {
             redo_burned,
             scaffold_ids,
             foreign_ids,
+            failed_create_synthetics,
             rt,
             settle,
             engaged,
@@ -1045,6 +1056,7 @@ impl<S: ComposedSlice> ComposedSut<S> {
             redo_burned: BTreeSet::new(),
             scaffold_ids,
             foreign_ids: BTreeSet::new(),
+            failed_create_synthetics: BTreeSet::new(),
             rt,
             settle,
             engaged: std::cell::RefCell::new(std::collections::BTreeMap::new()),
@@ -1215,6 +1227,7 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
             redo_burned: BTreeSet::new(),
             scaffold_ids,
             foreign_ids: BTreeSet::new(),
+            failed_create_synthetics: BTreeSet::new(),
             rt,
             settle: Box::new(|| {}),
             engaged: std::cell::RefCell::new(std::collections::BTreeMap::new()),
@@ -1683,6 +1696,100 @@ impl<S: ComposedSlice> crate::pbt::fixtures::FixtureAssertable for ComposedSut<S
                 &self.caps,
                 &self.resolver,
             ))
+    }
+}
+
+/// Creates the dispatch hold kept from landing, as one tick's reconcile sees
+/// them.
+#[derive(Debug, Clone, Copy)]
+struct HeldCreates {
+    parked: usize,
+    /// Failed since the previous tick.
+    newly_failed: usize,
+}
+
+/// Pair this tick's unmapped synthetic creates 1:1 with the real ids the SUT
+/// minted. A parked create stays unpaired until a later tick lands it; a
+/// failed one never lands, so its synthetic moves into `failed_synthetics`.
+fn pair_synthetic_creates(
+    synthetic: Vec<EntityUri>,
+    real_new: Vec<EntityUri>,
+    held: HeldCreates,
+    failed_synthetics: &mut BTreeSet<EntityUri>,
+    context: impl FnOnce() -> String,
+) -> Vec<(EntityUri, EntityUri)> {
+    let synthetic: Vec<EntityUri> = synthetic
+        .into_iter()
+        .filter(|id| !failed_synthetics.contains(id))
+        .collect();
+    let withheld = held.parked + held.newly_failed;
+    assert!(
+        withheld == 0 || real_new.is_empty(),
+        "per-tick reconcile: {held:?} create(s) and new real ids {real_new:?} in one tick \
+         cannot be paired with syn={synthetic:?}"
+    );
+    assert_eq!(
+        synthetic.len(),
+        real_new.len() + withheld,
+        "per-tick reconcile: one synthetic per minted real id (syn={synthetic:?}, \
+         real={real_new:?}, {held:?}); {}",
+        context()
+    );
+    if held.newly_failed == 0 {
+        return synthetic.into_iter().zip(real_new).collect();
+    }
+    assert_eq!(
+        held.parked, 0,
+        "per-tick reconcile: a parked and a failed create in one tick cannot be told apart \
+         (syn={synthetic:?})"
+    );
+    failed_synthetics.extend(synthetic);
+    Vec::new()
+}
+
+#[cfg(test)]
+mod pairing_tests {
+    use std::collections::BTreeSet;
+
+    use holon_api::EntityUri;
+
+    use super::HeldCreates;
+    use super::pair_synthetic_creates;
+
+    fn uri(s: &str) -> EntityUri {
+        EntityUri::parse(s).unwrap()
+    }
+
+    #[test]
+    fn a_failed_create_does_not_block_a_later_tick_pairing() {
+        let mut failed = BTreeSet::new();
+        let s1 = uri("block:syn-1");
+        let s2 = uri("block:syn-2");
+        let r2 = uri("block:real-2");
+
+        let tick1 = pair_synthetic_creates(
+            vec![s1.clone()],
+            vec![],
+            HeldCreates {
+                parked: 0,
+                newly_failed: 1,
+            },
+            &mut failed,
+            String::new,
+        );
+        assert!(tick1.is_empty());
+
+        let tick2 = pair_synthetic_creates(
+            vec![s1, s2.clone()],
+            vec![r2.clone()],
+            HeldCreates {
+                parked: 0,
+                newly_failed: 0,
+            },
+            &mut failed,
+            String::new,
+        );
+        assert_eq!(tick2, vec![(s2, r2)]);
     }
 }
 

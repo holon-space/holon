@@ -317,7 +317,6 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `integration-toggle-load`
 - `iroh-nat-traversal-address-set`
 - `join-then-stale-second-join`
-- `jump-typechars-no-row`
 - `keystroke-set-field-store-reorder`
 - `lib-type-chars-home-profile-derived`
 - `loro-backend-change-count`
