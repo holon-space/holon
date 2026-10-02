@@ -1508,14 +1508,14 @@ impl LoroProjection {
         mode: &str,
         reason: &str,
     ) -> Result<()> {
-        // Every pass read the tree before this point, so the saved snapshot
+        // Every pass read the tree before this point, so the saved state
         // holds at least what the sink and the sidecar are about to reflect.
         self.doc_store
             .read()
             .await
             .save_all()
             .await
-            .context("save the Loro snapshot before the SQL sink reflects it")?;
+            .context("save the Loro document before the SQL sink reflects it")?;
 
         // FK-safe create ordering — the single write chokepoint's guarantee.
         // The `block_raw.parent_id` self-FK is DEFERRABLE INITIALLY DEFERRED, but

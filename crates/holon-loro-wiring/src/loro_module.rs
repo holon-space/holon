@@ -98,6 +98,7 @@ impl Module for LoroModule {
         // Register LoroDocumentStore
         injector.provide::<LoroDocumentStore>(Provider::root(|resolver| {
             let config = resolver.resolve::<LoroConfig>();
+            let bus = resolver.resolve::<Arc<holon_api::ConditionBus>>();
             // Before the store can hand out a document: a pair killed between
             // its two renames left the global document in the staging or the
             // archive directory, and opening the store first would create an
@@ -105,7 +106,9 @@ impl Module for LoroModule {
             holon_loro::pairing_swap::complete_interrupted_swap(&config.storage_dir)
                 .expect("[LoroModule] finishing an interrupted pairing swap");
             Shared::new(
-                LoroDocumentStore::new(config.storage_dir.clone()).with_peer_id(config.peer_id),
+                LoroDocumentStore::new(config.storage_dir.clone())
+                    .with_peer_id(config.peer_id)
+                    .with_condition_bus((*bus).clone()),
             )
         }));
 
@@ -704,6 +707,9 @@ mod tests {
         let injector = Injector::root();
         injector.provide::<LoroConfig>(Provider::root(move |_| {
             Shared::new(LoroConfig::new(dir.path().to_path_buf()))
+        }));
+        injector.provide::<Arc<holon_api::ConditionBus>>(Provider::root(|_| {
+            Shared::new(Arc::new(holon_api::ConditionBus::new()))
         }));
         LoroModule.configure(&injector).unwrap();
         injector

@@ -159,9 +159,9 @@ pub async fn shutdown_session(injector: &fluxdi::Injector) -> Result<()> {
                 )
             })?;
         store
-            .save_all()
+            .checkpoint()
             .await
-            .map_err(|e| anyhow::anyhow!("shutdown: saving the Loro snapshot failed: {e:#}"))?;
+            .map_err(|e| anyhow::anyhow!("shutdown: checkpointing the Loro store failed: {e:#}"))?;
     }
 
     // Which substrate this container holds is a registered value, so a Turso

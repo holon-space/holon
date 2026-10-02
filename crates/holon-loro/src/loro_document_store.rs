@@ -2,8 +2,9 @@
 //!
 //! Blocks live in one of two LoroDocs, each with a LoroTree: the GLOBAL doc
 //! (notes — the replication set's root container) and the LAYOUT doc (the
-//! device-local UI layout). The store handles persistence (saving/loading each
-//! `.loro` snapshot) and hands out either doc by [`DocScope`].
+//! device-local UI layout). The store handles persistence (each doc is a
+//! `.loro` snapshot plus its [`crate::update_log`]) and hands out either doc
+//! by [`DocScope`].
 //!
 //! Legacy per-file methods are retained for backward compat during migration
 // ALLOW(compatibility): legacy per-file API shape predates the single-global-doc
@@ -70,16 +71,19 @@ pub struct LoroDocumentStore {
     storage_dir: PathBuf,
     /// Legacy: aliases mapping doc_ids to file paths (kept for org sync compat)
     doc_id_aliases: Arc<RwLock<HashMap<String, CanonicalPath>>>,
-    /// Counts `save_all` calls to schedule periodic history compaction
-    /// (see `save_all`). `Arc` so clones share one schedule (the struct is
+    /// Counts snapshot writes to schedule periodic history compaction
+    /// (see `persist`). `Arc` so clones share one schedule (the struct is
     /// `Clone`; a per-clone counter would compact on every clone's first save).
     #[cfg(not(target_arch = "wasm32"))]
     save_counter: Arc<std::sync::atomic::AtomicU64>,
-    /// The oplog frontiers each snapshot file holds, keyed by doc id. Held
-    /// across a whole `save_all`, so two savers cannot rename their files in
-    /// the opposite order to their exports.
+    /// What each doc's snapshot and log hold, keyed by doc id; a doc absent
+    /// here gets a snapshot on its next save. Held across a whole save, so
+    /// two savers cannot write their files in the opposite order to their
+    /// exports.
     #[cfg(not(target_arch = "wasm32"))]
-    saved: Arc<tokio::sync::Mutex<HashMap<&'static str, loro::Frontiers>>>,
+    saved: Arc<tokio::sync::Mutex<HashMap<&'static str, Persisted>>>,
+    /// Where a dropped torn log tail is disclosed.
+    conditions: Option<Arc<holon_api::ConditionBus>>,
     /// Peer id to mint both docs under. `None` = the env/random default
     /// in `LoroDocument::new`. Two instances in ONE process must each
     /// inject their own — the env var is process-global and would collide.
@@ -90,6 +94,15 @@ pub struct LoroDocumentStore {
     /// text side from inside other runtimes, where an async read would have to
     /// block on one executor from within another.
     text_undo: Arc<std::sync::OnceLock<Arc<TextUndo>>>,
+}
+
+/// What one doc's snapshot plus update log hold on disk.
+#[cfg(not(target_arch = "wasm32"))]
+struct Persisted {
+    frontiers: loro::Frontiers,
+    vv: loro::VersionVector,
+    snapshot_bytes: u64,
+    log_bytes: u64,
 }
 
 /// The replicated document's id and file name — the one document a device
@@ -111,6 +124,7 @@ impl LoroDocumentStore {
             save_counter: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             #[cfg(not(target_arch = "wasm32"))]
             saved: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            conditions: None,
             peer_id: None,
             text_undo: Arc::new(std::sync::OnceLock::new()),
         }
@@ -120,6 +134,12 @@ impl LoroDocumentStore {
     /// injection seam).
     pub fn with_peer_id(mut self, peer_id: Option<u64>) -> Self {
         self.peer_id = peer_id;
+        self
+    }
+
+    /// Disclose a dropped torn update-log tail on `bus`.
+    pub fn with_condition_bus(mut self, bus: Arc<holon_api::ConditionBus>) -> Self {
+        self.conditions = Some(bus);
         self
     }
 
@@ -210,14 +230,33 @@ impl LoroDocumentStore {
         #[cfg(not(target_arch = "wasm32"))]
         let doc = {
             let snapshot_path = self.snapshot_path(scope);
+            let log_path = crate::update_log::log_path(&snapshot_path);
             if snapshot_path.exists() {
                 info!("Loading {doc_id} LoroTree from {}", snapshot_path.display());
-                match LoroDocument::load_from_file_with_peer_id(
+                match LoroDocument::load_snapshot_with_peer_id(
                     &snapshot_path,
                     doc_id.to_string(),
                     self.peer_id,
                 ) {
-                    Ok(loaded) => Arc::new(loaded),
+                    Ok(loaded) => {
+                        let replay = loaded.replay_update_log(&log_path)?;
+                        info!(
+                            "Replayed {} records of {}",
+                            replay.records,
+                            log_path.display()
+                        );
+                        if let Some(torn) = replay.torn_tail {
+                            self.disclose_torn_tail(&log_path, torn);
+                        }
+                        if replay.magic_incomplete {
+                            tracing::debug!(
+                                "{} held no complete magic; rewriting it",
+                                log_path.display()
+                            );
+                            crate::update_log::reset(&log_path)?;
+                        }
+                        Arc::new(loaded)
+                    }
                     Err(e) => {
                         let error_str = e.to_string();
                         if error_str.contains("Decode error")
@@ -229,6 +268,7 @@ impl LoroDocumentStore {
                                 e
                             );
                             let _ = std::fs::remove_file(&snapshot_path);
+                            let _ = std::fs::remove_file(&log_path);
                             let fresh = Arc::new(LoroDocument::new_with_peer_id(
                                 doc_id.to_string(),
                                 self.peer_id,
@@ -243,6 +283,14 @@ impl LoroDocumentStore {
                     }
                 }
             } else {
+                anyhow::ensure!(
+                    !crate::update_log::holds_records(&log_path)?,
+                    "{} holds updates but its snapshot {} is missing; delete the Loro store {} \
+                     to rebuild it from the org files",
+                    log_path.display(),
+                    snapshot_path.display(),
+                    self.storage_dir.display()
+                );
                 info!("Creating new {doc_id} LoroTree document");
                 let fresh = Arc::new(LoroDocument::new_with_peer_id(
                     doc_id.to_string(),
@@ -301,62 +349,182 @@ impl LoroDocumentStore {
         self.get_doc(DocScope::Global).await
     }
 
-    /// Write every loaded document whose committed state is not on disk yet;
-    /// a document already saved at its current frontiers is skipped.
+    /// Persist every loaded document whose committed state is not on disk yet;
+    /// a document already saved at its current frontiers is skipped. Once this
+    /// returns, what it persisted survives a crash and a power loss.
+    ///
+    /// A save appends the changes since the last one to the document's update
+    /// log, and writes a fresh snapshot (resetting the log) once the log would
+    /// outgrow the snapshot, so a save costs the size of its change plus,
+    /// amortised, at most as much again.
     ///
     /// Anything that makes a Loro change visible outside the document (the SQL
-    /// projection, a session quit) calls this first, so the snapshot on disk is
+    /// projection, a session quit) calls this first, so the state on disk is
     /// never behind what the rest of the system already reflects.
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn save_all(&self) -> Result<()> {
+        let mut saved = self.saved.lock().await;
+        for (scope, doc) in self.loaded_docs().await {
+            let frontiers = doc.with_read(|d| Ok(d.oplog_frontiers()))?;
+            if saved.get(scope.doc_id()).map(|p| &p.frontiers) != Some(&frontiers) {
+                self.persist(scope, &doc, &mut saved, false)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The document `scope`'s snapshot and update log persist. Held under the
+    /// save lock so a save cannot swap the snapshot and reset the log between
+    /// the two reads.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn read_persisted(
+        &self,
+        scope: DocScope,
+    ) -> Result<(loro::LoroDoc, crate::update_log::Replay)> {
+        let _saved = self.saved.lock().await;
+        crate::update_log::read_persisted(&self.snapshot_path(scope))
+    }
+
+    /// Write a snapshot of every loaded document and empty its update log, so
+    /// the snapshot alone holds the document. For a quit, and before anything
+    /// that reads or moves snapshot files on its own.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn checkpoint(&self) -> Result<()> {
+        let mut saved = self.saved.lock().await;
+        self.checkpoint_locked(&mut saved).await
+    }
+
+    /// Run `swap` on the storage dir while no save can run, with the global
+    /// document checkpointed first: its snapshot is the whole document and its
+    /// log holds no record. The next save writes a fresh snapshot, so whatever
+    /// global snapshot `swap` leaves in place is replaced, never appended to.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn replace_global_files<R>(
+        &self,
+        swap: impl FnOnce(&Path) -> Result<R>,
+    ) -> Result<R> {
+        let mut saved = self.saved.lock().await;
+        self.checkpoint_locked(&mut saved).await?;
+        let result = swap(&self.storage_dir);
+        saved.remove(DocScope::Global.doc_id());
+        result
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn checkpoint_locked(&self, saved: &mut HashMap<&'static str, Persisted>) -> Result<()> {
+        for (scope, doc) in self.loaded_docs().await {
+            let frontiers = doc.with_read(|d| Ok(d.oplog_frontiers()))?;
+            let current = saved
+                .get(scope.doc_id())
+                .is_some_and(|p| p.frontiers == frontiers && p.log_bytes == 0);
+            if !current {
+                self.persist(scope, &doc, saved, true)?;
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn loaded_docs(&self) -> Vec<(DocScope, Arc<LoroDocument>)> {
+        let mut docs = Vec::new();
+        for scope in [DocScope::Global, DocScope::Layout] {
+            if let Some(doc) = self.doc_slot(scope).read().await.as_ref() {
+                docs.push((scope, doc.clone()));
+            }
+        }
+        docs
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn persist(
+        &self,
+        scope: DocScope,
+        doc: &LoroDocument,
+        saved: &mut HashMap<&'static str, Persisted>,
+        snapshot: bool,
+    ) -> Result<()> {
         use std::sync::atomic::Ordering;
 
         use anyhow::Context;
 
-        let mut saved = self.saved.lock().await;
-        let mut behind = Vec::new();
-        for scope in [DocScope::Global, DocScope::Layout] {
-            let slot = self.doc_slot(scope).read().await;
-            let Some(doc) = slot.as_ref() else { continue };
-            // Read before the export, so the recorded frontiers never claim
-            // more than the file holds.
-            let frontiers = doc.with_read(|d| Ok(d.oplog_frontiers()))?;
-            if saved.get(scope.doc_id()) != Some(&frontiers) {
-                behind.push((scope, doc.clone(), frontiers));
+        use crate::loro_document::SaveExport;
+        use crate::update_log;
+
+        let path = self.snapshot_path(scope);
+        let log = update_log::log_path(&path);
+        if let Some(on_disk) = saved.get_mut(scope.doc_id())
+            && !snapshot
+        {
+            let delta = doc.export_for_save(SaveExport::UpdatesSince(&on_disk.vv))?;
+            let record = update_log::RECORD_HEADER + delta.bytes.len() as u64;
+            if on_disk.log_bytes + record <= on_disk.snapshot_bytes {
+                let acked_len = update_log::MAGIC.len() as u64 + on_disk.log_bytes;
+                if let Some(stump) = update_log::append(&log, &delta.bytes, acked_len)? {
+                    self.disclose_dropped(
+                        &log,
+                        stump.bytes,
+                        "bytes behind the last acknowledged record".to_string(),
+                    );
+                }
+                on_disk.frontiers = delta.frontiers;
+                on_disk.vv = delta.vv;
+                on_disk.log_bytes += record;
+                return Ok(());
             }
         }
-        if behind.is_empty() {
-            return Ok(());
-        }
 
-        // Periodic history compaction: every Nth save (incl. the first save of
-        // a session, which sheds history accumulated in prior sessions) write a
-        // shallow snapshot instead of a full one. Holon undo replays the
-        // inverse-command log, so trimmed Loro history is never needed locally;
-        // stale P2P peers get a full snapshot via the delta-export guard in
-        // `iroh_sync_adapter`. Kill-switch: HOLON_LORO_COMPACT=off.
+        // Periodic history compaction: every Nth snapshot (incl. the first of
+        // a session, which sheds history accumulated in prior sessions) is
+        // shallow. Holon undo replays the inverse-command log, so trimmed Loro
+        // history is never needed locally; stale P2P peers get a full snapshot
+        // via the delta-export guard in `iroh_sync_adapter`. Kill-switch:
+        // HOLON_LORO_COMPACT=off.
         const COMPACT_EVERY: u64 = 64;
         let n = self.save_counter.fetch_add(1, Ordering::Relaxed);
         let compact = std::env::var("HOLON_LORO_COMPACT")
             .map(|v| v != "off")
             .unwrap_or(true)
             && n.is_multiple_of(COMPACT_EVERY);
-
-        for (scope, doc, frontiers) in behind {
-            let path = self.snapshot_path(scope);
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)
-                    .with_context(|| format!("create the Loro dir {}", parent.display()))?;
-            }
-            if compact {
-                doc.save_compact_to_file(&path)
-            } else {
-                doc.save_to_file(&path)
-            }
+        let full = doc.export_for_save(if compact {
+            SaveExport::CompactSnapshot
+        } else {
+            SaveExport::Snapshot
+        })?;
+        std::fs::create_dir_all(&self.storage_dir)
+            .with_context(|| format!("create the Loro dir {}", self.storage_dir.display()))?;
+        holon_filesystem::fs_port::write_durable_blocking(&path, &full.bytes)
             .with_context(|| format!("save {} to {}", scope.doc_id(), path.display()))?;
-            saved.insert(scope.doc_id(), frontiers);
-        }
+        update_log::reset(&log)?;
+        saved.insert(
+            scope.doc_id(),
+            Persisted {
+                frontiers: full.frontiers,
+                vv: full.vv,
+                snapshot_bytes: full.bytes.len() as u64,
+                log_bytes: 0,
+            },
+        );
         Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn disclose_torn_tail(&self, log: &Path, torn: crate::update_log::TornTail) {
+        self.disclose_dropped(
+            log,
+            torn.bytes,
+            format!("{} at byte {}", torn.reason, torn.offset),
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn disclose_dropped(&self, log: &Path, bytes: u64, reason: String) {
+        tracing::warn!("dropped {bytes} bytes of {}: {reason}", log.display());
+        if let Some(bus) = &self.conditions {
+            bus.emit(holon_api::Condition {
+                subject: log.display().to_string(),
+                reason: holon_api::ConditionKind::LoroUpdateLogTailDropped { bytes, reason },
+            });
+        }
     }
 
     /// No-op on wasm: the snapshot writer is the native atomic-replacement
@@ -364,6 +532,12 @@ impl LoroDocumentStore {
     /// for the lifetime of the instance.
     #[cfg(target_arch = "wasm32")]
     pub async fn save_all(&self) -> Result<()> {
+        Ok(())
+    }
+
+    /// No-op on wasm, like [`Self::save_all`].
+    #[cfg(target_arch = "wasm32")]
+    pub async fn checkpoint(&self) -> Result<()> {
         Ok(())
     }
 

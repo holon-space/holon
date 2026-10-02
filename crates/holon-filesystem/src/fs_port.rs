@@ -217,6 +217,54 @@ pub fn atomic_temp_target(temp: &Path) -> Option<PathBuf> {
     minted.then(|| temp.with_file_name(target))
 }
 
+/// A file-replacement step that bears on durability, as seen by
+/// [`DurabilityRecorder`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DurabilityEvent {
+    /// The file's bytes reached the device (`sync_all`).
+    FileSynced(PathBuf),
+    /// A temp file was renamed over this path.
+    Replaced(PathBuf),
+    /// The directory entry changes in this directory reached the device.
+    DirSynced(PathBuf),
+}
+
+thread_local! {
+    static RECORDED: std::cell::RefCell<Option<Vec<DurabilityEvent>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn record_durability_event(event: DurabilityEvent) {
+    RECORDED.with(|recorded| {
+        if let Some(events) = recorded.borrow_mut().as_mut() {
+            events.push(event);
+        }
+    });
+}
+
+/// Records the durability steps this thread's file writes take until
+/// [`DurabilityRecorder::finish`].
+pub struct DurabilityRecorder(());
+
+impl DurabilityRecorder {
+    pub fn start() -> Self {
+        RECORDED.with(|recorded| {
+            let previous = recorded.borrow_mut().replace(Vec::new());
+            assert!(
+                previous.is_none(),
+                "a DurabilityRecorder is already recording on this thread"
+            );
+        });
+        Self(())
+    }
+
+    pub fn finish(self) -> Vec<DurabilityEvent> {
+        RECORDED
+            .with(|recorded| recorded.borrow_mut().take())
+            .expect("the recorder started on this thread")
+    }
+}
+
 /// Write `contents` to a sibling temp and rename it over `path` — the atomic
 /// replacement [`FileSystem::write`] promises (ADR 0030 D3.1).
 ///
@@ -224,20 +272,65 @@ pub fn atomic_temp_target(temp: &Path) -> Option<PathBuf> {
 /// `F_FULLFSYNC` (a full device flush, tens of ms) on every write-back, and
 /// what it would buy — the newest bytes surviving a power loss — is not owed
 /// for a mirror that is re-derivable from the authority. Rename ordering alone
-/// delivers what IS owed: no reader ever sees an interior.
+/// delivers what IS owed: no reader ever sees an interior. A file that IS the
+/// authority uses [`write_durable_blocking`].
 ///
 /// A symlink at `path` is REPLACED, not followed, so the bytes land exactly
 /// where the caller's containment proof says they do.
 pub fn write_atomic_blocking(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    replace_via_temp(path, contents, Barrier::None)
+}
+
+/// [`write_atomic_blocking`] that also survives a power loss once it returns:
+/// the temp's bytes reach the device before the rename, and the rename
+/// reaches it before this returns.
+pub fn write_durable_blocking(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    replace_via_temp(path, contents, Barrier::Durable)
+}
+
+/// Make `file`'s data, open at `path`, survive a power loss.
+pub fn sync_data_blocking(file: &std::fs::File, path: &Path) -> std::io::Result<()> {
+    file.sync_data()?;
+    record_durability_event(DurabilityEvent::FileSynced(path.to_path_buf()));
+    Ok(())
+}
+
+/// Make the directory entries created or renamed in `dir` survive a power
+/// loss.
+pub fn sync_dir_blocking(dir: &Path) -> std::io::Result<()> {
+    std::fs::File::open(dir)?.sync_all()?;
+    record_durability_event(DurabilityEvent::DirSynced(dir.to_path_buf()));
+    Ok(())
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Barrier {
+    None,
+    Durable,
+}
+
+fn replace_via_temp(path: &Path, contents: &[u8], barrier: Barrier) -> std::io::Result<()> {
     let temp = atomic_temp_path(path)?;
     let replace = || -> std::io::Result<()> {
-        std::fs::write(&temp, contents)?;
+        let mut file = std::fs::File::create(&temp)?;
+        std::io::Write::write_all(&mut file, contents)?;
         // A replacement must not silently reset a file's mode; the target's
         // permissions are the user's, not ours.
         if let Ok(meta) = std::fs::metadata(path) {
             std::fs::set_permissions(&temp, meta.permissions())?;
         }
-        std::fs::rename(&temp, path)
+        if barrier == Barrier::Durable {
+            file.sync_all()?;
+            record_durability_event(DurabilityEvent::FileSynced(temp.clone()));
+        }
+        drop(file);
+        std::fs::rename(&temp, path)?;
+        record_durability_event(DurabilityEvent::Replaced(path.to_path_buf()));
+        if barrier == Barrier::Durable {
+            let parent = path.parent().filter(|p| !p.as_os_str().is_empty());
+            sync_dir_blocking(parent.unwrap_or(Path::new(".")))?;
+        }
+        Ok(())
     };
     replace()
         .inspect_err(|_| {

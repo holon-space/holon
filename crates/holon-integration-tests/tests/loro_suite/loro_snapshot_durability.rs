@@ -185,11 +185,13 @@ fn boot_over_a_stale_snapshot(sidecar: SidecarAtBoot) {
             .expect("Loro-enabled session")
             .read()
             .await
-            .save_all()
+            .checkpoint()
             .await
-            .expect("save the pre-append snapshot");
+            .expect("checkpoint the pre-append document");
         let path = snapshot_path(&env);
+        let log = holon_loro::update_log::log_path(&path);
         let stale = std::fs::read(&path).expect("read the pre-append snapshot");
+        let stale_log = std::fs::read(&log).expect("read the pre-append update log");
         assert!(
             !snapshot_holds(&path, APPENDED_ID).await,
             "premise: the pre-append snapshot must not hold {APPENDED_ID}"
@@ -204,6 +206,7 @@ fn boot_over_a_stale_snapshot(sidecar: SidecarAtBoot) {
         settle(&env).await;
         env.stop_app().await.expect("stop_app after boot-2");
         std::fs::write(&path, &stale).expect("put the stale snapshot back");
+        std::fs::write(&log, &stale_log).expect("put the stale update log back");
         if let SidecarAtBoot::Deleted = sidecar {
             std::fs::remove_file(sidecar_path(&path)).expect("delete the watermark sidecar");
         }

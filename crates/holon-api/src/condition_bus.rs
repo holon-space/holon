@@ -427,6 +427,12 @@ pub enum ConditionKind {
     /// All-clear:
     /// [`WrittenHashRecord`](crate::condition_profile::ClearingEvent).
     WrittenFilesUnrecorded { files: Vec<String>, cause: String },
+    /// `subject`, a Loro update log, ended in a record a crash cut short
+    /// (`reason`); its last `bytes` were dropped at load. That record was
+    /// never reported saved, so neither SQL nor the org files reflect it.
+    ///
+    /// All-clear: none in this process.
+    LoroUpdateLogTailDropped { bytes: u64, reason: String },
 }
 
 /// Subject of the device-wide conditions on this bus, which have no share to
@@ -479,6 +485,7 @@ impl ConditionKind {
     pub const VAULT_STATE_UNREADABLE: &'static str = "vault-state-unreadable";
     pub const VAULT_START_INCOMPLETE: &'static str = "vault-start-incomplete";
     pub const WRITTEN_FILES_UNRECORDED: &'static str = "written-files-unrecorded";
+    pub const LORO_UPDATE_LOG_TAIL_DROPPED: &'static str = "loro-update-log-tail-dropped";
 
     /// The condition's stable identity, paired with the subject to form a
     /// [`ConditionKey`]. Total: every degradation is a sticky
@@ -529,6 +536,7 @@ impl ConditionKind {
             Self::VaultStateUnreadable { .. } => Self::VAULT_STATE_UNREADABLE,
             Self::VaultStartIncomplete { .. } => Self::VAULT_START_INCOMPLETE,
             Self::WrittenFilesUnrecorded { .. } => Self::WRITTEN_FILES_UNRECORDED,
+            Self::LoroUpdateLogTailDropped { .. } => Self::LORO_UPDATE_LOG_TAIL_DROPPED,
         }
     }
 }

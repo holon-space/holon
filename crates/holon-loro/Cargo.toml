@@ -22,6 +22,7 @@ async-trait.workspace = true
 base64 = { version = "0.22", optional = true }
 blake3.workspace = true
 chrono.workspace = true
+crc32fast = "1"
 # Owner-identity key (ADR 0028 D1/OQ4). ed25519-dalek is already resolved
 # (=3.0.0-pre.1, patched at the workspace root) via iroh, so this direct dep
 # adds no lock churn. Available unconditionally — the owner key must sign

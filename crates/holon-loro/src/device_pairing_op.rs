@@ -1282,11 +1282,12 @@ impl DevicePairingOperations<()> for DevicePairing {
         crate::pairing_swap::write_marker(&store_dir, &marker)?;
 
         self.store
-            .save_all()
+            .replace_global_files(|dir| {
+                crate::pairing_swap::archive_global(dir, &stamp)?;
+                crate::pairing_swap::promote_staged(dir, &marker.staging)
+            })
             .await
-            .context("flushing this device's documents before archiving them")?;
-        crate::pairing_swap::archive_global(&store_dir, &stamp)?;
-        crate::pairing_swap::promote_staged(&store_dir, &marker.staging)?;
+            .context("archiving this device's global document for the owner's")?;
 
         self.adopt_staged_document(&staged).await?;
         let reimported = self.reimport_from_archive(&marker.archive).await?;

@@ -638,6 +638,15 @@ const WRITTEN_FILES_UNRECORDED: ConditionProfile = ConditionProfile::new(
     &[],
 );
 
+const LORO_UPDATE_LOG_TAIL_DROPPED: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Warning,
+    "A save cut short by a crash was dropped",
+    icons::WARN,
+    ConditionPlacement::Banner,
+    AllClear::UntilRestart,
+    &[],
+);
+
 impl ConditionKind {
     /// This kind's profile. Total, like
     /// [`condition_kind`](ConditionKind::condition_kind): a new variant cannot
@@ -684,6 +693,7 @@ impl ConditionKind {
             Self::VaultStateUnreadable { .. } => VAULT_STATE_UNREADABLE,
             Self::VaultStartIncomplete { .. } => VAULT_START_INCOMPLETE,
             Self::WrittenFilesUnrecorded { .. } => WRITTEN_FILES_UNRECORDED,
+            Self::LoroUpdateLogTailDropped { .. } => LORO_UPDATE_LOG_TAIL_DROPPED,
         }
     }
 }

@@ -125,6 +125,15 @@ pub fn archive_global(store_dir: &Path, stamp: &str) -> anyhow::Result<PathBuf> 
             live.display()
         );
     }
+    let log = crate::update_log::log_path(&live);
+    if crate::update_log::holds_records(&log)? {
+        bail!(
+            "{} holds updates its snapshot {} does not, so archiving the snapshot alone would \
+             lose them; archive through LoroDocumentStore::replace_global_files",
+            log.display(),
+            live.display()
+        );
+    }
     let archived = global_snapshot(&dir);
     std::fs::rename(&live, &archived)
         .with_context(|| format!("archiving {} to {}", live.display(), archived.display()))?;

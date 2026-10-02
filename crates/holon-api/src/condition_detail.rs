@@ -360,6 +360,11 @@ impl ConditionKind {
                 ),
                 files.clone(),
             ),
+
+            Self::LoroUpdateLogTailDropped { bytes, reason } => ConditionDetail::prose(format!(
+                "Holon dropped the last {bytes} bytes of {subject} at start, a save a crash cut \
+                 short ({reason}). Edits made just before the crash may be missing."
+            )),
         }
     }
 }

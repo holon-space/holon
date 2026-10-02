@@ -2943,6 +2943,7 @@ dependencies = [
  "async-trait",
  "blake3",
  "chrono",
+ "crc32fast",
  "ed25519-dalek",
  "futures",
  "getrandom 0.3.4",

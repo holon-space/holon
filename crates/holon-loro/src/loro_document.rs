@@ -421,7 +421,7 @@ impl LoroDocument {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn save_to_file(&self, path: &Path) -> Result<()> {
         let snapshot = self.export_snapshot()?;
-        holon_filesystem::fs_port::write_atomic_blocking(path, &snapshot)?;
+        holon_filesystem::fs_port::write_durable_blocking(path, &snapshot)?;
         debug!("Saved LoroDoc snapshot to {}", path.display());
         Ok(())
     }
@@ -432,7 +432,7 @@ impl LoroDocument {
     pub fn save_compact_to_file(&self, path: &Path) -> Result<()> {
         let snapshot = self.export_compact_snapshot()?;
         let len = snapshot.len();
-        holon_filesystem::fs_port::write_atomic_blocking(path, &snapshot)?;
+        holon_filesystem::fs_port::write_durable_blocking(path, &snapshot)?;
         debug!(
             "Saved compacted LoroDoc snapshot to {} ({} bytes)",
             path.display(),
@@ -441,14 +441,57 @@ impl LoroDocument {
         Ok(())
     }
 
+    /// Export what a save writes, with the version it holds, at one commit
+    /// boundary. Takes the write guard for the same reason as
+    /// [`Self::export_compact_snapshot`].
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn export_for_save(&self, kind: SaveExport<'_>) -> Result<SaveExported> {
+        self.lock.write(&self.doc_id, || {
+            self.doc
+                .set_next_commit_origin(&WriteOrigin::SnapshotFlush.as_origin());
+            self.doc.commit();
+            let frontiers = self.doc.oplog_frontiers();
+            let mode = match kind {
+                SaveExport::Snapshot => loro::ExportMode::Snapshot,
+                SaveExport::CompactSnapshot => loro::ExportMode::shallow_snapshot(&frontiers),
+                SaveExport::UpdatesSince(vv) => loro::ExportMode::updates(vv),
+            };
+            Ok(SaveExported {
+                bytes: self.doc.export(mode)?,
+                vv: self.doc.oplog_vv(),
+                frontiers,
+            })
+        })
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     pub fn load_from_file(path: &Path, doc_id: String) -> Result<Self> {
         Self::load_from_file_with_peer_id(path, doc_id, None)
     }
 
-    /// [`Self::load_from_file`] with the peer id supplied by the caller.
+    /// The document a snapshot and its update log persist, with the peer id
+    /// supplied by the caller.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn load_from_file_with_peer_id(
+        path: &Path,
+        doc_id: String,
+        peer_id: Option<PeerID>,
+    ) -> Result<Self> {
+        let doc = Self::load_snapshot_with_peer_id(path, doc_id, peer_id)?;
+        let log = crate::update_log::log_path(path);
+        let replay = doc.replay_update_log(&log)?;
+        if let Some(torn) = replay.torn_tail {
+            tracing::warn!(
+                "dropped the torn last record of {} ({torn:?})",
+                log.display()
+            );
+        }
+        Ok(doc)
+    }
+
+    /// The snapshot at `path` alone, without its update log.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn load_snapshot_with_peer_id(
         path: &Path,
         doc_id: String,
         peer_id: Option<PeerID>,
@@ -469,6 +512,31 @@ impl LoroDocument {
 
         Ok(Self::wrap(Arc::new(doc), peer_id, doc_id))
     }
+
+    /// Import the records of the update log at `log` (see
+    /// [`crate::update_log::replay`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn replay_update_log(&self, log: &Path) -> Result<crate::update_log::Replay> {
+        self.lock
+            .write(&self.doc_id, || crate::update_log::replay(&self.doc, log))
+    }
+}
+
+/// What [`LoroDocument::export_for_save`] exports.
+#[cfg(not(target_arch = "wasm32"))]
+pub enum SaveExport<'a> {
+    Snapshot,
+    /// A snapshot without the history before its frontiers (see
+    /// [`LoroDocument::export_compact_snapshot`]).
+    CompactSnapshot,
+    UpdatesSince(&'a loro::VersionVector),
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub struct SaveExported {
+    pub bytes: Vec<u8>,
+    pub vv: loro::VersionVector,
+    pub frontiers: loro::Frontiers,
 }
 
 #[cfg(test)]
