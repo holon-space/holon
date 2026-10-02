@@ -221,6 +221,32 @@ expect_outcome truncated 3 'the log states no pass/fail' "$work/no-outcome.log"
 expect_outcome empty 3 'the log states no pass/fail' "$work/empty.log"
 expect_outcome missing 3 '^\[known-reds\] UNREADABLE: ' "$work/does-not-exist.log"
 
+# `bulk-add-sibling-order` matches only a SUT order that OPENS with a bulk block.
+# No archived corpus carries that shape (the 2026-09-19 corpus's 52 sibling-order
+# lines are swapped uuid children under a bulk PARENT and classify novel), so the
+# row is pinned by synthesised panics built on a real panic header.
+panic_header="thread 'general_e2e_composed_pbt' (1) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1390:13:"
+expect_sut_order() {
+    local label="$1" want="$2" sut="$3" log="$work/sut-order-$1.log"
+    {
+        printf '%s\n' "$panic_header"
+        printf '%s\n' "reconciled composed sequence diverged from the oracle: [(\"inv-blocks-match-ref/org\", \"[inv-blocks-match-ref/org] sibling order diverges under parent block:journals.\\n  ref order: [\\\"block:c1\\\", \\\"block:bulk-1-0\\\"]\\n  sut order: [$sut]\")]"
+        printf '%s\n' "error: recipe \`keystone-full\` failed with exit code 101"
+    } >"$log"
+    local out
+    out=$("$repo_root/scripts/keystone-known-reds.sh" "$log" 2>&1 || true)
+    if ! printf '%s\n' "$out" | grep -q -- "^PRIMARY: \[$want\]"; then
+        echo "[fixture] FAIL sut-order/$label: want PRIMARY [$want]; got:"
+        printf '%s\n' "$out" | tail -5 | sed 's/^/          | /'
+        outcome_fail=1
+        return
+    fi
+    echo "[fixture] ok sut-order/$label ($want)"
+}
+expect_sut_order bulk-first known-red:bulk-add-sibling-order '\"block:bulk-1-0\", \"block:c1\"'
+expect_sut_order bulk-second novel '\"block:c1\", \"block:bulk-1-0\"'
+expect_sut_order day-page-first novel '\"block:2026-10-01\", \"block:bulk-1-0\"'
+
 if [ "$outcome_fail" -ne 0 ]; then
     echo ""
     echo "[fixture] FAIL: the classifier's outcome verdict changed. A green log read"
