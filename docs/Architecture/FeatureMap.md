@@ -36,7 +36,7 @@ The one-page answer to *"which features could this change impact?"*. Rows are us
 | **Ruled by** | An ADR under [`docs/adr/`](../adr/), or an invariant number from [Model.md](Model.md). |
 | **Mode axes** | Which of [Model.md](Model.md)'s four orthogonal axes the feature's behaviour varies on: **Storage** (Loro store on/off), **File adapter** (org/none), **Merge fidelity** (op-CRDT / base-3-way / LWW), **Transport** (iroh P2P on/off). `—` means the feature behaves the same everywhere. *Headless vs windowed* is a test-slice axis, not a product mode; it is called out in prose where it matters. |
 
-The composed keystone is [`general_e2e_composed_pbt.rs`](../../crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs). Its alphabet is 97 transitions; the repo declares 86 invariant ids plus 17 correspondence-family ids. Open reds are registered in [KeystoneKnownReds.md](../Testing/KeystoneKnownReds.md) — a red listed there is a pass-with-note, anything else is a regression.
+The composed keystone is [`general_e2e_composed_pbt.rs`](../../crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs). Its alphabet is 98 transitions; the repo declares 86 invariant ids plus 17 correspondence-family ids. Open reds are registered in [KeystoneKnownReds.md](../Testing/KeystoneKnownReds.md) — a red listed there is a pass-with-note, anything else is a regression.
 
 ---
 
@@ -262,6 +262,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `MoveBlockBetweenFiles` — no save order loses the block; a block held by two files at once stays in both, is disclosed naming both, and is resolved by the later save (D229.b)
 - `Nothing` — no-op interleaving for schedule diversity
 - `PasteBlockCopy` — the invariants run while both files hold the block: both copies stay on disk, Holon's edits reach both files, and a condition names the block, its owner's file and the file with the copy (D229.b)
+- `PlaceUnderOwnDescendant` — a cyclic move is refused on the SQL placement path as on the Loro one, so no store holds a parent cycle
 - `PressKey` — raw key chord -> bubble_input resolution
 - `Reboot` — what survives a real restart
 - `RebuildViews` — a watch opened before a `rebuild_views` keeps receiving changes after it and holds what its rebuilt view holds

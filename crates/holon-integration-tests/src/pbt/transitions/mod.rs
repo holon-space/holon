@@ -149,6 +149,7 @@ mod open_tab_via_modifier_click;
 pub mod outdent;
 mod paste_block_copy;
 mod pin_block;
+mod place_under_own_descendant;
 mod press_key;
 mod reboot;
 mod rebuild_views;
@@ -256,6 +257,7 @@ pub use open_tab_via_modifier_click::OpenTabViaModifierClick;
 pub use outdent::Outdent;
 pub use paste_block_copy::PasteBlockCopy;
 pub use pin_block::PinBlock;
+pub use place_under_own_descendant::PlaceUnderOwnDescendant;
 pub use press_key::PressKey;
 pub use reboot::Reboot;
 pub use rebuild_views::RebuildViews;
@@ -356,6 +358,7 @@ crate::declare_e2e_transitions! {
         Outdent(Outdent),
         OpenTabViaModifierClick(OpenTabViaModifierClick),
         PinBlock(PinBlock),
+        PlaceUnderOwnDescendant(PlaceUnderOwnDescendant),
         PressKey(PressKey),
         Reboot(Reboot),
         Redo(Redo),

@@ -2675,6 +2675,19 @@ pub trait SutUnschemedIdDispatch {
     async fn assert_unschemed_block_id_refused(&self, bare_id: &str);
 }
 
+#[holon_macros::capmap_adapter]
+pub trait SutCyclicPlaceAttempt {
+    /// Dispatch a user-origin `move_block(id, parent_id = descendant)` through
+    /// the production operation dispatcher. A refusal must be the typed cyclic
+    /// move refusal; an accepted move is left for `inv-no-parent-cycles` to
+    /// judge.
+    async fn attempt_place_under_own_descendant(
+        &self,
+        id: &holon_api::EntityUri,
+        descendant: &holon_api::EntityUri,
+    );
+}
+
 /// One condition the app is disclosing, as the oracle compares them: the raise
 /// site's subject and the condition's stable kind. The prose is deliberately
 /// absent — see `ConditionsRefState`.

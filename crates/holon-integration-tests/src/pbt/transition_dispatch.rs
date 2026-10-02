@@ -258,6 +258,7 @@ macro_rules! declare_e2e_transitions {
             + ::holon_pbt_core::capabilities::SutRebuildViews
             + ::holon_pbt_core::capabilities::SutReadOnlyEditAttempt
             + ::holon_pbt_core::capabilities::SutUnschemedIdDispatch
+            + ::holon_pbt_core::capabilities::SutCyclicPlaceAttempt
             + $crate::pbt::transitions::apply_mutation::SutApplyMutation
             + $crate::pbt::transitions::start_app::SutBootWatches>
             ::holon_pbt_core::TransitionImpl<

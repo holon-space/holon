@@ -646,6 +646,28 @@ pub type SettleHook = Box<dyn Fn() + Send>;
 /// C2 provenance oracle (`history_ever_created` / `history_min_op_groups`).
 pub type BurnedPairs = BTreeSet<(EntityUri, EntityUri)>;
 
+/// The SUT's tokio runtime. Dropped during a panic, it shuts down in the
+/// background: a worker spinning inside a wedged store never yields, so a
+/// blocking shutdown would turn the failing case into a hang.
+struct SutRuntime(Option<tokio::runtime::Runtime>);
+
+impl std::ops::Deref for SutRuntime {
+    type Target = tokio::runtime::Runtime;
+
+    fn deref(&self) -> &tokio::runtime::Runtime {
+        self.0.as_ref().expect("the runtime is taken only by drop")
+    }
+}
+
+impl Drop for SutRuntime {
+    fn drop(&mut self) {
+        let rt = self.0.take().expect("the runtime is taken only by drop");
+        if std::thread::panicking() {
+            rt.shutdown_background();
+        }
+    }
+}
+
 /// The generic composed SUT: a `CapMap` driven through a slice's alphabet, with
 /// the per-tick `IdResolver` reconcile and the shared-catalog check.
 pub struct ComposedSut<S: ComposedSlice> {
@@ -672,7 +694,7 @@ pub struct ComposedSut<S: ComposedSlice> {
     /// Synthetic ids of creates the dispatch hold failed: the SUT never mints
     /// them, so they leave the 1:1 pairing for the rest of the run.
     failed_create_synthetics: BTreeSet<EntityUri>,
-    rt: tokio::runtime::Runtime,
+    rt: SutRuntime,
     /// Pumps an attached gpui window to a fixed point before each
     /// `check_invariants` read; a no-op for the headless path. See
     /// [`SettleHook`].
@@ -1057,7 +1079,7 @@ impl<S: ComposedSlice> ComposedSut<S> {
             scaffold_ids,
             foreign_ids: BTreeSet::new(),
             failed_create_synthetics: BTreeSet::new(),
-            rt,
+            rt: SutRuntime(Some(rt)),
             settle,
             engaged: std::cell::RefCell::new(std::collections::BTreeMap::new()),
             telemetry: std::cell::RefCell::new(super::telemetry::new_case()),
@@ -1228,7 +1250,7 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
             scaffold_ids,
             foreign_ids: BTreeSet::new(),
             failed_create_synthetics: BTreeSet::new(),
-            rt,
+            rt: SutRuntime(Some(rt)),
             settle: Box::new(|| {}),
             engaged: std::cell::RefCell::new(std::collections::BTreeMap::new()),
             telemetry: std::cell::RefCell::new(super::telemetry::new_case()),

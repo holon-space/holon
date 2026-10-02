@@ -1394,6 +1394,27 @@ fn node_deleted_now(tree: &loro::LoroTree, node: loro::TreeID) -> bool {
     tree.is_node_deleted(&node).unwrap_or(true)
 }
 
+/// A failed re-parenting write as the caller sees it: Loro's native cycle
+/// refusal is the typed [`ApiError::CyclicMove`], anything else stays internal.
+fn reparent_write_error(
+    e: anyhow::Error,
+    id: &EntityUri,
+    new_parent: &EntityUri,
+    what: &str,
+) -> ApiError {
+    match e.downcast_ref::<loro::LoroError>() {
+        Some(loro::LoroError::TreeError(loro::LoroTreeError::CyclicMoveError)) => {
+            ApiError::CyclicMove {
+                id: id.to_string(),
+                target_parent: new_parent.to_string(),
+            }
+        }
+        _ => ApiError::InternalError {
+            message: format!("{what}: {e}"),
+        },
+    }
+}
+
 /// A [`BlockTreeView`] over a Loro tree, built by scanning live nodes once.
 /// Lets the domain run the ADR-0005 move preconditions
 /// ([`BlockMutation::validate`]) *before* `tree.mov` dispatches, so cycle /
@@ -4077,8 +4098,13 @@ impl LoroBackend {
                 doc.commit();
                 Ok(())
             })
-            .map_err(|e| ApiError::InternalError {
-                message: format!("Failed to update parent_id: {}", e),
+            .map_err(|e| {
+                reparent_write_error(
+                    e,
+                    &moved,
+                    &requested_parent_uri,
+                    "Failed to update parent_id",
+                )
             })?;
         Ok(())
     }
@@ -4204,8 +4230,13 @@ impl LoroBackend {
                 doc.commit();
                 Ok(())
             })
-            .map_err(|e| ApiError::InternalError {
-                message: format!("Failed to update block position: {}", e),
+            .map_err(|e| {
+                reparent_write_error(
+                    e,
+                    &moved,
+                    &requested_parent_uri,
+                    "Failed to update block position",
+                )
             })?;
 
         let block = self.get_block(target_id).await?;

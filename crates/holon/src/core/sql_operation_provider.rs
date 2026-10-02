@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 
 use async_trait::async_trait;
+use holon_api::ApiError;
 use holon_api::EntityName;
 use holon_api::EntityUri;
 use holon_api::Operation;
@@ -384,6 +385,10 @@ impl StagedParents {
             .collect()
     }
 }
+
+/// Hops [`SqlOperationProvider::is_ancestor_of`] follows before calling a
+/// parent chain cyclic; real outlines nest far shallower.
+const MAX_ANCESTRY_DEPTH: i64 = 1000;
 
 /// SQL-based operation provider that writes directly to a Turso table.
 ///
@@ -884,6 +889,15 @@ impl SqlOperationProvider {
         parent_id: &str,
         position: MintedPosition,
     ) -> Result<OperationResult> {
+        // A stored parent cycle detaches the subtree from every root and sends
+        // Turso's recursive IVM views into an unbounded fixpoint at COMMIT.
+        if id == parent_id || self.is_ancestor_of(id, parent_id).await? {
+            return Err(ApiError::CyclicMove {
+                id: id.to_string(),
+                target_parent: parent_id.to_string(),
+            }
+            .into());
+        }
         let (sort_key, rekeys) = position.into_parts();
         let sort_key = sort_key.as_str();
         self.prove_rekeys_are_siblings(&rekeys, Some(parent_id))
@@ -2622,50 +2636,57 @@ impl SqlOperationProvider {
             .collect())
     }
 
-    /// Whether `ancestor` sits on `descendant`'s parent chain. Walked one hop
-    /// at a time rather than as a recursive CTE: the self-parented
-    /// `sentinel:no_parent` root makes the CTE form fragile, and the chain is
-    /// short. Fails loud on a parent cycle instead of spinning.
+    /// Whether `ancestor` sits on `descendant`'s parent chain, in one
+    /// statement. The self-parented root sentinel ends the chain; a chain
+    /// still going at [`MAX_ANCESTRY_DEPTH`] hops holds a cycle and fails
+    /// loud.
     async fn is_ancestor_of(&self, ancestor: &str, descendant: &str) -> Result<bool> {
-        let mut current = descendant.to_string();
-        let mut seen = vec![current.clone()];
-        loop {
-            let sql = format!(
-                "SELECT parent_id FROM {} WHERE id = '{}'",
-                self.table_name,
-                current.replace('\'', "''")
-            );
-            let rows = self
-                .db_handle
-                .query(&sql, HashMap::new())
-                .await
-                .map_err(|e| {
-                    format!("merge_blocks_plan: ancestor walk {ancestor}/{descendant}: {e}")
-                })?;
-            let Some(parent) = rows
-                .first()
-                .and_then(|r| r.get("parent_id"))
-                .and_then(|v| v.as_string())
-                .map(str::to_string)
-            else {
-                return Ok(false);
-            };
-            if parent == ancestor {
-                return Ok(true);
-            }
-            // The root sentinel is its own parent, which terminates the walk.
-            if parent == current {
-                return Ok(false);
-            }
-            if seen.contains(&parent) {
-                return Err(format!(
-                    "block parent chain from {descendant} holds a cycle: {seen:?} -> {parent}"
-                )
-                .into());
-            }
-            seen.push(parent.clone());
-            current = parent;
+        let sql = format!(
+            "WITH RECURSIVE chain(id, depth) AS ( \
+               SELECT parent_id, 1 FROM {table} WHERE id = $descendant \
+               UNION ALL \
+               SELECT b.parent_id, chain.depth + 1 FROM {table} b JOIN chain ON b.id = chain.id \
+               WHERE b.parent_id <> b.id AND chain.id <> $ancestor \
+                 AND chain.depth < {MAX_ANCESTRY_DEPTH} \
+             ) \
+             SELECT COALESCE(MAX(id = $ancestor), 0) AS hit, COALESCE(MAX(depth), 0) AS depth \
+             FROM chain",
+            table = self.table_name,
+        );
+        let params = HashMap::from([
+            ("ancestor".to_string(), Value::String(ancestor.to_string())),
+            (
+                "descendant".to_string(),
+                Value::String(descendant.to_string()),
+            ),
+        ]);
+        let rows = self
+            .db_handle
+            .query(&sql, params)
+            .await
+            .map_err(|e| format!("ancestor walk {ancestor}/{descendant}: {e}"))?;
+        let [row] = rows.as_slice() else {
+            return Err(format!(
+                "ancestor walk {ancestor}/{descendant}: expected one row, got {rows:?}"
+            )
+            .into());
+        };
+        let column = |name: &str| {
+            row.get(name).and_then(|v| v.as_i64()).ok_or_else(|| {
+                format!("ancestor walk {ancestor}/{descendant}: no integer `{name}` in {row:?}")
+            })
+        };
+        if column("hit")? == 1 {
+            return Ok(true);
         }
+        if column("depth")? >= MAX_ANCESTRY_DEPTH {
+            return Err(format!(
+                "block parent chain from {descendant} holds a cycle: still going after \
+                 {MAX_ANCESTRY_DEPTH} hops"
+            )
+            .into());
+        }
+        Ok(false)
     }
 
     /// Whether a document file is bound to `id` — merging such a block away
@@ -6227,5 +6248,107 @@ mod soft_delete_route_tests {
             rows(&db).await.is_empty(),
             "purge must remove the row it reaps"
         );
+    }
+}
+
+#[cfg(test)]
+mod ancestry_tests {
+    use super::*;
+
+    async fn provider_with_chain(depth: usize) -> SqlOperationProvider {
+        let (_backend, db_handle) = crate::storage::turso::TursoBackend::new_in_memory()
+            .await
+            .expect("in-memory turso");
+        for stmt in holon_turso::sql_utils::sql_statements(
+            holon_turso::schema_modules::block_raw_schema_sql(),
+        ) {
+            db_handle.execute_ddl(stmt).await.expect("block_raw schema");
+        }
+        db_handle
+            .execute(
+                "INSERT INTO block_raw (id, parent_id) VALUES \
+                 ('sentinel:no_parent', 'sentinel:no_parent')",
+                vec![],
+            )
+            .await
+            .expect("seed sentinel");
+        let mut parent = "sentinel:no_parent".to_string();
+        for i in 0..depth {
+            let id = format!("block:c{i}");
+            db_handle
+                .execute(
+                    &format!("INSERT INTO block_raw (id, parent_id) VALUES ('{id}', '{parent}')"),
+                    vec![],
+                )
+                .await
+                .expect("seed chain");
+            parent = id;
+        }
+        std::mem::forget(_backend);
+        SqlOperationProvider::new(
+            db_handle,
+            "block_raw".to_string(),
+            "block".to_string(),
+            "block".to_string(),
+        )
+    }
+
+    #[tokio::test]
+    async fn the_chain_answers_ancestry_up_to_the_root_sentinel() {
+        let provider = provider_with_chain(5).await;
+        assert!(
+            provider
+                .is_ancestor_of("block:c0", "block:c4")
+                .await
+                .unwrap()
+        );
+        assert!(
+            provider
+                .is_ancestor_of("block:c3", "block:c4")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !provider
+                .is_ancestor_of("block:c4", "block:c0")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !provider
+                .is_ancestor_of("block:c2", "block:c2")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !provider
+                .is_ancestor_of("block:elsewhere", "block:c4")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !provider
+                .is_ancestor_of("block:c0", "block:missing")
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stored_parent_cycle_fails_loud() {
+        let provider = provider_with_chain(3).await;
+        provider
+            .db_handle
+            .execute(
+                "UPDATE block_raw SET parent_id = 'block:c2' WHERE id = 'block:c0'",
+                vec![],
+            )
+            .await
+            .expect("store a cycle");
+        let err = provider
+            .is_ancestor_of("block:elsewhere", "block:c2")
+            .await
+            .expect_err("a cyclic chain must not answer");
+        assert!(format!("{err}").contains("cycle"), "{err}");
     }
 }

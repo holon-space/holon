@@ -7890,6 +7890,48 @@ impl holon_pbt_core::capabilities::SutUnschemedIdDispatch for HeadlessFrontendCo
 }
 
 #[async_trait::async_trait(?Send)]
+impl holon_pbt_core::capabilities::SutCyclicPlaceAttempt for HeadlessFrontendComponent {
+    async fn attempt_place_under_own_descendant(
+        &self,
+        id: &holon_api::EntityUri,
+        descendant: &holon_api::EntityUri,
+    ) {
+        let mut params: holon_api::StorageEntity = std::collections::HashMap::new();
+        params.insert("id".into(), holon_api::Value::String(id.to_string()));
+        params.insert(
+            "parent_id".into(),
+            holon_api::Value::String(descendant.to_string()),
+        );
+        let outcome = self
+            .engine()
+            .execute_operation(
+                &holon_api::EntityName::from("block".to_string()),
+                "move_block",
+                params,
+                holon_api::OpOrigin::User,
+            )
+            .await;
+        let expected = holon_api::ApiError::CyclicMove {
+            id: id.to_string(),
+            target_parent: descendant.to_string(),
+        }
+        .to_string();
+        let message = match outcome {
+            Ok(_) => panic!(
+                "[cyclic place] move_block({id} under its descendant {descendant}) was ACCEPTED; \
+                 the store now holds a parent cycle.\n expected the refusal: {expected}"
+            ),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(
+            message.contains(&expected),
+            "[cyclic place] move_block({id} under its descendant {descendant}) was refused \
+             for the wrong reason.\n expected: {expected}\n got: {message}"
+        );
+    }
+}
+
+#[async_trait::async_trait(?Send)]
 impl holon_pbt_core::capabilities::SutReadOnlyEditAttempt for HeadlessFrontendComponent {
     async fn attempt_read_only_edit(&self, block_id: &str, content: &str) -> Result<(), String> {
         let mut params: holon_api::StorageEntity = std::collections::HashMap::new();

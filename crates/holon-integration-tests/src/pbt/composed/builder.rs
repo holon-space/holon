@@ -599,6 +599,8 @@ async fn compose_sut_seeded_impl(
         // needs nothing but the component's own engine: it dispatches at the
         // production dispatcher and is answered above every provider.
         caps.insert(comp.clone() as Arc<dyn holon_pbt_core::capabilities::SutUnschemedIdDispatch>);
+        // `PlaceUnderOwnDescendant` dispatches at the same dispatcher.
+        caps.insert(comp.clone() as Arc<dyn holon_pbt_core::capabilities::SutCyclicPlaceAttempt>);
         // Runtime entity-type registration (`RegisterEntityScheme`) — the
         // component serves the `create_entity_type` MCP tool over its OWN engine
         // and `TypeRegistry`, i.e. the container the link classifier reads. This

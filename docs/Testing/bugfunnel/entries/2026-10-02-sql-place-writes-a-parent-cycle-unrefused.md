@@ -3,7 +3,7 @@ id: 2026-10-02-sql-place-writes-a-parent-cycle-unrefused
 date: 2026-10-02
 gap: COVERAGE
 secondary: null
-status: OPEN
+status: FIXED
 summary: >-
   The SQL placement path writes a block under its own descendant without a cycle check,
   so in SqlOnly mode (and in Loro mode for a block with no Loro node) a dispatched
@@ -47,9 +47,16 @@ exercised.
 
 ## Remedy
 
-OPEN. Rung that closes the gap: a keystone transition (or a relaxed `DragDropBlock` variant)
-that dispatches `move_block(source, parent = a descendant of source)`. The reference model
-expects a refusal and an unchanged tree. Run it in both SqlOnly and Loro mode. It must go red
-in SqlOnly, on `no_parent_cycles` or on the ref/SUT tree comparison, before the fix. Fix
-direction from the study: call `BlockMutation::validate` at the one write gate (the dispatcher
-admission step, D6.d), so the SQL paths and `update_parent_id` share the Loro check.
+FIXED (DD tracer lane, Inc 1a). `SqlOperationProvider::place_row` walks the
+target parent's ancestry (`is_ancestor_of`) before its transaction and refuses
+a cyclic placement with `ApiError::CyclicMove`; this covers both SQL callers
+(`SqlBlockOperations::place`, `OrderedBlockCrud`'s `parent_id` re-parent). On
+Loro, `update_parent_id` / `update_block_position` map Loro's native
+`LoroTreeError::CyclicMoveError` to the same typed error (it surfaced as an
+internal error before). Rung: keystone transition `PlaceUnderOwnDescendant`
+(`crates/holon-integration-tests/src/pbt/transitions/place_under_own_descendant.rs`)
+and the hand-authored cases `place-under-own-descendant-refused-on-the-sql-authority`
+and `place-under-own-descendant-refused-on-loro`. Red before: SQL hung inside
+the placement's COMMIT (see
+`2026-10-02-stored-parent-cycle-spins-turso-ivm-commit-forever`); Loro was
+refused with the untyped internal error. Green after on both.
