@@ -30,6 +30,7 @@ use fluxdi::Provider;
 use fluxdi::Shared;
 use holon::api::backend_engine::BackendEngine;
 use holon_frontend::reactive::BuilderServices;
+use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -314,6 +315,7 @@ pub async fn run_http_server(
         builder_services,
         type_registry,
         listener,
+        Arc::new(LocalSessionManager::default()),
         cancellation_token,
     )
     .await
@@ -326,6 +328,7 @@ pub async fn serve_http_on(
     builder_services: Option<Arc<dyn BuilderServices>>,
     type_registry: Option<Arc<holon_profiles::TypeRegistry>>,
     listener: tokio::net::TcpListener,
+    session_manager: Arc<LocalSessionManager>,
     cancellation_token: CancellationToken,
 ) -> anyhow::Result<()> {
     use axum::Router;
@@ -333,7 +336,6 @@ pub async fn serve_http_on(
     use axum::response::Html;
     use axum::routing::get;
     use rmcp::transport::StreamableHttpServerConfig;
-    use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
     use rmcp::transport::streamable_http_server::tower::StreamableHttpService;
 
     let cancellation_token_for_service = cancellation_token.clone();
@@ -349,7 +351,7 @@ pub async fn serve_http_on(
         let mcp_service: StreamableHttpService<BrowserRelayServer, LocalSessionManager> =
             StreamableHttpService::new(
                 move || Ok(BrowserRelayServer::new(relay.clone())),
-                LocalSessionManager::default().into(),
+                session_manager,
                 StreamableHttpServerConfig {
                     sse_keep_alive: Some(std::time::Duration::from_secs(15)),
                     stateful_mode: true,
@@ -403,7 +405,7 @@ pub async fn serve_http_on(
                     ))
                 }
             },
-            LocalSessionManager::default().into(),
+            session_manager,
             StreamableHttpServerConfig {
                 sse_keep_alive: Some(std::time::Duration::from_secs(15)),
                 stateful_mode: true,
@@ -573,16 +575,45 @@ pub fn start_embedded_mcp_server_with_registry(
     });
 }
 
-/// An embedded MCP HTTP server on a loopback port the OS picked; it stops
-/// when this is dropped.
+/// An embedded MCP HTTP server on a loopback port the OS picked; once this
+/// is dropped, it stops as soon as its last session has ended, or after
+/// [`SESSION_END_DEADLINE`] with an error naming the sessions still open.
 pub struct EmbeddedMcpServer {
     pub port: u16,
+    sessions: Arc<LocalSessionManager>,
     cancel: CancellationToken,
+    runtime: tokio::runtime::Handle,
 }
+
+const SESSION_END_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl Drop for EmbeddedMcpServer {
     fn drop(&mut self) {
-        self.cancel.cancel();
+        // A dropped rmcp client ends its session with a DELETE from a detached
+        // task, so stopping before that request is served makes it fail.
+        let port = self.port;
+        let sessions = self.sessions.clone();
+        let cancel = self.cancel.clone();
+        self.runtime.spawn(async move {
+            let deadline = tokio::time::Instant::now() + SESSION_END_DEADLINE;
+            loop {
+                let open = sessions.sessions.read().await.len();
+                if open == 0 {
+                    break;
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    tracing::error!(
+                        port,
+                        open_sessions = open,
+                        "embedded MCP server on port {port} was dropped but {open} session(s) \
+                         did not end within {SESSION_END_DEADLINE:?}; stopping it anyway"
+                    );
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            cancel.cancel();
+        });
     }
 }
 
@@ -597,14 +628,30 @@ pub fn start_embedded_mcp_server_on_free_port(
     listener.set_nonblocking(true)?;
     let port = listener.local_addr()?.port();
     let listener = tokio::net::TcpListener::from_std(listener)?;
+    let sessions = Arc::new(LocalSessionManager::default());
     let cancel = CancellationToken::new();
-    let stop = cancel.clone();
+    let (served_sessions, stop) = (sessions.clone(), cancel.clone());
     tokio::spawn(async move {
-        if let Err(e) = serve_http_on(engine, debug, builder_services, None, listener, stop).await {
+        if let Err(e) = serve_http_on(
+            engine,
+            debug,
+            builder_services,
+            None,
+            listener,
+            served_sessions,
+            stop,
+        )
+        .await
+        {
             tracing::error!("MCP server error: {}", e);
         }
     });
-    Ok(EmbeddedMcpServer { port, cancel })
+    Ok(EmbeddedMcpServer {
+        port,
+        sessions,
+        cancel,
+        runtime: tokio::runtime::Handle::current(),
+    })
 }
 
 /// Extension trait for registering MCP server services in a
