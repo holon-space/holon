@@ -3,7 +3,7 @@ id: 2026-10-01-loro-create-entity-sync-bypasses-the-write-tier-gate
 date: 2026-10-01
 gap: ORACLE
 secondary: ENVIRONMENT
-status: OPEN
+status: FIXED
 summary: >-
   The Loro-leg `create_entity_sync` never asks the write tier, so a create under
   a read-only-homed page lands in the store and can never reach the .cook file.
@@ -33,6 +33,13 @@ The keystone draws it but classifies it as the known red `org-blocks-ref-diverge
 declared blocks, so a new child under a read-only page passes.
 
 ## Remedy
-OPEN, fix lane: i1-tier-guard. Refuse in `create_entity_sync` through the same
-write-tier check, turn the refusal into a disclosed outcome instead of a panic,
-and narrow or split `org-blocks-ref-diverge`.
+`create_entity_sync` and the async `create_entity` both call `refuse_create_under`
+(`crates/holon-loro/src/block_cell_registry.rs`) and return a typed `EditRefused`
+under a read-only parent; the registry takes the write-tier authority at
+construction, so it cannot run without one (lanes I1 and I1b). A read-only page
+offers no creation slot, so `edit_target_id` no longer meets a refusal. Test
+`create_entity_sync_under_a_read_only_parent_is_refused_typed`: red before the fix
+(i1-tier-guard `lane-logs/i1-red.log`), green after (`lane-logs/i1r2c-green-unit.log`),
+red with the refusal removed in place (`lane-logs/i1r2b-teeth-gate.log`,
+`lane-logs/i1-teeth-both.log`, restore sha-checked); async leg: i1b-fail-closed
+`lane-logs/i1b-f3-red.log`, `-f3-green.log`, `-f3-teeth.log`.
