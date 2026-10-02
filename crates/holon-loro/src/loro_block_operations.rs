@@ -577,11 +577,17 @@ impl CrudOperations<Block> for LoroBlockOperations {
 
         let (undo, changes): (Option<Operation>, Vec<FieldDelta>) = match field {
             "content" if matches!(value, Value::String(_)) => {
-                let old = Value::String(prior.content.clone());
+                // The dispatcher folds the derived `marks` write into this same
+                // undoable step, so the inverse restores text AND marks.
+                let old = rich_content_restore_value(
+                    &prior.content,
+                    &prior.marks.clone().unwrap_or_default(),
+                );
+                let old_text = Value::String(prior.content.clone());
                 let mut params = HashMap::new();
                 params.insert("id".to_string(), Value::String(id.to_string()));
                 params.insert("field".to_string(), Value::String("content".to_string()));
-                params.insert("value".to_string(), old.clone());
+                params.insert("value".to_string(), old);
                 // `content` is a projected column the `SqlUndoStateReader` can
                 // read, so a real fingerprint arms the stale-guard: an undo that
                 // runs after the block was deleted/edited reads a divergent (or
@@ -592,7 +598,7 @@ impl CrudOperations<Block> for LoroBlockOperations {
                     vec![FieldDelta::new(
                         id.to_string(),
                         "content",
-                        old,
+                        old_text,
                         value.clone(),
                     )],
                 )
@@ -706,7 +712,8 @@ impl CrudOperations<Block> for LoroBlockOperations {
         match field {
             "content" => {
                 match &value {
-                    // Plain string ⇒ text update; clears any existing marks.
+                    // Plain string ⇒ text update; marks stay on the characters
+                    // the text diff retains.
                     Value::String(s) => {
                         backend
                             .update_block_text(id, s)
@@ -753,20 +760,32 @@ impl CrudOperations<Block> for LoroBlockOperations {
             }
             "marks" => {
                 // Mark-only update: keep existing text, replace mark set.
-                let marks_json = value
-                    .as_string()
-                    .ok_or_else(|| "set_field('marks'): expected JSON string Value".to_string())?;
-                let marks: Vec<holon_api::MarkSpan> = holon_api::marks_from_json(marks_json)
-                    .map_err(|e| format!("set_field('marks'): JSON parse error: {e}"))?;
+                let marks: Vec<holon_api::MarkSpan> = match &value {
+                    Value::Null => Vec::new(),
+                    Value::String(marks_json) => holon_api::marks_from_json(marks_json)
+                        .map_err(|e| format!("set_field('marks'): JSON parse error: {e}"))?,
+                    other => {
+                        return Err(format!(
+                            "set_field('marks'): expected a JSON string or Null, got {other:?}"
+                        )
+                        .into());
+                    }
+                };
                 // Read current text from the backend; update_block_marked rewrites both.
                 let current = backend
                     .get_block(id)
                     .await
                     .map_err(|e| format!("set_field('marks'): get_block: {e}"))?;
-                backend
-                    .update_block_marked(id, &current.content, &marks)
-                    .await
-                    .map_err(|e| format!("Failed to update marks: {}", e))?;
+                // Clearing marks off a mark-free block must not mint a CRDT
+                // write or a projection event.
+                let already_clear =
+                    marks.is_empty() && current.marks.as_ref().is_none_or(|m| m.is_empty());
+                if !already_clear {
+                    backend
+                        .update_block_marked(id, &current.content, &marks)
+                        .await
+                        .map_err(|e| format!("Failed to update marks: {}", e))?;
+                }
             }
             "sort_key" => {
                 // Sibling order is owned by `place()`/`tree.mov_after` and
@@ -2025,6 +2044,19 @@ impl OperationProvider for LoroBlockOperations {
         // Try task operations
         __operations_task_operations::dispatch_operation::<_, Block>(self, op_name, &params).await
     }
+
+    async fn read_block_content_marks(&self, id: &str) -> Result<Option<(String, Value)>> {
+        let block = match self.find_doc_for_block(id).await?.get_block(id).await {
+            Ok(block) => block,
+            Err(holon_api::ApiError::BlockNotFound { .. }) => return Ok(None),
+            Err(e) => return Err(format!("read_block_content_marks({id}): {e}").into()),
+        };
+        let marks = match block.marks.filter(|m| !m.is_empty()) {
+            Some(marks) => Value::String(holon_api::marks_to_json(&marks)),
+            None => Value::Null,
+        };
+        Ok(Some((block.content, marks)))
+    }
 }
 
 /// The `properties` param of a block write as the per-key map it stands for.
@@ -2261,7 +2293,8 @@ mod advice_dismiss_tests {
         assert_eq!(delta.new_value, Value::String("edited".into()));
         assert!(
             matches!(&result.undo, UndoAction::Undo(op)
-                if op.params.get("value").and_then(|v| v.as_string()) == Some("a task")),
+                if matches!(op.params.get("value"), Some(Value::Object(o))
+                    if o.get("text").and_then(|v| v.as_string()) == Some("a task"))),
             "inverse must restore the prior content"
         );
     }
@@ -2645,6 +2678,75 @@ mod advice_dismiss_tests {
             Some(vec![bold(0, 1)]),
             "undo restores the prior mark set exactly"
         );
+    }
+
+    /// A plain-String `content` write (a page rename) must invert to the rich
+    /// restore value so undo gives back the marks the dispatcher's follow-up
+    /// `marks` write cleared.
+    #[tokio::test]
+    async fn set_field_plain_content_inverse_restores_marks() {
+        let (ops, _dir, anchor) = ops_with_anchor().await;
+        let backend = ops.get_backend("").await.expect("backend");
+        ops.set_field(&anchor, "content", object_content("a task", &[bold(0, 1)]))
+            .await
+            .expect("seed rich");
+
+        let result = ops
+            .set_field(&anchor, "content", Value::String("renamed".into()))
+            .await
+            .expect("plain write");
+        ops.set_field(&anchor, "marks", Value::Null)
+            .await
+            .expect("clear marks");
+
+        let inverse = match &result.undo {
+            UndoAction::Undo(op) => op.clone(),
+            other => panic!("plain content write must be reversible, got {other:?}"),
+        };
+        replay_inverse(&ops, &inverse).await;
+        let restored = backend.get_block(&anchor).await.expect("read");
+        assert_eq!(restored.content, "a task");
+        assert_eq!(restored.marks, Some(vec![bold(0, 1)]));
+    }
+
+    /// An absent block reads as `Ok(None)` (unknown), matching the SQL provider
+    /// and the trait contract.
+    #[tokio::test]
+    async fn read_block_content_marks_of_missing_block_is_none() {
+        let (ops, _dir, _anchor) = ops_with_anchor().await;
+        let got = ops
+            .read_block_content_marks("block:does-not-exist")
+            .await
+            .expect("missing block is not an error");
+        assert!(got.is_none());
+    }
+
+    /// Clearing marks off a mark-free block writes no CRDT ops; clearing a
+    /// marked block does.
+    #[tokio::test]
+    async fn clearing_marks_writes_only_when_marks_exist() {
+        let (ops, _dir, anchor) = ops_with_anchor().await;
+        let changes = || async {
+            let store = ops.shared_doc_store();
+            let store = store.read().await;
+            let doc = store.get_doc(DocScope::Global).await.expect("global doc");
+            doc.with_read(|d| Ok(d.len_ops())).expect("read")
+        };
+
+        let before = changes().await;
+        ops.set_field(&anchor, "marks", Value::Null)
+            .await
+            .expect("clear");
+        assert_eq!(changes().await, before, "no marks: no commit");
+
+        ops.set_field(&anchor, "content", object_content("a task", &[bold(0, 1)]))
+            .await
+            .expect("seed rich");
+        let before = changes().await;
+        ops.set_field(&anchor, "marks", Value::Null)
+            .await
+            .expect("clear");
+        assert!(changes().await > before, "marked: the clear is written");
     }
 
     /// Multibyte round-trip: a rich write over content with non-ASCII scalars

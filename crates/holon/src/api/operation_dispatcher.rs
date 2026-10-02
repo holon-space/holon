@@ -1270,14 +1270,15 @@ impl OperationDispatcher {
                 // text (the LIVE bug). It also spuriously doubled the dispatch count
                 // on plain-text edits, inflating the undo replay tally.
                 //
-                // - Readable provider (SQL CRUD authority): compare against ground truth. Skip
-                //   when the mark set is unchanged, and skip a null-producing re-commit whose
-                //   stripped label already equals the stored content (the blur path). Otherwise
-                //   dispatch — including a legitimate `marks = Null` when an edit genuinely
-                //   REMOVED the link (new label differs from the stored content).
-                // - Unreadable provider (Loro CRUD authority, test stubs): fail safe — dispatch
-                //   only when the new content actually yields marks (a link was typed); never
-                //   null on an unknown prior state.
+                // - Readable provider (SQL or Loro CRUD authority): compare against ground
+                //   truth. Skip when the mark set is unchanged, and skip a null-producing
+                //   re-commit whose stripped label already equals the stored content (the blur
+                //   path). Otherwise dispatch — including a legitimate `marks = Null` when an
+                //   edit genuinely REMOVED the link (new label differs from the stored
+                //   content).
+                // - Unreadable provider (test stubs): fail safe — dispatch only when the new
+                //   content actually yields marks (a link was typed); never null on an unknown
+                //   prior state.
                 let content_marks_followup: Option<(String, holon_api::Value)> =
                     if let Some((id, label, extracted)) = content_edit {
                         let marks_value = |marks: &[holon_api::MarkSpan]| {

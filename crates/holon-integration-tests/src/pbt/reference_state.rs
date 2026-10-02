@@ -2719,7 +2719,14 @@ impl ReferenceState {
             .blocks
             .get_mut(page_id)
             .expect("apply_page_rename: page block must exist (precondition)");
-        block.content = new_title.to_string();
+        // A content edit: the title's own markup is the page's whole mark set.
+        let (content, marks) = super::types::normalize_content_for_org_roundtrip_with(
+            new_title,
+            ContentType::Text,
+            &self.harness.link_classifier,
+        );
+        block.content = content;
+        block.marks = marks;
         // A page that owns its file (a journal day page) takes it along: the
         // file is named by the title.
         if let Some(file) = self.files.documents.get_mut(page_id) {

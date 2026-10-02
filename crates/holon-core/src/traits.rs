@@ -190,9 +190,9 @@ pub trait OperationProvider: Send + Sync {
     /// - `Ok(Some((content, marks)))` — the stored stripped-label `content` and
     ///   the `marks` column value (`Value::Null` when the block has no marks).
     /// - `Ok(None)` — this provider does NOT own readable block state (the
-    ///   structural-ops providers, test stubs, and the Loro CRUD provider
-    ///   today). Callers MUST treat `None` as UNKNOWN and fail safe: never null
-    ///   a block's marks on the strength of an unreadable prior state.
+    ///   structural-ops providers and test stubs). Callers MUST treat `None` as
+    ///   UNKNOWN and fail safe: never null a block's marks on the strength of
+    ///   an unreadable prior state.
     async fn read_block_content_marks(&self, _: &str) -> Result<Option<(String, Value)>> {
         Ok(None)
     }
