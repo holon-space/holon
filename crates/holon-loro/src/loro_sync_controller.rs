@@ -839,11 +839,15 @@ impl LoroProjection {
         let (collab_doc, layout_doc) = (collab.doc(), layout.doc());
 
         for (doc, queue) in [
-            (&*collab_doc, self.pending.clone()),
-            (&*layout_doc, self.layout_pending.clone()),
+            (&collab_doc, self.pending.clone()),
+            (&layout_doc, self.layout_pending.clone()),
         ] {
             let wake = self.wake.clone();
+            #[cfg(any(test, feature = "test-helpers"))]
+            let lock = crate::doc_lock::DocLock::for_doc(doc);
             installed.push(doc.subscribe_root(Arc::new(move |event| {
+                #[cfg(any(test, feature = "test-helpers"))]
+                crate::emit_probe::record(lock.this_thread_holds_write(), &event);
                 let mut facts = crate::loro_backend::extract_pending_changes(&event);
                 if !facts.is_empty() {
                     queue.lock().unwrap().append(&mut facts);

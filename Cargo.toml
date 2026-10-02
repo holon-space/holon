@@ -41,6 +41,7 @@ members = [
   "crates/holon-loro",
   "crates/holon-secrets",
   "crates/holon-sharing",
+  "crates/holon-views",
   "crates/holon-architecture-tests",
   "frontends/tui",
   "frontends/mcp",

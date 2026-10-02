@@ -239,6 +239,14 @@ const DOC_ESCAPES: &[(&str, usize)] = &[
         "crates/holon-integration-tests/tests/loro_suite/projection_harness.rs",
         1,
     ),
+    // A text cell's retained container, and the raw unguarded commit that is
+    // the guard probe's positive control.
+    (
+        "crates/holon-integration-tests/tests/loro_suite/loro_root_deliveries_are_guarded.rs",
+        2,
+    ),
+    // The bench's subscription registration.
+    ("crates/holon-loro/examples/projection_extract_bench.rs", 1),
     // The vault's `UndoManager`: a long-lived observer registered on the doc,
     // the same shape as a subscription.
     ("crates/holon-loro/src/text_undo.rs", 2),
@@ -485,6 +493,13 @@ const STABLE_ID_WRITERS: &[(&str, usize)] = &[
         "crates/holon-integration-tests/tests/loro_suite/projection_harness.rs",
         1,
     ),
+    // Raw doc states built on purpose: the guard probe's writers and peer
+    // import, and the extraction bench's generated vault.
+    (
+        "crates/holon-integration-tests/tests/loro_suite/loro_root_deliveries_are_guarded.rs",
+        2,
+    ),
+    ("crates/holon-loro/examples/projection_extract_bench.rs", 1),
     ("crates/holon/tests/sync_import_read_only_adoption.rs", 3),
 ];
 

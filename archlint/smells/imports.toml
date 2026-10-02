@@ -229,3 +229,31 @@ block, keyword or drawer. A home's adapter (the block tree's is \
 `decision_block.rs`) depends on the core, never the reverse. \
 To suppress: // ALLOW(decision-core-no-home): <reason>
 """
+
+# holon-views owns all differential-dataflow code: the engine crates stay out
+# of holon-api, the shared kernel, and out of every other member's build.
+
+[[smell]]
+id = "dd_outside_holon_views"
+pattern = '\b(differential_dataflow|timely)::'
+files = "**/*.rs"
+case_sensitive = true
+default_skips = false
+exclude = ["**/crates/holon-views/**"]
+message = """
+Only crates/holon-views names `differential_dataflow` or `timely`. Reach the \
+incremental view engine through holon-views' API. \
+To suppress: // ALLOW(dd_outside_holon_views): <reason>
+"""
+
+[[smell]]
+id = "dd_outside_holon_views_manifest"
+pattern = '^(differential-dataflow|timely)\s*(=|\.workspace)'
+files = "**/Cargo.toml"
+case_sensitive = true
+default_skips = false
+exclude = ["**/crates/holon-views/Cargo.toml"]
+message = """
+Only crates/holon-views may depend on `differential-dataflow` or `timely`. \
+To suppress: # ALLOW(dd_outside_holon_views_manifest): <reason>
+"""
