@@ -10,8 +10,10 @@
 
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
+use std::time::Duration;
 
 use anyhow::Result;
+use holon_api::commit_clock::CommitSource;
 use holon_core::OriginTaggedWrites;
 use holon_core::ProjectionPass;
 use holon_loro::CONTENT_RAW;
@@ -31,6 +33,8 @@ use crate::projection_harness::MemorySink;
 use crate::projection_harness::delete_block_in;
 use crate::projection_harness::insert_root_block;
 use crate::projection_harness::insert_root_block_in;
+
+const SETTLE_WAIT: Duration = Duration::from_secs(2);
 
 struct Fixture {
     _tempdir: tempfile::TempDir,
@@ -182,6 +186,78 @@ async fn a_pass_that_owes_a_withheld_op_is_not_settled() -> Result<()> {
     assert_eq!(fx.projection.project().await?, ProjectionPass::Converged);
     assert_eq!(fx.sink.row_ids(), ["block:keep-id"]);
     assert!(fx.settled());
+    Ok(())
+}
+
+/// The run loop stops re-driving after a `Converged` pass, so a converged
+/// pass must settle with no further pass.
+async fn converged_implies_settled(fx: &Fixture, pass: ProjectionPass) {
+    if pass != ProjectionPass::Converged {
+        return;
+    }
+    let settled = tokio::time::timeout(SETTLE_WAIT, async {
+        while !fx.settled() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .is_ok();
+    let clock = fx.projection.commit_clock();
+    assert!(
+        settled,
+        "the pass reported Converged, so the run loop stops re-driving, yet the projection did \
+         not settle within {SETTLE_WAIT:?}: global stamps {:?} and layout stamps {:?} are never \
+         fed",
+        clock.outstanding(CommitSource::LoroGlobal),
+        clock.outstanding(CommitSource::LoroLayout),
+    );
+}
+
+fn model_holds(fx: &Fixture, id: &str) -> bool {
+    use holon_api::block_read_model::BlockDeltaSource;
+    fx.projection
+        .read_model()
+        .as_ref()
+        .blocks()
+        .read()
+        .contains_key(id)
+}
+
+/// A snapshot with an unreadable live node is not published to the read
+/// model, so the commits it walked stay unfed until a settled pass.
+#[tokio::test]
+async fn a_pass_over_an_unsettled_snapshot_keeps_the_run_loop_driving() -> Result<()> {
+    let fx = Fixture::new().await?;
+    insert_root_block(&fx.doc_store, "seed-id", "seed").await?;
+    assert_eq!(fx.projection.project().await?, ProjectionPass::Converged);
+
+    let half_born = fx
+        .global
+        .with_write(holon_loro::WriteOrigin::Probe("settle"), |txn| {
+            Ok(txn.get_tree(TREE_NAME).create(None)?)
+        })?;
+    insert_root_block(&fx.doc_store, "late-id", "late").await?;
+    for _ in 0..2 {
+        let pass = fx.projection.project().await?;
+        converged_implies_settled(&fx, pass).await;
+        assert!(
+            !fx.settled() || model_holds(&fx, "block:late-id"),
+            "settled while the read model lacks block:late-id"
+        );
+    }
+
+    fx.global
+        .with_write(holon_loro::WriteOrigin::Probe("settle"), |txn| {
+            holon_loro::write_stable_id(txn, half_born, "grown-id")?;
+            let meta = txn.get_tree(TREE_NAME).get_meta(half_born)?;
+            meta.insert(CONTENT_TYPE, loro::LoroValue::from("text"))?;
+            meta.ensure_mergeable_text(CONTENT_RAW)?
+                .insert(0, "grown")?;
+            Ok(())
+        })?;
+    assert_eq!(fx.projection.project().await?, ProjectionPass::Converged);
+    assert!(fx.settled());
+    assert!(model_holds(&fx, "block:late-id") && model_holds(&fx, "block:grown-id"));
     Ok(())
 }
 

@@ -235,10 +235,6 @@ const DOC_ESCAPES: &[(&str, usize)] = &[
         "crates/holon-integration-tests/tests/loro_suite/loro_projection_share_rows.rs",
         2,
     ),
-    (
-        "crates/holon-integration-tests/tests/loro_suite/projection_harness.rs",
-        1,
-    ),
     // A text cell's retained container, and the raw unguarded commit that is
     // the guard probe's positive control.
     (
@@ -275,7 +271,7 @@ const DOC_ESCAPES: &[(&str, usize)] = &[
         "crates/holon-loro/tests/with_write_is_isolation_not_rollback.rs",
         1,
     ),
-    ("crates/holon-loro-testing/src/sut_loro.rs", 3),
+    ("crates/holon-loro-testing/src/sut_loro.rs", 1),
     // +1: the layout doc's retained container handle, same cell-backing rationale
     // as the global one.
     ("crates/holon-loro/src/block_cell_registry.rs", 2),

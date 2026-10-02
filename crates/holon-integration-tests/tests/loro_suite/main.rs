@@ -7,6 +7,7 @@ mod loro_kind_fidelity_through_projection;
 mod loro_live_entity_wiring;
 mod loro_memory_holds_the_vault;
 mod loro_memory_start_app;
+mod loro_minted_stamps_are_fed_at_settle;
 mod loro_projection_atomic_advance;
 mod loro_projection_settle;
 mod loro_projection_share_rows;

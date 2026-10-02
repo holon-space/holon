@@ -22,6 +22,7 @@ pub mod block_write_field;
 pub mod capability;
 pub mod change_set;
 pub mod clock;
+pub mod commit_clock;
 pub mod computation;
 pub mod computed;
 /// flutter_rust_bridge:ignore

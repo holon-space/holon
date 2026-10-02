@@ -397,11 +397,19 @@ impl SutLoro for LoroSut {
                 .get_doc(DocScope::Global)
                 .await
                 .expect("Failed to get global doc for SyncWithPeer");
-            let primary_doc = global_doc.doc();
-            let primary = &*primary_doc;
             let peers = self.peers.borrow();
             let peer = &peers[peer_idx];
-            holon_loro::multi_peer::sync_docs_direct(primary, &peer.doc);
+            let to_peer = global_doc
+                .with_read(|primary| {
+                    Ok(primary.export(loro::ExportMode::updates(&peer.doc.oplog_vv()))?)
+                })
+                .expect("Failed to export primary delta");
+            if !to_peer.is_empty() {
+                peer.doc
+                    .import(&to_peer)
+                    .expect("Failed to import primary delta");
+            }
+            import_peer_delta(&global_doc, &peer.doc);
         }
         // Give the controller's spawned task time to process the
         // peer import via subscribe_root → on_loro_changed → SQL.
@@ -416,23 +424,8 @@ impl SutLoro for LoroSut {
                 .get_doc(DocScope::Global)
                 .await
                 .expect("Failed to get global doc for MergeFromPeer");
-            // One-directional merge: export the peer's delta relative
-            // to the primary's current version and import it into the
-            // primary. The raw `doc.import` is enough — the
-            // `LoroSyncController`'s `subscribe_root` will fire and
-            // reconcile the diff into SQL via the command bus.
-            let primary_doc = global_doc.doc();
-            let primary = &*primary_doc;
             let peers = self.peers.borrow();
-            let peer = &peers[peer_idx];
-            let peer_vv = primary.oplog_vv();
-            let delta = peer
-                .doc
-                .export(loro::ExportMode::updates(&peer_vv))
-                .expect("Failed to export peer delta");
-            if !delta.is_empty() {
-                primary.import(&delta).expect("Failed to import peer delta");
-            }
+            import_peer_delta(&global_doc, &peers[peer_idx].doc);
         }
         self.wait_for_quiescence(Duration::from_secs(10)).await;
     }
@@ -461,6 +454,22 @@ impl SutLoro for LoroSut {
 impl CapProvider for LoroSut {
     fn register(self: Arc<Self>, caps: &mut CapMap) {
         caps.insert(self as Arc<dyn SutLoro>);
+    }
+}
+
+/// Import `peer`'s changes the primary lacks the way peer sync does: through
+/// the primary's guarded import, under the sync origin.
+fn import_peer_delta(primary: &holon_loro::LoroDocument, peer: &loro::LoroDoc) {
+    let primary_vv = primary
+        .with_read(|doc| Ok(doc.oplog_vv()))
+        .expect("Failed to read the primary's version");
+    let delta = peer
+        .export(loro::ExportMode::updates(&primary_vv))
+        .expect("Failed to export peer delta");
+    if !delta.is_empty() {
+        primary
+            .apply_update_with_origin(holon_loro::WriteOrigin::SyncImport, &delta)
+            .expect("Failed to import peer delta");
     }
 }
 

@@ -288,7 +288,9 @@ async fn flush_downstream_with_redrive(
             .await
             .map_err(|e| anyhow::anyhow!("downstream flush {context}: {e}"))?
         {
-            holon_core::ProjectionPass::Converged => return Ok(()),
+            holon_core::ProjectionPass::Converged | holon_core::ProjectionPass::Unsettled => {
+                return Ok(());
+            }
             holon_core::ProjectionPass::Incomplete { withheld } => last = withheld,
         }
     }

@@ -47,8 +47,6 @@ pub mod device_pairing;
 ))]
 pub mod device_pairing_op;
 mod doc_lock;
-#[cfg(any(test, feature = "test-helpers"))]
-pub mod emit_probe;
 pub mod event_bus;
 pub mod event_ring;
 

@@ -1,6 +1,8 @@
 //! Every commit the projected docs' root subscription sees is delivered on the
 //! committing thread while it holds the doc's write guard: a commit number
-//! minted in that callback is then ordered before the writer returns.
+//! minted in that callback is then ordered before the writer returns. The
+//! subscription panics on an unguarded delivery, so the workload passing is
+//! the proof, and a raw commit outside the guard is the positive control.
 //!
 //! @pbt kind harness
 //! @pbt covers loro-root-delivery-guarded — no deferred or unguarded root
@@ -21,15 +23,12 @@ use holon_loro::STABLE_ID;
 use holon_loro::SinkReader;
 use holon_loro::TREE_NAME;
 use holon_loro::WriteOrigin;
-use holon_loro::emit_probe::counts_for;
 use holon_loro::loro_text_cell_backing::LoroTextCellBacking;
 use loro::Frontiers;
 use tokio::sync::RwLock;
 
 use crate::projection_harness::MemorySink;
 
-const GUARDED: &str = "probe.root_delivery_guarded";
-const IMPORTED: &str = "probe.root_delivery_imported";
 const RAW: &str = "root_delivery_raw_control";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -91,6 +90,12 @@ async fn every_root_delivery_holds_the_doc_write_guard() -> Result<()> {
         writer.join().unwrap()?;
     }
     passes.await?;
+    let clock = projection.commit_clock();
+    assert!(
+        clock.high_water().get() >= 200,
+        "the writers' commits were not all delivered: high water {:?}",
+        clock.high_water()
+    );
 
     // A peer delta imported through the guarded import path.
     let peer = loro::LoroDoc::new();
@@ -112,38 +117,27 @@ async fn every_root_delivery_holds_the_doc_write_guard() -> Result<()> {
         Ok(tree.get_meta(node)?.ensure_mergeable_text(CONTENT_RAW)?)
     })?;
     let cell = LoroTextCellBacking::new(global.doc(), text)?;
-    let keystrokes_before = counts_for("ui_editor_echo");
+    let before_keystroke = clock.high_water();
     cell.apply_text_op(TextOp::Insert {
         pos_codepoint: 0,
         text: "k".to_string(),
     })?;
-    let keystrokes = counts_for("ui_editor_echo");
+    assert_eq!(
+        clock.high_water().get(),
+        before_keystroke.get() + 1,
+        "the keystroke's commit was not delivered"
+    );
 
-    // Positive control: a raw commit outside the guard IS counted.
     let raw = global.doc();
     raw.get_tree(TREE_NAME).create(None)?;
     raw.set_next_commit_origin(RAW);
-    raw.commit();
-
-    let guarded = counts_for(GUARDED);
-    assert_eq!(guarded.unguarded, 0, "with_write deliveries: {guarded:?}");
-    assert!(guarded.guarded >= 200, "with_write deliveries: {guarded:?}");
-    let imported = counts_for(IMPORTED);
-    assert_eq!(
-        imported,
-        holon_loro::emit_probe::EmitCounts {
-            guarded: 1,
-            unguarded: 0
-        }
-    );
-    assert_eq!(keystrokes.unguarded, keystrokes_before.unguarded);
-    assert_eq!(keystrokes.guarded, keystrokes_before.guarded + 1);
-    assert_eq!(
-        counts_for(RAW),
-        holon_loro::emit_probe::EmitCounts {
-            guarded: 0,
-            unguarded: 1
-        }
-    );
+    let control = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| raw.commit()));
+    let message = control
+        .err()
+        .and_then(|p| p.downcast::<String>().ok())
+        .expect("a raw commit outside the write guard must panic in the subscription");
+    assert!(message.contains(RAW), "panic names the origin: {message}");
+    // The panic unwound through loro's commit; nothing may touch the docs again.
+    std::mem::forget((projection, global, layout, doc_store, raw));
     Ok(())
 }

@@ -47,6 +47,9 @@ use anyhow::Result;
 use holon_api::EdgeField;
 use holon_api::Value;
 use holon_api::block::Block;
+use holon_api::commit_clock::CommitClock;
+use holon_api::commit_clock::CommitSource;
+use holon_api::commit_clock::Stamp;
 use holon_api::lifecycle::SessionShutdown;
 use holon_api::types::ContentType;
 use holon_core::OriginTaggedWrites;
@@ -258,12 +261,15 @@ impl FullReason {
 /// sees the same outcome the run loop does.
 pub use holon_core::ProjectionPass;
 
-/// The outcome a pass that withheld `ungrounded` op(s) must report.
-fn pass_outcome(ungrounded: usize) -> ProjectionPass {
+/// The outcome a pass that withheld `ungrounded` op(s) over a snapshot that
+/// was `settled` or not must report. Only a converged pass stops the run loop.
+fn pass_outcome(ungrounded: usize, settled: bool) -> ProjectionPass {
     if ungrounded > 0 {
         ProjectionPass::Incomplete {
             withheld: ungrounded,
         }
+    } else if !settled {
+        ProjectionPass::Unsettled
     } else {
         ProjectionPass::Converged
     }
@@ -316,6 +322,20 @@ pub const GLOBAL_PROJECTION_SUBJECT: &str = "loro-sql-projection";
 /// burn.
 const RECONCILE_MAX_ATTEMPTS: usize = 4;
 const RECONCILE_RETRY_BACKOFF: Duration = Duration::from_millis(50);
+
+/// A delivery outside the doc's write guard can be minted after a drain read
+/// the high water and before its facts are queued, so a feed would cover a
+/// commit the read model has not seen.
+fn unguarded_delivery(source: CommitSource, event: &loro::event::DiffEvent<'_>) {
+    let message = format!(
+        "{source:?} delivered a commit outside its write guard (triggered by {:?}, origin {:?})",
+        event.triggered_by, event.origin
+    );
+    #[cfg(any(test, feature = "test-helpers"))]
+    panic!("{message}");
+    #[cfg(not(any(test, feature = "test-helpers")))]
+    error!("{message}");
+}
 
 /// The sticky condition key the projection raises and clears.
 pub fn projection_degraded_key() -> holon_api::condition_bus::ConditionKey {
@@ -611,6 +631,14 @@ async fn drive_with_redrive<F, Fut>(
                     "[LoroSyncController] Outbound reconcile incomplete: {why}"
                 );
             }
+            Ok(ProjectionPass::Unsettled) => {
+                why = "a live Loro node has no readable meta, so the read model was not refreshed"
+                    .to_string();
+                warn!(
+                    attempt,
+                    "[LoroSyncController] Outbound reconcile unsettled: {why}"
+                );
+            }
             Err(e) => {
                 error_count.fetch_add(1, Ordering::SeqCst);
                 why = format!("{e:#}");
@@ -743,6 +771,9 @@ pub struct LoroProjection {
     /// share's own projection, so the full walk leaves exactly those rows
     /// alone. `None`: no share machinery, so every row is this walk's.
     shared_trees: Option<Arc<dyn crate::shared_tree::SharedTreeStore>>,
+    /// Minted by the doc subscriptions under the doc's write guard; fed when a
+    /// pass hands a doc's commits to the read model.
+    commit_clock: Arc<CommitClock>,
 }
 
 impl LoroProjection {
@@ -783,6 +814,7 @@ impl LoroProjection {
             read_model,
             degraded,
             shared_trees: None,
+            commit_clock: Arc::new(CommitClock::new()),
         }
     }
 
@@ -800,6 +832,10 @@ impl LoroProjection {
     /// as a [`holon_api::block_read_model::BlockDeltaSource`].
     pub fn read_model(&self) -> Arc<holon_api::block_read_model::BlockReadModel> {
         self.read_model.clone()
+    }
+
+    pub fn commit_clock(&self) -> Arc<CommitClock> {
+        self.commit_clock.clone()
     }
 
     /// The wake signal the doc subscriptions fire and the controller's run loop
@@ -838,16 +874,22 @@ impl LoroProjection {
         // never read doc state.
         let (collab_doc, layout_doc) = (collab.doc(), layout.doc());
 
-        for (doc, queue) in [
-            (&collab_doc, self.pending.clone()),
-            (&layout_doc, self.layout_pending.clone()),
+        for (doc, queue, source) in [
+            (&collab_doc, self.pending.clone(), CommitSource::LoroGlobal),
+            (
+                &layout_doc,
+                self.layout_pending.clone(),
+                CommitSource::LoroLayout,
+            ),
         ] {
             let wake = self.wake.clone();
-            #[cfg(any(test, feature = "test-helpers"))]
+            let clock = self.commit_clock.clone();
             let lock = crate::doc_lock::DocLock::for_doc(doc);
             installed.push(doc.subscribe_root(Arc::new(move |event| {
-                #[cfg(any(test, feature = "test-helpers"))]
-                crate::emit_probe::record(lock.this_thread_holds_write(), &event);
+                if !lock.this_thread_holds_write() {
+                    unguarded_delivery(source, &event);
+                }
+                clock.mint(source);
                 let mut facts = crate::loro_backend::extract_pending_changes(&event);
                 if !facts.is_empty() {
                     queue.lock().unwrap().append(&mut facts);
@@ -881,13 +923,21 @@ impl LoroProjection {
     }
 
     /// Whether every change up to `global` and `layout` (the two projected
-    /// documents' `oplog_frontiers`) has reached the sink. The watermarks
-    /// advance only after a pass wrote its rows AND owes nothing, so an
-    /// in-flight or owed change always reads as unsettled.
+    /// documents' `oplog_frontiers`) has reached the sink and the read model.
+    /// The watermarks advance only after a pass wrote its rows AND owes
+    /// nothing, so an in-flight or owed change always reads as unsettled.
     pub fn is_settled_at(&self, global: &Frontiers, layout: &Frontiers) -> bool {
         &*self.last_synced.lock().unwrap() == global
             && &*self.layout_last_synced.lock().unwrap() == layout
             && self.pending_is_empty()
+            && self
+                .commit_clock
+                .outstanding(CommitSource::LoroGlobal)
+                .is_empty()
+            && self
+                .commit_clock
+                .outstanding(CommitSource::LoroLayout)
+                .is_empty()
     }
 
     /// [`Self::is_settled_at`] the documents' current heads. The one settle
@@ -1040,10 +1090,14 @@ impl LoroProjection {
         if seeded {
             // Drain the WHOLE queue first — never early-return while facts are
             // pending (that would silently drop a committed change).
-            let pending: Vec<crate::loro_backend::PendingChange> =
-                std::mem::take(&mut *self.pending.lock().unwrap());
-            let layout_pending: Vec<crate::loro_backend::PendingChange> =
-                std::mem::take(&mut *self.layout_pending.lock().unwrap());
+            let (pending, cover) = self.drain(&collab, &self.pending)?;
+            let (layout_pending, layout_cover) = self.drain(&layout, &self.layout_pending)?;
+            let feed = || {
+                self.commit_clock
+                    .feed_through(CommitSource::LoroGlobal, cover);
+                self.commit_clock
+                    .feed_through(CommitSource::LoroLayout, layout_cover);
+            };
 
             // Idle wake: no facts and NEITHER oplog has moved — nothing to do.
             if pending.is_empty()
@@ -1051,6 +1105,7 @@ impl LoroProjection {
                 && last == current
                 && layout_last == layout_current
             {
+                feed();
                 return Ok(ProjectionPass::Converged);
             }
 
@@ -1183,6 +1238,7 @@ impl LoroProjection {
                     // authority, so `staging` is already true; the reseed that
                     // follows re-publishes an atomic snapshot over it.
                     self.read_model.publish_delta(&staging);
+                    feed();
                     if has_unarmed_delete {
                         // The unarmed delete gate lives on the full walk, which
                         // withholds deletes and reports the pass complete
@@ -1293,10 +1349,18 @@ impl LoroProjection {
         // `block_raw` → Loro and re-establishes `live == block_raw` on success.
         // This path is not steady-state (cold boot / unsettled / orphan / oversized
         // bootstrap), so the extra sink read is not on the hot path.
-        let (mut after, mut after_settled): (HashMap<String, SnapshotBlock>, bool) =
-            collab.with_read(|doc| Ok(snapshot_blocks_from_doc_settled(doc)))?;
-        let (layout_after, layout_settled) =
-            layout.with_read(|doc| Ok(snapshot_blocks_from_doc_settled(doc)))?;
+        let ((mut after, mut after_settled), cover) = collab.with_read(|doc| {
+            Ok((
+                snapshot_blocks_from_doc_settled(doc),
+                self.commit_clock.high_water(),
+            ))
+        })?;
+        let ((layout_after, layout_settled), layout_cover) = layout.with_read(|doc| {
+            Ok((
+                snapshot_blocks_from_doc_settled(doc),
+                self.commit_clock.high_water(),
+            ))
+        })?;
         after_settled &= layout_settled;
         for (id, snap) in layout_after {
             // The two docs partition the block set. An id in both is an
@@ -1442,9 +1506,14 @@ impl LoroProjection {
         // keep the stale parent forever. Leaving `live` alone keeps the next
         // pass on the full walk against sink truth, which is where the withheld
         // op gets re-emitted.
+        // Unseeded, the next pass cannot take the idle return, which would
+        // feed this walk's commits without their rows in the read model.
         if ungrounded > 0 {
             self.seeded.store(false, Ordering::SeqCst);
             *self.pending_reseed_reason.lock().unwrap() = Some(FullReason::Orphan);
+        } else if !after_settled {
+            self.seeded.store(false, Ordering::SeqCst);
+            *self.pending_reseed_reason.lock().unwrap() = Some(FullReason::Unsettled);
         }
         if may_seed_live(after_settled, ungrounded) {
             let mut idx = collab.with_read(|doc| Ok(crate::loro_backend::build_tid_index(doc)))?;
@@ -1456,6 +1525,10 @@ impl LoroProjection {
             // through empty, blanking the surface mid-reseed (Reactivity.md
             // corollary 3).
             self.read_model.publish_snapshot(&after);
+            self.commit_clock
+                .feed_through(CommitSource::LoroGlobal, cover);
+            self.commit_clock
+                .feed_through(CommitSource::LoroLayout, layout_cover);
             *self.live.lock().unwrap() = after;
             self.seeded.store(true, Ordering::SeqCst);
             // This full snapshot captured everything up to `current`, so any facts
@@ -1470,7 +1543,23 @@ impl LoroProjection {
         // dropped change is still owed to SQL and only another pass — against a
         // base that grounds it — can pay it. Saying so lets the run loop
         // re-drive instead of treating a partial projection as finished.
-        Ok(pass_outcome(ungrounded))
+        Ok(pass_outcome(ungrounded, after_settled))
+    }
+
+    /// Take `doc`'s queued facts and the clock's high water under the doc's
+    /// read guard. No commit of the doc runs meanwhile, so the facts are
+    /// exactly its commits stamped up to that high water.
+    fn drain(
+        &self,
+        doc: &LoroDocument,
+        queue: &StdMutex<Vec<crate::loro_backend::PendingChange>>,
+    ) -> Result<(Vec<crate::loro_backend::PendingChange>, Stamp)> {
+        doc.with_read(|_| {
+            Ok((
+                std::mem::take(&mut *queue.lock().unwrap()),
+                self.commit_clock.high_water(),
+            ))
+        })
     }
 
     /// A failed sink write leaves the SQL index behind the Loro authority.
@@ -3380,11 +3469,16 @@ mod orphan_gate_tests {
     /// its own test rather than an inline conjunction.
     #[test]
     fn a_pass_that_withheld_ops_reports_incomplete_and_may_not_seed_live() {
-        assert_eq!(pass_outcome(0), ProjectionPass::Converged);
+        assert_eq!(pass_outcome(0, true), ProjectionPass::Converged);
         assert_eq!(
-            pass_outcome(3),
+            pass_outcome(3, true),
             ProjectionPass::Incomplete { withheld: 3 },
             "a withheld op is owed to the sink, so the pass did not converge"
+        );
+        assert_eq!(
+            pass_outcome(0, false),
+            ProjectionPass::Unsettled,
+            "an unsettled walk feeds nothing, so the run loop must drive another pass"
         );
 
         assert!(
@@ -3427,12 +3521,12 @@ mod orphan_gate_tests {
         );
 
         assert_eq!(
-            pass_outcome(withheld_deletes_are_owed(true) as usize),
+            pass_outcome(withheld_deletes_are_owed(true) as usize, true),
             ProjectionPass::Incomplete { withheld: 1 },
             "an armed pass that withheld a delete must not read as converged"
         );
         assert_eq!(
-            pass_outcome(withheld_deletes_are_owed(false) as usize),
+            pass_outcome(withheld_deletes_are_owed(false) as usize, true),
             ProjectionPass::Converged
         );
     }

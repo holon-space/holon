@@ -237,16 +237,19 @@ pub(crate) async fn insert_root_block_in(
     content: &str,
 ) -> Result<TreeID> {
     let collab = doc_store.read().await.get_doc(scope).await?;
-    let doc = collab.doc();
-    let tree = doc.get_tree(TREE_NAME);
-    let node = tree.create(None)?; // root-level; fi auto-assigned by schema
-    let meta = tree.get_meta(node)?;
-    meta.insert(STABLE_ID, loro::LoroValue::from(stable_id))?;
-    meta.insert(CONTENT_TYPE, loro::LoroValue::from("text"))?;
-    let text = meta.ensure_mergeable_text(CONTENT_RAW)?;
-    text.insert(0, content)?;
-    doc.commit();
-    Ok(node)
+    collab.with_write(
+        holon_loro::WriteOrigin::Probe("projection_harness"),
+        |txn| {
+            let tree = txn.get_tree(TREE_NAME);
+            let node = tree.create(None)?; // root-level; fi auto-assigned by schema
+            let meta = tree.get_meta(node)?;
+            meta.insert(STABLE_ID, loro::LoroValue::from(stable_id))?;
+            meta.insert(CONTENT_TYPE, loro::LoroValue::from("text"))?;
+            let text = meta.ensure_mergeable_text(CONTENT_RAW)?;
+            text.insert(0, content)?;
+            Ok(node)
+        },
+    )
 }
 
 /// Remove a node from the named document and commit — the delete the

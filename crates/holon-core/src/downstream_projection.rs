@@ -34,13 +34,17 @@ pub enum ProjectionPass {
     /// `withheld` op(s) were dropped as FK-ungrounded. The sink is behind the
     /// consolidator until a later pass re-emits them against a grounded base.
     Incomplete { withheld: usize },
+    /// Every op reached the sink, but the walked snapshot had a live node
+    /// without readable meta, so the read model was not refreshed and the
+    /// pass's commits stay unfed until a pass walks a settled snapshot.
+    Unsettled,
 }
 
 impl ProjectionPass {
     /// The op count this pass still owes the sink; zero when it converged.
     pub fn withheld(self) -> usize {
         match self {
-            Self::Converged => 0,
+            Self::Converged | Self::Unsettled => 0,
             Self::Incomplete { withheld } => withheld,
         }
     }
