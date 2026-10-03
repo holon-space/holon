@@ -17,6 +17,8 @@ pub enum EngineError {
     Clock(#[from] CoverAboveHighWater),
     #[error("a payload does not decode to a block: {reason}")]
     UndecodablePayload { reason: String },
-    #[error("the engine thread panicked")]
-    Stopped,
+    #[error("block {id} encodes to no payload: {reason}")]
+    UnencodableBlock { id: EntityUri, reason: String },
+    #[error("the engine thread panicked: {0}")]
+    Panicked(String),
 }

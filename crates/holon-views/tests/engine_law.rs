@@ -14,11 +14,15 @@ use std::thread;
 use std::time::Duration;
 
 use holon_api::Block;
+use holon_api::ConditionBus;
+use holon_api::ConditionKind;
 use holon_api::EntityUri;
 use holon_api::block::SnapshotBlock;
 use holon_api::commit_clock::CommitClock;
 use holon_api::commit_clock::CommitSource;
 use holon_api::commit_clock::CoverAboveHighWater;
+use holon_api::commit_clock::Stamp;
+use holon_api::condition_bus::VIEW_ENGINE_SUBJECT;
 use holon_views::batch;
 use holon_views::batch::Multiset;
 use holon_views::batch::add;
@@ -26,6 +30,7 @@ use holon_views::engine::Field;
 use holon_views::engine::ViewBatch;
 use holon_views::engine::ViewEngine;
 use holon_views::engine::fields;
+use holon_views::engine::raise_on;
 use holon_views::error::EngineError;
 use holon_views::error::MAX_DEPTH;
 use holon_views::intern::Interner;
@@ -96,15 +101,20 @@ enum Edit {
     DeleteLeaf(usize),
 }
 
+/// How far a feed covers: `Cut(p)` is `p` percent of the way from the
+/// source's last cover to the high water. A cut that passes none of the
+/// source's commits feeds no stamp.
+#[derive(Debug, Clone, Copy)]
+struct Cut(u8);
+
 #[derive(Debug, Clone)]
 enum Event {
     /// One commit, stamped by the clock.
     Commit(usize, Edit),
-    /// The source's rows changed since its last feed, covering every stamp
-    /// minted so far.
-    Feed(usize),
-    /// Every row of the source.
-    Replace(usize),
+    /// The source's rows changed by its commits up to the cut.
+    Feed(usize, Cut),
+    /// Every row of the source after its commits up to the cut.
+    Replace(usize, Cut),
 }
 
 fn pick(candidates: Vec<u32>, i: usize) -> Option<u32> {
@@ -221,9 +231,14 @@ struct Harness {
     subscribers: Vec<Receiver<ViewBatch>>,
     plans: Vec<Rc<Checked>>,
     world: World,
-    /// `states[k]`: the world after the commit stamped `k`.
+    /// `states[k]`: the world after the commit stamped `stamps[k]`;
+    /// `stamps[0]` is [`Stamp::NONE`].
     states: Vec<World>,
-    pending: [BTreeSet<u32>; 2],
+    stamps: Vec<Stamp>,
+    /// Per source: the commits no feed covered yet, as `(k, block)`.
+    pending: [Vec<(usize, u32)>; 2],
+    /// Per source: the `k` of its last cover.
+    covered: [usize; 2],
     views: Vec<Released>,
     /// The `below` of the last released version; 1 before the first.
     released: u64,
@@ -231,11 +246,19 @@ struct Harness {
 
 impl Harness {
     fn new() -> Harness {
+        Harness::with_engine(|clock| ViewEngine::start(clock, |_| {}))
+    }
+
+    fn with_engine(start: impl FnOnce(Arc<CommitClock>) -> ViewEngine) -> Harness {
         let clock = Arc::new(CommitClock::new());
-        let engine = ViewEngine::start(clock.clone());
+        let engine = start(clock.clone());
         let subscribers = View::ALL
             .iter()
-            .map(|view| engine.subscribe(*view).unwrap())
+            .map(|view| {
+                let (state, rx) = engine.snapshot_and_subscribe(*view).unwrap();
+                assert!(state.deltas.is_empty());
+                rx
+            })
             .collect();
         Harness {
             clock,
@@ -244,7 +267,9 @@ impl Harness {
             plans: check_all(&views().plans(), &catalog()).unwrap(),
             world: World::default(),
             states: vec![World::default()],
+            stamps: vec![Stamp::NONE],
             pending: Default::default(),
+            covered: [0; 2],
             views: vec![Released::new(); View::ALL.len()],
             released: 1,
         }
@@ -252,31 +277,67 @@ impl Harness {
 
     fn commit(&mut self, source: usize, edit: &Edit) {
         if let Some(n) = self.world.apply(source, edit) {
-            self.clock.mint(SOURCES[source]);
-            self.states.push(self.world.clone());
-            self.pending[source].insert(n);
+            self.record(source, n);
         }
     }
 
+    /// Stamps the change of block `n` that `world` already holds.
+    fn record(&mut self, source: usize, n: u32) {
+        self.stamps.push(self.clock.mint(SOURCES[source]));
+        self.states.push(self.world.clone());
+        self.pending[source].push((self.states.len() - 1, n));
+    }
+
+    fn last(&self) -> usize {
+        self.states.len() - 1
+    }
+
+    fn cut(&self, source: usize, Cut(percent): Cut) -> usize {
+        let from = self.covered[source];
+        from + (self.last() - from) * usize::from(percent) / 100
+    }
+
+    /// Waits until the engine handled every post before it.
+    fn settle(&self) -> Result<(), EngineError> {
+        self.engine.snapshot_and_subscribe(View::Row).map(drop)
+    }
+
     fn feed(&mut self, source: usize) -> Result<(), EngineError> {
-        let cover = self.clock.high_water();
-        let delta = std::mem::take(&mut self.pending[source])
+        self.feed_to(source, self.last())
+    }
+
+    fn feed_to(&mut self, source: usize, k: usize) -> Result<(), EngineError> {
+        let (now, later): (Vec<_>, Vec<_>) = std::mem::take(&mut self.pending[source])
             .into_iter()
-            .map(|n| (uri(n), self.world.snapshot(n)))
+            .partition(|(at, _)| *at <= k);
+        self.pending[source] = later;
+        self.covered[source] = k;
+        let delta = now
+            .into_iter()
+            .map(|(_, n)| n)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .map(|n| (uri(n), self.states[k].snapshot(n)))
             .collect();
-        self.engine.feed(SOURCES[source], cover, delta)
+        self.engine.feed(SOURCES[source], self.stamps[k], delta);
+        self.settle()
     }
 
     fn replace(&mut self, source: usize) -> Result<(), EngineError> {
-        let cover = self.clock.high_water();
-        self.pending[source].clear();
-        let blocks = self
-            .world
+        self.replace_to(source, self.last())
+    }
+
+    fn replace_to(&mut self, source: usize, k: usize) -> Result<(), EngineError> {
+        self.pending[source].retain(|(at, _)| *at > k);
+        self.covered[source] = k;
+        let state = &self.states[k];
+        let blocks = state
             .of(source)
             .into_iter()
-            .map(|n| self.world.snapshot(n).unwrap())
+            .map(|n| state.snapshot(n).unwrap())
             .collect();
-        self.engine.replace(SOURCES[source], cover, blocks)
+        self.engine.replace(SOURCES[source], self.stamps[k], blocks);
+        self.settle()
     }
 
     /// Takes every released version and checks it against the authority at
@@ -331,8 +392,8 @@ fn law(events: Vec<Event>) -> Result<(), TestCaseError> {
     for event in events {
         match event {
             Event::Commit(source, edit) => h.commit(source, &edit),
-            Event::Feed(source) => h.feed(source).unwrap(),
-            Event::Replace(source) => h.replace(source).unwrap(),
+            Event::Feed(source, cut) => h.feed_to(source, h.cut(source, cut)).unwrap(),
+            Event::Replace(source, cut) => h.replace_to(source, h.cut(source, cut)).unwrap(),
         }
         h.check_released()?;
     }
@@ -358,12 +419,16 @@ fn edit() -> impl Strategy<Value = Edit> {
     ]
 }
 
+fn cut() -> impl Strategy<Value = Cut> {
+    prop_oneof![1 => Just(100), 1 => 0u8..=100].prop_map(Cut)
+}
+
 fn event() -> impl Strategy<Value = Event> {
     let source = 0..SOURCES.len();
     prop_oneof![
         5 => (source.clone(), edit()).prop_map(|(s, e)| Event::Commit(s, e)),
-        2 => source.clone().prop_map(Event::Feed),
-        1 => source.prop_map(Event::Replace),
+        2 => (source.clone(), cut()).prop_map(|(s, c)| Event::Feed(s, c)),
+        1 => (source, cut()).prop_map(|(s, c)| Event::Replace(s, c)),
     ]
 }
 
@@ -442,29 +507,21 @@ fn a_chain_past_max_depth_stops_the_engine() {
     });
 }
 
+/// b1 under b0, fed; then b0 under b1.
+fn parent_cycle(h: &mut Harness) -> Result<(), EngineError> {
+    create(h, 0, None);
+    create(h, 0, Some(0));
+    h.feed(0).unwrap();
+    h.world.nodes.get_mut(&0).unwrap().parent = Some(1);
+    h.record(0, 0);
+    h.feed(0)
+}
+
 #[test]
 fn a_parent_cycle_stops_the_engine() {
     within_deadline(|| {
         let mut h = Harness::new();
-        h.commit(
-            0,
-            &Edit::Create {
-                parent: None,
-                page: false,
-            },
-        );
-        h.commit(
-            0,
-            &Edit::Create {
-                parent: Some(0),
-                page: false,
-            },
-        );
-        h.feed(0).unwrap();
-        h.world.nodes.get_mut(&0).unwrap().parent = Some(1);
-        h.clock.mint(SOURCES[0]);
-        h.pending[0].insert(0);
-        let Err(EngineError::ParentCycle { ids }) = h.feed(0) else {
+        let Err(EngineError::ParentCycle { ids }) = parent_cycle(&mut h) else {
             panic!("a cycle through b0 and b1 is refused");
         };
         assert_eq!(
@@ -472,7 +529,7 @@ fn a_parent_cycle_stops_the_engine() {
             BTreeSet::from([uri(0), uri(1)])
         );
         assert!(matches!(
-            h.engine.subscribe(View::Row),
+            h.engine.snapshot_and_subscribe(View::Row),
             Err(EngineError::ParentCycle { .. })
         ));
     });
@@ -544,14 +601,12 @@ fn a_feed_that_covers_no_commit_waits_behind_its_source() {
         let mut h = Harness::new();
         let root = |page| Edit::Create { parent: None, page };
         h.commit(1, &root(false));
-        let first = h.clock.high_water();
         h.commit(0, &root(true));
         h.commit(1, &Edit::TogglePage(0));
         h.commit(0, &Edit::TogglePage(0));
         h.feed(0).unwrap();
         h.replace(0).unwrap();
-        let b0 = (uri(0), h.states[1].snapshot(0));
-        h.engine.feed(SOURCES[1], first, vec![b0]).unwrap();
+        h.feed_to(1, 1).unwrap();
         h.check_released().unwrap();
         assert_eq!(h.released, 2, "source 0's batch holds stamps 2 and 4");
         h.feed(1).unwrap();
@@ -566,7 +621,7 @@ fn each_view_releases_the_rows_of_its_own_plan() {
         let mut h = Harness::new();
         let subscribed: Vec<_> = View::ALL
             .iter()
-            .map(|view| (*view, h.engine.subscribe(*view).unwrap()))
+            .map(|view| (*view, h.engine.snapshot_and_subscribe(*view).unwrap().1))
             .collect();
         h.commit(
             0,
@@ -592,6 +647,37 @@ fn each_view_releases_the_rows_of_its_own_plan() {
     });
 }
 
+fn create(h: &mut Harness, source: usize, parent: Option<usize>) {
+    h.commit(
+        source,
+        &Edit::Create {
+            parent,
+            page: false,
+        },
+    );
+}
+
+/// The stop reason the conditions name, one per raise.
+fn stops(conditions: &ConditionBus) -> Vec<String> {
+    conditions
+        .current()
+        .into_iter()
+        .map(|c| match c.reason {
+            ConditionKind::ViewEngineStopped(reason) if c.subject == VIEW_ENGINE_SUBJECT => reason,
+            other => panic!("{} raised {other:?}", c.subject),
+        })
+        .collect()
+}
+
+fn every_stamp_is_fed(clock: &CommitClock) {
+    assert_eq!(
+        clock.low_watermark().get(),
+        clock.high_water().get() + 1,
+        "outstanding: {:?}",
+        SOURCES.map(|s| clock.outstanding(s))
+    );
+}
+
 #[test]
 fn a_cover_past_the_high_water_stops_the_engine_but_not_the_clock() {
     within_deadline(|| {
@@ -599,49 +685,147 @@ fn a_cover_past_the_high_water_stops_the_engine_but_not_the_clock() {
         let other = CommitClock::new();
         other.mint(SOURCES[0]);
         let cover = other.mint(SOURCES[0]);
-        h.commit(
-            0,
-            &Edit::Create {
-                parent: None,
-                page: false,
-            },
-        );
+        create(&mut h, 0, None);
         let refused = Err(EngineError::Clock(CoverAboveHighWater {
             store: SOURCES[0],
             cover,
             high_water: h.clock.high_water(),
         }));
-        assert_eq!(h.engine.feed(SOURCES[0], cover, vec![]), refused);
-        assert_eq!(h.feed(0), refused);
-        assert_eq!(h.clock.mint(SOURCES[1]), cover);
+        h.engine.feed(SOURCES[0], cover, vec![]);
+        assert_eq!(h.settle(), refused);
+        assert_eq!(h.clock.high_water().get(), 1);
         assert_eq!(h.clock.outstanding(SOURCES[0]).len(), 1);
-        assert_eq!(h.clock.low_watermark().get(), 1);
+        assert_eq!(h.feed(0), refused);
+        every_stamp_is_fed(&h.clock);
     });
 }
 
 #[test]
-fn a_panic_on_the_engine_thread_stops_every_call() {
+fn a_stopped_engine_still_feeds_the_clock() {
+    within_deadline(|| {
+        let conditions = Arc::new(ConditionBus::new());
+        let bus = conditions.clone();
+        let mut h = Harness::with_engine(|clock| ViewEngine::start(clock, raise_on(bus)));
+        assert!(matches!(
+            parent_cycle(&mut h),
+            Err(EngineError::ParentCycle { .. })
+        ));
+        create(&mut h, 0, None);
+        create(&mut h, 1, None);
+        create(&mut h, 1, None);
+        h.feed(0).unwrap_err();
+        h.replace_to(1, h.last() - 1).unwrap_err();
+        h.feed(1).unwrap_err();
+        every_stamp_is_fed(&h.clock);
+        let [reason] = stops(&conditions).try_into().unwrap();
+        assert!(reason.contains("form a cycle"), "{reason}");
+    });
+}
+
+#[test]
+fn a_panic_keeps_the_clock_fed() {
+    within_deadline(|| {
+        let conditions = Arc::new(ConditionBus::new());
+        let bus = conditions.clone();
+        let mut h = Harness::with_engine(|clock| ViewEngine::start(clock, raise_on(bus)));
+        create(&mut h, 0, None);
+        h.feed(0).unwrap();
+        h.record(1, 0);
+        let Err(EngineError::Panicked(message)) = h.feed(1) else {
+            panic!("a block fed by two sources panics the engine thread");
+        };
+        assert!(message.contains("fed by two sources"), "{message}");
+        every_stamp_is_fed(&h.clock);
+        create(&mut h, 0, None);
+        assert_eq!(h.feed(0), Err(EngineError::Panicked(message.clone())));
+        every_stamp_is_fed(&h.clock);
+        assert_eq!(
+            stops(&conditions),
+            [EngineError::Panicked(message).to_string()]
+        );
+    });
+}
+
+#[test]
+fn a_late_subscriber_gets_the_released_state() {
     within_deadline(|| {
         let mut h = Harness::new();
         h.commit(
             0,
             &Edit::Create {
                 parent: None,
-                page: false,
+                page: true,
             },
         );
+        create(&mut h, 1, Some(0));
         h.feed(0).unwrap();
-        h.clock.mint(SOURCES[1]);
-        let cover = h.clock.high_water();
-        let stolen = vec![(uri(0), h.world.snapshot(0))];
-        assert_eq!(
-            h.engine.feed(SOURCES[1], cover, stolen),
-            Err(EngineError::Stopped)
-        );
-        assert_eq!(h.feed(0), Err(EngineError::Stopped));
-        assert_eq!(
-            h.engine.subscribe(View::Row).err(),
-            Some(EngineError::Stopped)
-        );
+        h.feed(1).unwrap();
+        h.commit(0, &Edit::TogglePage(0));
+        create(&mut h, 1, Some(1));
+        h.feed(1).unwrap();
+        h.check_released().unwrap();
+        assert_eq!(h.released, 3, "source 0's toggle holds stamp 3");
+        let late: Vec<(Released, Receiver<ViewBatch>)> = View::ALL
+            .iter()
+            .map(|view| {
+                let (state, rx) = h.engine.snapshot_and_subscribe(*view).unwrap();
+                assert_eq!(state.below.get(), h.released);
+                let mut folded = Released::new();
+                for (row, diff) in state.deltas {
+                    add(&mut folded, row, diff);
+                }
+                (folded, rx)
+            })
+            .collect();
+        for ((folded, _), view) in late.iter().zip(&h.views) {
+            assert!(!folded.is_empty());
+            assert_eq!(folded, view);
+        }
+        h.feed(0).unwrap();
+        h.check_released().unwrap();
+        assert_eq!(h.released, 5);
+        for ((mut folded, rx), view) in late.into_iter().zip(&h.views) {
+            for batch in rx.try_iter() {
+                for (row, diff) in batch.deltas {
+                    add(&mut folded, row, diff);
+                }
+            }
+            assert_eq!(&folded, view);
+        }
     });
+}
+
+/// The posts of a producer, such as a store's commit callback, must not wait
+/// for the engine's work.
+#[test]
+fn a_feed_returns_while_the_engine_thread_is_held() {
+    within_deadline(|| {
+        let (held, holding) = mpsc::channel();
+        let (go, waiting) = mpsc::channel::<()>();
+        let mut h = Harness::with_engine(|clock| {
+            ViewEngine::start(clock, move |_| {
+                held.send(()).unwrap();
+                waiting.recv().unwrap();
+            })
+        });
+        let other = CommitClock::new();
+        other.mint(SOURCES[0]);
+        h.engine.feed(SOURCES[0], other.mint(SOURCES[0]), vec![]);
+        holding.recv().unwrap();
+        create(&mut h, 0, None);
+        h.engine
+            .feed(SOURCES[0], h.stamps[1], vec![(uri(0), h.world.snapshot(0))]);
+        h.engine.replace(SOURCES[1], Stamp::NONE, vec![]);
+        go.send(()).unwrap();
+        h.settle().unwrap_err();
+        every_stamp_is_fed(&h.clock);
+    });
+}
+
+#[test]
+#[should_panic(expected = "a clock that minted")]
+fn an_engine_refuses_a_clock_that_minted_before_it_started() {
+    let clock = Arc::new(CommitClock::new());
+    clock.mint(SOURCES[0]);
+    ViewEngine::start(clock, |_| {});
 }

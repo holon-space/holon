@@ -18,6 +18,7 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 timely = { version = "=0.31.0", default-features = false }
+tracing.workspace = true
 workspace-hack = { version = "0.1", path = "../../workspace-hack" }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]

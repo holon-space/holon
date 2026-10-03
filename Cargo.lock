@@ -6288,6 +6288,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.19",
  "timely",
+ "tracing",
  "uuid",
  "workspace-hack 0.1.0",
 ]

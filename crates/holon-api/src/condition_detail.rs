@@ -365,6 +365,11 @@ impl ConditionKind {
                 "Holon dropped the last {bytes} bytes of {subject} at start, a save a crash cut \
                  short ({reason}). Edits made just before the crash may be missing."
             )),
+
+            Self::ViewEngineStopped(reason) => ConditionDetail::prose(format!(
+                "Holon's view engine stopped: {reason}. Its views keep the state before the \
+                 error until Holon restarts."
+            )),
         }
     }
 }

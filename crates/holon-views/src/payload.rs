@@ -62,9 +62,11 @@ impl Payload {
             .map(|(key, value)| (key, Tagged::from(&value)))
             .collect();
         let wire = Wire { block, properties };
-        Ok(Payload(
-            serde_json::to_vec(&wire).expect("a Wire serializes").into(),
-        ))
+        let bytes = serde_json::to_vec(&wire).map_err(|e| EngineError::UnencodableBlock {
+            id: wire.block.block.id.clone(),
+            reason: e.to_string(),
+        })?;
+        Ok(Payload(bytes.into()))
     }
 
     pub fn decode(&self) -> Result<SnapshotBlock, EngineError> {

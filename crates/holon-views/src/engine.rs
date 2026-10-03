@@ -1,8 +1,11 @@
 //! The engine host: the views of one dataflow on a thread of their own, fed
 //! per source and released per version of the commit clock.
 
+use std::any::Any;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::panic;
+use std::panic::AssertUnwindSafe;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::mpsc;
@@ -10,16 +13,22 @@ use std::sync::mpsc::Receiver;
 use std::sync::mpsc::Sender;
 use std::thread;
 
+use holon_api::Condition;
+use holon_api::ConditionBus;
+use holon_api::ConditionKind;
 use holon_api::EntityUri;
 use holon_api::block::SnapshotBlock;
 use holon_api::commit_clock::CommitClock;
 use holon_api::commit_clock::CommitSource;
 use holon_api::commit_clock::Stamp;
+use holon_api::condition_bus::VIEW_ENGINE_SUBJECT;
 use timely::WorkerConfig;
 use timely::communication::Allocator;
 use timely::communication::allocator::Thread;
 use timely::worker::Worker;
 
+use crate::batch::Multiset;
+use crate::batch::add;
 use crate::batch::col;
 use crate::error::EngineError;
 use crate::intern::Interner;
@@ -62,14 +71,20 @@ pub struct ViewBatch {
     pub deltas: Vec<(Vec<Field>, isize)>,
 }
 
-/// After the first error every call returns it; after a panic on the engine
-/// thread every call returns [`EngineError::Stopped`].
+/// The engine thread handles the requests in the order they are posted. Its
+/// first error or panic stops it: the views stay at the last released
+/// version, every snapshot returns the error, and a feed only feeds the
+/// clock, so no watermark waits on a stopped engine.
 pub struct ViewEngine {
-    requests: Sender<(Request, Sender<Result<(), EngineError>>)>,
+    requests: Sender<Request>,
 }
 
 enum Request {
-    Subscribe(View, Sender<ViewBatch>),
+    Snapshot {
+        view: View,
+        subscriber: Sender<ViewBatch>,
+        reply: Sender<Result<ViewBatch, EngineError>>,
+    },
     Feed {
         source: CommitSource,
         cover: Stamp,
@@ -84,7 +99,16 @@ enum Rows {
 }
 
 impl ViewEngine {
-    pub fn start(clock: Arc<CommitClock>) -> ViewEngine {
+    /// `on_stop` runs on the engine thread with the error that stops it.
+    pub fn start(
+        clock: Arc<CommitClock>,
+        on_stop: impl FnOnce(&EngineError) + Send + 'static,
+    ) -> ViewEngine {
+        assert_eq!(
+            clock.high_water(),
+            Stamp::NONE,
+            "the engine starts on a clock that minted nothing: its views miss every earlier commit"
+        );
         let (requests, inbox) = mpsc::channel();
         thread::Builder::new()
             .name("holon-views".into())
@@ -92,19 +116,34 @@ impl ViewEngine {
                 let catalog = catalog();
                 let plans =
                     check_all(&views().plans(), &catalog).expect("Holon's views are well typed");
+                let on_stop = Box::new(on_stop);
                 match RowKind::for_plans(&plans) {
-                    RowKind::Dyn => Host::<DynRow>::new(clock, &catalog, &plans).serve(inbox),
+                    RowKind::Dyn => {
+                        Host::<DynRow>::new(clock, on_stop, &catalog, &plans).serve(inbox)
+                    }
                 }
             })
             .expect("the engine thread starts");
         ViewEngine { requests }
     }
 
-    /// The batches of every version released after this call.
-    pub fn subscribe(&self, view: View) -> Result<Receiver<ViewBatch>, EngineError> {
-        let (tx, rx) = mpsc::channel();
-        self.call(Request::Subscribe(view, tx))?;
-        Ok(rx)
+    /// The view at the last released version, as the batch from the empty
+    /// view, and the batches of every version released after it.
+    pub fn snapshot_and_subscribe(
+        &self,
+        view: View,
+    ) -> Result<(ViewBatch, Receiver<ViewBatch>), EngineError> {
+        let (subscriber, batches) = mpsc::channel();
+        let (reply, answer) = mpsc::channel();
+        self.post(Request::Snapshot {
+            view,
+            subscriber,
+            reply,
+        });
+        let state = answer
+            .recv()
+            .expect("the engine thread answers every snapshot")?;
+        Ok((state, batches))
     }
 
     /// `delta` holds every block of `source` whose row changed in its commits
@@ -114,37 +153,41 @@ impl ViewEngine {
         source: CommitSource,
         cover: Stamp,
         delta: Vec<(EntityUri, Option<SnapshotBlock>)>,
-    ) -> Result<(), EngineError> {
+    ) {
         let rows = Rows::Delta(delta);
-        self.call(Request::Feed {
+        self.post(Request::Feed {
             source,
             cover,
             rows,
-        })
+        });
     }
 
     /// `blocks` is every block of `source` after its commits stamped up to
     /// `cover`.
-    pub fn replace(
-        &self,
-        source: CommitSource,
-        cover: Stamp,
-        blocks: Vec<SnapshotBlock>,
-    ) -> Result<(), EngineError> {
+    pub fn replace(&self, source: CommitSource, cover: Stamp, blocks: Vec<SnapshotBlock>) {
         let rows = Rows::Replace(blocks);
-        self.call(Request::Feed {
+        self.post(Request::Feed {
             source,
             cover,
             rows,
-        })
+        });
     }
 
-    fn call(&self, request: Request) -> Result<(), EngineError> {
-        let (reply, answer) = mpsc::channel();
+    fn post(&self, request: Request) {
         self.requests
-            .send((request, reply))
-            .map_err(|_| EngineError::Stopped)?;
-        answer.recv().map_err(|_| EngineError::Stopped)?
+            .send(request)
+            .expect("the engine thread serves until the engine is dropped");
+    }
+}
+
+/// Raises [`ConditionKind::ViewEngineStopped`] on `conditions`; an `on_stop`
+/// for [`ViewEngine::start`].
+pub fn raise_on(conditions: Arc<ConditionBus>) -> impl FnOnce(&EngineError) + Send + 'static {
+    move |error| {
+        conditions.emit(Condition {
+            subject: VIEW_ENGINE_SUBJECT.to_string(),
+            reason: ConditionKind::ViewEngineStopped(error.to_string()),
+        })
     }
 }
 
@@ -172,6 +215,7 @@ struct Batch<R> {
 
 struct Host<R: Row> {
     clock: Arc<CommitClock>,
+    on_stop: Option<Box<dyn FnOnce(&EngineError) + Send>>,
     worker: Worker,
     dataflow: Dataflow<R>,
     /// In the order of [`View::ALL`].
@@ -186,12 +230,19 @@ struct Host<R: Row> {
     buffered: Vec<Batch<R>>,
     /// The `below` of the last released version.
     released: Stamp,
+    /// Each view at `released`, in the order of [`View::ALL`].
+    states: Vec<Multiset<R>>,
     subscribers: Vec<(View, Sender<ViewBatch>)>,
     stopped: Option<EngineError>,
 }
 
 impl<R: Row> Host<R> {
-    fn new(clock: Arc<CommitClock>, catalog: &Catalog, plans: &[Rc<Checked>]) -> Self {
+    fn new(
+        clock: Arc<CommitClock>,
+        on_stop: Box<dyn FnOnce(&EngineError) + Send>,
+        catalog: &Catalog,
+        plans: &[Rc<Checked>],
+    ) -> Self {
         let mut worker = Worker::new(
             WorkerConfig::default(),
             Allocator::Thread(Thread::default()),
@@ -201,6 +252,8 @@ impl<R: Row> Host<R> {
         Host {
             released: clock.low_watermark(),
             clock,
+            on_stop: Some(on_stop),
+            states: vec![Multiset::new(); plans.len()],
             worker,
             dataflow,
             schemas: plans.iter().map(|p| p.schema().clone()).collect(),
@@ -214,30 +267,72 @@ impl<R: Row> Host<R> {
         }
     }
 
-    fn serve(mut self, inbox: Receiver<(Request, Sender<Result<(), EngineError>>)>) {
-        for (request, reply) in inbox {
-            let result = match &self.stopped {
-                Some(error) => Err(error.clone()),
-                None => self.handle(request),
-            };
-            if let Err(error) = &result {
-                self.stopped.get_or_insert_with(|| error.clone());
+    fn serve(mut self, inbox: Receiver<Request>) {
+        for request in inbox {
+            match request {
+                Request::Snapshot {
+                    view,
+                    subscriber,
+                    reply,
+                } => {
+                    let state = self.unless_stopped(|host| Ok(host.snapshot(view, subscriber)));
+                    reply
+                        .send(state)
+                        .expect("the caller waits for the snapshot");
+                }
+                Request::Feed {
+                    source,
+                    cover,
+                    rows,
+                } => {
+                    // The engine may have failed or panicked before its own
+                    // feed of the clock; a second feed through one cover is a
+                    // no-op.
+                    let fed = self.unless_stopped(|host| host.feed(source, cover, rows));
+                    if fed.is_err() {
+                        if let Err(refused) = self.clock.feed_through(source, cover) {
+                            tracing::error!(
+                                "the stopped view engine could not feed the clock: {refused}"
+                            );
+                        }
+                    }
+                }
             }
-            reply.send(result).expect("the caller waits for the reply");
         }
     }
 
-    fn handle(&mut self, request: Request) -> Result<(), EngineError> {
-        match request {
-            Request::Subscribe(view, tx) => {
-                self.subscribers.push((view, tx));
-                Ok(())
-            }
-            Request::Feed {
-                source,
-                cover,
-                rows,
-            } => self.feed(source, cover, rows),
+    /// The stop error once stopped; else `handle`'s result, and its error or
+    /// panic stops the engine.
+    fn unless_stopped<T>(
+        &mut self,
+        handle: impl FnOnce(&mut Self) -> Result<T, EngineError>,
+    ) -> Result<T, EngineError> {
+        if let Some(error) = &self.stopped {
+            return Err(error.clone());
+        }
+        // ALLOW(catch_unwind): a panic stops the engine; then only the clock is used.
+        let result = panic::catch_unwind(AssertUnwindSafe(|| handle(self)))
+            .unwrap_or_else(|panic| Err(EngineError::Panicked(panic_message(&*panic))));
+        if let Err(error) = &result {
+            (self.on_stop.take().expect("the engine stops once"))(error);
+            self.stopped = Some(error.clone());
+        }
+        result
+    }
+
+    fn snapshot(&mut self, view: View, subscriber: Sender<ViewBatch>) -> ViewBatch {
+        let i = View::ALL
+            .iter()
+            .position(|v| *v == view)
+            .expect("View::ALL holds every view");
+        let deltas = self.states[i]
+            .iter()
+            .map(|(row, n)| (fields(row, &self.schemas[i], &self.interner), *n))
+            .collect();
+        self.subscribers.push((view, subscriber));
+        ViewBatch {
+            below: self.released,
+            deltas,
         }
     }
 
@@ -356,12 +451,11 @@ impl<R: Row> Host<R> {
         self.dataflow.commit(&mut self.worker)?;
         self.released = below;
         for (i, view) in View::ALL.into_iter().enumerate() {
-            let deltas: Vec<(Vec<Field>, isize)> = self
-                .dataflow
-                .take_changes(i)?
-                .into_iter()
-                .map(|(row, diff)| (fields(&row, &self.schemas[i], &self.interner), diff))
-                .collect();
+            let mut deltas = Vec::new();
+            for (row, diff) in self.dataflow.take_changes(i)? {
+                deltas.push((fields(&row, &self.schemas[i], &self.interner), diff));
+                add(&mut self.states[i], row, diff);
+            }
             let batch = ViewBatch { below, deltas };
             // A dropped receiver unsubscribes.
             self.subscribers
@@ -402,5 +496,13 @@ impl<R: Row> Host<R> {
             acyclic.extend(path);
         }
         Ok(())
+    }
+}
+
+fn panic_message(panic: &(dyn Any + Send)) -> String {
+    match (panic.downcast_ref::<&str>(), panic.downcast_ref::<String>()) {
+        (Some(message), _) => message.to_string(),
+        (None, Some(message)) => message.clone(),
+        (None, None) => "a panic payload that is not a string".to_string(),
     }
 }

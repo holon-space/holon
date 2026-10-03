@@ -647,6 +647,15 @@ const LORO_UPDATE_LOG_TAIL_DROPPED: ConditionProfile = ConditionProfile::new(
     &[],
 );
 
+const VIEW_ENGINE_STOPPED: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Error,
+    "Holon's view engine stopped",
+    icons::BLOCKED,
+    ConditionPlacement::Banner,
+    AllClear::UntilRestart,
+    &[],
+);
+
 impl ConditionKind {
     /// This kind's profile. Total, like
     /// [`condition_kind`](ConditionKind::condition_kind): a new variant cannot
@@ -694,6 +703,7 @@ impl ConditionKind {
             Self::VaultStartIncomplete { .. } => VAULT_START_INCOMPLETE,
             Self::WrittenFilesUnrecorded { .. } => WRITTEN_FILES_UNRECORDED,
             Self::LoroUpdateLogTailDropped { .. } => LORO_UPDATE_LOG_TAIL_DROPPED,
+            Self::ViewEngineStopped(_) => VIEW_ENGINE_STOPPED,
         }
     }
 }
