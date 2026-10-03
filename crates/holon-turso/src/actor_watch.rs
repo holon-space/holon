@@ -10,8 +10,7 @@
 //! already wait.
 //!
 //! A watch that fails raises [`ConditionKind::DatabaseWatchFailed`]. The
-//! watchdog thread is not restarted when it stops: it runs only this module's
-//! code, so a second thread would stop the same way.
+//! watchdog thread is not restarted when it stops.
 //!
 //! wasm32-unknown-unknown has no threads, so there is no watchdog there.
 //!
@@ -635,17 +634,59 @@ mod watchdog {
 
     use super::*;
 
-    static WATCHED: Mutex<Vec<Weak<ActorWatch>>> = Mutex::new(Vec::new());
+    /// The actors the watchdog thread watches.
+    pub(super) struct Registry {
+        watched: Mutex<Vec<Weak<ActorWatch>>>,
+        /// Why the watchdog thread does not run.
+        stopped: OnceLock<String>,
+    }
+
+    impl Registry {
+        pub(super) const fn new() -> Self {
+            Self {
+                watched: Mutex::new(Vec::new()),
+                stopped: OnceLock::new(),
+            }
+        }
+
+        pub(super) fn add(&self, watch: &Arc<ActorWatch>) {
+            self.watched
+                .lock()
+                .expect("watched actors poisoned")
+                .push(Arc::downgrade(watch));
+        }
+
+        /// Fails `watch` if the registry has stopped. `stop` sets the cause
+        /// before it reads the watches, so a watch added after that read sees
+        /// it.
+        pub(super) fn fail_if_stopped(&self, watch: &ActorWatch) {
+            if let Some(cause) = self.stopped.get() {
+                watch.fail(not_disclosed(cause));
+            }
+        }
+
+        /// Fails every watch, those added later included.
+        pub(super) fn stop(&self, cause: String) {
+            let cause = self.stopped.get_or_init(|| cause);
+            let watched: Vec<Arc<ActorWatch>> = self
+                .watched
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .iter()
+                .filter_map(Weak::upgrade)
+                .collect();
+            for watch in watched {
+                watch.fail(not_disclosed(cause));
+            }
+        }
+    }
+
+    static REGISTRY: Registry = Registry::new();
     /// The watchdog thread, `None` when it did not start.
     static STARTED: OnceLock<Option<std::thread::Thread>> = OnceLock::new();
-    /// Why the watchdog thread does not run.
-    static STOPPED: OnceLock<String> = OnceLock::new();
 
     pub(super) fn watch(watch: &Arc<ActorWatch>) {
-        WATCHED
-            .lock()
-            .expect("watched actors poisoned")
-            .push(Arc::downgrade(watch));
+        REGISTRY.add(watch);
         let started = STARTED.get_or_init(|| {
             match std::thread::Builder::new()
                 .name("sql-actor-watchdog".into())
@@ -653,7 +694,7 @@ mod watchdog {
             {
                 Ok(thread) => Some(thread.thread().clone()),
                 Err(e) => {
-                    stop(format!("the watchdog thread did not start ({e})"));
+                    REGISTRY.stop(format!("the watchdog thread did not start ({e})"));
                     None
                 }
             }
@@ -662,36 +703,18 @@ mod watchdog {
         if let Some(thread) = started {
             thread.unpark();
         }
-        // `stop` sets STOPPED before it reads WATCHED, so a watch pushed
-        // after that read sees STOPPED here.
-        if let Some(cause) = STOPPED.get() {
-            watch.fail(not_disclosed(cause));
-        }
+        REGISTRY.fail_if_stopped(watch);
     }
 
     fn not_disclosed(cause: &str) -> String {
         format!("{cause}, so a stuck SQL command is not disclosed")
     }
 
-    /// Fails every watch, those registered later included.
-    fn stop(cause: String) {
-        let cause = STOPPED.get_or_init(|| cause);
-        let watched: Vec<Arc<ActorWatch>> = WATCHED
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .iter()
-            .filter_map(Weak::upgrade)
-            .collect();
-        for watch in watched {
-            watch.fail(not_disclosed(cause));
-        }
-    }
-
     struct Stopping;
 
     impl Drop for Stopping {
         fn drop(&mut self) {
-            stop("the watchdog thread stopped on a panic".into());
+            REGISTRY.stop("the watchdog thread stopped on a panic".into());
         }
     }
 
@@ -699,7 +722,7 @@ mod watchdog {
         let _stopping = Stopping;
         loop {
             let live: Vec<Arc<ActorWatch>> = {
-                let mut watched = WATCHED.lock().expect("watched actors poisoned");
+                let mut watched = REGISTRY.watched.lock().expect("watched actors poisoned");
                 watched.retain(|w| w.strong_count() > 0);
                 watched.iter().filter_map(Weak::upgrade).collect()
             };
@@ -709,7 +732,8 @@ mod watchdog {
                         "its watchdog check panicked ({})",
                         crate::turso::panic_message(&*panic)
                     )));
-                    WATCHED
+                    REGISTRY
+                        .watched
                         .lock()
                         .expect("watched actors poisoned")
                         .retain(|w| !std::ptr::eq(w.as_ptr(), Arc::as_ptr(watch)));
@@ -955,6 +979,29 @@ mod tests {
             },
         );
         healthy.end();
+    }
+
+    #[test]
+    fn a_stopped_registry_fails_the_watches_it_holds_and_those_added_later() {
+        let registry = watchdog::Registry::new();
+        let bus = Arc::new(ConditionBus::new());
+        let (held, _held_tx) = watched_on(&bus);
+        registry.add(&held);
+
+        registry.stop("the watchdog thread stopped on a panic".into());
+        let (later, _later_tx) = watched_on(&bus);
+        registry.add(&later);
+        registry.fail_if_stopped(&later);
+
+        let failures = watch_failures(&bus);
+        assert_eq!(failures.len(), 2, "{:#?}", bus.current());
+        assert!(
+            failures
+                .iter()
+                .all(|cause| cause.contains("stopped on a panic")
+                    && cause.contains("a stuck SQL command is not disclosed")),
+            "{failures:#?}"
+        );
     }
 
     struct PanicOnEnter;

@@ -221,7 +221,7 @@ A command inside `turso_core` can spin or block without yielding (an IVM commit 
 - The watchdog runs each actor's check inside `catch_unwind`. A check that panics stops the watch of that actor only and raises `DatabaseWatchFailed` for it; the other actors stay watched. If the thread does not start or stops, every watch raises `DatabaseWatchFailed`. The thread is not restarted. The log and the condition are emitted with no watch lock held.
 - wasm32-unknown-unknown has no threads, so it has no watchdog; it says so once in the log at startup.
 
-The keystone harness ends the process with the report when any session raises `DatabaseStuck` (`inv-no-database-stuck`), because the step that sent a stuck command never returns to an invariant check.
+The keystone harness ends the process with the report when any session raises `DatabaseStuck` or `DatabaseWatchFailed` (`inv-no-database-stuck`), because the step that sent a stuck command never returns to an invariant check, and a failed watch cannot report one.
 
 **Platform Support:**
 - **Unix-like systems** (macOS, Linux, BSD, iOS, Android): Full file-based storage via `UnixIO`

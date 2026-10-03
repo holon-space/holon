@@ -142,8 +142,8 @@ fn run_slow_query(rt: &tokio::runtime::Runtime, handle: &DbHandle, rows: u64) ->
 
 /// A slow query on this machine and build. A bound below it is a quarter of
 /// its fastest run, for a query with four times its rows; a bound above it is
-/// four times its slowest run. Load that changes between the calibration and
-/// the test query then cannot carry the query across the bound.
+/// four times its slowest run. The margins absorb load that changes between
+/// the calibration and the test.
 struct Calibration {
     rows: u64,
     fastest: Duration,

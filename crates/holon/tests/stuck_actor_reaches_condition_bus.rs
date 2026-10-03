@@ -15,9 +15,46 @@ use holon_api::ConditionBus;
 use holon_api::ConditionKind;
 use tokio::sync::RwLock;
 
-/// About one to three seconds in the test profile.
-const SLOW_QUERY: &str = "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE \
-                          x < 60000) SELECT count(*) AS n FROM c";
+fn slow_query(rows: u64) -> String {
+    format!(
+        "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < {rows}) \
+         SELECT count(*) AS n FROM c"
+    )
+}
+
+/// The rows whose query runs for at least 200 ms in each of three runs, and
+/// the fastest of those runs. A bound of a quarter of it, against a query with
+/// four times the rows, absorbs load that changes between the calibration and
+/// the test.
+fn calibrate_slow_query() -> (u64, Duration) {
+    const SLOW: Duration = Duration::from_millis(200);
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("calibration runtime");
+    let (_backend, handle) = rt
+        .block_on(TursoBackend::new_in_memory())
+        .expect("in-memory db");
+    let mut run = |rows: u64| {
+        rt.block_on(async {
+            let t0 = Instant::now();
+            handle
+                .query(&slow_query(rows), Default::default())
+                .await
+                .expect("calibration query");
+            t0.elapsed()
+        })
+    };
+    let mut rows = 10_000;
+    loop {
+        let fastest = (0..3).map(|_| run(rows)).min().expect("three runs");
+        if fastest >= SLOW {
+            return (rows, fastest);
+        }
+        rows *= 2;
+    }
+}
 
 fn stuck_command(bus: &ConditionBus) -> Option<(String, String)> {
     bus.current().into_iter().find_map(|c| match c.reason {
@@ -42,8 +79,11 @@ fn wait_until(within: Duration, what: &str, bus: &ConditionBus, done: impl Fn() 
 
 #[test]
 fn a_command_past_the_hang_bound_reaches_the_containers_condition_bus() {
-    // SAFETY: no other thread exists yet that reads the environment.
-    unsafe { std::env::set_var("HOLON_ACTOR_HANG_MS", "250") };
+    let (rows, fastest) = calibrate_slow_query();
+    let bound = fastest / 4;
+    // SAFETY: the calibration runtime is dropped, so no other thread reads the
+    // environment.
+    unsafe { std::env::set_var("HOLON_ACTOR_HANG_MS", bound.as_millis().to_string()) };
     let rt = ManuallyDrop::new(
         tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -73,7 +113,7 @@ fn a_command_past_the_hang_bound_reaches_the_containers_condition_bus() {
     );
 
     let query = rt.spawn(async move {
-        db.query(SLOW_QUERY, Default::default())
+        db.query(&slow_query(rows * 4), Default::default())
             .await
             .expect("slow count query");
     });
