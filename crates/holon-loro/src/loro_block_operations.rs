@@ -3412,7 +3412,10 @@ mod intent_boundary_tests {
     #[tokio::test]
     async fn execute_operation_rejects_set_field_over_order_keys() {
         let (ops, _dir) = ops_over_temp_store();
-        for field in ["sort_key", "after_block_id"] {
+        for (field, invariant) in [
+            ("sort_key", "private field"),
+            ("after_block_id", "order key"),
+        ] {
             let mut params: StorageEntity = HashMap::new();
             params.insert("id".into(), Value::String("block:a".into()));
             params.insert("field".into(), Value::String(field.into()));
@@ -3422,7 +3425,7 @@ mod intent_boundary_tests {
                 .await
                 .expect_err("set_field over an order key must be rejected at the boundary");
             assert!(
-                err.to_string().contains("order key"),
+                err.to_string().contains(invariant),
                 "rejection must name the invariant, got: {err}"
             );
         }
