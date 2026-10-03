@@ -9,6 +9,8 @@ use std::collections::HashMap;
 
 use holon_api::Block;
 use holon_api::EntityUri;
+use holon_api::REMOVED_MARKER_KEY;
+use holon_api::RemovedTag;
 use holon_api::Value;
 use holon_api::block::SnapshotBlock;
 use holon_views::batch;
@@ -344,11 +346,19 @@ fn float() -> impl Strategy<Value = f64> {
 
 fn value() -> impl Strategy<Value = Value> {
     let leaf = prop_oneof![
+        Just(Value::Removed(RemovedTag)),
         "[a-c]{0,2}".prop_map(Value::String),
         any::<i64>().prop_map(Value::Integer),
         float().prop_map(Value::Float),
         any::<bool>().prop_map(Value::Boolean),
+        "[a-c]{0,2}".prop_map(Value::DateTime),
+        "[a-c]{0,2}".prop_map(Value::Json),
         Just(Value::Null),
+        // The map that untagged `Value` serde reads back as `Removed`.
+        Just(Value::Object(HashMap::from([(
+            REMOVED_MARKER_KEY.into(),
+            Value::Boolean(true)
+        )]))),
     ];
     leaf.prop_recursive(2, 12, 3, |inner| {
         prop_oneof![

@@ -1,13 +1,14 @@
 //! A whole block as one opaque column value.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
+use holon_api::RemovedTag;
 use holon_api::Value;
 use holon_api::block::SnapshotBlock;
 use serde::Deserialize;
 use serde::Serialize;
-use serde_json::Number;
 
 use crate::error::EngineError;
 
@@ -16,6 +17,30 @@ use crate::error::EngineError;
 /// Only [`Payload::encode`] makes one.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Payload(Arc<[u8]>);
+
+/// The block travels with its properties taken out, because `Value`'s own
+/// serde is untagged and reads `DateTime` and `Json` back as `String`.
+#[derive(Serialize, Deserialize)]
+struct Wire {
+    block: SnapshotBlock,
+    properties: BTreeMap<String, Tagged>,
+}
+
+/// [`Value`] with its variant written out. Maps are ordered, and -0.0 is
+/// stored as 0.0, which it equals.
+#[derive(Serialize, Deserialize)]
+enum Tagged {
+    Removed,
+    String(String),
+    Integer(i64),
+    Float(f64),
+    Boolean(bool),
+    DateTime(String),
+    Json(String),
+    Array(Vec<Tagged>),
+    Object(BTreeMap<String, Tagged>),
+    Null,
+}
 
 impl Payload {
     /// JSON has no NaN or infinity, and `serde_json` writes them as `null`,
@@ -29,17 +54,69 @@ impl Payload {
                 });
             }
         }
-        let mut json = serde_json::to_value(block).expect("a SnapshotBlock serializes");
-        canonical(&mut json);
+        let mut block = block.clone();
+        let properties = std::mem::take(&mut block.block.properties)
+            .into_iter()
+            .map(|(key, value)| (key, Tagged::from(&value)))
+            .collect();
+        let wire = Wire { block, properties };
         Ok(Payload(
-            serde_json::to_vec(&json)
-                .expect("a JSON value serializes")
-                .into(),
+            serde_json::to_vec(&wire).expect("a Wire serializes").into(),
         ))
     }
 
     pub fn decode(&self) -> SnapshotBlock {
-        serde_json::from_slice(&self.0).expect("a Payload holds an encoded SnapshotBlock")
+        let Wire {
+            mut block,
+            properties,
+        } = serde_json::from_slice(&self.0).expect("a Payload holds an encoded Wire");
+        block.block.properties = properties
+            .into_iter()
+            .map(|(key, value)| (key, Value::from(value)))
+            .collect();
+        block
+    }
+}
+
+impl From<&Value> for Tagged {
+    fn from(value: &Value) -> Tagged {
+        match value {
+            Value::Removed(RemovedTag) => Tagged::Removed,
+            Value::String(s) => Tagged::String(s.clone()),
+            Value::Integer(i) => Tagged::Integer(*i),
+            Value::Float(f) => Tagged::Float(if *f == 0.0 { 0.0 } else { *f }),
+            Value::Boolean(b) => Tagged::Boolean(*b),
+            Value::DateTime(s) => Tagged::DateTime(s.clone()),
+            Value::Json(s) => Tagged::Json(s.clone()),
+            Value::Array(items) => Tagged::Array(items.iter().map(Tagged::from).collect()),
+            Value::Object(map) => Tagged::Object(
+                map.iter()
+                    .map(|(key, value)| (key.clone(), Tagged::from(value)))
+                    .collect(),
+            ),
+            Value::Null => Tagged::Null,
+        }
+    }
+}
+
+impl From<Tagged> for Value {
+    fn from(tagged: Tagged) -> Value {
+        match tagged {
+            Tagged::Removed => Value::Removed(RemovedTag),
+            Tagged::String(s) => Value::String(s),
+            Tagged::Integer(i) => Value::Integer(i),
+            Tagged::Float(f) => Value::Float(f),
+            Tagged::Boolean(b) => Value::Boolean(b),
+            Tagged::DateTime(s) => Value::DateTime(s),
+            Tagged::Json(s) => Value::Json(s),
+            Tagged::Array(items) => Value::Array(items.into_iter().map(Value::from).collect()),
+            Tagged::Object(map) => Value::Object(
+                map.into_iter()
+                    .map(|(key, value)| (key, Value::from(value)))
+                    .collect(),
+            ),
+            Tagged::Null => Value::Null,
+        }
     }
 }
 
@@ -61,28 +138,5 @@ fn finite(value: &Value) -> bool {
         | Value::DateTime(_)
         | Value::Json(_)
         | Value::Null => true,
-    }
-}
-
-/// Sorts the keys of every object and writes -0.0 as 0.0. The map keeps
-/// insertion order (the workspace enables `preserve_order`), so it is rebuilt
-/// in key order.
-fn canonical(json: &mut serde_json::Value) {
-    match json {
-        serde_json::Value::Object(map) => {
-            let mut entries: Vec<_> = std::mem::take(map).into_iter().collect();
-            entries.sort_by(|(a, _), (b, _)| a.cmp(b));
-            for (_, value) in &mut entries {
-                canonical(value);
-            }
-            *map = entries.into_iter().collect();
-        }
-        serde_json::Value::Array(items) => items.iter_mut().for_each(canonical),
-        serde_json::Value::Number(n)
-            if n.as_f64().is_some_and(|f| f == 0.0 && f.is_sign_negative()) =>
-        {
-            *n = Number::from_f64(0.0).expect("0.0 is finite")
-        }
-        _ => {}
     }
 }
