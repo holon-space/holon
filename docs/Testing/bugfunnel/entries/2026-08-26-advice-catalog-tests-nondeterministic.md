@@ -70,7 +70,8 @@ Note the test's own doc comment is wrong on this point — it says
 explains why).
 
 Not reproduced on demand, so mechanism 2 remains a hypothesis. Under `cargo
-nextest` (process per test) `advice_dismiss` passed in every observed run.
+nextest` (process per test) `advice_dismiss` also fails sometimes: 1 of 3 isolated runs and 1
+loaded full-core run (`lane-logs/reds-fix-4/novel-2.log`, `lane-logs/reds-fix-4/full-core.log`).
 
 ## Missing piece
 
@@ -96,6 +97,4 @@ would be guessing. Proposed, in order:
    which is a production behaviour change and needs the `holon-feature`
    red-first treatment plus a ruling, since the schema comment records a
    deliberate data-loss tradeoff in the neighbouring `lesson_id` case.
-3. Until then, treat a full-suite `catalog_suite` red on either advice test as
-   unattributable: re-run, or attribute only via `cargo nextest`
-   (process-per-test), which did not exhibit it.
+3. Until then, treat a `catalog_suite` red on either advice test as unattributable: re-run.

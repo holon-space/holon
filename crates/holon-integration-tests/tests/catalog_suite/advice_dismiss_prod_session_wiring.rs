@@ -68,6 +68,33 @@ async fn suppressed_rows(engine: &holon::api::BackendEngine, anchor: &str, lesso
         .len()
 }
 
+/// Whether `id` is a row of `block_raw`: the FK target of
+/// `advice_suppressed.anchor_id`.
+async fn in_block_raw(engine: &holon::api::BackendEngine, id: &str) -> bool {
+    let sql = format!(
+        "SELECT id FROM block_raw WHERE id = '{}'",
+        id.replace('\'', "''")
+    );
+    !engine
+        .db_handle()
+        .query(&sql, HashMap::new())
+        .await
+        .expect("query block_raw")
+        .is_empty()
+}
+
+/// Whether the row shows up within two seconds. Separates a read that lags the
+/// write from a write that never landed.
+async fn row_lands_late(engine: &holon::api::BackendEngine, anchor: &str, lesson: &str) -> bool {
+    for _ in 0..20 {
+        if suppressed_rows(engine, anchor, lesson).await == 1 {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    false
+}
+
 #[test]
 fn prod_session_dispatches_dismiss_advice() {
     let runtime = Arc::new(tokio::runtime::Runtime::new().expect("tokio runtime"));
@@ -102,10 +129,15 @@ fn prod_session_dispatches_dismiss_advice() {
             });
 
         // (2) The dismissal persisted in the authored exclusion set.
-        assert_eq!(
-            suppressed_rows(&engine, &anchor_id, &lesson_id).await,
-            1,
-            "dismiss_advice must append exactly one (anchor, lesson) row to advice_suppressed"
+        let rows = suppressed_rows(&engine, &anchor_id, &lesson_id).await;
+        assert!(
+            rows == 1,
+            "dismiss_advice must append exactly one (anchor, lesson) row to advice_suppressed; \
+             rows={rows} anchor_in_block_raw={} lesson_in_block_raw={} \
+             row_lands_within_2s={}",
+            in_block_raw(&engine, &anchor_id).await,
+            in_block_raw(&engine, &lesson_id).await,
+            row_lands_late(&engine, &anchor_id, &lesson_id).await,
         );
 
         // (3) Idempotent — re-dismissing the same lesson is a no-op.

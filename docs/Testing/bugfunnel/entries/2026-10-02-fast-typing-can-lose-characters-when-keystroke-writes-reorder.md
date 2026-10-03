@@ -28,7 +28,7 @@ production (`frontends/gpui/src/di.rs:128` installs no editor-cell registry, so
 every keystroke goes through `dispatch_intent`).
 `two_instance_composed_pbt edit_on_receiver_concurrent_with_create_on_owner_converges`
 fails with `owner converged WITHOUT the receiver-authored text`
-(`crates/holon-integration-tests/tests/two_instance_composed_pbt.rs:843`): 1/1 in the
+(`crates/holon-integration-tests/tests/two_instance_composed_pbt.rs:895`): 1/1 in the
 night core run on main `03078ee3`, 1/10 alone at load 7, 6/20 under load 136-215.
 Probe run `b2-receiver-click/lane-logs/probe4.log` (temporary order logging, since
 reverted) typed `"phone"` on the receiver's `block:c1`:

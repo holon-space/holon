@@ -305,6 +305,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 
 ### Known reds
 
+- `advice-dismiss-prod-session-row-missing`
 - `advice-gate-weave-row-missing`
 - `bulk-add-sibling-order`
 - `catalog-advice-step6-weave-dismiss`
@@ -322,7 +323,9 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `held-slot-create-sqlonly-keystroke-races-create`
 - `integration-toggle-load`
 - `iroh-nat-traversal-address-set`
+- `iroh-pairing-refusal-reads-as-io-failure`
 - `join-then-stale-second-join`
+- `journal-feed-main-panel-still-loading`
 - `keystroke-set-field-store-reorder`
 - `lib-type-chars-home-profile-derived`
 - `logseq-parity-caret-fold-lost-loro`
@@ -345,9 +348,11 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `sqlonly-creation-slot-keystroke-races-create`
 - `text-undo-manager-load`
 - `toggle-state-sql-read-repeat-budget`
+- `tour-spike-advance-cursor-not-visible`
 - `tui-inline-row-mount-unsettled-frame`
 - `turso-block-query-source-round-trip`
 - `typechars-sql-reads-budget`
+- `undo-prod-session-source-block-marks`
 - `undo-prod-session-stale-dropped`
 - `vault-scale-main-panel-delivery`
 - `windowed-splitblock-no-editable-surface`

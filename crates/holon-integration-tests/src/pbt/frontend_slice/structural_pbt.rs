@@ -4764,7 +4764,12 @@ entities:
             .walk()
             .find(|n| n.kind == "live_block" && n.entity_id.as_deref() == Some("block:journals"))
             .unwrap_or_else(|| {
-                panic!("main panel must delegate to block:journals via live_block: {root:#?}")
+                panic!(
+                    "main panel must delegate to block:journals via live_block; loading \
+                     placeholders={} live_blocks={}: {root:#?}",
+                    root.collect_by_kind("loading").len(),
+                    root.collect_by_kind("live_block").len(),
+                )
             });
 
         // The app's focus path MUST show the journals feed: default-expanded

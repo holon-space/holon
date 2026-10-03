@@ -85,6 +85,29 @@ async fn children_of(env: &holon_integration_tests::TestEnvironment, parent: &st
         .count()
 }
 
+/// Whether the cursor shows up in the snapshot within two seconds. Separates a
+/// read that lags the write from a write that never landed.
+async fn cursor_visible_late(harness: &holon_integration_tests::TestEnvironment) -> bool {
+    for _ in 0..20 {
+        let snap = harness
+            .session()
+            .block_query()
+            .snapshot()
+            .await
+            .expect("block snapshot");
+        if snap
+            .iter_blocks()
+            .find(|b| b.id.id() == "tour-welcome")
+            .and_then(|b| b.properties.get("tour_active_step"))
+            == Some(&Value::String("1".into()))
+        {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    false
+}
+
 #[test]
 fn tour_spike_parses_advances_and_gates_on_real_engine() {
     let rt = runtime();
@@ -144,14 +167,20 @@ fn tour_spike_parses_advances_and_gates_on_real_engine() {
             .snapshot()
             .await
             .expect("snapshot after advance");
-        let persisted = snap
-            .iter_blocks()
-            .find(|b| b.id.id() == "tour-welcome")
-            .and_then(|b| b.properties.get("tour_active_step").cloned());
+        let welcome = snap.iter_blocks().find(|b| b.id.id() == "tour-welcome");
+        let persisted = welcome.and_then(|b| b.properties.get("tour_active_step").cloned());
         assert_eq!(
             persisted,
             Some(Value::String("1".into())),
-            "advance op must persist the progress cursor"
+            "advance op must persist the progress cursor; block_in_snapshot={} property_keys={:?} \
+             visible_within_2s={}",
+            welcome.is_some(),
+            welcome.map(|b| {
+                let mut keys: Vec<_> = b.properties.keys().cloned().collect();
+                keys.sort();
+                keys
+            }),
+            cursor_visible_late(&env).await,
         );
 
         // Mirror it in the pure projection.
