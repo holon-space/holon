@@ -7,15 +7,25 @@ publish = false
 
 # `workspace-hack` is the cargo-hakari feature-unification crate: every
 # member depends on it and no member references it in source, by design.
+# `getrandom` and `uuid` only switch on browser features (wasm32 dependencies).
 [package.metadata.cargo-machete]
-ignored = ["workspace-hack"]
+ignored = ["getrandom", "uuid", "workspace-hack"]
 
 [dependencies]
 differential-dataflow = { version = "=0.25.1", default-features = false }
+holon-api.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 timely = { version = "=0.31.0", default-features = false }
 workspace-hack = { version = "0.1", path = "../../workspace-hack" }
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+# holon-api brings getrandom and uuid to the browser target only transitively;
+# naming them turns on their browser randomness (the getrandom backend cfg is
+# in .cargo/config.toml).
+getrandom.workspace = true
+uuid = { workspace = true, features = ["js"] }
 
 # proptest's `getrandom` and `wait-timeout` do not build for wasm.
 [target.'cfg(not(target_family = "wasm"))'.dev-dependencies]

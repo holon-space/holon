@@ -6,6 +6,7 @@
 //! literal. So the values a recursion can derive are finite, and an `Iterate`
 //! with set semantics always reaches its fixed point.
 
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::row::Datum;
@@ -25,6 +26,7 @@ pub enum ColType {
     Int,
     Id,
     Text,
+    Payload,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -45,7 +47,7 @@ impl Schema {
             })
     }
 
-    fn pick(&self, cols: &[Col]) -> Result<Schema, PlanError> {
+    pub(crate) fn pick(&self, cols: &[Col]) -> Result<Schema, PlanError> {
         cols.iter()
             .map(|c| self.col(*c))
             .collect::<Result<_, _>>()
@@ -226,108 +228,132 @@ pub enum PlanError {
 }
 
 pub fn check(plan: &Rc<Plan>, catalog: &Catalog) -> Result<Rc<Checked>, PlanError> {
-    check_in(plan, catalog, None)
+    Ok(check_all(std::slice::from_ref(plan), catalog)?.remove(0))
 }
 
-/// `recur` is the schema of the enclosing `Iterate`, when inside its step.
-fn check_in(
-    plan: &Rc<Plan>,
-    catalog: &Catalog,
-    recur: Option<&Schema>,
-) -> Result<Rc<Checked>, PlanError> {
-    let checked = match &plan.0 {
-        Op::Scan(relation) => Checked {
-            op: Op::Scan(*relation),
-            schema: catalog.schema(*relation)?.clone(),
-        },
-        Op::Recur => Checked {
-            op: Op::Recur,
-            schema: recur.ok_or(PlanError::RecurOutsideIterate)?.clone(),
-        },
-        Op::Filter { input, pred } => {
-            let input = check_in(input, catalog, recur)?;
-            expect_type(pred, &input.schema, ColType::Bool)?;
-            Checked {
-                schema: input.schema.clone(),
-                op: Op::Filter {
-                    input,
-                    pred: pred.clone(),
-                },
-            }
+/// Checks the plans of one dataflow. A sub-plan they share by `Rc` becomes one
+/// [`Checked`] node, so the lowering builds it, and its arrangements, once.
+pub fn check_all(plans: &[Rc<Plan>], catalog: &Catalog) -> Result<Vec<Rc<Checked>>, PlanError> {
+    let mut checker = Checker {
+        catalog,
+        memo: HashMap::new(),
+    };
+    plans.iter().map(|p| checker.check(p, None)).collect()
+}
+
+struct Checker<'c> {
+    catalog: &'c Catalog,
+    /// By the plan node and the `Recur` schema it was checked under. The
+    /// plans being checked keep every node, and so every key, alive.
+    memo: HashMap<(*const Plan, Option<Schema>), Rc<Checked>>,
+}
+
+impl Checker<'_> {
+    /// `recur` is the schema of the enclosing `Iterate`, when inside its step.
+    fn check(&mut self, plan: &Rc<Plan>, recur: Option<&Schema>) -> Result<Rc<Checked>, PlanError> {
+        let memo_key = (Rc::as_ptr(plan), recur.cloned());
+        if let Some(checked) = self.memo.get(&memo_key) {
+            return Ok(checked.clone());
         }
-        Op::Project { input, exprs } => {
-            let input = check_in(input, catalog, recur)?;
-            let schema = exprs
-                .iter()
-                .map(|e| expr_type(e, &input.schema))
-                .collect::<Result<_, _>>()
-                .map(Schema)?;
-            Checked {
-                schema,
-                op: Op::Project {
-                    input,
-                    exprs: exprs.clone(),
-                },
-            }
-        }
-        Op::Join { left, right, keys } => {
-            let left = check_in(left, catalog, recur)?;
-            let right = check_in(right, catalog, recur)?;
-            for (l, r) in keys {
-                let (lt, rt) = (left.schema.col(*l)?, right.schema.col(*r)?);
-                if lt != rt {
-                    return Err(PlanError::Incomparable {
-                        left: lt,
-                        right: rt,
-                    });
+        let checked = Rc::new(self.check_op(plan, recur)?);
+        self.memo.insert(memo_key, checked.clone());
+        Ok(checked)
+    }
+
+    fn check_op(&mut self, plan: &Rc<Plan>, recur: Option<&Schema>) -> Result<Checked, PlanError> {
+        Ok(match &plan.0 {
+            Op::Scan(relation) => Checked {
+                op: Op::Scan(*relation),
+                schema: self.catalog.schema(*relation)?.clone(),
+            },
+            Op::Recur => Checked {
+                op: Op::Recur,
+                schema: recur.ok_or(PlanError::RecurOutsideIterate)?.clone(),
+            },
+            Op::Filter { input, pred } => {
+                let input = self.check(input, recur)?;
+                expect_type(pred, &input.schema, ColType::Bool)?;
+                Checked {
+                    schema: input.schema.clone(),
+                    op: Op::Filter {
+                        input,
+                        pred: pred.clone(),
+                    },
                 }
             }
-            let mut schema = left.schema.clone();
-            schema.0.extend(right.schema.0.iter().copied());
-            Checked {
-                schema,
-                op: Op::Join {
-                    left,
-                    right,
-                    keys: keys.clone(),
-                },
+            Op::Project { input, exprs } => {
+                let input = self.check(input, recur)?;
+                let schema = exprs
+                    .iter()
+                    .map(|e| expr_type(e, &input.schema))
+                    .collect::<Result<_, _>>()
+                    .map(Schema)?;
+                Checked {
+                    schema,
+                    op: Op::Project {
+                        input,
+                        exprs: exprs.clone(),
+                    },
+                }
             }
-        }
-        Op::Reduce { input, key, aggs } => {
-            let input = check_in(input, catalog, recur)?;
-            if input.reads_recur() {
-                return Err(PlanError::ReduceOverRecur);
+            Op::Join { left, right, keys } => {
+                let left = self.check(left, recur)?;
+                let right = self.check(right, recur)?;
+                for (l, r) in keys {
+                    let (lt, rt) = (left.schema.col(*l)?, right.schema.col(*r)?);
+                    if lt != rt {
+                        return Err(PlanError::Incomparable {
+                            left: lt,
+                            right: rt,
+                        });
+                    }
+                }
+                let mut schema = left.schema.clone();
+                schema.0.extend(right.schema.0.iter().copied());
+                Checked {
+                    schema,
+                    op: Op::Join {
+                        left,
+                        right,
+                        keys: keys.clone(),
+                    },
+                }
             }
-            let mut schema = input.schema.pick(key)?;
-            schema.0.extend(aggs.iter().map(|Agg::Count| ColType::Int));
-            Checked {
-                schema,
-                op: Op::Reduce {
-                    input,
-                    key: key.clone(),
-                    aggs: aggs.clone(),
-                },
+            Op::Reduce { input, key, aggs } => {
+                let input = self.check(input, recur)?;
+                if input.reads_recur() {
+                    return Err(PlanError::ReduceOverRecur);
+                }
+                let mut schema = input.schema.pick(key)?;
+                schema.0.extend(aggs.iter().map(|Agg::Count| ColType::Int));
+                Checked {
+                    schema,
+                    op: Op::Reduce {
+                        input,
+                        key: key.clone(),
+                        aggs: aggs.clone(),
+                    },
+                }
             }
-        }
-        Op::Iterate { seed, step } => {
-            if recur.is_some() {
-                return Err(PlanError::NestedIterate);
+            Op::Iterate { seed, step } => {
+                if recur.is_some() {
+                    return Err(PlanError::NestedIterate);
+                }
+                let seed = self.check(seed, None)?;
+                let step = self.check(step, Some(&seed.schema))?;
+                if step.schema != seed.schema {
+                    return Err(PlanError::StepSchema {
+                        seed: seed.schema.clone(),
+                        step: step.schema.clone(),
+                    });
+                }
+                Checked {
+                    schema: seed.schema.clone(),
+                    op: Op::Iterate { seed, step },
+                }
             }
-            let seed = check_in(seed, catalog, None)?;
-            let step = check_in(step, catalog, Some(&seed.schema))?;
-            if step.schema != seed.schema {
-                return Err(PlanError::StepSchema {
-                    seed: seed.schema.clone(),
-                    step: step.schema.clone(),
-                });
-            }
-            Checked {
-                schema: seed.schema.clone(),
-                op: Op::Iterate { seed, step },
-            }
-        }
-    };
-    Ok(Rc::new(checked))
+        })
+    }
 }
 
 fn expr_type(expr: &Expr, schema: &Schema) -> Result<ColType, PlanError> {

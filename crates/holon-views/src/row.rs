@@ -6,6 +6,7 @@ use std::sync::Arc;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::payload::Payload;
 use crate::plan::Col;
 use crate::plan::ColType;
 use crate::plan::Schema;
@@ -20,6 +21,7 @@ pub enum Datum {
     Int(i64),
     Id(Id),
     Text(Arc<str>),
+    Payload(Payload),
 }
 
 impl Datum {
@@ -29,6 +31,7 @@ impl Datum {
             Datum::Int(_) => ColType::Int,
             Datum::Id(_) => ColType::Id,
             Datum::Text(_) => ColType::Text,
+            Datum::Payload(_) => ColType::Payload,
         }
     }
 }

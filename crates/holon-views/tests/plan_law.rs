@@ -294,6 +294,7 @@ impl Gen {
             ColType::Int => Datum::Int(self.pick(4) as i64),
             ColType::Id => Datum::Id(Id(self.pick(6) as u32)),
             ColType::Text => Datum::Text(LABELS[self.pick(LABELS.len())].into()),
+            ColType::Payload => unreachable!("the law catalog has no payload column"),
         })
     }
 }

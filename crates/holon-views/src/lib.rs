@@ -5,9 +5,12 @@
 pub mod batch;
 pub mod error;
 mod eval;
+pub mod intern;
 pub mod lower;
+pub mod payload;
 pub mod plan;
 pub mod row;
+pub mod views;
 
 #[cfg(test)]
 mod tests {

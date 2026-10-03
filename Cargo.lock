@@ -6281,10 +6281,14 @@ name = "holon-views"
 version = "0.1.0"
 dependencies = [
  "differential-dataflow",
+ "getrandom 0.3.4",
+ "holon-api",
  "proptest 1.11.0",
  "serde",
+ "serde_json",
  "thiserror 2.0.19",
  "timely",
+ "uuid",
  "workspace-hack 0.1.0",
 ]
 

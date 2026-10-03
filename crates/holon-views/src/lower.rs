@@ -2,6 +2,7 @@
 //! every commit its output equals [`crate::batch::run`] over the inputs at
 //! that commit.
 
+use std::cell::Cell;
 use std::cell::Ref;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -12,6 +13,9 @@ use differential_dataflow::input::Input;
 use differential_dataflow::input::InputSession;
 use differential_dataflow::lattice::Lattice;
 use differential_dataflow::operators::Iterate;
+use differential_dataflow::operators::arrange::Arranged;
+use differential_dataflow::operators::arrange::TraceAgent;
+use differential_dataflow::trace::implementations::ValSpine;
 use timely::dataflow::operators::probe::Handle;
 use timely::order::Product;
 use timely::progress::Timestamp;
@@ -36,13 +40,35 @@ use crate::row::Datum;
 use crate::row::Row;
 
 type Coll<'s, T, R> = VecCollection<'s, T, R, isize>;
+/// Rows keyed by a key row.
+type Arr<'s, T, R> = Arranged<'s, TraceAgent<ValSpine<R, R, T, isize>>>;
 type Fault = Rc<RefCell<Option<EngineError>>>;
+
+/// What one scope built, by [`Checked`] node, so a node two plans share is
+/// built once.
+struct Cache<'s, T: Timestamp + Lattice, R: Row> {
+    colls: HashMap<usize, Coll<'s, T, R>>,
+    /// By node and key columns.
+    arrangements: HashMap<(usize, Vec<Col>), Arr<'s, T, R>>,
+    /// Arrangements built in every scope of the dataflow.
+    built: Rc<Cell<usize>>,
+}
+
+impl<'s, T: Timestamp + Lattice, R: Row> Cache<'s, T, R> {
+    fn new(built: Rc<Cell<usize>>) -> Self {
+        Cache {
+            colls: HashMap::new(),
+            arrangements: HashMap::new(),
+            built,
+        }
+    }
+}
 
 /// The scope a plan is lowered into resolves the leaves of that scope.
 trait Env<'s, T: Timestamp + Lattice, R: Row> {
     /// `None` for an operator, which [`lower`] builds from its inputs.
     fn leaf(&mut self, plan: &Rc<Checked>) -> Option<Coll<'s, T, R>>;
-    fn cache(&mut self) -> &mut HashMap<usize, Coll<'s, T, R>>;
+    fn cache(&mut self) -> &mut Cache<'s, T, R>;
 }
 
 fn key_of(plan: &Rc<Checked>) -> usize {
@@ -55,7 +81,7 @@ where
     R: Row,
     E: Env<'s, T, R>,
 {
-    if let Some(c) = env.cache().get(&key_of(plan)) {
+    if let Some(c) = env.cache().colls.get(&key_of(plan)) {
         return c.clone();
     }
     let out = match env.leaf(plan) {
@@ -72,28 +98,14 @@ where
                     .map(move |row| R::build(&out, exprs.iter().map(|e| eval(e, &row, &layout))))
             }
             Op::Join { left, right, keys } => {
-                let key_schema = Schema(
-                    keys.iter()
-                        .map(|(l, _)| left.schema().0[l.index()])
-                        .collect(),
-                );
-                let key_layout = R::layout(&key_schema);
-                let left_keys = keys.iter().map(|(l, _)| *l).collect();
-                let right_keys = keys.iter().map(|(_, r)| *r).collect();
-                let l = keyed(
-                    lower(left, env),
-                    left.schema(),
-                    left_keys,
-                    key_layout.clone(),
-                );
-                let r = keyed(lower(right, env), right.schema(), right_keys, key_layout);
+                let l = arrange(left, keys.iter().map(|(l, _)| *l).collect(), env);
+                let r = arrange(right, keys.iter().map(|(_, r)| *r).collect(), env);
                 let (ll, la) = (R::layout(left.schema()), left.schema().arity());
                 let (rl, ra) = (R::layout(right.schema()), right.schema().arity());
                 let out = R::layout(plan.schema());
-                l.arrange_by_key()
-                    .join_core(r.arrange_by_key(), move |_, a, b| {
-                        Some(R::build(&out, concat(a, &ll, la, b, &rl, ra)))
-                    })
+                l.join_core(r, move |_, a, b| {
+                    Some(R::build(&out, concat(a, &ll, la, b, &rl, ra)))
+                })
             }
             Op::Reduce { input, key, aggs } => {
                 let key_layout = R::layout(&Schema(plan.schema().0[..key.len()].to_vec()));
@@ -121,8 +133,27 @@ where
             }
         },
     };
-    env.cache().insert(key_of(plan), out.clone());
+    env.cache().colls.insert(key_of(plan), out.clone());
     out
+}
+
+/// The rows of `plan` keyed by its `cols`.
+fn arrange<'s, T, R, E>(plan: &Rc<Checked>, cols: Vec<Col>, env: &mut E) -> Arr<'s, T, R>
+where
+    T: Timestamp + Lattice,
+    R: Row,
+    E: Env<'s, T, R>,
+{
+    let id = (key_of(plan), cols.clone());
+    if let Some(a) = env.cache().arrangements.get(&id) {
+        return a.clone();
+    }
+    let key_layout = R::layout(&plan.schema().pick(&cols).expect("checked key columns"));
+    let arranged = keyed(lower(plan, env), plan.schema(), cols, key_layout).arrange_by_key();
+    let cache = env.cache();
+    cache.built.set(cache.built.get() + 1);
+    cache.arrangements.insert(id, arranged.clone());
+    arranged
 }
 
 /// Each row keyed by its `cols`, the key built with `key_layout`.
@@ -166,7 +197,7 @@ struct Top<'s, R: Row> {
     /// By [`RelationId`].
     scans: Vec<Coll<'s, u64, R>>,
     fault: Fault,
-    cache: HashMap<usize, Coll<'s, u64, R>>,
+    cache: Cache<'s, u64, R>,
 }
 
 impl<'s, R: Row> Env<'s, u64, R> for Top<'s, R> {
@@ -179,7 +210,7 @@ impl<'s, R: Row> Env<'s, u64, R> for Top<'s, R> {
         }
     }
 
-    fn cache(&mut self) -> &mut HashMap<usize, Coll<'s, u64, R>> {
+    fn cache(&mut self) -> &mut Cache<'s, u64, R> {
         &mut self.cache
     }
 }
@@ -194,14 +225,14 @@ impl<'s, R: Row> Top<'s, R> {
         let entered: Vec<(usize, Coll<'s, u64, R>)> =
             parts.iter().map(|p| (key_of(p), lower(p, self))).collect();
         let (step, fault, seed_again) = (step.clone(), self.fault.clone(), seed.clone());
+        let built = self.cache.built.clone();
         seed.iterate(move |sub, x| {
-            let mut inner = Inner {
-                rec: x,
-                cache: entered
-                    .into_iter()
-                    .map(|(k, c)| (k, c.enter(sub)))
-                    .collect(),
-            };
+            let mut cache = Cache::new(built);
+            cache.colls = entered
+                .into_iter()
+                .map(|(k, c)| (k, c.enter(sub)))
+                .collect();
+            let mut inner = Inner { rec: x, cache };
             lower(&step, &mut inner)
                 .concat(seed_again.enter(sub))
                 .distinct()
@@ -218,7 +249,7 @@ impl<'s, R: Row> Top<'s, R> {
 /// that does not read it was lowered outside the loop and entered.
 struct Inner<'s, R: Row> {
     rec: Coll<'s, Product<u64, u64>, R>,
-    cache: HashMap<usize, Coll<'s, Product<u64, u64>, R>>,
+    cache: Cache<'s, Product<u64, u64>, R>,
 }
 
 impl<'s, R: Row> Env<'s, Product<u64, u64>, R> for Inner<'s, R> {
@@ -232,7 +263,7 @@ impl<'s, R: Row> Env<'s, Product<u64, u64>, R> for Inner<'s, R> {
         }
     }
 
-    fn cache(&mut self) -> &mut HashMap<usize, Coll<'s, Product<u64, u64>, R>> {
+    fn cache(&mut self) -> &mut Cache<'s, Product<u64, u64>, R> {
         &mut self.cache
     }
 }
@@ -246,12 +277,14 @@ pub struct Dataflow<R: Row> {
     fault: Fault,
     /// The time of the next commit.
     time: u64,
+    arrangements: usize,
 }
 
 impl<R: Row> Dataflow<R> {
     pub fn build(worker: &mut Worker, catalog: &Catalog, plans: &[Rc<Checked>]) -> Self {
         let probe = Handle::new();
         let fault = Fault::default();
+        let built = Rc::new(Cell::new(0));
         let outputs: Vec<Rc<RefCell<Multiset<R>>>> = plans.iter().map(|_| Rc::default()).collect();
         let inputs = worker.dataflow::<u64, _, _>(|scope| {
             let (inputs, scans) = catalog
@@ -262,7 +295,7 @@ impl<R: Row> Dataflow<R> {
             let mut env = Top {
                 scans,
                 fault: fault.clone(),
-                cache: HashMap::new(),
+                cache: Cache::new(built.clone()),
             };
             for (plan, out) in plans.iter().zip(&outputs) {
                 let out = out.clone();
@@ -278,7 +311,13 @@ impl<R: Row> Dataflow<R> {
             probe,
             fault,
             time: 0,
+            arrangements: built.get(),
         }
+    }
+
+    /// The arrangements the dataflow keeps, one per shared (node, key).
+    pub fn arrangements(&self) -> usize {
+        self.arrangements
     }
 
     pub fn update(&mut self, relation: RelationId, row: R, diff: isize) {
