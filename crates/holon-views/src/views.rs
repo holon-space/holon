@@ -72,13 +72,29 @@ pub fn views() -> Views {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum View {
+    Children,
+    OwningPage,
+    Row,
+}
+
+impl View {
+    pub const ALL: [View; 3] = [View::Children, View::OwningPage, View::Row];
+}
+
 impl Views {
+    pub fn plan(&self, view: View) -> &Rc<Plan> {
+        match view {
+            View::Children => &self.children,
+            View::OwningPage => &self.owning_page,
+            View::Row => &self.row,
+        }
+    }
+
+    /// In the order of [`View::ALL`].
     pub fn plans(&self) -> [Rc<Plan>; 3] {
-        [
-            self.children.clone(),
-            self.owning_page.clone(),
-            self.row.clone(),
-        ]
+        View::ALL.map(|view| self.plan(view).clone())
     }
 }
 

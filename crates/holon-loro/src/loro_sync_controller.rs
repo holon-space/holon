@@ -1108,9 +1108,9 @@ impl LoroProjection {
             let (layout_pending, layout_cover) = self.drain(&layout, &self.layout_pending)?;
             let feed = || {
                 self.commit_clock
-                    .feed_through(CommitSource::LoroGlobal, cover);
+                    .feed_through(CommitSource::LoroGlobal, cover)?;
                 self.commit_clock
-                    .feed_through(CommitSource::LoroLayout, layout_cover);
+                    .feed_through(CommitSource::LoroLayout, layout_cover)
             };
 
             // Idle wake: no facts and NEITHER oplog has moved — nothing to do.
@@ -1119,7 +1119,7 @@ impl LoroProjection {
                 && last == current
                 && layout_last == layout_current
             {
-                feed();
+                feed()?;
                 return Ok(ProjectionPass::Converged);
             }
 
@@ -1252,7 +1252,7 @@ impl LoroProjection {
                     // authority, so `staging` is already true; the reseed that
                     // follows re-publishes an atomic snapshot over it.
                     self.read_model.publish_delta(&staging);
-                    feed();
+                    feed()?;
                     if has_unarmed_delete {
                         // The unarmed delete gate lives on the full walk, which
                         // withholds deletes and reports the pass complete
@@ -1540,9 +1540,9 @@ impl LoroProjection {
             // corollary 3).
             self.read_model.publish_snapshot(&after);
             self.commit_clock
-                .feed_through(CommitSource::LoroGlobal, cover);
+                .feed_through(CommitSource::LoroGlobal, cover)?;
             self.commit_clock
-                .feed_through(CommitSource::LoroLayout, layout_cover);
+                .feed_through(CommitSource::LoroLayout, layout_cover)?;
             *self.live.lock().unwrap() = after;
             self.seeded.store(true, Ordering::SeqCst);
             // This full snapshot captured everything up to `current`, so any facts

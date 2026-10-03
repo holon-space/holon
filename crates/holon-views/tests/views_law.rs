@@ -256,7 +256,7 @@ fn check_row_view(
         else {
             panic!("the row view yields (Id, Payload), got {r:?}");
         };
-        let block = payload.decode();
+        let block = payload.decode().unwrap();
         prop_assert_eq!(&block.block.id, interner.uri(id));
         let n: u32 = block.block.id.id().trim_start_matches('b').parse().unwrap();
         prop_assert_eq!(block, forest.snapshot(n));
@@ -431,7 +431,7 @@ proptest! {
     #[test]
     fn a_payload_decodes_to_its_block(props in props()) {
         let block = block_with(&props);
-        prop_assert_eq!(Payload::encode(&block).unwrap().decode(), block);
+        prop_assert_eq!(Payload::encode(&block).unwrap().decode().unwrap(), block);
     }
 
     #[test]
@@ -440,6 +440,15 @@ proptest! {
         prop_assert_eq!(&block, &twin);
         prop_assert_eq!(Payload::encode(&block).unwrap(), Payload::encode(&twin).unwrap());
     }
+}
+
+#[test]
+fn bytes_that_encode_no_block_are_no_payload() {
+    let refused = serde_json::from_str::<Payload>("[110, 111]").unwrap_err();
+    assert!(
+        refused.to_string().contains("does not decode to a block"),
+        "{refused}"
+    );
 }
 
 #[test]
@@ -461,11 +470,11 @@ fn a_non_finite_float_is_refused() {
 }
 
 #[test]
-fn the_views_arrange_once_per_relation_and_key() {
+fn the_views_arrange_only_the_two_inputs_of_the_owning_page_step() {
     let catalog = catalog();
     let plans = check_all(&views().plans(), &catalog).unwrap();
     let dd = Dataflow::<DynRow>::build(&mut worker(), &catalog, &plans);
-    // `owning_page`'s step: the recursion by node, the non-pages by parent.
+    // The recursion by node, the non-pages by parent.
     assert_eq!(dd.arrangements(), 2);
 }
 

@@ -14,8 +14,10 @@ use crate::error::EngineError;
 
 /// The canonical encoding of a [`SnapshotBlock`]: equal blocks give equal
 /// bytes, so a block fed again unchanged cancels out instead of churning.
-/// Only [`Payload::encode`] makes one.
+/// [`Payload::encode`] makes one; deserialized bytes are one only if they
+/// decode.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "Arc<[u8]>")]
 pub struct Payload(Arc<[u8]>);
 
 /// The block travels with its properties taken out, because `Value`'s own
@@ -65,17 +67,32 @@ impl Payload {
         ))
     }
 
-    pub fn decode(&self) -> SnapshotBlock {
-        let Wire {
-            mut block,
-            properties,
-        } = serde_json::from_slice(&self.0).expect("a Payload holds an encoded Wire");
-        block.block.properties = properties
-            .into_iter()
-            .map(|(key, value)| (key, Value::from(value)))
-            .collect();
-        block
+    pub fn decode(&self) -> Result<SnapshotBlock, EngineError> {
+        decode(&self.0)
     }
+}
+
+impl TryFrom<Arc<[u8]>> for Payload {
+    type Error = EngineError;
+
+    fn try_from(bytes: Arc<[u8]>) -> Result<Payload, EngineError> {
+        decode(&bytes)?;
+        Ok(Payload(bytes))
+    }
+}
+
+fn decode(bytes: &[u8]) -> Result<SnapshotBlock, EngineError> {
+    let Wire {
+        mut block,
+        properties,
+    } = serde_json::from_slice(bytes).map_err(|e| EngineError::UndecodablePayload {
+        reason: e.to_string(),
+    })?;
+    block.block.properties = properties
+        .into_iter()
+        .map(|(key, value)| (key, Value::from(value)))
+        .collect();
+    Ok(block)
 }
 
 impl From<&Value> for Tagged {

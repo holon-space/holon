@@ -49,6 +49,14 @@ impl CommitSource {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WriteTicket(Stamp);
 
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{store:?} fed through {cover:?}, past the high water {high_water:?}")]
+pub struct CoverAboveHighWater {
+    pub store: CommitSource,
+    pub cover: Stamp,
+    pub high_water: Stamp,
+}
+
 #[derive(Debug, Default)]
 pub struct CommitClock {
     inner: Mutex<Inner>,
@@ -75,20 +83,24 @@ impl CommitClock {
     }
 
     /// Mark `source`'s stamps up to and including `cover` as fed. Stamps of
-    /// other sources stay outstanding.
-    ///
-    /// # Panics
-    /// When `cover` is past the high water: the caller names a commit that
-    /// was never minted.
-    pub fn feed_through(&self, source: CommitSource, cover: Stamp) {
+    /// other sources stay outstanding. A `cover` past the high water names a
+    /// commit that was never minted and changes nothing.
+    pub fn feed_through(
+        &self,
+        source: CommitSource,
+        cover: Stamp,
+    ) -> Result<(), CoverAboveHighWater> {
         let mut inner = self.inner.lock().unwrap();
-        assert!(
-            cover.0 <= inner.high,
-            "{source:?} fed through {cover:?}, past the high water {}",
-            inner.high
-        );
+        if cover.0 > inner.high {
+            return Err(CoverAboveHighWater {
+                store: source,
+                cover,
+                high_water: Stamp(inner.high),
+            });
+        }
         let set = &mut inner.outstanding[source.index()];
         *set = set.split_off(&(cover.0 + 1));
+        Ok(())
     }
 
     /// The last stamp minted.
@@ -207,7 +219,7 @@ mod tests {
                     }
                     Step::Feed(source, pick) => {
                         let cover = model.high() * u64::from(pick) / 100;
-                        clock.feed_through(source, Stamp(cover));
+                        clock.feed_through(source, Stamp(cover)).unwrap();
                         for (i, (s, fed)) in model.minted.iter_mut().enumerate() {
                             if *s == source && i as u64 + 1 <= cover {
                                 *fed = true;
@@ -226,7 +238,7 @@ mod tests {
             }
             let high = clock.high_water();
             for source in CommitSource::ALL {
-                clock.feed_through(source, high);
+                clock.feed_through(source, high).unwrap();
             }
             prop_assert_eq!(clock.low_watermark(), Stamp(high.get() + 1));
             for source in CommitSource::ALL {
@@ -236,10 +248,19 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "past the high water")]
-    fn a_feed_past_the_high_water_panics() {
+    fn a_feed_past_the_high_water_is_refused_and_the_clock_works_on() {
         let clock = CommitClock::new();
         clock.mint(CommitSource::Sql);
-        clock.feed_through(CommitSource::Sql, Stamp(2));
+        assert_eq!(
+            clock.feed_through(CommitSource::Sql, Stamp(2)),
+            Err(CoverAboveHighWater {
+                store: CommitSource::Sql,
+                cover: Stamp(2),
+                high_water: Stamp(1),
+            })
+        );
+        assert_eq!(clock.mint(CommitSource::LoroGlobal), Stamp(2));
+        assert_eq!(clock.high_water(), Stamp(2));
+        assert_eq!(clock.low_watermark(), Stamp(1));
     }
 }

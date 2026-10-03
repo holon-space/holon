@@ -18,11 +18,11 @@ use holon_api::EntityUri;
 use holon_api::block::SnapshotBlock;
 use holon_api::commit_clock::CommitClock;
 use holon_api::commit_clock::CommitSource;
+use holon_api::commit_clock::CoverAboveHighWater;
 use holon_views::batch;
 use holon_views::batch::Multiset;
 use holon_views::batch::add;
 use holon_views::engine::Field;
-use holon_views::engine::View;
 use holon_views::engine::ViewBatch;
 use holon_views::engine::ViewEngine;
 use holon_views::engine::fields;
@@ -32,6 +32,7 @@ use holon_views::intern::Interner;
 use holon_views::plan::Checked;
 use holon_views::plan::check_all;
 use holon_views::row::DynRow;
+use holon_views::views::View;
 use holon_views::views::block_row;
 use holon_views::views::catalog;
 use holon_views::views::views;
@@ -419,7 +420,11 @@ fn a_200_deep_chain_resolves() {
         let mut h = chain(200);
         h.feed(0).unwrap();
         h.check_released().unwrap();
-        let owners = &h.views[View::OwningPage as usize];
+        let owning = View::ALL
+            .iter()
+            .position(|v| *v == View::OwningPage)
+            .unwrap();
+        let owners = &h.views[owning];
         assert_eq!(owners.len(), 201);
         assert!(
             owners.keys().all(|row| row[1] == Field::Uri(uri(0))),
@@ -530,6 +535,87 @@ fn a_cycle_only_between_unreleased_feeds_is_not_refused() {
         h.check_released().unwrap();
         assert_eq!(h.released, h.clock.high_water().get() + 1);
         assert_eq!(h.world.nodes[&1].parent, Some(0));
+    });
+}
+
+#[test]
+fn a_feed_that_covers_no_commit_waits_behind_its_source() {
+    within_deadline(|| {
+        let mut h = Harness::new();
+        let root = |page| Edit::Create { parent: None, page };
+        h.commit(1, &root(false));
+        let first = h.clock.high_water();
+        h.commit(0, &root(true));
+        h.commit(1, &Edit::TogglePage(0));
+        h.commit(0, &Edit::TogglePage(0));
+        h.feed(0).unwrap();
+        h.replace(0).unwrap();
+        let b0 = (uri(0), h.states[1].snapshot(0));
+        h.engine.feed(SOURCES[1], first, vec![b0]).unwrap();
+        h.check_released().unwrap();
+        assert_eq!(h.released, 2, "source 0's batch holds stamps 2 and 4");
+        h.feed(1).unwrap();
+        h.check_released().unwrap();
+        assert_eq!(h.released, 5);
+    });
+}
+
+#[test]
+fn each_view_releases_the_rows_of_its_own_plan() {
+    within_deadline(|| {
+        let mut h = Harness::new();
+        let subscribed: Vec<_> = View::ALL
+            .iter()
+            .map(|view| (*view, h.engine.subscribe(*view).unwrap()))
+            .collect();
+        h.commit(
+            0,
+            &Edit::Create {
+                parent: None,
+                page: true,
+            },
+        );
+        h.feed(0).unwrap();
+        for (view, rx) in subscribed {
+            let batch = rx.try_recv().unwrap();
+            let [(row, 1)] = batch.deltas.as_slice() else {
+                panic!("{view:?} releases one row, got {:?}", batch.deltas);
+            };
+            let page = Field::Uri(uri(0));
+            let fits = match view {
+                View::Children => matches!(row.as_slice(), [_, Field::Text(_), id] if *id == page),
+                View::OwningPage => row.as_slice() == [page.clone(), page],
+                View::Row => matches!(row.as_slice(), [id, Field::Payload(_)] if *id == page),
+            };
+            assert!(fits, "{view:?} released {row:?}");
+        }
+    });
+}
+
+#[test]
+fn a_cover_past_the_high_water_stops_the_engine_but_not_the_clock() {
+    within_deadline(|| {
+        let mut h = Harness::new();
+        let other = CommitClock::new();
+        other.mint(SOURCES[0]);
+        let cover = other.mint(SOURCES[0]);
+        h.commit(
+            0,
+            &Edit::Create {
+                parent: None,
+                page: false,
+            },
+        );
+        let refused = Err(EngineError::Clock(CoverAboveHighWater {
+            store: SOURCES[0],
+            cover,
+            high_water: h.clock.high_water(),
+        }));
+        assert_eq!(h.engine.feed(SOURCES[0], cover, vec![]), refused);
+        assert_eq!(h.feed(0), refused);
+        assert_eq!(h.clock.mint(SOURCES[1]), cover);
+        assert_eq!(h.clock.outstanding(SOURCES[0]).len(), 1);
+        assert_eq!(h.clock.low_watermark().get(), 1);
     });
 }
 

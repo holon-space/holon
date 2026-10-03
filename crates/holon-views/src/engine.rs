@@ -38,22 +38,11 @@ use crate::row::RowKind;
 use crate::views::BLOCKS;
 use crate::views::ID;
 use crate::views::PARENT;
+use crate::views::View;
 use crate::views::block_row;
 use crate::views::blocks_schema;
 use crate::views::catalog;
 use crate::views::views;
-
-/// In the order of [`crate::views::Views::plans`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum View {
-    Children,
-    OwningPage,
-    Row,
-}
-
-impl View {
-    pub const ALL: [View; 3] = [View::Children, View::OwningPage, View::Row];
-}
 
 /// A column of a released row, with ids as block URIs.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -185,7 +174,7 @@ struct Host<R: Row> {
     clock: Arc<CommitClock>,
     worker: Worker,
     dataflow: Dataflow<R>,
-    /// By [`View`].
+    /// In the order of [`View::ALL`].
     schemas: Vec<Schema>,
     blocks: R::Layout,
     interner: Interner,
@@ -296,7 +285,7 @@ impl<R: Row> Host<R> {
             stamps: stamps.first().copied().zip(stamps.last().copied()),
             updates,
         });
-        self.clock.feed_through(source, cover);
+        self.clock.feed_through(source, cover)?;
         self.release()
     }
 
@@ -335,7 +324,8 @@ impl<R: Row> Host<R> {
         if below <= self.released {
             return Ok(());
         }
-        // A source's batches go in in feed order.
+        // A source's batches go in in feed order. A batch with no stamps
+        // repeats rows its source fed before, so its updates cancel at any cut.
         let mut held = HashSet::new();
         let (now, later): (Vec<_>, Vec<_>) = std::mem::take(&mut self.buffered)
             .into_iter()
