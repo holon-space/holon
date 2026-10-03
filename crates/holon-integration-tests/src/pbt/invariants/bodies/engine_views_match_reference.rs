@@ -1,8 +1,8 @@
 //! `inv-engine-views-match-reference`.
 //!
 //! @pbt oracle differential — every view the engine released equals the same
-//!   view recomputed by the batch backend from the SUT's Loro docs, once
-//!   everything settles
+//!   view recomputed by the batch backend from the SUT's Loro docs and its
+//!   focus_roots matview, once everything settles
 //! @pbt covers engine-views-drift — a feed the projection never posted, a
 //!   feed whose rows and cover disagree, and an engine that stopped
 //! @pbt slips-if-removed the engine's views: no other invariant reads them,
@@ -90,7 +90,7 @@ where
             if Instant::now() >= deadline {
                 return InvariantResult::Fail(format!(
                     "[{}] the engine's views differed from the views recomputed from the Loro \
-                     docs for {budget:?}, past the in-flight window.\n{last_fail}",
+                     docs and focus_roots for {budget:?}, past the in-flight window.\n{last_fail}",
                     Self::ID.0
                 ));
             }

@@ -17,6 +17,7 @@
 //! parallel with `holon-loro` instead of waiting for it.
 
 pub mod event_infra_module;
+pub mod focus_roots_feed;
 pub mod loro_block_query_source;
 pub mod loro_module;
 pub mod loro_ui_watcher;

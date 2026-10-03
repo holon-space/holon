@@ -1,8 +1,9 @@
-//! Holon's views, as plans over the `blocks` relation, and the parse of a
-//! block into its `blocks` row.
+//! Holon's views, as plans over the `blocks` and `focus_roots` relations, and
+//! the parse of a block and a focus root into their rows.
 
 use std::rc::Rc;
 
+use holon_api::EntityUri;
 use holon_api::block::SnapshotBlock;
 
 use crate::error::EngineError;
@@ -36,9 +37,20 @@ pub(crate) fn blocks_schema() -> Schema {
     ])
 }
 
+/// `focus_roots(history: Int, region: Text, root: Id)`: the open focus of
+/// each navigation history entry, keyed by `history`.
+pub const FOCUS_ROOTS: RelationId = RelationId(1);
+pub const HISTORY: Col = Col(0);
+pub const REGION: Col = Col(1);
+pub const ROOT: Col = Col(2);
+
+pub(crate) fn focus_roots_schema() -> Schema {
+    Schema(vec![ColType::Int, ColType::Text, ColType::Id])
+}
+
 pub fn catalog() -> Catalog {
     Catalog {
-        relations: vec![blocks_schema()],
+        relations: vec![blocks_schema(), focus_roots_schema()],
     }
 }
 
@@ -53,6 +65,9 @@ pub struct Views {
     pub owning_page: Rc<Plan>,
     /// `(id, payload)`, read by `id`.
     pub row: Rc<Plan>,
+    /// `(region, root, history)`, read by `region`. The root need not be a
+    /// block of the same version.
+    pub focus_roots: Rc<Plan>,
 }
 
 pub fn views() -> Views {
@@ -69,6 +84,7 @@ pub fn views() -> Views {
         children: blocks.project(vec![col(PARENT), col(SORT), col(ID)]),
         owning_page: pages.iterate(&inherit),
         row: blocks.project(vec![col(ID), col(PAYLOAD)]),
+        focus_roots: Plan::scan(FOCUS_ROOTS).project(vec![col(REGION), col(ROOT), col(HISTORY)]),
     }
 }
 
@@ -77,10 +93,16 @@ pub enum View {
     Children,
     OwningPage,
     Row,
+    FocusRoots,
 }
 
 impl View {
-    pub const ALL: [View; 3] = [View::Children, View::OwningPage, View::Row];
+    pub const ALL: [View; 4] = [
+        View::Children,
+        View::OwningPage,
+        View::Row,
+        View::FocusRoots,
+    ];
 }
 
 impl Views {
@@ -89,11 +111,12 @@ impl Views {
             View::Children => &self.children,
             View::OwningPage => &self.owning_page,
             View::Row => &self.row,
+            View::FocusRoots => &self.focus_roots,
         }
     }
 
     /// In the order of [`View::ALL`].
-    pub fn plans(&self) -> [Rc<Plan>; 3] {
+    pub fn plans(&self) -> [Rc<Plan>; 4] {
         View::ALL.map(|view| self.plan(view).clone())
     }
 }
@@ -111,4 +134,24 @@ pub fn block_row<R: Row>(interner: &mut Interner, block: &SnapshotBlock) -> Resu
             Datum::Payload(payload),
         ],
     ))
+}
+
+/// An open `navigation_history` entry that focuses a block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FocusRoot {
+    pub history: i64,
+    pub region: String,
+    pub root: EntityUri,
+}
+
+/// The `focus_roots` row of `focus`; ids interned in `interner`.
+pub fn focus_root_row<R: Row>(interner: &mut Interner, focus: &FocusRoot) -> R {
+    R::build(
+        &R::layout(&focus_roots_schema()),
+        [
+            Datum::Int(focus.history),
+            Datum::Text(focus.region.as_str().into()),
+            Datum::Id(interner.intern(&focus.root)),
+        ],
+    )
 }

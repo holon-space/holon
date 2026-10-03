@@ -305,6 +305,7 @@ fn law(commits: Vec<Vec<Edit>>) -> Result<(), TestCaseError> {
             fed.values()
                 .map(|r| (r.clone(), 1))
                 .collect::<Multiset<DynRow>>(),
+            Multiset::new(),
         ];
         let batch: Vec<Multiset<DynRow>> = plans
             .iter()

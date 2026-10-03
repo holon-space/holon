@@ -16,6 +16,7 @@
 //! is one of four storage adapters).
 
 pub mod block_table_names;
+pub mod commit_event;
 mod db_open;
 pub mod derived_reconciler;
 pub mod durable_state;

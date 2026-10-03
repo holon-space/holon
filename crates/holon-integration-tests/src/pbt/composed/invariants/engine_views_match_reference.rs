@@ -1,5 +1,6 @@
 //! `inv-engine-views-match-reference` — the views the engine released equal
-//! the views recomputed from the SUT's Loro docs once everything settles.
+//! the views recomputed from the SUT's Loro docs and focus_roots once
+//! everything settles.
 //! `Needs SutEngineViews` only: the loro_* invariants tie the docs to the
 //! reference.
 

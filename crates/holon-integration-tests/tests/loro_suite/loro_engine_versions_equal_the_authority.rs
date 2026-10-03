@@ -277,7 +277,7 @@ impl Setup {
                 };
                 let mut blocks = self.writers[0].blocks_below(&histories[0], below)?;
                 blocks.extend(self.writers[1].blocks_below(&histories[1], below)?);
-                let expected = &recompute(&blocks)?[i];
+                let expected = &recompute(&blocks, &[])?[i];
                 assert!(
                     &self.folded.states[i] == expected,
                     "{view:?} at the version below {below:?} differs from the authority\n  \
@@ -434,7 +434,7 @@ async fn the_rows_a_doc_held_before_the_projection_are_released() -> Result<()> 
         );
     }
     assert_eq!(blocks.len(), 2);
-    let expected = recompute(&blocks)?;
+    let expected = recompute(&blocks, &[])?;
     let released = FoldedViews::subscribe(&engine)?;
     for (i, view) in View::ALL.into_iter().enumerate() {
         assert!(

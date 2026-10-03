@@ -1,4 +1,5 @@
-//! The engine host over two sources on one commit clock: every version it
+//! The engine host over three sources on one commit clock: two Loro sources
+//! feed `blocks` and the Sql source feeds `focus_roots`. Every version it
 //! releases equals the batch backend over the authority state at that
 //! version, and no version is released while a commit at or below it is
 //! outstanding.
@@ -37,16 +38,24 @@ use holon_views::intern::Interner;
 use holon_views::plan::Checked;
 use holon_views::plan::check_all;
 use holon_views::row::DynRow;
+use holon_views::views::FocusRoot;
 use holon_views::views::View;
 use holon_views::views::block_row;
 use holon_views::views::catalog;
+use holon_views::views::focus_root_row;
 use holon_views::views::views;
 use proptest::collection::vec;
 use proptest::option;
 use proptest::prelude::*;
 use proptest::test_runner::FileFailurePersistence;
 
-const SOURCES: [CommitSource; 2] = [CommitSource::LoroGlobal, CommitSource::LoroLayout];
+const SOURCES: [CommitSource; 3] = [
+    CommitSource::LoroGlobal,
+    CommitSource::LoroLayout,
+    CommitSource::Sql,
+];
+const SQL: usize = 2;
+const REGIONS: [&str; 2] = ["main", "sidebar"];
 const DEADLINE: Duration = Duration::from_secs(10);
 
 fn uri(n: u32) -> EntityUri {
@@ -76,12 +85,15 @@ struct Node {
     page: bool,
 }
 
-/// The authority: blocks of both sources in one forest. A parent may sit in
-/// the other source.
+/// The authority: blocks of both Loro sources in one forest, and the open
+/// navigation history entries. A parent may sit in the other source.
 #[derive(Debug, Clone, Default)]
 struct World {
     nodes: BTreeMap<u32, Node>,
     next: u32,
+    /// By history id: the region and the root block.
+    focus: BTreeMap<u32, (usize, u32)>,
+    next_history: u32,
 }
 
 /// One edit by one source. A `usize` picks a block by position among the
@@ -104,6 +116,19 @@ enum Edit {
     Adopt(usize),
 }
 
+/// One Sql commit on the navigation history.
+#[derive(Debug, Clone)]
+enum Focus {
+    /// Opens an entry on a block of either Loro source; `replace` closes the
+    /// region's open entries in the same commit.
+    Navigate {
+        region: usize,
+        root: usize,
+        replace: bool,
+    },
+    Close(usize),
+}
+
 /// How far a feed covers: `Cut(p)` is `p` percent of the way from the
 /// source's last cover to the high water. A cut that passes none of the
 /// source's commits feeds no stamp.
@@ -112,8 +137,9 @@ struct Cut(u8);
 
 #[derive(Debug, Clone)]
 enum Event {
-    /// One commit, stamped by the clock.
+    /// One commit of a Loro source, stamped by the clock.
     Commit(usize, Edit),
+    Focus(Focus),
     /// The source's rows changed by its commits up to the cut.
     Feed(usize, Cut),
     /// Every row of the source after its commits up to the cut.
@@ -208,6 +234,60 @@ impl World {
     fn snapshot_of(&self, source: usize, n: u32) -> Option<SnapshotBlock> {
         self.snapshot(n).filter(|_| self.nodes[&n].source == source)
     }
+
+    /// The history entries the commit changed.
+    fn navigate(&mut self, focus: &Focus) -> Vec<u32> {
+        match focus {
+            Focus::Navigate {
+                region,
+                root,
+                replace,
+            } => {
+                let Some(root) = pick(self.nodes.keys().copied().collect(), *root) else {
+                    return vec![];
+                };
+                let mut changed: Vec<u32> = match replace {
+                    true => self
+                        .focus
+                        .iter()
+                        .filter(|(_, (r, _))| r == region)
+                        .map(|(h, _)| *h)
+                        .collect(),
+                    false => vec![],
+                };
+                for h in &changed {
+                    self.focus.remove(h);
+                }
+                let h = self.next_history;
+                self.next_history += 1;
+                self.focus.insert(h, (*region, root));
+                changed.push(h);
+                changed
+            }
+            Focus::Close(i) => {
+                let Some(h) = pick(self.focus.keys().copied().collect(), *i) else {
+                    return vec![];
+                };
+                self.focus.remove(&h);
+                vec![h]
+            }
+        }
+    }
+
+    fn focus_root(&self, h: u32) -> Option<FocusRoot> {
+        self.focus.get(&h).map(|(region, root)| FocusRoot {
+            history: i64::from(h),
+            region: REGIONS[*region].to_string(),
+            root: uri(*root),
+        })
+    }
+
+    fn focus_roots(&self) -> Vec<FocusRoot> {
+        self.focus
+            .keys()
+            .map(|h| self.focus_root(*h).unwrap())
+            .collect()
+    }
 }
 
 type Released = Multiset<Vec<Field>>;
@@ -223,10 +303,16 @@ fn expected(plans: &[Rc<Checked>], world: &World) -> Vec<Released> {
             (row, 1)
         })
         .collect();
+    let focus_roots: Multiset<DynRow> = world
+        .focus_roots()
+        .iter()
+        .map(|focus| (focus_root_row(&mut interner, focus), 1))
+        .collect();
+    let inputs = [blocks, focus_roots];
     plans
         .iter()
         .map(|plan| {
-            batch::run(plan, std::slice::from_ref(&blocks))
+            batch::run(plan, &inputs)
                 .expect("a generated forest is shallow")
                 .into_iter()
                 .map(|(row, n)| (fields(&row, plan.schema(), &interner), n))
@@ -245,10 +331,11 @@ struct Harness {
     /// `stamps[0]` is [`Stamp::NONE`].
     states: Vec<World>,
     stamps: Vec<Stamp>,
-    /// Per source: the commits no feed covered yet, as `(k, block)`.
-    pending: [Vec<(usize, u32)>; 2],
+    /// Per source: the commits no feed covered yet, as `(k, block)`, or
+    /// `(k, history)` for Sql.
+    pending: [Vec<(usize, u32)>; 3],
     /// Per source: the `k` of its last cover.
-    covered: [usize; 2],
+    covered: [usize; 3],
     views: Vec<Released>,
     /// The `below` of the last released version; 1 before the first.
     released: u64,
@@ -279,7 +366,7 @@ impl Harness {
             states: vec![World::default()],
             stamps: vec![Stamp::NONE],
             pending: Default::default(),
-            covered: [0; 2],
+            covered: [0; 3],
             views: vec![Released::new(); View::ALL.len()],
             released: 1,
         }
@@ -292,6 +379,17 @@ impl Harness {
         if let Some(n) = self.world.apply(source, edit) {
             self.record(source, n);
         }
+    }
+
+    fn focus(&mut self, focus: &Focus) {
+        let changed = self.world.navigate(focus);
+        if changed.is_empty() {
+            return;
+        }
+        self.stamps.push(self.clock.mint(SOURCES[SQL]));
+        self.states.push(self.world.clone());
+        let k = self.last();
+        self.pending[SQL].extend(changed.into_iter().map(|h| (k, h)));
     }
 
     fn adopt(&mut self, source: usize, i: usize) {
@@ -336,14 +434,21 @@ impl Harness {
             .partition(|(at, _)| *at <= k);
         self.pending[source] = later;
         self.covered[source] = k;
-        let delta = now
-            .into_iter()
-            .map(|(_, n)| n)
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .map(|n| (uri(n), self.states[k].snapshot_of(source, n)))
-            .collect();
-        self.engine.feed(SOURCES[source], self.stamps[k], delta);
+        let changed = now.into_iter().map(|(_, n)| n).collect::<BTreeSet<_>>();
+        let state = &self.states[k];
+        if source == SQL {
+            let delta = changed
+                .into_iter()
+                .map(|h| (i64::from(h), state.focus_root(h)))
+                .collect();
+            self.engine.feed_focus_roots(self.stamps[k], delta);
+        } else {
+            let delta = changed
+                .into_iter()
+                .map(|n| (uri(n), state.snapshot_of(source, n)))
+                .collect();
+            self.engine.feed(SOURCES[source], self.stamps[k], delta);
+        }
         self.settle()
     }
 
@@ -355,12 +460,17 @@ impl Harness {
         self.pending[source].retain(|(at, _)| *at > k);
         self.covered[source] = k;
         let state = &self.states[k];
-        let blocks = state
-            .of(source)
-            .into_iter()
-            .map(|n| state.snapshot(n).unwrap())
-            .collect();
-        self.engine.replace(SOURCES[source], self.stamps[k], blocks);
+        if source == SQL {
+            self.engine
+                .replace_focus_roots(self.stamps[k], state.focus_roots());
+        } else {
+            let blocks = state
+                .of(source)
+                .into_iter()
+                .map(|n| state.snapshot(n).unwrap())
+                .collect();
+            self.engine.replace(SOURCES[source], self.stamps[k], blocks);
+        }
         self.settle()
     }
 
@@ -416,6 +526,7 @@ fn law(events: Vec<Event>) -> Result<(), TestCaseError> {
     for event in events {
         match event {
             Event::Commit(source, edit) => h.commit(source, &edit),
+            Event::Focus(focus) => h.focus(&focus),
             Event::Feed(source, cut) => h.feed_to(source, h.cut(source, cut)).unwrap(),
             Event::Replace(source, cut) => h.replace_to(source, h.cut(source, cut)).unwrap(),
         }
@@ -448,10 +559,19 @@ fn cut() -> impl Strategy<Value = Cut> {
     prop_oneof![1 => Just(100), 1 => 0u8..=100].prop_map(Cut)
 }
 
+fn focus() -> impl Strategy<Value = Focus> {
+    prop_oneof![
+        3 => (0..REGIONS.len(), any::<usize>(), any::<bool>())
+            .prop_map(|(region, root, replace)| Focus::Navigate { region, root, replace }),
+        1 => any::<usize>().prop_map(Focus::Close),
+    ]
+}
+
 fn event() -> impl Strategy<Value = Event> {
     let source = 0..SOURCES.len();
     prop_oneof![
-        5 => (source.clone(), edit()).prop_map(|(s, e)| Event::Commit(s, e)),
+        5 => (0..SQL, edit()).prop_map(|(s, e)| Event::Commit(s, e)),
+        2 => focus().prop_map(Event::Focus),
         2 => (source.clone(), cut()).prop_map(|(s, c)| Event::Feed(s, c)),
         1 => (source, cut()).prop_map(|(s, c)| Event::Replace(s, c)),
     ]
@@ -637,7 +757,7 @@ fn a_stampless_batch_that_changes_rows_stops_the_engine() {
         let stopped = EngineError::StamplessChange {
             store: SOURCES[0],
             changed: 2,
-            sample: vec![uri(0), uri(7)],
+            sample: vec![uri(0).to_string(), uri(7).to_string()],
         };
         assert_eq!(h.settle(), Err(stopped.clone()));
         assert_eq!(stops(&conditions), [stopped.to_string()]);
@@ -686,7 +806,7 @@ fn a_block_that_changes_source_is_retracted_and_inserted_in_one_version() {
 fn each_view_releases_the_rows_of_its_own_plan() {
     within_deadline(|| {
         let mut h = Harness::new();
-        let subscribed: Vec<_> = View::ALL
+        let subscribed: Vec<_> = [View::Children, View::OwningPage, View::Row]
             .iter()
             .map(|view| (*view, h.engine.snapshot_and_subscribe(*view).unwrap().1))
             .collect();
@@ -708,6 +828,7 @@ fn each_view_releases_the_rows_of_its_own_plan() {
                 View::Children => matches!(row.as_slice(), [_, Field::Text(_), id] if *id == page),
                 View::OwningPage => row.as_slice() == [page.clone(), page],
                 View::Row => matches!(row.as_slice(), [id, Field::Payload(_)] if *id == page),
+                View::FocusRoots => unreachable!("no focus commit"),
             };
             assert!(fits, "{view:?} released {row:?}");
         }
@@ -835,6 +956,7 @@ fn a_late_subscriber_gets_the_released_state() {
         assert_eq!(h.released, 3, "source 0's toggle holds stamp 3");
         let late: Vec<(Released, Receiver<ViewBatch>)> = View::ALL
             .iter()
+            .filter(|view| **view != View::FocusRoots)
             .map(|view| {
                 let (state, rx) = h.engine.snapshot_and_subscribe(*view).unwrap();
                 assert_eq!(state.below.get(), h.released);
@@ -917,4 +1039,79 @@ fn an_engine_refuses_a_clock_that_minted_before_it_started() {
     let clock = Arc::new(CommitClock::new());
     clock.mint(SOURCES[0]);
     ViewEngine::start(clock, |_| {});
+}
+
+fn navigate(region: usize, root: usize) -> Focus {
+    Focus::Navigate {
+        region,
+        root,
+        replace: true,
+    }
+}
+
+#[test]
+fn a_focus_root_waits_for_the_block_commit_before_it() {
+    within_deadline(|| {
+        let mut h = Harness::new();
+        create(&mut h, 1, None);
+        h.focus(&navigate(0, 0));
+        h.feed(SQL).unwrap();
+        h.check_released().unwrap();
+        assert_eq!(h.released, 1, "the block's commit, stamp 1, is outstanding");
+        h.feed(1).unwrap();
+        h.check_released().unwrap();
+        assert_eq!(h.released, 3);
+    });
+}
+
+#[test]
+fn a_focus_root_is_released_before_a_later_block_commit() {
+    within_deadline(|| {
+        let mut h = Harness::new();
+        create(&mut h, 0, None);
+        h.feed(0).unwrap();
+        h.focus(&navigate(1, 0));
+        create(&mut h, 0, Some(0));
+        h.focus(&navigate(1, 1));
+        h.feed_to(SQL, 2).unwrap();
+        h.check_released().unwrap();
+        assert_eq!(
+            h.released, 3,
+            "the second block's commit, stamp 3, is outstanding"
+        );
+        let focus = View::ALL
+            .iter()
+            .position(|v| *v == View::FocusRoots)
+            .unwrap();
+        assert_eq!(h.views[focus].len(), 1);
+        h.feed(SQL).unwrap();
+        h.feed(0).unwrap();
+        h.check_released().unwrap();
+        assert_eq!(h.released, 5);
+    });
+}
+
+#[test]
+fn a_stop_feeds_the_clock_and_raises_its_reason() {
+    within_deadline(|| {
+        let conditions = Arc::new(ConditionBus::new());
+        let bus = conditions.clone();
+        let h = Harness::with_engine(|clock| ViewEngine::start(clock, raise_on(bus)));
+        let stamp = h.clock.mint(SOURCES[SQL]);
+        let torn = EngineError::TornCommit {
+            store: SOURCES[SQL],
+            stamp,
+        };
+        h.engine.stop(SOURCES[SQL], stamp, torn.clone());
+        assert_eq!(h.settle(), Err(torn.clone()));
+        assert_eq!(stops(&conditions), [torn.to_string()]);
+        every_stamp_is_fed(&h.clock);
+    });
+}
+
+#[test]
+#[should_panic(expected = "Sql feeds only focus_roots")]
+fn the_sql_source_feeds_no_blocks() {
+    let h = Harness::new();
+    h.engine.feed(SOURCES[SQL], Stamp::NONE, vec![]);
 }

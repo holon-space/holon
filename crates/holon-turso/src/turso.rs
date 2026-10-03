@@ -67,6 +67,7 @@ use holon_core::storage::StorageBackend;
 use holon_core::storage::StorageEntity;
 use holon_core::storage::StorageError;
 
+use crate::commit_event::CommitEvent;
 use crate::matview_lease::LeaseGrant;
 use crate::matview_lease::MatviewStats;
 use crate::matview_lease::ViewState;
@@ -218,6 +219,16 @@ pub enum DbCommand {
     SubscribeCdc {
         relation: String,
         response: oneshot::Sender<Result<broadcast::Receiver<BatchWithMetadata<RowChange>>>>,
+    },
+
+    /// Register `on_event` for every relation's commits, then run
+    /// `snapshot_sql` and hand its rows to `on_snapshot`. No commit of this
+    /// actor falls between the two.
+    ListenFromSnapshot {
+        snapshot_sql: String,
+        on_event: Box<dyn Fn(CommitEvent<'_>) + Send + Sync>,
+        on_snapshot: Box<dyn FnOnce(Vec<StorageEntity>) + Send>,
+        response: oneshot::Sender<Result<()>>,
     },
 
     /// Transition to Ready phase (called after all startup DDL is complete)
@@ -1009,6 +1020,31 @@ impl DbHandle {
         self.tx
             .send(DbCommand::SubscribeCdc {
                 relation: relation.to_string(),
+                response: response_tx,
+            })
+            .await
+            .map_err(|_| StorageError::ActorGone)?;
+
+        response_rx
+            .await
+            .map_err(|_| StorageError::DatabaseError("Actor response channel closed".to_string()))?
+    }
+
+    /// Calls `on_event` with every relation's events of every later commit,
+    /// and `on_snapshot` with the rows of `snapshot_sql` as of the last commit
+    /// before the first of them.
+    pub async fn listen_from_snapshot(
+        &self,
+        snapshot_sql: &str,
+        on_event: impl Fn(CommitEvent<'_>) + Send + Sync + 'static,
+        on_snapshot: impl FnOnce(Vec<StorageEntity>) + Send + 'static,
+    ) -> Result<()> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.tx
+            .send(DbCommand::ListenFromSnapshot {
+                snapshot_sql: snapshot_sql.to_string(),
+                on_event: Box::new(on_event),
+                on_snapshot: Box::new(on_snapshot),
                 response: response_tx,
             })
             .await
@@ -2823,6 +2859,33 @@ impl TursoBackend {
                     "[TursoBackend::Actor] CDC subscription created for relation: {}",
                     relation
                 );
+            }
+
+            DbCommand::ListenFromSnapshot {
+                snapshot_sql,
+                on_event,
+                on_snapshot,
+                response,
+            } => {
+                let result = async {
+                    conn.set_change_callback(move |event: &RelationChangeEvent| {
+                        on_event(CommitEvent::new(event))
+                    })
+                    .map_err(|e| {
+                        StorageError::DatabaseError(format!("register a commit listener: {e}"))
+                    })?;
+                    let rows = Self::handle_query(
+                        conn,
+                        &state.schema_catalog,
+                        &snapshot_sql,
+                        HashMap::new(),
+                    )
+                    .await?;
+                    on_snapshot(rows);
+                    Ok(())
+                }
+                .await;
+                let _ = response.send(result);
             }
 
             DbCommand::TransitionToReady { response } => {

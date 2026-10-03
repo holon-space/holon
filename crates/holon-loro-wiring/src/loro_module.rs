@@ -19,6 +19,8 @@ use fluxdi::Module;
 use fluxdi::Provider;
 use fluxdi::Shared;
 use holon::core::SqlOperationProvider;
+use holon::di::DbReady;
+use holon::di::schema_providers::NavigationTables;
 use holon::storage::BLOCK_WRITE_TABLE;
 use holon::storage::schema_module::SchemaModule;
 use holon_api::commit_clock::CommitClock;
@@ -36,6 +38,8 @@ use holon_views::engine::raise_on;
 use tokio::sync::RwLock;
 use tracing::error;
 use tracing::info;
+
+use crate::focus_roots_feed::FocusRootsFeed;
 
 /// The SQL write authority for the `block` entity. Every Loro-side writer of
 /// blocks resolves its provider here, so all of them write through one
@@ -238,8 +242,8 @@ impl Module for LoroModule {
             Shared::new(ViewEngine::start(clock, raise_on((*bus).clone())))
         }));
 
-        injector.provide::<holon_loro::loro_sync_controller::LoroProjection>(Provider::root_async(
-            |resolver| async move {
+        injector.provide::<holon_loro::loro_sync_controller::LoroProjection>(
+            Provider::root_async(|resolver| async move {
                 let config = resolver.resolve::<LoroConfig>();
                 let doc_store = resolver.resolve::<LoroDocumentStore>();
                 let db_handle_provider = resolver.resolve::<dyn holon::di::DbHandleProvider>();
@@ -282,9 +286,18 @@ impl Module for LoroModule {
                     .install_doc_subscriptions()
                     .await
                     .expect("[LoroModule] install Loro doc subscriptions for the projection");
+                resolver.resolve_async::<DbReady<NavigationTables>>().await;
+                FocusRootsFeed::listen(
+                    &db_handle_provider.handle(),
+                    resolver.resolve::<CommitClock>(),
+                    resolver.resolve::<ViewEngine>(),
+                )
+                .await
+                .unwrap_or_else(|e| panic!("[LoroModule] feed the view engine focus_roots: {e:#}"));
                 Shared::new(projection)
-            },
-        ));
+            })
+            .with_dependency::<DbReady<NavigationTables>>(),
+        );
 
         injector.provide::<dyn holon_core::DownstreamProjection>(Provider::root_async(
             |resolver| async move {

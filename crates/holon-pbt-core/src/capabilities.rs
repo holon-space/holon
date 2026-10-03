@@ -197,7 +197,7 @@ pub struct EngineViewsObservation {
     /// stopped the engine.
     pub engine: Result<ViewRows, String>,
     /// The same views recomputed by the batch backend from the SUT's Loro
-    /// docs as they are now.
+    /// docs and its `focus_roots` matview as they are now.
     pub authority: ViewRows,
 }
 

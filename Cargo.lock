@@ -5809,6 +5809,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tracing",
+ "turso_core",
  "workspace-hack 0.1.0",
 ]
 

@@ -46,12 +46,17 @@ use crate::row::Id;
 use crate::row::Row;
 use crate::row::RowKind;
 use crate::views::BLOCKS;
+use crate::views::FOCUS_ROOTS;
+use crate::views::FocusRoot;
+use crate::views::HISTORY;
 use crate::views::ID;
 use crate::views::PARENT;
 use crate::views::View;
 use crate::views::block_row;
 use crate::views::blocks_schema;
 use crate::views::catalog;
+use crate::views::focus_root_row;
+use crate::views::focus_roots_schema;
 use crate::views::views;
 
 /// A column of a released row, with ids as block URIs.
@@ -72,6 +77,7 @@ pub struct ViewBatch {
     pub deltas: Vec<(Vec<Field>, isize)>,
 }
 
+/// [`CommitSource::Sql`] feeds `focus_roots`; the Loro sources feed `blocks`.
 /// The engine thread handles the requests in the order they are posted. Its
 /// first error or panic stops it: the views stay at the last released
 /// version, every snapshot returns the error, and a feed only feeds the
@@ -94,10 +100,14 @@ enum Request {
     },
 }
 
+/// A `Replace` holds every row of the source; a fed row not among them is
+/// deleted.
 enum Rows {
     Delta(Vec<(EntityUri, Option<SnapshotBlock>)>),
-    /// Every row of the source; a fed row not among them is deleted.
     Replace(Vec<SnapshotBlock>),
+    FocusDelta(Vec<(i64, Option<FocusRoot>)>),
+    FocusReplace(Vec<FocusRoot>),
+    Refused(EngineError),
 }
 
 impl ViewEngine {
@@ -156,18 +166,35 @@ impl ViewEngine {
         cover: Stamp,
         delta: Vec<(EntityUri, Option<SnapshotBlock>)>,
     ) {
-        let rows = Rows::Delta(delta);
-        self.post(Request::Feed {
-            source,
-            cover,
-            rows,
-        });
+        assert_ne!(source, CommitSource::Sql, "Sql feeds only focus_roots");
+        self.post_feed(source, cover, Rows::Delta(delta));
     }
 
     /// `blocks` is every block of `source` after its commits stamped up to
     /// `cover`.
     pub fn replace(&self, source: CommitSource, cover: Stamp, blocks: Vec<SnapshotBlock>) {
-        let rows = Rows::Replace(blocks);
+        assert_ne!(source, CommitSource::Sql, "Sql feeds only focus_roots");
+        self.post_feed(source, cover, Rows::Replace(blocks));
+    }
+
+    /// `delta` holds every focus root, by its history id, whose row changed in
+    /// the Sql commits stamped up to `cover`, with `None` for a closed one.
+    pub fn feed_focus_roots(&self, cover: Stamp, delta: Vec<(i64, Option<FocusRoot>)>) {
+        self.post_feed(CommitSource::Sql, cover, Rows::FocusDelta(delta));
+    }
+
+    /// `roots` is every focus root after the Sql commits stamped up to `cover`.
+    pub fn replace_focus_roots(&self, cover: Stamp, roots: Vec<FocusRoot>) {
+        self.post_feed(CommitSource::Sql, cover, Rows::FocusReplace(roots));
+    }
+
+    /// Stops the engine with `error`; `source`'s commits stamped up to `cover`
+    /// count as fed.
+    pub fn stop(&self, source: CommitSource, cover: Stamp, error: EngineError) {
+        self.post_feed(source, cover, Rows::Refused(error));
+    }
+
+    fn post_feed(&self, source: CommitSource, cover: Stamp, rows: Rows) {
         self.post(Request::Feed {
             source,
             cover,
@@ -207,7 +234,24 @@ pub fn fields<R: Row>(row: &R, schema: &Schema, interner: &Interner) -> Vec<Fiel
         .collect()
 }
 
-/// One feed: the `blocks` updates of one source's commits.
+/// A fed row: a block by the source that holds it, or a focus root by its
+/// history id.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum Key {
+    Block(CommitSource, Id),
+    Focus(i64),
+}
+
+impl Key {
+    fn source(&self) -> CommitSource {
+        match self {
+            Key::Block(source, _) => *source,
+            Key::Focus(_) => CommitSource::Sql,
+        }
+    }
+}
+
+/// One feed: the updates of one source's commits to its relation.
 struct Batch<R> {
     source: CommitSource,
     /// The first and last stamp of the commits it holds; `None` for none.
@@ -223,10 +267,11 @@ struct Host<R: Row> {
     /// In the order of [`View::ALL`].
     schemas: Vec<Schema>,
     blocks: R::Layout,
+    focus_roots: R::Layout,
     interner: Interner,
-    /// Every fed row by source. A block that changes source is held by both
-    /// until the leaving source feeds its retraction.
-    current: HashMap<(CommitSource, Id), R>,
+    /// Every fed row. A block that changes source is held by both until the
+    /// leaving source feeds its retraction.
+    current: HashMap<Key, R>,
     /// The parents in the last released version.
     parents: HashMap<Id, Id>,
     /// Fed batches not yet in a released version, in feed order.
@@ -261,6 +306,7 @@ impl<R: Row> Host<R> {
             dataflow,
             schemas: plans.iter().map(|p| p.schema().clone()).collect(),
             blocks: R::layout(&blocks_schema()),
+            focus_roots: R::layout(&focus_roots_schema()),
             interner: Interner::default(),
             current: HashMap::new(),
             parents: HashMap::new(),
@@ -349,33 +395,51 @@ impl<R: Row> Host<R> {
             .take_while(|s| *s <= cover)
             .collect();
         let mut updates = Vec::new();
+        let mut fed = HashSet::new();
+        let replace = matches!(rows, Rows::Replace(_) | Rows::FocusReplace(_));
         match rows {
             Rows::Delta(delta) => {
                 for (uri, block) in delta {
-                    let id = self.interner.intern(&uri);
+                    let key = Key::Block(source, self.interner.intern(&uri));
                     let row = block
                         .map(|b| block_row(&mut self.interner, &b))
                         .transpose()?;
-                    self.set(source, id, row, &mut updates);
+                    self.set(key, row, &mut updates);
                 }
             }
             Rows::Replace(blocks) => {
-                let mut fed = HashSet::new();
                 for block in blocks {
-                    let id = self.interner.intern(&block.block.id);
-                    fed.insert(id);
+                    let key = Key::Block(source, self.interner.intern(&block.block.id));
                     let row = block_row(&mut self.interner, &block)?;
-                    self.set(source, id, Some(row), &mut updates);
+                    self.set(key.clone(), Some(row), &mut updates);
+                    fed.insert(key);
                 }
-                let gone: Vec<Id> = self
-                    .current
-                    .keys()
-                    .filter(|(owner, id)| *owner == source && !fed.contains(id))
-                    .map(|(_, id)| *id)
-                    .collect();
-                for id in gone {
-                    self.set(source, id, None, &mut updates);
+            }
+            Rows::FocusDelta(delta) => {
+                for (history, focus) in delta {
+                    let row = focus.map(|f| focus_root_row(&mut self.interner, &f));
+                    self.set(Key::Focus(history), row, &mut updates);
                 }
+            }
+            Rows::FocusReplace(roots) => {
+                for focus in roots {
+                    let key = Key::Focus(focus.history);
+                    let row = focus_root_row(&mut self.interner, &focus);
+                    self.set(key.clone(), Some(row), &mut updates);
+                    fed.insert(key);
+                }
+            }
+            Rows::Refused(error) => return Err(error),
+        }
+        if replace {
+            let gone: Vec<Key> = self
+                .current
+                .keys()
+                .filter(|key| key.source() == source && !fed.contains(*key))
+                .cloned()
+                .collect();
+            for key in gone {
+                self.set(key, None, &mut updates);
             }
         }
         if stamps.is_empty() {
@@ -390,10 +454,10 @@ impl<R: Row> Host<R> {
         self.release()
     }
 
-    fn set(&mut self, source: CommitSource, id: Id, row: Option<R>, updates: &mut Vec<(R, isize)>) {
+    fn set(&mut self, key: Key, row: Option<R>, updates: &mut Vec<(R, isize)>) {
         let old = match &row {
-            Some(row) => self.current.insert((source, id), row.clone()),
-            None => self.current.remove(&(source, id)),
+            Some(row) => self.current.insert(key, row.clone()),
+            None => self.current.remove(&key),
         };
         if let Some(old) = old {
             updates.push((old, -1));
@@ -415,10 +479,7 @@ impl<R: Row> Host<R> {
         for (row, diff) in updates {
             add(&mut net, row.clone(), *diff);
         }
-        let changed: BTreeSet<EntityUri> = net
-            .keys()
-            .map(|row| self.interner.uri(self.id(row, ID)).clone())
-            .collect();
+        let changed: BTreeSet<String> = net.keys().map(|row| self.key_of(store, row)).collect();
         if changed.is_empty() {
             return Ok(());
         }
@@ -460,9 +521,15 @@ impl<R: Row> Host<R> {
             });
         self.buffered = later;
         self.dataflow.advance_to(below.get() - 1);
-        let mut updates = Multiset::new();
-        for (row, diff) in now.into_iter().flat_map(|b| b.updates) {
-            add(&mut updates, row, diff);
+        let (mut updates, mut focus_roots) = (Multiset::new(), Multiset::new());
+        for batch in now {
+            let into = match batch.source {
+                CommitSource::Sql => &mut focus_roots,
+                CommitSource::LoroGlobal | CommitSource::LoroLayout => &mut updates,
+            };
+            for (row, diff) in batch.updates {
+                add(into, row, diff);
+            }
         }
         // A block that changes source comes in as a retraction from one
         // source and an insertion from the other, in either feed order.
@@ -485,6 +552,9 @@ impl<R: Row> Host<R> {
             self.dataflow.update(BLOCKS, row, diff);
         }
         self.refuse_cycles(moved)?;
+        for (row, diff) in focus_roots {
+            self.dataflow.update(FOCUS_ROOTS, row, diff);
+        }
         self.dataflow.commit(&mut self.worker)?;
         self.released = below;
         for (i, view) in View::ALL.into_iter().enumerate() {
@@ -499,6 +569,19 @@ impl<R: Row> Host<R> {
                 .retain(|(v, tx)| *v != view || tx.send(batch.clone()).is_ok());
         }
         Ok(())
+    }
+
+    /// The key of a row `store` fed, as text.
+    fn key_of(&self, store: CommitSource, row: &R) -> String {
+        match store {
+            CommitSource::Sql => match row.get(&self.focus_roots, HISTORY) {
+                Datum::Int(history) => history.to_string(),
+                other => unreachable!("a focus_roots history holds {other:?}"),
+            },
+            CommitSource::LoroGlobal | CommitSource::LoroLayout => {
+                self.interner.uri(self.id(row, ID)).to_string()
+            }
+        }
     }
 
     fn id(&self, row: &R, col: Col) -> Id {

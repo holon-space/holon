@@ -3517,7 +3517,16 @@ impl SutEngineViews for HeadlessFrontendComponent {
                 .unwrap_or_else(|e| panic!("reading the {scope:?} Loro doc: {e}"));
             blocks.extend(snapshot.into_values());
         }
-        let authority = crate::pbt::engine_views::recompute(&blocks)
+        let focus_roots: Vec<_> = self
+            .sql_query("SELECT history_id, region, root_id FROM focus_roots")
+            .await
+            .iter()
+            .map(|row| {
+                holon_loro_wiring::focus_roots_feed::focus_root(row)
+                    .unwrap_or_else(|e| panic!("a focus_roots row: {e}"))
+            })
+            .collect();
+        let authority = crate::pbt::engine_views::recompute(&blocks, &focus_roots)
             .expect("every block in a Loro doc encodes as a view row");
         holon_pbt_core::capabilities::EngineViewsObservation {
             engine: crate::pbt::engine_views::FoldedViews::subscribe(&engine)

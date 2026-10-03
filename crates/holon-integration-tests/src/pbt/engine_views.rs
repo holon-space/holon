@@ -19,9 +19,11 @@ use holon_views::error::EngineError;
 use holon_views::intern::Interner;
 use holon_views::plan::check_all;
 use holon_views::row::DynRow;
+use holon_views::views::FocusRoot;
 use holon_views::views::View;
 use holon_views::views::block_row;
 use holon_views::views::catalog;
+use holon_views::views::focus_root_row;
 use holon_views::views::views;
 
 /// One view's rows, decoded.
@@ -43,21 +45,27 @@ pub fn engine_caught_up(engine: &ViewEngine) -> Result<(), EngineError> {
     engine.snapshot_and_subscribe(View::Row).map(drop)
 }
 
-/// The views over `blocks` by the batch backend, in the order of
-/// [`View::ALL`].
+/// The views over `blocks` and `focus_roots` by the batch backend, in the
+/// order of [`View::ALL`].
 pub fn recompute<'a>(
     blocks: impl IntoIterator<Item = &'a SnapshotBlock>,
+    focus_roots: &[FocusRoot],
 ) -> Result<Vec<Released>, EngineError> {
     let mut interner = Interner::default();
     let mut rows = Multiset::<DynRow>::new();
     for block in blocks {
         add(&mut rows, block_row(&mut interner, block)?, 1);
     }
+    let mut focus = Multiset::<DynRow>::new();
+    for root in focus_roots {
+        add(&mut focus, focus_root_row(&mut interner, root), 1);
+    }
+    let inputs = [rows, focus];
     check_all(&views().plans(), &catalog())
         .expect("Holon's views are well typed")
         .iter()
         .map(|plan| {
-            Ok(batch::run(plan, std::slice::from_ref(&rows))?
+            Ok(batch::run(plan, &inputs)?
                 .into_iter()
                 .map(|(row, n)| (fields(&row, plan.schema(), &interner), n))
                 .collect())
