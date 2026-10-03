@@ -183,6 +183,7 @@ mod undo_last_mutation;
 mod unpin_block;
 mod wheel_scroll;
 pub(crate) mod write_org_file;
+mod write_private_field_generically;
 
 // Shared layout-PBT variants (delegate to holon-pbt-core +
 // holon-layout-testing).
@@ -292,6 +293,7 @@ pub use undo_last_mutation::UndoLastMutation;
 pub use unpin_block::UnpinBlock;
 pub use wheel_scroll::WheelScroll;
 pub use write_org_file::WriteOrgFile;
+pub use write_private_field_generically::WritePrivateFieldGenerically;
 
 crate::declare_e2e_transitions! {
     pub enum E2ETransition {
@@ -359,6 +361,7 @@ crate::declare_e2e_transitions! {
         OpenTabViaModifierClick(OpenTabViaModifierClick),
         PinBlock(PinBlock),
         PlaceUnderOwnDescendant(PlaceUnderOwnDescendant),
+        WritePrivateFieldGenerically(WritePrivateFieldGenerically),
         PressKey(PressKey),
         Reboot(Reboot),
         Redo(Redo),

@@ -2699,13 +2699,61 @@ pub trait SutUnschemedIdDispatch {
 #[holon_macros::capmap_adapter]
 pub trait SutCyclicPlaceAttempt {
     /// Dispatch a user-origin `move_block(id, parent_id = descendant)` through
-    /// the production operation dispatcher. A refusal must be the typed cyclic
-    /// move refusal; an accepted move is left for `inv-no-parent-cycles` to
-    /// judge.
+    /// the production operation dispatcher. It must be refused with the typed
+    /// cyclic move refusal.
     async fn attempt_place_under_own_descendant(
         &self,
         id: &holon_api::EntityUri,
         descendant: &holon_api::EntityUri,
+    );
+}
+
+/// A block field that only its placement owner (`move_block` and its family)
+/// may write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrivateFieldName {
+    ParentId,
+    SortKey,
+}
+
+impl PrivateFieldName {
+    pub fn column(self) -> &'static str {
+        match self {
+            PrivateFieldName::ParentId => "parent_id",
+            PrivateFieldName::SortKey => "sort_key",
+        }
+    }
+}
+
+/// A write path that names the field it writes by string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GenericWrite {
+    /// Dispatched `set_field(field, value)`.
+    SetField,
+    /// Dispatched `update` carrying the field as a param.
+    Update,
+    /// `set_field` through the MCP `execute_operation` tool.
+    McpSetField,
+    /// `update` through the MCP `execute_operation` tool.
+    McpUpdate,
+    /// Dispatched `create` at the block's own id with its current title: a
+    /// recognized re-create that carries the field.
+    CreateRecreate,
+}
+
+#[holon_macros::capmap_adapter]
+pub trait SutPrivateFieldWriteAttempt {
+    /// Write `field = value` on block `id` (titled `title`) through `via`. It
+    /// must be refused as a private field, naming `move_block` as the route.
+    async fn attempt_private_field_write(
+        &self,
+        id: &holon_api::EntityUri,
+        title: &str,
+        field: PrivateFieldName,
+        via: GenericWrite,
+        value: &str,
     );
 }
 

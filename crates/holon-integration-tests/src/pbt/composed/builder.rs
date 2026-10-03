@@ -601,6 +601,11 @@ async fn compose_sut_seeded_impl(
         caps.insert(comp.clone() as Arc<dyn holon_pbt_core::capabilities::SutUnschemedIdDispatch>);
         // `PlaceUnderOwnDescendant` dispatches at the same dispatcher.
         caps.insert(comp.clone() as Arc<dyn holon_pbt_core::capabilities::SutCyclicPlaceAttempt>);
+        // `WritePrivateFieldGenerically` dispatches there too, and through an
+        // MCP server over the component's own engine.
+        caps.insert(
+            comp.clone() as Arc<dyn holon_pbt_core::capabilities::SutPrivateFieldWriteAttempt>
+        );
         // Runtime entity-type registration (`RegisterEntityScheme`) — the
         // component serves the `create_entity_type` MCP tool over its OWN engine
         // and `TypeRegistry`, i.e. the container the link classifier reads. This

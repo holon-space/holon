@@ -3876,11 +3876,43 @@ impl SutRebuildViews for HeadlessFrontendComponent {
 impl HeadlessFrontendComponent {
     /// Call one MCP tool over a real rmcp transport, against a server sharing
     /// THIS component's engine and `TypeRegistry`, and panic on any error.
-    ///
+    async fn call_mcp_tool(&self, tool: &str, arguments: serde_json::Value) {
+        let result = self
+            .call_mcp_tool_outcome(tool, arguments.clone())
+            .await
+            .unwrap_or_else(|e| panic!("{tool}({arguments}) failed over MCP: {e}"));
+        assert!(
+            result.is_error != Some(true),
+            "{tool}({arguments}) reported a tool error: {:?}",
+            result.content
+        );
+    }
+
+    /// Call one MCP tool that must fail with a protocol error, and return
+    /// that error's message.
+    async fn call_mcp_tool_expecting_error(
+        &self,
+        tool: &str,
+        arguments: serde_json::Value,
+    ) -> Result<String, String> {
+        match self.call_mcp_tool_outcome(tool, arguments.clone()).await {
+            Ok(result) => Err(format!(
+                "{tool}({arguments}) was ACCEPTED over MCP (is_error {:?}): {:?}",
+                result.is_error, result.content
+            )),
+            Err(rmcp::ServiceError::McpError(e)) => Ok(e.message.to_string()),
+            Err(e) => panic!("{tool}({arguments}) failed over MCP outside the tool: {e}"),
+        }
+    }
+
     /// The server is built per call rather than kept: it holds no state of its
     /// own (engine, registry and debug services are all shared `Arc`s), so a
     /// fresh one is the same server an integration would reconnect to.
-    async fn call_mcp_tool(&self, tool: &str, arguments: serde_json::Value) {
+    async fn call_mcp_tool_outcome(
+        &self,
+        tool: &str,
+        arguments: serde_json::Value,
+    ) -> Result<rmcp::model::CallToolResult, rmcp::ServiceError> {
         use rmcp::ServiceExt;
 
         let server = holon_mcp::server::HolonMcpServer::with_type_registry(
@@ -3902,19 +3934,13 @@ impl HeadlessFrontendComponent {
             async { ().serve(client_transport).await.map_err(anyhow::Error::from) },
         )
         .unwrap_or_else(|e| panic!("in-process MCP handshake for {tool}: {e}"));
-        let result = client_running
+        let outcome = client_running
             .peer()
             .call_tool(rmcp::model::CallToolRequestParam {
                 name: tool.to_string().into(),
                 arguments: arguments.as_object().cloned(),
             })
-            .await
-            .unwrap_or_else(|e| panic!("{tool}({arguments}) failed over MCP: {e}"));
-        assert!(
-            result.is_error != Some(true),
-            "{tool}({arguments}) reported a tool error: {:?}",
-            result.content
-        );
+            .await;
         client_running
             .cancel()
             .await
@@ -3923,7 +3949,31 @@ impl HeadlessFrontendComponent {
             .cancel()
             .await
             .expect("MCP server loop shuts down");
+        outcome
     }
+}
+
+/// Await `write`, and exit the process with 101 when it has not returned
+/// within 60 s: a stored parent cycle spins the Turso actor inside COMMIT, so
+/// the write that stored it never returns.
+async fn within_cycle_watchdog<T>(what: String, write: impl std::future::Future<Output = T>) -> T {
+    let (done, watched) = std::sync::mpsc::channel::<()>();
+    let watchdog = std::thread::spawn(move || {
+        if let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
+            watched.recv_timeout(std::time::Duration::from_secs(60))
+        {
+            eprintln!(
+                "[cycle watchdog] {what} did not return within 60s: the store accepted a parent \
+                 cycle and the Turso IVM commit is spinning."
+            );
+            std::process::exit(101);
+        }
+    });
+    let outcome = write.await;
+    done.send(())
+        .expect("watchdog thread is alive until it hears from us");
+    watchdog.join().expect("watchdog thread panicked");
+    outcome
 }
 
 /// `SutClockAdvance` (the `AdvanceDay` transition, ADR 0024 §6): advance the
@@ -7938,15 +7988,16 @@ impl holon_pbt_core::capabilities::SutCyclicPlaceAttempt for HeadlessFrontendCom
             "parent_id".into(),
             holon_api::Value::String(descendant.to_string()),
         );
-        let outcome = self
-            .engine()
-            .execute_operation(
+        let outcome = within_cycle_watchdog(
+            format!("move_block({id} under its descendant {descendant})"),
+            self.engine().execute_operation(
                 &holon_api::EntityName::from("block".to_string()),
                 "move_block",
                 params,
                 holon_api::OpOrigin::User,
-            )
-            .await;
+            ),
+        )
+        .await;
         let expected = holon_api::ApiError::CyclicMove {
             id: id.to_string(),
             target_parent: descendant.to_string(),
@@ -7963,6 +8014,81 @@ impl holon_pbt_core::capabilities::SutCyclicPlaceAttempt for HeadlessFrontendCom
             message.contains(&expected),
             "[cyclic place] move_block({id} under its descendant {descendant}) was refused \
              for the wrong reason.\n expected: {expected}\n got: {message}"
+        );
+    }
+}
+
+#[async_trait::async_trait(?Send)]
+impl holon_pbt_core::capabilities::SutPrivateFieldWriteAttempt for HeadlessFrontendComponent {
+    async fn attempt_private_field_write(
+        &self,
+        id: &holon_api::EntityUri,
+        title: &str,
+        field: holon_pbt_core::capabilities::PrivateFieldName,
+        via: holon_pbt_core::capabilities::GenericWrite,
+        value: &str,
+    ) {
+        use holon_pbt_core::capabilities::GenericWrite;
+        let column = field.column();
+        let set_field =
+            serde_json::json!({ "id": id.to_string(), "field": column, "value": value });
+        let update = serde_json::json!({ "id": id.to_string(), column: value });
+        let recreate = serde_json::json!({ "id": id.to_string(), "content": title, column: value });
+        let what = format!("{via:?} of {column} = {value:?} on {id}");
+        let dispatch = |op: &'static str, params: serde_json::Value| async move {
+            let params: holon_api::StorageEntity = params
+                .as_object()
+                .expect("params are a JSON object")
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        k.as_str().into(),
+                        holon_api::Value::String(v.as_str().expect("string param").to_string()),
+                    )
+                })
+                .collect();
+            match self
+                .engine()
+                .execute_operation(
+                    &holon_api::EntityName::from("block".to_string()),
+                    op,
+                    params,
+                    holon_api::OpOrigin::User,
+                )
+                .await
+            {
+                Ok(_) => Err(format!("{op} was ACCEPTED")),
+                Err(e) => Ok(format!("{e:#}")),
+            }
+        };
+        let mcp = |op: &'static str, params: serde_json::Value| {
+            self.call_mcp_tool_expecting_error(
+                "execute_operation",
+                serde_json::json!({ "entity_name": "block", "operation": op, "params": params }),
+            )
+        };
+        let outcome = within_cycle_watchdog(what.clone(), async {
+            match via {
+                GenericWrite::SetField => dispatch("set_field", set_field).await,
+                GenericWrite::Update => dispatch("update", update).await,
+                GenericWrite::McpSetField => mcp("set_field", set_field).await,
+                GenericWrite::McpUpdate => mcp("update", update).await,
+                GenericWrite::CreateRecreate => dispatch("create", recreate).await,
+            }
+        })
+        .await;
+        let message = outcome.unwrap_or_else(|accepted| {
+            panic!(
+                "[private field] {what}: {accepted}; only move_block may write {column}.\n \
+                 expected a refusal naming {column} as private and move_block as its route"
+            )
+        });
+        assert!(
+            message.contains(column)
+                && message.contains("private")
+                && message.contains("move_block"),
+            "[private field] {what} was refused for the wrong reason.\n expected a refusal \
+             naming {column} as private and move_block as its route\n got: {message}"
         );
     }
 }

@@ -517,6 +517,61 @@ impl StepField for holon_api::Region {
     }
 }
 
+impl StepField for crate::capabilities::PrivateFieldName {
+    const QUOTED: bool = true;
+    fn render_step_field(&self) -> String {
+        self.column().to_string()
+    }
+    fn parse_step_field(raw: &str) -> Result<Self, String> {
+        use crate::capabilities::PrivateFieldName;
+        match raw {
+            "parent_id" => Ok(PrivateFieldName::ParentId),
+            "sort_key" => Ok(PrivateFieldName::SortKey),
+            other => Err(format!("unknown private block field: {other:?}")),
+        }
+    }
+    fn step_field_examples() -> Vec<Self> {
+        use crate::capabilities::PrivateFieldName;
+        vec![PrivateFieldName::ParentId, PrivateFieldName::SortKey]
+    }
+}
+
+impl StepField for crate::capabilities::GenericWrite {
+    const QUOTED: bool = true;
+    fn render_step_field(&self) -> String {
+        use crate::capabilities::GenericWrite;
+        match self {
+            GenericWrite::SetField => "set_field",
+            GenericWrite::Update => "update",
+            GenericWrite::McpSetField => "mcp_set_field",
+            GenericWrite::McpUpdate => "mcp_update",
+            GenericWrite::CreateRecreate => "create_recreate",
+        }
+        .to_string()
+    }
+    fn parse_step_field(raw: &str) -> Result<Self, String> {
+        use crate::capabilities::GenericWrite;
+        match raw {
+            "set_field" => Ok(GenericWrite::SetField),
+            "update" => Ok(GenericWrite::Update),
+            "mcp_set_field" => Ok(GenericWrite::McpSetField),
+            "mcp_update" => Ok(GenericWrite::McpUpdate),
+            "create_recreate" => Ok(GenericWrite::CreateRecreate),
+            other => Err(format!("unknown generic write path: {other:?}")),
+        }
+    }
+    fn step_field_examples() -> Vec<Self> {
+        use crate::capabilities::GenericWrite;
+        vec![
+            GenericWrite::SetField,
+            GenericWrite::Update,
+            GenericWrite::McpSetField,
+            GenericWrite::McpUpdate,
+            GenericWrite::CreateRecreate,
+        ]
+    }
+}
+
 /// Payload types with no readable one-line spelling travel as compact JSON
 /// inside a quoted run. Round-trip is serde's, so it is lossless by
 /// construction.
