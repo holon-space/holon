@@ -38,6 +38,7 @@ const FIRST_WARNING: Duration = Duration::from_secs(5);
 const RECENT_COMMANDS: usize = 16;
 const RECENT_HEAD_BYTES: usize = 120;
 const REPORTED_STATEMENTS: usize = 4;
+const COPIED_SQL_BYTES: usize = 4096;
 /// A command at least this long is logged when it is the longest so far.
 const LONGEST_WORTH_LOGGING: Duration = Duration::from_millis(250);
 
@@ -97,6 +98,8 @@ pub(crate) struct ActorWatch {
     commands: Mutex<Commands>,
     bus: OnceLock<Arc<ConditionBus>>,
     disclosure: Mutex<Disclosure>,
+    #[cfg(test)]
+    after_read: Mutex<Option<Box<dyn FnOnce(&ActorWatch) + Send>>>,
 }
 
 struct Commands {
@@ -104,10 +107,18 @@ struct Commands {
     running: Option<Running>,
     /// The running command's statements, up to [`REPORTED_STATEMENTS`]. The
     /// buffers are reused, so a command start allocates nothing once warm.
-    statements: Vec<String>,
+    statements: Vec<CopiedSql>,
     statement_count: usize,
     recent: VecDeque<Finished>,
     longest: Duration,
+}
+
+#[derive(Clone)]
+struct CopiedSql {
+    bytes: usize,
+    /// At most [`COPIED_SQL_BYTES`]. Only a prefix: redaction lexes from the
+    /// start, and a tail can begin inside a string literal.
+    head: String,
 }
 
 struct Running {
@@ -139,8 +150,14 @@ impl ActorWatch {
     /// A watch over the actor whose queue `tx` feeds, bounded by
     /// `HOLON_ACTOR_HANG_MS`, already watched by the process's watchdog.
     pub(crate) fn start(tx: &ActorSender) -> Arc<Self> {
-        let watch = Arc::new(Self {
-            bound: bound_from_env(),
+        let watch = Self::new(bound_from_env(), tx);
+        watchdog::watch(&watch);
+        watch
+    }
+
+    fn new(bound: Duration, tx: &ActorSender) -> Arc<Self> {
+        Arc::new(Self {
+            bound,
             queue: tx.0.downgrade(),
             commands: Mutex::new(Commands {
                 next_seq: 1,
@@ -152,9 +169,9 @@ impl ActorWatch {
             }),
             bus: OnceLock::new(),
             disclosure: Mutex::new(Disclosure::default()),
-        });
-        watchdog::watch(&watch);
-        watch
+            #[cfg(test)]
+            after_read: Mutex::new(None),
+        })
     }
 
     /// Raise and clear [`ConditionKind::DatabaseStuck`] on `bus` from now on,
@@ -168,7 +185,13 @@ impl ActorWatch {
         }
     }
 
-    pub(crate) fn begin(&self, envelope: &Envelope) {
+    /// Watches the command of `envelope` until the returned guard drops.
+    pub(crate) fn watching(&self, envelope: &Envelope) -> Watching<'_> {
+        self.begin(envelope);
+        Watching(self)
+    }
+
+    fn begin(&self, envelope: &Envelope) {
         let mut c = self.commands.lock().expect("actor watch poisoned");
         let seq = c.next_seq;
         c.next_seq += 1;
@@ -187,7 +210,7 @@ impl ActorWatch {
         });
     }
 
-    pub(crate) fn end(&self) {
+    fn end(&self) {
         let new_longest = {
             let mut c = self.commands.lock().expect("actor watch poisoned");
             let running = c
@@ -210,7 +233,7 @@ impl ActorWatch {
             finished.took = took;
             finished.head.clear();
             if c.statement_count > 0 {
-                let first = &c.statements[0];
+                let first = &c.statements[0].head;
                 finished
                     .head
                     .push_str(&first[..floor_char_boundary(first, RECENT_HEAD_BYTES)]);
@@ -240,6 +263,10 @@ impl ActorWatch {
                 .as_ref()
                 .map(|r| (r.seq, r.kind, r.started.elapsed()))
         };
+        #[cfg(test)]
+        if let Some(hook) = self.after_read.lock().expect("hook poisoned").take() {
+            hook(self);
+        }
         let mut d = self
             .disclosure
             .lock()
@@ -257,16 +284,20 @@ impl ActorWatch {
                 None => Disclosure::default(),
             };
         }
-        let Some((_, kind, running)) = now else {
+        let Some((seq, kind, running)) = now else {
             return;
         };
         if running >= d.next_report {
+            // A command that finished since the read has its disclosure ended
+            // on the next tick.
+            let Some((report, caller)) = self.report(seq, running) else {
+                return;
+            };
             d.next_report = if d.next_report < self.bound {
                 (d.next_report * 2).min(self.bound)
             } else {
                 d.next_report * 2
             };
-            let (report, caller) = self.report(running);
             let _in_caller = caller.enter();
             if running >= self.bound {
                 d.past_bound = true;
@@ -279,7 +310,9 @@ impl ActorWatch {
             }
         }
         if d.past_bound && !d.on_bus && self.bus.get().is_some() {
-            let (report, _) = self.report(running);
+            let Some((report, _)) = self.report(seq, running) else {
+                return;
+            };
             self.raise(kind, running, report);
             d.on_bus = true;
         }
@@ -317,8 +350,15 @@ impl ActorWatch {
             )
         );
         if d.on_bus {
-            let bus = self.bus.get().expect("on_bus implies an attached bus");
-            bus.clear(
+            self.clear();
+        }
+    }
+
+    fn clear(&self) {
+        self.bus
+            .get()
+            .expect("on_bus implies an attached bus")
+            .clear(
                 &Condition {
                     subject: DATABASE_SUBJECT.to_string(),
                     reason: ConditionKind::DatabaseStuck {
@@ -329,43 +369,91 @@ impl ActorWatch {
                 }
                 .condition_key(),
             );
-        }
     }
 
-    /// The report on the running command, with every SQL literal and comment
-    /// blanked, and the span of the code that sent it.
-    fn report(&self, running: Duration) -> (String, tracing::Span) {
+    /// The report on command `seq`, with every SQL literal and comment
+    /// blanked, and the span of the code that sent it. `None` once `seq` no
+    /// longer runs.
+    fn report(&self, seq: u64, running: Duration) -> Option<(String, tracing::Span)> {
         let queued = self
             .queue
             .upgrade()
             .map(|tx| tx.max_capacity() - tx.capacity());
-        let c = self.commands.lock().expect("actor watch poisoned");
-        let r = c
-            .running
-            .as_ref()
-            .expect("a report is made only on a running command");
+        let (kind, waited, caller, statement_count, statements, recent) = {
+            let c = self.commands.lock().expect("actor watch poisoned");
+            let r = c.running.as_ref().filter(|r| r.seq == seq)?;
+            (
+                r.kind,
+                r.started.duration_since(r.enqueued),
+                r.caller.clone(),
+                c.statement_count,
+                c.statements[..c.statement_count.min(REPORTED_STATEMENTS)].to_vec(),
+                c.recent
+                    .iter()
+                    .map(|f| (f.kind, f.took, f.head.clone()))
+                    .collect::<Vec<_>>(),
+            )
+        };
         let mut out = String::new();
         let _ = writeln!(
             out,
-            "SQL actor stuck: a `{}` command has run for {running:?} (bound {:?}). It waited {:?} \
-             in the queue. Queued behind it: {}.",
-            r.kind,
+            "SQL actor stuck: a `{kind}` command has run for {running:?} (bound {:?}). It waited \
+             {waited:?} in the queue. Queued behind it: {}.",
             self.bound,
-            r.started.duration_since(r.enqueued),
             queued.map_or_else(
                 || "none, every sender is gone".to_string(),
                 |n| n.to_string()
             ),
         );
-        let _ = writeln!(out, "Statements: {}", c.statement_count);
-        for (i, sql) in c.statements.iter().take(c.statement_count).enumerate() {
-            let _ = writeln!(out, "  [{i}] ({} bytes) {}", sql.len(), redact(sql));
+        let _ = writeln!(out, "Statements: {statement_count}");
+        for (i, sql) in statements.iter().enumerate() {
+            let copied = if sql.head.len() < sql.bytes {
+                format!(", first {} copied", sql.head.len())
+            } else {
+                String::new()
+            };
+            let _ = writeln!(
+                out,
+                "  [{i}] ({} bytes{copied}) {}",
+                sql.bytes,
+                redact(&sql.head)
+            );
         }
-        let _ = writeln!(out, "Last {} commands, oldest first:", c.recent.len());
-        for f in &c.recent {
-            let _ = writeln!(out, "  {} {:?}: {}", f.kind, f.took, redact(&f.head));
+        let _ = writeln!(out, "Last {} commands, oldest first:", recent.len());
+        for (kind, took, head) in &recent {
+            let _ = writeln!(out, "  {kind} {took:?}: {}", redact(head));
         }
-        (out, r.caller.clone())
+        Some((out, caller))
+    }
+}
+
+/// Ends its command's watch when dropped, also when the command panics.
+pub(crate) struct Watching<'a>(&'a ActorWatch);
+
+impl Drop for Watching<'_> {
+    fn drop(&mut self) {
+        self.0.end();
+    }
+}
+
+impl Drop for ActorWatch {
+    fn drop(&mut self) {
+        let d = std::mem::take(
+            self.disclosure
+                .get_mut()
+                .expect("actor watch disclosure poisoned"),
+        );
+        if !d.past_bound {
+            return;
+        }
+        tracing::warn!(
+            target: "holon_actor_watch",
+            kind = d.kind,
+            "the SQL actor stopped while its stuck command still ran"
+        );
+        if d.on_bus {
+            self.clear();
+        }
     }
 }
 
@@ -375,15 +463,22 @@ fn redact(sql: &str) -> String {
 
 /// Copies the command's SQL into `into`, up to [`REPORTED_STATEMENTS`]
 /// statements, and returns how many statements it has.
-fn copy_statements(cmd: &DbCommand, into: &mut Vec<String>) -> usize {
+fn copy_statements(cmd: &DbCommand, into: &mut Vec<CopiedSql>) -> usize {
     let mut count = 0;
     let mut copy = |sql: &str| {
         if count < REPORTED_STATEMENTS {
             if into.len() == count {
-                into.push(String::new());
+                into.push(CopiedSql {
+                    bytes: 0,
+                    head: String::with_capacity(COPIED_SQL_BYTES),
+                });
             }
-            into[count].clear();
-            into[count].push_str(sql);
+            let copied = &mut into[count];
+            copied.bytes = sql.len();
+            copied.head.clear();
+            copied
+                .head
+                .push_str(&sql[..floor_char_boundary(sql, COPIED_SQL_BYTES)]);
         }
         count += 1;
     };
@@ -484,5 +579,139 @@ mod watchdog {
                  command holds the only one, so a stuck SQL command is not disclosed"
             );
         });
+    }
+}
+
+#[cfg(test)]
+impl ActorWatch {
+    pub(crate) fn poison(&self) {
+        std::thread::scope(|s| {
+            let poisoner = s.spawn(|| {
+                let _held = self.commands.lock().expect("not yet poisoned");
+                panic!("poisoning the actor watch");
+            });
+            assert!(poisoner.join().is_err(), "the poisoning thread panics");
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const BOUND: Duration = Duration::from_millis(1);
+
+    fn watched() -> (Arc<ActorWatch>, Arc<ConditionBus>, ActorSender) {
+        let (tx, _rx) = ActorSender::channel(4);
+        let watch = ActorWatch::new(BOUND, &tx);
+        let bus = Arc::new(ConditionBus::new());
+        watch.disclose_on(bus.clone());
+        (watch, bus, tx)
+    }
+
+    fn envelope(sql: &str) -> Envelope {
+        Envelope {
+            cmd: DbCommand::Execute {
+                sql: sql.to_string(),
+                params: Vec::new(),
+                response: tokio::sync::oneshot::channel().0,
+            },
+            caller: tracing::Span::none(),
+            enqueued: Instant::now(),
+        }
+    }
+
+    fn run_past_bound() {
+        std::thread::sleep(BOUND * 5);
+    }
+
+    fn after_read(watch: &ActorWatch, hook: impl FnOnce(&ActorWatch) + Send + 'static) {
+        *watch.after_read.lock().expect("hook poisoned") = Some(Box::new(hook));
+    }
+
+    /// (command, report) of each `DatabaseStuck` in effect.
+    fn stuck(bus: &ConditionBus) -> Vec<(String, String)> {
+        bus.current()
+            .into_iter()
+            .filter_map(|c| match c.reason {
+                ConditionKind::DatabaseStuck {
+                    command, report, ..
+                } => Some((command, report)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_command_that_finishes_after_the_watchdog_read_it_is_not_reported() {
+        let (watch, bus, _tx) = watched();
+        watch.begin(&envelope("SELECT 1 AS finishing_command"));
+        run_past_bound();
+        after_read(&watch, ActorWatch::end);
+
+        watch.check();
+
+        assert_eq!(stuck(&bus), Vec::new());
+        watch.begin(&envelope("SELECT 2 AS next_command"));
+        watch.end();
+    }
+
+    #[test]
+    fn a_busy_actor_never_reports_the_next_command_under_the_previous_ones_time() {
+        let (watch, bus, _tx) = watched();
+        watch.begin(&envelope("SELECT 1 AS first_command"));
+        run_past_bound();
+        after_read(&watch, |w| {
+            w.end();
+            w.begin(&envelope("SELECT 2 AS second_command"));
+        });
+
+        watch.check();
+
+        let reports = stuck(&bus);
+        assert!(
+            reports.iter().all(|(_, r)| !r.contains("second_command")),
+            "the report names the command that started after the one whose time it gives: \
+             {reports:#?}"
+        );
+    }
+
+    #[test]
+    fn a_long_statement_is_copied_up_to_the_cap_and_reported_with_its_full_length() {
+        let sql = format!("SELECT '{}' AS long_command", "x".repeat(64 * 1024));
+        let (watch, bus, _tx) = watched();
+        watch.begin(&envelope(&sql));
+        let copied = watch.commands.lock().expect("not poisoned").statements[0]
+            .head
+            .len();
+        assert!(
+            copied <= COPIED_SQL_BYTES,
+            "begin copied {copied} bytes of a {} byte statement",
+            sql.len()
+        );
+        run_past_bound();
+
+        watch.check();
+
+        let reports = stuck(&bus);
+        assert_eq!(reports.len(), 1, "{reports:#?}");
+        assert!(
+            reports[0].1.contains(&format!("({} bytes", sql.len())),
+            "{}",
+            reports[0].1
+        );
+    }
+
+    #[test]
+    fn a_watch_dropped_while_its_command_is_stuck_clears_the_condition() {
+        let (watch, bus, _tx) = watched();
+        watch.begin(&envelope("SELECT 1 AS stuck_command"));
+        run_past_bound();
+        watch.check();
+        assert_eq!(stuck(&bus).len(), 1, "raised before the drop");
+
+        drop(watch);
+
+        assert_eq!(stuck(&bus), Vec::new());
     }
 }

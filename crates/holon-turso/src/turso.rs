@@ -2643,10 +2643,8 @@ impl TursoBackend {
         Self::resync_whole_catalog(&conn, &state.schema_catalog).await;
 
         while let Some(envelope) = rx.recv().await {
-            watch.begin(&envelope);
-            let cmd = envelope.cmd;
             let stats_meta = actor_stats.as_ref().map(|_| {
-                let (variant, sql) = crate::turso_actor_stats::cmd_fingerprint(&cmd);
+                let (variant, sql) = crate::turso_actor_stats::cmd_fingerprint(&envelope.cmd);
                 (
                     variant,
                     sql.map(crate::turso_actor_stats::fingerprint_sql),
@@ -2655,17 +2653,17 @@ impl TursoBackend {
             });
 
             // Wrap command processing in catch_unwind to prevent panics
-            // (e.g., from tracing-subscriber span lifecycle bugs) from killing the actor.
+            // (e.g., from tracing-subscriber span lifecycle bugs or a poisoned
+            // watch) from killing the actor.
+            let watch = &watch;
             let should_break: std::result::Result<bool, Box<dyn std::any::Any + Send>> =
-                AssertUnwindSafe(Self::process_actor_command(
-                    cmd,
-                    &conn,
-                    &mut state,
-                    &cdc_broadcast,
-                ))
+                AssertUnwindSafe(async {
+                    let _watching = watch.watching(&envelope);
+                    Self::process_actor_command(envelope.cmd, &conn, &mut state, &cdc_broadcast)
+                        .await
+                })
                 .catch_unwind()
                 .await;
-            watch.end();
 
             if let (Some(stats), Some((variant, sql_key, t0))) = (&actor_stats, stats_meta) {
                 stats.record_command(variant, sql_key, t0.elapsed());
@@ -4377,6 +4375,25 @@ impl StorageBackend for TursoBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_poisoned_actor_watch_fails_each_command_and_the_actor_lives_on() {
+        let (_backend, handle) = TursoBackend::new_in_memory().await.expect("in-memory db");
+        handle.watch.poison();
+
+        for attempt in 0..3 {
+            // A dead actor's queue closes only after the failed command's reply.
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            let err = handle
+                .query("SELECT 1 AS one", HashMap::new())
+                .await
+                .expect_err("a poisoned watch fails the command");
+            assert!(
+                !matches!(err, StorageError::ActorGone),
+                "attempt {attempt}: the actor died: {err}"
+            );
+        }
+    }
 
     #[test]
     fn test_database_phase_default() {
