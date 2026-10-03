@@ -656,6 +656,15 @@ const VIEW_ENGINE_STOPPED: ConditionProfile = ConditionProfile::new(
     &[],
 );
 
+const DATABASE_STUCK: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Error,
+    "Holon's database is stuck",
+    icons::BLOCKED,
+    ConditionPlacement::Banner,
+    AllClear::RaisingOperationEnds,
+    &[],
+);
+
 impl ConditionKind {
     /// This kind's profile. Total, like
     /// [`condition_kind`](ConditionKind::condition_kind): a new variant cannot
@@ -704,6 +713,7 @@ impl ConditionKind {
             Self::WrittenFilesUnrecorded { .. } => WRITTEN_FILES_UNRECORDED,
             Self::LoroUpdateLogTailDropped { .. } => LORO_UPDATE_LOG_TAIL_DROPPED,
             Self::ViewEngineStopped(_) => VIEW_ENGINE_STOPPED,
+            Self::DatabaseStuck { .. } => DATABASE_STUCK,
         }
     }
 }

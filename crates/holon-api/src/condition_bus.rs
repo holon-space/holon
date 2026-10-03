@@ -438,6 +438,17 @@ pub enum ConditionKind {
     ///
     /// All-clear: none in this process; the engine is rebuilt at start.
     ViewEngineStopped(String),
+    /// The SQL database has run one `command` (its kind, such as
+    /// `Transaction`) for `running_secs` without finishing, so every read and
+    /// write waits behind it. `report` is the log's account of it: the
+    /// redacted SQL, the queue behind it, the commands before it.
+    ///
+    /// All-clear: the command finishes.
+    DatabaseStuck {
+        command: String,
+        running_secs: u64,
+        report: String,
+    },
 }
 
 /// Subject of the device-wide conditions on this bus, which have no share to
@@ -448,6 +459,9 @@ pub const WATCH_VIEWS_SUBJECT: &str = "watch-views";
 
 /// Subject of [`ConditionKind::ViewEngineStopped`].
 pub const VIEW_ENGINE_SUBJECT: &str = "view-engine";
+
+/// Subject of [`ConditionKind::DatabaseStuck`].
+pub const DATABASE_SUBJECT: &str = "database";
 
 impl ConditionKind {
     /// Kind constants, so an all-clear site names the condition it lifts
@@ -495,6 +509,7 @@ impl ConditionKind {
     pub const WRITTEN_FILES_UNRECORDED: &'static str = "written-files-unrecorded";
     pub const LORO_UPDATE_LOG_TAIL_DROPPED: &'static str = "loro-update-log-tail-dropped";
     pub const VIEW_ENGINE_STOPPED: &'static str = "view-engine-stopped";
+    pub const DATABASE_STUCK: &'static str = "database-stuck";
 
     /// The condition's stable identity, paired with the subject to form a
     /// [`ConditionKey`]. Total: every degradation is a sticky
@@ -547,6 +562,7 @@ impl ConditionKind {
             Self::WrittenFilesUnrecorded { .. } => Self::WRITTEN_FILES_UNRECORDED,
             Self::LoroUpdateLogTailDropped { .. } => Self::LORO_UPDATE_LOG_TAIL_DROPPED,
             Self::ViewEngineStopped(_) => Self::VIEW_ENGINE_STOPPED,
+            Self::DatabaseStuck { .. } => Self::DATABASE_STUCK,
         }
     }
 }

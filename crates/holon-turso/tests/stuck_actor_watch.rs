@@ -1,0 +1,230 @@
+//! Contract: a command that keeps the SQL actor busy past the hang bound
+//! (`HOLON_ACTOR_HANG_MS`) is disclosed as `DatabaseStuck`, naming its kind
+//! and its SQL with the literals blanked, and the disclosure clears when the
+//! command finishes.
+//!
+//! The bound is read once per backend from the environment, so each bound gets
+//! its own test function; nextest runs every test in its own process.
+//!
+//! A spinning command never yields, so a runtime that owns it can never finish
+//! a drop: each runtime is `ManuallyDrop` and ends with `shutdown_background`,
+//! which a failed assertion skips instead of hanging in the drop.
+
+use std::mem::ManuallyDrop;
+use std::sync::Arc;
+use std::time::Duration;
+use std::time::Instant;
+
+use holon_api::ConditionBus;
+use holon_api::ConditionKind;
+use holon_turso::turso::DbHandle;
+use holon_turso::turso::TursoBackend;
+
+/// `blocks_with_paths` reduced to the columns the recursion needs.
+const PATHS_VIEW: &str = "CREATE MATERIALIZED VIEW blocks_with_paths AS
+WITH RECURSIVE paths AS (
+    SELECT id, parent_id, '/' || id AS path, id AS root_id
+    FROM block WHERE parent_id LIKE 'sentinel:%'
+    UNION ALL
+    SELECT b.id, b.parent_id, p.path || '/' || b.id AS path, p.root_id
+    FROM block b INNER JOIN paths p ON b.parent_id = p.id
+)
+SELECT * FROM paths";
+
+/// Moves `a` under its own child `b`: the stored parent cycle that makes the
+/// IVM commit of `blocks_with_paths` spin forever.
+const CYCLE_WRITE: &str = "UPDATE block SET parent_id = 'b' WHERE id = 'a'";
+
+fn slow_count_sql(n: u64) -> String {
+    format!(
+        "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < {n}) \
+         SELECT count(*) AS n FROM c"
+    )
+}
+
+fn runtime() -> ManuallyDrop<tokio::runtime::Runtime> {
+    ManuallyDrop::new(
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("test runtime"),
+    )
+}
+
+fn set_hang_bound(ms: u64) {
+    // SAFETY: called before the runtime and the backend exist, while this
+    // process has no other thread that reads the environment.
+    unsafe { std::env::set_var("HOLON_ACTOR_HANG_MS", ms.to_string()) };
+}
+
+fn open(rt: &tokio::runtime::Runtime, bus: &Arc<ConditionBus>) -> DbHandle {
+    rt.block_on(async {
+        let (backend, handle) = TursoBackend::new_in_memory().await.expect("in-memory db");
+        // The actor lives as long as a handle does; the backend only owns the
+        // database file, which an in-memory database does not have.
+        std::mem::forget(backend);
+        handle.disclose_stuck_commands_on(bus.clone());
+        handle
+    })
+}
+
+struct Stuck {
+    command: String,
+    running_secs: u64,
+    report: String,
+}
+
+fn stuck_now(bus: &ConditionBus) -> Option<Stuck> {
+    bus.current().into_iter().find_map(|c| match c.reason {
+        ConditionKind::DatabaseStuck {
+            command,
+            running_secs,
+            report,
+        } => Some(Stuck {
+            command,
+            running_secs,
+            report,
+        }),
+        _ => None,
+    })
+}
+
+fn wait_for_stuck(bus: &ConditionBus, within: Duration) -> Stuck {
+    let deadline = Instant::now() + within;
+    loop {
+        if let Some(stuck) = stuck_now(bus) {
+            return stuck;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no DatabaseStuck condition within {within:?} while the actor is busy past the bound; \
+             conditions in effect: {:?}",
+            bus.current()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// How long the slow query takes on this machine and build, so the bounds of
+/// the other tests are fractions and multiples of a measurement, not guesses.
+fn time_slow_query(rt: &tokio::runtime::Runtime, handle: &DbHandle, n: u64) -> Duration {
+    rt.block_on(async {
+        let t0 = Instant::now();
+        handle
+            .query(&slow_count_sql(n), Default::default())
+            .await
+            .expect("slow count query");
+        t0.elapsed()
+    })
+}
+
+/// Rows a slow query needs to run for one to two seconds in the test profile
+/// (about 28 µs per row).
+const SLOW_ROWS: u64 = 60_000;
+
+#[test]
+fn a_spinning_commit_is_disclosed_with_its_command_kind_and_redacted_sql() {
+    set_hang_bound(500);
+    let rt = runtime();
+    let bus = Arc::new(ConditionBus::new());
+    let handle = open(&rt, &bus);
+    rt.block_on(async {
+        handle
+            .execute_ddl("CREATE TABLE block (id TEXT PRIMARY KEY, parent_id TEXT)")
+            .await
+            .expect("create block");
+        handle.execute_ddl(PATHS_VIEW).await.expect("create view");
+        handle
+            .execute_values(
+                "INSERT INTO block VALUES ('a', 'sentinel:no_parent'), ('b', 'a')",
+                vec![],
+            )
+            .await
+            .expect("seed a tree");
+    });
+
+    let spinning = handle.clone();
+    let started = Instant::now();
+    rt.spawn(async move {
+        let outcome = spinning.execute_values(CYCLE_WRITE, vec![]).await;
+        panic!("the cycle write returned ({outcome:?}); this test needs it to spin");
+    });
+
+    let stuck = wait_for_stuck(&bus, Duration::from_secs(10));
+    let waited = started.elapsed();
+    assert_eq!(stuck.command, "Execute");
+    assert!(
+        stuck.report.contains("UPDATE block SET parent_id ="),
+        "the report names the stuck statement: {}",
+        stuck.report
+    );
+    assert!(
+        !stuck.report.contains("'b'") && !stuck.report.contains("'a'"),
+        "the report carries no SQL literal: {}",
+        stuck.report
+    );
+    assert!(
+        waited >= Duration::from_millis(500),
+        "raised after {waited:?}, before the 500 ms bound"
+    );
+    eprintln!(
+        "raised after {waited:?}, running_secs {}; report:\n{}",
+        stuck.running_secs, stuck.report
+    );
+    ManuallyDrop::into_inner(rt).shutdown_background();
+}
+
+#[test]
+fn a_slow_healthy_command_past_the_bound_is_disclosed_then_cleared() {
+    set_hang_bound(250);
+    let rt = runtime();
+    let bus = Arc::new(ConditionBus::new());
+    let handle = open(&rt, &bus);
+    let took = time_slow_query(&rt, &handle, SLOW_ROWS);
+    assert!(
+        took >= Duration::from_secs(1),
+        "the slow query took only {took:?}; raise SLOW_ROWS so it outlasts the 250 ms bound \
+         by a wide margin"
+    );
+    assert!(
+        stuck_now(&bus).is_none(),
+        "the condition is still in effect after the slow command finished: {:?}",
+        bus.current()
+    );
+
+    let slow = handle.clone();
+    let query = rt.spawn(async move {
+        slow.query(&slow_count_sql(SLOW_ROWS), Default::default())
+            .await
+            .expect("slow count query");
+    });
+    let stuck = wait_for_stuck(&bus, took);
+    assert_eq!(stuck.command, "Query");
+    rt.block_on(query).expect("slow query task");
+    assert!(
+        stuck_now(&bus).is_none(),
+        "the condition is still in effect after the slow command finished: {:?}",
+        bus.current()
+    );
+    ManuallyDrop::into_inner(rt).shutdown_background();
+}
+
+#[test]
+fn a_slow_healthy_command_under_the_bound_is_not_disclosed() {
+    set_hang_bound(30_000);
+    let rt = runtime();
+    let bus = Arc::new(ConditionBus::new());
+    let handle = open(&rt, &bus);
+    let mut changes = bus.subscribe().changes;
+    let took = time_slow_query(&rt, &handle, SLOW_ROWS);
+    assert!(
+        took * 4 < Duration::from_secs(30),
+        "the slow query took {took:?}, too close to the 30 s bound to show no false alarm"
+    );
+    assert!(
+        changes.try_recv().is_err(),
+        "a command that finished in {took:?}, far under the 30 s bound, raised a condition: {:?}",
+        bus.current()
+    );
+}

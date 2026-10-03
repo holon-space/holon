@@ -808,6 +808,10 @@ pub struct DbHandle {
 impl DbHandle {
     /// What the relations in this database declare — the authority a SQL
     /// rewriter asks instead of assuming a table's columns.
+    pub fn disclose_stuck_commands_on(&self, bus: Arc<holon_api::ConditionBus>) {
+        drop(bus);
+    }
+
     pub fn schema_catalog(&self) -> Arc<SchemaCatalog> {
         self.schema_catalog.clone()
     }

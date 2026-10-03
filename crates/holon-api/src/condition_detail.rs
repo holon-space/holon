@@ -370,6 +370,15 @@ impl ConditionKind {
                 "Holon's view engine stopped: {reason}. Its views keep the state before the \
                  error until Holon restarts."
             )),
+
+            Self::DatabaseStuck {
+                command,
+                running_secs,
+                ..
+            } => ConditionDetail::prose(format!(
+                "Holon's database has run one {command} command for {running_secs} s without \
+                 finishing. Every read and write waits behind it. The log has the full report."
+            )),
         }
     }
 }
