@@ -454,6 +454,7 @@ fn post_boot_create_reaches_the_receiver_over(transport: TransportChoice) {
 // oracle here, over the SAME production caps the keystone transitions drive.
 
 use holon_integration_tests::pbt::composed::two_instance::boot_two_instances_with_receiver_caps;
+use holon_pbt_core::capabilities::CapRegion;
 use holon_pbt_core::capabilities::SutBlockCreate;
 use holon_pbt_core::capabilities::SutBlockTreeWrite;
 use holon_pbt_core::capabilities::SutEditorMirrorWrite;
@@ -526,7 +527,14 @@ fn pair_step() -> impl Strategy<Value = PairStep> {
 /// enforces that in its reference model, and this slice — which picks by
 /// observation, not by model — has to enforce it here or it reds on driver
 /// preconditions instead of on convergence.
-fn candidates(state: &TreeState, op: &PairOp) -> Vec<holon_api::EntityUri> {
+fn candidates(
+    state: &TreeState,
+    tier: &dyn holon_core::WriteTierAuthority,
+    op: &PairOp,
+) -> Vec<holon_api::EntityUri> {
+    if matches!(op, PairOp::Create) {
+        return creation_pages(state, tier);
+    }
     // A page ROOT has no parent block: `outdent` refuses it outright, and
     // `indent`/`join_block` refuse it even when other page roots sit beside it
     // under the tree sentinel.
@@ -551,12 +559,46 @@ fn candidates(state: &TreeState, op: &PairOp) -> Vec<holon_api::EntityUri> {
         .collect()
 }
 
+/// Page roots whose main-panel view renders a creation slot: the slot's parent
+/// is resolved from the page's rendered rows, so an empty page has none, and
+/// the write tier withholds it under a refused home.
+fn creation_pages(
+    state: &TreeState,
+    tier: &dyn holon_core::WriteTierAuthority,
+) -> Vec<holon_api::EntityUri> {
+    state
+        .values()
+        .filter(|b| !state.contains_key(b.block.parent_id.as_str()))
+        .filter(|b| state.values().any(|c| c.block.parent_id == b.block.id))
+        .filter(|b| {
+            tier.refusal_for(b.block.id.as_str())
+                .unwrap_or_else(|e| panic!("write-tier lookup of {}: {e}", b.block.id))
+                .is_none()
+        })
+        .map(|b| b.block.id.clone())
+        .collect()
+}
+
+fn page_root(state: &TreeState, id: &holon_api::EntityUri) -> holon_api::EntityUri {
+    let mut current = &state[id.as_str()].block;
+    while let Some(parent) = state.get(current.parent_id.as_str()) {
+        current = &parent.block;
+    }
+    current.id.clone()
+}
+
 /// Apply one production write to one peer through its OWN cap map.
 ///
 /// Returns `false` when no target satisfies the op's precondition, so the
 /// caller does not count a write that never happened.
-async fn apply_pair_op(caps: &CapMap, state: &TreeState, op: &PairOp, pick: usize) -> bool {
-    let mut targets = candidates(state, op);
+async fn apply_pair_op(
+    caps: &CapMap,
+    state: &TreeState,
+    tier: &dyn holon_core::WriteTierAuthority,
+    op: &PairOp,
+    pick: usize,
+) -> bool {
+    let mut targets = candidates(state, tier, op);
     targets.sort();
     if targets.is_empty() {
         return false;
@@ -564,14 +606,22 @@ async fn apply_pair_op(caps: &CapMap, state: &TreeState, op: &PairOp, pick: usiz
     let target = targets[pick % targets.len()].clone();
     match op {
         PairOp::Create => {
+            // The slot gesture creates under whatever page the main panel shows.
+            caps.expect::<dyn SutFocusWrite>()
+                .apply_navigate_focus(CapRegion::Main, &target)
+                .await;
             caps.expect::<dyn SutBlockCreate>()
                 .apply_create_under_focus(&target, "pair", None)
                 .await;
         }
         PairOp::Type(text) => {
-            caps.expect::<dyn SutFocusWrite>()
-                .apply_focus_editable_text(&target)
+            // The click hits only what the main panel renders, so open the
+            // target's page first, as a user would.
+            let focus = caps.expect::<dyn SutFocusWrite>();
+            focus
+                .apply_navigate_focus(CapRegion::Main, &page_root(state, &target))
                 .await;
+            focus.apply_focus_editable_text(&target).await;
             caps.expect::<dyn SutEditorMirrorWrite>()
                 .apply_type_chars(text)
                 .await;
@@ -655,18 +705,20 @@ async fn run_pair_script(
     // The oracle's subtraction, resolved BEFORE the script so writes and the
     // comparison agree on what is observable.
     let exclude = recv.receiver_boot_block_ids().await;
+    let owner_tier = write_tier_of(&handle, true).await;
+    let receiver_tier = write_tier_of(&handle, false).await;
 
     let mut writes = 0usize;
     for step in script {
         match step {
             PairStep::Write { on_owner, pick, op } => {
-                let caps = if *on_owner {
-                    &owner_caps
+                let (caps, tier) = if *on_owner {
+                    (&owner_caps, &owner_tier)
                 } else {
-                    &receiver_caps
+                    (&receiver_caps, &receiver_tier)
                 };
                 let state = handle.loro_tree_state(*on_owner, &exclude).await;
-                if !apply_pair_op(caps, &state, op, *pick).await {
+                if !apply_pair_op(caps, &state, &**tier, op, *pick).await {
                     continue;
                 }
                 let side = if *on_owner {

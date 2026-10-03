@@ -200,7 +200,7 @@ pub(crate) fn inject_scaffold_seed(
 /// differ between slices. Everything else (reconcile, check, runtime) is the
 /// harness's.
 #[allow(async_fn_in_trait)]
-pub trait ComposedSlice {
+pub trait ComposedSlice: 'static {
     /// The slice's transition alphabet enum.
     type Transition: Clone + std::fmt::Debug;
     /// The reference machine that generates/applies those transitions over a
@@ -741,7 +741,137 @@ pub(crate) struct EngageTally {
     pub skipped: u32,
 }
 
+pub(crate) type SettleFuture<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'a>>;
+
 impl<S: ComposedSlice> ComposedSut<S> {
+    /// [`StateMachineTest::apply`] with `settle` in place of the slice's
+    /// post-apply settle.
+    pub(crate) fn apply_then_settle(
+        mut sut: Self,
+        ref_state: &ReferenceState,
+        transition: S::Transition,
+        settle: impl for<'a> FnOnce(&'a S::Handle, &'a CapMap) -> SettleFuture<'a>,
+    ) -> Self {
+        if S::is_reboot(&transition) {
+            return sut.rebooted(ref_state, &transition);
+        }
+        let action = action_label(&transition);
+        // Kept for the post-apply redo gate below (`action` itself is moved into
+        // the timed async block's tracing field).
+        let is_redo = action == "Redo";
+        // Weights-spike telemetry: pre-clone the kind label (the async block
+        // moves `action`), record after the timed apply. No-op when the flag is
+        // off — `record_label` stays `None`.
+        let record_label = super::telemetry::telemetry_enabled().then(|| action.clone());
+        // Interleaving axis (Increment 2): the kind the mask keys on, and this
+        // transition's position in the sequence — together they seed the pump so
+        // two ticks of one kind explore two schedules. `plan` is `None` for every
+        // kind on an unarmed run.
+        let kind = S::transition_kind(&transition);
+        let tick = sut.tick.get();
+        sut.tick.set(tick + 1);
+        let plan = super::interleave::plan_for(&kind, tick);
+        let (before, after, action_us) = {
+            // Split the borrow: `settle_after_apply` reads `&sut.handle` while the apply
+            // writes `&mut sut.caps` — disjoint fields, so borrow each separately before
+            // the `block_on` (both are captured by the `async move`).
+            let caps = &mut sut.caps;
+            let handle = &sut.handle;
+            sut.rt.block_on(async move {
+                let before = sut_ids(caps).await;
+                // Drop the SUT's per-tick render memo BEFORE mutating, so the
+                // snapshot the invariants read this tick is recomputed against
+                // the post-transition settled state (never a stale pre-mutation
+                // frame). No-op for slices without a render memo.
+                S::invalidate_render_caches(handle);
+                let opened = std::time::SystemTime::now();
+                let t_action = std::time::Instant::now();
+                // Bounded wait (`inv-settle-budget`): a WEDGED transition — the
+                // 2026-07-28 turso IVM regime held one navigation write for 23
+                // minutes — must become a red, not a hung suite. Slow-but-
+                // progressing transitions stay well inside this and are reported
+                // with their real measured duration by the invariant below.
+                let wedge = crate::pbt::invariants::bodies::settle_budget::wedge_deadline();
+                let progressed = tokio::time::timeout(wedge, async {
+                    match plan {
+                        // UNMASKED — the same two statements, in the same order,
+                        // this harness has always run. `plan_for` returns `None`
+                        // for every kind unless `HOLON_PBT_SCHED_KINDS` is set,
+                        // so this is the whole behaviour of an unarmed run.
+                        None => {
+                            S::apply_transition(&transition, ref_state, caps).await;
+                            settle(handle, caps).await;
+                        }
+                        // MASKED — the fire-and-forget door plus a seeded pump
+                        // closes the overlap window instead of the settle. The
+                        // settle still runs before any invariant reads state, so
+                        // the per-tick oracle stays exactly as strict as it is
+                        // unarmed; what changes is the ORDER the writes reached
+                        // the store in.
+                        Some(p) => {
+                            let recording = interleave_armed_apply::<S>(
+                                &transition,
+                                ref_state,
+                                caps,
+                                handle,
+                                &kind,
+                                p,
+                            )
+                            .await;
+                            settle(handle, caps).await;
+                            // Most intents settle during the settle, not during
+                            // the detached apply, so the signature is only whole
+                            // once the settle has run.
+                            if let (Some(rec), Some(j)) = (recording, S::dispatch_journal(handle)) {
+                                eprintln!(
+                                    "[schedule-signature] {kind}: seed={} {}",
+                                    p.seed,
+                                    rec.finish(&j),
+                                );
+                            }
+                        }
+                    }
+                })
+                .await;
+                assert!(
+                    progressed.is_ok(),
+                    "[inv-settle-budget] WEDGED: '{action}' made no projection visible within \
+                     {wedge:?} (HOLON_PBT_LATENCY_WEDGE_MS). The dispatch or the 3-projection \
+                     settle is not progressing — abandoning the wait, because a transition that \
+                     never completes cannot be measured and must not hang the suite."
+                );
+                let action_us = t_action.elapsed().as_micros() as u64;
+                if let Some(l) =
+                    caps.get::<dyn crate::pbt::composed::settle_latency::SettleLatencyLifecycle>()
+                {
+                    l.note_settle(&action, opened, std::time::Duration::from_micros(action_us));
+                }
+                // Latency (end-to-end, action->visible rows): dispatch through the
+                // real pipeline plus the CDC settle — everything except final GPU
+                // paint (headless harness). Greppable via target="holon_latency".
+                tracing::info!(
+                    target: "holon_latency",
+                    stage = "action_total",
+                    action = %action,
+                    total_ms = t_action.elapsed().as_millis() as u64,
+                    "holon_latency",
+                );
+                feed_sut_clock(caps, ref_state).await;
+                let after = sut_ids(caps).await;
+                (before, after, action_us)
+            })
+        };
+        Self::post_apply(
+            sut,
+            ref_state,
+            is_redo,
+            before,
+            after,
+            action_us,
+            record_label,
+        )
+    }
+
     /// Everything a tick does AFTER its measured apply+settle window:
     /// authorship scoping, weights telemetry, the synthetic→real id reconcile
     /// and `align_ids`. Shared by [`Self::apply`] and [`Self::rebooted`] so a
@@ -1261,125 +1391,10 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
         }
     }
 
-    fn apply(mut sut: Self, ref_state: &ReferenceState, transition: S::Transition) -> Self {
-        if S::is_reboot(&transition) {
-            return sut.rebooted(ref_state, &transition);
-        }
-        let action = action_label(&transition);
-        // Kept for the post-apply redo gate below (`action` itself is moved into
-        // the timed async block's tracing field).
-        let is_redo = action == "Redo";
-        // Weights-spike telemetry: pre-clone the kind label (the async block
-        // moves `action`), record after the timed apply. No-op when the flag is
-        // off — `record_label` stays `None`.
-        let record_label = super::telemetry::telemetry_enabled().then(|| action.clone());
-        // Interleaving axis (Increment 2): the kind the mask keys on, and this
-        // transition's position in the sequence — together they seed the pump so
-        // two ticks of one kind explore two schedules. `plan` is `None` for every
-        // kind on an unarmed run.
-        let kind = S::transition_kind(&transition);
-        let tick = sut.tick.get();
-        sut.tick.set(tick + 1);
-        let plan = super::interleave::plan_for(&kind, tick);
-        let (before, after, action_us) = {
-            // Split the borrow: `settle_after_apply` reads `&sut.handle` while the apply
-            // writes `&mut sut.caps` — disjoint fields, so borrow each separately before
-            // the `block_on` (both are captured by the `async move`).
-            let caps = &mut sut.caps;
-            let handle = &sut.handle;
-            sut.rt.block_on(async move {
-                let before = sut_ids(caps).await;
-                // Drop the SUT's per-tick render memo BEFORE mutating, so the
-                // snapshot the invariants read this tick is recomputed against
-                // the post-transition settled state (never a stale pre-mutation
-                // frame). No-op for slices without a render memo.
-                S::invalidate_render_caches(handle);
-                let opened = std::time::SystemTime::now();
-                let t_action = std::time::Instant::now();
-                // Bounded wait (`inv-settle-budget`): a WEDGED transition — the
-                // 2026-07-28 turso IVM regime held one navigation write for 23
-                // minutes — must become a red, not a hung suite. Slow-but-
-                // progressing transitions stay well inside this and are reported
-                // with their real measured duration by the invariant below.
-                let wedge = crate::pbt::invariants::bodies::settle_budget::wedge_deadline();
-                let progressed = tokio::time::timeout(wedge, async {
-                    match plan {
-                        // UNMASKED — the same two statements, in the same order,
-                        // this harness has always run. `plan_for` returns `None`
-                        // for every kind unless `HOLON_PBT_SCHED_KINDS` is set,
-                        // so this is the whole behaviour of an unarmed run.
-                        None => {
-                            S::apply_transition(&transition, ref_state, caps).await;
-                            S::settle_after_apply(handle, caps).await;
-                        }
-                        // MASKED — the fire-and-forget door plus a seeded pump
-                        // closes the overlap window instead of the settle. The
-                        // settle still runs before any invariant reads state, so
-                        // the per-tick oracle stays exactly as strict as it is
-                        // unarmed; what changes is the ORDER the writes reached
-                        // the store in.
-                        Some(p) => {
-                            let recording = interleave_armed_apply::<S>(
-                                &transition,
-                                ref_state,
-                                caps,
-                                handle,
-                                &kind,
-                                p,
-                            )
-                            .await;
-                            S::settle_after_apply(handle, caps).await;
-                            // Most intents settle during the settle, not during
-                            // the detached apply, so the signature is only whole
-                            // once the settle has run.
-                            if let (Some(rec), Some(j)) = (recording, S::dispatch_journal(handle)) {
-                                eprintln!(
-                                    "[schedule-signature] {kind}: seed={} {}",
-                                    p.seed,
-                                    rec.finish(&j),
-                                );
-                            }
-                        }
-                    }
-                })
-                .await;
-                assert!(
-                    progressed.is_ok(),
-                    "[inv-settle-budget] WEDGED: '{action}' made no projection visible within \
-                     {wedge:?} (HOLON_PBT_LATENCY_WEDGE_MS). The dispatch or the 3-projection \
-                     settle is not progressing — abandoning the wait, because a transition that \
-                     never completes cannot be measured and must not hang the suite."
-                );
-                let action_us = t_action.elapsed().as_micros() as u64;
-                if let Some(l) =
-                    caps.get::<dyn crate::pbt::composed::settle_latency::SettleLatencyLifecycle>()
-                {
-                    l.note_settle(&action, opened, std::time::Duration::from_micros(action_us));
-                }
-                // Latency (end-to-end, action->visible rows): dispatch through the
-                // real pipeline plus the CDC settle — everything except final GPU
-                // paint (headless harness). Greppable via target="holon_latency".
-                tracing::info!(
-                    target: "holon_latency",
-                    stage = "action_total",
-                    action = %action,
-                    total_ms = t_action.elapsed().as_millis() as u64,
-                    "holon_latency",
-                );
-                feed_sut_clock(caps, ref_state).await;
-                let after = sut_ids(caps).await;
-                (before, after, action_us)
-            })
-        };
-        Self::post_apply(
-            sut,
-            ref_state,
-            is_redo,
-            before,
-            after,
-            action_us,
-            record_label,
-        )
+    fn apply(sut: Self, ref_state: &ReferenceState, transition: S::Transition) -> Self {
+        Self::apply_then_settle(sut, ref_state, transition, |handle, caps| {
+            Box::pin(S::settle_after_apply(handle, caps))
+        })
     }
 
     fn check_invariants(sut: &Self, ref_state: &ReferenceState) {

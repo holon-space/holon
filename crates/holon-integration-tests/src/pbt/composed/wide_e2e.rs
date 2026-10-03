@@ -178,6 +178,29 @@ pub async fn converge_handle(handle: &WideHandle, budget: Duration) {
     converge_projections(handle, budget).await
 }
 
+/// The post-apply settle: dispatches drained, then the 3 projections
+/// converged, each within `budget` (floored at [`CONVERGE_BUDGET`]).
+async fn settle_within(handle: &WideHandle, budget: Duration) {
+    drain_dispatches(handle, budget).await;
+    converge_projections(handle, budget).await;
+}
+
+impl crate::pbt::composed::harness::ComposedSut<WideE2E> {
+    /// [`StateMachineTest::apply`](proptest_state_machine::StateMachineTest::apply)
+    /// settling within `budget`, for a transition whose work exceeds the
+    /// per-transition budget (a bulk seed).
+    pub fn apply_settling_within(
+        self,
+        ref_state: &ReferenceState,
+        transition: E2ETransition,
+        budget: Duration,
+    ) -> Self {
+        Self::apply_then_settle(self, ref_state, transition, move |handle, _| {
+            Box::pin(settle_within(handle, budget))
+        })
+    }
+}
+
 /// Wait until every intent the frontend dispatched has landed or failed, as
 /// production's state is once its fire-and-forget ops complete. A run the
 /// dispatch hold parked stays in flight on purpose and is not waited for.
@@ -2048,9 +2071,7 @@ impl ComposedSlice for WideE2E {
     /// lagged and the block/org invariants diverged). Capped at `SETTLE`,
     /// so it never over-waits vs the old sleep.
     async fn settle_after_apply(handle: &WideHandle, _: &CapMap) {
-        let budget = crate::pbt::composed::soak_seed::soak_settle();
-        drain_dispatches(handle, budget).await;
-        converge_projections(handle, budget).await;
+        settle_within(handle, crate::pbt::composed::soak_seed::soak_settle()).await;
     }
 
     /// The mask's alphabet is the transition enum's own variant names, not a

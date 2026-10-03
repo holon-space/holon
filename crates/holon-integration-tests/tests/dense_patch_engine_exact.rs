@@ -35,6 +35,7 @@ use holon_integration_tests::McpUserDriver;
 use holon_integration_tests::pbt::composed::embedded_mcp::EmbeddedMcp;
 use holon_integration_tests::pbt::composed::embedded_mcp::connect_embedded_mcp;
 use holon_integration_tests::pbt::composed::harness::ComposedSut;
+use holon_integration_tests::pbt::composed::wide_e2e::CONVERGE_BUDGET;
 use holon_integration_tests::pbt::composed::wide_e2e::WideE2E;
 use holon_integration_tests::pbt::composed::wide_e2e::WideE2EMachine;
 use holon_integration_tests::pbt::composed::wide_e2e::wide_e2e_ref;
@@ -387,6 +388,14 @@ fn a_row_over_the_emphasis_mark_bound_is_refused_by_name() {
 /// Far above a patch's ~1-2 s, far below the binary's 10 min cap.
 const PATCH_ANSWERS_WITHIN: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// The settle budget for seeding a page of `blocks` blocks. Ingest costs
+/// ~20 ms per block in the test profile under load (2001 blocks settle in
+/// 30-47 s).
+fn seed_settle_budget(blocks: usize) -> std::time::Duration {
+    const PER_BLOCK: std::time::Duration = std::time::Duration::from_millis(40);
+    CONVERGE_BUDGET.max(PER_BLOCK * blocks as u32)
+}
+
 /// A booted session that seeds one page per case.
 struct Session {
     ref_state: ReferenceState,
@@ -537,6 +546,7 @@ impl Session {
         blocks: Vec<Block>,
         keyword_set: Option<holon_integration_tests::pbt::generators::TodoKeywordSet>,
     ) -> Session {
+        let budget = seed_settle_budget(blocks.len());
         let t = E2ETransition::WriteOrgFile(WriteOrgFile {
             filename: file.to_string(),
             blocks,
@@ -550,7 +560,7 @@ impl Session {
         } = self;
         assert!(WideE2EMachine::preconditions(&ref_state, &t));
         let ref_state = WideE2EMachine::apply(ref_state, &t);
-        let sut = <Sut as StateMachineTest>::apply(sut, &ref_state, t);
+        let sut = sut.apply_settling_within(&ref_state, t, budget);
         sut.settle_projections();
         Session {
             ref_state,
