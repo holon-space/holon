@@ -198,7 +198,7 @@ async fn create_initialized_engine(
         ui_info,
         LiveEntities::new(),
         type_profiles,
-        type_registry.profile_scope_check(),
+        type_registry.profile_load_check(),
         conditions,
     )
     .await?;
@@ -464,7 +464,7 @@ async fn create_profile_resolver(
     ui_info: holon_api::UiInfo,
     live_entities: LiveEntities,
     type_profiles: Vec<crate::entity_profile::EntityProfile>,
-    profile_scope_check: impl Fn(&crate::entity_profile::ParsedProfile) -> Result<()>
+    profile_load_check: impl Fn(&crate::entity_profile::ParsedProfile) -> Result<()>
     + Send
     + Sync
     + 'static,
@@ -501,7 +501,7 @@ async fn create_profile_resolver(
     match matview_manager.watch(PROFILE_SQL).await {
         Ok(result) => {
             let load =
-                move |row: &StorageEntity| load_profile_row(row, &profile_scope_check, &conditions);
+                move |row: &StorageEntity| load_profile_row(row, &profile_load_check, &conditions);
             // A refused row stays out of the mirror at boot exactly as a
             // refused CDC row does after it.
             let initial_rows = result
@@ -556,7 +556,7 @@ async fn create_profile_resolver(
 /// successful load clears it.
 fn load_profile_row(
     row: &StorageEntity,
-    profile_scope_check: &impl Fn(&crate::entity_profile::ParsedProfile) -> Result<()>,
+    profile_load_check: &impl Fn(&crate::entity_profile::ParsedProfile) -> Result<()>,
     conditions: &holon_api::ConditionBus,
 ) -> Result<crate::entity_profile::EntityProfile> {
     let id = row
@@ -569,7 +569,7 @@ fn load_profile_row(
             .and_then(|v| v.as_string())
             .ok_or_else(|| anyhow::anyhow!("profile row missing 'content'"))?;
         let profile = parse_profile_yaml(content)?;
-        profile_scope_check(&profile)?;
+        profile_load_check(&profile)?;
         profile.to_entity_profile()
     })();
     match &loaded {

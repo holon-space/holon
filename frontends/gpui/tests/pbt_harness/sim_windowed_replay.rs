@@ -622,11 +622,11 @@ impl UserDriver for SimUserDriver {
         let intent =
             holon_frontend::focus_path::state_toggle_cycle_intent(&resolved, entity_id, region)
                 .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "cycle_state_toggle: no state_toggle node for {entity_id} in region \
+                anyhow::anyhow!(
+                    "cycle_state_toggle: no state_toggle node for {entity_id} in region \
                          {region} (target rendered no task toggle — not a visible task row?)"
-                    )
-                })?;
+                )
+            })??;
         self.engine.dispatch_intent_sync(intent).await?;
         self.pump();
         Ok(holon_frontend::StateToggleVerb::Idempotent)

@@ -175,6 +175,42 @@ fn a_refused_profile_in_the_vault_at_boot_is_disclosed() {
 }
 
 #[test]
+fn a_profile_writing_a_private_field_is_disclosed_at_boot() {
+    runtime().block_on(async {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let org = PROFILE_ORG
+            .replace("'asker == \"martin\"'", "'is_def_var(\"asker\")'")
+            .replace(
+                "'text(col(\"content\"))'",
+                "'board(#{item_template: render_entity(), lane_field: \"parent_id\"})'",
+            );
+        assert!(
+            org.contains("lane_field") && !org.contains("martin"),
+            "{org}"
+        );
+        std::fs::write(dir.path().join("profiles.org"), org).expect("write the vault");
+
+        let booted = boot(dir.path()).await;
+        let refusal = wait_for_refusal(&booted.bus)
+            .await
+            .expect("a profile whose board would set_field(parent_id) must be disclosed");
+        let ConditionKind::ProfileRefused { error } = &refusal.reason else {
+            unreachable!()
+        };
+        for needle in [
+            "variant 'asked'",
+            "lane_field",
+            "'parent_id' is a private field",
+        ] {
+            assert!(
+                error.contains(needle),
+                "the disclosure must name {needle:?}: {error}"
+            );
+        }
+    });
+}
+
+#[test]
 fn a_refused_profile_written_after_boot_is_disclosed_until_fixed() {
     runtime().block_on(async {
         let dir = tempfile::tempdir().expect("tempdir");

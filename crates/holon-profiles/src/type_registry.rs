@@ -241,6 +241,7 @@ impl TypeRegistry {
     /// produced by both bundled and org-embedded YAML parsing.
     pub fn apply_parsed_profile(&self, profile: ParsedProfile) -> Result<()> {
         crate::check_profile_scope(&profile, self.get(&profile.entity_name).as_ref())?;
+        crate::check_profile_write_targets(&profile)?;
         let entity_name = profile.entity_name;
         let computed: Vec<(String, ComputedFieldDecl)> = profile.computed.into_iter().collect();
         if !computed.is_empty() {
@@ -277,10 +278,11 @@ impl TypeRegistry {
         LinkTargetClassifier::with_registry(self.clone() as Arc<dyn LinkSchemeRegistry>)
     }
 
+    /// The load-time checks [`Self::apply_parsed_profile`] runs, with
     /// [`crate::check_profile_scope`] against a snapshot of the types
     /// registered now, for profiles that load after the registry is built
     /// (org-embedded profile blocks).
-    pub fn profile_scope_check(
+    pub fn profile_load_check(
         &self,
     ) -> impl Fn(&ParsedProfile) -> Result<()> + Send + Sync + 'static {
         let types = self.types.read().expect("TypeRegistry poisoned").clone();
@@ -288,7 +290,8 @@ impl TypeRegistry {
             crate::check_profile_scope(
                 profile,
                 types.get(TableName::from_scheme(&profile.entity_name).as_str()),
-            )
+            )?;
+            crate::check_profile_write_targets(profile)
         }
     }
 

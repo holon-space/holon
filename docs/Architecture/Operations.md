@@ -513,7 +513,10 @@ invariant 16.
   `LoroBlockOperations::execute_operation`, in both modes. The dispatcher
   refuses a block `update` whose params name a private field with the same
   error. MCP `execute_operation` passes through the dispatcher and gets the
-  same refusal. `OperationIntent::set_field` asserts it at construction.
+  same refusal. `OperationIntent::set_field` returns it at construction, and a
+  profile whose widget names a private field as its write target (`board`'s
+  `lane_field`, `state_toggle`'s or `editable_text`'s `field`) is refused at
+  load (`crates/holon-profiles/src/profile_write_targets.rs`).
 - **Not yet refused in the store.** `SqlOperationProvider`'s `update` /
   `set_field` arms, batch `update`, and a recognized re-create (`create` of an
   existing id) still write the columns for an internal caller. The ingest,

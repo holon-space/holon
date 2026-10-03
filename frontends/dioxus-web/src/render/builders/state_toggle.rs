@@ -56,6 +56,15 @@ pub fn render(node: &ViewModel, _: &DioxusRenderContext) -> Element {
             row_id.as_deref(),
         ),
     };
+    let intent = match intent {
+        Ok(intent) => intent,
+        Err(e) => {
+            tracing::error!("[state_toggle] {e}");
+            return rsx! {
+                span { "data-role": "state-toggle-error", "state_toggle: {e}" }
+            };
+        }
+    };
     if intent.is_none() {
         // Disclose the degraded (display-only) pill: without op wiring or
         // a row id a click can't dispatch — same nodes GPUI renders inert.

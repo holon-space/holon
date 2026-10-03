@@ -1,13 +1,14 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use holon_api::BlockWriteFieldError;
 use holon_api::EntityName;
 use holon_api::Value;
+use holon_api::block_write_field::refuse_structural_field;
 use holon_api::render_eval::eval_to_value;
 use holon_api::render_types::OperationDescriptor;
 use holon_api::render_types::OperationWiring;
 use holon_api::render_types::RenderExpr;
-use holon_api::schema::FieldIntent;
 use holon_api::spawner::Spawner;
 use holon_api::widget_spec::DataRow;
 
@@ -63,8 +64,9 @@ pub fn click_intent_for(
 ///
 /// `states` is the comma-separated list the widget carries. `entity_name` is
 /// the node's own entity when it has one, otherwise the op's declared entity.
-/// `None` means the toggle is not wired for writing — the caller discloses
-/// that, it is not an error here.
+/// `Ok(None)` means the toggle is not wired for writing — the caller discloses
+/// that, it is not an error here. `Err` means `field` is not writable by
+/// `set_field` at all.
 pub fn state_toggle_intent(
     field: &str,
     current: &str,
@@ -72,41 +74,39 @@ pub fn state_toggle_intent(
     ops: &[OperationWiring],
     entity_name: Option<&EntityName>,
     row_id: Option<&str>,
-) -> Option<OperationIntent> {
-    let op = find_set_field_op(field, ops)?;
+) -> Result<Option<OperationIntent>, BlockWriteFieldError> {
+    let (Some(op), Some(row_id)) = (find_set_field_op(field, ops), row_id) else {
+        return Ok(None);
+    };
     let states_vec: Vec<String> = states.split(',').map(|s| s.trim().to_string()).collect();
     let next = holon_api::render_eval::cycle_state(current, &states_vec);
     let entity_name = entity_name.unwrap_or(&op.entity_name);
-    Some(OperationIntent::set_field(
-        entity_name,
-        &op.name,
-        row_id?,
-        field,
-        Value::String(next),
-    ))
+    OperationIntent::set_field(entity_name, &op.name, row_id, field, Value::String(next)).map(Some)
 }
 
 /// The bool-bound counterpart of [`state_toggle_intent`]: flip `current` and
 /// dispatch the decision at its own type.
 ///
-/// `None` means the toggle is not wired for writing — the caller discloses
-/// that, it is not an error here.
+/// Results as in [`state_toggle_intent`].
 pub fn state_toggle_intent_bool(
     field: &str,
     current: bool,
     ops: &[OperationWiring],
     entity_name: Option<&EntityName>,
     row_id: Option<&str>,
-) -> Option<OperationIntent> {
-    let op = find_set_field_op(field, ops)?;
+) -> Result<Option<OperationIntent>, BlockWriteFieldError> {
+    let (Some(op), Some(row_id)) = (find_set_field_op(field, ops), row_id) else {
+        return Ok(None);
+    };
     let entity_name = entity_name.unwrap_or(&op.entity_name);
-    Some(OperationIntent::set_field(
+    OperationIntent::set_field(
         entity_name,
         &op.name,
-        row_id?,
+        row_id,
         field,
         Value::Boolean(!current),
-    ))
+    )
+    .map(Some)
 }
 
 pub fn dispatch_operation(
@@ -219,37 +219,26 @@ impl OperationIntent {
     }
 
     /// Build a `set_field` intent (used by state_toggle, editable_text on blur,
-    /// etc.).
+    /// etc.). `field` can come from author data (a profile's `lane_field` or
+    /// `state_toggle` field), so a private field or an order key is refused
+    /// here (Model.md invariants 3 and 16): it needs a structural op instead.
     pub fn set_field(
         entity_name: &EntityName,
         op_name: &str,
         row_id: &str,
         field: &str,
         value: Value,
-    ) -> Self {
-        // Model.md invariants 3 and 16: a widget constructing a set_field over
-        // a private field or an order key is a programming error. Assert here
-        // so the bug surfaces at the constructor, not as a downstream
-        // dispatch Err.
-        let intent = holon_api::schema::BLOCK.field(field).map(|f| f.intent);
-        assert!(
-            !matches!(
-                intent,
-                Some(FieldIntent::Private(_) | FieldIntent::OrderKey)
-            ),
-            "OperationIntent::set_field({field:?}): intent must never write a private field or \
-             carry an order key (Model.md invariants 3 and 16); dispatch a structural move \
-             (move_block) instead"
-        );
+    ) -> Result<Self, BlockWriteFieldError> {
+        refuse_structural_field(field)?;
         let mut params = HashMap::new();
         params.insert("id".to_string(), Value::String(row_id.to_string()));
         params.insert("field".to_string(), Value::String(field.to_string()));
         params.insert("value".to_string(), value);
-        Self {
+        Ok(Self {
             entity_name: entity_name.clone(),
             op_name: op_name.to_string(),
             params,
-        }
+        })
     }
 }
 
@@ -374,31 +363,37 @@ pub fn get_row_id(ctx: &RenderContext) -> Option<holon_api::EntityUri> {
 mod tests {
     use super::*;
 
-    /// Model.md invariant 3: no widget may construct a `set_field` intent
-    /// carrying an order key — the constructor asserts immediately instead
-    /// of letting the smuggle travel to a downstream dispatch Err.
     #[test]
-    #[should_panic(expected = "intent must never write a private field")]
-    fn set_field_intent_over_sort_key_is_unconstructible() {
-        let _ = OperationIntent::set_field(
-            &EntityName::Named("block".to_string()),
-            "set_field",
-            "block:a",
-            "sort_key",
-            Value::String("A5".to_string()),
-        );
-    }
-
-    #[test]
-    #[should_panic(expected = "intent must never write a private field")]
-    fn set_field_intent_over_parent_id_is_unconstructible() {
-        let _ = OperationIntent::set_field(
-            &EntityName::Named("block".to_string()),
-            "set_field",
-            "block:a",
-            "parent_id",
-            Value::String("block:b".to_string()),
-        );
+    fn set_field_intent_over_a_structural_field_is_refused() {
+        for (field, expected) in [
+            (
+                "sort_key",
+                BlockWriteFieldError::Private {
+                    field: "sort_key".to_string(),
+                    route: "move_block { id, parent_id, after_block_id }",
+                },
+            ),
+            (
+                "parent_id",
+                BlockWriteFieldError::Private {
+                    field: "parent_id".to_string(),
+                    route: "move_block { id, parent_id, after_block_id }",
+                },
+            ),
+            (
+                "after_block_id",
+                BlockWriteFieldError::OrderKey("after_block_id".to_string()),
+            ),
+        ] {
+            let refused = OperationIntent::set_field(
+                &EntityName::Named("block".to_string()),
+                "set_field",
+                "block:a",
+                field,
+                Value::String("block:b".to_string()),
+            );
+            assert_eq!(refused.unwrap_err(), expected, "{field}");
+        }
     }
 
     /// A bool-bound toggle carries a typed decision on the wire. The word
@@ -436,6 +431,7 @@ mod tests {
             Some(&EntityName::Named("integration".to_string())),
             Some("integration:gmail"),
         )
+        .expect("`enabled` is writable")
         .expect("a wired bool toggle must produce an intent");
 
         assert_eq!(
@@ -453,7 +449,8 @@ mod tests {
             "block:a",
             "content",
             Value::String("hello".to_string()),
-        );
+        )
+        .expect("content is writable");
         assert_eq!(intent.op_name, "set_field");
     }
 }

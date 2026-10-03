@@ -53,6 +53,11 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
         }
     };
 
+    let intent = match intent {
+        Ok(intent) => intent,
+        Err(e) => return div().child(error_banner(&format!("state_toggle: {e}"), ctx)),
+    };
+
     let (_label, semantic) = state_display(&current);
     let color = super::theme::theme_token_color(ctx, semantic);
     let icon = state_icon(&current);

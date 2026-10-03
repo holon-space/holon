@@ -78,7 +78,7 @@ for any field is: op-fidelity (store) → base-limited 3-way (transient) → LWW
 
 ## Invariants
 
-(1)–(7) are [Replication §9](Replication.md); (8)–(16) extend them.
+(1)–(7) are [Replication §9](Replication.md); the rest extend them.
 
 1. One base per replica, diffed against — never against the cache.
 2. One consolidator per sibling-set owns order; sinks store its fi verbatim.
@@ -88,7 +88,7 @@ for any field is: op-fidelity (store) → base-limited 3-way (transient) → LWW
    `after_block_id` is a loud `Err` in `OperationDispatcher` and in
    `LoroBlockOperations::execute_operation`, in both modes, and `sort_key`
    is refused there as a private field (invariant 16); the frontend intent
-   constructor (`OperationIntent::set_field`) asserts the same. Reorders
+   constructor (`OperationIntent::set_field`) returns the same `Err`. Reorders
    dispatch `move_block { id, parent_id, after_block_id }`.
    The same vocabulary refuses a whole-bag `set_field("properties")`:
    the bag carries its values as ONE serialized string, so no per-property

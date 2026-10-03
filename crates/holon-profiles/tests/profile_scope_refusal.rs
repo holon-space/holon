@@ -84,7 +84,7 @@ fn guarded_and_declared_reads_load() {
 fn an_org_embedded_profile_is_checked_against_the_registered_types() {
     let check = create_default_registry()
         .expect("default registry loads")
-        .profile_scope_check();
+        .profile_load_check();
     let refused = parse_profile_yaml(&block_profile_with_condition("asked-by != ()"))
         .expect("profile parses");
     let msg = format!("{:#}", check(&refused).expect_err("hyphenated key refused"));

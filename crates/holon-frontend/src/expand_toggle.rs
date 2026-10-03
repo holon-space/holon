@@ -40,13 +40,16 @@ pub fn expand_toggle_effects(
         entity_name,
         row_id,
     ) {
-        (Some(op), Some(entity), Some(id)) => Some(OperationIntent::set_field(
-            entity,
-            &op.name,
-            &id.to_string(),
-            "collapsed",
-            Value::Boolean(!expanded),
-        )),
+        (Some(op), Some(entity), Some(id)) => Some(
+            OperationIntent::set_field(
+                entity,
+                &op.name,
+                &id.to_string(),
+                "collapsed",
+                Value::Boolean(!expanded),
+            )
+            .expect("`collapsed` is writable"),
+        ),
         _ => None,
     };
     ExpandToggleEffects {
@@ -87,13 +90,16 @@ pub fn tree_chevron_persist_intent(
         );
         return None;
     };
-    Some(OperationIntent::set_field(
-        &op.entity_name,
-        "set_field",
-        &row_id.to_string(),
-        "collapsed",
-        Value::Boolean(!new_expanded),
-    ))
+    Some(
+        OperationIntent::set_field(
+            &op.entity_name,
+            "set_field",
+            &row_id.to_string(),
+            "collapsed",
+            Value::Boolean(!new_expanded),
+        )
+        .expect("`collapsed` is writable"),
+    )
 }
 
 /// A `set_field("collapsed")` wiring as an `expand_toggle` node carries it.

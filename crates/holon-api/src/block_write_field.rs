@@ -137,6 +137,23 @@ impl fmt::Display for BlockWriteFieldError {
 
 impl std::error::Error for BlockWriteFieldError {}
 
+/// Refuse `raw` when only a structural op may write it: a private field
+/// (invariant 16) or an order key (invariant 3). Every other name passes.
+///
+/// This is the part of [`BlockWriteField::parse`] that holds for a `set_field`
+/// on ANY entity, so author-supplied field names (profile widgets) are checked
+/// with it before they reach an intent.
+pub fn refuse_structural_field(raw: &str) -> Result<(), BlockWriteFieldError> {
+    match holon_pattern::schema::BLOCK.field(raw).map(|f| f.intent) {
+        Some(FieldIntent::Private(private)) => Err(BlockWriteFieldError::Private {
+            field: raw.to_string(),
+            route: private.route,
+        }),
+        Some(FieldIntent::OrderKey) => Err(BlockWriteFieldError::OrderKey(raw.to_string())),
+        _ => Ok(()),
+    }
+}
+
 impl BlockWriteField {
     /// Parse a raw `set_field` field name into the closed intent vocabulary.
     ///
@@ -149,19 +166,11 @@ impl BlockWriteField {
         if raw.starts_with("_expected_") {
             return Err(BlockWriteFieldError::StorageInternal(raw.to_string()));
         }
+        refuse_structural_field(raw)?;
         // The refusals are read off the ONE schema declaration
         // (`holon_pattern::schema::BLOCK`), so a field's intent classification
         // lives beside its storage and cannot drift from it.
         match holon_pattern::schema::BLOCK.field(raw).map(|f| f.intent) {
-            Some(FieldIntent::Private(private)) => {
-                return Err(BlockWriteFieldError::Private {
-                    field: raw.to_string(),
-                    route: private.route,
-                });
-            }
-            Some(FieldIntent::OrderKey) => {
-                return Err(BlockWriteFieldError::OrderKey(raw.to_string()));
-            }
             Some(FieldIntent::StorageInternal) => {
                 return Err(BlockWriteFieldError::StorageInternal(raw.to_string()));
             }

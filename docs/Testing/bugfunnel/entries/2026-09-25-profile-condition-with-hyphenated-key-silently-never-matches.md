@@ -40,7 +40,7 @@ column (block), a computed field or a UI-state variable. The error names the
 profile, variant/field, expression and names, and suggests
 `properties["<hyphenated-key>"]` when the names are segments of one. It runs in
 `TypeRegistry::apply_parsed_profile` (bundled and kitchen profiles) and on
-every org-embedded profile block (`TypeRegistry::profile_scope_check`, wired in
+every org-embedded profile block (`TypeRegistry::profile_load_check`, wired in
 crates/holon/src/di/registration.rs). Pinned by
 crates/holon-profiles/tests/profile_scope_refusal.rs. All shipped profiles
 under assets/default/types/ load unchanged.

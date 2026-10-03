@@ -212,14 +212,20 @@ fn dispatch_set_field(
     let Some(entity_name) = resolve_row_op_entity(services, row_id, "set_field", context) else {
         return;
     };
-    let intent = OperationIntent::set_field(
+    match OperationIntent::set_field(
         &entity_name,
         "set_field",
         &row_id.to_string(),
         field,
         Value::String(value),
-    );
-    services.dispatch_intent(intent);
+    ) {
+        Ok(intent) => services.dispatch_intent(intent),
+        Err(e) => services.surface_op_failure(
+            entity_name.as_str(),
+            "set_field",
+            &anyhow::anyhow!("board {context}: not dispatched for row_id={row_id}: {e}"),
+        ),
+    }
 }
 
 /// Cross-lane drag handler. Updates `lane_field` to the destination lane's

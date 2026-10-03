@@ -1105,7 +1105,7 @@ impl UserDriver for ReactiveEngineDriver {
             if let Some(intent) =
                 crate::focus_path::state_toggle_cycle_intent(&resolved, entity_id, region)
             {
-                self.apply_intent(intent).await?;
+                self.apply_intent(intent?).await?;
                 return Ok(StateToggleVerb::Idempotent);
             }
             if Instant::now() >= deadline {

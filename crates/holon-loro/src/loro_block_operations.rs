@@ -1928,14 +1928,12 @@ impl OperationProvider for LoroBlockOperations {
             return Err(format!("Expected entity_name 'block', got '{}'", entity_name).into());
         }
 
-        // Intent boundary (Model.md invariant 3): `execute_operation` is the
-        // provider surface intents arrive on (dispatcher, MCP, and
-        // no-dispatcher configs that hold this provider directly). Parse the
-        // `set_field` field into the closed `BlockWriteField` vocabulary —
-        // order keys and storage-internal fields fail loud instead of being
-        // silently discarded downstream. Internal callers (move_block's
-        // depth write, the task-state convenience setters) call the
-        // `CrudOperations::set_field` method directly and are unaffected.
+        // Intent boundary for `set_field` only (Model.md invariants 3 and 16):
+        // its field is parsed into the closed `BlockWriteField` vocabulary, so
+        // private fields, order keys and storage-internal fields fail loud.
+        // Other ops, `update` included, are not checked here. Internal callers
+        // (move_block's depth write, the task-state convenience setters) call
+        // `CrudOperations::set_field` directly and are unaffected.
         if op_name == "set_field" {
             let field = params
                 .get("field")

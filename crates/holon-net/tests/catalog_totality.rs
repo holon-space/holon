@@ -218,6 +218,11 @@ fn an_excluded_place_is_not_resurrected_by_the_delta_half() {
         .iter()
         .map(|p| p.to_string())
         .collect();
+    assert!(
+        written.contains(&"block.content".to_string()),
+        "the subtraction must remove only the excluded places; set_field still writes \
+         block.content: {written:?}"
+    );
     for place in ["block.parent_id", "block.sort_key"] {
         assert!(
             !written.contains(&place.to_string()),

@@ -63,8 +63,8 @@ dispatched `set_field` or `update` that names them, from the UI or from MCP
 cases `update-parent-under-own-descendant-refused-on-the-sql-authority` and
 `mcp-execute-operation-update-parent-id-refused`, red by hang before, green
 after). Suspected next path: a dispatched `create` of an existing id with the
-same title re-parents it through the upsert with no cycle check (keystone case
-`create-recreate-reparent-refused-on-the-sql-authority`, red).
+same title re-parents it through the upsert with no cycle check. Its keystone
+case is parked until the store-layer refusal.
 Open: any other path that can store a cycle (org ingest of a hand-edited file,
 a peer import into SQL, an internal `parent_id` write outside `place_row`) would still hang the actor. Close it at the view: a cycle guard
 in the recursive view (a visited path check, or a depth bound that fails loud)

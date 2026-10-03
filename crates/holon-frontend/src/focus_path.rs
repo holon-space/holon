@@ -387,13 +387,13 @@ pub fn state_toggle_cycle_intent(
     root: &crate::view_model::ViewModel,
     entity_id: &EntityUri,
     region: &str,
-) -> Option<crate::operations::OperationIntent> {
+) -> Option<Result<crate::operations::OperationIntent, holon_api::BlockWriteFieldError>> {
     use crate::view_model::ViewKind;
 
     fn walk(
         node: &crate::view_model::ViewModel,
         entity_id: &EntityUri,
-    ) -> Option<crate::operations::OperationIntent> {
+    ) -> Option<Result<crate::operations::OperationIntent, holon_api::BlockWriteFieldError>> {
         if let ViewKind::StateToggle {
             field,
             current,
@@ -410,7 +410,8 @@ pub fn state_toggle_cycle_intent(
                     &node.operations,
                     node.entity_name().as_ref(),
                     row_id.as_deref(),
-                );
+                )
+                .transpose();
             }
         }
         for child in node.children() {
