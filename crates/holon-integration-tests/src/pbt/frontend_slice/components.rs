@@ -898,6 +898,11 @@ impl HeadlessFrontendComponent {
             config_dir,
             std::collections::HashSet::new(),
             move |injector| {
+                crate::pbt::database_stuck_guard::forbid_database_stuck(
+                    &injector
+                        .try_resolve::<Arc<holon_api::ConditionBus>>()
+                        .expect("every container provides a ConditionBus"),
+                );
                 crate::test_environment::install_headless_render_interpreter(
                     injector,
                     &org_fs_for_di,

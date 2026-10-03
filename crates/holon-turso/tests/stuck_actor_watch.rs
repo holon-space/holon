@@ -106,6 +106,21 @@ fn wait_for_stuck(bus: &ConditionBus, within: Duration) -> Stuck {
     }
 }
 
+/// The watchdog clears a finished command's disclosure on its next tick.
+const CLEAR_WITHIN: Duration = Duration::from_secs(2);
+
+fn wait_for_clear(bus: &ConditionBus, within: Duration) {
+    let deadline = Instant::now() + within;
+    while stuck_now(bus).is_some() {
+        assert!(
+            Instant::now() < deadline,
+            "the condition is still in effect {within:?} after the slow command finished: {:?}",
+            bus.current()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 /// How long the slow query takes on this machine and build, so the bounds of
 /// the other tests are fractions and multiples of a measurement, not guesses.
 fn time_slow_query(rt: &tokio::runtime::Runtime, handle: &DbHandle, n: u64) -> Duration {
@@ -187,11 +202,7 @@ fn a_slow_healthy_command_past_the_bound_is_disclosed_then_cleared() {
         "the slow query took only {took:?}; raise SLOW_ROWS so it outlasts the 250 ms bound \
          by a wide margin"
     );
-    assert!(
-        stuck_now(&bus).is_none(),
-        "the condition is still in effect after the slow command finished: {:?}",
-        bus.current()
-    );
+    wait_for_clear(&bus, CLEAR_WITHIN);
 
     let slow = handle.clone();
     let query = rt.spawn(async move {
@@ -202,11 +213,7 @@ fn a_slow_healthy_command_past_the_bound_is_disclosed_then_cleared() {
     let stuck = wait_for_stuck(&bus, took);
     assert_eq!(stuck.command, "Query");
     rt.block_on(query).expect("slow query task");
-    assert!(
-        stuck_now(&bus).is_none(),
-        "the condition is still in effect after the slow command finished: {:?}",
-        bus.current()
-    );
+    wait_for_clear(&bus, CLEAR_WITHIN);
     ManuallyDrop::into_inner(rt).shutdown_background();
 }
 

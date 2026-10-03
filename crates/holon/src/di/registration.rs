@@ -616,8 +616,11 @@ pub fn register_core_services_with_backend(
     let db_handle_for_nav = db_handle.clone();
     let db_handle_for_identity = db_handle.clone();
 
-    injector.provide::<dyn DbHandleProvider>(Provider::root(move |_| {
+    injector.provide::<dyn DbHandleProvider>(Provider::root(move |resolver| {
         tracing::debug!("[DI] Registering pre-created DbHandle");
+        db_handle.disclose_stuck_commands_on(
+            (*resolver.resolve::<Arc<holon_api::ConditionBus>>()).clone(),
+        );
         Arc::new(DbHandleProviderImpl {
             handle: db_handle.clone(),
         }) as Arc<dyn DbHandleProvider>

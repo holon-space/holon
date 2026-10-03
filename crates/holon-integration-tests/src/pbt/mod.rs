@@ -12,6 +12,7 @@ pub mod complexity_trend;
 pub mod composed;
 pub mod convergence;
 pub mod copies_model;
+pub mod database_stuck_guard;
 pub mod dense_text;
 pub mod driver_input;
 pub mod engine_views;

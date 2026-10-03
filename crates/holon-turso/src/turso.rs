@@ -67,6 +67,9 @@ use holon_core::storage::StorageBackend;
 use holon_core::storage::StorageEntity;
 use holon_core::storage::StorageError;
 
+use crate::actor_watch::ActorSender;
+use crate::actor_watch::ActorWatch;
+use crate::actor_watch::Envelope;
 use crate::commit_event::CommitEvent;
 use crate::matview_lease::LeaseGrant;
 use crate::matview_lease::MatviewStats;
@@ -465,7 +468,7 @@ fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
 ///
 /// Text is replaced by spaces rather than removed so byte offsets are preserved
 /// for anything reading positions out of the result.
-fn blank_comments_and_string_literals(sql: &str) -> String {
+pub(crate) fn blank_comments_and_string_literals(sql: &str) -> String {
     let bytes = sql.as_bytes();
     let mut out: Vec<u8> = bytes.to_vec();
     let mut i = 0usize;
@@ -750,7 +753,7 @@ fn reject_replace_into_rowid_matview_base(
     ))
 }
 
-fn sql_fingerprint(sql: &str) -> String {
+pub(crate) fn sql_fingerprint(sql: &str) -> String {
     use std::hash::Hash;
     use std::hash::Hasher;
 
@@ -791,7 +794,8 @@ fn positional_params_fingerprint(params: &[turso::Value]) -> String {
 #[derive(Clone)]
 /// @c4 code
 pub struct DbHandle {
-    tx: mpsc::Sender<DbCommand>,
+    tx: ActorSender,
+    watch: Arc<ActorWatch>,
     cdc_broadcast: broadcast::Sender<BatchWithMetadata<RowChange>>,
     /// Monotonic counter assigned to each non-empty CDC batch immediately
     /// before broadcast. Cloned `DbHandle`s share the same `Arc<AtomicU64>`,
@@ -806,12 +810,14 @@ pub struct DbHandle {
 }
 
 impl DbHandle {
-    /// What the relations in this database declare — the authority a SQL
-    /// rewriter asks instead of assuming a table's columns.
+    /// Raise [`holon_api::ConditionKind::DatabaseStuck`] on `bus` while a
+    /// command keeps this handle's actor busy past the hang bound.
     pub fn disclose_stuck_commands_on(&self, bus: Arc<holon_api::ConditionBus>) {
-        drop(bus);
+        self.watch.disclose_on(bus);
     }
 
+    /// What the relations in this database declare — the authority a SQL
+    /// rewriter asks instead of assuming a table's columns.
     pub fn schema_catalog(&self) -> Arc<SchemaCatalog> {
         self.schema_catalog.clone()
     }
@@ -2007,7 +2013,8 @@ pub struct TursoBackend {
     /// Broadcast channel for CDC events - all subscribers share this channel.
     cdc_broadcast: broadcast::Sender<BatchWithMetadata<RowChange>>,
     /// Command channel sender for creating DbHandles
-    tx: mpsc::Sender<DbCommand>,
+    tx: ActorSender,
+    watch: Arc<ActorWatch>,
     /// Monotonic per-process counter assigned to each CDC batch as it is
     /// broadcast. Cloned `DbHandle`s share this `Arc<AtomicU64>` so any
     /// reader observes the same emission watermark.
@@ -2030,7 +2037,7 @@ impl std::fmt::Debug for TursoBackend {
                     self.cdc_broadcast.receiver_count()
                 ),
             )
-            .field("tx", &"mpsc::Sender<DbCommand>")
+            .field("tx", &"ActorSender")
             .finish()
     }
 }
@@ -2135,8 +2142,8 @@ impl TursoBackend {
         })
         .map_err(|e| StorageError::DatabaseError(format!("Failed to set CDC callback: {}", e)))?;
 
-        // Create command channel
-        let (tx, rx) = mpsc::channel(256);
+        let (tx, rx) = ActorSender::channel(256);
+        let watch = ActorWatch::start(&tx);
 
         // Spawn actor loop. On wasm32 tokio's single-threaded runtime is
         // not actually polled (Dioxus-web drives futures via
@@ -2166,6 +2173,7 @@ impl TursoBackend {
             actor_stats_for_actor,
             matview_stats_for_actor,
             schema_catalog_for_actor,
+            watch.clone(),
         ));
         #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
         wasm_bindgen_futures::spawn_local(Self::run_actor(
@@ -2175,6 +2183,7 @@ impl TursoBackend {
             actor_stats_for_actor,
             matview_stats_for_actor,
             schema_catalog_for_actor,
+            watch.clone(),
         ));
 
         tracing::info!(
@@ -2186,12 +2195,14 @@ impl TursoBackend {
             db,
             cdc_broadcast: cdc_broadcast.clone(),
             tx: tx.clone(),
+            watch: watch.clone(),
             cdc_seq: cdc_seq.clone(),
             matview_stats: matview_stats.clone(),
             schema_catalog: schema_catalog.clone(),
         };
         let handle = DbHandle {
             tx,
+            watch,
             cdc_broadcast,
             cdc_seq,
             matview_stats,
@@ -2226,6 +2237,7 @@ impl TursoBackend {
     pub fn handle(&self) -> DbHandle {
         DbHandle {
             tx: self.tx.clone(),
+            watch: self.watch.clone(),
             cdc_broadcast: self.cdc_broadcast.clone(),
             cdc_seq: self.cdc_seq.clone(),
             matview_stats: self.matview_stats.clone(),
@@ -2612,12 +2624,13 @@ impl TursoBackend {
 
     /// Internal actor loop - runs in spawned task
     async fn run_actor(
-        mut rx: mpsc::Receiver<DbCommand>,
+        mut rx: mpsc::Receiver<Envelope>,
         conn: turso::Connection,
         cdc_broadcast: broadcast::Sender<BatchWithMetadata<RowChange>>,
         actor_stats: Option<Arc<crate::turso_actor_stats::ActorStats>>,
         matview_stats: Arc<MatviewStats>,
         schema_catalog: Arc<SchemaCatalog>,
+        watch: Arc<ActorWatch>,
     ) {
         tracing::info!("[TursoBackend::Actor] Starting actor loop");
 
@@ -2629,7 +2642,9 @@ impl TursoBackend {
         // the engine already reports. Every later DDL keeps it current.
         Self::resync_whole_catalog(&conn, &state.schema_catalog).await;
 
-        while let Some(cmd) = rx.recv().await {
+        while let Some(envelope) = rx.recv().await {
+            watch.begin(&envelope);
+            let cmd = envelope.cmd;
             let stats_meta = actor_stats.as_ref().map(|_| {
                 let (variant, sql) = crate::turso_actor_stats::cmd_fingerprint(&cmd);
                 (
@@ -2650,6 +2665,7 @@ impl TursoBackend {
                 ))
                 .catch_unwind()
                 .await;
+            watch.end();
 
             if let (Some(stats), Some((variant, sql_key, t0))) = (&actor_stats, stats_meta) {
                 stats.record_command(variant, sql_key, t0.elapsed());

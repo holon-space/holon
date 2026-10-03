@@ -211,6 +211,16 @@ let rows = db_handle.query("SELECT * FROM blocks WHERE id = $id", params).await?
 let _ = db_handle.execute_ddl("CREATE TABLE IF NOT EXISTS ...").await?;
 ```
 
+#### Stuck-command watchdog
+
+A command inside `turso_core` can spin or block without yielding (an IVM commit over a stored parent cycle, an endless recursive CTE). Nothing on the actor's runtime can then run, and the command cannot be stopped safely. `actor_watch.rs` watches every actor from one OS thread of its own and only reports:
+
+- A command running past `HOLON_ACTOR_HANG_MS` (default 30 s) is logged with its command kind, its SQL with every string literal and comment blanked, the queue behind it and the last finished commands, inside the span of the code that sent it. Before the bound, WARN records with the same report come at doubling intervals.
+- The `ConditionBus` that DI attaches (`DbHandle::disclose_stuck_commands_on`) carries `ConditionKind::DatabaseStuck` (subject `database`, a banner that names the command kind and the running time) until the command finishes.
+- wasm32-unknown-unknown has no threads, so it has no watchdog; it says so once in the log at startup.
+
+The keystone harness ends the process with the report when any session raises `DatabaseStuck` (`inv-no-database-stuck`), because the step that sent a stuck command never returns to an invariant check.
+
 **Platform Support:**
 - **Unix-like systems** (macOS, Linux, BSD, iOS, Android): Full file-based storage via `UnixIO`
 - **WASM**: In-memory storage via `MemoryIO` (no OPFS yet)

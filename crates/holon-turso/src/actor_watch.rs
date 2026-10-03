@@ -18,7 +18,6 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::OnceLock;
-use std::sync::Weak;
 use std::time::Duration;
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 use std::time::Instant;
@@ -423,6 +422,8 @@ fn bound_from_env() -> Duration {
 
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 mod watchdog {
+    use std::sync::Weak;
+
     use super::*;
 
     static WATCHED: Mutex<Vec<Weak<ActorWatch>>> = Mutex::new(Vec::new());
