@@ -132,9 +132,188 @@ fn commits() -> impl Strategy<Value = Vec<Vec<Change>>> {
     vec(vec(change(), 0..6), 1..40)
 }
 
+/// Where a generated sub-plan sits.
+#[derive(Clone, Copy)]
+enum Ctx<'a> {
+    Top {
+        iterate_left: bool,
+    },
+    /// The step of an `Iterate` over this schema.
+    Step(&'a Schema),
+    /// Inside a step, below a `Reduce`: `check` refuses a `Recur` there.
+    Invariant,
+}
+
+/// Builds a well-typed plan from a tape of choices. Choice 0 is the simplest
+/// one and the tape reads as 0s past its end, so a shrunk tape is a smaller
+/// plan.
+struct Gen {
+    tape: Vec<u32>,
+    pos: usize,
+}
+
+impl Gen {
+    fn pick(&mut self, n: usize) -> usize {
+        let choice = self.tape.get(self.pos).copied().unwrap_or(0);
+        self.pos += 1;
+        choice as usize % n
+    }
+
+    fn plan(&mut self, depth: usize, ctx: &mut Ctx) -> (Rc<Plan>, Schema) {
+        match self.pick(if depth == 0 { 1 } else { 7 }) {
+            0 => {
+                let relation = match (self.pick(3), *ctx) {
+                    (0 | 1, Ctx::Step(schema)) => return (Plan::recur(), schema.clone()),
+                    (1, _) => NODES,
+                    _ => EDGES,
+                };
+                let schema = catalog().schema(relation).unwrap().clone();
+                (Plan::scan(relation), schema)
+            }
+            1 => {
+                let (input, schema) = self.plan(depth - 1, ctx);
+                let pred = self.pred(&schema, 2);
+                (input.filter(pred), schema)
+            }
+            2 => {
+                let (input, schema) = self.plan(depth - 1, ctx);
+                let exprs: Vec<Expr> = (0..self.pick(4)).map(|_| self.expr(&schema)).collect();
+                let out = exprs.iter().map(|e| expr_type(e, &schema)).collect();
+                (input.project(exprs), Schema(out))
+            }
+            3 | 4 => {
+                let (left, ls) = self.plan(depth - 1, ctx);
+                let (right, rs) = self.plan(depth - 1, ctx);
+                let pairs: Vec<(Col, Col)> = cols(&ls)
+                    .flat_map(|l| cols(&rs).map(move |r| (l, r)))
+                    .filter(|(l, r)| ls.0[l.index()] == rs.0[r.index()])
+                    .collect();
+                if pairs.is_empty() {
+                    return (left, ls);
+                }
+                let keys = (0..=self.pick(2))
+                    .map(|_| pairs[self.pick(pairs.len())])
+                    .collect();
+                let mut schema = ls;
+                schema.0.extend(rs.0);
+                (left.join(&right, keys), schema)
+            }
+            5 => {
+                let (input, schema) = match ctx {
+                    Ctx::Top { .. } => self.plan(depth - 1, ctx),
+                    Ctx::Step(_) | Ctx::Invariant => self.plan(depth - 1, &mut Ctx::Invariant),
+                };
+                let key: Vec<Col> = match schema.arity() {
+                    0 => vec![],
+                    arity => (0..self.pick(3))
+                        .map(|_| Col(self.pick(arity) as u16))
+                        .collect(),
+                };
+                let aggs = vec![Agg::Count; 1 + self.pick(2)];
+                let mut out: Vec<ColType> = key.iter().map(|c| schema.0[c.index()]).collect();
+                out.extend(aggs.iter().map(|Agg::Count| ColType::Int));
+                (input.reduce(key, aggs), Schema(out))
+            }
+            _ => match ctx {
+                Ctx::Top { iterate_left: true } if depth >= 2 => {
+                    *ctx = Ctx::Top {
+                        iterate_left: false,
+                    };
+                    let (seed, schema) = self.plan(depth - 1, ctx);
+                    let (body, bs) = self.plan(depth - 2, &mut Ctx::Step(&schema));
+                    let back = schema
+                        .0
+                        .iter()
+                        .map(|t| match self.col_of(&bs, *t) {
+                            Some(c) => Expr::Col(c),
+                            None => self.lit(*t),
+                        })
+                        .collect();
+                    (seed.iterate(&body.project(back)), schema)
+                }
+                _ => self.plan(depth - 1, ctx),
+            },
+        }
+    }
+
+    /// A `Bool` expression over `schema`.
+    fn pred(&mut self, schema: &Schema, depth: usize) -> Expr {
+        match self.pick(if depth == 0 { 3 } else { 4 }) {
+            0 => self.lit(ColType::Bool),
+            1 => match self.col_of(schema, ColType::Bool) {
+                Some(c) => Expr::Col(c),
+                None => self.lit(ColType::Bool),
+            },
+            2 => {
+                let a = self.expr(schema);
+                let t = expr_type(&a, schema);
+                let b = match (self.pick(2), self.col_of(schema, t)) {
+                    (1, Some(c)) => Expr::Col(c),
+                    _ => self.lit(t),
+                };
+                Expr::Eq(Box::new(a), Box::new(b))
+            }
+            _ => Expr::Not(Box::new(self.pred(schema, depth - 1))),
+        }
+    }
+
+    /// A column of `schema`, a literal, or a predicate.
+    fn expr(&mut self, schema: &Schema) -> Expr {
+        match self.pick(3) {
+            0 if schema.arity() > 0 => Expr::Col(Col(self.pick(schema.arity()) as u16)),
+            1 => {
+                let t = [ColType::Bool, ColType::Int, ColType::Id, ColType::Text][self.pick(4)];
+                self.lit(t)
+            }
+            _ => self.pred(schema, 1),
+        }
+    }
+
+    fn col_of(&mut self, schema: &Schema, t: ColType) -> Option<Col> {
+        let of_type: Vec<Col> = cols(schema).filter(|c| schema.0[c.index()] == t).collect();
+        match of_type.len() {
+            0 => None,
+            n => Some(of_type[self.pick(n)]),
+        }
+    }
+
+    fn lit(&mut self, t: ColType) -> Expr {
+        Expr::Lit(match t {
+            ColType::Bool => Datum::Bool(self.pick(2) == 1),
+            ColType::Int => Datum::Int(self.pick(4) as i64),
+            ColType::Id => Datum::Id(Id(self.pick(6) as u32)),
+            ColType::Text => Datum::Text(LABELS[self.pick(LABELS.len())].into()),
+        })
+    }
+}
+
+fn cols(schema: &Schema) -> impl Iterator<Item = Col> + '_ {
+    (0..schema.arity()).map(|i| Col(i as u16))
+}
+
+fn expr_type(expr: &Expr, schema: &Schema) -> ColType {
+    match expr {
+        Expr::Col(c) => schema.0[c.index()],
+        Expr::Lit(d) => d.col_type(),
+        Expr::Eq(..) | Expr::Not(_) => ColType::Bool,
+    }
+}
+
+/// Depth ≤ 4, every operator, at most one `Iterate`.
+fn random_plan() -> impl Strategy<Value = Rc<Plan>> {
+    vec(any::<u32>(), 0..64).prop_map(|tape| {
+        let (plan, _) = Gen { tape, pos: 0 }.plan(4, &mut Ctx::Top { iterate_left: true });
+        plan
+    })
+}
+
 fn law(name: &str, commits: Vec<Vec<Change>>) -> Result<(), TestCaseError> {
+    law_of(&plan(name), commits)
+}
+
+fn law_of(plan: &Rc<Plan>, commits: Vec<Vec<Change>>) -> Result<(), TestCaseError> {
     let catalog = catalog();
-    let plan = check(&plan(name), &catalog).expect("the corpus is well typed");
+    let plan = check(plan, &catalog).expect("every tested plan is well typed");
     let mut worker = worker();
     let mut dd = Dataflow::<DynRow>::build(&mut worker, &catalog, &[plan.clone()]);
     let mut inputs: Vec<Multiset<DynRow>> = vec![Multiset::new(); 2];
@@ -157,9 +336,9 @@ fn law(name: &str, commits: Vec<Vec<Change>>) -> Result<(), TestCaseError> {
         }
         let time = dd
             .commit(&mut worker)
-            .expect("the corpus stays below MAX_DEPTH");
-        let expected = batch::run(&plan, &inputs).expect("the corpus stays below MAX_DEPTH");
-        prop_assert_eq!(&*dd.output(0), &expected, "plan {} at time {}", name, time);
+            .expect("ids 0..6 stay below MAX_DEPTH");
+        let expected = batch::run(&plan, &inputs).expect("ids 0..6 stay below MAX_DEPTH");
+        prop_assert_eq!(&*dd.output(0), &expected, "at time {}", time);
     }
     Ok(())
 }
@@ -192,6 +371,14 @@ law_tests!(
     join_of_iterate,
     reduce_of_iterate,
 );
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+    #[test]
+    fn random_plans(plan in random_plan(), commits in commits()) {
+        law_of(&plan, commits)?;
+    }
+}
 
 #[test]
 fn a_group_that_empties_disappears() {
