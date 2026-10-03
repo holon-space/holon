@@ -6263,6 +6263,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tracing",
+ "tracing-subscriber",
  "turso",
  "turso_core",
  "turso_sdk_kit",

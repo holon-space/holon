@@ -12,6 +12,7 @@
 
 use std::mem::ManuallyDrop;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -19,6 +20,11 @@ use holon_api::ConditionBus;
 use holon_api::ConditionKind;
 use holon_turso::turso::DbHandle;
 use holon_turso::turso::TursoBackend;
+use tracing::Instrument;
+use tracing_subscriber::EnvFilter;
+use tracing_subscriber::Layer;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 /// `blocks_with_paths` reduced to the columns the recursion needs.
 const PATHS_VIEW: &str = "CREATE MATERIALIZED VIEW blocks_with_paths AS
@@ -214,6 +220,64 @@ fn a_slow_healthy_command_past_the_bound_is_disclosed_then_cleared() {
     assert_eq!(stuck.command, "Query");
     rt.block_on(query).expect("slow query task");
     wait_for_clear(&bus, CLEAR_WITHIN);
+    ManuallyDrop::into_inner(rt).shutdown_background();
+}
+
+#[derive(Clone, Default)]
+struct Log(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for Log {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().expect("log poisoned").extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The subscriber is shaped like the app's: global, with the filter on the
+/// fmt layer.
+#[test]
+fn the_stuck_report_is_logged_in_the_span_of_the_code_that_sent_the_command() {
+    let log = Log::default();
+    let writer = log.clone();
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(move || writer.clone())
+                .with_ansi(false)
+                .with_filter(EnvFilter::new("info")),
+        )
+        .init();
+    set_hang_bound(250);
+    let rt = runtime();
+    let bus = Arc::new(ConditionBus::new());
+    let handle = open(&rt, &bus);
+
+    let slow = handle.clone();
+    let query = rt.spawn(
+        async move {
+            slow.query(&slow_count_sql(SLOW_ROWS), Default::default())
+                .await
+                .expect("slow count query");
+        }
+        .instrument(tracing::info_span!("sender_of_the_slow_query")),
+    );
+    wait_for_stuck(&bus, Duration::from_secs(10));
+    rt.block_on(query).expect("slow query task");
+
+    let text = String::from_utf8(log.0.lock().expect("log poisoned").clone()).expect("utf-8 log");
+    let line = text
+        .lines()
+        .find(|l| l.contains("ERROR") && l.contains("SQL actor stuck"))
+        .unwrap_or_else(|| panic!("no ERROR line for the stuck command in the log:\n{text}"));
+    eprintln!("{line}");
+    assert!(
+        line.contains("sender_of_the_slow_query"),
+        "the ERROR line does not carry the sender's span: {line}"
+    );
     ManuallyDrop::into_inner(rt).shutdown_background();
 }
 
