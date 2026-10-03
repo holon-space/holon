@@ -26,7 +26,7 @@ pub const SORT: Col = Col(2);
 pub const IS_PAGE: Col = Col(3);
 pub const PAYLOAD: Col = Col(4);
 
-fn blocks_schema() -> Schema {
+pub(crate) fn blocks_schema() -> Schema {
     Schema(vec![
         ColType::Id,
         ColType::Id,

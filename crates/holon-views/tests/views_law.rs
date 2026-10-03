@@ -272,6 +272,7 @@ fn law(commits: Vec<Vec<Edit>>) -> Result<(), TestCaseError> {
     let mut interner = Interner::default();
     let mut forest = Forest::default();
     let mut fed: BTreeMap<u32, DynRow> = BTreeMap::new();
+    let mut outputs = vec![Multiset::new(); plans.len()];
     for commit in commits {
         let replace = commit.iter().any(|e| matches!(e, Edit::Replace));
         for edit in &commit {
@@ -310,13 +311,10 @@ fn law(commits: Vec<Vec<Edit>>) -> Result<(), TestCaseError> {
             .map(|p| batch::run(p, &inputs).expect("a generated forest is shallow"))
             .collect();
         for (i, expected) in batch.iter().enumerate() {
-            prop_assert_eq!(
-                &*dd.output(i).unwrap(),
-                expected,
-                "view {} at time {}",
-                i,
-                time
-            );
+            for (row, diff) in dd.take_changes(i).unwrap() {
+                add(&mut outputs[i], row, diff);
+            }
+            prop_assert_eq!(&outputs[i], expected, "view {} at time {}", i, time);
         }
         prop_assert_eq!(
             &batch[0],

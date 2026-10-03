@@ -1,12 +1,14 @@
 //! The one trait every operator reads and builds rows through, so the storage
 //! of a relation can change without a change to any operator.
 
+use std::rc::Rc;
 use std::sync::Arc;
 
 use serde::Deserialize;
 use serde::Serialize;
 
 use crate::payload::Payload;
+use crate::plan::Checked;
 use crate::plan::Col;
 use crate::plan::ColType;
 use crate::plan::Schema;
@@ -63,5 +65,18 @@ impl Row for DynRow {
 
     fn build(_: &(), cols: impl IntoIterator<Item = Datum>) -> Self {
         DynRow(cols.into_iter().collect())
+    }
+}
+
+/// The row type of one dataflow, chosen from its plans; the engine matches on
+/// it once and builds the dataflow for that type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowKind {
+    Dyn,
+}
+
+impl RowKind {
+    pub fn for_plans(_: &[Rc<Checked>]) -> RowKind {
+        RowKind::Dyn
     }
 }

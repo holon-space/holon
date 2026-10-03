@@ -3,7 +3,6 @@
 //! that commit.
 
 use std::cell::Cell;
-use std::cell::Ref;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -272,11 +271,14 @@ impl<'s, R: Row> Env<'s, Product<u64, u64>, R> for Inner<'s, R> {
 pub struct Dataflow<R: Row> {
     /// By [`RelationId`].
     inputs: Vec<InputSession<u64, R, isize>>,
-    outputs: Vec<Rc<RefCell<Multiset<R>>>>,
+    /// Per plan, the output changes not yet taken.
+    changes: Vec<Rc<RefCell<Multiset<R>>>>,
     probe: Handle<u64>,
     fault: Fault,
     /// The time of the next commit.
     time: u64,
+    /// Whether an update waits for the next commit.
+    pending: bool,
     arrangements: usize,
 }
 
@@ -285,7 +287,7 @@ impl<R: Row> Dataflow<R> {
         let probe = Handle::new();
         let fault = Fault::default();
         let built = Rc::new(Cell::new(0));
-        let outputs: Vec<Rc<RefCell<Multiset<R>>>> = plans.iter().map(|_| Rc::default()).collect();
+        let changes: Vec<Rc<RefCell<Multiset<R>>>> = plans.iter().map(|_| Rc::default()).collect();
         let inputs = worker.dataflow::<u64, _, _>(|scope| {
             let (inputs, scans) = catalog
                 .relations
@@ -297,7 +299,7 @@ impl<R: Row> Dataflow<R> {
                 fault: fault.clone(),
                 cache: Cache::new(built.clone()),
             };
-            for (plan, out) in plans.iter().zip(&outputs) {
+            for (plan, out) in plans.iter().zip(&changes) {
                 let out = out.clone();
                 lower(plan, &mut env)
                     .inspect(move |(row, _, diff)| add(&mut out.borrow_mut(), row.clone(), *diff))
@@ -307,10 +309,11 @@ impl<R: Row> Dataflow<R> {
         });
         Dataflow {
             inputs,
-            outputs,
+            changes,
             probe,
             fault,
             time: 0,
+            pending: false,
             arrangements: built.get(),
         }
     }
@@ -322,6 +325,25 @@ impl<R: Row> Dataflow<R> {
 
     pub fn update(&mut self, relation: RelationId, row: R, diff: isize) {
         self.inputs[usize::from(relation.0)].update(row, diff);
+        self.pending = true;
+    }
+
+    /// Makes `time` the time of the next commit.
+    pub fn advance_to(&mut self, time: u64) {
+        assert!(
+            !self.pending,
+            "updates wait for the commit at {}",
+            self.time
+        );
+        assert!(
+            time >= self.time,
+            "time {time} is before the next commit at {}",
+            self.time
+        );
+        for input in &mut self.inputs {
+            input.advance_to(time);
+        }
+        self.time = time;
     }
 
     /// Applies the updates since the last commit, as one version; returns
@@ -335,14 +357,15 @@ impl<R: Row> Dataflow<R> {
         worker.step_while(|| self.probe.less_than(&(t + 1)));
         self.faulted()?;
         self.time = t + 1;
+        self.pending = false;
         Ok(t)
     }
 
-    /// The output of `plans[i]`, accumulated through the last commit; after
-    /// the first error, that error.
-    pub fn output(&self, i: usize) -> Result<Ref<'_, Multiset<R>>, EngineError> {
+    /// The change of `plans[i]`'s output since the last take, through the
+    /// last commit; after the first error, that error.
+    pub fn take_changes(&mut self, i: usize) -> Result<Multiset<R>, EngineError> {
         self.faulted()?;
-        Ok(self.outputs[i].borrow())
+        Ok(std::mem::take(&mut *self.changes[i].borrow_mut()))
     }
 
     fn faulted(&self) -> Result<(), EngineError> {

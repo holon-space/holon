@@ -330,6 +330,7 @@ fn law_of(plan: &Rc<Plan>, commits: Vec<Vec<Change>>) -> Result<(), TestCaseErro
     let mut worker = worker();
     let mut dd = Dataflow::<DynRow>::build(&mut worker, &catalog, &[plan.clone()]);
     let mut inputs: Vec<Multiset<DynRow>> = vec![Multiset::new(); 2];
+    let mut output = Multiset::new();
     for commit in commits {
         for change in commit {
             let (relation, row, diff) = match change {
@@ -351,7 +352,10 @@ fn law_of(plan: &Rc<Plan>, commits: Vec<Vec<Change>>) -> Result<(), TestCaseErro
             .commit(&mut worker)
             .expect("ids 0..6 stay below MAX_DEPTH");
         let expected = batch::run(&plan, &inputs).expect("ids 0..6 stay below MAX_DEPTH");
-        prop_assert_eq!(&*dd.output(0).unwrap(), &expected, "at time {}", time);
+        for (row, diff) in dd.take_changes(0).unwrap() {
+            add(&mut output, row, diff);
+        }
+        prop_assert_eq!(&output, &expected, "at time {}", time);
     }
     Ok(())
 }
@@ -466,7 +470,7 @@ fn dataflow_resolves_max_depth_and_refuses_one_more() {
         dd.update(relation, row, 1);
     }
     dd.commit(&mut worker).unwrap();
-    assert_eq!(dd.output(0).unwrap().len() as u64, MAX_DEPTH + 1);
+    assert_eq!(dd.take_changes(0).unwrap().len() as u64, MAX_DEPTH + 1);
 
     let last = u32::try_from(MAX_DEPTH).unwrap();
     dd.update(EDGES, edge(last, last + 1), 1);
@@ -481,11 +485,11 @@ fn a_depth_fault_is_sticky() {
         dd.update(relation, row, 1);
     }
     assert_eq!(dd.commit(&mut worker), Err(EngineError::DepthBound));
-    assert_eq!(dd.output(0).err(), Some(EngineError::DepthBound));
+    assert_eq!(dd.take_changes(0).err(), Some(EngineError::DepthBound));
 
     let last = u32::try_from(MAX_DEPTH).unwrap();
     dd.update(EDGES, edge(last, last + 1), -1);
     assert_eq!(dd.commit(&mut worker), Err(EngineError::DepthBound));
     assert_eq!(dd.commit(&mut worker), Err(EngineError::DepthBound));
-    assert_eq!(dd.output(0).err(), Some(EngineError::DepthBound));
+    assert_eq!(dd.take_changes(0).err(), Some(EngineError::DepthBound));
 }

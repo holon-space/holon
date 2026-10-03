@@ -10,4 +10,8 @@ pub enum EngineError {
     DepthBound,
     #[error("block {id} has a NaN or infinite float in property {key:?}")]
     NonFiniteFloat { id: EntityUri, key: String },
+    #[error("the parents of {ids:?} form a cycle")]
+    ParentCycle { ids: Vec<EntityUri> },
+    #[error("the engine thread panicked")]
+    Stopped,
 }

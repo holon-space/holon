@@ -3,6 +3,7 @@
 //! that names `differential_dataflow` or `timely`.
 
 pub mod batch;
+pub mod engine;
 pub mod error;
 mod eval;
 pub mod intern;

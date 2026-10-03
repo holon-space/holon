@@ -17,7 +17,7 @@ use crate::row::Row;
 /// Row -> multiplicity; no entry has multiplicity 0.
 pub type Multiset<R> = BTreeMap<R, isize>;
 
-pub fn add<R: Row>(set: &mut Multiset<R>, row: R, diff: isize) {
+pub fn add<R: Ord>(set: &mut Multiset<R>, row: R, diff: isize) {
     match set.entry(row) {
         Entry::Occupied(mut e) => {
             *e.get_mut() += diff;
