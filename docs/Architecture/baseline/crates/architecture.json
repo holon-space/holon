@@ -210,6 +210,9 @@
                     "name": "block_domain.rs"
                   },
                   {
+                    "name": "dispatch_hold.rs"
+                  },
+                  {
                     "name": "guard_world.rs"
                   },
                   {
@@ -609,6 +612,9 @@
             ],
             "files": [
               {
+                "name": "admission_footprint_sweep.rs"
+              },
+              {
                 "name": "automations_journal_matview.rs"
               },
               {
@@ -654,6 +660,9 @@
                 "name": "edge_field_e2e.rs"
               },
               {
+                "name": "empty_question_is_unrepresentable.rs"
+              },
+              {
                 "name": "entity_reference_boundary.rs"
               },
               {
@@ -697,6 +706,9 @@
               },
               {
                 "name": "loro_binary_benchmark.rs"
+              },
+              {
+                "name": "merge_blocks_in_shared_pages.rs"
               },
               {
                 "name": "petri_e2e_pbt.rs"
@@ -1040,6 +1052,9 @@
                 "name": "clock.rs"
               },
               {
+                "name": "commit_clock.rs"
+              },
+              {
                 "name": "computation.rs"
               },
               {
@@ -1061,6 +1076,12 @@
                 "name": "content_canonical.rs"
               },
               {
+                "name": "decision.rs"
+              },
+              {
+                "name": "decision_block.rs"
+              },
+              {
                 "name": "edge_field.rs"
               },
               {
@@ -1080,6 +1101,9 @@
               },
               {
                 "name": "expr_parser.rs"
+              },
+              {
+                "name": "file_render.rs"
               },
               {
                 "name": "filter.rs"
@@ -1107,6 +1131,9 @@
               },
               {
                 "name": "interp_value.rs"
+              },
+              {
+                "name": "latency_drain.rs"
               },
               {
                 "name": "latency_e2e.rs"
@@ -1229,6 +1256,9 @@
                 "name": "condition_replay_order.rs"
               },
               {
+                "name": "decision_core_pbt.rs"
+              },
+              {
                 "name": "derived_field_dual_eval_pbt.rs"
               },
               {
@@ -1254,6 +1284,9 @@
               },
               {
                 "name": "typed_computed_field_declaration.rs"
+              },
+              {
+                "name": "vault_ingest_failed_detail.rs"
               }
             ]
           }
@@ -1407,10 +1440,16 @@
                 "name": "session.rs"
               },
               {
+                "name": "stop_signal.rs"
+              },
+              {
                 "name": "turso_seams.rs"
               },
               {
                 "name": "type_admission.rs"
+              },
+              {
+                "name": "vault_lock.rs"
               },
               {
                 "name": "wiring.rs"
@@ -1463,10 +1502,16 @@
                 "name": "computed_persisted_boot_column.rs"
               },
               {
+                "name": "database_rebuild_disclosure.rs"
+              },
+              {
                 "name": "doc_membership_page_boundary_below_root.rs"
               },
               {
                 "name": "edge_field_duplicate_targets.rs"
+              },
+              {
+                "name": "file_row_document_id.rs"
               },
               {
                 "name": "fresh_db_boot_seed_smoke.rs"
@@ -1508,10 +1553,16 @@
                 "name": "invalid_connection_config_boots_degraded.rs"
               },
               {
+                "name": "irreversible_share_ops_record_history.rs"
+              },
+              {
                 "name": "is_program_net_agrees_with_the_profile.rs"
               },
               {
                 "name": "loro_seam_edge_fields.rs"
+              },
+              {
+                "name": "loro_ui_row_matches_sql_row.rs"
               },
               {
                 "name": "loro_write_origins.rs"
@@ -1536,6 +1587,12 @@
               },
               {
                 "name": "quick_open_search_at_vault_scale.rs"
+              },
+              {
+                "name": "rebuild_views_discloses_while_it_runs.rs"
+              },
+              {
+                "name": "refused_profile_boots_degraded.rs"
               },
               {
                 "name": "rehome_entity_op.rs"
@@ -1565,6 +1622,9 @@
                 "name": "shopping_pull_mock.rs"
               },
               {
+                "name": "shutdown_writes_back_every_edit.rs"
+              },
+              {
                 "name": "slashmenu_correspondence.rs"
               },
               {
@@ -1587,6 +1647,9 @@
               },
               {
                 "name": "undo_precondition_id_scheme.rs"
+              },
+              {
+                "name": "vault_lock.rs"
               }
             ]
           }
@@ -2261,6 +2324,9 @@
                 "name": "change_source.rs"
               },
               {
+                "name": "crash_injection.rs"
+              },
+              {
                 "name": "error.rs"
               },
               {
@@ -2291,6 +2357,9 @@
                 "name": "sync_ports.rs"
               },
               {
+                "name": "undone_deletions_file.rs"
+              },
+              {
                 "name": "vault_filter.rs"
               },
               {
@@ -2316,6 +2385,9 @@
               }
             ],
             "files": [
+              {
+                "name": "find_foreign_blocks_cost.rs"
+              },
               {
                 "name": "nearest_page_ancestor_walk.rs"
               }
@@ -3120,6 +3192,9 @@
                             "name": "conditions_match_ref.rs"
                           },
                           {
+                            "name": "copies_stay_on_disk.rs"
+                          },
+                          {
                             "name": "declared_column_gaps.rs"
                           },
                           {
@@ -3189,6 +3264,9 @@
                             "name": "loro_no_errors.rs"
                           },
                           {
+                            "name": "loro_ui_rows_match_ref.rs"
+                          },
+                          {
                             "name": "main_panel_rows_match_focus.rs"
                           },
                           {
@@ -3225,6 +3303,9 @@
                             "name": "org_render_fixed_point.rs"
                           },
                           {
+                            "name": "overlay_placement_local.rs"
+                          },
+                          {
                             "name": "paint_text_styling.rs"
                           },
                           {
@@ -3238,6 +3319,9 @@
                           },
                           {
                             "name": "settle_budget.rs"
+                          },
+                          {
+                            "name": "share_mount_carries_page_identity.rs"
                           },
                           {
                             "name": "sidebar_page_tag_preserved.rs"
@@ -3346,6 +3430,9 @@
                         "name": "declared_column_gaps.rs"
                       },
                       {
+                        "name": "embedded_mcp.rs"
+                      },
+                      {
                         "name": "first_divergent.rs"
                       },
                       {
@@ -3355,6 +3442,9 @@
                         "name": "harness.rs"
                       },
                       {
+                        "name": "host_contention.rs"
+                      },
+                      {
                         "name": "interleave.rs"
                       },
                       {
@@ -3362,6 +3452,9 @@
                       },
                       {
                         "name": "live_mcp.rs"
+                      },
+                      {
+                        "name": "loro_ui_rows.rs"
                       },
                       {
                         "name": "observed_errors.rs"
@@ -3515,6 +3608,9 @@
                             "name": "conditions_match_ref.rs"
                           },
                           {
+                            "name": "copies_stay_on_disk.rs"
+                          },
+                          {
                             "name": "display_placement_canonical_inert.rs"
                           },
                           {
@@ -3575,6 +3671,9 @@
                             "name": "live_tree_matches_fresh.rs"
                           },
                           {
+                            "name": "loro_ui_rows_match_ref.rs"
+                          },
+                          {
                             "name": "main_panel_rows_match_focus.rs"
                           },
                           {
@@ -3611,6 +3710,9 @@
                             "name": "org_render_fixed_point.rs"
                           },
                           {
+                            "name": "overlay_placement_local.rs"
+                          },
+                          {
                             "name": "paint_text_styling.rs"
                           },
                           {
@@ -3621,6 +3723,9 @@
                           },
                           {
                             "name": "settle_budget.rs"
+                          },
+                          {
+                            "name": "share_mount_carries_page_identity.rs"
                           },
                           {
                             "name": "sidebar_page_tag_preserved.rs"
@@ -3931,6 +4036,18 @@
                         "name": "delete_document.rs"
                       },
                       {
+                        "name": "delete_line_from_file.rs"
+                      },
+                      {
+                        "name": "delete_placed_root.rs"
+                      },
+                      {
+                        "name": "delete_placement_parent.rs"
+                      },
+                      {
+                        "name": "delete_placement_record.rs"
+                      },
+                      {
                         "name": "deliver_block_content.rs"
                       },
                       {
@@ -3941,6 +4058,9 @@
                       },
                       {
                         "name": "drag_drop_block.rs"
+                      },
+                      {
+                        "name": "edit_block_copy.rs"
                       },
                       {
                         "name": "emit_mcp_data.rs"
@@ -3958,10 +4078,22 @@
                         "name": "external_write_while_focused.rs"
                       },
                       {
+                        "name": "fail_next_dispatch.rs"
+                      },
+                      {
+                        "name": "finish_cut_paste.rs"
+                      },
+                      {
                         "name": "focus_editable_text.rs"
                       },
                       {
+                        "name": "full_sync.rs"
+                      },
+                      {
                         "name": "git_init.rs"
+                      },
+                      {
+                        "name": "hold_dispatch.rs"
                       },
                       {
                         "name": "indent.rs"
@@ -3976,16 +4108,25 @@
                         "name": "join_block.rs"
                       },
                       {
+                        "name": "join_placed_root.rs"
+                      },
+                      {
                         "name": "jump_to_search_hit.rs"
                       },
                       {
                         "name": "mod.rs"
                       },
                       {
+                        "name": "move_block_between_files.rs"
+                      },
+                      {
                         "name": "move_cursor.rs"
                       },
                       {
                         "name": "move_down.rs"
+                      },
+                      {
+                        "name": "move_placed_root.rs"
                       },
                       {
                         "name": "move_up.rs"
@@ -4012,13 +4153,22 @@
                         "name": "outdent.rs"
                       },
                       {
+                        "name": "paste_block_copy.rs"
+                      },
+                      {
                         "name": "pin_block.rs"
+                      },
+                      {
+                        "name": "place_under_own_descendant.rs"
                       },
                       {
                         "name": "press_key.rs"
                       },
                       {
                         "name": "reboot.rs"
+                      },
+                      {
+                        "name": "rebuild_views.rs"
                       },
                       {
                         "name": "receiver_create_block.rs"
@@ -4031,6 +4181,9 @@
                       },
                       {
                         "name": "rehome_entity.rs"
+                      },
+                      {
+                        "name": "release_held.rs"
                       },
                       {
                         "name": "remote_list_sync.rs"
@@ -4048,6 +4201,9 @@
                         "name": "search.rs"
                       },
                       {
+                        "name": "second_writer_refused.rs"
+                      },
+                      {
                         "name": "select_bias.rs"
                       },
                       {
@@ -4058,6 +4214,9 @@
                       },
                       {
                         "name": "share_container.rs"
+                      },
+                      {
+                        "name": "share_page.rs"
                       },
                       {
                         "name": "simulate_restart.rs"
@@ -4152,6 +4311,12 @@
                   },
                   {
                     "name": "convergence.rs"
+                  },
+                  {
+                    "name": "copies_model.rs"
+                  },
+                  {
+                    "name": "dense_text.rs"
                   },
                   {
                     "name": "driver_input.rs"
@@ -4468,13 +4633,25 @@
                     "name": "cycle_task_state_cold_boot_reingest.rs"
                   },
                   {
+                    "name": "drawer_id_write_boundary.rs"
+                  },
+                  {
+                    "name": "drawer_key_write_boundary.rs"
+                  },
+                  {
                     "name": "editor_pure_pbt.rs"
+                  },
+                  {
+                    "name": "empty_question_loro_arm.rs"
                   },
                   {
                     "name": "main.rs"
                   },
                   {
                     "name": "merge_blocks_pbt.rs"
+                  },
+                  {
+                    "name": "multiline_property_write_boundary.rs"
                   },
                   {
                     "name": "schedule_boundary_observables.rs"
@@ -4560,6 +4737,10 @@
                     ]
                   },
                   {
+                    "name": "org_keywords",
+                    "path": "holon-integration-tests/tests/fixtures/org_keywords"
+                  },
+                  {
                     "name": "region_writeback_loss",
                     "path": "holon-integration-tests/tests/fixtures/region_writeback_loss"
                   },
@@ -4573,6 +4754,9 @@
                 "name": "frontend_suite",
                 "path": "holon-integration-tests/tests/frontend_suite",
                 "files": [
+                  {
+                    "name": "fire_and_forget_dispatch_disclosure.rs"
+                  },
                   {
                     "name": "integration_configure_button_visibility.rs"
                   },
@@ -4643,10 +4827,22 @@
                     "name": "loro_live_entity_wiring.rs"
                   },
                   {
+                    "name": "loro_memory_holds_the_vault.rs"
+                  },
+                  {
                     "name": "loro_memory_start_app.rs"
                   },
                   {
+                    "name": "loro_minted_stamps_are_fed_at_settle.rs"
+                  },
+                  {
                     "name": "loro_projection_atomic_advance.rs"
+                  },
+                  {
+                    "name": "loro_projection_settle.rs"
+                  },
+                  {
+                    "name": "loro_projection_share_rows.rs"
                   },
                   {
                     "name": "loro_projection_unarmed_delete.rs"
@@ -4659,6 +4855,9 @@
                   },
                   {
                     "name": "loro_restart_unseeded_vault.rs"
+                  },
+                  {
+                    "name": "loro_root_deliveries_are_guarded.rs"
                   },
                   {
                     "name": "loro_snapshot_durability.rs"
@@ -4692,6 +4891,9 @@
                 "files": [
                   {
                     "name": "bidirectional_sync.rs"
+                  },
+                  {
+                    "name": "convert_block_to_page_inherits_the_source_ring.rs"
                   },
                   {
                     "name": "convert_block_to_page_materializes_child_file.rs"
@@ -4728,6 +4930,9 @@
                   },
                   {
                     "name": "probe_link_marks_roundtrip.rs"
+                  },
+                  {
+                    "name": "reparent_clears_removed_values.rs"
                   },
                   {
                     "name": "writeback_stale_cross_doc_prune.rs"
@@ -4805,6 +5010,9 @@
                     "name": "watch_recovers_when_table_appears.rs"
                   },
                   {
+                    "name": "watch_refusal_is_final.rs"
+                  },
+                  {
                     "name": "watch_ui.rs"
                   }
                 ]
@@ -4818,6 +5026,12 @@
                 "name": "authority_name_chain_under_lag.rs"
               },
               {
+                "name": "authority_owning_page_latency.rs"
+              },
+              {
+                "name": "authority_owning_page_parity.rs"
+              },
+              {
                 "name": "bisection_pbt.rs"
               },
               {
@@ -4828,6 +5042,12 @@
               },
               {
                 "name": "cook_vault_ingest.rs"
+              },
+              {
+                "name": "dense_patch_engine_exact.rs"
+              },
+              {
+                "name": "dense_patch_tags_properties.rs"
               },
               {
                 "name": "enabledness_query_production_cost.rs"
@@ -5303,6 +5523,15 @@
         ],
         "dirs": [
           {
+            "name": "examples",
+            "path": "holon-loro/examples",
+            "files": [
+              {
+                "name": "projection_extract_bench.rs"
+              }
+            ]
+          },
+          {
             "name": "src",
             "path": "holon-loro/src",
             "dirs": [
@@ -5456,6 +5685,9 @@
                 "name": "shared_tree.rs"
               },
               {
+                "name": "stable_id_index.rs"
+              },
+              {
                 "name": "sync_transport.rs"
               },
               {
@@ -5466,6 +5698,15 @@
               },
               {
                 "name": "ticket.rs"
+              },
+              {
+                "name": "tree_event_delivery_probe.rs"
+              },
+              {
+                "name": "tree_watch.rs"
+              },
+              {
+                "name": "update_log.rs"
               },
               {
                 "name": "write_origin.rs"
@@ -5480,6 +5721,9 @@
                 "name": "batch_rollback_guard.rs"
               },
               {
+                "name": "field_write_cost.rs"
+              },
+              {
                 "name": "layout_create_idempotence.rs"
               },
               {
@@ -5489,10 +5733,34 @@
                 "name": "pairing_boot_degraded.rs"
               },
               {
+                "name": "persisted_read_is_consistent.rs"
+              },
+              {
+                "name": "projected_blocks_commits_nothing.rs"
+              },
+              {
+                "name": "snapshot_write_is_durable.rs"
+              },
+              {
+                "name": "stable_id_duplicates_resolve_alike.rs"
+              },
+              {
+                "name": "stable_id_index_cost.rs"
+              },
+              {
+                "name": "stable_id_index_pbt.rs"
+              },
+              {
                 "name": "text_undo_contract.rs"
               },
               {
                 "name": "undo_history_trim_probe.rs"
+              },
+              {
+                "name": "update_log_cost.rs"
+              },
+              {
+                "name": "update_log_recovery.rs"
               },
               {
                 "name": "with_write_is_isolation_not_rollback.rs"
@@ -5957,10 +6225,19 @@
             ],
             "files": [
               {
+                "name": "explicit_id_contract.rs"
+              },
+              {
                 "name": "logseq_ingest.rs"
               },
               {
                 "name": "obsidian_ingest.rs"
+              },
+              {
+                "name": "planning_property_reingest.rs"
+              },
+              {
+                "name": "task_marker_reingest.rs"
               },
               {
                 "name": "write_guard.rs"
@@ -6026,6 +6303,9 @@
             "name": "examples",
             "path": "holon-mcp-client/examples",
             "files": [
+              {
+                "name": "clock_tick_cost.rs"
+              },
               {
                 "name": "github_probe.rs"
               },
@@ -6544,7 +6824,13 @@
             "path": "holon-org-format/src",
             "files": [
               {
+                "name": "comma_escape.rs"
+              },
+              {
                 "name": "dense.rs"
+              },
+              {
+                "name": "drawer.rs"
               },
               {
                 "name": "inline_marks.rs"
@@ -6562,7 +6848,13 @@
                 "name": "org_renderer.rs"
               },
               {
+                "name": "page_keywords.rs"
+              },
+              {
                 "name": "parser.rs"
+              },
+              {
+                "name": "subtree.rs"
               },
               {
                 "name": "task_keyword.rs"
@@ -6572,18 +6864,42 @@
           {
             "name": "tests",
             "path": "holon-org-format/tests",
+            "dirs": [
+              {
+                "name": "emacs",
+                "path": "holon-org-format/tests/emacs"
+              }
+            ],
             "files": [
               {
                 "name": "compass_property_key_probe.rs"
               },
               {
+                "name": "decision_block_adapter_pbt.rs"
+              },
+              {
+                "name": "decision_block_shape.rs"
+              },
+              {
+                "name": "deep_authored_text_never_aborts.rs"
+              },
+              {
                 "name": "degraded_render_severity.rs"
+              },
+              {
+                "name": "dense_parse_marks_index_the_row_content.rs"
+              },
+              {
+                "name": "dense_parse_refusal_names_the_row.rs"
               },
               {
                 "name": "dense_roundtrip_proptest.rs"
               },
               {
                 "name": "drawer_key_order_stability.rs"
+              },
+              {
+                "name": "drawer_value_codec_pbt.rs"
               },
               {
                 "name": "feed_value_drops_resolved_link_form.rs"
@@ -6595,13 +6911,28 @@
                 "name": "get_blocks_flat_order_is_not_document_order.rs"
               },
               {
+                "name": "headline_tags_read_as_emacs_reads.rs"
+              },
+              {
                 "name": "holon_filter_source_roundtrip.rs"
               },
               {
                 "name": "inline_marks_proptest.rs"
               },
               {
+                "name": "org_faithful_probe.rs"
+              },
+              {
+                "name": "org_id_contract.rs"
+              },
+              {
+                "name": "org_reads_as_emacs_reads.rs"
+              },
+              {
                 "name": "org_roundtrip_characterization.rs"
+              },
+              {
+                "name": "org_text_reads_back_as_written.rs"
               },
               {
                 "name": "probe_drawer_order_leak.rs"
@@ -6611,6 +6942,9 @@
               },
               {
                 "name": "properties_prefix_headline_repro.rs"
+              },
+              {
+                "name": "question_keyword.rs"
               },
               {
                 "name": "render_lossless_shapes.rs"
@@ -6628,7 +6962,19 @@
                 "name": "template_slot_edges.rs"
               },
               {
+                "name": "todo_ring_spellings.rs"
+              },
+              {
                 "name": "top_level_source_roundtrip.rs"
+              },
+              {
+                "name": "typed_property_values_stay_out_of_the_drawer.rs"
+              },
+              {
+                "name": "unedited_file_keeps_its_bytes.rs"
+              },
+              {
+                "name": "vault_parse_differential.rs"
               },
               {
                 "name": "vault_writeback_stability.rs"
@@ -6752,6 +7098,9 @@
                 "name": "org_block_round_trip_pbt.rs"
               },
               {
+                "name": "page_id_with_a_scheme_is_refused.rs"
+              },
+              {
                 "name": "page_rename_retires_old_file.rs"
               },
               {
@@ -6765,6 +7114,9 @@
               },
               {
                 "name": "reingest_task_promotion_idempotent.rs"
+              },
+              {
+                "name": "render_refusal_is_per_file.rs"
               },
               {
                 "name": "round_trip_pbt.rs"
@@ -6789,6 +7141,9 @@
               },
               {
                 "name": "writeback_readonly_skip.rs"
+              },
+              {
+                "name": "written_hash_stamp_without_a_file_table.rs"
               }
             ]
           }
@@ -7113,6 +7468,15 @@
                 "name": "parser.rs"
               }
             ]
+          },
+          {
+            "name": "tests",
+            "path": "holon-petri/tests",
+            "files": [
+              {
+                "name": "declared_question_keyword.rs"
+              }
+            ]
           }
         ],
         "files": [
@@ -7267,6 +7631,9 @@
                 "name": "lib.rs"
               },
               {
+                "name": "profile_scope.rs"
+              },
+              {
                 "name": "trust.rs"
               },
               {
@@ -7283,6 +7650,12 @@
               },
               {
                 "name": "computed_tier_declaration.rs"
+              },
+              {
+                "name": "decision_profile_conditions.rs"
+              },
+              {
+                "name": "profile_scope_refusal.rs"
               }
             ]
           }
@@ -7721,6 +8094,9 @@
                 "name": "block_table_names.rs"
               },
               {
+                "name": "db_open.rs"
+              },
+              {
                 "name": "derived_reconciler.rs"
               },
               {
@@ -7745,6 +8121,9 @@
                 "name": "matview_manager.rs"
               },
               {
+                "name": "scalar_fns.rs"
+              },
+              {
                 "name": "schema_catalog.rs"
               },
               {
@@ -7760,6 +8139,9 @@
                 "name": "sql_utils.rs"
               },
               {
+                "name": "table_classes.rs"
+              },
+              {
                 "name": "turso.rs"
               },
               {
@@ -7770,6 +8152,9 @@
               },
               {
                 "name": "util.rs"
+              },
+              {
+                "name": "watch_view_rebuild.rs"
               }
             ]
           },
@@ -7796,6 +8181,9 @@
                 "name": "chained_matview_cdc_repro.rs"
               },
               {
+                "name": "clock_reader_prune.rs"
+              },
+              {
                 "name": "concat_isnull_matview_probe.rs"
               },
               {
@@ -7817,6 +8205,9 @@
                 "name": "edge_agg_retraction_across_reboot.rs"
               },
               {
+                "name": "failed_statement_change_events.rs"
+              },
+              {
                 "name": "group_by_matview_spike.rs"
               },
               {
@@ -7824,6 +8215,9 @@
               },
               {
                 "name": "json_extract_matview_spike.rs"
+              },
+              {
+                "name": "matview_cache_forgets_only_dropped_views.rs"
               },
               {
                 "name": "matview_cache_is_per_database.rs"
@@ -7869,6 +8263,9 @@
               },
               {
                 "name": "watch_preserves_order.rs"
+              },
+              {
+                "name": "watch_view_rebuild.rs"
               }
             ]
           }
@@ -7920,6 +8317,31 @@
             "files": [
               {
                 "name": "no_ref_state_dep.rs"
+              }
+            ]
+          }
+        ],
+        "files": [
+          {
+            "name": "Cargo.toml"
+          }
+        ]
+      },
+      {
+        "name": "holon-views",
+        "path": "holon-views",
+        "c4_level": "unknown",
+        "description": "The incremental view engine: derived views over the authority data, kept by differential dataflow and versioned by the commit clock. The only crate that names `differential_dataflow` or `timely`.",
+        "pattern_status": "planned",
+        "content": "The incremental view engine: derived views over the authority data, kept\nby differential dataflow and versioned by the commit clock. The only crate\nthat names `differential_dataflow` or `timely`.",
+        "source_file": "holon-views/src/lib.rs",
+        "dirs": [
+          {
+            "name": "src",
+            "path": "holon-views/src",
+            "files": [
+              {
+                "name": "lib.rs"
               }
             ]
           }

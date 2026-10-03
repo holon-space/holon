@@ -1225,6 +1225,9 @@
                 "name": "dense_patch_entity_links.rs"
               },
               {
+                "name": "dense_patch_exact.rs"
+              },
+              {
                 "name": "dense_patch_pbt.rs"
               },
               {
