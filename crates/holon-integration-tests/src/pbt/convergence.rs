@@ -13,10 +13,46 @@ use holon_orgmode::OrgSyncIdleSignal;
 
 use crate::test_environment::pbt_quiet_floor;
 
-/// Wait — capped at `budget` — for every projection the invariants read to
-/// reach quiescence. Absent signals make the corresponding stage a no-op
-/// (those stores are synchronous or not wired, so there is nothing to wait
-/// for):
+/// When [`converge_signals`] gives up.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Patience {
+    /// A fixed wait from the start.
+    Budget(Duration),
+    /// As long as the SUT keeps doing work: give up after `stall` in which no
+    /// signal and no work counter advanced, or at `ceiling` regardless.
+    WhileProgressing { stall: Duration, ceiling: Duration },
+}
+
+/// Why [`converge_signals`] gave up.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum GaveUp {
+    Budget(Duration),
+    Stalled { stall: Duration, waited: Duration },
+    Ceiling(Duration),
+}
+
+impl std::fmt::Display for GaveUp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GaveUp::Budget(budget) => write!(f, "within {budget:?}"),
+            GaveUp::Stalled { stall, waited } => write!(
+                f,
+                "after {waited:?}: no signal or work counter advanced for {stall:?}"
+            ),
+            GaveUp::Ceiling(ceiling) => {
+                write!(
+                    f,
+                    "within the {ceiling:?} ceiling, although work kept advancing"
+                )
+            }
+        }
+    }
+}
+
+/// Wait — as long as `patience` allows — for every projection the invariants
+/// read to reach quiescence. Absent signals make the corresponding stage a
+/// no-op (those stores are synchronous or not wired, so there is nothing to
+/// wait for):
 ///
 /// 1. **Turso CDC** — `cdc_emitted_watermark` stable for one quiet floor (the
 ///    `block_raw` matview the block invariants query is CDC-fed).
@@ -40,18 +76,22 @@ use crate::test_environment::pbt_quiet_floor;
 /// re-drained. The old order let stage-1 CDC drain before stage-2 ever wrote
 /// the sort_key, and every stage broke on `deadline` returning silently — an
 /// unconverged SUT looked settled, the direct cause of the org-render
-/// sibling-order flake. Returns `true` iff the fixed point was reached within
-/// `budget`; `false` = gave up, and the caller MUST decide (the composed settle
-/// fails loud on `false`).
+/// sibling-order flake. `Err` = gave up, and the caller MUST decide (the
+/// composed settle fails loud on it).
+///
+/// Work counters (ingest, Loro projection passes, the Loro sync watermark)
+/// count as progress for [`Patience::WhileProgressing`] but not as activity:
+/// a bulk ingest moves them for a long time while every projection signal
+/// stays quiet.
 pub(crate) async fn converge_signals(
     engine: Option<&Arc<BackendEngine>>,
     sync: Option<Arc<LoroSyncControllerHandle>>,
     org_idle: Option<Arc<OrgSyncIdleSignal>>,
     block_feed: Option<Arc<holon_api::live_data::LiveData<holon_api::Block>>>,
     reactive: Option<&Arc<ReactiveEngine>>,
-    budget: Duration,
-) -> bool {
-    let deadline = tokio::time::Instant::now() + budget;
+    patience: Patience,
+) -> Result<(), GaveUp> {
+    let started = tokio::time::Instant::now();
     let quiet = pbt_quiet_floor();
     let poll = Duration::from_millis(2);
 
@@ -63,11 +103,21 @@ pub(crate) async fn converge_signals(
     let mut last_epoch = reactive.map(|r| r.apply_epoch());
     // The last instant ANY signal showed activity OR Loro was not yet caught up.
     // Convergence = all three quiet AND Loro caught up, held for one `quiet` floor.
-    let mut last_activity = tokio::time::Instant::now();
+    let mut last_activity = started;
+    let work = || {
+        (
+            holon_filesystem::ingest_progress::snapshot(),
+            holon_loro::projection_stats::snapshot(),
+            sync.as_ref().map(|s| s.last_synced_frontiers()),
+        )
+    };
+    let mut last_work = work();
+    let mut last_progress = started;
 
     loop {
         tokio::time::sleep(poll).await;
         let mut active = false;
+        let mut advanced = false;
 
         // Loro FIRST. This is the projection that writes the reordered `sort_key`
         // into `block_raw` (which then fires CDC). Until `last_synced` has caught
@@ -92,7 +142,7 @@ pub(crate) async fn converge_signals(
             let now_cdc = engine.db_handle().cdc_emitted_watermark();
             if last_cdc != Some(now_cdc) {
                 last_cdc = Some(now_cdc);
-                active = true;
+                advanced = true;
             }
         }
 
@@ -112,7 +162,7 @@ pub(crate) async fn converge_signals(
             let now_seq = feed.consumed_seq();
             if last_feed_seq != Some(now_seq) {
                 last_feed_seq = Some(now_seq);
-                active = true;
+                advanced = true;
             }
         }
 
@@ -129,7 +179,7 @@ pub(crate) async fn converge_signals(
             let now_tick = idle.current_tick();
             if last_tick != Some(now_tick) {
                 last_tick = Some(now_tick);
-                active = true;
+                advanced = true;
             }
             // Two windows the tick cannot show, because it moves only when a
             // pass COMPLETES: the `home_by` fold that has not handed the loop
@@ -153,24 +203,35 @@ pub(crate) async fn converge_signals(
             let now_epoch = reactive.apply_epoch();
             if last_epoch != Some(now_epoch) {
                 last_epoch = Some(now_epoch);
-                active = true;
+                advanced = true;
             }
         }
 
         let now = tokio::time::Instant::now();
-        if active {
+        let now_work = work();
+        if advanced || now_work != last_work {
+            last_work = now_work;
+            last_progress = now;
+        }
+        if active || advanced {
             last_activity = now;
         } else if now.duration_since(last_activity) >= quiet {
-            // All three signals quiet AND Loro caught up for a full quiet floor.
-            return true;
+            // All signals quiet AND Loro caught up for a full quiet floor.
+            return Ok(());
         }
 
-        if now >= deadline {
-            // FAIL to converge. The caller decides whether that is fatal — the
-            // per-transition composed settle fails loud (reading invariants on an
-            // unconverged SUT is a race, not a flake to swallow); the one-time
-            // boot settle tolerates it (signals resolve on a spawned task).
-            return false;
+        let waited = now.duration_since(started);
+        match patience {
+            Patience::Budget(budget) if waited >= budget => return Err(GaveUp::Budget(budget)),
+            Patience::WhileProgressing { ceiling, .. } if waited >= ceiling => {
+                return Err(GaveUp::Ceiling(ceiling));
+            }
+            Patience::WhileProgressing { stall, .. }
+                if now.duration_since(last_progress) >= stall =>
+            {
+                return Err(GaveUp::Stalled { stall, waited });
+            }
+            _ => {}
         }
     }
 }

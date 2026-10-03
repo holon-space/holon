@@ -745,11 +745,12 @@ pub(crate) type SettleFuture<'a> = std::pin::Pin<Box<dyn std::future::Future<Out
 
 impl<S: ComposedSlice> ComposedSut<S> {
     /// [`StateMachineTest::apply`] with `settle` in place of the slice's
-    /// post-apply settle.
+    /// post-apply settle, and `wedge` bounding apply + settle.
     pub(crate) fn apply_then_settle(
         mut sut: Self,
         ref_state: &ReferenceState,
         transition: S::Transition,
+        wedge: std::time::Duration,
         settle: impl for<'a> FnOnce(&'a S::Handle, &'a CapMap) -> SettleFuture<'a>,
     ) -> Self {
         if S::is_reboot(&transition) {
@@ -791,7 +792,6 @@ impl<S: ComposedSlice> ComposedSut<S> {
                 // minutes — must become a red, not a hung suite. Slow-but-
                 // progressing transitions stay well inside this and are reported
                 // with their real measured duration by the invariant below.
-                let wedge = crate::pbt::invariants::bodies::settle_budget::wedge_deadline();
                 let progressed = tokio::time::timeout(wedge, async {
                     match plan {
                         // UNMASKED — the same two statements, in the same order,
@@ -1392,9 +1392,13 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
     }
 
     fn apply(sut: Self, ref_state: &ReferenceState, transition: S::Transition) -> Self {
-        Self::apply_then_settle(sut, ref_state, transition, |handle, caps| {
-            Box::pin(S::settle_after_apply(handle, caps))
-        })
+        Self::apply_then_settle(
+            sut,
+            ref_state,
+            transition,
+            crate::pbt::invariants::bodies::settle_budget::wedge_deadline(),
+            |handle, caps| Box::pin(S::settle_after_apply(handle, caps)),
+        )
     }
 
     fn check_invariants(sut: &Self, ref_state: &ReferenceState) {

@@ -1041,9 +1041,10 @@ impl HeadlessFrontendComponent {
             // A boot registers only the sidebar page-list watch; the reactive
             // consumer-drain stage matters for per-transition settles.
             None,
-            remaining,
+            crate::pbt::convergence::Patience::Budget(remaining),
         )
         .await
+        .is_ok()
     }
 
     /// Cache each tracked file's resolved doc-block id from a CLEAN parse at

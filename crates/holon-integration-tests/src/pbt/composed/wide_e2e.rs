@@ -65,6 +65,7 @@ use crate::pbt::composed::seed_primitives::C2;
 use crate::pbt::composed::seed_primitives::PARENT;
 use crate::pbt::composed::seed_primitives::fixed_ids;
 use crate::pbt::composed::subsystem_seed::build_started_ref;
+use crate::pbt::convergence::Patience;
 use crate::pbt::frontend_slice::components::HeadlessFrontendComponent;
 use crate::pbt::frontend_slice::components::RebootGap;
 use crate::pbt::op_write_cap::IdResolver;
@@ -96,6 +97,14 @@ pub const SETTLE: Duration = Duration::from_millis(150);
 /// sibling-order flake). This is a real hang backstop, not a per-transition
 /// budget — only genuine non-convergence hits it.
 pub const CONVERGE_BUDGET: Duration = Duration::from_secs(30);
+
+/// The longest a bulk transition's settle waits with no projection signal and
+/// no work counter advancing. One atomic step of a 2001-block ingest (the Loro
+/// full reprojection) shows no counter for 22-54 s at load 90-150.
+pub const BULK_SETTLE_STALL: Duration = Duration::from_secs(120);
+
+/// The longest a bulk transition's settle waits while work still advances.
+pub const BULK_SETTLE_CEILING: Duration = Duration::from_secs(360);
 
 /// The slice handle for [`WideE2E`] — the store handles the post-write settle
 /// needs to prove all three projections (Turso CDC + Loro + org) have drained,
@@ -185,19 +194,34 @@ async fn settle_within(handle: &WideHandle, budget: Duration) {
     converge_projections(handle, budget).await;
 }
 
+/// [`settle_within`] for a transition whose work grows with its size: waits as
+/// long as the SUT keeps advancing, up to [`BULK_SETTLE_CEILING`] in all.
+async fn settle_while_progressing(handle: &WideHandle) {
+    let started = std::time::Instant::now();
+    drain_dispatches(handle, BULK_SETTLE_CEILING).await;
+    converge_projections_until(
+        handle,
+        Patience::WhileProgressing {
+            stall: BULK_SETTLE_STALL,
+            ceiling: BULK_SETTLE_CEILING.saturating_sub(started.elapsed()),
+        },
+    )
+    .await;
+}
+
 impl crate::pbt::composed::harness::ComposedSut<WideE2E> {
     /// [`StateMachineTest::apply`](proptest_state_machine::StateMachineTest::apply)
-    /// settling within `budget`, for a transition whose work exceeds the
-    /// per-transition budget (a bulk seed).
-    pub fn apply_settling_within(
-        self,
-        ref_state: &ReferenceState,
-        transition: E2ETransition,
-        budget: Duration,
-    ) -> Self {
-        Self::apply_then_settle(self, ref_state, transition, move |handle, _| {
-            Box::pin(settle_within(handle, budget))
-        })
+    /// for a transition whose work exceeds the per-transition budget (a bulk
+    /// seed): it settles with [`settle_while_progressing`], and the wedge bound
+    /// grows by [`BULK_SETTLE_CEILING`] so the settle reports first.
+    pub fn apply_bulk(self, ref_state: &ReferenceState, transition: E2ETransition) -> Self {
+        Self::apply_then_settle(
+            self,
+            ref_state,
+            transition,
+            crate::pbt::invariants::bodies::settle_budget::wedge_deadline() + BULK_SETTLE_CEILING,
+            |handle, _| Box::pin(settle_while_progressing(handle)),
+        )
     }
 }
 
@@ -235,6 +259,12 @@ async fn drain_dispatches(handle: &WideHandle, budget: Duration) {
 }
 
 async fn converge_projections(handle: &WideHandle, budget: Duration) {
+    // Never wait less than CONVERGE_BUDGET — 150ms is below the heavy
+    // projection pass and was the flake's root cause.
+    converge_projections_until(handle, Patience::Budget(budget.max(CONVERGE_BUDGET))).await
+}
+
+async fn converge_projections_until(handle: &WideHandle, patience: Patience) {
     // The frontend accessors are queried at settle time, not at boot: the sync
     // controller / idle signal resolve on a spawned `post_ready_work` task.
     let (sync, org_idle, block_feed) = match &handle.frontend {
@@ -249,27 +279,25 @@ async fn converge_projections(handle: &WideHandle, budget: Duration) {
     // out (see `converge_signals`' reactive-epoch stage): its `snapshot()` is
     // what the ViewModel invariants read.
     let reactive = handle.reactive();
-    // Loop to a combined fixed point with a generous cap (a settled SUT still
-    // returns in ~one quiet floor). Honour a larger caller budget if given, but
-    // never wait less than CONVERGE_BUDGET — 150ms is below the heavy projection
-    // pass and was the flake's root cause.
-    let cap = budget.max(CONVERGE_BUDGET);
-    let converged = crate::pbt::convergence::converge_signals(
+    // A settled SUT still returns in ~one quiet floor.
+    if let Err(gave_up) = crate::pbt::convergence::converge_signals(
         handle.engine.as_ref(),
         sync,
         org_idle,
         block_feed,
         reactive.as_ref(),
-        cap,
+        patience,
     )
-    .await;
-    assert!(
-        converged,
-        "[converge_projections] projections did not reach a combined fixed point within {cap:?}: \
-         the Loro->SQL sort_key projection / Turso CDC / org re-render are still churning. \
-         Reading invariants now would race a half-projected sink (the org-render sibling-order \
-         class). This is a real non-convergence, not a flaky timeout to swallow."
-    );
+    .await
+    {
+        panic!(
+            "[converge_projections] projections did not reach a combined fixed point {gave_up}: \
+             the Loro->SQL sort_key projection / Turso CDC / org re-render are still churning. \
+             Reading invariants now would race a half-projected sink (the org-render \
+             sibling-order class). This is a real non-convergence, not a flaky timeout to \
+             swallow."
+        );
+    }
 
     // Advice weave (ADR 0022): now that CDC has converged (the `advice_rule_{slug}`
     // matview + `advice_suppressed` reflect the settled SQL state), recompute the
