@@ -1082,8 +1082,6 @@ impl LoroProjection {
         let t0 = std::time::Instant::now();
 
         let (collab, layout) = self.docs().await?;
-        let current = collab.with_read(|doc| Ok(doc.oplog_frontiers()))?;
-        let layout_current = layout.with_read(|doc| Ok(doc.oplog_frontiers()))?;
         let last = self.last_synced.lock().unwrap().clone();
         let layout_last = self.layout_last_synced.lock().unwrap().clone();
         let seeded = self.seeded.load(Ordering::SeqCst);
@@ -1127,9 +1125,9 @@ impl LoroProjection {
         if seeded {
             // Drain the WHOLE queue first — never early-return while facts are
             // pending (that would silently drop a committed change).
-            let (global_facts, mut changed, mut settled) =
+            let (global_facts, mut changed, mut settled, current) =
                 self.read_incremental(&collab, &self.pending, CommitSource::LoroGlobal)?;
-            let (layout_facts, layout_changed, layout_settled) =
+            let (layout_facts, layout_changed, layout_settled, layout_current) =
                 self.read_incremental(&layout, &self.layout_pending, CommitSource::LoroLayout)?;
 
             // Idle wake: no facts and NEITHER oplog has moved — nothing to do.
@@ -1368,9 +1366,9 @@ impl LoroProjection {
         // `block_raw` → Loro and re-establishes `live == block_raw` on success.
         // This path is not steady-state (cold boot / unsettled / orphan / oversized
         // bootstrap), so the extra sink read is not on the hot path.
-        let (mut after, mut after_settled) =
+        let (mut after, mut after_settled, current) =
             self.read_full(&collab, &self.pending, CommitSource::LoroGlobal)?;
-        let (layout_after, layout_settled) =
+        let (layout_after, layout_settled, layout_current) =
             self.read_full(&layout, &self.layout_pending, CommitSource::LoroLayout)?;
         after_settled &= layout_settled;
         for (id, snap) in layout_after {
@@ -1547,21 +1545,27 @@ impl LoroProjection {
         Ok(pass_outcome(ungrounded, after_settled))
     }
 
-    /// Takes `doc`'s queued facts, the clock's high water and the rows the
-    /// facts name, all under ONE read guard of the doc: no commit of the doc
-    /// runs meanwhile, so the rows are exactly the doc after its commits
-    /// stamped up to that high water. A settled read is fed to the engine at
-    /// that cover; an unsettled one leaves its stamps to the full walk.
-    /// Returns the number of facts taken, the changed rows, and whether the
-    /// read is settled.
+    /// Takes `doc`'s queued facts, its frontier, the clock's high water and
+    /// the rows the facts name, all under ONE read guard of the doc: no
+    /// commit of the doc runs meanwhile, so the rows are exactly the doc after
+    /// its commits stamped up to that high water. A settled read is fed to the
+    /// engine at that cover; an unsettled one leaves its stamps to the full
+    /// walk. Returns the number of facts taken, the changed rows, whether the
+    /// read is settled, and the frontier the rows are at.
     fn read_incremental(
         &self,
         doc: &LoroDocument,
         queue: &StdMutex<Vec<crate::loro_backend::PendingChange>>,
         source: CommitSource,
-    ) -> Result<(usize, HashMap<String, Option<SnapshotBlock>>, bool)> {
-        let (facts, cover, (changed, settled)) = doc.with_read(|doc| {
+    ) -> Result<(
+        usize,
+        HashMap<String, Option<SnapshotBlock>>,
+        bool,
+        Frontiers,
+    )> {
+        let (facts, frontier, cover, (changed, settled)) = doc.with_read(|doc| {
             let facts = std::mem::take(&mut *queue.lock().unwrap());
+            let frontier = doc.oplog_frontiers();
             let cover = self.commit_clock.high_water();
             #[cfg(any(test, feature = "test-helpers"))]
             if let Some(seam) = self.read_seam.lock().unwrap().clone() {
@@ -1569,7 +1573,7 @@ impl LoroProjection {
             }
             let mut tid_index = self.tid_index.lock().unwrap();
             let read = crate::loro_backend::incremental_block_changes(doc, &facts, &mut tid_index)?;
-            Ok((facts.len(), cover, read))
+            Ok((facts.len(), frontier, cover, read))
         })?;
         if settled {
             let delta = changed
@@ -1582,21 +1586,22 @@ impl LoroProjection {
                 .collect::<Result<Vec<_>>>()?;
             self.views_engine.feed(source, cover, delta);
         }
-        Ok((facts, changed, settled))
+        Ok((facts, changed, settled, frontier))
     }
 
     /// The full-walk counterpart of [`Self::read_incremental`]: the doc's
-    /// whole block set under the same guard as its cover. The taken facts
-    /// are covered by the snapshot.
+    /// whole block set under the same guard as its frontier and its cover.
+    /// The taken facts are covered by the snapshot.
     fn read_full(
         &self,
         doc: &LoroDocument,
         queue: &StdMutex<Vec<crate::loro_backend::PendingChange>>,
         source: CommitSource,
-    ) -> Result<(HashMap<String, SnapshotBlock>, bool)> {
-        let (cover, (blocks, settled)) = doc.with_read(|doc| {
+    ) -> Result<(HashMap<String, SnapshotBlock>, bool, Frontiers)> {
+        let (frontier, cover, (blocks, settled)) = doc.with_read(|doc| {
             queue.lock().unwrap().clear();
             Ok((
+                doc.oplog_frontiers(),
                 self.commit_clock.high_water(),
                 snapshot_blocks_from_doc_settled(doc),
             ))
@@ -1605,7 +1610,7 @@ impl LoroProjection {
             self.views_engine
                 .replace(source, cover, blocks.values().cloned().collect());
         }
-        Ok((blocks, settled))
+        Ok((blocks, settled, frontier))
     }
 
     /// A failed sink write leaves the SQL index behind the Loro authority.

@@ -306,3 +306,47 @@ async fn a_pass_whose_sidecar_write_fails_is_not_settled_and_recovers() -> Resul
     assert!(fx.settled());
     Ok(())
 }
+
+/// A layout commit that lands while the pass reads the global doc: the
+/// layout read takes its facts, so the pass that writes its row settles, and
+/// the next pass has nothing to walk.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_commit_to_one_doc_while_the_pass_reads_the_other_settles_in_that_pass() -> Result<()> {
+    let fx = Fixture::new().await?;
+    insert_root_block(&fx.doc_store, "global-id", "global").await?;
+    let parent = insert_root_block_in(&fx.doc_store, DocScope::Layout, "panel-id", "panel").await?;
+    assert_eq!(fx.projection.project().await?, ProjectionPass::Converged);
+
+    let fired = std::sync::atomic::AtomicBool::new(false);
+    let layout = fx.layout.clone();
+    fx.projection.set_read_seam(Arc::new(move |source| {
+        if source != CommitSource::LoroGlobal
+            || fired.swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            return;
+        }
+        let layout = layout.clone();
+        std::thread::spawn(move || insert_child_in(&layout, parent, "panel-child-id"))
+            .join()
+            .unwrap()
+            .expect("the layout commit lands while only the global doc is read");
+    }));
+    assert_eq!(fx.projection.project().await?, ProjectionPass::Converged);
+    assert!(
+        fx.sink
+            .row_ids()
+            .contains(&"block:panel-child-id".to_string()),
+        "the layout read took the commit's facts: {:?}",
+        fx.sink.row_ids()
+    );
+
+    let full_before = holon_loro::projection_stats::snapshot().full_passes;
+    assert_eq!(fx.projection.project().await?, ProjectionPass::Converged);
+    assert_eq!(
+        holon_loro::projection_stats::snapshot().full_passes - full_before,
+        0,
+        "the pass after the one that wrote every row walked the whole tree"
+    );
+    assert!(fx.settled());
+    Ok(())
+}
