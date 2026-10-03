@@ -2,6 +2,13 @@
 //! by differential dataflow and versioned by the commit clock. The only crate
 //! that names `differential_dataflow` or `timely`.
 
+pub mod batch;
+pub mod error;
+mod eval;
+pub mod lower;
+pub mod plan;
+pub mod row;
+
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;

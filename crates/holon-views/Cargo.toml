@@ -12,5 +12,11 @@ ignored = ["workspace-hack"]
 
 [dependencies]
 differential-dataflow = { version = "=0.25.1", default-features = false }
+serde.workspace = true
+thiserror.workspace = true
 timely = { version = "=0.31.0", default-features = false }
 workspace-hack = { version = "0.1", path = "../../workspace-hack" }
+
+# proptest's `getrandom` and `wait-timeout` do not build for wasm.
+[target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
+proptest.workspace = true

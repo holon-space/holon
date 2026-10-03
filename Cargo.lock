@@ -6281,6 +6281,9 @@ name = "holon-views"
 version = "0.1.0"
 dependencies = [
  "differential-dataflow",
+ "proptest 1.11.0",
+ "serde",
+ "thiserror 2.0.19",
  "timely",
  "workspace-hack 0.1.0",
 ]
