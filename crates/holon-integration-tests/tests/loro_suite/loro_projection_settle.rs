@@ -10,7 +10,6 @@
 
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
-use std::time::Duration;
 
 use anyhow::Result;
 use holon_api::commit_clock::CommitSource;
@@ -34,8 +33,6 @@ use crate::projection_harness::delete_block_in;
 use crate::projection_harness::insert_root_block;
 use crate::projection_harness::insert_root_block_in;
 
-const SETTLE_WAIT: Duration = Duration::from_secs(2);
-
 struct Fixture {
     _tempdir: tempfile::TempDir,
     doc_store: Arc<RwLock<LoroDocumentStore>>,
@@ -43,6 +40,7 @@ struct Fixture {
     layout: Arc<LoroDocument>,
     sink: Arc<MemorySink>,
     projection: Arc<LoroProjection>,
+    degraded: Arc<holon_api::ConditionBus>,
 }
 
 impl Fixture {
@@ -54,6 +52,7 @@ impl Fixture {
         let global = doc_store.read().await.get_doc(DocScope::Global).await?;
         let layout = doc_store.read().await.get_doc(DocScope::Layout).await?;
         let sink = Arc::new(MemorySink::new());
+        let degraded = Arc::new(holon_api::ConditionBus::new());
         let projection = Arc::new(LoroProjection::new(
             doc_store.clone(),
             Arc::new(StdMutex::new(Frontiers::default())),
@@ -61,7 +60,7 @@ impl Fixture {
             sink.clone() as Arc<dyn SinkReader>,
             tempdir.path().join("sidecar").join("sc.sync"),
             holon_api::block_read_model::BlockReadModel::new(),
-            Arc::new(holon_api::ConditionBus::new()),
+            degraded.clone(),
         ));
         projection.install_doc_subscriptions().await?;
         projection.arm();
@@ -72,6 +71,7 @@ impl Fixture {
             layout,
             sink,
             projection,
+            degraded,
         })
     }
 
@@ -189,30 +189,6 @@ async fn a_pass_that_owes_a_withheld_op_is_not_settled() -> Result<()> {
     Ok(())
 }
 
-/// The run loop stops re-driving after a `Converged` pass, so a converged
-/// pass must settle with no further pass.
-async fn converged_implies_settled(fx: &Fixture, pass: ProjectionPass) {
-    if pass != ProjectionPass::Converged {
-        return;
-    }
-    let settled = tokio::time::timeout(SETTLE_WAIT, async {
-        while !fx.settled() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .is_ok();
-    let clock = fx.projection.commit_clock();
-    assert!(
-        settled,
-        "the pass reported Converged, so the run loop stops re-driving, yet the projection did \
-         not settle within {SETTLE_WAIT:?}: global stamps {:?} and layout stamps {:?} are never \
-         fed",
-        clock.outstanding(CommitSource::LoroGlobal),
-        clock.outstanding(CommitSource::LoroLayout),
-    );
-}
-
 fn model_holds(fx: &Fixture, id: &str) -> bool {
     use holon_api::block_read_model::BlockDeltaSource;
     fx.projection
@@ -226,7 +202,8 @@ fn model_holds(fx: &Fixture, id: &str) -> bool {
 /// A snapshot with an unreadable live node is not published to the read
 /// model, so the commits it walked stay unfed until a settled pass.
 #[tokio::test]
-async fn a_pass_over_an_unsettled_snapshot_keeps_the_run_loop_driving() -> Result<()> {
+async fn a_pass_over_an_unsettled_snapshot_reports_unsettled_until_the_node_settles() -> Result<()>
+{
     let fx = Fixture::new().await?;
     insert_root_block(&fx.doc_store, "seed-id", "seed").await?;
     assert_eq!(fx.projection.project().await?, ProjectionPass::Converged);
@@ -238,8 +215,15 @@ async fn a_pass_over_an_unsettled_snapshot_keeps_the_run_loop_driving() -> Resul
         })?;
     insert_root_block(&fx.doc_store, "late-id", "late").await?;
     for _ in 0..2 {
-        let pass = fx.projection.project().await?;
-        converged_implies_settled(&fx, pass).await;
+        let clock = fx.projection.commit_clock();
+        assert_eq!(
+            fx.projection.project().await?,
+            ProjectionPass::Unsettled,
+            "a Converged pass ends the run loop's re-drive while global stamps {:?} and layout \
+             stamps {:?} are unfed",
+            clock.outstanding(CommitSource::LoroGlobal),
+            clock.outstanding(CommitSource::LoroLayout),
+        );
         assert!(
             !fx.settled() || model_holds(&fx, "block:late-id"),
             "settled while the read model lacks block:late-id"
@@ -258,6 +242,40 @@ async fn a_pass_over_an_unsettled_snapshot_keeps_the_run_loop_driving() -> Resul
     assert_eq!(fx.projection.project().await?, ProjectionPass::Converged);
     assert!(fx.settled());
     assert!(model_holds(&fx, "block:late-id") && model_holds(&fx, "block:grown-id"));
+    Ok(())
+}
+
+/// A flush that gives up on an unsettled pass discloses it through the
+/// projection, which must raise the banner the run loop's next converged pass
+/// clears.
+#[tokio::test]
+async fn a_disclosed_unsettled_flush_raises_the_run_loops_banner() -> Result<()> {
+    use holon_core::DownstreamProjection;
+
+    let fx = Fixture::new().await?;
+    fx.global
+        .with_write(holon_loro::WriteOrigin::Probe("settle"), |txn| {
+            Ok(txn.get_tree(TREE_NAME).create(None)?)
+        })?;
+    assert_eq!(
+        DownstreamProjection::flush(fx.projection.as_ref())
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?,
+        ProjectionPass::Unsettled
+    );
+    fx.projection
+        .disclose_degraded(ProjectionPass::UNSETTLED_REASON.to_string());
+
+    let current = fx.degraded.current();
+    assert_eq!(current.len(), 1, "{current:?}");
+    assert_eq!(
+        current[0].condition_key(),
+        holon_loro::loro_sync_controller::projection_degraded_key()
+    );
+    assert!(
+        format!("{:?}", current[0].reason).contains(ProjectionPass::UNSETTLED_REASON),
+        "{current:?}"
+    );
     Ok(())
 }
 

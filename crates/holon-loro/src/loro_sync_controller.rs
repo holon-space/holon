@@ -616,8 +616,11 @@ async fn drive_with_redrive<F, Fut>(
 {
     let mut backoff = RECONCILE_RETRY_BACKOFF;
     let mut why = String::new();
+    let mut unsettled = false;
     for attempt in 1..=RECONCILE_MAX_ATTEMPTS {
-        match pass().await {
+        let outcome = pass().await;
+        unsettled = matches!(outcome, Ok(ProjectionPass::Unsettled));
+        match outcome {
             Ok(ProjectionPass::Converged) => {
                 degraded.clear(&projection_degraded_key());
                 return;
@@ -632,8 +635,7 @@ async fn drive_with_redrive<F, Fut>(
                 );
             }
             Ok(ProjectionPass::Unsettled) => {
-                why = "a live Loro node has no readable meta, so the read model was not refreshed"
-                    .to_string();
+                why = ProjectionPass::UNSETTLED_REASON.to_string();
                 warn!(
                     attempt,
                     "[LoroSyncController] Outbound reconcile unsettled: {why}"
@@ -653,14 +655,26 @@ async fn drive_with_redrive<F, Fut>(
             backoff *= 2;
         }
     }
-    let summary = format!(
-        "the Loro→SQL projection did not converge in {RECONCILE_MAX_ATTEMPTS} attempts, so SQL \
-         (what the UI reads) is behind Loro: {why}"
-    );
+    let summary = if unsettled {
+        format!(
+            "the Loro→SQL projection did not settle in {RECONCILE_MAX_ATTEMPTS} attempts, so the \
+             read model (what the UI reads) is stale: {why}"
+        )
+    } else {
+        format!(
+            "the Loro→SQL projection did not converge in {RECONCILE_MAX_ATTEMPTS} attempts, so \
+             SQL (what the UI reads) is behind Loro: {why}"
+        )
+    };
     error!("[LoroSyncController] {summary}");
+    raise_projection_degraded(degraded, summary);
+}
+
+/// The banner a converged pass of [`drive_with_redrive`] clears.
+fn raise_projection_degraded(degraded: &holon_api::condition_bus::ConditionBus, why: String) {
     degraded.emit(holon_api::condition_bus::Condition {
         subject: GLOBAL_PROJECTION_SUBJECT.to_string(),
-        reason: holon_api::condition_bus::ConditionKind::SqlProjectionFailed(summary),
+        reason: holon_api::condition_bus::ConditionKind::SqlProjectionFailed(why),
     });
 }
 
@@ -1762,6 +1776,10 @@ impl holon_core::DownstreamProjection for LoroProjection {
             .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { format!("{e:#}").into() })
     }
 
+    fn disclose_degraded(&self, why: String) {
+        raise_projection_degraded(&self.degraded, why);
+    }
+
     /// The synced watermark is advanced only after the snapshot is saved, so a
     /// loaded global doc missing any of its ids was reloaded from a snapshot
     /// that lost writes SQL already holds. Without a watermark, any sink row
@@ -2173,6 +2191,50 @@ mod redrive_tests {
             current[0].reason,
             ConditionKind::SqlProjectionFailed(ref why) if why.contains("3 op(s) withheld")
         ));
+    }
+
+    /// An unsettled pass wrote its rows but left the read model stale, and
+    /// only a later pass over a settled snapshot refreshes it.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn an_unsettled_pass_is_re_driven_and_disclosed_if_it_never_settles() {
+        let bus = ConditionBus::new();
+        let errors = AtomicUsize::new(0);
+        let mut passes = 0;
+        let mut pass = scripted(
+            (0..RECONCILE_MAX_ATTEMPTS)
+                .map(|_| Ok(ProjectionPass::Unsettled))
+                .collect(),
+        );
+        drive_with_redrive(
+            || {
+                passes += 1;
+                pass()
+            },
+            &bus,
+            &errors,
+        )
+        .await;
+        assert_eq!(
+            passes, RECONCILE_MAX_ATTEMPTS,
+            "an unsettled pass is re-driven"
+        );
+        let current = bus.subscribe().current;
+        assert_eq!(
+            current.len(),
+            1,
+            "a projection that never settles is disclosed"
+        );
+        assert!(
+            matches!(
+                current[0].reason,
+                ConditionKind::SqlProjectionFailed(ref why)
+                    if why.contains("read model (what the UI reads) is stale")
+                        && why.contains(ProjectionPass::UNSETTLED_REASON)
+                        && !why.contains("behind Loro")
+            ),
+            "{:?}",
+            current[0].reason
+        );
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]

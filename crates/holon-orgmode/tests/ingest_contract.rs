@@ -395,8 +395,38 @@ impl holon_core::downstream_projection::DownstreamProjection for DirectProjectio
         Ok(holon_core::downstream_projection::ProjectionPass::Converged)
     }
 
+    fn disclose_degraded(&self, why: String) {
+        panic!("a converged projection has nothing to disclose: {why}");
+    }
+
     async fn consolidator_behind_sink(&self) -> holon_core::traits::Result<bool> {
         Ok(false)
+    }
+}
+
+/// A projection whose every pass walks a snapshot with a half-born node: the
+/// rows land, the read model stays stale.
+#[derive(Default)]
+struct UnsettledProjection {
+    passes: Mutex<usize>,
+    disclosed: Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl holon_core::downstream_projection::DownstreamProjection for UnsettledProjection {
+    async fn flush(
+        &self,
+    ) -> holon_core::traits::Result<holon_core::downstream_projection::ProjectionPass> {
+        *self.passes.lock().unwrap() += 1;
+        Ok(holon_core::downstream_projection::ProjectionPass::Unsettled)
+    }
+
+    async fn consolidator_behind_sink(&self) -> holon_core::traits::Result<bool> {
+        Ok(false)
+    }
+
+    fn disclose_degraded(&self, why: String) {
+        self.disclosed.lock().unwrap().push(why);
     }
 }
 
@@ -521,6 +551,14 @@ impl Vault {
 }
 
 fn vault(adapter: FixtureAdapter, contents: &str) -> Vault {
+    vault_with_projection(adapter, contents, Arc::new(DirectProjection))
+}
+
+fn vault_with_projection(
+    adapter: FixtureAdapter,
+    contents: &str,
+    projection: Arc<dyn holon_core::downstream_projection::DownstreamProjection>,
+) -> Vault {
     let tmp = tempfile::tempdir().unwrap();
     // macOS hands out `/var/...` temp dirs that canonicalize to `/private/var/...`;
     // the controller strips the root prefix from each path, so both must agree.
@@ -542,7 +580,7 @@ fn vault(adapter: FixtureAdapter, contents: &str) -> Vault {
         }),
         Arc::new(RealFileSystem),
     )
-    .with_downstream_projection(Arc::new(DirectProjection))
+    .with_downstream_projection(projection)
     .with_read_only_documents(Arc::new(holon_core::ReadOnlyDocuments::new()));
     Vault {
         controller,
@@ -603,6 +641,36 @@ async fn a_parsed_documents_title_and_properties_reach_the_document_block() {
         doc.get_property_str("source").as_deref(),
         Some("Familienrezept"),
         "the parsed document's properties never reached the store",
+    );
+}
+
+/// A vault with one half-born node must still open: the ingest's rows are
+/// written, so the ingest completes, and the stale read model is disclosed.
+#[tokio::test]
+async fn an_unsettled_projection_completes_the_ingest_and_raises_the_banner() {
+    let projection = Arc::new(UnsettledProjection::default());
+    let mut v = vault_with_projection(
+        FixtureAdapter::parsing(WriteTier::ReadOnly),
+        "Boil water\nStir\n",
+        projection.clone(),
+    );
+    let path = v.file.clone();
+    v.controller
+        .on_file_changed(&path)
+        .await
+        .expect("an unsettled pass wrote the ingest's rows, so the ingest completes");
+    v.document();
+
+    assert!(
+        *projection.passes.lock().unwrap() > 0,
+        "the ingest never flushed"
+    );
+    let disclosed = projection.disclosed.lock().unwrap();
+    assert!(
+        !disclosed.is_empty()
+            && disclosed.iter().all(|why| why
+                .contains(holon_core::downstream_projection::ProjectionPass::UNSETTLED_REASON)),
+        "the stale read model was never disclosed: {disclosed:?}"
     );
 }
 

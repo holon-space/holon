@@ -6032,6 +6032,10 @@ mod tests {
             Ok(self.0)
         }
 
+        fn disclose_degraded(&self, why: String) {
+            panic!("the share backend never gives up on a projection pass: {why}");
+        }
+
         async fn consolidator_behind_sink(&self) -> holon_core::traits::Result<bool> {
             Ok(false)
         }

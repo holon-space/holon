@@ -261,15 +261,10 @@ impl DocOrder {
 /// progress-line granularity so every chunk boundary is also a liveness tick.
 const CREATE_CHUNK_BLOCKS: usize = ingest_progress::PROGRESS_EVERY_BLOCKS;
 
-/// Disclosure sites for `failure_disclosed`. Two DISTINCT diagnoses of the same
-/// underlying condition, each worth one loud line: the identity-file pre-flight
-/// reports it via `authoritative_name_chain`, the write path via
-/// `doc_id_to_path`. Keying by site stops whichever fires first from muting the
-/// other.
-/// How many times an org-path flush re-drives a projection pass that withheld
-/// FK-ungrounded ops before failing loud. A withhold forces the next pass onto
-/// the full walk against sink truth, so the second attempt is the one that
-/// normally pays the owed op; the third is headroom.
+/// How many times an org-path flush re-drives a projection pass that did not
+/// converge before it gives up. A withhold forces the next pass onto the full
+/// walk against sink truth, so the second attempt is the one that normally
+/// pays the owed op; the third is headroom.
 const DOWNSTREAM_FLUSH_ATTEMPTS: usize = 3;
 
 /// [`FileSyncController::flush_downstream`]'s policy, as a free function so it
@@ -281,26 +276,44 @@ async fn flush_downstream_with_redrive(
     let Some(downstream) = downstream else {
         return Ok(());
     };
-    let mut last = 0usize;
+    let mut last = None;
     for _ in 0..DOWNSTREAM_FLUSH_ATTEMPTS {
         match downstream
             .flush()
             .await
             .map_err(|e| anyhow::anyhow!("downstream flush {context}: {e}"))?
         {
-            holon_core::ProjectionPass::Converged | holon_core::ProjectionPass::Unsettled => {
-                return Ok(());
-            }
-            holon_core::ProjectionPass::Incomplete { withheld } => last = withheld,
+            holon_core::ProjectionPass::Converged => return Ok(()),
+            pass => last = Some(pass),
         }
     }
-    anyhow::bail!(
-        "downstream flush {context}: the projection still withheld {last} op(s) after \
-         {DOWNSTREAM_FLUSH_ATTEMPTS} attempts, so their SQL rows were never written — the org \
-         path's callers would otherwise treat this as a completed write"
-    )
+    match last.expect("DOWNSTREAM_FLUSH_ATTEMPTS is non-zero") {
+        holon_core::ProjectionPass::Incomplete { withheld } => anyhow::bail!(
+            "downstream flush {context}: the projection still withheld {withheld} op(s) after \
+             {DOWNSTREAM_FLUSH_ATTEMPTS} attempts, so their SQL rows were never written — the \
+             org path's callers would otherwise treat this as a completed write"
+        ),
+        // Every op reached the sink, so the rows are written; failing here
+        // would keep a vault with one half-born node from opening.
+        holon_core::ProjectionPass::Unsettled => {
+            let why = format!(
+                "downstream flush {context}: the projection was still unsettled after \
+                 {DOWNSTREAM_FLUSH_ATTEMPTS} attempts: {}",
+                holon_core::ProjectionPass::UNSETTLED_REASON
+            );
+            tracing::warn!("[FileSyncController] {why}");
+            downstream.disclose_degraded(why);
+            Ok(())
+        }
+        holon_core::ProjectionPass::Converged => unreachable!("a converged pass returned above"),
+    }
 }
 
+/// Disclosure sites for `failure_disclosed`. Two DISTINCT diagnoses of the same
+/// underlying condition, each worth one loud line: the identity-file pre-flight
+/// reports it via `authoritative_name_chain`, the write path via
+/// `doc_id_to_path`. Keying by site stops whichever fires first from muting the
+/// other.
 const IDENTITY_PREFLIGHT_SITE: &str = "identity-file-preflight";
 const PATH_DERIVATION_SITE: &str = "page-file-path-derivation";
 const IMAGE_PATH_SITE: &str = "image-file-path-derivation";
@@ -11673,14 +11686,20 @@ mod downstream_flush_tests {
     struct ScriptedProjection {
         outcomes: Mutex<std::vec::IntoIter<ProjectionPass>>,
         calls: std::sync::atomic::AtomicUsize,
+        disclosed: Mutex<Vec<String>>,
     }
 
     impl ScriptedProjection {
-        fn arc(outcomes: Vec<ProjectionPass>) -> Arc<dyn DownstreamProjection> {
+        fn new(outcomes: Vec<ProjectionPass>) -> Arc<Self> {
             Arc::new(Self {
                 outcomes: Mutex::new(outcomes.into_iter()),
                 calls: std::sync::atomic::AtomicUsize::new(0),
+                disclosed: Mutex::new(Vec::new()),
             })
+        }
+
+        fn arc(outcomes: Vec<ProjectionPass>) -> Arc<dyn DownstreamProjection> {
+            Self::new(outcomes)
         }
     }
 
@@ -11698,6 +11717,10 @@ mod downstream_flush_tests {
 
         async fn consolidator_behind_sink(&self) -> holon_core::traits::Result<bool> {
             Ok(false)
+        }
+
+        fn disclose_degraded(&self, why: String) {
+            self.disclosed.lock().unwrap().push(why);
         }
     }
 
@@ -11725,6 +11748,44 @@ mod downstream_flush_tests {
         let msg = format!("{err:#}");
         assert!(msg.contains("withheld 7 op(s)"), "{msg}");
         assert!(msg.contains("after scan"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn an_unsettled_flush_is_re_driven_until_it_converges() {
+        let scripted =
+            ScriptedProjection::new(vec![ProjectionPass::Unsettled, ProjectionPass::Converged]);
+        let projection: Arc<dyn DownstreamProjection> = scripted.clone();
+        flush_downstream_with_redrive(Some(&projection), "test")
+            .await
+            .expect("a pass that settles on the re-drive is a completed write");
+        assert_eq!(scripted.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert!(scripted.disclosed.lock().unwrap().is_empty());
+    }
+
+    /// Every op of an unsettled pass reached the sink, so the caller may
+    /// proceed — but the read model is stale, and that must be visible.
+    #[tokio::test]
+    async fn a_flush_that_never_settles_proceeds_and_raises_the_banner() {
+        let scripted = ScriptedProjection::new(
+            (0..DOWNSTREAM_FLUSH_ATTEMPTS)
+                .map(|_| ProjectionPass::Unsettled)
+                .collect(),
+        );
+        let projection: Arc<dyn DownstreamProjection> = scripted.clone();
+        flush_downstream_with_redrive(Some(&projection), "after scan")
+            .await
+            .expect("an unsettled pass wrote its rows, so the scan goes on");
+        assert_eq!(
+            scripted.calls.load(std::sync::atomic::Ordering::SeqCst),
+            DOWNSTREAM_FLUSH_ATTEMPTS
+        );
+        let disclosed = scripted.disclosed.lock().unwrap();
+        assert_eq!(disclosed.len(), 1, "{disclosed:?}");
+        assert!(
+            disclosed[0].contains(ProjectionPass::UNSETTLED_REASON)
+                && disclosed[0].contains("after scan"),
+            "{disclosed:?}"
+        );
     }
 
     #[tokio::test]

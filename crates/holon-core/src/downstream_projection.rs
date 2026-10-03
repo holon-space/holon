@@ -41,6 +41,11 @@ pub enum ProjectionPass {
 }
 
 impl ProjectionPass {
+    /// What an [`Unsettled`](Self::Unsettled) pass left undone, for a log line
+    /// or a banner.
+    pub const UNSETTLED_REASON: &'static str =
+        "a live Loro node has no readable meta, so the read model was not refreshed";
+
     /// The op count this pass still owes the sink; zero when it converged.
     pub fn withheld(self) -> usize {
         match self {
@@ -62,6 +67,11 @@ pub trait DownstreamProjection: Send + Sync {
     /// [`ProjectionPass::Incomplete`] — it is not an error, but it is not
     /// success either.
     async fn flush(&self) -> Result<ProjectionPass>;
+
+    /// Raise the projection's degraded banner with `why` as its reason, for a
+    /// caller that stops re-driving a pass it can still proceed past. The
+    /// projection's next converged pass clears it.
+    fn disclose_degraded(&self, why: String);
 
     /// Whether the sink already reflects consolidator changes the
     /// consolidator's loaded state does not hold: it was reloaded from a

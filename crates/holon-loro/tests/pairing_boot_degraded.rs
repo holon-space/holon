@@ -143,6 +143,10 @@ impl DownstreamProjection for CountingProjection {
         Ok(ProjectionPass::Converged)
     }
 
+    fn disclose_degraded(&self, why: String) {
+        panic!("a converged projection has nothing to disclose: {why}");
+    }
+
     async fn consolidator_behind_sink(&self) -> holon_core::Result<bool> {
         Ok(false)
     }
