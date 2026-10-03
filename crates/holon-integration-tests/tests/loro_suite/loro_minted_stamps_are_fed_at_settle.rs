@@ -14,6 +14,7 @@ use anyhow::Result;
 use holon_api::commit_clock::CommitSource;
 use holon_core::OriginTaggedWrites;
 use holon_core::ProjectionPass;
+use holon_integration_tests::pbt::engine_views::engine_caught_up;
 use holon_loro::CONTENT_RAW;
 use holon_loro::DocScope;
 use holon_loro::LoroDocument;
@@ -22,6 +23,7 @@ use holon_loro::LoroProjection;
 use holon_loro::SinkReader;
 use holon_loro::TREE_NAME;
 use holon_loro::WriteOrigin;
+use holon_views::engine::ViewEngine;
 use loro::Frontiers;
 use tokio::sync::RwLock;
 
@@ -72,6 +74,7 @@ fn assert_fed(projection: &LoroProjection, stage: &str) {
 /// stamps minted before it.
 async fn one_pass_feeds(
     projection: &LoroProjection,
+    engine: &ViewEngine,
     global: &LoroDocument,
     layout: &LoroDocument,
     stage: &str,
@@ -81,6 +84,7 @@ async fn one_pass_feeds(
         ProjectionPass::Converged,
         "{stage}"
     );
+    engine_caught_up(engine)?;
     assert_fed(projection, stage);
     let frontiers = |doc: &LoroDocument| doc.with_read(|d| Ok(d.oplog_frontiers()));
     assert!(
@@ -102,12 +106,14 @@ fn check_out_and_back(doc: &LoroDocument, earlier: &Frontiers) -> Result<()> {
 
 async fn settle_and_assert_fed(
     projection: &LoroProjection,
+    engine: &ViewEngine,
     global: &LoroDocument,
     layout: &LoroDocument,
     stage: &str,
 ) -> Result<()> {
     for _ in 0..MAX_PASSES {
         projection.project().await?;
+        engine_caught_up(engine)?;
         let frontiers = |doc: &LoroDocument| doc.with_read(|d| Ok(d.oplog_frontiers()));
         if projection.is_settled_at(&frontiers(global)?, &frontiers(layout)?) {
             assert_fed(projection, stage);
@@ -126,6 +132,7 @@ async fn every_minted_stamp_is_fed_at_settle() -> Result<()> {
     let global = doc_store.read().await.get_doc(DocScope::Global).await?;
     let layout = doc_store.read().await.get_doc(DocScope::Layout).await?;
     let sink = Arc::new(MemorySink::new());
+    let (clock, engine) = holon_integration_tests::pbt::engine_views::start_views_engine();
     let projection = Arc::new(LoroProjection::new(
         doc_store.clone(),
         Arc::new(StdMutex::new(Frontiers::default())),
@@ -134,23 +141,25 @@ async fn every_minted_stamp_is_fed_at_settle() -> Result<()> {
         tempdir.path().join("sidecar").join("sc.sync"),
         holon_api::block_read_model::BlockReadModel::new(),
         Arc::new(holon_api::ConditionBus::new()),
+        clock,
+        engine.clone(),
     ));
     projection.install_doc_subscriptions().await?;
     projection.arm();
 
     insert(&global, "g-0")?;
     insert(&layout, "l-0")?;
-    one_pass_feeds(&projection, &global, &layout, "cold full walk").await?;
+    one_pass_feeds(&projection, &engine, &global, &layout, "cold full walk").await?;
 
     insert(&global, "g-1")?;
     insert(&layout, "l-1")?;
-    one_pass_feeds(&projection, &global, &layout, "incremental").await?;
+    one_pass_feeds(&projection, &engine, &global, &layout, "incremental").await?;
 
     let heads = |doc: &LoroDocument| doc.with_read(|d| Ok(d.oplog_frontiers()));
     let (global_before, layout_before) = (heads(&global)?, heads(&layout)?);
     touch_outside_the_tree(&global, 0)?;
     touch_outside_the_tree(&layout, 0)?;
-    one_pass_feeds(&projection, &global, &layout, "no block facts").await?;
+    one_pass_feeds(&projection, &engine, &global, &layout, "no block facts").await?;
 
     let fed = projection.commit_clock().high_water().get();
     check_out_and_back(&global, &global_before)?;
@@ -159,7 +168,7 @@ async fn every_minted_stamp_is_fed_at_settle() -> Result<()> {
         projection.commit_clock().high_water().get() > fed,
         "the checkout round trip minted no stamp"
     );
-    one_pass_feeds(&projection, &global, &layout, "idle").await?;
+    one_pass_feeds(&projection, &engine, &global, &layout, "idle").await?;
 
     let writers: Vec<_> = [global.clone(), layout.clone()]
         .into_iter()
@@ -183,5 +192,5 @@ async fn every_minted_stamp_is_fed_at_settle() -> Result<()> {
     for writer in writers {
         writer.join().unwrap()?;
     }
-    settle_and_assert_fed(&projection, &global, &layout, "concurrent writers").await
+    settle_and_assert_fed(&projection, &engine, &global, &layout, "concurrent writers").await
 }

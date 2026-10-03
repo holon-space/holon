@@ -275,6 +275,8 @@ fn central_invariants() -> Vec<Box<dyn CapInvariant>> {
         // quiescence. Needs `SutReadModel`; only a slice booting a real Loro
         // projection supplies it. Fast-path on agreement, so no per-tick cost.
         invariants::view_model_matches_store::wire(),
+        // Needs `SutEngineViews`, which every Loro draw supplies.
+        invariants::engine_views_match_reference::wire(),
         // The row a no-Turso `LoroUiWatcher` session renders carries the
         // edge fields profile conditions read. Needs `SutLoroUiRows`, which
         // every Loro draw supplies.

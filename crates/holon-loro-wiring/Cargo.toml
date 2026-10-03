@@ -33,6 +33,7 @@ holon-loro.workspace = true
 holon-profiles.workspace = true
 holon-sharing.workspace = true
 holon-turso.workspace = true
+holon-views.workspace = true
 # `loro_ui_watcher` and `memory_backend` call tokio::spawn / sync / time on
 # EVERY target, so tokio cannot live only in the non-wasm block below — the
 # wasi worker links this crate. Same wasm-safe set holon-loro declares; the

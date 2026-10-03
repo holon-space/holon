@@ -99,6 +99,9 @@ enum Edit {
     },
     TogglePage(usize),
     DeleteLeaf(usize),
+    /// A leaf of the other source leaves it in one commit and joins this
+    /// source in the next, under the same parent.
+    Adopt(usize),
 }
 
 /// How far a feed covers: `Cut(p)` is `p` percent of the way from the
@@ -127,6 +130,13 @@ impl World {
             .iter()
             .filter(|(_, node)| node.source == source)
             .map(|(n, _)| *n)
+            .collect()
+    }
+
+    fn leaves(&self, source: usize) -> Vec<u32> {
+        self.of(source)
+            .into_iter()
+            .filter(|n| self.nodes.values().all(|c| c.parent != Some(*n)))
             .collect()
     }
 
@@ -181,15 +191,11 @@ impl World {
                 Some(node)
             }
             Edit::DeleteLeaf(i) => {
-                let leaves = self
-                    .of(source)
-                    .into_iter()
-                    .filter(|n| self.nodes.values().all(|c| c.parent != Some(*n)))
-                    .collect();
-                let node = pick(leaves, *i)?;
+                let node = pick(self.leaves(source), *i)?;
                 self.nodes.remove(&node);
                 Some(node)
             }
+            Edit::Adopt(_) => unreachable!("an adoption is two commits"),
         }
     }
 
@@ -197,6 +203,10 @@ impl World {
         self.nodes
             .get(&n)
             .map(|node| snapshot(n, node.parent, node.page))
+    }
+
+    fn snapshot_of(&self, source: usize, n: u32) -> Option<SnapshotBlock> {
+        self.snapshot(n).filter(|_| self.nodes[&n].source == source)
     }
 }
 
@@ -276,9 +286,23 @@ impl Harness {
     }
 
     fn commit(&mut self, source: usize, edit: &Edit) {
+        if let Edit::Adopt(i) = edit {
+            return self.adopt(source, *i);
+        }
         if let Some(n) = self.world.apply(source, edit) {
             self.record(source, n);
         }
+    }
+
+    fn adopt(&mut self, source: usize, i: usize) {
+        let other = 1 - source;
+        let Some(n) = pick(self.world.leaves(other), i) else {
+            return;
+        };
+        let node = self.world.nodes.remove(&n).unwrap();
+        self.record(other, n);
+        self.world.nodes.insert(n, Node { source, ..node });
+        self.record(source, n);
     }
 
     /// Stamps the change of block `n` that `world` already holds.
@@ -317,7 +341,7 @@ impl Harness {
             .map(|(_, n)| n)
             .collect::<BTreeSet<_>>()
             .into_iter()
-            .map(|n| (uri(n), self.states[k].snapshot(n)))
+            .map(|n| (uri(n), self.states[k].snapshot_of(source, n)))
             .collect();
         self.engine.feed(SOURCES[source], self.stamps[k], delta);
         self.settle()
@@ -416,6 +440,7 @@ fn edit() -> impl Strategy<Value = Edit> {
             .prop_map(|(node, parent)| Edit::Move { node, parent }),
         1 => any::<usize>().prop_map(Edit::TogglePage),
         1 => any::<usize>().prop_map(Edit::DeleteLeaf),
+        1 => any::<usize>().prop_map(Edit::Adopt),
     ]
 }
 
@@ -615,6 +640,23 @@ fn a_feed_that_covers_no_commit_waits_behind_its_source() {
     });
 }
 
+/// The joining source is fed before the leaving one, so the engine holds
+/// the block from both until the version that holds both commits.
+#[test]
+fn a_block_that_changes_source_is_retracted_and_inserted_in_one_version() {
+    within_deadline(|| {
+        let mut h = Harness::new();
+        create(&mut h, 0, None);
+        h.feed(0).unwrap();
+        h.commit(1, &Edit::Adopt(0));
+        h.feed(1).unwrap();
+        h.feed(0).unwrap();
+        h.check_released().unwrap();
+        assert_eq!(h.released, h.clock.high_water().get() + 1);
+        assert_eq!(h.world.nodes[&0].source, 1);
+    });
+}
+
 #[test]
 fn each_view_releases_the_rows_of_its_own_plan() {
     within_deadline(|| {
@@ -730,11 +772,12 @@ fn a_panic_keeps_the_clock_fed() {
         let mut h = Harness::with_engine(|clock| ViewEngine::start(clock, raise_on(bus)));
         create(&mut h, 0, None);
         h.feed(0).unwrap();
+        h.world.nodes.get_mut(&0).unwrap().source = 1;
         h.record(1, 0);
         let Err(EngineError::Panicked(message)) = h.feed(1) else {
-            panic!("a block fed by two sources panics the engine thread");
+            panic!("a block live in two sources panics the engine thread");
         };
-        assert!(message.contains("fed by two sources"), "{message}");
+        assert!(message.contains("live in two sources"), "{message}");
         every_stamp_is_fed(&h.clock);
         create(&mut h, 0, None);
         assert_eq!(h.feed(0), Err(EngineError::Panicked(message.clone())));
@@ -792,6 +835,27 @@ fn a_late_subscriber_gets_the_released_state() {
             }
             assert_eq!(&folded, view);
         }
+    });
+}
+
+#[test]
+fn a_snapshot_names_the_released_version_not_the_watermark() {
+    within_deadline(|| {
+        let mut h = Harness::new();
+        create(&mut h, 1, None);
+        create(&mut h, 0, None);
+        create(&mut h, 1, None);
+        h.feed(1).unwrap();
+        h.check_released().unwrap();
+        assert_eq!(h.released, 1, "source 1's batch straddles stamp 2");
+        assert_eq!(h.clock.low_watermark().get(), 2);
+        let (snap, _rx) = h.engine.snapshot_and_subscribe(View::Row).unwrap();
+        assert_eq!(
+            snap.below.get(),
+            h.released,
+            "the snapshot names a version the engine never released"
+        );
+        assert!(snap.deltas.is_empty(), "the snapshot holds unreleased rows");
     });
 }
 

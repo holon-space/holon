@@ -36,6 +36,7 @@ test-infra = [
     "dep:holon-filesystem",
     "dep:holon-kitchen",
     "dep:holon-loro",
+    "dep:holon-views",
     "dep:holon-sharing",
     "dep:holon-api",
     "dep:holon-capability",
@@ -152,6 +153,7 @@ holon-layout-testing = { path = "../holon-layout-testing", optional = true }
 holon-loro-testing = { path = "../holon-loro-testing", optional = true }
 holon-turso-testing = { path = "../holon-turso-testing", optional = true }
 holon-oracles = { workspace = true, optional = true }
+holon-views = { workspace = true, optional = true }
 holon-pbt-core = { path = "../holon-pbt-core", optional = true }
 holon-macros = { workspace = true, optional = true }
 holon-block-roundtrip-testing = { workspace = true, optional = true }

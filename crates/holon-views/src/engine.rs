@@ -74,7 +74,8 @@ pub struct ViewBatch {
 /// The engine thread handles the requests in the order they are posted. Its
 /// first error or panic stops it: the views stay at the last released
 /// version, every snapshot returns the error, and a feed only feeds the
-/// clock, so no watermark waits on a stopped engine.
+/// clock, so no watermark waits on a stopped engine. A panic can leave the
+/// host state half-updated; only the sticky stop keeps it from being released.
 pub struct ViewEngine {
     requests: Sender<Request>,
 }
@@ -222,8 +223,9 @@ struct Host<R: Row> {
     schemas: Vec<Schema>,
     blocks: R::Layout,
     interner: Interner,
-    /// Every fed row, with the source that fed it.
-    current: HashMap<Id, (CommitSource, R)>,
+    /// Every fed row by source. A block that changes source is held by both
+    /// until the leaving source feeds its retraction.
+    current: HashMap<(CommitSource, Id), R>,
     /// The parents in the last released version.
     parents: HashMap<Id, Id>,
     /// Fed batches not yet in a released version, in feed order.
@@ -366,9 +368,9 @@ impl<R: Row> Host<R> {
                 }
                 let gone: Vec<Id> = self
                     .current
-                    .iter()
-                    .filter(|(id, (owner, _))| *owner == source && !fed.contains(id))
-                    .map(|(id, _)| *id)
+                    .keys()
+                    .filter(|(owner, id)| *owner == source && !fed.contains(id))
+                    .map(|(_, id)| *id)
                     .collect();
                 for id in gone {
                     self.set(source, id, None, &mut updates);
@@ -386,16 +388,10 @@ impl<R: Row> Host<R> {
 
     fn set(&mut self, source: CommitSource, id: Id, row: Option<R>, updates: &mut Vec<(R, isize)>) {
         let old = match &row {
-            Some(row) => self.current.insert(id, (source, row.clone())),
-            None => self.current.remove(&id),
+            Some(row) => self.current.insert((source, id), row.clone()),
+            None => self.current.remove(&(source, id)),
         };
-        if let Some((owner, old)) = old {
-            assert_eq!(
-                owner,
-                source,
-                "block {} is fed by two sources",
-                self.interner.uri(id)
-            );
+        if let Some(old) = old {
             updates.push((old, -1));
         }
         if let Some(row) = row {
@@ -434,18 +430,29 @@ impl<R: Row> Host<R> {
             });
         self.buffered = later;
         self.dataflow.advance_to(below.get() - 1);
+        let mut updates = Multiset::new();
+        for (row, diff) in now.into_iter().flat_map(|b| b.updates) {
+            add(&mut updates, row, diff);
+        }
+        // A block that changes source comes in as a retraction from one
+        // source and an insertion from the other, in either feed order.
+        let (retracted, inserted): (Vec<_>, Vec<_>) =
+            updates.into_iter().partition(|(_, diff)| *diff < 0);
         let mut moved = Vec::new();
-        for batch in now {
-            for (row, diff) in batch.updates {
-                let (id, parent) = (self.id(&row, ID), self.id(&row, PARENT));
-                if diff > 0 {
-                    self.parents.insert(id, parent);
-                    moved.push(id);
-                } else {
-                    assert_eq!(self.parents.remove(&id), Some(parent));
-                }
-                self.dataflow.update(BLOCKS, row, diff);
+        for (row, diff) in retracted.into_iter().chain(inserted) {
+            let (id, parent) = (self.id(&row, ID), self.id(&row, PARENT));
+            if diff > 0 {
+                let held = self.parents.insert(id, parent);
+                assert!(
+                    held.is_none(),
+                    "block {} is live in two sources at the version below {below:?}",
+                    self.interner.uri(id)
+                );
+                moved.push(id);
+            } else {
+                assert_eq!(self.parents.remove(&id), Some(parent));
             }
+            self.dataflow.update(BLOCKS, row, diff);
         }
         self.refuse_cycles(moved)?;
         self.dataflow.commit(&mut self.worker)?;

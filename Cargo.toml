@@ -294,6 +294,7 @@ holon-loro = { path = "crates/holon-loro", default-features = false }
 holon-secrets = { path = "crates/holon-secrets" }
 holon-sharing = { path = "crates/holon-sharing" }
 holon-turso = { path = "crates/holon-turso" }
+holon-views = { path = "crates/holon-views" }
 holon-frontend = { path = "crates/holon-frontend" }
 holon-app = { path = "crates/holon-app" }
 holon-macros = { path = "crates/holon-macros" }

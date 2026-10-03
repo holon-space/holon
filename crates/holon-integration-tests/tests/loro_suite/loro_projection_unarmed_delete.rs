@@ -51,6 +51,7 @@ async fn subscribed_projection() -> Result<(
         tempdir.path().to_path_buf(),
     )));
     let sink = Arc::new(MemorySink::new());
+    let (clock, engine) = holon_integration_tests::pbt::engine_views::start_views_engine();
     let projection = LoroProjection::new(
         doc_store.clone(),
         Arc::new(StdMutex::new(Frontiers::default())),
@@ -59,6 +60,8 @@ async fn subscribed_projection() -> Result<(
         tempdir.path().join("sc.sync"),
         holon_api::block_read_model::BlockReadModel::new(),
         Arc::new(holon_api::ConditionBus::new()),
+        clock,
+        engine,
     );
     projection.install_doc_subscriptions().await?;
     Ok((tempdir, doc_store, sink, projection))

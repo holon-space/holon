@@ -53,6 +53,7 @@ impl Fixture {
         let layout = doc_store.read().await.get_doc(DocScope::Layout).await?;
         let sink = Arc::new(MemorySink::new());
         let degraded = Arc::new(holon_api::ConditionBus::new());
+        let (clock, engine) = holon_integration_tests::pbt::engine_views::start_views_engine();
         let projection = Arc::new(LoroProjection::new(
             doc_store.clone(),
             Arc::new(StdMutex::new(Frontiers::default())),
@@ -61,6 +62,8 @@ impl Fixture {
             tempdir.path().join("sidecar").join("sc.sync"),
             holon_api::block_read_model::BlockReadModel::new(),
             degraded.clone(),
+            clock,
+            engine,
         ));
         projection.install_doc_subscriptions().await?;
         projection.arm();

@@ -53,6 +53,7 @@ use holon_pbt_core::capabilities::SutClockAdvance;
 use holon_pbt_core::capabilities::SutDispatchHold;
 use holon_pbt_core::capabilities::SutEditorMirrorRead;
 use holon_pbt_core::capabilities::SutEditorMirrorWrite;
+use holon_pbt_core::capabilities::SutEngineViews;
 use holon_pbt_core::capabilities::SutEntityTypeRegister;
 use holon_pbt_core::capabilities::SutErrorLog;
 use holon_pbt_core::capabilities::SutFocus;
@@ -3492,6 +3493,40 @@ impl SutMatviews for HeadlessFrontendComponent {
     }
 }
 
+/// Registered with `SutReadModel`: the Loro projection that publishes the read
+/// model is the one that feeds the view engine.
+#[async_trait::async_trait(?Send)]
+impl SutEngineViews for HeadlessFrontendComponent {
+    async fn engine_views(&self) -> holon_pbt_core::capabilities::EngineViewsObservation {
+        let engine = self
+            .injector()
+            .try_resolve::<holon_views::engine::ViewEngine>()
+            .expect("this component booted with Loro on, so its projection feeds a view engine");
+        let store = self
+            .loro_doc_store()
+            .expect("this component booted with Loro on, so it has a Loro doc store");
+        let mut blocks = Vec::new();
+        for scope in [holon_loro::DocScope::Global, holon_loro::DocScope::Layout] {
+            let doc = store
+                .get_doc(scope)
+                .await
+                .unwrap_or_else(|e| panic!("the {scope:?} Loro doc: {e}"));
+            let snapshot = doc
+                .with_read(|doc| Ok(holon_loro::snapshot_blocks_from_doc(doc)))
+                .unwrap_or_else(|e| panic!("reading the {scope:?} Loro doc: {e}"));
+            blocks.extend(snapshot.into_values());
+        }
+        let authority = crate::pbt::engine_views::recompute(&blocks)
+            .expect("every block in a Loro doc encodes as a view row");
+        holon_pbt_core::capabilities::EngineViewsObservation {
+            engine: crate::pbt::engine_views::FoldedViews::subscribe(&engine)
+                .map(|folded| crate::pbt::engine_views::view_rows(&folded.states))
+                .map_err(|e| e.to_string()),
+            authority: crate::pbt::engine_views::view_rows(&authority),
+        }
+    }
+}
+
 /// `SutReadModel` — the three-way read for
 /// `inv-view-model-matches-store-at-quiescence` (D172.a). Reads all three
 /// statements of the block set that the CRDT write path produces: the read
@@ -5531,6 +5566,7 @@ impl HeadlessFrontendComponent {
         // agreement and vacuity are indistinguishable in the summary.
         if self.publishes_a_read_model() {
             caps.insert(self.clone() as Arc<dyn SutReadModel>);
+            caps.insert(self.clone() as Arc<dyn SutEngineViews>);
         } else {
             // An ARMED red-vector seam with no read model to break would sail
             // through as a deselect. That is the failure mode the seam exists

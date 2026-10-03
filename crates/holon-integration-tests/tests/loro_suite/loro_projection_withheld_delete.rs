@@ -55,6 +55,7 @@ async fn an_armed_unsettled_pass_owes_the_delete_it_withheld() -> Result<()> {
     doc_store.read().await.get_doc(DocScope::Global).await?;
 
     let sink = Arc::new(MemorySink::new());
+    let (clock, engine) = holon_integration_tests::pbt::engine_views::start_views_engine();
     let projection = LoroProjection::new(
         doc_store.clone(),
         Arc::new(StdMutex::new(Frontiers::default())),
@@ -63,6 +64,8 @@ async fn an_armed_unsettled_pass_owes_the_delete_it_withheld() -> Result<()> {
         tempdir.path().join("sc.sync"),
         holon_api::block_read_model::BlockReadModel::new(),
         Arc::new(holon_api::ConditionBus::new()),
+        clock,
+        engine,
     );
     projection.arm();
 

@@ -94,6 +94,7 @@ impl StubSut {
     async fn start_controller(&mut self) -> Result<()> {
         let command_bus: Arc<dyn OriginTaggedWrites> = self.stub_ops.clone();
         let sink_reader: Arc<dyn holon_loro::SinkReader> = self.stub_ops.clone();
+        let (clock, engine) = crate::pbt::engine_views::start_views_engine();
         let projection = Arc::new(holon_loro::LoroProjection::from_storage(
             self.doc_store.clone(),
             command_bus,
@@ -101,6 +102,8 @@ impl StubSut {
             &self.storage_dir,
             holon_api::block_read_model::BlockReadModel::new(),
             Arc::new(holon_api::ConditionBus::new()),
+            clock,
+            engine,
         )?);
         let controller =
             LoroSyncController::new(projection, Arc::new(holon_api::ConditionBus::new()));

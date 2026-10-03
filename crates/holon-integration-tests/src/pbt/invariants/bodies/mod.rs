@@ -13,6 +13,7 @@ pub mod block_tags_references_exist;
 pub mod boundary_respected;
 pub mod displayed_text;
 pub mod editable_text_has_draggable;
+pub mod engine_views_match_reference;
 pub mod focus_matches_ref;
 pub mod focus_roots;
 pub mod frontend_bounds_rendered;

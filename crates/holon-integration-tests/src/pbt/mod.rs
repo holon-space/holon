@@ -14,6 +14,7 @@ pub mod convergence;
 pub mod copies_model;
 pub mod dense_text;
 pub mod driver_input;
+pub mod engine_views;
 pub mod file_adapter_state;
 pub mod fixtures;
 pub mod frontend_slice;

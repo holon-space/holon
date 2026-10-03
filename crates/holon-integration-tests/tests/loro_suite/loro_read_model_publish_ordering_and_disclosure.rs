@@ -53,6 +53,7 @@ fn projection(
     bus: &Arc<ConditionBus>,
     dir: &std::path::Path,
 ) -> Arc<LoroProjection> {
+    let (clock, engine) = holon_integration_tests::pbt::engine_views::start_views_engine();
     Arc::new(LoroProjection::new(
         doc_store.clone(),
         Arc::new(StdMutex::new(Frontiers::default())),
@@ -61,6 +62,8 @@ fn projection(
         dir.join("sc.sync"),
         holon_api::block_read_model::BlockReadModel::new(),
         bus.clone(),
+        clock,
+        engine,
     ))
 }
 

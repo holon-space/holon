@@ -40,6 +40,7 @@ async fn every_root_delivery_holds_the_doc_write_guard() -> Result<()> {
     let global = doc_store.read().await.get_doc(DocScope::Global).await?;
     let layout = doc_store.read().await.get_doc(DocScope::Layout).await?;
     let sink = Arc::new(MemorySink::new());
+    let (clock, engine) = holon_integration_tests::pbt::engine_views::start_views_engine();
     let projection = Arc::new(LoroProjection::new(
         doc_store.clone(),
         Arc::new(StdMutex::new(Frontiers::default())),
@@ -48,6 +49,8 @@ async fn every_root_delivery_holds_the_doc_write_guard() -> Result<()> {
         tempdir.path().join("sidecar").join("sc.sync"),
         holon_api::block_read_model::BlockReadModel::new(),
         Arc::new(holon_api::ConditionBus::new()),
+        clock,
+        engine,
     ));
     projection.install_doc_subscriptions().await?;
     projection.arm();

@@ -230,6 +230,11 @@ const DOC_ESCAPES: &[(&str, usize)] = &[
         "crates/holon-integration-tests/src/pbt/loro_sync/stub_sut.rs",
         4,
     ),
+    // A writer's subscription that records each commit's stamp.
+    (
+        "crates/holon-integration-tests/tests/loro_suite/loro_engine_versions_equal_the_authority.rs",
+        1,
+    ),
     // Tests planting a mount in the global doc, the way an accept does.
     (
         "crates/holon-integration-tests/tests/loro_suite/loro_projection_share_rows.rs",

@@ -49,10 +49,10 @@ use holon_api::Value;
 use holon_api::block::Block;
 use holon_api::commit_clock::CommitClock;
 use holon_api::commit_clock::CommitSource;
-use holon_api::commit_clock::Stamp;
 use holon_api::lifecycle::SessionShutdown;
 use holon_api::types::ContentType;
 use holon_core::OriginTaggedWrites;
+use holon_views::engine::ViewEngine;
 use loro::Frontiers;
 use tokio::sync::Notify;
 use tokio::sync::RwLock;
@@ -785,9 +785,13 @@ pub struct LoroProjection {
     /// share's own projection, so the full walk leaves exactly those rows
     /// alone. `None`: no share machinery, so every row is this walk's.
     shared_trees: Option<Arc<dyn crate::shared_tree::SharedTreeStore>>,
-    /// Minted by the doc subscriptions under the doc's write guard; fed when a
-    /// pass hands a doc's commits to the read model.
+    /// Minted by the doc subscriptions under the doc's write guard; fed only by
+    /// `views_engine`.
     commit_clock: Arc<CommitClock>,
+    /// Gets each doc's rows read under the same guard as their cover.
+    views_engine: Arc<ViewEngine>,
+    #[cfg(any(test, feature = "test-helpers"))]
+    read_seam: StdMutex<Option<Arc<dyn Fn(CommitSource) + Send + Sync>>>,
 }
 
 impl LoroProjection {
@@ -799,6 +803,8 @@ impl LoroProjection {
         sidecar_path: PathBuf,
         read_model: Arc<holon_api::block_read_model::BlockReadModel>,
         degraded: Arc<holon_api::condition_bus::ConditionBus>,
+        commit_clock: Arc<CommitClock>,
+        views_engine: Arc<ViewEngine>,
     ) -> Self {
         // A `LoroProjection` exists only in the Loro-present config (it IS the
         // Loro→SQL projection), so the consolidator is pinned to Loro.
@@ -828,7 +834,10 @@ impl LoroProjection {
             read_model,
             degraded,
             shared_trees: None,
-            commit_clock: Arc::new(CommitClock::new()),
+            commit_clock,
+            views_engine,
+            #[cfg(any(test, feature = "test-helpers"))]
+            read_seam: StdMutex::new(None),
         }
     }
 
@@ -910,6 +919,9 @@ impl LoroProjection {
                 }
                 wake.notify_one();
             })));
+            // Stamps the rows the doc held before this subscription, such as a
+            // doc loaded from disk: the engine releases a feed only at a stamp.
+            self.commit_clock.mint(source);
         }
         Ok(())
     }
@@ -994,6 +1006,13 @@ impl LoroProjection {
         self.live.lock().unwrap().clone()
     }
 
+    /// Runs `seam` in every incremental read, after the cover is taken and
+    /// before the rows are read, so a test can commit at that point.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn set_read_seam(&self, seam: Arc<dyn Fn(CommitSource) + Send + Sync>) {
+        *self.read_seam.lock().unwrap() = Some(seam);
+    }
+
     /// Test-only view of the synced watermark.
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn last_synced_value(&self) -> Frontiers {
@@ -1019,6 +1038,8 @@ impl LoroProjection {
         storage_dir: &std::path::Path,
         read_model: Arc<holon_api::block_read_model::BlockReadModel>,
         degraded: Arc<holon_api::condition_bus::ConditionBus>,
+        commit_clock: Arc<CommitClock>,
+        views_engine: Arc<ViewEngine>,
     ) -> Result<Self> {
         let sidecar_path = storage_dir.join(SIDECAR_FILENAME);
         let loaded = load_sidecar_blocking(&sidecar_path)?;
@@ -1034,6 +1055,8 @@ impl LoroProjection {
                 sidecar_path,
                 read_model,
                 degraded,
+                commit_clock,
+                views_engine,
             )
         })
     }
@@ -1104,47 +1127,30 @@ impl LoroProjection {
         if seeded {
             // Drain the WHOLE queue first — never early-return while facts are
             // pending (that would silently drop a committed change).
-            let (pending, cover) = self.drain(&collab, &self.pending)?;
-            let (layout_pending, layout_cover) = self.drain(&layout, &self.layout_pending)?;
-            let feed = || {
-                self.commit_clock
-                    .feed_through(CommitSource::LoroGlobal, cover)?;
-                self.commit_clock
-                    .feed_through(CommitSource::LoroLayout, layout_cover)
-            };
+            let (global_facts, mut changed, mut settled) =
+                self.read_incremental(&collab, &self.pending, CommitSource::LoroGlobal)?;
+            let (layout_facts, layout_changed, layout_settled) =
+                self.read_incremental(&layout, &self.layout_pending, CommitSource::LoroLayout)?;
 
             // Idle wake: no facts and NEITHER oplog has moved — nothing to do.
-            if pending.is_empty()
-                && layout_pending.is_empty()
+            if global_facts == 0
+                && layout_facts == 0
                 && last == current
                 && layout_last == layout_current
             {
-                feed()?;
                 return Ok(ProjectionPass::Converged);
             }
 
             // Take the O(changed) path only for a bounded, event-supplied batch.
             // An empty queue with a moved frontier (pre-subscription boot window,
             // a filtered Checkout event, or a reseed-race) or an oversized batch
-            // (cold org-scan / bulk import — one snapshot beats draining thousands
-            // of facts + re-reading each node) routes to the full reseed below.
+            // (cold org-scan / bulk import — one snapshot beats diffing thousands
+            // of rows against `live`) routes to the full reseed below.
             // Both routes are checkout-free, so neither can reintroduce the race.
             let live_len = self.live.lock().unwrap().len();
-            let facts = pending.len() + layout_pending.len();
+            let facts = global_facts + layout_facts;
             let take_incremental = facts > 0 && facts <= INCREMENTAL_BATCH_MAX.max(live_len);
             if take_incremental {
-                let (mut changed, mut settled) = collab.with_read(|doc| {
-                    let mut tid_index = self.tid_index.lock().unwrap();
-                    crate::loro_backend::incremental_block_changes(doc, &pending, &mut tid_index)
-                })?;
-                let (layout_changed, layout_settled) = layout.with_read(|doc| {
-                    let mut tid_index = self.tid_index.lock().unwrap();
-                    crate::loro_backend::incremental_block_changes(
-                        doc,
-                        &layout_pending,
-                        &mut tid_index,
-                    )
-                })?;
                 changed.extend(layout_changed);
                 settled &= layout_settled;
                 if settled {
@@ -1252,7 +1258,6 @@ impl LoroProjection {
                     // authority, so `staging` is already true; the reseed that
                     // follows re-publishes an atomic snapshot over it.
                     self.read_model.publish_delta(&staging);
-                    feed()?;
                     if has_unarmed_delete {
                         // The unarmed delete gate lives on the full walk, which
                         // withholds deletes and reports the pass complete
@@ -1337,7 +1342,7 @@ impl LoroProjection {
             } else {
                 // Not a bounded incremental batch: empty queue with a moved
                 // frontier, or an oversized batch (cold org-scan / bulk import).
-                full_reason = Some(if pending.is_empty() {
+                full_reason = Some(if facts == 0 {
                     FullReason::EmptyPendingMovedFrontier
                 } else {
                     FullReason::Oversized
@@ -1363,18 +1368,10 @@ impl LoroProjection {
         // `block_raw` → Loro and re-establishes `live == block_raw` on success.
         // This path is not steady-state (cold boot / unsettled / orphan / oversized
         // bootstrap), so the extra sink read is not on the hot path.
-        let ((mut after, mut after_settled), cover) = collab.with_read(|doc| {
-            Ok((
-                snapshot_blocks_from_doc_settled(doc),
-                self.commit_clock.high_water(),
-            ))
-        })?;
-        let ((layout_after, layout_settled), layout_cover) = layout.with_read(|doc| {
-            Ok((
-                snapshot_blocks_from_doc_settled(doc),
-                self.commit_clock.high_water(),
-            ))
-        })?;
+        let (mut after, mut after_settled) =
+            self.read_full(&collab, &self.pending, CommitSource::LoroGlobal)?;
+        let (layout_after, layout_settled) =
+            self.read_full(&layout, &self.layout_pending, CommitSource::LoroLayout)?;
         after_settled &= layout_settled;
         for (id, snap) in layout_after {
             // The two docs partition the block set. An id in both is an
@@ -1539,18 +1536,8 @@ impl LoroProjection {
             // through empty, blanking the surface mid-reseed (Reactivity.md
             // corollary 3).
             self.read_model.publish_snapshot(&after);
-            self.commit_clock
-                .feed_through(CommitSource::LoroGlobal, cover)?;
-            self.commit_clock
-                .feed_through(CommitSource::LoroLayout, layout_cover)?;
             *self.live.lock().unwrap() = after;
             self.seeded.store(true, Ordering::SeqCst);
-            // This full snapshot captured everything up to `current`, so any facts
-            // accumulated before/during it are now stale — drop them so the next
-            // incremental pass starts clean (bounds the queue during the pre-arm
-            // boot window and after every reseed).
-            self.pending.lock().unwrap().clear();
-            self.layout_pending.lock().unwrap().clear();
         }
 
         // A pass that withheld FK-ungrounded ops did NOT converge the sink: the
@@ -1560,20 +1547,65 @@ impl LoroProjection {
         Ok(pass_outcome(ungrounded, after_settled))
     }
 
-    /// Take `doc`'s queued facts and the clock's high water under the doc's
-    /// read guard. No commit of the doc runs meanwhile, so the facts are
-    /// exactly its commits stamped up to that high water.
-    fn drain(
+    /// Takes `doc`'s queued facts, the clock's high water and the rows the
+    /// facts name, all under ONE read guard of the doc: no commit of the doc
+    /// runs meanwhile, so the rows are exactly the doc after its commits
+    /// stamped up to that high water. A settled read is fed to the engine at
+    /// that cover; an unsettled one leaves its stamps to the full walk.
+    /// Returns the number of facts taken, the changed rows, and whether the
+    /// read is settled.
+    fn read_incremental(
         &self,
         doc: &LoroDocument,
         queue: &StdMutex<Vec<crate::loro_backend::PendingChange>>,
-    ) -> Result<(Vec<crate::loro_backend::PendingChange>, Stamp)> {
-        doc.with_read(|_| {
+        source: CommitSource,
+    ) -> Result<(usize, HashMap<String, Option<SnapshotBlock>>, bool)> {
+        let (facts, cover, (changed, settled)) = doc.with_read(|doc| {
+            let facts = std::mem::take(&mut *queue.lock().unwrap());
+            let cover = self.commit_clock.high_water();
+            #[cfg(any(test, feature = "test-helpers"))]
+            if let Some(seam) = self.read_seam.lock().unwrap().clone() {
+                seam(source);
+            }
+            let mut tid_index = self.tid_index.lock().unwrap();
+            let read = crate::loro_backend::incremental_block_changes(doc, &facts, &mut tid_index)?;
+            Ok((facts.len(), cover, read))
+        })?;
+        if settled {
+            let delta = changed
+                .iter()
+                .map(|(id, row)| {
+                    let id = holon_api::EntityUri::parse(id)
+                        .with_context(|| format!("{source:?} block id {id:?} is not a URI"))?;
+                    Ok((id, row.clone()))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            self.views_engine.feed(source, cover, delta);
+        }
+        Ok((facts, changed, settled))
+    }
+
+    /// The full-walk counterpart of [`Self::read_incremental`]: the doc's
+    /// whole block set under the same guard as its cover. The taken facts
+    /// are covered by the snapshot.
+    fn read_full(
+        &self,
+        doc: &LoroDocument,
+        queue: &StdMutex<Vec<crate::loro_backend::PendingChange>>,
+        source: CommitSource,
+    ) -> Result<(HashMap<String, SnapshotBlock>, bool)> {
+        let (cover, (blocks, settled)) = doc.with_read(|doc| {
+            queue.lock().unwrap().clear();
             Ok((
-                std::mem::take(&mut *queue.lock().unwrap()),
                 self.commit_clock.high_water(),
+                snapshot_blocks_from_doc_settled(doc),
             ))
-        })
+        })?;
+        if settled {
+            self.views_engine
+                .replace(source, cover, blocks.values().cloned().collect());
+        }
+        Ok((blocks, settled))
     }
 
     /// A failed sink write leaves the SQL index behind the Loro authority.

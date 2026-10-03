@@ -21,6 +21,7 @@ use fluxdi::Shared;
 use holon::core::SqlOperationProvider;
 use holon::storage::BLOCK_WRITE_TABLE;
 use holon::storage::schema_module::SchemaModule;
+use holon_api::commit_clock::CommitClock;
 use holon_core::OriginTaggedWrites;
 use holon_core::block_ordering::BlockOrdering;
 use holon_loro::DocScope;
@@ -30,6 +31,8 @@ use holon_loro::LoroDocumentStore;
 use holon_loro::LoroSyncController;
 use holon_loro::LoroSyncControllerHandle;
 use holon_turso::schema_modules::BlockSchemaModule;
+use holon_views::engine::ViewEngine;
+use holon_views::engine::raise_on;
 use tokio::sync::RwLock;
 use tracing::error;
 use tracing::info;
@@ -228,6 +231,13 @@ impl Module for LoroModule {
         // sidecar (last session's frontier); Loro's persisted snapshot is the
         // startup source of truth, so the diff is bounded to this session's
         // changes.
+        injector.provide::<CommitClock>(Provider::root(|_| Shared::new(CommitClock::new())));
+        injector.provide::<ViewEngine>(Provider::root(|resolver| {
+            let clock = resolver.resolve::<CommitClock>();
+            let bus = resolver.resolve::<Arc<holon_api::ConditionBus>>();
+            Shared::new(ViewEngine::start(clock, raise_on((*bus).clone())))
+        }));
+
         injector.provide::<holon_loro::loro_sync_controller::LoroProjection>(Provider::root_async(
             |resolver| async move {
                 let config = resolver.resolve::<LoroConfig>();
@@ -248,6 +258,8 @@ impl Module for LoroModule {
                     &config.storage_dir,
                     (*read_model).clone(),
                     (*degraded).clone(),
+                    resolver.resolve::<CommitClock>(),
+                    resolver.resolve::<ViewEngine>(),
                 )
                 .unwrap_or_else(|e| panic!("[LoroModule] build the Loro projection: {e:#}"));
                 #[cfg(all(

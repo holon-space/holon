@@ -186,6 +186,27 @@ pub trait SutReadModel {
     async fn read_model_triple(&self) -> ReadModelObservation;
 }
 
+/// One view's rows as `"{row:?} x{count}"`, sorted, keyed by the view's name.
+pub type ViewRows = Vec<(String, Vec<String>)>;
+
+/// SUT-side differential observation for
+/// `inv-engine-views-match-reference-at-quiescence`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EngineViewsObservation {
+    /// Every view at the version the engine released last, or the error that
+    /// stopped the engine.
+    pub engine: Result<ViewRows, String>,
+    /// The same views recomputed by the batch backend from the SUT's Loro
+    /// docs as they are now.
+    pub authority: ViewRows,
+}
+
+#[holon_macros::capmap_adapter]
+pub trait SutEngineViews {
+    /// Present exactly where a Loro projection feeds a view engine.
+    async fn engine_views(&self) -> EngineViewsObservation;
+}
+
 // ─── Reference-side: BlockTree ────────────────────────────────────────
 
 /// Read-side block-tree queries used by Phase 5 T0 transitions and their
