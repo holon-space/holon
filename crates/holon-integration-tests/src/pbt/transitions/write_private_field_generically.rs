@@ -1,6 +1,6 @@
 //! Transition: write a block's `parent_id` or `sort_key` through a generic
-//! write path (`set_field`, `update`, MCP `execute_operation`, a recognized
-//! re-create) instead of through its placement owner.
+//! write path (`set_field`, `update`, MCP `execute_operation`) instead of
+//! through its placement owner.
 //!
 //! @pbt rung dispatch
 //!   `attempt_private_field_write` dispatches at the production operation
@@ -43,18 +43,16 @@ fn movable<R: RefBlockTree>(state: &R, id: &EntityUri) -> bool {
     state.is_text_block(id) && !state.is_page_block(id) && !state.is_layout_block(id)
 }
 
-/// The block-CRUD authority registers `update` and the re-create only in
-/// SqlOnly mode.
+/// The block-CRUD authority registers `update` only in SqlOnly mode.
 fn dispatchable<R: RefLifecycle>(state: &R, via: GenericWrite) -> bool {
     matches!(via, GenericWrite::SetField | GenericWrite::McpSetField) || !state.enable_loro()
 }
 
-const VIAS: [GenericWrite; 5] = [
+const VIAS: [GenericWrite; 4] = [
     GenericWrite::SetField,
     GenericWrite::Update,
     GenericWrite::McpSetField,
     GenericWrite::McpUpdate,
-    GenericWrite::CreateRecreate,
 ];
 
 impl<R: RefLifecycle + RefBlockTree + RefLayout> TransitionFactory<R>
@@ -159,11 +157,7 @@ crate::cap_transition! {
     WritePrivateFieldGenerically: SutPrivateFieldWriteAttempt,
     where R: [ RefLifecycle + RefBlockTree + RefLayout ],
     |me, state, sut| {
-        let title = state
-            .block_content(&me.id)
-            .unwrap_or_else(|| panic!("movable block {} has no content in the reference", me.id))
-            .to_string();
-        sut.attempt_private_field_write(&me.id, &title, me.field, me.via, &me.value)
+        sut.attempt_private_field_write(&me.id, me.field, me.via, &me.value)
             .await;
     }
     sql_budget: |_me, _state| {

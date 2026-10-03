@@ -8023,7 +8023,6 @@ impl holon_pbt_core::capabilities::SutPrivateFieldWriteAttempt for HeadlessFront
     async fn attempt_private_field_write(
         &self,
         id: &holon_api::EntityUri,
-        title: &str,
         field: holon_pbt_core::capabilities::PrivateFieldName,
         via: holon_pbt_core::capabilities::GenericWrite,
         value: &str,
@@ -8033,7 +8032,6 @@ impl holon_pbt_core::capabilities::SutPrivateFieldWriteAttempt for HeadlessFront
         let set_field =
             serde_json::json!({ "id": id.to_string(), "field": column, "value": value });
         let update = serde_json::json!({ "id": id.to_string(), column: value });
-        let recreate = serde_json::json!({ "id": id.to_string(), "content": title, column: value });
         let what = format!("{via:?} of {column} = {value:?} on {id}");
         let dispatch = |op: &'static str, params: serde_json::Value| async move {
             let params: holon_api::StorageEntity = params
@@ -8073,22 +8071,28 @@ impl holon_pbt_core::capabilities::SutPrivateFieldWriteAttempt for HeadlessFront
                 GenericWrite::Update => dispatch("update", update).await,
                 GenericWrite::McpSetField => mcp("set_field", set_field).await,
                 GenericWrite::McpUpdate => mcp("update", update).await,
-                GenericWrite::CreateRecreate => dispatch("create", recreate).await,
             }
         })
         .await;
+        let route = match holon_api::schema::BLOCK.field(column).map(|f| f.intent) {
+            Some(holon_api::schema::FieldIntent::Private(private)) => private.route,
+            other => panic!("block.{column} is not declared private: {other:?}"),
+        };
+        let expected = holon_api::BlockWriteFieldError::Private {
+            field: column.to_string(),
+            route,
+        }
+        .to_string();
         let message = outcome.unwrap_or_else(|accepted| {
             panic!(
-                "[private field] {what}: {accepted}; only move_block may write {column}.\n \
-                 expected a refusal naming {column} as private and move_block as its route"
+                "[private field] {what}: {accepted}; only {route} may write {column}.\n \
+                 expected: {expected}"
             )
         });
         assert!(
-            message.contains(column)
-                && message.contains("private")
-                && message.contains("move_block"),
-            "[private field] {what} was refused for the wrong reason.\n expected a refusal \
-             naming {column} as private and move_block as its route\n got: {message}"
+            message.contains(&expected),
+            "[private field] {what} was refused for the wrong reason.\n expected: \
+             {expected}\n got: {message}"
         );
     }
 }

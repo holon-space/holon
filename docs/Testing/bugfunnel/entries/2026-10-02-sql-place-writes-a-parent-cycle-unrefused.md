@@ -60,3 +60,9 @@ and `place-under-own-descendant-refused-on-loro`. Red before: SQL hung inside
 the placement's COMMIT (see
 `2026-10-02-stored-parent-cycle-spins-turso-ivm-commit-forever`); Loro was
 refused with the untyped internal error. Green after on both.
+
+`set_field(parent_id)` is no longer a reparent route: `parent_id` is a private
+field (Model.md invariant 16, ruling D33.e), so the intent boundary refuses it
+with `BlockWriteFieldError::Private` and a move goes through `move_block`
+only. `OrderedBlockCrud`'s `parent_id` arm is still in the tree but no
+dispatched intent reaches it.

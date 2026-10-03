@@ -545,7 +545,6 @@ impl StepField for crate::capabilities::GenericWrite {
             GenericWrite::Update => "update",
             GenericWrite::McpSetField => "mcp_set_field",
             GenericWrite::McpUpdate => "mcp_update",
-            GenericWrite::CreateRecreate => "create_recreate",
         }
         .to_string()
     }
@@ -556,7 +555,6 @@ impl StepField for crate::capabilities::GenericWrite {
             "update" => Ok(GenericWrite::Update),
             "mcp_set_field" => Ok(GenericWrite::McpSetField),
             "mcp_update" => Ok(GenericWrite::McpUpdate),
-            "create_recreate" => Ok(GenericWrite::CreateRecreate),
             other => Err(format!("unknown generic write path: {other:?}")),
         }
     }
@@ -567,7 +565,6 @@ impl StepField for crate::capabilities::GenericWrite {
             GenericWrite::Update,
             GenericWrite::McpSetField,
             GenericWrite::McpUpdate,
-            GenericWrite::CreateRecreate,
         ]
     }
 }

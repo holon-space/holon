@@ -20,7 +20,7 @@ Holon has two complementary write surfaces. The cut between them is principled, 
 
 **Cells bypass the dispatcher.** Inside a chord op (which is itself a dispatched operation), nesting another `OperationDispatcher::execute_operation` would double-log to `OperationLog`, duplicate the trace span, and fork the undo stack. Cells call typed methods directly — same `event_bus.emit` / origin tagging, no re-entry.
 
-**`set_field` as a reflective op stays.** Cells replace the `set_field` *call site* for trivial chord-op writes; the reflective op surface remains for MCP / GraphQL / dynamic dispatch / third-party integrations. The two paths converge at the typed `CrudOperations::set_field` method.
+**`set_field` as a reflective op stays.** Cells replace the `set_field` *call site* for trivial chord-op writes; the reflective op surface remains for MCP / GraphQL / dynamic dispatch / third-party integrations. The two paths converge at the typed `CrudOperations::set_field` method. Neither reaches a private field (see [Private fields](#private-fields)).
 
 See [Storage](Storage.md) for the cell registry / backing details and [Sync](Sync.md) for the authority + projection model.
 
@@ -491,11 +491,41 @@ where
 { ... }
 ```
 
+### Private fields
+
+A private field carries an invariant that spans many rows, so a one-row
+generic write cannot keep it. Block's private fields are `parent_id` (the
+tree has no cycle) and `sort_key` (each sibling set is ordered); Model.md
+invariant 16.
+
+- **Declaration.** `holon_pattern::schema::BLOCK` marks the field
+  `FieldIntent::Private(PrivateField { route })`. `route` is the op the
+  refusal names: `move_block { id, parent_id, after_block_id }`.
+  `EntitySchema::private_fields()` lists them.
+- **Ownership** is the `#[emits]` arc. The ops that place a block
+  (`move_block`, `split_block`, `join_block`, `create`, `delete`) declare
+  that they write the field; `set_field` declares it `excluded("…", "private: placement
+  owns it")`. `crates/holon-core/tests/private_field_owners.rs` locks both
+  sides.
+- **Refusal at the intent boundary.** `BlockWriteField::parse` refuses a
+  private field with `BlockWriteFieldError::Private { field, route }`, so a
+  `set_field` is refused in `OperationDispatcher` and in
+  `LoroBlockOperations::execute_operation`, in both modes. The dispatcher
+  refuses a block `update` whose params name a private field with the same
+  error. MCP `execute_operation` passes through the dispatcher and gets the
+  same refusal. `OperationIntent::set_field` asserts it at construction.
+- **Not yet refused in the store.** `SqlOperationProvider`'s `update` /
+  `set_field` arms, batch `update`, and a recognized re-create (`create` of an
+  existing id) still write the columns for an internal caller. The ingest,
+  the Loro→SQL projection and `place_all` rely on that.
+
 ### Method Attributes
 
 **`#[affects("field1", "field2")]`**
 
-Declares which database fields an operation modifies. Used for:
+Declares which database fields an operation modifies, for UI reactivity. It is
+not checked against what the op writes; the machine-checked statement of an
+op's writes, and so of who owns a private field, is `#[emits]`. Used for:
 - UI reactivity (only re-render affected widgets)
 - Conflict detection
 - Audit logging

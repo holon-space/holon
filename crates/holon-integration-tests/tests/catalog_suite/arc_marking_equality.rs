@@ -185,17 +185,17 @@ fn the_snapshot_diff_observes_the_expected_place_per_variant() {
     );
 }
 
-/// The exclusion mechanism is real: `set_field` declares the order keys
-/// EXCLUDED, and an excluded place is NOT a declared write. If exclusions
-/// leaked into `written_places` the law above would accept a write the
-/// ordering authority alone is allowed to make.
+/// The exclusion mechanism is real: `set_field` declares the private
+/// placement fields and the positional anchor EXCLUDED, and an excluded place
+/// is NOT a declared write. If exclusions leaked into `written_places` the law
+/// above would accept a write the placement authority alone is allowed to make.
 #[test]
-fn excluded_order_keys_are_not_declared_writes() {
+fn excluded_placement_fields_are_not_declared_writes() {
     let declared = set_field_written_places();
-    for order_key in ["block.sort_key", "block.after_block_id"] {
+    for place in ["block.parent_id", "block.sort_key", "block.after_block_id"] {
         assert!(
-            !declared.contains(&order_key.to_string()),
-            "{order_key} is declared EXCLUDED (Model.md invariant 3) and must not \
+            !declared.contains(&place.to_string()),
+            "{place} is declared EXCLUDED (Model.md invariants 3 and 16) and must not \
              appear as a write: {declared:?}"
         );
     }
@@ -225,9 +225,10 @@ fn excluded_order_keys_are_not_declared_writes() {
     assert_eq!(
         excluded,
         vec![
+            "block.parent_id".to_string(),
             "block.sort_key".to_string(),
             "block.after_block_id".to_string()
         ],
-        "both order keys are declared EXCLUDED, each with its reason"
+        "the placement fields are declared EXCLUDED, each with its reason"
     );
 }

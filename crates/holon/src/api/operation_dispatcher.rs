@@ -1067,11 +1067,12 @@ impl OperationDispatcher {
                     &params,
                 )?;
 
-                // Intent boundary (Model.md invariant 3): parse the field of a
-                // block `set_field` intent into the closed `BlockWriteField`
-                // vocabulary. Order keys (`sort_key`) and storage-internal
-                // fields are a loud Err here, in EVERY mode — they are minted /
-                // written by the storage layer, never carried by intent. The
+                // Intent boundary (Model.md invariants 3 and 16): parse the
+                // field of a block `set_field` intent into the closed
+                // `BlockWriteField` vocabulary, and refuse a block `update`
+                // that names a private field. Private fields, order keys and
+                // storage-internal fields are a loud Err here, in EVERY mode —
+                // their owners write them, never a generic intent. The
                 // ordering authority's own writes don't pass through the
                 // dispatcher (they call the SQL provider / CRUD seam directly),
                 // so this rejects exactly the smuggling path.
@@ -1083,6 +1084,19 @@ impl OperationDispatcher {
                         .ok_or("block set_field: missing 'field' parameter")?;
                     holon_api::BlockWriteField::parse(field)
                         .map_err(|e| format!("intent boundary: {e}"))?;
+                }
+                if resolved_entity_name == "block" && op_name == "update" {
+                    if let Some((field, private)) = holon_api::schema::BLOCK
+                        .private_fields()
+                        .into_iter()
+                        .find(|(field, _)| params.contains_key(*field))
+                    {
+                        let refusal = holon_api::BlockWriteFieldError::Private {
+                            field: field.to_string(),
+                            route: private.route,
+                        };
+                        return Err(format!("intent boundary: {refusal}").into());
+                    }
                 }
 
                 // Adopt inline org markup a human or agent JUST AUTHORED — the one
@@ -2268,27 +2282,62 @@ mod tests {
         });
         let dispatcher = OperationDispatcher::new(vec![crud]);
 
-        for order_key_field in ["sort_key", "after_block_id"] {
-            let mut params = StorageEntity::new();
-            params.insert("id".into(), holon_api::Value::String("block:a".into()));
-            params.insert(
-                "field".into(),
-                holon_api::Value::String(order_key_field.into()),
-            );
-            params.insert("value".into(), holon_api::Value::String("A5".into()));
-            let err = dispatcher
-                .execute_operation(&EntityName::new("block"), "set_field", params)
-                .await
-                .expect_err("set_field over an order key must be rejected at the boundary");
-            let msg = err.to_string();
-            assert!(
-                msg.contains("order key"),
-                "rejection must name the invariant, got: {msg}"
-            );
-            assert!(
-                msg.contains(order_key_field),
-                "rejection must name the offending field, got: {msg}"
-            );
+        let mut params = StorageEntity::new();
+        params.insert("id".into(), holon_api::Value::String("block:a".into()));
+        params.insert(
+            "field".into(),
+            holon_api::Value::String("after_block_id".into()),
+        );
+        params.insert("value".into(), holon_api::Value::String("block:b".into()));
+        let err = dispatcher
+            .execute_operation(&EntityName::new("block"), "set_field", params)
+            .await
+            .expect_err("set_field over an order key must be rejected at the boundary");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("order key") && msg.contains("after_block_id"),
+            "rejection must name the invariant and the offending field, got: {msg}"
+        );
+    }
+
+    /// Model.md invariant 16 at the intent boundary: neither generic write
+    /// reaches a private field, whatever the mode or the provider.
+    #[tokio::test]
+    async fn block_generic_writes_reject_private_fields_at_intent_boundary() {
+        let crud = Arc::new(MockProvider {
+            entity_name: "block".to_string(),
+            operations_list: vec![
+                create_test_operation("block", "set_field"),
+                create_test_operation("block", "update"),
+            ],
+        });
+        let dispatcher = OperationDispatcher::new(vec![crud]);
+
+        for (field, private) in holon_api::schema::BLOCK.private_fields() {
+            let expected = holon_api::BlockWriteFieldError::Private {
+                field: field.to_string(),
+                route: private.route,
+            }
+            .to_string();
+
+            let mut set_field = StorageEntity::new();
+            set_field.insert("id".into(), holon_api::Value::String("block:a".into()));
+            set_field.insert("field".into(), holon_api::Value::String(field.into()));
+            set_field.insert("value".into(), holon_api::Value::String("block:b".into()));
+            let mut update = StorageEntity::new();
+            update.insert("id".into(), holon_api::Value::String("block:a".into()));
+            update.insert(field.into(), holon_api::Value::String("block:b".into()));
+
+            for (op, params) in [("set_field", set_field), ("update", update)] {
+                let err = dispatcher
+                    .execute_operation(&EntityName::new("block"), op, params)
+                    .await
+                    .expect_err("a generic write of a private field must be refused");
+                assert!(
+                    err.to_string().contains(&expected),
+                    "{op} of {field}: expected {expected:?}, got: {err}"
+                );
+            }
         }
     }
 

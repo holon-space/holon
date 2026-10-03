@@ -622,9 +622,10 @@ where
     #[holon_macros::emits("block.source_language", "block.source_name")]
     #[holon_macros::emits("block.marks", "block.collapsed", "block.widget_only")]
     #[holon_macros::emits("block.completed", "block.block_type", "block.properties")]
-    #[holon_macros::emits("block.tags", "block.task_state", "block.parent_id")]
+    #[holon_macros::emits("block.tags", "block.task_state")]
     #[holon_macros::emits("block.requires", "block.advice_suppressed")]
-    #[holon_macros::emits(excluded("block.sort_key", "the ordering authority mints order keys"))]
+    #[holon_macros::emits(excluded("block.parent_id", "private: placement owns it"))]
+    #[holon_macros::emits(excluded("block.sort_key", "private: placement owns it"))]
     #[holon_macros::emits(excluded("block.after_block_id", "a positional anchor, not a column"))]
     #[holon_macros::marking_delta(
         block(structural = relocates, text = produces, existence = reads),

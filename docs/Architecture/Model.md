@@ -78,17 +78,18 @@ for any field is: op-fidelity (store) → base-limited 3-way (transient) → LWW
 
 ## Invariants
 
-(1)–(7) are [Replication §9](Replication.md); (8)–(14) extend them.
+(1)–(7) are [Replication §9](Replication.md); (8)–(16) extend them.
 
 1. One base per replica, diffed against — never against the cache.
 2. One consolidator per sibling-set owns order; sinks store its fi verbatim.
 3. Intent carries `after_sibling`, never an order key — enforced at the
    intent boundary by the closed `BlockWriteField` vocabulary
    (`holon-api::block_write_field`): a block `set_field` over
-   `sort_key`/`after_block_id` is a loud `Err` in `OperationDispatcher`
-   and in `LoroBlockOperations::execute_operation`, in both modes; the
-   frontend intent constructor (`OperationIntent::set_field`) asserts the
-   same. Reorders dispatch `move_block { id, parent_id, after_block_id }`.
+   `after_block_id` is a loud `Err` in `OperationDispatcher` and in
+   `LoroBlockOperations::execute_operation`, in both modes, and `sort_key`
+   is refused there as a private field (invariant 16); the frontend intent
+   constructor (`OperationIntent::set_field`) asserts the same. Reorders
+   dispatch `move_block { id, parent_id, after_block_id }`.
    The same vocabulary refuses a whole-bag `set_field("properties")`:
    the bag carries its values as ONE serialized string, so no per-property
    kind travels with it and the write could only replace the bag while
@@ -232,6 +233,20 @@ for any field is: op-fidelity (store) → base-limited 3-way (transient) → LWW
     licenses skipping the assert. Telling the UI which transitions are
     *enabled* is a separate seam (D149), not this one. Pinned by
     `set_field_missing_subject_test.rs`.
+16. **A private field changes only through its owner.** A field whose
+    invariant spans many rows is declared `FieldIntent::Private` in
+    `holon_pattern::schema::BLOCK`, with the op to use; today these are
+    `parent_id` and `sort_key` (no parent cycle, ordered sibling keys), owned
+    by `move_block` and the placement authority. The owning ops declare the
+    field in their `#[emits]`; `set_field` declares it excluded
+    (`crates/holon-core/tests/private_field_owners.rs`). A generic write is
+    refused at the intent boundary with `BlockWriteFieldError::Private`,
+    naming the field and the route: `set_field` by the `BlockWriteField`
+    parse (dispatcher and Loro), a block `update` by the dispatcher. The
+    store layer does not refuse yet: internal callers of
+    `SqlOperationProvider` (ingest, the Loro→SQL projection,
+    `place_all`) still write the columns directly
+    (`2026-10-02-stored-parent-cycle-spins-turso-ivm-commit-forever`).
 
 ## Conditions: how a degradation reaches the user (ADR 0035)
 

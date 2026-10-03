@@ -616,7 +616,7 @@ async fn two_overlapping_watches_each_receive_only_their_own_subtree() -> Result
     let mut move_params: holon_api::StorageEntity = HashMap::new();
     move_params.insert("id".into(), Value::String("block:mover".to_string()));
     move_params.insert("parent_id".into(), Value::String("block:right".to_string()));
-    ctx.execute_op("block", "update", move_params).await?;
+    ctx.execute_op("block", "move_block", move_params).await?;
 
     let (left_after, left_gone) = drain(&mut left, Duration::from_secs(10)).await;
     let (right_after, _) = drain(&mut right, Duration::from_secs(10)).await;

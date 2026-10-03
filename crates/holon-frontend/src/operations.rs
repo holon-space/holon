@@ -7,6 +7,7 @@ use holon_api::render_eval::eval_to_value;
 use holon_api::render_types::OperationDescriptor;
 use holon_api::render_types::OperationWiring;
 use holon_api::render_types::RenderExpr;
+use holon_api::schema::FieldIntent;
 use holon_api::spawner::Spawner;
 use holon_api::widget_spec::DataRow;
 
@@ -226,16 +227,19 @@ impl OperationIntent {
         field: &str,
         value: Value,
     ) -> Self {
-        // Model.md invariant 3: intent never carries an order key. A widget
-        // constructing a set_field over `sort_key`/`after_block_id` is a
-        // programming error — reorders are expressed positionally through
-        // structural ops (`move_block` with an `after_block_id` anchor) so
-        // the ordering authority mints the key. Assert here so the bug
-        // surfaces at the constructor, not as a downstream dispatch Err.
+        // Model.md invariants 3 and 16: a widget constructing a set_field over
+        // a private field or an order key is a programming error. Assert here
+        // so the bug surfaces at the constructor, not as a downstream
+        // dispatch Err.
+        let intent = holon_api::schema::BLOCK.field(field).map(|f| f.intent);
         assert!(
-            !matches!(field, "sort_key" | "after_block_id"),
-            "OperationIntent::set_field({field:?}): intent must never carry an order key \
-             (Model.md invariant 3); dispatch a structural move (move_block) instead"
+            !matches!(
+                intent,
+                Some(FieldIntent::Private(_) | FieldIntent::OrderKey)
+            ),
+            "OperationIntent::set_field({field:?}): intent must never write a private field or \
+             carry an order key (Model.md invariants 3 and 16); dispatch a structural move \
+             (move_block) instead"
         );
         let mut params = HashMap::new();
         params.insert("id".to_string(), Value::String(row_id.to_string()));
@@ -374,7 +378,7 @@ mod tests {
     /// carrying an order key — the constructor asserts immediately instead
     /// of letting the smuggle travel to a downstream dispatch Err.
     #[test]
-    #[should_panic(expected = "intent must never carry an order key")]
+    #[should_panic(expected = "intent must never write a private field")]
     fn set_field_intent_over_sort_key_is_unconstructible() {
         let _ = OperationIntent::set_field(
             &EntityName::Named("block".to_string()),
@@ -382,6 +386,18 @@ mod tests {
             "block:a",
             "sort_key",
             Value::String("A5".to_string()),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "intent must never write a private field")]
+    fn set_field_intent_over_parent_id_is_unconstructible() {
+        let _ = OperationIntent::set_field(
+            &EntityName::Named("block".to_string()),
+            "set_field",
+            "block:a",
+            "parent_id",
+            Value::String("block:b".to_string()),
         );
     }
 

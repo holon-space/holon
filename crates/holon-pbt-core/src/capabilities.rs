@@ -2738,19 +2738,15 @@ pub enum GenericWrite {
     McpSetField,
     /// `update` through the MCP `execute_operation` tool.
     McpUpdate,
-    /// Dispatched `create` at the block's own id with its current title: a
-    /// recognized re-create that carries the field.
-    CreateRecreate,
 }
 
 #[holon_macros::capmap_adapter]
 pub trait SutPrivateFieldWriteAttempt {
-    /// Write `field = value` on block `id` (titled `title`) through `via`. It
+    /// Write `field = value` on block `id` through `via`. It
     /// must be refused as a private field, naming `move_block` as the route.
     async fn attempt_private_field_write(
         &self,
         id: &holon_api::EntityUri,
-        title: &str,
         field: PrivateFieldName,
         via: GenericWrite,
         value: &str,

@@ -1,5 +1,9 @@
 //! Closed intent vocabulary for block field writes ("parse, don't validate").
 //!
+//! Model.md invariant 16: **intent never writes a private field**. `parent_id`
+//! and `sort_key` belong to the placement authority, which keeps the tree
+//! acyclic and each sibling set ordered.
+//!
 //! Model.md invariant 3: **intent never carries an order key**. Fractional
 //! order keys (`sort_key`) are minted exclusively by the ordering authority
 //! (`OrderKeyMinting` / `BlockOrdering::place`); a frontend or MCP client
@@ -8,9 +12,9 @@
 //!
 //! [`BlockWriteField`] is the parsed form of the `field` parameter of a
 //! `set_field` *intent* (frontend dispatch, MCP `execute_operation`). It is a
-//! closed enum with **no order-key variant** and **no whole-bag variant**:
-//! after parsing, neither is representable, not merely discarded. Parsing
-//! happens once at the intent boundary
+//! closed enum with **no private-field variant**, **no order-key variant** and
+//! **no whole-bag variant**: after parsing, none is representable, not merely
+//! discarded. Parsing happens once at the intent boundary
 //! (`OperationDispatcher::execute_operation`,
 //! `LoroBlockOperations::execute_operation`); a disallowed field is a loud
 //! `Err`, never a silent drop.
@@ -34,8 +38,9 @@ use holon_pattern::schema::FieldIntent;
 /// `holon-api/tests/descriptor_arcs_roundtrip.rs`.
 ///
 /// Deliberately excludes:
-/// - `sort_key` / `after_block_id` — order keys; minted by the ordering
-///   authority only (Model.md invariant 3).
+/// - `parent_id` / `sort_key` — private fields; only their owner op writes them
+///   ([`BlockWriteFieldError::Private`], Model.md invariant 16).
+/// - `after_block_id` — a positional anchor (Model.md invariant 3).
 /// - `id`, `depth`, `created_at`, `updated_at`, `_change_origin`, `_expected_*`
 ///   — storage bookkeeping / derived fields; written by the storage layer
 ///   itself, never by intent.
@@ -54,9 +59,6 @@ pub enum BlockWriteField {
     BlockType,
     Tags,
     TaskState,
-    /// Routed to the structural authority (a tree move), not a raw column
-    /// write — see `BlockCellRegistry::write_field("parent_id")`.
-    ParentId,
     /// Any other user-defined property (e.g. `DEADLINE`, `PRIORITY`,
     /// `status`). The key is validated at construction: reserved and
     /// order-key names cannot be smuggled in through this variant.
@@ -79,6 +81,8 @@ impl PropertyKey {
 /// Why a raw field name was rejected at the intent boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BlockWriteFieldError {
+    /// The field is private: only `route`, its owner, writes it.
+    Private { field: String, route: &'static str },
     /// The field is an order key. Order is owned by the ordering authority;
     /// intent must express a move positionally (`move_block` with an
     /// `after_block_id` anchor), never carry a key value.
@@ -96,6 +100,12 @@ pub enum BlockWriteFieldError {
 impl fmt::Display for BlockWriteFieldError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            BlockWriteFieldError::Private { field, route } => write!(
+                f,
+                "'{field}' is a private field: a generic write (set_field, update) cannot keep \
+                 the invariant it shares with other rows, so only its owner writes it. Use \
+                 {route}."
+            ),
             BlockWriteFieldError::OrderKey(field) => write!(
                 f,
                 "set_field(\"{field}\") rejected: intent must never carry an order key (Model.md \
@@ -143,6 +153,12 @@ impl BlockWriteField {
         // (`holon_pattern::schema::BLOCK`), so a field's intent classification
         // lives beside its storage and cannot drift from it.
         match holon_pattern::schema::BLOCK.field(raw).map(|f| f.intent) {
+            Some(FieldIntent::Private(private)) => {
+                return Err(BlockWriteFieldError::Private {
+                    field: raw.to_string(),
+                    route: private.route,
+                });
+            }
             Some(FieldIntent::OrderKey) => {
                 return Err(BlockWriteFieldError::OrderKey(raw.to_string()));
             }
@@ -166,7 +182,6 @@ impl BlockWriteField {
             "block_type" => Ok(Self::BlockType),
             "tags" => Ok(Self::Tags),
             "task_state" => Ok(Self::TaskState),
-            "parent_id" => Ok(Self::ParentId),
             // An operation-control key that slipped past the specific arms above
             // (`_order_rekeys`, `_routing_*`) is an INSTRUCTION to the writer,
             // never a property. Accepted as a `Property`, a
@@ -196,7 +211,6 @@ impl BlockWriteField {
             Self::BlockType => "block_type",
             Self::Tags => "tags",
             Self::TaskState => "task_state",
-            Self::ParentId => "parent_id",
             Self::Property(key) => key.as_str(),
         }
     }
@@ -213,11 +227,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn private_fields_are_unrepresentable() {
+        for (field, private) in holon_pattern::schema::BLOCK.private_fields() {
+            assert_eq!(
+                BlockWriteField::parse(field),
+                Err(BlockWriteFieldError::Private {
+                    field: field.to_string(),
+                    route: private.route,
+                })
+            );
+        }
+    }
+
+    #[test]
     fn order_keys_are_unrepresentable() {
-        assert_eq!(
-            BlockWriteField::parse("sort_key"),
-            Err(BlockWriteFieldError::OrderKey("sort_key".to_string()))
-        );
         assert_eq!(
             BlockWriteField::parse("after_block_id"),
             Err(BlockWriteFieldError::OrderKey("after_block_id".to_string()))
@@ -306,10 +329,6 @@ mod tests {
             BlockWriteField::parse("task_state"),
             Ok(BlockWriteField::TaskState)
         );
-        assert_eq!(
-            BlockWriteField::parse("parent_id"),
-            Ok(BlockWriteField::ParentId)
-        );
     }
 
     #[test]
@@ -322,7 +341,7 @@ mod tests {
 
     #[test]
     fn as_str_round_trips() {
-        for field in ["content", "marks", "task_state", "DEADLINE", "parent_id"] {
+        for field in ["content", "marks", "task_state", "DEADLINE"] {
             assert_eq!(BlockWriteField::parse(field).unwrap().as_str(), field);
         }
     }

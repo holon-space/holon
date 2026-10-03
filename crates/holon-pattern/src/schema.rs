@@ -37,8 +37,11 @@ pub enum FieldIntent {
     /// Intent may write it, and the intent vocabulary carries a named variant
     /// for it.
     Writable,
-    /// An order key. Minted by the ordering authority only (Model.md invariant
-    /// 3); intent expresses a move positionally.
+    /// Written only by its owner op, which keeps an invariant spanning many
+    /// rows that a one-row generic write cannot see (Model.md invariant 16).
+    Private(PrivateField),
+    /// A positional anchor an intent names to express a move; never a stored
+    /// key (Model.md invariant 3).
     OrderKey,
     /// Storage bookkeeping or derived state, written by the storage layer.
     StorageInternal,
@@ -52,6 +55,17 @@ pub enum FieldIntent {
     /// column or junction.
     Unnamed,
 }
+
+/// The owner of a [`FieldIntent::Private`] field: the op a refused generic
+/// write points the caller to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrivateField {
+    pub route: &'static str,
+}
+
+const PLACEMENT: PrivateField = PrivateField {
+    route: "move_block { id, parent_id, after_block_id }",
+};
 
 /// One declared field of an entity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,6 +135,17 @@ impl EntitySchema {
             .iter()
             .filter(|f| f.intent == FieldIntent::Writable)
             .map(|f| f.name)
+            .collect()
+    }
+
+    /// Every field only its owner op may write, with that owner.
+    pub fn private_fields(&self) -> Vec<(&'static str, PrivateField)> {
+        self.fields
+            .iter()
+            .filter_map(|f| match f.intent {
+                FieldIntent::Private(private) => Some((f.name, private)),
+                _ => None,
+            })
             .collect()
     }
 
@@ -225,8 +250,8 @@ pub const BLOCK: EntitySchema = EntitySchema {
     binding: None,
     fields: &[
         column(block::ID, FieldIntent::StorageInternal, true),
-        column(block::PARENT_ID, FieldIntent::Writable, true),
-        column(block::SORT_KEY, FieldIntent::OrderKey, true),
+        column(block::PARENT_ID, FieldIntent::Private(PLACEMENT), true),
+        column(block::SORT_KEY, FieldIntent::Private(PLACEMENT), true),
         column(block::CONTENT, FieldIntent::Writable, true),
         column(block::CONTENT_TYPE, FieldIntent::Writable, true),
         column(block::SOURCE_LANGUAGE, FieldIntent::Writable, true),

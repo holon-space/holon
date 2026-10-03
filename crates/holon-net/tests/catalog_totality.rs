@@ -218,16 +218,13 @@ fn an_excluded_place_is_not_resurrected_by_the_delta_half() {
         .iter()
         .map(|p| p.to_string())
         .collect();
-    assert!(
-        !written.contains(&"block.sort_key".to_string()),
-        "set_field declares block.sort_key EXCLUDED (the ordering authority mints order \
-         keys), yet the compiled net lists it as a write: {written:?}"
-    );
-    assert!(
-        written.contains(&"block.parent_id".to_string()),
-        "the subtraction must remove only the excluded place — parent_id is the other \
-         half of the same structural lowering and must survive: {written:?}"
-    );
+    for place in ["block.parent_id", "block.sort_key"] {
+        assert!(
+            !written.contains(&place.to_string()),
+            "set_field declares private {place} EXCLUDED, yet the compiled net lists it as \
+             a write: {written:?}"
+        );
+    }
 }
 
 /// A descriptor whose ONLY emit is an exclusion, so every write it compiles to

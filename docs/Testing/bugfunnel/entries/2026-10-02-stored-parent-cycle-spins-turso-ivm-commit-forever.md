@@ -55,7 +55,17 @@ MITIGATED: the SQL placement path now refuses a cyclic `place_row` with
 `ApiError::CyclicMove` before the transaction runs, so the dispatched move can
 no longer store a cycle (keystone cases
 `place-under-own-descendant-refused-on-the-sql-authority` / `-on-loro`, green).
+`parent_id` and `sort_key` are now private fields (Model.md invariant 16): a
+dispatched `set_field` or `update` that names them, from the UI or from MCP
+`execute_operation`, is refused at the intent boundary with
+`BlockWriteFieldError::Private` naming `move_block`. That closes the dispatched
+`update { parent_id }` path, which stored a cycle and hung the commit (keystone
+cases `update-parent-under-own-descendant-refused-on-the-sql-authority` and
+`mcp-execute-operation-update-parent-id-refused`, red by hang before, green
+after). Suspected next path: a dispatched `create` of an existing id with the
+same title re-parents it through the upsert with no cycle check (keystone case
+`create-recreate-reparent-refused-on-the-sql-authority`, red).
 Open: any other path that can store a cycle (org ingest of a hand-edited file,
-a peer import into SQL, any `parent_id` write outside `place_row`) would still hang the actor. Close it at the view: a cycle guard
+a peer import into SQL, an internal `parent_id` write outside `place_row`) would still hang the actor. Close it at the view: a cycle guard
 in the recursive view (a visited path check, or a depth bound that fails loud)
 or an iteration bound with a typed error in the fork's `RecursiveOperator`.

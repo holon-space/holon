@@ -496,9 +496,8 @@ async fn observations() -> Vec<Observation> {
     seeded(&h.handle).await;
     out.push(observe(&h, h.crud.as_ref(), "delete", param(&[("id", "block:A")])).await);
 
-    // `set_field` is the sixth analyzable op and the one whose EXCLUDED
-    // `block.sort_key` the delta half also speaks about — the reparenting
-    // case is what decides whether the exclusion is true of the op.
+    // `set_field` is the sixth analyzable op. It declares the private
+    // placement fields excluded; the intent boundary refuses them.
     let h = harness().await;
     seeded(&h.handle).await;
     out.push(
@@ -507,22 +506,6 @@ async fn observations() -> Vec<Observation> {
             h.crud.as_ref(),
             "set_field",
             param(&[("id", "block:A"), ("field", "content"), ("value", "edited")]),
-        )
-        .await,
-    );
-
-    let h = harness().await;
-    seeded(&h.handle).await;
-    out.push(
-        observe(
-            &h,
-            h.crud.as_ref(),
-            "set_field",
-            param(&[
-                ("id", "block:B"),
-                ("field", "parent_id"),
-                ("value", "block:A"),
-            ]),
         )
         .await,
     );
