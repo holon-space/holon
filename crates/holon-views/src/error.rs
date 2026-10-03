@@ -1,4 +1,5 @@
 use holon_api::EntityUri;
+use holon_api::commit_clock::CommitSource;
 use holon_api::commit_clock::CoverAboveHighWater;
 
 /// More rounds than any real outline needs, and the bound the SQL ancestry
@@ -19,6 +20,14 @@ pub enum EngineError {
     UndecodablePayload { reason: String },
     #[error("block {id} encodes to no payload: {reason}")]
     UnencodableBlock { id: EntityUri, reason: String },
+    #[error(
+        "{store:?} fed {changed} changed blocks with no outstanding commit, such as {sample:?}"
+    )]
+    StamplessChange {
+        store: CommitSource,
+        changed: usize,
+        sample: Vec<EntityUri>,
+    },
     #[error("the engine thread panicked: {0}")]
     Panicked(String),
 }

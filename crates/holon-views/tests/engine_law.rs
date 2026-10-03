@@ -621,6 +621,31 @@ fn a_cycle_only_between_unreleased_feeds_is_not_refused() {
 }
 
 #[test]
+fn a_stampless_batch_that_changes_rows_stops_the_engine() {
+    within_deadline(|| {
+        let conditions = Arc::new(ConditionBus::new());
+        let bus = conditions.clone();
+        let mut h = Harness::with_engine(|clock| ViewEngine::start(clock, raise_on(bus)));
+        create(&mut h, 0, None);
+        h.feed(0).unwrap();
+        h.replace(0).unwrap();
+        h.engine.replace(
+            SOURCES[0],
+            h.stamps[1],
+            vec![snapshot(0, None, true), snapshot(7, None, false)],
+        );
+        let stopped = EngineError::StamplessChange {
+            store: SOURCES[0],
+            changed: 2,
+            sample: vec![uri(0), uri(7)],
+        };
+        assert_eq!(h.settle(), Err(stopped.clone()));
+        assert_eq!(stops(&conditions), [stopped.to_string()]);
+        every_stamp_is_fed(&h.clock);
+    });
+}
+
+#[test]
 fn a_feed_that_covers_no_commit_waits_behind_its_source() {
     within_deadline(|| {
         let mut h = Harness::new();

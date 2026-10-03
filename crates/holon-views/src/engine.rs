@@ -2,6 +2,7 @@
 //! per source and released per version of the commit clock.
 
 use std::any::Any;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::panic;
@@ -377,6 +378,9 @@ impl<R: Row> Host<R> {
                 }
             }
         }
+        if stamps.is_empty() {
+            self.refuse_stampless_change(source, &updates)?;
+        }
         self.buffered.push(Batch {
             source,
             stamps: stamps.first().copied().zip(stamps.last().copied()),
@@ -399,6 +403,32 @@ impl<R: Row> Host<R> {
         }
     }
 
+    /// A batch with no stamps is released at any cut, so its updates must
+    /// cancel: it may only repeat rows its source fed.
+    fn refuse_stampless_change(
+        &self,
+        store: CommitSource,
+        updates: &[(R, isize)],
+    ) -> Result<(), EngineError> {
+        const SAMPLE: usize = 5;
+        let mut net = Multiset::new();
+        for (row, diff) in updates {
+            add(&mut net, row.clone(), *diff);
+        }
+        let changed: BTreeSet<EntityUri> = net
+            .keys()
+            .map(|row| self.interner.uri(self.id(row, ID)).clone())
+            .collect();
+        if changed.is_empty() {
+            return Ok(());
+        }
+        Err(EngineError::StamplessChange {
+            store,
+            changed: changed.len(),
+            sample: changed.into_iter().take(SAMPLE).collect(),
+        })
+    }
+
     /// Releases the newest version below the low watermark that splits no
     /// buffered batch: a batch holds a source's rows after its last commit,
     /// so a version between its first and last commit cannot be built.
@@ -416,7 +446,7 @@ impl<R: Row> Host<R> {
             return Ok(());
         }
         // A source's batches go in in feed order. A batch with no stamps
-        // repeats rows its source fed before, so its updates cancel at any cut.
+        // cancels at any cut.
         let mut held = HashSet::new();
         let (now, later): (Vec<_>, Vec<_>) = std::mem::take(&mut self.buffered)
             .into_iter()
