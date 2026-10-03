@@ -26,6 +26,7 @@ use holon_views::row::Id;
 use holon_views::row::Row;
 use proptest::collection::vec;
 use proptest::prelude::*;
+use proptest::test_runner::FileFailurePersistence;
 use timely::WorkerConfig;
 use timely::communication::Allocator;
 use timely::communication::allocator::Thread;
@@ -106,6 +107,11 @@ fn plan(name: &str) -> Rc<Plan> {
         }
         "join_of_iterate" => reach(&edges, &edges).join(&nodes, vec![(Col(1), Col(0))]),
         "reduce_of_iterate" => reach(&edges, &edges).reduce(vec![Col(0)], vec![Agg::Count]),
+        "join_recur_with_itself" => edges.iterate(
+            &Plan::recur()
+                .join(&Plan::recur(), vec![(Col(1), Col(0))])
+                .project(vec![c(0), c(3)]),
+        ),
         other => unreachable!("no plan {other}"),
     }
 }
@@ -138,9 +144,10 @@ enum Ctx<'a> {
     Top {
         iterate_left: bool,
     },
-    /// The step of an `Iterate` over this schema.
+    /// The step of an `Iterate` over this schema, before its `Recur`.
     Step(&'a Schema),
-    /// Inside a step, below a `Reduce`: `check` refuses a `Recur` there.
+    /// Inside a step, where no `Recur` may appear: below a `Reduce` (`check`
+    /// refuses it) or after the step's one `Recur`.
     Invariant,
 }
 
@@ -163,7 +170,11 @@ impl Gen {
         match self.pick(if depth == 0 { 1 } else { 7 }) {
             0 => {
                 let relation = match (self.pick(3), *ctx) {
-                    (0 | 1, Ctx::Step(schema)) => return (Plan::recur(), schema.clone()),
+                    (0 | 1, Ctx::Step(schema)) => {
+                        let schema = schema.clone();
+                        *ctx = Ctx::Invariant;
+                        return (Plan::recur(), schema);
+                    }
                     (1, _) => NODES,
                     _ => EDGES,
                 };
@@ -299,7 +310,8 @@ fn expr_type(expr: &Expr, schema: &Schema) -> ColType {
     }
 }
 
-/// Depth ≤ 4, every operator, at most one `Iterate`.
+/// Depth ≤ 4, every operator, at most one `Iterate`, whose step reads `Recur`
+/// at most once: a step that joins `Recur` with itself costs `|X|³` per round.
 fn random_plan() -> impl Strategy<Value = Rc<Plan>> {
     vec(any::<u32>(), 0..64).prop_map(|tape| {
         let (plan, _) = Gen { tape, pos: 0 }.plan(4, &mut Ctx::Top { iterate_left: true });
@@ -338,15 +350,25 @@ fn law_of(plan: &Rc<Plan>, commits: Vec<Vec<Change>>) -> Result<(), TestCaseErro
             .commit(&mut worker)
             .expect("ids 0..6 stay below MAX_DEPTH");
         let expected = batch::run(&plan, &inputs).expect("ids 0..6 stay below MAX_DEPTH");
-        prop_assert_eq!(&*dd.output(0), &expected, "at time {}", time);
+        prop_assert_eq!(&*dd.output(0).unwrap(), &expected, "at time {}", time);
     }
     Ok(())
+}
+
+fn config() -> ProptestConfig {
+    ProptestConfig {
+        failure_persistence: Some(Box::new(FileFailurePersistence::Direct(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/plan_law.proptest-regressions"
+        )))),
+        ..ProptestConfig::with_cases(256)
+    }
 }
 
 macro_rules! law_tests {
     ($($name:ident),* $(,)?) => {
         proptest! {
-            #![proptest_config(ProptestConfig::with_cases(256))]
+            #![proptest_config(config())]
             $(
                 #[test]
                 fn $name(commits in commits()) {
@@ -370,10 +392,11 @@ law_tests!(
     join_inside_iterate,
     join_of_iterate,
     reduce_of_iterate,
+    join_recur_with_itself,
 );
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(256))]
+    #![proptest_config(config())]
     #[test]
     fn random_plans(plan in random_plan(), commits in commits()) {
         law_of(&plan, commits)?;
@@ -442,9 +465,26 @@ fn dataflow_resolves_max_depth_and_refuses_one_more() {
         dd.update(relation, row, 1);
     }
     dd.commit(&mut worker).unwrap();
-    assert_eq!(dd.output(0).len() as u64, MAX_DEPTH + 1);
+    assert_eq!(dd.output(0).unwrap().len() as u64, MAX_DEPTH + 1);
 
     let last = u32::try_from(MAX_DEPTH).unwrap();
     dd.update(EDGES, edge(last, last + 1), 1);
     assert_eq!(dd.commit(&mut worker), Err(EngineError::DepthBound));
+}
+
+#[test]
+fn a_depth_fault_is_sticky() {
+    let mut worker = worker();
+    let mut dd = Dataflow::<DynRow>::build(&mut worker, &catalog(), &[below_flagged()]);
+    for (relation, row) in chain(MAX_DEPTH + 1) {
+        dd.update(relation, row, 1);
+    }
+    assert_eq!(dd.commit(&mut worker), Err(EngineError::DepthBound));
+    assert_eq!(dd.output(0).err(), Some(EngineError::DepthBound));
+
+    let last = u32::try_from(MAX_DEPTH).unwrap();
+    dd.update(EDGES, edge(last, last + 1), -1);
+    assert_eq!(dd.commit(&mut worker), Err(EngineError::DepthBound));
+    assert_eq!(dd.commit(&mut worker), Err(EngineError::DepthBound));
+    assert_eq!(dd.output(0).err(), Some(EngineError::DepthBound));
 }

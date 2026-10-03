@@ -60,44 +60,47 @@ where
     }
     let out = match env.leaf(plan) {
         Some(c) => c,
-        None => match &plan.op {
+        None => match plan.op() {
             Op::Filter { input, pred } => {
-                let (pred, layout) = (pred.clone(), R::layout(&input.schema));
+                let (pred, layout) = (pred.clone(), R::layout(input.schema()));
                 lower(input, env).filter(move |row| holds(&pred, row, &layout))
             }
             Op::Project { input, exprs } => {
-                let (exprs, layout) = (exprs.clone(), R::layout(&input.schema));
-                let out = R::layout(&plan.schema);
+                let (exprs, layout) = (exprs.clone(), R::layout(input.schema()));
+                let out = R::layout(plan.schema());
                 lower(input, env)
                     .map(move |row| R::build(&out, exprs.iter().map(|e| eval(e, &row, &layout))))
             }
             Op::Join { left, right, keys } => {
-                let key_schema =
-                    Schema(keys.iter().map(|(l, _)| left.schema.0[l.index()]).collect());
+                let key_schema = Schema(
+                    keys.iter()
+                        .map(|(l, _)| left.schema().0[l.index()])
+                        .collect(),
+                );
                 let key_layout = R::layout(&key_schema);
                 let left_keys = keys.iter().map(|(l, _)| *l).collect();
                 let right_keys = keys.iter().map(|(_, r)| *r).collect();
                 let l = keyed(
                     lower(left, env),
-                    &left.schema,
+                    left.schema(),
                     left_keys,
                     key_layout.clone(),
                 );
-                let r = keyed(lower(right, env), &right.schema, right_keys, key_layout);
-                let (ll, la) = (R::layout(&left.schema), left.schema.arity());
-                let (rl, ra) = (R::layout(&right.schema), right.schema.arity());
-                let out = R::layout(&plan.schema);
+                let r = keyed(lower(right, env), right.schema(), right_keys, key_layout);
+                let (ll, la) = (R::layout(left.schema()), left.schema().arity());
+                let (rl, ra) = (R::layout(right.schema()), right.schema().arity());
+                let out = R::layout(plan.schema());
                 l.arrange_by_key()
                     .join_core(r.arrange_by_key(), move |_, a, b| {
                         Some(R::build(&out, concat(a, &ll, la, b, &rl, ra)))
                     })
             }
             Op::Reduce { input, key, aggs } => {
-                let key_layout = R::layout(&Schema(plan.schema.0[..key.len()].to_vec()));
-                let (key_arity, aggs, out) = (key.len(), aggs.clone(), R::layout(&plan.schema));
+                let key_layout = R::layout(&Schema(plan.schema().0[..key.len()].to_vec()));
+                let (key_arity, aggs, out) = (key.len(), aggs.clone(), R::layout(plan.schema()));
                 keyed(
                     lower(input, env),
-                    &input.schema,
+                    input.schema(),
                     key.clone(),
                     key_layout.clone(),
                 )
@@ -114,7 +117,7 @@ where
                 })
             }
             Op::Scan(_) | Op::Iterate { .. } | Op::Recur => {
-                unreachable!("{:?} is a leaf of its scope", plan.op)
+                unreachable!("{:?} is a leaf of its scope", plan.op())
             }
         },
     };
@@ -146,7 +149,7 @@ fn invariant_parts(plan: &Rc<Checked>, out: &mut Vec<Rc<Checked>>) {
         out.push(plan.clone());
         return;
     }
-    match &plan.op {
+    match plan.op() {
         Op::Recur => {}
         Op::Filter { input, .. } | Op::Project { input, .. } | Op::Reduce { input, .. } => {
             invariant_parts(input, out)
@@ -155,7 +158,7 @@ fn invariant_parts(plan: &Rc<Checked>, out: &mut Vec<Rc<Checked>>) {
             invariant_parts(left, out);
             invariant_parts(right, out);
         }
-        Op::Scan(_) | Op::Iterate { .. } => unreachable!("{:?} reads no Recur", plan.op),
+        Op::Scan(_) | Op::Iterate { .. } => unreachable!("{:?} reads no Recur", plan.op()),
     }
 }
 
@@ -168,11 +171,11 @@ struct Top<'s, R: Row> {
 
 impl<'s, R: Row> Env<'s, u64, R> for Top<'s, R> {
     fn leaf(&mut self, plan: &Rc<Checked>) -> Option<Coll<'s, u64, R>> {
-        match &plan.op {
+        match plan.op() {
             Op::Scan(relation) => Some(self.scans[usize::from(relation.0)].clone()),
             Op::Iterate { seed, step } => Some(self.iterate(seed, step)),
             Op::Recur => unreachable!("a checked Recur sits in a step"),
-            _ => None,
+            Op::Filter { .. } | Op::Project { .. } | Op::Join { .. } | Op::Reduce { .. } => None,
         }
     }
 
@@ -220,12 +223,12 @@ struct Inner<'s, R: Row> {
 
 impl<'s, R: Row> Env<'s, Product<u64, u64>, R> for Inner<'s, R> {
     fn leaf(&mut self, plan: &Rc<Checked>) -> Option<Coll<'s, Product<u64, u64>, R>> {
-        match &plan.op {
+        match plan.op() {
             Op::Recur => Some(self.rec.clone()),
             Op::Scan(_) | Op::Iterate { .. } => {
-                unreachable!("{:?} reads no Recur, so it was entered", plan.op)
+                unreachable!("{:?} reads no Recur, so it was entered", plan.op())
             }
-            _ => None,
+            Op::Filter { .. } | Op::Project { .. } | Op::Join { .. } | Op::Reduce { .. } => None,
         }
     }
 
@@ -291,15 +294,22 @@ impl<R: Row> Dataflow<R> {
             input.flush();
         }
         worker.step_while(|| self.probe.less_than(&(t + 1)));
-        if let Some(e) = self.fault.borrow().clone() {
-            return Err(e);
-        }
+        self.faulted()?;
         self.time = t + 1;
         Ok(t)
     }
 
-    /// The output of `plans[i]`, accumulated through the last commit.
-    pub fn output(&self, i: usize) -> Ref<'_, Multiset<R>> {
-        self.outputs[i].borrow()
+    /// The output of `plans[i]`, accumulated through the last commit; after
+    /// the first error, that error.
+    pub fn output(&self, i: usize) -> Result<Ref<'_, Multiset<R>>, EngineError> {
+        self.faulted()?;
+        Ok(self.outputs[i].borrow())
+    }
+
+    fn faulted(&self) -> Result<(), EngineError> {
+        match self.fault.borrow().clone() {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
     }
 }

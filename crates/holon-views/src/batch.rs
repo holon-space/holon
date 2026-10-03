@@ -33,7 +33,7 @@ pub fn add<R: Row>(set: &mut Multiset<R>, row: R, diff: isize) {
     }
 }
 
-/// `inputs[r]` is the content of relation `r`.
+/// `inputs[r]` is the content of relation `r`; every multiplicity is positive.
 pub fn run<R: Row>(plan: &Checked, inputs: &[Multiset<R>]) -> Result<Multiset<R>, EngineError> {
     eval_plan(plan, inputs, None)
 }
@@ -43,13 +43,13 @@ fn eval_plan<R: Row>(
     inputs: &[Multiset<R>],
     recur: Option<&Multiset<R>>,
 ) -> Result<Multiset<R>, EngineError> {
-    let out_layout = R::layout(&plan.schema);
+    let out_layout = R::layout(plan.schema());
     let mut out = Multiset::new();
-    match &plan.op {
+    match plan.op() {
         Op::Scan(relation) => return Ok(inputs[usize::from(relation.0)].clone()),
         Op::Recur => return Ok(recur.expect("a checked Recur sits in a step").clone()),
         Op::Filter { input, pred } => {
-            let layout = R::layout(&input.schema);
+            let layout = R::layout(input.schema());
             for (row, n) in eval_plan(input, inputs, recur)? {
                 if holds(pred, &row, &layout) {
                     add(&mut out, row, n);
@@ -57,14 +57,14 @@ fn eval_plan<R: Row>(
             }
         }
         Op::Project { input, exprs } => {
-            let layout = R::layout(&input.schema);
+            let layout = R::layout(input.schema());
             for (row, n) in eval_plan(input, inputs, recur)? {
                 let cols = exprs.iter().map(|e| eval(e, &row, &layout));
                 add(&mut out, R::build(&out_layout, cols), n);
             }
         }
         Op::Join { left, right, keys } => {
-            let (ll, rl) = (R::layout(&left.schema), R::layout(&right.schema));
+            let (ll, rl) = (R::layout(left.schema()), R::layout(right.schema()));
             let mut rights: BTreeMap<Vec<Datum>, Vec<(R, isize)>> = BTreeMap::new();
             for (b, n) in eval_plan(right, inputs, recur)? {
                 let key = keys.iter().map(|(_, r)| b.get(&rl, *r)).collect();
@@ -73,20 +73,28 @@ fn eval_plan<R: Row>(
             for (a, m) in eval_plan(left, inputs, recur)? {
                 let key: Vec<Datum> = keys.iter().map(|(l, _)| a.get(&ll, *l)).collect();
                 for (b, n) in rights.get(&key).into_iter().flatten() {
-                    let cols = concat(&a, &ll, left.schema.arity(), b, &rl, right.schema.arity());
+                    let cols = concat(
+                        &a,
+                        &ll,
+                        left.schema().arity(),
+                        b,
+                        &rl,
+                        right.schema().arity(),
+                    );
                     add(&mut out, R::build(&out_layout, cols), m * n);
                 }
             }
         }
         Op::Reduce { input, key, aggs } => {
-            let layout = R::layout(&input.schema);
+            let layout = R::layout(input.schema());
             let mut groups: BTreeMap<Vec<Datum>, isize> = BTreeMap::new();
             for (row, n) in eval_plan(input, inputs, recur)? {
                 *groups
                     .entry(key.iter().map(|c| row.get(&layout, *c)).collect())
                     .or_default() += n;
             }
-            for (key, count) in groups.into_iter().filter(|(_, n)| *n != 0) {
+            for (key, count) in groups {
+                assert!(count > 0, "the group {key:?} has count {count}");
                 let aggs = aggs.iter().map(|Agg::Count| Datum::Int(count as i64));
                 add(
                     &mut out,
@@ -116,8 +124,10 @@ fn iterate<R: Row>(
         }
         let next: Multiset<R> = next
             .into_iter()
-            .filter(|(_, n)| *n > 0)
-            .map(|(row, _)| (row, 1))
+            .map(|(row, n)| {
+                assert!(n > 0, "the step derived {row:?} with multiplicity {n}");
+                (row, 1)
+            })
             .collect();
         if next == x {
             return Ok(x);

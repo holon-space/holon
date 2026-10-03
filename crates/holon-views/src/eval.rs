@@ -41,6 +41,26 @@ mod tests {
     }
 
     #[test]
+    fn col_reads_its_column() {
+        for (i, datum) in [
+            Datum::Id(Id(7)),
+            Datum::Text("a".into()),
+            Datum::Bool(false),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(eval(&Expr::Col(Col(i as u16)), &row(), &()), datum);
+        }
+    }
+
+    #[test]
+    fn lit_is_its_value() {
+        let lit = Datum::Text("b".into());
+        assert_eq!(eval(&Expr::Lit(lit.clone()), &row(), &()), lit);
+    }
+
+    #[test]
     fn eq_compares_values() {
         let layout = DynRow::layout(&Schema(vec![ColType::Id, ColType::Text, ColType::Bool]));
         let same = Expr::Eq(

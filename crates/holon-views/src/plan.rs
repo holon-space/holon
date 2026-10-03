@@ -167,13 +167,27 @@ impl Plan {
     }
 }
 
+/// A plan that passed [`check`], its only constructor.
+///
+/// ```compile_fail,E0451
+/// use holon_views::plan::{Checked, Op, Schema};
+/// let forged = Checked { op: Op::Recur, schema: Schema(vec![]) };
+/// ```
 #[derive(Debug)]
 pub struct Checked {
-    pub op: Op<Rc<Checked>>,
-    pub schema: Schema,
+    op: Op<Rc<Checked>>,
+    schema: Schema,
 }
 
 impl Checked {
+    pub fn op(&self) -> &Op<Rc<Checked>> {
+        &self.op
+    }
+
+    pub fn schema(&self) -> &Schema {
+        &self.schema
+    }
+
     /// Whether this sub-plan reads the `Recur` of the enclosing `Iterate`.
     pub fn reads_recur(&self) -> bool {
         match &self.op {
