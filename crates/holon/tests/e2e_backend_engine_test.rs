@@ -238,13 +238,21 @@ impl OperationProvider for SqlOperationProvider {
     }
 }
 
+/// `block` is a materialized view in the booted schema, so the fixture owns a
+/// plain table.
+const PROBE_TABLE: &str = "probe";
+const BLOCK_1: &str = "probe:block-1";
+const BLOCK_2: &str = "probe:block-2";
+
 /// Helper to set up a test table with initial data
 async fn setup_test_table(ctx: &E2ETestContext, table_name: &str) -> Result<()> {
     let db = ctx.engine().db_handle();
 
+    // `SqlOperationProvider::create` writes every param as a column, including
+    // the `_provenance` stamp the engine adds to each `create`.
     let create_sql = format!(
         "CREATE TABLE IF NOT EXISTS {} (id TEXT PRIMARY KEY, content TEXT, completed INTEGER \
-         DEFAULT 0)",
+         DEFAULT 0, _provenance TEXT)",
         table_name
     );
     db.execute_ddl(&create_sql)
@@ -252,8 +260,8 @@ async fn setup_test_table(ctx: &E2ETestContext, table_name: &str) -> Result<()> 
         .map_err(|e| anyhow::anyhow!("Failed to create table: {}", e))?;
 
     let insert_sql = format!(
-        "INSERT OR IGNORE INTO {} (id, content, completed) VALUES ('block-1', 'Initial content', \
-         0)",
+        "INSERT OR IGNORE INTO {} (id, content, completed) VALUES ('{BLOCK_1}', 'Initial \
+         content', 0)",
         table_name
     );
     db.execute(&insert_sql, vec![])
@@ -266,10 +274,10 @@ async fn setup_test_table(ctx: &E2ETestContext, table_name: &str) -> Result<()> 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_basic_query_execution() -> Result<()> {
     let ctx = E2ETestContext::new().await?;
-    setup_test_table(&ctx, "block").await?;
+    setup_test_table(&ctx, PROBE_TABLE).await?;
 
     let prql = r#"
-        from block
+        from probe
         select {id, content, completed}
     "#;
 
@@ -279,7 +287,7 @@ async fn test_basic_query_execution() -> Result<()> {
 
     // Verify we got results
     assert!(!rows.is_empty(), "Should have at least one result");
-    assert_eq!(rows[0].get("id").unwrap().as_string(), Some("block-1"));
+    assert_eq!(rows[0].get("id").unwrap().as_string(), Some(BLOCK_1));
 
     Ok(())
 }
@@ -292,8 +300,6 @@ async fn test_query_engine_trait_one_shot_execute_query() -> Result<()> {
     use holon_api::query_engine::QueryEngine;
 
     let ctx = E2ETestContext::new().await?;
-    // Own table: `block` is a materialized view in this booted schema, so the
-    // shared `setup_test_table(ctx, "block")` insert is rejected.
     setup_test_table(&ctx, "one_shot_probe").await?;
 
     let engine: &dyn QueryEngine = ctx.engine().as_ref();
@@ -306,7 +312,7 @@ async fn test_query_engine_trait_one_shot_execute_query() -> Result<()> {
         )
         .await?;
     assert!(!rows.is_empty(), "one-shot read must return the seeded row");
-    assert_eq!(rows[0].get("id").unwrap().as_string(), Some("block-1"));
+    assert_eq!(rows[0].get("id").unwrap().as_string(), Some(BLOCK_1));
     assert_eq!(
         rows[0].get("content").unwrap().as_string(),
         Some("Initial content")
@@ -324,18 +330,18 @@ async fn test_query_and_watch_stream() -> Result<()> {
                 tokio::task::block_in_place(|| backend.blocking_read().handle().clone());
             Arc::new(SqlOperationProvider::new(
                 db_handle,
-                "block".to_string(),
-                EntityName::new("block"),
-                "block".to_string(),
+                PROBE_TABLE.to_string(),
+                EntityName::new(PROBE_TABLE),
+                PROBE_TABLE.to_string(),
             ))
         })
     })
     .await?;
 
-    setup_test_table(&ctx, "block").await?;
+    setup_test_table(&ctx, PROBE_TABLE).await?;
 
     let prql = r#"
-        from block
+        from probe
         select {id, content, completed}
     "#;
 
@@ -348,18 +354,18 @@ async fn test_query_and_watch_stream() -> Result<()> {
 
     // Execute an operation that should trigger a stream update
     let mut params: holon_api::StorageEntity = HashMap::new();
-    params.insert("id".into(), Value::String("block-1".to_string()));
+    params.insert("id".into(), Value::String(BLOCK_1.to_string()));
     params.insert("field".into(), Value::String("content".to_string()));
     params.insert("value".into(), Value::String("Updated content".to_string()));
 
-    ctx.execute_op("block", "set_field", params).await?;
+    ctx.execute_op(PROBE_TABLE, "set_field", params).await?;
 
     // Wait for the update change
     let change = wait_for_change(
         stream,
         Duration::from_secs(5),
         ChangeType::Updated,
-        Some("block-1"),
+        Some(BLOCK_1),
     )
     .await?;
 
@@ -385,18 +391,18 @@ async fn test_operation_triggers_stream_update() -> Result<()> {
                 tokio::task::block_in_place(|| backend.blocking_read().handle().clone());
             Arc::new(SqlOperationProvider::new(
                 db_handle,
-                "block".to_string(),
-                EntityName::new("block".to_string()),
-                "block".to_string(),
+                PROBE_TABLE.to_string(),
+                EntityName::new(PROBE_TABLE),
+                PROBE_TABLE.to_string(),
             ))
         })
     })
     .await?;
 
-    setup_test_table(&ctx, "block").await?;
+    setup_test_table(&ctx, PROBE_TABLE).await?;
 
     let prql = r#"
-        from block
+        from probe
         select {id, content, completed}
     "#;
 
@@ -406,11 +412,11 @@ async fn test_operation_triggers_stream_update() -> Result<()> {
 
     // Execute operation
     let mut params: holon_api::StorageEntity = HashMap::new();
-    params.insert("id".into(), Value::String("block-1".to_string()));
+    params.insert("id".into(), Value::String(BLOCK_1.to_string()));
     params.insert("field".into(), Value::String("content".to_string()));
     params.insert("value".into(), Value::String("New content".to_string()));
 
-    ctx.execute_op("block", "set_field", params).await?;
+    ctx.execute_op(PROBE_TABLE, "set_field", params).await?;
 
     // Collect stream events
     let changes = ctx
@@ -418,7 +424,7 @@ async fn test_operation_triggers_stream_update() -> Result<()> {
         .await?;
 
     // Assert we got an update
-    assert_change_type(&changes, ChangeType::Updated, Some("block-1"))?;
+    assert_change_type(&changes, ChangeType::Updated, Some(BLOCK_1))?;
 
     Ok(())
 }
@@ -431,18 +437,18 @@ async fn test_create_and_delete_workflow() -> Result<()> {
                 tokio::task::block_in_place(|| backend.blocking_read().handle().clone());
             Arc::new(SqlOperationProvider::new(
                 db_handle,
-                "block".to_string(),
-                EntityName::new("block"),
-                "block".to_string(),
+                PROBE_TABLE.to_string(),
+                EntityName::new(PROBE_TABLE),
+                PROBE_TABLE.to_string(),
             ))
         })
     })
     .await?;
 
-    setup_test_table(&ctx, "block").await?;
+    setup_test_table(&ctx, PROBE_TABLE).await?;
 
     let prql = r#"
-        from block
+        from probe
         select {id, content, completed}
     "#;
 
@@ -452,17 +458,17 @@ async fn test_create_and_delete_workflow() -> Result<()> {
 
     // Create a new block
     let mut create_params: holon_api::StorageEntity = HashMap::new();
-    create_params.insert("id".into(), Value::String("block-2".to_string()));
+    create_params.insert("id".into(), Value::String(BLOCK_2.to_string()));
     create_params.insert("content".into(), Value::String("New block".to_string()));
     create_params.insert("completed".into(), Value::Integer(0));
 
-    ctx.execute_op("block", "create", create_params).await?;
+    ctx.execute_op(PROBE_TABLE, "create", create_params).await?;
 
     // Delete the block
     let mut delete_params: holon_api::StorageEntity = HashMap::new();
-    delete_params.insert("id".into(), Value::String("block-2".to_string()));
+    delete_params.insert("id".into(), Value::String(BLOCK_2.to_string()));
 
-    ctx.execute_op("block", "delete", delete_params).await?;
+    ctx.execute_op(PROBE_TABLE, "delete", delete_params).await?;
 
     // Collect stream events
     let changes = ctx
@@ -473,8 +479,8 @@ async fn test_create_and_delete_workflow() -> Result<()> {
     assert_change_sequence(
         &changes,
         &[
-            (ChangeType::Created, Some("block-2")),
-            (ChangeType::Deleted, Some("block-2")),
+            (ChangeType::Created, Some(BLOCK_2)),
+            (ChangeType::Deleted, Some(BLOCK_2)),
         ],
     )?;
 
@@ -489,18 +495,18 @@ async fn test_multiple_operations_sequence() -> Result<()> {
                 tokio::task::block_in_place(|| backend.blocking_read().handle().clone());
             Arc::new(SqlOperationProvider::new(
                 db_handle,
-                "block".to_string(),
-                EntityName::new("block"),
-                "block".to_string(),
+                PROBE_TABLE.to_string(),
+                EntityName::new(PROBE_TABLE),
+                PROBE_TABLE.to_string(),
             ))
         })
     })
     .await?;
 
-    setup_test_table(&ctx, "block").await?;
+    setup_test_table(&ctx, PROBE_TABLE).await?;
 
     let prql = r#"
-        from block
+        from probe
         select {id, content, completed}
     "#;
 
@@ -511,11 +517,11 @@ async fn test_multiple_operations_sequence() -> Result<()> {
     // Execute multiple operations
     for i in 1..=3 {
         let mut params: holon_api::StorageEntity = HashMap::new();
-        params.insert("id".into(), Value::String("block-1".to_string()));
+        params.insert("id".into(), Value::String(BLOCK_1.to_string()));
         params.insert("field".into(), Value::String("content".to_string()));
         params.insert("value".into(), Value::String(format!("Update {}", i)));
 
-        ctx.execute_op("block", "set_field", params).await?;
+        ctx.execute_op(PROBE_TABLE, "set_field", params).await?;
     }
 
     // Collect stream events

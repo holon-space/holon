@@ -190,6 +190,7 @@ async fn share_mount(env: &holon_integration_tests::TestEnvironment, id: &str) -
 }
 
 #[test]
+#[ignore = "seeds 10 000 blocks, too slow for a debug build: `just owning-page-cost`"]
 fn owning_page_cost_on_a_deep_vault() {
     let shape = Shape::from_env();
     let probes = shape.probes();

@@ -1181,6 +1181,7 @@ pub async fn find_foreign_blocks(
         else {
             continue;
         };
+        rows.prefetch(id, block.clone());
         let doc = match nearest_page_ancestor(reader, &block.parent_id, &mut rows, None).await? {
             PageAncestor::Page(page) => page.id,
             PageAncestor::NoOwner | PageAncestor::StartAbsent | PageAncestor::Broken(_) => {

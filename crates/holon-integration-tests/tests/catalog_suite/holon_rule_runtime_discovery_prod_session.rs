@@ -109,21 +109,29 @@ fn runtime_authored_holon_rule_is_discovered_by_the_live_watcher() {
             .await
             .expect("create holon_rule block at runtime");
 
-        // Sanity: the one-shot discovery SELECT matches it (the dogfood confirmed
-        // this held even though the live watcher stayed silent).
-        let discovery = engine
-            .db_handle()
-            .query(
-                "SELECT id FROM block WHERE content_type = 'source' AND source_language = \
-                 'holon_rule'",
-                HashMap::new(),
-            )
-            .await
-            .expect("discovery SELECT");
-        let matched: Vec<String> = discovery
-            .iter()
-            .filter_map(|r| r.get("id").and_then(|v| v.as_string()).map(str::to_string))
-            .collect();
+        // Sanity: the discovery SELECT matches it (the dogfood confirmed this
+        // held even though the live watcher stayed silent). `create` returns
+        // before the Loro→SQL projection reaches the `block` matview.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let matched = loop {
+            let discovery = engine
+                .db_handle()
+                .query(
+                    "SELECT id FROM block WHERE content_type = 'source' AND source_language = \
+                     'holon_rule'",
+                    HashMap::new(),
+                )
+                .await
+                .expect("discovery SELECT");
+            let matched: Vec<String> = discovery
+                .iter()
+                .filter_map(|r| r.get("id").and_then(|v| v.as_string()).map(str::to_string))
+                .collect();
+            if matched.contains(&rule_id) || Instant::now() >= deadline {
+                break matched;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
         assert!(
             matched.contains(&rule_id),
             "the runtime-authored rule must match the discovery query (block matview lagging?); \

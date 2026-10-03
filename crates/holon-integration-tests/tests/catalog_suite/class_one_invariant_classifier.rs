@@ -55,6 +55,7 @@ use holon_pbt_core::null_ref::null_ref_caps;
 const CLASS_ONE: &[&str] = &[
     "inv-birth-contract-satisfied",
     "inv-complexity-class-trend",
+    "inv-engine-views-match-reference",
     "inv-filter-spec-resolves",
     "inv-frontend-engine",
     "inv-frontend-no-error-widgets",
@@ -63,6 +64,7 @@ const CLASS_ONE: &[&str] = &[
     "inv-live-block-shell-present",
     "inv-live-tree-matches-fresh",
     "inv-loro-no-errors",
+    "inv-loro-snapshot-covers-projection",
     "inv-mark-bounds-within-content",
     "inv-matview-consistent-with-recompute",
     "inv-net-totality",

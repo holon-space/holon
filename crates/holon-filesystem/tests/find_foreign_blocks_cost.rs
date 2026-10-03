@@ -175,7 +175,11 @@ fn run(
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(256))]
+    #![proptest_config(ProptestConfig {
+        cases: 256,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
 
     /// The answer is the whole-store attribution restricted to the asked ids,
     /// and reading it costs at most one row per asked id and ancestor level.
@@ -332,4 +336,16 @@ fn repeated_ids_are_answered_once_in_first_seen_order() {
 
     let ids: Vec<EntityUri> = found.into_iter().map(|(b, _)| b.id).collect();
     assert_eq!(ids, vec![id(2), id(1)]);
+}
+
+#[test]
+fn a_self_parented_block_is_read_once() {
+    let store = store(&[Node {
+        parent: Parent::Any(0),
+        page: false,
+    }]);
+
+    run(&store, &[id(0)], &EntityUri::block("other-doc"));
+
+    assert_eq!(store.rows_served.load(Ordering::Relaxed), 1);
 }

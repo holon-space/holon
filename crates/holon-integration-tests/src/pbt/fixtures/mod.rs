@@ -27,9 +27,6 @@ use std::path::Path;
 use assert::Assertion;
 use holon_pbt_core::TransitionRef;
 use holon_pbt_core::capabilities::RefLifecycle;
-use proptest::strategy::Strategy;
-use proptest::strategy::ValueTree;
-use proptest::test_runner::TestRunner;
 use proptest_state_machine::ReferenceStateMachine;
 use proptest_state_machine::StateMachineTest;
 
@@ -179,11 +176,9 @@ where
         fixture.steps.len()
     );
 
-    let mut runner = TestRunner::deterministic();
-    let init_tree = M::init_state()
-        .new_tree(&mut runner)
-        .unwrap_or_else(|_| panic!("[fixtures:{kind}] init_state failed for {:?}", fixture.name));
-    let ref_state = init_tree.current();
+    // Fixtures are authored against the full wiring; a drawn wiring can lack
+    // the caps their steps need.
+    let ref_state = crate::pbt::composed::wide_e2e::wide_e2e_ref();
     let sut = S::init_test(&ref_state);
 
     let label = format!("fixtures:{kind} {:?}", fixture.name);

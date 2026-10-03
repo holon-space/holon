@@ -716,9 +716,22 @@ latency-slo-gate *FLAGS:
              crates/holon-api/src/latency_drain.rs; do
         [ -f "$f" ] || { echo "latency-slo-gate: wrong tree — missing $f" >&2; exit 2; }
     done
-    cargo nextest run {{CANON}} --test latency_slo_gate \
+    cargo nextest run {{CANON}} --test latency_slo_gate --ignore-default-filter \
         --no-capture --no-fail-fast {{FLAGS}} 2>&1 \
         | tee target/gate-logs/latency-slo-gate.log
+
+# Report what an `owning_page` walk costs each write authority on a
+# 10 000-block vault. A debug build cannot seed that vault inside the nextest
+# cap, so the test is `#[ignore]`d and runs here in release.
+owning-page-cost *FLAGS:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p target/gate-logs
+    L=target/gate-logs/owning-page-cost.log
+    cargo test --release {{CANON}} --test authority_owning_page_latency \
+        -- --ignored --nocapture {{FLAGS}} 2>&1 | tee "$L"
+    grep -q 'test result: ok. 1 passed' "$L" \
+        || { echo "owning-page-cost: the walk did not run"; exit 1; }
 
 # Scale-soak: drive the REAL pipeline against a seeded 5–10k-block vault WITH CRDT on,
 # measuring per-action latency vs the p95<200ms SLO plus RSS growth. Boots the keystone
