@@ -379,6 +379,10 @@ impl ConditionKind {
                 "Holon's database has run one {command} command for {running_secs} s without \
                  finishing. Every read and write waits behind it. The log has the full report."
             )),
+
+            Self::DatabaseWatchFailed { cause } => {
+                ConditionDetail::prose(format!("Holon's watch over its database failed: {cause}."))
+            }
         }
     }
 }

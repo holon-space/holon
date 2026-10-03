@@ -9,6 +9,10 @@
 //! `turso_core` cannot be stopped safely, and the commands queued behind it
 //! already wait.
 //!
+//! A watch that fails raises [`ConditionKind::DatabaseWatchFailed`]. The
+//! watchdog thread is not restarted when it stops: it runs only this module's
+//! code, so a second thread would stop the same way.
+//!
 //! wasm32-unknown-unknown has no threads, so there is no watchdog there.
 //!
 //! [`DbHandle`]: crate::turso::DbHandle
@@ -17,7 +21,10 @@ use std::collections::VecDeque;
 use std::fmt::Write as _;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::MutexGuard;
 use std::sync::OnceLock;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 use std::time::Instant;
@@ -92,12 +99,17 @@ impl ActorSender {
 
 /// What the actor is running now and ran last, read by the watchdog.
 pub(crate) struct ActorWatch {
+    /// The condition subject, one per actor in the process.
+    subject: String,
     bound: Duration,
     /// Weak, so the watch never keeps the actor's queue open.
     queue: mpsc::WeakSender<Envelope>,
     commands: Mutex<Commands>,
     bus: OnceLock<Arc<ConditionBus>>,
+    /// Held only to copy it out and to store it back, so no panic poisons it.
     disclosure: Mutex<Disclosure>,
+    /// Why the watch failed. Set at most once.
+    failed: Mutex<Option<String>>,
     #[cfg(test)]
     after_read: Mutex<Option<Box<dyn FnOnce(&ActorWatch) + Send>>>,
 }
@@ -137,7 +149,7 @@ struct Finished {
 }
 
 /// The watchdog's view of one running command.
-#[derive(Default)]
+#[derive(Default, Clone, Copy)]
 struct Disclosure {
     seq: u64,
     kind: &'static str,
@@ -156,7 +168,12 @@ impl ActorWatch {
     }
 
     fn new(bound: Duration, tx: &ActorSender) -> Arc<Self> {
+        static NEXT_ACTOR: AtomicU64 = AtomicU64::new(1);
         Arc::new(Self {
+            subject: format!(
+                "{DATABASE_SUBJECT}#{}",
+                NEXT_ACTOR.fetch_add(1, Ordering::Relaxed)
+            ),
             bound,
             queue: tx.0.downgrade(),
             commands: Mutex::new(Commands {
@@ -169,13 +186,15 @@ impl ActorWatch {
             }),
             bus: OnceLock::new(),
             disclosure: Mutex::new(Disclosure::default()),
+            failed: Mutex::new(None),
             #[cfg(test)]
             after_read: Mutex::new(None),
         })
     }
 
-    /// Raise and clear [`ConditionKind::DatabaseStuck`] on `bus` from now on,
-    /// including for a command already past the bound.
+    /// Raise and clear this actor's conditions on `bus` from now on,
+    /// including for a command already past the bound and a watch that
+    /// already failed.
     pub(crate) fn disclose_on(&self, bus: Arc<ConditionBus>) {
         if let Err(other) = self.bus.set(bus) {
             assert!(
@@ -183,6 +202,54 @@ impl ActorWatch {
                 "the SQL actor already discloses on another ConditionBus"
             );
         }
+        // `fail` records its cause before it reads the bus, so one of the two
+        // sees the other.
+        let failed = self
+            .failed
+            .lock()
+            .expect("actor watch failure poisoned")
+            .clone();
+        if let Some(cause) = failed {
+            self.bus
+                .get()
+                .expect("set above")
+                .emit(self.watch_failed(cause));
+        }
+    }
+
+    /// Disclose that this watch failed: log it once, and raise
+    /// [`ConditionKind::DatabaseWatchFailed`] now or when a bus is attached.
+    fn fail(&self, cause: String) {
+        let bus = {
+            let mut failed = self.failed.lock().expect("actor watch failure poisoned");
+            if failed.is_some() {
+                return;
+            }
+            *failed = Some(cause.clone());
+            self.bus.get().cloned()
+        };
+        tracing::error!(
+            target: "holon_actor_watch",
+            subject = self.subject,
+            "the SQL actor watch failed: {cause}"
+        );
+        if let Some(bus) = bus {
+            bus.emit(self.watch_failed(cause));
+        }
+    }
+
+    fn watch_failed(&self, cause: String) -> Condition {
+        Condition {
+            subject: self.subject.clone(),
+            reason: ConditionKind::DatabaseWatchFailed { cause },
+        }
+    }
+
+    fn commands(&self) -> MutexGuard<'_, Commands> {
+        self.commands.lock().unwrap_or_else(|_| {
+            self.fail("its command record is poisoned, so every SQL command on it fails".into());
+            panic!("actor watch poisoned");
+        })
     }
 
     /// Watches the command of `envelope` until the returned guard drops.
@@ -192,7 +259,7 @@ impl ActorWatch {
     }
 
     fn begin(&self, envelope: &Envelope) {
-        let mut c = self.commands.lock().expect("actor watch poisoned");
+        let mut c = self.commands();
         let seq = c.next_seq;
         c.next_seq += 1;
         let Commands {
@@ -212,7 +279,7 @@ impl ActorWatch {
 
     fn end(&self) {
         let new_longest = {
-            let mut c = self.commands.lock().expect("actor watch poisoned");
+            let mut c = self.commands();
             let running = c
                 .running
                 .take()
@@ -258,7 +325,7 @@ impl ActorWatch {
     /// clear the disclosure of a command that has finished.
     fn check(&self) {
         let now = {
-            let c = self.commands.lock().expect("actor watch poisoned");
+            let c = self.commands();
             c.running
                 .as_ref()
                 .map(|r| (r.seq, r.kind, r.started.elapsed()))
@@ -267,55 +334,86 @@ impl ActorWatch {
         if let Some(hook) = self.after_read.lock().expect("hook poisoned").take() {
             hook(self);
         }
-        let mut d = self
+        let mut d = *self
             .disclosure
             .lock()
             .expect("actor watch disclosure poisoned");
-        if now.map(|(seq, ..)| seq) != Some(d.seq) {
-            self.end_disclosure(&d);
-            *d = match now {
-                Some((seq, kind, _)) => Disclosure {
-                    seq,
-                    kind,
-                    next_report: FIRST_WARNING.min(self.bound),
-                    past_bound: false,
-                    on_bus: false,
+        let ended = (now.map(|(seq, ..)| seq) != Some(d.seq)).then(|| {
+            std::mem::replace(
+                &mut d,
+                match now {
+                    Some((seq, kind, _)) => Disclosure {
+                        seq,
+                        kind,
+                        next_report: FIRST_WARNING.min(self.bound),
+                        past_bound: false,
+                        on_bus: false,
+                    },
+                    None => Disclosure::default(),
                 },
-                None => Disclosure::default(),
-            };
+            )
+        });
+        let due = now.and_then(|(seq, kind, running)| self.due(&mut d, seq, kind, running));
+        *self
+            .disclosure
+            .lock()
+            .expect("actor watch disclosure poisoned") = d;
+
+        if let Some(ended) = ended {
+            self.end_disclosure(&ended);
         }
-        let Some((seq, kind, running)) = now else {
+        let Some(due) = due else {
             return;
         };
-        if running >= d.next_report {
-            // A command that finished since the read has its disclosure ended
-            // on the next tick.
-            let Some((report, caller)) = self.report(seq, running) else {
-                return;
-            };
+        if due.raise {
+            self.raise(due.kind, due.running, due.report.clone());
+        }
+        let _in_caller = due.caller.enter();
+        match due.log {
+            Some(Level::Error) => tracing::error!(target: "holon_actor_watch", "{}", due.report),
+            Some(Level::Warn) => tracing::warn!(target: "holon_actor_watch", "{}", due.report),
+            None => {}
+        }
+    }
+
+    /// What this tick owes command `seq`, with `d` moved past it. `None` when
+    /// nothing is due, or `seq` no longer runs: a command that finished since
+    /// the read has its disclosure ended on the next tick.
+    fn due(
+        &self,
+        d: &mut Disclosure,
+        seq: u64,
+        kind: &'static str,
+        running: Duration,
+    ) -> Option<Due> {
+        let log_due = running >= d.next_report;
+        let past_bound = d.past_bound || (log_due && running >= self.bound);
+        let raise = past_bound && self.bus.get().is_some() && (log_due || !d.on_bus);
+        if !log_due && !raise {
+            return None;
+        }
+        let (report, caller) = self.report(seq, running)?;
+        if log_due {
             d.next_report = if d.next_report < self.bound {
                 (d.next_report * 2).min(self.bound)
             } else {
                 d.next_report * 2
             };
-            let _in_caller = caller.enter();
-            if running >= self.bound {
-                d.past_bound = true;
-                tracing::error!(target: "holon_actor_watch", "{report}");
-                if d.on_bus {
-                    self.raise(kind, running, report);
-                }
+        }
+        d.past_bound = past_bound;
+        d.on_bus |= raise;
+        Some(Due {
+            kind,
+            running,
+            report,
+            caller,
+            log: log_due.then_some(if running >= self.bound {
+                Level::Error
             } else {
-                tracing::warn!(target: "holon_actor_watch", "{report}");
-            }
-        }
-        if d.past_bound && !d.on_bus && self.bus.get().is_some() {
-            let Some((report, _)) = self.report(seq, running) else {
-                return;
-            };
-            self.raise(kind, running, report);
-            d.on_bus = true;
-        }
+                Level::Warn
+            }),
+            raise,
+        })
     }
 
     fn raise(&self, kind: &'static str, running: Duration, report: String) {
@@ -323,7 +421,7 @@ impl ActorWatch {
             .get()
             .expect("raised only once a bus is attached")
             .emit(Condition {
-                subject: DATABASE_SUBJECT.to_string(),
+                subject: self.subject.clone(),
                 reason: ConditionKind::DatabaseStuck {
                     command: kind.to_string(),
                     running_secs: running.as_secs(),
@@ -337,7 +435,7 @@ impl ActorWatch {
             return;
         }
         let took = {
-            let c = self.commands.lock().expect("actor watch poisoned");
+            let c = self.commands();
             c.recent.iter().find(|f| f.seq == d.seq).map(|f| f.took)
         };
         tracing::warn!(
@@ -360,7 +458,7 @@ impl ActorWatch {
             .expect("on_bus implies an attached bus")
             .clear(
                 &Condition {
-                    subject: DATABASE_SUBJECT.to_string(),
+                    subject: self.subject.clone(),
                     reason: ConditionKind::DatabaseStuck {
                         command: String::new(),
                         running_secs: 0,
@@ -380,7 +478,7 @@ impl ActorWatch {
             .upgrade()
             .map(|tx| tx.max_capacity() - tx.capacity());
         let (kind, waited, caller, statement_count, statements, recent) = {
-            let c = self.commands.lock().expect("actor watch poisoned");
+            let c = self.commands();
             let r = c.running.as_ref().filter(|r| r.seq == seq)?;
             (
                 r.kind,
@@ -425,6 +523,20 @@ impl ActorWatch {
         }
         Some((out, caller))
     }
+}
+
+struct Due {
+    kind: &'static str,
+    running: Duration,
+    report: String,
+    caller: tracing::Span,
+    log: Option<Level>,
+    raise: bool,
+}
+
+enum Level {
+    Warn,
+    Error,
 }
 
 /// Ends its command's watch when dropped, also when the command panics.
@@ -517,33 +629,74 @@ fn bound_from_env() -> Duration {
 
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 mod watchdog {
+    use std::panic::AssertUnwindSafe;
+    use std::sync::PoisonError;
     use std::sync::Weak;
 
     use super::*;
 
     static WATCHED: Mutex<Vec<Weak<ActorWatch>>> = Mutex::new(Vec::new());
-    static STARTED: OnceLock<()> = OnceLock::new();
+    /// The watchdog thread, `None` when it did not start.
+    static STARTED: OnceLock<Option<std::thread::Thread>> = OnceLock::new();
+    /// Why the watchdog thread does not run.
+    static STOPPED: OnceLock<String> = OnceLock::new();
 
     pub(super) fn watch(watch: &Arc<ActorWatch>) {
         WATCHED
             .lock()
             .expect("watched actors poisoned")
             .push(Arc::downgrade(watch));
-        STARTED.get_or_init(|| {
-            if let Err(e) = std::thread::Builder::new()
+        let started = STARTED.get_or_init(|| {
+            match std::thread::Builder::new()
                 .name("sql-actor-watchdog".into())
                 .spawn(run)
             {
-                tracing::error!(
-                    target: "holon_actor_watch",
-                    "the SQL actor watchdog thread did not start ({e}); a stuck SQL command will \
-                     not be disclosed"
-                );
+                Ok(thread) => Some(thread.thread().clone()),
+                Err(e) => {
+                    stop(format!("the watchdog thread did not start ({e})"));
+                    None
+                }
             }
         });
+        // A new watch can have a shorter tick than the one the thread sleeps.
+        if let Some(thread) = started {
+            thread.unpark();
+        }
+        // `stop` sets STOPPED before it reads WATCHED, so a watch pushed
+        // after that read sees STOPPED here.
+        if let Some(cause) = STOPPED.get() {
+            watch.fail(not_disclosed(cause));
+        }
+    }
+
+    fn not_disclosed(cause: &str) -> String {
+        format!("{cause}, so a stuck SQL command is not disclosed")
+    }
+
+    /// Fails every watch, those registered later included.
+    fn stop(cause: String) {
+        let cause = STOPPED.get_or_init(|| cause);
+        let watched: Vec<Arc<ActorWatch>> = WATCHED
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .filter_map(Weak::upgrade)
+            .collect();
+        for watch in watched {
+            watch.fail(not_disclosed(cause));
+        }
+    }
+
+    struct Stopping;
+
+    impl Drop for Stopping {
+        fn drop(&mut self) {
+            stop("the watchdog thread stopped on a panic".into());
+        }
     }
 
     fn run() {
+        let _stopping = Stopping;
         loop {
             let live: Vec<Arc<ActorWatch>> = {
                 let mut watched = WATCHED.lock().expect("watched actors poisoned");
@@ -551,7 +704,16 @@ mod watchdog {
                 watched.iter().filter_map(Weak::upgrade).collect()
             };
             for watch in &live {
-                watch.check();
+                if let Err(panic) = std::panic::catch_unwind(AssertUnwindSafe(|| watch.check())) {
+                    watch.fail(not_disclosed(&format!(
+                        "its watchdog check panicked ({})",
+                        crate::turso::panic_message(&*panic)
+                    )));
+                    WATCHED
+                        .lock()
+                        .expect("watched actors poisoned")
+                        .retain(|w| !std::ptr::eq(w.as_ptr(), Arc::as_ptr(watch)));
+                }
             }
             let tick = live
                 .iter()
@@ -560,7 +722,7 @@ mod watchdog {
                 .unwrap_or(Duration::from_secs(1))
                 .clamp(Duration::from_millis(20), Duration::from_secs(1));
             drop(live);
-            std::thread::sleep(tick);
+            std::thread::park_timeout(tick);
         }
     }
 }
@@ -602,11 +764,16 @@ mod tests {
     const BOUND: Duration = Duration::from_millis(1);
 
     fn watched() -> (Arc<ActorWatch>, Arc<ConditionBus>, ActorSender) {
+        let bus = Arc::new(ConditionBus::new());
+        let (watch, tx) = watched_on(&bus);
+        (watch, bus, tx)
+    }
+
+    fn watched_on(bus: &Arc<ConditionBus>) -> (Arc<ActorWatch>, ActorSender) {
         let (tx, _rx) = ActorSender::channel(4);
         let watch = ActorWatch::new(BOUND, &tx);
-        let bus = Arc::new(ConditionBus::new());
         watch.disclose_on(bus.clone());
-        (watch, bus, tx)
+        (watch, tx)
     }
 
     fn envelope(sql: &str) -> Envelope {
@@ -640,6 +807,28 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    fn watch_failures(bus: &ConditionBus) -> Vec<String> {
+        bus.current()
+            .into_iter()
+            .filter_map(|c| match c.reason {
+                ConditionKind::DatabaseWatchFailed { cause } => Some(cause),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn wait_until(what: &str, bus: &ConditionBus, done: impl Fn() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !done() {
+            assert!(
+                Instant::now() < deadline,
+                "{what}; conditions in effect: {:#?}",
+                bus.current()
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[test]
@@ -713,5 +902,104 @@ mod tests {
         drop(watch);
 
         assert_eq!(stuck(&bus), Vec::new());
+    }
+
+    #[test]
+    fn a_poisoned_watch_raises_a_watch_failure_on_its_bus() {
+        let (watch, bus, _tx) = watched();
+        watch.poison();
+
+        let began = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            watch.begin(&envelope("SELECT 1 AS any_command"))
+        }));
+
+        assert!(began.is_err(), "a poisoned watch fails the command");
+        assert_eq!(watch_failures(&bus).len(), 1, "{:#?}", bus.current());
+    }
+
+    #[test]
+    fn a_watch_that_failed_before_its_bus_was_attached_raises_on_attach() {
+        let (tx, _rx) = ActorSender::channel(4);
+        let watch = ActorWatch::new(BOUND, &tx);
+        watch.poison();
+        let began = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            watch.begin(&envelope("SELECT 1 AS any_command"))
+        }));
+        assert!(began.is_err(), "a poisoned watch fails the command");
+
+        let bus = Arc::new(ConditionBus::new());
+        watch.disclose_on(bus.clone());
+
+        assert_eq!(watch_failures(&bus).len(), 1, "{:#?}", bus.current());
+    }
+
+    #[test]
+    fn the_watchdog_outlives_a_watch_whose_check_panics() {
+        let bus = Arc::new(ConditionBus::new());
+        let (broken, _broken_tx) = watched_on(&bus);
+        let (healthy, _healthy_tx) = watched_on(&bus);
+        after_read(&broken, |_| panic!("a watchdog check panics"));
+        watchdog::watch(&broken);
+        watchdog::watch(&healthy);
+
+        healthy.begin(&envelope("SELECT 1 AS stuck_command"));
+
+        wait_until(
+            "the healthy actor's stuck command is disclosed, and the broken watch's failure",
+            &bus,
+            || {
+                stuck(&bus)
+                    .iter()
+                    .any(|(_, report)| report.contains("stuck_command"))
+                    && watch_failures(&bus).len() == 1
+            },
+        );
+        healthy.end();
+    }
+
+    struct PanicOnEnter;
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for PanicOnEnter {
+        fn on_enter(&self, _: &tracing::span::Id, _: tracing_subscriber::layer::Context<'_, S>) {
+            panic!("entering the sender's span panics");
+        }
+    }
+
+    #[test]
+    fn a_report_whose_logging_panics_leaves_the_watch_droppable() {
+        use tracing_subscriber::layer::SubscriberExt;
+        let (watch, _bus, _tx) = watched();
+        let subscriber = tracing_subscriber::registry().with(PanicOnEnter);
+        tracing::subscriber::with_default(subscriber, || {
+            let mut stuck_command = envelope("SELECT 1 AS stuck_command");
+            stuck_command.caller = tracing::info_span!("sender");
+            watch.begin(&stuck_command);
+            run_past_bound();
+            let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| watch.check()));
+            assert!(checked.is_err(), "the report enters the sender's span");
+        });
+
+        drop(watch);
+    }
+
+    #[test]
+    fn two_stuck_actors_on_one_bus_are_disclosed_and_cleared_apart() {
+        let bus = Arc::new(ConditionBus::new());
+        let (first, _first_tx) = watched_on(&bus);
+        let (second, _second_tx) = watched_on(&bus);
+        first.begin(&envelope("SELECT 1 AS stuck_on_first"));
+        second.begin(&envelope("SELECT 1 AS stuck_on_second"));
+        run_past_bound();
+        first.check();
+        second.check();
+        assert_eq!(stuck(&bus).len(), 2, "{:#?}", bus.current());
+
+        drop(first);
+
+        let left = stuck(&bus);
+        assert!(
+            left.len() == 1 && left[0].1.contains("stuck_on_second"),
+            "{left:#?}"
+        );
     }
 }

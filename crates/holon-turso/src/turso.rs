@@ -753,6 +753,14 @@ fn reject_replace_into_rowid_matview_base(
     ))
 }
 
+pub(crate) fn panic_message(panic: &(dyn std::any::Any + Send)) -> &str {
+    panic
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("unknown panic")
+}
+
 pub(crate) fn sql_fingerprint(sql: &str) -> String {
     use std::hash::Hash;
     use std::hash::Hasher;
@@ -2673,17 +2681,10 @@ impl TursoBackend {
                 Ok(true) => break,
                 Ok(false) => {}
                 Err(panic_info) => {
-                    let msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
-                        s.to_string()
-                    } else if let Some(s) = panic_info.downcast_ref::<String>() {
-                        s.clone()
-                    } else {
-                        "unknown panic".to_string()
-                    };
                     tracing::error!(
                         "[TursoBackend::Actor] Caught panic during command processing: {}. Actor \
                          continues.",
-                        msg
+                        panic_message(&*panic_info)
                     );
                     // If a panic left a transaction open, roll it back to prevent
                     // the connection from being stuck (which silences CDC callbacks).
@@ -4379,6 +4380,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_poisoned_actor_watch_fails_each_command_and_the_actor_lives_on() {
         let (_backend, handle) = TursoBackend::new_in_memory().await.expect("in-memory db");
+        let bus = Arc::new(holon_api::ConditionBus::new());
+        handle.disclose_stuck_commands_on(bus.clone());
         handle.watch.poison();
 
         for attempt in 0..3 {
@@ -4393,6 +4396,14 @@ mod tests {
                 "attempt {attempt}: the actor died: {err}"
             );
         }
+        assert!(
+            bus.current().iter().any(|c| matches!(
+                c.reason,
+                holon_api::ConditionKind::DatabaseWatchFailed { .. }
+            )),
+            "the failing commands are not disclosed: {:#?}",
+            bus.current()
+        );
     }
 
     #[test]

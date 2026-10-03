@@ -665,6 +665,15 @@ const DATABASE_STUCK: ConditionProfile = ConditionProfile::new(
     &[],
 );
 
+const DATABASE_WATCH_FAILED: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Error,
+    "Holon's database watch failed",
+    icons::BLOCKED,
+    ConditionPlacement::Banner,
+    AllClear::UntilRestart,
+    &[],
+);
+
 impl ConditionKind {
     /// This kind's profile. Total, like
     /// [`condition_kind`](ConditionKind::condition_kind): a new variant cannot
@@ -714,6 +723,7 @@ impl ConditionKind {
             Self::LoroUpdateLogTailDropped { .. } => LORO_UPDATE_LOG_TAIL_DROPPED,
             Self::ViewEngineStopped(_) => VIEW_ENGINE_STOPPED,
             Self::DatabaseStuck { .. } => DATABASE_STUCK,
+            Self::DatabaseWatchFailed { .. } => DATABASE_WATCH_FAILED,
         }
     }
 }

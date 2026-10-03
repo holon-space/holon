@@ -3,8 +3,8 @@
 //! and its SQL with the literals blanked, and the disclosure clears when the
 //! command finishes.
 //!
-//! The bound is read once per backend from the environment, so each bound gets
-//! its own test function; nextest runs every test in its own process.
+//! The bound is read from the environment when a backend starts; nextest runs
+//! every test in its own process.
 //!
 //! A spinning command never yields, so a runtime that owns it can never finish
 //! a drop: each runtime is `ManuallyDrop` and ends with `shutdown_background`,
@@ -16,7 +16,9 @@ use std::sync::Mutex;
 use std::time::Duration;
 use std::time::Instant;
 
+use holon_api::Condition;
 use holon_api::ConditionBus;
+use holon_api::ConditionChange;
 use holon_api::ConditionKind;
 use holon_turso::turso::DbHandle;
 use holon_turso::turso::TursoBackend;
@@ -58,10 +60,10 @@ fn runtime() -> ManuallyDrop<tokio::runtime::Runtime> {
     )
 }
 
-fn set_hang_bound(ms: u64) {
-    // SAFETY: called before the runtime and the backend exist, while this
-    // process has no other thread that reads the environment.
-    unsafe { std::env::set_var("HOLON_ACTOR_HANG_MS", ms.to_string()) };
+fn set_hang_bound(bound: Duration) {
+    // SAFETY: no runtime is alive. The only other thread is the SQL actor
+    // watchdog, which does not read the environment.
+    unsafe { std::env::set_var("HOLON_ACTOR_HANG_MS", bound.as_millis().max(1).to_string()) };
 }
 
 fn open(rt: &tokio::runtime::Runtime, bus: &Arc<ConditionBus>) -> DbHandle {
@@ -127,26 +129,82 @@ fn wait_for_clear(bus: &ConditionBus, within: Duration) {
     }
 }
 
-/// How long the slow query takes on this machine and build, so the bounds of
-/// the other tests are fractions and multiples of a measurement, not guesses.
-fn time_slow_query(rt: &tokio::runtime::Runtime, handle: &DbHandle, n: u64) -> Duration {
+fn run_slow_query(rt: &tokio::runtime::Runtime, handle: &DbHandle, rows: u64) -> Duration {
     rt.block_on(async {
         let t0 = Instant::now();
         handle
-            .query(&slow_count_sql(n), Default::default())
+            .query(&slow_count_sql(rows), Default::default())
             .await
             .expect("slow count query");
         t0.elapsed()
     })
 }
 
-/// Rows a slow query needs to run for one to two seconds in the test profile
-/// (about 28 µs per row).
-const SLOW_ROWS: u64 = 60_000;
+/// A slow query on this machine and build. A bound below it is a quarter of
+/// its fastest run, for a query with four times its rows; a bound above it is
+/// four times its slowest run. Load that changes between the calibration and
+/// the test query then cannot carry the query across the bound.
+struct Calibration {
+    rows: u64,
+    fastest: Duration,
+    slowest: Duration,
+}
+
+/// The rows whose query runs for at least 200 ms in each of three runs.
+fn calibrate_slow_query() -> Calibration {
+    const SLOW: Duration = Duration::from_millis(200);
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("calibration runtime");
+    let (_backend, handle) = rt
+        .block_on(TursoBackend::new_in_memory())
+        .expect("in-memory db");
+    let mut rows = 10_000;
+    loop {
+        let first = run_slow_query(&rt, &handle, rows);
+        if first >= SLOW {
+            let runs = [
+                first,
+                run_slow_query(&rt, &handle, rows),
+                run_slow_query(&rt, &handle, rows),
+            ];
+            let fastest = *runs.iter().min().expect("three runs");
+            if fastest >= SLOW {
+                eprintln!("calibration: {rows} rows ran for {runs:?}");
+                return Calibration {
+                    rows,
+                    fastest,
+                    slowest: *runs.iter().max().expect("three runs"),
+                };
+            }
+        }
+        rows *= 2;
+    }
+}
+
+/// The `DatabaseStuck` changes so far, a repeated raise once.
+fn stuck_changes(changes: &mut tokio::sync::broadcast::Receiver<ConditionChange>) -> Vec<String> {
+    let mut seen: Vec<String> = std::iter::from_fn(|| changes.try_recv().ok())
+        .filter_map(|change| match change {
+            ConditionChange::Raised(Condition {
+                reason: ConditionKind::DatabaseStuck { command, .. },
+                ..
+            }) => Some(format!("raised {command}")),
+            ConditionChange::Cleared(key) if key.kind == ConditionKind::DATABASE_STUCK => {
+                Some("cleared".to_string())
+            }
+            _ => None,
+        })
+        .collect();
+    seen.dedup();
+    seen
+}
 
 #[test]
 fn a_spinning_commit_is_disclosed_with_its_command_kind_and_redacted_sql() {
-    set_hang_bound(500);
+    set_hang_bound(Duration::from_millis(500));
     let rt = runtime();
     let bus = Arc::new(ConditionBus::new());
     let handle = open(&rt, &bus);
@@ -198,28 +256,22 @@ fn a_spinning_commit_is_disclosed_with_its_command_kind_and_redacted_sql() {
 
 #[test]
 fn a_slow_healthy_command_past_the_bound_is_disclosed_then_cleared() {
-    set_hang_bound(250);
+    let slow = calibrate_slow_query();
+    let bound = slow.fastest / 4;
+    set_hang_bound(bound);
     let rt = runtime();
     let bus = Arc::new(ConditionBus::new());
     let handle = open(&rt, &bus);
-    let took = time_slow_query(&rt, &handle, SLOW_ROWS);
-    assert!(
-        took >= Duration::from_secs(1),
-        "the slow query took only {took:?}; raise SLOW_ROWS so it outlasts the 250 ms bound \
-         by a wide margin"
-    );
+    let mut changes = bus.subscribe().changes;
+
+    let took = run_slow_query(&rt, &handle, slow.rows * 4);
     wait_for_clear(&bus, CLEAR_WITHIN);
 
-    let slow = handle.clone();
-    let query = rt.spawn(async move {
-        slow.query(&slow_count_sql(SLOW_ROWS), Default::default())
-            .await
-            .expect("slow count query");
-    });
-    let stuck = wait_for_stuck(&bus, took);
-    assert_eq!(stuck.command, "Query");
-    rt.block_on(query).expect("slow query task");
-    wait_for_clear(&bus, CLEAR_WITHIN);
+    assert_eq!(
+        stuck_changes(&mut changes),
+        ["raised Query", "cleared"],
+        "a query that ran {took:?} against a bound of {bound:?}"
+    );
     ManuallyDrop::into_inner(rt).shutdown_background();
 }
 
@@ -251,22 +303,22 @@ fn the_stuck_report_is_logged_in_the_span_of_the_code_that_sent_the_command() {
                 .with_filter(EnvFilter::new("info")),
         )
         .init();
-    set_hang_bound(250);
+    let slow = calibrate_slow_query();
+    set_hang_bound(slow.fastest / 4);
     let rt = runtime();
     let bus = Arc::new(ConditionBus::new());
     let handle = open(&rt, &bus);
 
-    let slow = handle.clone();
-    let query = rt.spawn(
+    rt.block_on(
         async move {
-            slow.query(&slow_count_sql(SLOW_ROWS), Default::default())
+            handle
+                .query(&slow_count_sql(slow.rows * 4), Default::default())
                 .await
                 .expect("slow count query");
         }
         .instrument(tracing::info_span!("sender_of_the_slow_query")),
     );
-    wait_for_stuck(&bus, Duration::from_secs(10));
-    rt.block_on(query).expect("slow query task");
+    wait_for_clear(&bus, CLEAR_WITHIN);
 
     let text = String::from_utf8(log.0.lock().expect("log poisoned").clone()).expect("utf-8 log");
     let line = text
@@ -283,19 +335,20 @@ fn the_stuck_report_is_logged_in_the_span_of_the_code_that_sent_the_command() {
 
 #[test]
 fn a_slow_healthy_command_under_the_bound_is_not_disclosed() {
-    set_hang_bound(30_000);
+    let slow = calibrate_slow_query();
+    let bound = slow.slowest * 4;
+    set_hang_bound(bound);
     let rt = runtime();
     let bus = Arc::new(ConditionBus::new());
     let handle = open(&rt, &bus);
     let mut changes = bus.subscribe().changes;
-    let took = time_slow_query(&rt, &handle, SLOW_ROWS);
-    assert!(
-        took * 4 < Duration::from_secs(30),
-        "the slow query took {took:?}, too close to the 30 s bound to show no false alarm"
-    );
+
+    let took = run_slow_query(&rt, &handle, slow.rows);
+
     assert!(
         changes.try_recv().is_err(),
-        "a command that finished in {took:?}, far under the 30 s bound, raised a condition: {:?}",
+        "a query that ran {took:?} against a bound of {bound:?} raised a condition: {:?}",
         bus.current()
     );
+    ManuallyDrop::into_inner(rt).shutdown_background();
 }

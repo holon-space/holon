@@ -449,6 +449,12 @@ pub enum ConditionKind {
         running_secs: u64,
         report: String,
     },
+    /// The watch over one SQL actor failed (`cause`, which names what no
+    /// longer works): a stuck command on it is no longer disclosed, or every
+    /// command on it fails.
+    ///
+    /// All-clear: none in this process.
+    DatabaseWatchFailed { cause: String },
 }
 
 /// Subject of the device-wide conditions on this bus, which have no share to
@@ -460,7 +466,8 @@ pub const WATCH_VIEWS_SUBJECT: &str = "watch-views";
 /// Subject of [`ConditionKind::ViewEngineStopped`].
 pub const VIEW_ENGINE_SUBJECT: &str = "view-engine";
 
-/// Subject of [`ConditionKind::DatabaseStuck`].
+/// Subject prefix of [`ConditionKind::DatabaseStuck`] and
+/// [`ConditionKind::DatabaseWatchFailed`]; the subject names one SQL actor.
 pub const DATABASE_SUBJECT: &str = "database";
 
 impl ConditionKind {
@@ -510,6 +517,7 @@ impl ConditionKind {
     pub const LORO_UPDATE_LOG_TAIL_DROPPED: &'static str = "loro-update-log-tail-dropped";
     pub const VIEW_ENGINE_STOPPED: &'static str = "view-engine-stopped";
     pub const DATABASE_STUCK: &'static str = "database-stuck";
+    pub const DATABASE_WATCH_FAILED: &'static str = "database-watch-failed";
 
     /// The condition's stable identity, paired with the subject to form a
     /// [`ConditionKey`]. Total: every degradation is a sticky
@@ -563,6 +571,7 @@ impl ConditionKind {
             Self::LoroUpdateLogTailDropped { .. } => Self::LORO_UPDATE_LOG_TAIL_DROPPED,
             Self::ViewEngineStopped(_) => Self::VIEW_ENGINE_STOPPED,
             Self::DatabaseStuck { .. } => Self::DATABASE_STUCK,
+            Self::DatabaseWatchFailed { .. } => Self::DATABASE_WATCH_FAILED,
         }
     }
 }
