@@ -1066,7 +1066,10 @@ impl BackendEngine {
         context: Option<QueryContext>,
     ) -> Result<RowChangeStream> {
         let transformed_sql = self.apply_sql_transforms(&sql);
-        tracing::debug!("[BackendEngine] SQL:\n{}", holon_turso::turso::redact_sql_for_logs(&transformed_sql));
+        tracing::debug!(
+            "[BackendEngine] SQL:\n{}",
+            holon_turso::turso::redact_sql_for_logs(&transformed_sql)
+        );
 
         let ctx = context.clone().unwrap_or_else(QueryContext::root);
 

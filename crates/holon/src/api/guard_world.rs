@@ -168,16 +168,12 @@ impl GuardWorld for SqlGuardWorld {
             ),
         };
         let sql = sql.map_err(|e| format!("guard does not compile to SQL: {e}"))?;
-        let rows = self
-            .db
-            .query_positional(&sql, params)
-            .await
-            .map_err(|e| {
-                format!(
-                    "guard evaluation failed for:\n{}\n\nerror: {e}",
-                    holon_turso::turso::redact_sql_for_logs(&sql)
-                )
-            })?;
+        let rows = self.db.query_positional(&sql, params).await.map_err(|e| {
+            format!(
+                "guard evaluation failed for:\n{}\n\nerror: {e}",
+                holon_turso::turso::redact_sql_for_logs(&sql)
+            )
+        })?;
         Ok(!rows.is_empty())
     }
 }

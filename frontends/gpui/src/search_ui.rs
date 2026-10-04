@@ -260,9 +260,17 @@ pub fn run_search(
             ),
         };
         if let Err(unsent) = tx.send(outcome) {
+            let outcome_shape = match &unsent {
+                Ok(r) => format!(
+                    "ok: {} pages, {} content hits",
+                    r.pages.len(),
+                    r.content.len()
+                ),
+                Err(e) => format!("err: {} chars", e.chars().count()),
+            };
             tracing::error!(
                 query_chars = query.chars().count(),
-                outcome = ?unsent,
+                outcome = %outcome_shape,
                 "quick_open_search: the overlay dropped its receiver before the result arrived"
             );
         }

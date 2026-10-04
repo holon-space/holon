@@ -269,6 +269,10 @@ async fn no_user_value_reaches_a_log_span_or_error() -> Result<()> {
         // this line the capture holds no error built from a statement at all,
         // and the loop above would be vacuous for that whole class.
         "names no grain as a literal",
+        // Only step 3's failing preload (the matview_manager Err arm) writes this.
+        "preload: failed to create view",
+        // Only step 5's failing query is refused at statement preparation.
+        "Failed to prepare query",
     ] {
         assert!(
             text.contains(shape),

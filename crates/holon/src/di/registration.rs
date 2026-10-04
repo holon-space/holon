@@ -415,15 +415,12 @@ async fn create_live_data_keyed_by(
     sql: &str,
     key_column: &'static str,
 ) -> Result<Arc<LiveData<holon_core::storage::types::StorageEntity>>> {
-    let result = matview_manager
-        .watch(sql)
-        .await
-        .with_context(|| {
-            format!(
-                "[DI] failed to watch live-entity query '{}'",
-                holon_turso::turso::redact_sql_for_logs(sql)
-            )
-        })?;
+    let result = matview_manager.watch(sql).await.with_context(|| {
+        format!(
+            "[DI] failed to watch live-entity query '{}'",
+            holon_turso::turso::redact_sql_for_logs(sql)
+        )
+    })?;
     let live = LiveData::new(
         result.initial_rows,
         move |row| {

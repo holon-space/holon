@@ -52,9 +52,7 @@ pub mod undo_persistence;
 /// search term — and the lines that carry them are INFO, which the production
 /// filter (`holon=info`) leaves on. The names are schema: they say which
 /// operation ran with which shape, which is what those lines are read for.
-pub(crate) fn param_keys_for_logs(
-    params: &holon_core::storage::types::StorageEntity,
-) -> String {
+pub(crate) fn param_keys_for_logs(params: &holon_core::storage::types::StorageEntity) -> String {
     let mut keys: Vec<&str> = params.keys().map(std::convert::AsRef::as_ref).collect();
     keys.sort_unstable();
     keys.join(", ")
