@@ -898,11 +898,7 @@ impl HeadlessFrontendComponent {
             config_dir,
             std::collections::HashSet::new(),
             move |injector| {
-                crate::pbt::database_stuck_guard::forbid_database_stuck(
-                    &injector
-                        .try_resolve::<Arc<holon_api::ConditionBus>>()
-                        .expect("every container provides a ConditionBus"),
-                );
+                crate::pbt::database_stuck_guard::forbid_database_stuck_in(injector);
                 crate::test_environment::install_headless_render_interpreter(
                     injector,
                     &org_fs_for_di,
@@ -976,6 +972,11 @@ impl HeadlessFrontendComponent {
             params.editor_leg == holon_pbt_core::EditorLeg::Cell,
             "the booted engine does not run the drawn editor leg {:?} (loro_enabled={loro_enabled})",
             params.editor_leg
+        );
+        crate::pbt::database_stuck_guard::assert_guarded_in(
+            injector_slot
+                .get()
+                .expect("DI injector captured during build"),
         );
 
         if settle > Duration::ZERO {

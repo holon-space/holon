@@ -18,6 +18,8 @@
 
 use std::collections::VecDeque;
 use std::fmt::Write as _;
+use std::io::Write as _;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
@@ -218,6 +220,8 @@ impl ActorWatch {
 
     /// Disclose that this watch failed: log it once, and raise
     /// [`ConditionKind::DatabaseWatchFailed`] now or when a bus is attached.
+    /// Never panics: the watchdog fails watches when its own code panicked,
+    /// so a panicking subscriber or bus must not stop the other disclosure.
     fn fail(&self, cause: String) {
         let bus = {
             let mut failed = self.failed.lock().expect("actor watch failure poisoned");
@@ -227,13 +231,24 @@ impl ActorWatch {
             *failed = Some(cause.clone());
             self.bus.get().cloned()
         };
-        tracing::error!(
-            target: "holon_actor_watch",
-            subject = self.subject,
-            "the SQL actor watch failed: {cause}"
-        );
-        if let Some(bus) = bus {
-            bus.emit(self.watch_failed(cause));
+        let logged = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            tracing::error!(
+                target: "holon_actor_watch",
+                subject = self.subject,
+                "the SQL actor watch failed: {cause}"
+            )
+        }));
+        let raised = bus.map(|bus| {
+            std::panic::catch_unwind(AssertUnwindSafe(|| {
+                bus.emit(self.watch_failed(cause.clone()))
+            }))
+        });
+        if logged.is_err() || matches!(raised, Some(Err(_))) {
+            let _ = writeln!(
+                std::io::stderr(),
+                "the SQL actor watch {} failed: {cause} (disclosing it panicked)",
+                self.subject
+            );
         }
     }
 
@@ -628,7 +643,7 @@ fn bound_from_env() -> Duration {
 
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 mod watchdog {
-    use std::panic::AssertUnwindSafe;
+    use std::convert::Infallible;
     use std::sync::PoisonError;
     use std::sync::Weak;
 
@@ -649,10 +664,12 @@ mod watchdog {
             }
         }
 
+        /// A panic under the `watched` lock stops the registry, which still
+        /// fails the watches it holds and those added later.
         pub(super) fn add(&self, watch: &Arc<ActorWatch>) {
             self.watched
                 .lock()
-                .expect("watched actors poisoned")
+                .unwrap_or_else(PoisonError::into_inner)
                 .push(Arc::downgrade(watch));
         }
 
@@ -710,16 +727,28 @@ mod watchdog {
         format!("{cause}, so a stuck SQL command is not disclosed")
     }
 
-    struct Stopping;
-
-    impl Drop for Stopping {
-        fn drop(&mut self) {
-            REGISTRY.stop("the watchdog thread stopped on a panic".into());
-        }
+    #[cfg(test)]
+    pub(super) fn poison_registry() {
+        std::thread::scope(|s| {
+            let poisoner = s.spawn(|| {
+                let _held = REGISTRY.watched.lock().expect("not yet poisoned");
+                panic!("poisoning the watchdog registry");
+            });
+            assert!(poisoner.join().is_err(), "the poisoning thread panics");
+        });
     }
 
+    /// Stops the registry after the unwind ends, so no failure is disclosed
+    /// while the thread unwinds.
     fn run() {
-        let _stopping = Stopping;
+        let Err(panic) = std::panic::catch_unwind(watch_until_a_panic);
+        REGISTRY.stop(format!(
+            "the watchdog thread stopped on a panic ({})",
+            crate::turso::panic_message(&*panic)
+        ));
+    }
+
+    fn watch_until_a_panic() -> Infallible {
         loop {
             let live: Vec<Arc<ActorWatch>> = {
                 let mut watched = REGISTRY.watched.lock().expect("watched actors poisoned");
@@ -1000,6 +1029,68 @@ mod tests {
                 .iter()
                 .all(|cause| cause.contains("stopped on a panic")
                     && cause.contains("a stuck SQL command is not disclosed")),
+            "{failures:#?}"
+        );
+    }
+
+    struct PanicOnWatchdogEvent;
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for PanicOnWatchdogEvent {
+        fn on_event(&self, _: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+            if std::thread::current().name() == Some("sql-actor-watchdog") {
+                panic!("the subscriber panics on a watchdog event");
+            }
+        }
+    }
+
+    #[test]
+    fn a_watchdog_whose_logging_panics_still_raises_every_condition() {
+        use tracing_subscriber::layer::SubscriberExt;
+        tracing::subscriber::set_global_default(
+            tracing_subscriber::registry().with(PanicOnWatchdogEvent),
+        )
+        .expect("nextest runs this test in a process of its own");
+        let bus = Arc::new(ConditionBus::new());
+        let (broken, _broken_tx) = watched_on(&bus);
+        let (healthy, _healthy_tx) = watched_on(&bus);
+        after_read(&broken, |_| panic!("a watchdog check panics"));
+        watchdog::watch(&broken);
+        watchdog::watch(&healthy);
+
+        healthy.begin(&envelope("SELECT 1 AS stuck_command"));
+
+        wait_until(
+            "the healthy actor's stuck command is disclosed, and both watches' failures",
+            &bus,
+            || {
+                stuck(&bus)
+                    .iter()
+                    .any(|(_, report)| report.contains("stuck_command"))
+                    && watch_failures(&bus).len() == 2
+            },
+        );
+        healthy.end();
+    }
+
+    #[test]
+    fn a_watchdog_thread_that_panics_fails_every_watch_and_those_added_later() {
+        let bus = Arc::new(ConditionBus::new());
+        let (held, _held_tx) = watched_on(&bus);
+        watchdog::watch(&held);
+
+        watchdog::poison_registry();
+
+        wait_until("the held watch fails", &bus, || {
+            watch_failures(&bus).len() == 1
+        });
+        let (later, _later_tx) = watched_on(&bus);
+        watchdog::watch(&later);
+        let failures = watch_failures(&bus);
+        assert_eq!(failures.len(), 2, "{:#?}", bus.current());
+        assert!(
+            failures
+                .iter()
+                .all(|cause| cause.contains("the watchdog thread stopped on a panic")),
             "{failures:#?}"
         );
     }

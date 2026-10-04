@@ -15,6 +15,7 @@
 //! thread of its own that ends the process with the report.
 
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::Weak;
 
 use holon_api::ConditionBus;
@@ -25,9 +26,15 @@ use tokio::sync::broadcast::error::RecvError;
 
 pub const ID: InvariantId = InvariantId("inv-no-database-stuck");
 
+static GUARDED: Mutex<Vec<Weak<ConditionBus>>> = Mutex::new(Vec::new());
+
 /// Ends the process with exit code 101 when `bus` raises `DatabaseStuck` or
 /// `DatabaseWatchFailed`.
 pub fn forbid_database_stuck(bus: &Arc<ConditionBus>) {
+    GUARDED
+        .lock()
+        .expect("guarded buses poisoned")
+        .push(Arc::downgrade(bus));
     let mut changes = bus.subscribe().changes;
     let bus = Arc::downgrade(bus);
     std::thread::Builder::new()
@@ -43,6 +50,38 @@ pub fn forbid_database_stuck(bus: &Arc<ConditionBus>) {
             }
         })
         .expect("spawn the database-stuck guard thread");
+}
+
+/// Guards the container's bus. Called from the first DI closure, so the boot's
+/// own commands are guarded too.
+pub fn forbid_database_stuck_in(injector: &fluxdi::Injector) {
+    forbid_database_stuck(&bus_of(injector));
+}
+
+/// Panics unless a guard watches the container's bus.
+pub fn assert_guarded_in(injector: &fluxdi::Injector) {
+    assert_guarded(&bus_of(injector));
+}
+
+fn bus_of(injector: &fluxdi::Injector) -> Arc<ConditionBus> {
+    (*injector
+        .try_resolve::<Arc<ConditionBus>>()
+        .expect("every container provides a ConditionBus"))
+    .clone()
+}
+
+fn assert_guarded(bus: &Arc<ConditionBus>) {
+    let guarded = GUARDED
+        .lock()
+        .expect("guarded buses poisoned")
+        .iter()
+        .any(|g| std::ptr::eq(g.as_ptr(), Arc::as_ptr(bus)));
+    assert!(
+        guarded,
+        "[{}] no guard watches the session's ConditionBus: a stuck SQL command would hang the \
+         run with no output",
+        ID.0
+    );
 }
 
 fn check_current(bus: &Weak<ConditionBus>) {

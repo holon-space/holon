@@ -36,7 +36,7 @@ fn calibrate_slow_query() -> (u64, Duration) {
     let (_backend, handle) = rt
         .block_on(TursoBackend::new_in_memory())
         .expect("in-memory db");
-    let mut run = |rows: u64| {
+    let run = |rows: u64| {
         rt.block_on(async {
             let t0 = Instant::now();
             handle

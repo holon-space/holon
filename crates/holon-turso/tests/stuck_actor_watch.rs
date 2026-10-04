@@ -140,10 +140,8 @@ fn run_slow_query(rt: &tokio::runtime::Runtime, handle: &DbHandle, rows: u64) ->
     })
 }
 
-/// A slow query on this machine and build. A bound below it is a quarter of
-/// its fastest run, for a query with four times its rows; a bound above it is
-/// four times its slowest run. The margins absorb load that changes between
-/// the calibration and the test.
+/// A slow query on this machine and build. Each test's margin over it absorbs
+/// load that changes between the calibration and the test.
 struct Calibration {
     rows: u64,
     fastest: Duration,
@@ -336,14 +334,18 @@ fn the_stuck_report_is_logged_in_the_span_of_the_code_that_sent_the_command() {
 #[test]
 fn a_slow_healthy_command_under_the_bound_is_not_disclosed() {
     let slow = calibrate_slow_query();
-    let bound = slow.slowest * 4;
+    // At least 1.6 s, longer than the watchdog's longest check interval (1 s).
+    let rows = slow.rows * 8;
+    // Eight busy threads per core, from the end of the calibration on, slow
+    // the query about 23x.
+    let bound = slow.slowest * 8 * 64;
     set_hang_bound(bound);
     let rt = runtime();
     let bus = Arc::new(ConditionBus::new());
     let handle = open(&rt, &bus);
     let mut changes = bus.subscribe().changes;
 
-    let took = run_slow_query(&rt, &handle, slow.rows);
+    let took = run_slow_query(&rt, &handle, rows);
 
     assert!(
         changes.try_recv().is_err(),
