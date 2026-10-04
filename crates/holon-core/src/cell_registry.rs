@@ -47,6 +47,22 @@ pub struct ShareExitRefused {
     pub action: RemovingAction,
 }
 
+/// A structural op on a block that the SQL projection holds but the write
+/// authority does not: the block was just deleted and the projection still
+/// lags, or the vault was never seeded into its authority.
+///
+/// One authority decides each write (D64.b), so the op is refused instead of
+/// deciding from the projection.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "{block} is in the SQL projection but not in the write authority, so no structural op may \
+     decide on it. The write authority does not hold this block: it was deleted, or this vault \
+     was never seeded (then re-create it from its org files)."
+)]
+pub struct BlockNotInWriteAuthority {
+    pub block: EntityUri,
+}
+
 /// What [`EntityCellRegistry::delete_exiting_shares`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TreeDelete {

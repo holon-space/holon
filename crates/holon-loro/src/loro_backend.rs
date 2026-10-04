@@ -783,7 +783,20 @@ fn stored_block_at(
     tree: &loro::LoroTree,
     node: loro::TreeID,
 ) -> anyhow::Result<holon_api::StoredBlock> {
-    let block = read_block_from_tree(tree, node, get_node_parent(tree, node));
+    stored_block_with_meta(
+        tree,
+        node,
+        read_block_from_tree(tree, node, get_node_parent(tree, node)),
+    )
+}
+
+/// `block`, read from `node`, plus the `block_type` and `completed` values
+/// the node's meta holds.
+fn stored_block_with_meta(
+    tree: &loro::LoroTree,
+    node: loro::TreeID,
+    block: Block,
+) -> anyhow::Result<holon_api::StoredBlock> {
     let meta = tree
         .get_meta(node)
         .map_err(|e| anyhow::anyhow!("get_meta({node:?}): {e}"))?;
@@ -4488,12 +4501,35 @@ impl LoroBackend {
     /// The block plus the `block_type` and `completed` values its meta holds;
     /// both live in the property map, which [`Block::properties`] never shows.
     pub async fn get_stored_block(&self, id: &str) -> Result<holon_api::StoredBlock, ApiError> {
+        self.read_placed_block(id, stored_block_with_meta).await
+    }
+
+    /// The block at `id`, routed the way writes route, with the parent this
+    /// device places it under: a placed page share's root answers its mount's
+    /// parent ([`Self::placement_mount`]), as SQL does. `finish` reads more
+    /// from the node under the same read.
+    async fn read_placed_block<R>(
+        &self,
+        id: &str,
+        finish: impl FnOnce(&loro::LoroTree, loro::TreeID, Block) -> anyhow::Result<R>,
+    ) -> Result<R, ApiError> {
         let target = self.resolve_write_target(id).await?;
+        let placed_under = match self.placement_mount(&target)? {
+            Some(mount) => Some(self.mount_placement(mount)?.0),
+            None => None,
+        };
         let (read_doc, tree_id) = self.target_doc(&target);
         read_doc
-            .with_read(|doc| stored_block_at(&doc.get_tree(TREE_NAME), tree_id))
+            .with_read(|doc| {
+                let tree = doc.get_tree(TREE_NAME);
+                let block = match placed_under {
+                    Some(parent) => read_block_from_tree_with_parent(&tree, tree_id, parent),
+                    None => read_block_from_tree(&tree, tree_id, get_node_parent(&tree, tree_id)),
+                };
+                finish(&tree, tree_id, block)
+            })
             .map_err(|e| ApiError::InternalError {
-                message: format!("get_stored_block({id}): {e:#}"),
+                message: format!("read block {id}: {e:#}"),
             })
     }
 
@@ -4992,28 +5028,9 @@ impl ChangeNotifications<Block> for LoroBackend {
 #[async_trait]
 impl CoreOperations for LoroBackend {
     async fn get_block(&self, id: &str) -> Result<Block, ApiError> {
-        // Route the read the same way writes route: global tree first, then the
-        // shared subtree docs. A shared block's stable id is absent from the
-        // global tree (pruned at share time), so a global-only resolver would
-        // return `BlockNotFound`; `resolve_write_target` finds it in the owning
-        // shared doc and hands back that doc's TreeID (only valid against it).
-        let target = self.resolve_write_target(id).await?;
-        let placed_under = match self.placement_mount(&target)? {
-            Some(mount) => Some(self.mount_placement(mount)?.0),
-            None => None,
-        };
-        let (read_doc, tree_id) = self.target_doc(&target);
-        read_doc
-            .with_read(|doc| {
-                let tree = doc.get_tree(TREE_NAME);
-                Ok(match placed_under.clone() {
-                    Some(parent) => read_block_from_tree_with_parent(&tree, tree_id, parent),
-                    None => read_block_from_tree(&tree, tree_id, get_node_parent(&tree, tree_id)),
-                })
-            })
-            .map_err(|e| ApiError::InternalError {
-                message: format!("Failed to get block: {}", e),
-            })
+        // A shared block's stable id is absent from the global tree (pruned at
+        // share time), so a global-only resolver would return `BlockNotFound`.
+        self.read_placed_block(id, |_, _, block| Ok(block)).await
     }
 
     async fn get_all_blocks(

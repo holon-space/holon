@@ -32,6 +32,7 @@ use holon_api::block::Block;
 use holon_api::capability::Consolidator;
 use holon_api::capability::SessionCapabilities;
 use holon_core::BlockDataSourceHelpers;
+use holon_core::BlockNotInWriteAuthority;
 use holon_core::BlockOperations;
 use holon_core::BlockQueryHelpers;
 use holon_core::CrudOperations;
@@ -134,6 +135,23 @@ impl SqlBlockOperations {
     pub fn with_write_authority(mut self, authority: Arc<dyn WriteAuthorityReads>) -> Self {
         self.write_authority = Some(authority);
         self
+    }
+
+    /// The block a structural op decides on, from `authority`; `None` when no
+    /// store holds it. Refused with [`BlockNotInWriteAuthority`] when only the
+    /// projection holds it (D64.b).
+    async fn decision_block(
+        &self,
+        authority: &dyn WriteAuthorityReads,
+        id: &holon_api::EntityUri,
+    ) -> Result<Option<Block>> {
+        if let Some(stored) = authority.block(id).await? {
+            return Ok(Some(stored.block));
+        }
+        match self.get_by_id(id.as_str()).await? {
+            Some(_) => Err(BlockNotInWriteAuthority { block: id.clone() }.into()),
+            None => Ok(None),
+        }
     }
 
     /// Ordered `(id, sort_key)` pairs for a parent, read straight from the
@@ -389,6 +407,68 @@ impl BlockDataSourceHelpers<Block> for SqlBlockOperations {
         }
     }
 
+    async fn block_authoritative(&self, id: &holon_api::EntityUri) -> Result<Option<Block>> {
+        match &self.write_authority {
+            Some(authority) => self.decision_block(authority.as_ref(), id).await,
+            None => self.get_by_id(id.as_str()).await,
+        }
+    }
+
+    async fn descendants_authoritative(&self, id: &holon_api::EntityUri) -> Result<Vec<Block>> {
+        let Some(authority) = &self.write_authority else {
+            return self.get_descendants(id).await;
+        };
+        if self.decision_block(authority.as_ref(), id).await?.is_none() {
+            return Err(format!("descendants of {id}: no such block").into());
+        }
+        Ok(authority
+            .subtree(id)
+            .await?
+            .ok_or_else(|| format!("the write authority holds {id} but no subtree at it"))?
+            .into_iter()
+            .skip(1)
+            .map(|stored| stored.block)
+            .collect())
+    }
+
+    async fn prev_sibling_authoritative(&self, id: &holon_api::EntityUri) -> Result<Option<Block>> {
+        let Some(authority) = &self.write_authority else {
+            return self.get_prev_sibling(id).await;
+        };
+        let Some(block) = self.decision_block(authority.as_ref(), id).await? else {
+            return Err(format!("prev sibling of {id}: no such block").into());
+        };
+        let Some((siblings, pos)) =
+            authority_siblings(authority.as_ref(), id, &block.parent_id).await?
+        else {
+            return Ok(None);
+        };
+        match pos.checked_sub(1) {
+            Some(i) => authority_block(authority.as_ref(), &siblings[i])
+                .await
+                .map(Some),
+            None => Ok(None),
+        }
+    }
+
+    async fn next_sibling_authoritative(&self, id: &holon_api::EntityUri) -> Result<Option<Block>> {
+        let Some(authority) = &self.write_authority else {
+            return self.get_next_sibling(id).await;
+        };
+        let Some(block) = self.decision_block(authority.as_ref(), id).await? else {
+            return Err(format!("next sibling of {id}: no such block").into());
+        };
+        let Some((siblings, pos)) =
+            authority_siblings(authority.as_ref(), id, &block.parent_id).await?
+        else {
+            return Ok(None);
+        };
+        match siblings.get(pos + 1) {
+            Some(next) => authority_block(authority.as_ref(), next).await.map(Some),
+            None => Ok(None),
+        }
+    }
+
     /// The SQL order owner CAN displace siblings, so it overrides the default
     /// `create_at` to apply the position's re-keys atomically with the row via
     /// `create_row` — the typed create seam (no `_order_rekeys` params key).
@@ -406,6 +486,38 @@ impl BlockDataSourceHelpers<Block> for SqlBlockOperations {
         Ok((id, result))
     }
 }
+
+/// `parent`'s children in the authority and `id`'s index among them; `None`
+/// when `parent` is not a block, as in `BlockOrdering::prev_sibling`.
+async fn authority_siblings(
+    authority: &dyn WriteAuthorityReads,
+    id: &holon_api::EntityUri,
+    parent: &holon_api::EntityUri,
+) -> Result<Option<(Vec<holon_api::EntityUri>, usize)>> {
+    if !parent.is_block() {
+        return Ok(None);
+    }
+    let siblings = authority.children(parent).await?;
+    let pos = siblings.iter().position(|s| s == id).ok_or_else(|| {
+        format!(
+            "the write authority names {parent} as the parent of {id}, but not {id} among its \
+             children"
+        )
+    })?;
+    Ok(Some((siblings, pos)))
+}
+
+async fn authority_block(
+    authority: &dyn WriteAuthorityReads,
+    id: &holon_api::EntityUri,
+) -> Result<Block> {
+    Ok(authority
+        .block(id)
+        .await?
+        .ok_or_else(|| format!("the write authority holds no block {id}"))?
+        .block)
+}
+
 impl BlockOperations<Block> for SqlBlockOperations {
     fn cells(&self) -> Option<&dyn EntityCellRegistry> {
         Some(&*self.cell_registry)
@@ -1301,12 +1413,16 @@ impl OperationProvider for SqlBlockOperations {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::sync::Arc;
 
     use holon_api::block::Block;
     use holon_api::entity_uri::EntityUri;
     use holon_core::__operations_block_operations;
+    use holon_core::BlockDataSourceHelpers;
+    use holon_core::BlockOperations;
     use holon_core::OperationRegistry;
+    use holon_core::WriteAuthorityReads;
     use holon_core::block_ordering::BlockOrdering;
     use holon_core::fractional_index::is_minted_key;
     use holon_core::storage::types::StorageEntity;
@@ -1346,6 +1462,16 @@ mod tests {
     }
 
     async fn setup_sql_block_ops() -> (
+        TursoBackend,
+        Arc<SqlBlockOperations>,
+        crate::storage::turso::DbHandle,
+    ) {
+        setup_sql_block_ops_with(None).await
+    }
+
+    async fn setup_sql_block_ops_with(
+        authority: Option<Arc<dyn WriteAuthorityReads>>,
+    ) -> (
         TursoBackend,
         Arc<SqlBlockOperations>,
         crate::storage::turso::DbHandle,
@@ -1393,8 +1519,262 @@ mod tests {
                 .await
                 .expect("cache"),
         );
-        let ops = Arc::new(SqlBlockOperations::new(sql_ops, cache));
-        (backend, ops, handle)
+        let ops = SqlBlockOperations::new(sql_ops, cache);
+        let ops = match authority {
+            Some(authority) => ops.with_write_authority(authority),
+            None => ops,
+        };
+        (backend, Arc::new(ops), handle)
+    }
+
+    /// A write authority over `(id, parent)` rows; `children` lists are given
+    /// separately so a test can make them disagree with the parents or with
+    /// the projection's `sort_key` order.
+    struct Tree {
+        parents: HashMap<EntityUri, EntityUri>,
+        children: HashMap<EntityUri, Vec<EntityUri>>,
+    }
+
+    #[async_trait::async_trait]
+    impl WriteAuthorityReads for Tree {
+        async fn block_exists(&self, id: &EntityUri) -> holon_core::Result<bool> {
+            Ok(self.parents.contains_key(id))
+        }
+        async fn block_is_page(&self, _: &EntityUri) -> holon_core::Result<bool> {
+            Ok(false)
+        }
+        async fn block(
+            &self,
+            id: &EntityUri,
+        ) -> holon_core::Result<Option<holon_api::StoredBlock>> {
+            Ok(self.parents.get(id).map(|parent| holon_api::StoredBlock {
+                block: Block::new_text(id.clone(), parent.clone(), ""),
+                block_type: None,
+                completed: None,
+            }))
+        }
+        async fn subtree(
+            &self,
+            root: &EntityUri,
+        ) -> holon_core::Result<Option<Vec<holon_api::StoredBlock>>> {
+            if !self.parents.contains_key(root) {
+                return Ok(None);
+            }
+            let mut out = Vec::new();
+            let mut stack = vec![root.clone()];
+            while let Some(id) = stack.pop() {
+                out.push(self.block(&id).await?.expect("listed child is held"));
+                stack.extend(self.children.get(&id).into_iter().flatten().rev().cloned());
+            }
+            Ok(Some(out))
+        }
+        async fn children(&self, parent: &EntityUri) -> holon_core::Result<Vec<EntityUri>> {
+            assert!(
+                self.parents.contains_key(parent),
+                "children of {parent}: the authority does not hold it"
+            );
+            Ok(self.children.get(parent).cloned().unwrap_or_default())
+        }
+    }
+
+    fn uri(s: &str) -> EntityUri {
+        EntityUri::parse(s).expect("test uri")
+    }
+
+    async fn insert_projection_row(
+        handle: &crate::storage::turso::DbHandle,
+        id: &str,
+        parent: &str,
+        sort_key: &str,
+    ) {
+        handle
+            .execute(
+                &format!(
+                    "INSERT INTO block_raw (id, parent_id, sort_key, content, content_type, \
+                     created_at, updated_at) VALUES ('{id}', '{parent}', '{sort_key}', '{id}', \
+                     'text', 0, 0)"
+                ),
+                vec![],
+            )
+            .await
+            .unwrap_or_else(|e| panic!("insert {id}: {e}"));
+    }
+
+    fn assert_refused(
+        what: &str,
+        result: holon_core::Result<impl std::fmt::Debug>,
+        block: &EntityUri,
+    ) {
+        let err = result.expect_err(&format!("{what} must be refused"));
+        assert_eq!(
+            err.downcast_ref::<holon_core::BlockNotInWriteAuthority>(),
+            Some(&holon_core::BlockNotInWriteAuthority {
+                block: block.clone()
+            }),
+            "{what} must be refused by name, got: {err}"
+        );
+    }
+
+    /// D64.b: a block only the projection holds is refused for every
+    /// structural decision read, and so for the op, before any write.
+    #[tokio::test]
+    async fn a_block_only_the_projection_holds_is_refused_by_name() {
+        let root = EntityUri::no_parent();
+        let page = uri("block:page");
+        let tree = Tree {
+            parents: HashMap::from([(page.clone(), root.clone())]),
+            children: HashMap::from([(page.clone(), vec![])]),
+        };
+        let (_backend, ops, handle) = setup_sql_block_ops_with(Some(Arc::new(tree))).await;
+        let stranded = uri("block:stranded");
+        insert_projection_row(&handle, page.as_str(), root.as_str(), "a0").await;
+        insert_projection_row(&handle, "block:before", page.as_str(), "a0").await;
+        insert_projection_row(&handle, stranded.as_str(), page.as_str(), "a1").await;
+
+        assert_refused(
+            "block read",
+            ops.block_authoritative(&stranded).await,
+            &stranded,
+        );
+        assert_refused(
+            "prev sibling read",
+            ops.prev_sibling_authoritative(&stranded).await,
+            &stranded,
+        );
+        assert_refused(
+            "next sibling read",
+            ops.next_sibling_authoritative(&stranded).await,
+            &stranded,
+        );
+        assert_refused(
+            "descendants read",
+            ops.descendants_authoritative(&stranded).await,
+            &stranded,
+        );
+        assert_refused(
+            "indent",
+            BlockOperations::indent(&*ops, &stranded).await,
+            &stranded,
+        );
+        assert_eq!(
+            read_sort_key(&handle, stranded.as_str()).await,
+            "a1",
+            "a refused op writes nothing"
+        );
+    }
+
+    /// A block neither store holds is absent, not refused: the block read
+    /// answers `None`, and reads that need its parent fail naming it.
+    #[tokio::test]
+    async fn a_block_neither_store_holds_is_absent() {
+        let tree = Tree {
+            parents: HashMap::new(),
+            children: HashMap::new(),
+        };
+        let (_backend, ops, _handle) = setup_sql_block_ops_with(Some(Arc::new(tree))).await;
+        let ghost = uri("block:ghost");
+
+        assert!(
+            ops.block_authoritative(&ghost)
+                .await
+                .expect("an absent block is no error")
+                .is_none()
+        );
+        for (what, result) in [
+            (
+                "prev sibling",
+                ops.prev_sibling_authoritative(&ghost).await.map(|_| ()),
+            ),
+            (
+                "next sibling",
+                ops.next_sibling_authoritative(&ghost).await.map(|_| ()),
+            ),
+            (
+                "descendants",
+                ops.descendants_authoritative(&ghost).await.map(|_| ()),
+            ),
+        ] {
+            let err = result.expect_err(&format!("{what} of an absent block must fail"));
+            assert!(
+                err.downcast_ref::<holon_core::BlockNotInWriteAuthority>()
+                    .is_none(),
+                "{what}: an absent block is not a projection-only block: {err}"
+            );
+            assert_eq!(err.to_string(), format!("{what} of {ghost}: no such block"));
+        }
+    }
+
+    /// The authority names a parent whose children do not list the block:
+    /// its own tree contradicts itself, so the sibling reads fail loud.
+    #[tokio::test]
+    async fn sibling_reads_fail_when_the_parent_does_not_list_the_block() {
+        let root = EntityUri::no_parent();
+        let page = uri("block:page");
+        let lost = uri("block:lost");
+        let tree = Tree {
+            parents: HashMap::from([
+                (page.clone(), root.clone()),
+                (uri("block:a"), page.clone()),
+                (lost.clone(), page.clone()),
+            ]),
+            children: HashMap::from([(page.clone(), vec![uri("block:a")])]),
+        };
+        let (_backend, ops, _handle) = setup_sql_block_ops_with(Some(Arc::new(tree))).await;
+        let want = format!(
+            "the write authority names {page} as the parent of {lost}, but not {lost} among its \
+             children"
+        );
+        let prev = ops
+            .prev_sibling_authoritative(&lost)
+            .await
+            .expect_err("prev sibling");
+        assert_eq!(prev.to_string(), want);
+        let next = ops
+            .next_sibling_authoritative(&lost)
+            .await
+            .expect_err("next sibling");
+        assert_eq!(next.to_string(), want);
+    }
+
+    /// Sibling order comes from the authority's child list, not from the
+    /// projection's `sort_key`, which here orders the same blocks a, b, c.
+    #[tokio::test]
+    async fn sibling_order_comes_from_the_write_authority() {
+        let root = EntityUri::no_parent();
+        let page = uri("block:page");
+        let [a, b, c] = [uri("block:a"), uri("block:b"), uri("block:c")];
+        let tree = Tree {
+            parents: HashMap::from([
+                (page.clone(), root.clone()),
+                (a.clone(), page.clone()),
+                (b.clone(), page.clone()),
+                (c.clone(), page.clone()),
+            ]),
+            children: HashMap::from([(page.clone(), vec![c.clone(), a.clone(), b.clone()])]),
+        };
+        let (_backend, ops, handle) = setup_sql_block_ops_with(Some(Arc::new(tree))).await;
+        insert_projection_row(&handle, page.as_str(), root.as_str(), "a0").await;
+        for (id, key) in [(&a, "a0"), (&b, "a1"), (&c, "a2")] {
+            insert_projection_row(&handle, id.as_str(), page.as_str(), key).await;
+        }
+
+        let id = |block: Option<Block>| block.map(|b| b.id);
+        let prev = |x: &EntityUri| {
+            let ops = ops.clone();
+            let x = x.clone();
+            async move { id(ops.prev_sibling_authoritative(&x).await.expect("prev")) }
+        };
+        let next = |x: &EntityUri| {
+            let ops = ops.clone();
+            let x = x.clone();
+            async move { id(ops.next_sibling_authoritative(&x).await.expect("next")) }
+        };
+        assert_eq!(prev(&c).await, None);
+        assert_eq!(prev(&a).await, Some(c.clone()));
+        assert_eq!(prev(&b).await, Some(a.clone()));
+        assert_eq!(next(&c).await, Some(a.clone()));
+        assert_eq!(next(&a).await, Some(b.clone()));
+        assert_eq!(next(&b).await, None);
     }
 
     async fn read_sort_key(handle: &crate::storage::turso::DbHandle, bare_id: &str) -> String {

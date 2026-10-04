@@ -286,7 +286,7 @@ projector-lag-lock:
     # recipe's status is `tee`'s and a failing test exits 0.
     set -euo pipefail
     mkdir -p target/gate-logs
-    for BIN in projector_lag_lock template_instantiation_under_lag move_guard_under_lag task_keyword_under_lag focus_on_new_block_under_lag; do
+    for BIN in projector_lag_lock template_instantiation_under_lag move_guard_under_lag task_keyword_under_lag focus_on_new_block_under_lag structural_burst_under_lag; do
         LOG=target/gate-logs/projector-lag-lock-$BIN.log
         cargo test {{CANON}} --test "$BIN" -- --nocapture 2>&1 | tee "$LOG"
         grep -qE '^test result: ok\. 1 passed' "$LOG" || {

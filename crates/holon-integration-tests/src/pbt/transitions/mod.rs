@@ -174,6 +174,7 @@ mod simulate_restart;
 pub mod split_block;
 pub mod stale_external_rewrite;
 pub(crate) mod start_app;
+pub mod structural_key_burst;
 mod switch_view;
 pub mod sync_now;
 mod toggle_collapse;
@@ -283,6 +284,7 @@ pub use simulate_restart::SimulateRestart;
 pub use split_block::SplitBlock;
 pub use stale_external_rewrite::StaleExternalRewrite;
 pub use start_app::StartApp;
+pub use structural_key_burst::StructuralKeyBurst;
 pub use switch_view::SwitchView;
 pub use switch_view_mode::SwitchViewMode;
 pub use sync_now::SyncNow;
@@ -375,6 +377,7 @@ crate::declare_e2e_transitions! {
         RemoveWatch(RemoveWatch),
         SetEdgeField(SetEdgeField),
         SplitBlock(SplitBlock),
+        StructuralKeyBurst(StructuralKeyBurst),
         SwitchView(SwitchView),
         SetupWatch(SetupWatch),
         ToggleState(ToggleState),

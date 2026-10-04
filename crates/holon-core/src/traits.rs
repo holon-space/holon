@@ -1032,6 +1032,36 @@ where
         Ok(self.get_by_id(id.as_str()).await?.is_some())
     }
 
+    /// The block as the WRITE authority holds it. Structural ops (indent,
+    /// outdent, split, join, moves) decide parent and slot from this and the
+    /// two sibling reads below, never from `get_by_id`: a key pressed before
+    /// the projection caught up with the previous key would otherwise act on
+    /// the old tree. Defaults read the projection, correct for a store that IS
+    /// its own write authority; the SQL store overrides them, and refuses a
+    /// block only its projection holds with
+    /// [`BlockNotInWriteAuthority`](crate::BlockNotInWriteAuthority).
+    async fn block_authoritative(&self, id: &EntityUri) -> Result<Option<T>> {
+        self.get_by_id(id.as_str()).await
+    }
+
+    /// `id`'s previous sibling in the write authority; see
+    /// [`Self::block_authoritative`].
+    async fn prev_sibling_authoritative(&self, id: &EntityUri) -> Result<Option<T>> {
+        self.get_prev_sibling(id).await
+    }
+
+    /// `id`'s next sibling in the write authority; see
+    /// [`Self::block_authoritative`].
+    async fn next_sibling_authoritative(&self, id: &EntityUri) -> Result<Option<T>> {
+        self.get_next_sibling(id).await
+    }
+
+    /// `id`'s descendants in the write authority, in no particular order; see
+    /// [`Self::block_authoritative`].
+    async fn descendants_authoritative(&self, id: &EntityUri) -> Result<Vec<T>> {
+        self.get_descendants(id).await
+    }
+
     /// Create a block AT a pre-minted
     /// [`MintedPosition`](crate::block_ordering::MintedPosition) — its
     /// `sort_key` AND the sibling re-keys the key is expressed against,
@@ -1354,9 +1384,8 @@ where
     #[holon_macros::menu_exposure(action_bar)]
     #[holon_macros::boundary_behavior(crossing_widens)]
     async fn indent(&self, id: &EntityUri) -> Result<OperationResult> {
-        let id_str = id.as_str();
         let block = self
-            .get_by_id(id_str)
+            .block_authoritative(id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("Block not found"))?;
         // `move_block` enforces the "must have a parent" invariant, but we
@@ -1367,7 +1396,7 @@ where
             .ok_or_else(|| anyhow::anyhow!("Cannot indent root block"))?;
         let moved = (old_parent, block.is_page());
 
-        let prev_sibling = self.get_prev_sibling(id).await?.ok_or_else(|| {
+        let prev_sibling = self.prev_sibling_authoritative(id).await?.ok_or_else(|| {
             anyhow::anyhow!("Cannot indent: no previous sibling to become parent")
         })?;
         let new_parent_uri = prev_sibling.id().clone();
@@ -1462,13 +1491,13 @@ where
     #[holon_macros::boundary_behavior(forbidden_at_page_boundary)]
     async fn outdent(&self, id: &EntityUri) -> Result<OperationResult> {
         let id_str = id.as_str();
-        let maybe_block: Option<T> = self.get_by_id(id_str).await?;
+        let maybe_block: Option<T> = self.block_authoritative(id).await?;
         let block: T = maybe_block.ok_or_else(|| anyhow::anyhow!("Block not found"))?;
         let parent_id = block
             .parent_id()
             .ok_or_else(|| anyhow::anyhow!("Cannot outdent root block"))?;
 
-        let maybe_parent: Option<T> = self.get_by_id(parent_id.as_str()).await?;
+        let maybe_parent: Option<T> = self.block_authoritative(parent_id).await?;
         let parent: T = maybe_parent.ok_or_else(|| anyhow::anyhow!("Parent not found"))?;
 
         // ADR 0028 D1: outdenting a DIRECT PAGE CHILD would move the block out of
@@ -1497,7 +1526,7 @@ where
         // Capture old predecessor before move (for inverse operation)
         let old_parent_uri = parent_id.clone();
         let old_predecessor = self
-            .get_prev_sibling(id)
+            .prev_sibling_authoritative(id)
             .await?
             .map(|pred| pred.id().clone());
 
@@ -1575,7 +1604,7 @@ where
         use uuid::Uuid;
 
         let id_str = id.as_str();
-        let maybe_block: Option<T> = self.get_by_id(id_str).await?;
+        let maybe_block: Option<T> = self.block_authoritative(id).await?;
         let block: T = maybe_block.ok_or_else(|| anyhow::anyhow!("Block not found"))?;
 
         // Page blocks have null `parent_id` (the visible `__document_root__`
@@ -1632,8 +1661,8 @@ where
         // truncates (formatting → both sides). Before this, split wrote only
         // `content`: the retained block kept STALE out-of-bounds marks and the
         // new block got NULL marks, destroying links across a split (dogfood
-        // 2026-07-20). Marks are read off the fetched block projection; in
-        // SqlOnly mode this is the same authority `content_owned` came from.
+        // 2026-07-20). Marks are read off the fetched block, which comes from
+        // the same authority as `content_owned`.
         let origin_marks: Vec<holon_api::MarkSpan> = block.marks().unwrap_or(&[]).to_vec();
         let holon_api::SplitContentMarks {
             left:
@@ -1703,7 +1732,9 @@ where
         // directly below it otherwise. Both create seams read `None` as
         // first-child.
         let after_uri: Option<EntityUri> = if at_start {
-            self.get_prev_sibling(id).await?.map(|b| b.id().clone())
+            self.prev_sibling_authoritative(id)
+                .await?
+                .map(|b| b.id().clone())
         } else {
             Some(id.clone())
         };
@@ -1966,9 +1997,8 @@ where
         )
         .await?;
 
-        let id_str = id.as_str();
         let block: T = self
-            .get_by_id(id_str)
+            .block_authoritative(id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("Block not found"))?;
         // Prefer the live (Loro) view via the cell registry; same reasoning
@@ -1986,7 +2016,7 @@ where
         // page carries no `collapsed` field and renders
         // collapsed-until-clicked). With no previous sibling the block above IS
         // the parent — the child→parent join.
-        let prev_opt: Option<T> = self.get_prev_sibling(id).await?;
+        let prev_opt: Option<T> = self.prev_sibling_authoritative(id).await?;
         let into_parent = prev_opt.is_none();
         // The undo inverse anchors the merged-away block after its PREVIOUS
         // SIBLING, which the walk above may have left behind.
@@ -2002,11 +2032,14 @@ where
                 let Some(last_child) = ordered_child_ids(self, &cursor_uri).await?.pop() else {
                     break cursor;
                 };
-                cursor = self.get_by_id(last_child.as_str()).await?.ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "join_block: ordered child {last_child} of {cursor_uri} not found"
-                    )
-                })?;
+                cursor = self
+                    .block_authoritative(&last_child)
+                    .await?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "join_block: ordered child {last_child} of {cursor_uri} not found"
+                        )
+                    })?;
                 visited.push(last_child);
                 if visited.len() > OUTLINE_DESCENT_LIMIT {
                     return Err(anyhow::anyhow!(
@@ -2031,7 +2064,7 @@ where
             if self.is_page_authoritative(parent_id).await? {
                 return Ok(OperationResult::irreversible(vec![]));
             }
-            self.get_by_id(parent_id.as_str())
+            self.block_authoritative(parent_id)
                 .await?
                 .ok_or_else(|| anyhow::anyhow!("Cannot join: parent {parent_id} not found"))?
         };
@@ -2319,7 +2352,7 @@ where
         )
         .await?;
         let block = self
-            .get_by_id(deleted_id.as_str())
+            .block_authoritative(deleted_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("restore_join: block {deleted_id} not found"))?;
 
@@ -2351,7 +2384,7 @@ where
             .cloned()
             .unwrap_or_else(EntityUri::no_parent);
         let after = self
-            .get_prev_sibling(deleted_id)
+            .prev_sibling_authoritative(deleted_id)
             .await?
             .map(|p| p.id().clone());
 
@@ -2406,25 +2439,24 @@ where
     #[holon_macros::menu_exposure(action_bar)]
     #[holon_macros::boundary_behavior(private_only)]
     async fn move_up(&self, id: &EntityUri) -> Result<OperationResult> {
-        let id_str = id.as_str();
         // Capture old state
         let block = self
-            .get_by_id(id_str)
+            .block_authoritative(id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("Block not found"))?;
         let parent_uri = block
             .parent_id()
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("Cannot move root block"))?;
-        let old_predecessor = self.get_prev_sibling(id).await?;
+        let old_predecessor = self.prev_sibling_authoritative(id).await?;
 
         let prev_sibling: T = self
-            .get_prev_sibling(id)
+            .prev_sibling_authoritative(id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("Cannot move up: no previous sibling"))?;
 
         // Get the sibling before prev_sibling
-        let before_prev: Option<T> = self.get_prev_sibling(prev_sibling.id()).await?;
+        let before_prev: Option<T> = self.prev_sibling_authoritative(prev_sibling.id()).await?;
 
         // Execute move and collect FieldDeltas
         let move_result = if let Some(before_id) = before_prev {
@@ -2514,20 +2546,19 @@ where
     #[holon_macros::menu_exposure(action_bar)]
     #[holon_macros::boundary_behavior(private_only)]
     async fn move_down(&self, id: &EntityUri) -> Result<OperationResult> {
-        let id_str = id.as_str();
         // Capture old state
         let block = self
-            .get_by_id(id_str)
+            .block_authoritative(id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("Block not found"))?;
         let parent_uri = block
             .parent_id()
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("Cannot move root block"))?;
-        let old_predecessor = self.get_prev_sibling(id).await?;
+        let old_predecessor = self.prev_sibling_authoritative(id).await?;
 
         let next_sibling: T = self
-            .get_next_sibling(id)
+            .next_sibling_authoritative(id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("Cannot move down: no next sibling"))?;
 
@@ -2595,7 +2626,7 @@ where
             }
             crate::cell_registry::TreeDelete::NotInTree => {}
         }
-        let descendants: Vec<T> = self.get_descendants(id).await?;
+        let descendants: Vec<T> = self.descendants_authoritative(id).await?;
         // Deepest-first: a node is deleted only after all of its descendants,
         // so each `self.delete` operates on a leaf and the fail-closed non-leaf
         // guard is never tripped. The rank is derived from `parent_id` WITHIN
@@ -2639,7 +2670,7 @@ where
         .await?;
         let id_str = id.as_str();
         let block: T = self
-            .get_by_id(id_str)
+            .block_authoritative(id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("Block not found"))?;
         let parent_uri = block
@@ -2663,8 +2694,10 @@ where
         // predecessor sibling, then thread each moved child as the next anchor
         // so their relative order is preserved.
         let mut changes = Vec::new();
-        let mut last_after: Option<EntityUri> =
-            self.get_prev_sibling(id).await?.map(|p| p.id().clone());
+        let mut last_after: Option<EntityUri> = self
+            .prev_sibling_authoritative(id)
+            .await?
+            .map(|p| p.id().clone());
         for child in children {
             let move_changes = self
                 .move_to_position(&child, &parent_uri, last_after.as_ref())
@@ -2714,7 +2747,7 @@ where
         let (old_parent_uri, moved_is_page) = match prefetch.block {
             Some(facts) => facts,
             None => {
-                let maybe_block: Option<T> = self.get_by_id(id_str).await?;
+                let maybe_block: Option<T> = self.block_authoritative(id).await?;
                 let block: T =
                     maybe_block.ok_or_else(|| anyhow::anyhow!("Block not found: {id_str}"))?;
                 // The root sentinel is a legal ORIGIN, not only a legal
@@ -2745,7 +2778,7 @@ where
         let old_predecessor: Option<EntityUri> = match prefetch.old_predecessor {
             Some(pred) => pred,
             None => self
-                .get_prev_sibling(id)
+                .prev_sibling_authoritative(id)
                 .await?
                 .map(|pred| pred.id().clone()),
         };

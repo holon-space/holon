@@ -27,9 +27,9 @@
 //!    order),
 //! 4. splitting a phase-1 block through the real engine then flows through Loro
 //!    (node count grows by exactly the new half) — never the poisoned-tree
-//!    "Block not found" / placeholder-root path. If the re-seed ever declines
-//!    (guarded), the assertions flip to the disclosed SQL-owned branch instead
-//!    of failing blind.
+//!    "Block not found" / placeholder-root path. A re-seed that declines is a
+//!    failure: a block Loro does not hold is refused for structural ops
+//!    (D64.b).
 //!
 //! @pbt kind harness
 //! @pbt covers restart-persistence(loro-unseeded) — true-restart twin,
@@ -171,11 +171,13 @@ async fn run_test(runtime: Arc<tokio::runtime::Runtime>) {
         .await
         .expect("global Loro doc");
     let backend = LoroBackend::from_document(global_doc);
-    let mut target_seeded = backend.resolve_to_tree_id(&target_id).await.is_some();
     let seed_deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while !target_seeded && std::time::Instant::now() < seed_deadline {
+    while backend.resolve_to_tree_id(&target_id).await.is_none() {
+        assert!(
+            std::time::Instant::now() < seed_deadline,
+            "phase 2: the re-seed never adopted {target_id} into the Loro tree"
+        );
         tokio::time::sleep(Duration::from_millis(200)).await;
-        target_seeded = backend.resolve_to_tree_id(&target_id).await.is_some();
     }
     // The target appearing does not mean the re-seed FINISHED — the org-scan
     // diff loop walks in document order, so later nodes can still be arriving.
@@ -201,7 +203,7 @@ async fn run_test(runtime: Arc<tokio::runtime::Runtime>) {
     }
     env.wait_for_loro_quiescence(Duration::from_secs(10)).await;
     let nodes_before = backend.snapshot_blocks().await.len();
-    eprintln!("[restart-vault] phase-2 tree: target_seeded={target_seeded} nodes={nodes_before}");
+    eprintln!("[restart-vault] phase-2 tree: nodes={nodes_before}");
 
     // ── The live repro: split a phase-1 block through the real engine ────
     // Split "alpha one" at byte 5 ("alpha" / " one"); prod trims the seam.
@@ -210,10 +212,7 @@ async fn run_test(runtime: Arc<tokio::runtime::Runtime>) {
     split_params.insert("position".to_string(), Value::Integer(5));
     env.execute_operation("block", "split_block", split_params)
         .await
-        .expect(
-            "phase 2: split_block on a phase-1 block must succeed (guarded SQL route if unseeded; \
-             Loro route if the rescan seeded it)",
-        );
+        .expect("phase 2: split_block on a re-seeded phase-1 block must succeed");
 
     // Both halves must land in SQL. Through the Loro route the content
     // update is projected asynchronously (outbound projector), so poll.
@@ -242,24 +241,12 @@ async fn run_test(runtime: Arc<tokio::runtime::Runtime>) {
     }
     let _ = doc_root;
 
-    // Tree consistency: seeded ⇒ the split flows through Loro (node count
-    // grows by one); unseeded ⇒ the guarded SQL route leaves the tree
-    // untouched. Either way, no placeholder poisoning.
+    // The split flows through Loro: the tree grows by exactly the new half,
+    // with no placeholder poisoning.
     let nodes_after = backend.snapshot_blocks().await.len();
-    if target_seeded {
-        assert_eq!(
-            nodes_after,
-            nodes_before + 1,
-            "seeded vault: split must add exactly the new half to the Loro tree"
-        );
-    } else {
-        assert!(
-            backend.resolve_to_tree_id(&target_id).await.is_none(),
-            "unseeded vault: split must not mint a Loro node for the SQL-only block"
-        );
-        assert_eq!(
-            nodes_before, nodes_after,
-            "unseeded vault: split must not mutate the Loro tree"
-        );
-    }
+    assert_eq!(
+        nodes_after,
+        nodes_before + 1,
+        "split must add exactly the new half to the Loro tree"
+    );
 }

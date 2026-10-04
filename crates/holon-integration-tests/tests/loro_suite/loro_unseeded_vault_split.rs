@@ -4,20 +4,17 @@
 //! Production state it models: `[loro] enabled = true` over a pre-existing
 //! vault whose SQL DB is fully populated while the Loro tree is missing
 //! blocks (`.loro/holon_tree.loro.sync` was ~11 bytes vs 1013 SQL rows).
-//! Splitting any such block routed the new-block create through
-//! `BlockCellRegistry::create_entity` → `LoroBackend::update_block_position`,
-//! which failed "Block not found: <after>" — and, worse, only AFTER minting a
-//! placeholder parent + empty-text node, so later splits read "" content from
-//! the poisoned tree ("Split position N exceeds content length 0").
+//! Splitting such a block once minted placeholder nodes in the tree before it
+//! failed, so later splits read "" content from the poisoned tree.
 //!
 //! The test reproduces the state directly: a Loro-enabled prod-DI session
-//! plus one block inserted SQL-only (no Loro node) — byte-for-byte the
-//! stranded-vault condition — then dispatches `block.split_block` through the
-//! real engine. Pre-guard this errored; post-guard the create falls through
-//! to the SQL path (disclosed) and the tree stays untouched.
+//! plus one block inserted SQL-only (no Loro node), then dispatches
+//! `block.split_block` through the real engine. One authority decides each
+//! write (D64.b), so the split is refused by name, and neither the tree nor
+//! the SQL row changes.
 //!
 //! @pbt kind harness
-//! @pbt covers loro-unseeded-split — Loro-over-unseeded-vault split failure
+//! @pbt covers loro-unseeded-split — Loro-over-unseeded-vault split refusal
 //! class
 
 use std::collections::HashMap;
@@ -99,7 +96,7 @@ async fn wait_for_journal_seeded(doc: &LoroDocument) {
 }
 
 #[test]
-fn split_block_on_sql_only_block_succeeds_without_poisoning_loro_tree() {
+fn split_block_on_sql_only_block_is_refused_without_poisoning_loro_tree() {
     // The SUT owns its own runtime (mirrors the phased runner); a plain
     // `#[test]` + `block_on` keeps the runtime's Drop on the main thread.
     let runtime = Arc::new(
@@ -193,21 +190,27 @@ async fn run_test(runtime: Arc<tokio::runtime::Runtime>) {
     let mut split_params = HashMap::new();
     split_params.insert("id".to_string(), Value::String(stranded_id.to_string()));
     split_params.insert("position".to_string(), Value::Integer(8));
-    env.execute_operation("block", "split_block", split_params)
+    let refused = env
+        .execute_operation("block", "split_block", split_params)
         .await
-        .expect(
-            "split_block on a SQL-only block must succeed via the disclosed SQL route (pre-guard: \
-             'Block not found: <after>' from update_block_position)",
-        );
+        .expect_err("split_block on a block the write authority does not hold must be refused");
+    let refusal = holon_core::BlockNotInWriteAuthority {
+        block: holon_api::EntityUri::parse(stranded_id).expect("stranded uri"),
+    }
+    .to_string();
+    assert!(
+        format!("{refused:#}").contains(&refusal),
+        "the split must be refused by name ({refusal}); got: {refused:#}"
+    );
 
-    // Both halves live in SQL under the same parent.
+    // Nothing was written: the SQL row keeps its content and no half exists.
     let rows = env
         .query_sql(&format!(
-            "SELECT id, content FROM block_raw WHERE parent_id = '{}' ORDER BY sort_key",
+            "SELECT id, content FROM block_raw WHERE parent_id = '{}'",
             doc_root
         ))
         .await
-        .expect("query halves");
+        .expect("query rows under the vault root");
     let contents: Vec<String> = rows
         .iter()
         .filter_map(|r| {
@@ -217,23 +220,23 @@ async fn run_test(runtime: Arc<tokio::runtime::Runtime>) {
         })
         .collect();
     assert!(
-        contents.iter().any(|c| c == "stranded"),
-        "original block must hold the trimmed prefix; got {contents:?}"
+        contents.iter().any(|c| c == "stranded content here"),
+        "a refused split must leave the block's content whole; got {contents:?}"
     );
     assert!(
-        contents.iter().any(|c| c == "content here"),
-        "new block must hold the trimmed suffix; got {contents:?}"
+        !contents.iter().any(|c| c == "content here"),
+        "a refused split must not create the second half; got {contents:?}"
     );
 
     // The Loro tree must be untouched: no node for either half, no
     // placeholder roots minted on the failed-anchor path.
     assert!(
         backend.resolve_to_tree_id(stranded_id).await.is_none(),
-        "split must not have minted a Loro node for the stranded block"
+        "a refused split must not mint a Loro node for the stranded block"
     );
     let nodes_after = settled_node_count(&global_doc).await;
     assert_eq!(
         nodes_before, nodes_after,
-        "split on a SQL-only block must not mutate the Loro tree"
+        "a refused split must not mutate the Loro tree"
     );
 }
