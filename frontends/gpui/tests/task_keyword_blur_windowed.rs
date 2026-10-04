@@ -24,11 +24,11 @@
 //! built with no operations, so `handle_text_sync` can never produce an
 //! `Execute` and the rung passes vacuously (proven, see lane-report-99.md).
 //!
-//! MODE: SqlOnly (`crdt.enabled = false`) — the mode the dogfood ran.
-//! `TestEnvironment` defaults to Loro, where the blur `set_field` is dropped as
-//! a redundant second content writer (`ViewEventHandler::loro_content_writer`),
-//! so a Loro-only rung would report a green that means nothing about the
-//! finding. The Loro arm is kept as a labelled control.
+//! MODE: SqlOnly (`crdt.enabled = false`) — the mode the dogfood ran. The Loro
+//! arm is a control. Neither arm attaches an editor cell, because the GPUI app
+//! installs no cell registry (D113.a): every keystroke commits its own
+//! `set_field`, which re-baselines the blur funnel, so a blur after typing has
+//! nothing left to commit and must dispatch nothing.
 //!
 //! Run: cargo test -p holon-gpui --features pbt --test
 //! task_keyword_blur_windowed
@@ -122,9 +122,7 @@ fn stored_pair(env: &TestEnvironment, id: &str) -> (String, Option<String>) {
     (content, task_state)
 }
 
-/// How many history rows this block has accumulated. The vacuity guard: the
-/// blur must actually DISPATCH something, otherwise "the store is still clean"
-/// proves only that no commit ran.
+/// How many history rows this block has accumulated: one per dispatched write.
 fn history_rows(env: &TestEnvironment, id: &str) -> i64 {
     let uri = EntityUri::block(id).to_string();
     let rows = sql_rows(
@@ -289,6 +287,8 @@ fn drive_promote_then_blur(loro: bool, suffix: &str, window_title: &'static str)
         "precondition: the grafted row starts plain and task-less"
     );
 
+    let history_untyped = history_rows(&env, &edit_id);
+
     // ── promote through a REAL click + REAL keystrokes ────────────────────
     futures::executor::block_on(driver.click_entity(&edit_target, "main"))
         .expect("click the edit target row's painted text");
@@ -310,7 +310,12 @@ fn drive_promote_then_blur(loro: bool, suffix: &str, window_title: &'static str)
          the keyword in `task_state`"
     );
 
-    let history_before = history_rows(&env, &edit_id);
+    let history_typed = history_rows(&env, &edit_id);
+    assert!(
+        history_typed > history_untyped,
+        "the keystrokes must commit through the keystroke sink: {history_untyped} history rows \
+         before typing and after"
+    );
 
     // ── the blur: click a DIFFERENT row ──────────────────────────────────
     futures::executor::block_on(driver.click_entity(&blur_target, "main"))
@@ -346,22 +351,16 @@ fn drive_promote_then_blur(loro: bool, suffix: &str, window_title: &'static str)
         "the write-back must render exactly ONE keyword; disk headlines {headlines:?}"
     );
 
-    // NON-VACUITY 2 (SqlOnly only): the blur ACTUALLY dispatched a write. In
-    // SqlOnly the blur `set_field` is the editor's own commit funnel, so a blur
-    // that emitted nothing would make the assertions above pass without ever
-    // crossing the funnel under test. Under Loro the blur write is deliberately
-    // dropped (a per-keystroke cell writer already committed), so the guard
-    // would assert the opposite fact and is not applied to that arm.
+    // The keystroke sink already persisted the promoted text. A blur write here
+    // would be a second, unordered `set_field` of the surface buffer — the
+    // channel the finding is about.
     let history_after = history_rows(&env, &edit_id);
-    if !loro {
-        assert!(
-            history_after > history_before,
-            "vacuity guard: the blur dispatched NO operation ({history_before} history rows \
-             before and after), so this arm never exercised the blur commit funnel"
-        );
-    }
+    assert_eq!(
+        history_after, history_typed,
+        "the blur must dispatch nothing after the keystroke sink committed the promoted text"
+    );
     eprintln!(
-        "[keyword-blur] loro={loro} history {history_before}->{history_after} \
+        "[keyword-blur] loro={loro} history {history_untyped}->{history_typed}->{history_after} \
          content={content:?} task_state={task_state:?} painted={painted_now:?}"
     );
 
@@ -379,9 +378,7 @@ fn promoted_row_keeps_its_keyword_out_of_the_title_across_a_blur_sqlonly() {
     drive_promote_then_blur(false, "kwblur-sqlonly", "Holon-TestPlatform-KwBlur-SqlOnly");
 }
 
-/// The control: with a Loro cell attached the blur `set_field("content")` is
-/// dropped as a redundant second writer, so this arm is expected to have been
-/// green all along. It fails only if the fix breaks the drop.
+/// The control: the same gestures with the CRDT layer on.
 #[test]
 fn promoted_row_keeps_its_keyword_out_of_the_title_across_a_blur_loro() {
     drive_promote_then_blur(true, "kwblur-loro", "Holon-TestPlatform-KwBlur-Loro");

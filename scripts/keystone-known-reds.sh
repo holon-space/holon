@@ -140,30 +140,49 @@ for log in "$@"; do
     # lines — hence the aggregation below.
     #
     # A panic on the thread of a test cargo reports as `- should panic ... ok`
-    # is that test passing. A test nextest killed (`TIMEOUT`, `SIGSEGV`, …)
-    # printed no panic, so its status line is its signature; nextest repeats
-    # status lines in its closing summary, hence the dedup.
+    # is that test passing. Test names are unique only within one test binary
+    # (one cargo `Running` section), and a passing should_panic test panics
+    # exactly once, so its panics are dropped only when their count in that
+    # section equals its `ok` lines there; any surplus keeps them all, because
+    # nothing tells the expected panic from the real one.
+    #
+    # A test nextest killed or failed outside the test body (timeout, signal,
+    # leak, could not execute) printed no panic, so its status line is its
+    # signature. nextest prints several labels for one cause (`TIMEOUT`, `TMT`,
+    # `TERMINATING`, …), which map to one class so a registry pattern names the
+    # cause once; it also repeats status lines in its closing summary, hence the
+    # dedup.
     sigs_file=$(mktemp)
     awk '
+        function thread_of(line,    t) {
+            if (index(line, "thread " q) != 1) return ""
+            t = substr(line, 9)
+            return substr(t, 1, index(t, q) - 1)
+        }
+        FNR == 1 { section = "" }
+        /^ +Running .* \(.*\)$/ || /^ +Doc-tests / { section = $0 }
         FNR == NR {
             if (match($0, /^test .* - should panic \.\.\. ok$/)) {
                 name = $0; sub(/^test /, "", name); sub(/ - should panic \.\.\. ok$/, "", name)
-                expected[name] = 1
+                expected[section SUBSEP name]++
+            } else if (/panicked at /) {
+                panics[section SUBSEP thread_of($0)]++
             }
             next
         }
         /panicked at / {
-            if (index($0, "thread " q) == 1) {
-                thread = substr($0, 9); thread = substr(thread, 1, index(thread, q) - 1)
-                if (thread in expected) next
-            }
+            key = section SUBSEP thread_of($0)
+            if ((key in expected) && expected[key] == panics[key]) next
             loc = $0; sub(/^.*panicked at /, "", loc); sub(/:$/, "", loc)
             if ((getline msg) > 0) print loc "\t" msg
             next
         }
-        /^ +(TIMEOUT|SIG[A-Z]+|ABORT) +\[/ {
-            status = $1; test = $0; sub(/^ +[A-Z]+ +\[[^]]*\] +/, "", test); sub(/^\([0-9]+\/[0-9]+\) +/, "", test)
-            sig = status ": " test
+        /^ +(TIMEOUT|TMT|TM|SLOW\+TM|TERMINATING|LEAK-FAIL|LKFAIL|FAIL \+ LEAK|FL\+LK|XFAIL|ABORT|SIG[A-Z]+) +\[/ {
+            label = $0; sub(/^ +/, "", label); sub(/ +\[.*$/, "", label)
+            if (label ~ /^(TIMEOUT|TMT|TM|SLOW\+TM|TERMINATING)$/) label = "TIMEOUT"
+            else if (label ~ /^(LEAK-FAIL|LKFAIL|FAIL \+ LEAK|FL\+LK)$/) label = "LEAK-FAIL"
+            test = $0; sub(/^ +[^[]*\[[^]]*\] +/, "", test); sub(/^\([^)]*\) +/, "", test)
+            sig = label ": " test
             if (!(sig in killed)) { killed[sig] = 1; print "nextest\t" sig }
         }' q="'" "$log" "$log" >"$sigs_file"
 

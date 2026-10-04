@@ -239,6 +239,72 @@ test mistyped_initial_state_key_is_loud - should panic ... ok
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
 EOF
 expect_outcome should-panic-only 0 '^\[known-reds\] PASS: 1 green run' "$work/should-panic-only.log"
+# A second panic on the thread of a passing should_panic test is not the
+# expected one, whichever of the two it is.
+cat >"$work/should-panic-name-collision.log" <<'EOF'
+thread 'dup_name' panicked at crates/x/src/lib.rs:7:1:
+expected loud refusal
+test dup_name - should panic ... ok
+thread 'dup_name' panicked at crates/y/src/other.rs:99:3:
+REAL PRODUCT BUG: the projection vanished
+test result: FAILED. 1 passed; 1 failed; 0 ignored
+EOF
+expect_outcome should-panic-name-collision 1 '^ *1 REAL PRODUCT BUG: the projection vanished$' \
+    "$work/should-panic-name-collision.log"
+# Test names repeat across binaries. The passing should_panic test's own panic
+# was captured, so the one printed panic belongs to the other binary's test.
+cat >"$work/should-panic-other-binary.log" <<'EOF'
+     Running tests/a.rs (target/debug/deps/a-0000000000000001)
+test tests::refuses - should panic ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+     Running tests/b.rs (target/debug/deps/b-0000000000000002)
+thread 'tests::refuses' (2) panicked at crates/y/tests/b.rs:12:5:
+REAL PRODUCT BUG: the refusal was never raised
+test tests::refuses ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+EOF
+expect_outcome should-panic-other-binary 1 '^PRIMARY: \[novel\] .*REAL PRODUCT BUG: the refusal was never raised$' \
+    "$work/should-panic-other-binary.log"
+# nextest's alternative labels for a killed or leaking test, in a log cut off
+# before `Summary`: each must name its test, under one class per cause.
+cat >"$work/nextest-labels-truncated.log" <<'EOF'
+        PASS [   0.010s] (1/9) holon-gpui::layout_smoke a
+   LEAK-FAIL [   0.312s] (2/9) holon-gpui::layout_smoke leaky
+      LKFAIL [   0.312s] (3/9) holon-gpui::layout_smoke leaky_short
+ FAIL + LEAK [   0.312s] (4/9) holon-gpui::layout_smoke leaky_spaced
+       FL+LK [   0.312s] (5/9) holon-gpui::layout_smoke leaky_plus
+       XFAIL [   0.001s] (6/9) holon-gpui::layout_smoke unexecutable
+         TMT [ 120.034s] (7/9) holon-gpui::bin timed_short
+ TERMINATING [>120.000s] (─────────) holon-gpui::bin terminating
+     SLOW+TM [> 60.000s] (─────────) holon-gpui::bin slow_terminating
+TIMEOUT-PASS [ 120.034s] (9/9) holon-gpui::bin allowed_to_time_out
+Canceling due to test failure
+EOF
+for want in 'LEAK-FAIL: holon-gpui::layout_smoke leaky' 'LEAK-FAIL: holon-gpui::layout_smoke leaky_short' \
+    'LEAK-FAIL: holon-gpui::layout_smoke leaky_spaced' 'LEAK-FAIL: holon-gpui::layout_smoke leaky_plus' \
+    'XFAIL: holon-gpui::layout_smoke unexecutable' 'TIMEOUT: holon-gpui::bin timed_short' \
+    'TIMEOUT: holon-gpui::bin terminating' 'TIMEOUT: holon-gpui::bin slow_terminating'; do
+    expect_outcome "nextest-label/${want%%:*}/${want##* }" 1 "^ *1 $want\$" "$work/nextest-labels-truncated.log"
+done
+cat >"$work/timeout-pass.log" <<'EOF'
+TIMEOUT-PASS [ 120.034s] (1/1) holon-gpui::bin allowed_to_time_out
+     Summary [ 120.355s] 1 tests run: 1 passed, 0 skipped
+EOF
+expect_outcome timeout-pass 0 '^\[known-reds\] PASS: 1 green run' "$work/timeout-pass.log"
+# A row whose known failure is a budget assertion must not absorb a TIMEOUT of
+# the same test: a hang past the nextest cap is a different bug.
+cat >"$work/budget-test-timeout.log" <<'EOF'
+     TIMEOUT [ 600.012s] (1/1) holon::turso_storage_repros tabs_main_panel_delivery::cursor_filtered_main_panel_delivers_at_vault_scale
+     Summary [ 600.355s] 1 tests run: 0 passed, 1 timed out, 0 skipped
+EOF
+expect_outcome budget-test-timeout 1 '^PRIMARY: \[novel\] .*TIMEOUT: holon::turso_storage_repros ' \
+    "$work/budget-test-timeout.log"
+cat >"$work/timeout-row.log" <<'EOF'
+     TIMEOUT [ 600.012s] (1/1) holon::turso_block_query_source_round_trip_pbt round_trip
+     Summary [ 600.355s] 1 tests run: 0 passed, 1 timed out, 0 skipped
+EOF
+expect_outcome timeout-row 0 '^PRIMARY: \[known-red:turso-block-query-source-round-trip\]' \
+    "$work/timeout-row.log"
 
 # `bulk-add-sibling-order` matches only a SUT order that OPENS with a bulk block.
 # No archived corpus carries that shape (the 2026-09-19 corpus's 52 sibling-order
