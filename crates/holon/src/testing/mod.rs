@@ -9,6 +9,7 @@
 //! - Integration with `proptest-state-machine` for automatic test generation
 //! - `E2ETestContext`: End-to-end testing utilities for BackendEngine
 
+pub mod database_stuck_guard;
 pub mod e2e_test_helpers;
 pub mod generic_provider_state;
 

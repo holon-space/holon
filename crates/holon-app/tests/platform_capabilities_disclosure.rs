@@ -56,7 +56,10 @@ async fn boot_and_report(dir: &std::path::Path) -> Report {
         SessionConfig::new(holon_api::UiInfo::permissive()).without_wait(),
         dir.to_path_buf(),
         HashSet::new(),
-        |_| Ok(()),
+        |injector| {
+            holon::testing::database_stuck_guard::report_database_stuck_in(injector);
+            Ok(())
+        },
         |_| (),
     )
     .await

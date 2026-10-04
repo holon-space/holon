@@ -53,7 +53,10 @@ async fn boot(dir: &std::path::Path) -> Booted {
         SessionConfig::new(holon_api::UiInfo::permissive()),
         dir.to_path_buf(),
         HashSet::new(),
-        |_injector| Ok(()),
+        |injector| {
+            holon::testing::database_stuck_guard::report_database_stuck_in(injector);
+            Ok(())
+        },
         |injector| injector.clone(),
     )
     .await

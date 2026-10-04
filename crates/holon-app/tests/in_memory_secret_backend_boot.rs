@@ -54,7 +54,10 @@ async fn boot(dir: &std::path::Path) -> (Arc<holon_frontend::FrontendSession>, A
         SessionConfig::new(holon_api::UiInfo::permissive()).without_wait(),
         dir.to_path_buf(),
         HashSet::new(),
-        |_| Ok(()),
+        |injector| {
+            holon::testing::database_stuck_guard::report_database_stuck_in(injector);
+            Ok(())
+        },
         |injector| {
             injector
                 .try_resolve::<Arc<ConditionBus>>()
@@ -237,7 +240,10 @@ fn a_seed_file_that_names_one_account_twice_refuses_to_boot() {
             SessionConfig::new(holon_api::UiInfo::permissive()).without_wait(),
             dir.path().to_path_buf(),
             HashSet::new(),
-            |_| Ok(()),
+            |injector| {
+                holon::testing::database_stuck_guard::report_database_stuck_in(injector);
+                Ok(())
+            },
             |_| (),
         )
         .await
@@ -288,7 +294,10 @@ fn a_seed_without_the_memory_backend_refuses_to_boot() {
             SessionConfig::new(holon_api::UiInfo::permissive()).without_wait(),
             dir.path().to_path_buf(),
             HashSet::new(),
-            |_| Ok(()),
+            |injector| {
+                holon::testing::database_stuck_guard::report_database_stuck_in(injector);
+                Ok(())
+            },
             |_| (),
         )
         .await
@@ -330,7 +339,10 @@ fn a_real_config_dir_refuses_to_boot_in_memory() {
             SessionConfig::new(holon_api::UiInfo::permissive()).without_wait(),
             std::path::PathBuf::from("/Users/someone/.config/holon"),
             HashSet::new(),
-            |_| Ok(()),
+            |injector| {
+                holon::testing::database_stuck_guard::report_database_stuck_in(injector);
+                Ok(())
+            },
             |_| (),
         )
         .await

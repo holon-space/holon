@@ -221,7 +221,14 @@ A command inside `turso_core` can spin or block without yielding (an IVM commit 
 - The watchdog runs each actor's check inside `catch_unwind`. A check that panics stops the watch of that actor only and raises `DatabaseWatchFailed` for it; the other actors stay watched. If the thread does not start or stops on a panic, every watch raises `DatabaseWatchFailed`, after the unwind has ended. The thread is not restarted. The log and the condition are emitted with no watch lock held. A watch failure never panics: if its log or its condition panics, the other one is still emitted, and the failure is also written to stderr.
 - wasm32-unknown-unknown has no threads, so it has no watchdog; it says so once in the log at startup.
 
-The test harness ends the process with the report when any session it boots raises `DatabaseStuck` or `DatabaseWatchFailed` (`inv-no-database-stuck`), because the step that sent a stuck command never returns to an invariant check, and a failed watch cannot report one. Every booted session asserts that a guard watches its `ConditionBus`.
+The test guard (`holon::testing::database_stuck_guard`, `inv-no-database-stuck`) watches the `ConditionBus` of every session that `TestEnvironment`, the keystone and the `holon-app` boot tests start. A stuck command never returns to an invariant check, so the guard writes each `DatabaseStuck` report to stderr, past the test harness's output capture. Its job is to name the stuck command in the log of a run that a timeout ends; it does not decide that a run failed. Healthy commands in a loaded debug build run past the 30 s bound (a 2001-statement ingest transaction took 101 s under 6x CPU oversubscription).
+
+The guard ends the process itself (exit 101) only where no other timeout would:
+
+- On `DatabaseWatchFailed`, because the watch can no longer report a stuck command.
+- On a `DatabaseStuck` report past 49 min. That is the longest per-test cap in `.config/nextest.toml` (a unit test reads the file and fails if a cap grows past it), and it is longer than the keystone's 120 s wedge bound. Under nextest, and in a keystone transition, the harness ends the run first, with the guard's reports already in the output. Only a `cargo test` run with no timeout (for example a boot in `just hand-authored`) reaches the guard's limit. Reports come at doubling intervals, so the guard acts at the first report past 49 min.
+
+`TestEnvironment` and the keystone boot assert that a guard watches the session's `ConditionBus`.
 
 **Platform Support:**
 - **Unix-like systems** (macOS, Linux, BSD, iOS, Android): Full file-based storage via `UnixIO`

@@ -98,6 +98,7 @@ async fn boot(
         dir.to_path_buf(),
         HashSet::new(),
         move |injector| {
+            holon::testing::database_stuck_guard::report_database_stuck_in(injector);
             if let Some(type_def) = seed {
                 // Exactly what a seeding door does: register into the SHARED
                 // registry. No admission call of its own — that is the point.

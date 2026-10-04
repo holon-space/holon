@@ -56,6 +56,7 @@ pub async fn boot_a_working_session() -> Booted {
         dir.path().to_path_buf(),
         HashSet::new(),
         |injector| {
+            holon::testing::database_stuck_guard::report_database_stuck_in(injector);
             use holon_frontend::reactive::RenderInterpreterInjectorExt;
             let slot = injector.resolve::<holon_frontend::reactive::BuilderServicesSlot>();
             injector.set_render_interpreter(holon_frontend::reactive::make_interpret_fn(

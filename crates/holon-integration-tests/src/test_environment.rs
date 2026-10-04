@@ -460,7 +460,7 @@ impl TestEnvironmentBuilder {
             config_dir,
             std::collections::HashSet::new(),
             move |injector| {
-                crate::database_stuck_guard::forbid_database_stuck_in(injector);
+                holon::testing::database_stuck_guard::report_database_stuck_in(injector);
                 install_headless_render_interpreter(injector, &org_fs_for_di, &secret_namespace);
                 holon_mcp::di::register_debug_services(injector);
                 if enable_fake_mcp {
@@ -516,7 +516,7 @@ impl TestEnvironmentBuilder {
         let ctx = E2ETestContext::from_engine(backend_engine);
 
         let _startup_errors = session.error_tracker().errors();
-        crate::database_stuck_guard::assert_guarded_in(&injector);
+        holon::testing::database_stuck_guard::assert_guarded_in(&injector);
 
         Ok(TestEnvironment {
             org_fs,
@@ -1065,7 +1065,7 @@ impl TestEnvironment {
             config_dir,
             std::collections::HashSet::new(),
             move |injector| {
-                crate::database_stuck_guard::forbid_database_stuck_in(injector);
+                holon::testing::database_stuck_guard::report_database_stuck_in(injector);
                 install_headless_render_interpreter(injector, &org_fs_for_di, &secret_namespace);
                 holon_mcp::di::register_debug_services(injector);
                 if enable_fake_mcp {
@@ -1109,7 +1109,7 @@ impl TestEnvironment {
 
         let ctx = E2ETestContext::from_engine(backend_engine);
 
-        crate::database_stuck_guard::assert_guarded_in(&injector);
+        holon::testing::database_stuck_guard::assert_guarded_in(&injector);
         self.latch_session(session);
         self.latch_injector(injector);
         if let Some(doc_store) = doc_store {

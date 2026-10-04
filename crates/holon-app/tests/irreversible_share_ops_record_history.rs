@@ -43,6 +43,7 @@ async fn boot(dir: &std::path::Path) -> (Arc<BackendEngine>, Arc<FrontendSession
         dir.to_path_buf(),
         HashSet::new(),
         move |injector| {
+            holon::testing::database_stuck_guard::report_database_stuck_in(injector);
             injector
                 .provide::<ShareCredentials>(fluxdi::Provider::root(move |_| credentials.clone()));
             Ok(())

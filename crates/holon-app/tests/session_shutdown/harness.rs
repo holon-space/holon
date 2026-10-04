@@ -146,6 +146,7 @@ pub async fn boot_a_working_session() -> Booted {
         dir.path().to_path_buf(),
         HashSet::new(),
         |injector| {
+            holon::testing::database_stuck_guard::report_database_stuck_in(injector);
             // The render stack the gpui frontend installs. Without it the
             // `ReactiveEngine` provider does not resolve, so this boot would
             // have no UI watcher to orphan.

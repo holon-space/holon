@@ -36,7 +36,6 @@
 //! and Cucumber BDD tests.
 
 pub mod assertions;
-pub mod database_stuck_guard;
 pub mod debug_pause;
 
 /// `cap_transition!` now lives in `holon-pbt-core` (shared with the

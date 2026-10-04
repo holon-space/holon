@@ -1073,7 +1073,7 @@ mod tests {
     }
 
     #[test]
-    fn a_watchdog_thread_that_panics_fails_every_watch_and_those_added_later() {
+    fn a_watchdog_thread_that_panics_fails_every_watch_with_the_panic_and_those_added_later() {
         let bus = Arc::new(ConditionBus::new());
         let (held, _held_tx) = watched_on(&bus);
         watchdog::watch(&held);
@@ -1088,9 +1088,10 @@ mod tests {
         let failures = watch_failures(&bus);
         assert_eq!(failures.len(), 2, "{:#?}", bus.current());
         assert!(
-            failures
-                .iter()
-                .all(|cause| cause.contains("the watchdog thread stopped on a panic")),
+            failures.iter().all(
+                |cause| cause.contains("the watchdog thread stopped on a panic")
+                    && cause.contains("watched actors poisoned")
+            ),
             "{failures:#?}"
         );
     }

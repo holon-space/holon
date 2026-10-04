@@ -64,7 +64,10 @@ async fn share_through_shipped_wiring(
         SessionConfig::new(holon_api::UiInfo::permissive()).without_wait(),
         dir.to_path_buf(),
         HashSet::new(),
-        |_| Ok(()),
+        |injector| {
+            holon::testing::database_stuck_guard::report_database_stuck_in(injector);
+            Ok(())
+        },
         |_| (),
     )
     .await

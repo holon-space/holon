@@ -59,7 +59,10 @@ async fn boot(dir: &Path) -> Booted {
         SessionConfig::new(holon_api::UiInfo::permissive()),
         dir.to_path_buf(),
         HashSet::new(),
-        |_| Ok(()),
+        |injector| {
+            holon::testing::database_stuck_guard::report_database_stuck_in(injector);
+            Ok(())
+        },
         |injector| (*injector.resolve::<Arc<ConditionBus>>()).clone(),
     )
     .await
