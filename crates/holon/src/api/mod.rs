@@ -46,6 +46,20 @@ pub mod undo_persistence;
 // `LoroBackend` and the Loro snapshot readers are no longer re-exported here —
 // consumers name `holon_loro::` directly (Phase 3b decoupling). The
 // `holon::sync::*` glob (sync/mod.rs) remains its own deferred migration slice.
+/// The parameter NAMES of an operation, for a log line.
+///
+/// The values are the user's own content — a note body, a property value, a
+/// search term — and the lines that carry them are INFO, which the production
+/// filter (`holon=info`) leaves on. The names are schema: they say which
+/// operation ran with which shape, which is what those lines are read for.
+pub(crate) fn param_keys_for_logs(
+    params: &holon_core::storage::types::StorageEntity,
+) -> String {
+    let mut keys: Vec<&str> = params.keys().map(std::convert::AsRef::as_ref).collect();
+    keys.sort_unstable();
+    keys.join(", ")
+}
+
 // Re-export render engine types for FFI
 pub use backend_engine::BackendEngine;
 pub use block_domain::BlockDomain;

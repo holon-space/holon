@@ -1589,11 +1589,11 @@ impl BackendEngine {
             "operation.origin" = request.origin.tag()
         );
         tracing::info!(
-            "[BackendEngine] execute_operation: entity={}, op={}, origin={}, params={:?}",
+            "[BackendEngine] execute_operation: entity={}, op={}, origin={}, params=[{}]",
             request.entity_name,
             request.op_name,
             request.origin.tag(),
-            request.params
+            crate::api::param_keys_for_logs(&request.params)
         );
         Box::pin(self.op_engine.run(ticket).instrument(span))
     }

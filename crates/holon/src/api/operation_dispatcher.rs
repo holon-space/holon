@@ -781,8 +781,10 @@ impl OperationDispatcher {
 
         async {
             info!(
-                "[OperationDispatcher] execute_operation: entity={}, op={}, params={:?}",
-                entity_name, op_name, params
+                "[OperationDispatcher] execute_operation: entity={}, op={}, params=[{}]",
+                entity_name,
+                op_name,
+                crate::api::param_keys_for_logs(&params)
             );
 
             // ADR 0031 Increment 3 — guard evaluation does NOT cover this arm,

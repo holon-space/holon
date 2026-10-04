@@ -57,7 +57,7 @@ impl SchemaModule for DynamicSchemaModule {
         tracing::info!(
             "[DynamicSchemaModule] Creating table '{}': {}",
             self.type_def.name,
-            &create_sql[..create_sql.len().min(120)]
+            crate::turso::redact_sql_for_logs(&create_sql)
         );
         db_handle.execute_ddl(&create_sql).await.map_err(|e| {
             holon_core::storage::StorageError::DatabaseError(format!(

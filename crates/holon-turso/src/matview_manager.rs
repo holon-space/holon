@@ -529,7 +529,12 @@ fn fine_clock_grains(sources: &[Resource], sql: &str) -> Result<Vec<holon_api::c
     let literals: Vec<String> =
         sqlparser::tokenizer::Tokenizer::new(&sqlparser::dialect::SQLiteDialect {}, sql)
             .tokenize()
-            .with_context(|| format!("tokenize the query to find its grain literals: {sql}"))?
+            .with_context(|| {
+                format!(
+                    "tokenize the query to find its grain literals: {}",
+                    crate::turso::redact_sql_for_logs(sql)
+                )
+            })?
             .into_iter()
             .filter_map(|token| match token {
                 sqlparser::tokenizer::Token::SingleQuotedString(literal) => Some(literal),
@@ -543,7 +548,8 @@ fn fine_clock_grains(sources: &[Resource], sql: &str) -> Result<Vec<holon_api::c
     if named.is_empty() {
         return Err(anyhow::Error::new(holon_api::QueryRefused(format!(
             "the query reads `clock` but names no grain as a literal ('day', 'hour' or \
-             'minute'), so nothing can keep its rows ticking: {sql}"
+             'minute'), so nothing can keep its rows ticking: {}",
+            crate::turso::redact_sql_for_logs(sql)
         ))));
     }
     Ok(named
@@ -1105,7 +1111,7 @@ impl MatviewManager {
         );
         tracing::debug!(
             "[MatviewManager] Creating materialized view: {}",
-            create_view_sql
+            crate::turso::redact_sql_for_logs(&create_view_sql)
         );
 
         let provides = vec![Resource::schema(view_name.clone())];
@@ -1116,7 +1122,8 @@ impl MatviewManager {
             format!(
                 "MatviewManager::ensure_view: failed to parse SELECT SQL for matview \
                  '{view_name}' while extracting table dependencies; mis-ordered DDL would hang \
-                 on missing deps. SQL: {sql_for_view}"
+                 on missing deps. SQL: {}",
+                crate::turso::redact_sql_for_logs(&sql_for_view)
             )
         })?;
         let requires = extract_table_refs(&stmts);
@@ -1125,7 +1132,8 @@ impl MatviewManager {
             let seeder = self.clock_seeder.get().ok_or_else(|| {
                 anyhow::Error::new(holon_api::QueryRefused(format!(
                     "the query reads the clock grains {grains:?}, but this session has no clock \
-                     scheduler to keep them ticking: {sql}"
+                     scheduler to keep them ticking: {}",
+                    crate::turso::redact_sql_for_logs(sql)
                 )))
             })?;
             for grain in &grains {
@@ -1149,7 +1157,8 @@ impl MatviewManager {
             // it with `{:#}`, so the cause is still recorded.
             .map_err(|e| {
                 anyhow::Error::new(e).context(format!(
-                    "Failed to create materialized view {view_name}: {create_view_sql}"
+                    "Failed to create materialized view {view_name}: {}",
+                    crate::turso::redact_sql_for_logs(&create_view_sql)
                 ))
             })?;
 
@@ -1248,7 +1257,7 @@ impl MatviewManager {
                     "[MatviewManager] preload: failed to create view {}: {}\n{}",
                     view_name,
                     e,
-                    create_view_sql
+                    crate::turso::redact_sql_for_logs(&create_view_sql)
                 );
             }
         }
@@ -1451,8 +1460,9 @@ impl MatviewManager {
                     crate::util::rewrite_order_by_for_view(&clause, &columns).with_context(
                         || {
                             format!(
-                                "watch: cannot re-apply `{clause}` over view {view_name}. Source \
-                                 SQL: {sql}"
+                                "watch: cannot re-apply `{clause}` over view {view_name}. \
+                                 Source SQL: {}",
+                                crate::turso::redact_sql_for_logs(sql)
                             )
                         },
                     )?,
@@ -1559,7 +1569,8 @@ impl MatviewManager {
             .with_context(|| {
                 format!(
                     "MatviewManager::prime_fdw_caches: failed to parse SQL while extracting \
-                     FDW-backed table references. SQL: {sql}"
+                     FDW-backed table references. SQL: {}",
+                    crate::turso::redact_sql_for_logs(sql)
                 )
             })?;
 
@@ -1570,7 +1581,7 @@ impl MatviewManager {
                 tracing::info!(
                     "[MatviewManager] Priming FDW cache for '{}': {}",
                     table_name,
-                    &fdw_sql[..fdw_sql.len().min(200)]
+                    crate::turso::redact_sql_for_logs(&fdw_sql)
                 );
                 match self.db_handle.query(&fdw_sql, HashMap::new()).await {
                     Ok(rows) => {

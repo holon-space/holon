@@ -374,9 +374,30 @@ fn named_params_fingerprint(params: &HashMap<String, Value>) -> String {
         .map(|(k, v)| (k.as_str(), format!("{v:?}")))
         .collect();
     entries.sort();
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut hasher = params_hasher();
     entries.hash(&mut hasher);
     format!("{:016x}", hasher.finish())
+}
+
+/// The hasher both parameter fingerprints digest with: ONE key, drawn at
+/// random the first time it is asked for, for the whole process (D60.a).
+///
+/// A parameter fingerprint is a digest OF USER DATA that is written to the log,
+/// so an unkeyed hash is a confirmation oracle: anyone holding the log can
+/// digest a guessed value and compare. The key removes that without taking the
+/// field's purpose away, which is telling one binding from another inside one
+/// run. Digests therefore do NOT match across runs — accepted, because nothing
+/// correlates them across runs.
+fn params_hasher() -> std::collections::hash_map::DefaultHasher {
+    use std::hash::BuildHasher;
+    // `RandomState::new` draws a fresh key per call, so the state is shared:
+    // two keys in one process would make two bindings of the same values look
+    // different.
+    static KEYED: std::sync::OnceLock<std::collections::hash_map::RandomState> =
+        std::sync::OnceLock::new();
+    KEYED
+        .get_or_init(std::collections::hash_map::RandomState::new)
+        .build_hasher()
 }
 
 /// The `sql` span attribute: the identity every SQL-metrics consumer buckets
@@ -450,8 +471,21 @@ fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
         .any(|w| w.iter().zip(n).all(|(a, b)| a.eq_ignore_ascii_case(b)))
 }
 
-/// `sql` with comment text AND single-quoted string-literal text blanked out,
-/// so only SQL *code* remains readable.
+/// What a double-quoted or backticked span is taken to be, which the two
+/// callers of [`blank_comments_and_string_literals`] need to answer
+/// differently.
+enum QuotedSpans {
+    /// The write guards read a target identifier back out of the blanked text,
+    /// so a quoted table name must survive.
+    Identifiers,
+    /// SQLite ALSO accepts `"…"` as a string literal — when the text inside
+    /// resolves to no column it is read as a value. A log must therefore treat
+    /// every quoted span as a value it cannot keep.
+    Values,
+}
+
+/// `sql` with comment text AND string-literal text blanked out, so only SQL
+/// *code* remains readable.
 ///
 /// Both erasures are load-bearing for the guard:
 /// - Comments: production SQL files lead with a comment block
@@ -464,54 +498,64 @@ fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
 ///   and one containing the verb can turn the guard on for a statement that
 ///   writes nothing.
 ///
-/// Double-quoted and backticked spans are IDENTIFIERS, not literals, and are
-/// deliberately left intact — the target may be spelled that way.
-///
 /// Text is replaced by spaces rather than removed so byte offsets are preserved
 /// for anything reading positions out of the result.
-fn blank_comments_and_string_literals(sql: &str) -> String {
+fn blank_comments_and_string_literals(sql: &str, quoted: QuotedSpans) -> String {
+    /// Blank one quoted span's contents, delimiter included in the scan. An
+    /// unterminated span runs to the end of the input, which is what makes a
+    /// stray quote blank the rest of the statement instead of exposing it.
+    fn blank_span(bytes: &[u8], out: &mut [u8], i: &mut usize) {
+        let quote = bytes[*i];
+        *i += 1;
+        while *i < bytes.len() {
+            if bytes[*i] == quote {
+                // A doubled quote is an escape, not the end.
+                if bytes.get(*i + 1) == Some(&quote) {
+                    out[*i] = b' ';
+                    out[*i + 1] = b' ';
+                    *i += 2;
+                    continue;
+                }
+                break;
+            }
+            if bytes[*i] != b'\n' {
+                out[*i] = b' ';
+            }
+            *i += 1;
+        }
+        *i += 1;
+    }
+
+    /// Step over a quoted identifier without touching it. An unterminated one
+    /// leaves the rest of the input intact, which keeps a stray quote from
+    /// blinding a token-scanning guard to the verbs behind it.
+    fn skip_span(bytes: &[u8], i: &mut usize) {
+        let quote = bytes[*i];
+        *i += 1;
+        while *i < bytes.len() {
+            if bytes[*i] == quote {
+                if bytes.get(*i + 1) == Some(&quote) {
+                    *i += 2;
+                    continue;
+                }
+                break;
+            }
+            *i += 1;
+        }
+        *i += 1;
+    }
+
     let bytes = sql.as_bytes();
     let mut out: Vec<u8> = bytes.to_vec();
     let mut i = 0usize;
     while i < bytes.len() {
         match bytes[i] {
             // Single quotes delimit a string LITERAL: blank its contents.
-            b'\'' => {
-                i += 1;
-                while i < bytes.len() {
-                    if bytes[i] == b'\'' {
-                        // A doubled quote is an escape, not the end.
-                        if bytes.get(i + 1) == Some(&b'\'') {
-                            out[i] = b' ';
-                            out[i + 1] = b' ';
-                            i += 2;
-                            continue;
-                        }
-                        break;
-                    }
-                    if bytes[i] != b'\n' {
-                        out[i] = b' ';
-                    }
-                    i += 1;
-                }
-                i += 1;
-            }
-            // Double quotes and backticks delimit an IDENTIFIER: skip intact.
-            b'"' | b'`' => {
-                let quote = bytes[i];
-                i += 1;
-                while i < bytes.len() {
-                    if bytes[i] == quote {
-                        if bytes.get(i + 1) == Some(&quote) {
-                            i += 2;
-                            continue;
-                        }
-                        break;
-                    }
-                    i += 1;
-                }
-                i += 1;
-            }
+            b'\'' => blank_span(bytes, &mut out, &mut i),
+            b'"' | b'`' => match quoted {
+                QuotedSpans::Identifiers => skip_span(bytes, &mut i),
+                QuotedSpans::Values => blank_span(bytes, &mut out, &mut i),
+            },
             b'-' if bytes.get(i + 1) == Some(&b'-') => {
                 while i < bytes.len() && bytes[i] != b'\n' {
                     out[i] = b' ';
@@ -565,7 +609,7 @@ fn replace_write_target(sql: &str) -> Option<String> {
     if !contains_ascii_case_insensitive(sql, "replace") {
         return None;
     }
-    let sql = blank_comments_and_string_literals(sql);
+    let sql = blank_comments_and_string_literals(sql, QuotedSpans::Identifiers);
     let tokens = identifier_tokens(&sql);
     let verb_at = if tokens.first()?.eq_ignore_ascii_case("WITH") {
         tokens.iter().position(|t| {
@@ -703,7 +747,7 @@ pub(crate) fn declares_on_conflict_replace(ddl: &str) -> bool {
     if !contains_ascii_case_insensitive(ddl, "conflict") {
         return false;
     }
-    let code = blank_comments_and_string_literals(ddl);
+    let code = blank_comments_and_string_literals(ddl, QuotedSpans::Identifiers);
     let tokens = identifier_tokens(&code);
     tokens.windows(3).any(|w| {
         w[0].eq_ignore_ascii_case("ON")
@@ -782,7 +826,7 @@ pub(crate) fn panic_message(panic: &(dyn std::any::Any + Send)) -> &str {
 /// template.
 pub fn redact_sql_for_logs(sql: &str) -> String {
     sql_fingerprint(&blank_numeric_literals(
-        &blank_comments_and_string_literals(sql),
+        &blank_comments_and_string_literals(sql, QuotedSpans::Values),
     ))
 }
 
@@ -796,8 +840,9 @@ pub fn redact_sql_for_logs(sql: &str) -> String {
 /// contain digits (`block_v2`, `mv_8f3a`) and parameter indices (`?1`, `$2`)
 /// keep theirs.
 ///
-/// Expects the comment and string-literal spans to be blanked already;
-/// double-quoted and backticked identifier spans are skipped intact.
+/// Expects every comment and every quoted span to be blanked already
+/// ([`QuotedSpans::Values`]), so the only digits left are bare numerals in the
+/// code.
 fn blank_numeric_literals(sql: &str) -> String {
     /// Could this byte be part of an identifier, so a digit after it is not a
     /// literal? Includes the sigils that introduce a parameter index.
@@ -810,14 +855,6 @@ fn blank_numeric_literals(sql: &str) -> String {
     let mut i = 0usize;
     while i < bytes.len() {
         match bytes[i] {
-            b'"' | b'`' => {
-                let quote = bytes[i];
-                i += 1;
-                while i < bytes.len() && bytes[i] != quote {
-                    i += 1;
-                }
-                i += 1;
-            }
             b'0'..=b'9' if i == 0 || !glues_to_a_digit(bytes[i - 1]) => {
                 while i < bytes.len()
                     && (bytes[i].is_ascii_alphanumeric()
@@ -852,6 +889,9 @@ fn sql_fingerprint(sql: &str) -> String {
     }
     let head: String = chars[..HEAD].iter().collect();
     let tail: String = chars[chars.len() - TAIL..].iter().collect();
+    // Unkeyed on purpose, unlike `params_hasher`: this digests CODE whose
+    // values are already blanked, and a reader correlates one statement's
+    // bucket across runs by it.
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     sql.hash(&mut hasher);
     format!("{head} …#{:016x}… {tail}", hasher.finish())
@@ -865,7 +905,7 @@ fn positional_params_fingerprint(params: &[turso::Value]) -> String {
     if params.is_empty() {
         return "-".to_string();
     }
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut hasher = params_hasher();
     for v in params {
         format!("{v:?}").hash(&mut hasher);
     }
@@ -3156,7 +3196,11 @@ impl TursoBackend {
                 })?;
 
                 let value = turso_value_to_value(value.into()).map_err(|e| {
-                    StorageError::QueryError(format!("{} [query: {sql}]", e.under(col_name)))
+                    StorageError::QueryError(format!(
+                        "{} [query: {}]",
+                        e.under(col_name),
+                        redact_sql_for_logs(sql)
+                    ))
                 })?;
                 entity.insert(Arc::clone(col_name), value);
             }
@@ -3206,7 +3250,11 @@ impl TursoBackend {
                 })?;
 
                 let value = turso_value_to_value(value.into()).map_err(|e| {
-                    StorageError::QueryError(format!("{} [query: {sql}]", e.under(col_name)))
+                    StorageError::QueryError(format!(
+                        "{} [query: {}]",
+                        e.under(col_name),
+                        redact_sql_for_logs(sql)
+                    ))
                 })?;
                 entity.insert(Arc::clone(col_name), value);
             }
@@ -3324,9 +3372,12 @@ impl TursoBackend {
             }
             // Token scan rather than a parse: it over-approximates toward
             // REJECTING, the safe direction for a guard.
-            if identifier_tokens(&blank_comments_and_string_literals(&view_sql))
-                .iter()
-                .any(|t| bare_table_name(t).eq_ignore_ascii_case(&target))
+            if identifier_tokens(&blank_comments_and_string_literals(
+                &view_sql,
+                QuotedSpans::Identifiers,
+            ))
+            .iter()
+            .any(|t| bare_table_name(t).eq_ignore_ascii_case(&target))
             {
                 dependent.push(name);
             }
@@ -4770,13 +4821,40 @@ mod tests {
         );
     }
 
+    // SQLite reads `"x"` as an identifier only when `x` resolves to one; when
+    // it does not, the SAME spelling is a string LITERAL. A log cannot tell the
+    // two apart without the schema, so it must keep neither.
     #[test]
-    fn redaction_keeps_a_quoted_identifier_that_is_a_number() {
+    fn redaction_blanks_a_quoted_span_because_sqlite_may_read_it_as_a_value() {
         assert_eq!(
             redact_sql_for_logs("SELECT \"2024\" FROM `t7` WHERE x = 2024"),
-            "SELECT \"2024\" FROM `t7` WHERE x =     ",
-            "double quotes and backticks delimit an identifier, single quotes a value"
+            "SELECT \"    \" FROM `  ` WHERE x =     ",
         );
+    }
+
+    // An unterminated quote must blank the REST of the statement: the opposite
+    // reading — treat the quote as a stray character and carry on — leaves
+    // every value behind it in the log, and one unbalanced quote is all a value
+    // needs to contain to arrange that.
+    #[test]
+    fn an_unterminated_quote_blanks_the_rest_of_the_statement() {
+        for opener in ['\'', '"', '`'] {
+            // No second quote of any kind: one more would CLOSE this span and
+            // the text behind it would be code, not a value.
+            let redacted = redact_sql_for_logs(&format!(
+                "SELECT a FROM t WHERE x = {opener}oops AND amount = 991337"
+            ));
+            for value in ["oops", "991337"] {
+                assert!(
+                    !redacted.contains(value),
+                    "{value} survived an unterminated {opener}: {redacted}"
+                );
+            }
+            assert!(
+                redacted.starts_with("SELECT a FROM t WHERE x = "),
+                "the code before the stray quote must stay readable: {redacted}"
+            );
+        }
     }
 
     // The identity hash must not become an oracle. It is taken over the blanked

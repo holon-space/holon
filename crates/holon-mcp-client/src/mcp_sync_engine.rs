@@ -697,7 +697,7 @@ impl McpSyncEngine {
 
                 info!(
                     "[McpSyncEngine] Refreshing vtable cache via: {}",
-                    &sql[..sql.len().min(200)]
+                    holon_turso::turso::redact_sql_for_logs(&sql)
                 );
 
                 let rows = db_handle.query(&sql, HashMap::new()).await.map_err(|e| {

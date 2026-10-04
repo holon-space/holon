@@ -244,6 +244,10 @@ pub fn run_search(
 ) {
     let (tx, rx) =
         futures::channel::oneshot::channel::<Result<holon_api::QuickOpenResults, String>>();
+    // The term itself stays out of both error lines below: it is the user's
+    // keystrokes, and a span field is exported (stdout, `HOLON_LOG`, the OTLP
+    // exporter). Its LENGTH is what these two failures are diagnosed by — an
+    // empty or a pathologically long term — so that is what they carry.
     let query_for_log = query.clone();
     rt_handle.spawn(async move {
         let outcome = match session.query_engine() {
@@ -257,7 +261,7 @@ pub fn run_search(
         };
         if let Err(unsent) = tx.send(outcome) {
             tracing::error!(
-                query = %query,
+                query_chars = query.chars().count(),
                 outcome = ?unsent,
                 "quick_open_search: the overlay dropped its receiver before the result arrived"
             );
@@ -312,7 +316,7 @@ pub fn run_search(
             });
             if let Err(e) = delivered {
                 tracing::error!(
-                    query = %query_for_log,
+                    query_chars = query_for_log.chars().count(),
                     error = %e,
                     "quick_open_search: results could not reach the overlay — the window is gone"
                 );

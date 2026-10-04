@@ -168,10 +168,18 @@ pub fn cmd_fingerprint(cmd: &DbCommand) -> (&'static str, Option<&str>) {
     }
 }
 
+/// A statement reduced to one log-safe line: every value blanked, whitespace
+/// collapsed, head kept.
+///
+/// The blanking is not optional and not deferred to the call site. This keys
+/// the `by_sql` histogram AND prints in the `[actor-stats sql]` line, and a
+/// statement carries its values inline whenever the caller built the text
+/// instead of binding parameters.
 pub fn fingerprint_sql(sql: &str) -> String {
-    let mut buf = String::with_capacity(sql.len().min(120));
+    let redacted = crate::turso::redact_sql_for_logs(sql);
+    let mut buf = String::with_capacity(redacted.len().min(120));
     let mut last_was_space = false;
-    for c in sql.chars() {
+    for c in redacted.chars() {
         if c.is_whitespace() {
             if !last_was_space {
                 buf.push(' ');

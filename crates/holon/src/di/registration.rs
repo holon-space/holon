@@ -418,7 +418,12 @@ async fn create_live_data_keyed_by(
     let result = matview_manager
         .watch(sql)
         .await
-        .with_context(|| format!("[DI] failed to watch live-entity query '{sql}'"))?;
+        .with_context(|| {
+            format!(
+                "[DI] failed to watch live-entity query '{}'",
+                holon_turso::turso::redact_sql_for_logs(sql)
+            )
+        })?;
     let live = LiveData::new(
         result.initial_rows,
         move |row| {

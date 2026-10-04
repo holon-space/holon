@@ -172,7 +172,12 @@ impl GuardWorld for SqlGuardWorld {
             .db
             .query_positional(&sql, params)
             .await
-            .map_err(|e| format!("guard evaluation failed for:\n{sql}\n\nerror: {e}"))?;
+            .map_err(|e| {
+                format!(
+                    "guard evaluation failed for:\n{}\n\nerror: {e}",
+                    holon_turso::turso::redact_sql_for_logs(&sql)
+                )
+            })?;
         Ok(!rows.is_empty())
     }
 }
