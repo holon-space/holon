@@ -223,10 +223,30 @@ drivers the keystone exists to exercise.
 lightweight `resolve_computed_fields` have no block id and no bus. They refuse
 the float, log a `warn` and return `Null`. Only tests call them.
 
-## Open gaps (ruling D45 pending)
-SQL can compute a non-finite float from finite inputs. These shapes are
-measured (verify-nan-5) and stay OPEN until ruling D45. No read door can see
-them, because the engine has already turned the value into something else:
+## SQL arithmetic of a derived field (ruling D57.b)
+A derived `Arith` field lowers to Holon's checked scalar functions
+`holon_add`, `holon_sub`, `holon_mul` and `holon_div`
+(`ArithOp::sql_fn`, registered in crates/holon-turso/src/scalar_fns.rs), not to
+SQL's `+ - * /`. Each computes `arith_apply`, so the planted column and
+`Computation::eval` give the same value or the same refusal: division by zero,
+integer overflow, a non-finite result and a non-numeric operand (TEXT, NULL)
+raise an error that names the operation and the operands. A raise during IVM
+maintenance refuses the base-table write as a whole and leaves the view intact;
+a raise at CREATE refuses the view. Before this, SQL gave NULL for `/0` and
+NaN, a REAL for integer overflow, and the number for a numeric TEXT operand.
+The new function set changes the database's function signature, so an
+existing database is rebuilt once at open (crates/holon-turso/src/db_open.rs).
+Tests: crates/holon-turso/tests/derived_field_eval_vs_sql.rs
+(`arithmetic_without_a_finite_exact_answer_is_refused_by_both_seats`, the
+proptest `planted_arithmetic_gives_evals_value_or_evals_refusal`,
+`a_refused_derived_value_refuses_the_base_write_and_keeps_the_view`) and
+`db_open::tests::a_database_built_without_this_binarys_functions_is_rebuilt_at_open`.
+
+## Open gaps
+User-authored SQL (a PRQL or SQL query, a matview a vault query creates) still
+uses SQL's own arithmetic. These shapes are measured (verify-nan-5, D45 spike)
+and stay OPEN. No read door can see them, because the engine has already turned
+the value into something else:
 - `x / 0.0`, `0.0 / 0.0`, `-1.0 / 0.0` and NaN arithmetic (`9e999 - 9e999`,
   `9e999 * 0.0`) give NULL.
 - `CAST('inf' AS REAL)`, `CAST('Infinity' AS REAL)` and `CAST('nan' AS REAL)`

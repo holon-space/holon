@@ -90,6 +90,19 @@ impl ArithOp {
             ArithOp::Div => "/",
         }
     }
+
+    /// The SQL scalar function the lowering emits for this operator. SQL's own
+    /// operators turn `/0`, overflow and non-finite results into NULL or a
+    /// promoted REAL; the function computes [`arith_apply`] and refuses
+    /// instead. A database registers it at open.
+    pub const fn sql_fn(self) -> &'static str {
+        match self {
+            ArithOp::Add => "holon_add",
+            ArithOp::Sub => "holon_sub",
+            ArithOp::Mul => "holon_mul",
+            ArithOp::Div => "holon_div",
+        }
+    }
 }
 
 /// Comparison operators for the [`Computation::Compare`] shape (a
@@ -543,8 +556,12 @@ impl fmt::Display for InlineError {
 
 impl std::error::Error for InlineError {}
 
+/// A negative number is spelled as a CAST of its text: SQL has no negative
+/// literal, only unary minus, which the matview planner refuses, and `-`
+/// applied to `9223372036854775808` is a REAL.
 fn value_to_sql_literal(v: &Value, placeholder: usize, sql: &str) -> Result<String, InlineError> {
     Ok(match v {
+        Value::Integer(i) if *i < 0 => format!("CAST('{i}' AS INTEGER)"),
         Value::Integer(i) => i.to_string(),
         // `{:?}` for f64 always renders a decimal point or exponent, so the
         // literal keeps REAL affinity in SQLite (`3.0`, not `3` which would take
@@ -557,7 +574,11 @@ fn value_to_sql_literal(v: &Value, placeholder: usize, sql: &str) -> Result<Stri
                     sql: sql.to_string(),
                 });
             }
-            format!("{f:?}")
+            if f.is_sign_negative() {
+                format!("CAST('{f:?}' AS REAL)")
+            } else {
+                format!("{f:?}")
+            }
         }
         Value::Boolean(b) => {
             if *b {
@@ -733,7 +754,7 @@ impl Computation {
                 let mut params = l.params;
                 params.extend(r.params);
                 Ok(SqlFragment::new(
-                    format!("({} {} {})", l.sql, op.sql(), r.sql),
+                    format!("{}({}, {})", op.sql_fn(), l.sql, r.sql),
                     params,
                 ))
             }
@@ -1031,7 +1052,10 @@ fn as_number(v: &Value, context: &str) -> Result<f64, ComputeError> {
 /// Type-faithful arithmetic mirroring Rhai: `int op int` stays integer
 /// (checked; overflow / integer-div-by-zero fail loud), any float operand
 /// promotes to a float result, which must be finite. See the module header.
-fn arith_apply(op: ArithOp, lhs: &Value, rhs: &Value) -> Result<Value, ComputeError> {
+///
+/// The planted SQL column computes this same function ([`ArithOp::sql_fn`]),
+/// so both seats give one value or one refusal.
+pub fn arith_apply(op: ArithOp, lhs: &Value, rhs: &Value) -> Result<Value, ComputeError> {
     if let (Value::Integer(a), Value::Integer(b)) = (lhs, rhs) {
         let (a, b) = (*a, *b);
         let checked = match op {
@@ -1050,8 +1074,14 @@ fn arith_apply(op: ArithOp, lhs: &Value, rhs: &Value) -> Result<Value, ComputeEr
             ComputeError::Arithmetic { detail }
         });
     }
-    let a = as_number(lhs, "arithmetic left operand")?;
-    let b = as_number(rhs, "arithmetic right operand")?;
+    let operand = |v: &Value, side: &str| {
+        v.as_f64().ok_or_else(|| ComputeError::NotNumeric {
+            context: format!("the {side} operand of `{lhs:?} {} {rhs:?}`", op.sql()),
+            value: v.clone(),
+        })
+    };
+    let a = operand(lhs, "left")?;
+    let b = operand(rhs, "right")?;
     finite_float(op.apply(a, b), || format!("{a:?} {} {b:?}", op.sql()))
 }
 
@@ -1419,7 +1449,7 @@ mod tests {
             rhs: Box::new(Computation::Lit(Value::Integer(2))),
         };
         let frag = expr.compile_sql().unwrap();
-        assert_eq!(frag.sql, "(weight * ?)");
+        assert_eq!(frag.sql, "holon_mul(weight, ?)");
         assert_eq!(frag.params, vec![Value::Integer(2)]);
     }
 
@@ -1550,8 +1580,8 @@ mod tests {
         .compile_sql()
         .unwrap();
         // Parameterized form keeps `?`; inlined form is DDL-safe (no bind params).
-        assert_eq!(frag.sql, "(priority * ?)");
-        assert_eq!(frag.inline_sql().unwrap(), "(priority * 2)");
+        assert_eq!(frag.sql, "holon_mul(priority, ?)");
+        assert_eq!(frag.inline_sql().unwrap(), "holon_mul(priority, 2)");
     }
 
     #[test]
@@ -1591,7 +1621,7 @@ mod tests {
 
         assert_eq!(plan.sql_planted.len(), 1);
         assert_eq!(plan.sql_planted[0].name.as_str(), "boosted");
-        assert_eq!(plan.sql_planted[0].sql, "(weight * 2)");
+        assert_eq!(plan.sql_planted[0].sql, "holon_mul(weight, 2)");
 
         assert_eq!(plan.stage_evaluated.len(), 1);
         assert_eq!(
@@ -1832,7 +1862,7 @@ mod tests {
         let e = arith(ArithOp::Div, lit(3.0), lit(2.0));
         assert_eq!(
             e.compile_sql().unwrap().inline_sql().unwrap(),
-            "(3.0 / 2.0)"
+            "holon_div(3.0, 2.0)"
         );
     }
 

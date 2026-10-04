@@ -31,6 +31,7 @@ use holon_turso::schema_module::SchemaModule;
 use holon_turso::schema_modules::BlockDerivedSchemaModule;
 use holon_turso::turso::DbHandle;
 use holon_turso::turso::TursoBackend;
+use proptest::prelude::*;
 
 fn fid(name: &str) -> holon_api::computation::FieldIdent {
     holon_api::computation::FieldIdent::parse(name).expect("test identifier")
@@ -495,4 +496,389 @@ async fn absent_field_divergence_is_documented() {
         Some(&Value::Null),
         "json_extract of an absent key must be SQL NULL"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Arithmetic with no exact finite answer: the planted column and `eval` must
+// give the same value or the same refusal.
+// ---------------------------------------------------------------------------
+
+/// The operand row: `xi INTEGER`, `xf REAL`, `xs TEXT`, `xn INTEGER` (always
+/// NULL).
+#[derive(Debug, Clone)]
+struct ArithRow {
+    xi: i64,
+    xf: f64,
+    xs: &'static str,
+}
+
+impl ArithRow {
+    fn ctx(&self) -> HashMap<String, Value> {
+        HashMap::from([
+            ("xi".to_string(), Value::Integer(self.xi)),
+            ("xf".to_string(), Value::Float(self.xf)),
+            ("xs".to_string(), Value::String(self.xs.to_string())),
+            ("xn".to_string(), Value::Null),
+        ])
+    }
+
+    fn params(&self, id: &str) -> Vec<turso::Value> {
+        vec![
+            turso::Value::Text(id.to_string()),
+            turso::Value::Integer(self.xi),
+            turso::Value::Real(self.xf),
+            turso::Value::Text(self.xs.to_string()),
+        ]
+    }
+}
+
+const ARITH_TABLE_COLUMNS: &str = "(id TEXT PRIMARY KEY, xi INTEGER, xf REAL, xs TEXT, xn INTEGER)";
+const ARITH_INSERT: &str = "INSERT INTO {t} (id, xi, xf, xs, xn) VALUES (?, ?, ?, ?, NULL)";
+
+static ARITH_CASE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// The planted column's outcome on `row`, by both ways a matview computes it:
+/// the initial population at CREATE, and IVM maintenance of an INSERT into a
+/// table the view already covers.
+async fn planted_outcomes(
+    handle: &DbHandle,
+    comp: &Computation,
+    row: &ArithRow,
+) -> [(&'static str, Result<Value, String>); 2] {
+    let n = ARITH_CASE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let plan = DerivedFieldPlan::plan(vec![DerivedField::new(fid("d"), comp.clone())]);
+    assert_eq!(
+        plan.sql_planted.len(),
+        1,
+        "{comp:?} must plant; stage={:?}",
+        plan.stage_evaluated
+    );
+    let col = &plan.sql_planted[0].sql;
+
+    let initial_t = format!("ta_{n}");
+    let ivm_t = format!("tb_{n}");
+    for t in [&initial_t, &ivm_t] {
+        handle
+            .execute_ddl(&format!("CREATE TABLE {t} {ARITH_TABLE_COLUMNS}"))
+            .await
+            .expect("create table");
+    }
+    handle
+        .execute(&ARITH_INSERT.replace("{t}", &initial_t), row.params("r1"))
+        .await
+        .expect("seed the initial-population table");
+
+    let initial = async {
+        let view = format!("va_{n}");
+        reconcile_named_view(
+            handle,
+            &view,
+            &format!("SELECT id, {col} AS d FROM {initial_t}"),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        read_d(handle, &view).await
+    }
+    .await;
+
+    let ivm = async {
+        let view = format!("vb_{n}");
+        reconcile_named_view(
+            handle,
+            &view,
+            &format!("SELECT id, {col} AS d FROM {ivm_t}"),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("planted DDL `{col}` over an empty table: {e}"));
+        handle
+            .execute(&ARITH_INSERT.replace("{t}", &ivm_t), row.params("r1"))
+            .await
+            .map_err(|e| e.to_string())?;
+        read_d(handle, &view).await
+    }
+    .await;
+
+    [
+        ("matview initial population", initial),
+        ("IVM maintenance", ivm),
+    ]
+}
+
+async fn read_d(handle: &DbHandle, view: &str) -> Result<Value, String> {
+    let rows = handle
+        .query(&format!("SELECT d FROM {view}"), HashMap::new())
+        .await
+        .map_err(|e| e.to_string())?;
+    match rows.as_slice() {
+        [row] => Ok(row.get("d").cloned().expect("d column present")),
+        other => panic!("{view} must hold the one row, holds {other:?}"),
+    }
+}
+
+/// `eval` is the oracle: its value must be the planted value exactly, and its
+/// refusal must be the planted refusal.
+async fn assert_planted_matches_eval(
+    handle: &DbHandle,
+    comp: &Computation,
+    row: &ArithRow,
+) -> Result<(), String> {
+    let expected = comp.eval(&row.ctx());
+    for (leg, got) in planted_outcomes(handle, comp, row).await {
+        let agree = match (&expected, &got) {
+            (Ok(e), Ok(g)) => e == g,
+            (Err(e), Err(g)) => g.contains(&e.to_string()),
+            _ => false,
+        };
+        if !agree {
+            return Err(format!(
+                "{leg} disagrees with eval for {comp:?} over {row:?}:\n  eval: {expected:?}\n  sql:  {got:?}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn arith(op: ArithOp, lhs: Box<Computation>, rhs: Box<Computation>) -> Computation {
+    Computation::Arith { op, lhs, rhs }
+}
+
+fn benign_row() -> ArithRow {
+    ArithRow {
+        xi: 5,
+        xf: 1.5,
+        xs: "x",
+    }
+}
+
+#[tokio::test]
+async fn arithmetic_without_a_finite_exact_answer_is_refused_by_both_seats() {
+    let handle = setup().await;
+    let row_with = |xi: i64, xf: f64| ArithRow {
+        xi,
+        xf,
+        ..benign_row()
+    };
+    let cases: Vec<(Computation, ArithRow)> = vec![
+        (div(field("xi"), ilit(0)), benign_row()),
+        (
+            div(
+                field("xi"),
+                Box::new(arith(ArithOp::Sub, field("xi"), field("xi"))),
+            ),
+            benign_row(),
+        ),
+        (div(field("xf"), flit(0.0)), benign_row()),
+        (div(field("xf"), ilit(0)), benign_row()),
+        (div(field("xf"), field("xf")), row_with(5, 0.0)),
+        (
+            arith(ArithOp::Mul, field("xf"), ilit(10)),
+            row_with(5, 1e308),
+        ),
+        (
+            arith(
+                ArithOp::Sub,
+                Box::new(arith(ArithOp::Mul, field("xf"), ilit(10))),
+                Box::new(arith(ArithOp::Mul, field("xf"), ilit(10))),
+            ),
+            row_with(5, 1e308),
+        ),
+        (
+            arith(ArithOp::Add, field("xi"), ilit(1)),
+            row_with(i64::MAX, 1.5),
+        ),
+        (
+            arith(ArithOp::Mul, field("xi"), ilit(2)),
+            row_with(i64::MAX, 1.5),
+        ),
+        (
+            arith(ArithOp::Sub, field("xi"), ilit(1)),
+            row_with(i64::MIN, 1.5),
+        ),
+        (
+            arith(ArithOp::Sub, ilit(0), field("xi")),
+            row_with(i64::MIN, 1.5),
+        ),
+        (arith(ArithOp::Add, field("xs"), ilit(1)), benign_row()),
+        (arith(ArithOp::Add, field("xn"), ilit(1)), benign_row()),
+        (arith(ArithOp::Mul, field("xi"), field("xn")), benign_row()),
+        // Finite controls: the checked path keeps the ordinary answers.
+        (div(field("xi"), ilit(2)), benign_row()),
+        (arith(ArithOp::Add, field("xi"), field("xf")), benign_row()),
+        (
+            arith(ArithOp::Sub, field("xi"), ilit(1)),
+            row_with(i64::MAX, 1.5),
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (comp, row) in &cases {
+        if let Err(e) = assert_planted_matches_eval(&handle, comp, row).await {
+            failures.push(e);
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} of {} cases disagree:\n{}",
+        failures.len(),
+        cases.len(),
+        failures.join("\n")
+    );
+}
+
+fn arb_leaf() -> impl Strategy<Value = Computation> {
+    prop_oneof![
+        prop::sample::select(vec!["xi", "xf", "xs", "xn"])
+            .prop_map(|c| Computation::Field(c.into())),
+        prop::sample::select(vec![0i64, 1, 2, 7, i64::MAX, -1, -3, i64::MIN])
+            .prop_map(|i| Computation::Lit(Value::Integer(i))),
+        prop::sample::select(vec![0.0f64, 0.5, 2.0, 1e308, -1.5, -0.0])
+            .prop_map(|f| Computation::Lit(Value::Float(f))),
+    ]
+}
+
+fn arb_arith() -> impl Strategy<Value = Computation> {
+    let op = prop::sample::select(vec![ArithOp::Add, ArithOp::Sub, ArithOp::Mul, ArithOp::Div]);
+    arb_leaf().prop_recursive(3, 8, 2, move |inner| {
+        (op.clone(), inner.clone(), inner)
+            .prop_map(|(op, l, r)| arith(op, Box::new(l), Box::new(r)))
+    })
+}
+
+fn arb_row() -> impl Strategy<Value = ArithRow> {
+    (
+        prop::sample::select(vec![0i64, 1, -1, 7, 3_037_000_500, i64::MAX, i64::MIN]),
+        prop::sample::select(vec![0.0f64, 1.5, -2.5, 2.0, 1e308, -1e308]),
+        prop::sample::select(vec!["5", "inf", "abc"]),
+    )
+        .prop_map(|(xi, xf, xs)| ArithRow { xi, xf, xs })
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(64))]
+
+    #[test]
+    fn planted_arithmetic_gives_evals_value_or_evals_refusal(
+        comp in arb_arith().prop_filter("an arithmetic node, not a bare leaf", |c| {
+            matches!(c, Computation::Arith { .. })
+        }),
+        row in arb_row(),
+    ) {
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let outcome = runtime.block_on(async {
+            let handle = setup().await;
+            assert_planted_matches_eval(&handle, &comp, &row).await
+        });
+        prop_assert!(outcome.is_ok(), "{}", outcome.unwrap_err());
+    }
+}
+
+/// A refusal during IVM maintenance refuses the base-table write as a whole:
+/// the row is not stored, the view keeps its rows, and the next good write
+/// lands.
+#[tokio::test]
+async fn a_refused_derived_value_refuses_the_base_write_and_keeps_the_view() {
+    let handle = setup().await;
+    handle
+        .execute_ddl(&format!("CREATE TABLE tw {ARITH_TABLE_COLUMNS}"))
+        .await
+        .expect("create table");
+    let insert = ARITH_INSERT.replace("{t}", "tw");
+    handle
+        .execute(&insert, benign_row().params("ok1"))
+        .await
+        .expect("seed");
+    let plan = DerivedFieldPlan::plan(vec![DerivedField::new(
+        fid("d"),
+        arith(ArithOp::Add, field("xi"), ilit(1)),
+    )]);
+    let col = &plan.sql_planted[0].sql;
+    reconcile_named_view(&handle, "vw", &format!("SELECT id, {col} AS d FROM tw"))
+        .await
+        .expect("planted DDL");
+
+    let overflow = ArithRow {
+        xi: i64::MAX,
+        ..benign_row()
+    };
+    let refused = handle.execute(&insert, overflow.params("bad")).await;
+    let refused = refused.expect_err("an overflowing derived value must refuse the INSERT");
+    assert!(
+        refused
+            .to_string()
+            .contains("integer overflow: 9223372036854775807 + 1"),
+        "the refusal must name the operation and its operands: {refused}"
+    );
+    let refused_update = handle
+        .execute(
+            "UPDATE tw SET xi = ? WHERE id = 'ok1'",
+            vec![turso::Value::Integer(i64::MAX)],
+        )
+        .await;
+    assert!(
+        refused_update.is_err(),
+        "an overflowing derived value must refuse the UPDATE: {refused_update:?}"
+    );
+
+    let base = handle
+        .query("SELECT id, xi FROM tw ORDER BY id", HashMap::new())
+        .await
+        .expect("read base");
+    assert_eq!(
+        base.len(),
+        1,
+        "the refused rows must not be stored: {base:?}"
+    );
+    assert_eq!(base[0].get("xi"), Some(&Value::Integer(5)));
+    let view = handle
+        .query("SELECT id, d FROM vw ORDER BY id", HashMap::new())
+        .await
+        .expect("read view");
+    assert_eq!(view.len(), 1, "the view must keep its rows: {view:?}");
+    assert_eq!(view[0].get("d"), Some(&Value::Integer(6)));
+
+    handle
+        .execute(
+            &insert,
+            ArithRow {
+                xi: 3,
+                ..benign_row()
+            }
+            .params("ok2"),
+        )
+        .await
+        .expect("the next good write lands");
+    let view = handle
+        .query("SELECT d FROM vw ORDER BY id", HashMap::new())
+        .await
+        .expect("read view");
+    assert_eq!(view.len(), 2, "{view:?}");
+    assert_eq!(view[1].get("d"), Some(&Value::Integer(4)));
+}
+
+/// A negative literal reaches planted DDL through a switch label and through a
+/// programmatic `Lit`; the matview planner must accept both.
+#[tokio::test]
+async fn a_negative_literal_plants() {
+    let handle = setup().await;
+    let ctx = HashMap::from([
+        ("xi".to_string(), Value::Integer(9)),
+        ("xf".to_string(), Value::Float(5.0)),
+    ]);
+    let cases = [
+        ("v_neg_int", arith(ArithOp::Mul, field("xi"), ilit(-5))),
+        ("v_neg_float", arith(ArithOp::Add, field("xf"), flit(-1.5))),
+        (
+            "v_neg_min",
+            arith(ArithOp::Add, field("xi"), ilit(i64::MIN)),
+        ),
+        (
+            "v_neg_label",
+            holon_api::expr_parser::parse("switch xi { -9 => 1, 9 => -2, _ => 3 }")
+                .expect("subset parses a negative switch label"),
+        ),
+    ];
+    for (view, comp) in cases {
+        let expected = comp.eval(&ctx).expect("eval");
+        let got = plant_and_read(&handle, view, comp).await;
+        assert_eq!(expected, got, "{view}");
+    }
 }

@@ -545,6 +545,33 @@ mod tests {
         ));
     }
 
+    /// A file an older binary built under the empty set cannot load a view that
+    /// calls this binary's functions, so the first open of this binary rebuilds
+    /// it.
+    #[test]
+    fn a_database_built_without_this_binarys_functions_is_rebuilt_at_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("holon.db");
+        {
+            let db = open(&path, &[]).unwrap().0;
+            exec(&db, "CREATE TABLE t (id INTEGER PRIMARY KEY)").unwrap();
+            exec(&db, "INSERT INTO t (id) VALUES (1)").unwrap();
+        }
+        let db = TursoBackend::open_database(&path).expect("open with this binary's set");
+        assert_eq!(
+            count(&db, "SELECT count(*) FROM sqlite_schema WHERE name = 't'"),
+            0,
+            "a database built without [{}] must be rebuilt",
+            scalar_fns::signature(scalar_fns::ALL)
+        );
+        let conn = connect(&db).unwrap();
+        assert!(matches!(
+            stored_signature(&conn).unwrap(),
+            StoredSignature::Recorded(s) if s == scalar_fns::signature(scalar_fns::ALL)
+                && s.contains("holon_div/2/v1")
+        ));
+    }
+
     /// A crash between the DELETE and the INSERT of a non-atomic record leaves
     /// the table with no row; a table holding anything but one text row is as
     /// unreadable. Either way the file is derived data, so it is rebuilt.

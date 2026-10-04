@@ -1744,8 +1744,8 @@ fn bind_parameters(
 /// so consumers diffing initial rows against CDC updates saw a spurious
 /// type change.
 ///
-/// A REAL that SQL computed as NaN or infinity is refused: no `Value` carries
-/// one.
+/// A REAL that SQL computed as NaN or infinity, and a BLOB, are refused: no
+/// `Value` carries one.
 fn turso_value_to_value(value: turso_core::Value) -> std::result::Result<Value, NotJson> {
     Ok(match value {
         turso_core::Value::Null => Value::Null,
@@ -1754,7 +1754,12 @@ fn turso_value_to_value(value: turso_core::Value) -> std::result::Result<Value, 
             Value::Float(NotJson::finite(f.into())?)
         }
         turso_core::Value::Text(s) => Value::String(s.to_string()),
-        turso_core::Value::Blob(_) => Value::Null,
+        turso_core::Value::Blob(b) => {
+            return Err(NotJson::Blob {
+                path: String::new(),
+                len: b.len(),
+            });
+        }
     })
 }
 
@@ -5027,6 +5032,17 @@ mod tests {
         assert_eq!(arr_val, Value::String("[1, 2, 3]".to_string()));
         let obj_val = turso_value_to_value(turso_core::Value::Text("{\"a\": 1}".into())).unwrap();
         assert_eq!(obj_val, Value::String("{\"a\": 1}".to_string()));
+    }
+
+    #[test]
+    fn a_blob_is_refused_not_read_as_null() {
+        let refused =
+            turso_value_to_value(turso_core::Value::from_slice(&[0xde, 0xad]).expect("blob"))
+                .expect_err("no Value carries a BLOB; reading one as Null loses it silently");
+        assert!(
+            refused.to_string().contains("BLOB"),
+            "the refusal must name the BLOB: {refused}"
+        );
     }
 
     /// Both row-parsing paths must agree: JSON-shaped user TEXT stays a

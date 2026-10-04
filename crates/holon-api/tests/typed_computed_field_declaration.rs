@@ -43,7 +43,7 @@ fn two_declared_numeric_columns_add() {
         matches!(comp, Computation::Arith { .. }),
         "expected Arith, got {comp:?}"
     );
-    assert_eq!(comp.compile_sql().expect("lowers").sql, "(weight + bonus)");
+    assert_eq!(comp.compile_sql().expect("lowers").sql, "holon_add(weight, bonus)");
 }
 
 #[test]

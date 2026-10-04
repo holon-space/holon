@@ -624,6 +624,8 @@ pub enum NotJson {
         text: String,
         detail: String,
     },
+    /// Bytes: neither JSON nor `Value` has a kind for them.
+    Blob { path: String, len: usize },
 }
 
 impl NotJson {
@@ -661,6 +663,10 @@ impl NotJson {
                 text,
                 detail,
             },
+            NotJson::Blob { path, len } => NotJson::Blob {
+                path: nest(path),
+                len,
+            },
         }
     }
 }
@@ -690,6 +696,9 @@ impl std::fmt::Display for NotJson {
                 "{} is Value::Json holding text that does not parse as JSON ({detail}): {text:?}",
                 at(path)
             ),
+            NotJson::Blob { path, len } => {
+                write!(f, "{} is a {len}-byte BLOB; no Value holds bytes", at(path))
+            }
         }
     }
 }

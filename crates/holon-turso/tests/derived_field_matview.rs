@@ -103,8 +103,8 @@ async fn planted_computed_column_is_ivm_maintained_and_retracts() {
         "nothing falls to the stage"
     );
     let col = &plan.sql_planted[0];
-    assert_eq!(col.sql, "(priority * 2)");
-    assert_eq!(col.select_expr(), "((priority * 2)) AS \"boosted\"");
+    assert_eq!(col.sql, "holon_mul(priority, 2)");
+    assert_eq!(col.select_expr(), "(holon_mul(priority, 2)) AS \"boosted\"");
 
     // Plant the column into a matview over the base table.
     let select = format!("SELECT id, {} FROM task", col.select_expr());
