@@ -12,6 +12,7 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
+use futures::future::BoxFuture;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -19,6 +20,8 @@ use crate::EntityName;
 use crate::OperationDescriptor;
 use crate::StorageEntity;
 use crate::Value;
+use crate::admission::OpRequest;
+use crate::admission::Ticket;
 
 /// Provenance of an operation as it enters the engine — the "who caused this"
 /// axis of ADR 0024's `fired-by: <transition-id>` slot.
@@ -110,17 +113,37 @@ impl OpOutcome {
 /// Execute, discover, and undo/redo operations.
 #[async_trait]
 pub trait OperationEngine: Send + Sync {
-    /// Dispatch an operation, returning its optional result value.
+    /// Take the operation's place in the write order now. Its writes land
+    /// after those of every operation admitted earlier on an overlapping
+    /// footprint, however late [`Self::run`]'s future is first polled.
+    fn admit(&self, request: OpRequest) -> Result<Ticket>;
+
+    /// Execute an operation this engine admitted. The future owns all it
+    /// needs, so a fire-and-forget caller can spawn it.
+    fn run(&self, ticket: Ticket) -> BoxFuture<'static, Result<OpOutcome>>;
+
+    /// [`Self::admit`] at the call, then [`Self::run`].
     ///
     /// `origin` states who caused the operation (ADR 0024 `fired-by`
     /// provenance). Only [`OpOrigin::User`] operations push undo entries.
-    async fn execute_operation(
+    fn execute_operation(
         &self,
         entity_name: &EntityName,
         op_name: &str,
         params: StorageEntity,
         origin: OpOrigin,
-    ) -> Result<OpOutcome>;
+    ) -> BoxFuture<'static, Result<OpOutcome>> {
+        let request = OpRequest {
+            entity_name: entity_name.clone(),
+            op_name: op_name.to_string(),
+            params,
+            origin,
+        };
+        match self.admit(request) {
+            Ok(ticket) => self.run(ticket),
+            Err(e) => Box::pin(std::future::ready(Err(e))),
+        }
+    }
 
     /// The operations registered for `entity_name`.
     async fn available_operations(&self, entity_name: &str) -> Vec<OperationDescriptor>;

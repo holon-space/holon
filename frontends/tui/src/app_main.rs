@@ -837,14 +837,13 @@ fn dispatch_block_op_on_focused(state: &TuiState, op_name: &str) -> bool {
         eprintln!("[chord] {op_name}: dispatching on block {block_id}");
     }
 
-    let engine = state.engine.clone();
     let op = op_name.to_string();
+    let mut params = std::collections::HashMap::new();
+    params.insert("id".to_string(), Value::String(block_id));
+    let intent = OperationIntent::new(EntityName::Named("block".to_string()), op.clone(), params);
+    let run = state.engine.dispatch_intent_sync(intent);
     state.rt_handle.spawn(async move {
-        let mut params = std::collections::HashMap::new();
-        params.insert("id".to_string(), Value::String(block_id));
-        let intent =
-            OperationIntent::new(EntityName::Named("block".to_string()), op.clone(), params);
-        if let Err(e) = engine.dispatch_intent_sync(intent).await {
+        if let Err(e) = run.await {
             tracing::error!("{op} failed: {e}");
         }
     });
@@ -1095,20 +1094,19 @@ fn handle_edit_input(state: &mut TuiState, input_event: InputEvent) -> EventProp
             // so no pre-flush is needed — just dispatch.
             let block_id = edit_state.block_id.clone();
             let cursor = edit_state.cursor as i64;
-            let engine = state.engine.clone();
-            let rt = state.rt_handle.clone();
             *edit = None;
             drop(edit);
-            rt.spawn(async move {
-                let mut params = std::collections::HashMap::new();
-                params.insert("id".to_string(), Value::String(block_id));
-                params.insert("position".to_string(), Value::Integer(cursor));
-                let split = OperationIntent::new(
-                    EntityName::Named("block".to_string()),
-                    "split_block".to_string(),
-                    params,
-                );
-                if let Err(e) = engine.dispatch_intent_sync(split).await {
+            let mut params = std::collections::HashMap::new();
+            params.insert("id".to_string(), Value::String(block_id));
+            params.insert("position".to_string(), Value::Integer(cursor));
+            let split = OperationIntent::new(
+                EntityName::Named("block".to_string()),
+                "split_block".to_string(),
+                params,
+            );
+            let run = state.engine.dispatch_intent_sync(split);
+            state.rt_handle.spawn(async move {
+                if let Err(e) = run.await {
                     tracing::error!("split_block failed: {e}");
                 }
             });
@@ -1122,20 +1120,19 @@ fn handle_edit_input(state: &mut TuiState, input_event: InputEvent) -> EventProp
         Key::SpecialKey(SpecialKey::Backspace) if edit_state.cursor == 0 => {
             // Backspace at column 0: join with previous sibling.
             let block_id = edit_state.block_id.clone();
-            let engine = state.engine.clone();
-            let rt = state.rt_handle.clone();
             *edit = None;
             drop(edit);
-            rt.spawn(async move {
-                let mut params = std::collections::HashMap::new();
-                params.insert("id".to_string(), Value::String(block_id));
-                params.insert("position".to_string(), Value::Integer(0));
-                let join = OperationIntent::new(
-                    EntityName::Named("block".to_string()),
-                    "join_block".to_string(),
-                    params,
-                );
-                if let Err(e) = engine.dispatch_intent_sync(join).await {
+            let mut params = std::collections::HashMap::new();
+            params.insert("id".to_string(), Value::String(block_id));
+            params.insert("position".to_string(), Value::Integer(0));
+            let join = OperationIntent::new(
+                EntityName::Named("block".to_string()),
+                "join_block".to_string(),
+                params,
+            );
+            let run = state.engine.dispatch_intent_sync(join);
+            state.rt_handle.spawn(async move {
+                if let Err(e) = run.await {
                     tracing::error!("join_block failed: {e}");
                 }
             });

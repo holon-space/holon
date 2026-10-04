@@ -29,10 +29,10 @@ test-helpers = ["dep:tempfile", "testing", "test-yield", "dispatch-hold"]
 # Enable proptest-backed test utilities (`holon::testing`, `api::pbt_infrastructure`).
 # Keeps proptest / proptest-state-machine out of production builds.
 testing = ["dep:proptest", "dep:proptest-state-machine"]
-# Widen the compound write step at the two points a competing write could
-# overtake it (see `EntityWriteLocks`), so the interleave a compound must
-# survive is forceable instead of a stopwatch race. Test-only: it changes
-# nothing but WHEN a task may be preempted. Implied by `test-helpers`.
+# Widen the compound write step at the two points a competing write must not
+# overtake it, so the interleave a compound must survive is forceable instead
+# of a stopwatch race. Test-only: it changes nothing but WHEN a task may be
+# preempted. Implied by `test-helpers`.
 test-yield = []
 # Compile the hold hook into the operation engine (`api::dispatch_hold`), so a
 # test can park or fail a named operation. Test-only; implied by `test-helpers`.

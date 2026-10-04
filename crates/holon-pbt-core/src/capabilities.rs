@@ -3948,10 +3948,16 @@ pub trait SutAppLifecycle {
 pub trait SutDispatchHold {
     fn hold_next_dispatch(&self, entity: &str, op: &str);
     fn fail_next_dispatch(&self, entity: &str, op: &str);
-    /// Panics unless exactly `expect_parked` runs are parked.
+    /// Block each of the next `delays_ms.len()` admissions of `entity.op` for
+    /// its delay, in the order they reach admission.
+    fn delay_next_admissions(&self, entity: &str, op: &str, delays_ms: &[u64]);
+    /// Panics unless exactly `expect_parked` runs are parked and every
+    /// admission delay was spent.
     async fn release_held_dispatches(&self, expect_parked: usize);
     /// Runs of `entity.op` parked at the hold right now.
     fn parked_dispatches(&self, entity: &str, op: &str) -> usize;
+    /// The `entity.op` of every run parked at the hold right now.
+    fn parked_dispatch_names(&self) -> Vec<String>;
     /// Runs of `entity.op` the hold failed since the last call.
     fn take_failed_dispatches(&self, entity: &str, op: &str) -> usize;
 }

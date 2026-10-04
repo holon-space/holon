@@ -52,17 +52,22 @@ async fn rebuild_views_is_disclosed_while_it_runs_and_not_after() {
         holon_api::StorageEntity::new(),
         OpOrigin::User,
     ));
-    let mut pending_polls = 0;
+    // As a fence, the op first waits for the boot's in-flight ops; it runs
+    // from the first poll that sees the condition.
+    let mut running_polls = 0;
     let result = std::future::poll_fn(|cx| match op.as_mut().poll(cx) {
         Poll::Ready(result) => Poll::Ready(result),
         Poll::Pending => {
-            pending_polls += 1;
-            assert!(
-                rebuilding(&bus),
-                "rebuild_views is running (pending poll {pending_polls}) and the bus does not \
-                 say so: {:?}",
-                bus.current()
-            );
+            if rebuilding(&bus) {
+                running_polls += 1;
+            } else {
+                assert_eq!(
+                    running_polls,
+                    0,
+                    "rebuild_views is running and the bus stopped saying so: {:?}",
+                    bus.current()
+                );
+            }
             Poll::Pending
         }
     })
@@ -70,8 +75,8 @@ async fn rebuild_views_is_disclosed_while_it_runs_and_not_after() {
     result.expect("rebuild_views");
 
     assert!(
-        pending_polls > 0,
-        "the op never yielded, so nothing observed it while it ran"
+        running_polls > 0,
+        "the op never yielded while it ran, so nothing observed it"
     );
     assert!(
         !rebuilding(&bus),

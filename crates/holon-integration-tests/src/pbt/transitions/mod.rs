@@ -108,6 +108,7 @@ mod create_document;
 pub(crate) mod create_page_at_freed_path;
 pub mod create_typed_entity;
 mod declare_typed_schema;
+mod delay_admissions;
 pub mod delete_backward;
 mod delete_document;
 mod delete_line_from_file;
@@ -206,6 +207,7 @@ pub use create_document::CreateDocument;
 pub use create_page_at_freed_path::CreatePageAtFreedPath;
 pub use create_typed_entity::CreateTypedEntity;
 pub use declare_typed_schema::DeclareTypedSchema;
+pub use delay_admissions::DelayAdmissions;
 pub use delete_backward::DeleteBackward;
 pub use delete_document::DeleteDocument;
 pub use delete_line_from_file::DeleteLineFromFile;
@@ -352,6 +354,7 @@ crate::declare_e2e_transitions! {
         StartApp(StartApp),
         Nothing(Nothing),
         HoldDispatch(HoldDispatch),
+        DelayAdmissions(DelayAdmissions),
         ReleaseHeld(ReleaseHeld),
         FailNextDispatch(FailNextDispatch),
         NavigateFocus(NavigateFocus),

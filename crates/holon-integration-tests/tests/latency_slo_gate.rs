@@ -156,6 +156,7 @@ fn warm_up_target() -> String {
 enum DriveTargets {
     Skip,
     Create { writes: usize },
+    Fence,
 }
 
 /// Whether a run's host must pass [`require_a_judgeable_host`] before setup.
@@ -175,6 +176,9 @@ fn setup_sequence(targets: DriveTargets) -> Vec<E2ETransition> {
             .map(burst_target)
             .chain(std::iter::once(warm_up_target()))
             .collect(),
+        DriveTargets::Fence => [FENCE_TYPED, FENCE_SUBJECT, FENCE_AFTER]
+            .map(String::from)
+            .to_vec(),
     };
     // Burst targets FIRST, then the host, then the focus: a create moves the
     // editor, so focusing the host has to be the last thing the prefix does.
@@ -1102,4 +1106,151 @@ fn a_slowed_pipeline_moves_the_service_statistic() {
         "[latency-slo gate] teeth (wiring): injection reached the scorer — p50 {p50}ms \
          (max {max}ms) over n={n}, against a 22-45ms unslowed baseline"
     );
+}
+
+/// The fence rung's blocks: typing in flight on the first, the measured op on
+/// the second, the next keystroke on the third.
+const FENCE_TYPED: &str = "block:slo-gate-fence-typed";
+const FENCE_SUBJECT: &str = "block:slo-gate-fence-subject";
+const FENCE_AFTER: &str = "block:slo-gate-fence-after";
+
+/// Rounds per variant of the fence rung.
+const FENCE_ROUNDS: usize = 40;
+
+/// A fence round that is still invisible after this is a hang, not a sample.
+const FENCE_ROUND_PATIENCE: std::time::Duration = std::time::Duration::from_secs(10);
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum FenceVariant {
+    /// `cycle_task_state` on the subject: admitted as a fence.
+    Fence,
+    /// A content `set_field` on the subject: admitted by its footprint.
+    Plain,
+}
+
+fn content_write(target: &str, value: String) -> OperationIntent {
+    let mut params = HashMap::new();
+    params.insert("id".to_string(), Value::String(target.to_string()));
+    params.insert("field".to_string(), Value::String("content".to_string()));
+    params.insert("value".to_string(), Value::String(value));
+    OperationIntent::new(EntityName::new("block"), "set_field".to_string(), params)
+}
+
+fn subject_op(variant: FenceVariant, round: usize) -> OperationIntent {
+    match variant {
+        FenceVariant::Fence => {
+            let mut params = HashMap::new();
+            params.insert("id".to_string(), Value::String(FENCE_SUBJECT.to_string()));
+            OperationIntent::new(
+                EntityName::new("block"),
+                "cycle_task_state".to_string(),
+                params,
+            )
+        }
+        FenceVariant::Plain => content_write(FENCE_SUBJECT, format!("subject {round}")),
+    }
+}
+
+/// Nearest-rank percentile of `ms`, which must not be empty.
+fn percentile(ms: &[u64], p: f64) -> u64 {
+    assert!(!ms.is_empty(), "percentile of no samples");
+    let mut sorted = ms.to_vec();
+    sorted.sort_unstable();
+    let rank = ((p / 100.0) * sorted.len() as f64).ceil() as usize;
+    sorted[rank.max(1) - 1]
+}
+
+/// **FENCE UNDER TYPING — a report for ruling D44, not a gate.** A write on
+/// one block is in flight, the subject op on a second block and a keystroke on
+/// a third follow at once, through the fire-and-forget door. Rounds alternate
+/// the fence op with a plain write on the subject, so host drift hits both
+/// variants alike. Prints p50/p95 interaction→visible per variant and block.
+#[test]
+#[ignore = "measurement for D44; run explicitly, it judges nothing"]
+fn latency_fence_under_typing_report() {
+    let _turn = RUNG_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (sut, _ref_state) = boot(DriveTargets::Fence, Host::Admitted);
+    let engine = sut
+        .handle()
+        .reactive()
+        .expect("the full-headless draw boots a reactive engine");
+    let targets = [FENCE_TYPED, FENCE_SUBJECT, FENCE_AFTER];
+
+    let probe = SloProbe::arm();
+    let rounds: Vec<(FenceVariant, Vec<E2eSample>)> = sut.runtime().block_on(async {
+        engine.ui_state().set_detached_dispatch(true);
+        let mut seen = 0;
+        let mut rounds = Vec::new();
+        for round in 0..2 * FENCE_ROUNDS {
+            let variant = if round % 2 == 0 {
+                FenceVariant::Fence
+            } else {
+                FenceVariant::Plain
+            };
+            for intent in [
+                content_write(FENCE_TYPED, format!("typed {round}")),
+                subject_op(variant, round),
+                content_write(FENCE_AFTER, format!("after {round}")),
+            ] {
+                dispatch_intent_through_armed_door(&engine, intent)
+                    .await
+                    .expect("the detached door accepts the fence round's ops");
+            }
+            let started = std::time::Instant::now();
+            let mut samples: Vec<E2eSample> = Vec::new();
+            while !targets
+                .iter()
+                .all(|t| samples.iter().any(|s| s.target == *t))
+            {
+                assert!(
+                    started.elapsed() < FENCE_ROUND_PATIENCE,
+                    "[fence rung] round {round} ({variant:?}) still not visible after \
+                     {FENCE_ROUND_PATIENCE:?}: delivered {samples:?}"
+                );
+                tokio::time::sleep(DRAIN_POLL).await;
+                let fresh = probe.samples_after(ClockOrigin::Ui, seen);
+                seen += fresh.len();
+                samples.extend(
+                    fresh
+                        .into_iter()
+                        .filter(|s| targets.contains(&s.target.as_str())),
+                );
+            }
+            rounds.push((variant, samples));
+        }
+        engine.ui_state().set_detached_dispatch(false);
+        rounds
+    });
+    let lost: Vec<_> = probe
+        .lost_clocks()
+        .into_iter()
+        .filter(|l| targets.contains(&l.target.as_str()))
+        .collect();
+    drop(probe);
+    assert!(
+        lost.is_empty(),
+        "[fence rung] the correlator dropped round clocks unmeasured: {lost:?}"
+    );
+
+    for variant in [FenceVariant::Fence, FenceVariant::Plain] {
+        for target in targets {
+            let picked: Vec<&E2eSample> = rounds
+                .iter()
+                .filter(|(v, _)| *v == variant)
+                .flat_map(|(_, samples)| samples.iter().filter(|s| s.target == target))
+                .collect();
+            let ms: Vec<u64> = picked.iter().map(|s| s.ms).collect();
+            let max_in_flight = picked.iter().map(|s| s.in_flight).max().unwrap_or(0);
+            eprintln!(
+                "[fence rung] variant={variant:?} target={target} n={} p50={}ms p95={}ms \
+                 max={}ms max_in_flight={max_in_flight}",
+                ms.len(),
+                percentile(&ms, 50.0),
+                percentile(&ms, 95.0),
+                ms.iter().max().expect("percentile asserted non-empty"),
+            );
+        }
+    }
 }

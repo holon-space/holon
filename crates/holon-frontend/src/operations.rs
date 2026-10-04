@@ -137,11 +137,9 @@ pub fn dispatch_operation(
             holon_api::latency_e2e::ClockOrigin::Ui,
         );
     }
+    let run = session.execute_operation(&entity_name, &op_name, params);
     spawner.spawn(Box::pin(async move {
-        if let Err(e) = session
-            .execute_operation(&entity_name, &op_name, params)
-            .await
-        {
+        if let Err(e) = run.await {
             // A refused/failed op writes nothing: retire its latency entry so no
             // later unrelated delivery for the row closes it as a phantom sample.
             if let Some(target) = &latency_target {

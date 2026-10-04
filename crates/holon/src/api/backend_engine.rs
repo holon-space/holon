@@ -3,12 +3,15 @@ use std::sync::Arc;
 
 use anyhow::Context as _;
 use anyhow::Result;
+use futures::future::BoxFuture;
 use holon_api::BatchWithMetadata;
 use holon_api::EntityName;
 use holon_api::OperationDescriptor;
 use holon_api::QueryContext;
 use holon_api::QueryLanguage;
 use holon_api::Value;
+use holon_api::admission::OpRequest;
+use holon_api::admission::Ticket;
 use holon_core::storage::types::StorageEntity;
 use holon_core::storage::types::StorageError;
 use tokio::sync::RwLock;
@@ -1504,11 +1507,8 @@ impl BackendEngine {
         tokio_stream::wrappers::ReceiverStream::new(rx)
     }
 
-    /// Execute a block operation
-    ///
-    /// This method provides a clean interface for executing operations without
-    /// exposing the internal TursoBackend. It handles locking and passes
-    /// the current UI state.
+    /// Execute a block operation. It is admitted into the write order when
+    /// this is called, not when the future is first polled.
     ///
     /// # Arguments
     /// * `op_name` - Name of the operation to execute (e.g., "indent",
@@ -1536,58 +1536,66 @@ impl BackendEngine {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn execute_operation(
+    pub fn execute_operation(
         &self,
         entity_name: &EntityName,
         op_name: &str,
         params: StorageEntity,
         origin: holon_api::OpOrigin,
-    ) -> Result<holon_api::OpOutcome> {
+    ) -> BoxFuture<'static, Result<holon_api::OpOutcome>> {
         self.execute_with_parsed_carriers(entity_name, op_name, params, &[], origin)
-            .await
     }
 
     /// [`Self::execute_operation`] with `carriers` the org parser read from the
     /// author's own text written alongside `params`.
-    pub async fn execute_with_parsed_carriers(
+    pub fn execute_with_parsed_carriers(
         &self,
         entity_name: &EntityName,
         op_name: &str,
         params: StorageEntity,
         carriers: &[holon_org_format::ParsedCarrier],
         origin: holon_api::OpOrigin,
-    ) -> Result<holon_api::OpOutcome> {
-        use tracing::Instrument;
-        use tracing::info;
+    ) -> BoxFuture<'static, Result<holon_api::OpOutcome>> {
+        match self.op_engine.admit_with_parsed_carriers(
+            entity_name,
+            op_name,
+            params,
+            carriers,
+            origin,
+        ) {
+            Ok(ticket) => self.run_ticket(ticket),
+            Err(e) => Box::pin(std::future::ready(Err(e))),
+        }
+    }
 
-        // Create tracing span that will be bridged to OpenTelemetry
-        // Use .instrument() to maintain context across async boundaries
+    pub(crate) fn admit(&self, request: OpRequest) -> Result<Ticket> {
+        self.op_engine.admit(request)
+    }
+
+    pub(crate) fn run_ticket(
+        &self,
+        ticket: Ticket,
+    ) -> BoxFuture<'static, Result<holon_api::OpOutcome>> {
+        use tracing::Instrument;
+
+        let request = ticket.request();
+        // Bridged to OpenTelemetry; `.instrument()` keeps the context across
+        // async boundaries.
         let span = tracing::span!(
             tracing::Level::INFO,
             "backend.execute_operation",
-            "operation.entity" = entity_name.to_string(),
-            "operation.name" = op_name,
-            "operation.origin" = origin.tag()
+            "operation.entity" = request.entity_name.to_string(),
+            "operation.name" = request.op_name.as_str(),
+            "operation.origin" = request.origin.tag()
         );
-
-        async {
-            info!(
-                "[BackendEngine] execute_operation: entity={}, op={}, origin={}, params={:?}",
-                entity_name,
-                op_name,
-                origin.tag(),
-                params
-            );
-
-            // Dispatch + undo-stack bookkeeping live in the shared op engine
-            // (over the same dispatcher). Span context propagates via the
-            // tracing-opentelemetry bridge.
-            self.op_engine
-                .execute_with_parsed_carriers(entity_name, op_name, params, carriers, origin)
-                .await
-        }
-        .instrument(span)
-        .await
+        tracing::info!(
+            "[BackendEngine] execute_operation: entity={}, op={}, origin={}, params={:?}",
+            request.entity_name,
+            request.op_name,
+            request.origin.tag(),
+            request.params
+        );
+        Box::pin(self.op_engine.run(ticket).instrument(span))
     }
 
     /// Replace the in-memory undo engine with a persistent one backed by the
@@ -1625,6 +1633,11 @@ impl BackendEngine {
     #[cfg(feature = "dispatch-hold")]
     pub fn dispatch_hold(&self) -> &Arc<crate::api::dispatch_hold::DispatchHold> {
         self.op_engine.dispatch_hold()
+    }
+
+    #[cfg(feature = "dispatch-hold")]
+    pub fn admission(&self) -> &holon_api::admission::AdmissionOverlay {
+        self.op_engine.admission()
     }
 
     pub async fn enable_undo_persistence(&mut self) -> Result<()> {

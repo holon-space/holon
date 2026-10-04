@@ -1007,12 +1007,14 @@ impl<S: ComposedSlice> ComposedSut<S> {
             .cloned()
             .collect();
         let vanished: Vec<&EntityUri> = before.difference(&after).collect();
-        let (parked, newly_failed) = sut
+        let (parked, parked_other, newly_failed) = sut
             .caps
             .get::<dyn holon_pbt_core::capabilities::SutDispatchHold>()
-            .map_or((0, 0), |hold| {
+            .map_or((0, 0, 0), |hold| {
+                let parked = hold.parked_dispatches("block", "create");
                 (
-                    hold.parked_dispatches("block", "create"),
+                    parked,
+                    hold.parked_dispatch_names().len() - parked,
                     hold.take_failed_dispatches("block", "create"),
                 )
             });
@@ -1029,6 +1031,7 @@ impl<S: ComposedSlice> ComposedSut<S> {
         // apply_to_ref` (shared `tiered_match`), so the two lengths match here.
         let held = HeldCreates {
             parked,
+            parked_other,
             newly_failed,
         };
         let pairs = pair_synthetic_creates(
@@ -1406,6 +1409,66 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
         // read the post-transition frame (no-op headlessly — see `SettleHook`). Mirrors
         // the sim windowed per-tick hook's `settle_to_fixed_point` before its check.
         (sut.settle)();
+        // A parked run is a write the reference already applied but the test
+        // holds out of the store, so the tick's store state is judged at the
+        // release instead.
+        let parked = sut
+            .caps
+            .get::<dyn holon_pbt_core::capabilities::SutDispatchHold>()
+            .map_or(0, |hold| hold.parked_dispatch_names().len());
+        // Swallowed errors are still judged on this tick: the next transition
+        // resets their window.
+        if parked > 0 {
+            let problems: Vec<String> = crate::test_tracing::SpanCollector::global()
+                .captured_problems()
+                .iter()
+                .map(|p| p.to_string())
+                .collect();
+            assert!(
+                problems.is_empty(),
+                "reconciled composed sequence diverged from the oracle: \
+                 [(\"inv-no-observed-errors\", \"{} swallowed problem(s) while {parked} run(s) \
+                 parked: {}\")]",
+                problems.len(),
+                problems.join(" | ")
+            );
+            // The editor never waits for a write, so what the user typed must
+            // stay on screen while the write is held.
+            const EDITOR_INVARIANTS: [&str; 2] =
+                ["inv-editor-text/mirror", "inv-editor-caret/mirror"];
+            let report = sut.rt.block_on(S::run_report(
+                &sut.caps,
+                &sut.resolver,
+                &sut.burned,
+                &sut.redo_burned,
+                &sut.unmodeled_ids(),
+                ref_state,
+            ));
+            let editor: Vec<(&str, &str)> = report
+                .failures()
+                .into_iter()
+                .filter(|(id, _)| EDITOR_INVARIANTS.contains(id))
+                .collect();
+            assert!(
+                editor.is_empty(),
+                "reconciled composed sequence diverged from the oracle: {editor:?} \
+                 (while {parked} run(s) parked)"
+            );
+            let engaged: Vec<&str> = report
+                .ran
+                .iter()
+                .filter(|(id, result)| {
+                    EDITOR_INVARIANTS.contains(&id.0)
+                        && !matches!(result, InvariantResult::Skipped(_))
+                })
+                .map(|(id, _)| id.0)
+                .collect();
+            eprintln!(
+                "[dispatch hold] {parked} run(s) parked: editor judged by {engaged:?}, store \
+                 state check deferred to the release"
+            );
+            return;
+        }
         let unmodeled = sut.unmodeled_ids();
         let report = sut.rt.block_on(S::run_report(
             &sut.caps,
@@ -1559,6 +1622,18 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
     /// accumulator, deferred (see the audit's "validate on the two F1
     /// invariants first, then sweep").
     fn teardown(sut: Self, ref_state: ReferenceState) {
+        // A parked run defers the state check, so a case may not end on one.
+        if let Some(hold) = sut
+            .caps
+            .get::<dyn holon_pbt_core::capabilities::SutDispatchHold>()
+        {
+            let parked = hold.parked_dispatch_names();
+            assert!(
+                parked.is_empty(),
+                "[dispatch hold] the case ended with parked run(s) {parked:?}: their state was \
+                 never checked; end the case with ReleaseHeld"
+            );
+        }
         super::schedule_signature::assert_coverage();
         let ledger = sut.engaged.borrow();
         // Weights-spike telemetry: one machine-parseable per-case line
@@ -1745,6 +1820,9 @@ impl<S: ComposedSlice> crate::pbt::fixtures::FixtureAssertable for ComposedSut<S
 #[derive(Debug, Clone, Copy)]
 struct HeldCreates {
     parked: usize,
+    /// Parked runs of any other op. A create queued behind one (a split behind
+    /// the held write it follows) mints nothing until the release.
+    parked_other: usize,
     /// Failed since the previous tick.
     newly_failed: usize,
 }
@@ -1764,6 +1842,9 @@ fn pair_synthetic_creates(
         .filter(|id| !failed_synthetics.contains(id))
         .collect();
     let withheld = held.parked + held.newly_failed;
+    if held.parked_other > 0 && withheld == 0 && real_new.is_empty() {
+        return Vec::new();
+    }
     assert!(
         withheld == 0 || real_new.is_empty(),
         "per-tick reconcile: {held:?} create(s) and new real ids {real_new:?} in one tick \
@@ -1813,6 +1894,7 @@ mod pairing_tests {
             vec![],
             HeldCreates {
                 parked: 0,
+                parked_other: 0,
                 newly_failed: 1,
             },
             &mut failed,
@@ -1825,12 +1907,46 @@ mod pairing_tests {
             vec![r2.clone()],
             HeldCreates {
                 parked: 0,
+                parked_other: 0,
                 newly_failed: 0,
             },
             &mut failed,
             String::new,
         );
         assert_eq!(tick2, vec![(s2, r2)]);
+    }
+
+    #[test]
+    fn a_create_queued_behind_a_parked_run_pairs_at_the_release() {
+        let mut failed = BTreeSet::new();
+        let s1 = uri("block:syn-1");
+        let r1 = uri("block:real-1");
+
+        let held = pair_synthetic_creates(
+            vec![s1.clone()],
+            vec![],
+            HeldCreates {
+                parked: 0,
+                parked_other: 1,
+                newly_failed: 0,
+            },
+            &mut failed,
+            String::new,
+        );
+        assert!(held.is_empty());
+
+        let released = pair_synthetic_creates(
+            vec![s1.clone()],
+            vec![r1.clone()],
+            HeldCreates {
+                parked: 0,
+                parked_other: 0,
+                newly_failed: 0,
+            },
+            &mut failed,
+            String::new,
+        );
+        assert_eq!(released, vec![(s1, r1)]);
     }
 }
 

@@ -77,7 +77,11 @@ fn change_to_event(change: Change<StorageEntity>) -> Option<RuleEvent> {
 
 /// Execute one plan against the live DB, recording status. DDL failures are
 /// surfaced (status + `tracing::error`), never swallowed.
-async fn apply_plan(db_handle: &DbHandle, status: &AdviceRuleStatusHandle, plan: ReconcilePlan) {
+async fn apply_reconcile_plan(
+    db_handle: &DbHandle,
+    status: &AdviceRuleStatusHandle,
+    plan: ReconcilePlan,
+) {
     // Drops first (rename / teardown), so a rename can't briefly have two live
     // views.
     let mut ddl_error: Option<String> = None;
@@ -164,7 +168,7 @@ pub async fn spawn_advice_reconciler(
                 },
             };
             let plan = state.plan(event, parse_advice_rule);
-            apply_plan(&db_handle, &status, plan).await;
+            apply_reconcile_plan(&db_handle, &status, plan).await;
         }
     });
 

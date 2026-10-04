@@ -3,8 +3,14 @@
 //! `execute_operation`: a test parks the next run of a named operation until it
 //! releases it, or makes that run fail, so an interleave that is otherwise a
 //! scheduler race is forced deterministically.
+//!
+//! A second hook delays admission itself, so a dispatch that admits on a
+//! spawned task instead of at its call is reordered on purpose.
 
+use std::collections::VecDeque;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -30,11 +36,13 @@ struct HoldState {
     rules: Vec<Rule>,
     parked: Vec<(String, oneshot::Sender<()>)>,
     failed: Vec<String>,
+    admission_delays: Vec<(String, VecDeque<Duration>)>,
 }
 
 pub struct DispatchHold {
     state: Mutex<HoldState>,
     parked_count: watch::Sender<usize>,
+    delayed_admissions: AtomicUsize,
 }
 
 impl Default for DispatchHold {
@@ -42,6 +50,7 @@ impl Default for DispatchHold {
         Self {
             state: Mutex::default(),
             parked_count: watch::Sender::new(0),
+            delayed_admissions: AtomicUsize::new(0),
         }
     }
 }
@@ -79,6 +88,33 @@ impl DispatchHold {
         *self.parked_count.borrow()
     }
 
+    /// The `entity.op` of every run parked at the hook right now.
+    pub fn parked_names(&self) -> Vec<String> {
+        let state = self.state.lock().unwrap();
+        state.parked.iter().map(|(n, _)| n.clone()).collect()
+    }
+
+    /// Block each of the next `delays.len()` admissions of `entity.op` for its
+    /// delay, in the order they reach admission. Admission at the call blocks
+    /// the caller, so the order holds; admission on spawned tasks blocks
+    /// separate workers, so descending delays reverse it.
+    pub fn delay_next_admissions(&self, entity: &str, op: &str, delays: Vec<Duration>) {
+        assert!(
+            !delays.is_empty(),
+            "no admission delay given for {entity}.{op}"
+        );
+        self.state
+            .lock()
+            .unwrap()
+            .admission_delays
+            .push((format!("{entity}.{op}"), delays.into()));
+    }
+
+    /// Admissions sleeping on their delay right now.
+    pub fn delayed_admissions(&self) -> usize {
+        self.delayed_admissions.load(Ordering::SeqCst)
+    }
+
     fn add_rule(&self, entity: &str, op: &str, effect: Effect) {
         self.state.lock().unwrap().rules.push(Rule {
             entity: entity.to_string(),
@@ -106,6 +142,11 @@ impl DispatchHold {
              ({names:?}); unmatched holds: {:?}",
             state.parked.len(),
             state.rules
+        );
+        anyhow::ensure!(
+            state.admission_delays.is_empty(),
+            "dispatch hold: admission delays never reached: {:?}",
+            state.admission_delays
         );
         state.rules.retain(|r| r.effect == Effect::Fail);
         for (_, resume) in state.parked.drain(..) {
@@ -141,6 +182,29 @@ impl DispatchHold {
         resumed.await.map_err(|_| {
             anyhow::anyhow!("dispatch hold dropped while {entity}.{op} was parked, never released")
         })
+    }
+
+    /// The admission hook: a no-op unless a delay names this admission.
+    pub(crate) fn admission_checkpoint(&self, entity: &EntityName, op: &str) {
+        let name = format!("{entity}.{op}");
+        let delay = {
+            let mut state = self.state.lock().unwrap();
+            let Some(at) = state.admission_delays.iter().position(|(n, _)| *n == name) else {
+                return;
+            };
+            let delay = state.admission_delays[at]
+                .1
+                .pop_front()
+                .expect("an admission delay rule is removed when it runs empty");
+            if state.admission_delays[at].1.is_empty() {
+                state.admission_delays.remove(at);
+            }
+            delay
+        };
+        tracing::info!("admission of {name} delayed by {delay:?}");
+        self.delayed_admissions.fetch_add(1, Ordering::SeqCst);
+        std::thread::sleep(delay);
+        self.delayed_admissions.fetch_sub(1, Ordering::SeqCst);
     }
 }
 

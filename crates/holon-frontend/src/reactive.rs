@@ -261,6 +261,9 @@ pub trait BuilderServices: Send + Sync {
 
     /// Fire-and-forget operation dispatch.
     ///
+    /// Every `dispatch_intent*` method admits its operation at the call
+    /// ([`holon_api::OperationEngine::admit`]), so writes land in call order.
+    ///
     /// Spawns the operation on the runtime and logs errors. This replaces the
     /// pattern of downcasting to `ReactiveEngine` just to get `session()` +
     /// `runtime_handle()` and calling `dispatch_operation()` manually.
@@ -292,7 +295,7 @@ pub trait BuilderServices: Send + Sync {
     fn dispatch_intent_sync(
         &self,
         intent: crate::operations::OperationIntent,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>> {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'static>> {
         self.dispatch_intent(intent);
         Box::pin(std::future::ready(Ok(())))
     }
@@ -3182,10 +3185,8 @@ impl ReactiveEngine {
         // GPUI production runs this leg too (D113.a).
         tracing::warn!(
             newborn = %id,
-            "creation-slot birth falls back to a DETACHED dispatched create: no cell route took \
-             the create. A write from the same gesture is NOT \
-             ordered after this create, so the first keystroke can reach the store before the \
-             block exists."
+            "creation-slot birth falls back to a dispatched create: no cell route took the \
+             create. It is admitted before the gesture's keystroke, so the keystroke waits for it."
         );
         let mut params: HashMap<String, holon_api::Value> = HashMap::new();
         params.insert("id".into(), holon_api::Value::String(id.to_string()));
@@ -3227,11 +3228,9 @@ impl ReactiveEngine {
         let origin = holon_api::OpOrigin::Rule {
             transition_id: transition_id.to_string(),
         };
+        let run = session.execute_operation_with_origin(&entity, op_name, params, origin);
         self.runtime_handle.spawn(async move {
-            match session
-                .execute_operation_with_origin(&entity, op_name, params, origin)
-                .await
-            {
+            match run.await {
                 Ok(_) => journal.settle(journal_seq, Ok(())),
                 Err(e) => {
                     journal.settle(journal_seq, Err(format!("{e:#}")));
@@ -4272,13 +4271,12 @@ impl BuilderServices for ReactiveEngine {
         // time went. `scripts/measure_latency.py` reads both.
         let stage_block = latency_block.clone();
         let stage_action = op_name.clone();
+        let t_dispatch = std::time::Instant::now();
+        let run =
+            dispatch_span.in_scope(|| session.execute_operation(&entity_name, &op_name, params));
         self.runtime_handle.spawn(
             async move {
-                let t_dispatch = std::time::Instant::now();
-                match session
-                    .execute_operation(&entity_name, &op_name, params)
-                    .await
-                {
+                match run.await {
                     Ok(response) => {
                         tracing::info!(
                             target: "holon_latency",
@@ -4365,9 +4363,8 @@ impl BuilderServices for ReactiveEngine {
     fn dispatch_intent_sync(
         &self,
         intent: crate::operations::OperationIntent,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>> {
-        let journal = self.ui_state.dispatch_journal.clone();
-        let journal_seq = journal.record(&intent);
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'static>> {
+        let entry = self.ui_state.dispatch_journal.record_pending(&intent);
         // Preference sets run inline — no async execute_operation path.
         // TODO: The extra handling of "preferences" is not nice
         if intent.entity_name == "preferences" && intent.op_name == "set" {
@@ -4380,13 +4377,10 @@ impl BuilderServices for ReactiveEngine {
                 // Surface a persist failure to the sync caller instead of
                 // aborting — this path awaits the result (MCP/tests/driver).
                 let persisted = self.session.set_preference(&pref_key, toml_value);
-                journal.settle(
-                    journal_seq,
-                    persisted.as_ref().map(|_| ()).map_err(|e| format!("{e:#}")),
-                );
+                entry.settle(persisted.as_ref().map(|_| ()).map_err(|e| format!("{e:#}")));
                 return Box::pin(std::future::ready(persisted));
             }
-            journal.settle(journal_seq, Ok(()));
+            entry.settle(Ok(()));
             return Box::pin(std::future::ready(Ok(())));
         }
 
@@ -4400,56 +4394,59 @@ impl BuilderServices for ReactiveEngine {
         let session = self.session.clone();
         let (focused_block, caret_seed) = self.ui_state.focus_handles();
         let dispatch_span = interaction_span(intent.entity_name.as_str(), &intent.op_name);
+        let crate::operations::OperationIntent {
+            entity_name,
+            op_name,
+            params,
+        } = intent;
+        // Latency stage (dispatch->op-applied): a user action enters the
+        // pipeline here. `block` is the entity the op targets; `action` the
+        // op name (split_block, indent, outdent, cycle_state, ...). The push
+        // pipeline (Loro commit -> projection -> CDC rows) runs downstream and
+        // is measured by the `projection`/`rows` stages. Greppable via
+        // target="holon_latency".
+        let block = params
+            // ALLOW(raw_row_id_column): param-map — an op intent's params, read to start
+            // the latency clock
+            .get("id")
+            .and_then(|v| v.as_string())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| entity_name.as_str().to_string());
+        // End-to-end latency: start the interaction clock here;
+        // `holon_api::latency_e2e` closes it when the target's row lands
+        // in a LiveData mirror (stage="e2e").
+        let latency_target = params
+            // ALLOW(raw_row_id_column): param-map — an op intent's params, read to start
+            // the latency clock
+            .get("id")
+            .and_then(|v| v.as_string())
+            .map(String::from);
+        if let Some(target) = &latency_target {
+            holon_api::latency_e2e::interaction_dispatched(
+                &op_name,
+                target,
+                holon_api::latency_e2e::Observable::BlockRow(
+                    holon_api::latency_e2e::write_seq_from_params(&params),
+                ),
+                holon_api::latency_e2e::ClockOrigin::Ui,
+            );
+        }
+        let t_dispatch = std::time::Instant::now();
+        let run =
+            dispatch_span.in_scope(|| session.execute_operation(&entity_name, &op_name, params));
         Box::pin(
             async move {
-                // Latency stage (dispatch->op-applied): a user action enters the
-                // pipeline here. `block` is the entity the op targets; `action` the
-                // op name (split_block, indent, outdent, cycle_state, ...). The push
-                // pipeline (Loro commit -> projection -> CDC rows) runs downstream and
-                // is measured by the `projection`/`rows` stages. Greppable via
-                // target="holon_latency".
-                let block = intent
-                    .params
-                    // ALLOW(raw_row_id_column): param-map — an op intent's params, read to start
-                    // the latency clock
-                    .get("id")
-                    .and_then(|v| v.as_string())
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| intent.entity_name.as_str().to_string());
-                // End-to-end latency: start the interaction clock here;
-                // `holon_api::latency_e2e` closes it when the target's row lands
-                // in a LiveData mirror (stage="e2e").
-                let latency_target = intent
-                    .params
-                    // ALLOW(raw_row_id_column): param-map — an op intent's params, read to start
-                    // the latency clock
-                    .get("id")
-                    .and_then(|v| v.as_string())
-                    .map(String::from);
-                if let Some(target) = &latency_target {
-                    holon_api::latency_e2e::interaction_dispatched(
-                        &intent.op_name,
-                        target,
-                        holon_api::latency_e2e::Observable::BlockRow(
-                            holon_api::latency_e2e::write_seq_from_params(&intent.params),
-                        ),
-                        holon_api::latency_e2e::ClockOrigin::Ui,
-                    );
-                }
-                let t_dispatch = std::time::Instant::now();
-                let outcome = session
-                    .execute_operation(&intent.entity_name, &intent.op_name, intent.params)
-                    .await;
+                let outcome = run.await;
                 match &outcome {
-                    Ok(_) => journal.settle(journal_seq, Ok(())),
+                    Ok(_) => entry.settle(Ok(())),
                     Err(e) => {
-                        journal.settle(journal_seq, Err(format!("{e:#}")));
+                        entry.settle(Err(format!("{e:#}")));
                         // A refused/failed op writes nothing: retire its latency
                         // entry so no later unrelated delivery for the row closes
                         // it as a phantom sample.
                         if let Some(target) = &latency_target {
                             holon_api::latency_e2e::interaction_failed(
-                                &intent.op_name,
+                                &op_name,
                                 target,
                                 holon_api::latency_e2e::ClockOrigin::Ui,
                             );
@@ -4457,26 +4454,18 @@ impl BuilderServices for ReactiveEngine {
                     }
                 }
                 let response = outcome.with_context(|| {
-                    format!(
-                        "dispatch_intent_sync: {}.{} failed",
-                        intent.entity_name, intent.op_name
-                    )
+                    format!("dispatch_intent_sync: {}.{} failed", entity_name, op_name)
                 })?;
                 tracing::info!(
                     target: "holon_latency",
                     stage = "dispatch",
-                    action = %intent.op_name,
+                    action = %op_name,
                     block = %block,
                     ms = t_dispatch.elapsed().as_millis() as u64,
                     "holon_latency",
                 );
                 // Same in-process structural-focus projection as `dispatch_intent`.
-                apply_structural_focus(
-                    &focused_block,
-                    &caret_seed,
-                    &intent.op_name,
-                    &response.response,
-                );
+                apply_structural_focus(&focused_block, &caret_seed, &op_name, &response.response);
                 if let Some(target) = &clear_focus_target {
                     clear_focus_after_delete(&focused_block, target);
                 }
@@ -4522,12 +4511,11 @@ impl BuilderServices for ReactiveEngine {
             );
         }
         let dispatch_span = interaction_span(entity_name.as_str(), &op_name);
+        let run =
+            dispatch_span.in_scope(|| session.execute_operation(&entity_name, &op_name, params));
         Box::pin(
             async move {
-                match session
-                    .execute_operation(&entity_name, &op_name, params)
-                    .await
-                {
+                match run.await {
                     Ok(response) => {
                         apply_structural_focus(
                             &focused_block,
@@ -4600,12 +4588,11 @@ impl BuilderServices for ReactiveEngine {
             );
         }
         let dispatch_span = interaction_span(entity_name.as_str(), &op_name);
+        let run =
+            dispatch_span.in_scope(|| session.execute_operation(&entity_name, &op_name, params));
         Box::pin(
             async move {
-                match session
-                    .execute_operation(&entity_name, &op_name, params)
-                    .await
-                {
+                match run.await {
                     Ok(outcome) => {
                         apply_structural_focus(
                             &focused_block,
@@ -4662,10 +4649,18 @@ impl BuilderServices for ReactiveEngine {
             .into_iter()
             .collect(),
         ));
+        let create = create_page_from_link(&session, &target);
         self.runtime_handle.spawn(async move {
-            let followed =
-                create_page_and_navigate(&session, &nav_handles, &target, &region, focus_at_click)
-                    .await;
+            // ALLOW(admit-in-spawn): the navigation follows the create it awaits.
+            let followed = navigate_to_created_page(
+                &session,
+                &nav_handles,
+                create,
+                &target,
+                &region,
+                focus_at_click,
+            )
+            .await;
             journal.settle(
                 journal_seq,
                 followed.as_ref().map(|_| ()).map_err(|e| format!("{e:#}")),
@@ -5498,18 +5493,6 @@ fn apply_structural_focus(
     }
 }
 
-/// Create the page chain for a *dangling* wiki-link `target`, then navigate
-/// `region` to the freshly-created leaf page. Factored out of
-/// [`ReactiveEngine::follow_dangling_link`] so the create→navigate chain —
-/// which depends on the fresh leaf-page id carried in the create op's response
-/// — can run inside a spawned task over cloned `Mutable` handles, and so the
-/// response→nav-target decision is unit-testable via
-/// [`dangling_link_nav_target`].
-///
-/// Navigation seats the caret in `UiState` (so value-fn providers like
-/// `focus_chain` observe it) and is then persisted through the backend
-/// `navigation.focus` op, exactly as `seat_caret_for_navigation` +
-/// `NavigationProvider` do for an ordinary click on a resolved link.
 /// The `UiState` mirrors a spawned navigation writes to.
 struct NavFocusHandles {
     focused_block: Mutable<Option<EntityUri>>,
@@ -5517,25 +5500,42 @@ struct NavFocusHandles {
     main_view: Mutable<u64>,
 }
 
-async fn create_page_and_navigate(
-    session: &Arc<FrontendSession>,
-    nav: &NavFocusHandles,
+/// Admit the page-chain create for a *dangling* wiki-link `target`.
+fn create_page_from_link(
+    session: &FrontendSession,
     target: &str,
-    region: &str,
-    focus_at_click: Option<EntityUri>,
-) -> Result<()> {
+) -> futures::future::BoxFuture<'static, Result<holon_api::OpOutcome>> {
     let create_params = [(
         "target".to_string(),
         holon_api::Value::String(target.to_string()),
     )]
     .into_iter()
     .collect();
-    let response = session
-        .execute_operation(
-            &holon_api::EntityName::new("block"),
-            "create_page_from_link",
-            create_params,
-        )
+    session.execute_operation(
+        &holon_api::EntityName::new("block"),
+        "create_page_from_link",
+        create_params,
+    )
+}
+
+/// Await the admitted `create`, then navigate `region` to the freshly-created
+/// leaf page, whose id only the create op's response carries. The
+/// response→nav-target decision is unit-testable via
+/// [`dangling_link_nav_target`].
+///
+/// Navigation seats the caret in `UiState` (so value-fn providers like
+/// `focus_chain` observe it) and is then persisted through the backend
+/// `navigation.focus` op, exactly as `seat_caret_for_navigation` +
+/// `NavigationProvider` do for an ordinary click on a resolved link.
+async fn navigate_to_created_page(
+    session: &Arc<FrontendSession>,
+    nav: &NavFocusHandles,
+    create: futures::future::BoxFuture<'static, Result<holon_api::OpOutcome>>,
+    target: &str,
+    region: &str,
+    focus_at_click: Option<EntityUri>,
+) -> Result<()> {
+    let response = create
         .await
         .with_context(|| format!("create_page_from_link({target})"))?;
 
@@ -5646,29 +5646,33 @@ pub async fn dispatch_intent_through_armed_door(
     engine.dispatch_intent_sync(intent).await
 }
 
-/// Dispatch `intents` as ONE ordered fire-and-forget chain: a single spawned
-/// task awaits each via `dispatch_intent_sync` in sequence, aborting on the
-/// first failure (loudly — the remaining intents must not run against state
-/// the failed one was supposed to establish).
+/// Dispatch `intents` as ONE ordered fire-and-forget chain: every intent is
+/// admitted at the call, then a single spawned task awaits each in sequence,
+/// aborting on the first failure (loudly — the remaining intents must not run
+/// against state the failed one was supposed to establish).
 ///
 /// This is the dispatch primitive for "structural ops are commit points"
 /// (docs/Architecture/UI.md): an editor flushing pending text before a
-/// split/join MUST order the flush before the structural op. Two
-/// `dispatch_intent` calls each spawn their own task and can reorder; this
-/// cannot. UI callers (GPUI handlers) stay non-blocking — the chain runs on
-/// the services' runtime.
+/// split/join MUST order the flush before the structural op. UI callers (GPUI
+/// handlers) stay non-blocking — the chain runs on the services' runtime.
 pub fn dispatch_intent_chain(
     services: &Arc<dyn BuilderServices>,
     intents: Vec<crate::operations::OperationIntent>,
 ) {
-    let services = services.clone();
     let open = services.dispatch_journal().map(|j| j.open_chain());
-    services.clone().runtime_handle().spawn(async move {
-        let _open = open;
-        for intent in intents {
+    let runs: Vec<_> = intents
+        .into_iter()
+        .map(|intent| {
             let entity_name = intent.entity_name.clone();
             let op_name = intent.op_name.clone();
-            if let Err(e) = services.dispatch_intent_sync(intent).await {
+            (entity_name, op_name, services.dispatch_intent_sync(intent))
+        })
+        .collect();
+    let services = services.clone();
+    services.clone().runtime_handle().spawn(async move {
+        let _open = open;
+        for (entity_name, op_name, run) in runs {
+            if let Err(e) = run.await {
                 services.surface_op_failure(entity_name.as_str(), &op_name, &e);
                 return;
             }

@@ -85,6 +85,7 @@ pub async fn start_holon_rule_watchers(
     let status = engine.rule_status().clone();
     shutdown.spawn(
         "holon-rule-discovery",
+        // ALLOW(admit-in-spawn): the watcher admits per row event, not at start.
         run_discovery_loop(engine, status, discovery_stream, shutdown.clone()),
     );
     Ok(())
@@ -257,6 +258,7 @@ async fn start_rule(
         .accepted_rules()
         .set(&block_id, RuleAcceptance::Running(rule));
     let rule_id = RuleId::new(block_id.clone());
+    // ALLOW(admit-in-spawn): the watcher admits per row event, not at start.
     let handle = tokio::spawn(run_rule_watcher(
         engine.clone(),
         status.clone(),

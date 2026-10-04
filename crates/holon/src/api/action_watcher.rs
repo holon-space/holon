@@ -60,6 +60,7 @@ pub async fn start_action_watchers(
     let status = engine.rule_status().clone();
     shutdown.spawn(
         "action-discovery",
+        // ALLOW(admit-in-spawn): the watcher admits per row event, not at start.
         run_discovery_loop(engine.clone(), status, discovery_stream, shutdown.clone()),
     );
 
@@ -172,6 +173,7 @@ fn start_pair(
 
     info!("[action_watcher] starting watcher for {action_id}");
     status.set(&action_id, RuleStatus::Active);
+    // ALLOW(admit-in-spawn): the watcher admits per row event, not at start.
     let handle = tokio::spawn(run_pair_watcher(
         engine.clone(),
         status.clone(),

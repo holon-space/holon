@@ -14,6 +14,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 pub mod action_dsl;
+pub mod admission;
 pub mod auth;
 pub mod block;
 pub mod block_mutation;

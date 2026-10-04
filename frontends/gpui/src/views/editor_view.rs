@@ -1104,6 +1104,8 @@ fn spawn_focus_binding(
                     let ctrl = view.read(cx).controller.clone();
                     let commit = ctrl.lock().unwrap().pending_commit_intent(&live_text);
                     if let Some(commit) = commit {
+                        // ALLOW(admit-in-spawn): a focus change is the event that
+                        // commits pending text, so the commit is admitted when it arrives.
                         services.dispatch_intent(commit);
                     }
                 }
@@ -1669,19 +1671,16 @@ impl Render for EditorView {
                         // Commit any pending text edit FIRST (structural commit
                         // point), then dispatch outdent and await its result.
                         let commit = ctrl.lock().unwrap().chord_commit_intent(&live_text);
-                        let services_for = services.clone();
+                        let commit = commit.map(|c| services.dispatch_intent_awaitable(c));
+                        let outdent = services.dispatch_intent_awaitable(intent);
                         let rt = services.runtime_handle();
                         cx.spawn(async move |cx| {
                             let (tx, rx) = tokio::sync::oneshot::channel::<Option<String>>();
                             rt.spawn(async move {
-                                if let Some(c) = commit {
-                                    let _ = services_for.dispatch_intent_awaitable(c).await;
+                                if let Some(commit) = commit {
+                                    let _ = commit.await;
                                 }
-                                let outcome = services_for
-                                    .dispatch_intent_awaitable(intent)
-                                    .await
-                                    .err()
-                                    .map(|e| format!("{e:#}"));
+                                let outcome = outdent.await.err().map(|e| format!("{e:#}"));
                                 let _ = tx.send(outcome);
                             });
                             if let Ok(Some(detail)) = rx.await {
@@ -1969,6 +1968,39 @@ fn line_bounds(text: &str, cursor: usize) -> (usize, usize) {
     (start, end)
 }
 
+/// Replace the typed `command` at byte `start` of the live buffer with
+/// `replacement`. Callers `defer` it: the window is leased while the gesture
+/// dispatches, and the next queued key must see the spliced buffer.
+fn splice_command(
+    state: &mut InputState,
+    start: usize,
+    command: &str,
+    replacement: &str,
+    window: &mut Window,
+    cx: &mut Context<InputState>,
+) {
+    let text = state.value().to_string();
+    let end = start + command.len();
+    assert_eq!(
+        text.get(start..end),
+        Some(command),
+        "the command span {start}..{end} changed between the menu gesture and its deferred splice: {text:?}"
+    );
+    let cursor = state.cursor();
+    let caret = if cursor >= end {
+        cursor - command.len() + replacement.len()
+    } else {
+        start + replacement.len()
+    };
+    let mut new_text = String::with_capacity(text.len() + replacement.len());
+    new_text.push_str(&text[..start]);
+    new_text.push_str(replacement);
+    new_text.push_str(&text[end..]);
+    state.set_value(&new_text, window, cx);
+    let pos = state.text().offset_to_position(caret);
+    state.set_cursor_position(pos, window, cx);
+}
+
 /// What [`apply_popup_action`] did with an `EditorAction`.
 enum PopupActionOutcome {
     /// The action was a popup outcome and has been fully applied.
@@ -2008,24 +2040,16 @@ fn apply_popup_action(
             let cursor_pos = input.read(cx).cursor_position();
             let line_start = cursor - cursor_pos.character as usize;
             let abs_start = line_start + prefix_start;
-
-            let mut new_text = String::with_capacity(text.len() + replacement.len());
-            new_text.push_str(&text[..abs_start]);
-            new_text.push_str(&replacement);
-            new_text.push_str(&text[cursor..]);
-            let new_cursor_offset = abs_start + replacement.len();
+            let command = text[abs_start..cursor].to_string();
 
             let input = input.clone();
-            cx.spawn(async move |cx| {
+            cx.defer(move |cx| {
                 let _ = cx.update_window(window_handle, |_, window, cx| {
                     input.update(cx, |state, cx| {
-                        state.set_value(&new_text, window, cx);
-                        let pos = state.text().offset_to_position(new_cursor_offset);
-                        state.set_cursor_position(pos, window, cx);
+                        splice_command(state, abs_start, &command, &replacement, window, cx);
                     });
                 });
-            })
-            .detach();
+            });
             cx.notify(editor_entity_id);
         }
         EditorAction::Execute(intent) => {
@@ -2056,63 +2080,48 @@ fn apply_popup_action(
                      abs_start={abs_start}"
                 );
             }
-            let mut new_text = String::with_capacity(text.len());
-            new_text.push_str(&text[..abs_start]);
-            new_text.push_str(&text[cursor..]);
+            let command = text[abs_start..cursor].to_string();
 
             let input = input.clone();
             let services_for_dispatch = services.clone();
             let rt = services.runtime_handle();
-            // ONE ordered spawn: (B) strip the typed "/command"
-            // from the editor FIRST, THEN dispatch. Previously
-            // the strip ran in a SEPARATE detached spawn that
-            // raced the synchronous `dispatch_intent`, so the
-            // menu-trigger `/` was still in the origin's content
-            // when `convert_block_to_page` read it (GPUI dogfood
-            // 2026-07-20, bug a2). Sequencing strip→dispatch in
-            // one future removes that race.
-            //
-            // (D) EVERY menu-dispatched op now goes through the
-            // awaitable path so a backend failure surfaces as a
-            // visible toast — fail-loud, not a lone
-            // `tracing::error!`. Before, only
-            // `instantiate_template` got the toast; convert (and
-            // every other slash op) failed silently (bug a3).
-            cx.spawn(async move |cx| {
+            // The strip writes before the dispatch: ops such as
+            // `convert_block_to_page` read the origin's content.
+            // The awaitable path turns a backend failure into a toast.
+            cx.defer(move |cx| {
                 let _ = cx.update_window(window_handle, |_, window, cx| {
                     input.update(cx, |state, cx| {
-                        state.set_value(&new_text, window, cx);
-                        let pos = state.text().offset_to_position(abs_start);
-                        state.set_cursor_position(pos, window, cx);
+                        splice_command(state, abs_start, &command, "", window, cx);
                     });
                 });
+                // ALLOW(admit-in-defer): the strip and the dispatch must follow
+                // each other, and the deferral ends before the next queued key.
+                let run = services_for_dispatch.dispatch_intent_awaitable(intent);
                 let (tx, rx) = tokio::sync::oneshot::channel::<Option<String>>();
                 rt.spawn(async move {
-                    let outcome = services_for_dispatch
-                        .dispatch_intent_awaitable(intent)
-                        .await
-                        .err()
-                        .map(|e| format!("{e:#}"));
+                    let outcome = run.await.err().map(|e| format!("{e:#}"));
                     let _ = tx.send(outcome);
                 });
-                if let Ok(Some(detail)) = rx.await {
-                    let _ = cx.update_window(window_handle, |_, _window, cx| {
-                        crate::share_ui::DegradedToastSink::push(
-                            crate::share_ui::DegradedToast {
-                                kind: crate::share_ui::ToastKind::Local(
-                                    crate::share_ui::LocalToastKind::CommandFailed,
-                                ),
-                                subject: "command".into(),
-                                detail: detail.into(),
-                                condition: None,
-                                format: None,
-                            },
-                            cx,
-                        );
-                    });
-                }
-            })
-            .detach();
+                cx.spawn(async move |cx| {
+                    if let Ok(Some(detail)) = rx.await {
+                        let _ = cx.update_window(window_handle, |_, _window, cx| {
+                            crate::share_ui::DegradedToastSink::push(
+                                crate::share_ui::DegradedToast {
+                                    kind: crate::share_ui::ToastKind::Local(
+                                        crate::share_ui::LocalToastKind::CommandFailed,
+                                    ),
+                                    subject: "command".into(),
+                                    detail: detail.into(),
+                                    condition: None,
+                                    format: None,
+                                },
+                                cx,
+                            );
+                        });
+                    }
+                })
+                .detach();
+            });
             cx.notify(editor_entity_id);
         }
         EditorAction::CommandFailed {
@@ -2133,20 +2142,15 @@ fn apply_popup_action(
                 let cursor = input.read(cx).cursor();
                 let line_start = text[..cursor].rfind('\n').map(|p| p + 1).unwrap_or(0);
                 let abs_start = line_start + strip_prefix_start;
-                let mut new_text = String::with_capacity(text.len());
-                new_text.push_str(&text[..abs_start]);
-                new_text.push_str(&text[cursor..]);
+                let command = text[abs_start..cursor].to_string();
                 let input = input.clone();
-                cx.spawn(async move |cx| {
+                cx.defer(move |cx| {
                     let _ = cx.update_window(window_handle, |_, window, cx| {
                         input.update(cx, |state, cx| {
-                            state.set_value(&new_text, window, cx);
-                            let pos = state.text().offset_to_position(abs_start);
-                            state.set_cursor_position(pos, window, cx);
+                            splice_command(state, abs_start, &command, "", window, cx);
                         });
                     });
-                })
-                .detach();
+                });
             }
             crate::share_ui::DegradedToastSink::push(
                 crate::share_ui::DegradedToast {
@@ -2199,7 +2203,7 @@ fn apply_popup_action(
                 .command_text_hidden(line_prefix, hidden);
 
             let input = input.clone();
-            cx.spawn(async move |cx| {
+            cx.defer(move |cx| {
                 let _ = cx.update_window(window_handle, |_, window, cx| {
                     input.update(cx, |state, cx| {
                         state.set_value(&new_text, window, cx);
@@ -2207,8 +2211,7 @@ fn apply_popup_action(
                         state.set_cursor_position(pos, window, cx);
                     });
                 });
-            })
-            .detach();
+            });
             cx.notify(editor_entity_id);
         }
         EditorAction::RestoreCommandText {
@@ -2248,7 +2251,7 @@ fn apply_popup_action(
                 .command_text_restored(restored_line);
 
             let input = input.clone();
-            cx.spawn(async move |cx| {
+            cx.defer(move |cx| {
                 let _ = cx.update_window(window_handle, |_, window, cx| {
                     input.update(cx, |state, cx| {
                         state.set_value(&new_text, window, cx);
@@ -2256,8 +2259,7 @@ fn apply_popup_action(
                         state.set_cursor_position(pos, window, cx);
                     });
                 });
-            })
-            .detach();
+            });
             cx.notify(editor_entity_id);
         }
         EditorAction::PopupDismissed | EditorAction::UpdatePopup => {

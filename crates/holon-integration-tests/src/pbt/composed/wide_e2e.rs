@@ -227,32 +227,43 @@ impl crate::pbt::composed::harness::ComposedSut<WideE2E> {
 
 /// Wait until every intent the frontend dispatched has landed or failed, as
 /// production's state is once its fire-and-forget ops complete. A run the
-/// dispatch hold parked stays in flight on purpose and is not waited for.
+/// dispatch hold parked stays in flight on purpose and is not waited for, nor
+/// are the ops admitted behind it or the chains that hold them: once every
+/// released claim is parked, the waiting ones cannot move until the hold lets
+/// go.
 async fn drain_dispatches(handle: &WideHandle, budget: Duration) {
     let Some(reactive) = handle.reactive() else {
         return;
     };
     let journal = reactive.ui_state().dispatch_journal();
-    let hold = handle
+    let engine = handle
         .engine
         .as_ref()
-        .expect("a frontend draw boots a backend engine")
-        .dispatch_hold()
-        .clone();
+        .expect("a frontend draw boots a backend engine");
+    let hold = engine.dispatch_hold().clone();
     let cap = budget.max(CONVERGE_BUDGET);
     let started = std::time::Instant::now();
     loop {
+        // Admission at the call sleeps inside the gesture, before this drain.
+        assert_eq!(
+            hold.delayed_admissions(),
+            0,
+            "dispatch drain: a delayed admission is sleeping after its gesture returned, so it \
+             was admitted on a spawned task, not at the call"
+        );
         let chains = journal.open_chains();
         let pending = journal.pending();
-        if chains == 0 && pending.len() == hold.parked() {
+        let parked = hold.parked();
+        let census = engine.admission().census();
+        let blocked = census.released == parked && pending.len() <= parked + census.waiting;
+        if blocked && (chains == 0 || parked > 0) {
             return;
         }
         assert!(
             started.elapsed() < cap,
             "dispatch drain: {chains} intent chain(s) open and {} pending intent(s) {pending:?} \
-             ({} parked at the dispatch hold) after {cap:?}",
+             ({parked} parked at the dispatch hold, admission {census:?}) after {cap:?}",
             pending.len(),
-            hold.parked(),
         );
         tokio::time::sleep(Duration::from_millis(2)).await;
     }

@@ -143,13 +143,11 @@ impl InputBoxView {
         let rt = services.runtime_handle();
         let window_handle = window.window_handle();
         let sent_text = text;
+        let run = services.dispatch_intent_awaitable(intent);
         cx.spawn(async move |this, cx| {
             let (tx, rx) = tokio::sync::oneshot::channel::<Result<Delivery, String>>();
             rt.spawn(async move {
-                let outcome = services
-                    .dispatch_intent_awaitable(intent)
-                    .await
-                    .map_err(|e| format!("{e:#}"));
+                let outcome = run.await.map_err(|e| format!("{e:#}"));
                 let _ = tx.send(outcome);
             });
             let detail = match rx.await {

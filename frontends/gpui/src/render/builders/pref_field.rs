@@ -358,6 +358,7 @@ fn build_text_field(
                 // prompt_text_input is blocking (osascript), run on a thread
                 std::thread::spawn(move || {
                     if let Some(new_val) = prompt_text_input(&key, &default, hidden) {
+                        // ALLOW(admit-in-spawn): the dialog's answer is the gesture.
                         dispatch_set_preference(&services, &key, Value::String(new_val));
                     }
                 });

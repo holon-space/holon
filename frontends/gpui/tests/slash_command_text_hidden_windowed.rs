@@ -359,6 +359,74 @@ fn a_cancelled_picker_leaves_the_trigger_working(cx: &mut TestAppContext) {
     );
 }
 
+/// Runs `/del` on `ab ` with `keys` queued behind the Enter, no tick between.
+/// Each expected text is what the same keys give with a tick after the Enter:
+/// the caret sits at the end of the stripped `ab `.
+fn run_command_with_queued_keys(cx: &mut TestAppContext, keys: &str) -> String {
+    let (rig, vcx) = mount(cx);
+    focus_editor(vcx, &rig);
+    type_text(vcx, "ab /del");
+    vcx.simulate_keystrokes(&format!("enter {keys}"));
+    vcx.run_until_parked();
+    buffer(vcx, &rig)
+}
+
+#[gpui::test]
+fn a_typed_key_queued_behind_the_command_enter_survives_the_strip(cx: &mut TestAppContext) {
+    assert_eq!(run_command_with_queued_keys(cx, "x"), "ab x");
+}
+
+#[gpui::test]
+fn a_queued_backspace_deletes_before_the_stripped_command(cx: &mut TestAppContext) {
+    assert_eq!(run_command_with_queued_keys(cx, "backspace"), "ab");
+}
+
+#[gpui::test]
+fn a_queued_delete_after_a_caret_move_deletes_outside_the_command(cx: &mut TestAppContext) {
+    assert_eq!(run_command_with_queued_keys(cx, "left delete"), "ab");
+}
+
+#[gpui::test]
+fn a_queued_caret_move_then_key_types_outside_the_command(cx: &mut TestAppContext) {
+    assert_eq!(run_command_with_queued_keys(cx, "left x"), "abx ");
+}
+
+#[gpui::test]
+fn a_queued_selection_replace_replaces_outside_the_command(cx: &mut TestAppContext) {
+    assert_eq!(run_command_with_queued_keys(cx, "shift-left x"), "abx");
+}
+
+#[gpui::test]
+fn a_queued_paste_lands_after_the_stripped_command(cx: &mut TestAppContext) {
+    cx.write_to_clipboard(gpui::ClipboardItem::new_string("P".into()));
+    assert_eq!(run_command_with_queued_keys(cx, "cmd-v"), "ab P");
+}
+
+#[gpui::test]
+fn a_search_term_queued_behind_the_picker_enter_survives_the_hide(cx: &mut TestAppContext) {
+    let (rig, vcx) = mount(cx);
+    focus_editor(vcx, &rig);
+    type_text(vcx, "/emb");
+    vcx.simulate_keystrokes("enter p r o j");
+    vcx.run_until_parked();
+
+    assert_eq!(buffer(vcx, &rig), "proj");
+}
+
+#[gpui::test]
+fn a_key_queued_behind_the_picker_escape_survives_the_restore(cx: &mut TestAppContext) {
+    let (rig, vcx) = mount(cx);
+    focus_editor(vcx, &rig);
+    type_text(vcx, "/emb");
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+    type_text(vcx, "proj");
+    vcx.simulate_keystrokes("escape x");
+    vcx.run_until_parked();
+
+    assert_eq!(buffer(vcx, &rig), "/embprojx");
+}
+
 // Installs the windowed capturing tracing subscriber before this binary's
 // first line of test code (see tests/test_init/mod.rs).
 mod test_init;

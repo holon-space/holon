@@ -351,6 +351,16 @@ impl HeadlessEditorMirror {
         Ok(())
     }
 
+    /// The intent that flushes text the keystroke sink never saw, if any.
+    fn chord_commit(&self, block_id: &str) -> Option<OperationIntent> {
+        let mut eds = self.editors.lock().unwrap();
+        let vm = eds
+            .get_mut(block_id)
+            .expect("handle_keystroke mounted this block's editor before routing the key");
+        let live = vm.buffer().to_string();
+        vm.chord_commit_intent(&live)
+    }
+
     /// Dispatch a structural key's op as a commit point, as GPUI's
     /// `dispatch_structural_as_commit_point` does: any text the keystroke sink
     /// never saw flushes first, both in one detached ordered chain.
@@ -360,20 +370,35 @@ impl HeadlessEditorMirror {
         block_id: &str,
         structural: OperationIntent,
     ) {
-        let commit = {
-            let mut eds = self.editors.lock().unwrap();
-            let vm = eds
-                .get_mut(block_id)
-                .expect("handle_keystroke mounted this block's editor before routing the key");
-            let live = vm.buffer().to_string();
-            vm.chord_commit_intent(&live)
-        };
+        let commit = self.chord_commit(block_id);
         let intents = commit
             .into_iter()
             .chain(std::iter::once(structural))
             .collect();
         let services: Arc<dyn BuilderServices> = engine.clone();
         crate::reactive::dispatch_intent_chain(&services, intents);
+    }
+
+    /// Dispatch Shift+Tab's outdent as GPUI's `OutdentInline` handler does:
+    /// the pending-text commit and the outdent are both admitted at the key,
+    /// and one detached task awaits them in order. Each awaitable discloses its
+    /// own failure, which covers the ADR 0028 D1 page-boundary refusal.
+    fn dispatch_outdent(
+        &self,
+        engine: &Arc<ReactiveEngine>,
+        block_id: &str,
+        outdent: OperationIntent,
+    ) {
+        let commit = self.chord_commit(block_id);
+        let services: &dyn BuilderServices = engine.as_ref();
+        let commit = commit.map(|c| services.dispatch_intent_awaitable(c));
+        let outdent = services.dispatch_intent_awaitable(outdent);
+        services.runtime_handle().spawn(async move {
+            if let Some(commit) = commit {
+                let _ = commit.await;
+            }
+            let _ = outdent.await;
+        });
     }
 
     /// Flush the departing editor's pending text when the focus authority
@@ -792,7 +817,7 @@ impl HeadlessEditorMirror {
                     self.structural_caret(&block_id, &current_text, cursor_byte)?,
                 )
                 .expect("Shift+Tab is the structural outdent");
-                self.dispatch_structural(engine, &block_id, intent);
+                self.dispatch_outdent(engine, &block_id, intent);
             }
             "escape" => {
                 self.forget(&block_id, occ);

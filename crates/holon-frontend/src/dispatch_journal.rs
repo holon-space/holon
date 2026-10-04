@@ -78,10 +78,32 @@ pub struct DispatchJournal {
     open_chains: AtomicUsize,
 }
 
-/// Held while an ordered chain of intents runs. A chain records each intent
-/// only when it reaches it, so between two of them the journal alone shows
-/// nothing pending although the chain has more to dispatch.
+/// Held until an ordered chain of intents has run and disclosed its failure,
+/// which happens after the failed entry settles.
 pub struct OpenChain(Arc<DispatchJournal>);
+
+/// A recorded entry that settles as failed when dropped unsettled: whoever
+/// held it gave up on the dispatch before its outcome was known.
+pub struct PendingEntry {
+    journal: Arc<DispatchJournal>,
+    seq: Option<u64>,
+}
+
+impl PendingEntry {
+    pub fn settle(mut self, outcome: Result<(), String>) {
+        let seq = self.seq.take().expect("a pending entry settles once");
+        self.journal.settle(seq, outcome);
+    }
+}
+
+impl Drop for PendingEntry {
+    fn drop(&mut self) {
+        if let Some(seq) = self.seq.take() {
+            self.journal
+                .settle(seq, Err("dropped before its outcome was known".to_string()));
+        }
+    }
+}
 
 impl Drop for OpenChain {
     fn drop(&mut self) {
@@ -111,6 +133,13 @@ impl DispatchJournal {
                 .and_then(|v| v.as_string())
                 .map(str::to_string),
         )
+    }
+
+    pub fn record_pending(self: &Arc<Self>, intent: &OperationIntent) -> PendingEntry {
+        PendingEntry {
+            seq: Some(self.record(intent)),
+            journal: self.clone(),
+        }
     }
 
     /// Record that a window-registry chord's handler ran. `action` must be the
@@ -250,6 +279,17 @@ mod tests {
             seen[1].outcome,
             DispatchOutcome::Failed("no parent to outdent to".into())
         );
+    }
+
+    #[test]
+    fn a_dropped_pending_entry_settles_as_failed() {
+        let journal = Arc::new(DispatchJournal::new());
+        let mark = journal.mark();
+        drop(journal.record_pending(&intent("split_block", "block:a")));
+        assert!(matches!(
+            journal.since(mark).unwrap()[0].outcome,
+            DispatchOutcome::Failed(_)
+        ));
     }
 
     #[test]

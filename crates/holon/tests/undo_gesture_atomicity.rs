@@ -1,9 +1,9 @@
-//! One undo gesture holds one lock (task #47).
+//! One undo gesture runs under one admission fence (task #47).
 //!
 //! An external write must not land between the staleness check and the replay,
 //! nor between two inverses of one composite entry. Each rung drives a REAL
 //! competing write on a second task through the same engine, so the only thing
-//! that can serialize it is the engine's own stripe lock.
+//! that can serialize it is the engine's own admission.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -41,36 +41,21 @@ const COMPETING: &str = "competing";
 /// This is a DEADLOCK ESCAPE, not a race window, and both directions are
 /// deterministic rather than timing-dependent:
 ///
-/// - Before the fix nothing holds the target's stripe while the window is open,
-///   so the competing write acquires immediately and signals; the wait ends on
-///   the signal, never on the clock, however slow the machine is.
-/// - After the fix the stripe is held by the very task that is waiting, so the
-///   competing write CANNOT complete until that task releases — no scheduling
+/// - Without a fence over the gesture, the competing write runs at once and
+///   signals; the wait ends on the signal, never on the clock, however slow the
+///   machine is.
+/// - Under the fence, the competing write is admitted behind the very task that
+///   is waiting, so it CANNOT complete until that task settles — no scheduling
 ///   order makes the signal arrive, and the wait always ends on the clock.
 ///
 /// Each rung asserts which of the two happened (`completed_in_window`), so a
-/// green run proves the lock did the work instead of merely agreeing with the
+/// green run proves the fence did the work instead of merely agreeing with the
 /// final value.
 const RACE_ESCAPE: Duration = Duration::from_secs(5);
 
-/// Upper bound on a whole gesture. A stripe re-locked by the task that already
-/// holds it would hang forever; this turns that into a named failure.
+/// Upper bound on a whole gesture. A gesture that waits on its own admission
+/// would hang forever; this turns that into a named failure.
 const GESTURE_ESCAPE: Duration = Duration::from_secs(30);
-
-/// The stripe an id hashes to, mirroring `EntityWriteLocks::stripe_of`
-/// (private to the engine). Only used to assert that the ids the self-deadlock
-/// rung picks really do collide — if the engine's hashing changes, that rung
-/// tells us rather than silently testing nothing.
-fn stripe_of(entity_name: &str, id: &str) -> usize {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::Hash;
-    use std::hash::Hasher;
-
-    let mut hasher = DefaultHasher::new();
-    entity_name.hash(&mut hasher);
-    id.hash(&mut hasher);
-    (hasher.finish() % 64) as usize
-}
 
 /// Block id → current content. Shared by the provider (which writes it) and the
 /// reader (which verifies preconditions against it).
@@ -154,9 +139,9 @@ impl Race {
         }
     }
 
-    /// Wait for the competing write to land. After the fix it is still queued
-    /// on the stripe when `undo()` returns, so every assertion about final
-    /// content must come after this.
+    /// Wait for the competing write to land. It may still be queued behind the
+    /// gesture when `undo()` returns, so every assertion about final content
+    /// must come after this.
     async fn settle(&self) {
         let handle = self.handle.lock().unwrap().take().expect("race fired");
         handle.await.expect("competing write task");
@@ -177,8 +162,8 @@ fn set_field_params(id: &str, value: &str) -> StorageEntity {
 /// - `set_field`: the replay target AND the competing write's op.
 struct StubProvider {
     store: Store,
-    /// Fires between two inverses of a composite: the window a per-op lock
-    /// leaves open but a per-gesture hold closes. `None` for the rungs whose
+    /// Fires between two inverses of a composite: the window a per-op hold
+    /// leaves open but a per-gesture fence closes. `None` for the rungs whose
     /// window is the staleness check instead.
     race: Option<Arc<Race>>,
 }
@@ -381,7 +366,7 @@ async fn an_external_write_during_the_staleness_check_cannot_race_the_replay() {
     assert!(
         !race.completed_in_window.load(Ordering::SeqCst),
         "the competing write completed INSIDE the check-to-replay window — the \
-         gesture did not hold {id}'s stripe across its staleness check \
+         gesture did not keep {id} fenced across its staleness check \
          (outcome was {outcome:?})"
     );
     assert_eq!(
@@ -396,7 +381,7 @@ async fn an_external_write_during_the_staleness_check_cannot_race_the_replay() {
 /// The between-inverses window: a composite entry replays N inverses, and a
 /// competing write to a LATER inverse's block must not land between them.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_composite_undo_holds_its_locks_across_every_inverse() {
+async fn a_composite_undo_stays_fenced_across_every_inverse() {
     let first = "block:b1";
     let second = "block:b2";
     let store: Store = Arc::new(Mutex::new(HashMap::new()));
@@ -424,7 +409,7 @@ async fn a_composite_undo_holds_its_locks_across_every_inverse() {
     assert!(
         !race.completed_in_window.load(Ordering::SeqCst),
         "the competing write completed BETWEEN two inverses of one composite \
-         entry — the gesture released {first}'s stripe while it was still \
+         entry — the gesture released its fence while it was still \
          replaying (outcome was {outcome:?})"
     );
     assert_eq!(
@@ -435,21 +420,12 @@ async fn a_composite_undo_holds_its_locks_across_every_inverse() {
     );
 }
 
-/// Two blocks of one composite entry that hash to the SAME stripe must not
-/// deadlock the gesture against itself. A `tokio` mutex is not reentrant, so a
-/// multi-guard hold that orders and dedupes by `(entity_name, id)` rather than
-/// by stripe index re-locks a stripe it already holds and hangs forever.
+/// A composite entry naming two blocks undoes as one gesture without waiting
+/// on itself.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_composite_undo_over_two_stripe_colliding_blocks_completes() {
+async fn a_composite_undo_over_two_blocks_completes() {
     let a = "block:b0";
     let b = "block:b89";
-    assert_eq!(
-        stripe_of("block", a),
-        stripe_of("block", b),
-        "this rung is only meaningful while {a} and {b} collide; pick a new \
-         colliding pair for the engine's current hashing"
-    );
-
     let store: Store = Arc::new(Mutex::new(HashMap::new()));
     let engine = engine_with(store.clone(), None, None).await;
 
@@ -460,11 +436,7 @@ async fn a_composite_undo_over_two_stripe_colliding_blocks_completes() {
 
     tokio::time::timeout(GESTURE_ESCAPE, engine.undo())
         .await
-        .expect(
-            "a composite undo over two blocks sharing one stripe hung — the \
-                 gesture's guards are ordered/deduped by key instead of by \
-                 stripe index",
-        )
+        .expect("a composite undo over two blocks hung on its own admission")
         .expect("undo dispatch");
 
     assert_eq!(content_of(&store, a), OLD, "{a} restored");

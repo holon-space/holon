@@ -691,6 +691,7 @@ step_field_via_json!(
         holon_api::EntityUri::block("blk-b"),
     ])]
 );
+step_field_via_json!(Vec<u64>, vec![Vec::new(), vec![60, 40, 20]]);
 step_field_via_json!(
     holon_api::KeyChord,
     vec![

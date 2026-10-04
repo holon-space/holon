@@ -413,16 +413,7 @@ impl SutBlockTreeWrite for KeystrokeBlockTreeWriter {
         // Shift+Tab → `outdent` (BackTab) in the `HeadlessEditorMirror`.
         let resolved = self.resolve(id);
         self.focus_editor(&resolved, "Outdent").await;
-        // The ADR 0028 D1 page-boundary refusal is a modelled no-op, not a driver
-        // failure — see `is_page_boundary_outdent_refusal`. Any OTHER keystroke
-        // error stays fail-loud.
-        if let Err(e) = self.driver.send_raw_keystroke("tab", &["shift"]).await {
-            let msg = format!("{e:#}");
-            assert!(
-                is_page_boundary_outdent_refusal(&msg),
-                "[Outdent/keystroke] tab [\"shift\"] failed: {msg}"
-            );
-        }
+        self.key("tab", &["shift"], "Outdent").await;
     }
 
     // `move_up`/`move_down` are block-reorder ops with NO editor-mirror keystroke

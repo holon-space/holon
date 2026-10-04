@@ -3,7 +3,7 @@ id: 2026-10-02-fast-typing-can-lose-characters-when-keystroke-writes-reorder
 date: 2026-10-02
 gap: ENVIRONMENT
 secondary: null
-status: OPEN
+status: FIXED
 summary: >-
   A fast typist in the GPUI editor can lose characters or a just-typed task keyword:
   each keystroke's whole-buffer set_field runs in its own task, and the store accepts
@@ -65,8 +65,21 @@ The two-instance pair reaches the race only by chance (6/20 under load), and its
 failure names the convergence, not the lost keystroke.
 
 ## Remedy
-OPEN. Registered as known red `keystroke-set-field-store-reorder`
-(`docs/Testing/KeystoneKnownReds.md`, two patterns: the task-state teeth and the
-two-instance teeth); both hand-authored rows are in the `just hand-authored`
-default skip list. Owner: admission Inc 1 (the dispatcher admission step orders a
-block's local writes, D6.d/D7.a).
+FIXED. Each operation takes its place in the write order when it is admitted
+(`crates/holon-api/src/admission.rs`), and every fire-and-forget site admits at
+the call, before it spawns (`dispatch_intent*`, `spawn_journaled_rule_op`,
+`dispatch_intent_chain` in `crates/holon-frontend/src/reactive.rs`).
+`scripts/check-admission-sites.sh` (in `just gate-arch`) fails on a spawned task
+that admits.
+
+Pinned by deterministic hand-authored rows that hold one write and type behind
+it: `keystrokes-on-an-existing-block-land-in-order-{loro-cell,loro-dispatch,sqlonly}`,
+`enter-after-typing-splits-at-the-committed-length-{loro-dispatch,sqlonly}`,
+`slot-first-keystroke-waits-for-a-held-create{,-loro-dispatch}`. Red before
+admission: `lane-logs/admission-1a/h4-*.log`, `h3-*.log`; green after:
+`lane-logs/admission-1a/C-retired-r1.log`, `C-enter-r1.log`. Teeth: with the
+creation-slot create admitted inside its spawn, the slot rows went red with
+`set_field ... Block not found` (`lane-logs/admission-1a/C-teeth-slot-loop-*.log`).
+The task64 rows are out of the default skip list; the known red
+`keystroke-set-field-store-reorder` is `fixed-pending-soak`.
+The two-instance teeth (`owner converged WITHOUT the receiver-authored text`, `two_instance_composed_pbt.rs:895`) ran green 11 of 11 times on the admission tree (`lane-logs/admission-1a/E-two-1.log`, `E-b2-loop.log`), so its row is `fixed-pending-soak` too.

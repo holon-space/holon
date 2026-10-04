@@ -765,32 +765,32 @@ pub fn dispatch_approve(
     intent_key: String,
 ) {
     let (tx, rx) = futures::channel::oneshot::channel::<Result<(), String>>();
-    rt_handle.spawn(async move {
-        let outcome = if !store.confirm(&intent_key) {
-            Err(format!(
-                "no once_only write awaiting confirmation for intent '{intent_key}' (already \
-                 approved, dispatched, or unknown-outcome)"
-            ))
-        } else {
-            match store.stored_call(&intent_key) {
-                Some((entity_name, op_name, params)) => {
-                    // StorageEntity keys are `Arc<str>`; the session API takes
-                    // `HashMap<String, Value>`. The key/value strings survive the
-                    // round-trip, so the chokepoint re-mints the SAME intent key.
-                    let params: std::collections::HashMap<String, Value> = params
-                        .into_iter()
-                        .map(|(k, v)| (k.to_string(), v))
-                        .collect();
-                    session
-                        .execute_operation(&entity_name, &op_name, params)
-                        .await
-                        .map(|_| ())
-                        .map_err(|e| format!("{e:#}"))
-                }
-                None => Err(format!(
-                    "confirmed intent '{intent_key}' has no stored call — cannot re-dispatch"
-                )),
+    let run = if !store.confirm(&intent_key) {
+        Err(format!(
+            "no once_only write awaiting confirmation for intent '{intent_key}' (already \
+             approved, dispatched, or unknown-outcome)"
+        ))
+    } else {
+        match store.stored_call(&intent_key) {
+            Some((entity_name, op_name, params)) => {
+                // StorageEntity keys are `Arc<str>`; the session API takes
+                // `HashMap<String, Value>`. The key/value strings survive the
+                // round-trip, so the chokepoint re-mints the SAME intent key.
+                let params: std::collections::HashMap<String, Value> = params
+                    .into_iter()
+                    .map(|(k, v)| (k.to_string(), v))
+                    .collect();
+                Ok(session.execute_operation(&entity_name, &op_name, params))
             }
+            None => Err(format!(
+                "confirmed intent '{intent_key}' has no stored call — cannot re-dispatch"
+            )),
+        }
+    };
+    rt_handle.spawn(async move {
+        let outcome = match run {
+            Ok(run) => run.await.map(|_| ()).map_err(|e| format!("{e:#}")),
+            Err(e) => Err(e),
         };
         let _ = tx.send(outcome);
     });
@@ -830,17 +830,16 @@ pub fn dispatch_share(
     block_id: String,
 ) {
     let (tx, rx) = futures::channel::oneshot::channel::<Result<ShareTicket, String>>();
+    let mut params = std::collections::HashMap::new();
+    params.insert("id".to_string(), Value::String(block_id));
+    // State-only sharing: "full" retention would ship the whole forked
+    // oplog (including pruned sibling subtrees' content) to the accepter —
+    // a whole-vault history leak. "none" exports current state only.
+    // See docs/Reference/SUBTREE_SHARING.md B1.
+    params.insert("retention".to_string(), Value::String("none".to_string()));
+    let run = session.execute_operation(&EntityName::new("tree"), "share_subtree", params);
     rt_handle.spawn(async move {
-        let mut params = std::collections::HashMap::new();
-        params.insert("id".to_string(), Value::String(block_id));
-        // State-only sharing: "full" retention would ship the whole forked
-        // oplog (including pruned sibling subtrees' content) to the accepter —
-        // a whole-vault history leak. "none" exports current state only.
-        // See docs/Reference/SUBTREE_SHARING.md B1.
-        params.insert("retention".to_string(), Value::String("none".to_string()));
-        let result = session
-            .execute_operation(&EntityName::new("tree"), "share_subtree", params)
-            .await;
+        let result = run.await;
         let outcome = match result.map(|out| out.response) {
             Ok(Some(v)) => ShareTicket::from_value(&v).map_err(|e| format!("{e:#}")),
             Ok(None) => Err("share_subtree returned no response".to_string()),
@@ -883,13 +882,12 @@ pub fn dispatch_accept(
     ticket: String,
 ) {
     let (tx, rx) = futures::channel::oneshot::channel::<Result<(), String>>();
+    let mut params = std::collections::HashMap::new();
+    params.insert("parent_id".to_string(), Value::String(parent_id));
+    params.insert("ticket".to_string(), Value::String(ticket));
+    let run = session.execute_operation(&EntityName::new("tree"), "accept_shared_subtree", params);
     rt_handle.spawn(async move {
-        let mut params = std::collections::HashMap::new();
-        params.insert("parent_id".to_string(), Value::String(parent_id));
-        params.insert("ticket".to_string(), Value::String(ticket));
-        let result = session
-            .execute_operation(&EntityName::new("tree"), "accept_shared_subtree", params)
-            .await;
+        let result = run.await;
         let outcome = match result {
             Ok(_) => Ok(()),
             Err(e) => Err(format!("{e:#}")),
@@ -1343,14 +1341,13 @@ pub fn dispatch_retry_reimport(
     async_cx: &AsyncApp,
 ) {
     let (tx, rx) = futures::channel::oneshot::channel::<Result<(), String>>();
+    let run = session.execute_operation(
+        &EntityName::new("device"),
+        "pair_retry_reimport",
+        std::collections::HashMap::new(),
+    );
     rt_handle.spawn(async move {
-        let result = session
-            .execute_operation(
-                &EntityName::new("device"),
-                "pair_retry_reimport",
-                std::collections::HashMap::new(),
-            )
-            .await;
+        let result = run.await;
         let _ = tx.send(result.map(|_| ()).map_err(|e| format!("{e:#}")));
     });
 

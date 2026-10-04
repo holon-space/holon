@@ -267,6 +267,7 @@ pub use config::UiConfig;
 pub use config::WidgetState;
 // Re-export types needed by consumers
 pub use editor_view_model::{EditorAction, EditorKey, EditorViewModel};
+use futures::future::BoxFuture;
 use holon_api::EntityName;
 use holon_api::EntityUri;
 pub use holon_api::OperationDescriptor;
@@ -1063,14 +1064,16 @@ impl<T> FrontendSession<T> {
     /// * `entity_name` - The entity to operate on (e.g., "blocks", "documents")
     /// * `op_name` - The operation name (e.g., "create", "delete", "set_field")
     /// * `params` - Operation parameters
-    pub async fn execute_operation(
+    ///
+    /// Admits at the call (see [`holon_api::OperationEngine::admit`]), so a
+    /// fire-and-forget caller calls this BEFORE it spawns the returned future.
+    pub fn execute_operation(
         &self,
         entity_name: &EntityName,
         op_name: &str,
         params: HashMap<String, Value>,
-    ) -> Result<holon_api::OpOutcome> {
+    ) -> BoxFuture<'static, Result<holon_api::OpOutcome>> {
         self.execute_operation_with_origin(entity_name, op_name, params, holon_api::OpOrigin::User)
-            .await
     }
 
     /// Execute an operation the session itself authored on the user's behalf
@@ -1081,21 +1084,22 @@ impl<T> FrontendSession<T> {
     ///
     /// Everything else a `FrontendSession` dispatches is a direct user gesture
     /// and goes through [`Self::execute_operation`].
-    pub async fn execute_operation_with_origin(
+    pub fn execute_operation_with_origin(
         &self,
         entity_name: &EntityName,
         op_name: &str,
         params: HashMap<String, Value>,
         origin: holon_api::OpOrigin,
-    ) -> Result<holon_api::OpOutcome> {
-        self.require_operation_engine()?
-            .execute_operation(
+    ) -> BoxFuture<'static, Result<holon_api::OpOutcome>> {
+        match self.require_operation_engine() {
+            Ok(engine) => engine.execute_operation(
                 entity_name,
                 op_name,
                 params.into_iter().map(|(k, v)| (k.into(), v)).collect(),
                 origin,
-            )
-            .await
+            ),
+            Err(e) => Box::pin(std::future::ready(Err(e))),
+        }
     }
 
     /// Get available operations for an entity

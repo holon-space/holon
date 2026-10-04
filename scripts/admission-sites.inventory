@@ -1,7 +1,9 @@
 # <count> <file> <class> — maintained by scripts/check-admission-sites.sh.
 # entry: reaches the OperationEngine (directly or through BackendEngine,
-#        FrontendSession or HolonService) and must admit before it spawns or awaits.
+#        FrontendSession, HolonService or dispatch_intent) and must admit before
+#        it spawns or awaits.
 # below: runs inside an already admitted operation, or writes below the dispatcher.
+2 crates/holon-app/src/headless_builder_services.rs below
 1 crates/holon-app/src/integrations_operations.rs below
 1 crates/holon-app/src/mcp_integrations.rs below
 3 crates/holon-app/src/ordered_block_crud.rs below
@@ -10,22 +12,45 @@
 1 crates/holon-connections/src/registry.rs below
 1 crates/holon-core/src/operation_subset.rs below
 1 crates/holon-core/src/operation_wrapper.rs below
+5 crates/holon-frontend/src/headless_editor_mirror.rs entry
 2 crates/holon-frontend/src/lib.rs entry
 1 crates/holon-frontend/src/operations.rs entry
-7 crates/holon-frontend/src/reactive.rs entry
+16 crates/holon-frontend/src/reactive.rs entry
+5 crates/holon-frontend/src/user_driver.rs entry
 1 crates/holon-loro-wiring/src/event_infra_module.rs below
 5 crates/holon-loro/src/loro_share_backend.rs below
 1 crates/holon-mcp-client/src/mcp_provider.rs below
 1 crates/holon/src/api/action_watcher.rs entry
-2 crates/holon/src/api/backend_engine.rs entry
+1 crates/holon/src/api/backend_engine.rs entry
 1 crates/holon/src/api/holon_rule_watcher.rs entry
 2 crates/holon/src/api/holon_service.rs entry
 6 crates/holon/src/api/operation_dispatcher.rs below
-5 crates/holon/src/api/operation_engine.rs below
+4 crates/holon/src/api/operation_engine.rs below
 6 crates/holon/src/core/sql_block_operations.rs below
 3 crates/holon/src/core/sql_operation_provider.rs below
+1 frontends/gpui/src/lib.rs entry
+1 frontends/gpui/src/render/builders/block_operations.rs entry
+2 frontends/gpui/src/render/builders/board.rs entry
+1 frontends/gpui/src/render/builders/drop_zone.rs entry
+1 frontends/gpui/src/render/builders/expand_toggle.rs entry
+1 frontends/gpui/src/render/builders/input_box.rs entry
+1 frontends/gpui/src/render/builders/op_button.rs entry
+1 frontends/gpui/src/render/builders/pie_menu.rs entry
+1 frontends/gpui/src/render/builders/pref_field.rs entry
+1 frontends/gpui/src/render/builders/rendered_text.rs entry
+1 frontends/gpui/src/render/builders/selectable.rs entry
+1 frontends/gpui/src/render/builders/source_block.rs entry
+1 frontends/gpui/src/render/builders/state_toggle.rs entry
+1 frontends/gpui/src/render/builders/tree_item.rs entry
+1 frontends/gpui/src/search_ui.rs entry
 4 frontends/gpui/src/share_ui.rs entry
-2 frontends/holon-worker/src/lib.rs entry
+1 frontends/gpui/src/tab_strip.rs entry
+1 frontends/gpui/src/user_driver.rs entry
+11 frontends/gpui/src/views/editor_view.rs entry
+1 frontends/gpui/src/views/render_entity_view.rs entry
+1 frontends/gpui/src/views/rich_text_editor.rs entry
+4 frontends/holon-worker/src/lib.rs entry
 1 frontends/holon-worker/src/seed.rs entry
 8 frontends/mcp/src/tools.rs entry
-1 frontends/tui/src/app_main.rs entry
+6 frontends/tui/src/app_main.rs entry
+1 frontends/tui/src/user_driver.rs entry

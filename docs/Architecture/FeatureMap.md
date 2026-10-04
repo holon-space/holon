@@ -36,7 +36,7 @@ The one-page answer to *"which features could this change impact?"*. Rows are us
 | **Ruled by** | An ADR under [`docs/adr/`](../adr/), or an invariant number from [Model.md](Model.md). |
 | **Mode axes** | Which of [Model.md](Model.md)'s four orthogonal axes the feature's behaviour varies on: **Storage** (Loro store on/off), **File adapter** (org/none), **Merge fidelity** (op-CRDT / base-3-way / LWW), **Transport** (iroh P2P on/off). `—` means the feature behaves the same everywhere. *Headless vs windowed* is a test-slice axis, not a product mode; it is called out in prose where it matters. |
 
-The composed keystone is [`general_e2e_composed_pbt.rs`](../../crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs). Its alphabet is 99 transitions; the repo declares 88 invariant ids plus 17 correspondence-family ids. Open reds are registered in [KeystoneKnownReds.md](../Testing/KeystoneKnownReds.md) — a red listed there is a pass-with-note, anything else is a regression.
+The composed keystone is [`general_e2e_composed_pbt.rs`](../../crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs). Its alphabet is 100 transitions; the repo declares 88 invariant ids plus 17 correspondence-family ids. Open reds are registered in [KeystoneKnownReds.md](../Testing/KeystoneKnownReds.md) — a red listed there is a pass-with-note, anything else is a regression.
 
 ---
 
@@ -247,6 +247,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `AttemptIngestCompoundOnReadOnly` — a compound's constituents must be judged under the COMPOUND's provenance, not re-judged as a user's edit
 - `AttemptReadOnlyEdit` — the write the dispatcher must refuse, without which `inv-read-only-home-refuses-writes` can only prove that nothing tried
 - `CreateBlockUnderFocus` — creation-slot gesture mint under focus root
+- `DelayAdmissions` — descending delays reverse dispatches that admit on their spawned tasks, and leave dispatches that admit at the call in order
 - `DeleteLineFromFile` — a child deleted from its own file is put back while a copy holds it, and the put-back is disclosed; the same deletion in the copy lets it stand (D229.b)
 - `DeletePlacedRoot` — a recipient delete of a placed page, which leaves the share on the receiver and never deletes the owner's page.
 - `DeletePlacementParent` — a recipient delete of a block the placed page hangs under, which leaves the page's share exactly as a delete of the page does and never deletes the owner's page.
@@ -320,18 +321,14 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `fs-watcher-arm-no-event-agent-session`
 - `fs-watcher-no-events-agent-session`
 - `fs-watcher-rename-unpaired-agent-session`
-- `held-slot-create-loro-dispatch-keystroke-races-create`
-- `held-slot-create-sqlonly-keystroke-races-create`
 - `integration-toggle-load`
 - `iroh-nat-traversal-address-set`
 - `iroh-pairing-refusal-reads-as-io-failure`
 - `join-then-stale-second-join`
 - `journal-feed-main-panel-still-loading`
-- `keystroke-set-field-store-reorder`
 - `lib-type-chars-home-profile-derived`
 - `logseq-parity-caret-fold-lost-loro`
 - `loro-backend-change-count`
-- `loro-dispatch-creation-slot-keystroke-races-create`
 - `loro-move-false-cycle-duplicate-id`
 - `loro-owning-page-types-share-removal`
 - `metamorphic-undo-facet-unchanged`
@@ -346,7 +343,6 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `ref-diverge-content-text-drift`
 - `ref-diverge-parent-reparent`
 - `shopping-mapping-cost-slo`
-- `sqlonly-creation-slot-keystroke-races-create`
 - `text-undo-manager-load`
 - `toggle-state-sql-read-repeat-budget`
 - `tour-spike-advance-cursor-not-visible`

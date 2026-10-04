@@ -256,22 +256,14 @@ hand-authored *FLAGS:
     # (docs/Testing/bugfunnel/entries/2026-09-22-unseeded-vault-blocks-are-sql-only-so-a-loro-fed-read-model-cannot-show-them.md).
     # Re-strict by deleting this default the day that pass lands; the
     # invariant itself excludes NOTHING, so the case reds again on its own.
-    # The two dispatch-leg creation-slot rows are registered known reds
-    # (`sqlonly-creation-slot-keystroke-races-create`,
-    # `loro-dispatch-creation-slot-keystroke-races-create`) until admission Inc 1
-    # orders the keystroke after the create; the runner stops at the first red.
     # `external-rewrite-keeps-a-promoted-pages-body` is registered known red
     # `external-rewrite-drops-page-body` (unowned).
-    # The held-create rows are registered known reds
-    # (`held-slot-create-sqlonly-keystroke-races-create`,
-    # `held-slot-create-loro-dispatch-keystroke-races-create`) until admission
-    # Inc 1; the failed-create rows (`failed-slot-create-sqlonly-keystrokes-run-anyway`,
-    # `failed-slot-create-loro-dispatch-keystrokes-run-anyway`) until admission Inc 2.
-    # The task64 sqlonly rows are registered known red
-    # `keystroke-set-field-store-reorder` (intermittent) until admission Inc 1;
-    # `split-then-two-backspaces-caret-follows-second-join` is registered known
-    # red `join-then-stale-second-join` until admission Inc 2.
-    export HOLON_HAND_AUTHORED_SKIP=${HOLON_HAND_AUTHORED_SKIP-reboot-orphans-the-previous-boots-watchers,creation-slot-first-keystroke-turso-dispatch,creation-slot-first-keystroke-loro-dispatch,external-rewrite-keeps-a-promoted-pages-body,slot-first-keystroke-waits-for-a-held-create,slot-first-keystroke-waits-for-a-held-create-loro-dispatch,a-failed-create-cancels-its-keystrokes-with-one-disclosure,a-failed-create-cancels-its-keystrokes-with-one-disclosure-loro-dispatch,task64-promotion-sqlonly-arm,task64-second-keyword-draw-sqlonly,split-then-two-backspaces-caret-follows-second-join}
+    # The failed-create rows are registered known reds
+    # (`failed-slot-create-sqlonly-keystrokes-run-anyway`,
+    # `failed-slot-create-loro-dispatch-keystrokes-run-anyway`) until admission
+    # Inc 2; `split-then-two-backspaces-caret-follows-second-join` is registered
+    # known red `join-then-stale-second-join` until admission Inc 2.
+    export HOLON_HAND_AUTHORED_SKIP=${HOLON_HAND_AUTHORED_SKIP-reboot-orphans-the-previous-boots-watchers,external-rewrite-keeps-a-promoted-pages-body,a-failed-create-cancels-its-keystrokes-with-one-disclosure,a-failed-create-cancels-its-keystrokes-with-one-disclosure-loro-dispatch,split-then-two-backspaces-caret-follows-second-join}
     cargo test \
         {{CANON}} --test hand_authored_regressions \
         -- --nocapture {{FLAGS}} 2>&1 | tee target/gate-logs/pbt-hand-authored.log
@@ -1370,6 +1362,7 @@ gate-arch:
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p target/gate-logs
+    ./scripts/check-admission-sites.sh 2>&1 | tee target/gate-logs/gate-arch-admission-sites.log
     cargo nextest run {{CANON}} --test architecture_rules 2>&1 | tee target/gate-logs/gate-arch.log
     # clippy.toml lists the tracing span guards; one held across `.await` leaves
     # its span current on the worker thread and panics an unrelated task.

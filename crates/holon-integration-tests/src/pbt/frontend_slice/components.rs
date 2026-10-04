@@ -5058,16 +5058,37 @@ impl SutDispatchHold for HeadlessFrontendComponent {
         self.engine().dispatch_hold().fail_next(entity, op);
     }
 
+    fn delay_next_admissions(&self, entity: &str, op: &str, delays_ms: &[u64]) {
+        self.engine().dispatch_hold().delay_next_admissions(
+            entity,
+            op,
+            delays_ms
+                .iter()
+                .copied()
+                .map(Duration::from_millis)
+                .collect(),
+        );
+    }
+
     async fn release_held_dispatches(&self, expect_parked: usize) {
         self.engine()
             .dispatch_hold()
             .release(expect_parked, Duration::from_secs(10))
             .await
             .unwrap_or_else(|e| panic!("[SutDispatchHold::release_held_dispatches] {e:#}"));
+        let parked = self.parked_dispatch_names();
+        assert!(
+            parked.is_empty(),
+            "[SutDispatchHold::release_held_dispatches] runs parked after the release: {parked:?}"
+        );
     }
 
     fn parked_dispatches(&self, entity: &str, op: &str) -> usize {
         self.engine().dispatch_hold().parked_runs(entity, op)
+    }
+
+    fn parked_dispatch_names(&self) -> Vec<String> {
+        self.engine().dispatch_hold().parked_names()
     }
 
     fn take_failed_dispatches(&self, entity: &str, op: &str) -> usize {
