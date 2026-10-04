@@ -94,7 +94,7 @@ is_collateral() {
 # `error: ` on its own stdout has not failed, and reading it as one reproduces
 # the very false alarm this classifier exists to avoid. With no green verdict to
 # weigh it against, any error-shaped line still counts as failure evidence.
-harness_failed_re='^test result: FAILED|^ +FAIL \[|tests run:.* [1-9][0-9]* failed|^error: (test failed|could not compile|recipe .* failed|process didn.t exit successfully|linking with|failed to run custom build command)'
+harness_failed_re='^test result: FAILED|^ +FAIL \[|tests run:.* [1-9][0-9]* (failed|timed out)|^error: (test failed|could not compile|recipe .* failed|process didn.t exit successfully|linking with|failed to run custom build command)'
 green_verdict_re='^test result: ok\.|tests run: [0-9]+ passed'
 any_error_re='^error(\[[A-Za-z0-9]+\])?: '
 
@@ -138,11 +138,34 @@ for log in "$@"; do
     # the NEXT line; that message line IS the signature. Proptest re-panics on
     # every shrink step, so one failing case yields dozens of near-identical
     # lines — hence the aggregation below.
+    #
+    # A panic on the thread of a test cargo reports as `- should panic ... ok`
+    # is that test passing. A test nextest killed (`TIMEOUT`, `SIGSEGV`, …)
+    # printed no panic, so its status line is its signature; nextest repeats
+    # status lines in its closing summary, hence the dedup.
     sigs_file=$(mktemp)
-    awk '/panicked at / {
+    awk '
+        FNR == NR {
+            if (match($0, /^test .* - should panic \.\.\. ok$/)) {
+                name = $0; sub(/^test /, "", name); sub(/ - should panic \.\.\. ok$/, "", name)
+                expected[name] = 1
+            }
+            next
+        }
+        /panicked at / {
+            if (index($0, "thread " q) == 1) {
+                thread = substr($0, 9); thread = substr(thread, 1, index(thread, q) - 1)
+                if (thread in expected) next
+            }
             loc = $0; sub(/^.*panicked at /, "", loc); sub(/:$/, "", loc)
             if ((getline msg) > 0) print loc "\t" msg
-         }' "$log" >"$sigs_file"
+            next
+        }
+        /^ +(TIMEOUT|SIG[A-Z]+|ABORT) +\[/ {
+            status = $1; test = $0; sub(/^ +[A-Z]+ +\[[^]]*\] +/, "", test); sub(/^\([0-9]+\/[0-9]+\) +/, "", test)
+            sig = status ": " test
+            if (!(sig in killed)) { killed[sig] = 1; print "nextest\t" sig }
+        }' q="'" "$log" "$log" >"$sigs_file"
 
     # Panics ARE failure evidence, and outrank the verdict lines: a run killed
     # mid-shrink is truncated before cargo ever prints `test result:`.
@@ -171,7 +194,7 @@ for log in "$@"; do
 
     if [ ! -s "$sigs_file" ]; then
         echo "[known-reds] NOVEL: $log — run failed but no panic signature was extracted"
-        echo "               (compile error, timeout, or a new failure shape). Tail:"
+        echo "               (compile error or a new failure shape). Tail:"
         tail -20 "$log" | sed 's/^/               | /'
         novel=$((novel + 1))
         rm -f "$sigs_file"

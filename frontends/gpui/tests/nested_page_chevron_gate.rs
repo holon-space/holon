@@ -193,6 +193,11 @@ impl BuilderServices for ExpandStoreServices {
     fn link_classifier(&self) -> &holon_api::link_parser::LinkTargetClassifier {
         self.inner.link_classifier()
     }
+    /// A `from descendants` live_query resolves its context path through the
+    /// engine before it watches; without one it paints a degraded banner.
+    fn query_engine(&self) -> Option<Arc<dyn holon_api::QueryEngine>> {
+        Some(Arc::new(support::DeclaresNothingQueryEngine::open()))
+    }
     fn resolve_profile(
         &self,
         row: &holon_api::widget_spec::DataRow,

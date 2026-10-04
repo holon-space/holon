@@ -173,8 +173,8 @@ fn invariant_fires_on_zero_spacer(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn snapshot_captures_each_widget(cx: &mut TestAppContext) {
-    // col(text, text, badge) — the snapshot should contain one entry for
-    // `col` and one for each of the four leaves, proving `tag()` is wired
+    // col(text, text, badge, icon) — the snapshot should contain an entry for
+    // `col` and for each of the four leaves, proving `tag()` is wired
     // through `builder_registry!` for every variant.
     let fixture = column(vec![text("a"), text("b"), badge("c"), icon("info")]);
     let snap = render_fixture(cx, Arc::new(fixture));
@@ -196,10 +196,16 @@ fn snapshot_captures_each_widget(cx: &mut TestAppContext) {
         "expected 2 text, got {text_count}\n{}",
         snap.dump()
     );
+    // A badge records twice: the registry's wrapper, and the badge builder's
+    // own tracker, the only one carrying the label it paints.
+    let badge_labels: Vec<&str> = snap
+        .of_type("badge")
+        .filter_map(|info| info.displayed_text.as_deref())
+        .collect();
     assert_eq!(
-        badge_count,
-        1,
-        "expected 1 badge, got {badge_count}\n{}",
+        (badge_count, badge_labels),
+        (2, vec!["c"]),
+        "expected the wrapper and the labelled builder tracker for the one badge\n{}",
         snap.dump()
     );
     assert_eq!(

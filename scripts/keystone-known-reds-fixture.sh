@@ -221,6 +221,25 @@ expect_outcome truncated 3 'the log states no pass/fail' "$work/no-outcome.log"
 expect_outcome empty 3 'the log states no pass/fail' "$work/empty.log"
 expect_outcome missing 3 '^\[known-reds\] UNREADABLE: ' "$work/does-not-exist.log"
 
+# nextest's summary counts a killed test as `timed out`, not `failed`, and the
+# test printed no panic: the status line is the only failure evidence.
+cat >"$work/timeout-only.log" <<'EOF'
+        PASS [   0.010s] (1/2) holon-gpui::layout_smoke a
+     TIMEOUT [ 120.034s] (2/2) holon-gpui::gpui_composed_windowed_loop general_e2e_composed_pbt_windowed
+     Summary [ 120.355s] 2 tests run: 1 passed, 1 timed out, 0 skipped
+     TIMEOUT [ 120.034s] (2/2) holon-gpui::gpui_composed_windowed_loop general_e2e_composed_pbt_windowed
+EOF
+expect_outcome timeout-only 1 '^PRIMARY: \[novel\] .* TIMEOUT: holon-gpui::gpui_composed_windowed_loop general_e2e_composed_pbt_windowed$' \
+    "$work/timeout-only.log"
+# cargo test prints the expected panic of a passing `#[should_panic]` test.
+cat >"$work/should-panic-only.log" <<'EOF'
+thread 'mistyped_initial_state_key_is_loud' (1) panicked at crates/holon-integration-tests/src/pbt/hand_authored.rs:166:9:
+hand-authored regression "<inline>":1: unknown top-level key "initail_state"
+test mistyped_initial_state_key_is_loud - should panic ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+EOF
+expect_outcome should-panic-only 0 '^\[known-reds\] PASS: 1 green run' "$work/should-panic-only.log"
+
 # `bulk-add-sibling-order` matches only a SUT order that OPENS with a bulk block.
 # No archived corpus carries that shape (the 2026-09-19 corpus's 52 sibling-order
 # lines are swapped uuid children under a bulk PARENT and classify novel), so the

@@ -181,3 +181,7 @@ fn ctrl_c_during_boot_ends_the_gui_through_the_session_shutdown() {
 fn sigterm_during_boot_ends_the_gui_through_the_session_shutdown() {
     a_signal_during_boot_quits_through_the_session_shutdown("TERM");
 }
+
+// Installs the windowed capturing tracing subscriber before this binary's
+// first line of test code (see tests/test_init/mod.rs).
+mod test_init;

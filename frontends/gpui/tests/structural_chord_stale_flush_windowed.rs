@@ -42,6 +42,7 @@ use holon_frontend::user_driver::UserDriver;
 use holon_gpui::geometry::BoundsRegistry;
 use holon_gpui::launch_holon_window_rebindable;
 use holon_gpui::navigation_state::NavigationState;
+use holon_integration_tests::pbt::window_slice::seed::GRAFT_PAGE_ID;
 use holon_integration_tests::pbt::window_slice::seed::UNDO_EDIT_CONTENT;
 use holon_integration_tests::pbt::window_slice::seed::graft_undo_blur_pair;
 use holon_integration_tests::test_environment::TestEnvironment;
@@ -208,9 +209,8 @@ fn drive_external_split_then_chord(loro: bool, suffix: &str, window_title: &'sta
         loro,
         "this arm must boot the storage mode it claims"
     );
-    let (edit_id, _sibling_id) = futures::executor::block_on(graft_undo_blur_pair(&env, suffix))
+    let (edit_id, sibling_id) = futures::executor::block_on(graft_undo_blur_pair(&env, suffix))
         .expect("graft the edit/sibling row pair");
-
     let session = env.session_arc();
     let engine = env
         .reactive_engine
@@ -258,6 +258,23 @@ fn drive_external_split_then_chord(loro: bool, suffix: &str, window_title: &'sta
         painted,
         "boot precondition: the edit row must paint before anything is typed"
     );
+
+    // The pair is grafted in order, so the edit row is the FIRST child and Tab
+    // has no previous sibling to indent it under. Move the sibling ahead of it
+    // after boot has painted the edit row: under Loro a move issued right after
+    // the create fails with "Block not found".
+    let mut params: HashMap<String, Value> = HashMap::new();
+    params.insert(
+        "id".into(),
+        Value::String(EntityUri::block(&sibling_id).to_string()),
+    );
+    params.insert(
+        "parent_id".into(),
+        Value::String(EntityUri::block(GRAFT_PAGE_ID).to_string()),
+    );
+    futures::executor::block_on(env.execute_operation("block", "move_block", params))
+        .expect("move the sibling ahead of the edit row");
+    settle(&mut app, &bounds, Duration::from_secs(30));
 
     let interaction_tx = debug_services
         .interaction_tx

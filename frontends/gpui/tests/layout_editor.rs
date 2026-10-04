@@ -198,8 +198,11 @@ mod windowed_caret {
         props.insert("content".into(), Value::String(content.into()));
         props.insert("field".into(), Value::String("content".into()));
 
+        // `marks_of` checks the marks against the ROW's `content` column and
+        // drops them when it is absent, as a production row always carries it.
         let mut data: DataRow = HashMap::new();
         data.insert("id".into(), Value::String(id.into()));
+        data.insert("content".into(), Value::String(content.into()));
         if !marks.is_empty() {
             data.insert("marks".into(), Value::String(marks_to_json(marks)));
         }
