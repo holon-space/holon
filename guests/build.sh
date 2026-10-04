@@ -71,7 +71,13 @@ if [ "$(cat "$STAGE/guests/.staged" 2>/dev/null || true)" != "$SRC_HASH" ]; then
 fi
 
 CARGO_HOME_DIR=$(cd "${CARGO_HOME:-$HOME/.cargo}" && pwd)
-export RUSTFLAGS="--remap-path-prefix=$STAGE=/holon --remap-path-prefix=$CARGO_HOME_DIR=/cargo"
+# Installing the rust-src component makes rustc embed the real sysroot path in
+# std's panic locations instead of `/rustc/<commit>`; remapping it back keeps
+# the bytes independent of that component.
+SYSROOT_SRC=$(rustc --print sysroot)/lib/rustlib/src/rust
+RUSTC_COMMIT=$(rustc -vV | sed -n 's/^commit-hash: //p')
+[ -n "$RUSTC_COMMIT" ] || { echo "build.sh: rustc -vV reports no commit-hash" >&2; exit 1; }
+export RUSTFLAGS="--remap-path-prefix=$STAGE=/holon --remap-path-prefix=$CARGO_HOME_DIR=/cargo --remap-path-prefix=$SYSROOT_SRC=/rustc/$RUSTC_COMMIT"
 
 cd "$STAGE/guests/$GUEST"
 cargo build --locked --release --target wasm32-unknown-unknown
