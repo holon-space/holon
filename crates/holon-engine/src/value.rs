@@ -57,20 +57,25 @@ impl std::fmt::Display for Value {
     }
 }
 
-impl From<rhai::Dynamic> for Value {
-    fn from(d: rhai::Dynamic) -> Self {
+impl Value {
+    /// Refuses non-finite floats: they have no faithful YAML/JSON form.
+    pub fn try_from_dynamic(d: rhai::Dynamic) -> Result<Self, String> {
         if d.is_unit() {
-            Value::Null
+            Ok(Value::Null)
         } else if let Ok(b) = d.as_bool() {
-            Value::Bool(b)
+            Ok(Value::Bool(b))
         } else if let Ok(i) = d.as_int() {
-            Value::Int(i)
+            Ok(Value::Int(i))
         } else if let Ok(f) = d.as_float() {
-            Value::Float(f)
+            if f.is_finite() {
+                Ok(Value::Float(f))
+            } else {
+                Err(format!("non-finite float {f}"))
+            }
         } else if let Ok(s) = d.into_string() {
-            Value::String(s)
+            Ok(Value::String(s))
         } else {
-            Value::Null
+            Ok(Value::Null)
         }
     }
 }

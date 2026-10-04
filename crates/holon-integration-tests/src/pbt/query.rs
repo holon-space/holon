@@ -279,7 +279,9 @@ pub fn value_to_sql_literal(v: &Value) -> String {
     match v {
         Value::String(s) => format!("'{s}'"),
         Value::Integer(i) => i.to_string(),
-        Value::Float(f) => f.to_string(),
+        Value::Float(f) => holon_api::NotJson::finite(*f)
+            .unwrap_or_else(|e| panic!("query predicate: {e}"))
+            .to_string(),
         Value::Boolean(b) => if *b { "TRUE" } else { "FALSE" }.to_string(),
         Value::Null => "NULL".to_string(),
         other => format!("'{:?}'", other),
@@ -291,7 +293,9 @@ pub fn value_to_prql_literal(v: &Value) -> String {
     match v {
         Value::String(s) => format!("\"{s}\""),
         Value::Integer(i) => i.to_string(),
-        Value::Float(f) => f.to_string(),
+        Value::Float(f) => holon_api::NotJson::finite(*f)
+            .unwrap_or_else(|e| panic!("query predicate: {e}"))
+            .to_string(),
         Value::Boolean(b) => if *b { "true" } else { "false" }.to_string(),
         Value::Null => "null".to_string(),
         other => format!("\"{:?}\"", other),

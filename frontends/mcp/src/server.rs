@@ -24,8 +24,16 @@ use tokio::task::JoinHandle;
 use crate::types::RowChangeJson;
 
 pub struct WatchState {
-    pub pending_changes: Arc<Mutex<Vec<RowChangeJson>>>,
+    pub pending_changes: Arc<Mutex<Vec<PendingChange>>>,
     pub task_handle: JoinHandle<()>,
+}
+
+/// A buffered change, the disclosure of one left out of the feed, or a
+/// batch's degraded-mode disclosure.
+pub enum PendingChange {
+    Row(RowChangeJson),
+    Omitted(String),
+    Degraded(String),
 }
 
 /// A command sent from an MCP tool (tokio thread) to the GPUI foreground

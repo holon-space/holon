@@ -16,6 +16,7 @@ use holon_api::EntityRef;
 use holon_api::EntityUri;
 use holon_api::InlineMark;
 use holon_api::MarkSpan;
+use holon_api::NotJson;
 use holon_api::PAGE_TAG;
 use holon_api::Value;
 
@@ -212,13 +213,22 @@ fn carry_raw(entity: &Entity<'_>, schema: &Schema, block: &mut Block) -> Result<
         };
         let key = format!("{RAW_PREFIX}{}", ident.trim_start_matches(':'));
         let value = if schema.is_cardinality_many(ident) {
-            Value::Array(datoms.iter().map(|d| raw_value(&d.v)).collect())
+            datoms
+                .iter()
+                .enumerate()
+                .map(|(i, d)| raw_value(&d.v).map_err(|e| e.under(&format!("[{i}]"))))
+                .collect::<Result<_, _>>()
+                .map(Value::Array)
         } else {
             let current = entity
                 .one(attr)
                 .expect("the attribute has at least one datom");
             raw_value(current)
-        };
+        }
+        .map_err(|e| ImportError::NotStorable {
+            entity: entity.e.0,
+            source: e.under(&key),
+        })?;
         block.properties.insert(key, value);
     }
     Ok(())
@@ -226,19 +236,19 @@ fn carry_raw(entity: &Entity<'_>, schema: &Schema, block: &mut Block) -> Result<
 
 /// Render a datom value for opaque carriage. Nested EDN keeps its decoded
 /// shape as JSON so nothing about it is interpreted on the way through.
-fn raw_value(value: &DatomValue) -> Value {
+fn raw_value(value: &DatomValue) -> Result<Value, NotJson> {
     match value {
-        DatomValue::Ref(target) => Value::Integer(target.0),
+        DatomValue::Ref(target) => Ok(Value::Integer(target.0)),
         DatomValue::Node(node) => node_value(node),
     }
 }
 
-fn node_value(node: &TransitNode) -> Value {
-    match node {
+fn node_value(node: &TransitNode) -> Result<Value, NotJson> {
+    Ok(match node {
         TransitNode::Nil => Value::Null,
         TransitNode::Bool(b) => Value::Boolean(*b),
         TransitNode::Int(i) => Value::Integer(*i),
-        TransitNode::Float(f) => Value::Float(f.get()),
+        TransitNode::Float(f) => Value::Float(NotJson::finite(f.get())?),
         TransitNode::Str(s) => Value::String(s.clone()),
         // The leading marker is kept so a carried keyword stays recognisable
         // as one rather than becoming an ordinary string.
@@ -246,19 +256,29 @@ fn node_value(node: &TransitNode) -> Value {
         TransitNode::Symbol(s) => Value::String(s.clone()),
         TransitNode::Uuid(u) => Value::String(u.clone()),
         TransitNode::Instant(t) | TransitNode::InstantMillis(t) => Value::String(t.clone()),
-        TransitNode::List(items) => Value::Array(items.iter().map(node_value).collect()),
+        TransitNode::List(items) => Value::Array(
+            items
+                .iter()
+                .enumerate()
+                .map(|(i, item)| node_value(item).map_err(|e| e.under(&format!("[{i}]"))))
+                .collect::<Result<_, _>>()?,
+        ),
         TransitNode::Map(pairs) => Value::Object(
             pairs
                 .iter()
-                .map(|(k, v)| (map_key(k), node_value(v)))
-                .collect(),
+                .map(|(k, v)| {
+                    let key = map_key(k);
+                    let value = node_value(v).map_err(|e| e.under(&key))?;
+                    Ok((key, value))
+                })
+                .collect::<Result<_, NotJson>>()?,
         ),
-        TransitNode::Tagged(tag, inner) => Value::Object(
-            [(format!("~#{tag}"), node_value(inner))]
-                .into_iter()
-                .collect(),
-        ),
-    }
+        TransitNode::Tagged(tag, inner) => {
+            let key = format!("~#{tag}");
+            let value = node_value(inner).map_err(|e| e.under(&key))?;
+            Value::Object([(key, value)].into_iter().collect())
+        }
+    })
 }
 
 fn map_key(node: &TransitNode) -> String {
@@ -610,12 +630,27 @@ mod tests {
     }
 
     #[test]
+    fn a_non_finite_transit_float_is_refused_by_its_path() {
+        let node = TransitNode::Map(vec![(
+            TransitNode::Keyword("w".into()),
+            TransitNode::List(vec![
+                TransitNode::Int(1),
+                TransitNode::Float(crate::F64Bits::new(f64::INFINITY)),
+            ]),
+        )]);
+        assert_eq!(
+            format!("{:?}", node_value(&node)),
+            r#"Err(NonFiniteFloat { path: ":w[1]", value: inf })"#
+        );
+    }
+
+    #[test]
     fn nested_collections_carry_as_structured_json() {
         let node = TransitNode::Map(vec![(
             TransitNode::Keyword("icon".into()),
             TransitNode::List(vec![TransitNode::Int(1), TransitNode::Str("x".into())]),
         )]);
-        let Value::Object(map) = node_value(&node) else {
+        let Value::Object(map) = node_value(&node).expect("every float is finite") else {
             panic!("a Transit map carries as an object")
         };
         assert_eq!(

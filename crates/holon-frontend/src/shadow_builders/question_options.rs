@@ -146,7 +146,10 @@ holon_macros::widget_builder! {
         };
 
         let row = ba.ctx.row();
-        let resolved = resolve_args(args, row);
+        let resolved = match resolve_args(args, row) {
+            Ok(resolved) => resolved,
+            Err(e) => return ViewModel::error("question_options", e.to_string()),
+        };
         assert!(
             resolved.positional.is_empty(),
             "question_options: `action:` takes named params only, got {} positional",

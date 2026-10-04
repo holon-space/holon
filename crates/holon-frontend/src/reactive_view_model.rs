@@ -38,8 +38,16 @@ use crate::view_model::ViewModel;
 /// and the current container-query `Mutable<Option<AvailableSpace>>`, so the
 /// node can recompute its own props when data (or later, expr) changes without
 /// the driver having to call `services.interpret()`.
-pub type InterpretFn =
-    Arc<dyn Fn(&RenderExpr, &Arc<DataRow>) -> HashMap<String, Value> + Send + Sync>;
+pub type InterpretFn = Arc<
+    dyn Fn(&RenderExpr, &Arc<DataRow>) -> Result<HashMap<String, Value>, NotAPropsUpdate>
+        + Send
+        + Sync,
+>;
+
+/// The expression renders this row as an error node, which props on the
+/// existing node cannot express: the node must be re-interpreted whole.
+#[derive(Debug)]
+pub struct NotAPropsUpdate;
 
 // ── CollectionData (builder-time helper) ───────────────────────────────
 
@@ -805,17 +813,6 @@ impl ReactiveViewModel {
     pub fn patch_mutables(&self, fresh: &ReactiveViewModel) {
         self.expr.set(fresh.expr.get_cloned());
         self.props.set(fresh.props.get_cloned());
-    }
-
-    /// Set the render expression and recompute props.
-    ///
-    /// Used when a shared template `Mutable<RenderExpr>` changes — each node
-    /// that shares the template recomputes its own props from its own data.
-    pub fn set_expr(&self, new_expr: RenderExpr) {
-        self.expr.set(new_expr.clone());
-        if let Some(ref f) = self.interpret_fn {
-            self.props.set(f(&new_expr, &self.data.get_cloned()));
-        }
     }
 
     /// Receive a structural update and apply it in place.
@@ -1744,6 +1741,20 @@ impl ReactiveViewModel {
         Self::from_widget("error", props)
     }
 
+    pub fn is_error(&self) -> bool {
+        self.widget_name().as_deref() == Some("error")
+    }
+
+    /// This freshly interpreted node's props, for applying onto the existing
+    /// node of the same widget.
+    pub fn props_update(&self) -> Result<HashMap<String, Value>, NotAPropsUpdate> {
+        if self.is_error() {
+            Err(NotAPropsUpdate)
+        } else {
+            Ok(self.props.get_cloned())
+        }
+    }
+
     pub fn empty() -> Self {
         Self::default()
     }
@@ -2108,6 +2119,10 @@ impl crate::render_interpreter::WithEntity for ReactiveViewModel {
 
     fn refused_row(refusal: &holon_api::RowIdUnusable) -> Self {
         Self::error("refused_row", refusal.to_string())
+    }
+
+    fn eval_error(message: String) -> Self {
+        Self::error("eval_error", message)
     }
 }
 

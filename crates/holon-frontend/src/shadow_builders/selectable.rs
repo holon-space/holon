@@ -10,12 +10,17 @@ use holon_api::widget_spec::DataRow;
 
 use super::prelude::*;
 
-fn build_wiring(name: &str, args: &[Arg], row: &DataRow, trigger: Trigger) -> OperationWiring {
+fn build_wiring(
+    name: &str,
+    args: &[Arg],
+    row: &DataRow,
+    trigger: Trigger,
+) -> Result<OperationWiring, holon_api::computation::ComputeError> {
     let (entity_name, op_name) = match name.split_once('.') {
         Some((e, o)) => (e.to_string(), o.to_string()),
         None => ("block".to_string(), name.to_string()),
     };
-    let resolved = resolve_args(args, row);
+    let resolved = resolve_args(args, row)?;
     let mut bound_params: std::collections::HashMap<String, Value> =
         std::collections::HashMap::new();
     for (k, v) in &resolved.named {
@@ -24,7 +29,7 @@ fn build_wiring(name: &str, args: &[Arg], row: &DataRow, trigger: Trigger) -> Op
     for (i, v) in resolved.positional.iter().enumerate() {
         bound_params.insert(format!("pos_{i}"), v.clone());
     }
-    OperationWiring {
+    Ok(OperationWiring {
         modified_param: String::new(),
         descriptor: OperationDescriptor {
             entity_name: EntityName::new(entity_name),
@@ -47,7 +52,7 @@ fn build_wiring(name: &str, args: &[Arg], row: &DataRow, trigger: Trigger) -> Op
             guard: holon_api::pattern::OpGuard::None,
             arcs: holon_api::arcs::TransitionArcs::Undeclared,
         },
-    }
+    })
 }
 
 holon_macros::widget_builder! {
@@ -74,14 +79,17 @@ holon_macros::widget_builder! {
         // preserve the previous wire format for ops that consume them.
         let mut operations = Vec::new();
         if let Some(RenderExpr::FunctionCall { name, args, .. }) = action {
-            operations.push(build_wiring(
+            match build_wiring(
                 name,
                 args,
                 ba.ctx.row(),
                 Trigger::Click {
                     modifiers: ClickModifiers::none(),
                 },
-            ));
+            ) {
+                Ok(wiring) => operations.push(wiring),
+                Err(e) => return ViewModel::error("selectable", e.to_string()),
+            }
         }
         // Modifier-bound secondary actions. Each `<modifier>_action:` template
         // declares a SEPARATE wiring fired only when that modifier is held at
@@ -108,9 +116,10 @@ holon_macros::widget_builder! {
             (alt_action, ClickModifiers::alt()),
         ] {
             if let Some(RenderExpr::FunctionCall { name, args, .. }) = template {
-                operations.push(build_wiring(name, args, ba.ctx.row(), Trigger::Click {
-                    modifiers,
-                }));
+                match build_wiring(name, args, ba.ctx.row(), Trigger::Click { modifiers }) {
+                    Ok(wiring) => operations.push(wiring),
+                    Err(e) => return ViewModel::error("selectable", e.to_string()),
+                }
             }
         }
 

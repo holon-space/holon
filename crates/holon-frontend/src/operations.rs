@@ -246,7 +246,10 @@ impl OperationIntent {
 ///
 /// Expects a `FunctionCall` whose name is `"entity.operation"` (dot-separated).
 /// Named arguments are evaluated against the current data row.
-pub fn parse_action_expr(action_expr: &RenderExpr, row: &DataRow) -> Option<OperationIntent> {
+pub fn parse_action_expr(
+    action_expr: &RenderExpr,
+    row: &DataRow,
+) -> Result<Option<OperationIntent>, holon_api::computation::ComputeError> {
     if let RenderExpr::FunctionCall {
         name,
         args: action_args,
@@ -261,19 +264,19 @@ pub fn parse_action_expr(action_expr: &RenderExpr, row: &DataRow) -> Option<Oper
             let mut params = HashMap::new();
             for arg in action_args {
                 if let Some(ref param_name) = arg.name {
-                    let value = eval_to_value(&arg.value, row);
+                    let value = eval_to_value(&arg.value, row)?;
                     params.insert(param_name.clone(), value);
                 }
             }
 
-            return Some(OperationIntent {
+            return Ok(Some(OperationIntent {
                 entity_name,
                 op_name,
                 params,
-            });
+            }));
         }
     }
-    None
+    Ok(None)
 }
 
 /// Filter operations whose `affected_fields` intersect with the given field

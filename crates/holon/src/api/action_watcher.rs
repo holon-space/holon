@@ -302,17 +302,29 @@ async fn fire_action(
     // see `is_template_arg`) into an unevaluated `templates` bucket the op never
     // sees — which silently dropped `block.create`'s `parent_id` and broke
     // journal auto-create ("parent_id is required for block creation").
-    let mut params: StorageEntity = parsed_action
-        .params
-        .iter()
-        .filter_map(|arg| {
-            let name = arg.name.as_ref()?;
-            match eval_to_interp(&arg.value, data, &CORE_VALUE_FN_LOOKUP) {
-                InterpValue::Value(v) => Some((name.clone().into(), v)),
-                InterpValue::Rows(_) => None,
+    let mut params = StorageEntity::new();
+    for arg in &parsed_action.params {
+        let Some(name) = arg.name.as_ref() else {
+            continue;
+        };
+        match eval_to_interp(&arg.value, data, &CORE_VALUE_FN_LOOKUP) {
+            Ok(InterpValue::Value(v)) => {
+                params.insert(name.clone().into(), v);
             }
-        })
-        .collect();
+            Ok(InterpValue::Rows(_)) => {}
+            Err(e) => {
+                status.set(
+                    rule.as_str(),
+                    RuleStatus::ExecError(format!("param {name}: {e}")),
+                );
+                tracing::error!(
+                    "[action_watcher] action {} refused: param {name}: {e}",
+                    rule.as_str()
+                );
+                return;
+            }
+        }
+    }
 
     // Deterministic effect id (ADR 0024 P4): a rule-fired create mints a
     // name-based UUIDv5 of (rule-id, firing-key, slot) so every replica firing

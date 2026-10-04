@@ -423,15 +423,22 @@ Poll for accumulated CDC changes from a watch.
 - `watch_id` (string): Watch ID returned from `watch_query`
 
 **Returns:**
-Array of change objects:
+The changes since the last poll. A change whose row has no JSON form (for
+example a NaN or infinite float) is left out of `changes` and named in
+`omitted`. `degraded` carries the disclosures of the batches the changes came
+in (for example a CDC row the storage layer could not read).
 ```json
-[
-  {
-    "change_type": "Created|Updated|Deleted",
-    "entity_id": "entity-id",
-    "data": {...}
-  }
-]
+{
+  "changes": [
+    {
+      "change_type": "Created|Updated|Deleted",
+      "entity_id": "entity-id",
+      "data": {...}
+    }
+  ],
+  "omitted": ["Created of entity bad: 'd' is the non-finite float inf; ..."],
+  "degraded": []
+}
 ```
 
 **Note on `entity_id`:**

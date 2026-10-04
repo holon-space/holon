@@ -15,6 +15,7 @@ use serde::Serialize;
 use crate::Value;
 use crate::computation::Computation;
 use crate::computation::FieldTypes;
+use crate::entity_profile::dynamic_to_value;
 
 /// Result type for entity operations
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -184,6 +185,9 @@ impl ComputedSpec {
         let expr = holon_expr::CompiledExpr::compile(engine, source)?;
         let computation = match crate::expr_parser::parse_typed(source, types) {
             Ok(c) => c,
+            Err(e) if e.kind == crate::expr_parser::ExprParseErrorKind::NonFiniteLiteral => {
+                return Err(format!("computed field {name}: {e}"));
+            }
             Err(e) => {
                 tracing::debug!(
                     field = %name,
@@ -944,15 +948,22 @@ impl TypeDefinition {
             let FieldLifetime::Computed { spec } = &field.lifetime else {
                 continue;
             };
-            match engine.eval_ast_with_scope::<rhai::Dynamic>(&mut scope, &spec.expr.ast) {
-                Ok(result) => {
-                    let value = dynamic_to_value(result.clone());
+            let evaluated = engine
+                .eval_ast_with_scope::<rhai::Dynamic>(&mut scope, &spec.expr.ast)
+                .map_err(|e| e.to_string())
+                .and_then(|result| {
+                    let value =
+                        dynamic_to_value(&result, &spec.expr.source).map_err(|e| e.to_string())?;
+                    Ok((result, value))
+                });
+            match evaluated {
+                Ok((result, value)) => {
                     scope.push(field.name.clone(), result);
                     row.insert(field.name.as_str().into(), value);
                 }
                 Err(e) => {
-                    tracing::debug!(
-                        "Computed field '{}' on '{}' failed: {e}",
+                    tracing::warn!(
+                        "Computed field '{}' on '{}' failed, substituting Null: {e}",
                         field.name,
                         self.name
                     );
@@ -961,21 +972,6 @@ impl TypeDefinition {
             }
         }
         row
-    }
-}
-
-/// Convert a Rhai Dynamic value to a holon Value.
-fn dynamic_to_value(d: rhai::Dynamic) -> Value {
-    if let Ok(s) = d.clone().into_string() {
-        Value::String(s)
-    } else if let Ok(i) = d.as_int() {
-        Value::Integer(i)
-    } else if let Ok(f) = d.as_float() {
-        Value::Float(f)
-    } else if let Ok(b) = d.as_bool() {
-        Value::Boolean(b)
-    } else {
-        Value::Null
     }
 }
 
@@ -1350,6 +1346,35 @@ mod mutation_gap_tests {
         let enriched = td.enrich(row);
         assert_eq!(enriched.get("score"), Some(&Value::Integer(3)));
         assert_eq!(enriched.get("a"), Some(&Value::Integer(2)));
+    }
+
+    #[test]
+    fn enrich_refuses_an_overflowing_computed_field() {
+        let engine = rhai::Engine::new();
+        let spec = ComputedSpec::parse(
+            "ratio",
+            "base * 10.0",
+            ComputedTier::ComputedLive,
+            &FieldTypes::new(),
+            &engine,
+        )
+        .unwrap();
+        let td = TypeDefinition::new(
+            "thing",
+            vec![
+                FieldSchema::new("ratio", "REAL").lifetime(FieldLifetime::Computed {
+                    spec: Box::new(spec),
+                }),
+            ],
+        );
+        let row: StorageEntity = [(std::sync::Arc::<str>::from("base"), Value::Float(1e308))]
+            .into_iter()
+            .collect();
+        assert_eq!(
+            td.enrich(row).get("ratio"),
+            Some(&Value::Null),
+            "an infinite result is refused"
+        );
     }
 
     #[test]

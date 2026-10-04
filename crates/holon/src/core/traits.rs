@@ -19,16 +19,16 @@ pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + S
 /// Convert a holon_api::Value to turso::Value for database operations.
 /// This handles all Value variants including Object and Array by serializing
 /// them to JSON.
-pub fn value_to_turso(value: &Value) -> turso::Value {
-    match value {
+pub fn value_to_turso(value: &Value) -> std::result::Result<turso::Value, holon_api::NotJson> {
+    Ok(match value {
         Value::String(s) => turso::Value::Text(s.clone()),
         Value::Integer(i) => turso::Value::Integer(*i),
-        Value::Float(f) => turso::Value::Real(*f),
+        Value::Float(f) => turso::Value::Real(holon_api::NotJson::finite(*f)?),
         Value::Boolean(b) => turso::Value::Integer(if *b { 1 } else { 0 }),
         Value::Null => turso::Value::Null,
         // DateTime, Json, Reference, Object, Array all serialize to JSON text
-        v => turso::Value::Text(v.to_json_string()),
-    }
+        v => turso::Value::Text(v.to_json_string()?),
+    })
 }
 
 // DELETED (C4 ruling, "generalize the Predicate trait"): the static-dispatch
@@ -81,5 +81,20 @@ mod tests {
         let indexes = td.to_index_sql();
         assert_eq!(indexes.len(), 1);
         assert!(indexes[0].contains("CREATE INDEX IF NOT EXISTS idx_tasks_priority"));
+    }
+
+    #[test]
+    fn a_non_finite_float_has_no_turso_value() {
+        for x in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let outcome = value_to_turso(&Value::Float(x));
+            assert!(
+                matches!(outcome, Err(holon_api::NotJson::NonFiniteFloat { .. })),
+                "a bound {x} is stored as NULL; it must be refused, got {outcome:?}"
+            );
+        }
+        assert_eq!(
+            value_to_turso(&Value::Float(1.5)).unwrap(),
+            turso::Value::Real(1.5)
+        );
     }
 }

@@ -91,30 +91,37 @@ async fn an_id_deleted_in_the_global_doc_can_be_created_in_the_layout_doc() -> R
 }
 
 /// The docs store each property as JSON, which has no NaN or infinity, so a
-/// block read from a doc holds only finite floats.
+/// non-finite float is refused by name rather than stored as null.
 #[tokio::test]
-async fn a_non_finite_float_property_reads_back_as_null() -> Result<()> {
+async fn a_non_finite_float_property_is_refused_by_name() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let store = LoroDocumentStore::new(dir.path().to_path_buf());
     let registry = registry(&store).await?;
-    let id = EntityUri::block("floats");
-    let properties = HashMap::from([
-        ("nan".to_string(), Value::Float(f64::NAN)),
-        ("inf".to_string(), Value::Float(f64::INFINITY)),
-        ("neg_inf".to_string(), Value::Float(f64::NEG_INFINITY)),
+    let cases = [
+        ("nan", Value::Float(f64::NAN), "'nan'", "NaN"),
+        ("inf", Value::Float(f64::INFINITY), "'inf'", "inf"),
         (
-            "nested".to_string(),
-            Value::Array(vec![Value::Float(f64::NAN)]),
+            "neg_inf",
+            Value::Float(f64::NEG_INFINITY),
+            "'neg_inf'",
+            "-inf",
         ),
-    ]);
-    create(&registry, &EntityUri::no_parent(), &id, &properties).await?;
-
-    let doc = store.get_doc(DocScope::Global).await?;
-    let blocks = doc.with_read(|d| Ok(snapshot_blocks_from_doc(d)))?;
-    let stored = &blocks[id.as_str()].block.properties;
-    assert_eq!(stored["nan"], Value::Null);
-    assert_eq!(stored["inf"], Value::Null);
-    assert_eq!(stored["neg_inf"], Value::Null);
-    assert_eq!(stored["nested"], Value::Array(vec![Value::Null]));
+        (
+            "nested",
+            Value::Array(vec![Value::Float(f64::NAN)]),
+            "'nested[0]'",
+            "NaN",
+        ),
+    ];
+    for (key, value, path, shown) in cases {
+        let id = EntityUri::block(&format!("floats-{key}"));
+        let properties = HashMap::from([(key.to_string(), value)]);
+        let err = create(&registry, &EntityUri::no_parent(), &id, &properties)
+            .await
+            .expect_err("a non-finite float must be refused, not stored as null");
+        let msg = format!("{err:?}");
+        assert!(msg.contains(path), "the refusal must name {path}: {msg}");
+        assert!(msg.contains(shown), "the refusal must name {shown}: {msg}");
+    }
     Ok(())
 }

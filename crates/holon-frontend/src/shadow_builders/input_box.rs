@@ -21,12 +21,12 @@ fn submit_wiring(
     row: &DataRow,
     modified_param: String,
     id_param: String,
-) -> OperationWiring {
+) -> Result<OperationWiring, holon_api::computation::ComputeError> {
     let (entity_name, op_name) = match name.split_once('.') {
         Some((e, o)) => (e.to_string(), o.to_string()),
         None => ("block".to_string(), name.to_string()),
     };
-    let resolved = resolve_args(args, row);
+    let resolved = resolve_args(args, row)?;
     let mut bound_params: std::collections::HashMap<String, Value> =
         std::collections::HashMap::new();
     // The row's `id` names the entity this box composes for. Cache tables store
@@ -43,7 +43,7 @@ fn submit_wiring(
     for (i, v) in resolved.positional.iter().enumerate() {
         bound_params.insert(format!("pos_{i}"), v.clone());
     }
-    OperationWiring {
+    Ok(OperationWiring {
         modified_param,
         descriptor: OperationDescriptor {
             entity_name: EntityName::new(entity_name),
@@ -68,7 +68,7 @@ fn submit_wiring(
             guard: holon_api::pattern::OpGuard::None,
             arcs: holon_api::arcs::TransitionArcs::Undeclared,
         },
-    }
+    })
 }
 
 holon_macros::widget_builder! {
@@ -89,7 +89,10 @@ holon_macros::widget_builder! {
                 "input_box requires an `action:` operation template".to_string(),
             );
         };
-        let operations = vec![submit_wiring(name, args, ba.ctx.row(), text_param, id_param)];
+        let operations = match submit_wiring(name, args, ba.ctx.row(), text_param, id_param) {
+            Ok(wiring) => vec![wiring],
+            Err(e) => return ViewModel::error("input_box", e.to_string()),
+        };
 
         let mut __props = std::collections::HashMap::new();
         __props.insert("placeholder".to_string(), Value::String(placeholder));

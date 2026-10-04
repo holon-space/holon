@@ -52,7 +52,10 @@ holon_macros::widget_builder! {
         };
         let (current, label) = read_current(&row_arc);
 
-        let states = resolve_states(ba.args, ba.ctx.row()).join(",");
+        let states = match resolve_states(ba.args, ba.ctx.row()) {
+            Ok(states) => states.join(","),
+            Err(e) => return ViewModel::error("state_toggle", e.to_string()),
+        };
 
         let mt = ba.args.get_f64("mt").unwrap_or(0.0);
 

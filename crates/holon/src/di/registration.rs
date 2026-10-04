@@ -344,18 +344,22 @@ fn register_shared_services(injector: &Injector) -> Result<()> {
         )) as Arc<dyn OperationProvider>
     }));
 
-    // Degraded-state disclosure bus: the only channel through which a frontend
-    // learns that something degraded, so every container has one. It is a
-    // plain broadcast channel, so mode has no say in whether it exists.
-    injector.provide::<Arc<holon_api::ConditionBus>>(Provider::root(|_| {
-        Shared::new(Arc::new(holon_api::ConditionBus::new()))
-    }));
+    register_condition_bus(injector);
 
     OperationModule
         .configure(injector)
         .map_err(|e| anyhow::anyhow!("Failed to register OperationModule: {}", e))?;
 
     Ok(())
+}
+
+/// Degraded-state disclosure bus: the only channel through which a frontend
+/// learns that something degraded, so every container has one. It is a
+/// plain broadcast channel, so mode has no say in whether it exists.
+fn register_condition_bus(injector: &Injector) {
+    injector.provide::<Arc<holon_api::ConditionBus>>(Provider::root(|_| {
+        Shared::new(Arc::new(holon_api::ConditionBus::new()))
+    }));
 }
 
 /// Register the minimal, **Turso-free** core (ADR 0004 Phase 9).
@@ -387,6 +391,7 @@ pub fn register_core_services_no_turso(injector: &Injector, db_path: PathBuf) ->
     injector.provide::<holon_api::link_parser::LinkTargetClassifier>(Provider::root(move |_| {
         Shared::new(link_classifier.clone())
     }));
+    register_condition_bus(injector);
 
     Ok(())
 }
@@ -498,6 +503,7 @@ async fn create_profile_resolver(
             )
             .map_err(|e| anyhow::anyhow!("[ProfileResolver] {e}"))?,
         );
+    let computed_conditions = Arc::clone(&conditions);
     match matview_manager.watch(PROFILE_SQL).await {
         Ok(result) => {
             let load =
@@ -528,6 +534,7 @@ async fn create_profile_resolver(
                 live_entities,
                 entity_operations,
                 type_profiles,
+                computed_conditions,
             )))
         }
         Err(e) => {
@@ -546,6 +553,7 @@ async fn create_profile_resolver(
                 live_entities,
                 entity_operations,
                 type_profiles,
+                computed_conditions,
             )))
         }
     }

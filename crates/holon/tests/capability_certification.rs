@@ -301,7 +301,7 @@ impl HolonNative {
                 anyhow::anyhow!("the bag probe's anchor block must be creatable: {e:#}")
             })?;
 
-        let json: serde_json::Value = value.clone().into();
+        let json = value.clone().try_into_json()?;
         let bag = serde_json::json!({ key: json });
         let mut params: holon_api::StorageEntity = HashMap::new();
         params.insert("id".into(), Value::String(block_uri(id)));

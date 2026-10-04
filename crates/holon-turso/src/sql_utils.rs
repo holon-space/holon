@@ -1,15 +1,15 @@
+use holon_api::NotJson;
 use holon_api::Value;
-use serde_json;
 
 /// Convert a `Value` to a SQL literal string suitable for embedding in raw SQL.
 ///
 /// Array and Object types are serialized as JSON strings.
-pub fn value_to_sql_literal(value: &Value) -> String {
-    match value {
+pub fn value_to_sql_literal(value: &Value) -> Result<String, NotJson> {
+    Ok(match value {
         Value::Null => "NULL".to_string(),
         Value::Boolean(b) => if *b { "1" } else { "0" }.to_string(),
         Value::Integer(i) => i.to_string(),
-        Value::Float(f) => f.to_string(),
+        Value::Float(f) => NotJson::finite(*f)?.to_string(),
         Value::String(s) | Value::DateTime(s) | Value::Json(s) => {
             format!("'{}'", s.replace('\'', "''"))
         }
@@ -20,11 +20,10 @@ pub fn value_to_sql_literal(value: &Value) -> String {
             "value_to_sql_literal: Value::REMOVED is a write-leg removal instruction, not a value"
         ),
         Value::Array(_) | Value::Object(_) => {
-            let json: serde_json::Value = value.clone().into();
-            let s = serde_json::to_string(&json).expect("Value→JSON serialization cannot fail");
+            let s = value.to_json_string()?;
             format!("'{}'", s.replace('\'', "''"))
         }
-    }
+    })
 }
 
 /// The sigils SQLite accepts in front of a named parameter. All three are
@@ -174,43 +173,55 @@ mod tests {
     #[test]
     fn test_string_escapes_quotes() {
         assert_eq!(
-            value_to_sql_literal(&Value::String("it's".into())),
+            value_to_sql_literal(&Value::String("it's".into())).unwrap(),
             "'it''s'"
         );
     }
 
     #[test]
     fn test_null() {
-        assert_eq!(value_to_sql_literal(&Value::Null), "NULL");
+        assert_eq!(value_to_sql_literal(&Value::Null).unwrap(), "NULL");
     }
 
     #[test]
     fn test_boolean() {
-        assert_eq!(value_to_sql_literal(&Value::Boolean(true)), "1");
-        assert_eq!(value_to_sql_literal(&Value::Boolean(false)), "0");
+        assert_eq!(value_to_sql_literal(&Value::Boolean(true)).unwrap(), "1");
+        assert_eq!(value_to_sql_literal(&Value::Boolean(false)).unwrap(), "0");
     }
 
     #[test]
     fn test_integer() {
-        assert_eq!(value_to_sql_literal(&Value::Integer(42)), "42");
+        assert_eq!(value_to_sql_literal(&Value::Integer(42)).unwrap(), "42");
     }
 
     #[test]
     fn test_float() {
-        assert_eq!(value_to_sql_literal(&Value::Float(2.5)), "2.5");
+        assert_eq!(value_to_sql_literal(&Value::Float(2.5)).unwrap(), "2.5");
+    }
+
+    #[test]
+    fn a_non_finite_float_has_no_literal_at_any_depth() {
+        use std::collections::HashMap;
+        assert!(value_to_sql_literal(&Value::Float(f64::INFINITY)).is_err());
+        let nested = Value::Object(HashMap::from([(
+            "k".into(),
+            Value::Array(vec![Value::Float(f64::NAN)]),
+        )]));
+        let err = value_to_sql_literal(&nested).unwrap_err().to_string();
+        assert!(err.contains("'k[0]'") && err.contains("NaN"), "{err}");
     }
 
     #[test]
     fn test_array() {
         let val = Value::Array(vec![Value::Integer(1), Value::String("two".into())]);
-        assert_eq!(value_to_sql_literal(&val), "'[1,\"two\"]'");
+        assert_eq!(value_to_sql_literal(&val).unwrap(), "'[1,\"two\"]'");
     }
 
     #[test]
     fn test_object() {
         use std::collections::HashMap;
         let val = Value::Object(HashMap::from([("key".into(), Value::String("val".into()))]));
-        assert_eq!(value_to_sql_literal(&val), "'{\"key\":\"val\"}'");
+        assert_eq!(value_to_sql_literal(&val).unwrap(), "'{\"key\":\"val\"}'");
     }
 
     // A `-` that is NOT part of a `--` comment must not swallow the following

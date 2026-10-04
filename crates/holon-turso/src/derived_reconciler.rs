@@ -30,9 +30,13 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::Hash;
 use std::hash::Hasher;
+use std::sync::Arc;
 
 use holon_api::Change;
-use holon_api::Value;
+use holon_api::Condition;
+use holon_api::ConditionBus;
+use holon_api::ConditionKey;
+use holon_api::DerivedFieldSeat;
 use holon_api::computation::Context;
 use holon_api::computation::DerivedField;
 use holon_core::storage::StorageEntity;
@@ -42,7 +46,6 @@ use tokio_stream::StreamExt;
 
 use crate::matview_manager::MatviewManager;
 use crate::turso::DbHandle;
-use crate::turso::value_to_turso_param;
 
 /// A declared derived field paired with the provenance hash of its computation.
 /// Provenance lets a value produced by an outdated declaration be detected: a
@@ -114,12 +117,16 @@ fn change_to_event(change: Change<StorageEntity>) -> Option<SidecarEvent> {
     }
 }
 
-/// Recompute every declared field for one block and upsert the results in a
-/// single transaction. A computation that fails to evaluate (e.g. a declared
-/// input column absent from the source row) is surfaced LOUDLY at `error`
-/// level with full context and its row is skipped — never written as a faked
-/// value.
-async fn apply_upsert(db_handle: &DbHandle, fields: &[CompiledDerived], row: &StorageEntity) {
+/// Recompute every declared field for one block and write the results in a
+/// single transaction. A field with no value (its computation failed, or gave
+/// what JSON cannot hold) loses its row and raises `DerivedFieldNotComputed`
+/// until it computes again.
+async fn apply_upsert(
+    db_handle: &DbHandle,
+    conditions: &ConditionBus,
+    fields: &[CompiledDerived],
+    row: &StorageEntity,
+) {
     let block_id = match row.get("id").and_then(|v| v.as_string()) {
         Some(id) => id.to_string(),
         None => {
@@ -132,44 +139,37 @@ async fn apply_upsert(db_handle: &DbHandle, fields: &[CompiledDerived], row: &St
     };
     let ctx = row_to_context(row);
     let mut statements: Vec<(String, Vec<turso::Value>)> = Vec::with_capacity(fields.len());
+    let mut failures: Vec<(String, Option<String>)> = Vec::with_capacity(fields.len());
     for compiled in fields {
-        let value = match compiled.field.computation.eval(&ctx) {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::error!(
-                    %block_id,
-                    field = %compiled.field.name,
-                    error = %e,
-                    "[DerivedFieldReconciler] derived-field evaluation failed; skipping this \
-                     field's sidecar write (no faked value)"
-                );
-                continue;
-            }
-        };
-        let value_json = match serde_json::to_string(&value) {
-            Ok(j) => j,
-            Err(e) => {
-                tracing::error!(
-                    %block_id,
-                    field = %compiled.field.name,
-                    error = %e,
-                    "[DerivedFieldReconciler] could not JSON-encode derived value"
-                );
-                continue;
-            }
-        };
-        statements.push((
-            "INSERT INTO block_derived (block_id, field_name, value_json, provenance) VALUES (?, \
-             ?, ?, ?) ON CONFLICT(block_id, field_name) DO UPDATE SET value_json = \
-             excluded.value_json, provenance = excluded.provenance"
-                .to_string(),
-            vec![
-                value_to_turso_param(&Value::String(block_id.clone())),
-                value_to_turso_param(&Value::String(compiled.field.name.to_string())),
-                value_to_turso_param(&Value::String(value_json)),
-                value_to_turso_param(&Value::String(compiled.provenance.clone())),
-            ],
-        ));
+        let field = compiled.field.name.to_string();
+        let computed = compiled
+            .field
+            .computation
+            .eval(&ctx)
+            .map_err(|e| e.to_string())
+            .and_then(|value| value.to_json_string().map_err(|e| e.to_string()));
+        statements.push(match &computed {
+            Ok(value_json) => (
+                "INSERT INTO block_derived (block_id, field_name, value_json, provenance) VALUES \
+                 (?, ?, ?, ?) ON CONFLICT(block_id, field_name) DO UPDATE SET value_json = \
+                 excluded.value_json, provenance = excluded.provenance"
+                    .to_string(),
+                vec![
+                    turso::Value::Text(block_id.clone()),
+                    turso::Value::Text(field.clone()),
+                    turso::Value::Text(value_json.clone()),
+                    turso::Value::Text(compiled.provenance.clone()),
+                ],
+            ),
+            Err(_) => (
+                "DELETE FROM block_derived WHERE block_id = ? AND field_name = ?".to_string(),
+                vec![
+                    turso::Value::Text(block_id.clone()),
+                    turso::Value::Text(field.clone()),
+                ],
+            ),
+        });
+        failures.push((field, computed.err()));
     }
     if statements.is_empty() {
         return;
@@ -180,15 +180,36 @@ async fn apply_upsert(db_handle: &DbHandle, fields: &[CompiledDerived], row: &St
             error = %e,
             "[DerivedFieldReconciler] sidecar upsert transaction failed"
         );
+        return;
+    }
+    for (field, failure) in failures {
+        match failure {
+            Some(reason) => conditions.emit(Condition::derived_field_not_computed(
+                DerivedFieldSeat::Sidecar,
+                &block_id,
+                &field,
+                reason,
+            )),
+            None => conditions.clear(&ConditionKey::derived_field_not_computed(
+                DerivedFieldSeat::Sidecar,
+                &block_id,
+                &field,
+            )),
+        }
     }
 }
 
 /// Retract every sidecar row for a deleted block.
-async fn apply_delete(db_handle: &DbHandle, block_id: &str) {
+async fn apply_delete(
+    db_handle: &DbHandle,
+    conditions: &ConditionBus,
+    fields: &[CompiledDerived],
+    block_id: &str,
+) {
     if let Err(e) = db_handle
         .transaction(vec![(
             "DELETE FROM block_derived WHERE block_id = ?".to_string(),
-            vec![value_to_turso_param(&Value::String(block_id.to_string()))],
+            vec![turso::Value::Text(block_id.to_string())],
         )])
         .await
     {
@@ -197,6 +218,14 @@ async fn apply_delete(db_handle: &DbHandle, block_id: &str) {
             error = %e,
             "[DerivedFieldReconciler] sidecar retraction transaction failed"
         );
+        return;
+    }
+    for compiled in fields {
+        conditions.clear(&ConditionKey::derived_field_not_computed(
+            DerivedFieldSeat::Sidecar,
+            block_id,
+            compiled.field.name.as_str(),
+        ));
     }
 }
 
@@ -216,6 +245,7 @@ pub async fn spawn_derived_field_reconciler(
     db_handle: DbHandle,
     source_view_sql: &str,
     fields: Vec<DerivedField>,
+    conditions: Arc<ConditionBus>,
 ) -> anyhow::Result<DerivedFieldReconcilerHandle> {
     let compiled: Vec<CompiledDerived> = fields
         .into_iter()
@@ -234,8 +264,12 @@ pub async fn spawn_derived_field_reconciler(
     let reconciler = tokio::spawn(async move {
         while let Some(event) = event_rx.recv().await {
             match event {
-                SidecarEvent::Upsert(row) => apply_upsert(&db_handle, &compiled, &row).await,
-                SidecarEvent::Delete(id) => apply_delete(&db_handle, &id).await,
+                SidecarEvent::Upsert(row) => {
+                    apply_upsert(&db_handle, &conditions, &compiled, &row).await
+                }
+                SidecarEvent::Delete(id) => {
+                    apply_delete(&db_handle, &conditions, &compiled, &id).await
+                }
             }
         }
     });

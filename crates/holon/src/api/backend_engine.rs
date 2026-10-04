@@ -674,7 +674,7 @@ impl BackendEngine {
             sql_queries.len()
         );
         for sql in sql_queries {
-            let sql_with_params = Self::inline_parameters(sql, &HashMap::new());
+            let sql_with_params = Self::inline_parameters(sql, &HashMap::new())?;
             self.matview_manager.preload(&sql_with_params).await?;
         }
         tracing::info!("[BackendEngine] preload_views: completed");
@@ -826,8 +826,24 @@ impl BackendEngine {
     /// Shares its placeholder scanner with the execute path's
     /// `bind_parameters`, so the two cannot come to recognize different
     /// placeholder styles for the same query.
-    fn inline_parameters(sql: &str, params: &HashMap<String, Value>) -> String {
-        rewrite_named_params(sql, &mut |name| params.get(name).map(value_to_sql_literal))
+    fn inline_parameters(
+        sql: &str,
+        params: &HashMap<String, Value>,
+    ) -> std::result::Result<String, holon_api::NotJson> {
+        let mut refused = None;
+        let inlined = rewrite_named_params(sql, &mut |name| match value_to_sql_literal(
+            params.get(name)?,
+        ) {
+            Ok(literal) => Some(literal),
+            Err(e) => {
+                refused.get_or_insert(e.under(name));
+                None
+            }
+        });
+        match refused {
+            Some(e) => Err(e),
+            None => Ok(inlined),
+        }
     }
 
     /// Compute a deterministic view name for a given SQL query and parameters.
@@ -1011,7 +1027,7 @@ impl BackendEngine {
         let ctx = context.unwrap_or_else(QueryContext::root);
         self.bind_context_params(&mut params, &ctx);
 
-        let sql_with_params = Self::inline_parameters(&sql, &params);
+        let sql_with_params = Self::inline_parameters(&sql, &params)?;
         // Same diagnostic as `query_and_watch`: without it this path's views are
         // unattributable, and it is the one that still mints per placement.
         if std::env::var("HOLON_TRACE_VIEWS").is_ok() {
@@ -1054,7 +1070,7 @@ impl BackendEngine {
         // Inline params to get the final SQL for the matview
         let mut params_with_context = params.clone();
         self.bind_context_params(&mut params_with_context, &ctx);
-        let sql_with_params = Self::inline_parameters(&transformed_sql, &params_with_context);
+        let sql_with_params = Self::inline_parameters(&transformed_sql, &params_with_context)?;
 
         // Shapes the fork's DBSP IVM cannot maintain (subquery predicates —
         // EXISTS / NOT EXISTS / IN) would be served from a silently-empty
@@ -1940,27 +1956,27 @@ mod tests {
 
         // Test string parameter
         let sql = "SELECT * FROM block WHERE id = $context_id";
-        let result = BackendEngine::inline_parameters(sql, &params);
+        let result = BackendEngine::inline_parameters(sql, &params).unwrap();
         assert_eq!(result, "SELECT * FROM block WHERE id = 'block-123'");
 
         // Test NULL parameter
         let sql = "SELECT * FROM block WHERE parent_id = $context_parent_id";
-        let result = BackendEngine::inline_parameters(sql, &params);
+        let result = BackendEngine::inline_parameters(sql, &params).unwrap();
         assert_eq!(result, "SELECT * FROM block WHERE parent_id = NULL");
 
         // Test integer parameter
         let sql = "SELECT * FROM block WHERE count = $num";
-        let result = BackendEngine::inline_parameters(sql, &params);
+        let result = BackendEngine::inline_parameters(sql, &params).unwrap();
         assert_eq!(result, "SELECT * FROM block WHERE count = 42");
 
         // Test boolean parameter
         let sql = "SELECT * FROM block WHERE active = $flag";
-        let result = BackendEngine::inline_parameters(sql, &params);
+        let result = BackendEngine::inline_parameters(sql, &params).unwrap();
         assert_eq!(result, "SELECT * FROM block WHERE active = 1");
 
         // Test multiple parameters
         let sql = "SELECT * FROM block WHERE id = $context_id AND parent_id = $context_parent_id";
-        let result = BackendEngine::inline_parameters(sql, &params);
+        let result = BackendEngine::inline_parameters(sql, &params).unwrap();
         assert_eq!(
             result,
             "SELECT * FROM block WHERE id = 'block-123' AND parent_id = NULL"
@@ -1968,14 +1984,14 @@ mod tests {
 
         // Test unknown parameter is preserved
         let sql = "SELECT * FROM block WHERE id = $unknown_param";
-        let result = BackendEngine::inline_parameters(sql, &params);
+        let result = BackendEngine::inline_parameters(sql, &params).unwrap();
         assert_eq!(result, "SELECT * FROM block WHERE id = $unknown_param");
 
         // Test SQL injection prevention (quotes are escaped)
         let mut params_with_quote = HashMap::new();
         params_with_quote.insert("name".to_string(), Value::String("O'Brien".to_string()));
         let sql = "SELECT * FROM users WHERE name = $name";
-        let result = BackendEngine::inline_parameters(sql, &params_with_quote);
+        let result = BackendEngine::inline_parameters(sql, &params_with_quote).unwrap();
         assert_eq!(result, "SELECT * FROM users WHERE name = 'O''Brien'");
     }
 
@@ -2053,7 +2069,7 @@ mod tests {
         );
         let mut params = HashMap::new();
         engine.bind_context_params(&mut params, &context);
-        let inlined = BackendEngine::inline_parameters(&raw_sql, &params);
+        let inlined = BackendEngine::inline_parameters(&raw_sql, &params).unwrap();
 
         assert!(
             inlined.contains("'block:test-1'"),
@@ -2086,7 +2102,8 @@ mod tests {
             "SELECT 1 FROM cc_message WHERE session_id = $context_local_id AND owner = \
              $context_id",
             &params,
-        );
+        )
+        .unwrap();
         assert_eq!(
             inlined,
             "SELECT 1 FROM cc_message WHERE session_id = '5969a71e' AND owner = \
@@ -2528,7 +2545,7 @@ mod tests {
             .expect("PRQL compile");
         let mut params = HashMap::new();
         engine.bind_context_params(&mut params, &QueryContext::root());
-        let inlined = BackendEngine::inline_parameters(&raw_sql, &params);
+        let inlined = BackendEngine::inline_parameters(&raw_sql, &params).unwrap();
 
         assert!(
             !inlined.contains("__NO_PATH__"),

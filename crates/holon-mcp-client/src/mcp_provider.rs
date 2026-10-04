@@ -678,11 +678,6 @@ impl McpOperationProvider {
     }
 }
 
-/// Convert a holon_api::Value to serde_json::Value for MCP tool call params.
-fn to_json_value(v: holon_api::Value) -> serde_json::Value {
-    serde_json::Value::from(v)
-}
-
 #[async_trait]
 impl OperationProvider for McpOperationProvider {
     fn operations(&self) -> Vec<OperationDescriptor> {
@@ -896,8 +891,8 @@ impl OperationProvider for McpOperationProvider {
         let mut json_params: serde_json::Map<String, serde_json::Value> = params
             .into_iter()
             .filter(|(k, _)| !k.starts_with('_'))
-            .map(|(k, v)| (k.to_string(), to_json_value(v)))
-            .collect();
+            .map(|(k, v)| Ok((k.to_string(), v.try_into_json().map_err(|e| e.under(&k))?)))
+            .collect::<std::result::Result<_, holon_api::NotJson>>()?;
         if let Some((param_name, key)) = inject {
             json_params.insert(param_name, serde_json::Value::String(key));
         }

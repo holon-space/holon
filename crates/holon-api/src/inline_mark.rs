@@ -414,7 +414,7 @@ impl TryFrom<Value> for MarkSpan {
     type Error = Box<dyn std::error::Error + Send + Sync>;
 
     fn try_from(v: Value) -> Result<Self, Self::Error> {
-        let json: serde_json::Value = v.into();
+        let json = v.try_into_json()?;
         serde_json::from_value(json).map_err(|e| Box::new(e) as Self::Error)
     }
 }

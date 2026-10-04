@@ -27,8 +27,8 @@
 //!   **fail loud** ([`ComputeError::Arithmetic`]), exactly as Rhai raises
 //!   `Addition overflow` / `Division by zero`.
 //! - mixed `int`/`float` (either operand float) → `float` (Rhai promotes the
-//!   integer). Float arithmetic is IEEE and NOT checked: `x/0.0` → ±inf,
-//!   `0.0/0.0` → NaN, same as Rhai.
+//!   integer). A non-finite float result (`x/0.0`, `0.0/0.0`, overflow) fails
+//!   loud ([`ComputeError::Arithmetic`]), where Rhai yields ±inf or NaN.
 //!
 //! Equality has TWO faces, because Rhai's `==` and `switch` disagree on
 //! cross-type numerics (both verified against the engine):
@@ -409,10 +409,8 @@ pub enum ComputeError {
         detail: String,
     },
     /// Integer overflow or integer division-by-zero — the same conditions
-    /// Rhai's default **checked** integer arithmetic raises as runtime errors.
-    /// Float arithmetic is NOT checked (mirrors Rhai): `x/0.0` yields ±inf and
-    /// `0.0/0.0` NaN at eval time (a non-finite value is only rejected later,
-    /// at SQL-plant time).
+    /// Rhai's default **checked** integer arithmetic raises as runtime errors —
+    /// or a float result that is NaN or infinite.
     Arithmetic {
         detail: String,
     },
@@ -474,14 +472,14 @@ impl SqlFragment {
     /// [`Value::Object`]) are an error, never silently dropped.
     pub fn inline_sql(&self) -> Result<String, InlineError> {
         let mut out = String::with_capacity(self.sql.len());
-        let mut params = self.params.iter();
+        let mut params = self.params.iter().enumerate();
         for ch in self.sql.chars() {
             if ch == '?' {
-                let v = params.next().ok_or(InlineError::PlaceholderParamMismatch {
+                let (i, v) = params.next().ok_or(InlineError::PlaceholderParamMismatch {
                     sql: self.sql.clone(),
                     params: self.params.len(),
                 })?;
-                out.push_str(&value_to_sql_literal(v)?);
+                out.push_str(&value_to_sql_literal(v, i + 1, &self.sql)?);
             } else {
                 out.push(ch);
             }
@@ -507,7 +505,11 @@ pub enum InlineError {
     NonScalarLiteral { value: Value },
     /// A non-finite float (`±inf`/`NaN`) has no SQLite literal syntax; planting
     /// one would silently corrupt the column, so it is a loud planning error.
-    NonFiniteFloat { value: f64 },
+    NonFiniteFloat {
+        value: f64,
+        placeholder: usize,
+        sql: String,
+    },
 }
 
 impl fmt::Display for InlineError {
@@ -524,11 +526,15 @@ impl fmt::Display for InlineError {
                     "cannot inline non-scalar literal into SQL column: {value:?}"
                 )
             }
-            InlineError::NonFiniteFloat { value } => {
+            InlineError::NonFiniteFloat {
+                value,
+                placeholder,
+                sql,
+            } => {
                 write!(
                     f,
-                    "cannot inline non-finite float ({value}) as a SQL literal; SQLite has no \
-                     inf/NaN literal"
+                    "cannot inline non-finite float ({value}) for placeholder {placeholder} of \
+                     `{sql}` as a SQL literal; SQLite has no inf/NaN literal"
                 )
             }
         }
@@ -537,7 +543,7 @@ impl fmt::Display for InlineError {
 
 impl std::error::Error for InlineError {}
 
-fn value_to_sql_literal(v: &Value) -> Result<String, InlineError> {
+fn value_to_sql_literal(v: &Value, placeholder: usize, sql: &str) -> Result<String, InlineError> {
     Ok(match v {
         Value::Integer(i) => i.to_string(),
         // `{:?}` for f64 always renders a decimal point or exponent, so the
@@ -545,7 +551,11 @@ fn value_to_sql_literal(v: &Value) -> Result<String, InlineError> {
         // integer division). Non-finite floats have no SQL literal — fail loud.
         Value::Float(f) => {
             if !f.is_finite() {
-                return Err(InlineError::NonFiniteFloat { value: *f });
+                return Err(InlineError::NonFiniteFloat {
+                    value: *f,
+                    placeholder,
+                    sql: sql.to_string(),
+                });
             }
             format!("{f:?}")
         }
@@ -1020,7 +1030,7 @@ fn as_number(v: &Value, context: &str) -> Result<f64, ComputeError> {
 
 /// Type-faithful arithmetic mirroring Rhai: `int op int` stays integer
 /// (checked; overflow / integer-div-by-zero fail loud), any float operand
-/// promotes to a float result (IEEE, unchecked). See the module header.
+/// promotes to a float result, which must be finite. See the module header.
 fn arith_apply(op: ArithOp, lhs: &Value, rhs: &Value) -> Result<Value, ComputeError> {
     if let (Value::Integer(a), Value::Integer(b)) = (lhs, rhs) {
         let (a, b) = (*a, *b);
@@ -1042,7 +1052,17 @@ fn arith_apply(op: ArithOp, lhs: &Value, rhs: &Value) -> Result<Value, ComputeEr
     }
     let a = as_number(lhs, "arithmetic left operand")?;
     let b = as_number(rhs, "arithmetic right operand")?;
-    Ok(Value::Float(op.apply(a, b)))
+    finite_float(op.apply(a, b), || format!("{a:?} {} {b:?}", op.sql()))
+}
+
+pub(crate) fn finite_float(f: f64, expr: impl FnOnce() -> String) -> Result<Value, ComputeError> {
+    if f.is_finite() {
+        Ok(Value::Float(f))
+    } else {
+        Err(ComputeError::Arithmetic {
+            detail: format!("non-finite float {f} from {}", expr()),
+        })
+    }
 }
 
 /// Evaluate a compiled Rhai expression over `ctx` — the same single-expression
@@ -1071,7 +1091,7 @@ fn eval_script(expr: &CompiledExpr, ctx: &Context) -> Result<Value, ComputeError
             detail: e.to_string(),
         })?;
     if result.is_float() {
-        Ok(Value::Float(result.as_float().unwrap()))
+        finite_float(result.as_float().unwrap(), || expr.source.clone())
     } else if result.is_int() {
         Ok(Value::Integer(result.as_int().unwrap()))
     } else if result.is_bool() {
@@ -1772,6 +1792,31 @@ mod tests {
     }
 
     #[test]
+    fn a_non_finite_float_result_is_fail_loud() {
+        for (e, shown) in [
+            (arith(ArithOp::Mul, lit(f64::MAX), lit(2.0)), "inf"),
+            (arith(ArithOp::Div, lit(1.0), lit(0.0)), "inf"),
+            (arith(ArithOp::Div, lit(0.0), lit(0.0)), "NaN"),
+        ] {
+            match e.eval(&ctx(&[])) {
+                Err(ComputeError::Arithmetic { detail }) => {
+                    assert!(detail.contains(shown), "{detail}")
+                }
+                other => panic!("{e:?} must be refused, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_non_finite_script_result_is_fail_loud() {
+        let expr = CompiledExpr::compile(&engine(), "1.0 / 0.0").unwrap();
+        match Computation::Script(expr).eval(&ctx(&[])) {
+            Err(ComputeError::Arithmetic { detail }) => assert!(detail.contains("inf"), "{detail}"),
+            other => panic!("1.0 / 0.0 must be refused, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn integer_overflow_is_fail_loud() {
         let e = arith(ArithOp::Add, ilit(i64::MAX), ilit(1));
         assert!(matches!(
@@ -1814,6 +1859,15 @@ mod tests {
             nan.inline_sql(),
             Err(InlineError::NonFiniteFloat { .. })
         ));
+        let second = SqlFragment::new(
+            "y = ? AND x = ?",
+            vec![Value::Integer(1), Value::Float(f64::INFINITY)],
+        );
+        let err = second.inline_sql().unwrap_err().to_string();
+        assert!(
+            err.contains("placeholder 2 of `y = ? AND x = ?`"),
+            "the refusal names the placeholder and its SQL: {err}"
+        );
     }
 
     #[test]

@@ -879,7 +879,7 @@ fn value_to_rhai(value: &Value) -> String {
 }
 
 impl BinaryOperator {
-    fn to_rhai(&self) -> &'static str {
+    pub(crate) fn to_rhai(&self) -> &'static str {
         match self {
             BinaryOperator::Eq => "==",
             BinaryOperator::Neq => "!=",

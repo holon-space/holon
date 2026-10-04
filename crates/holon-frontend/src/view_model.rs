@@ -904,6 +904,10 @@ impl crate::render_interpreter::WithEntity for ViewModel {
     fn refused_row(refusal: &holon_api::RowIdUnusable) -> Self {
         Self::error("refused_row", refusal.to_string())
     }
+
+    fn eval_error(message: String) -> Self {
+        Self::error("eval_error", message)
+    }
 }
 
 impl ViewModel {

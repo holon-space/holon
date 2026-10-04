@@ -1287,8 +1287,7 @@ impl ReactiveView {
                 let handle =
                     holon_api::data_row_entity_uri(data).and_then(|uri| ds.row_mutable(&uri));
                 let ctx = row_render_context(data.clone(), handle, svc.as_ref(), parent_space);
-                let fresh = svc.interpret(expr, &ctx);
-                fresh.props.get_cloned()
+                svc.interpret(expr, &ctx).props_update()
             })
         };
 
@@ -1942,8 +1941,7 @@ impl ReactiveView {
                 let handle =
                     holon_api::data_row_entity_uri(data).and_then(|uri| ds.row_mutable(&uri));
                 let ctx = row_render_context(data.clone(), handle, svc.as_ref(), parent_space);
-                let fresh = svc.interpret(expr, &ctx);
-                fresh.props.get_cloned()
+                svc.interpret(expr, &ctx).props_update()
             })
         };
 
@@ -2072,7 +2070,7 @@ impl ReactiveView {
             let space = space_handle.clone();
             let csf = child_space_fn.clone();
             let rebuild = full_rebuild.clone();
-            let interpret = interpret_and_attach;
+            let interpret = interpret_and_attach.clone();
 
             data_source.keyed_rows_signal_vec().for_each(move |diff| {
                 match diff {
@@ -2220,19 +2218,35 @@ impl ReactiveView {
         // Template driver: re-interpret all items' props when the shared
         // template Mutable changes. Items are updated in place — no new
         // Arc<ReactiveViewModel>, no MutableVec signals. GPUI's props
-        // watchers detect the changes and call cx.notify().
+        // watchers detect the changes and call cx.notify(). An item that
+        // becomes or stops being an error node is replaced, as a CDC update
+        // replaces it.
         let template_driver = {
             let target = target.clone();
             let interpret_fn = node_interpret_fn;
+            let interpret = interpret_and_attach;
+            let space = space_handle.clone();
             let mut first = true;
             template_mutable.signal_cloned().for_each(move |new_tmpl| {
                 if first {
                     first = false;
                 } else {
-                    let items = target.lock_ref();
-                    for item in items.iter() {
-                        let new_props = interpret_fn(&new_tmpl, &item.data.get_cloned());
-                        item.props.set(new_props);
+                    let mut items = target.lock_mut();
+                    for index in 0..items.len() {
+                        let item = items[index].clone();
+                        let row = item.data.get_cloned();
+                        match interpret_fn(&new_tmpl, &row) {
+                            Ok(props) if !item.is_error() => item.props.set(props),
+                            _ => items.set_cloned(
+                                index,
+                                interpret(
+                                    &new_tmpl,
+                                    row,
+                                    space.get_cloned(),
+                                    item.occurrence().clone(),
+                                ),
+                            ),
+                        }
                     }
                 }
                 async {}
@@ -3060,6 +3074,147 @@ mod tests {
             .expect("the row whose id names no entity renders an error card");
         let message = refused.prop_str("message").unwrap_or_default();
         assert!(message.contains("my task"), "{message}");
+    }
+
+    fn text_of(arg: RenderExpr) -> RenderExpr {
+        RenderExpr::FunctionCall {
+            name: "text".to_string(),
+            args: vec![holon_api::render_types::Arg {
+                name: None,
+                value: arg,
+            }],
+        }
+    }
+
+    fn x_column() -> RenderExpr {
+        RenderExpr::ColumnRef {
+            name: "x".to_string(),
+        }
+    }
+
+    fn x_times_ten() -> RenderExpr {
+        text_of(RenderExpr::BinaryOp {
+            op: holon_api::render_types::BinaryOperator::Mul,
+            left: Box::new(x_column()),
+            right: Box::new(RenderExpr::Literal {
+                value: Value::Float(10.0),
+            }),
+        })
+    }
+
+    fn row_with_x(x: f64) -> DataRow {
+        let mut row = make_row("block:a", "a");
+        row.insert("x".to_string(), Value::Float(x));
+        row
+    }
+
+    async fn started_list(row_set: Arc<ReactiveRowSet>, item_template: RenderExpr) -> ReactiveView {
+        let data_source: Arc<dyn holon_api::ReactiveRowProvider> = row_set;
+        let view = ReactiveView::new_collection(
+            CollectionConfig {
+                layout: CollectionVariant::from_name("list", 0.0)
+                    .expect("`list` layout is registered as a builtin"),
+                item_template,
+                sort_key: None,
+                virtual_child: None,
+                rules: Vec::new(),
+                context_root_id: None,
+            },
+            data_source,
+            None,
+            None,
+        );
+        let services: Arc<dyn crate::reactive::BuilderServices> =
+            Arc::new(StubBuilderServices::new());
+        view.start(services, &tokio::runtime::Handle::current());
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        view
+    }
+
+    /// The node the full interpret path renders for `expr` over `row`.
+    fn fully_interpreted(expr: &RenderExpr, row: DataRow) -> ReactiveViewModel {
+        use crate::reactive::BuilderServices;
+        let ctx = crate::RenderContext::default().with_row(Arc::new(row));
+        StubBuilderServices::new().interpret(expr, &ctx)
+    }
+
+    fn assert_renders_as(view: &ReactiveView, expected: &ReactiveViewModel, leg: &str) {
+        let items = view.items.lock_ref();
+        assert_eq!(items.len(), 1, "{leg}: one row, one node");
+        assert_eq!(
+            (
+                items[0].widget_name(),
+                items[0].prop_str("message"),
+                items[0].prop_str("content")
+            ),
+            (
+                expected.widget_name(),
+                expected.prop_str("message"),
+                expected.prop_str("content")
+            ),
+            "{leg}: the live node must be the node the full interpret path renders; live props: \
+             {:?}",
+            items[0].props.get_cloned()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cdc_update_into_an_overflow_renders_the_full_path_error_node() {
+        let row_set = Arc::new(ReactiveRowSet::new());
+        row_set.set_generation(1);
+        row_set.apply_change(
+            holon_api::Change::Created {
+                data: enriched(row_with_x(1.0)),
+                origin: remote_origin(),
+            },
+            1,
+        );
+        let view = started_list(row_set.clone(), x_times_ten()).await;
+
+        row_set.apply_change(
+            holon_api::Change::Updated {
+                id: "block:a".to_string(),
+                data: enriched(row_with_x(1e308)),
+                origin: remote_origin(),
+            },
+            1,
+        );
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        let expected = fully_interpreted(&x_times_ten(), row_with_x(1e308));
+        assert_eq!(expected.widget_name().as_deref(), Some("error"));
+        assert_renders_as(&view, &expected, "CDC update");
+        view.stop();
+    }
+
+    #[tokio::test]
+    async fn a_template_switch_into_an_overflow_renders_the_full_path_error_node_and_recovers() {
+        let row_set = Arc::new(ReactiveRowSet::new());
+        row_set.set_generation(1);
+        row_set.apply_change(
+            holon_api::Change::Created {
+                data: enriched(row_with_x(1e308)),
+                origin: remote_origin(),
+            },
+            1,
+        );
+        let healthy = text_of(x_column());
+        let view = started_list(row_set, healthy.clone()).await;
+
+        view.set_template(x_times_ten());
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        let expected = fully_interpreted(&x_times_ten(), row_with_x(1e308));
+        assert_eq!(expected.widget_name().as_deref(), Some("error"));
+        assert_renders_as(&view, &expected, "template switch into the overflow");
+
+        view.set_template(healthy.clone());
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        assert_renders_as(
+            &view,
+            &fully_interpreted(&healthy, row_with_x(1e308)),
+            "template switch back to a finite expression",
+        );
+        view.stop();
     }
 
     /// Reproducer: a single CDC field update on one row should NOT produce a

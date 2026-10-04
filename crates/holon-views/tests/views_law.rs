@@ -464,7 +464,7 @@ fn a_non_finite_float_is_refused() {
             Payload::encode(&block),
             Err(EngineError::NonFiniteFloat {
                 id: uri(1),
-                key: "k".into()
+                path: "k.x[0]".into()
             })
         );
     }

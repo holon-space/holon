@@ -248,10 +248,11 @@ async fn a_declared_rest_write_reaches_the_wire_with_its_method_and_body() {
     assert_eq!(body["lang"], serde_json::json!("en"));
     assert_eq!(body["oldVersion"], serde_json::json!(73));
 
-    let response: serde_json::Value = result
+    let response = result
         .response
         .expect("the ack is carried back on the result")
-        .into();
+        .try_into_json()
+        .expect("the ack is JSON");
     assert_eq!(
         response[RESPONSE_VERSION_KEY],
         serde_json::json!(74),

@@ -195,7 +195,9 @@ async fn stored_properties(
         Value::String(s) => serde_json::from_str(&s)
             .unwrap_or_else(|e| panic!("properties for {id} is not JSON ({e}): {s}")),
         other => {
-            let json: serde_json::Value = other.into();
+            let json = other
+                .try_into_json()
+                .unwrap_or_else(|e| panic!("properties for {id} is not JSON: {e}"));
             match json {
                 serde_json::Value::Object(m) => m,
                 serde_json::Value::String(s) => serde_json::from_str(&s)

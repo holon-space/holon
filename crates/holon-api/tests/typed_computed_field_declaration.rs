@@ -121,3 +121,23 @@ fn deserializing_without_field_types_is_refused() {
         "the error must name the missing field, got: {err}"
     );
 }
+
+#[test]
+fn a_declaration_with_a_non_finite_literal_is_refused_naming_it() {
+    for tier in [
+        holon_api::ComputedTier::ComputedLive,
+        holon_api::ComputedTier::ComputedPersisted,
+    ] {
+        let outcome = holon_api::ComputedSpec::parse(
+            "ratio",
+            "weight * 1e999",
+            tier,
+            &types(&[("weight", FieldKind::Numeric)]),
+            &rhai::Engine::new(),
+        );
+        assert!(
+            matches!(&outcome, Err(e) if e.contains("`1e999`") && e.contains("finite")),
+            "{tier:?}: a literal beyond f64 must be refused at declaration, got {outcome:?}"
+        );
+    }
+}

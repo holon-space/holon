@@ -71,6 +71,11 @@ pub enum PropertyKindsError {
          timestamp: {found:?}"
     )]
     NotADateTime { key: String, found: Value },
+    #[error("{key:?} cannot be read as JSON: {source}")]
+    NotJson {
+        key: String,
+        source: crate::value::NotJson,
+    },
 }
 
 impl PropertyKinds {
@@ -111,7 +116,12 @@ impl PropertyKinds {
             // Turso hands a JSON TEXT column back as an Object on some read
             // paths, so both shapes reach here for the same stored bytes.
             Some(object @ Value::Object(_)) => {
-                let json: serde_json::Value = object.clone().into();
+                let json = object.clone().try_into_json().map_err(|source| {
+                    PropertyKindsError::NotJson {
+                        key: "property_kinds".to_string(),
+                        source,
+                    }
+                })?;
                 serde_json::from_value(json).map_err(|source| PropertyKindsError::Malformed {
                     raw: object_debug(object),
                     source,
@@ -149,7 +159,12 @@ impl PropertyKinds {
                     // formatting: re-serializing yields the canonical spelling
                     // of the same JSON the author handed in.
                     Some(AmbiguousKind::Json) => {
-                        let json: serde_json::Value = value.into();
+                        let json = value.try_into_json().map_err(|source| {
+                            PropertyKindsError::NotJson {
+                                key: key.clone(),
+                                source,
+                            }
+                        })?;
                         Value::Json(
                             serde_json::to_string(&json)
                                 .expect("a value that came from JSON must serialize"),

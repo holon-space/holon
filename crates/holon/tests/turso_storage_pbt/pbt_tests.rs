@@ -986,7 +986,7 @@ async fn apply_to_turso(
                 let fields: Vec<_> = data.keys().collect();
                 let values: Vec<_> = data
                     .values()
-                    .map(|v| backend.value_to_sql_param(v))
+                    .map(|v| backend.value_to_sql_param(v).unwrap())
                     .collect();
 
                 let insert_sql = format!(
@@ -1020,7 +1020,7 @@ async fn apply_to_turso(
                 let set_clauses: Vec<_> = data
                     .iter()
                     .filter(|(k, _)| k.as_ref() != "id")
-                    .map(|(k, v)| format!("{} = {}", k, backend.value_to_sql_param(v)))
+                    .map(|(k, v)| format!("{} = {}", k, backend.value_to_sql_param(v).unwrap()))
                     .collect();
 
                 let update_sql = format!(

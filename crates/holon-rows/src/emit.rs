@@ -53,9 +53,12 @@ pub fn emit_row_sets(sets: &[TypedRowSet]) -> Result<String> {
                 row: RowCells(
                     row.iter()
                         .map(|(column, value)| {
-                            (column.to_string(), serde_json::Value::from(value.clone()))
+                            Ok((
+                                column.to_string(),
+                                value.clone().try_into_json().map_err(|e| e.under(column))?,
+                            ))
                         })
-                        .collect(),
+                        .collect::<Result<_, holon_api::NotJson>>()?,
                 ),
             };
             out.push_str(&serde_json::to_string(&line)?);

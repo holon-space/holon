@@ -67,6 +67,7 @@ fn boot(blocks: &Blocks) -> FrontendSession {
         source_over(Arc::clone(blocks)),
         None,
         &holon_api::lifecycle::SessionShutdown::new(),
+        Arc::new(holon_api::ConditionBus::new()),
     )
 }
 

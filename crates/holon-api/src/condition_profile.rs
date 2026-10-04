@@ -106,6 +106,7 @@ pub enum ClearingEvent {
     PairReimport,
     ProfileLoad,
     WrittenHashRecord,
+    DerivedFieldEval,
 }
 
 /// The named moment that clears a condition.
@@ -674,6 +675,15 @@ const DATABASE_WATCH_FAILED: ConditionProfile = ConditionProfile::new(
     &[],
 );
 
+const DERIVED_FIELD_NOT_COMPUTED: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Warning,
+    "A derived value could not be computed",
+    icons::WARN,
+    ConditionPlacement::Toast,
+    AllClear::NextSuccessOf(ClearingEvent::DerivedFieldEval),
+    &[],
+);
+
 impl ConditionKind {
     /// This kind's profile. Total, like
     /// [`condition_kind`](ConditionKind::condition_kind): a new variant cannot
@@ -724,6 +734,7 @@ impl ConditionKind {
             Self::ViewEngineStopped(_) => VIEW_ENGINE_STOPPED,
             Self::DatabaseStuck { .. } => DATABASE_STUCK,
             Self::DatabaseWatchFailed { .. } => DATABASE_WATCH_FAILED,
+            Self::DerivedFieldNotComputed { .. } => DERIVED_FIELD_NOT_COMPUTED,
         }
     }
 }

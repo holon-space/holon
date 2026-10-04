@@ -38,36 +38,10 @@ use crate::storage::schema_module::EdgeFieldDescriptor;
 use crate::storage::sql_utils::value_to_sql_literal;
 use crate::storage::turso::DbHandle;
 
-pub(crate) fn value_to_json(v: &Value) -> serde_json::Value {
-    match v {
-        Value::String(s) => serde_json::Value::String(s.clone()),
-        Value::Integer(i) => serde_json::Value::Number((*i).into()),
-        Value::Float(f) => serde_json::Number::from_f64(*f)
-            .map(serde_json::Value::Number)
-            .unwrap_or(serde_json::Value::Null),
-        Value::Boolean(b) => serde_json::Value::Bool(*b),
-        Value::Null => serde_json::Value::Null,
-        // `Removed` is write-leg INTENT, not a value: every caller filters it
-        // out before serializing. Reaching here means a removal was about to be
-        // stored as a value, which is the D27.b sentinel bug all over again.
-        Value::Removed(_) => panic!(
-            "[value_to_json] Value::REMOVED reached the properties serializer — a removal \
-             sentinel must be consumed by the merge, never stored"
-        ),
-        Value::DateTime(s) => serde_json::Value::String(s.clone()),
-        Value::Json(s) => serde_json::from_str(s).unwrap_or_else(|e| {
-            panic!(
-                "[value_to_json] Value::Json contains invalid JSON {:?}: {}",
-                s, e
-            )
-        }),
-        Value::Array(arr) => serde_json::Value::Array(arr.iter().map(value_to_json).collect()),
-        Value::Object(map) => serde_json::Value::Object(
-            map.iter()
-                .map(|(k, v)| (k.clone(), value_to_json(v)))
-                .collect(),
-        ),
-    }
+pub(crate) fn value_to_json(
+    v: &Value,
+) -> std::result::Result<serde_json::Value, holon_api::NotJson> {
+    v.clone().try_into_json()
 }
 
 /// The `property_kinds` SQL literal for a bag's kinds — NULL when no key needs
@@ -152,7 +126,8 @@ fn sql_literal_equals_value(sql_literal: &str, db_val: Option<&Value>) -> bool {
                 // Turso may parse JSON TEXT columns into Value::Object (or
                 // Value::Json). Serialize back to string and compare canonically.
                 fn canonical_json_from_value(v: &Value) -> String {
-                    let json_val: serde_json::Value = value_to_json(v);
+                    let json_val = value_to_json(v)
+                        .unwrap_or_else(|e| panic!("a value read out of the store was JSON: {e}"));
                     match json_val {
                         serde_json::Value::Object(map) => {
                             let sorted: std::collections::BTreeMap<_, _> =
@@ -554,7 +529,7 @@ impl SqlOperationProvider {
         self
     }
 
-    fn value_to_sql(value: &Value) -> String {
+    fn value_to_sql(value: &Value) -> std::result::Result<String, holon_api::NotJson> {
         value_to_sql_literal(value)
     }
 
@@ -639,10 +614,7 @@ impl SqlOperationProvider {
                 // shape dropped every property from a delete-inverse, so undo
                 // resurrected the row stripped of them.
                 existing_properties_json = match value {
-                    Value::Object(_) => {
-                        let json: serde_json::Value = value.clone().into();
-                        Some(serde_json::to_string(&json).expect("Value→JSON cannot fail"))
-                    }
+                    Value::Object(_) => Some(value.to_json_string()?),
                     _ => value.as_string().map(str::to_string),
                 };
             } else if holon_core::block_ordering::is_operation_control_param(key) {
@@ -688,7 +660,10 @@ impl SqlOperationProvider {
                 } else {
                     value
                 };
-                sql_fields.push((key.to_string(), Self::value_to_sql(value)));
+                sql_fields.push((
+                    key.to_string(),
+                    Self::value_to_sql(value).map_err(|e| e.under(key))?,
+                ));
             } else {
                 self.require_write_route(key)?;
                 extra_props.insert(key.to_string(), value.clone());
@@ -718,6 +693,7 @@ impl SqlOperationProvider {
         // author is present.
         for (key, value) in &extra_props {
             value.reject_reserved_marker(key)?;
+            value.reject_non_finite_float(key)?;
         }
 
         Ok((sql_fields, extra_props, edge_field_params))
@@ -1500,7 +1476,10 @@ impl SqlOperationProvider {
                 .collect();
             let kinds = PropertyKinds::of(carried.iter().map(|(k, v)| (k.as_str(), v)));
             let props_json = properties_to_canonical_json(
-                carried.iter().map(|(k, v)| (k.clone(), value_to_json(v))),
+                carried
+                    .iter()
+                    .map(|(k, v)| Ok((k.clone(), value_to_json(v)?)))
+                    .collect::<std::result::Result<Vec<_>, holon_api::NotJson>>()?,
             );
             sql_fields.push((
                 "properties".to_string(),
@@ -1676,9 +1655,10 @@ impl SqlOperationProvider {
                             id, e, s
                         )
                     })?,
-                    Some(Value::Object(m)) => {
-                        m.into_iter().map(|(k, v)| (k, value_to_json(&v))).collect()
-                    }
+                    Some(Value::Object(m)) => m
+                        .into_iter()
+                        .map(|(k, v)| Ok((k, value_to_json(&v)?)))
+                        .collect::<std::result::Result<_, holon_api::NotJson>>()?,
                     Some(other) => {
                         return Err(format!(
                             "prepare_update: properties column for {} has unexpected type: {:?}",
@@ -1697,7 +1677,7 @@ impl SqlOperationProvider {
                 if v.is_removed() {
                     existing.remove(k);
                 } else {
-                    existing.insert(k.clone(), value_to_json(v));
+                    existing.insert(k.clone(), value_to_json(v)?);
                 }
             }
 
@@ -2883,10 +2863,10 @@ impl SqlOperationProvider {
             other => unreachable!("trimmed_content(String) yields String, got {other:?}"),
         };
 
-        let content_sql = Self::value_to_sql(&Value::String(trimmed.clone()));
+        let content_sql = Self::value_to_sql(&Value::String(trimmed.clone()))?;
         let marks_sql = match &marks_val {
             Value::String(s) | Value::Json(s) if !s.is_empty() && s != "[]" => {
-                Self::value_to_sql(&Value::String(s.clone()))
+                Self::value_to_sql(&Value::String(s.clone()))?
             }
             _ => "NULL".to_string(),
         };
@@ -3653,8 +3633,9 @@ impl OriginTaggedWrites for SqlOperationProvider {
                 };
 
                 // `set_field` does not route through `partition_params`, so it
-                // carries the same marker refusal itself.
+                // carries the same refusals itself.
                 raw_value.reject_reserved_marker(field)?;
+                raw_value.reject_non_finite_float(field)?;
 
                 // A COLUMN has no "absent" state to return to: clearing one is
                 // `SET col = NULL`, which `Value::Null` already spells. Refusing
@@ -3669,7 +3650,7 @@ impl OriginTaggedWrites for SqlOperationProvider {
                 }
                 // Deferred: a removal has no SQL literal at all, and the
                 // `json_remove` branch below never asks for one.
-                let sql_value = || Self::value_to_sql(&value);
+                let sql_value = || Self::value_to_sql(&value).map_err(|e| e.under(field));
 
                 // Edge-typed field: DELETE all current rows then INSERT new
                 // ones (route through prepare-style helper so set_field
@@ -3752,7 +3733,7 @@ impl OriginTaggedWrites for SqlOperationProvider {
                         "UPDATE {} SET {} = {}{} WHERE id = '{}'",
                         self.table_name,
                         Self::quote_identifier(field),
-                        sql_value(),
+                        sql_value()?,
                         write_seq_pair.as_deref().unwrap_or(""),
                         id.replace('\'', "''")
                     )
@@ -3781,14 +3762,14 @@ impl OriginTaggedWrites for SqlOperationProvider {
                         // statement, so the pair never reads back half-written.
                         let category = state.category.as_str();
                         vec![
-                            BagEntry::set("task_state", sql_value(), &value),
+                            BagEntry::set("task_state", sql_value()?, &value),
                             BagEntry::set_derived(
                                 "task_state_category",
                                 format!("'{}'", category.replace('\'', "''")),
                             ),
                         ]
                     } else {
-                        vec![BagEntry::set(field, sql_value(), &value)]
+                        vec![BagEntry::set(field, sql_value()?, &value)]
                     };
                     format!(
                         "UPDATE {} SET {} WHERE id = '{}'",

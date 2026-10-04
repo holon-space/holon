@@ -79,7 +79,10 @@ async fn setup() -> (DbHandle, Arc<SqlOperationProvider>) {
 fn canonical(v: &Value) -> String {
     match v {
         Value::Object(_) => {
-            let json: serde_json::Value = v.clone().into();
+            let json = v
+                .clone()
+                .try_into_json()
+                .expect("a stored column value is JSON");
             let sorted: BTreeMap<String, String> = json
                 .as_object()
                 .expect("an Object converts to a JSON object")

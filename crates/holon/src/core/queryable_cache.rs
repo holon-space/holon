@@ -213,7 +213,7 @@ where
             if let Some(value) = entity.fields.get(field.name.as_str()) {
                 columns.push(field.name.clone());
                 placeholders.push("?");
-                values.push(value_to_turso(value));
+                values.push(value_to_turso(value).map_err(|e| e.under(&field.name))?);
             }
         }
 
@@ -734,7 +734,7 @@ where
         T: IntoEntity + Clone,
     {
         let statements =
-            Self::build_batch_statements(schema, table_name, id_field, changes, sync_token);
+            Self::build_batch_statements(schema, table_name, id_field, changes, sync_token)?;
 
         db_handle
             .transaction(statements)
@@ -755,7 +755,7 @@ where
         id_field: &str,
         changes: &[Change<T>],
         sync_token: Option<&SyncTokenUpdate>,
-    ) -> Vec<(String, Vec<turso::Value>)>
+    ) -> Result<Vec<(String, Vec<turso::Value>)>>
     where
         T: IntoEntity + Clone,
     {
@@ -811,6 +811,8 @@ where
                             .fields
                             .get(field.name.as_str())
                             .map(value_to_turso)
+                            .transpose()
+                            .map_err(|e| e.under(&field.name))?
                             .unwrap_or(turso::Value::Null);
                         values.push(turso_value);
                     }
@@ -844,6 +846,8 @@ where
                             .fields
                             .get(field.name.as_str())
                             .map(value_to_turso)
+                            .transpose()
+                            .map_err(|e| e.under(&field.name))?
                             .unwrap_or(turso::Value::Null);
                         values.push(turso_value);
                     }
@@ -914,7 +918,7 @@ where
             ));
         }
 
-        statements
+        Ok(statements)
     }
 }
 
@@ -932,7 +936,7 @@ where
     where
         T: IntoEntity + Clone,
     {
-        let statements = Self::build_batch_statements(schema, table_name, id_field, changes, None);
+        let statements = Self::build_batch_statements(schema, table_name, id_field, changes, None)?;
 
         db_handle
             .transaction(statements)
@@ -962,7 +966,10 @@ where
                 where_sql
             )
         };
-        let params: Vec<turso::Value> = params.iter().map(value_to_turso).collect();
+        let params = params
+            .iter()
+            .map(value_to_turso)
+            .collect::<std::result::Result<Vec<_>, _>>()?;
         self.db_handle
             .query_positional(&sql, params)
             .await

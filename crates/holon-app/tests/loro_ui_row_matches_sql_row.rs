@@ -248,7 +248,11 @@ async fn loro_ui_row_matches_the_sql_block_row() {
     let source: Arc<dyn BlockQuerySource> = Arc::new(LoroBlockQuerySource::new(backend.clone()));
     let snapshot = source.snapshot().await.expect("Loro snapshot");
     let shutdown = SessionShutdown::new();
-    let resolver = build_turso_free_profile_resolver(source.clone(), &shutdown);
+    let resolver = build_turso_free_profile_resolver(
+        source.clone(),
+        &shutdown,
+        Arc::new(holon_api::ConditionBus::new()),
+    );
     shutdown
         .shutdown(DEFAULT_SHUTDOWN_TIMEOUT)
         .await

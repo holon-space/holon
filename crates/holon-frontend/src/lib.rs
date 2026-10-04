@@ -302,6 +302,7 @@ pub use reactive_view::CollectionConfig;
 pub use reactive_view::ReactiveView;
 pub use reactive_view_model::CollectionVariant;
 pub use reactive_view_model::InterpretFn;
+pub use reactive_view_model::NotAPropsUpdate;
 pub use reactive_view_model::ReactiveSlot;
 pub use reactive_view_model::ReactiveViewModel;
 pub use reactive_view_model::collection_variant_of;

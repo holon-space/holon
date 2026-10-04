@@ -64,6 +64,7 @@ use tokio::sync::mpsc;
 pub fn build_turso_free_profile_resolver(
     source: Arc<dyn BlockQuerySource>,
     shutdown: &holon_api::lifecycle::SessionShutdown,
+    conditions: Arc<holon_api::ConditionBus>,
 ) -> Arc<dyn ProfileResolving> {
     let type_registry = holon_profiles::create_default_registry().expect("default TypeRegistry");
     let type_profiles = holon_profiles::type_profiles_from_registry(&type_registry);
@@ -80,6 +81,7 @@ pub fn build_turso_free_profile_resolver(
         LiveEntities::new(),
         HashMap::new(),
         type_profiles,
+        conditions,
     ));
     spawn_live_entity_refresh(source, Arc::downgrade(&resolver), shutdown);
     resolver
@@ -818,6 +820,7 @@ mod tests {
         let resolver = build_turso_free_profile_resolver(
             source,
             &holon_api::lifecycle::SessionShutdown::new(),
+            Arc::new(holon_api::ConditionBus::new()),
         );
         let variants = resolver.resolve_collection_variants();
         assert!(

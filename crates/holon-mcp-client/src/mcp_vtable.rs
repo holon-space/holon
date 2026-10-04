@@ -1013,10 +1013,14 @@ impl WritebackTarget {
             let value_rows: Vec<String> = chunk
                 .iter()
                 .map(|row| {
-                    let vals: Vec<String> = row.iter().map(value_to_sql_literal).collect();
-                    format!("({})", vals.join(", "))
+                    let vals = row
+                        .iter()
+                        .zip(&self.column_names)
+                        .map(|(v, column)| value_to_sql_literal(v, column))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Ok(format!("({})", vals.join(", ")))
                 })
-                .collect();
+                .collect::<Result<_, LimboError>>()?;
 
             let sql = format!(
                 "INSERT OR REPLACE INTO {} ({}) VALUES {}",
@@ -1083,14 +1087,17 @@ impl McpCursor {
     fn build_tool_params(
         &self,
         constraints: &[PushedConstraint],
-    ) -> serde_json::Map<String, serde_json::Value> {
+    ) -> Result<serde_json::Map<String, serde_json::Value>, LimboError> {
         let mut params: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
         for c in constraints {
             if let Some(param_name) = self.column_to_param.get(&c.column_index) {
-                params.insert(param_name.clone(), turso_value_to_json(&c.value));
+                let value = turso_value_to_json(&c.value).map_err(|e| {
+                    LimboError::ExtensionError(format!("[McpCursor] {}", e.under(param_name)))
+                })?;
+                params.insert(param_name.clone(), value);
             }
         }
-        params
+        Ok(params)
     }
 
     /// Build the URI template param map from defaults overlaid with
@@ -1374,7 +1381,7 @@ impl ForeignCursor for McpCursor {
                 enumerations,
             } => {
                 let mut params = static_args.clone();
-                for (k, v) in self.build_tool_params(constraints) {
+                for (k, v) in self.build_tool_params(constraints)? {
                     params.insert(k, v);
                 }
                 let unresolved = pick_unresolved_enumerations_tool(&params, enumerations);
@@ -1811,7 +1818,7 @@ impl McpCursor {
                 };
                 predicates.push(format!(
                     "{col} = {}",
-                    value_to_sql_literal(&Value::build_text(value.clone()))
+                    value_to_sql_literal(&Value::build_text(value.clone()), col)?
                 ));
             }
 
@@ -1826,7 +1833,7 @@ impl McpCursor {
                             wb.cache_table
                         )));
                     }
-                    Ok(value_to_sql_literal(id))
+                    value_to_sql_literal(id, id_col)
                 })
                 .collect::<Result<_, _>>()?;
 
@@ -1849,34 +1856,34 @@ impl McpCursor {
     }
 }
 
-/// Convert a Turso Value to a SQL literal string for INSERT statements.
-fn value_to_sql_literal(v: &Value) -> String {
+/// Convert a Turso Value of `column` to a SQL literal string.
+fn value_to_sql_literal(v: &Value, column: &str) -> Result<String, LimboError> {
     use turso_core::Numeric;
-    match v {
+    Ok(match v {
         Value::Null => "NULL".to_string(),
         Value::Numeric(Numeric::Integer(i)) => i.to_string(),
-        Value::Numeric(Numeric::Float(f)) => format!("{}", **f),
+        Value::Numeric(Numeric::Float(f)) => holon_api::NotJson::finite(**f)
+            .map_err(|e| LimboError::ExtensionError(format!("[McpCursor] {}", e.under(column))))?
+            .to_string(),
         Value::Text(t) => {
             // Escape single quotes by doubling them
             let escaped = t.as_str().replace('\'', "''");
             format!("'{escaped}'")
         }
         Value::Blob(b) => format!("X'{}'", hex_encode(b)),
-    }
+    })
 }
 
 /// Convert a Turso Value to a serde_json::Value for MCP tool params.
-fn turso_value_to_json(v: &Value) -> serde_json::Value {
+fn turso_value_to_json(v: &Value) -> Result<serde_json::Value, holon_api::NotJson> {
     use turso_core::Numeric;
-    match v {
+    Ok(match v {
         Value::Null => serde_json::Value::Null,
         Value::Numeric(Numeric::Integer(i)) => serde_json::Value::Number((*i).into()),
-        Value::Numeric(Numeric::Float(f)) => serde_json::Number::from_f64(**f)
-            .map(serde_json::Value::Number)
-            .unwrap_or(serde_json::Value::Null),
+        Value::Numeric(Numeric::Float(f)) => holon_api::Value::Float(**f).try_into_json()?,
         Value::Text(t) => serde_json::Value::String(t.as_str().to_owned()),
         Value::Blob(b) => serde_json::Value::String(hex_encode(b)),
-    }
+    })
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
@@ -2449,15 +2456,33 @@ limit: 20
     #[test]
     fn turso_value_json_roundtrip() {
         let v = Value::build_text("hello");
-        let j = turso_value_to_json(&v);
+        let j = turso_value_to_json(&v).unwrap();
         assert_eq!(j, serde_json::Value::String("hello".to_string()));
 
         let v = Value::from_i64(42);
-        let j = turso_value_to_json(&v);
+        let j = turso_value_to_json(&v).unwrap();
         assert_eq!(j, serde_json::json!(42));
 
         let j = serde_json::json!("world");
         let v = json_value_to_turso_value(&j);
         assert_eq!(v, Value::build_text("world"));
+    }
+
+    #[test]
+    fn an_infinite_float_has_no_literal_and_no_json() {
+        for x in [f64::INFINITY, f64::NEG_INFINITY] {
+            let v = Value::from_f64(x);
+            let literal = value_to_sql_literal(&v, "score");
+            assert!(
+                matches!(&literal, Err(e) if e.to_string().contains("'score'")),
+                "`inf` reads as a column name; the refusal names the column: {literal:?}"
+            );
+            let json = turso_value_to_json(&v);
+            assert!(json.is_err(), "JSON has no infinity: {json:?}");
+        }
+        assert_eq!(
+            value_to_sql_literal(&Value::from_f64(1.5), "score").unwrap(),
+            "1.5"
+        );
     }
 }

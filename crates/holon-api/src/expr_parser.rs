@@ -51,17 +51,27 @@ use crate::computation::FieldIdent;
 use crate::computation::FieldKind;
 use crate::computation::FieldTypes;
 
-/// A subset-parse failure. Not a user error on its own: the derived-field
-/// pipeline falls back to Rhai on `Err`. Carries a message for disclosure.
+/// A subset-parse failure. Carries a message for disclosure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExprParseError {
     pub message: String,
+    pub kind: ExprParseErrorKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExprParseErrorKind {
+    /// Not a user error on its own: the caller falls back to Rhai.
+    OutsideSubset,
+    /// A float literal beyond the finite `f64` range. Neither seat can serve
+    /// it.
+    NonFiniteLiteral,
 }
 
 impl ExprParseError {
     fn new(message: impl Into<String>) -> Self {
         ExprParseError {
             message: message.into(),
+            kind: ExprParseErrorKind::OutsideSubset,
         }
     }
 }
@@ -75,8 +85,7 @@ impl fmt::Display for ExprParseError {
 impl std::error::Error for ExprParseError {}
 
 /// Parse `src` (the expression AFTER the leading `=` has been stripped) as the
-/// Rhai subset into a typed [`Computation`]. `Err` means "not in the subset";
-/// the caller falls back to Rhai.
+/// Rhai subset into a typed [`Computation`].
 pub fn parse(src: &str) -> Result<Computation, ExprParseError> {
     parse_typed(src, &FieldTypes::new())
 }
@@ -102,6 +111,21 @@ pub fn parse_typed(src: &str, types: &FieldTypes) -> Result<Computation, ExprPar
         )));
     }
     Ok(expr)
+}
+
+/// Rust's `f64` parser saturates out-of-range text such as `1e999` to infinity.
+fn finite_float(text: &str, what: &str) -> Result<f64, ExprParseError> {
+    let f: f64 = text
+        .parse()
+        .map_err(|e| ExprParseError::new(format!("bad float {what} `{text}`: {e}")))?;
+    if f.is_finite() {
+        Ok(f)
+    } else {
+        Err(ExprParseError {
+            message: format!("float {what} `{text}` is not a finite number"),
+            kind: ExprParseErrorKind::NonFiniteLiteral,
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -488,9 +512,7 @@ impl Parser {
         match self.bump() {
             Some(Tok::Num { text, is_float }) => {
                 if is_float {
-                    let n: f64 = text.parse().map_err(|e| {
-                        ExprParseError::new(format!("bad float case label `{text}`: {e}"))
-                    })?;
+                    let n = finite_float(&text, "case label")?;
                     Ok(Value::Float(if negate { -n } else { n }))
                 } else {
                     let n: i64 = text.parse().map_err(|e| {
@@ -590,9 +612,7 @@ impl Parser {
             Some(Tok::Str(s)) => Ok(Computation::Lit(Value::String(s))),
             Some(Tok::Num { text, is_float }) => {
                 let value = if is_float {
-                    Value::Float(text.parse::<f64>().map_err(|e| {
-                        ExprParseError::new(format!("bad float literal `{text}`: {e}"))
-                    })?)
+                    Value::Float(finite_float(&text, "literal")?)
                 } else {
                     Value::Integer(text.parse::<i64>().map_err(|e| {
                         ExprParseError::new(format!("bad integer literal `{text}`: {e}"))
@@ -778,6 +798,24 @@ mod tests {
         assert!(parse("switch x { 1.0 => 1.0, 1.0 => 2.0, _ => 0.0 }").is_err());
         // But Integer 1 and Float 1.0 are DISTINCT labels (type-strict switch).
         assert!(parse("switch x { 1 => 1.0, 1.0 => 2.0, _ => 0.0 }").is_ok());
+    }
+
+    #[test]
+    fn a_float_literal_beyond_f64_is_refused_naming_its_text() {
+        for (src, text) in [
+            ("1e999", "1e999"),
+            ("-1.0e400", "1.0e400"),
+            ("switch x { 9e999 => 1.0, _ => 0.0 }", "9e999"),
+            ("switch x { -9e999 => 1.0, _ => 0.0 }", "9e999"),
+        ] {
+            match parse(src) {
+                Err(e) => assert!(
+                    e.message.contains(&format!("`{text}`")) && e.message.contains("finite"),
+                    "{src}: the refusal must name `{text}`, got {e}"
+                ),
+                Ok(c) => panic!("{src} must be refused, got {c:?}"),
+            }
+        }
     }
 
     #[test]

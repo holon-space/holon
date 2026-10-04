@@ -4,6 +4,7 @@
 //! inverses, enabling persistent undo/redo functionality and future offline
 //! sync support.
 
+use anyhow::Context as _;
 use holon_api::Operation;
 use holon_macros::Entity;
 use serde::Deserialize;
@@ -96,19 +97,32 @@ pub struct OperationLogEntry {
 
 impl OperationLogEntry {
     /// Create a new operation log entry
-    pub fn new(operation: Operation, inverse: Option<Operation>) -> Self {
+    pub fn new(operation: Operation, inverse: Option<Operation>) -> anyhow::Result<Self> {
         let now = holon_api::clock::now_millis();
-        Self {
+        Ok(Self {
             id: 0, // Will be set by database
             display_name: operation.display_name.clone(),
             entity_name: operation.entity_name.to_string(),
             op_name: operation.op_name.clone(),
-            operation: serde_json::to_string(&operation).expect("Operation must be serializable"),
+            operation: serde_json::to_string(&operation).with_context(|| {
+                format!(
+                    "serializing operation {}.{}",
+                    operation.entity_name, operation.op_name
+                )
+            })?,
             inverse: inverse
-                .map(|inv| serde_json::to_string(&inv).expect("Operation must be serializable")),
+                .map(|inv| {
+                    serde_json::to_string(&inv).with_context(|| {
+                        format!(
+                            "serializing inverse operation {}.{}",
+                            inv.entity_name, inv.op_name
+                        )
+                    })
+                })
+                .transpose()?,
             status: OperationStatus::PendingSync.as_str().to_string(),
             created_at: now,
-        }
+        })
     }
 
     /// Get the operation struct
@@ -187,7 +201,7 @@ mod tests {
             ]),
         );
 
-        let entry = OperationLogEntry::new(operation.clone(), Some(inverse.clone()));
+        let entry = OperationLogEntry::new(operation.clone(), Some(inverse.clone())).unwrap();
 
         assert_eq!(entry.display_name, "Mark as complete");
         assert_eq!(entry.entity_name, "todoist-task");

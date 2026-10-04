@@ -229,7 +229,7 @@ mod backend {
     // Separate from `subscriptions` (which only tracks ReactiveEngine watchers).
 
     struct McpWatchEntry {
-        pending: Arc<parking_lot::Mutex<Vec<serde_json::Value>>>,
+        pending: Arc<parking_lot::Mutex<Vec<super::McpPending>>>,
         _task: tokio::task::JoinHandle<()>,
     }
 
@@ -622,9 +622,8 @@ mod backend {
     /// The callback is wrapped in a `ThreadsafeFunction` so it can be called
     /// from the tokio task that drains the `ReactiveEngine::watch` stream.
     ///
-    /// Fail-loud: a serialize error tears down the subscription. Silent
-    /// log-and-continue is a CLAUDE.md violation and would hide real bugs
-    /// in `ViewModel`.
+    /// Fail-loud: a serialize error is delivered to the callback as an error
+    /// `ViewModel`, never dropped and never a worker panic.
     pub(super) fn watch_view(
         block_id: String,
         callback: napi::bindgen_prelude::Function<'_, (String,), ()>,
@@ -649,10 +648,6 @@ mod backend {
         let handle = crate::subscriptions::allocate();
 
         let task = runtime.spawn(async move {
-            // Fail-loud helper: serialize + call. On serialize failure,
-            // panic — the task aborts and the bug surfaces instead of
-            // silently swallowing a malformed ViewModel.
-            //
             // Emissions are wrapped in a `WatchEnvelope` carrying the
             // in-memory focus state (ADR 0010) read AFTER the
             // interpretation, so the page applies DOM focus consistent
@@ -669,10 +664,10 @@ mod backend {
                     focused_block: focused.map(|f| f.to_string()),
                     caret_offset,
                 };
-                let json = serde_json::to_string(&envelope).unwrap_or_else(|e| {
-                    panic!("[watch_view handle={handle}] WatchEnvelope serialize failed: {e}")
-                });
-                tsfn.call(json, ThreadsafeFunctionCallMode::NonBlocking);
+                tsfn.call(
+                    super::watch_envelope_json(&envelope, handle),
+                    ThreadsafeFunctionCallMode::NonBlocking,
+                );
             };
 
             // Snapshot-pipeline watch: re-fires on focus changes too (the
@@ -966,8 +961,9 @@ mod backend {
                 let rows: Vec<serde_json::Value> = result
                     .rows
                     .iter()
-                    .map(|row| serde_json::to_value(row).unwrap_or(serde_json::Value::Null))
-                    .collect();
+                    .map(super::row_to_json)
+                    .collect::<Result<_, _>>()
+                    .map_err(|e| anyhow::anyhow!("a result row has no JSON form: {e}"))?;
                 let count = rows.len();
                 Ok(serde_json::json!({
                     "rows": rows,
@@ -983,8 +979,9 @@ mod backend {
                 let rows: Vec<serde_json::Value> = result
                     .rows
                     .iter()
-                    .map(|row| serde_json::to_value(row).unwrap_or(serde_json::Value::Null))
-                    .collect();
+                    .map(super::row_to_json)
+                    .collect::<Result<_, _>>()
+                    .map_err(|e| anyhow::anyhow!("a result row has no JSON form: {e}"))?;
                 let count = rows.len();
                 Ok(serde_json::json!({"rows": rows, "row_count": count}))
             }
@@ -1159,14 +1156,15 @@ mod backend {
 
                 let json_initial: Vec<serde_json::Value> = initial_rows
                     .iter()
-                    .map(|row| serde_json::to_value(row).unwrap_or(serde_json::Value::Null))
-                    .collect();
+                    .map(super::row_to_json)
+                    .collect::<Result<_, _>>()
+                    .map_err(|e| anyhow::anyhow!("a result row has no JSON form: {e}"))?;
 
                 let watch_id = format!(
                     "mcp-watch-{}",
                     MCP_WATCH_COUNTER.fetch_add(1, Ordering::Relaxed)
                 );
-                let pending = Arc::new(parking_lot::Mutex::new(Vec::<serde_json::Value>::new()));
+                let pending = Arc::new(parking_lot::Mutex::new(Vec::<super::McpPending>::new()));
                 let pending_clone = pending.clone();
 
                 // Drain task: accumulates CDC batches into the pending buffer.
@@ -1174,10 +1172,15 @@ mod backend {
                 let task = runtime.spawn(async move {
                     use futures::StreamExt as _;
                     while let Some(batch) = stream.next().await {
-                        let mut buf = pending_clone.lock();
-                        for row_change in batch.inner.items {
-                            buf.push(change_to_json(row_change.change));
-                        }
+                        super::buffer_mcp_batch(
+                            &mut pending_clone.lock(),
+                            batch.metadata.degraded,
+                            batch
+                                .inner
+                                .items
+                                .into_iter()
+                                .map(|row_change| row_change.change),
+                        );
                     }
                 });
 
@@ -1200,8 +1203,8 @@ mod backend {
                 let entry = guard
                     .get(&watch_id)
                     .ok_or_else(|| anyhow::anyhow!("watch '{}' not found", watch_id))?;
-                let changes: Vec<serde_json::Value> = entry.pending.lock().drain(..).collect();
-                Ok(serde_json::to_value(changes)?)
+                let poll = super::take_mcp_poll(&mut entry.pending.lock());
+                Ok(poll)
             }
 
             "stop_watch" => {
@@ -1681,47 +1684,6 @@ mod backend {
             )),
         }
     }
-
-    fn change_to_json(change: Change<StorageEntity>) -> serde_json::Value {
-        match change {
-            Change::Created { data, .. } => {
-                let entity_id = data.get("id").and_then(|v| v.as_string_owned());
-                serde_json::json!({
-                    "change_type": "Created",
-                    "entity_id": entity_id,
-                    "data": serde_json::to_value(&data).unwrap_or(serde_json::Value::Null),
-                })
-            }
-            Change::Updated { id, data, .. } => serde_json::json!({
-                "change_type": "Updated",
-                "entity_id": id,
-                "data": serde_json::to_value(&data).unwrap_or(serde_json::Value::Null),
-            }),
-            Change::Deleted { id, .. } => serde_json::json!({
-                "change_type": "Deleted",
-                "entity_id": id,
-                "data": null,
-            }),
-            Change::FieldsChanged {
-                entity_id, fields, ..
-            } => {
-                let data: serde_json::Map<String, serde_json::Value> = fields
-                    .into_iter()
-                    .map(|(field_name, _old, new_val)| {
-                        (
-                            field_name,
-                            serde_json::to_value(&new_val).unwrap_or(serde_json::Value::Null),
-                        )
-                    })
-                    .collect();
-                serde_json::json!({
-                    "change_type": "Updated",
-                    "entity_id": entity_id,
-                    "data": data,
-                })
-            }
-        }
-    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -1944,6 +1906,106 @@ fn op_wire_response<'a>(
     &outcome.response
 }
 
+/// A `watch_view` emission as the JSON the page receives. An envelope with no
+/// JSON form arrives as an error ViewModel naming the cause.
+fn watch_envelope_json(envelope: &holon_frontend::view_model::WatchEnvelope, handle: u32) -> String {
+    serde_json::to_string(envelope).unwrap_or_else(|e| {
+        let message = format!("[watch_view handle={handle}] WatchEnvelope serialize failed: {e}");
+        tracing::error!("{message}");
+        let error_envelope = holon_frontend::view_model::WatchEnvelope {
+            view_model: holon_frontend::view_model::ViewModel::error("watch_view", message),
+            focused_block: None,
+            caret_offset: None,
+        };
+        serde_json::to_string(&error_envelope)
+            .expect("an error ViewModel carries no Value and always serializes")
+    })
+}
+
+/// A buffered MCP watch change, the disclosure of one left out of the feed, or
+/// a batch's degraded-mode disclosure.
+enum McpPending {
+    Row(serde_json::Value),
+    Omitted(String),
+    Degraded(String),
+}
+
+fn mcp_pending_change(change: holon_api::Change<holon_api::StorageEntity>) -> McpPending {
+    use holon_api::Change;
+    let (change_type, entity_id, data) = match change {
+        Change::Created { data, .. } => (
+            "Created",
+            data.get("id").and_then(|v| v.as_string_owned()),
+            row_to_json(&data),
+        ),
+        Change::Updated { id, data, .. } => ("Updated", Some(id), row_to_json(&data)),
+        Change::Deleted { id, .. } => ("Deleted", Some(id), Ok(serde_json::Value::Null)),
+        Change::FieldsChanged {
+            entity_id, fields, ..
+        } => (
+            "Updated",
+            Some(entity_id),
+            fields
+                .into_iter()
+                .map(|(field_name, _old, new_val)| {
+                    let json = new_val.try_into_json().map_err(|e| e.under(&field_name))?;
+                    Ok((field_name, json))
+                })
+                .collect::<Result<serde_json::Map<_, _>, holon_api::NotJson>>()
+                .map(serde_json::Value::Object),
+        ),
+    };
+    match data {
+        Ok(data) => McpPending::Row(serde_json::json!({
+            "change_type": change_type,
+            "entity_id": entity_id,
+            "data": data,
+        })),
+        Err(e) => McpPending::Omitted(format!(
+            "{change_type} of entity {}: {e}",
+            entity_id.as_deref().unwrap_or("<no id>")
+        )),
+    }
+}
+
+/// A result row as JSON, refused by the field that has no JSON form.
+fn row_to_json(row: &holon_api::StorageEntity) -> Result<serde_json::Value, holon_api::NotJson> {
+    row.iter()
+        .map(|(k, v)| {
+            Ok((
+                k.to_string(),
+                v.clone().try_into_json().map_err(|e| e.under(k))?,
+            ))
+        })
+        .collect::<Result<serde_json::Map<_, _>, _>>()
+        .map(serde_json::Value::Object)
+}
+
+fn buffer_mcp_batch(
+    pending: &mut Vec<McpPending>,
+    degraded: Option<String>,
+    changes: impl Iterator<Item = holon_api::Change<holon_api::StorageEntity>>,
+) {
+    pending.extend(degraded.map(McpPending::Degraded));
+    pending.extend(changes.map(mcp_pending_change));
+}
+
+/// The `poll_changes` result: the delivered changes, the disclosures of the
+/// ones left out, and the degraded-mode notes of their batches.
+fn take_mcp_poll(pending: &mut Vec<McpPending>) -> serde_json::Value {
+    let mut changes = Vec::new();
+    let mut omitted = Vec::new();
+    let mut degraded = Vec::new();
+    for p in pending.drain(..) {
+        match p {
+            McpPending::Row(row) => changes.push(row),
+            McpPending::Omitted(why) => omitted.push(why),
+            McpPending::Degraded(note) => degraded.push(note),
+        }
+    }
+    serde_json::json!({"changes": changes, "omitted": omitted, "degraded": degraded})
+}
+
 /// Open (or create) a Turso database at `path` backed by the OPFS IO shim.
 /// Re-opening replaces any existing handle. Phase 2 does not yet support
 /// multiple databases.
@@ -2084,6 +2146,89 @@ mod tests {
             serde_json::to_string(super::op_wire_response("t", &outcome)).unwrap(),
             r#""sent""#
         );
+    }
+
+    #[test]
+    fn a_watch_change_with_no_json_form_is_omitted_by_name_and_the_others_are_delivered() {
+        use holon_api::Change;
+        use holon_api::ChangeOrigin;
+        let origin = || ChangeOrigin::local_with_trace(None, None);
+        let row = |id: &str, d: Value| {
+            holon_api::StorageEntity::from([
+                ("id".into(), Value::String(id.into())),
+                ("d".into(), d),
+            ])
+        };
+        let changes = vec![
+            Change::Created {
+                data: row("ok1", Value::Float(1.5)),
+                origin: origin(),
+            },
+            Change::Created {
+                data: row("bad", Value::Float(f64::INFINITY)),
+                origin: origin(),
+            },
+            Change::FieldsChanged {
+                entity_id: "bad2".into(),
+                fields: vec![("d".into(), Value::Null, Value::Float(f64::NAN))],
+                origin: origin(),
+            },
+            Change::Updated {
+                id: "ok2".into(),
+                data: row("ok2", Value::Integer(2)),
+                origin: origin(),
+            },
+        ];
+        let mut pending = Vec::new();
+        super::buffer_mcp_batch(
+            &mut pending,
+            Some("one row left out".into()),
+            changes.into_iter(),
+        );
+        let poll = super::take_mcp_poll(&mut pending);
+
+        let delivered: Vec<&str> = poll["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["entity_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(delivered, ["ok1", "ok2"], "{poll}");
+        let omitted = poll["omitted"].as_array().unwrap();
+        assert_eq!(omitted.len(), 2, "{poll}");
+        assert!(omitted[0].as_str().unwrap().contains("bad"), "{poll}");
+        assert!(omitted[0].as_str().unwrap().contains("'d'"), "{poll}");
+        assert!(omitted[1].as_str().unwrap().contains("bad2"), "{poll}");
+        assert_eq!(poll["degraded"], serde_json::json!(["one row left out"]));
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn a_non_finite_watch_envelope_is_sent_as_an_error_view_model() {
+        use holon_frontend::view_model::ViewKind;
+        use holon_frontend::view_model::ViewModel;
+        use holon_frontend::view_model::WatchEnvelope;
+
+        let mut view_model = ViewModel::from_kind(ViewKind::Empty);
+        view_model.entity = std::sync::Arc::new(HashMap::from([(
+            "ratio".to_string(),
+            Value::Float(f64::INFINITY),
+        )]));
+        let envelope = WatchEnvelope {
+            view_model,
+            focused_block: Some("block:a".to_string()),
+            caret_offset: None,
+        };
+
+        let json = super::watch_envelope_json(&envelope, 7);
+        let sent: WatchEnvelope = serde_json::from_str(&json).expect("the page gets valid JSON");
+        match sent.view_model.kind {
+            ViewKind::Error { message } => assert!(
+                message.contains("handle=7") && message.contains("inf"),
+                "the error must name the watch and the value, got {message}"
+            ),
+            other => panic!("expected an error ViewModel, got {other:?}"),
+        }
     }
 
     /// A null JS value should map to `Value::Null`, not deserialize-fail.

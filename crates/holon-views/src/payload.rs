@@ -49,12 +49,13 @@ impl Payload {
     /// so a block holding one is refused rather than changed.
     pub fn encode(block: &SnapshotBlock) -> Result<Payload, EngineError> {
         for (key, value) in &block.block.properties {
-            if !finite(value) {
-                return Err(EngineError::NonFiniteFloat {
+            value.reject_non_finite_float(key).map_err(|e| match e {
+                holon_api::NotJson::NonFiniteFloat { path, .. } => EngineError::NonFiniteFloat {
                     id: block.block.id.clone(),
-                    key: key.clone(),
-                });
-            }
+                    path,
+                },
+                other => unreachable!("reject_non_finite_float refused a finite value: {other}"),
+            })?;
         }
         let mut block = block.clone();
         let properties = std::mem::take(&mut block.block.properties)
@@ -142,20 +143,5 @@ impl From<Tagged> for Value {
 impl fmt::Debug for Payload {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Payload({})", String::from_utf8_lossy(&self.0))
-    }
-}
-
-fn finite(value: &Value) -> bool {
-    match value {
-        Value::Float(f) => f.is_finite(),
-        Value::Array(items) => items.iter().all(finite),
-        Value::Object(map) => map.values().all(finite),
-        Value::Removed(_)
-        | Value::String(_)
-        | Value::Integer(_)
-        | Value::Boolean(_)
-        | Value::DateTime(_)
-        | Value::Json(_)
-        | Value::Null => true,
     }
 }

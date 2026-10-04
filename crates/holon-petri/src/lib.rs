@@ -36,6 +36,7 @@ use holon_api::CompiledExpr;
 use holon_api::EntityUri;
 use holon_api::block::Block;
 use holon_api::computation::Computation;
+use holon_api::expr_parser::ExprParseErrorKind;
 use holon_api::types::DependsOn;
 use holon_api::types::Priority;
 use holon_api::types::TaskState;
@@ -117,7 +118,11 @@ pub enum PetriError {
         detail: String,
         expr: String,
     },
-    #[error("Rhai computed property '{name}' returned non-numeric: {detail}")]
+    #[error("prototype literal '{name}' is the non-finite float {value}")]
+    NonFiniteLiteral { name: String, value: f64 },
+    #[error("context property '{name}' is the non-finite float {value}")]
+    NonFiniteContextProperty { name: String, value: f64 },
+    #[error("Rhai computed property '{name}' returned no finite number: {detail}")]
     ComputedNonNumeric { name: String, detail: String },
     #[error("block ids {a:?} and {b:?} both sanitize to Rhai identifier fragment {frag:?}")]
     FragmentCollision { a: String, b: String, frag: String },
@@ -350,6 +355,9 @@ impl PrototypeValue {
             // the subset rejection reason.
             match holon_api::expr_parser::parse(expr) {
                 Ok(comp) => Ok(PrototypeValue::Computed(comp)),
+                Err(e) if e.kind == ExprParseErrorKind::NonFiniteLiteral => {
+                    Err(format!("expression '{expr}': {e}"))
+                }
                 Err(subset_err) => {
                     // Outside the typed subset -> Rhai Script (seat B). This
                     // routing is disclosed downstream at `DerivedFieldPlan::plan`
@@ -365,14 +373,12 @@ impl PrototypeValue {
                 }
             }
         } else {
-            raw.parse::<f64>()
-                .map(PrototypeValue::Literal)
-                .map_err(|_| {
-                    format!(
-                        "prototype value '{raw}' is neither a number nor a '='-prefixed Rhai \
-                         expression"
-                    )
-                })
+            parse_finite(raw).map(PrototypeValue::Literal).map_err(|e| {
+                format!(
+                    "prototype value '{raw}' is neither a number nor a '='-prefixed Rhai \
+                     expression: {e}"
+                )
+            })
         }
     }
 
@@ -443,6 +449,12 @@ pub fn resolve_prototype(
     for (k, v) in &merged {
         match v {
             PrototypeValue::Literal(f) => {
+                if !f.is_finite() {
+                    return Err(PetriError::NonFiniteLiteral {
+                        name: k.clone(),
+                        value: *f,
+                    });
+                }
                 literals.insert(k.clone(), *f);
             }
             PrototypeValue::Computed(comp) => {
@@ -452,6 +464,12 @@ pub fn resolve_prototype(
     }
 
     for (k, v) in context_props {
+        if !v.is_finite() {
+            return Err(PetriError::NonFiniteContextProperty {
+                name: k.clone(),
+                value: *v,
+            });
+        }
         literals.insert(k.clone(), *v);
     }
 
@@ -542,6 +560,13 @@ pub fn block_to_prototype_props(
             continue;
         }
         let pv = match v {
+            HValue::Float(f) if !f.is_finite() => {
+                return Err(PetriError::InvalidPrototypeProperty {
+                    block_id: block.id.to_string(),
+                    name: k.clone(),
+                    detail: format!("{f} is not a finite number"),
+                });
+            }
             HValue::Float(f) => PrototypeValue::Literal(*f),
             HValue::Integer(i) => PrototypeValue::Literal(*i as f64),
             HValue::String(s) => PrototypeValue::parse(engine, s).map_err(|detail| {
@@ -616,16 +641,27 @@ fn numeric_prop(block_id: &EntityUri, name: &str, v: &holon_api::Value) -> Resul
     match v {
         HValue::Float(f) => Ok(*f),
         HValue::Integer(i) => Ok(*i as f64),
-        HValue::String(s) => s.parse().map_err(|e| PetriError::NonNumericProperty {
+        HValue::String(s) => parse_finite(s).map_err(|detail| PetriError::NonNumericProperty {
             block_id: block_id.to_string(),
             name: name.to_string(),
-            detail: format!("{s:?}: {e}"),
+            detail,
         }),
         other => Err(PetriError::NonNumericProperty {
             block_id: block_id.to_string(),
             name: name.to_string(),
             detail: format!("non-numeric type {other:?}"),
         }),
+    }
+}
+
+/// Rust's `f64` parser also takes `inf`, `NaN` and out-of-range text such as
+/// `1e400`; none of them is a number a property can hold.
+fn parse_finite(raw: &str) -> Result<f64, String> {
+    let f: f64 = raw.parse().map_err(|e| format!("{raw:?}: {e}"))?;
+    if f.is_finite() {
+        Ok(f)
+    } else {
+        Err(format!("{raw:?} is not a finite number"))
     }
 }
 
@@ -1602,6 +1638,84 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_non_finite_computed_value_is_refused() {
+        let engine = holon_expr::bounded_engine();
+        for (expr, shown) in [("=1.0 / 0.0", "inf"), ("=0.0 / 0.0", "NaN")] {
+            let mut prototype: BTreeMap<String, PrototypeValue> = BTreeMap::new();
+            prototype.insert(
+                "ratio".to_string(),
+                PrototypeValue::parse(&engine, expr).unwrap(),
+            );
+
+            let outcome = resolve_prototype(&prototype, &BTreeMap::new(), &BTreeMap::new());
+            assert!(
+                matches!(&outcome, Err(PetriError::ComputedEval { name, detail, .. })
+                    if name == "ratio" && detail.contains(&format!("non-finite float {shown}"))),
+                "{expr} must be refused as non-finite, got {outcome:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_rust_built_non_finite_literal_is_refused_by_name() {
+        for value in [f64::INFINITY, f64::NAN] {
+            let mut prototype: BTreeMap<String, PrototypeValue> = BTreeMap::new();
+            prototype.insert("ratio".to_string(), PrototypeValue::Literal(value));
+
+            let outcome = resolve_prototype(&prototype, &BTreeMap::new(), &BTreeMap::new());
+            assert!(
+                matches!(&outcome, Err(PetriError::NonFiniteLiteral { name, .. }) if name == "ratio"),
+                "{value} literal must be refused by name, got {outcome:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_non_finite_literal_expression_is_refused() {
+        let engine = holon_expr::bounded_engine();
+        for expr in ["=1e999", "=9e999"] {
+            let mut prototype: BTreeMap<String, PrototypeValue> = BTreeMap::new();
+            let outcome = PrototypeValue::parse(&engine, expr).map(|pv| {
+                prototype.insert("ratio".to_string(), pv);
+                resolve_prototype(&prototype, &BTreeMap::new(), &BTreeMap::new())
+            });
+            assert!(
+                matches!(&outcome, Err(detail) if detail.contains(&expr[1..])),
+                "{expr} must be refused where it is parsed, naming its text, got {outcome:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_non_finite_context_property_is_refused_by_name() {
+        let mut context: BTreeMap<String, f64> = BTreeMap::new();
+        context.insert("priority".to_string(), 1.0);
+        context.insert("seed".to_string(), f64::INFINITY);
+
+        let outcome = resolve_prototype(&BTreeMap::new(), &BTreeMap::new(), &context);
+        assert!(
+            matches!(&outcome, Err(PetriError::NonFiniteContextProperty { name, .. }) if name == "seed"),
+            "an infinite context property must be refused by name, got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn a_non_finite_stored_prototype_float_is_refused_by_name() {
+        let engine = holon_expr::bounded_engine();
+        let mut block = Block::new_text(EntityUri::block_random(), EntityUri::block("p"), "Proto");
+        block
+            .properties
+            .insert("weight".to_string(), holon_api::Value::Float(f64::NAN));
+
+        let outcome = block_to_prototype_props(&engine, &block);
+        assert!(
+            matches!(&outcome, Err(PetriError::InvalidPrototypeProperty { name, detail, .. })
+                if name == "weight" && detail.contains("NaN")),
+            "a NaN prototype property must be refused by name, got {outcome:?}"
+        );
+    }
+
     /// Real block ids are EntityUris (`block:<uuid>`) whose `:`/`-` are invalid
     /// in Rhai identifiers — rank_tasks must still compile the objective and
     /// return real block ids, never delegate sub-transition ids.
@@ -1719,6 +1833,28 @@ mod tests {
             err.to_string().contains("is not numeric"),
             "error must name the failure, got: {err}"
         );
+    }
+
+    #[test]
+    fn non_finite_number_text_is_refused_where_it_is_parsed() {
+        let engine = holon_expr::bounded_engine();
+        for raw in ["inf", "-infinity", "NaN", "1e400"] {
+            let mut b = Block::new_text(EntityUri::block_random(), EntityUri::block("p"), "Self");
+            b.set_property(
+                "mental_slots_capacity",
+                holon_api::Value::String(raw.to_string()),
+            );
+            let err = SelfDescriptor::from_block(&b).expect_err("a non-finite number must fail");
+            assert!(
+                matches!(err, PetriError::NonNumericProperty { .. })
+                    && err.to_string().contains("not a finite number"),
+                "{raw}: {err}"
+            );
+
+            let err = PrototypeValue::parse(&engine, raw)
+                .expect_err("a non-finite prototype literal must fail");
+            assert!(err.contains("not a finite number"), "{raw}: {err}");
+        }
     }
 
     /// A delegate name containing `"` and `\\` must be carried as typed token

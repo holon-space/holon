@@ -594,11 +594,11 @@ impl ReactiveShell {
     /// subscription has already updated by the time the data signal fires
     /// here, because both observers see the same Mutable emission).
     ///
-    /// `props` covers structural prop updates (set_data, set_expr, template
-    /// changes). `data` covers per-row CDC writes that go through the
-    /// `ReactiveRowSet`'s shared Mutable — without watching `data` at the
-    /// shell level, leaf prop mutations from CDC never trigger a GPUI
-    /// re-render and `inv-displayed-text` flags stale text widgets.
+    /// `props` covers structural prop updates (template changes). `data` covers
+    /// per-row CDC writes that go through the `ReactiveRowSet`'s shared
+    /// Mutable — without watching `data` at the shell level, leaf prop
+    /// mutations from CDC never trigger a GPUI re-render and
+    /// `inv-displayed-text` flags stale text widgets.
     ///
     /// One subscription per row, not per nested widget — a recursive walk
     /// over every node was tried and caused hangs from runtime contention.

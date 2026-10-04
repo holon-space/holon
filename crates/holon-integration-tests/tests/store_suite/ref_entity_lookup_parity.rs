@@ -54,11 +54,13 @@ fn computed_fields(state: &ReferenceState, block: &Block) -> HashMap<String, Val
         .seed_profile
         .as_ref()
         .expect("oracle carries the bundled block profile");
-    profile.compute_fields_only(
-        &block_to_data_row(block),
-        &state.profile_engine(),
-        &holon_api::render_requirements::RenderRequirements::entity_dispatch(),
-    )
+    profile
+        .compute_fields_only(
+            &block_to_data_row(block),
+            &state.profile_engine(),
+            &holon_api::render_requirements::RenderRequirements::entity_dispatch(),
+        )
+        .values
 }
 
 /// `has_query_source` = "this block owns a query-source child and is not rule

@@ -51,10 +51,12 @@ pub fn register_block_query_frontend(injector: &Injector) {
             .try_resolve::<dyn holon::api::OperationEngine>()
             .ok();
         let shutdown = resolver.resolve::<holon_api::lifecycle::SessionShutdown>();
+        let conditions = (*resolver.resolve::<Arc<holon_api::ConditionBus>>()).clone();
         Shared::new(from_block_query_source(
             block_query,
             operation_engine,
             &shutdown,
+            conditions,
         ))
     }));
 
@@ -82,6 +84,7 @@ pub fn from_block_query_source(
     block_query: Arc<dyn BlockQuerySource>,
     operation_engine: Option<Arc<dyn holon::api::OperationEngine>>,
     shutdown: &holon_api::lifecycle::SessionShutdown,
+    conditions: Arc<holon_api::ConditionBus>,
 ) -> FrontendSession {
     let ui_watcher = Arc::new(holon_loro_wiring::loro_ui_watcher::LoroUiWatcher::new(
         block_query.clone(),
@@ -89,6 +92,7 @@ pub fn from_block_query_source(
     let profiles = holon_loro_wiring::loro_ui_watcher::build_turso_free_profile_resolver(
         block_query.clone(),
         shutdown,
+        conditions,
     );
     // Third boot path, and the least complete one: it assembles a session
     // directly, performing none of the steps the shared wiring runs except the

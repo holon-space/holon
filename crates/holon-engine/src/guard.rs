@@ -77,10 +77,12 @@ impl RhaiEvaluator {
         compiled: &CompiledExpr,
         scope: &mut Scope,
     ) -> Result<Value, String> {
-        self.engine
+        let d = self
+            .engine
             .eval_ast_with_scope::<rhai::Dynamic>(scope, &compiled.ast)
-            .map(Value::from)
-            .map_err(|e| format!("eval error for '{}': {e}", compiled.source))
+            .map_err(|e| format!("eval error for '{}': {e}", compiled.source))?;
+        Value::try_from_dynamic(d)
+            .map_err(|e| format!("expression '{}' produced {e}", compiled.source))
     }
 
     pub fn token_to_map(token: &impl TokenState) -> rhai::Map {

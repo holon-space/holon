@@ -35,7 +35,11 @@ impl LoroUiRowsComponent {
     pub fn new(backend: Arc<LoroBackend>) -> Self {
         let source: Arc<dyn BlockQuerySource> = Arc::new(LoroBlockQuerySource::new(backend));
         let shutdown = SessionShutdown::new();
-        let resolver = build_turso_free_profile_resolver(source.clone(), &shutdown);
+        let resolver = build_turso_free_profile_resolver(
+            source.clone(),
+            &shutdown,
+            Arc::new(holon_api::ConditionBus::new()),
+        );
         Self {
             source,
             resolver,

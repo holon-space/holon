@@ -383,6 +383,15 @@ impl ConditionKind {
             Self::DatabaseWatchFailed { cause } => {
                 ConditionDetail::prose(format!("Holon's watch over its database failed: {cause}."))
             }
+
+            Self::DerivedFieldNotComputed {
+                block_id,
+                field,
+                reason,
+            } => ConditionDetail::prose(format!(
+                "Holon could not compute {field} of {block_id}: {reason}. It shows no value \
+                 until the next computation succeeds."
+            )),
         }
     }
 }

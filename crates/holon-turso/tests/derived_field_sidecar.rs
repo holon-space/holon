@@ -12,9 +12,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use holon_api::ConditionBus;
+use holon_api::ConditionKind;
 use holon_api::Value;
 use holon_api::computation::ArithOp;
 use holon_api::computation::Computation;
+use holon_api::computation::ComputeError;
 use holon_api::computation::DerivedField;
 use holon_api::computation::FieldIdent;
 use holon_turso::derived_reconciler::spawn_derived_field_reconciler;
@@ -23,6 +26,7 @@ use holon_turso::schema_module::SchemaModule;
 use holon_turso::schema_modules::BlockDerivedSchemaModule;
 use holon_turso::turso::DbHandle;
 use holon_turso::turso::TursoBackend;
+use proptest::prelude::*;
 
 async fn setup() -> DbHandle {
     let (_backend, handle) = TursoBackend::new_in_memory().await.expect("in-memory db");
@@ -119,6 +123,7 @@ async fn sidecar_is_cdc_maintained_incrementally_and_retracts() {
         handle.clone(),
         "SELECT id, priority FROM task",
         vec![boosted()],
+        Arc::new(ConditionBus::new()),
     )
     .await
     .expect("spawn reconciler");
@@ -159,4 +164,122 @@ async fn sidecar_is_cdc_maintained_incrementally_and_retracts() {
         .await
         .expect("delete t1");
     await_derived(&handle, "t1", "boosted", None).await;
+}
+
+/// `ratio = priority / divisor`; a zero divisor makes it non-finite.
+fn ratio(divisor: f64) -> DerivedField {
+    DerivedField::new(
+        FieldIdent::parse("ratio").expect("identifier"),
+        Computation::Arith {
+            op: ArithOp::Div,
+            lhs: Box::new(Computation::Field("priority".into())),
+            rhs: Box::new(Computation::Lit(Value::Float(divisor))),
+        },
+    )
+}
+
+/// `scaled = priority * f64::MAX`: finite at 1, infinite at 2.
+fn scaled() -> DerivedField {
+    DerivedField::new(
+        FieldIdent::parse("scaled").expect("identifier"),
+        Computation::Arith {
+            op: ArithOp::Mul,
+            lhs: Box::new(Computation::Field("priority".into())),
+            rhs: Box::new(Computation::Lit(Value::Float(f64::MAX))),
+        },
+    )
+}
+
+/// The `DerivedFieldNotComputed` reason raised for `t.scaled`, if any.
+fn not_computed_reason(bus: &ConditionBus) -> Option<String> {
+    bus.current().into_iter().find_map(|c| match c.reason {
+        ConditionKind::DerivedFieldNotComputed {
+            block_id,
+            field,
+            reason,
+        } if block_id == "t" && field == "scaled" => Some(reason),
+        _ => None,
+    })
+}
+
+#[tokio::test]
+async fn a_value_turning_non_finite_drops_its_row_and_is_disclosed_until_it_recovers() {
+    let handle = setup().await;
+    let mgr = MatviewManager::new(handle.clone(), Arc::new(tokio::sync::Mutex::new(())));
+    let bus = Arc::new(ConditionBus::new());
+    set_priority(&handle, "t", 1).await;
+    let _guard = spawn_derived_field_reconciler(
+        &mgr,
+        handle.clone(),
+        "SELECT id, priority FROM task",
+        vec![boosted(), scaled()],
+        bus.clone(),
+    )
+    .await
+    .expect("spawn reconciler");
+    let finite = serde_json::to_string(&Value::Float(f64::MAX)).expect("json");
+    await_derived(&handle, "t", "scaled", Some(&finite)).await;
+    assert_eq!(not_computed_reason(&bus), None);
+
+    set_priority(&handle, "t", 2).await;
+    await_derived(&handle, "t", "boosted", Some(&expected_json(2))).await;
+    assert_eq!(
+        read_derived(&handle, "t", "scaled").await,
+        None,
+        "the row computed from priority 1 must not stand as the value of priority 2"
+    );
+    let reason = not_computed_reason(&bus).expect("the missing value must be disclosed");
+    assert!(reason.contains("non-finite float inf"), "{reason}");
+
+    set_priority(&handle, "t", 1).await;
+    await_derived(&handle, "t", "scaled", Some(&finite)).await;
+    assert_eq!(
+        not_computed_reason(&bus),
+        None,
+        "a successful computation clears the condition"
+    );
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(12))]
+
+    /// A non-finite result leaves no row, never a stored `null`.
+    #[test]
+    fn a_non_finite_derived_value_never_lands_in_the_sidecar(
+        priority in -3i64..=3,
+        divisor in prop::sample::select(vec![0.0, -0.0, 0.5, 1e-320, 3.0]),
+    ) {
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        runtime.block_on(async {
+            let handle = setup().await;
+            let mgr = MatviewManager::new(handle.clone(), Arc::new(tokio::sync::Mutex::new(())));
+            set_priority(&handle, "t", priority).await;
+            let _guard = spawn_derived_field_reconciler(
+                &mgr,
+                handle.clone(),
+                "SELECT id, priority FROM task",
+                vec![boosted(), ratio(divisor)],
+                Arc::new(ConditionBus::new()),
+            )
+            .await
+            .expect("spawn reconciler");
+
+            // Both fields are written in one transaction, so `boosted` landing
+            // means `ratio` is decided too.
+            await_derived(&handle, "t", "boosted", Some(&expected_json(priority))).await;
+
+            let ctx = HashMap::from([("priority".to_string(), Value::Integer(priority))]);
+            let value = ratio(divisor).computation.eval(&ctx);
+            let expected = match &value {
+                Ok(value) => Some(serde_json::to_string(value).expect("json")),
+                Err(ComputeError::Arithmetic { .. }) => None,
+                Err(e) => panic!("{priority} / {divisor:?} must evaluate or be non-finite: {e}"),
+            };
+            assert_eq!(
+                read_derived(&handle, "t", "ratio").await,
+                expected,
+                "{priority} / {divisor:?} evaluates to {value:?}"
+            );
+        });
+    }
 }

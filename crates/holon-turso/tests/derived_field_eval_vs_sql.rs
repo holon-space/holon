@@ -18,6 +18,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use holon_api::ConditionBus;
 use holon_api::Value;
 use holon_api::computation::ArithOp;
 use holon_api::computation::Computation;
@@ -415,6 +416,7 @@ async fn sidecar_value_matches_eval_and_planted_sql() {
         handle.clone(),
         "SELECT id, xf FROM t",
         vec![DerivedField::new(fid("d"), comp)],
+        Arc::new(ConditionBus::new()),
     )
     .await
     .expect("spawn reconciler");

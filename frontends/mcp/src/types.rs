@@ -180,6 +180,16 @@ pub struct RowChangeJson {
     pub data: Option<HashMap<String, serde_json::Value>>,
 }
 
+/// What one `poll_changes` returns. A change whose row has no JSON form is
+/// left out of `changes` and named in `omitted`; `degraded` carries the
+/// disclosures of the batches the changes came in.
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct PollResult {
+    pub changes: Vec<RowChangeJson>,
+    pub omitted: Vec<String>,
+    pub degraded: Vec<String>,
+}
+
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct DropTableParams {
     pub table_name: String,

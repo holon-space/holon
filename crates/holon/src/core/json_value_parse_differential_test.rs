@@ -46,7 +46,7 @@ proptest! {
     #[test]
     fn the_parser_carries_every_json_shape_back_unchanged(v in any_json()) {
         let parsed = Value::from_json_value(v.clone());
-        let back = value_to_json(&parsed);
+        let back = value_to_json(&parsed).unwrap();
         prop_assert_eq!(&back, &v, "properties blob re-typed {} on the way through", v);
     }
 }
@@ -76,9 +76,13 @@ fn an_integer_too_large_for_i64_keeps_its_digits() {
         Value::Json("18446744073709551615".into()),
         "a u64 beyond i64::MAX must be carried exactly, not rounded into an f64"
     );
-    assert_eq!(value_to_json(&parsed), huge, "and it must round-trip");
     assert_eq!(
-        holon_turso::sql_utils::value_to_sql_literal(&parsed),
+        value_to_json(&parsed).unwrap(),
+        huge,
+        "and it must round-trip"
+    );
+    assert_eq!(
+        holon_turso::sql_utils::value_to_sql_literal(&parsed).unwrap(),
         "'18446744073709551615'",
         "the exact carrier is rendered as a QUOTED literal — the disclosed cost of not rounding"
     );
@@ -121,7 +125,7 @@ fn each_value_kind_reaches_a_known_json_shape() {
     ];
     for (value, expected) in cases {
         assert_eq!(
-            value_to_json(&value),
+            value_to_json(&value).unwrap(),
             expected,
             "properties blob changed what it stores for {value:?}"
         );

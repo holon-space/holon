@@ -41,6 +41,9 @@ pub enum StorageError {
     #[error("Serialization error: {0}")]
     SerializationError(String),
 
+    #[error(transparent)]
+    NotJson(#[from] holon_api::NotJson),
+
     #[error("Backend error: {0}")]
     BackendError(String),
 

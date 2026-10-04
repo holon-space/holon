@@ -82,7 +82,7 @@ mod sql_injection_tests {
     async fn test_value_to_sql_param_escapes_single_quotes() {
         let backend = create_test_backend().await;
         let input = Value::String("O'Reilly".to_string());
-        let escaped = backend.value_to_sql_param(&input);
+        let escaped = backend.value_to_sql_param(&input).unwrap();
         assert_eq!(escaped, "'O''Reilly'");
     }
 
@@ -90,7 +90,7 @@ mod sql_injection_tests {
     async fn test_value_to_sql_param_handles_multiple_quotes() {
         let backend = create_test_backend().await;
         let input = Value::String("It's a'test'case".to_string());
-        let escaped = backend.value_to_sql_param(&input);
+        let escaped = backend.value_to_sql_param(&input).unwrap();
         assert_eq!(escaped, "'It''s a''test''case'");
     }
 
@@ -98,7 +98,7 @@ mod sql_injection_tests {
     async fn test_value_to_sql_param_handles_empty_string() {
         let backend = create_test_backend().await;
         let input = Value::String("".to_string());
-        let escaped = backend.value_to_sql_param(&input);
+        let escaped = backend.value_to_sql_param(&input).unwrap();
         assert_eq!(escaped, "''");
     }
 }
@@ -112,14 +112,16 @@ mod value_conversion_tests {
     #[tokio::test]
     async fn test_value_to_sql_param_null() {
         let backend = create_test_backend().await;
-        assert_eq!(backend.value_to_sql_param(&Value::Null), "NULL");
+        assert_eq!(backend.value_to_sql_param(&Value::Null).unwrap(), "NULL");
     }
 
     #[tokio::test]
     async fn test_value_to_sql_param_datetime() {
         let backend = create_test_backend().await;
         let dt = Utc::now();
-        let result = backend.value_to_sql_param(&Value::DateTime(dt.to_rfc3339()));
+        let result = backend
+            .value_to_sql_param(&Value::DateTime(dt.to_rfc3339()))
+            .unwrap();
         assert!(result.starts_with('\''));
         assert!(result.ends_with('\''));
     }
@@ -128,8 +130,9 @@ mod value_conversion_tests {
     async fn test_value_to_sql_param_json() {
         let backend = create_test_backend().await;
         let json = serde_json::json!({"key": "value"});
-        let result =
-            backend.value_to_sql_param(&Value::Json(serde_json::to_string(&json).unwrap()));
+        let result = backend
+            .value_to_sql_param(&Value::Json(serde_json::to_string(&json).unwrap()))
+            .unwrap();
         assert!(result.contains("key"));
         assert!(result.contains("value"));
     }
@@ -145,7 +148,7 @@ mod value_conversion_tests {
             let rt = tokio::runtime::Runtime::new().unwrap();
             let backend = rt.block_on(create_test_backend());
             let value = Value::Integer(i);
-            let sql_param = backend.value_to_sql_param(&value);
+            let sql_param = backend.value_to_sql_param(&value).unwrap();
             assert_eq!(sql_param, i.to_string());
         }
 
@@ -154,7 +157,7 @@ mod value_conversion_tests {
             let rt = tokio::runtime::Runtime::new().unwrap();
             let backend = rt.block_on(create_test_backend());
             let value = Value::Boolean(b);
-            let sql_param = backend.value_to_sql_param(&value);
+            let sql_param = backend.value_to_sql_param(&value).unwrap();
             assert_eq!(sql_param, if b { "1" } else { "0" });
         }
 
@@ -163,7 +166,7 @@ mod value_conversion_tests {
             let rt = tokio::runtime::Runtime::new().unwrap();
             let backend = rt.block_on(create_test_backend());
             let value = Value::String(s.clone());
-            let sql_param = backend.value_to_sql_param(&value);
+            let sql_param = backend.value_to_sql_param(&value).unwrap();
             assert!(sql_param.starts_with('\''));
             assert!(sql_param.ends_with('\''));
             let quote_count_input = s.matches('\'').count();

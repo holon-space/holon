@@ -5,6 +5,7 @@
 //! fields. Compilation happens at registration time (TypeRegistry); this module
 //! only evaluates.
 
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -18,6 +19,12 @@ use crate::Value;
 use crate::entity_profile::CompiledComputedField;
 use crate::entity_profile::dynamic_to_value;
 use crate::entity_profile::value_to_dynamic;
+
+/// Per computed field: `Ok` when evaluation gave a value (or the field is
+/// unbound), `Err(reason)` when evaluation failed or was refused on present
+/// columns. A failed field's value in the row is `Null`; this is how a
+/// caller tells that `Null` from a computed one.
+pub type ComputedOutcomes = BTreeMap<String, Result<(), String>>;
 
 /// Process-global dedup for the LOUD "declared column missing" signal so a
 /// per-row render/enrich path emits at most ONE warning per
@@ -68,14 +75,14 @@ pub(crate) fn warn_missing_declared_column(context: &str, column: &str) {
 /// `TypeRegistry::compiled_fields_for()`). Results are added to both the Rhai
 /// scope and the context map.
 ///
-/// Evaluation errors are logged and produce `Value::Null` — they do not
-/// propagate.
+/// Evaluation errors are logged, produce `Value::Null` and are returned as
+/// `Err` outcomes.
 pub fn resolve_computed_fields(
     fields: &[CompiledComputedField],
     context: &mut HashMap<String, Value>,
-) {
+) -> ComputedOutcomes {
     if fields.is_empty() {
-        return;
+        return ComputedOutcomes::new();
     }
 
     let engine = RhaiEngine::new();
@@ -89,7 +96,7 @@ pub fn resolve_computed_fields(
     // callers/tests): every missing required column is treated as
     // structurally-absent (silent typed skip).
     let no_declared = BTreeSet::new();
-    resolve_computed_fields_with_scope(&engine, &mut scope, fields, context, &no_declared);
+    resolve_computed_fields_with_scope(&engine, &mut scope, fields, context, &no_declared)
 }
 
 /// Evaluate pre-compiled computed fields with an existing Rhai engine and
@@ -111,12 +118,13 @@ pub fn resolve_computed_fields(
 ///   We do NOT invoke Rhai (so NO "Variable not found" error is ever raised)
 ///   and do NOT push the field into scope (absence = the typed "unbound" value,
 ///   which propagates cleanly to dependents and to variant conditions). Its
-///   output value defaults to `Null` via `extract_computed_values`. This is
-///   SILENT for optional columns and LOUD (once) for columns in the entity's
-///   `declared_columns` — a declared column missing is a real projection gap.
+///   output value is `Null`. This is SILENT for optional columns and LOUD
+///   (once) for columns in the entity's `declared_columns` — a declared column
+///   missing is a real projection gap.
 /// - **All required columns present**: evaluate. A failure now is a genuine
-///   runtime error on columns that ARE present (a type mismatch, a bad lookup)
-///   — surfaced at `warn` (disclosed degraded) and substituted with `Null`.
+///   runtime error on columns that ARE present (a type mismatch, a bad lookup,
+///   a non-finite float result) — surfaced at `warn` (disclosed degraded) and
+///   substituted with `Null` and returned as an `Err` outcome.
 ///
 /// NOTE: this path keeps its **caller-provided engine** deliberately — that
 /// engine carries the custom entity-lookup Rhai functions registered by the
@@ -132,7 +140,8 @@ pub fn resolve_computed_fields_with_scope(
     fields: &[CompiledComputedField],
     context: &mut HashMap<String, Value>,
     declared_columns: &BTreeSet<String>,
-) {
+) -> ComputedOutcomes {
+    let mut outcomes = ComputedOutcomes::new();
     for (name, compiled) in fields {
         let missing: Vec<&String> = compiled
             .required_columns
@@ -152,29 +161,39 @@ pub fn resolve_computed_fields_with_scope(
             // Do NOT push to scope — absence is the typed "unbound" value, which
             // propagates to dependent fields and variant conditions (they see it
             // missing, not as a `unit` that would type-error). Record Null in the
-            // OUTPUT context so consumers that read the context map keep the
-            // field's shape (the render path reads scope via
-            // `extract_computed_values`, which applies the same Null default).
+            // OUTPUT context so consumers keep the field's shape.
             context.insert(name.clone(), Value::Null);
+            outcomes.insert(name.clone(), Ok(()));
             continue;
         }
 
-        let result = match engine.eval_ast_with_scope::<rhai::Dynamic>(scope, &compiled.ast) {
-            Ok(v) => v,
-            Err(e) => {
+        let evaluated = engine
+            .eval_ast_with_scope::<rhai::Dynamic>(scope, &compiled.ast)
+            .map_err(|e| e.to_string())
+            .and_then(|d| {
+                let value = dynamic_to_value(&d, &compiled.source).map_err(|e| e.to_string())?;
+                Ok((d, value))
+            });
+        let (result, value) = match evaluated {
+            Ok(evaluated) => {
+                outcomes.insert(name.clone(), Ok(()));
+                evaluated
+            }
+            Err(error) => {
                 tracing::warn!(
                     field = %name,
-                    error = %e,
+                    %error,
                     "C4 enrich: computed field eval failed on PRESENT columns — genuine \
-                     runtime error (type mismatch / bad lookup), DISCLOSED degraded mode, \
-                     substituting Null"
+                     runtime error, DISCLOSED degraded mode, substituting Null"
                 );
-                rhai::Dynamic::UNIT
+                outcomes.insert(name.clone(), Err(error));
+                (rhai::Dynamic::UNIT, Value::Null)
             }
         };
-        scope.push(name.clone(), result.clone());
-        context.insert(name.clone(), dynamic_to_value(&result));
+        scope.push(name.clone(), result);
+        context.insert(name.clone(), value);
     }
+    outcomes
 }
 
 #[cfg(test)]
@@ -211,6 +230,52 @@ mod tests {
         resolve_computed_fields(&fields, &mut ctx);
         assert_eq!(ctx["doubled"], Value::Float(4.0));
         assert_eq!(ctx["quadrupled"], Value::Float(8.0));
+    }
+
+    fn huge_base_row() -> HashMap<String, Value> {
+        HashMap::from([("base".to_string(), Value::Float(1e308))])
+    }
+
+    #[test]
+    fn a_non_finite_rhai_result_is_refused_naming_its_source() {
+        let err = dynamic_to_value(&rhai::Dynamic::from(f64::INFINITY), "base * 10.0")
+            .expect_err("a non-finite float has no Value");
+        assert!(
+            err.to_string()
+                .contains("non-finite float inf from base * 10.0"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn an_overflowing_computed_field_is_refused_at_the_enrich_seat() {
+        let mut ctx = huge_base_row();
+        let fields = vec![("ratio".to_string(), compile("base * 10.0"))];
+
+        resolve_computed_fields(&fields, &mut ctx);
+        assert_eq!(ctx["ratio"], Value::Null, "an infinite result is refused");
+    }
+
+    #[test]
+    fn an_overflowing_computed_field_is_refused_at_the_render_seat() {
+        let profile = crate::entity_profile::EntityProfile {
+            entity_name: crate::EntityName::new("thing"),
+            variants: Vec::new(),
+            computed_fields: vec![("ratio".to_string(), compile("base * 10.0"))],
+            virtual_child: None,
+            declared_columns: BTreeSet::new(),
+            render_requirements: crate::render_requirements::RenderRequirements::default(),
+        };
+        let computed = profile.compute_fields_only(
+            &huge_base_row(),
+            &RhaiEngine::new(),
+            &crate::render_requirements::RenderRequirements::default(),
+        );
+        assert_eq!(
+            computed["ratio"],
+            Value::Null,
+            "an infinite result is refused"
+        );
     }
 
     #[test]

@@ -427,7 +427,7 @@ fn insert_rows_into_cache(
         let literals = row
             .iter()
             .map(value_to_sql_literal)
-            .collect::<Vec<_>>()
+            .collect::<Result<Vec<_>>>()?
             .join(", ");
         let sql = format!(
             "INSERT OR REPLACE INTO {} ({col_idents}) VALUES ({literals})",
@@ -438,17 +438,19 @@ fn insert_rows_into_cache(
     Ok(())
 }
 
-fn value_to_sql_literal(v: &Value) -> String {
-    match v {
+fn value_to_sql_literal(v: &Value) -> Result<String> {
+    Ok(match v {
         Value::Null => "NULL".to_string(),
         Value::Text(t) => format!("'{}'", t.as_str().replace('\'', "''")),
         Value::Numeric(turso_core::Numeric::Integer(i)) => i.to_string(),
-        Value::Numeric(turso_core::Numeric::Float(f)) => format!("{}", **f),
+        Value::Numeric(turso_core::Numeric::Float(f)) => {
+            holon_api::NotJson::finite(**f)?.to_string()
+        }
         Value::Blob(b) => {
             let hex: String = b.iter().map(|byte| format!("{byte:02x}")).collect();
             format!("x'{hex}'")
         }
-    }
+    })
 }
 
 fn quote_ident(s: &str) -> String {

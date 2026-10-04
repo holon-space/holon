@@ -1023,6 +1023,9 @@ fn encode_property_value(key: &str, value: &Value) -> anyhow::Result<loro::LoroV
     if let Err(e) = value.reject_kind_envelope_shape(key) {
         anyhow::bail!(e);
     }
+    if let Err(e) = value.reject_non_finite_float(key) {
+        anyhow::bail!(e);
+    }
     // `Value` is untagged, so `DateTime` and `Json` would go out as bare
     // strings and read back as `String`. Those two travel inside an envelope
     // that names the kind; every other kind keeps the exact bytes it has

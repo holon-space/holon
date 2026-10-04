@@ -164,6 +164,12 @@ pub enum ImportError {
         #[source]
         source: crate::kvs_writer::RowError,
     },
+    #[error("entity {entity}: {source}")]
+    NotStorable {
+        entity: i64,
+        #[source]
+        source: holon_api::NotJson,
+    },
     #[error("unknown attribute {attr:?} is not declared in the schema node (addr 0)")]
     UnknownAttr { attr: String },
     /// The addr-0 root node is not the shape a DataScript schema node has.

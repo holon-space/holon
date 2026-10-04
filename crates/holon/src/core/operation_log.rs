@@ -117,10 +117,10 @@ impl OperationLogStore {
 #[async_trait]
 impl OperationLogOperations for OperationLogStore {
     async fn log_operation(&self, operation: Operation, inverse: UndoAction) -> Result<i64> {
+        let entry = OperationLogEntry::new(operation, inverse.into_option())?;
+
         // Clear redo stack (new operation invalidates redo history)
         self.clear_redo_stack().await?;
-
-        let entry = OperationLogEntry::new(operation, inverse.into_option());
 
         // INSERT RETURNING id: combines insert + get ID in one round-trip.
         // Saves 1 SQL query vs separate INSERT + SELECT last_insert_rowid().

@@ -59,6 +59,7 @@ use holon_api::BatchWithMetadata;
 use holon_api::CHANGE_ORIGIN_COLUMN;
 use holon_api::Change;
 use holon_api::ChangeOrigin;
+use holon_api::NotJson;
 use holon_api::Value;
 use holon_core::storage::Filter;
 use holon_core::storage::Resource;
@@ -882,7 +883,7 @@ impl DbHandle {
     /// holon-orgmode) use this so they never name `turso::Value` directly;
     /// same actor path (and CDC emission) as [`execute`](Self::execute).
     pub async fn execute_values(&self, sql: &str, params: Vec<Value>) -> Result<u64> {
-        let params = params.iter().map(value_to_turso_param).collect();
+        let params = positional_turso_params(&params)?;
         self.execute(sql, params).await
     }
 
@@ -980,7 +981,7 @@ impl DbHandle {
     /// PR #8463).
     #[cfg(any(test, feature = "unguarded-writes"))]
     pub async fn execute_unguarded(&self, sql: &str, params: Vec<holon_api::Value>) -> Result<u64> {
-        let params = params.iter().map(value_to_turso_param).collect();
+        let params = positional_turso_params(&params)?;
         let (response_tx, response_rx) = oneshot::channel();
         self.tx
             .send(DbCommand::ExecuteUnscreened {
@@ -1552,28 +1553,15 @@ pub(crate) fn extract_change_origin_from_data(data: &StorageEntity) -> ChangeOri
 }
 
 /// Convert holon_api::Value to turso::Value for parameter binding
-pub(crate) fn value_to_turso_param(value: &Value) -> turso::Value {
-    match value {
+pub(crate) fn value_to_turso_param(value: &Value) -> std::result::Result<turso::Value, NotJson> {
+    Ok(match value {
         Value::String(s) => turso::Value::Text(s.clone()),
         Value::Integer(i) => turso::Value::Integer(*i),
-        Value::Float(f) => turso::Value::Real(*f),
+        Value::Float(f) => turso::Value::Real(NotJson::finite(*f)?),
         Value::Boolean(b) => turso::Value::Integer(if *b { 1 } else { 0 }),
         Value::DateTime(s) => turso::Value::Text(s.clone()),
         Value::Json(s) => turso::Value::Text(s.clone()),
-        Value::Array(arr) => {
-            let json_arr: Vec<serde_json::Value> = arr
-                .iter()
-                .map(|v| serde_json::Value::from(v.clone()))
-                .collect();
-            turso::Value::Text(serde_json::to_string(&serde_json::Value::Array(json_arr)).unwrap())
-        }
-        Value::Object(obj) => {
-            let json_obj: serde_json::Map<String, serde_json::Value> = obj
-                .iter()
-                .map(|(k, v)| (k.clone(), serde_json::Value::from(v.clone())))
-                .collect();
-            turso::Value::Text(serde_json::to_string(&serde_json::Value::Object(json_obj)).unwrap())
-        }
+        Value::Array(_) | Value::Object(_) => turso::Value::Text(value.to_json_string()?),
         Value::Null => turso::Value::Null,
         // Binding a removal as a parameter would write the deletion INTENT into
         // a column. The sentinel is consumed by the property merge, never bound.
@@ -1581,7 +1569,16 @@ pub(crate) fn value_to_turso_param(value: &Value) -> turso::Value {
             "value_to_turso_param: Value::REMOVED is a write-leg removal instruction, not a \
              bindable value"
         ),
-    }
+    })
+}
+
+/// A refusal names the parameter by its placeholder number (`?1` first).
+fn positional_turso_params(params: &[Value]) -> std::result::Result<Vec<turso::Value>, NotJson> {
+    params
+        .iter()
+        .enumerate()
+        .map(|(i, v)| value_to_turso_param(v).map_err(|e| e.under(&format!("?{}", i + 1))))
+        .collect()
 }
 
 /// Bind named parameters (`$name`, `:name`, `@name`) to positional
@@ -1599,7 +1596,7 @@ fn bind_parameters(
 
     let result_sql = rewrite_named_params(sql, &mut |name| match params.get(name) {
         Some(value) => {
-            param_values.push(value_to_turso_param(value));
+            param_values.push((name.to_string(), value));
             Some("?".to_string())
         }
         None => {
@@ -1615,6 +1612,10 @@ fn bind_parameters(
         )));
     }
 
+    let param_values = param_values
+        .into_iter()
+        .map(|(name, value)| value_to_turso_param(value).map_err(|e| e.under(&name)))
+        .collect::<std::result::Result<_, _>>()?;
     Ok((result_sql, param_values))
 }
 
@@ -1626,14 +1627,19 @@ fn bind_parameters(
 /// `Value::Array` on the query path while the CDC path kept it a String,
 /// so consumers diffing initial rows against CDC updates saw a spurious
 /// type change.
-fn turso_value_to_value(value: turso_core::Value) -> Value {
-    match value {
+///
+/// A REAL that SQL computed as NaN or infinity is refused: no `Value` carries
+/// one.
+fn turso_value_to_value(value: turso_core::Value) -> std::result::Result<Value, NotJson> {
+    Ok(match value {
         turso_core::Value::Null => Value::Null,
         turso_core::Value::Numeric(turso_core::Numeric::Integer(i)) => Value::Integer(i),
-        turso_core::Value::Numeric(turso_core::Numeric::Float(f)) => Value::Float(f.into()),
+        turso_core::Value::Numeric(turso_core::Numeric::Float(f)) => {
+            Value::Float(NotJson::finite(f.into())?)
+        }
         turso_core::Value::Text(s) => Value::String(s.to_string()),
         turso_core::Value::Blob(_) => Value::Null,
-    }
+    })
 }
 
 /// Parse a Value that may be JSON object text or already an Object into a
@@ -2318,20 +2324,10 @@ impl TursoBackend {
     pub fn parse_row_values_with_schema(
         values: &[turso_core::Value],
         columns: &[Arc<str>],
-    ) -> std::result::Result<StorageEntity, holon_api::PropertyKindsError> {
+    ) -> Result<StorageEntity> {
         let mut entity = StorageEntity::with_capacity(values.len());
 
         for (idx, value) in values.iter().enumerate() {
-            let our_value = match value {
-                turso_core::Value::Null => Value::Null,
-                turso_core::Value::Numeric(turso_core::Numeric::Integer(i)) => Value::Integer(*i),
-                turso_core::Value::Numeric(turso_core::Numeric::Float(f)) => {
-                    Value::Float((*f).into())
-                }
-                turso_core::Value::Text(s) => Value::String(s.to_string()),
-                turso_core::Value::Blob(_) => Value::Null,
-            };
-
             // Clone the shared column-name Arc; only the out-of-schema case allocates
             let column_name = columns.get(idx).map(Arc::clone).unwrap_or_else(|| {
                 tracing::debug!(
@@ -2342,32 +2338,40 @@ impl TursoBackend {
                 Arc::from("unknown")
             });
 
+            let our_value =
+                turso_value_to_value(value.clone()).map_err(|e| e.under(&column_name))?;
             entity.insert(column_name, our_value);
         }
 
-        normalize_known_json_columns(&mut entity)?;
+        normalize_known_json_columns(&mut entity).map_err(|e| {
+            StorageError::QueryError(format!("stored property kinds are corrupt: {e}"))
+        })?;
 
         Ok(entity)
     }
 
-    pub fn value_to_sql_param(&self, value: &Value) -> String {
+    pub fn value_to_sql_param(&self, value: &Value) -> std::result::Result<String, NotJson> {
         super::sql_utils::value_to_sql_literal(value)
     }
 
-    fn build_where_clause(&self, filter: &Filter, params: &mut Vec<turso::Value>) -> String {
-        match filter {
+    fn build_where_clause(
+        &self,
+        filter: &Filter,
+        params: &mut Vec<turso::Value>,
+    ) -> Result<String> {
+        Ok(match filter {
             Filter::Eq(field, value) => {
-                params.push(value_to_turso_param(value));
+                params.push(value_to_turso_param(value).map_err(|e| e.under(field))?);
                 format!("{} = ?", field)
             }
             Filter::In(field, values) => {
                 let placeholders = values
                     .iter()
                     .map(|v| {
-                        params.push(value_to_turso_param(v));
-                        "?"
+                        params.push(value_to_turso_param(v).map_err(|e| e.under(field))?);
+                        Ok("?")
                     })
-                    .collect::<Vec<_>>()
+                    .collect::<Result<Vec<_>>>()?
                     .join(", ");
                 format!("{} IN ({})", field, placeholders)
             }
@@ -2375,7 +2379,7 @@ impl TursoBackend {
                 let clauses = filters
                     .iter()
                     .map(|f| self.build_where_clause(f, params))
-                    .collect::<Vec<_>>()
+                    .collect::<Result<Vec<_>>>()?
                     .join(" AND ");
                 format!("({})", clauses)
             }
@@ -2383,13 +2387,13 @@ impl TursoBackend {
                 let clauses = filters
                     .iter()
                     .map(|f| self.build_where_clause(f, params))
-                    .collect::<Vec<_>>()
+                    .collect::<Result<Vec<_>>>()?
                     .join(" OR ");
                 format!("({})", clauses)
             }
             Filter::IsNull(field) => format!("{} IS NULL", field),
             Filter::IsNotNull(field) => format!("{} IS NOT NULL", field),
-        }
+        })
     }
 
     // ========================================================================
@@ -3071,7 +3075,10 @@ impl TursoBackend {
                     StorageError::QueryError(format!("Failed to get column value: {}", e))
                 })?;
 
-                entity.insert(Arc::clone(col_name), turso_value_to_value(value.into()));
+                let value = turso_value_to_value(value.into()).map_err(|e| {
+                    StorageError::QueryError(format!("{} [query: {sql}]", e.under(col_name)))
+                })?;
+                entity.insert(Arc::clone(col_name), value);
             }
 
             normalize_known_json_columns(&mut entity).map_err(|e| {
@@ -3118,7 +3125,10 @@ impl TursoBackend {
                     StorageError::QueryError(format!("Failed to get column value: {}", e))
                 })?;
 
-                entity.insert(Arc::clone(col_name), turso_value_to_value(value.into()));
+                let value = turso_value_to_value(value.into()).map_err(|e| {
+                    StorageError::QueryError(format!("{} [query: {sql}]", e.under(col_name)))
+                })?;
+                entity.insert(Arc::clone(col_name), value);
             }
 
             normalize_known_json_columns(&mut entity).map_err(|e| {
@@ -4260,7 +4270,7 @@ impl StorageBackend for TursoBackend {
 
     async fn query(&self, entity: &str, filter: Filter) -> Result<Vec<StorageEntity>> {
         let mut params = Vec::new();
-        let where_clause = self.build_where_clause(&filter, &mut params);
+        let where_clause = self.build_where_clause(&filter, &mut params)?;
         let query_str = format!("SELECT * FROM {} WHERE {}", entity, where_clause);
         self.handle().query_positional(&query_str, params).await
     }
@@ -4289,7 +4299,10 @@ impl StorageBackend for TursoBackend {
             placeholders.join(", ")
         );
 
-        let params: Vec<turso::Value> = data.values().map(value_to_turso_param).collect();
+        let params: Vec<turso::Value> = data
+            .iter()
+            .map(|(k, v)| value_to_turso_param(v).map_err(|e| e.under(k)))
+            .collect::<std::result::Result<_, _>>()?;
 
         self.handle().execute(&insert_sql, params).await?;
         Ok(())
@@ -4322,8 +4335,8 @@ impl StorageBackend for TursoBackend {
 
         let mut params: Vec<turso::Value> = filtered_data
             .iter()
-            .map(|(_, v)| value_to_turso_param(v))
-            .collect();
+            .map(|(k, v)| value_to_turso_param(v).map_err(|e| e.under(k)))
+            .collect::<std::result::Result<_, _>>()?;
         params.push(turso::Value::Text(id.to_string()));
 
         self.handle().execute(&update_sql, params).await?;
@@ -4649,8 +4662,8 @@ mod tests {
     #[test]
     fn positional_params_fingerprint_empty_is_dash_and_discriminates() {
         assert_eq!(positional_params_fingerprint(&[]), "-");
-        let a = [value_to_turso_param(&Value::Integer(1))];
-        let b = [value_to_turso_param(&Value::Integer(2))];
+        let a = [value_to_turso_param(&Value::Integer(1)).unwrap()];
+        let b = [value_to_turso_param(&Value::Integer(2)).unwrap()];
         assert_ne!(positional_params_fingerprint(&a), "-");
         assert_ne!(
             positional_params_fingerprint(&a),
@@ -4773,26 +4786,29 @@ mod tests {
 
     #[test]
     fn test_turso_value_to_value_conversions() {
-        assert_eq!(turso_value_to_value(turso_core::Value::Null), Value::Null);
         assert_eq!(
-            turso_value_to_value(turso_core::Value::from_i64(42)),
+            turso_value_to_value(turso_core::Value::Null).unwrap(),
+            Value::Null
+        );
+        assert_eq!(
+            turso_value_to_value(turso_core::Value::from_i64(42)).unwrap(),
             Value::Integer(42)
         );
         assert_eq!(
-            turso_value_to_value(turso_core::Value::from_f64(2.5)),
+            turso_value_to_value(turso_core::Value::from_f64(2.5)).unwrap(),
             Value::Float(2.5)
         );
 
         // Plain string
-        let text_val = turso_value_to_value(turso_core::Value::Text("hello".into()));
+        let text_val = turso_value_to_value(turso_core::Value::Text("hello".into())).unwrap();
         assert_eq!(text_val, Value::String("hello".to_string()));
 
         // User text that merely LOOKS like JSON stays a String — no content
         // sniffing (the CDC path never parsed it, so parsing here made the
         // two paths disagree about the same row).
-        let arr_val = turso_value_to_value(turso_core::Value::Text("[1, 2, 3]".into()));
+        let arr_val = turso_value_to_value(turso_core::Value::Text("[1, 2, 3]".into())).unwrap();
         assert_eq!(arr_val, Value::String("[1, 2, 3]".to_string()));
-        let obj_val = turso_value_to_value(turso_core::Value::Text("{\"a\": 1}".into()));
+        let obj_val = turso_value_to_value(turso_core::Value::Text("{\"a\": 1}".into())).unwrap();
         assert_eq!(obj_val, Value::String("{\"a\": 1}".to_string()));
     }
 
@@ -5187,6 +5203,79 @@ mod integration_tests {
             literal.len(),
             "`:pid` must select what the literal selects, not silently nothing"
         );
+
+        handle.shutdown().await.unwrap();
+    }
+
+    /// SQLite stores a bound NaN REAL as NULL.
+    #[tokio::test]
+    async fn a_bound_non_finite_float_is_refused_not_stored_as_null() {
+        let (_backend, handle) = create_test_backend().await.unwrap();
+        handle
+            .execute_ddl("CREATE TABLE f (id INTEGER PRIMARY KEY, x REAL)")
+            .await
+            .unwrap();
+
+        for (i, x) in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY]
+            .into_iter()
+            .enumerate()
+        {
+            let outcome = handle
+                .execute_values(
+                    "INSERT INTO f (id, x) VALUES (?, ?)",
+                    vec![Value::Integer(i as i64), Value::Float(x)],
+                )
+                .await;
+            let stored = handle
+                .query("SELECT x FROM f", HashMap::new())
+                .await
+                .unwrap();
+            assert!(
+                outcome.is_err() && stored.is_empty(),
+                "binding {x} must be refused, got {outcome:?} and stored {stored:?}"
+            );
+            let err = outcome.unwrap_err().to_string();
+            assert!(err.contains("'?2' is the non-finite float"), "{err}");
+        }
+
+        let mut params = HashMap::new();
+        params.insert("x".to_string(), Value::Float(f64::NAN));
+        let err = handle
+            .query("SELECT 1 WHERE :x IS NULL", params)
+            .await
+            .expect_err("a NaN filter parameter compares as NULL; it must be refused")
+            .to_string();
+        assert!(
+            err.contains("'x'") && err.contains("non-finite float"),
+            "{err}"
+        );
+
+        handle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_refused_filter_value_names_its_field() {
+        let (backend, handle) = create_test_backend().await.unwrap();
+        handle
+            .execute_ddl("CREATE TABLE f (id INTEGER PRIMARY KEY, x REAL)")
+            .await
+            .unwrap();
+        let backend = backend.read().await;
+
+        for filter in [
+            Filter::Eq("x".into(), Value::Float(f64::NAN)),
+            Filter::In(
+                "x".into(),
+                vec![Value::Float(1.0), Value::Float(f64::INFINITY)],
+            ),
+        ] {
+            let err = backend
+                .query("f", filter)
+                .await
+                .expect_err("a non-finite filter value must be refused")
+                .to_string();
+            assert!(err.contains("'x' is the non-finite float"), "{err}");
+        }
 
         handle.shutdown().await.unwrap();
     }

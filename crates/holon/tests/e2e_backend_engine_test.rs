@@ -53,7 +53,7 @@ impl SqlOperationProvider {
     }
 
     fn value_to_sql(value: &Value) -> String {
-        value_to_sql_literal(value)
+        value_to_sql_literal(value).unwrap()
     }
 }
 

@@ -11,6 +11,7 @@ use holon_api::Change;
 use holon_api::EdgeField;
 use holon_api::EntityName;
 use holon_api::EntityUri;
+use holon_api::NotJson;
 use holon_api::POSITION_AFTER_BLOCK_ID_PARAM;
 use holon_api::QueryLanguage;
 use holon_api::Value;
@@ -27,6 +28,7 @@ use uuid::Uuid;
 
 use crate::dense_patch::RowContent;
 use crate::server::HolonMcpServer;
+use crate::server::PendingChange;
 use crate::types::*;
 
 /// Extract context_id/context_parent_id from a generic params map and build
@@ -239,33 +241,113 @@ fn push_retired(sut: RetiredSut) {
 }
 
 // Helper function to convert holon_api::Value to serde_json::Value
-fn holon_to_json_value(v: &Value) -> serde_json::Value {
-    match v {
+fn holon_to_json_value(v: &Value) -> Result<serde_json::Value, NotJson> {
+    Ok(match v {
         Value::String(s) => serde_json::Value::String(s.clone()),
         Value::Integer(i) => serde_json::Value::Number((*i).into()),
         Value::Float(f) => serde_json::Value::Number(
-            serde_json::Number::from_f64(*f).unwrap_or_else(|| serde_json::Number::from(0)),
+            serde_json::Number::from_f64(NotJson::finite(*f)?)
+                .expect("a finite f64 is a JSON number"),
         ),
         Value::Boolean(b) => serde_json::Value::Bool(*b),
         Value::DateTime(s) => serde_json::Value::String(s.clone()),
         Value::Json(s) => serde_json::from_str(s).unwrap_or(serde_json::Value::String(s.clone())),
-        Value::Array(arr) => {
-            serde_json::Value::Array(arr.iter().map(holon_to_json_value).collect())
-        }
-        Value::Object(obj) => {
-            let mut map = serde_json::Map::new();
-            for (k, v) in obj {
-                map.insert(k.clone(), holon_to_json_value(v));
-            }
-            serde_json::Value::Object(map)
-        }
+        Value::Array(arr) => serde_json::Value::Array(
+            arr.iter()
+                .enumerate()
+                .map(|(i, v)| holon_to_json_value(v).map_err(|e| e.under(&format!("[{i}]"))))
+                .collect::<Result<_, _>>()?,
+        ),
+        Value::Object(obj) => serde_json::Value::Object(
+            obj.iter()
+                .map(|(k, v)| Ok((k.clone(), holon_to_json_value(v).map_err(|e| e.under(k))?)))
+                .collect::<Result<_, NotJson>>()?,
+        ),
         Value::Null => serde_json::Value::Null,
         // Never JSON `null`: an MCP client reading that back and submitting it
         // would be asking to STORE a null, not to remove the key.
         Value::Removed(_) => panic!(
             "holon_to_json_value: Value::REMOVED is a write-leg sentinel and has no MCP JSON form"
         ),
+    })
+}
+
+fn row_to_json(
+    row: &holon_api::StorageEntity,
+) -> Result<HashMap<String, serde_json::Value>, NotJson> {
+    row.iter()
+        .map(|(k, v)| {
+            Ok((
+                k.to_string(),
+                holon_to_json_value(v).map_err(|e| e.under(k))?,
+            ))
+        })
+        .collect()
+}
+
+fn pending_change(change: &Change<StorageEntity>) -> PendingChange {
+    let (change_type, entity_id) = match change {
+        Change::Created { data, .. } => {
+            ("Created", data.get("id").and_then(Value::as_string_owned))
+        }
+        Change::Updated { id, .. } => ("Updated", Some(id.clone())),
+        Change::Deleted { id, .. } => ("Deleted", Some(id.clone())),
+        Change::FieldsChanged { entity_id, .. } => ("Updated", Some(entity_id.clone())),
+    };
+    let data = match change {
+        Change::Created { data, .. } | Change::Updated { data, .. } => row_to_json(data).map(Some),
+        Change::Deleted { .. } => Ok(None),
+        Change::FieldsChanged { fields, .. } => fields
+            .iter()
+            .map(|(field_name, _old_val, new_val)| {
+                Ok((
+                    field_name.clone(),
+                    holon_to_json_value(new_val).map_err(|e| e.under(field_name))?,
+                ))
+            })
+            .collect::<Result<HashMap<_, _>, NotJson>>()
+            .map(Some),
+    };
+    match data {
+        Ok(data) => PendingChange::Row(RowChangeJson {
+            change_type: change_type.to_string(),
+            entity_id,
+            data,
+        }),
+        Err(e) => PendingChange::Omitted(format!(
+            "{change_type} of entity {}: {e}",
+            entity_id.as_deref().unwrap_or("<no id>")
+        )),
     }
+}
+
+fn buffer_batch<'a>(
+    pending: &mut Vec<PendingChange>,
+    degraded: Option<String>,
+    changes: impl Iterator<Item = &'a Change<StorageEntity>>,
+) {
+    pending.extend(degraded.map(PendingChange::Degraded));
+    pending.extend(changes.map(pending_change));
+}
+
+fn take_poll(pending: &mut Vec<PendingChange>) -> PollResult {
+    let mut poll = PollResult {
+        changes: Vec::new(),
+        omitted: Vec::new(),
+        degraded: Vec::new(),
+    };
+    for p in pending.drain(..) {
+        match p {
+            PendingChange::Row(row) => poll.changes.push(row),
+            PendingChange::Omitted(why) => poll.omitted.push(why),
+            PendingChange::Degraded(note) => poll.degraded.push(note),
+        }
+    }
+    poll
+}
+
+fn row_json_error(e: NotJson) -> rmcp::ErrorData {
+    rmcp::ErrorData::internal_error(format!("a result row has no JSON form: {e}"), None)
 }
 
 /// Output encoding for query-result tools. TOON — a dense tabular encoding
@@ -2632,66 +2714,30 @@ impl HolonMcpServer {
 
         let json_initial_data: Vec<HashMap<String, serde_json::Value>> = initial_rows
             .iter()
-            .map(|row| {
-                row.iter()
-                    .map(|(k, v)| (k.to_string(), holon_to_json_value(v)))
-                    .collect()
-            })
-            .collect();
+            .map(row_to_json)
+            .collect::<Result<_, _>>()
+            .map_err(row_json_error)?;
 
         // Generate watch ID
         let watch_id = Uuid::new_v4().to_string();
 
         // Create pending changes buffer
-        let pending_changes = Arc::new(Mutex::new(Vec::<RowChangeJson>::new()));
+        let pending_changes = Arc::new(Mutex::new(Vec::<PendingChange>::new()));
         let pending_changes_clone = pending_changes.clone();
 
         // Spawn background task to collect changes
         let task_handle = tokio::spawn(async move {
             let mut stream = stream;
             while let Some(batch) = stream.next().await {
-                let mut changes = pending_changes_clone.lock().await;
-                for row_change in batch.inner.items {
-                    let change: &holon_api::Change<holon_api::StorageEntity> = &row_change.change;
-                    let change_json = RowChangeJson {
-                        change_type: match change {
-                            Change::Created { .. } => "Created".to_string(),
-                            Change::Updated { .. } => "Updated".to_string(),
-                            Change::Deleted { .. } => "Deleted".to_string(),
-                            Change::FieldsChanged { .. } => "Updated".to_string(),
-                        },
-                        entity_id: match change {
-                            Change::Created { data, .. } => data
-                                .get("id")
-                                .and_then(|v: &holon_api::Value| v.as_string_owned()),
-                            Change::Updated { id, .. } => Some(id.clone()),
-                            Change::Deleted { id, .. } => Some(id.clone()),
-                            Change::FieldsChanged { entity_id, .. } => Some(entity_id.clone()),
-                        },
-                        data: match change {
-                            Change::Created { data, .. } => Some(
-                                data.iter()
-                                    .map(|(k, v)| (k.to_string(), holon_to_json_value(v)))
-                                    .collect(),
-                            ),
-                            Change::Updated { data, .. } => Some(
-                                data.iter()
-                                    .map(|(k, v)| (k.to_string(), holon_to_json_value(v)))
-                                    .collect(),
-                            ),
-                            Change::Deleted { .. } => None,
-                            Change::FieldsChanged { fields, .. } => {
-                                // Convert fields vec to a map
-                                let mut map = HashMap::new();
-                                for (field_name, _old_val, new_val) in fields {
-                                    map.insert(field_name.clone(), holon_to_json_value(new_val));
-                                }
-                                Some(map)
-                            }
-                        },
-                    };
-                    changes.push(change_json);
-                }
+                buffer_batch(
+                    &mut *pending_changes_clone.lock().await,
+                    batch.metadata.degraded,
+                    batch
+                        .inner
+                        .items
+                        .iter()
+                        .map(|row_change| &row_change.change),
+                );
             }
         });
 
@@ -2734,8 +2780,7 @@ impl HolonMcpServer {
             )
         })?;
 
-        let mut changes = watch_state.pending_changes.lock().await;
-        let result = changes.drain(..).collect::<Vec<_>>();
+        let result = take_poll(&mut *watch_state.pending_changes.lock().await);
 
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string(&result).map_err(|e| {
@@ -2797,7 +2842,12 @@ impl HolonMcpServer {
             })?;
 
         let content = match response.response {
-            Some(value) => Content::text(value.to_json_string()),
+            Some(value) => Content::text(value.to_json_string().map_err(|e| {
+                rmcp::ErrorData::internal_error(
+                    format!("Operation response is not JSON: {e}"),
+                    None,
+                )
+            })?),
             None => Content::text(format!(
                 "Operation '{}' on entity '{}' executed successfully",
                 params.operation, params.entity_name
@@ -3277,7 +3327,12 @@ impl HolonMcpServer {
             })?;
 
         let content = match response.response {
-            Some(value) => Content::text(value.to_json_string()),
+            Some(value) => Content::text(value.to_json_string().map_err(|e| {
+                rmcp::ErrorData::internal_error(
+                    format!("Operation response is not JSON: {e}"),
+                    None,
+                )
+            })?),
             None => Content::text(format!(
                 "Command '{}' executed successfully on block '{}'",
                 params.command_name, params.block_id
@@ -6031,10 +6086,7 @@ impl HolonMcpServer {
         let json_rows: Vec<HashMap<String, serde_json::Value>> = rows
             .iter()
             .map(|row| {
-                let mut json_row: HashMap<String, serde_json::Value> = row
-                    .iter()
-                    .map(|(k, v)| (k.to_string(), holon_to_json_value(v)))
-                    .collect();
+                let mut json_row = row_to_json(row).map_err(row_json_error)?;
 
                 if include_profile {
                     let row_string_keyed: HashMap<String, Value> = row
@@ -6054,9 +6106,9 @@ impl HolonMcpServer {
                     );
                 }
 
-                json_row
+                Ok(json_row)
             })
-            .collect();
+            .collect::<Result<_, rmcp::ErrorData>>()?;
 
         if format == OutputFormat::Toon {
             // TOON carries the rows only (no row_count/duration envelope — the
@@ -6719,49 +6771,49 @@ mod tests {
 
     #[test]
     fn holon_to_json_string() {
-        let v = holon_to_json_value(&Value::String("hello".into()));
+        let v = holon_to_json_value(&Value::String("hello".into())).unwrap();
         assert_eq!(v, serde_json::json!("hello"));
     }
 
     #[test]
     fn holon_to_json_integer() {
-        let v = holon_to_json_value(&Value::Integer(42));
+        let v = holon_to_json_value(&Value::Integer(42)).unwrap();
         assert_eq!(v, serde_json::json!(42));
     }
 
     #[test]
     fn holon_to_json_float() {
-        let v = holon_to_json_value(&Value::Float(2.5));
+        let v = holon_to_json_value(&Value::Float(2.5)).unwrap();
         assert_eq!(v, serde_json::json!(2.5));
     }
 
     #[test]
     fn holon_to_json_bool() {
-        let v = holon_to_json_value(&Value::Boolean(false));
+        let v = holon_to_json_value(&Value::Boolean(false)).unwrap();
         assert_eq!(v, serde_json::json!(false));
     }
 
     #[test]
     fn holon_to_json_null() {
-        let v = holon_to_json_value(&Value::Null);
+        let v = holon_to_json_value(&Value::Null).unwrap();
         assert_eq!(v, serde_json::Value::Null);
     }
 
     #[test]
     fn holon_to_json_datetime() {
-        let v = holon_to_json_value(&Value::DateTime("2024-01-01T00:00:00Z".into()));
+        let v = holon_to_json_value(&Value::DateTime("2024-01-01T00:00:00Z".into())).unwrap();
         assert_eq!(v, serde_json::json!("2024-01-01T00:00:00Z"));
     }
 
     #[test]
     fn holon_to_json_valid_json_string_is_parsed() {
-        let v = holon_to_json_value(&Value::Json(r#"{"nested": true}"#.into()));
+        let v = holon_to_json_value(&Value::Json(r#"{"nested": true}"#.into())).unwrap();
         assert_eq!(v, serde_json::json!({"nested": true}));
     }
 
     #[test]
     fn holon_to_json_invalid_json_falls_back_to_string() {
-        let v = holon_to_json_value(&Value::Json("not json".into()));
+        let v = holon_to_json_value(&Value::Json("not json".into())).unwrap();
         assert_eq!(v, serde_json::json!("not json"));
     }
 
@@ -6770,7 +6822,8 @@ mod tests {
         let v = holon_to_json_value(&Value::Array(vec![
             Value::Integer(1),
             Value::String("two".into()),
-        ]));
+        ]))
+        .unwrap();
         assert_eq!(v, serde_json::json!([1, "two"]));
     }
 
@@ -6778,7 +6831,7 @@ mod tests {
     fn holon_to_json_object() {
         let mut map = HashMap::new();
         map.insert("k".into(), Value::Boolean(true));
-        let v = holon_to_json_value(&Value::Object(map));
+        let v = holon_to_json_value(&Value::Object(map)).unwrap();
         assert_eq!(v, serde_json::json!({"k": true}));
     }
 
@@ -6792,8 +6845,85 @@ mod tests {
             "meta": null
         });
         let holon = json_to_holon_value(original.clone());
-        let back = holon_to_json_value(&holon);
+        let back = holon_to_json_value(&holon).unwrap();
         assert_eq!(original, back);
+    }
+
+    #[test]
+    fn a_non_finite_float_is_refused_naming_its_field() {
+        let row: holon_api::StorageEntity = [
+            ("id".into(), Value::String("r1".into())),
+            (
+                "d".into(),
+                Value::Object(HashMap::from([(
+                    "w".to_string(),
+                    Value::Array(vec![Value::Float(1.0), Value::Float(f64::NAN)]),
+                )])),
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let err = row_to_json(&row)
+            .expect_err("NaN has no JSON form")
+            .to_string();
+        assert!(
+            err.contains("'d.w[1]' is the non-finite float NaN"),
+            "{err}"
+        );
+        for f in [f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(holon_to_json_value(&Value::Float(f)).is_err(), "{f}");
+        }
+    }
+
+    #[test]
+    fn a_row_with_no_json_form_is_omitted_by_name_and_the_others_are_delivered() {
+        let row = |id: &str, d: f64| -> StorageEntity {
+            [
+                ("id".into(), Value::String(id.into())),
+                ("d".into(), Value::Float(d)),
+            ]
+            .into_iter()
+            .collect()
+        };
+        let created: Vec<Change<StorageEntity>> = [
+            row("a", 1.0),
+            row("b", 2.0),
+            row("bad", f64::INFINITY),
+            row("c", 3.0),
+            row("e", 4.0),
+        ]
+        .into_iter()
+        .map(|data| Change::Created {
+            data,
+            origin: holon_api::ChangeOrigin::Remote {
+                operation_id: None,
+                trace_id: None,
+            },
+        })
+        .collect();
+        let mut pending = Vec::new();
+        let cdc_note = "1 CDC change record(s) failed to parse; rowid=3 omitted".to_string();
+        buffer_batch(&mut pending, Some(cdc_note.clone()), created.iter());
+
+        let poll = take_poll(&mut pending);
+        assert_eq!(
+            poll.degraded,
+            [cdc_note],
+            "the batch's disclosure reaches the poll"
+        );
+        let delivered: Vec<_> = poll.changes.iter().map(|c| c.entity_id.clone()).collect();
+        assert_eq!(
+            delivered,
+            ["a", "b", "c", "e"].map(|id| Some(id.to_string())),
+            "every change but the bad one is delivered, in order"
+        );
+        assert_eq!(poll.omitted.len(), 1, "{:?}", poll.omitted);
+        assert!(
+            poll.omitted[0].contains("entity bad") && poll.omitted[0].contains("'d'"),
+            "the omission names the row and the field: {}",
+            poll.omitted[0]
+        );
+        assert!(pending.is_empty());
     }
 
     #[test]

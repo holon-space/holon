@@ -22,6 +22,7 @@ async fn from_block_query_source_has_no_engine_but_a_source() {
         empty_source(),
         None,
         &holon_api::lifecycle::SessionShutdown::new(),
+        Arc::new(holon_api::ConditionBus::new()),
     );
     // No Turso query engine wired on a no-Turso session.
     assert!(session.query_engine().is_none());

@@ -24,6 +24,8 @@ use rhai::Scope;
 use crate::CompiledExpr;
 use crate::EntityName;
 use crate::Value;
+use crate::computation::ComputeError;
+use crate::computed::ComputedOutcomes;
 use crate::predicate::Predicate;
 use crate::render_requirements::RenderRequirements;
 use crate::render_types::OperationDescriptor;
@@ -131,6 +133,22 @@ pub struct EntityProfile {
 // Resolution (compiles Rhai on-demand)
 // ---------------------------------------------------------------------------
 
+/// The computed fields of one row: their values and, per field, whether
+/// evaluation succeeded. Reads like the value map.
+#[derive(Debug, Clone, Default)]
+pub struct ComputedFields {
+    pub values: HashMap<String, Value>,
+    pub outcomes: ComputedOutcomes,
+}
+
+impl std::ops::Deref for ComputedFields {
+    type Target = HashMap<String, Value>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.values
+    }
+}
+
 impl EntityProfile {
     /// Normalize the creation-slot config against this profile's declared
     /// schema (see [`VirtualChildConfig::widened_to_declared`]). Idempotent —
@@ -208,14 +226,13 @@ impl EntityProfile {
         &self,
         row: &HashMap<String, Value>,
         engine: &RhaiEngine,
-    ) -> (Option<Arc<StoredProfile>>, HashMap<String, Value>) {
+    ) -> (Option<Arc<StoredProfile>>, ComputedFields) {
         // The render seat: this profile IS the renderer, so it is its own
         // binding.
         let loud = self.loud_columns(&self.render_requirements);
-        let mut scope = self.build_scope(row, engine, &loud);
+        let (mut scope, computed) = self.build_scope(row, engine, &loud);
 
         let profile = self.resolve_from_scope(engine, &mut scope, &loud);
-        let computed = self.extract_computed_values(&scope);
         (profile, computed)
     }
 
@@ -227,8 +244,8 @@ impl EntityProfile {
     /// variant resolution there evaluated every variant's condition —
     /// including UI-bearing ones like `is_source && is_focused` — against a
     /// raw storage row that carries no such bindings, emitting spurious
-    /// eval errors. Computing the fields directly (build scope → extract
-    /// computed) skips that entirely.
+    /// eval errors. Computing the fields directly (`build_scope`) skips
+    /// that entirely.
     ///
     /// `binding` is the requirement manifest of the renderer attached to the
     /// subscription this row arrived on.
@@ -237,10 +254,9 @@ impl EntityProfile {
         row: &HashMap<String, Value>,
         engine: &RhaiEngine,
         binding: &RenderRequirements,
-    ) -> HashMap<String, Value> {
+    ) -> ComputedFields {
         let loud = self.loud_columns(binding);
-        let scope = self.build_scope(row, engine, &loud);
-        self.extract_computed_values(&scope)
+        self.build_scope(row, engine, &loud).1
     }
 
     /// Resolve ALL matching candidates for a row (multi-variant mode).
@@ -254,12 +270,9 @@ impl EntityProfile {
         &self,
         row: &HashMap<String, Value>,
         engine: &RhaiEngine,
-    ) -> (
-        Vec<(&StoredVariant, Arc<StoredProfile>)>,
-        HashMap<String, Value>,
-    ) {
+    ) -> (Vec<(&StoredVariant, Arc<StoredProfile>)>, ComputedFields) {
         let loud = self.loud_columns(&self.render_requirements);
-        let mut scope = self.build_scope(row, engine, &loud);
+        let (mut scope, computed) = self.build_scope(row, engine, &loud);
 
         let mut candidates = Vec::new();
         for variant in &self.variants {
@@ -278,7 +291,6 @@ impl EntityProfile {
             }
         }
 
-        let computed = self.extract_computed_values(&scope);
         (candidates, computed)
     }
 
@@ -312,29 +324,15 @@ impl EntityProfile {
         None
     }
 
-    fn extract_computed_values(&self, scope: &Scope<'_>) -> HashMap<String, Value> {
-        // Every computed field appears in the output. A field UNBOUND for this
-        // row (type-aware binding skipped it, so it was never pushed to scope)
-        // defaults to `Null` — preserving the row's shape for consumers without
-        // letting the unbound field poison downstream scope evaluation.
-        self.computed_fields
-            .iter()
-            .map(|(name, _expr)| {
-                let value = scope
-                    .get_value::<rhai::Dynamic>(name)
-                    .map(|d| dynamic_to_value(&d))
-                    .unwrap_or(Value::Null);
-                (name.clone(), value)
-            })
-            .collect()
-    }
-
+    /// The row's Rhai scope with the computed fields bound, and the computed
+    /// fields. Every computed field has a value; an unbound or refused one is
+    /// `Null`, and a refused one has an `Err` outcome.
     fn build_scope(
         &self,
         row: &HashMap<String, Value>,
         engine: &RhaiEngine,
         loud: &BTreeSet<String>,
-    ) -> Scope<'static> {
+    ) -> (Scope<'static>, ComputedFields) {
         let mut scope = Scope::new();
 
         // The computed pass below is the SOLE authority for these names in
@@ -374,37 +372,36 @@ impl EntityProfile {
 
         // Evaluate computed fields in topo order via shared evaluator, with
         // type-aware binding against this entity's declared schema.
-        let mut computed_ctx = row.clone();
-        crate::computed::resolve_computed_fields_with_scope(
+        let mut values = HashMap::new();
+        let outcomes = crate::computed::resolve_computed_fields_with_scope(
             engine,
             &mut scope,
             &self.computed_fields,
-            &mut computed_ctx,
+            &mut values,
             loud,
         );
 
-        scope
+        (scope, ComputedFields { values, outcomes })
     }
 }
 
-/// Convert a Rhai `Dynamic` back into a holon `Value`.
-///
-/// `pub` because profile-source machinery in `holon::entity_profile`
-/// (entity lookup registration) shares it.
-pub fn dynamic_to_value(d: &rhai::Dynamic) -> Value {
-    if d.is_unit() {
+/// Convert a Rhai `Dynamic` back into a holon `Value`, refusing a non-finite
+/// float with an error naming `source` (the field or expression that produced
+/// `d`).
+pub fn dynamic_to_value(d: &rhai::Dynamic, source: &str) -> Result<Value, ComputeError> {
+    Ok(if d.is_unit() {
         Value::Null
     } else if let Some(s) = d.clone().try_cast::<String>() {
         Value::String(s)
     } else if let Some(i) = d.clone().try_cast::<i64>() {
         Value::Integer(i)
     } else if let Some(f) = d.clone().try_cast::<f64>() {
-        Value::Float(f)
+        crate::computation::finite_float(f, || source.to_string())?
     } else if let Some(b) = d.clone().try_cast::<bool>() {
         Value::Boolean(b)
     } else {
         Value::String(d.to_string())
-    }
+    })
 }
 
 /// Evaluate a profile variant condition against a row scope with **type-aware
@@ -459,7 +456,8 @@ fn eval_condition(
 
 /// Convert a holon `Value` into a Rhai `Dynamic`.
 ///
-/// `pub` for the same reason as [`dynamic_to_value`].
+/// `pub` because profile-source machinery in `holon-profiles` (entity lookup
+/// registration) shares it.
 pub fn value_to_dynamic(value: &Value) -> rhai::Dynamic {
     match value {
         Value::String(s) => rhai::Dynamic::from(s.clone()),

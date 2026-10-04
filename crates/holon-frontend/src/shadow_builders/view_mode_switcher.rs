@@ -56,10 +56,16 @@ holon_macros::widget_builder! {
         __props.insert("active_mode".to_string(), Value::String(active_mode.get_cloned()));
         // Serialize mode_templates into props for snapshot reconstruction.
         for (k, v) in &mode_templates {
-            __props.insert(
-                format!("tmpl_{k}"),
-                Value::String(serde_json::to_string(v).unwrap_or_default()),
-            );
+            let json = match serde_json::to_string(v) {
+                Ok(json) => json,
+                Err(e) => {
+                    return ViewModel::error(
+                        "view_mode_switcher",
+                        format!("mode template `{k}` has no JSON form: {e}"),
+                    )
+                }
+            };
+            __props.insert(format!("tmpl_{k}"), Value::String(json));
         }
         ViewModel {
             slot: Some(crate::reactive_view_model::ReactiveSlot::new(child)),

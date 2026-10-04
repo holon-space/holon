@@ -96,6 +96,7 @@ pub use condition_bus::ConditionChange;
 pub use condition_bus::ConditionKey;
 pub use condition_bus::ConditionKind;
 pub use condition_bus::ConditionSubscription;
+pub use condition_bus::DerivedFieldSeat;
 pub use condition_bus::LostTableRows;
 pub use condition_profile::AllClear;
 pub use condition_profile::ClearingEvent;
@@ -270,6 +271,7 @@ pub use holon_expr::unoptimized_engine;
 // the leaf crate `holon-pattern` (reachable from `holon-macros`, which parses
 // both declaration surfaces at expansion time); these are their canonical paths.
 pub use holon_pattern::AmbiguousKind;
+pub use holon_pattern::NotJson;
 pub use holon_pattern::PropertyKinds;
 pub use holon_pattern::PropertyKindsError;
 pub use holon_pattern::REMOVED_MARKER_KEY;
@@ -522,7 +524,7 @@ mod tests {
             .collect(),
         );
 
-        let json = v.to_json_string();
+        let json = v.to_json_string().expect("finite JSON");
         let parsed = Value::from_json_str(&json).unwrap();
         assert_eq!(v, parsed);
     }

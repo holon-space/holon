@@ -489,3 +489,176 @@ async fn a_removal_marker_inside_the_submitted_bag_is_refused() {
         "a removal marker inside the submitted properties bag must be REFUSED"
     );
 }
+
+/// Each SQL write leg refuses a non-finite float by its key path and value.
+#[tokio::test]
+async fn a_non_finite_float_is_refused_by_the_sql_create_leg() {
+    let (_backend, _db, provider, _) = make_provider_with_block("x", None, 1000).await;
+
+    let mut params: holon_api::StorageEntity = holon_api::StorageEntity::new();
+    params.insert("id".into(), Value::String("nan-create".to_string()));
+    params.insert("score".into(), Value::Float(f64::NAN));
+
+    let err = provider
+        .prepare_create(&params, None)
+        .err()
+        .expect("a NaN property must be REFUSED, not stored as null");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("'score'"),
+        "the refusal must name the key: {msg}"
+    );
+    assert!(
+        msg.contains("NaN"),
+        "the refusal must name the value: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn a_nested_non_finite_float_is_refused_by_the_sql_update_leg() {
+    let (_backend, _db, provider, id) =
+        make_provider_with_block("x", Some(r#"{"k":"v"}"#), 1000).await;
+
+    let mut params: holon_api::StorageEntity = holon_api::StorageEntity::new();
+    params.insert("id".into(), Value::String(id));
+    params.insert(
+        "cfg".into(),
+        Value::Object(HashMap::from([(
+            "limit".to_string(),
+            Value::Float(f64::INFINITY),
+        )])),
+    );
+
+    let err = provider
+        .prepare_update(&params)
+        .await
+        .err()
+        .expect("a nested infinity must be REFUSED, not stored as null");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("'cfg.limit'"),
+        "the refusal must name the key PATH: {msg}"
+    );
+    assert!(
+        msg.contains("inf"),
+        "the refusal must name the value: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn a_non_finite_float_is_refused_by_the_sql_set_field_leg() {
+    let (_backend, db, provider, id) =
+        make_provider_with_block("x", Some(r#"{"k":"v"}"#), 1000).await;
+
+    let mut params: holon_api::StorageEntity = holon_api::StorageEntity::new();
+    params.insert("id".into(), Value::String(id));
+    params.insert("field".into(), Value::String("score".to_string()));
+    params.insert("value".into(), Value::Float(f64::NEG_INFINITY));
+
+    let err = provider
+        .execute_operation(&EntityName::new("block"), "set_field", params)
+        .await
+        .err()
+        .expect("a set_field of -inf must be REFUSED, not stored as null");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("'score'"),
+        "the refusal must name the key: {msg}"
+    );
+    assert!(
+        msg.contains("-inf"),
+        "the refusal must name the value: {msg}"
+    );
+
+    let stored = db
+        .query("SELECT properties FROM block_raw", HashMap::new())
+        .await
+        .expect("read back");
+    let bag = format!("{:?}", stored[0].get("properties"));
+    assert!(
+        !bag.contains("score"),
+        "a refused write must leave the bag untouched: {bag}"
+    );
+}
+
+#[tokio::test]
+async fn a_non_finite_float_column_value_never_reaches_sql_text() {
+    let (_backend, _db, provider, _) = make_provider_with_block("x", None, 1000).await;
+
+    let mut params: holon_api::StorageEntity = holon_api::StorageEntity::new();
+    params.insert("id".into(), Value::String("col-inf".to_string()));
+    params.insert("created_at".into(), Value::Float(f64::INFINITY));
+
+    let err = provider
+        .prepare_create(&params, None)
+        .err()
+        .expect("an infinite column value must be REFUSED, not written as the SQL text `inf`");
+    let msg = format!("{err}");
+    assert!(msg.contains("'created_at'"), "{msg}");
+    assert!(msg.contains("inf"), "{msg}");
+}
+
+/// The same `create` goes to the SQL and the Loro store; both refuse it by
+/// the same key path and value.
+#[tokio::test]
+async fn both_stores_refuse_the_same_non_finite_float_write() {
+    let bag = |key: &str, value: Value| Value::Object(HashMap::from([(key.to_string(), value)]));
+    let cases = [
+        (
+            "properties",
+            bag("score", Value::Float(f64::NAN)),
+            "'score'",
+            "NaN",
+        ),
+        (
+            "properties",
+            bag("cfg", Value::Array(vec![Value::Float(f64::NEG_INFINITY)])),
+            "'cfg[0]'",
+            "-inf",
+        ),
+        ("score", Value::Float(f64::INFINITY), "'score'", "inf"),
+    ];
+
+    let (_backend, _db, sql, _) = make_provider_with_block("x", None, 1000).await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let loro = holon_loro::LoroBlockOperations::new(std::sync::Arc::new(tokio::sync::RwLock::new(
+        holon_loro::LoroDocumentStore::new(dir.path().to_path_buf()),
+    )));
+
+    for (i, (param, value, path, shown)) in cases.into_iter().enumerate() {
+        let mut params: holon_api::StorageEntity = holon_api::StorageEntity::new();
+        params.insert("id".into(), Value::String(format!("block:nf-{i}")));
+        params.insert(
+            "parent_id".into(),
+            Value::String("sentinel:no_parent".to_string()),
+        );
+        params.insert("content".into(), Value::String("nf".to_string()));
+        params.insert(param.into(), value);
+
+        let entity = EntityName::new("block");
+        let answers = [
+            (
+                "sql",
+                sql.execute_operation(&entity, "create", params.clone())
+                    .await
+                    .map(|_| ()),
+            ),
+            (
+                "loro",
+                loro.execute_operation(&entity, "create", params)
+                    .await
+                    .map(|_| ()),
+            ),
+        ];
+        for (store, answer) in answers {
+            let msg = format!(
+                "{}",
+                answer.expect_err(&format!(
+                    "{store} must refuse case {i} ({param} holding {shown}), not store null"
+                ))
+            );
+            assert!(msg.contains(path), "{store} must name {path}: {msg}");
+            assert!(msg.contains(shown), "{store} must name {shown}: {msg}");
+        }
+    }
+}

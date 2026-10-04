@@ -455,6 +455,18 @@ pub enum ConditionKind {
     ///
     /// All-clear: none in this process.
     DatabaseWatchFailed { cause: String },
+    /// Derived field `field` of block `block_id` (the two make `subject`) has
+    /// no value: its computation failed or gave what JSON cannot hold
+    /// (`reason`). The block holds no stored value for it, and a row that
+    /// shows it carries `Null`.
+    ///
+    /// All-clear: [`DerivedFieldEval`](crate::condition_profile::ClearingEvent)
+    /// of the same field and block.
+    DerivedFieldNotComputed {
+        block_id: String,
+        field: String,
+        reason: String,
+    },
 }
 
 /// Subject of the device-wide conditions on this bus, which have no share to
@@ -518,6 +530,7 @@ impl ConditionKind {
     pub const VIEW_ENGINE_STOPPED: &'static str = "view-engine-stopped";
     pub const DATABASE_STUCK: &'static str = "database-stuck";
     pub const DATABASE_WATCH_FAILED: &'static str = "database-watch-failed";
+    pub const DERIVED_FIELD_NOT_COMPUTED: &'static str = "derived-field-not-computed";
 
     /// The condition's stable identity, paired with the subject to form a
     /// [`ConditionKey`]. Total: every degradation is a sticky
@@ -572,6 +585,7 @@ impl ConditionKind {
             Self::ViewEngineStopped(_) => Self::VIEW_ENGINE_STOPPED,
             Self::DatabaseStuck { .. } => Self::DATABASE_STUCK,
             Self::DatabaseWatchFailed { .. } => Self::DATABASE_WATCH_FAILED,
+            Self::DerivedFieldNotComputed { .. } => Self::DERIVED_FIELD_NOT_COMPUTED,
         }
     }
 }
@@ -594,6 +608,25 @@ pub struct ClearedCacheRows {
     pub rows: u64,
 }
 
+/// Which component computes a derived field. Each seat raises and clears only
+/// its own [`ConditionKind::DerivedFieldNotComputed`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DerivedFieldSeat {
+    /// The derived-field sidecar reconciler.
+    Sidecar,
+    /// The profile resolver's computed fields.
+    Resolver,
+}
+
+impl DerivedFieldSeat {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Sidecar => "sidecar",
+            Self::Resolver => "resolver",
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Condition {
     pub subject: String,
@@ -601,6 +634,24 @@ pub struct Condition {
 }
 
 impl Condition {
+    /// Derived field `field` of block `block_id` has no value because of
+    /// `reason`.
+    pub fn derived_field_not_computed(
+        seat: DerivedFieldSeat,
+        block_id: &str,
+        field: &str,
+        reason: String,
+    ) -> Self {
+        Self {
+            subject: ConditionKey::derived_field_not_computed(seat, block_id, field).subject,
+            reason: ConditionKind::DerivedFieldNotComputed {
+                block_id: block_id.to_string(),
+                field: field.to_string(),
+                reason,
+            },
+        }
+    }
+
     /// The sticky identity of this degradation.
     pub fn condition_key(&self) -> ConditionKey {
         ConditionKey {
@@ -619,6 +670,15 @@ pub struct ConditionKey {
 }
 
 impl ConditionKey {
+    /// The key of [`ConditionKind::DerivedFieldNotComputed`] for `field` of
+    /// `block_id`.
+    pub fn derived_field_not_computed(seat: DerivedFieldSeat, block_id: &str, field: &str) -> Self {
+        Self {
+            subject: format!("{block_id}/{field}@{}", seat.name()),
+            kind: ConditionKind::DERIVED_FIELD_NOT_COMPUTED,
+        }
+    }
+
     /// The key this condition occupies in the bus's mirror.
     ///
     /// Subject FIRST, so the mirror's key order groups a subject's conditions

@@ -37,8 +37,8 @@ pub fn format_header_args(args: &HashMap<String, String>) -> String {
 
 /// Convert a holon_api::Value to a string suitable for Org Mode header
 /// arguments.
-pub fn value_to_header_arg_string(value: &Value) -> String {
-    match value {
+pub fn value_to_header_arg_string(value: &Value) -> Result<String, serde_json::Error> {
+    Ok(match value {
         Value::String(s) => s.clone(),
         Value::Integer(i) => i.to_string(),
         Value::Float(f) => f.to_string(),
@@ -48,27 +48,29 @@ pub fn value_to_header_arg_string(value: &Value) -> String {
         Value::Array(arr) => arr
             .iter()
             .map(value_to_header_arg_string)
-            .collect::<Vec<_>>()
+            .collect::<Result<Vec<_>, _>>()?
             .join(" "),
-        Value::Object(_) | Value::Json(_) => serde_json::to_string(value).unwrap_or_default(),
+        Value::Object(_) | Value::Json(_) => serde_json::to_string(value)?,
         Value::Removed(_) => panic!(
             "value_to_header_arg_string: Value::REMOVED is a write-leg sentinel, not a header arg"
         ),
-    }
+    })
 }
 
 /// Format header arguments from holon_api::Value HashMap.
-pub fn format_header_args_from_values(args: &HashMap<String, Value>) -> String {
+pub fn format_header_args_from_values(
+    args: &HashMap<String, Value>,
+) -> Result<String, serde_json::Error> {
     if args.is_empty() {
-        return String::new();
+        return Ok(String::new());
     }
 
     let string_args: HashMap<String, String> = args
         .iter()
-        .map(|(k, v)| (k.clone(), value_to_header_arg_string(v)))
-        .collect();
+        .map(|(k, v)| Ok((k.clone(), value_to_header_arg_string(v)?)))
+        .collect::<Result<_, serde_json::Error>>()?;
 
-    format_header_args(&string_args)
+    Ok(format_header_args(&string_args))
 }
 
 /// Format a SourceBlock as Org Mode text.
@@ -77,7 +79,7 @@ pub fn format_org_source_block(block: &SourceBlock) -> String {
 }
 
 /// Format a holon_api::SourceBlock as Org Mode text.
-pub fn format_api_source_block(block: &SourceBlock) -> String {
+pub fn format_api_source_block(block: &SourceBlock) -> Result<String, serde_json::Error> {
     let mut result = String::new();
 
     if let Some(ref name) = block.name {
@@ -93,7 +95,7 @@ pub fn format_api_source_block(block: &SourceBlock) -> String {
         result.push_str(lang);
     }
 
-    let header_args = format_header_args_from_values(&block.header_args);
+    let header_args = format_header_args_from_values(&block.header_args)?;
     if !header_args.is_empty() {
         result.push(' ');
         result.push_str(&header_args);
@@ -113,11 +115,14 @@ pub fn format_api_source_block(block: &SourceBlock) -> String {
         result.push('\n');
     }
 
-    result
+    Ok(result)
 }
 
 /// Format a BlockResult as an Org Mode #+RESULTS: block.
-pub fn format_block_result(result: &BlockResult, name: Option<&str>) -> String {
+pub fn format_block_result(
+    result: &BlockResult,
+    name: Option<&str>,
+) -> Result<String, serde_json::Error> {
     let mut output = String::from("#+RESULTS:");
 
     if let Some(n) = name {
@@ -156,7 +161,7 @@ pub fn format_block_result(result: &BlockResult, name: Option<&str>) -> String {
                 output.push('|');
                 for cell in row {
                     output.push(' ');
-                    output.push_str(&value_to_header_arg_string(cell));
+                    output.push_str(&value_to_header_arg_string(cell)?);
                     output.push_str(" |");
                 }
                 output.push('\n');
@@ -172,7 +177,7 @@ pub fn format_block_result(result: &BlockResult, name: Option<&str>) -> String {
         }
     }
 
-    output.trim_end().to_string()
+    Ok(output.trim_end().to_string())
 }
 
 /// Insert a source block at the specified position in the content.
@@ -292,19 +297,38 @@ mod tests {
     #[test]
     fn test_value_to_header_arg_string() {
         assert_eq!(
-            value_to_header_arg_string(&Value::String("hello".to_string())),
+            value_to_header_arg_string(&Value::String("hello".to_string())).unwrap(),
             "hello"
         );
-        assert_eq!(value_to_header_arg_string(&Value::Integer(42)), "42");
-        assert_eq!(value_to_header_arg_string(&Value::Boolean(true)), "yes");
-        assert_eq!(value_to_header_arg_string(&Value::Boolean(false)), "no");
+        assert_eq!(
+            value_to_header_arg_string(&Value::Integer(42)).unwrap(),
+            "42"
+        );
+        assert_eq!(
+            value_to_header_arg_string(&Value::Boolean(true)).unwrap(),
+            "yes"
+        );
+        assert_eq!(
+            value_to_header_arg_string(&Value::Boolean(false)).unwrap(),
+            "no"
+        );
+    }
+
+    #[test]
+    fn a_non_finite_float_in_an_object_header_arg_is_refused() {
+        let value = Value::Object(HashMap::from([("x".to_string(), Value::Float(f64::NAN))]));
+        let err = value_to_header_arg_string(&value).unwrap_err().to_string();
+        assert!(err.contains("Value::Float NaN"), "{err}");
     }
 
     #[test]
     fn format_header_args_from_values_renders_inline_params() {
         let mut args = HashMap::new();
         args.insert("connection".to_string(), Value::String("main".to_string()));
-        assert_eq!(format_header_args_from_values(&args), ":connection main");
+        assert_eq!(
+            format_header_args_from_values(&args).unwrap(),
+            ":connection main"
+        );
     }
 
     /// Exact serialized shape of a source block: the `#+NAME:` line, the
@@ -317,7 +341,7 @@ mod tests {
     fn format_api_source_block_exact_shape() {
         let block = SourceBlock::new("python", "print(1)").with_name("demo");
         assert_eq!(
-            format_api_source_block(&block),
+            format_api_source_block(&block).unwrap(),
             "#+NAME: demo\n#+BEGIN_SRC python\nprint(1)\n#+END_SRC\n"
         );
     }
@@ -331,7 +355,10 @@ mod tests {
     #[test]
     fn format_block_result_text_exact_shape() {
         let result = BlockResult::text("hello");
-        assert_eq!(format_block_result(&result, None), "#+RESULTS:\n: hello");
+        assert_eq!(
+            format_block_result(&result, None).unwrap(),
+            "#+RESULTS:\n: hello"
+        );
     }
 
     fn src() -> SourceBlock {

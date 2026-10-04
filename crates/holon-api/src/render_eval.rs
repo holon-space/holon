@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::Value;
+use crate::computation::ComputeError;
+use crate::computation::finite_float;
 use crate::interp_value::InterpValue;
 use crate::interp_value::ReactiveRowProvider;
 use crate::render_types::Arg;
@@ -118,25 +120,28 @@ pub fn sorted_rows(rows: &[Arc<DataRow>], sort_key: Option<&str>) -> Vec<Arc<Dat
     sorted
 }
 
-pub fn resolve_states<K: RowKey>(args: &ResolvedArgs, row: &HashMap<K, Value>) -> Vec<String> {
+pub fn resolve_states<K: RowKey>(
+    args: &ResolvedArgs,
+    row: &HashMap<K, Value>,
+) -> Result<Vec<String>, ComputeError> {
     if let Some(states_expr) = args.get_template("states") {
-        let val = eval_to_value(states_expr, row);
+        let val = eval_to_value(states_expr, row)?;
         if let Value::Array(items) = val {
             let states: Vec<String> = items
                 .iter()
                 .filter_map(|v| v.as_string().map(|s| s.to_string()))
                 .collect();
             if !states.is_empty() {
-                return states;
+                return Ok(states);
             }
         }
     }
-    vec![
+    Ok(vec![
         String::new(),
         "TODO".to_string(),
         "DOING".to_string(),
         "DONE".to_string(),
-    ]
+    ])
 }
 
 pub fn cycle_state(current: &str, states: &[String]) -> String {
@@ -684,7 +689,10 @@ impl<T: std::borrow::Borrow<str> + std::hash::Hash + Eq> RowKey for T {}
 /// Scalar-only legacy path (preserved behavior for callers that don't
 /// have a value-fn registry). Thin wrapper over `eval_to_interp` that
 /// drops `Rows` to `Value::Null` with a warning.
-pub fn resolve_args<K: RowKey>(args: &[Arg], row: &HashMap<K, Value>) -> ResolvedArgs {
+pub fn resolve_args<K: RowKey>(
+    args: &[Arg],
+    row: &HashMap<K, Value>,
+) -> Result<ResolvedArgs, ComputeError> {
     resolve_args_with(args, row, &CORE_VALUE_FN_LOOKUP)
 }
 
@@ -699,7 +707,7 @@ pub fn resolve_args_with<K: RowKey>(
     args: &[Arg],
     row: &HashMap<K, Value>,
     fns: &dyn ValueFnLookup,
-) -> ResolvedArgs {
+) -> Result<ResolvedArgs, ComputeError> {
     resolve_args_for_widget(args, row, fns, None)
 }
 
@@ -711,7 +719,7 @@ pub fn resolve_args_for_widget<K: RowKey>(
     row: &HashMap<K, Value>,
     fns: &dyn ValueFnLookup,
     widget: Option<&'static crate::WidgetMeta>,
-) -> ResolvedArgs {
+) -> Result<ResolvedArgs, ComputeError> {
     let mut positional = Vec::new();
     let mut positional_exprs = Vec::new();
     let mut named = HashMap::new();
@@ -723,7 +731,7 @@ pub fn resolve_args_for_widget<K: RowKey>(
             Some(name) if is_template_arg_for(widget, name) => {
                 templates.insert(name.clone(), arg.value.clone());
             }
-            Some(name) => match eval_to_interp(&arg.value, row, fns) {
+            Some(name) => match eval_to_interp(&arg.value, row, fns)? {
                 InterpValue::Value(v) => {
                     named.insert(name.clone(), v);
                 }
@@ -733,7 +741,7 @@ pub fn resolve_args_for_widget<K: RowKey>(
             },
             None => {
                 positional_exprs.push(arg.value.clone());
-                match eval_to_interp(&arg.value, row, fns) {
+                match eval_to_interp(&arg.value, row, fns)? {
                     InterpValue::Value(v) => positional.push(v),
                     InterpValue::Rows(_) => panic!(
                         "value-function returned Rows in positional position; use a named arg \
@@ -744,14 +752,14 @@ pub fn resolve_args_for_widget<K: RowKey>(
         }
     }
 
-    ResolvedArgs {
+    Ok(ResolvedArgs {
         positional,
         positional_exprs,
         named,
         rows,
         templates,
         widget,
-    }
+    })
 }
 
 /// Per-widget answer to "must this named arg stay an unevaluated template?".
@@ -796,14 +804,17 @@ pub fn is_template_arg(name: &str) -> bool {
 /// `eval_to_value`. Thin wrapper over `eval_to_interp` with the empty
 /// lookup: row-sets become `Value::Null` + a warning, since a scalar
 /// caller cannot meaningfully consume one.
-pub fn eval_to_value<K: RowKey>(expr: &RenderExpr, row: &HashMap<K, Value>) -> Value {
-    match eval_to_interp(expr, row, &CORE_VALUE_FN_LOOKUP) {
+pub fn eval_to_value<K: RowKey>(
+    expr: &RenderExpr,
+    row: &HashMap<K, Value>,
+) -> Result<Value, ComputeError> {
+    Ok(match eval_to_interp(expr, row, &CORE_VALUE_FN_LOOKUP)? {
         InterpValue::Value(v) => v,
         InterpValue::Rows(_) => {
             tracing::warn!("eval_to_value: FunctionCall returned Rows in scalar context; dropping");
             Value::Null
         }
-    }
+    })
 }
 
 /// Evaluate a `RenderExpr` into an `InterpValue`.
@@ -817,9 +828,9 @@ pub fn eval_to_interp<K: RowKey>(
     expr: &RenderExpr,
     row: &HashMap<K, Value>,
     fns: &dyn ValueFnLookup,
-) -> InterpValue {
+) -> Result<InterpValue, ComputeError> {
     use InterpValue::*;
-    match expr {
+    Ok(match expr {
         RenderExpr::Literal { value } => Value(value.clone()),
         RenderExpr::ColumnRef { name } => Value(
             row.get(name.as_str())
@@ -827,14 +838,14 @@ pub fn eval_to_interp<K: RowKey>(
                 .unwrap_or(crate::Value::Null),
         ),
         RenderExpr::BinaryOp { op, left, right } => {
-            let l = eval_to_value(left, row);
-            let r = eval_to_value(right, row);
-            Value(eval_binary_op(op, &l, &r))
+            let l = eval_to_value(left, row)?;
+            let r = eval_to_value(right, row)?;
+            Value(eval_binary_op(op, &l, &r)?)
         }
         RenderExpr::FunctionCall { name, args, .. } => {
             // Evaluate args against the same registry so value-fn calls
             // nested under other value-fn calls resolve correctly.
-            let resolved = resolve_args_with(args, row, fns);
+            let resolved = resolve_args_with(args, row, fns)?;
             match fns.invoke(name, &resolved) {
                 Some(v) => v,
                 // F1: silent first-arg default removed. Unknown name // ALLOW(fallback): historical
@@ -846,47 +857,68 @@ pub fn eval_to_interp<K: RowKey>(
             }
         }
         RenderExpr::Array { items } => Value(crate::Value::Array(
-            items.iter().map(|i| eval_to_value(i, row)).collect(),
+            items
+                .iter()
+                .map(|i| eval_to_value(i, row))
+                .collect::<Result<_, _>>()?,
         )),
         RenderExpr::Object { fields } => Value(crate::Value::Object(
             fields
                 .iter()
-                .map(|(k, v)| (k.clone(), eval_to_value(v, row)))
-                .collect(),
+                .map(|(k, v)| Ok((k.clone(), eval_to_value(v, row)?)))
+                .collect::<Result<_, ComputeError>>()?,
         )),
         RenderExpr::LiveBlock { block_id } => {
             Value(crate::Value::String(format!("[LiveBlock: {}]", block_id)))
         }
-    }
+    })
 }
 
-/// Arithmetic ops (`+ - * /`). Type-mismatched or div-by-zero operands yield
-/// `Null`. Only called by `eval_binary_op` for arithmetic operators.
-fn eval_arithmetic(op: &BinaryOperator, left: &Value, right: &Value) -> Value {
-    match op {
+/// Arithmetic ops (`+ - * /`). Type-mismatched operands yield `Null`; integer
+/// overflow, integer division by zero and a NaN or infinite float result are
+/// errors. Only called by `eval_binary_op` for arithmetic operators.
+fn eval_arithmetic(
+    op: &BinaryOperator,
+    left: &Value,
+    right: &Value,
+) -> Result<Value, ComputeError> {
+    let float =
+        |a: f64, b: f64, r: f64| finite_float(r, || format!("{a:?} {} {b:?}", op.to_rhai()));
+    let int = |a: i64, b: i64, r: Option<i64>| {
+        r.map(Value::Integer)
+            .ok_or_else(|| ComputeError::Arithmetic {
+                detail: format!("integer overflow: {a} {} {b}", op.to_rhai()),
+            })
+    };
+    Ok(match op {
         BinaryOperator::Add => match (left, right) {
-            (Value::Integer(a), Value::Integer(b)) => Value::Integer(a + b),
-            (Value::Float(a), Value::Float(b)) => Value::Float(a + b),
+            (Value::Integer(a), Value::Integer(b)) => int(*a, *b, a.checked_add(*b))?,
+            (Value::Float(a), Value::Float(b)) => float(*a, *b, a + b)?,
             (Value::String(a), Value::String(b)) => Value::String(format!("{a}{b}")),
             _ => Value::Null,
         },
         BinaryOperator::Sub => match (left, right) {
-            (Value::Integer(a), Value::Integer(b)) => Value::Integer(a - b),
-            (Value::Float(a), Value::Float(b)) => Value::Float(a - b),
+            (Value::Integer(a), Value::Integer(b)) => int(*a, *b, a.checked_sub(*b))?,
+            (Value::Float(a), Value::Float(b)) => float(*a, *b, a - b)?,
             _ => Value::Null,
         },
         BinaryOperator::Mul => match (left, right) {
-            (Value::Integer(a), Value::Integer(b)) => Value::Integer(a * b),
-            (Value::Float(a), Value::Float(b)) => Value::Float(a * b),
+            (Value::Integer(a), Value::Integer(b)) => int(*a, *b, a.checked_mul(*b))?,
+            (Value::Float(a), Value::Float(b)) => float(*a, *b, a * b)?,
             _ => Value::Null,
         },
         BinaryOperator::Div => match (left, right) {
-            (Value::Integer(a), Value::Integer(b)) if *b != 0 => Value::Integer(a / b),
-            (Value::Float(a), Value::Float(b)) if *b != 0.0 => Value::Float(a / b),
+            (Value::Integer(a), Value::Integer(0)) => {
+                return Err(ComputeError::Arithmetic {
+                    detail: format!("integer division by zero: {a} / 0"),
+                });
+            }
+            (Value::Integer(a), Value::Integer(b)) => int(*a, *b, a.checked_div(*b))?,
+            (Value::Float(a), Value::Float(b)) => float(*a, *b, a / b)?,
             _ => Value::Null,
         },
         other => unreachable!("eval_arithmetic called with non-arithmetic op {other:?}"),
-    }
+    })
 }
 
 /// Ordering comparisons (`> < >= <=`). Non-numeric or mismatched operands
@@ -928,10 +960,14 @@ fn eval_logical(op: &BinaryOperator, left: &Value, right: &Value) -> Value {
     }
 }
 
-pub fn eval_binary_op(op: &BinaryOperator, left: &Value, right: &Value) -> Value {
-    match op {
+pub fn eval_binary_op(
+    op: &BinaryOperator,
+    left: &Value,
+    right: &Value,
+) -> Result<Value, ComputeError> {
+    Ok(match op {
         BinaryOperator::Add | BinaryOperator::Sub | BinaryOperator::Mul | BinaryOperator::Div => {
-            eval_arithmetic(op, left, right)
+            eval_arithmetic(op, left, right)?
         }
         BinaryOperator::Eq => Value::Boolean(left == right),
         BinaryOperator::Neq => Value::Boolean(left != right),
@@ -939,11 +975,15 @@ pub fn eval_binary_op(op: &BinaryOperator, left: &Value, right: &Value) -> Value
             eval_ordering(op, left, right)
         }
         BinaryOperator::And | BinaryOperator::Or => eval_logical(op, left, right),
-    }
+    })
 }
 
 #[cfg(test)]
 mod tests {
+    fn eval_binary_op(op: &BinaryOperator, l: &Value, r: &Value) -> Value {
+        super::eval_binary_op(op, l, r).unwrap()
+    }
+
     use super::*;
     use crate::render_dsl::parse_render_dsl;
     use crate::render_types::Arg;
@@ -980,7 +1020,7 @@ mod tests {
         let expr = parse_render_dsl(source).expect("parse the shipped left-sidebar expression");
         let args =
             find_call(&expr, "selectable").expect("selectable call in the shipped expression");
-        let resolved = resolve_args(args, &HashMap::<String, Value>::new());
+        let resolved = resolve_args(args, &HashMap::<String, Value>::new()).unwrap();
 
         // `action` is allowlisted, so its presence proves the fixture parsed and
         // reached `selectable` — a failure below is then specifically about the
@@ -1018,14 +1058,6 @@ mod tests {
                 &Value::Integer(3)
             ),
             Value::Integer(3)
-        );
-        assert_eq!(
-            eval_binary_op(
-                &BinaryOperator::Div,
-                &Value::Integer(10),
-                &Value::Integer(0)
-            ),
-            Value::Null
         );
     }
 
@@ -1122,7 +1154,7 @@ mod tests {
         let expr = RenderExpr::Literal {
             value: Value::Integer(42),
         };
-        assert_eq!(eval_to_value(&expr, &row), Value::Integer(42));
+        assert_eq!(eval_to_value(&expr, &row).unwrap(), Value::Integer(42));
     }
 
     #[test]
@@ -1132,7 +1164,10 @@ mod tests {
         let expr = RenderExpr::ColumnRef {
             name: "name".to_string(),
         };
-        assert_eq!(eval_to_value(&expr, &row), Value::String("Alice".into()));
+        assert_eq!(
+            eval_to_value(&expr, &row).unwrap(),
+            Value::String("Alice".into())
+        );
     }
 
     #[test]
@@ -1141,7 +1176,7 @@ mod tests {
         let expr = RenderExpr::ColumnRef {
             name: "missing".to_string(),
         };
-        assert_eq!(eval_to_value(&expr, &row), Value::Null);
+        assert_eq!(eval_to_value(&expr, &row).unwrap(), Value::Null);
     }
 
     #[test]
@@ -1156,7 +1191,7 @@ mod tests {
                 value: Value::Integer(2),
             }),
         };
-        assert_eq!(eval_to_value(&expr, &row), Value::Integer(3));
+        assert_eq!(eval_to_value(&expr, &row).unwrap(), Value::Integer(3));
     }
 
     #[test]
@@ -1180,7 +1215,7 @@ mod tests {
             ],
         };
         assert_eq!(
-            eval_to_value(&expr, &row),
+            eval_to_value(&expr, &row).unwrap(),
             Value::String("hello world".into())
         );
     }
@@ -1199,7 +1234,7 @@ mod tests {
             ],
         };
         assert_eq!(
-            eval_to_value(&expr, &row),
+            eval_to_value(&expr, &row).unwrap(),
             Value::Array(vec![Value::Integer(1), Value::Integer(2)])
         );
     }
@@ -1228,7 +1263,7 @@ mod tests {
             },
         ];
 
-        let resolved = resolve_args(&args, &row);
+        let resolved = resolve_args(&args, &row).unwrap();
         assert_eq!(resolved.positional.len(), 1);
         assert_eq!(resolved.positional[0], Value::String("val1".into()));
         assert_eq!(
@@ -1516,7 +1551,7 @@ mod tests {
                 },
             }],
         };
-        assert_eq!(eval_to_value(&expr, &row), Value::Null);
+        assert_eq!(eval_to_value(&expr, &row).unwrap(), Value::Null);
     }
 
     #[test]
@@ -1543,7 +1578,10 @@ mod tests {
                 },
             ],
         };
-        assert_eq!(eval_to_value(&expr, &row), Value::String("abcd".into()));
+        assert_eq!(
+            eval_to_value(&expr, &row).unwrap(),
+            Value::String("abcd".into())
+        );
     }
 
     // ── Value-fn dispatch via resolve_args_with / eval_to_interp ───────
@@ -1570,7 +1608,7 @@ mod tests {
                 },
             }],
         };
-        match eval_to_interp(&expr, &row, &MockValueFnLookup) {
+        match eval_to_interp(&expr, &row, &MockValueFnLookup).unwrap() {
             InterpValue::Value(v) => assert_eq!(v, Value::Integer(99)),
             InterpValue::Rows(_) => panic!("expected Value"),
         }
@@ -1596,8 +1634,8 @@ mod tests {
             },
         ];
 
-        let legacy = resolve_args(&args, &row);
-        let with_empty = resolve_args_with(&args, &row, &CORE_VALUE_FN_LOOKUP);
+        let legacy = resolve_args(&args, &row).unwrap();
+        let with_empty = resolve_args_with(&args, &row, &CORE_VALUE_FN_LOOKUP).unwrap();
 
         assert_eq!(legacy.positional, with_empty.positional);
         assert_eq!(legacy.named, with_empty.named);
@@ -1607,6 +1645,10 @@ mod tests {
 
 #[cfg(test)]
 mod mutation_gap_tests {
+    fn eval_binary_op(op: &BinaryOperator, l: &Value, r: &Value) -> Value {
+        super::eval_binary_op(op, l, r).unwrap()
+    }
+
     use super::*;
 
     fn empty_args() -> ResolvedArgs {
@@ -1660,6 +1702,96 @@ mod mutation_gap_tests {
     }
 
     #[test]
+    fn non_finite_float_arithmetic_result_is_refused() {
+        let f = |x: f64| Value::Float(x);
+        for (op, a, b, symbol) in [
+            (BinaryOperator::Mul, 1e308, 10.0, "*"),
+            (BinaryOperator::Add, 1.7e308, 1.7e308, "+"),
+            (BinaryOperator::Sub, -1.7e308, 1.7e308, "-"),
+            (BinaryOperator::Div, 1e308, 1e-308, "/"),
+        ] {
+            let err = super::eval_binary_op(&op, &f(a), &f(b))
+                .expect_err("overflow to infinity must be refused");
+            let message = err.to_string();
+            assert!(
+                message.contains("non-finite float") && message.contains(symbol),
+                "{a:?} {symbol} {b:?}: error must name value and operator, got {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn integer_overflow_is_refused_naming_operator_and_operands() {
+        let i = |x: i64| Value::Integer(x);
+        for (op, a, b, expected) in [
+            (
+                BinaryOperator::Add,
+                i64::MAX,
+                1,
+                format!("{} + 1", i64::MAX),
+            ),
+            (
+                BinaryOperator::Sub,
+                i64::MIN,
+                1,
+                format!("{} - 1", i64::MIN),
+            ),
+            (
+                BinaryOperator::Mul,
+                i64::MAX,
+                2,
+                format!("{} * 2", i64::MAX),
+            ),
+            (
+                BinaryOperator::Div,
+                i64::MIN,
+                -1,
+                format!("{} / -1", i64::MIN),
+            ),
+        ] {
+            let err = super::eval_binary_op(&op, &i(a), &i(b))
+                .expect_err("integer overflow must be refused");
+            let message = err.to_string();
+            assert!(
+                message.contains("integer overflow") && message.contains(&expected),
+                "{expected}: error must name operator and operands, got {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn division_by_zero_is_refused_naming_the_operands() {
+        let i = |x: i64| Value::Integer(x);
+        let f = |x: f64| Value::Float(x);
+        for (l, r, expected) in [
+            (i(7), i(0), "integer division by zero: 7 / 0"),
+            (f(1.0), f(0.0), "non-finite float inf from 1.0 / 0.0"),
+        ] {
+            let err = super::eval_binary_op(&BinaryOperator::Div, &l, &r)
+                .expect_err("division by zero must be refused");
+            assert!(err.to_string().contains(expected), "{expected}: got {err}");
+        }
+    }
+
+    #[test]
+    fn nested_overflow_reaches_the_caller_of_eval_to_value() {
+        let expr = RenderExpr::Array {
+            items: vec![RenderExpr::BinaryOp {
+                op: BinaryOperator::Mul,
+                left: Box::new(RenderExpr::Literal {
+                    value: Value::Float(1e308),
+                }),
+                right: Box::new(RenderExpr::Literal {
+                    value: Value::Float(10.0),
+                }),
+            }],
+        };
+        let err = eval_to_value(&expr, &HashMap::<String, Value>::new())
+            .expect_err("a nested non-finite result must not become Null");
+        assert!(err.to_string().contains("non-finite float inf"), "{err}");
+    }
+
+    #[test]
     fn binary_op_arithmetic_semantics() {
         let i = |x: i64| Value::Integer(x);
         let f = |x: f64| Value::Float(x);
@@ -1692,16 +1824,6 @@ mod mutation_gap_tests {
             eval_binary_op(&BinaryOperator::Div, &f(3.0), &f(2.0)),
             f(1.5)
         );
-        // Division by zero yields Null, never panics.
-        assert_eq!(
-            eval_binary_op(&BinaryOperator::Div, &i(7), &i(0)),
-            Value::Null
-        );
-        assert_eq!(
-            eval_binary_op(&BinaryOperator::Div, &f(1.0), &f(0.0)),
-            Value::Null
-        );
-
         // Type mismatch yields Null.
         assert_eq!(
             eval_binary_op(&BinaryOperator::Add, &i(1), &f(1.0)),
@@ -1841,11 +1963,11 @@ mod mutation_gap_tests {
             },
         );
         assert_eq!(
-            resolve_states(&args, &row),
+            resolve_states(&args, &row).unwrap(),
             vec!["A".to_string(), "B".to_string()]
         );
 
-        let default = resolve_states(&empty_args(), &row);
+        let default = resolve_states(&empty_args(), &row).unwrap();
         assert_eq!(
             default,
             vec![
@@ -1873,7 +1995,7 @@ mod mutation_gap_tests {
             },
         );
         assert_eq!(
-            resolve_states(&args, &row),
+            resolve_states(&args, &row).unwrap(),
             vec![
                 String::new(),
                 "TODO".to_string(),
@@ -1900,7 +2022,7 @@ mod mutation_gap_tests {
             },
         );
         assert_eq!(
-            resolve_states(&args, &row),
+            resolve_states(&args, &row).unwrap(),
             vec![
                 String::new(),
                 "TODO".to_string(),
@@ -2021,7 +2143,7 @@ mod mutation_gap_tests {
     #[should_panic(expected = "not a")]
     fn get_template_for_an_unclassified_name_panics() {
         let row: HashMap<String, Value> = HashMap::new();
-        let args = resolve_args(&[], &row);
+        let args = resolve_args(&[], &row).unwrap();
         let _ = args.get_template("nope");
     }
 

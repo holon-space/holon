@@ -238,8 +238,8 @@ impl UserDriver for McpUserDriver {
     ) -> Result<()> {
         let json_params: serde_json::Map<String, serde_json::Value> = params
             .into_iter()
-            .map(|(k, v)| (k, serde_json::Value::from(v)))
-            .collect();
+            .map(|(k, v)| v.try_into_json().map_err(|e| e.under(&k)).map(|v| (k, v)))
+            .collect::<std::result::Result<_, _>>()?;
         self.call_tool_text(
             "execute_operation",
             serde_json::json!({

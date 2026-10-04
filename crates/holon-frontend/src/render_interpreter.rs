@@ -28,6 +28,9 @@ pub trait WithEntity {
 
     /// The node a row renders as when its `id` column forms no URI.
     fn refused_row(refusal: &holon_api::RowIdUnusable) -> Self;
+
+    /// The node an expression that failed to evaluate renders as.
+    fn eval_error(message: String) -> Self;
 }
 
 use crate::RenderContext;
@@ -261,7 +264,10 @@ impl<W> RenderInterpreter<W> {
         expr: &RenderExpr,
         ctx: &RenderContext,
         services: &dyn BuilderServices,
-    ) -> W {
+    ) -> W
+    where
+        W: WithEntity,
+    {
         let interpret_fn = |e: &RenderExpr, c: &RenderContext| self.interpret(e, c, services);
 
         match expr {
@@ -274,12 +280,15 @@ impl<W> RenderInterpreter<W> {
                     services,
                     ctx,
                 };
-                let resolved = resolve_args_for_widget(
+                let resolved = match resolve_args_for_widget(
                     args,
                     ctx.row(),
                     &binding,
                     self.widget_metas.get(name.as_str()).copied(),
-                );
+                ) {
+                    Ok(resolved) => resolved,
+                    Err(e) => return W::eval_error(format!("{name}: {e}")),
+                };
                 // `live_block(id, #{role: "page_title", ...})` — second
                 // positional Object arg becomes ctx.flags for the resolved
                 // block's variant dispatch. AST stays shape-stable; flags
@@ -302,9 +311,13 @@ impl<W> RenderInterpreter<W> {
                 self.dispatch("text", &args, ctx, services, &interpret_fn)
             }
             RenderExpr::BinaryOp { op, left, right } => {
-                let l = eval_to_value(left, ctx.row());
-                let r = eval_to_value(right, ctx.row());
-                let result = eval_binary_op(op, &l, &r);
+                let result = match eval_to_value(left, ctx.row()).and_then(|l| {
+                    let r = eval_to_value(right, ctx.row())?;
+                    eval_binary_op(op, &l, &r)
+                }) {
+                    Ok(v) => v,
+                    Err(e) => return W::eval_error(e.to_string()),
+                };
                 let args = ResolvedArgs::from_positional_value(result);
                 self.dispatch("text", &args, ctx, services, &interpret_fn)
             }
@@ -412,14 +425,16 @@ pub fn is_props_only_widget(widget_name: &str) -> bool {
 /// Resolves args from the expression, builds a `BuilderArgs`, and dispatches
 /// to the builder's macro-generated `resolve_props_from_args`. For raw
 /// builders that lack a macro-generated function, falls back to
-/// `services.interpret()` and extracts the resulting props.
+/// `services.interpret()` and extracts the resulting props. Args that fail to
+/// evaluate are `NotAPropsUpdate`: the full interpret path renders them as an
+/// error node.
 pub fn resolve_props(
     widget_name: &str,
     expr: &RenderExpr,
     data: &Arc<DataRow>,
     services: &dyn BuilderServices,
     space: Option<crate::render_context::AvailableSpace>,
-) -> HashMap<String, Value> {
+) -> Result<HashMap<String, Value>, crate::reactive_view_model::NotAPropsUpdate> {
     use crate::reactive_view::row_render_context;
     use crate::reactive_view_model::ReactiveViewModel;
 
@@ -427,7 +442,10 @@ pub fn resolve_props(
 
     // Extract args from FunctionCall; other expr variants have no args.
     let args = match expr {
-        RenderExpr::FunctionCall { args, .. } => resolve_args(args, ctx.row()),
+        RenderExpr::FunctionCall { args, .. } => match resolve_args(args, ctx.row()) {
+            Ok(args) => args,
+            Err(_) => return Err(crate::reactive_view_model::NotAPropsUpdate),
+        },
         _ => ResolvedArgs::from_positional_exprs(vec![]),
     };
 
@@ -448,14 +466,13 @@ pub fn resolve_props(
 
     // Try the macro-generated fast path first.
     if let Some(props) = crate::shadow_builders::dispatch_resolve_props(widget_name, &ba) {
-        return props;
+        return Ok(props);
     }
 
     // ALLOW(fallback): two-level dispatch — fast path then full interpret; both
     // succeed deterministically Fallback for raw builders: full interpret,
     // extract props.
-    let fresh = services.interpret(expr, &ctx);
-    fresh.props.get_cloned()
+    services.interpret(expr, &ctx).props_update()
 }
 
 // =========================================================================

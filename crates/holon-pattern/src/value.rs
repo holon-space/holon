@@ -66,7 +66,7 @@ pub enum Value {
     Removed(RemovedTag),
     String(String),
     Integer(i64),
-    Float(f64),
+    Float(#[serde(serialize_with = "serialize_finite_float")] f64),
     Boolean(bool),
     // DateTime variant: stored as RFC3339 string for flutter_rust_bridge interop. //
     // ALLOW(compatibility): FRB doesn't expose chrono::DateTime Use as_datetime() to get the
@@ -79,6 +79,16 @@ pub enum Value {
     Array(Vec<Value>),
     Object(HashMap<String, Value>),
     Null,
+}
+
+/// serde_json writes a non-finite `f64` as `null`.
+fn serialize_finite_float<S: serde::Serializer>(f: &f64, serializer: S) -> Result<S::Ok, S::Error> {
+    if !f.is_finite() {
+        return Err(serde::ser::Error::custom(format!(
+            "Value::Float {f} is not finite; JSON and SQL have no NaN or infinity"
+        )));
+    }
+    serializer.serialize_f64(*f)
 }
 
 impl Value {
@@ -242,6 +252,7 @@ impl Value {
             matches!(v, Value::Object(map)
                 if map.len() == 1 && map.get(REMOVED_MARKER_KEY) == Some(&Value::Boolean(true)))
         })
+        .map(|(path, _)| path)
     }
 
     /// The dotted key path at which this value wears the kind-envelope marker,
@@ -255,24 +266,25 @@ impl Value {
         self.path_to(&|v| {
             matches!(v, Value::Object(map) if map.contains_key(kind_envelope::KIND_ENVELOPE_KEY))
         })
+        .map(|(path, _)| path)
     }
 
-    /// The dotted key path of the first value satisfying `offends`, at any
-    /// depth. Shared by the reserved-shape guards so a new one cannot forget
+    /// The dotted key path and value of the first value satisfying `offends`,
+    /// at any depth. Shared by the write-leg guards so a new one cannot forget
     /// to recurse — a guard that only inspects the root is a guard the hazard
     /// walks around inside a nested object.
-    fn path_to(&self, offends: &dyn Fn(&Value) -> bool) -> Option<String> {
-        fn walk(
-            v: &Value,
+    fn path_to(&self, offends: &dyn Fn(&Value) -> bool) -> Option<(String, &Value)> {
+        fn walk<'v>(
+            v: &'v Value,
             prefix: &str,
-            out: &mut Option<String>,
+            out: &mut Option<(String, &'v Value)>,
             offends: &dyn Fn(&Value) -> bool,
         ) {
             if out.is_some() {
                 return;
             }
             if offends(v) {
-                *out = Some(prefix.to_string());
+                *out = Some((prefix.to_string(), v));
                 return;
             }
             match v {
@@ -351,6 +363,18 @@ impl Value {
         }
     }
 
+    /// Refuse this value if it holds a NaN or infinite float at any depth. The
+    /// error's path starts at the property `key`.
+    pub fn reject_non_finite_float(&self, key: &str) -> Result<(), NotJson> {
+        match self.path_to(&|v| matches!(v, Value::Float(f) if !f.is_finite())) {
+            None => Ok(()),
+            Some((path, &Value::Float(value))) => {
+                Err(NotJson::NonFiniteFloat { path, value }.under(key))
+            }
+            Some((_, other)) => unreachable!("the predicate matched only floats, got {other:?}"),
+        }
+    }
+
     /// Is this the write-leg instruction to delete the property?
     pub fn is_removed(&self) -> bool {
         matches!(self, Value::Removed(_))
@@ -379,7 +403,8 @@ impl Value {
                 let parts: Vec<String> = items.iter().map(|v| v.to_display_string()).collect();
                 parts.join(", ")
             }
-            Value::Object(map) => serde_json::to_string(map).unwrap_or_default(),
+            Value::Object(map) => serde_json::to_string(map)
+                .unwrap_or_else(|e| format!("<object not displayable: {e}>")),
             // A removal instruction has no rendering: nothing stored is ever
             // `Removed`, so reaching a display path with one means a write-leg
             // sentinel escaped into read state.
@@ -389,8 +414,8 @@ impl Value {
         }
     }
 
-    pub fn to_json_string(&self) -> String {
-        serde_json::to_string(self).unwrap_or_default()
+    pub fn to_json_string(&self) -> Result<String, NotJson> {
+        Ok(self.clone().try_into_json()?.to_string())
     }
 
     pub fn from_json_str(s: &str) -> Result<Self, serde_json::Error> {
@@ -583,80 +608,144 @@ impl From<serde_json::Value> for Value {
     }
 }
 
-/// A `Value::REMOVED` where a JSON value is needed. It is a write-leg removal
-/// instruction, not a value, and never becomes JSON `null`: that is the shape
-/// of an explicit null, which would store the value the sentinel deletes.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RemovalIsNotJson {
-    /// Where the removal sits: object keys and array indices from the root,
-    /// empty for the root itself.
-    pub path: String,
+/// A `Value` that JSON cannot hold. `path` is where it sits: object keys and
+/// array indices from the root, empty for the root itself.
+#[derive(Debug, Clone, PartialEq)]
+pub enum NotJson {
+    /// A write-leg removal instruction, not a value. It never becomes JSON
+    /// `null`: that is the shape of an explicit null, which would store the
+    /// value the sentinel deletes.
+    Removal { path: String },
+    /// JSON has no NaN or infinity.
+    NonFiniteFloat { path: String, value: f64 },
+    /// A `Value::Json` whose text does not parse.
+    InvalidJson {
+        path: String,
+        text: String,
+        detail: String,
+    },
 }
 
-impl std::fmt::Display for RemovalIsNotJson {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let at = if self.path.is_empty() {
-            "the value".to_string()
+impl NotJson {
+    /// `value` if it is finite. JSON and SQL have no NaN or infinity.
+    pub fn finite(value: f64) -> Result<f64, NotJson> {
+        if value.is_finite() {
+            Ok(value)
         } else {
-            format!("`{}`", self.path)
+            Err(NotJson::NonFiniteFloat {
+                path: String::new(),
+                value,
+            })
+        }
+    }
+
+    /// The same refusal for a value filed under `key`.
+    pub fn under(self, key: &str) -> Self {
+        let nest = |path: String| {
+            if path.is_empty() {
+                key.to_string()
+            } else if path.starts_with('[') {
+                format!("{key}{path}")
+            } else {
+                format!("{key}.{path}")
+            }
         };
-        write!(
-            f,
-            "{at} is Value::REMOVED, a write-leg removal instruction, not a value JSON can hold"
-        )
+        match self {
+            NotJson::Removal { path } => NotJson::Removal { path: nest(path) },
+            NotJson::NonFiniteFloat { path, value } => NotJson::NonFiniteFloat {
+                path: nest(path),
+                value,
+            },
+            NotJson::InvalidJson { path, text, detail } => NotJson::InvalidJson {
+                path: nest(path),
+                text,
+                detail,
+            },
+        }
     }
 }
 
-impl std::error::Error for RemovalIsNotJson {}
+impl std::fmt::Display for NotJson {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let at = |path: &str| {
+            if path.is_empty() {
+                "the value".to_string()
+            } else {
+                format!("'{path}'")
+            }
+        };
+        match self {
+            NotJson::Removal { path } => write!(
+                f,
+                "{} is Value::REMOVED, a write-leg removal instruction, not a value JSON can hold",
+                at(path)
+            ),
+            NotJson::NonFiniteFloat { path, value } => write!(
+                f,
+                "{} is the non-finite float {value}; JSON and SQL have no NaN or infinity",
+                at(path)
+            ),
+            NotJson::InvalidJson { path, text, detail } => write!(
+                f,
+                "{} is Value::Json holding text that does not parse as JSON ({detail}): {text:?}",
+                at(path)
+            ),
+        }
+    }
+}
+
+impl std::error::Error for NotJson {}
 
 impl Value {
-    /// This value as JSON, refusing a `Value::REMOVED` anywhere inside it.
-    pub fn try_into_json(self) -> Result<serde_json::Value, RemovalIsNotJson> {
+    /// This value as JSON, refusing what JSON cannot hold anywhere inside it.
+    pub fn try_into_json(self) -> Result<serde_json::Value, NotJson> {
         self.json_at(String::new())
     }
 
-    fn json_at(self, path: String) -> Result<serde_json::Value, RemovalIsNotJson> {
-        let child = |step: &dyn std::fmt::Display| {
-            if path.is_empty() {
-                step.to_string()
-            } else {
-                format!("{path}.{step}")
-            }
-        };
+    fn json_at(self, path: String) -> Result<serde_json::Value, NotJson> {
         Ok(match self {
             Value::String(s) => serde_json::Value::String(s),
             Value::Integer(i) => serde_json::Value::Number(serde_json::Number::from(i)),
-            Value::Float(f) => serde_json::Number::from_f64(f)
-                .map(serde_json::Value::Number)
-                .unwrap_or(serde_json::Value::Null),
+            Value::Float(f) => match serde_json::Number::from_f64(f) {
+                Some(n) => serde_json::Value::Number(n),
+                None => return Err(NotJson::NonFiniteFloat { path, value: f }),
+            },
             Value::Boolean(b) => serde_json::Value::Bool(b),
             Value::DateTime(s) => serde_json::Value::String(s.clone()),
-            Value::Json(s) => serde_json::from_str(&s).unwrap_or(serde_json::Value::Null),
+            Value::Json(text) => match serde_json::from_str(&text) {
+                Ok(json) => json,
+                Err(e) => {
+                    return Err(NotJson::InvalidJson {
+                        path,
+                        text,
+                        detail: e.to_string(),
+                    });
+                }
+            },
             Value::Array(arr) => serde_json::Value::Array(
                 arr.into_iter()
                     .enumerate()
-                    .map(|(i, v)| v.json_at(child(&i)))
+                    .map(|(i, v)| v.json_at(format!("{path}[{i}]")))
                     .collect::<Result<_, _>>()?,
             ),
             Value::Object(obj) => serde_json::Value::Object(
                 obj.into_iter()
                     .map(|(k, v)| {
-                        let at = child(&k);
+                        let at = if path.is_empty() {
+                            k.clone()
+                        } else {
+                            format!("{path}.{k}")
+                        };
                         v.json_at(at).map(|v| (k, v))
                     })
                     .collect::<Result<_, _>>()?,
             ),
             Value::Null => serde_json::Value::Null,
-            Value::Removed(_) => return Err(RemovalIsNotJson { path }),
+            Value::Removed(_) => return Err(NotJson::Removal { path }),
         })
     }
 }
 
-impl From<Value> for serde_json::Value {
-    fn from(v: Value) -> Self {
-        v.try_into_json().unwrap_or_else(|e| panic!("{e}"))
-    }
-}
 impl From<HashMap<String, String>> for Value {
     fn from(map: HashMap<String, String>) -> Self {
         Value::Object(
@@ -764,5 +853,78 @@ mod removal_sentinel_tests {
         );
         assert!(!Value::from_json_value(serde_json::Value::Null).is_removed());
         assert!(Value::from_json_value(serde_json::Value::Null).is_null());
+    }
+}
+
+#[cfg(test)]
+mod non_finite_float_tests {
+    use super::*;
+
+    /// JSON input (MCP, a submitted properties bag) cannot carry a non-finite
+    /// float; only Rust code that computes one reaches the write-leg refusal.
+    #[test]
+    fn json_input_cannot_carry_a_non_finite_float() {
+        for text in ["NaN", "Infinity", "-Infinity", "1e400", "-1e400"] {
+            assert!(
+                serde_json::from_str::<serde_json::Value>(text).is_err(),
+                "{text} must not parse as a JSON number"
+            );
+        }
+    }
+
+    #[test]
+    fn a_non_finite_float_is_refused_by_its_key_path_and_value() {
+        let value = Value::Object(HashMap::from([(
+            "xs".to_string(),
+            Value::Array(vec![Value::Float(1.5), Value::Float(f64::NAN)]),
+        )]));
+        let err = value
+            .reject_non_finite_float("cfg")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("'cfg.xs[1]'"), "{err}");
+        assert!(err.contains("NaN"), "{err}");
+        assert_eq!(Value::Float(1.5).reject_non_finite_float("k"), Ok(()));
+    }
+
+    #[test]
+    fn json_refuses_a_non_finite_float_by_its_path_and_value() {
+        let value = Value::Object(HashMap::from([(
+            "cfg".to_string(),
+            Value::Array(vec![Value::Float(1.5), Value::Float(f64::NEG_INFINITY)]),
+        )]));
+        let err = value
+            .try_into_json()
+            .expect_err("a non-finite float must be refused, not turned into null");
+        let msg = err.to_string();
+        assert!(msg.contains("'cfg[1]'"), "{msg}");
+        assert!(msg.contains("-inf"), "{msg}");
+    }
+
+    #[test]
+    fn serde_refuses_a_non_finite_float_by_kind_and_value() {
+        for f in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let value = Value::Object(HashMap::from([(
+                "cfg".to_string(),
+                Value::Array(vec![Value::Float(1.5), Value::Float(f)]),
+            )]));
+            let to_value = serde_json::to_value(&value);
+            let err = to_value
+                .as_ref()
+                .expect_err("a non-finite float must be refused, not turned into null")
+                .to_string();
+            assert!(err.contains("Value::Float"), "{err}");
+            assert!(err.contains(&f.to_string()), "{err}");
+            assert!(serde_json::to_string(&value).is_err());
+        }
+        assert_eq!(serde_json::to_string(&Value::Float(1.5)).unwrap(), "1.5");
+    }
+
+    #[test]
+    fn an_object_holding_a_non_finite_float_displays_the_refusal() {
+        let value = Value::Object(HashMap::from([("x".to_string(), Value::Float(f64::NAN))]));
+        let shown = value.to_display_string();
+        assert!(shown.contains("not displayable"), "{shown}");
+        assert!(shown.contains("Value::Float NaN"), "{shown}");
     }
 }

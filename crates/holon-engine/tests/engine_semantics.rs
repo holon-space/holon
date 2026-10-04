@@ -9,6 +9,7 @@ use chrono::DateTime;
 use chrono::Utc;
 use holon_engine::Marking;
 use holon_engine::NetDef;
+use holon_engine::PostcondExpr;
 use holon_engine::PrecondSpec;
 use holon_engine::TransitionDef;
 use holon_engine::engine::Engine;
@@ -318,6 +319,54 @@ transitions:
         event.changes.is_empty(),
         "no-op postcond must not record a change"
     );
+}
+
+#[test]
+fn eval_postcond_refuses_non_finite_float() {
+    let ev = RhaiEvaluator::new();
+    for (source, shown) in [("1.0 / 0.0", "inf"), ("0.0 / 0.0", "NaN")] {
+        let spec: PostcondExpr = source.parse().unwrap();
+        let err = ev
+            .eval_postcond(&spec, &BTreeMap::new(), &BTreeMap::new())
+            .expect_err("a non-finite float must be refused");
+        assert!(
+            err.contains(source) && err.contains(shown),
+            "error must name expression and value, got: {err}"
+        );
+    }
+}
+
+#[test]
+fn fire_refuses_non_finite_postcond_and_leaves_marking_unchanged() {
+    let net = net_from_yaml(
+        r#"
+transitions:
+  blow_up:
+    inputs: [{ bind: x, token_type: task, consume: false }]
+    outputs: [{ from: x, postcond: { v: "1.0 / 0.0" } }]
+  blow_up_create:
+    inputs: [{ bind: x, token_type: task, consume: false }]
+    creates:
+      - { token_type: child, id_expr: '"c"', attrs: { v: "1.0 / 0.0" } }
+    outputs: []
+"#,
+    );
+    let engine = Engine::new();
+    let original = marking(vec![("t1", "task", vec![("v", Value::Float(1.0))])]);
+    let mut m = original.clone();
+    let enabled = engine.enabled(&net, &m).unwrap();
+    assert_eq!(enabled.len(), 2);
+    for e in &enabled {
+        let err = engine
+            .fire(&net, &mut m, e, 1)
+            .expect_err("a non-finite attribute must refuse the firing");
+        assert!(
+            err.contains("1.0 / 0.0") && err.contains("inf"),
+            "got: {err}"
+        );
+    }
+    assert_eq!(m.tokens.len(), original.tokens.len());
+    assert_eq!(m.tokens[0].attributes, original.tokens[0].attributes);
 }
 
 #[test]

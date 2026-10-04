@@ -495,7 +495,8 @@ fn parse_conjunct_to_predicate(conjunct: &str) -> Result<Predicate> {
             "unsupported UI condition `{s}`: left side of `{op}` must be a plain variable"
         );
         let field = field.to_string();
-        let value = parse_literal_value(s[idx + op.len()..].trim());
+        let value = parse_literal_value(s[idx + op.len()..].trim())
+            .with_context(|| format!("unsupported UI condition `{s}`"))?;
         return Ok(match op {
             "==" => Predicate::Eq { field, value },
             "!=" => Predicate::Ne { field, value },
@@ -558,23 +559,26 @@ fn find_comparison_operator(s: &str) -> Option<(&'static str, usize)> {
 }
 
 /// Parse a literal value from a Rhai expression fragment.
-fn parse_literal_value(s: &str) -> Value {
+fn parse_literal_value(s: &str) -> Result<Value> {
     let s = s.trim();
-    if (s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')) {
-        Value::String(s[1..s.len() - 1].to_string())
-    } else if s == "true" {
-        Value::Boolean(true)
-    } else if s == "false" {
-        Value::Boolean(false)
-    } else if s == "()" || s == "null" {
-        Value::Null
-    } else if let Ok(i) = s.parse::<i64>() {
-        Value::Integer(i)
-    } else if let Ok(f) = s.parse::<f64>() {
-        Value::Float(f)
-    } else {
-        Value::String(s.to_string())
-    }
+    Ok(
+        if (s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')) {
+            Value::String(s[1..s.len() - 1].to_string())
+        } else if s == "true" {
+            Value::Boolean(true)
+        } else if s == "false" {
+            Value::Boolean(false)
+        } else if s == "()" || s == "null" {
+            Value::Null
+        } else if let Ok(i) = s.parse::<i64>() {
+            Value::Integer(i)
+        } else if let Ok(f) = s.parse::<f64>() {
+            anyhow::ensure!(f.is_finite(), "literal `{s}` is not a finite number");
+            Value::Float(f)
+        } else {
+            Value::String(s.to_string())
+        },
+    )
 }
 
 /// Convert `ProfileVariant`s into `StoredVariant`s.
@@ -984,24 +988,59 @@ pub struct ProfileResolver {
     /// Cached Rhai engine with entity lookup functions pre-registered.
     /// Rebuilt only when `live_entities` changes via `set_live_entities()`.
     rhai_engine: std::sync::RwLock<Arc<RhaiEngine>>,
+    computed_disclosure: ComputedFieldDisclosure,
+}
+
+/// Raises [`holon_api::ConditionKind::DerivedFieldNotComputed`] for a computed
+/// field whose evaluation failed on a row, and clears it on the next success
+/// for that row and field.
+struct ComputedFieldDisclosure {
+    conditions: Arc<holon_api::ConditionBus>,
+    /// `(block id, field)` of every condition raised here, so a success clears
+    /// only what is in effect instead of taking the bus lock per field per row.
+    raised: std::sync::Mutex<HashSet<(String, String)>>,
+}
+
+impl ComputedFieldDisclosure {
+    fn new(conditions: Arc<holon_api::ConditionBus>) -> Self {
+        Self {
+            conditions,
+            raised: std::sync::Mutex::new(HashSet::new()),
+        }
+    }
+
+    fn report(&self, block_id: &str, outcomes: &holon_api::computed::ComputedOutcomes) {
+        let mut raised = self.raised.lock().unwrap();
+        for (field, outcome) in outcomes {
+            let key = (block_id.to_string(), field.clone());
+            match outcome {
+                Err(reason) => {
+                    raised.insert(key);
+                    self.conditions
+                        .emit(holon_api::Condition::derived_field_not_computed(
+                            holon_api::DerivedFieldSeat::Resolver,
+                            block_id,
+                            field,
+                            reason.clone(),
+                        ));
+                }
+                Ok(()) => {
+                    if raised.remove(&key) {
+                        self.conditions.clear(
+                            &holon_api::ConditionKey::derived_field_not_computed(
+                                holon_api::DerivedFieldSeat::Resolver,
+                                block_id,
+                                field,
+                            ),
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl ProfileResolver {
-    pub fn new(
-        source: Arc<holon_api::live_data::LiveData<EntityProfile>>,
-        ui_info: holon_api::UiInfo,
-        live_entities: LiveEntities,
-        entity_operations: HashMap<EntityName, Vec<OperationDescriptor>>,
-    ) -> Self {
-        Self::with_type_profiles(
-            source,
-            ui_info,
-            live_entities,
-            entity_operations,
-            Vec::new(),
-        )
-    }
-
     /// Create a ProfileResolver seeded with type-defined profiles.
     ///
     /// Type-defined profiles are seeded first; org-based profiles override
@@ -1012,6 +1051,7 @@ impl ProfileResolver {
         live_entities: LiveEntities,
         entity_operations: HashMap<EntityName, Vec<OperationDescriptor>>,
         type_profiles: Vec<EntityProfile>,
+        conditions: Arc<holon_api::ConditionBus>,
     ) -> Self {
         let entity_operations = Arc::new(entity_operations);
         let type_profiles = Arc::new(type_profiles);
@@ -1048,6 +1088,7 @@ impl ProfileResolver {
             entity_operations,
             rhai_engine: std::sync::RwLock::new(rhai_engine),
             live_entities: std::sync::RwLock::new(live_entities),
+            computed_disclosure: ComputedFieldDisclosure::new(conditions),
         }
     }
 
@@ -1263,6 +1304,8 @@ impl ProfileResolving for ProfileResolver {
 
         let engine = self.rhai_engine.read().unwrap().clone();
         let (stored, computed) = entity_profile.resolve_with_computed(row, &engine);
+        self.computed_disclosure
+            .report(entity_uri.as_str(), &computed.outcomes);
         let stored = stored.unwrap_or_else(|| {
             let variants: Vec<_> = entity_profile
                 .variants
@@ -1279,7 +1322,7 @@ impl ProfileResolving for ProfileResolver {
                  Variants tried: {variants:?}"
             )
         });
-        (self.materialize(&stored, row), computed)
+        (self.materialize(&stored, row), computed.values)
     }
 
     fn resolve_computed_only(
@@ -1303,7 +1346,10 @@ impl ProfileResolving for ProfileResolver {
             None => return HashMap::new(),
         };
         let engine = self.rhai_engine.read().unwrap().clone();
-        entity_profile.compute_fields_only(row, &engine, binding)
+        let computed = entity_profile.compute_fields_only(row, &engine, binding);
+        self.computed_disclosure
+            .report(entity_uri.as_str(), &computed.outcomes);
+        computed.values
     }
 
     fn resolve_batch(&self, rows: &[HashMap<String, holon_api::Value>]) -> Vec<Arc<RenderProfile>> {
@@ -1372,6 +1418,8 @@ impl ProfileResolving for ProfileResolver {
 
         let engine = self.rhai_engine.read().unwrap().clone();
         let (candidates, computed) = entity_profile.resolve_candidates(row, &engine);
+        self.computed_disclosure
+            .report(entity_uri.as_str(), &computed.outcomes);
 
         let ops = row_id(row)
             .map(|id| self.lookup_operations(id.scheme()))
@@ -1410,7 +1458,7 @@ impl ProfileResolving for ProfileResolver {
             variants: render_variants,
         });
 
-        (first_profile, computed)
+        (first_profile, computed.values)
     }
 
     fn resolve_collection_variants(&self) -> Vec<RenderVariant> {
@@ -1643,6 +1691,15 @@ mod tests {
         let (data, ui) = split_condition("is_expanded").unwrap();
         assert!(data.is_none());
         assert_eq!(ui, Predicate::Var("is_expanded".into()));
+    }
+
+    #[test]
+    fn a_ui_condition_literal_beyond_f64_is_refused_naming_it() {
+        let outcome = parse_conjunct_to_predicate("zoom > 1e999");
+        assert!(
+            matches!(&outcome, Err(e) if format!("{e:#}").contains("`1e999`")),
+            "a literal beyond f64 must be refused by its text, got {outcome:?}"
+        );
     }
 
     #[test]
@@ -2454,5 +2511,127 @@ variants:
         let name = resolved.expect("a variant must resolve").name.clone();
         assert_ne!(name, "embedded_page");
         assert_ne!(name, "embedded_page_expanded");
+    }
+
+    fn derived_field_conditions(bus: &holon_api::ConditionBus) -> Vec<(String, String, String)> {
+        bus.current()
+            .into_iter()
+            .filter_map(|c| match c.reason {
+                holon_api::ConditionKind::DerivedFieldNotComputed {
+                    block_id,
+                    field,
+                    reason,
+                } => Some((block_id, field, reason)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_refused_computed_field_is_disclosed_until_it_computes_again() {
+        init_render_dsl();
+        type Seat = fn(&ProfileResolver, &HashMap<String, Value>);
+        let seats: [(&str, Seat); 3] = [
+            ("resolve_computed_only", |r, row| {
+                r.resolve_computed_only(row, &entity_dispatch());
+            }),
+            ("resolve_with_computed", |r, row| {
+                r.resolve_with_computed(row);
+            }),
+            ("resolve_with_variants", |r, row| {
+                r.resolve_with_variants(row);
+            }),
+        ];
+        for (seat_name, seat) in seats {
+            let bus = Arc::new(holon_api::ConditionBus::new());
+            let resolver = ProfileResolver::with_type_profiles(
+                holon_api::live_data::LiveData::new(
+                    Vec::new(),
+                    |_| Ok(String::new()),
+                    |_| anyhow::bail!("no profile source"),
+                ),
+                holon_api::UiInfo::default(),
+                LiveEntities::new(),
+                HashMap::new(),
+                vec![make_test_profile(
+                    r#"
+entity_name: thing
+computed:
+  ratio: 'base * 10.0'
+variants:
+  - name: default
+    render: 'row(col("content"))'
+"#,
+                )],
+                bus.clone(),
+            );
+            let row = |base: f64| {
+                HashMap::from([
+                    ("id".to_string(), Value::String("thing:one".to_string())),
+                    ("base".to_string(), Value::Float(base)),
+                ])
+            };
+
+            seat(&resolver, &row(1e308));
+            let raised = derived_field_conditions(&bus);
+            assert_eq!(raised.len(), 1, "{seat_name}: {raised:?}");
+            let (block_id, field, reason) = &raised[0];
+            assert_eq!((block_id.as_str(), field.as_str()), ("thing:one", "ratio"));
+            assert!(
+                reason.contains("non-finite float inf from base * 10.0"),
+                "{seat_name}: {reason}"
+            );
+
+            seat(&resolver, &row(1.0));
+            assert_eq!(
+                derived_field_conditions(&bus),
+                Vec::new(),
+                "{seat_name}: a successful evaluation clears the condition"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_sidecar_success_does_not_clear_a_resolver_condition() {
+        init_render_dsl();
+        let bus = Arc::new(holon_api::ConditionBus::new());
+        let resolver = ProfileResolver::with_type_profiles(
+            holon_api::live_data::LiveData::new(
+                Vec::new(),
+                |_| Ok(String::new()),
+                |_| anyhow::bail!("no profile source"),
+            ),
+            holon_api::UiInfo::default(),
+            LiveEntities::new(),
+            HashMap::new(),
+            vec![make_test_profile(
+                r#"
+entity_name: thing
+computed:
+  ratio: 'base * 10.0'
+variants:
+  - name: default
+    render: 'row(col("content"))'
+"#,
+            )],
+            bus.clone(),
+        );
+        let row = HashMap::from([
+            ("id".to_string(), Value::String("thing:one".to_string())),
+            ("base".to_string(), Value::Float(1e308)),
+        ]);
+        resolver.resolve_with_computed(&row);
+        assert_eq!(derived_field_conditions(&bus).len(), 1);
+
+        bus.clear(&holon_api::ConditionKey::derived_field_not_computed(
+            holon_api::DerivedFieldSeat::Sidecar,
+            "thing:one",
+            "ratio",
+        ));
+        assert_eq!(
+            derived_field_conditions(&bus).len(),
+            1,
+            "the sidecar's all-clear must leave the resolver's condition in place"
+        );
     }
 }
