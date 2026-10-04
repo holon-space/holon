@@ -229,7 +229,7 @@ pub fn sql_ivm_maintainable(sql: &str) -> bool {
         Ok(statements) => !statements.iter().any(statement_has_subquery_predicate),
         Err(e) => {
             tracing::warn!(
-                sql = %sql.chars().take(160).collect::<String>(),
+                sql = %crate::turso::redact_sql_for_logs(sql),
                 "sql_ivm_maintainable: SQL did not parse — routing to eager re-execution \
                  (conservative; eager always serves correct rows): {e}"
             );
@@ -1184,7 +1184,7 @@ impl MatviewManager {
         if std::env::var("HOLON_TRACE_VIEWS").is_ok() {
             tracing::warn!(
                 view_name = %view_name,
-                sql = %sql,
+                sql = %crate::turso::redact_sql_for_logs(sql),
                 "[diag-cdc-leak] query_and_watch: SQL → view"
             );
         }

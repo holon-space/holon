@@ -469,7 +469,7 @@ fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
 ///
 /// Text is replaced by spaces rather than removed so byte offsets are preserved
 /// for anything reading positions out of the result.
-pub(crate) fn blank_comments_and_string_literals(sql: &str) -> String {
+fn blank_comments_and_string_literals(sql: &str) -> String {
     let bytes = sql.as_bytes();
     let mut out: Vec<u8> = bytes.to_vec();
     let mut i = 0usize;
@@ -714,6 +714,7 @@ pub(crate) fn declares_on_conflict_replace(ddl: &str) -> bool {
 
 /// The loud rejection for schema-declared REPLACE semantics.
 fn reject_on_conflict_replace(what: &str, sql: &str) -> StorageError {
+    let sql = redact_sql_for_logs(sql);
     StorageError::DatabaseError(format!(
         "refusing {what}: it declares ON CONFLICT REPLACE. A table with that clause gives every \
          later PLAIN INSERT full REPLACE semantics — the corrupting write then contains no \
@@ -738,6 +739,7 @@ fn reject_replace_into_rowid_matview_base(
         Some(i) => format!(" (statement {i} of the transaction batch)"),
         None => String::new(),
     };
+    let sql = redact_sql_for_logs(sql);
     StorageError::DatabaseError(format!(
         "refusing a REPLACE into `{table}`{where_}: it is a rowid-alias table (a lone INTEGER \
          PRIMARY KEY, either spelling) AND the base of materialized view(s) {views:?}. On our \
@@ -762,7 +764,81 @@ pub(crate) fn panic_message(panic: &(dyn std::any::Any + Send)) -> &str {
         .unwrap_or("unknown panic")
 }
 
-pub(crate) fn sql_fingerprint(sql: &str) -> String {
+/// The only form of a statement that may reach a log, a span field or an error
+/// message: its code, with every value blanked, truncated to a readable
+/// head+tail with an identity hash in between.
+///
+/// Values are blanked because they are user content. A statement reaches the
+/// database with its values inline whenever the caller built the text rather
+/// than binding parameters, which `BackendEngine::inline_parameters` does for
+/// every watched query — so a note's body, a property value or a search term
+/// lands in the statement text. The span fields are exported (stdout, the
+/// `HOLON_LOG` file, the OTLP span exporter), so an unredacted field carries
+/// that content off the machine.
+///
+/// The hash inside the fingerprint is taken over the BLANKED text, never the
+/// original: a hash of the original would be a crackable oracle over the
+/// blanked value for anyone who holds the log and knows the statement
+/// template.
+pub fn redact_sql_for_logs(sql: &str) -> String {
+    sql_fingerprint(&blank_numeric_literals(
+        &blank_comments_and_string_literals(sql),
+    ))
+}
+
+/// `sql` with every numeric literal blanked, for [`redact_sql_for_logs`].
+///
+/// Numbers are values like strings are: `value_to_sql_literal` inlines
+/// `Value::Integer`/`Value::Float` property values verbatim, so an amount, a
+/// weight or an epoch out of a user's block becomes a bare numeral in the text.
+/// Blanking them costs no shape — a numeral says nothing a reader of the
+/// surrounding code does not already know — while identifiers that merely
+/// contain digits (`block_v2`, `mv_8f3a`) and parameter indices (`?1`, `$2`)
+/// keep theirs.
+///
+/// Expects the comment and string-literal spans to be blanked already;
+/// double-quoted and backticked identifier spans are skipped intact.
+fn blank_numeric_literals(sql: &str) -> String {
+    /// Could this byte be part of an identifier, so a digit after it is not a
+    /// literal? Includes the sigils that introduce a parameter index.
+    fn glues_to_a_digit(b: u8) -> bool {
+        b.is_ascii_alphanumeric() || matches!(b, b'_' | b'?' | b'$' | b':' | b'@' | b'#')
+    }
+
+    let bytes = sql.as_bytes();
+    let mut out: Vec<u8> = bytes.to_vec();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' | b'`' => {
+                let quote = bytes[i];
+                i += 1;
+                while i < bytes.len() && bytes[i] != quote {
+                    i += 1;
+                }
+                i += 1;
+            }
+            b'0'..=b'9' if i == 0 || !glues_to_a_digit(bytes[i - 1]) => {
+                while i < bytes.len()
+                    && (bytes[i].is_ascii_alphanumeric()
+                        || bytes[i] == b'.'
+                        || (matches!(bytes[i], b'+' | b'-') && matches!(bytes[i - 1], b'e' | b'E')))
+                {
+                    out[i] = b' ';
+                    i += 1;
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    // Only whole ASCII bytes were overwritten: a numeric literal is ASCII, and
+    // every multi-byte character is skipped by the catch-all arm.
+    String::from_utf8(out).expect("blanking ASCII numeral bytes preserves UTF-8")
+}
+
+/// Private on purpose: outside this module the only statement form allowed
+/// into a log is [`redact_sql_for_logs`], which blanks the values first.
+fn sql_fingerprint(sql: &str) -> String {
     use std::hash::Hash;
     use std::hash::Hasher;
 
@@ -836,7 +912,7 @@ impl DbHandle {
     // full-table hydrating scan, the doc-scoped CTE and the single-block point
     // read share a longer prefix than that, so a shorter fingerprint merges
     // three different consumers into one bucket and misattributes redundancy.
-    #[tracing::instrument(skip(self, params), fields(sql = %sql_fingerprint(sql), params_fp = %named_params_fingerprint(&params)))]
+    #[tracing::instrument(skip(self, params), fields(sql = %redact_sql_for_logs(sql), params_fp = %named_params_fingerprint(&params)))]
     pub async fn query(
         &self,
         sql: &str,
@@ -889,7 +965,7 @@ impl DbHandle {
 
     /// Execute a statement (INSERT, UPDATE, DELETE) and return affected row
     /// count
-    #[tracing::instrument(skip(self, params), fields(sql = %sql_fingerprint(sql), params_fp = %positional_params_fingerprint(&params)))]
+    #[tracing::instrument(skip(self, params), fields(sql = %redact_sql_for_logs(sql), params_fp = %positional_params_fingerprint(&params)))]
     pub async fn execute(&self, sql: &str, params: Vec<turso::Value>) -> Result<u64> {
         let (response_tx, response_rx) = oneshot::channel();
         self.tx
@@ -928,7 +1004,7 @@ impl DbHandle {
     }
 
     /// Execute DDL (CREATE TABLE, CREATE VIEW, etc.)
-    #[tracing::instrument(skip(self), fields(sql = %sql_fingerprint(sql)))]
+    #[tracing::instrument(skip(self), fields(sql = %redact_sql_for_logs(sql)))]
     pub async fn execute_ddl(&self, sql: &str) -> Result<()> {
         let (response_tx, response_rx) = oneshot::channel();
         self.tx
@@ -1134,7 +1210,7 @@ impl DbHandle {
     /// * `requires` - Resources this operation depends on
     /// * `priority` - Execution priority (higher = sooner among ready
     ///   operations)
-    #[tracing::instrument(skip(self, provides, requires), fields(sql = %sql_fingerprint(sql)))]
+    #[tracing::instrument(skip(self, provides, requires), fields(sql = %redact_sql_for_logs(sql)))]
     pub async fn execute_ddl_with_deps(
         &self,
         sql: &str,
@@ -1145,7 +1221,7 @@ impl DbHandle {
         use std::time::Duration;
 
         let requires_for_error = requires.clone();
-        let sql_preview: String = sql.chars().take(80).collect();
+        let sql_preview: String = redact_sql_for_logs(sql).chars().take(80).collect();
 
         let (response_tx, response_rx) = oneshot::channel();
         self.tx
@@ -1203,7 +1279,7 @@ impl DbHandle {
     pub async fn execute_ddl_auto(&self, sql: &str, priority: u32) -> Result<()> {
         use std::time::Duration;
 
-        let sql_preview: String = sql.chars().take(80).collect();
+        let sql_preview: String = redact_sql_for_logs(sql).chars().take(80).collect();
 
         let (response_tx, response_rx) = oneshot::channel();
         self.tx
@@ -1950,6 +2026,10 @@ fn dropped_view_name(sql: &str) -> Option<&str> {
     Some(name.trim_end_matches(';').trim_matches('"'))
 }
 
+/// `HOLON_TRACE_SQL` is the one place a statement is logged with its values
+/// intact: `turso-sql-replay` consumes this exact format and cannot replay a
+/// redacted statement. Turning it on therefore writes user content to the log
+/// by design. Without it, only the redacted code is traced.
 fn trace_sql(tag: &str, sql: &str) {
     if full_sql_tracing() {
         // In release builds, workspace-hack's `release_max_level_info` compiles
@@ -1967,7 +2047,7 @@ fn trace_sql(tag: &str, sql: &str) {
         }
         tracing::trace!("[TursoBackend] {tag}: {sql}");
     } else {
-        tracing::trace!("[TursoBackend] {tag}: {}", &sql[..sql.len().min(120)]);
+        tracing::trace!("[TursoBackend] {tag}: {}", redact_sql_for_logs(sql));
     }
 }
 
@@ -3623,7 +3703,7 @@ impl TursoBackend {
     /// Answer `op`'s waiter with `MissingDependencies` instead of letting it
     /// wait out the dependency timeout.
     fn fail_unpromised_ddl(state: &mut ActorState, op: PendingDdl, unpromised: Vec<String>) {
-        let sql_preview: String = sql_fingerprint(&op.sql);
+        let sql_preview: String = redact_sql_for_logs(&op.sql);
         tracing::warn!(
             missing = ?unpromised,
             sql = %sql_preview,
@@ -4657,6 +4737,65 @@ mod tests {
         let right = format!("{head} FROM rhs_table_name {tail}");
         assert_eq!(left.len(), right.len());
         assert_ne!(sql_fingerprint(&left), sql_fingerprint(&right));
+    }
+
+    #[test]
+    fn redact_sql_for_logs_erases_every_value_and_keeps_the_code() {
+        let redacted = redact_sql_for_logs(
+            "-- seed the inbox\nINSERT INTO note (id, body, amount, ratio) VALUES ('n1', \
+             'buy 40 litres of milk', 991337, 1.75e-3)",
+        );
+        for value in [
+            "buy", "litres", "milk", "n1", "991337", "1.75e-3", "40", "seed", "inbox",
+        ] {
+            assert!(
+                !redacted.contains(value),
+                "{value} survived redaction: {redacted}"
+            );
+        }
+        assert!(
+            redacted.contains("INSERT INTO note (id, body, amount, ratio) VALUES"),
+            "the code must stay readable: {redacted}"
+        );
+    }
+
+    #[test]
+    fn redaction_keeps_identifiers_that_contain_digits_and_parameter_indices() {
+        let redacted =
+            redact_sql_for_logs("SELECT b.col2 FROM block_v2 b WHERE b.id = ?1 AND b.rank > $2");
+        assert_eq!(
+            redacted, "SELECT b.col2 FROM block_v2 b WHERE b.id = ?1 AND b.rank > $2",
+            "only numeric LITERALS are values; a digit inside an identifier or a parameter index \
+             is code"
+        );
+    }
+
+    #[test]
+    fn redaction_keeps_a_quoted_identifier_that_is_a_number() {
+        assert_eq!(
+            redact_sql_for_logs("SELECT \"2024\" FROM `t7` WHERE x = 2024"),
+            "SELECT \"2024\" FROM `t7` WHERE x =     ",
+            "double quotes and backticks delimit an identifier, single quotes a value"
+        );
+    }
+
+    // The identity hash must not become an oracle. It is taken over the blanked
+    // text, so two statements differing only in a value of the same width land
+    // on one string and a guessed value cannot be confirmed against the hash.
+    // The blanks keep the value's WIDTH — that much is disclosed, and is the
+    // price of preserving byte offsets for the REPLACE guard.
+    #[test]
+    fn redaction_is_not_an_oracle_over_the_blanked_value() {
+        let stmt = |secret: &str| {
+            format!(
+                "UPDATE note SET body = '{secret}' WHERE id = 'n1' AND {}",
+                "parent_id IS NOT NULL AND ".repeat(30)
+            )
+        };
+        assert_eq!(
+            redact_sql_for_logs(&stmt("hunter2")),
+            redact_sql_for_logs(&stmt("sesame7")),
+        );
     }
 
     #[test]

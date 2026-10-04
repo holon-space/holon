@@ -477,7 +477,7 @@ impl BackendEngine {
             let view_name_preview = crate::sync::MatviewManager::compute_view_name(sql);
             tracing::warn!(
                 view_name = %view_name_preview,
-                sql = %sql,
+                sql = %holon_turso::turso::redact_sql_for_logs(sql),
                 "[diag-cdc-leak] subscribe_sql: SQL → view"
             );
         }
@@ -1036,7 +1036,7 @@ impl BackendEngine {
         if std::env::var("HOLON_TRACE_VIEWS").is_ok() {
             tracing::warn!(
                 view_name = %crate::sync::MatviewManager::compute_view_name(&sql_with_params),
-                sql = %sql_with_params,
+                sql = %holon_turso::turso::redact_sql_for_logs(&sql_with_params),
                 "[diag-cdc-leak] query_and_watch: SQL → view"
             );
         }
@@ -1066,7 +1066,7 @@ impl BackendEngine {
         context: Option<QueryContext>,
     ) -> Result<RowChangeStream> {
         let transformed_sql = self.apply_sql_transforms(&sql);
-        tracing::debug!("[BackendEngine] SQL:\n{}", transformed_sql);
+        tracing::debug!("[BackendEngine] SQL:\n{}", holon_turso::turso::redact_sql_for_logs(&transformed_sql));
 
         let ctx = context.clone().unwrap_or_else(QueryContext::root);
 
@@ -1083,7 +1083,7 @@ impl BackendEngine {
         // banner. See `holon_turso::matview_manager::sql_ivm_maintainable`.
         if !holon_turso::matview_manager::sql_ivm_maintainable(&sql_with_params) {
             tracing::warn!(
-                sql = %sql_with_params.chars().take(160).collect::<String>(),
+                sql = %holon_turso::turso::redact_sql_for_logs(&sql_with_params),
                 "[query_and_watch] query shape is not IVM-maintainable (subquery predicate); \
                  serving by eager re-execution in disclosed degraded mode"
             );
@@ -1108,7 +1108,7 @@ impl BackendEngine {
                 crate::sync::MatviewManager::compute_view_name(&sql_with_params);
             tracing::warn!(
                 view_name = %view_name_preview,
-                sql = %sql_with_params,
+                sql = %holon_turso::turso::redact_sql_for_logs(&sql_with_params),
                 "[diag-cdc-leak] query_and_watch: SQL → view"
             );
         }
@@ -1126,7 +1126,7 @@ impl BackendEngine {
             Ok(view_name) => view_name,
             Err(e) if Self::is_permanent_matview_conversion_error(&e) => {
                 tracing::warn!(
-                    sql = %sql_with_params.chars().take(160).collect::<String>(),
+                    sql = %holon_turso::turso::redact_sql_for_logs(&sql_with_params),
                     "[query_and_watch] matview CREATE refused permanently ({e:#}); serving by \
                      eager re-execution in disclosed degraded mode (predicate did not foresee \
                      this shape)"

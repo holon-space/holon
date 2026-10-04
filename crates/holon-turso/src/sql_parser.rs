@@ -96,7 +96,7 @@ pub fn ddl_touched_relations(sql: &str) -> Option<Vec<String>> {
     let stmts = match parse_sql(sql) {
         Ok(stmts) => stmts,
         Err(e) => {
-            let preview: String = sql.chars().take(120).collect();
+            let preview = crate::turso::redact_sql_for_logs(sql);
             tracing::debug!(
                 error = %e,
                 sql = %preview,

@@ -522,7 +522,10 @@ impl SchemaModule for DerivedMatviewModule {
     async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<()> {
         let view = TursoAdapter::matview_name(&self.type_def);
         let select = TursoAdapter::matview_select(&self.type_def);
-        tracing::info!("[DerivedMatviewModule] Reconciling '{view}' matview: {select}");
+        tracing::info!(
+            "[DerivedMatviewModule] Reconciling '{view}' matview: {}",
+            crate::turso::redact_sql_for_logs(&select)
+        );
         reconcile_named_view(db_handle, &view, &select)
             .await
             .map_err(|e| {

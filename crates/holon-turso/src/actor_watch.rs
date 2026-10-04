@@ -584,7 +584,7 @@ impl Drop for ActorWatch {
 }
 
 fn redact(sql: &str) -> String {
-    crate::turso::sql_fingerprint(&crate::turso::blank_comments_and_string_literals(sql))
+    crate::turso::redact_sql_for_logs(sql)
 }
 
 /// Copies the command's SQL into `into`, up to [`REPORTED_STATEMENTS`]
