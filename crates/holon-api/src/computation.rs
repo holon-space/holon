@@ -833,6 +833,52 @@ impl Computation {
         }
     }
 
+    /// Refuse an arithmetic operand, anywhere in the tree, whose declared
+    /// storage class is not numeric. [`Self::result_kind`] answers for the
+    /// node it is asked about only; an arithmetic node under a comparison or a
+    /// branch is checked here. A [`Computation::Script`] is opaque.
+    pub fn check_arith_operands(&self, types: &FieldTypes) -> Result<(), ResultKindUnknown> {
+        match self {
+            Computation::Arith { lhs, rhs, .. } => {
+                for operand in [lhs, rhs] {
+                    if let Ok(kind @ (FieldKind::Text | FieldKind::Boolean)) =
+                        operand.result_kind(types)
+                    {
+                        return Err(ResultKindUnknown::NonNumericOperand {
+                            operand: format!("{operand:?}"),
+                            kind,
+                        });
+                    }
+                    operand.check_arith_operands(types)?;
+                }
+                Ok(())
+            }
+            Computation::Compare { lhs, rhs, .. }
+            | Computation::Concat { lhs, rhs }
+            | Computation::And { lhs, rhs } => {
+                lhs.check_arith_operands(types)?;
+                rhs.check_arith_operands(types)
+            }
+            Computation::Case {
+                scrutinee,
+                branches,
+                else_,
+            } => {
+                scrutinee.check_arith_operands(types)?;
+                for (match_value, result) in branches {
+                    match_value.check_arith_operands(types)?;
+                    result.check_arith_operands(types)?;
+                }
+                else_.check_arith_operands(types)
+            }
+            Computation::Lit(_)
+            | Computation::Field(_)
+            | Computation::IsDefined(_)
+            | Computation::Predicate(_)
+            | Computation::Script(_) => Ok(()),
+        }
+    }
+
     /// The [`FieldKind`] this computation produces, inferred from the shape and
     /// the declared types of the columns it reads.
     ///

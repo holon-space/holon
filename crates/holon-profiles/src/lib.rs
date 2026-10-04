@@ -651,9 +651,9 @@ pub fn profile_from_type_def(type_def: &holon_api::TypeDefinition) -> Option<Ent
     });
 
     let computed_fields: Vec<CompiledComputedField> = type_def
-        .computed_fields()
+        .computed_specs()
         .into_iter()
-        .map(|(name, expr)| (name.to_string(), expr.clone()))
+        .map(|(_, spec)| CompiledComputedField::typed(spec))
         .collect();
 
     // Declared schema = the TypeDefinition's persistent field names. This is the
@@ -755,7 +755,7 @@ fn topo_sort_computed_fields(
         .into_iter()
         .map(|name| {
             let (_raw, compiled) = field_map.remove(&name).unwrap();
-            (name, compiled)
+            CompiledComputedField::script(name, compiled)
         })
         .collect()
 }
@@ -1192,11 +1192,14 @@ impl ProfileResolver {
             .sort_by_key(|v| std::cmp::Reverse(v.priority));
 
         // Computed fields: incoming overrides existing by name
-        for (name, expr) in &incoming.computed_fields {
-            if let Some(pos) = existing.computed_fields.iter().position(|(n, _)| n == name) {
-                existing.computed_fields[pos] = (name.clone(), expr.clone());
-            } else {
-                existing.computed_fields.push((name.clone(), expr.clone()));
+        for field in &incoming.computed_fields {
+            match existing
+                .computed_fields
+                .iter()
+                .position(|f| f.name() == field.name())
+            {
+                Some(pos) => existing.computed_fields[pos] = field.clone(),
+                None => existing.computed_fields.push(field.clone()),
             }
         }
     }
@@ -1738,8 +1741,8 @@ mod tests {
             ),
         ];
         let sorted = topo_sort_computed_fields(fields);
-        assert_eq!(sorted[0].0, "a");
-        assert_eq!(sorted[1].0, "b");
+        assert_eq!(sorted[0].name(), "a");
+        assert_eq!(sorted[1].name(), "b");
     }
 
     #[test]
@@ -1760,7 +1763,7 @@ variants:
         let profile = parse_entity_profile(yaml).unwrap();
         assert_eq!(profile.entity_name, "block");
         assert_eq!(profile.computed_fields.len(), 1);
-        assert_eq!(profile.computed_fields[0].0, "is_task");
+        assert_eq!(profile.computed_fields[0].name(), "is_task");
         assert_eq!(profile.variants.len(), 2);
         assert_eq!(profile.variants[0].name, "task");
     }
@@ -2402,8 +2405,8 @@ variants:
             profile
                 .computed_fields
                 .iter()
-                .find(|(n, _)| n == name)
-                .map(|(_, e)| e.required_columns.clone())
+                .find(|f| f.name() == name)
+                .map(|f| f.expr().required_columns.clone())
                 .unwrap_or_else(|| panic!("computed field '{name}' missing"))
         };
         assert!(required("is_task").contains("task_state"));

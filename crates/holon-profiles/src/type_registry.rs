@@ -317,7 +317,7 @@ impl TypeRegistry {
                     .iter()
                     .filter_map(|f| match &f.lifetime {
                         FieldLifetime::Computed { spec } => {
-                            Some((f.name.clone(), spec.expr().clone()))
+                            Some(CompiledComputedField::typed(spec))
                         }
                         _ => None,
                     })
@@ -599,9 +599,9 @@ mod tests {
         assert_eq!(retrieved.fields.len(), 2);
     }
 
-    fn live(expr: &str) -> ComputedSpec {
+    fn live(name: &str, expr: &str) -> ComputedSpec {
         ComputedSpec::parse(
-            "f",
+            name,
             expr,
             holon_api::ComputedTier::ComputedLive,
             &holon_api::computation::FieldTypes::new(),
@@ -628,7 +628,7 @@ mod tests {
                     name: "weight".to_string(),
                     sql_type: "REAL".to_string(),
                     lifetime: FieldLifetime::Computed {
-                        spec: Box::new(live("priority_score * 2.0")),
+                        spec: Box::new(live("weight", "priority_score * 2.0")),
                     },
                     ..Default::default()
                 },
@@ -636,7 +636,7 @@ mod tests {
                     name: "priority_score".to_string(),
                     sql_type: "REAL".to_string(),
                     lifetime: FieldLifetime::Computed {
-                        spec: Box::new(live("priority * 10.0")),
+                        spec: Box::new(live("priority_score", "priority * 10.0")),
                     },
                     ..Default::default()
                 },
@@ -648,11 +648,11 @@ mod tests {
         let compiled = registry.compiled_fields_for("task");
         assert_eq!(compiled.len(), 2);
         // priority_score must come before weight (weight depends on priority_score)
-        assert_eq!(compiled[0].0, "priority_score");
-        assert_eq!(compiled[1].0, "weight");
+        assert_eq!(compiled[0].name(), "priority_score");
+        assert_eq!(compiled[1].name(), "weight");
         // Verify they're actually compiled (source is preserved)
-        assert_eq!(compiled[0].1.source, "priority * 10.0");
-        assert_eq!(compiled[1].1.source, "priority_score * 2.0");
+        assert_eq!(compiled[0].expr().source, "priority * 10.0");
+        assert_eq!(compiled[1].expr().source, "priority_score * 2.0");
     }
 
     #[test]
@@ -692,7 +692,7 @@ mod tests {
 
         let compiled = registry.compiled_fields_for("block");
         assert_eq!(compiled.len(), 1);
-        assert_eq!(compiled[0].0, "is_task");
+        assert_eq!(compiled[0].name(), "is_task");
     }
 
     #[test]
@@ -775,10 +775,8 @@ mod tests {
     }
 
     #[test]
-    fn enrich_evaluates_computed_fields() {
+    fn the_live_seat_evaluates_computed_fields() {
         let registry = create_default_registry().unwrap();
-        let td = registry.get("person").unwrap();
-
         let mut row = holon_api::StorageEntity::new();
         row.insert("id".into(), holon_api::Value::String("p1".to_string()));
         row.insert(
@@ -790,8 +788,14 @@ mod tests {
             holon_api::Value::String("Engineer".to_string()),
         );
 
-        let enriched = td.enrich(row);
-        let display = enriched
+        let mut row: HashMap<String, holon_api::Value> =
+            row.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+        let outcomes = holon_api::computed::resolve_computed_fields(
+            &registry.compiled_fields_for("person"),
+            &mut row,
+        );
+        assert_eq!(outcomes["display_name"], Ok(()));
+        let display = row
             .get("display_name")
             .expect("display_name should be computed");
         assert_eq!(
@@ -802,10 +806,8 @@ mod tests {
     }
 
     #[test]
-    fn enrich_handles_missing_optional_fields() {
+    fn the_live_seat_handles_missing_optional_fields() {
         let registry = create_default_registry().unwrap();
-        let td = registry.get("person").unwrap();
-
         let mut row = holon_api::StorageEntity::new();
         row.insert("id".into(), holon_api::Value::String("p2".to_string()));
         row.insert(
@@ -814,8 +816,14 @@ mod tests {
         );
         // role is NOT set — the expression should take the else branch
 
-        let enriched = td.enrich(row);
-        let display = enriched
+        let mut row: HashMap<String, holon_api::Value> =
+            row.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+        let outcomes = holon_api::computed::resolve_computed_fields(
+            &registry.compiled_fields_for("person"),
+            &mut row,
+        );
+        assert_eq!(outcomes["display_name"], Ok(()));
+        let display = row
             .get("display_name")
             .expect("display_name should be computed");
         assert_eq!(

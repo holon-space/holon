@@ -16,6 +16,9 @@ use rhai::Engine as RhaiEngine;
 use rhai::Scope;
 
 use crate::Value;
+use crate::computation::Computation;
+use crate::computation::ComputeError;
+use crate::computation::Context;
 use crate::entity_profile::CompiledComputedField;
 use crate::entity_profile::dynamic_to_value;
 use crate::entity_profile::value_to_dynamic;
@@ -142,7 +145,9 @@ pub fn resolve_computed_fields_with_scope(
     declared_columns: &BTreeSet<String>,
 ) -> ComputedOutcomes {
     let mut outcomes = ComputedOutcomes::new();
-    for (name, compiled) in fields {
+    for field in fields {
+        let name = &field.name().to_string();
+        let compiled = field.expr();
         let missing: Vec<&String> = compiled
             .required_columns
             .iter()
@@ -167,13 +172,20 @@ pub fn resolve_computed_fields_with_scope(
             continue;
         }
 
-        let evaluated = engine
-            .eval_ast_with_scope::<rhai::Dynamic>(scope, &compiled.ast)
-            .map_err(|e| e.to_string())
-            .and_then(|d| {
-                let value = dynamic_to_value(&d, &compiled.source).map_err(|e| e.to_string())?;
-                Ok((d, value))
-            });
+        let evaluated = match field.computation() {
+            Computation::Script(_) => engine
+                .eval_ast_with_scope::<rhai::Dynamic>(scope, &compiled.ast)
+                .map_err(|e| e.to_string())
+                .and_then(|d| {
+                    let value =
+                        dynamic_to_value(&d, &compiled.source).map_err(|e| e.to_string())?;
+                    Ok((d, value))
+                }),
+            typed => typed_context(typed, scope)
+                .and_then(|ctx| typed.eval(&ctx))
+                .map(|value| (value_to_dynamic(&value), value))
+                .map_err(|e| e.to_string()),
+        };
         let (result, value) = match evaluated {
             Ok(evaluated) => {
                 outcomes.insert(name.clone(), Ok(()));
@@ -196,14 +208,29 @@ pub fn resolve_computed_fields_with_scope(
     outcomes
 }
 
+/// The values a typed computation reads, taken from `scope`. A name the
+/// scope does not bind stays out, so the computation sees it absent.
+fn typed_context(computation: &Computation, scope: &Scope) -> Result<Context, ComputeError> {
+    let mut ctx = Context::new();
+    for name in computation.referenced_fields() {
+        if let Some(d) = scope.get_value::<rhai::Dynamic>(&name) {
+            let value = dynamic_to_value(&d, &name)?;
+            ctx.insert(name, value);
+        }
+    }
+    Ok(ctx)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::CompiledExpr;
 
-    fn compile(expr: &str) -> CompiledExpr {
-        let engine = RhaiEngine::new();
-        CompiledExpr::compile(&engine, expr).unwrap()
+    fn field(name: &str, expr: &str) -> CompiledComputedField {
+        CompiledComputedField::script(
+            name,
+            CompiledExpr::compile(&RhaiEngine::new(), expr).unwrap(),
+        )
     }
 
     #[test]
@@ -211,7 +238,7 @@ mod tests {
         let mut ctx = HashMap::new();
         ctx.insert("priority".to_string(), Value::Integer(3));
 
-        let fields = vec![("priority_score".to_string(), compile("priority * 10"))];
+        let fields = vec![field("priority_score", "priority * 10")];
 
         resolve_computed_fields(&fields, &mut ctx);
         assert_eq!(ctx["priority_score"], Value::Integer(30));
@@ -223,8 +250,8 @@ mod tests {
         ctx.insert("base".to_string(), Value::Float(2.0));
 
         let fields = vec![
-            ("doubled".to_string(), compile("base * 2.0")),
-            ("quadrupled".to_string(), compile("doubled * 2.0")),
+            field("doubled", "base * 2.0"),
+            field("quadrupled", "doubled * 2.0"),
         ];
 
         resolve_computed_fields(&fields, &mut ctx);
@@ -250,7 +277,7 @@ mod tests {
     #[test]
     fn an_overflowing_computed_field_is_refused_at_the_enrich_seat() {
         let mut ctx = huge_base_row();
-        let fields = vec![("ratio".to_string(), compile("base * 10.0"))];
+        let fields = vec![field("ratio", "base * 10.0")];
 
         resolve_computed_fields(&fields, &mut ctx);
         assert_eq!(ctx["ratio"], Value::Null, "an infinite result is refused");
@@ -261,7 +288,7 @@ mod tests {
         let profile = crate::entity_profile::EntityProfile {
             entity_name: crate::EntityName::new("thing"),
             variants: Vec::new(),
-            computed_fields: vec![("ratio".to_string(), compile("base * 10.0"))],
+            computed_fields: vec![field("ratio", "base * 10.0")],
             virtual_child: None,
             declared_columns: BTreeSet::new(),
             render_requirements: crate::render_requirements::RenderRequirements::default(),
@@ -283,7 +310,7 @@ mod tests {
         // Type-aware binding: a required column absent from scope makes the field
         // UNBOUND — rhai is never invoked (no "Variable not found"), output is Null.
         let mut ctx = HashMap::new();
-        let fields = vec![("bad".to_string(), compile("nonexistent_var + 1"))];
+        let fields = vec![field("bad", "nonexistent_var + 1")];
 
         resolve_computed_fields(&fields, &mut ctx);
         assert_eq!(ctx["bad"], Value::Null);
@@ -298,11 +325,8 @@ mod tests {
         let mut scope = Scope::new();
         let mut ctx = HashMap::new();
         let fields = vec![
-            ("is_page_row".to_string(), compile("tags != ()")),
-            (
-                "embedded".to_string(),
-                compile("is_page_row && content_type == \"text\""),
-            ),
+            field("is_page_row", "tags != ()"),
+            field("embedded", "is_page_row && content_type == \"text\""),
         ];
         let declared = BTreeSet::new();
         resolve_computed_fields_with_scope(&engine, &mut scope, &fields, &mut ctx, &declared);
@@ -324,11 +348,8 @@ mod tests {
         );
         let mut ctx = HashMap::new();
         let fields = vec![
-            (
-                "is_source".to_string(),
-                compile("content_type == \"source\""),
-            ),
-            ("shown".to_string(), compile("!is_source")),
+            field("is_source", "content_type == \"source\""),
+            field("shown", "!is_source"),
         ];
         let declared = BTreeSet::new();
         resolve_computed_fields_with_scope(&engine, &mut scope, &fields, &mut ctx, &declared);

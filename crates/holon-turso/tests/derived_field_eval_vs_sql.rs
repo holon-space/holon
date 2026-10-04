@@ -807,7 +807,71 @@ async fn assert_planted_matches_eval(
             ));
         }
     }
+    let live = live_outcome(comp, &stored);
+    let agree = match (&expected, &live) {
+        (Ok(e), (Ok(()), got)) => e == got,
+        (Err(e), (Err(reason), Value::Null)) => *reason == e.to_string(),
+        _ => false,
+    };
+    if !agree {
+        return Err(format!(
+            "the live read seat disagrees with eval for {comp:?} over {row:?} (stored \
+             {stored:?}):\n  eval: {expected:?}\n  live: {live:?}"
+        ));
+    }
     Ok(())
+}
+
+/// The source a user writes for `comp`. A negative literal has no spelling of
+/// its own: it is written as arithmetic that gives the same value.
+fn source_of(comp: &Computation) -> String {
+    match comp {
+        Computation::Field(name) => name.clone(),
+        Computation::Lit(Value::Null) => "()".to_string(),
+        Computation::Lit(Value::Integer(i64::MIN)) => format!("(0 - {} - 1)", i64::MAX),
+        Computation::Lit(Value::Integer(i)) if *i < 0 => format!("(0 - {})", -i),
+        Computation::Lit(Value::Integer(i)) => i.to_string(),
+        Computation::Lit(Value::Float(f)) if f.is_sign_negative() => {
+            format!("({:?} * (0 - 1))", -f)
+        }
+        Computation::Lit(Value::Float(f)) => format!("{f:?}"),
+        Computation::Arith { op, lhs, rhs } => {
+            let op = match op {
+                ArithOp::Add => "+",
+                ArithOp::Sub => "-",
+                ArithOp::Mul => "*",
+                ArithOp::Div => "/",
+            };
+            format!("({} {op} {})", source_of(lhs), source_of(rhs))
+        }
+        other => panic!("no source spelling for {other:?}"),
+    }
+}
+
+/// The live read seat: `comp` declared `computed_live` from its source, then
+/// evaluated the way the UI enrichment evaluates a row. Returns the field's
+/// outcome and value.
+fn live_outcome(
+    comp: &Computation,
+    stored: &HashMap<String, Value>,
+) -> (Result<(), String>, Value) {
+    let source = source_of(comp);
+    let spec = holon_api::ComputedSpec::parse(
+        "d",
+        &source,
+        holon_api::ComputedTier::ComputedLive,
+        &arith_field_types(),
+        &holon_api::bounded_engine(),
+    )
+    .unwrap_or_else(|e| panic!("`{source}` declares for the live tier: {e}"));
+    let mut row = stored.clone();
+    let outcomes = holon_api::computed::resolve_computed_fields(
+        &[holon_api::entity_profile::CompiledComputedField::typed(
+            &spec,
+        )],
+        &mut row,
+    );
+    (outcomes["d"].clone(), row["d"].clone())
 }
 
 fn arith(op: ArithOp, lhs: Box<Computation>, rhs: Box<Computation>) -> Computation {
@@ -962,6 +1026,19 @@ fn arb_row() -> impl Strategy<Value = ArithRow> {
         .prop_map(|(xi, xf, xs, xb)| ArithRow { xi, xf, xs, xb })
 }
 
+/// Whether `comp` has no arithmetic spelling in source: a text or boolean
+/// literal declares a Rhai script, and `+` beside a TEXT column spells
+/// concatenation.
+fn has_no_arithmetic_spelling(comp: &Computation, types: &FieldTypes) -> bool {
+    let Computation::Arith { op, lhs, rhs } = comp else {
+        return matches!(comp, Computation::Lit(Value::Boolean(_) | Value::String(_)));
+    };
+    let text = |c: &Computation| matches!(c, Computation::Field(n) if types.kind(n) == Some(FieldKind::Text));
+    (*op == ArithOp::Add && (text(lhs) || text(rhs)))
+        || has_no_arithmetic_spelling(lhs, types)
+        || has_no_arithmetic_spelling(rhs, types)
+}
+
 /// The first operand of an arithmetic node that is not a number by its
 /// declaration: a column declared other than numeric, or a text or boolean
 /// literal. NULL is no such operand.
@@ -993,7 +1070,20 @@ proptest! {
     ) {
         let types = arith_field_types();
         match (comp.result_kind(&types), non_numeric_operand(&comp, &types)) {
-            (Err(_), Some(_)) => {}
+            (Err(_), Some(_)) if has_no_arithmetic_spelling(&comp, &types) => {}
+            (Err(_), Some(_)) => {
+                let live = holon_api::ComputedSpec::parse(
+                    "d",
+                    &source_of(&comp),
+                    holon_api::ComputedTier::ComputedLive,
+                    &types,
+                    &holon_api::bounded_engine(),
+                );
+                prop_assert!(
+                    matches!(&live, Err(e) if e.contains("arithmetic takes numbers")),
+                    "the live tier must refuse {comp:?} as the persisted tier does, got {live:?}"
+                );
+            }
             (Ok(FieldKind::Numeric), None) => {
                 let runtime = tokio::runtime::Runtime::new().expect("runtime");
                 let outcome = runtime.block_on(async {

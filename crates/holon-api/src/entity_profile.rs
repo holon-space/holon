@@ -24,6 +24,7 @@ use rhai::Scope;
 use crate::CompiledExpr;
 use crate::EntityName;
 use crate::Value;
+use crate::computation::Computation;
 use crate::computation::ComputeError;
 use crate::computed::ComputedOutcomes;
 use crate::predicate::Predicate;
@@ -33,8 +34,49 @@ use crate::render_types::RenderExpr;
 use crate::render_types::RenderProfile;
 use crate::render_types::RenderVariant;
 
-/// A computed field: name + pre-compiled Rhai expression.
-pub type CompiledComputedField = (String, CompiledExpr);
+/// A computed field as the read path evaluates it.
+///
+/// A typed declaration is evaluated by its [`Computation`], the evaluator the
+/// sidecar and the planted SQL column are held equal to; only a
+/// [`Computation::Script`] runs on Rhai. The Rhai form is kept either way: its
+/// required columns decide whether a row binds the field at all.
+#[derive(Debug, Clone)]
+pub struct CompiledComputedField {
+    name: String,
+    expr: CompiledExpr,
+    computation: Computation,
+}
+
+impl CompiledComputedField {
+    /// A field with no typed declaration, served by Rhai alone.
+    pub fn script(name: impl Into<String>, expr: CompiledExpr) -> Self {
+        Self {
+            name: name.into(),
+            computation: Computation::Script(expr.clone()),
+            expr,
+        }
+    }
+
+    pub fn typed(spec: &crate::ComputedSpec) -> Self {
+        Self {
+            name: spec.name().to_string(),
+            expr: spec.expr().clone(),
+            computation: spec.computation().clone(),
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn expr(&self) -> &CompiledExpr {
+        &self.expr
+    }
+
+    pub fn computation(&self) -> &Computation {
+        &self.computation
+    }
+}
 
 /// Stored profile spec — render expression only, no operations.
 /// Operations are injected by `ProfileResolver` at resolve time.
@@ -169,7 +211,7 @@ impl EntityProfile {
         let computed: std::collections::BTreeMap<String, BTreeSet<String>> = self
             .computed_fields
             .iter()
-            .map(|(name, expr)| (name.clone(), expr.required_columns.clone()))
+            .map(|f| (f.name.clone(), f.expr.required_columns.clone()))
             .collect();
 
         let mut names = crate::render_requirements::BoundNames::default();
@@ -342,11 +384,8 @@ impl EntityProfile {
         // scope from that would turn typed ABSENCE into a `()` binding, which
         // type-errors every condition that ANDs it. Recomputing is idempotent,
         // so dropping the row's copy loses nothing.
-        let computed_names: BTreeSet<&str> = self
-            .computed_fields
-            .iter()
-            .map(|(name, _)| name.as_str())
-            .collect();
+        let computed_names: BTreeSet<&str> =
+            self.computed_fields.iter().map(|f| f.name()).collect();
 
         for (key, value) in row {
             if computed_names.contains(key.as_str()) {

@@ -146,40 +146,58 @@ fn a_declaration_with_a_non_finite_literal_is_refused_naming_it() {
 }
 
 /// The storage has no boolean, so a planted column would compute `flag + 1`
-/// over `1` where `eval` refuses `true + 1`. Arithmetic over a TEXT column has
-/// no value at all. A planted declaration of either is refused; a NULL operand
-/// is not, because it gives NULL.
+/// over `1` where `eval` refuses `true + 1`; Rhai would concatenate `name + 1`
+/// where `eval` refuses it. Every tier evaluates arithmetic the one way, so
+/// every tier refuses a declaration of arithmetic over a non-number, wherever
+/// in the expression the arithmetic sits. A NULL operand is not refused,
+/// because it gives NULL.
 #[test]
-fn a_persisted_declaration_of_arithmetic_over_a_non_number_is_refused() {
+fn a_declaration_of_arithmetic_over_a_non_number_is_refused_in_every_tier() {
     let t = types(&[
         ("flag", FieldKind::Boolean),
         ("name", FieldKind::Text),
         ("n", FieldKind::Numeric),
     ]);
-    let declare = |source: &str| {
-        holon_api::ComputedSpec::parse(
-            "d",
-            source,
-            holon_api::ComputedTier::ComputedPersisted,
-            &t,
-            &rhai::Engine::new(),
-        )
-    };
-    for (source, operand) in [
-        ("flag + 1", "Field(\"flag\")"),
-        ("n * flag", "Field(\"flag\")"),
-        ("-flag", "Field(\"flag\")"),
-        ("name - 1", "Field(\"name\")"),
-        ("(n < 2) * n", "Compare"),
+    for tier in [
+        holon_api::ComputedTier::ComputedLive,
+        holon_api::ComputedTier::ComputedPersisted,
     ] {
-        let outcome = declare(source);
-        assert!(
-            matches!(&outcome, Err(e) if e.contains("arithmetic takes numbers") && e.contains(operand)),
-            "`{source}` must be refused naming {operand}, got {outcome:?}"
-        );
+        let declare = |source: &str| {
+            holon_api::ComputedSpec::parse("d", source, tier, &t, &rhai::Engine::new())
+        };
+        for (source, operand) in [
+            ("flag + 1", "Field(\"flag\")"),
+            ("n * flag", "Field(\"flag\")"),
+            ("-flag", "Field(\"flag\")"),
+            ("name - 1", "Field(\"name\")"),
+            ("(n < 2) * n", "Compare"),
+            ("flag * 2 > 1", "Field(\"flag\")"),
+            ("if n > 0 { name - 1 } else { 0 }", "Field(\"name\")"),
+            ("n > 0 && flag + 1 > 1", "Field(\"flag\")"),
+            ("name + (flag * 2)", "Field(\"flag\")"),
+            ("switch flag * 2 { 1 => n, _ => 0 }", "Field(\"flag\")"),
+        ] {
+            let outcome = declare(source);
+            assert!(
+                matches!(&outcome, Err(e) if e.contains("arithmetic takes numbers") && e.contains(operand)),
+                "{tier:?}: `{source}` must be refused naming {operand}, got {outcome:?}"
+            );
+        }
+        for source in ["n + ()", "n * 2 - n"] {
+            let spec =
+                declare(source).unwrap_or_else(|e| panic!("{tier:?}: `{source}` declares: {e}"));
+            assert_eq!(spec.result_kind(), Ok(FieldKind::Numeric), "`{source}`");
+        }
     }
-    for source in ["n + ()", "n * 2 - n"] {
-        let spec = declare(source).unwrap_or_else(|e| panic!("`{source}` declares: {e}"));
-        assert_eq!(spec.result_kind(), Ok(FieldKind::Numeric), "`{source}`");
-    }
+}
+
+#[test]
+fn deserializing_a_live_field_of_arithmetic_over_a_boolean_is_refused() {
+    let json = r#"{"name":"d","tier":"computed_live","source":"flag + 1","field_types":{"flag":"boolean"}}"#;
+    let err = serde_json::from_str::<holon_api::ComputedSpec>(json)
+        .expect_err("a live spec of arithmetic over a boolean must be refused");
+    assert!(
+        format!("{err}").contains("arithmetic takes numbers"),
+        "the error must name the refusal, got: {err}"
+    );
 }

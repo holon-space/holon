@@ -15,7 +15,6 @@ use serde::Serialize;
 use crate::Value;
 use crate::computation::Computation;
 use crate::computation::FieldTypes;
-use crate::entity_profile::dynamic_to_value;
 
 /// Result type for entity operations
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -172,7 +171,9 @@ impl ComputedSpec {
     /// neither seat could serve the field. The subset parser failing is not:
     /// the field is served by Rhai alone, reported through
     /// [`Self::is_rhai_only`], unless the declared tier promised a planted
-    /// column.
+    /// column. Arithmetic over a declared non-number is refused in every tier:
+    /// every seat evaluates arithmetic one way, and that way has no value for
+    /// it.
     pub fn parse(
         name: &str,
         source: &str,
@@ -198,6 +199,9 @@ impl ComputedSpec {
                 Computation::Script(expr.clone())
             }
         };
+        computation
+            .check_arith_operands(types)
+            .map_err(|e| format!("computed field '{name}': {e}. Source: {source}"))?;
         let spec = ComputedSpec {
             name,
             tier,
@@ -911,72 +915,6 @@ impl TypeDefinition {
             .filter(|f| matches!(f.lifetime, FieldLifetime::Transient))
             .collect()
     }
-
-    /// Evaluate computed fields and merge results into the row.
-    ///
-    /// Uses a default Rhai engine. For expressions that need custom functions
-    /// (e.g., entity lookups), use `enrich_with()` instead.
-    pub fn enrich(&self, row: StorageEntity) -> StorageEntity {
-        let engine = rhai::Engine::new();
-        self.enrich_with(row, &engine)
-    }
-
-    /// Evaluate computed fields with a caller-provided Rhai engine.
-    ///
-    /// Allows callers to register custom functions (e.g., `document()`,
-    /// `query_source()` backed by LiveEntities) before evaluation.
-    /// Fields must be in topological order (dependencies before dependents) —
-    /// `TypeRegistry::register()` ensures this via topo-sort.
-    pub fn enrich_with(&self, mut row: StorageEntity, engine: &rhai::Engine) -> StorageEntity {
-        let mut scope = rhai::Scope::new();
-
-        for (key, value) in &row {
-            match value {
-                Value::String(s) => {
-                    scope.push(key.as_ref(), s.clone());
-                }
-                Value::Integer(i) => {
-                    scope.push(key.as_ref(), *i);
-                }
-                Value::Float(f) => {
-                    scope.push(key.as_ref(), *f);
-                }
-                Value::Boolean(b) => {
-                    scope.push(key.as_ref(), *b);
-                }
-                _ => {}
-            }
-        }
-
-        for field in &self.fields {
-            let FieldLifetime::Computed { spec } = &field.lifetime else {
-                continue;
-            };
-            let evaluated = engine
-                .eval_ast_with_scope::<rhai::Dynamic>(&mut scope, &spec.expr.ast)
-                .map_err(|e| e.to_string())
-                .and_then(|result| {
-                    let value =
-                        dynamic_to_value(&result, &spec.expr.source).map_err(|e| e.to_string())?;
-                    Ok((result, value))
-                });
-            match evaluated {
-                Ok((result, value)) => {
-                    scope.push(field.name.clone(), result);
-                    row.insert(field.name.as_str().into(), value);
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "Computed field '{}' on '{}' failed, substituting Null: {e}",
-                        field.name,
-                        self.name
-                    );
-                    row.insert(field.name.as_str().into(), Value::Null);
-                }
-            }
-        }
-        row
-    }
 }
 
 // =============================================================================
@@ -1341,43 +1279,6 @@ mod mutation_gap_tests {
                 "CREATE INDEX IF NOT EXISTS idx_thing_title ON \"thing\" (\"title\")".to_string(),
                 "CREATE INDEX IF NOT EXISTS idx_thing_cache ON \"thing\" (\"cache\")".to_string(),
             ]
-        );
-
-        // enrich evaluates the computed field from row scope.
-        let row: StorageEntity = [(std::sync::Arc::<str>::from("a"), Value::Integer(2))]
-            .into_iter()
-            .collect();
-        let enriched = td.enrich(row);
-        assert_eq!(enriched.get("score"), Some(&Value::Integer(3)));
-        assert_eq!(enriched.get("a"), Some(&Value::Integer(2)));
-    }
-
-    #[test]
-    fn enrich_refuses_an_overflowing_computed_field() {
-        let engine = rhai::Engine::new();
-        let spec = ComputedSpec::parse(
-            "ratio",
-            "base * 10.0",
-            ComputedTier::ComputedLive,
-            &FieldTypes::new(),
-            &engine,
-        )
-        .unwrap();
-        let td = TypeDefinition::new(
-            "thing",
-            vec![
-                FieldSchema::new("ratio", "REAL").lifetime(FieldLifetime::Computed {
-                    spec: Box::new(spec),
-                }),
-            ],
-        );
-        let row: StorageEntity = [(std::sync::Arc::<str>::from("base"), Value::Float(1e308))]
-            .into_iter()
-            .collect();
-        assert_eq!(
-            td.enrich(row).get("ratio"),
-            Some(&Value::Null),
-            "an infinite result is refused"
         );
     }
 
