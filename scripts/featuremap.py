@@ -228,10 +228,13 @@ def scan_invariants(root):
     families = {}
     for path in _rust_files(root):
         source = path.read_text()
-        # Three declaration forms: an invariant body's `InvariantId`, a
-        # `capability_pair!` id override, and a correspondence family's entry.
+        # Four declaration forms: an invariant body's `InvariantId`, a
+        # `capability_pair!` id override, a `const ID: &str` (a guard outside
+        # the pbt feature, which cannot name `InvariantId`), and a
+        # correspondence family's entry.
         found = (re.findall(rf'InvariantId\("({ID})"\)', source)
-                 + re.findall(rf'id\s*=\s*"({ID})"', source),
+                 + re.findall(rf'id\s*=\s*"({ID})"', source)
+                 + re.findall(rf'const ID: &str = "({ID})"', source),
                  re.findall(rf'id: "({ID})"', source))
         # A file's `@pbt covers` clause describes what that file declares, so it
         # only speaks for an id when the file declares one or two of them; the

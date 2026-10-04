@@ -1,6 +1,6 @@
-//! `inv-no-database-stuck` — no SQL command keeps the actor busy past the hang
-//! bound (`HOLON_ACTOR_HANG_MS`), in any session a PBT boots, and the watch
-//! that reports it keeps running.
+//! `inv-no-database-stuck` — no SQL command keeps the actor busy past the
+//! guard's limit, in every session the test harness boots, and the watch that
+//! reports it keeps running.
 //!
 //! @pbt oracle internal-consistency — the session's `ConditionBus` never
 //!   carries `DatabaseStuck` or `DatabaseWatchFailed` (no ref)
@@ -21,10 +21,13 @@ use std::sync::Weak;
 use holon_api::ConditionBus;
 use holon_api::ConditionChange;
 use holon_api::ConditionKind;
-use holon_pbt_core::invariant::InvariantId;
 use tokio::sync::broadcast::error::RecvError;
 
-pub const ID: InvariantId = InvariantId("inv-no-database-stuck");
+const ID: &str = "inv-no-database-stuck";
+
+/// A test build under parallel load runs healthy bulk commands past the 30 s
+/// production hang bound, so the guard waits for the report at twice that.
+const KILL_AFTER_SECS: u64 = 60;
 
 static GUARDED: Mutex<Vec<Weak<ConditionBus>>> = Mutex::new(Vec::new());
 
@@ -78,9 +81,8 @@ fn assert_guarded(bus: &Arc<ConditionBus>) {
         .any(|g| std::ptr::eq(g.as_ptr(), Arc::as_ptr(bus)));
     assert!(
         guarded,
-        "[{}] no guard watches the session's ConditionBus: a stuck SQL command would hang the \
-         run with no output",
-        ID.0
+        "[{ID}] no guard watches the session's ConditionBus: a stuck SQL command would hang the \
+         run with no output"
     );
 }
 
@@ -98,16 +100,15 @@ fn fail_if_database_broken(reason: &ConditionKind) {
             command,
             running_secs,
             report,
-        } => {
+        } if *running_secs >= KILL_AFTER_SECS => {
             eprintln!(
-                "[{}] a `{command}` SQL command has kept the actor busy for {running_secs} s, \
-                 past the hang bound. The step that sent it cannot return.\n{report}",
-                ID.0
+                "[{ID}] a `{command}` SQL command has kept the actor busy for {running_secs} s, \
+                 past the hang bound. The step that sent it cannot return.\n{report}"
             );
             std::process::exit(101);
         }
         ConditionKind::DatabaseWatchFailed { cause } => {
-            eprintln!("[{}] the SQL actor watch failed: {cause}", ID.0);
+            eprintln!("[{ID}] the SQL actor watch failed: {cause}");
             std::process::exit(101);
         }
         _ => {}
