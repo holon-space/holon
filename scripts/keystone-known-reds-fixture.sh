@@ -265,32 +265,113 @@ test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; 
 EOF
 expect_outcome should-panic-other-binary 1 '^PRIMARY: \[novel\] .*REAL PRODUCT BUG: the refusal was never raised$' \
     "$work/should-panic-other-binary.log"
-# nextest's alternative labels for a killed or leaking test, in a log cut off
-# before `Summary`: each must name its test, under one class per cause.
+# nextest status lines, in the shapes nextest-runner's reporter prints them
+# (reporter/displayer/imp.rs `status_str` / `short_status_str`). A test killed
+# or leaking after a passing body printed no panic, so the status line is its
+# signature, under the long label; a log cut off before `Summary` still says so.
 cat >"$work/nextest-labels-truncated.log" <<'EOF'
-        PASS [   0.010s] (1/9) holon-gpui::layout_smoke a
-   LEAK-FAIL [   0.312s] (2/9) holon-gpui::layout_smoke leaky
-      LKFAIL [   0.312s] (3/9) holon-gpui::layout_smoke leaky_short
- FAIL + LEAK [   0.312s] (4/9) holon-gpui::layout_smoke leaky_spaced
-       FL+LK [   0.312s] (5/9) holon-gpui::layout_smoke leaky_plus
-       XFAIL [   0.001s] (6/9) holon-gpui::layout_smoke unexecutable
-         TMT [ 120.034s] (7/9) holon-gpui::bin timed_short
- TERMINATING [>120.000s] (─────────) holon-gpui::bin terminating
-     SLOW+TM [> 60.000s] (─────────) holon-gpui::bin slow_terminating
-TIMEOUT-PASS [ 120.034s] (9/9) holon-gpui::bin allowed_to_time_out
+        PASS [   0.010s] (1/6) holon-gpui::layout_smoke a
+   LEAK-FAIL [   0.312s] (2/6) holon-gpui::layout_smoke leaky
+       XFAIL [   0.001s] (3/6) holon-gpui::layout_smoke unexecutable
+     SIGSEGV [   0.312s] (4/6) holon-gpui::layout_smoke boom
+ ABORT SIG 9 [   0.312s] (5/6) holon-gpui::layout_smoke killed
+ TERMINATING [>120.000s] (─────────) holon-gpui::bin timed
+     TIMEOUT [ 120.034s] (6/6) holon-gpui::bin timed
 Canceling due to test failure
 EOF
-for want in 'LEAK-FAIL: holon-gpui::layout_smoke leaky' 'LEAK-FAIL: holon-gpui::layout_smoke leaky_short' \
-    'LEAK-FAIL: holon-gpui::layout_smoke leaky_spaced' 'LEAK-FAIL: holon-gpui::layout_smoke leaky_plus' \
-    'XFAIL: holon-gpui::layout_smoke unexecutable' 'TIMEOUT: holon-gpui::bin timed_short' \
-    'TIMEOUT: holon-gpui::bin terminating' 'TIMEOUT: holon-gpui::bin slow_terminating'; do
+for want in 'LEAK-FAIL: holon-gpui::layout_smoke leaky' 'XFAIL: holon-gpui::layout_smoke unexecutable' \
+    'SIGSEGV: holon-gpui::layout_smoke boom' 'ABORT SIG 9: holon-gpui::layout_smoke killed' \
+    'TIMEOUT: holon-gpui::bin timed'; do
     expect_outcome "nextest-label/${want%%:*}/${want##* }" 1 "^ *1 $want\$" "$work/nextest-labels-truncated.log"
 done
-cat >"$work/timeout-pass.log" <<'EOF'
-TIMEOUT-PASS [ 120.034s] (1/1) holon-gpui::bin allowed_to_time_out
-     Summary [ 120.355s] 1 tests run: 1 passed, 0 skipped
+# A `FAIL + LEAK` test failed in its body: its own panic is the signature, and a
+# known one stays known.
+cat >"$work/fail-leak-known-panic.log" <<'EOF'
+ FAIL + LEAK [   6.486s] (197/682) holon-app::integration_toggle_round_trip a_dispatched_switch_reaches_the_seeded_section_without_a_manual_reprojection
+  stderr ───
+    thread 'a_dispatched_switch_reaches_the_seeded_section_without_a_manual_reprojection' (2) panicked at crates/holon-app/tests/integration_toggle_round_trip.rs:83:9:
+    the seeded Integrations section never showed 'todoist' as true — it is still false. The operation wrote the state file, so the break is between the store's signal and the mirror.
+     Summary [  25.469s] 682 tests run: 681 passed (1 leaky), 1 failed, 1 skipped
+ FAIL + LEAK [   6.486s] (197/682) holon-app::integration_toggle_round_trip a_dispatched_switch_reaches_the_seeded_section_without_a_manual_reprojection
 EOF
-expect_outcome timeout-pass 0 '^\[known-reds\] PASS: 1 green run' "$work/timeout-pass.log"
+expect_outcome fail-leak-known-panic 0 '^\[known-reds\] PASS-WITH-NOTE: 1 known-red' "$work/fail-leak-known-panic.log"
+# A test that returned `Err` printed no panic; its status line stands in.
+cat >"$work/fail-leak-no-panic.log" <<'EOF'
+ FAIL + LEAK [   0.906s] (36/49) holon::integration_tests test_multiple_containers
+  stderr ───
+    Error: aborted by peer: the cryptographic handshake failed: error 120: peer doesn't support any known protocol
+     Summary [  31.396s] 49 tests run: 48 passed, 1 failed, 0 skipped
+EOF
+expect_outcome fail-leak-no-panic 1 '^ *1 FAIL + LEAK: holon::integration_tests test_multiple_containers$' \
+    "$work/fail-leak-no-panic.log"
+# `TERMINATING` is nextest killing the test, not an outcome: the final line decides.
+cat >"$work/terminating-timeout-pass.log" <<'EOF'
+        SLOW [> 60.000s] (─────────) holon-gpui::bin allowed
+ TERMINATING [>120.000s] (─────────) holon-gpui::bin allowed
+TIMEOUT-PASS [ 120.034s] (1/2) holon-gpui::bin allowed
+ SLOW+TMPASS [ 120.034s] (2/2) holon-gpui::bin slowish
+     Summary [ 120.355s] 2 tests run: 2 passed, 0 skipped
+EOF
+expect_outcome terminating-timeout-pass 0 '^\[known-reds\] PASS: 1 green run' "$work/terminating-timeout-pass.log"
+# A stress run prefixes the instance with its iteration `[i/n]`; the signature
+# names the test without it.
+cat >"$work/stress-index.log" <<'EOF'
+  Cancelling due to signal: 1 test still running
+     SIGTERM [  20.778s] [10/12] (1/1) holon-integration-tests::two_instance_composed_pbt edit_on_receiver_concurrent_with_create_on_owner_converges
+ Stress test [  20.778s] iteration 10/12: 1 test run: 0 passed, 1 failed, 37 skipped
+     TIMEOUT [  20.778s] [11/12] (1/1) holon::turso_block_query_source_round_trip_pbt round_trip
+     Summary [ 385.895s] 11/12 stress run iterations: 9 passed; cancelled due to signal
+     SIGTERM [  20.778s] [10/12] (1/1) holon-integration-tests::two_instance_composed_pbt edit_on_receiver_concurrent_with_create_on_owner_converges
+error: test run failed
+EOF
+expect_outcome stress-index/signal 1 '^ *1 SIGTERM: holon-integration-tests::two_instance_composed_pbt edit_on_receiver_concurrent_with_create_on_owner_converges$' \
+    "$work/stress-index.log"
+expect_outcome stress-index/known-row 1 '^WARN known-red \[turso-block-query-source-round-trip\] x1$' \
+    "$work/stress-index.log"
+# Retries: a retried test's last failing `TRY n` decides. A test that passes on
+# a later try (`FLAKY`) did not fail, and the panic of its failed try is no
+# signature.
+cat >"$work/retry-flaky-pass.log" <<'EOF'
+   TRY 1 FAIL [   0.120s] (1/2) holon::flaky_suite sometimes
+  stderr ───
+    thread 'sometimes' (2) panicked at crates/holon/tests/flaky_suite.rs:10:5:
+    REAL ONLY ON TRY 1: the first attempt lost the race
+     TRY 2 START [         ] (1/2) holon::flaky_suite sometimes
+   FLAKY 2/2 [   0.110s] (1/2) holon::flaky_suite sometimes
+        PASS [   0.010s] (2/2) holon::flaky_suite always
+     Summary [   0.355s] 2 tests run: 2 passed (1 flaky), 0 skipped
+EOF
+expect_outcome retry-flaky-pass 0 '^\[known-reds\] PASS: 1 green run' "$work/retry-flaky-pass.log"
+cat >"$work/retry-final-fail.log" <<'EOF'
+     TRY 1 SLOW [>120.000s] (1/3) holon::turso_block_query_source_round_trip_pbt round_trip
+  TRY 1 TRMNTG [>120.000s] (1/3) holon::turso_block_query_source_round_trip_pbt round_trip
+     TRY 1 TMT [ 120.034s] (1/3) holon::turso_block_query_source_round_trip_pbt round_trip
+     TRY 2 TMT [ 120.034s] (1/3) holon::turso_block_query_source_round_trip_pbt round_trip
+   TRY 1 LKFAIL [   0.312s] (2/3) holon-gpui::layout_smoke leaky
+    TRY 2 SIG 9 [   0.312s] (2/3) holon-gpui::layout_smoke leaky
+    TRY 1 FAIL [   0.120s] (3/3) holon::flaky_suite never
+  stderr ───
+    thread 'never' (2) panicked at crates/holon/tests/flaky_suite.rs:20:5:
+    REAL ON EVERY TRY: the race is lost every time
+    TRY 2 FAIL [   0.120s] (3/3) holon::flaky_suite never
+  stderr ───
+    thread 'never' (2) panicked at crates/holon/tests/flaky_suite.rs:20:5:
+    REAL ON EVERY TRY: the race is lost every time
+     Summary [ 240.355s] 3 tests run: 0 passed, 1 timed out, 2 failed, 0 skipped
+EOF
+expect_outcome retry-final-fail/timeout 1 '^WARN known-red \[turso-block-query-source-round-trip\] x1$' \
+    "$work/retry-final-fail.log"
+expect_outcome retry-final-fail/signal 1 '^ *1 ABORT SIG 9: holon-gpui::layout_smoke leaky$' \
+    "$work/retry-final-fail.log"
+expect_outcome retry-final-fail/panic 1 '^ *2 REAL ON EVERY TRY: the race is lost every time$' \
+    "$work/retry-final-fail.log"
+# A failed setup script fails the run before any test does.
+cat >"$work/setup-fail.log" <<'EOF'
+   SETUP PASS [   0.100s] db-seed: ./scripts/seed.sh
+ SETUP LKFAIL [   0.312s] leaky-script: ./scripts/leaky.sh
+     Summary [   1.000s] 0 tests run: 0 passed, 0 skipped
+EOF
+expect_outcome setup-fail 1 '^ *1 SETUP LEAK-FAIL: leaky-script: ./scripts/leaky.sh$' "$work/setup-fail.log"
 # A row whose known failure is a budget assertion must not absorb a TIMEOUT of
 # the same test: a hang past the nextest cap is a different bug.
 cat >"$work/budget-test-timeout.log" <<'EOF'
