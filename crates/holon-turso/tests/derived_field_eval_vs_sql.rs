@@ -22,8 +22,11 @@ use holon_api::ConditionBus;
 use holon_api::Value;
 use holon_api::computation::ArithOp;
 use holon_api::computation::Computation;
+use holon_api::computation::ComputeError;
 use holon_api::computation::DerivedField;
 use holon_api::computation::DerivedFieldPlan;
+use holon_api::computation::FieldKind;
+use holon_api::computation::FieldTypes;
 use holon_turso::derived_reconciler::spawn_derived_field_reconciler;
 use holon_turso::matview_manager::MatviewManager;
 use holon_turso::matview_manager::reconcile_named_view;
@@ -434,6 +437,96 @@ async fn sidecar_value_matches_eval_and_planted_sql() {
     );
 }
 
+/// A NULL operand gives NULL in every seat: eval, the planted column, and the
+/// sidecar. NULL is "no value", so the sidecar raises no
+/// `DerivedFieldNotComputed` for it.
+#[tokio::test]
+async fn a_null_operand_gives_null_in_every_seat() {
+    let handle = setup().await;
+    BlockDerivedSchemaModule
+        .ensure_schema(&handle)
+        .await
+        .expect("block_derived table");
+    handle
+        .execute_ddl("CREATE TABLE tn (id TEXT PRIMARY KEY, xi INTEGER, xn INTEGER)")
+        .await
+        .expect("create table");
+    handle
+        .execute("INSERT INTO tn (id, xi, xn) VALUES ('r1', 9, NULL)", vec![])
+        .await
+        .expect("seed row");
+    let comp = arith(
+        ArithOp::Add,
+        Box::new(arith(ArithOp::Mul, field("xi"), field("xn"))),
+        ilit(1),
+    );
+    let ctx = HashMap::from([
+        ("xi".to_string(), Value::Integer(9)),
+        ("xn".to_string(), Value::Null),
+    ]);
+    assert_eq!(comp.eval(&ctx), Ok(Value::Null), "eval");
+
+    let plan = DerivedFieldPlan::plan(vec![DerivedField::new(fid("d"), comp.clone())]);
+    let col = &plan.sql_planted[0].sql;
+    reconcile_named_view(
+        &handle,
+        "v_null_operand",
+        &format!("SELECT id, {col} AS d FROM tn"),
+    )
+    .await
+    .unwrap_or_else(|e| panic!("planted DDL `{col}` must succeed: {e}"));
+    assert_eq!(
+        read_d(&handle, "v_null_operand").await,
+        Ok(Value::Null),
+        "planted column"
+    );
+
+    let bus = Arc::new(ConditionBus::new());
+    let mgr = MatviewManager::new(handle.clone(), Arc::new(tokio::sync::Mutex::new(())));
+    let _guard = spawn_derived_field_reconciler(
+        &mgr,
+        handle.clone(),
+        "SELECT id, xi, xn FROM tn",
+        vec![DerivedField::new(fid("d"), comp)],
+        bus.clone(),
+    )
+    .await
+    .expect("spawn reconciler");
+    for _ in 0..100 {
+        let disclosed: Vec<_> = bus
+            .current()
+            .into_iter()
+            .filter(|c| {
+                matches!(
+                    c.reason,
+                    holon_api::ConditionKind::DerivedFieldNotComputed { .. }
+                )
+            })
+            .collect();
+        assert!(
+            disclosed.is_empty(),
+            "NULL is not a failed computation: {disclosed:?}"
+        );
+        let rows = handle
+            .query_positional(
+                "SELECT value_json FROM block_derived WHERE block_id = 'r1' AND field_name = 'd'",
+                vec![],
+            )
+            .await
+            .expect("query block_derived");
+        if let Some(row) = rows.first() {
+            assert_eq!(
+                row.get("value_json"),
+                Some(&Value::String("null".into())),
+                "sidecar"
+            );
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("the sidecar never wrote r1.d");
+}
+
 /// Poll `block_derived` for one field's persisted value, decoding the stored
 /// JSON back into a [`Value`].
 async fn await_sidecar(handle: &DbHandle, block_id: &str, field: &str) -> Value {
@@ -503,48 +596,105 @@ async fn absent_field_divergence_is_documented() {
 // give the same value or the same refusal.
 // ---------------------------------------------------------------------------
 
-/// The operand row: `xi INTEGER`, `xf REAL`, `xs TEXT`, `xn INTEGER` (always
-/// NULL).
+/// A cell as written. The column's declared affinity decides what is stored, so
+/// a cell may be of another kind than its column: TEXT `'7'` written to an
+/// INTEGER column is stored as the integer 7.
+#[derive(Debug, Clone, Copy)]
+enum Cell {
+    Int(i64),
+    Real(f64),
+    Text(&'static str),
+    Null,
+}
+
+impl Cell {
+    fn param(self) -> turso::Value {
+        match self {
+            Cell::Int(i) => turso::Value::Integer(i),
+            Cell::Real(f) => turso::Value::Real(f),
+            Cell::Text(s) => turso::Value::Text(s.to_string()),
+            Cell::Null => turso::Value::Null,
+        }
+    }
+}
+
+/// The operand row over [`ARITH_TABLE_COLUMNS`]; `xn` is always NULL.
 #[derive(Debug, Clone)]
 struct ArithRow {
-    xi: i64,
-    xf: f64,
+    xi: Cell,
+    xf: Cell,
     xs: &'static str,
+    xb: Option<bool>,
 }
 
 impl ArithRow {
-    fn ctx(&self) -> HashMap<String, Value> {
-        HashMap::from([
-            ("xi".to_string(), Value::Integer(self.xi)),
-            ("xf".to_string(), Value::Float(self.xf)),
-            ("xs".to_string(), Value::String(self.xs.to_string())),
-            ("xn".to_string(), Value::Null),
-        ])
-    }
-
     fn params(&self, id: &str) -> Vec<turso::Value> {
         vec![
             turso::Value::Text(id.to_string()),
-            turso::Value::Integer(self.xi),
-            turso::Value::Real(self.xf),
+            self.xi.param(),
+            self.xf.param(),
             turso::Value::Text(self.xs.to_string()),
+            self.xb
+                .map_or(turso::Value::Null, |b| turso::Value::Integer(b.into())),
         ]
     }
 }
 
-const ARITH_TABLE_COLUMNS: &str = "(id TEXT PRIMARY KEY, xi INTEGER, xf REAL, xs TEXT, xn INTEGER)";
-const ARITH_INSERT: &str = "INSERT INTO {t} (id, xi, xf, xs, xn) VALUES (?, ?, ?, ?, NULL)";
+const ARITH_TABLE_COLUMNS: &str =
+    "(id TEXT PRIMARY KEY, xi INTEGER, xf REAL, xs TEXT, xn INTEGER, xb BOOLEAN)";
+const ARITH_INSERT: &str = "INSERT INTO {t} (id, xi, xf, xs, xn, xb) VALUES (?, ?, ?, ?, NULL, ?)";
+
+/// The declared kinds of [`ARITH_TABLE_COLUMNS`], derived the way the type
+/// registry derives them.
+fn arith_field_types() -> FieldTypes {
+    let mut types = FieldTypes::new();
+    for (column, sql_type) in [
+        ("xi", "INTEGER"),
+        ("xf", "REAL"),
+        ("xs", "TEXT"),
+        ("xn", "INTEGER"),
+        ("xb", "BOOLEAN"),
+    ] {
+        types.insert(
+            column,
+            FieldKind::of_sql_type(sql_type).expect("an affinity the parser knows"),
+        );
+    }
+    types
+}
 
 static ARITH_CASE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-/// The planted column's outcome on `row`, by both ways a matview computes it:
-/// the initial population at CREATE, and IVM maintenance of an INSERT into a
-/// table the view already covers.
+/// The stored row: what the sidecar reconciler evaluates against, after the
+/// column affinity has converted each written cell.
+async fn stored_context(handle: &DbHandle, table: &str) -> HashMap<String, Value> {
+    let rows = handle
+        .query(
+            &format!("SELECT xi, xf, xs, xn, xb FROM {table}"),
+            HashMap::new(),
+        )
+        .await
+        .expect("read the stored row");
+    match rows.as_slice() {
+        [row] => row
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect(),
+        other => panic!("{table} must hold the one row, holds {other:?}"),
+    }
+}
+
+/// The stored row, and the planted column's outcome on it by both ways a
+/// matview computes it: the initial population at CREATE, and IVM maintenance
+/// of an INSERT into a table the view already covers.
 async fn planted_outcomes(
     handle: &DbHandle,
     comp: &Computation,
     row: &ArithRow,
-) -> [(&'static str, Result<Value, String>); 2] {
+) -> (
+    HashMap<String, Value>,
+    [(&'static str, Result<Value, String>); 2],
+) {
     let n = ARITH_CASE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let plan = DerivedFieldPlan::plan(vec![DerivedField::new(fid("d"), comp.clone())]);
     assert_eq!(
@@ -567,6 +717,7 @@ async fn planted_outcomes(
         .execute(&ARITH_INSERT.replace("{t}", &initial_t), row.params("r1"))
         .await
         .expect("seed the initial-population table");
+    let stored = stored_context(handle, &initial_t).await;
 
     let initial = async {
         let view = format!("va_{n}");
@@ -598,10 +749,13 @@ async fn planted_outcomes(
     }
     .await;
 
-    [
-        ("matview initial population", initial),
-        ("IVM maintenance", ivm),
-    ]
+    (
+        stored,
+        [
+            ("matview initial population", initial),
+            ("IVM maintenance", ivm),
+        ],
+    )
 }
 
 async fn read_d(handle: &DbHandle, view: &str) -> Result<Value, String> {
@@ -615,15 +769,32 @@ async fn read_d(handle: &DbHandle, view: &str) -> Result<Value, String> {
     }
 }
 
-/// `eval` is the oracle: its value must be the planted value exactly, and its
-/// refusal must be the planted refusal.
+/// `eval` over the stored row is the oracle: its value must be the planted
+/// value exactly, and its refusal must be the planted refusal. A refusal names
+/// arithmetic that has no finite exact answer or an operand that is not a
+/// number; a NULL operand gives NULL, so NULL is never the refused operand.
 async fn assert_planted_matches_eval(
     handle: &DbHandle,
     comp: &Computation,
     row: &ArithRow,
 ) -> Result<(), String> {
-    let expected = comp.eval(&row.ctx());
-    for (leg, got) in planted_outcomes(handle, comp, row).await {
+    let (stored, planted) = planted_outcomes(handle, comp, row).await;
+    let expected = comp.eval(&stored);
+    match &expected {
+        Ok(_)
+        | Err(ComputeError::Arithmetic { .. })
+        | Err(ComputeError::NotNumeric {
+            value: Value::String(_),
+            ..
+        }) => {}
+        Err(other) => {
+            return Err(format!(
+                "eval refused {comp:?} over {stored:?} for a reason arithmetic does not have: \
+                 {other}"
+            ));
+        }
+    }
+    for (leg, got) in planted {
         let agree = match (&expected, &got) {
             (Ok(e), Ok(g)) => e == g,
             (Err(e), Err(g)) => g.contains(&e.to_string()),
@@ -631,7 +802,8 @@ async fn assert_planted_matches_eval(
         };
         if !agree {
             return Err(format!(
-                "{leg} disagrees with eval for {comp:?} over {row:?}:\n  eval: {expected:?}\n  sql:  {got:?}"
+                "{leg} disagrees with eval for {comp:?} over {row:?} (stored {stored:?}):\n  eval: \
+                 {expected:?}\n  sql:  {got:?}"
             ));
         }
     }
@@ -644,9 +816,10 @@ fn arith(op: ArithOp, lhs: Box<Computation>, rhs: Box<Computation>) -> Computati
 
 fn benign_row() -> ArithRow {
     ArithRow {
-        xi: 5,
-        xf: 1.5,
+        xi: Cell::Int(5),
+        xf: Cell::Real(1.5),
         xs: "x",
+        xb: Some(true),
     }
 }
 
@@ -654,8 +827,12 @@ fn benign_row() -> ArithRow {
 async fn arithmetic_without_a_finite_exact_answer_is_refused_by_both_seats() {
     let handle = setup().await;
     let row_with = |xi: i64, xf: f64| ArithRow {
-        xi,
-        xf,
+        xi: Cell::Int(xi),
+        xf: Cell::Real(xf),
+        ..benign_row()
+    };
+    let xi_text = |text: &'static str| ArithRow {
+        xi: Cell::Text(text),
         ..benign_row()
     };
     let cases: Vec<(Computation, ArithRow)> = vec![
@@ -698,9 +875,22 @@ async fn arithmetic_without_a_finite_exact_answer_is_refused_by_both_seats() {
             arith(ArithOp::Sub, ilit(0), field("xi")),
             row_with(i64::MIN, 1.5),
         ),
-        (arith(ArithOp::Add, field("xs"), ilit(1)), benign_row()),
+        (arith(ArithOp::Add, field("xi"), ilit(1)), xi_text("abc")),
+        (arith(ArithOp::Add, field("xi"), ilit(1)), xi_text(" 5 ")),
+        // Numeric text in an INTEGER column is stored as a number.
+        (arith(ArithOp::Add, field("xi"), ilit(1)), xi_text("7")),
+        // A NULL operand gives NULL, with or without a refusing partner.
         (arith(ArithOp::Add, field("xn"), ilit(1)), benign_row()),
         (arith(ArithOp::Mul, field("xi"), field("xn")), benign_row()),
+        (div(field("xn"), ilit(0)), benign_row()),
+        (
+            arith(
+                ArithOp::Sub,
+                Box::new(Computation::Lit(Value::Null)),
+                field("xf"),
+            ),
+            benign_row(),
+        ),
         // Finite controls: the checked path keeps the ordinary answers.
         (div(field("xi"), ilit(2)), benign_row()),
         (arith(ArithOp::Add, field("xi"), field("xf")), benign_row()),
@@ -726,12 +916,19 @@ async fn arithmetic_without_a_finite_exact_answer_is_refused_by_both_seats() {
 
 fn arb_leaf() -> impl Strategy<Value = Computation> {
     prop_oneof![
-        prop::sample::select(vec!["xi", "xf", "xs", "xn"])
+        4 => prop::sample::select(vec!["xi", "xf", "xn", "xs", "xb"])
             .prop_map(|c| Computation::Field(c.into())),
-        prop::sample::select(vec![0i64, 1, 2, 7, i64::MAX, -1, -3, i64::MIN])
+        3 => prop::sample::select(vec![0i64, 1, 2, 7, i64::MAX, -1, -3, i64::MIN])
             .prop_map(|i| Computation::Lit(Value::Integer(i))),
-        prop::sample::select(vec![0.0f64, 0.5, 2.0, 1e308, -1.5, -0.0])
+        3 => prop::sample::select(vec![0.0f64, 0.5, 2.0, 1e308, -1.5, -0.0])
             .prop_map(|f| Computation::Lit(Value::Float(f))),
+        1 => prop::sample::select(vec![
+            Value::Null,
+            Value::Boolean(true),
+            Value::Boolean(false),
+            Value::String("7".into()),
+        ])
+        .prop_map(Computation::Lit),
     ]
 }
 
@@ -743,18 +940,50 @@ fn arb_arith() -> impl Strategy<Value = Computation> {
     })
 }
 
+/// Cells of every kind, whatever the column's declared affinity.
+fn arb_cell(ints: Vec<i64>, reals: Vec<f64>) -> impl Strategy<Value = Cell> {
+    prop_oneof![
+        3 => prop::sample::select(ints).prop_map(Cell::Int),
+        3 => prop::sample::select(reals).prop_map(Cell::Real),
+        2 => prop::sample::select(vec!["7", "2.5", "7.0", " 5 ", "abc", "inf"]).prop_map(Cell::Text),
+        1 => Just(Cell::Null),
+    ]
+}
+
 fn arb_row() -> impl Strategy<Value = ArithRow> {
+    let ints = vec![0i64, 1, -1, 7, 3_037_000_500, i64::MAX, i64::MIN];
+    let reals = vec![0.0f64, 1.5, -2.5, 2.0, 1e308, -1e308];
     (
-        prop::sample::select(vec![0i64, 1, -1, 7, 3_037_000_500, i64::MAX, i64::MIN]),
-        prop::sample::select(vec![0.0f64, 1.5, -2.5, 2.0, 1e308, -1e308]),
+        arb_cell(ints.clone(), reals.clone()),
+        arb_cell(ints, reals),
         prop::sample::select(vec!["5", "inf", "abc"]),
+        prop::option::of(any::<bool>()),
     )
-        .prop_map(|(xi, xf, xs)| ArithRow { xi, xf, xs })
+        .prop_map(|(xi, xf, xs, xb)| ArithRow { xi, xf, xs, xb })
+}
+
+/// The first operand of an arithmetic node that is not a number by its
+/// declaration: a column declared other than numeric, or a text or boolean
+/// literal. NULL is no such operand.
+fn non_numeric_operand(comp: &Computation, types: &FieldTypes) -> Option<Computation> {
+    let Computation::Arith { lhs, rhs, .. } = comp else {
+        return None;
+    };
+    [lhs, rhs].into_iter().find_map(|operand| match &**operand {
+        Computation::Field(name) if types.kind(name) != Some(FieldKind::Numeric) => {
+            Some((**operand).clone())
+        }
+        Computation::Lit(Value::Boolean(_) | Value::String(_)) => Some((**operand).clone()),
+        nested => non_numeric_operand(nested, types),
+    })
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(64))]
+    #![proptest_config(ProptestConfig::with_cases(96))]
 
+    /// The declaration refuses arithmetic over an operand that is not a
+    /// number; every declaration it accepts plants a column that gives eval's
+    /// value or eval's refusal.
     #[test]
     fn planted_arithmetic_gives_evals_value_or_evals_refusal(
         comp in arb_arith().prop_filter("an arithmetic node, not a bare leaf", |c| {
@@ -762,12 +991,22 @@ proptest! {
         }),
         row in arb_row(),
     ) {
-        let runtime = tokio::runtime::Runtime::new().expect("runtime");
-        let outcome = runtime.block_on(async {
-            let handle = setup().await;
-            assert_planted_matches_eval(&handle, &comp, &row).await
-        });
-        prop_assert!(outcome.is_ok(), "{}", outcome.unwrap_err());
+        let types = arith_field_types();
+        match (comp.result_kind(&types), non_numeric_operand(&comp, &types)) {
+            (Err(_), Some(_)) => {}
+            (Ok(FieldKind::Numeric), None) => {
+                let runtime = tokio::runtime::Runtime::new().expect("runtime");
+                let outcome = runtime.block_on(async {
+                    let handle = setup().await;
+                    assert_planted_matches_eval(&handle, &comp, &row).await
+                });
+                prop_assert!(outcome.is_ok(), "{}", outcome.unwrap_err());
+            }
+            (declared, operand) => prop_assert!(
+                false,
+                "declaring {comp:?} gave {declared:?}; its non-numeric operand is {operand:?}"
+            ),
+        }
     }
 }
 
@@ -796,7 +1035,7 @@ async fn a_refused_derived_value_refuses_the_base_write_and_keeps_the_view() {
         .expect("planted DDL");
 
     let overflow = ArithRow {
-        xi: i64::MAX,
+        xi: Cell::Int(i64::MAX),
         ..benign_row()
     };
     let refused = handle.execute(&insert, overflow.params("bad")).await;
@@ -839,7 +1078,7 @@ async fn a_refused_derived_value_refuses_the_base_write_and_keeps_the_view() {
         .execute(
             &insert,
             ArithRow {
-                xi: 3,
+                xi: Cell::Int(3),
                 ..benign_row()
             }
             .params("ok2"),

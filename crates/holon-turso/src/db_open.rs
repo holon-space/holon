@@ -568,7 +568,7 @@ mod tests {
         assert!(matches!(
             stored_signature(&conn).unwrap(),
             StoredSignature::Recorded(s) if s == scalar_fns::signature(scalar_fns::ALL)
-                && s.contains("holon_div/2/v1")
+                && s.contains("holon_div/2/v2")
         ));
     }
 

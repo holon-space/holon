@@ -29,6 +29,7 @@
 //! - mixed `int`/`float` (either operand float) → `float` (Rhai promotes the
 //!   integer). A non-finite float result (`x/0.0`, `0.0/0.0`, overflow) fails
 //!   loud ([`ComputeError::Arithmetic`]), where Rhai yields ±inf or NaN.
+//! - a NULL operand → NULL, as in SQL, where Rhai raises on `()`.
 //!
 //! Equality has TWO faces, because Rhai's `==` and `switch` disagree on
 //! cross-type numerics (both verified against the engine):
@@ -856,7 +857,21 @@ impl Computation {
             Computation::Field(name) => types
                 .kind(name)
                 .ok_or_else(|| ResultKindUnknown::UndeclaredField(name.clone()))?,
-            Computation::Arith { .. } => FieldKind::Numeric,
+            Computation::Arith { lhs, rhs, .. } => {
+                for operand in [lhs, rhs] {
+                    match operand.result_kind(types) {
+                        Ok(FieldKind::Numeric) | Err(ResultKindUnknown::NullLiteral) => {}
+                        Ok(kind) => {
+                            return Err(ResultKindUnknown::NonNumericOperand {
+                                operand: format!("{operand:?}"),
+                                kind,
+                            });
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+                FieldKind::Numeric
+            }
             Computation::Concat { .. } => FieldKind::Text,
             Computation::Compare { .. }
             | Computation::And { .. }
@@ -923,6 +938,9 @@ pub enum ResultKindUnknown {
     MixedCaseArms { first: FieldKind, second: FieldKind },
     /// An opaque Rhai expression.
     Script { source: String },
+    /// An arithmetic operand of another storage class. The storage has no
+    /// boolean, so SQL would compute over `1`/`0` where `eval` refuses.
+    NonNumericOperand { operand: String, kind: FieldKind },
 }
 
 impl fmt::Display for ResultKindUnknown {
@@ -943,6 +961,10 @@ impl fmt::Display for ResultKindUnknown {
             Self::Script { source } => write!(
                 f,
                 "`{source}` is an opaque Rhai expression, which has no inferable storage class"
+            ),
+            Self::NonNumericOperand { operand, kind } => write!(
+                f,
+                "arithmetic takes numbers, but the operand {operand} is {kind:?}"
             ),
         }
     }
@@ -1051,11 +1073,15 @@ fn as_number(v: &Value, context: &str) -> Result<f64, ComputeError> {
 
 /// Type-faithful arithmetic mirroring Rhai: `int op int` stays integer
 /// (checked; overflow / integer-div-by-zero fail loud), any float operand
-/// promotes to a float result, which must be finite. See the module header.
+/// promotes to a float result, which must be finite, and a NULL operand gives
+/// NULL. See the module header.
 ///
 /// The planted SQL column computes this same function ([`ArithOp::sql_fn`]),
 /// so both seats give one value or one refusal.
 pub fn arith_apply(op: ArithOp, lhs: &Value, rhs: &Value) -> Result<Value, ComputeError> {
+    if *lhs == Value::Null || *rhs == Value::Null {
+        return Ok(Value::Null);
+    }
     if let (Value::Integer(a), Value::Integer(b)) = (lhs, rhs) {
         let (a, b) = (*a, *b);
         let checked = match op {

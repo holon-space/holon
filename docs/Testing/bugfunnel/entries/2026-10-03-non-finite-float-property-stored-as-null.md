@@ -229,8 +229,10 @@ A derived `Arith` field lowers to Holon's checked scalar functions
 (`ArithOp::sql_fn`, registered in crates/holon-turso/src/scalar_fns.rs), not to
 SQL's `+ - * /`. Each computes `arith_apply`, so the planted column and
 `Computation::eval` give the same value or the same refusal: division by zero,
-integer overflow, a non-finite result and a non-numeric operand (TEXT, NULL)
-raise an error that names the operation and the operands. A raise during IVM
+integer overflow, a non-finite result and a non-numeric operand (TEXT)
+raise an error that names the operation and the operands. A NULL operand is a
+missing value and gives NULL in both seats (ruling D62.a); the sidecar stores
+it as JSON `null` and raises no `DerivedFieldNotComputed`. A raise during IVM
 maintenance refuses the base-table write as a whole and leaves the view intact;
 a raise at CREATE refuses the view. Before this, SQL gave NULL for `/0` and
 NaN, a REAL for integer overflow, and the number for a numeric TEXT operand.
@@ -241,6 +243,26 @@ Tests: crates/holon-turso/tests/derived_field_eval_vs_sql.rs
 proptest `planted_arithmetic_gives_evals_value_or_evals_refusal`,
 `a_refused_derived_value_refuses_the_base_write_and_keeps_the_view`) and
 `db_open::tests::a_database_built_without_this_binarys_functions_is_rebuilt_at_open`.
+
+Parity holes found by the verifier after D57.b (COVERAGE: the proptest drew
+only INTEGER/REAL/TEXT cells of their column's own kind and no boolean
+operand, and built the Rust context by hand instead of from the stored row):
+- A BOOLEAN column or a boolean literal in an `Arith`: the storage has no
+  boolean, so SQL computed `true + 1` over `1` as `2` where `eval` refused.
+  `Computation::result_kind` now refuses an arithmetic operand whose storage
+  class is TEXT or BOOLEAN (`ResultKindUnknown::NonNumericOperand`), and
+  `ComputedSpec::parse` refuses a `computed_persisted` declaration without a
+  storage class, so such a column is never planted.
+- TEXT `'7'` written to an INTEGER column: column affinity stores the integer
+  7, so SQL computed `xi + 1` as `8` while a hand-built context held
+  `String("7")`. The Rust seat (the sidecar reconciler) evaluates the stored
+  row, which already carries the conversion, so the seats agree; the proptest
+  now builds its context from the stored row the same way.
+The proptest now draws cells of every kind into every column (numeric text,
+non-numeric text, NULL), a BOOLEAN column, and boolean, NULL and text
+literals, and checks the declaration against a model of the operand rule.
+Tests: the proptest above, `a_null_operand_gives_null_in_every_seat`,
+`typed_computed_field_declaration::a_persisted_declaration_of_arithmetic_over_a_non_number_is_refused`.
 
 ## Open gaps
 User-authored SQL (a PRQL or SQL query, a matview a vault query creates) still

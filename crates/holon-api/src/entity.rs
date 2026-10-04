@@ -212,18 +212,22 @@ impl ComputedSpec {
     }
 
     /// Refuse a `computed_persisted` declaration that cannot become a matview
-    /// column, naming the construct that stopped it.
+    /// column, naming the construct that stopped it. A column needs a storage
+    /// class as well as an expression.
     fn require_sql_plantable(&self) -> std::result::Result<(), String> {
         let reason = match self.computation.compile_sql() {
             Ok(frag) => match frag.inline_sql() {
-                Ok(_) => return Ok(()),
+                Ok(_) => match self.result_kind() {
+                    Ok(_) => return Ok(()),
+                    Err(e) => format!("the column would have no storage class: {e}"),
+                },
                 Err(e) => e.to_string(),
             },
             Err(e) => e.to_string(),
         };
         Err(format!(
-            "computed field '{}' is declared computed_persisted but does not lower to SQL: \
-             {reason}. Source: {}",
+            "computed field '{}' is declared computed_persisted but cannot be planted as a \
+             matview column: {reason}. Source: {}",
             self.name, self.expr.source
         ))
     }

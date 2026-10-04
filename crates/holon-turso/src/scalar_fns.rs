@@ -35,7 +35,7 @@ const fn arith(op: ArithOp, func: DeterministicScalarFn) -> ScalarFn {
     ScalarFn {
         name: op.sql_fn(),
         arg_count: 2,
-        version: 1,
+        version: 2,
         func,
     }
 }
@@ -65,6 +65,7 @@ fn checked(op: ArithOp, args: &[turso_core::Value]) -> Result<turso_core::Value,
     match arith_apply(op, &operand(op, lhs)?, &operand(op, rhs)?).map_err(|e| e.to_string())? {
         Value::Integer(i) => Ok(turso_core::Value::from_i64(i)),
         Value::Float(f) => Ok(turso_core::Value::from_f64(f)),
+        Value::Null => Ok(turso_core::Value::Null),
         other => Err(format!("{} computed the non-number {other:?}", op.sql_fn())),
     }
 }

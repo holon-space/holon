@@ -43,7 +43,10 @@ fn two_declared_numeric_columns_add() {
         matches!(comp, Computation::Arith { .. }),
         "expected Arith, got {comp:?}"
     );
-    assert_eq!(comp.compile_sql().expect("lowers").sql, "holon_add(weight, bonus)");
+    assert_eq!(
+        comp.compile_sql().expect("lowers").sql,
+        "holon_add(weight, bonus)"
+    );
 }
 
 #[test]
@@ -139,5 +142,44 @@ fn a_declaration_with_a_non_finite_literal_is_refused_naming_it() {
             matches!(&outcome, Err(e) if e.contains("`1e999`") && e.contains("finite")),
             "{tier:?}: a literal beyond f64 must be refused at declaration, got {outcome:?}"
         );
+    }
+}
+
+/// The storage has no boolean, so a planted column would compute `flag + 1`
+/// over `1` where `eval` refuses `true + 1`. Arithmetic over a TEXT column has
+/// no value at all. A planted declaration of either is refused; a NULL operand
+/// is not, because it gives NULL.
+#[test]
+fn a_persisted_declaration_of_arithmetic_over_a_non_number_is_refused() {
+    let t = types(&[
+        ("flag", FieldKind::Boolean),
+        ("name", FieldKind::Text),
+        ("n", FieldKind::Numeric),
+    ]);
+    let declare = |source: &str| {
+        holon_api::ComputedSpec::parse(
+            "d",
+            source,
+            holon_api::ComputedTier::ComputedPersisted,
+            &t,
+            &rhai::Engine::new(),
+        )
+    };
+    for (source, operand) in [
+        ("flag + 1", "Field(\"flag\")"),
+        ("n * flag", "Field(\"flag\")"),
+        ("-flag", "Field(\"flag\")"),
+        ("name - 1", "Field(\"name\")"),
+        ("(n < 2) * n", "Compare"),
+    ] {
+        let outcome = declare(source);
+        assert!(
+            matches!(&outcome, Err(e) if e.contains("arithmetic takes numbers") && e.contains(operand)),
+            "`{source}` must be refused naming {operand}, got {outcome:?}"
+        );
+    }
+    for source in ["n + ()", "n * 2 - n"] {
+        let spec = declare(source).unwrap_or_else(|e| panic!("`{source}` declares: {e}"));
+        assert_eq!(spec.result_kind(), Ok(FieldKind::Numeric), "`{source}`");
     }
 }
