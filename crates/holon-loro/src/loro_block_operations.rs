@@ -33,6 +33,7 @@ use holon_api::repository::CoreOperations;
 use holon_api::repository::Traversal;
 use holon_core::BatchRollback;
 use holon_core::BlockDataSourceHelpers;
+use holon_core::BlockNotInWriteAuthority;
 use holon_core::BlockOperations;
 use holon_core::BlockQueryHelpers;
 use holon_core::CompletionStateInfo;
@@ -470,6 +471,12 @@ const CREATE_HANDLED_FIELDS: [&str; 12] = [
 
 /// Whether `create` reads `key` as an instruction rather than as a
 /// property to store — the edge fields plus [`CREATE_HANDLED_FIELDS`].
+/// Refuse a write on `id`, which the Loro tree does not hold (D69.a).
+fn not_held<T>(id: &str) -> Result<T> {
+    let block = EntityUri::parse(id).map_err(|e| format!("not_held({id}): {e:#}"))?;
+    Err(BlockNotInWriteAuthority { block }.into())
+}
+
 fn create_handles_field(key: &str) -> bool {
     holon_api::EdgeField::is_edge_column(key) || CREATE_HANDLED_FIELDS.contains(&key)
 }
@@ -527,10 +534,11 @@ impl CrudOperations<Block> for LoroBlockOperations {
         //     stale-guard entirely and letting an undo-after-delete replay a stale
         //     inverse that destroyed unrelated blocks (P1 data loss).
         // Rich content (Object with marks) and mark-only edits stay irreversible.
-        let prior = backend
-            .get_block(id)
-            .await
-            .map_err(|e| format!("set_field('{field}'): capture prior state: {e}"))?;
+        let prior = match backend.get_block(id).await {
+            Ok(block) => block,
+            Err(ApiError::BlockNotFound { .. }) => return not_held(id),
+            Err(e) => return Err(format!("set_field('{field}'): capture prior state: {e}").into()),
+        };
 
         let (undo, changes): (Option<Operation>, Vec<FieldDelta>) = match field {
             "content" if matches!(value, Value::String(_)) => {
@@ -1192,14 +1200,7 @@ impl CrudOperations<Block> for LoroBlockOperations {
         // MCP/agent path — no caller can cascade by accident.
         let block = match backend.get_block(id).await {
             Ok(block) => block,
-            // Absent (never seeded / already deleted): `delete_block` is an
-            // idempotent no-op and there is nothing to resurrect.
-            Err(ApiError::BlockNotFound { .. }) => {
-                return Ok(OperationResult::declared_irreversible(
-                    vec![],
-                    "delete: target block absent (nothing to resurrect)",
-                ));
-            }
+            Err(ApiError::BlockNotFound { .. }) => return not_held(id),
             Err(e) => return Err(format!("delete: capture block {id}: {e}").into()),
         };
 

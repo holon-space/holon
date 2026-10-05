@@ -47,17 +47,16 @@ pub struct ShareExitRefused {
     pub action: RemovingAction,
 }
 
-/// A structural op on a block that the SQL projection holds but the write
-/// authority does not: the block was just deleted and the projection still
-/// lags, or the vault was never seeded into its authority.
+/// A write on a block the write authority does not hold: the block was just
+/// deleted and the projection still lags, or the vault was never seeded into
+/// its authority.
 ///
-/// One authority decides each write (D64.b), so the op is refused instead of
-/// deciding from the projection.
+/// One authority decides each write (D64.b) and takes every write (D69.a), so
+/// the op is refused instead of deciding from, or writing to, the projection.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error(
-    "{block} is in the SQL projection but not in the write authority, so no structural op may \
-     decide on it. The write authority does not hold this block: it was deleted, or this vault \
-     was never seeded (then re-create it from its org files)."
+    "{block} is not in the write authority, so no write may land on it. It was deleted, or this \
+     vault was never seeded (then re-create it from its org files)."
 )]
 pub struct BlockNotInWriteAuthority {
     pub block: EntityUri,
@@ -168,9 +167,10 @@ pub trait EntityCellRegistry: Send + Sync {
     /// to the backend's positioned-move primitive.
     ///
     /// Returns `Ok(true)` when handled (the registry executed the move).
-    /// Returns `Ok(false)` when this registry can't satisfy the move (no
-    /// backing tree, SqlOnly mode, etc.) — the caller is expected to
-    /// fall back to the legacy compute + `set_field("sort_key")` path.
+    /// Returns `Ok(false)` when this registry has no authority to move it in
+    /// (SqlOnly mode) — the caller then orders the block in SQL. A registry
+    /// over an authority refuses a block it does not hold with
+    /// [`BlockNotInWriteAuthority`].
     ///
     /// Default impl returns `Ok(false)` so registries that don't model
     /// positional intent (most non-block entity types) opt out for free.
@@ -187,7 +187,9 @@ pub trait EntityCellRegistry: Send + Sync {
     /// Returns `Ok(true)` when the create landed via the cell route;
     /// `Ok(false)` when this registry has no cell-routed create path
     /// (SqlOnly mode, synthetic test stores, non-block entity types).
-    /// Callers fall back to `BlockOperations::create` on `Ok(false)`.
+    /// Callers fall back to `BlockOperations::create` on `Ok(false)`. An
+    /// `after` anchor the authority does not hold is refused with
+    /// [`BlockNotInWriteAuthority`].
     ///
     /// Default impl returns `Ok(false)` so registries that don't support
     /// authoritative creates opt out for free.
@@ -244,7 +246,8 @@ pub trait EntityCellRegistry: Send + Sync {
     /// Returns `Ok(true)` when the delete landed via the cell route;
     /// `Ok(false)` when this registry has no cell-routed delete path
     /// (SqlOnly mode, synthetic test stores). Callers fall back to the
-    /// SQL delete on `Ok(false)`.
+    /// SQL delete on `Ok(false)`. A registry over an authority refuses a
+    /// block it does not hold with [`BlockNotInWriteAuthority`].
     async fn delete_entity(&self, _: &EntityUri) -> Result<bool> {
         Ok(false)
     }

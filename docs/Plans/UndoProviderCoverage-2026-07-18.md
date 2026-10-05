@@ -267,9 +267,8 @@ Ranked by *user-facing frequency first, then transform-prerequisite weight*.
   (Loro authority)")`. Faithfully resurrecting an ordered subtree (recursive
   capture + per-node position) is deferred; the leaf case is the daily action
   and the Option-C prerequisite. SqlOnly draws the identical line.
-- **`delete` (Loro authority), absent target** —
-  `DeclaredIrreversible("delete: target block absent (nothing to resurrect)")`
-  (idempotent no-op delete).
+- **`delete` (Loro authority), absent target** — refused with
+  `BlockNotInWriteAuthority` (D69.a): the tree does not hold the block.
 - `restore_link_resolution` returns `DeclaredIrreversible` by design — an
   inverse-only surface (redo re-runs the forward `rewrite_link_resolution`),
   its classification ignored on inverse replay.

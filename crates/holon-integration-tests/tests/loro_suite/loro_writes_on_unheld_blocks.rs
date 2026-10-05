@@ -36,15 +36,16 @@ async fn started_vault(runtime: Arc<tokio::runtime::Runtime>, org: &str) -> Test
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
     loop {
         let rows = env
-            .query_sql("SELECT id FROM block_raw WHERE content = 'second block'")
+            .query_sql("SELECT id FROM block_raw")
             .await
             .expect("query block_raw");
-        if !rows.is_empty() {
+        if rows.len() >= 3 {
             break;
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "org scan never projected vault.org into SQL"
+            "org scan never populated SQL (have {} rows)",
+            rows.len()
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
@@ -212,4 +213,124 @@ async fn unheld_writes(runtime: Arc<tokio::runtime::Runtime>) {
         !backend.is_live_anywhere(stranded).await,
         "a refused write mints no Loro node"
     );
+}
+
+fn text(raw: &str) -> holon_api::BlockContent {
+    holon_api::BlockContent::Text {
+        raw: raw.to_string(),
+    }
+}
+
+/// A create under a parent only the SQL projection holds is a write on that
+/// parent: the authority would stand up an empty placeholder for it, whose
+/// projection overwrites the parent's row with "". Refused by the PARENT's
+/// name. A parent no store holds yet (a child reached before its parent's
+/// create) still gets its placeholder, which the parent's create completes.
+#[test]
+fn a_create_under_a_parent_only_the_projection_holds_is_refused() {
+    let rt = runtime();
+    rt.clone().block_on(create_under_unheld_parent(rt));
+}
+
+async fn create_under_unheld_parent(runtime: Arc<tokio::runtime::Runtime>) {
+    use holon_api::repository::CoreOperations;
+    use holon_core::block_ordering::BlockOrdering;
+
+    let env = started_vault(runtime, "* vault\n- first block\n- second block\n").await;
+    let doc_root = env
+        .resolve_page_uri_by_name("vault.org")
+        .await
+        .expect("resolve vault.org root");
+    let stranded = "block:d69a0000-0000-0000-0000-000000000002";
+    let mut params = HashMap::new();
+    params.insert("id".to_string(), Value::String(stranded.to_string()));
+    params.insert("parent".to_string(), Value::String(doc_root.to_string()));
+    env.engine()
+        .db_handle()
+        .query(
+            "INSERT INTO block_raw (id, parent_id, sort_key, content) VALUES ($id, $parent, \
+             'Zz', 'stranded parent')",
+            params,
+        )
+        .await
+        .expect("insert stranded SQL-only block");
+    let ordering = env
+        .injector()
+        .expect("start_app must capture the injector")
+        .resolve_async::<dyn BlockOrdering>()
+        .await;
+    let stranded_uri = holon_api::EntityUri::parse(stranded).expect("stranded uri");
+    let child = holon_api::EntityUri::parse("block:d69a0000-0000-0000-0000-00000000c001")
+        .expect("child uri");
+
+    let outcome = ordering
+        .create_in_tree(
+            &stranded_uri,
+            None,
+            &child,
+            text("child of a stranded parent"),
+            &HashMap::new(),
+            &holon_api::BlockEdges::default(),
+        )
+        .await;
+    env.wait_for_loro_quiescence(Duration::from_secs(10)).await;
+    let row = env
+        .query_sql(&format!(
+            "SELECT content FROM block_raw WHERE id = '{stranded}'"
+        ))
+        .await
+        .expect("query stranded row");
+    let refused_by_parent = match &outcome {
+        Err(e) => {
+            e.downcast_ref::<holon_core::BlockNotInWriteAuthority>()
+                == Some(&holon_core::BlockNotInWriteAuthority {
+                    block: stranded_uri.clone(),
+                })
+        }
+        Ok(_) => false,
+    };
+    assert!(
+        refused_by_parent,
+        "a create under {stranded} must be refused by the parent's name; got {outcome:?}, \
+         parent row now {row:?}"
+    );
+    assert_eq!(
+        row.first()
+            .and_then(|r| r.get("content"))
+            .and_then(|v| v.as_string()),
+        Some("stranded parent"),
+        "a refused create leaves the parent row: {row:?}"
+    );
+    let backend = authority(&env).await;
+    assert!(
+        !backend.is_live_anywhere(stranded).await,
+        "a refused create mints no placeholder for the parent"
+    );
+
+    let forward_parent = holon_api::EntityUri::parse("block:d69a0000-0000-0000-0000-00000000f001")
+        .expect("forward parent uri");
+    let forward_child = holon_api::EntityUri::parse("block:d69a0000-0000-0000-0000-00000000f002")
+        .expect("forward child uri");
+    for (parent, id, raw) in [
+        (&forward_parent, &forward_child, "forward child"),
+        (&doc_root, &forward_parent, "forward parent"),
+    ] {
+        let created = ordering
+            .create_in_tree(
+                parent,
+                None,
+                id,
+                text(raw),
+                &HashMap::new(),
+                &holon_api::BlockEdges::default(),
+            )
+            .await
+            .expect("a child reached before its parent's create is created");
+        assert!(created, "{id} lands in the write authority");
+    }
+    let parent = backend
+        .get_block(forward_parent.id())
+        .await
+        .expect("the forward parent is held");
+    assert_eq!(parent.content, "forward parent");
 }

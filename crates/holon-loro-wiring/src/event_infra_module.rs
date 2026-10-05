@@ -238,6 +238,21 @@ impl Module for EventInfraModule {
             let block_ops = SqlBlockOperations::new(sql_ops, block_cache)
                 .with_cell_registry(cell_registry)
                 .with_capabilities(caps);
+            // A create under a parent only the projection holds is refused
+            // against the same authority the OperationProvider above decides on.
+            let block_ops = match resolver
+                .try_resolve_async::<holon_loro::LoroBlockOperations>()
+                .await
+            {
+                Ok(authority) => {
+                    block_ops.with_write_authority(authority as Arc<dyn WriteAuthorityReads>)
+                }
+                Err(e) if e.kind == fluxdi::ErrorKind::ServiceNotProvided => block_ops,
+                Err(e) => panic!(
+                    "[EventInfraModule] resolving the block write authority \
+                     (LoroBlockOperations) for BlockOrdering failed: {e}"
+                ),
+            };
             Arc::new(block_ops) as Arc<dyn BlockOrdering>
         }));
 

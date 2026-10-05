@@ -531,14 +531,11 @@ async fn flush_pending_creates(
                         "re-seeded pre-Loro vault block into the Loro tree"
                     );
                 } else {
-                    // The authority declined (e.g. its unseeded-vault guard:
-                    // parent still missing). Order stays SQL-owned for this
-                    // block — ALLOW(fallback): disclosed via warn, the place
-                    // loop's pre-existing-block guard then skips it.
-                    tracing::warn!(
-                        block_id = %id,
-                        parent = %entry.request.parent_id,
-                        "re-seed declined by the tree backing — order stays SQL-owned"
+                    anyhow::bail!(
+                        "re-seed of {id} under {}: the tree backing declined it, but a re-seed \
+                         runs only under an Upstream consolidator, whose authority takes every \
+                         create or refuses it",
+                        entry.request.parent_id
                     );
                 }
             }
@@ -6525,10 +6522,8 @@ impl FileSyncController {
                     }
                     // Source / image children are grouped ahead of text by
                     // `OrgRenderer::render_entity_tree` regardless of sort_key
-                    // (see assertions.rs `render_group`). They also don't land
-                    // in the Loro tree — synthetic ids like `<parent>::render::0`
-                    // exist only in SQL — so `place()` would surface
-                    // `Block not found` through `update_block_position`.
+                    // (see assertions.rs `render_group`), so their order needs
+                    // no placing.
                     if !matches!(new_block.content_type, holon_api::ContentType::Text) {
                         continue;
                     }

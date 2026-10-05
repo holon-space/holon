@@ -21,6 +21,7 @@
 //! same backing store as the rest of the system.
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -96,6 +97,16 @@ pub struct SqlBlockOperations {
     write_authority: Option<Arc<dyn WriteAuthorityReads>>,
 }
 
+/// A registry error as this crate's error type, keeping a
+/// [`BlockNotInWriteAuthority`] refusal typed (anyhow's own conversion boxes
+/// its wrapper, which no caller can downcast).
+fn registry_error(e: anyhow::Error) -> Box<dyn std::error::Error + Send + Sync> {
+    match e.downcast::<BlockNotInWriteAuthority>() {
+        Ok(refusal) => refusal.into(),
+        Err(e) => format!("{e:#}").into(),
+    }
+}
+
 impl SqlBlockOperations {
     /// Construct without a cell registry. Defaults to a `sql_only()`
     /// registry so chord ops degrade to direct SQL writes when no
@@ -152,6 +163,21 @@ impl SqlBlockOperations {
             Some(_) => Err(BlockNotInWriteAuthority { block: id.clone() }.into()),
             None => Ok(None),
         }
+    }
+
+    /// Refuse a create under `parent` when only the SQL projection holds it:
+    /// the authority would stand up an empty placeholder for it, whose
+    /// projection overwrites the parent's row (D69.a). A parent no store holds
+    /// yet is a forward reference the create path completes.
+    async fn refuse_create_under_projection_only(&self, parent: &EntityUri) -> Result<()> {
+        let Some(authority) = &self.write_authority else {
+            return Ok(());
+        };
+        if parent.is_no_parent() || parent.is_sentinel() {
+            return Ok(());
+        }
+        self.decision_block(authority.as_ref(), parent).await?;
+        Ok(())
     }
 
     /// Ordered `(id, sort_key)` pairs for a parent, read straight from the
@@ -630,7 +656,7 @@ impl BlockOrdering for SqlBlockOperations {
             .cell_registry
             .write_position(uri, parent_id.as_str(), after_id.map(|u| u.as_str()))
             .await
-            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { format!("{e:#}").into() })?
+            .map_err(registry_error)?
         {
             return Ok(());
         }
@@ -791,10 +817,11 @@ impl BlockOrdering for SqlBlockOperations {
         properties: &HashMap<String, Value>,
         edges: &holon_api::BlockEdges,
     ) -> Result<bool> {
+        self.refuse_create_under_projection_only(parent_id).await?;
         self.cell_registry
             .create_entity(parent_id, after_id, new_id, content, properties, edges)
             .await
-            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { format!("{e:#}").into() })
+            .map_err(registry_error)
     }
 
     /// One warm + one commit for the whole chunk (see
@@ -804,10 +831,17 @@ impl BlockOrdering for SqlBlockOperations {
         &self,
         requests: &[holon_core::block_ordering::BlockCreateRequest],
     ) -> Result<Vec<bool>> {
+        let created: HashSet<&EntityUri> = requests.iter().map(|r| &r.id).collect();
+        for r in requests {
+            if !created.contains(&r.parent_id) {
+                self.refuse_create_under_projection_only(&r.parent_id)
+                    .await?;
+            }
+        }
         self.cell_registry
             .create_entities(requests)
             .await
-            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { format!("{e:#}").into() })
+            .map_err(registry_error)
     }
 
     async fn ever_seen(&self, id: &EntityUri) -> Result<holon_core::consolidator::Seen> {
@@ -964,9 +998,11 @@ impl BlockOrdering for SqlBlockOperations {
     /// resurrects (observed as `inv-backend-blocks-match-ref` spurious
     /// `bulk-*` rows).
     ///
-    /// SqlOnly mode: the registry returns `false`; delete straight from SQL via
-    /// the operation provider, preserving the `ROUTING_DOC_URI_KEY` hint so
-    /// `prepare_delete` skips the recursive document walk.
+    /// SqlOnly mode: the registry answers `NotInTree`; delete straight from SQL
+    /// via the operation provider, preserving the `ROUTING_DOC_URI_KEY` hint so
+    /// `prepare_delete` skips the recursive document walk. A Loro registry
+    /// refuses a block its tree does not hold, so the reconciler's ingest of
+    /// that file fails loud.
     async fn delete_in_tree(&self, params: holon_api::StorageEntity) -> Result<()> {
         let id = params.get("id").and_then(|v| v.as_string()).ok_or_else(
             || -> Box<dyn std::error::Error + Send + Sync> {
@@ -981,26 +1017,13 @@ impl BlockOrdering for SqlBlockOperations {
             .cell_registry
             .delete_exiting_shares(&uri)
             .await
-            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { format!("{e:#}").into() })?
+            .map_err(registry_error)?
             != holon_core::TreeDelete::NotInTree
         {
             // Loro-backed: the outbound projector writes the SQL DELETE.
             return Ok(());
         }
-        // ALLOW(fallback): authority-first delete guard (Task 3) — the SQL delete
-        // path here is only reachable for unseeded blocks and SqlOnly mode. In Loro
-        // mode, log a warning so we observe how often the transitional path fires.
-        if self.cell_registry.has_loro_backing() {
-            tracing::warn!(
-                block_id = %id, // ALLOW(fallback): disclosed degraded-mode warning, transitional path
-                "SQL delete on the degraded path in Loro mode — block was unseeded. \
-                 Transitional; re-seed adoption eliminates unseeded blocks."
-            );
-        }
-        // ALLOW(sole_block_writer) ALLOW(fallback): SQL delete fallback for unseeded
-        // blocks. Transitional — after sole-writer, all blocks originate in
-        // Loro, so this fires only for pre-existing unseeded vaults the re-seed
-        // adoption pass eliminates. NOT dead code: re-seed can fail mid-adoption.
+        // ALLOW(sole_block_writer): SqlOnly, where SQL is the authority.
         let entity = EntityName::new(Block::entity_name());
         self.sql_ops
             .execute_operation_with_origin(&entity, "delete", params, EventOrigin::Org)
@@ -1244,10 +1267,9 @@ impl CrudOperations<Block> for SqlBlockOperations {
         // `LoroSyncController.on_loro_changed` outbound projector then
         // emits the SQL UPDATE — there's no SQL write on this path. The
         // registry returns `Ok(false)` for fields it can't handle (SqlOnly
-        // mode, or fields like `sort_key`/`marks`/`depth` whose Loro
-        // encoding doesn't round-trip cleanly today); on `Ok(false)` we
-        // fall through to the legacy SQL `set_field` path so existing
-        // behaviour is preserved for those fields.
+        // mode, or fields like `depth` whose Loro encoding doesn't round-trip
+        // cleanly today); on `Ok(false)` we fall through to the SQL
+        // `set_field` path. It refuses a block its tree does not hold.
         // `id` arrives in mixed forms: already-schemed (`block:foo`) from the
         // org update path (`build_block_params` → `block.id.to_string()`), or
         // bare (`foo`) from some `LoroBlockOperations` callers. `from_raw`
@@ -1263,8 +1285,8 @@ impl CrudOperations<Block> for SqlBlockOperations {
             .cell_registry
             .write_field(&uri, field, value.clone())
             .await
-            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-                format!("BlockCellRegistry::write_field({field}): {e:#}").into()
+            .map_err(|e| {
+                registry_error(e.context(format!("BlockCellRegistry::write_field({field})")))
             })?;
         if routed {
             // The Loro outbound projector emits the SQL UPDATE and the resulting
