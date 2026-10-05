@@ -45,7 +45,7 @@ async fn run_scenario(fake: &holon_connections_testing::Fake) -> anyhow::Result<
     let peer = fake.peer(&[1, 2], 4);
     let reconciler = RemoteListReconciler::new(fake.compiled.clone());
     let local_only = (fake.local_row)(LOCAL_ONLY, 1, false, false, false);
-    let mut mirror = FixtureRows(vec![local_only]);
+    let mut mirror = FixtureRows(vec![local_only.clone()]);
 
     // Round 1: the local-only row is pushed to the peer, and the peer's rows
     // are pulled into the mirror.
@@ -71,6 +71,21 @@ async fn run_scenario(fake: &holon_connections_testing::Fake) -> anyhow::Result<
         "{}: the mirror does not match the peer after the first round",
         fake.label
     );
+    // The verifying re-pull hands back what the peer stored, so a merge column
+    // the push left off the wire would come back as no value.
+    let pushed = mirror
+        .0
+        .iter()
+        .find(|r| r.id == local_only.id)
+        .expect("the pushed row is still mirrored");
+    for column in &fake.compiled.spec().merge_columns {
+        assert_eq!(
+            pushed.columns.get(column),
+            local_only.columns.get(column),
+            "{}: the round rewrote the pushed row's `{column}`",
+            fake.label
+        );
+    }
 
     // Round 2 with an unchanged peer is a no-op: nothing is re-pushed, and the
     // mirror still equals the peer.

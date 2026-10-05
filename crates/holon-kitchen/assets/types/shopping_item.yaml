@@ -20,8 +20,9 @@ fields:
   - name: cat
     sql_type: TEXT
     indexed: true
+  # The peer's amount as its own free text ("2kg", "4 Zehen"), byte for byte.
   - name: count
-    sql_type: REAL
+    sql_type: TEXT
     nullable: true
   # Local-only. The peer's observed schema has neither field, and checking an
   # item there may simply BE removal from the list, so nothing here is ever

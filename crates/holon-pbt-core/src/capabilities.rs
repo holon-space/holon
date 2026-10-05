@@ -4577,13 +4577,21 @@ pub enum RemoteListMutation {
     Add { columns: Vec<(String, String)> },
     /// Remove the row whose key the connection derives from `columns`.
     Remove { columns: Vec<(String, String)> },
+    /// The list gains a second entry under the key `columns` derive, after the
+    /// first. The connection keeps the first and refuses the key by name.
+    AddDuplicate { columns: Vec<(String, String)> },
+    /// A person creates the row in Holon; the round pushes it to the peer.
+    AuthorLocally { columns: Vec<(String, String)> },
 }
 
 impl RemoteListMutation {
     /// The columns this mutation names, whichever leg it is.
     pub fn columns(&self) -> &[(String, String)] {
         match self {
-            RemoteListMutation::Add { columns } | RemoteListMutation::Remove { columns } => columns,
+            RemoteListMutation::Add { columns }
+            | RemoteListMutation::Remove { columns }
+            | RemoteListMutation::AddDuplicate { columns }
+            | RemoteListMutation::AuthorLocally { columns } => columns,
         }
     }
 }
@@ -4596,6 +4604,7 @@ crate::step_field_via_json!(
                 ("label".to_string(), "label1".to_string()),
                 ("bucket".to_string(), "bucket".to_string()),
                 ("rank".to_string(), "1".to_string()),
+                ("amount".to_string(), "2kg".to_string()),
                 ("done".to_string(), "0".to_string()),
             ],
         },
@@ -4604,6 +4613,7 @@ crate::step_field_via_json!(
                 ("label".to_string(), "label1".to_string()),
                 ("bucket".to_string(), "bucket".to_string()),
                 ("rank".to_string(), "1".to_string()),
+                ("amount".to_string(), "2kg".to_string()),
                 ("done".to_string(), "0".to_string()),
             ],
         },
@@ -4616,6 +4626,9 @@ crate::step_field_via_json!(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteListRoundOutcome {
     pub committed: usize,
+    /// How many refusals the round reported, one per key it skipped entries
+    /// under.
+    pub refused: usize,
 }
 
 /// SUT side of the remote-list sync axis: a fixture peer the composed keystone
@@ -4650,4 +4663,8 @@ pub trait SutRemoteListSync {
 pub trait RefRemoteListSync {
     /// The expected mirror rows — the peer's declared list, canonically sorted.
     fn remote_list_expected_rows(&self) -> Vec<Vec<String>>;
+
+    /// How many keys the peer's list holds more than one entry under — each is
+    /// one refusal per round.
+    fn remote_list_expected_refusals(&self) -> usize;
 }

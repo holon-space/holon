@@ -16,4 +16,8 @@ impl RefRemoteListSync for ReferenceState {
     fn remote_list_expected_rows(&self) -> Vec<Vec<String>> {
         self.remote_list.expected_rows()
     }
+
+    fn remote_list_expected_refusals(&self) -> usize {
+        self.remote_list.expected_refusals()
+    }
 }

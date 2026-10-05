@@ -70,14 +70,16 @@ utcp:
                     type: "string"
                   count:
                     type:
+                      - "string"
                       - "number"
                       - "null"
+                    description: "Free-text amount such as '2kg' or '4 Zehen'."
                 required:
                   - "name"
                   - "cat"
             pickedItems:
               type: "object"
-              description: "Map keyed by item name; value carries cat and optionally count/date. Membership means checked."
+              description: "Map keyed by item name; value carries cat and optionally pickedCount (the amount, free text), count and date. Membership means checked."
               additionalProperties:
                 type: "object"
             options:
@@ -147,6 +149,8 @@ utcp:
                             type: "string"
                           new:
                             type: "boolean"
+                          count:
+                            type: "string"
                         required:
                           - "name"
                           - "cat"
@@ -216,6 +220,9 @@ holon:
     # that write as missing and gets it sent twice. The manual's `_nocache`
     # input is where the value lands.
     cache_buster: epoch_millis
+    # Active entries beyond the first for one `(name, cat)` are skipped, not
+    # fatal; the mapping reports each skip under this row type.
+    refusal_row_type: shopping_refusal
     batch_row_type: shopping_commit
     command_row_type: shopping_command
     merge_columns:
@@ -244,8 +251,13 @@ holon:
       # semantics, which is the one outcome absence-as-deletion must never
       # produce from bad input.
       #
-      # The peer issues no count for a picked entry, so an active and a picked row
-      # of one `(name, cat)` fold into ONE row — declared design, not for 1:1.
+      # An amount is free text ("2kg", "4 Zehen"), kept byte for byte; a picked
+      # entry carries it as `pickedCount`. An active and a picked entry of one
+      # `(name, cat)` fold into ONE row carrying the active amount — the one
+      # still to buy. An amount is opaque text here: never parsed, never added.
+      # A second ACTIVE entry for one `(name, cat)` is skipped (the first by list
+      # position is kept) and reported under `shopping_refusal`, because the
+      # peer names an item by its name and the rest of the list still syncs.
       response: |
         def code_of: split("_")[0];
         def blank: . == 9 or . == 10 or . == 11 or . == 12 or . == 13 or . == 32
@@ -253,7 +265,7 @@ holon:
                    or . == 8232 or . == 8233 or . == 8239 or . == 8287 or . == 12288;
         def nonempty($k): if type == "string" and ((explode | map(select(blank | not)) | length) > 0) then . else error("`\($k)` must be a non-empty string") end;
         def whole($k): if type == "number" and . == floor then . else error("`\($k)` is not a whole number") end;
-        def count_of: if . == null then null elif type == "number" then . else error("`count` must be a number") end;
+        def amount($k): if . == null then null elif type == "string" then . elif type == "number" then tostring else error("`\($k)` must be text or a number") end;
         . as $r
         | (if $r | has("version") then $r.version | whole("version") else error("the list response has no `version`") end) as $version
         | (if ($r.pickedItemsVersion // null) == null then $version else ($r.pickedItemsVersion | whole("pickedItemsVersion")) end) as $picked_version
@@ -267,26 +279,35 @@ holon:
         | (if ($r.pickedItems | type) == "object" then $r.pickedItems else error("the list response has no `pickedItems`") end) as $picked
         | ([ $items[]
              | if type == "object" then . else error("`items` holds a non-object entry") end
-             | {name: (.name | nonempty("name")), cat: (.cat | nonempty("cat")), count: (.count | count_of), checked: false} ]
+             | {name: (.name | nonempty("name")), cat: (.cat | nonempty("cat")), count: (.count | amount("count")), checked: false} ]
            + [ $picked | to_entries[] | .key as $n | .value
                | if type == "object" then . else error("a `pickedItems` entry is not an object") end
-               | {name: ($n | nonempty("name")), cat: (.cat | nonempty("cat")), count: (.count | count_of), checked: true} ]) as $all
-        | ($all | group_by([.name, .cat]) | map({
-              name: .[0].name,
-              cat: .[0].cat,
-              count: (if length == 1 then .[0].count else (map(.count // 1) | add) end),
-              checked: (map(.checked) | any)
-          })) as $folded
+               | {name: ($n | nonempty("name")), cat: (.cat | nonempty("cat")),
+                  count: (if .pickedCount != null then .pickedCount | amount("pickedCount") else .count | amount("count") end),
+                  checked: true} ]) as $all
+        | ($all | group_by([.name, .cat])) as $groups
+        | ($groups | map(
+              map(select(.checked | not)) as $active
+              | {
+                  name: .[0].name,
+                  cat: .[0].cat,
+                  count: (if ($active | length) >= 1 then $active[0].count else .[0].count end),
+                  checked: (map(.checked) | any)
+                })) as $folded
+        | ([ $groups[] | map(select(.checked | not)) | select(length > 1)
+             | "the list holds `\(.[0].name)` in `\(.[0].cat)` \(length) times as active entries; the first is mirrored and \(length - 1) duplicate(s) are skipped" ]) as $refusals
         | {holon_rows: 1, scopes: [
             {type: "shopping_list", owner_column: "list", owner_value: "shopping"},
             {type: "shopping_category", owner_column: "list", owner_value: "shopping"},
-            {type: "shopping_item", owner_column: "list", owner_value: "shopping"}
+            {type: "shopping_item", owner_column: "list", owner_value: "shopping"},
+            {type: "shopping_refusal", owner_column: "list", owner_value: "shopping"}
           ]},
           {type: "shopping_list", row: {id: "shopping", list: "shopping", version: $version, picked_items_version: $picked_version}},
           ($cats[] | . as $raw | split("_") as $s
             | {type: "shopping_category", row: {id: ("shopping_cat:" + $s[0]), list: "shopping", wire: $raw, code: $s[0], icon: $s[1], color: $s[2]}}),
           ($folded[]
-            | {type: "shopping_item", row: {id: ("shopping-item:" + (.cat | @uri) + ":" + (.name | @uri)), list: "shopping", name: .name, cat: .cat, count: .count, checked: .checked}})
+            | {type: "shopping_item", row: {id: ("shopping-item:" + (.cat | @uri) + ":" + (.name | @uri)), list: "shopping", name: .name, cat: .cat, count: .count, checked: .checked}}),
+          ($refusals[] | {type: "shopping_refusal", row: {list: "shopping", reason: .}})
 
     commit:
       query:
@@ -306,7 +327,8 @@ holon:
       # `add` and `del` exist — a check toggle is deliberately unrepresentable,
       # because the on-versus-off encoding was never isolated in a capture and a
       # guess paired with an add/del risks deleting the item instead of ticking
-      # it.
+      # it. An `add` carries the amount verbatim: `count` is a merge column, so
+      # an amount left off the wire returns from the verifying re-pull as none.
       request: |
         .rows as $rows
         | ($rows | map(select(.type == "shopping_commit")) | .[0].row
@@ -319,6 +341,7 @@ holon:
                         | {cmd: (if .verb == "add" then "add"
                                  elif .verb == "remove" then "del"
                                  else error("this peer has no command for the intent \(.verb)") end),
-                           good: {name: .name, cat: .cat, new: true},
+                           good: ({name: .name, cat: .cat, new: true}
+                                  + (if .verb == "add" and .count != null then {count: .count} else {} end)),
                            id: .command_id} ]
           }

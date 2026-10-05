@@ -23,6 +23,7 @@ use std::sync::atomic::Ordering::SeqCst;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use holon_api::EntityName;
 use holon_api::Value;
 use holon_app::remote_list::RestListPeer;
 use holon_connections::CommitBatch;
@@ -33,10 +34,14 @@ use holon_connections::LocalIntent;
 use holon_connections::LocalRow;
 use holon_connections::LocalRowReader;
 use holon_connections::PushIntent;
+use holon_connections::REMOTE_LIST_SYNC;
+use holon_connections::RemoteListOperations;
 use holon_connections::RemoteListPeer;
 use holon_connections::RemoteListReconciler;
+use holon_connections::SystemRoundClock;
 use holon_connections::local_intent_operation;
 use holon_connections::sync_once;
+use holon_core::OperationProvider;
 use holon_core::file_format::TypedRowSet;
 use holon_mcp_client::CredentialRoot;
 use holon_mcp_client::IntegrationFileConfig;
@@ -81,15 +86,18 @@ enum Mode {
 
 #[derive(Default)]
 struct ListState {
-    /// `(name, cat, count)` — the ACTIVE list.
-    items: Vec<(String, String, Option<f64>)>,
-    /// `(name, cat)` — the checked-off ones.
-    picked: Vec<(String, String)>,
+    /// `(name, cat, count)` — the ACTIVE list. `count` is the peer's JSON
+    /// value: the app writes free text, older entries a number.
+    items: Vec<(String, String, Option<serde_json::Value>)>,
+    /// `(name, cat, pickedCount)` — the checked-off ones.
+    picked: Vec<(String, String, Option<serde_json::Value>)>,
     version: i64,
     commits: usize,
     /// Every request path the mock served, in order. The pull's freshness
     /// argument is only observable on the wire, so this is where it is read.
     paths: Vec<String>,
+    /// Every command a commit carried, as sent.
+    sent: Vec<serde_json::Value>,
 }
 
 impl ListState {
@@ -105,11 +113,12 @@ impl ListState {
         let picked: serde_json::Map<String, serde_json::Value> = self
             .picked
             .iter()
-            .map(|(name, cat)| {
-                (
-                    name.clone(),
-                    serde_json::json!({"cat": cat, "date": "2026-09-01T08:00:00Z"}),
-                )
+            .map(|(name, cat, picked_count)| {
+                let mut entry = serde_json::json!({"cat": cat, "date": "2026-09-01T08:00:00Z"});
+                if let Some(c) = picked_count {
+                    entry["pickedCount"] = c.clone();
+                }
+                (name.clone(), entry)
             })
             .collect();
         serde_json::json!({
@@ -123,14 +132,17 @@ impl ListState {
 
     fn apply(&mut self, commands: &[serde_json::Value]) {
         for command in commands {
+            self.sent.push(command.clone());
             let good = &command["good"];
             let name = good["name"].as_str().unwrap_or_default().to_string();
             let cat = good["cat"].as_str().unwrap_or_default().to_string();
             match command["cmd"].as_str().unwrap_or_default() {
-                "add" => self.items.push((name, cat, None)),
+                // The peer keeps exactly what the command carries: an amount
+                // the command leaves out is an item with no amount.
+                "add" => self.items.push((name, cat, good.get("count").cloned())),
                 "del" => {
                     self.items.retain(|(n, c, _)| !(n == &name && c == &cat));
-                    self.picked.retain(|(n, c)| !(n == &name && c == &cat));
+                    self.picked.retain(|(n, c, _)| !(n == &name && c == &cat));
                 }
                 other => panic!("the mock peer received an unknown command '{other}'"),
             }
@@ -146,24 +158,28 @@ struct Mock {
 fn seeded_state(version: i64) -> ListState {
     ListState {
         items: vec![
-            ("Milk".into(), "R".into(), Some(2.0)),
-            ("Milk".into(), "R".into(), None),
-            ("Milk".into(), "Ca".into(), Some(1.0)),
+            ("Milk".into(), "R".into(), Some(serde_json::json!(2))),
+            ("Milk".into(), "Ca".into(), Some(serde_json::json!(1))),
             ("Bread".into(), "B".into(), None),
-            ("Salmon".into(), "Fish".into(), Some(1.0)),
+            ("Salmon".into(), "Fish".into(), Some(serde_json::json!(1))),
             ("Socks".into(), "Kleidung".into(), None),
         ],
-        picked: vec![("Bread".into(), "B".into())],
+        picked: vec![("Bread".into(), "B".into(), None)],
         version,
         commits: 0,
         paths: Vec::new(),
+        sent: Vec::new(),
     }
 }
 
 async fn start_mock(mode: Mode) -> Mock {
+    start_mock_with(mode, seeded_state(7)).await
+}
+
+async fn start_mock_with(mode: Mode, list: ListState) -> Mock {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mock");
     let addr = listener.local_addr().expect("mock addr");
-    let state = Arc::new(Mutex::new(seeded_state(7)));
+    let state = Arc::new(Mutex::new(list));
     let state_bg = state.clone();
     let stale_used = Arc::new(AtomicBool::new(false));
 
@@ -361,7 +377,7 @@ fn uri_segment(raw: &str) -> String {
 /// One mirror row, spelled in the declared type's columns. The id is derived
 /// from the content pair because this peer issues none — which is exactly what
 /// the connection's `key` expression says.
-fn local(name: &str, cat: &str, count: Option<f64>) -> LocalRow {
+fn local(name: &str, cat: &str, count: Option<&str>) -> LocalRow {
     let id = format!("shopping-item:{}:{}", uri_segment(cat), uri_segment(name));
     let mut columns = std::collections::BTreeMap::new();
     columns.insert("id".to_string(), Value::String(id.clone()));
@@ -369,7 +385,9 @@ fn local(name: &str, cat: &str, count: Option<f64>) -> LocalRow {
     columns.insert("cat".to_string(), Value::String(cat.to_string()));
     columns.insert(
         "count".to_string(),
-        count.map(Value::Float).unwrap_or(Value::Null),
+        count
+            .map(|c| Value::String(c.to_string()))
+            .unwrap_or(Value::Null),
     );
     columns.insert("checked".to_string(), Value::Integer(0));
     columns.insert("deleted_at".to_string(), Value::Null);
@@ -396,9 +414,10 @@ async fn a_served_list_projects_shopping_items() {
 
     let snapshot = peer.pull().await.expect("the peer serves the list");
 
-    // Six wire rows, five keys: the two `Milk`/`R` rows are one item. The FOLD
-    // happens in the sidecar's own mapping; what the generic path adds is that
-    // a pair which survived the fold and still collided would be refused.
+    // Six wire rows, five keys: `Bread`/`B` is both active and picked, which is
+    // one item. The FOLD happens in the sidecar's own mapping; what the generic
+    // path adds is that a pair which survived the fold and still collided would
+    // be refused.
     assert_eq!(
         snapshot.len(),
         5,
@@ -430,17 +449,8 @@ async fn a_served_list_projects_shopping_items() {
 
     let milk = "shopping-item:R:Milk";
     assert_eq!(column(milk, "name"), Some(Value::String("Milk".into())));
-    // A row with no count still counts for one, so folding cannot lose a unit.
-    // Read as a number rather than a spelling: the peer's JSON and the REAL
-    // column disagree on Integer-vs-Float and mean the same thing.
-    assert_eq!(
-        match column(milk, "count") {
-            Some(Value::Integer(n)) => n as f64,
-            Some(Value::Float(f)) => f,
-            other => panic!("`count` is not a number (got {other:?})"),
-        },
-        3.0
-    );
+    // A number from the peer is mirrored as its text, like any amount.
+    assert_eq!(column(milk, "count"), Some(Value::String("2".into())));
     // The peer stamps the fetch time; its VALUE is pinned in the reconciler
     // tests, which supply one. Here only its presence is the watermark claim.
     assert!(
@@ -482,6 +492,152 @@ async fn a_served_list_projects_shopping_items() {
             "the insert carries the undeclared column '{column}'"
         );
     }
+}
+
+/// Entry `docs/Testing/bugfunnel/entries/
+/// 2026-10-05-a-free-text-shopping-amount-stops-all-shopping-sync.md`: the app
+/// writes an amount as free text, and a picked item carries it as
+/// `pickedCount`. Each is mirrored as the peer's own text.
+#[tokio::test]
+async fn free_text_amounts_are_mirrored_verbatim() {
+    let list = ListState {
+        items: vec![
+            ("Mehl".into(), "B".into(), Some(serde_json::json!("2kg"))),
+            (
+                "Knoblauch".into(),
+                "R".into(),
+                Some(serde_json::json!("4 Zehen")),
+            ),
+            (
+                "Zucker".into(),
+                "B".into(),
+                Some(serde_json::json!("1,5Kg")),
+            ),
+            ("Eier".into(), "R".into(), Some(serde_json::json!(6))),
+        ],
+        picked: vec![("Butter".into(), "R".into(), Some(serde_json::json!("500g")))],
+        version: 7,
+        ..ListState::default()
+    };
+    let mock = start_mock_with(Mode::Live, list).await;
+    let peer = peer_for(&mock.base_url);
+
+    let snapshot = peer
+        .pull()
+        .await
+        .expect("a list with free-text amounts is a valid list");
+    let inserts: Vec<(String, std::collections::BTreeMap<String, Value>)> =
+        RemoteListReconciler::new(connection())
+            .reconcile(&[], &snapshot)
+            .expect("reconcile against an empty local list")
+            .local
+            .into_iter()
+            .map(|intent| match intent {
+                LocalIntent::Insert { id, columns } => (id, columns.into_iter().collect()),
+                other => panic!("an empty local list can only take inserts, got {other:?}"),
+            })
+            .collect();
+    let column = |id: &str, name: &str| -> Option<Value> {
+        inserts
+            .iter()
+            .find(|(row_id, _)| row_id == id)
+            .unwrap_or_else(|| panic!("no insert for '{id}' in {inserts:?}"))
+            .1
+            .get(name)
+            .cloned()
+    };
+
+    for (id, text) in [
+        ("shopping-item:B:Mehl", "2kg"),
+        ("shopping-item:R:Knoblauch", "4 Zehen"),
+        ("shopping-item:B:Zucker", "1,5Kg"),
+        ("shopping-item:R:Eier", "6"),
+        ("shopping-item:R:Butter", "500g"),
+    ] {
+        assert_eq!(
+            column(id, "count"),
+            Some(Value::String(text.into())),
+            "'{id}' must carry the peer's amount as text"
+        );
+    }
+    assert_eq!(
+        column("shopping-item:R:Butter", "checked"),
+        Some(Value::Boolean(true))
+    );
+}
+
+/// Two active entries for one `(name, cat)` skip that item's later entries, not
+/// the pull: the first by list position is mirrored, every other item syncs,
+/// and the skip is reported both in the snapshot and in the operation's
+/// response.
+#[tokio::test]
+async fn a_duplicate_active_entry_is_refused_by_name_and_the_rest_syncs() {
+    let list = ListState {
+        items: vec![
+            ("Milch".into(), "R".into(), Some(serde_json::json!("2"))),
+            ("Mehl".into(), "B".into(), Some(serde_json::json!("1kg"))),
+            ("Milch".into(), "R".into(), Some(serde_json::json!("5"))),
+            ("Eier".into(), "R".into(), None),
+        ],
+        version: 7,
+        ..ListState::default()
+    };
+    let mock = start_mock_with(Mode::Live, list).await;
+    let peer = peer_for(&mock.base_url);
+
+    let snapshot = peer
+        .pull()
+        .await
+        .expect("one duplicated item must not fail the whole pull");
+    assert_eq!(snapshot.len(), 3, "Milch once, plus Mehl and Eier");
+    let milch = snapshot
+        .rows()
+        .map(|(_, row)| row)
+        .find(|row| row.id == "shopping-item:R:Milch")
+        .expect("Milch is mirrored");
+    assert_eq!(
+        milch.columns.get("count"),
+        Some(&Value::String("2".into())),
+        "the FIRST active entry by list position is kept"
+    );
+    assert_eq!(snapshot.refusals().len(), 1, "{:?}", snapshot.refusals());
+    for part in ["Milch", "`R`", "2 times", "1 duplicate"] {
+        assert!(
+            snapshot.refusals()[0].contains(part),
+            "the refusal must name {part:?}; got: {}",
+            snapshot.refusals()[0]
+        );
+    }
+
+    let operations = RemoteListOperations::new(
+        "shopping",
+        connection(),
+        Arc::new(peer),
+        Arc::new(Rows(Vec::new())),
+        Arc::new(SystemRoundClock),
+        DEVICE_ID,
+    );
+    let result = operations
+        .execute_operation(
+            &EntityName::new("shopping_item"),
+            REMOTE_LIST_SYNC,
+            Default::default(),
+        )
+        .await
+        .expect("the sync operation succeeds with a duplicate in the list");
+    let response = result
+        .response
+        .expect("a refusal is reported in the operation response");
+    let refused = response
+        .as_object()
+        .and_then(|response| response.get("refused"))
+        .and_then(Value::as_array)
+        .expect("the response carries a `refused` array");
+    assert_eq!(refused.len(), 1);
+    assert!(
+        refused[0].as_string().is_some_and(|r| r.contains("Milch")),
+        "{refused:?}"
+    );
 }
 
 #[tokio::test]
@@ -545,7 +701,7 @@ async fn the_commit_leg_hides_the_credential_too() {
     let peer = peer_for(&mock.base_url);
     let compiled = connection();
 
-    let row = local("Oat milk", "R", Some(1.0));
+    let row = local("Oat milk", "R", Some("2kg"));
     let key = compiled
         .key_of(&serde_json::json!({ "name": "Oat milk", "cat": "R" }))
         .expect("the connection derives the key");
@@ -583,7 +739,7 @@ async fn a_local_addition_reaches_the_peer_and_the_round_converges() {
     let peer = peer_for(&mock.base_url);
     let reconciler = RemoteListReconciler::new(connection());
 
-    let mut mine = local("Oat milk", "R", Some(1.0));
+    let mut mine = local("Oat milk", "R", Some("2kg"));
     set(&mut mine, "last_seen_remote", Value::Null);
     let rows = Rows(vec![mine]);
 
@@ -609,6 +765,64 @@ async fn a_local_addition_reaches_the_peer_and_the_round_converges() {
         .await
         .expect("second round");
     assert_eq!(again.committed, 0, "the round did not converge");
+}
+
+/// Entry `docs/Testing/bugfunnel/entries/
+/// 2026-10-05-an-amount-authored-in-holon-is-nulled-by-the-next-sync.md`:
+/// `count` is a merge column, so the verifying re-pull hands back whatever the
+/// peer stored. An amount the push leaves out comes back as no amount and
+/// overwrites the local one.
+#[tokio::test]
+async fn an_amount_authored_in_holon_reaches_the_peer_and_survives_the_round() {
+    let mock = start_mock(Mode::Live).await;
+    let peer = peer_for(&mock.base_url);
+    let reconciler = RemoteListReconciler::new(connection());
+
+    let mut mine = local("Oat milk", "R", Some("2kg"));
+    set(&mut mine, "last_seen_remote", Value::Null);
+    let outcome = sync_once(
+        &peer,
+        &Rows(vec![mine.clone()]),
+        &reconciler,
+        DEVICE_ID,
+        1_756_700_000_000,
+    )
+    .await
+    .expect("one round");
+    assert_eq!(outcome.committed, 1, "the addition was not committed");
+
+    let mirrored =
+        outcome.local.iter().fold(
+            mine.columns["count"].clone(),
+            |count, intent| match intent {
+                LocalIntent::SetColumn { id, column, value }
+                    if id == &mine.id && column == "count" =>
+                {
+                    value.clone()
+                }
+                _ => count,
+            },
+        );
+    assert_eq!(
+        mirrored,
+        Value::String("2kg".into()),
+        "the round overwrote the amount authored in Holon"
+    );
+
+    let sent: Vec<serde_json::Value> = mock
+        .state
+        .lock()
+        .expect("mock list")
+        .sent
+        .iter()
+        .filter(|command| command["good"]["name"] == "Oat milk")
+        .map(|command| command["good"]["count"].clone())
+        .collect();
+    assert_eq!(
+        sent,
+        vec![serde_json::json!("2kg")],
+        "the add command must carry the amount verbatim"
+    );
 }
 
 #[tokio::test]
@@ -657,7 +871,7 @@ async fn a_stale_version_re_pulls_instead_of_overwriting() {
     let mock = start_mock(Mode::StaleFirstCommit).await;
     let peer = peer_for(&mock.base_url);
 
-    let mut mine = local("Oat milk", "R", Some(1.0));
+    let mut mine = local("Oat milk", "R", Some("2kg"));
     set(&mut mine, "last_seen_remote", Value::Null);
 
     let outcome = sync_once(

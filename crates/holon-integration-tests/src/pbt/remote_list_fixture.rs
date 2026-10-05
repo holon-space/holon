@@ -18,16 +18,19 @@ use holon_connections::ListSyncSpec;
 pub const ENTITY: &str = "content_row";
 pub const TABLE: &str = "content_row_raw";
 pub const LIST_ROW_TYPE: &str = "content_cursor";
+pub const REFUSAL_ROW_TYPE: &str = "content_refusal";
 pub const VERSION_COLUMN: &str = "version";
 pub const WATERMARK_COLUMN: &str = "synced_at";
 pub const TOMBSTONE_COLUMN: &str = "removed_at";
 pub const MERGE_COLUMN: &str = "rank";
+/// A free-text amount ("2kg", "0,5 l"), mirrored as the peer's own text.
+pub const AMOUNT_COLUMN: &str = "amount";
 pub const LATCH_COLUMN: &str = "done";
 
 /// The peer-authoritative columns, in the invariant's projection order: the id
 /// first, then the columns the peer serves (the bookkeeping watermark and
 /// tombstone are absent by construction).
-pub const PROJECTION: &[&str] = &["id", "label", "bucket", "rank", "done"];
+pub const PROJECTION: &[&str] = &["id", "label", "bucket", "rank", "amount", "done"];
 
 /// The identity pair the key expression reads — the content a row is identified
 /// by.
@@ -39,6 +42,7 @@ pub fn type_definition() -> TypeDefinition {
         FieldSchema::new("label", "TEXT"),
         FieldSchema::new("bucket", "TEXT"),
         FieldSchema::new("rank", "REAL").nullable(),
+        FieldSchema::new(AMOUNT_COLUMN, "TEXT").nullable(),
         FieldSchema::new("done", "INTEGER"),
         FieldSchema::new(TOMBSTONE_COLUMN, "TEXT").nullable(),
         FieldSchema::new(WATERMARK_COLUMN, "TEXT").nullable(),
@@ -68,11 +72,21 @@ pub fn list_sync_spec() -> ListSyncSpec {
         watermark_column: WATERMARK_COLUMN.to_string(),
         batch_row_type: "content_batch".to_string(),
         command_row_type: "content_command".to_string(),
-        merge_columns: vec![MERGE_COLUMN.to_string()],
+        merge_columns: vec![MERGE_COLUMN.to_string(), AMOUNT_COLUMN.to_string()],
         cache_buster: CacheBuster::EpochMillis,
         latch_columns: vec![LATCH_COLUMN.to_string()],
+        refusal_row_type: Some(REFUSAL_ROW_TYPE.to_string()),
     }
 }
+
+/// The commit `request` mapping: the batch's command rows as the fixture
+/// peer's wire. The peer stores only what this transmits; the id is derived
+/// as [`row_id`] derives it.
+pub const REQUEST: &str = r#"
+{commands: [.rows[] | select(.type == "content_command") | .row
+  | {op: .verb, row: {id: ("content-row:" + .label + ":" + .bucket), label: .label, bucket: .bucket,
+                      rank: .rank, amount: .amount, done: .done}}]}
+"#;
 
 /// The id a content-keyed row is stored under, derived from the identity pair
 /// the key expression reads — the same derivation a sidecar's `response`

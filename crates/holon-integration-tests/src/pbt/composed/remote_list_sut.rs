@@ -112,6 +112,7 @@ impl RemoteListSut {
         let seed = Self::peer_seed_from_mirror(&rows).await;
         let peer = Arc::new(FixtureListPeer::seeded(
             compiled.clone(),
+            remote_list_fixture::REQUEST,
             profile(),
             seed,
             0,
@@ -201,6 +202,7 @@ impl RemoteListSut {
                     .expect("the remote-list rank is a whole number"),
             ),
         );
+        cols.insert("amount".into(), Value::String(cell("amount")));
         cols.insert(
             "done".into(),
             Value::Integer(
@@ -251,6 +253,34 @@ impl SutRemoteListSync for RemoteListSut {
                 let key = self.key_of(columns);
                 self.peer.mutate(&ListMutation::Remove { key });
             }
+            RemoteListMutation::AddDuplicate { columns } => {
+                let row = self.typed_remote_row(columns);
+                self.peer.mutate(&ListMutation::AddDuplicate(row));
+            }
+            RemoteListMutation::AuthorLocally { columns } => {
+                let row = self.typed_remote_row(columns);
+                use holon_core::OperationProvider;
+                let mut params = holon_api::StorageEntity::default();
+                for (column, value) in row.columns {
+                    params.insert(column.into(), value);
+                }
+                self.component
+                    .engine()
+                    .get_dispatcher()
+                    .execute_operation(
+                        &EntityName::new(remote_list_fixture::ENTITY),
+                        "create",
+                        params,
+                    )
+                    .await
+                    .unwrap_or_else(|e| {
+                        panic!(
+                            "creating {} '{}' through the dispatcher failed: {e:#}",
+                            remote_list_fixture::ENTITY,
+                            row.id
+                        )
+                    });
+            }
         }
     }
 
@@ -258,7 +288,8 @@ impl SutRemoteListSync for RemoteListSut {
         // The round's push count, read from the peer it pushed to — the remote
         // end of the round, not the round's self-report.
         let before = self.peer.commands_applied();
-        self.component
+        let result = self
+            .component
             .engine()
             .get_dispatcher()
             .execute_operation_with_provenance(
@@ -278,8 +309,20 @@ impl SutRemoteListSync for RemoteListSut {
                     remote_list_fixture::ENTITY
                 )
             });
+        let refused = match &result.response {
+            None => 0,
+            Some(response) => response
+                .as_object()
+                .and_then(|response| response.get("refused"))
+                .and_then(Value::as_array)
+                .unwrap_or_else(|| {
+                    panic!("a sync response carries no `refused` list: {response:?}")
+                })
+                .len(),
+        };
         RemoteListRoundOutcome {
             committed: self.peer.commands_applied() - before,
+            refused,
         }
     }
 

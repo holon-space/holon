@@ -5397,6 +5397,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "tokio",
+ "tracing",
  "workspace-hack 0.1.0",
 ]
 
@@ -5409,6 +5410,7 @@ dependencies = [
  "holon-api",
  "holon-connections",
  "holon-core",
+ "holon-rows",
  "proptest 1.11.0",
  "serde_json",
  "serde_yaml",

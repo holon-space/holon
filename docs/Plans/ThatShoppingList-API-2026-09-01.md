@@ -74,6 +74,9 @@ Per the client code (`list.js`; inferred, medium confidence) `good` also accepts
   (`.` or `,` as decimal separator); the rest is the unit (`numberRangeOfString`,
   `adjustCountByDelta`). A bare `"1"` means no quantity. Holon must parse and compose `count`
   with these rules.
+  Holon's push now depends on `good.count` on add (`commit.request` in `shopping.yaml`); it was
+  not seen in a capture. Holon sends `"1"` verbatim, and an app that normalises a bare `"1"` may
+  null it (see `lane-logs/shopping-count-verify3.md` P3).
 - `price`, `pos` (position), `img`.
 - `pickedItems` side only: `pickedCount`.
 

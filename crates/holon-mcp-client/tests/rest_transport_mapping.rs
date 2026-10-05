@@ -136,11 +136,11 @@ fn the_write_leg_maps_command_rows_into_the_peers_own_envelope() {
                 "version": 7, "picked_items_version": 5, "device_id": "dev-1"}},
             {"type": "shopping_command", "row": {
                 "id": "1756713600000_3f0a1c9d2b4e5f60", "list": "shopping",
-                "verb": "add", "name": "Eggs", "cat": "R",
+                "verb": "add", "name": "Eggs", "cat": "R", "count": "6 Stück",
                 "command_id": "1756713600000_3f0a1c9d2b4e5f60"}},
             {"type": "shopping_command", "row": {
                 "id": "1756713600000_a1b2c3d4e5f60718", "list": "shopping",
-                "verb": "remove", "name": "Bread", "cat": "B",
+                "verb": "remove", "name": "Bread", "cat": "B", "count": "1",
                 "command_id": "1756713600000_a1b2c3d4e5f60718"}},
         ],
     });
@@ -153,14 +153,15 @@ fn the_write_leg_maps_command_rows_into_the_peers_own_envelope() {
     assert_eq!(
         args["commands"],
         serde_json::json!([
-            {"cmd": "add", "good": {"name": "Eggs", "cat": "R", "new": true},
+            {"cmd": "add", "good": {"name": "Eggs", "cat": "R", "new": true, "count": "6 Stück"},
              "id": "1756713600000_3f0a1c9d2b4e5f60"},
             {"cmd": "del", "good": {"name": "Bread", "cat": "B", "new": true},
              "id": "1756713600000_a1b2c3d4e5f60718"},
         ]),
         "the peer's `good` wrapper and its `new: true` literal live in the sidecar, and the \
          command ids pass through untouched — reminting one on a retry is a pinned regression. \
-         Note `remove` in, `del` out: the peer's word for a removal is the sidecar's, not Rust's"
+         Note `remove` in, `del` out: the peer's word for a removal is the sidecar's, not Rust's. \
+         An add carries its amount verbatim; a del names the item alone"
     );
 }
 

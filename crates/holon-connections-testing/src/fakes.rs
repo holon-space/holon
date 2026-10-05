@@ -32,6 +32,8 @@ pub struct Fake {
     pub compiled: Arc<CompiledListSync>,
     pub profile: FixtureProfile,
     pub merge_column: &'static str,
+    /// The connection's commit `request` mapping, in the fixture peer's wire.
+    pub request: &'static str,
     pub latch_column: &'static str,
     pub tombstone_column: &'static str,
     pub watermark_column: &'static str,
@@ -64,7 +66,7 @@ impl Fake {
             cache_mode,
             ..self.profile
         };
-        FixtureListPeer::seeded(self.compiled.clone(), profile, rows, version)
+        FixtureListPeer::seeded(self.compiled.clone(), self.request, profile, rows, version)
     }
 }
 
@@ -109,6 +111,11 @@ merge_columns: [rank]
 latch_columns: [done]
 "#;
 
+const KEYED_REQUEST: &str = r#"
+{commands: [.rows[] | select(.type == "keyed_command") | .row
+  | {op: .verb, row: {id: .key, content: .content, rank: .rank, done: .done}}]}
+"#;
+
 /// The peer issues the row id, so identity is `.id`; it versions itself with a
 /// cursor, applies a commit as one batch, and serves no cached body.
 pub fn id_keyed_cursor() -> Fake {
@@ -122,6 +129,7 @@ pub fn id_keyed_cursor() -> Fake {
             cache_mode: CacheMode::Fresh,
         },
         merge_column: "rank",
+        request: KEYED_REQUEST,
         latch_column: "done",
         tombstone_column: "removed_at",
         watermark_column: "synced_at",
@@ -186,6 +194,7 @@ fields:
   - { name: label, sql_type: TEXT }
   - { name: bucket, sql_type: TEXT }
   - { name: rank, sql_type: REAL, nullable: true }
+  - { name: amount, sql_type: TEXT, nullable: true }
   - { name: done, sql_type: INTEGER }
   - { name: removed_at, sql_type: TEXT, nullable: true }
   - { name: synced_at, sql_type: TEXT, nullable: true }
@@ -206,8 +215,14 @@ watermark_column: synced_at
 cache_buster: epoch_millis
 batch_row_type: content_batch
 command_row_type: content_command
-merge_columns: [rank]
+merge_columns: [rank, amount]
 latch_columns: [done]
+"#;
+
+const CONTENT_REQUEST: &str = r#"
+{commands: [.rows[] | select(.type == "content_command") | .row
+  | {op: .verb, row: {id: ("content-row:" + .label + ":" + .bucket), label: .label, bucket: .bucket,
+                      rank: .rank, amount: .amount, done: .done}}]}
 "#;
 
 /// The peer issues no row id, so identity is the content pair `[.label,
@@ -225,6 +240,7 @@ pub fn content_keyed_snapshot_cache_bust() -> Fake {
             cache_mode: CacheMode::CachedNeedsBust,
         },
         merge_column: "rank",
+        request: CONTENT_REQUEST,
         latch_column: "done",
         tombstone_column: "removed_at",
         watermark_column: "synced_at",
@@ -251,6 +267,8 @@ fn content_columns(n: u8, rank: i64, done: bool) -> std::collections::BTreeMap<S
     columns.insert("label".into(), Value::String(format!("label{n}")));
     columns.insert("bucket".into(), Value::String("bucket".into()));
     columns.insert("rank".into(), Value::Integer(rank));
+    // Free text, mirrored as the peer's own spelling on both legs.
+    columns.insert("amount".into(), Value::String(format!("{rank} kg")));
     columns.insert("done".into(), Value::Integer(i64::from(done)));
     columns
 }

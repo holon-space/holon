@@ -144,11 +144,23 @@ impl OperationProvider for RemoteListOperations {
             .iter()
             .map(|intent| local_intent_operation(spec, intent))
             .collect();
-        // A completed exchange with another peer has no inverse: undoing it
-        // would push the reverse commands at a list that has already moved on.
-        Ok(
+        for reason in &outcome.refused {
+            tracing::warn!(
+                connection = %self.connection,
+                list = %spec.entity,
+                "{reason}"
+            );
+        }
+        let mut result =
+            // A completed exchange with another peer has no inverse: undoing it
+            // would push the reverse commands at a list that has already moved on.
             OperationResult::declared_irreversible(Vec::new(), "a peer sync cannot be un-sent")
-                .with_follow_ups(follow_ups),
-        )
+                .with_follow_ups(follow_ups);
+        if !outcome.refused.is_empty() {
+            result.response = Some(holon_api::Value::from_json_value(serde_json::json!({
+                "refused": outcome.refused
+            })));
+        }
+        Ok(result)
     }
 }

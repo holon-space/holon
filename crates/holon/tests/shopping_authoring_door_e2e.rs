@@ -303,7 +303,7 @@ async fn adding_a_shopping_item_through_the_generic_surface_stores_it() -> Resul
             ),
             ("name", Value::String("Guanciale".to_string())),
             ("cat", Value::String("Fleisch".to_string())),
-            ("count", Value::Float(1.0)),
+            ("count", Value::String("2kg".to_string())),
             ("checked", Value::Integer(0)),
         ]),
     )
@@ -313,6 +313,18 @@ async fn adding_a_shopping_item_through_the_generic_surface_stores_it() -> Resul
         stored_rows(&ctx).await?,
         vec![("Guanciale".to_string(), None)],
         "the added item must be on the list, un-tombstoned"
+    );
+    let counts = ctx
+        .query(
+            format!("SELECT count FROM {TABLE}"),
+            QueryLanguage::HolonSql,
+            HashMap::new(),
+        )
+        .await?;
+    assert_eq!(
+        counts[0].get("count"),
+        Some(&Value::String("2kg".to_string())),
+        "the amount is stored as the text it was written as"
     );
     Ok(())
 }

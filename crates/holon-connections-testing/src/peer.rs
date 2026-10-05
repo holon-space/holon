@@ -27,6 +27,7 @@ use holon_connections::RemoteListPeer;
 use holon_connections::RemoteRow;
 use holon_connections::RowKey;
 use holon_core::file_format::TypedRowSet;
+use holon_rows::RowMapper;
 
 use crate::axes::CacheMode;
 use crate::axes::ChangeDetection;
@@ -45,8 +46,12 @@ pub enum ListMutation {
     /// The peer gains a row (or, under a natural key, replaces the row the key
     /// folds to).
     Add(RemoteRow),
-    /// The peer drops the row this key identifies.
+    /// The peer drops every entry under this key.
     Remove { key: RowKey },
+    /// The list gains a second entry under a key it already holds, after the
+    /// first in list order — what a list app that matches entries by display
+    /// text alone lets a person type twice.
+    AddDuplicate(RemoteRow),
 }
 
 /// The peer's list and its version bookkeeping.
@@ -54,6 +59,8 @@ pub enum ListMutation {
 pub struct FixtureList {
     /// The peer's rows, keyed by the connection's reconciliation key.
     rows: BTreeMap<RowKey, RemoteRow>,
+    /// Later entries under a key `rows` already holds, in list order.
+    duplicates: Vec<(RowKey, RemoteRow)>,
     version: i64,
     commits: usize,
     /// Commands this peer has applied across every commit it was sent.
@@ -68,16 +75,30 @@ pub struct FixtureList {
 /// A list peer that applies the commands it is sent and versions itself, so
 /// "the peer moved between polls" and "the peer serves a stale body" are
 /// scenarios a test can stage.
+///
+/// A commit reaches it through the connection's declared `request` mapping,
+/// so the peer stores only the columns that mapping transmits — a column the
+/// mapping leaves out comes back from the next pull as absent, as it does
+/// from a real peer. The mapping's output is this peer's own wire:
+/// `{"commands": [{"op": "add" | "remove", "row": {<column>: <value>}}]}`,
+/// where `row` is the row as the peer will serve it, its `id` included.
 pub struct FixtureListPeer {
     compiled: Arc<CompiledListSync>,
+    request: RowMapper,
     profile: FixtureProfile,
     state: Mutex<FixtureList>,
 }
 
 impl FixtureListPeer {
-    pub fn new(compiled: Arc<CompiledListSync>, profile: FixtureProfile) -> Self {
+    pub fn new(compiled: Arc<CompiledListSync>, request: &str, profile: FixtureProfile) -> Self {
+        let request = RowMapper::compile(
+            format!("{}/commit.request", compiled.spec().entity),
+            request,
+        )
+        .unwrap_or_else(|e| panic!("fixture peer: the request mapping does not compile: {e:#}"));
         Self {
             compiled,
+            request,
             profile,
             state: Mutex::new(FixtureList::default()),
         }
@@ -86,11 +107,12 @@ impl FixtureListPeer {
     /// An empty list whose first pull carries `version`.
     pub fn seeded(
         compiled: Arc<CompiledListSync>,
+        request: &str,
         profile: FixtureProfile,
         rows: Vec<RemoteRow>,
         version: i64,
     ) -> Self {
-        let peer = Self::new(compiled, profile);
+        let peer = Self::new(compiled, request, profile);
         {
             let mut state = peer.state.lock().expect("the fixture list");
             for row in rows {
@@ -145,6 +167,17 @@ impl FixtureListPeer {
             }
             ListMutation::Remove { key } => {
                 state.rows.remove(key);
+                state.duplicates.retain(|(k, _)| k != key);
+            }
+            ListMutation::AddDuplicate(row) => {
+                let key = self
+                    .key_of_row(row)
+                    .expect("a duplicated-in row derives its key");
+                assert!(
+                    state.rows.contains_key(&key),
+                    "fixture peer: a duplicate of {key} needs a first entry under that key"
+                );
+                state.duplicates.push((key, row.clone()));
             }
         }
         state.version += 1;
@@ -159,6 +192,11 @@ impl FixtureListPeer {
     }
 
     /// Build one complete snapshot of the peer's list.
+    ///
+    /// A connection that declares a refusal row type keeps the first entry
+    /// under a key and reports each duplicated key once, as a production
+    /// `response` mapping does. One that declares none serves every entry, and
+    /// the snapshot refuses the shared key.
     fn build_snapshot(&self, state: &FixtureList) -> Result<ListSnapshot> {
         let spec = self.compiled.spec();
         let mut cursor = StorageEntity::default();
@@ -168,20 +206,38 @@ impl FixtureListPeer {
             Value::Integer(state.version),
         );
 
-        let entity_rows: Vec<StorageEntity> = state
-            .rows
-            .values()
-            .map(|row| {
-                let mut entity = StorageEntity::default();
-                entity.insert("id".into(), Value::String(row.id.clone()));
-                for (column, value) in &row.columns {
-                    entity.insert(column.as_str().into(), value.clone());
+        let entity_of = |row: &RemoteRow| {
+            let mut entity = StorageEntity::default();
+            entity.insert("id".into(), Value::String(row.id.clone()));
+            for (column, value) in &row.columns {
+                entity.insert(column.as_str().into(), value.clone());
+            }
+            entity
+        };
+        let mut entity_rows: Vec<StorageEntity> = state.rows.values().map(entity_of).collect();
+        let mut refusal_rows = Vec::new();
+        match &spec.refusal_row_type {
+            None => entity_rows.extend(state.duplicates.iter().map(|(_, row)| entity_of(row))),
+            Some(_) => {
+                let mut extra: BTreeMap<&RowKey, usize> = BTreeMap::new();
+                for (key, _) in &state.duplicates {
+                    *extra.entry(key).or_default() += 1;
                 }
-                entity
-            })
-            .collect();
+                for (key, count) in extra {
+                    let mut refusal = StorageEntity::default();
+                    refusal.insert(
+                        "reason".into(),
+                        Value::String(format!(
+                            "{key} is on the list {} times; kept the first",
+                            count + 1
+                        )),
+                    );
+                    refusal_rows.push(refusal);
+                }
+            }
+        }
 
-        let sets = vec![
+        let mut sets = vec![
             TypedRowSet {
                 type_name: spec.list_row_type.clone(),
                 owner_column: "id".into(),
@@ -195,30 +251,56 @@ impl FixtureListPeer {
                 rows: entity_rows,
             },
         ];
+        if let Some(refusal_type) = &spec.refusal_row_type {
+            sets.push(TypedRowSet {
+                type_name: refusal_type.clone(),
+                owner_column: "id".into(),
+                owner_value: "list".into(),
+                rows: refusal_rows,
+            });
+        }
         ListSnapshot::from_rows(&self.compiled, &sets, FETCHED_AT)
     }
 
-    /// A command's columns, minus this connection's own watermark and tombstone
-    /// bookkeeping. The peer stores only the columns it actually serves; the
-    /// watermark the local leg stamps on every insert is not the peer's list.
-    fn remote_row_of(&self, command: &holon_connections::CommitCommand) -> RemoteRow {
-        let spec = self.compiled.spec();
-        let tombstone = self.compiled.tombstone_column().to_string();
-        let mut columns = command.columns.clone();
-        columns.remove(&spec.watermark_column);
-        columns.remove(&tombstone);
-        let id = columns
-            .get("id")
-            .and_then(Value::as_string)
-            .unwrap_or_else(|| {
-                panic!(
-                    "fixture peer: a commit command carries no string `id` column; the \
-                     connection's row codec must name one, and a peer that stored an empty id \
-                     would hold a row nothing can address"
-                )
+    /// The batch as this peer receives it: its row stream through the
+    /// connection's `request` mapping, decoded from this peer's wire.
+    fn received(&self, batch: &CommitBatch) -> Result<Vec<(CommandVerb, RemoteRow)>> {
+        let stream = batch.to_row_stream(self.compiled.spec())?;
+        let sent = self.request.map(&stream)?;
+        let [wire] = sent.as_slice() else {
+            anyhow::bail!(
+                "fixture peer: the request mapping emitted {} values; one commit is one request",
+                sent.len()
+            );
+        };
+        let commands = wire["commands"].as_array().ok_or_else(|| {
+            anyhow::anyhow!("fixture peer: the request carries no `commands` array: {wire}")
+        })?;
+        commands
+            .iter()
+            .map(|command| {
+                let verb = match command["op"].as_str() {
+                    Some("add") => CommandVerb::Add,
+                    Some("remove") => CommandVerb::Remove,
+                    _ => anyhow::bail!("fixture peer: a command names no known `op`: {command}"),
+                };
+                let row = command["row"].as_object().ok_or_else(|| {
+                    anyhow::anyhow!("fixture peer: a command carries no `row` object: {command}")
+                })?;
+                let columns: BTreeMap<String, Value> = row
+                    .iter()
+                    .map(|(column, value)| (column.clone(), Value::from_json_value(value.clone())))
+                    .collect();
+                let Some(Value::String(id)) = columns.get("id") else {
+                    anyhow::bail!(
+                        "fixture peer: a command row carries no string `id`; a stored row \
+                         nothing can address is no row: {command}"
+                    );
+                };
+                let id = id.clone();
+                Ok((verb, RemoteRow { id, columns }))
             })
-            .to_string();
-        RemoteRow { id, columns }
+            .collect()
     }
 }
 
@@ -259,15 +341,15 @@ impl RemoteListPeer for FixtureListPeer {
         }
 
         let mut applied = 0i64;
-        for command in &batch.commands {
-            match command.verb {
+        for (verb, row) in self.received(batch)? {
+            let key = self.key_of_row(&row)?;
+            match verb {
                 CommandVerb::Add => {
-                    state
-                        .rows
-                        .insert(command.key.clone(), self.remote_row_of(command));
+                    state.rows.insert(key, row);
                 }
                 CommandVerb::Remove => {
-                    state.rows.remove(&command.key);
+                    state.rows.remove(&key);
+                    state.duplicates.retain(|(k, _)| k != &key);
                 }
             }
             applied += 1;

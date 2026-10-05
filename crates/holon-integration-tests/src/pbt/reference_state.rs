@@ -723,6 +723,9 @@ pub struct RemoteListRefState {
     /// id -> cells in [`crate::pbt::remote_list_fixture::PROJECTION`] order
     /// WITHOUT the leading id (the id is the key).
     rows: BTreeMap<String, Vec<String>>,
+    /// ids the peer's list holds more than one entry under. The mirror keeps
+    /// the first entry's cells; each id is one refusal per round.
+    duplicated: BTreeSet<String>,
     /// Monotonic label allocator, so an `Add` never reuses a label a `Remove`
     /// freed and silently folds into a surviving row.
     next_label: u64,
@@ -770,8 +773,9 @@ impl RemoteListRefState {
             &cell(mutation.columns(), "label"),
             &cell(mutation.columns(), "bucket"),
         );
+        use holon_pbt_core::capabilities::RemoteListMutation;
         match mutation {
-            holon_pbt_core::capabilities::RemoteListMutation::Add { .. } => {
+            RemoteListMutation::Add { .. } | RemoteListMutation::AuthorLocally { .. } => {
                 let cells = crate::pbt::remote_list_fixture::PROJECTION[1..]
                     .iter()
                     .map(|name| cell(mutation.columns(), name))
@@ -779,10 +783,29 @@ impl RemoteListRefState {
                 self.rows.insert(id, cells);
                 self.next_label += 1;
             }
-            holon_pbt_core::capabilities::RemoteListMutation::Remove { .. } => {
+            RemoteListMutation::Remove { .. } => {
                 self.rows.remove(&id);
+                self.duplicated.remove(&id);
+            }
+            RemoteListMutation::AddDuplicate { .. } => {
+                assert!(
+                    self.rows.contains_key(&id),
+                    "the reference model duplicates {id}, which the peer does not hold"
+                );
+                self.duplicated.insert(id);
             }
         }
+    }
+
+    /// Refusals every round reports: one per duplicated id.
+    pub fn expected_refusals(&self) -> usize {
+        self.duplicated.len()
+    }
+
+    /// A reboot rebuilds the fixture peer from the mirror, which holds only
+    /// the first entry under each key.
+    pub fn reboot_reseeds_peer_from_mirror(&mut self) {
+        self.duplicated.clear();
     }
 
     /// The peer's declared list, as `[id, ..cells]` in projection order,

@@ -40,7 +40,7 @@ fields:
   - { name: id, sql_type: TEXT, primary_key: true }
   - { name: name, sql_type: TEXT }
   - { name: cat, sql_type: TEXT }
-  - { name: count, sql_type: REAL, nullable: true }
+  - { name: count, sql_type: TEXT, nullable: true }
   - { name: checked, sql_type: INTEGER }
   - { name: deleted_at, sql_type: TEXT, nullable: true }
   - { name: last_seen_remote, sql_type: TEXT, nullable: true }
@@ -110,8 +110,19 @@ struct Conn {
     /// The identity-bearing columns of `n`, as both legs spell them.
     identity: fn(u8) -> Vec<(&'static str, Value)>,
     merge_column: &'static str,
+    /// Merge value `v` as the mirror column reads it back.
+    local_merge: fn(i64) -> Value,
+    /// Merge value `v` as the peer's JSON carries it.
+    remote_merge: fn(i64) -> Value,
     tombstone_column: &'static str,
     watermark_column: &'static str,
+}
+
+/// Shopping amounts are free text, compared as the peer's own spelling.
+const AMOUNTS: [&str; 4] = ["1", "2kg", "0,5 l", "4 Zehen"];
+
+fn amount(v: i64) -> Value {
+    Value::String(AMOUNTS[v as usize].into())
 }
 
 fn compile(connection: &str, type_yaml: &str, spec_yaml: &str) -> Arc<CompiledListSync> {
@@ -132,6 +143,8 @@ fn shopping() -> Conn {
             ]
         },
         merge_column: "count",
+        local_merge: amount,
+        remote_merge: amount,
         tombstone_column: "deleted_at",
         watermark_column: "last_seen_remote",
     }
@@ -144,6 +157,10 @@ fn tasks() -> Conn {
         row_id: |n| format!("todo-task:{n}"),
         identity: |n| vec![("content", Value::String(format!("task {n}")))],
         merge_column: "day_order",
+        // A REAL column reads the peer's whole number back as a float; the
+        // merge comparison has to see through that difference.
+        local_merge: |v| Value::Float(v as f64),
+        remote_merge: Value::Integer,
         tombstone_column: "removed_at",
         watermark_column: "synced_at",
     }
@@ -217,9 +234,7 @@ fn tombstone_value(tomb: Tombstone) -> Value {
     }
 }
 
-/// The local mirror row for identity `n`. `count` is written as a float because
-/// that is what a `REAL` column reads back as, while the peer's JSON carries an
-/// integer — the difference the merge comparison has to see through.
+/// The local mirror row for identity `n`.
 fn local_row(
     conn: &Conn,
     n: u8,
@@ -233,7 +248,7 @@ fn local_row(
     for (column, value) in (conn.identity)(n) {
         columns.insert(column.into(), value);
     }
-    columns.insert(conn.merge_column.into(), Value::Float(count as f64));
+    columns.insert(conn.merge_column.into(), (conn.local_merge)(count));
     columns.insert("checked".into(), Value::Integer(i64::from(checked)));
     columns.insert(conn.tombstone_column.into(), tombstone_value(tomb));
     columns.insert(
@@ -258,7 +273,7 @@ fn remote_row(conn: &Conn, n: u8, count: i64, checked: bool) -> holon_api::entit
     for (column, value) in (conn.identity)(n) {
         row.insert(column.into(), value);
     }
-    row.insert(conn.merge_column.into(), Value::Integer(count));
+    row.insert(conn.merge_column.into(), (conn.remote_merge)(count));
     row.insert("checked".into(), Value::Integer(i64::from(checked)));
     row
 }
@@ -503,9 +518,10 @@ proptest! {
         }
     }
 
-    /// The peer's number and the column's read-back spelling of it are the same
-    /// number. Without that, every round would rewrite the merge column and a
-    /// quiet list would look permanently busy.
+    /// The peer's value and the column's read-back spelling of it compare
+    /// equal: a free-text amount as the same text, a number as the same number.
+    /// Without that, every round would rewrite the merge column and a quiet
+    /// list would look permanently busy.
     #[test]
     fn an_unchanged_merge_column_is_not_rewritten(counts in prop::collection::vec(0i64..4, 1..6)) {
         for conn in connections() {

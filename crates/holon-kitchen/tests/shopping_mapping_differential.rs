@@ -48,8 +48,10 @@ struct Observed {
     version: (i64, i64),
     /// code → (icon, color)
     cats: BTreeMap<String, (Option<String>, Option<String>)>,
-    /// (name, cat) → (count, checked, the category resolved)
-    items: BTreeMap<(String, String), (Option<f64>, bool, bool)>,
+    /// (name, cat) → (amount text, checked, the category resolved)
+    items: BTreeMap<(String, String), (Option<String>, bool, bool)>,
+    /// How many `(name, cat)` keys held more than one active entry.
+    refused: usize,
 }
 
 /// The connection this sidecar declares, compiled against the shipped
@@ -83,11 +85,11 @@ fn observed_cats(rows: &[TypedRowSet]) -> BTreeMap<String, (Option<String>, Opti
         .collect()
 }
 
-fn as_f64(value: Option<&holon_api::Value>) -> Option<f64> {
+fn amount_text(value: Option<&holon_api::Value>) -> Option<String> {
     match value {
-        Some(holon_api::Value::Integer(n)) => Some(*n as f64),
-        Some(holon_api::Value::Float(f)) => Some(*f),
-        _ => None,
+        None | Some(holon_api::Value::Null) => None,
+        Some(holon_api::Value::String(s)) => Some(s.clone()),
+        Some(other) => panic!("an item row's `count` is not text (got {other:?})"),
     }
 }
 
@@ -116,7 +118,7 @@ fn observe(rows: &[TypedRowSet], snapshot: &ListSnapshot) -> Observed {
                 (
                     (text("name"), cat.clone()),
                     (
-                        as_f64(item.columns.get("count")),
+                        amount_text(item.columns.get("count")),
                         checked,
                         cats.contains_key(&cat),
                     ),
@@ -125,6 +127,7 @@ fn observe(rows: &[TypedRowSet], snapshot: &ListSnapshot) -> Observed {
             .collect(),
         version: (snapshot.version(), picked),
         cats,
+        refused: snapshot.refusals().len(),
     }
 }
 
@@ -142,10 +145,12 @@ fn through_the_sidecar(
 
 // ------------------------------------------------------------------ the model
 
-/// The parse this increment deletes, transcribed. Nothing here may be
-/// "improved": its job is to state what the old behaviour WAS.
+/// The bespoke parse the mapping replaced, plus the rulings made since, each
+/// named by its bugfunnel entry. Nothing else here may be "improved": its job
+/// is to state what the behaviour IS MEANT to be.
 mod model {
     use std::collections::BTreeMap;
+    use std::collections::BTreeSet;
 
     use anyhow::Result;
     use serde_json::Map;
@@ -173,7 +178,7 @@ mod model {
     struct Item {
         name: String,
         cat: String,
-        count: Option<f64>,
+        count: Option<String>,
         checked: bool,
     }
 
@@ -186,16 +191,18 @@ mod model {
         };
 
         let mut items: BTreeMap<(String, String), Item> = BTreeMap::new();
+        let mut refused: BTreeSet<(String, String)> = BTreeSet::new();
         for value in required_array(response, "items")? {
             let record = value
                 .as_object()
                 .ok_or_else(|| anyhow::anyhow!("`items` holds a non-object entry"))?;
-            fold(
+            fold_active(
                 &mut items,
+                &mut refused,
                 Item {
                     name: required_name(record.get("name"))?,
                     cat: required_cat(record.get("cat"))?,
-                    count: optional_count(record.get("count"))?,
+                    count: optional_amount(record.get("count"))?,
                     checked: false,
                 },
             );
@@ -204,18 +211,22 @@ mod model {
             let record = value
                 .as_object()
                 .ok_or_else(|| anyhow::anyhow!("`pickedItems['{name}']` is not an object"))?;
-            fold(
+            fold_picked(
                 &mut items,
                 Item {
                     name: required_name(Some(&Json::String(name.to_string())))?,
                     cat: required_cat(record.get("cat"))?,
-                    count: optional_count(record.get("count"))?,
+                    count: optional_amount(match record.get("pickedCount") {
+                        None | Some(Json::Null) => record.get("count"),
+                        picked_count => picked_count,
+                    })?,
                     checked: true,
                 },
             );
         }
 
         Ok(Observed {
+            refused: refused.len(),
             version: (list, picked),
             cats: by_code
                 .iter()
@@ -233,13 +244,29 @@ mod model {
         })
     }
 
-    fn fold(items: &mut BTreeMap<(String, String), Item>, item: Item) {
+    /// Entry `2026-10-05-a-free-text-shopping-amount-stops-all-shopping-sync`:
+    /// amounts are free text, so a fold adds none up. The peer names an item
+    /// by its name, so a second active entry for one `(name, cat)` is skipped:
+    /// the first by list position stays, and the key is counted as refused.
+    fn fold_active(
+        items: &mut BTreeMap<(String, String), Item>,
+        refused: &mut BTreeSet<(String, String)>,
+        item: Item,
+    ) {
+        let key = (item.name.clone(), item.cat.clone());
+        if items.contains_key(&key) {
+            refused.insert(key);
+        } else {
+            items.insert(key, item);
+        }
+    }
+
+    /// Picked entries come after every active one, and an active entry's
+    /// amount is the one still to buy.
+    fn fold_picked(items: &mut BTreeMap<(String, String), Item>, item: Item) {
         let key = (item.name.clone(), item.cat.clone());
         match items.get_mut(&key) {
-            Some(held) => {
-                held.count = Some(held.count.unwrap_or(1.0) + item.count.unwrap_or(1.0));
-                held.checked |= item.checked;
-            }
+            Some(held) => held.checked = true,
             None => {
                 items.insert(key, item);
             }
@@ -283,15 +310,14 @@ mod model {
         }
     }
 
-    fn optional_count(value: Option<&Json>) -> Result<Option<f64>> {
+    /// Entry `2026-10-05-a-free-text-shopping-amount-stops-all-shopping-sync`:
+    /// the app writes an amount as free text; a number is its decimal text.
+    fn optional_amount(value: Option<&Json>) -> Result<Option<String>> {
         match value {
             None | Some(Json::Null) => Ok(None),
-            Some(Json::Number(n)) => {
-                Ok(Some(n.as_f64().ok_or_else(|| {
-                    anyhow::anyhow!("`count` is not representable")
-                })?))
-            }
-            Some(other) => anyhow::bail!("`count` must be a number, got {other}"),
+            Some(Json::String(s)) => Ok(Some(s.clone())),
+            Some(Json::Number(n)) => Ok(Some(n.to_string())),
+            Some(other) => anyhow::bail!("an amount must be text or a number, got {other}"),
         }
     }
 
@@ -373,14 +399,21 @@ fn captured() -> Vec<Json> {
                            "pickedItemsVersion": 9, "options": {"cats": []}}),
         serde_json::json!({"items": [], "pickedItems": {}, "version": 3,
                            "pickedItemsVersion": null, "options": {"cats": []}}),
-        // The same key twice: counts fold, checked wins.
-        serde_json::json!({"items": [{"name": "Milk", "cat": "R"}, {"name": "Milk", "cat": "R", "count": 4}],
-                           "pickedItems": {"Milk": {"cat": "R"}}, "version": 1,
-                           "options": {"cats": ["R"]}}),
+        // Active and picked under one key: one row, checked, carrying the
+        // amount still to buy.
+        serde_json::json!({"items": [{"name": "Milk", "cat": "R", "count": "2kg"}],
+                           "pickedItems": {"Milk": {"cat": "R", "pickedCount": "500g"}},
+                           "version": 1, "options": {"cats": ["R"]}}),
+        // Free-text amounts, a picked item's `pickedCount`, and a number.
+        serde_json::json!({"items": [{"name": "Milk", "cat": "R", "count": "2"},
+                                     {"name": "Mehl", "cat": "R", "count": "2kg"},
+                                     {"name": "Eier", "cat": "R", "count": 6}],
+                           "pickedItems": {"Butter": {"cat": "R", "pickedCount": "500g"}},
+                           "version": 1, "options": {"cats": ["R"]}}),
         // A cat outside the published vocabulary must not fail the fetch.
         serde_json::json!({"items": [{"name": "Milk", "cat": "ZZ"}], "pickedItems": {},
                            "version": 1, "options": {"cats": ["R"]}}),
-        // Refusals the old parse made.
+        // Refusals.
         serde_json::json!({"items": [], "pickedItems": {}, "version": 1,
                            "options": {"cats": ["R", "R_icon_color"]}}),
         serde_json::json!({"items": [], "pickedItems": {}, "version": 1, "options": {"cats": ["_x"]}}),
@@ -392,7 +425,10 @@ fn captured() -> Vec<Json> {
                            "version": 1, "options": {"cats": ["R"]}}),
         serde_json::json!({"items": [{"name": "Milk"}], "pickedItems": {}, "version": 1,
                            "options": {"cats": ["R"]}}),
-        serde_json::json!({"items": [{"name": "Milk", "cat": "R", "count": "2"}],
+        // The same active key twice: the first stays, the key is reported.
+        serde_json::json!({"items": [{"name": "Milk", "cat": "R"}, {"name": "Milk", "cat": "R", "count": 4}],
+                           "pickedItems": {}, "version": 1, "options": {"cats": ["R"]}}),
+        serde_json::json!({"items": [{"name": "Milk", "cat": "R", "count": true}],
                            "pickedItems": {}, "version": 1, "options": {"cats": ["R"]}}),
         serde_json::json!({"items": [], "pickedItems": {}, "version": "7", "options": {"cats": []}}),
         serde_json::json!({"items": [], "pickedItems": {}, "options": {"cats": []}}),
@@ -470,17 +506,21 @@ fn count() -> impl Strategy<Value = Json> {
         Just(Json::Null),
         (0i64..5).prop_map(|n| serde_json::json!(n)),
         (-3.0f64..3.0).prop_map(|f| serde_json::json!(f)),
-        Just(serde_json::json!("2")),
+        prop::sample::select(vec!["2", "1", "", "2kg", "500g", "0,5 l", "4 Zehen"])
+            .prop_map(|s| serde_json::json!(s)),
+        "[\\PC]{0,8}".prop_map(Json::String),
+        Just(serde_json::json!(true)),
     ]
 }
 
 /// The `(name, cat)` a generated item lands on.
 ///
 /// Drawn from a SMALL hot pool on purpose: `(name, cat)` is this peer's whole
-/// identity, so two items sharing one is the duplicate-fold arm — the arm that
-/// sums counts and ORs `checked`. Drawing names widely made that arm a rare
-/// accident that ~256 default cases missed, leaving it defended only by the
-/// captured examples. The wide, adversarial draw stays reachable as the tail.
+/// identity, so an active and a picked item sharing one is the fold arm — the
+/// arm that picks the amount and ORs `checked`. Drawing names widely made that
+/// arm a rare accident that ~256 default cases missed, leaving it defended only
+/// by the captured examples. The wide, adversarial draw stays reachable as the
+/// tail.
 fn item_key() -> impl Strategy<Value = (String, String)> {
     prop_oneof![
         6 => Just(("Milk".to_string(), "R".to_string())),
@@ -502,20 +542,45 @@ fn active_item() -> impl Strategy<Value = Json> {
     })
 }
 
+/// A picked entry carries its amount as `pickedCount`; `count` appears beside
+/// it only when the app keeps the amount on checking.
 fn picked_entry() -> impl Strategy<Value = (String, Json)> {
-    (item_key(), count(), any::<bool>()).prop_map(|((name, cat), c, with_count)| {
-        let mut o = serde_json::Map::new();
-        o.insert("cat".into(), Json::String(cat));
-        if with_count {
-            o.insert("count".into(), c);
+    (
+        item_key(),
+        prop::option::of(count()),
+        prop::option::of(count()),
+    )
+        .prop_map(|((name, cat), picked_count, c)| {
+            let mut o = serde_json::Map::new();
+            o.insert("cat".into(), Json::String(cat));
+            if let Some(p) = picked_count {
+                o.insert("pickedCount".into(), p);
+            }
+            if let Some(c) = c {
+                o.insert("count".into(), c);
+            }
+            (name, Json::Object(o))
+        })
+}
+
+/// The active list. The peer names an item by its name, so a repeated
+/// `(name, cat)` is malformed; it stays reachable as the rare tail.
+fn active_items() -> impl Strategy<Value = Vec<Json>> {
+    (prop::collection::vec(active_item(), 0..7), 0u8..8).prop_map(|(items, keep_duplicates)| {
+        if keep_duplicates == 0 {
+            return items;
         }
-        (name, Json::Object(o))
+        let mut seen = std::collections::BTreeSet::new();
+        items
+            .into_iter()
+            .filter(|item| seen.insert((item["name"].to_string(), item["cat"].to_string())))
+            .collect()
     })
 }
 
 fn body() -> impl Strategy<Value = Json> {
     (
-        prop::collection::vec(active_item(), 0..7),
+        active_items(),
         prop::collection::vec(picked_entry(), 0..4),
         0i64..50,
         prop::option::of(prop::option::of(0i64..50)),

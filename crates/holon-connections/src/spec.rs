@@ -66,6 +66,11 @@ pub struct ListSyncSpec {
     /// rather than remembered at each call site.
     #[serde(default)]
     pub latch_columns: Vec<String>,
+    /// Row type under which the pull mapping reports entries it skipped, each
+    /// row carrying a text `reason` column. Absent where the peer's list can
+    /// never hold an entry the mapping must skip.
+    #[serde(default)]
+    pub refusal_row_type: Option<String>,
 }
 
 /// The freshness argument a connection's pull carries, under the name

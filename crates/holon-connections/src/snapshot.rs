@@ -55,6 +55,7 @@ pub struct ListSnapshot {
     envelope: BTreeMap<String, Value>,
     version: i64,
     fetched_at: String,
+    refusals: Vec<String>,
 }
 
 impl ListSnapshot {
@@ -101,11 +102,25 @@ impl ListSnapshot {
             }
         }
 
+        let refusals = match &spec.refusal_row_type {
+            None => Vec::new(),
+            Some(refusal_type) => rows_of(rows, refusal_type)
+                .map(|row| match row.get("reason") {
+                    Some(Value::String(reason)) if !reason.trim().is_empty() => Ok(reason.clone()),
+                    other => anyhow::bail!(
+                        "a `{refusal_type}` row carries no usable `reason` (got {other:?}); a \
+                         skipped entry is reported by name or not at all"
+                    ),
+                })
+                .collect::<Result<Vec<_>>>()?,
+        };
+
         Ok(Self {
             rows: keyed,
             envelope,
             version,
             fetched_at: fetched_at.into(),
+            refusals,
         })
     }
 
@@ -123,6 +138,12 @@ impl ListSnapshot {
     /// The one monotonic number this crate compares.
     pub fn version(&self) -> i64 {
         self.version
+    }
+
+    /// Why each entry the mapping skipped was skipped, in the order the mapping
+    /// emitted them. The rows of the snapshot are the entries that were kept.
+    pub fn refusals(&self) -> &[String] {
+        &self.refusals
     }
 
     pub fn len(&self) -> usize {

@@ -210,6 +210,9 @@ pub struct SyncOutcome {
     /// True when the verifying re-pull found pushes still outstanding and a
     /// second commit was needed.
     pub retried: bool,
+    /// Entries of the peer's list the pull mapping skipped, with the reason
+    /// for each.
+    pub refused: Vec<String>,
 }
 
 /// Run one round: pull the list, reconcile it against the local rows, commit
@@ -247,6 +250,7 @@ pub async fn sync_once(
                 pulled: snapshot.len(),
                 committed,
                 retried,
+                refused: snapshot.refusals().to_vec(),
             });
         }
         anyhow::ensure!(

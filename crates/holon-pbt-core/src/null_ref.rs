@@ -330,6 +330,10 @@ impl RefRemoteListSync for NullRef {
     fn remote_list_expected_rows(&self) -> Vec<Vec<String>> {
         panic!("class-2: invariant read RefRemoteListSync::remote_list_expected_rows")
     }
+
+    fn remote_list_expected_refusals(&self) -> usize {
+        panic!("class-2: invariant read RefRemoteListSync::remote_list_expected_refusals")
+    }
 }
 
 #[allow(unused_variables)]
