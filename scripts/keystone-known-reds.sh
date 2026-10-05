@@ -179,8 +179,8 @@ for log in "$@"; do
         function parse_status(line,    head) {
             if (!match(line, /^ *[A-Z][A-Za-z0-9 +\/-]* \[[^]]*\] /)) return 0
             head = substr(line, 1, RLENGTH)
-            if (index(head, " [") < 13) return 0
-            LABEL = head; sub(/^ +/, "", LABEL); sub(/ \[[^]]*\] $/, "", LABEL)
+            LABEL = head; sub(/^ +/, "", LABEL); sub(/ +\[[^]]*\] $/, "", LABEL)
+            if (index(head, " [") != (length(LABEL) < 12 ? 13 : length(LABEL) + 1)) return 0
             if (LABEL ~ /[a-z]/ && LABEL !~ /^(Summary|Stress test)$/) return 0
             UNIT = substr(line, RLENGTH + 1)
             STRESS = ""
@@ -293,7 +293,7 @@ for log in "$@"; do
             if ((OWNER in passed) && !(OWNER in flaky_failed)) { getline; next }
             key = scope() SUBSEP thread_of($0)
             if ((key in expected) && expected[key] == panics[key]) next
-            loc = $0; sub(/^.*panicked at /, "", loc); sub(/:$/, "", loc)
+            loc = $0; sub(/^.*panicked at /, "", loc); sub(/\r$/, "", loc); sub(/:$/, "", loc)
             if ((getline msg) > 0) { sub(/^ +/, "", msg); print loc "\t" msg }
             next
         }' q="'" signals="HUP|INT|QUIT|ILL|TRAP|ABRT|BUS|FPE|KILL|USR1|SEGV|USR2|PIPE|ALRM|TERM" "$log" "$log" >"$sigs_file" \

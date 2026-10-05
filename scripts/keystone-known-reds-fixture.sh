@@ -402,14 +402,14 @@ expect_outcome nextest-should-panic/leak 1 '^ *1 FAIL + LEAK: holon::leaky boom_
     "$work/nextest-should-panic.log"
 # A label outside nextest's vocabulary stops the run instead of being guessed.
 cat >"$work/unknown-label.log" <<'EOF'
-   TRY 1 FROB [   0.120s] (1/1) holon::flaky_suite sometimes
+  TRY 1 FROB [   0.120s] (1/1) holon::flaky_suite sometimes
      Summary [   0.355s] 1 tests run: 0 passed, 1 failed, 0 skipped
 EOF
 expect_outcome unknown-label 3 'UNKNOWN nextest status label "TRY 1 FROB"' "$work/unknown-label.log"
 # A passing retry may end leaky or past its slow bound; neither is a failure.
 cat >"$work/try-success-labels.log" <<'EOF'
    TRY 2 TMPASS [ 120.034s] (1/2) holon-gpui::bin slowish
-   TRY 2 LEAK [   0.312s] (2/2) holon-gpui::bin leaky
+  TRY 2 LEAK [   0.312s] (2/2) holon-gpui::bin leaky
      Summary [ 120.355s] 2 tests run: 2 passed, 0 skipped
 EOF
 expect_outcome try-success-labels 0 '^\[known-reds\] PASS: 1 green run' "$work/try-success-labels.log"
@@ -441,7 +441,7 @@ expect_outcome stress-index/known-row 1 '^WARN known-red \[turso-block-query-sou
 # a later try (`FLAKY`) did not fail, and the panic of its failed try is no
 # signature.
 cat >"$work/retry-flaky-pass.log" <<'EOF'
-   TRY 1 FAIL [   0.120s] (1/2) holon::flaky_suite sometimes
+  TRY 1 FAIL [   0.120s] (1/2) holon::flaky_suite sometimes
   stderr ───
     thread 'sometimes' (2) panicked at crates/holon/tests/flaky_suite.rs:10:5:
     REAL ONLY ON TRY 1: the first attempt lost the race
@@ -452,17 +452,17 @@ cat >"$work/retry-flaky-pass.log" <<'EOF'
 EOF
 expect_outcome retry-flaky-pass 0 '^\[known-reds\] PASS: 1 green run' "$work/retry-flaky-pass.log"
 cat >"$work/retry-final-fail.log" <<'EOF'
-     TRY 1 SLOW [>120.000s] (1/3) holon::turso_block_query_source_round_trip_pbt round_trip
+  TRY 1 SLOW [>120.000s] (1/3) holon::turso_block_query_source_round_trip_pbt round_trip
   TRY 1 TRMNTG [>120.000s] (1/3) holon::turso_block_query_source_round_trip_pbt round_trip
-     TRY 1 TMT [ 120.034s] (1/3) holon::turso_block_query_source_round_trip_pbt round_trip
-     TRY 2 TMT [ 120.034s] (1/3) holon::turso_block_query_source_round_trip_pbt round_trip
+   TRY 1 TMT [ 120.034s] (1/3) holon::turso_block_query_source_round_trip_pbt round_trip
+   TRY 2 TMT [ 120.034s] (1/3) holon::turso_block_query_source_round_trip_pbt round_trip
    TRY 1 LKFAIL [   0.312s] (2/3) holon-gpui::layout_smoke leaky
-    TRY 2 SIG 9 [   0.312s] (2/3) holon-gpui::layout_smoke leaky
-    TRY 1 FAIL [   0.120s] (3/3) holon::flaky_suite never
+ TRY 2 SIG 9 [   0.312s] (2/3) holon-gpui::layout_smoke leaky
+  TRY 1 FAIL [   0.120s] (3/3) holon::flaky_suite never
   stderr ───
     thread 'never' (2) panicked at crates/holon/tests/flaky_suite.rs:20:5:
     REAL ON EVERY TRY: the race is lost every time
-    TRY 2 FAIL [   0.120s] (3/3) holon::flaky_suite never
+  TRY 2 FAIL [   0.120s] (3/3) holon::flaky_suite never
   stderr ───
     thread 'never' (2) panicked at crates/holon/tests/flaky_suite.rs:20:5:
     REAL ON EVERY TRY: the race is lost every time
@@ -474,10 +474,26 @@ expect_outcome retry-final-fail/signal 1 '^ *1 ABORT SIG 9: holon-gpui::layout_s
     "$work/retry-final-fail.log"
 expect_outcome retry-final-fail/panic 1 '^ *2 REAL ON EVERY TRY: the race is lost every time$' \
     "$work/retry-final-fail.log"
+# A passing test's own captured output can look like a status line; only
+# nextest's fixed label column counts, so it must not read as a label.
+cat >"$work/captured-output-lines.log" <<'EOF'
+        PASS [   0.010s] (1/2) holon-capability::certify prints_report
+    TIGHTENING [org] foo
+    VIOLATION  [logseq] bar
+ FAIL + LEAK [   6.486s] (2/2) holon-app::integration_toggle_round_trip a_dispatched_switch_reaches_the_seeded_section_without_a_manual_reprojection
+  stderr ───
+    thread 'a_dispatched_switch_reaches_the_seeded_section_without_a_manual_reprojection' (2) panicked at crates/holon-app/tests/integration_toggle_round_trip.rs:83:9:
+    the seeded Integrations section never showed 'todoist' as true — it is still false. The operation wrote the state file, so the break is between the store's signal and the mirror.
+     Summary [  25.469s] 2 tests run: 1 passed, 1 failed, 0 skipped
+EOF
+expect_outcome captured-output-lines 0 '^\[known-reds\] PASS-WITH-NOTE: 1 known-red' "$work/captured-output-lines.log"
+# CRLF line endings must not hide a known panic's location.
+sed '/panicked at/s/$/\r/' "$work/captured-output-lines.log" >"$work/crlf.log"
+expect_outcome crlf 0 '^\[known-reds\] PASS-WITH-NOTE: 1 known-red' "$work/crlf.log"
 # A failed setup script fails the run before any test does.
 cat >"$work/setup-fail.log" <<'EOF'
-   SETUP PASS [   0.100s] db-seed: ./scripts/seed.sh
- SETUP LKFAIL [   0.312s] leaky-script: ./scripts/leaky.sh
+  SETUP PASS [   0.100s] db-seed: ./scripts/seed.sh
+SETUP LKFAIL [   0.312s] leaky-script: ./scripts/leaky.sh
      Summary [   1.000s] 0 tests run: 0 passed, 0 skipped
 EOF
 expect_outcome setup-fail 1 '^ *1 SETUP LEAK-FAIL: leaky-script: ./scripts/leaky.sh$' "$work/setup-fail.log"
