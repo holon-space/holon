@@ -428,7 +428,10 @@ async fn dispatch(controller: &mut holon_filesystem::FileSyncController, msg: Op
                 .await;
             // A document that resolved to no tracked file escalates to the
             // bulk pass. Dropping this verdict would hide an amplification.
-            if verdicts.iter().any(|(_, v)| matches!(v, Ok(false))) {
+            if verdicts
+                .iter()
+                .any(|(_, v)| matches!(v, Ok(holon_filesystem::BlockChangeVerdict::NeedsBulkPass)))
+            {
                 controller
                     .re_render_all_tracked(&HashSet::new())
                     .await

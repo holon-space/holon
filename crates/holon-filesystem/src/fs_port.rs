@@ -27,6 +27,73 @@ pub struct FileMeta {
     pub len: u64,
 }
 
+/// What a file was when Holon read it: the basis a write-back over it is
+/// checked against. Only an adapter mints one, from the read itself, so a
+/// write-back cannot name a basis it never read.
+///
+/// The file is identified by inode (where the platform has one), size and
+/// mtime: an atomic replacement changes the inode, an in-place edit the mtime.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileStamp(Basis);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Basis {
+    Absent,
+    Present {
+        inode: Option<u64>,
+        len: u64,
+        modified: SystemTime,
+    },
+}
+
+impl FileStamp {
+    pub(crate) fn absent() -> Self {
+        Self(Basis::Absent)
+    }
+
+    pub(crate) fn present(inode: Option<u64>, len: u64, modified: SystemTime) -> Self {
+        Self(Basis::Present {
+            inode,
+            len,
+            modified,
+        })
+    }
+
+    fn of_metadata(meta: &std::fs::Metadata) -> std::io::Result<Self> {
+        #[cfg(unix)]
+        let inode = Some(std::os::unix::fs::MetadataExt::ino(meta));
+        #[cfg(not(unix))]
+        let inode = None;
+        Ok(Self::present(inode, meta.len(), meta.modified()?))
+    }
+
+    /// The stamp of whatever `path` is now.
+    fn current_blocking(path: &Path) -> std::io::Result<Self> {
+        match std::fs::metadata(path) {
+            Ok(meta) => Self::of_metadata(&meta),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::absent()),
+            Err(e) => Err(e),
+        }
+    }
+}
+
+/// A file's text and the stamp of the file it came from. `content` is `None`
+/// exactly when the file was absent.
+#[derive(Debug, Clone)]
+pub struct StampedRead {
+    pub content: Option<String>,
+    pub stamp: FileStamp,
+}
+
+/// Outcome of [`FileSystem::write_if_unchanged`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use]
+pub enum WriteBack {
+    Written,
+    /// The file no longer matched the stamp; nothing was written.
+    Changed,
+}
+
 /// "Where the bytes live" — see ADR 0011.
 ///
 /// `write` is whole-buffer by design: there is no streaming / file-handle
@@ -36,6 +103,22 @@ pub struct FileMeta {
 pub trait FileSystem: Send + Sync {
     async fn read_to_string(&self, path: &Path) -> std::io::Result<String>;
     async fn read(&self, path: &Path) -> std::io::Result<Vec<u8>>;
+    /// Read `path` as text together with the [`FileStamp`] of the file the
+    /// text came from. An absent file is not an error.
+    async fn read_stamped(&self, path: &Path) -> std::io::Result<StampedRead>;
+    /// [`FileSystem::write`] that writes only while `path` still matches
+    /// `expected`: the target is re-checked after the new bytes are staged,
+    /// immediately before they replace it. A user edit or delete that lands
+    /// between the read and the write is therefore never overwritten or
+    /// recreated, except inside the window between that check and the rename.
+    ///
+    /// Every write-back of a file Holon read goes through here.
+    async fn write_if_unchanged(
+        &self,
+        path: &Path,
+        expected: &FileStamp,
+        contents: &[u8],
+    ) -> std::io::Result<WriteBack>;
     /// Replace `path`'s contents ATOMICALLY: a reader (our own ingest
     /// included) sees either the complete previous file or the complete new
     /// one, never an interior — ADR 0030 D3.1, whose motivation is that a torn
@@ -113,6 +196,30 @@ impl FileSystem for RealFileSystem {
         tokio::fs::read(path)
             .await
             .map_err(|e| at_path("reading", path, e))
+    }
+
+    async fn read_stamped(&self, path: &Path) -> std::io::Result<StampedRead> {
+        let owned = path.to_path_buf();
+        tokio::task::spawn_blocking(move || read_stamped_blocking(&owned))
+            .await
+            .map_err(|e| std::io::Error::other(format!("read join error: {e}")))?
+            .map_err(|e| at_path("reading", path, e))
+    }
+
+    async fn write_if_unchanged(
+        &self,
+        path: &Path,
+        expected: &FileStamp,
+        contents: &[u8],
+    ) -> std::io::Result<WriteBack> {
+        let path = path.to_path_buf();
+        let expected = expected.clone();
+        let contents = contents.to_vec();
+        tokio::task::spawn_blocking(move || {
+            replace_via_temp(&path, &contents, Barrier::None, Some(&expected))
+        })
+        .await
+        .map_err(|e| std::io::Error::other(format!("write join error: {e}")))?
     }
 
     async fn write(&self, path: &Path, contents: &[u8]) -> std::io::Result<()> {
@@ -278,14 +385,40 @@ impl DurabilityRecorder {
 /// A symlink at `path` is REPLACED, not followed, so the bytes land exactly
 /// where the caller's containment proof says they do.
 pub fn write_atomic_blocking(path: &Path, contents: &[u8]) -> std::io::Result<()> {
-    replace_via_temp(path, contents, Barrier::None)
+    let written = replace_via_temp(path, contents, Barrier::None, None)?;
+    assert_eq!(written, WriteBack::Written, "an unconditional write writes");
+    Ok(())
 }
 
 /// [`write_atomic_blocking`] that also survives a power loss once it returns:
 /// the temp's bytes reach the device before the rename, and the rename
 /// reaches it before this returns.
 pub fn write_durable_blocking(path: &Path, contents: &[u8]) -> std::io::Result<()> {
-    replace_via_temp(path, contents, Barrier::Durable)
+    let written = replace_via_temp(path, contents, Barrier::Durable, None)?;
+    assert_eq!(written, WriteBack::Written, "an unconditional write writes");
+    Ok(())
+}
+
+/// The stamp comes from the open handle, so it describes the file the text
+/// was read from even when the path is replaced during the read.
+fn read_stamped_blocking(path: &Path) -> std::io::Result<StampedRead> {
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(StampedRead {
+                content: None,
+                stamp: FileStamp::absent(),
+            });
+        }
+        Err(e) => return Err(e),
+    };
+    let stamp = FileStamp::of_metadata(&file.metadata()?)?;
+    let mut content = String::new();
+    std::io::Read::read_to_string(&mut file, &mut content)?;
+    Ok(StampedRead {
+        content: Some(content),
+        stamp,
+    })
 }
 
 /// Make `file`'s data, open at `path`, survive a power loss.
@@ -309,9 +442,14 @@ enum Barrier {
     Durable,
 }
 
-fn replace_via_temp(path: &Path, contents: &[u8], barrier: Barrier) -> std::io::Result<()> {
+fn replace_via_temp(
+    path: &Path,
+    contents: &[u8],
+    barrier: Barrier,
+    expected: Option<&FileStamp>,
+) -> std::io::Result<WriteBack> {
     let temp = atomic_temp_path(path)?;
-    let replace = || -> std::io::Result<()> {
+    let replace = || -> std::io::Result<WriteBack> {
         let mut file = std::fs::File::create(&temp)?;
         std::io::Write::write_all(&mut file, contents)?;
         // A replacement must not silently reset a file's mode; the target's
@@ -324,13 +462,19 @@ fn replace_via_temp(path: &Path, contents: &[u8], barrier: Barrier) -> std::io::
             record_durability_event(DurabilityEvent::FileSynced(temp.clone()));
         }
         drop(file);
+        if let Some(expected) = expected {
+            if FileStamp::current_blocking(path)? != *expected {
+                std::fs::remove_file(&temp)?;
+                return Ok(WriteBack::Changed);
+            }
+        }
         std::fs::rename(&temp, path)?;
         record_durability_event(DurabilityEvent::Replaced(path.to_path_buf()));
         if barrier == Barrier::Durable {
             let parent = path.parent().filter(|p| !p.as_os_str().is_empty());
             sync_dir_blocking(parent.unwrap_or(Path::new(".")))?;
         }
-        Ok(())
+        Ok(WriteBack::Written)
     };
     replace()
         .inspect_err(|_| {
@@ -597,5 +741,58 @@ mod tests {
 
         let missing = fs.scan_directory(&dir.path().join("nope")).await.unwrap();
         assert!(missing.files.is_empty());
+    }
+
+    /// What the user does between Holon's read and its write-back.
+    fn interfere(path: &Path, how: &str) {
+        match how {
+            "untouched" => {}
+            "edited in place" => std::fs::write(path, b"* User edit, longer\n").unwrap(),
+            "replaced" => write_atomic_blocking(path, b"* Same len\n").unwrap(),
+            "deleted" => std::fs::remove_file(path).unwrap(),
+            "created" => std::fs::write(path, b"* User file\n").unwrap(),
+            other => unreachable!("{other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_write_back_lands_only_on_the_file_it_read() {
+        let fs = RealFileSystem;
+        for (start, how, expected) in [
+            (Some("* Same len\n"), "untouched", WriteBack::Written),
+            (Some("* Same len\n"), "edited in place", WriteBack::Changed),
+            (Some("* Same len\n"), "replaced", WriteBack::Changed),
+            (Some("* Same len\n"), "deleted", WriteBack::Changed),
+            (None, "untouched", WriteBack::Written),
+            (None, "created", WriteBack::Changed),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let file = dir.path().join("page.org");
+            if let Some(start) = start {
+                std::fs::write(&file, start).unwrap();
+            }
+            let read = fs.read_stamped(&file).await.unwrap();
+            assert_eq!(read.content.as_deref(), start);
+            interfere(&file, how);
+            let before = std::fs::read(&file).ok(); // ALLOW(ok): a deleted file is None
+
+            let outcome = fs
+                .write_if_unchanged(&file, &read.stamp, b"* Holon\n")
+                .await
+                .unwrap();
+
+            assert_eq!(outcome, expected, "file {how} after the read");
+            let after = std::fs::read(&file).ok(); // ALLOW(ok): a deleted file is None
+            match outcome {
+                WriteBack::Written => assert_eq!(after.as_deref(), Some(&b"* Holon\n"[..])),
+                WriteBack::Changed => assert_eq!(after, before, "a dropped write touched {how}"),
+            }
+            let debris: Vec<_> = std::fs::read_dir(dir.path())
+                .unwrap()
+                .map(|e| e.unwrap().file_name())
+                .filter(|n| n != "page.org")
+                .collect();
+            assert!(debris.is_empty(), "temp left behind: {debris:?}");
+        }
     }
 }

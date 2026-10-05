@@ -50,6 +50,8 @@ use crate::BaseKey;
 use crate::BaseStore;
 use crate::FileSystem;
 use crate::SyncBaseStore;
+use crate::fs_port::StampedRead;
+use crate::fs_port::WriteBack;
 use crate::ingest_progress;
 use crate::sync_ports::AliasRegistrar;
 use crate::sync_ports::BlockMatchStrategy;
@@ -732,6 +734,14 @@ enum HomeMembership {
     Untouched,
 }
 
+/// A file whose ingest bound blocks to ids the file does not carry yet.
+struct UnstampedFile {
+    bytes: String,
+    /// The stalled render of `bytes`: the same blocks, named by the ids the
+    /// store holds them under. The ingest's removal guard proved it drops none.
+    stamped: String,
+}
+
 pub struct FileSyncController {
     /// What we last wrote to (or confirmed on) disk, per file.
     /// Uses CanonicalPath to resolve macOS /var → /private/var symlinks,
@@ -882,6 +892,10 @@ pub struct FileSyncController {
     /// write-back can follow several retractions (a subtree re-home emits one
     /// `Remove` per descendant, and only the last of them renders).
     pending_removals: HashMap<EntityUri, HashSet<String>>,
+
+    /// Files whose ingest normalization stalled ([`StampChurn`]), while they
+    /// still hold the bytes that ingest parsed.
+    unstamped: HashMap<CanonicalPath, UnstampedFile>,
 
     /// 3-way text-content merger for the no-store conflict path. Present only
     /// when wired (production, via a transient LoroText impl). Consulted only
@@ -1186,6 +1200,7 @@ impl FileSyncController {
             fs,
             holder: HashMap::new(),
             pending_removals: HashMap::new(),
+            unstamped: HashMap::new(),
             text_merge: None,
             block_matcher: Arc::new(TieredMatcher),
             mount_registry: None,
@@ -2302,6 +2317,11 @@ impl FileSyncController {
         // (same single-sink-writer contract as the ingest path's flush).
         self.flush_downstream("after delete").await?;
 
+        // The document is gone, so a write-back it still owed is moot.
+        self.refused_writebacks.written(&document_uri);
+        if let Some(disclosure) = &self.writeback_disclosure {
+            disclosure.writeback_resumed(path);
+        }
         self.forget_file_state(canonical);
         // Also clear the diff base so a later re-create of the same document
         // id starts from an empty base (all blocks are creates), not from the
@@ -2690,6 +2710,7 @@ impl FileSyncController {
     /// Drop every per-file tracking entry for a vanished path.
     fn forget_file_state(&mut self, canonical: &CanonicalPath) {
         self.last_projection_doc.remove(canonical);
+        self.unstamped.remove(canonical);
         if let Some(docs) = &self.read_only_docs {
             for (doc_id, home) in &self.doc_home {
                 if home == canonical {
@@ -2789,6 +2810,9 @@ impl FileSyncController {
         }
         if let Some(v) = self.base_source.remove(from) {
             self.base_source.insert(to.clone(), v);
+        }
+        if let Some(v) = self.unstamped.remove(from) {
+            self.unstamped.insert(to.clone(), v);
         }
         if let Some(v) = self.ingest_quarantine.remove(from) {
             self.ingest_quarantine.insert(to.clone(), v);
@@ -4625,21 +4649,18 @@ impl FileSyncController {
             return Ok(IngestOutcome::Ingested);
         }
         let canonical = CanonicalPath::new(path);
-        let disk_content = match self.fs.read_to_string(path).await {
-            Ok(c) => c,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                // The file is gone. Usually the user removed it outside Holon and
-                // its document's blocks cascade — but a page rename's retire also
-                // removes a file, so `on_file_deleted` proves the vanished path
-                // owned the document before deleting anything.
-                self.on_file_deleted(path, &canonical).await?;
-                return Ok(IngestOutcome::Ingested);
-            }
-            Err(e) => {
-                return Err(e).with_context(|| {
-                    format!("[FileSyncController] Cannot read {}", path.display())
-                });
-            }
+        let basis = self
+            .fs
+            .read_stamped(path)
+            .await
+            .with_context(|| format!("[FileSyncController] Cannot read {}", path.display()))?;
+        let Some(disk_content) = basis.content.clone() else {
+            // The file is gone. Usually the user removed it outside Holon and
+            // its document's blocks cascade — but a page rename's retire also
+            // removes a file, so `on_file_deleted` proves the vanished path
+            // owned the document before deleting anything.
+            self.on_file_deleted(path, &canonical).await?;
+            return Ok(IngestOutcome::Ingested);
         };
 
         // A 0-byte file at a path Holon HOLDS CONTENT FOR is a save in flight:
@@ -6915,37 +6936,44 @@ impl FileSyncController {
         }
 
         if rendered != disk_content {
-            // TOCTOU guard: re-read the disk NOW. If it changed since we parsed
-            // it, a concurrent external write has landed new content — writing
-            // `rendered` (derived from a stale CDC cache) would wipe that
-            // external write off disk. Defer to the next on_file_changed
-            // invocation (FSEvents and the poll backstop will both fire for the
-            // new disk content), and stamp `last_projection` with the version
-            // we reconciled so the next diff sees the true external delta.
-            match self.fs.read_to_string(path).await {
-                Ok(now) if now != disk_content => {
-                    tracing::debug!(
-                        "[ORGSYNC_TOCTOU] {} disk changed during processing (parsed_len={} \
-                         disk_now_len={}); skipping write-back, stamping last_projection with \
-                         parsed content so next diff picks up the external delta.",
-                        path.display(),
-                        disk_content.len(),
-                        now.len(),
-                    );
-                    self.last_projection.insert(canonical.clone(), disk_content);
-                    return Ok(IngestOutcome::Ingested);
-                }
-                Ok(_) => {
-                    // The normalization write-back re-renders org bytes over the
-                    // ingested file. `on_file_changed` is `pub`, so containment
-                    // is proven here rather than inherited from the watcher's
-                    // provenance.
-                    let target = VaultPath::inside(&self.root_dir, path.to_path_buf())
-                        .context("ingest normalization write-back")?;
-                    if let Some(parent) = target.as_path().parent() {
-                        self.fs.create_dir_all(parent).await?;
+            // The normalization write-back re-renders org bytes over the
+            // ingested file. `on_file_changed` is `pub`, so containment is
+            // proven here rather than inherited from the watcher's provenance.
+            let target = VaultPath::inside(&self.root_dir, path.to_path_buf())
+                .context("ingest normalization write-back")?;
+            if let Some(parent) = target.as_path().parent() {
+                self.fs.create_dir_all(parent).await?;
+            }
+            let written =
+                match write_over_basis(&self.fs, target.as_path(), &basis, rendered.as_bytes())
+                    .await
+                {
+                    Err(e) if e.is::<StampChurn>() => {
+                        // The store holds the whole file, so this is a stalled
+                        // write-back, not a failed ingest. The store holds what
+                        // was parsed, so that is the base a later re-ingest
+                        // diffs against.
+                        self.disclose_stalled_writeback(&document_uri, path, &format!("{e:#}"));
+                        self.unstamped.insert(
+                            canonical.clone(),
+                            UnstampedFile {
+                                bytes: disk_content.clone(),
+                                stamped: rendered,
+                            },
+                        );
+                        self.last_projection
+                            .insert(canonical.clone(), disk_content.clone());
+                        return Ok(IngestOutcome::Ingested);
                     }
-                    self.fs.write(target.as_path(), rendered.as_bytes()).await?;
+                    other => other?,
+                };
+            match written {
+                WriteBack::Written => {
+                    self.unstamped.remove(&canonical);
+                    self.refused_writebacks.written(&document_uri);
+                    if let Some(disclosure) = &self.writeback_disclosure {
+                        disclosure.writeback_resumed(path);
+                    }
                     self.run_post_write_hook(path);
                     #[cfg(feature = "crash-injection")]
                     crate::crash_injection::reached("after_ingest_write_back");
@@ -6954,21 +6982,13 @@ impl FileSyncController {
                         path.display()
                     );
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    // Deleted after the blocks reached the store. Tracking the
-                    // ingested bytes lets the poll backstop and the watcher's
-                    // Remove cascade the delete; untracked, the page upsert's
-                    // identity pre-flight would write the file back.
-                    self.last_projection.insert(canonical.clone(), disk_content);
+                WriteBack::Changed => {
+                    // The store holds what was parsed, so that is the base the
+                    // re-ingest diffs the user's change against.
+                    self.last_projection
+                        .insert(canonical.clone(), disk_content.clone());
+                    self.schedule_reingest(&canonical, path, Some(&disk_content));
                     return Ok(IngestOutcome::Ingested);
-                }
-                Err(e) => {
-                    return Err(e).with_context(|| {
-                        format!(
-                            "[FileSyncController] TOCTOU re-read failed for {}",
-                            path.display()
-                        )
-                    });
                 }
             }
         }
@@ -7251,12 +7271,11 @@ impl FileSyncController {
     /// only the render is idempotent over a fold.
     ///
     /// Returns one verdict per document, in the order the documents were first
-    /// seen, so the caller's bookkeeping is unchanged from the per-message
-    /// loop.
+    /// seen.
     pub async fn on_block_changed_coalesced(
         &mut self,
         batch: &[(EntityUri, BlockDelta)],
-    ) -> Vec<(EntityUri, Result<bool>)> {
+    ) -> Vec<(EntityUri, Result<BlockChangeVerdict>)> {
         let mut order: Vec<EntityUri> = Vec::new();
         let mut by_doc: HashMap<EntityUri, Vec<&BlockDelta>> = HashMap::new();
         for (doc, delta) in batch {
@@ -7296,7 +7315,7 @@ impl FileSyncController {
             // `on_block_changed` only re-materializes images for the delta it
             // was handed; an image folded earlier in this burst would otherwise
             // never reach disk.
-            if earlier_image && matches!(verdict, Ok(true)) {
+            if earlier_image && matches!(verdict, Ok(BlockChangeVerdict::Handled)) {
                 if let Err(e) = self.materialize_images(&doc).await {
                     tracing::error!(
                         doc = %doc,
@@ -7321,12 +7340,12 @@ impl FileSyncController {
         doc_id: &EntityUri,
         delta: &BlockDelta,
     ) -> Result<bool> {
-        let rendered = self
+        let verdict = self
             .on_block_changed_memoized(doc_id, delta, &mut crate::sync_ports::BlockRowMemo::new())
             .await?;
         self.follow_copies(std::slice::from_ref(delta.block_id()))
             .await?;
-        Ok(rendered)
+        Ok(verdict != BlockChangeVerdict::NeedsBulkPass)
     }
 
     /// Holon deleted or moved blocks that other files hold copies of
@@ -7415,7 +7434,7 @@ impl FileSyncController {
         doc_id: &EntityUri,
         delta: &BlockDelta,
         rows: &mut crate::sync_ports::BlockRowMemo,
-    ) -> Result<bool> {
+    ) -> Result<BlockChangeVerdict> {
         // Did this delta actually bring something new? Computed BEFORE the fold,
         // because afterwards the holder already agrees with it.
         //
@@ -7454,12 +7473,12 @@ impl FileSyncController {
                 let home = home.as_path_buf().clone();
                 self.note_readonly_skip(doc_id, &home, "on_block_changed");
             }
-            return Ok(false);
+            return Ok(BlockChangeVerdict::NeedsBulkPass);
         }
 
         let vault_path = match self.doc_id_to_path(doc_id, PathIntent::WriteOwnFile).await {
             Ok(Some(p)) => p,
-            Ok(None) => return Ok(false),
+            Ok(None) => return Ok(BlockChangeVerdict::NeedsBulkPass),
             Err(e) => {
                 // §3.1 Finding A / R11: name_chain failed loud (e.g. a
                 // prohibited page-under-non-page topology, or an ancestor that
@@ -7471,7 +7490,7 @@ impl FileSyncController {
                     &e,
                     "on_block_changed: this block's edit is NOT written to disk",
                 );
-                return Ok(false);
+                return Ok(BlockChangeVerdict::NeedsBulkPass);
             }
         };
         let path = vault_path.as_path().to_path_buf();
@@ -7487,7 +7506,8 @@ impl FileSyncController {
         // we'd incorrectly re-ingest the on-disk file — which can revert the
         // user's just-issued UPDATE if the file watcher hasn't yet delivered the
         // initial WriteOrgFile event. The watcher will catch up on its own.
-        let disk_content = read_disk_or_empty(&self.fs, &path).await?;
+        let mut basis = read_basis(&self.fs, &path).await?;
+        let mut disk_content = basis.content.clone().unwrap_or_default();
         let last = self
             .last_projection
             .get(&canonical)
@@ -7512,6 +7532,10 @@ impl FileSyncController {
             // invalidation edge: rows read before it may name a parentage the
             // ingest has just replaced.
             rows.clear();
+            // The ingest may have written the file, and the write-back and its
+            // removal guard must compare against the bytes it would replace.
+            basis = read_basis(&self.fs, &path).await?;
+            disk_content = basis.content.clone().unwrap_or_default();
         }
 
         // Fold-completeness gate. Deliberately AFTER the pending-external-change
@@ -7524,11 +7548,10 @@ impl FileSyncController {
             .await?
         {
             FoldVerdict::Complete => {}
-            FoldVerdict::Incomplete => return Ok(true),
-            // `Ok(false)` is the established "this document needs the bulk
-            // pass" signal (di.rs sets `pending_full_rerender`), so a stalled
-            // fold reuses it rather than inventing a second recovery route.
-            FoldVerdict::Stalled => return Ok(false),
+            FoldVerdict::Incomplete => return Ok(BlockChangeVerdict::Handled),
+            // A stalled fold reuses the bulk pass rather than inventing a
+            // second recovery route.
+            FoldVerdict::Stalled => return Ok(BlockChangeVerdict::NeedsBulkPass),
         }
 
         let rendered = self.render_doc_from_holder(doc_id, &path).await?;
@@ -7541,7 +7564,7 @@ impl FileSyncController {
             .unwrap_or("");
 
         if rendered == current_last {
-            return Ok(true);
+            return Ok(BlockChangeVerdict::Handled);
         }
 
         // Copy-on-write: keep a VIRTUAL seed layout doc (`block:__default__`)
@@ -7551,23 +7574,7 @@ impl FileSyncController {
         // on-disk file wins (`disk_content` non-empty ⇒ not gated). Race-free:
         // a late boot-seed delta renders == pristine and is never written.
         if self.gate_virtual_seed_write(doc_id, &canonical, &rendered, !disk_content.is_empty()) {
-            return Ok(true);
-        }
-
-        // TOCTOU guard: disk may have changed again since we read it above
-        // (concurrent external write). Writing `rendered` here — derived
-        // from the CDC cache which may lag behind the new disk content —
-        // would wipe the external write. Re-read and bail if changed.
-        let disk_at_write = read_disk_or_empty(&self.fs, &path).await?;
-        if disk_at_write != disk_content {
-            tracing::debug!(
-                "[ORGSYNC_TOCTOU on_block_changed] {} disk changed during processing \
-                 (initial_len={} disk_now_len={}); skipping write-back.",
-                path.display(),
-                disk_content.len(),
-                disk_at_write.len(),
-            );
-            return Ok(true);
+            return Ok(BlockChangeVerdict::Handled);
         }
 
         // ADR 0025 removal guard on the block-driven path — UNCONDITIONAL.
@@ -7600,27 +7607,27 @@ impl FileSyncController {
         match self.quarantined.get(&canonical).copied() {
             Some(QuarantineCause::Ingest | QuarantineCause::Refused) => {
                 self.note_quarantine_skip(&path);
-                return Ok(true);
+                return Ok(BlockChangeVerdict::Handled);
             }
             Some(QuarantineCause::WritebackVeto) => {
                 if !self
                     .writeback_render_is_grounded(
                         &path,
-                        &disk_at_write,
+                        &disk_content,
                         &rendered,
                         &sanctioned_removals,
                     )
                     .await?
                 {
                     self.note_quarantine_skip(&path);
-                    return Ok(true);
+                    return Ok(BlockChangeVerdict::Handled);
                 }
                 self.clear_writeback_quarantine(&canonical, &path);
             }
             None => {
                 self.veto_ungrounded_removals(
                     &path,
-                    &disk_at_write,
+                    &disk_content,
                     &rendered,
                     &sanctioned_removals,
                 )
@@ -7628,16 +7635,21 @@ impl FileSyncController {
             }
         }
 
-        // EROFS row 346: skip-with-one-loud-error for a doc whose path has no
-        // writable backing file — first failure discloses, later CDC events
-        // skip (no per-event storm). A skip returns Ok(true) up-stack (the loop
-        // survives) but does NOT stamp `last_projection`, so a later-writable
-        // path re-attempts.
-        if !self
-            .write_back_or_skip_readonly(doc_id, &vault_path, &rendered)
+        // A skip does NOT stamp `last_projection`, so a later-writable path
+        // re-attempts.
+        match self
+            .write_back_or_skip_readonly(doc_id, &vault_path, &basis, &rendered)
             .await?
         {
-            return Ok(true);
+            ProjectionWrite::Written => {}
+            ProjectionWrite::Changed => return Ok(BlockChangeVerdict::FileChanged),
+            ProjectionWrite::SkippedReadOnly => return Ok(BlockChangeVerdict::Handled),
+            ProjectionWrite::Stalled => {
+                return Err(StampChurn {
+                    path: path.to_path_buf(),
+                })
+                .with_context(|| format!("org write-back to {} stalled", path.display()));
+            }
         }
         self.run_post_write_hook(&path);
         // H2 image-gate: `materialize_images` re-reads the whole doc (a 2nd
@@ -7659,7 +7671,7 @@ impl FileSyncController {
             path.display()
         );
 
-        Ok(true)
+        Ok(BlockChangeVerdict::Handled)
     }
 
     /// Fold one homed diff into `doc`'s holder entry.
@@ -8033,7 +8045,6 @@ impl FileSyncController {
                 ingested += 1;
             }
         }
-
         Ok(ingested)
     }
 
@@ -8286,17 +8297,12 @@ impl FileSyncController {
             // If disk content differs from last_projection, ingest the pending external
             // change first so the re-render includes both the block event and external
             // edit.
-            let disk_content = match self.fs.read_to_string(&path).await {
-                Ok(c) => c,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    debug!("[re_render_all_tracked] File deleted: {}", path.display(),);
-                    continue;
-                }
-                Err(e) => {
-                    return Err(e).with_context(|| {
-                        format!("[re_render_all_tracked] Cannot read {}", path.display())
-                    });
-                }
+            let mut basis = self.fs.read_stamped(&path).await.with_context(|| {
+                format!("[re_render_all_tracked] Cannot read {}", path.display())
+            })?;
+            let Some(mut disk_content) = basis.content.clone() else {
+                debug!("[re_render_all_tracked] File deleted: {}", path.display(),);
+                continue;
             };
             let last = self
                 .last_projection
@@ -8316,6 +8322,15 @@ impl FileSyncController {
                     }
                     continue;
                 }
+                // The ingest may have written the file, and the write-back and
+                // its removal guard must compare against the bytes it would
+                // replace.
+                basis = read_basis(&self.fs, &path).await?;
+                let Some(content) = basis.content.clone() else {
+                    debug!("[re_render_all_tracked] File deleted: {}", path.display(),);
+                    continue;
+                };
+                disk_content = content;
             }
 
             // A read-only-tier format is not a re-render candidate: its file is
@@ -8434,23 +8449,6 @@ impl FileSyncController {
                 continue;
             }
 
-            // TOCTOU guard: re-read disk. If it changed since we read it
-            // at the top of the loop (concurrent external write), writing
-            // `rendered` — derived from a potentially stale CDC cache —
-            // would wipe that new content. Skip this file; the next
-            // on_file_changed will pick up the external delta.
-            let disk_at_write = read_disk_or_empty(&self.fs, &path).await?;
-            if disk_at_write != disk_content {
-                tracing::debug!(
-                    "[ORGSYNC_TOCTOU re_render_all_tracked] {} disk changed during processing \
-                     (initial_len={} disk_now_len={}); skipping write-back.",
-                    path.display(),
-                    disk_content.len(),
-                    disk_at_write.len(),
-                );
-                continue;
-            }
-
             if self.is_quarantined(&path) {
                 continue;
             }
@@ -8477,10 +8475,10 @@ impl FileSyncController {
                 });
             }
 
-            // EROFS row 346: skip-with-one-loud-error (see on_block_changed).
-            if !self
-                .write_back_or_skip_readonly(&doc.id, &vault_path, &rendered)
+            if self
+                .write_back_or_skip_readonly(&doc.id, &vault_path, &basis, &rendered)
                 .await?
+                != ProjectionWrite::Written
             {
                 continue;
             }
@@ -8646,8 +8644,8 @@ impl FileSyncController {
             return Ok(());
         }
         // Already on disk (ingested / materialized elsewhere) — do not clobber.
-        let disk = read_disk_or_empty(&self.fs, &path).await?;
-        if !disk.is_empty() {
+        let basis = read_basis(&self.fs, &path).await?;
+        if basis.content.as_ref().is_some_and(|c| !c.is_empty()) {
             return Ok(());
         }
         // Render the page's own doc: the `#+ID:` header (from the authoritative
@@ -8671,12 +8669,12 @@ impl FileSyncController {
         if self.gate_virtual_seed_write(page_id, &canonical, &rendered, false) {
             return Ok(());
         }
-        // EROFS row 346: skip-with-one-loud-error. A skip returns early WITHOUT
-        // registering the alias — a path that could not be written does not own
-        // a file to advertise.
-        if !self
-            .write_back_or_skip_readonly(page_id, &vault_path, &rendered)
+        // A skip returns early WITHOUT registering the alias — a path that
+        // could not be written does not own a file to advertise.
+        if self
+            .write_back_or_skip_readonly(page_id, &vault_path, &basis, &rendered)
             .await?
+            != ProjectionWrite::Written
         {
             return Ok(());
         }
@@ -8908,8 +8906,8 @@ impl FileSyncController {
             if self.last_projection.contains_key(&canonical) {
                 continue;
             }
-            let disk = read_disk_or_empty(&self.fs, &path).await?;
-            if !disk.is_empty() {
+            let basis = read_basis(&self.fs, &path).await?;
+            if basis.content.as_ref().is_some_and(|c| !c.is_empty()) {
                 continue;
             }
             let rendered = match self.render_doc_blocks(&doc_id, &path, &blocks).await {
@@ -8937,10 +8935,10 @@ impl FileSyncController {
             if self.gate_virtual_seed_write(&doc_id, &canonical, &rendered, false) {
                 continue;
             }
-            // EROFS row 346: skip-with-one-loud-error (see on_block_changed).
-            if !self
-                .write_back_or_skip_readonly(&doc_id, &vault_path, &rendered)
+            if self
+                .write_back_or_skip_readonly(&doc_id, &vault_path, &basis, &rendered)
                 .await?
+                != ProjectionWrite::Written
             {
                 continue;
             }
@@ -9228,6 +9226,7 @@ impl FileSyncController {
         rendered: &str,
         sanctioned_removals: &HashSet<String>,
     ) -> Result<(WritebackDropVerdict, Vec<String>)> {
+        let source = self.removal_guard_source(path, source);
         let grounding = self
             .writeback_sibling_grounding(path, source, rendered, sanctioned_removals)
             .await?;
@@ -9638,18 +9637,45 @@ impl FileSyncController {
             .remove(&(doc_id.clone(), site));
     }
 
+    /// A write-back found its file's bytes changed (or the file deleted) since
+    /// the read it was based on, so it wrote nothing. The path stays (or
+    /// becomes) tracked at what was read, absent reading as `""`, so the poll
+    /// backstop and the next block-driven write-back see the change and
+    /// re-ingest it, or cascade its deletion.
+    fn schedule_reingest(&mut self, canonical: &CanonicalPath, path: &Path, basis: Option<&str>) {
+        info!(
+            "[FileSyncController] {} changed since it was read; write-back dropped. It is \
+             re-ingested when its bytes differ from Holon's last projection of it",
+            path.display()
+        );
+        self.disk_signatures.remove(canonical);
+        self.last_projection
+            .entry(canonical.clone())
+            .or_insert_with(|| basis.unwrap_or_default().to_string());
+    }
+
     /// Write `rendered` to `path` for `doc_id`, applying the read-only
     /// skip-with-one-loud-error posture (BugFunnel EROFS row 346).
     ///
-    /// - `Ok(true)`  — the write succeeded (caller runs its post-write steps).
-    /// - `Ok(false)` — SKIPPED because this path is on a read-only filesystem
-    ///   (EROFS). The FIRST such failure logs a loud ERROR and marks the path;
-    ///   every later CDC event for it returns `Ok(false)` WITHOUT touching the
-    ///   fs — no per-event retry storm. `last_projection` is deliberately NOT
-    ///   updated by the caller on a skip, so if the path later becomes writable
-    ///   (alias change / re-ingest clears the mark) the next event re-attempts.
-    /// - `Err(e)`    — a non-EROFS IO error propagates LOUDLY, per-event: only
-    ///   the persistent read-only condition is de-duplicated; a transient or
+    /// The write lands only while the file still matches `basis`, the read
+    /// the render was based on ([`FileSystem::write_if_unchanged`]).
+    ///
+    /// - `Written` — the write succeeded (caller runs its post-write steps).
+    /// - `Changed` — the file's bytes changed (or it was deleted) since `basis`
+    ///   was read; nothing was written and the file is scheduled for re-ingest.
+    ///   A new stamp over the same bytes is retried.
+    /// - `Stalled` — the stamp never settled ([`StampChurn`]); nothing was
+    ///   written, and the stall is disclosed for this file only, so a bulk pass
+    ///   goes on with the next one.
+    /// - `SkippedReadOnly` — SKIPPED because this path is on a read-only
+    ///   filesystem (EROFS). The FIRST such failure logs a loud ERROR and marks
+    ///   the path; every later CDC event for it returns `Ok(false)` WITHOUT
+    ///   touching the fs — no per-event retry storm. `last_projection` is
+    ///   deliberately NOT updated by the caller on a skip, so if the path later
+    ///   becomes writable (alias change / re-ingest clears the mark) the next
+    ///   event re-attempts.
+    /// - `Err(e)` — a non-EROFS IO error propagates LOUDLY, per-event: only the
+    ///   persistent read-only condition is de-duplicated; a transient or
     ///   unexpected fault stays visible on every occurrence.
     ///
     /// Takes a [`VaultPath`], not a bare `&Path`: this is where every
@@ -9663,8 +9689,9 @@ impl FileSyncController {
         &mut self,
         doc_id: &EntityUri,
         vault_path: &VaultPath,
+        basis: &StampedRead,
         rendered: &str,
-    ) -> Result<bool> {
+    ) -> Result<ProjectionWrite> {
         let path = vault_path.as_path();
         let canonical = CanonicalPath::new(path);
         let rel_path = path.strip_prefix(&self.root_dir).with_context(|| {
@@ -9693,7 +9720,7 @@ impl FileSyncController {
                 .map(|h| h.as_path_buf().clone())
                 .unwrap_or_else(|| path.to_path_buf());
             self.note_readonly_skip(doc_id, &home, "write_back");
-            return Ok(false);
+            return Ok(ProjectionWrite::SkippedReadOnly);
         }
         if self
             .formats
@@ -9701,7 +9728,7 @@ impl FileSyncController {
             .is_some_and(|a| a.write_tier() == WriteTier::ReadOnly)
         {
             self.note_readonly_skip(doc_id, path, "write_back_target");
-            return Ok(false);
+            return Ok(ProjectionWrite::SkippedReadOnly);
         }
 
         if self.writeback_readonly.contains(&canonical) {
@@ -9710,14 +9737,14 @@ impl FileSyncController {
                 path = %path.display(),
                 "[FileSyncController] write-back skipped for read-only path                  (already disclosed once)",
             );
-            return Ok(false);
+            return Ok(ProjectionWrite::SkippedReadOnly);
         }
         if let Some(parent) = path.parent() {
             match self.fs.create_dir_all(parent).await {
                 Ok(()) => {}
                 Err(e) if is_read_only_fs(&e) => {
                     self.mark_readonly_writeback(doc_id, path, &e, canonical);
-                    return Ok(false);
+                    return Ok(ProjectionWrite::SkippedReadOnly);
                 }
                 Err(e) => {
                     self.refused_writebacks.refused(doc_id, path, &e);
@@ -9752,10 +9779,15 @@ impl FileSyncController {
                 )
             });
         }
-        match self.fs.write(path, rendered.as_bytes()).await {
-            Ok(()) => {
+        match write_over_basis(&self.fs, path, basis, rendered.as_bytes()).await {
+            Ok(WriteBack::Changed) => {
+                self.schedule_reingest(&canonical, path, basis.content.as_deref());
+                Ok(ProjectionWrite::Changed)
+            }
+            Ok(WriteBack::Written) => {
                 #[cfg(feature = "crash-injection")]
                 crate::crash_injection::reached("after_write_back");
+                self.unstamped.remove(&canonical);
                 let hash = self.projection_hash(rendered);
                 self.note_projection_hash(&canonical, &hash);
                 self.refused_writebacks.written(doc_id);
@@ -9772,16 +9804,51 @@ impl FileSyncController {
                 self.note_doc_home(doc_id, path, HomeMembership::Untouched)?;
                 self.disclose_share_inlined_into(doc_id, path, rendered.as_bytes())
                     .await;
-                Ok(true)
+                Ok(ProjectionWrite::Written)
             }
-            Err(e) if is_read_only_fs(&e) => {
+            Err(e)
+                if e.downcast_ref::<std::io::Error>()
+                    .is_some_and(is_read_only_fs) =>
+            {
+                let e = e
+                    .downcast::<std::io::Error>()
+                    .expect("the guard matched an io::Error");
                 self.mark_readonly_writeback(doc_id, path, &e, canonical);
-                Ok(false)
+                Ok(ProjectionWrite::SkippedReadOnly)
+            }
+            Err(e) if e.is::<StampChurn>() => {
+                self.disclose_stalled_writeback(doc_id, path, &format!("{e:#}"));
+                Ok(ProjectionWrite::Stalled)
             }
             Err(e) => {
-                self.refused_writebacks.refused(doc_id, path, &e);
+                self.refused_writebacks
+                    .refused(doc_id, path, &format!("{e:#}"));
                 Err(e).with_context(|| format!("org write-back to {} failed", path.display()))
             }
+        }
+    }
+
+    /// A write-back of `doc_id` to `path` that cannot land is skipped: the file
+    /// shows the write-back condition and the shutdown guard reports the
+    /// document until the next write to it lands.
+    fn disclose_stalled_writeback(&mut self, doc_id: &EntityUri, path: &Path, cause: &str) {
+        warn!(
+            path = %path.display(),
+            "[FileSyncController] write-back skipped: {cause}"
+        );
+        if let Some(disclosure) = &self.writeback_disclosure {
+            disclosure.writeback_stalled(path, cause);
+        }
+        self.refused_writebacks.refused(doc_id, path, &cause);
+    }
+
+    /// The file contents the removal guard reads `path`'s blocks from. An
+    /// ingest-stalled file still holding its bytes reads as its stalled
+    /// render, because only that names the blocks the ingest minted ids for.
+    fn removal_guard_source<'a>(&'a self, path: &Path, disk: &'a str) -> &'a str {
+        match self.unstamped.get(&CanonicalPath::new(path)) {
+            Some(file) if file.bytes == disk => &file.stamped,
+            _ => disk,
         }
     }
 
@@ -10041,6 +10108,31 @@ fn batch_file_key(path: &Path) -> EntityUri {
     EntityUri::file(&path.to_string_lossy())
 }
 
+/// What a block-driven write-back did with one document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockChangeVerdict {
+    /// Rendered and written, or held back by a guard that disclosed it.
+    Handled,
+    /// The file changed since it was read; nothing was written and the file
+    /// is re-ingested instead.
+    FileChanged,
+    /// The document needs the bulk re-render pass.
+    NeedsBulkPass,
+}
+
+/// Outcome of `write_back_or_skip_readonly`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProjectionWrite {
+    Written,
+    /// The file's bytes changed since the read the render was based on.
+    Changed,
+    /// The path is read-only (a read-only format or filesystem).
+    SkippedReadOnly,
+    /// The file's stamp kept changing over the basis bytes ([`StampChurn`]);
+    /// nothing was written and the stall is disclosed.
+    Stalled,
+}
+
 /// True when an IO error is a persistent read-only-filesystem condition
 /// (EROFS, os error 30) — either the mapped `ErrorKind::ReadOnlyFilesystem`
 /// or the raw errno directly (belt-and-suspenders for adapters that build the
@@ -10060,6 +10152,65 @@ async fn read_disk_or_empty(fs: &Arc<dyn FileSystem>, path: &Path) -> Result<Str
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
         Err(e) => Err(e).with_context(|| format!("reading {} for org sync", path.display())),
     }
+}
+
+/// How often a write-back over a file whose bytes still match its basis is
+/// retried against the file's new stamp.
+const STAMP_CHANGE_RETRIES: usize = 3;
+
+/// A file kept getting a new stamp without new bytes, so no write-back over
+/// it could land.
+#[derive(Debug)]
+struct StampChurn {
+    path: PathBuf,
+}
+
+impl std::fmt::Display for StampChurn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Holon did not write {}: its stamp kept changing while its bytes did not \
+             ({STAMP_CHANGE_RETRIES} attempts); some process keeps rewriting it",
+            self.path.display()
+        )
+    }
+}
+
+impl std::error::Error for StampChurn {}
+
+/// [`FileSystem::write_if_unchanged`] over the file `basis` was read from.
+/// A file that got a new stamp but kept the basis bytes (a touch, a no-op
+/// save, a sync client's rewrite) still holds what the render was computed
+/// from, so the write is retried against its new stamp. `Changed` therefore
+/// means the bytes changed or the file was deleted.
+async fn write_over_basis(
+    fs: &Arc<dyn FileSystem>,
+    path: &Path,
+    basis: &StampedRead,
+    contents: &[u8],
+) -> Result<WriteBack> {
+    let mut stamp = basis.stamp.clone();
+    for _ in 0..STAMP_CHANGE_RETRIES {
+        if fs.write_if_unchanged(path, &stamp, contents).await? == WriteBack::Written {
+            return Ok(WriteBack::Written);
+        }
+        let now = fs.read_stamped(path).await?;
+        if now.content != basis.content {
+            return Ok(WriteBack::Changed);
+        }
+        stamp = now.stamp;
+    }
+    Err(StampChurn {
+        path: path.to_path_buf(),
+    }
+    .into())
+}
+
+/// The read a write-back over `path` is based on.
+async fn read_basis(fs: &Arc<dyn FileSystem>, path: &Path) -> Result<StampedRead> {
+    fs.read_stamped(path)
+        .await
+        .with_context(|| format!("reading {} for org sync", path.display()))
 }
 
 /// What an org file's content says it is under Model.md invariant 11 — the

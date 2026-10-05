@@ -28,12 +28,27 @@ use crate::change_source::FileChange;
 use crate::change_source::FileChangeKind;
 use crate::change_source::FileChangeSource;
 use crate::fs_port::FileMeta;
+use crate::fs_port::FileStamp;
 use crate::fs_port::FileSystem;
 use crate::fs_port::ScannedEntries;
+use crate::fs_port::StampedRead;
+use crate::fs_port::WriteBack;
 
 struct FileEntry {
     bytes: Vec<u8>,
     mtime_tick: u64,
+}
+
+impl FileEntry {
+    /// Every write and rename takes a fresh tick, so the tick alone tells two
+    /// versions of a path apart; there is no inode.
+    fn stamp(&self) -> FileStamp {
+        FileStamp::present(
+            None,
+            self.bytes.len() as u64,
+            UNIX_EPOCH + Duration::from_nanos(self.mtime_tick),
+        )
+    }
 }
 
 struct State {
@@ -182,6 +197,80 @@ impl InMemoryFileSystem {
         });
         Ok(())
     }
+
+    /// The core of `write` and `write_if_unchanged`. The stamp check and the
+    /// commit hold one lock, so here the check has no window at all.
+    fn replace(
+        &self,
+        path: &Path,
+        contents: &[u8],
+        expected: Option<&FileStamp>,
+    ) -> std::io::Result<WriteBack> {
+        let path = normalize(path);
+        let temp = crate::fs_port::atomic_temp_path(&path)?;
+        let (kind, tick) = {
+            let mut st = self.lock();
+            st.write_targets.push(path.clone());
+            match path.parent() {
+                Some(parent) if st.dirs.contains(parent) => {}
+                Some(parent) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        format!(
+                            "Parent directory does not exist (in-memory): {}",
+                            parent.display()
+                        ),
+                    ));
+                }
+                None => return Err(not_found(&path)),
+            }
+            if let Some(expected) = expected {
+                let current = st
+                    .files
+                    .get(&path)
+                    .map_or_else(FileStamp::absent, FileEntry::stamp);
+                if current != *expected {
+                    return Ok(WriteBack::Changed);
+                }
+            }
+            st.clock += 1;
+            let tick = st.clock;
+            // The temp side of the real adapter's temp+rename, so a test can
+            // fail the replacement at the commit boundary and see the target
+            // still hold its complete previous bytes (ADR 0030 D3.1).
+            st.files.insert(
+                temp.clone(),
+                FileEntry {
+                    bytes: contents.to_vec(),
+                    mtime_tick: tick,
+                },
+            );
+            if st.fail_next_write_commit {
+                st.fail_next_write_commit = false;
+                st.files.remove(&temp);
+                return Err(std::io::Error::other(format!(
+                    "injected failure between temp write and rename (in-memory): {}",
+                    path.display()
+                )));
+            }
+            let entry = st.files.remove(&temp).expect("temp entry just inserted");
+            st.files.insert(path.clone(), entry);
+            // `Create`, not `Modify`, whether or not the target existed: an
+            // atomic replacement reaches the real watcher as the `To` half of a
+            // rename, which `RenamePairing` classifies as a Create. A double
+            // that emits a shape the production adapter never produces cannot
+            // be trusted to prove anything about the watcher.
+            (FileChangeKind::Create, tick)
+        };
+        // The "close" hook: the full content is committed before anyone is
+        // notified. send only errors when there are no subscribers — fine.
+        let _ = self.tx.send(FileChange {
+            path,
+            kind,
+            seq: tick,
+        });
+        Ok(WriteBack::Written)
+    }
 }
 
 fn normalize(path: &Path) -> PathBuf {
@@ -222,61 +311,35 @@ impl FileSystem for InMemoryFileSystem {
             .ok_or_else(|| not_found(&path))
     }
 
-    async fn write(&self, path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    async fn read_stamped(&self, path: &Path) -> std::io::Result<StampedRead> {
         let path = normalize(path);
-        let temp = crate::fs_port::atomic_temp_path(&path)?;
-        let (kind, tick) = {
-            let mut st = self.lock();
-            st.write_targets.push(path.clone());
-            match path.parent() {
-                Some(parent) if st.dirs.contains(parent) => {}
-                Some(parent) => {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::NotFound,
-                        format!(
-                            "Parent directory does not exist (in-memory): {}",
-                            parent.display()
-                        ),
-                    ));
-                }
-                None => return Err(not_found(&path)),
-            }
-            st.clock += 1;
-            let tick = st.clock;
-            // The temp side of the real adapter's temp+rename, so a test can
-            // fail the replacement at the commit boundary and see the target
-            // still hold its complete previous bytes (ADR 0030 D3.1).
-            st.files.insert(
-                temp.clone(),
-                FileEntry {
-                    bytes: contents.to_vec(),
-                    mtime_tick: tick,
-                },
-            );
-            if st.fail_next_write_commit {
-                st.fail_next_write_commit = false;
-                st.files.remove(&temp);
-                return Err(std::io::Error::other(format!(
-                    "injected failure between temp write and rename (in-memory): {}",
-                    path.display()
-                )));
-            }
-            let entry = st.files.remove(&temp).expect("temp entry just inserted");
-            st.files.insert(path.clone(), entry);
-            // `Create`, not `Modify`, whether or not the target existed: an
-            // atomic replacement reaches the real watcher as the `To` half of a
-            // rename, which `RenamePairing` classifies as a Create. A double
-            // that emits a shape the production adapter never produces cannot
-            // be trusted to prove anything about the watcher.
-            (FileChangeKind::Create, tick)
+        let st = self.lock();
+        let Some(entry) = st.files.get(&path) else {
+            return Ok(StampedRead {
+                content: None,
+                stamp: FileStamp::absent(),
+            });
         };
-        // The "close" hook: the full content is committed before anyone is
-        // notified. send only errors when there are no subscribers — fine.
-        let _ = self.tx.send(FileChange {
-            path,
-            kind,
-            seq: tick,
-        });
+        let content = String::from_utf8(entry.bytes.clone())
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        Ok(StampedRead {
+            content: Some(content),
+            stamp: entry.stamp(),
+        })
+    }
+
+    async fn write_if_unchanged(
+        &self,
+        path: &Path,
+        expected: &FileStamp,
+        contents: &[u8],
+    ) -> std::io::Result<WriteBack> {
+        self.replace(path, contents, Some(expected))
+    }
+
+    async fn write(&self, path: &Path, contents: &[u8]) -> std::io::Result<()> {
+        let written = self.replace(path, contents, None)?;
+        assert_eq!(written, WriteBack::Written, "an unconditional write writes");
         Ok(())
     }
 
@@ -467,5 +530,31 @@ mod tests {
 
         let scanned = fs.scan_directory(Path::new("/r")).await.unwrap();
         assert_eq!(scanned.files, vec![PathBuf::from("/r/a.org")]);
+    }
+
+    #[tokio::test]
+    async fn a_write_back_lands_only_on_the_file_it_read() {
+        let fs = InMemoryFileSystem::new();
+        let page = Path::new("/holon-virtual/vault/a.org");
+        fs.mkdir_all(page.parent().unwrap());
+        fs.write(page, b"* A").await.unwrap();
+
+        let read = fs.read_stamped(page).await.unwrap();
+        fs.write(page, b"* B").await.unwrap();
+        let outcome = fs.write_if_unchanged(page, &read.stamp, b"* Holon").await;
+        assert_eq!(outcome.unwrap(), WriteBack::Changed);
+        assert_eq!(fs.read(page).await.unwrap(), b"* B");
+
+        let read = fs.read_stamped(page).await.unwrap();
+        fs.remove_file(page).unwrap();
+        let outcome = fs.write_if_unchanged(page, &read.stamp, b"* Holon").await;
+        assert_eq!(outcome.unwrap(), WriteBack::Changed);
+        assert!(!fs.exists(page));
+
+        let read = fs.read_stamped(page).await.unwrap();
+        assert_eq!(read.content, None);
+        let outcome = fs.write_if_unchanged(page, &read.stamp, b"* Holon").await;
+        assert_eq!(outcome.unwrap(), WriteBack::Written);
+        assert_eq!(fs.read(page).await.unwrap(), b"* Holon");
     }
 }

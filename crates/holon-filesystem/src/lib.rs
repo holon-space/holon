@@ -59,6 +59,8 @@ pub use file::File;
 #[cfg(not(target_arch = "wasm32"))]
 pub use file_sync_controller::AdapterRefusal;
 #[cfg(not(target_arch = "wasm32"))]
+pub use file_sync_controller::BlockChangeVerdict;
+#[cfg(not(target_arch = "wasm32"))]
 pub use file_sync_controller::BlockDelta;
 #[cfg(not(target_arch = "wasm32"))]
 pub use file_sync_controller::ClaimedId;
@@ -75,11 +77,17 @@ pub use file_sync_controller::tiered_match;
 #[cfg(not(target_arch = "wasm32"))]
 pub use fs_port::FileMeta;
 #[cfg(not(target_arch = "wasm32"))]
+pub use fs_port::FileStamp;
+#[cfg(not(target_arch = "wasm32"))]
 pub use fs_port::FileSystem;
 #[cfg(not(target_arch = "wasm32"))]
 pub use fs_port::RealFileSystem;
 #[cfg(not(target_arch = "wasm32"))]
 pub use fs_port::ScannedEntries;
+#[cfg(not(target_arch = "wasm32"))]
+pub use fs_port::StampedRead;
+#[cfg(not(target_arch = "wasm32"))]
+pub use fs_port::WriteBack;
 #[cfg(not(target_arch = "wasm32"))]
 pub use in_memory::InMemoryFileSystem;
 pub use sync_base_store::BaseKey;

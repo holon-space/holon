@@ -19,6 +19,7 @@ use holon_api::EntityUri;
 use holon_api::block::Block;
 use holon_core::block_ordering::BlockOrdering;
 use holon_filesystem::AliasRegistrar;
+use holon_filesystem::BlockChangeVerdict;
 use holon_filesystem::BlockDelta;
 use holon_filesystem::BlockReader;
 use holon_filesystem::DocumentManager;
@@ -1674,9 +1675,10 @@ pub async fn run_file_sync_controller(
                             controller.on_block_changed_coalesced(&pending_blocks).await
                         {
                             match verdict {
-                                Ok(true) => { note_doc_written_from_holder(); }
+                                Ok(BlockChangeVerdict::Handled) => { note_doc_written_from_holder(); }
+                                Ok(BlockChangeVerdict::FileChanged) => {}
                                 // ALLOW(fallback): doc resolved to no tracked file → full re-render
-                                Ok(false) => {
+                                Ok(BlockChangeVerdict::NeedsBulkPass) => {
                                     pending_full_rerender = true;
                                     idle_signal_for_task.set_bulk_pending(true);
                                 }

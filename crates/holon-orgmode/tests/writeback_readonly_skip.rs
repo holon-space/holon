@@ -32,9 +32,12 @@ use holon_filesystem::BlockDelta;
 use holon_filesystem::BlockReader;
 use holon_filesystem::DocumentManager;
 use holon_filesystem::fs_port::FileMeta;
+use holon_filesystem::fs_port::FileStamp;
 use holon_filesystem::fs_port::FileSystem;
 use holon_filesystem::fs_port::RealFileSystem;
 use holon_filesystem::fs_port::ScannedEntries;
+use holon_filesystem::fs_port::StampedRead;
+use holon_filesystem::fs_port::WriteBack;
 use holon_orgmode::file_sync_controller::new_org_sync_controller;
 
 /// Authoritative block store stub (stands in for `block_raw`).
@@ -199,6 +202,16 @@ impl ReadOnlyWriteFs {
     fn set_writable(&self) {
         self.readonly.store(false, Ordering::SeqCst);
     }
+    fn attempt_write(&self, path: &Path) -> std::io::Result<()> {
+        self.write_attempts.fetch_add(1, Ordering::SeqCst);
+        if self.readonly.load(Ordering::SeqCst) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::ReadOnlyFilesystem,
+                format!("Read-only file system (os error 30): {}", path.display()),
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -209,14 +222,22 @@ impl FileSystem for ReadOnlyWriteFs {
     async fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
         self.inner.read(path).await
     }
+    async fn read_stamped(&self, path: &Path) -> std::io::Result<StampedRead> {
+        self.inner.read_stamped(path).await
+    }
+    async fn write_if_unchanged(
+        &self,
+        path: &Path,
+        expected: &FileStamp,
+        contents: &[u8],
+    ) -> std::io::Result<WriteBack> {
+        self.attempt_write(path)?;
+        self.inner
+            .write_if_unchanged(path, expected, contents)
+            .await
+    }
     async fn write(&self, path: &Path, contents: &[u8]) -> std::io::Result<()> {
-        self.write_attempts.fetch_add(1, Ordering::SeqCst);
-        if self.readonly.load(Ordering::SeqCst) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::ReadOnlyFilesystem,
-                format!("Read-only file system (os error 30): {}", path.display()),
-            ));
-        }
+        self.attempt_write(path)?;
         self.inner.write(path, contents).await
     }
     async fn remove(&self, path: &Path) -> std::io::Result<()> {

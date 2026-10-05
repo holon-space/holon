@@ -92,7 +92,6 @@ async fn delete_right_after_ingest() -> Result<(), String> {
 }
 
 #[test]
-#[ignore = "red until D70.d: the normalization write-back can still overwrite a delete (M2, bug 2026-10-05-deleted-vault-org-file-is-recreated-by-projection-writer)"]
 fn a_vault_file_deleted_right_after_ingest_stays_deleted() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())

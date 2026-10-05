@@ -50,9 +50,12 @@ use holon_core::traits::Result as OrderingResult;
 use holon_filesystem::BlockReader;
 use holon_filesystem::DocumentManager;
 use holon_filesystem::FileMeta;
+use holon_filesystem::FileStamp;
 use holon_filesystem::FileSystem;
 use holon_filesystem::InMemoryFileSystem;
 use holon_filesystem::ScannedEntries;
+use holon_filesystem::StampedRead;
+use holon_filesystem::WriteBack;
 use holon_orgmode::file_sync_controller::new_org_sync_controller;
 use tracing::field::Field;
 use tracing::field::Visit;
@@ -279,6 +282,25 @@ impl FileSystem for CountingFs {
     }
     async fn read(&self, path: &std::path::Path) -> std::io::Result<Vec<u8>> {
         self.inner.read(path).await
+    }
+    async fn read_stamped(&self, path: &std::path::Path) -> std::io::Result<StampedRead> {
+        *self
+            .reads
+            .lock()
+            .unwrap()
+            .entry(path.to_path_buf())
+            .or_insert(0) += 1;
+        self.inner.read_stamped(path).await
+    }
+    async fn write_if_unchanged(
+        &self,
+        path: &std::path::Path,
+        expected: &FileStamp,
+        contents: &[u8],
+    ) -> std::io::Result<WriteBack> {
+        self.inner
+            .write_if_unchanged(path, expected, contents)
+            .await
     }
     async fn write(&self, path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
         self.inner.write(path, contents).await

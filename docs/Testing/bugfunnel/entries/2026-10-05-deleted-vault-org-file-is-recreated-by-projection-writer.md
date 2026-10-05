@@ -3,7 +3,7 @@ id: 2026-10-05-deleted-vault-org-file-is-recreated-by-projection-writer
 date: 2026-10-05
 gap: COVERAGE
 secondary: ENVIRONMENT
-status: OPEN
+status: FIXED
 summary: >-
   A vault org file the user deletes right after its first ingest is recreated
   by the projection writer, and its blocks stay in the database.
@@ -72,7 +72,7 @@ in flight. That is the coverage gap.
    again: true"), lane-logs/d66c-green.log (first failing runs).
 
 ## Remedy
-Status stays OPEN: M1 is FIXED, M2 is open and needs a decision.
+M1 and M2 are FIXED.
 
 M1 FIXED. In `ingest_file`'s `NotFound` branch
 (crates/holon-filesystem/src/file_sync_controller.rs, the TOCTOU re-read)
@@ -99,8 +99,28 @@ ingest is still in flight. `DeleteDocument` runs only after `CreateDocument`
 settled, on a 0-byte file with no normalization write-back. A new in-flight
 delete transition is out of scope here.
 
-M2 is open and needs a decision. Every write-back path does read, compare,
-then write (also `on_block_changed` :7452 -> :7528), and no file-system step
-makes that atomic. Options: (a) after the write, re-check and undo, which is
-still racy; (b) no normalization write-back on first ingest, which defers it
-to the next edit; (c) accept the window and disclose it.
+M2 FIXED by ruling D70.d: every write-back is compare-and-rename. A
+write-back reads the file with `FileSystem::read_stamped`, which returns a
+`FileStamp` (inode, size, mtime, or absent). `FileSystem::write_if_unchanged`
+stages the bytes in a temp file, re-checks the target against the stamp,
+and renames only on a match (crates/holon-filesystem/src/fs_port.rs). Only an
+adapter can make a stamp, so no write-back can exist without its read. On a
+mismatch the controller drops the write and keeps the path tracked at the
+bytes it read (`schedule_reingest` in file_sync_controller.rs), so the change
+is re-ingested or the delete cascades. Converted paths: the ingest
+normalization write-back, and through `write_back_or_skip_readonly` the
+block-driven write-back, `re_render_all_tracked`,
+`materialize_page_identity_file` and `materialize_missing_page_files`. The
+content re-reads that served as TOCTOU guards are removed. A window remains
+between the re-check and the rename.
+- Red first: crates/holon-orgmode/tests/writeback_compare_and_rename.rs, one
+  test per path, a FileSystem double edits or deletes the file as the write
+  starts. Red log lane-logs/d70d-red.log (7 of 7 fail: "overwrote the user's
+  edit", "recreated the deleted file"). Green: lane-logs/d70d-green2.log.
+  delete_during_first_ingest.rs now deletes at the write-back (its re-read is
+  gone).
+- Probe crates/holon-app/tests/vault_file_delete_after_ingest.rs is no longer
+  ignored. 25 iterations, 25 passed, 0 M2, 0 M1 (lane-logs/d70d-probe.log). In
+  12 of 25 the delete landed during the normalization write-back, which was
+  dropped ("changed since it was read; write-back dropped") and the delete
+  cascaded.
