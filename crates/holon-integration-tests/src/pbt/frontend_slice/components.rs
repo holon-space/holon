@@ -4781,6 +4781,30 @@ impl SutSeamMutate for HeadlessFrontendComponent {
             .await;
         self.settle_block_ids_stable(Duration::from_secs(5)).await;
     }
+
+    async fn save_vault_file(&self, name: &str, content: &str) {
+        let path = self.org_root().join(name);
+        self.write_org_file_and_await_ingest(&path, content, "save_vault_file")
+            .await;
+    }
+
+    async fn delete_vault_file(&self, name: &str) {
+        const SEAM: &str = "delete_vault_file";
+        let path = self.org_root().join(name);
+        self.org_fs()
+            .remove_file(&path)
+            .unwrap_or_else(|e| panic!("[{SEAM}] remove {path:?}: {e}"));
+        self.await_ingest(&path, SEAM).await;
+    }
+
+    async fn rename_vault_file(&self, from: &str, to: &str) {
+        const SEAM: &str = "rename_vault_file";
+        let to_path = self.org_root().join(to);
+        self.org_fs()
+            .rename_file(&self.org_root().join(from), &to_path)
+            .unwrap_or_else(|e| panic!("[{SEAM}] rename {from} -> {to}: {e}"));
+        self.await_ingest(&to_path, SEAM).await;
+    }
 }
 
 /// The two files of an external cut & paste of a block, rendered from the
@@ -4875,6 +4899,12 @@ impl HeadlessFrontendComponent {
     /// included.
     async fn write_org_file_and_await_ingest(&self, path: &Path, org: &str, seam: &str) {
         self.write_org_file(path, org, seam).await;
+        self.await_ingest(path, seam).await;
+    }
+
+    /// Wait until the file-sync controller has processed every change up to
+    /// the latest one, `path`'s.
+    async fn await_ingest(&self, path: &Path, seam: &str) {
         let seq = self.org_fs().last_change_seq();
         let idle = self
             .org_idle_signal()
@@ -7873,6 +7903,11 @@ fn named_file_names(kind: &holon_api::ConditionKind) -> Vec<String> {
             .collect(),
         holon_api::ConditionKind::DeletedBlockKeptInFile { file }
         | holon_api::ConditionKind::DeletionEndedByEdit { file } => vec![name(file)],
+        holon_api::ConditionKind::VaultIngestFailed(refusals) => refusals
+            .examples()
+            .iter()
+            .map(|file| name(&file.path))
+            .collect(),
         holon_api::ConditionKind::DeletionUndoneBlockInOtherFile { file, copy_files } => {
             std::iter::once(file)
                 .chain(copy_files)
@@ -7899,6 +7934,12 @@ impl holon_pbt_core::capabilities::SutConditions for HeadlessFrontendComponent {
             .map(|c| holon_pbt_core::capabilities::RaisedCondition {
                 kind: c.reason.condition_kind().to_string(),
                 files: named_file_names(&c.reason),
+                count: match &c.reason {
+                    holon_api::ConditionKind::VaultIngestFailed(refusals) => {
+                        Some(refusals.count().get())
+                    }
+                    _ => None,
+                },
                 subject: c.subject,
             })
             .collect()

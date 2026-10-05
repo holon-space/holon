@@ -1094,14 +1094,22 @@ fn a_deletion_undone_because_of_a_copy_is_disclosed() {
     });
 }
 
+/// The path of every refused file, of every format.
 fn ingest_refusals(env: &TestEnvironment) -> Vec<String> {
-    env.injector()
+    let bus = env
+        .injector()
         .expect("injector")
-        .resolve::<Arc<holon_api::ConditionBus>>()
-        .current()
+        .resolve::<Arc<holon_api::ConditionBus>>();
+    bus.current()
         .into_iter()
-        .filter(|c| c.reason.condition_kind() == holon_api::ConditionKind::VAULT_INGEST_FAILED)
-        .map(|c| c.subject)
+        .filter_map(|c| match c.reason {
+            holon_api::ConditionKind::VaultIngestFailed(refusals) => {
+                Some(bus.refused_files(refusals.format()))
+            }
+            _ => None,
+        })
+        .flatten()
+        .map(|file| file.path)
         .collect()
 }
 
@@ -2535,11 +2543,10 @@ fn a_write_back_the_file_table_cannot_record_is_not_written_and_says_why() {
             }),
             "the unwritten edit is not disclosed with its cause: {conditions:?}"
         );
+        let refused = ingest_refusals(&env);
         assert!(
-            !conditions
-                .iter()
-                .any(|(kind, _)| *kind == holon_api::ConditionKind::VAULT_INGEST_FAILED),
-            "the store-side failure is disclosed as a failed ingest: {conditions:?}"
+            !refused.iter().any(|path| path.ends_with("/Notes.org")),
+            "the store-side failure is disclosed as a failed ingest: {refused:?}"
         );
         if let Err(e) = env.stop_app().await {
             assert!(format!("{e:#}").contains("Notes.org"), "stop_app: {e:#}");

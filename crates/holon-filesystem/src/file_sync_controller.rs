@@ -380,6 +380,35 @@ pub enum IngestOutcome {
     RefusedEmptyFile,
 }
 
+/// A format adapter refused a file's bytes, so nothing of the file was
+/// ingested. Unlike a partial ingest, the store holds no truncated state: the
+/// refusal is disclosed as a per-format condition and logged at WARN. Travels
+/// inside the `anyhow::Error` that `on_file_changed` returns; callers tell it
+/// apart with `downcast_ref::<AdapterRefusal>()`.
+#[derive(Debug)]
+pub struct AdapterRefusal {
+    pub path: PathBuf,
+    pub format: &'static str,
+    pub reason: anyhow::Error,
+}
+
+impl std::fmt::Display for AdapterRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} was REFUSED by the {} adapter — nothing of it is ingested",
+            self.path.display(),
+            self.format,
+        )
+    }
+}
+
+impl std::error::Error for AdapterRefusal {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.reason.as_ref())
+    }
+}
+
 /// Why `poll_new_files` is skipping a file it rediscovered, and what ends the
 /// skip. Recorded per path in
 /// [`ingest_quarantine`](FileSyncController::ingest_quarantine).
@@ -539,16 +568,21 @@ enum AbsentOwner {
 
 /// Why a file is quarantined from write-back.
 ///
-/// The two causes are disproven by different evidence, which is the whole
-/// reason the tag exists: an ingest failure is a claim about the DB holding a
+/// The causes are disproven by different evidence, which is the whole reason
+/// the tag exists: an ingest failure is a claim about the DB holding a
 /// truncated PREFIX, and only a clean re-ingest can retire it. A write-back
 /// veto is a claim about ONE render being lossy, and the removal guard — the
 /// very check that raised it — retires it directly the next time it passes
 /// fully grounded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum QuarantineCause {
-    /// `ingest_file` returned `Err`. Clears only on a fully-successful ingest.
+    /// `ingest_file` returned `Err` partway. Clears only on a fully-successful
+    /// ingest.
     Ingest,
+    /// The format adapter refused the file's bytes ([`AdapterRefusal`]), so the
+    /// DB still holds what the bytes before them gave. Clears on the next
+    /// successful read, which includes bytes equal to the last projection.
+    Refused,
     /// The ADR 0025 removal guard vetoed a render. Clears when a later render
     /// of the same file passes the guard with every absence grounded.
     WritebackVeto,
@@ -2703,8 +2737,17 @@ impl FileSyncController {
         // A deleted file must not leave a stale ingest-quarantine entry: if the
         // same path reappears it starts un-quarantined (fresh discovery).
         self.ingest_quarantine.remove(canonical);
+        self.quarantined.remove(canonical);
+        self.quarantine_skip_logged
+            .lock()
+            .expect("quarantine_skip_logged poisoned")
+            .remove(canonical);
         self.empty_since.remove(canonical);
         self.duplicate_id_disclosed.retain(|(p, _)| p != canonical);
+        // A file that is gone is neither refused nor empty any more.
+        if let Some(disclosure) = &self.writeback_disclosure {
+            disclosure.ingest_recovered(canonical);
+        }
     }
 
     /// Move every per-file tracking entry from `from` to `to` — the rename
@@ -2771,6 +2814,12 @@ impl FileSyncController {
         }
         if self.writeback_readonly.remove(from) {
             self.writeback_readonly.insert(to.clone());
+        }
+        // `from` is gone, so it is neither refused nor empty. What `to` is, the
+        // ingest of `to` that follows every migration discloses: an echo is
+        // bytes that once ingested, so it reads as recovered too.
+        if let Some(disclosure) = &self.writeback_disclosure {
+            disclosure.ingest_recovered(from);
         }
         Ok(())
     }
@@ -2861,7 +2910,13 @@ impl FileSyncController {
         // stays alive throughout, never passing through a deleted state. Done
         // BEFORE the retitle so the retitle is the LAST write and always wins,
         // even when a rename coincides with a content edit that re-ingests.
-        let _ = self.on_file_changed(to).await?;
+        // A refusal of `to` is disclosed by that ingest and does not stop the
+        // retitle: the file moved even though its bytes are refused.
+        let refusal = match self.on_file_changed(to).await {
+            Ok(_) => None,
+            Err(e) if e.downcast_ref::<AdapterRefusal>().is_some() => Some(e),
+            Err(e) => return Err(e),
+        };
 
         // File-move spec (D2): a document page's title FOLLOWS its file name.
         // Retitle the doc-root page to the new file stem through the SAME single
@@ -2908,7 +2963,7 @@ impl FileSyncController {
             }
         }
 
-        Ok(())
+        refusal.map_or(Ok(()), Err)
     }
 
     /// Handle a file change event from the FileWatcher.
@@ -2920,10 +2975,19 @@ impl FileSyncController {
     /// data-loss guard). A successful ingest clears the quarantine. The
     /// `Err` is still propagated so the caller's degraded-mode
     /// banner / survival logic is unchanged.
+    ///
+    /// A failure to persist the undone deletions is the returned error, and
+    /// names the ingest's own error when both fail.
     pub async fn on_file_changed(&mut self, path: &Path) -> Result<IngestOutcome> {
         let outcome = self.on_file_changed_unpersisted(path).await;
-        self.persist_undone_deletions().await?;
-        outcome
+        match (outcome, self.persist_undone_deletions().await) {
+            (outcome, Ok(())) => outcome,
+            (Ok(_), Err(persist)) => Err(persist),
+            (Err(ingest), Err(persist)) => Err(persist.context(format!(
+                "persist the undone deletions after {} was not ingested: {ingest:#}",
+                path.display()
+            ))),
+        }
     }
 
     /// The undone-deletions record could not be read: it is moved aside for
@@ -3171,7 +3235,10 @@ impl FileSyncController {
     fn unread_at_boot(&self, file: &CanonicalPath) -> bool {
         self.fs.exists(file.as_path_buf())
             && (!self.last_projection.contains_key(file)
-                || self.quarantined.get(file) == Some(&QuarantineCause::Ingest))
+                || matches!(
+                    self.quarantined.get(file),
+                    Some(QuarantineCause::Ingest | QuarantineCause::Refused)
+                ))
     }
 
     async fn on_file_changed_unpersisted(&mut self, path: &Path) -> Result<IngestOutcome> {
@@ -3242,12 +3309,15 @@ impl FileSyncController {
             }
             Err(e) => {
                 // Partial ingest: the DB now holds only a PREFIX of this file's
-                // blocks. Quarantine it so write-back never renders that prefix
-                // over the intact on-disk file. Loud + disclosed.
-                let already_ingest_caused = self
-                    .quarantined
-                    .insert(canonical.clone(), QuarantineCause::Ingest)
-                    == Some(QuarantineCause::Ingest);
+                // blocks. Refusal: the DB holds what the bytes before it gave.
+                // Either way write-back must not render the DB over disk.
+                let cause = if e.downcast_ref::<AdapterRefusal>().is_some() {
+                    QuarantineCause::Refused
+                } else {
+                    QuarantineCause::Ingest
+                };
+                let already_ingest_caused =
+                    self.quarantined.insert(canonical.clone(), cause) == Some(cause);
                 // Raise the file's degraded condition, named by the format that
                 // refused it. Every episode re-raises: `emit` replaces by key,
                 // so the banner carries the current reason.
@@ -3264,24 +3334,33 @@ impl FileSyncController {
                         .lock()
                         .expect("quarantine_skip_logged poisoned")
                         .remove(&canonical);
-                    tracing::error!(
-                        path = %path.display(),
-                        error = %format!("{e:#}"),
-                        "[FileSyncController] ingest FAILED partway — QUARANTINING this file \
-                         from write-back so its truncated DB state is not rendered over disk. \
-                         Un-quarantines on the next fully-successful ingest.",
-                    );
+                    match e.downcast_ref::<AdapterRefusal>() {
+                        Some(refusal) => tracing::warn!(
+                            path = %path.display(),
+                            "[FileSyncController] refused by the {} adapter: {:#}; disclosed as a \
+                             condition. Nothing of it is ingested, and it is QUARANTINED from \
+                             write-back so no stored state is rendered over the refused bytes. \
+                             Un-quarantines on the next fully-successful ingest.",
+                            refusal.format,
+                            refusal.reason,
+                        ),
+                        None => tracing::error!(
+                            path = %path.display(),
+                            error = %format!("{e:#}"),
+                            "[FileSyncController] ingest FAILED partway — QUARANTINING this file \
+                             from write-back so its truncated DB state is not rendered over disk. \
+                             Un-quarantines on the next fully-successful ingest.",
+                        ),
+                    }
                 }
                 Err(e)
             }
         }
     }
 
-    /// True when `path` is quarantined from write-back (its last ingest failed
-    /// partway). A quarantined file's DB state is a truncated prefix, so any
-    /// write-back path must SKIP it (loud + disclosed) rather than render that
-    /// prefix over the intact on-disk file. See
-    /// [`quarantined`](Self::quarantined).
+    /// True when `path` is quarantined from write-back. Any write-back path
+    /// must SKIP it (disclosed) rather than render the DB's view over the
+    /// on-disk file. See [`quarantined`](Self::quarantined).
     fn is_quarantined(&self, path: &Path) -> bool {
         let canonical = CanonicalPath::new(path);
         if self.quarantined.contains_key(&canonical) {
@@ -3292,8 +3371,16 @@ impl FileSyncController {
         }
     }
 
-    /// Disclose one write-back skip of an already-quarantined file: ERROR the
-    /// first time per episode, `debug` afterwards. Separate from
+    /// The last read of `canonical` was refused. Its next read is owed even
+    /// when the bytes equal the last projection: an undo back to them leaves
+    /// nothing that differs, and only a read lifts the refusal.
+    fn read_was_refused(&self, canonical: &CanonicalPath) -> bool {
+        self.quarantined.get(canonical) == Some(&QuarantineCause::Refused)
+    }
+
+    /// Disclose one write-back skip of an already-quarantined file: loud the
+    /// first time per episode (WARN for a refusal, which is already disclosed
+    /// as a condition; ERROR otherwise), `debug` afterwards. Separate from
     /// [`is_quarantined`](Self::is_quarantined) because the cause-aware trigger
     /// path decides whether to skip by probing the guard, and still owes the
     /// reader the same one-loud-line-per-episode disclosure when it does.
@@ -3303,7 +3390,19 @@ impl FileSyncController {
             .lock()
             .expect("quarantine_skip_logged poisoned")
             .insert(CanonicalPath::new(path));
-        if first_skip {
+        let cause = *self
+            .quarantined
+            .get(&CanonicalPath::new(path))
+            .expect("a write-back skip is of a quarantined file");
+        if first_skip && cause == QuarantineCause::Refused {
+            tracing::warn!(
+                path = %path.display(),
+                "[FileSyncController] SKIPPING write-back for a file its format adapter refused: \
+                 rendering the stored content over it would overwrite the refused bytes on disk. \
+                 Write-back resumes once the file reads again. (Further skips of this file log \
+                 at debug.)",
+            );
+        } else if first_skip {
             tracing::error!(
                 path = %path.display(),
                 "[FileSyncController] SKIPPING write-back for quarantined file — rendering the \
@@ -4633,7 +4732,11 @@ impl FileSyncController {
         let disk_root = match adapter.document_identity() {
             holon_core::DocumentIdentity::Embedded => adapter
                 .doc_id_from_content(&disk_content)
-                .with_context(|| format!("{} was REFUSED", path.display()))?,
+                .map_err(|reason| AdapterRefusal {
+                    path: path.to_path_buf(),
+                    format: adapter.format_name(),
+                    reason,
+                })?,
             holon_core::DocumentIdentity::ByRecordedHome => {
                 self.last_projection_doc.get(&canonical).cloned()
             }
@@ -4787,16 +4890,18 @@ impl FileSyncController {
         // reparents afterwards.
         let new_parse = ingest_adapter
             .parse(path, &disk_content, &EntityUri::no_parent(), &self.root_dir)
-            .with_context(|| {
-                format!(
-                    "{} was REFUSED by the {} adapter — nothing of it is ingested",
-                    path.display(),
-                    ingest_adapter.format_name(),
-                )
+            .map_err(|reason| AdapterRefusal {
+                path: path.to_path_buf(),
+                format: ingest_adapter.format_name(),
+                reason,
             })?;
         let id_in_file = ingest_adapter
             .doc_id_from_content(&disk_content)
-            .with_context(|| format!("{} was REFUSED", path.display()))?;
+            .map_err(|reason| AdapterRefusal {
+                path: path.to_path_buf(),
+                format: ingest_adapter.format_name(),
+                reason,
+            })?;
 
         // D102.a — the block-level twin of the duplicate-`#+ID:` refusal, and
         // it sits at the same place in the pipeline: after the parse (which
@@ -7396,7 +7501,7 @@ impl FileSyncController {
                 .any(|id| held.blocks.contains_key(id))
         });
         if self.last_projection.contains_key(&canonical)
-            && (disk_content != last || adopts_own_copy)
+            && (disk_content != last || adopts_own_copy || self.read_was_refused(&canonical))
         {
             info!(
                 "[FileSyncController] Processing pending external change for {} before re-render",
@@ -7484,16 +7589,16 @@ impl FileSyncController {
             .unwrap_or_default();
 
         // Quarantine, cause-aware — and deliberately AFTER the guard is
-        // reachable rather than before it. An ingest-caused entry is opaque to
-        // write-back: nothing a render can show disproves "the DB holds a
-        // truncated prefix", so it still short-circuits. A veto-caused entry is
+        // reachable rather than before it. An ingest- or refusal-caused entry
+        // is opaque to write-back: only a read of the file retires it, so it
+        // still short-circuits. A veto-caused entry is
         // a claim the guard itself made about one render, so probe the guard
         // and let a fully-grounded render retire it. The old unconditional
         // early-return here is what made auto-clear unreachable: a file
         // quarantined by a transient partial fold never got to prove itself
         // again, so one bad render killed its write-back for the session.
         match self.quarantined.get(&canonical).copied() {
-            Some(QuarantineCause::Ingest) => {
+            Some(QuarantineCause::Ingest | QuarantineCause::Refused) => {
                 self.note_quarantine_skip(&path);
                 return Ok(true);
             }
@@ -7913,13 +8018,18 @@ impl FileSyncController {
                 .get(&canonical)
                 .map(|s| s.as_str())
                 .unwrap_or("");
-            if disk_content != last {
+            if disk_content != last || self.read_was_refused(&canonical) {
                 info!(
                     "[FileSyncController] poll_external_changes: ingesting {} (disk != \
-                     last_projection)",
+                     last_projection, or its last read was refused)",
                     path.display()
                 );
-                let _ = self.on_file_changed(&path).await?;
+                match self.on_file_changed(&path).await {
+                    Ok(_) => {}
+                    // Disclosed by the ingest; the rest of the pass still runs.
+                    Err(e) if e.downcast_ref::<AdapterRefusal>().is_some() => {}
+                    Err(e) => return Err(e),
+                }
                 ingested += 1;
             }
         }
@@ -8123,14 +8233,25 @@ impl FileSyncController {
                             claimed_id: None,
                         },
                     );
-                    tracing::error!(
-                        path = %path.display(),
-                        error = %format!("{e:#}"),
-                        "[FileSyncController] poll_new_files: CONTAINED a failed ingest -- this \
-                         file is QUARANTINED from re-ingest until its content changes; the \
-                         discovery walk CONTINUES so healthy files still ingest. Fix the file to \
-                         un-quarantine it. (on_file_changed also write-back-quarantined it.)",
-                    );
+                    match e.downcast_ref::<AdapterRefusal>() {
+                        Some(refusal) => tracing::warn!(
+                            path = %path.display(),
+                            "[FileSyncController] poll_new_files: refused by the {} adapter: {:#}; \
+                             disclosed as a condition. The discovery walk skips it until its \
+                             content changes.",
+                            refusal.format,
+                            refusal.reason,
+                        ),
+                        None => tracing::error!(
+                            path = %path.display(),
+                            error = %format!("{e:#}"),
+                            "[FileSyncController] poll_new_files: CONTAINED a failed ingest -- \
+                             this file is QUARANTINED from re-ingest until its content changes; \
+                             the discovery walk CONTINUES so healthy files still ingest. Fix the \
+                             file to un-quarantine it. (on_file_changed also write-back-quarantined \
+                             it.)",
+                        ),
+                    }
                 }
             }
         }
@@ -8182,14 +8303,17 @@ impl FileSyncController {
                 .get(&canonical)
                 .map(|s| s.as_str())
                 .unwrap_or("");
-            if disk_content != last {
+            if disk_content != last || self.read_was_refused(&canonical) {
                 info!(
                     "[FileSyncController] Processing pending external change for {} before \
                      re-render",
                     path.display()
                 );
                 if let Err(e) = self.on_file_changed(&path).await {
-                    self.disclose_batch_read_failure(&path, &e, "re_render_all_tracked");
+                    // A refusal is disclosed by the ingest itself.
+                    if e.downcast_ref::<AdapterRefusal>().is_none() {
+                        self.disclose_batch_read_failure(&path, &e, "re_render_all_tracked");
+                    }
                     continue;
                 }
             }

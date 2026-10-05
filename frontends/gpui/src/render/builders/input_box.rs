@@ -198,7 +198,7 @@ impl InputBoxView {
                         subject: "input_box".into(),
                         detail: detail.into(),
                         condition: None,
-                        format: None,
+                        refusals: None,
                     },
                     cx,
                 );

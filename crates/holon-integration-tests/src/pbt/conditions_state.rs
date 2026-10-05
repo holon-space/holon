@@ -42,6 +42,8 @@ pub struct ExpectedCondition {
     /// The file names the condition names, in its order, when the model
     /// states them.
     pub files: Option<Vec<String>>,
+    /// How many files the condition counts, when the model states it.
+    pub count: Option<usize>,
 }
 
 impl ExpectedCondition {
@@ -67,7 +69,7 @@ impl ConditionsRefState {
     /// `subject_name` is the FILE NAME the raise site's subject will carry as
     /// its final path component — not a string suffix.
     pub fn raise(&mut self, subject_name: impl Into<String>, kind: &'static str) {
-        self.raise_expecting(subject_name.into(), kind, None);
+        self.raise_expecting(subject_name.into(), kind, None, None);
     }
 
     /// [`raise`](Self::raise) for a condition that names files: `files` are
@@ -78,7 +80,19 @@ impl ConditionsRefState {
         kind: &'static str,
         files: Vec<String>,
     ) {
-        self.raise_expecting(subject_name.into(), kind, Some(files));
+        self.raise_expecting(subject_name.into(), kind, Some(files), None);
+    }
+
+    /// [`raise_naming_files`](Self::raise_naming_files) for a condition that
+    /// also counts the files it stands for, beyond the ones it names.
+    pub fn raise_counting_files(
+        &mut self,
+        subject_name: impl Into<String>,
+        kind: &'static str,
+        count: usize,
+        files: Vec<String>,
+    ) {
+        self.raise_expecting(subject_name.into(), kind, Some(files), Some(count));
     }
 
     fn raise_expecting(
@@ -86,6 +100,7 @@ impl ConditionsRefState {
         subject_name: String,
         kind: &'static str,
         files: Option<Vec<String>>,
+        count: Option<usize>,
     ) {
         self.governed.insert(kind);
         self.expected
@@ -94,6 +109,7 @@ impl ConditionsRefState {
             subject_name,
             kind,
             files,
+            count,
         });
     }
 

@@ -20,20 +20,35 @@ pub struct ReadOnlyRefState {
     homes: BTreeSet<EntityUri>,
     /// Every block the write-tier authority refuses — the document page and its
     /// steps — with the vault file name the refusal is disclosed against.
-    files: BTreeMap<EntityUri, &'static str>,
+    files: BTreeMap<EntityUri, String>,
+    /// The read-only documents' pages.
+    documents: BTreeSet<EntityUri>,
     attempts: usize,
 }
 
 impl ReadOnlyRefState {
     /// The read-only document's page: refused, but not one of the `homes`
     /// whose ingested content the invariant pins.
-    pub fn seed_document(&mut self, page: EntityUri, file: &'static str) {
-        self.files.insert(page, file);
+    pub fn seed_document(&mut self, page: EntityUri, file: &str) {
+        self.files.insert(page.clone(), file.to_string());
+        self.documents.insert(page);
     }
 
-    pub fn seed_home(&mut self, id: EntityUri, file: &'static str) {
-        self.files.insert(id.clone(), file);
+    pub fn documents(&self) -> &BTreeSet<EntityUri> {
+        &self.documents
+    }
+
+    pub fn seed_home(&mut self, id: EntityUri, file: &str) {
+        self.files.insert(id.clone(), file.to_string());
         self.homes.insert(id);
+    }
+
+    /// The vault file `from` was renamed to `to`: its blocks keep their ids and
+    /// are now refused against the new file.
+    pub fn rename_file(&mut self, from: &str, to: &str) {
+        for file in self.files.values_mut().filter(|file| *file == from) {
+            *file = to.to_string();
+        }
     }
 
     pub fn homes(&self) -> &BTreeSet<EntityUri> {
@@ -41,8 +56,8 @@ impl ReadOnlyRefState {
     }
 
     /// The file whose read-only tier refuses a write naming `id`, if any.
-    pub fn refusing_file(&self, id: &EntityUri) -> Option<&'static str> {
-        self.files.get(id).copied()
+    pub fn refusing_file(&self, id: &EntityUri) -> Option<&str> {
+        self.files.get(id).map(String::as_str)
     }
 
     /// Record one attempted write. The block's content is deliberately NOT

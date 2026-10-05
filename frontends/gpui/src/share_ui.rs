@@ -41,6 +41,7 @@ use holon_api::ConditionChange;
 use holon_api::ConditionKey;
 use holon_api::ConditionKind;
 use holon_api::EntityName;
+use holon_api::IngestRefusals;
 use holon_api::Value;
 use holon_api::condition_profile::ConditionPlacement;
 use holon_api::condition_profile::ConditionProfile;
@@ -189,10 +190,10 @@ pub struct DegradedToast {
     /// them at all.
     pub subject: String,
     pub detail: ToastDetail,
-    /// The vault format that refused a file, for the one kind whose headline is
+    /// The files one vault format refused, for the one kind whose headline is
     /// not fixed ([`ConditionKind::VaultIngestFailed`]). `None` for every
     /// other kind, whose headline is its profile's constant.
-    pub format: Option<String>,
+    pub refusals: Option<IngestRefusals>,
     /// Set for toasts sourced from the degraded bus, where every degradation is
     /// a sticky condition — upserted on re-raise, removed on clear. `None` for
     /// UI-local toasts (undo/command/preference failures, info) that have no
@@ -399,9 +400,9 @@ impl ShareUiState {
             }
             ConditionPlacement::Toast | ConditionPlacement::Section(_) => {
                 // The one kind whose headline names instance data — the format
-                // that refused the file — instead of the profile's constant.
-                let format = match &event.reason {
-                    ConditionKind::VaultIngestFailed { format, .. } => Some(format.clone()),
+                // that refused the files — instead of the profile's constant.
+                let refusals = match &event.reason {
+                    ConditionKind::VaultIngestFailed(refusals) => Some(refusals.clone()),
                     _ => None,
                 };
                 self.push_toast(DegradedToast {
@@ -409,7 +410,7 @@ impl ShareUiState {
                     subject: event.subject,
                     detail: ToastDetail::with_body(detail.headline, detail.body),
                     condition: Some(condition),
-                    format,
+                    refusals,
                 });
             }
         }
@@ -644,7 +645,7 @@ pub fn spawn_op_failure_toast_bridge(
                             subject: "command".into(),
                             detail: detail.into(),
                             condition: None,
-                            format: None,
+                            refusals: None,
                         });
                         cx.emit(NotifyShareUi);
                         cx.notify();
@@ -734,7 +735,7 @@ fn pending_event_toast(event: &PendingWriteEvent) -> DegradedToast {
             )
             .into(),
             condition: None,
-            format: None,
+            refusals: None,
         },
         PendingWriteEventKind::OutcomeUnknown => DegradedToast {
             kind: ToastKind::Local(LocalToastKind::ConnectorWriteOutcomeUnknown),
@@ -745,7 +746,7 @@ fn pending_event_toast(event: &PendingWriteEvent) -> DegradedToast {
             )
             .into(),
             condition: None,
-            format: None,
+            refusals: None,
         },
     }
 }
@@ -806,7 +807,7 @@ pub fn dispatch_approve(
                             subject: "connector-write".into(),
                             detail: format!("approve failed: {e}").into(),
                             condition: None,
-                            format: None,
+                            refusals: None,
                         });
                     }
                     // Success is silent here; the panel re-reads store state
@@ -1040,7 +1041,7 @@ fn dispatch_undo_redo(
                             subject: "undo".into(),
                             detail: d.detail.into(),
                             condition: None,
-                            format: None,
+                            refusals: None,
                         });
                         cx.emit(NotifyShareUi);
                         cx.notify();
@@ -1366,7 +1367,7 @@ pub fn dispatch_retry_reimport(
                         subject: "device".into(),
                         detail: detail.into(),
                         condition: None,
-                        format: None,
+                        refusals: None,
                     });
                     cx.emit(NotifyShareUi);
                     cx.notify();
@@ -1633,7 +1634,7 @@ fn render_share_modal(
                                             subject: "ui".into(),
                                             detail: "Ticket copied to clipboard".into(),
                                             condition: None,
-                                            format: None,
+                                            refusals: None,
                                         });
                                         cx.emit(NotifyShareUi);
                                         cx.notify();
@@ -1932,9 +1933,13 @@ const MAX_DETAIL_CHARS: usize = 320;
 fn toast_message(toast: &DegradedToast) -> String {
     let (_, icon, label) = toast_style(toast.kind);
     // The one kind whose headline is not a constant: it names the format that
-    // refused the file.
-    let label = match &toast.format {
-        Some(format) => format!("File sync degraded (bad {format} file)"),
+    // refused the files and how many.
+    let label = match &toast.refusals {
+        Some(refusals) => {
+            let count = refusals.count().get();
+            let files = if count == 1 { "file" } else { "files" };
+            format!("{count} {} {files} not read", refusals.format())
+        }
         None => label.to_string(),
     };
     let sentence = toast.detail.headline.as_str();
@@ -2284,7 +2289,7 @@ mod tests {
             subject: String::new(),
             detail: detail.to_string().into(),
             condition: None,
-            format: None,
+            refusals: None,
         }
     }
 
@@ -2305,7 +2310,7 @@ mod tests {
                 subject: subject.to_string(),
                 kind: ConditionKind::INTEGRATION_NOT_ENABLED,
             }),
-            format: None,
+            refusals: None,
         }
     }
 
@@ -2403,20 +2408,35 @@ mod tests {
         assert_eq!(s.quarantines.len(), 1);
     }
 
+    /// The condition a bus raises for one refused file — only the bus builds
+    /// a `VaultIngestFailed`.
+    fn refused_file_condition(format: &str, path: &str, reason: &str) -> Condition {
+        let bus = holon_api::ConditionBus::new();
+        bus.vault_ingest_refused(
+            format,
+            holon_api::RefusedFile {
+                path: path.into(),
+                reason: reason.into(),
+            },
+        );
+        bus.subscribe()
+            .current
+            .pop()
+            .expect("the refusal raises its format's condition")
+    }
+
     #[test]
     fn the_ingest_headline_names_the_refusing_format() {
         let mut s = ShareUiState::new();
-        s.apply_degraded(Condition {
-            subject: "/vault/Resources/Rezepte/Linsensuppe.cook".into(),
-            reason: ConditionKind::VaultIngestFailed {
-                format: "cooklang".into(),
-                reason: "unknown timer unit".into(),
-            },
-        });
+        s.apply_degraded(refused_file_condition(
+            "cooklang",
+            "/vault/Resources/Rezepte/Linsensuppe.cook",
+            "unknown timer unit",
+        ));
         let message = toast_message(&s.toasts[0]);
         assert!(
-            message.contains("bad cooklang file"),
-            "the headline must name the refusing format; got: {message}",
+            message.contains("1 cooklang file not read"),
+            "the headline must name the refusing format and count; got: {message}",
         );
         assert!(
             !message.contains("org"),
@@ -2428,18 +2448,40 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_ingest_headline_counts_every_refused_file_of_the_format() {
+        let bus = holon_api::ConditionBus::new();
+        for i in 0..4 {
+            bus.vault_ingest_refused(
+                "cooklang",
+                holon_api::RefusedFile {
+                    path: format!("/vault/Rezepte/r{i}.cook"),
+                    reason: "unknown timer unit".into(),
+                },
+            );
+        }
+        let mut s = ShareUiState::new();
+        for condition in bus.subscribe().current {
+            s.apply_degraded(condition);
+        }
+        assert_eq!(s.toasts.len(), 1, "one toast per refusing format");
+        let message = toast_message(&s.toasts[0]);
+        assert!(
+            message.contains("4 cooklang files not read"),
+            "the headline must count every refused file; got: {message}",
+        );
+    }
+
     /// A boot-race degradation that a late window learns about via replay must
     /// still render — and must be clearable by key like any other condition.
     #[test]
     fn a_vault_ingest_failure_is_a_clearable_condition() {
         let mut s = ShareUiState::new();
-        s.apply_degraded(Condition {
-            subject: "/vault/notes.org".into(),
-            reason: ConditionKind::VaultIngestFailed {
-                format: "org".into(),
-                reason: "unparseable".into(),
-            },
-        });
+        s.apply_degraded(refused_file_condition(
+            "org",
+            "/vault/notes.org",
+            "unparseable",
+        ));
         assert_eq!(s.toasts.len(), 1);
         let key = s.toasts[0]
             .condition
@@ -2477,7 +2519,7 @@ mod tests {
                      this (no-Turso) session"
                 .into(),
             condition: None,
-            format: None,
+            refusals: None,
         });
         assert_eq!(s.toasts.len(), 1);
         assert_eq!(
@@ -2527,7 +2569,7 @@ mod tests {
             subject: "undo".into(),
             detail: d.detail.into(),
             condition: None,
-            format: None,
+            refusals: None,
         });
         assert_eq!(s.toasts.len(), 1);
         assert_eq!(

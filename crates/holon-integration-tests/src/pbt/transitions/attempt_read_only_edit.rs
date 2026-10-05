@@ -112,10 +112,17 @@ impl TransitionRef<ReferenceState> for AttemptReadOnlyEdit {
         state.read_only.record_attempt();
         // The refusal is only half the contract. `read_only_format_gate`
         // discloses it against the refused FILE's path, so the model expects a
-        // condition whose subject ends in the fixture's recipe file — the part
-        // of an absolute temp-vault path a constant can own.
+        // condition whose subject ends in the block's file as it is named now —
+        // the part of an absolute temp-vault path the model can own.
+        let block = holon_api::EntityUri::parse(&self.block_id)
+            .expect("a read-only home is a parseable block id");
+        let file = state
+            .read_only
+            .refusing_file(&block)
+            .expect("every read-only home has a file")
+            .to_string();
         state.conditions.raise(
-            crate::pbt::composed::wide_e2e::READ_ONLY_RECIPE_FILE,
+            file,
             holon_api::ConditionKind::EDIT_REFUSED_READ_ONLY_FORMAT,
         );
     }

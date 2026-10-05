@@ -680,25 +680,21 @@ impl holon_filesystem::WritebackDisclosure for WritebackDegradedDisclosure {
     }
 
     fn ingest_refused(&self, path: &Path, format: &str, reason: &str) {
-        self.bus.emit(holon_api::Condition {
-            subject: file_subject(path),
-            reason: holon_api::ConditionKind::VaultIngestFailed {
-                format: format.to_string(),
+        self.bus.vault_ingest_refused(
+            format,
+            holon_api::RefusedFile {
+                path: file_subject(path),
                 reason: reason.to_string(),
             },
-        });
+        );
     }
 
     fn ingest_recovered(&self, path: &Path) {
-        for kind in [
-            holon_api::ConditionKind::VAULT_INGEST_FAILED,
-            holon_api::ConditionKind::VAULT_FILE_EMPTIED,
-        ] {
-            self.bus.clear(&holon_api::ConditionKey {
-                subject: file_subject(path),
-                kind,
-            });
-        }
+        self.bus.vault_ingest_recovered(&file_subject(path));
+        self.bus.clear(&holon_api::ConditionKey {
+            subject: file_subject(path),
+            kind: holon_api::ConditionKind::VAULT_FILE_EMPTIED,
+        });
     }
 
     fn vault_file_emptied(&self, path: &Path) {

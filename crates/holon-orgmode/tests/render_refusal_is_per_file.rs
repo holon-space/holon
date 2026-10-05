@@ -47,6 +47,21 @@ impl<S: tracing::Subscriber> Layer<S> for ErrorCapture {
     }
 }
 
+/// The WARN-level sibling of [`ErrorCapture`]: an adapter refusal is disclosed
+/// at WARN.
+#[derive(Clone, Default)]
+struct WarnCapture(Arc<Mutex<Vec<String>>>);
+
+impl<S: tracing::Subscriber> Layer<S> for WarnCapture {
+    fn on_event(&self, event: &tracing::Event<'_>, _: Context<'_, S>) {
+        if *event.metadata().level() == tracing::Level::WARN {
+            let mut buf = String::new();
+            event.record(&mut MsgVisitor(&mut buf));
+            self.0.lock().unwrap().push(buf);
+        }
+    }
+}
+
 /// A page and its blocks.
 type Page = (Block, Vec<Block>);
 
@@ -268,7 +283,12 @@ async fn the_tracked_re_render_writes_the_other_files_when_one_render_is_refused
 #[tokio::test]
 async fn the_tracked_re_render_writes_the_other_files_when_one_page_id_on_disk_is_refused() {
     let cap = ErrorCapture::default();
-    let _guard = tracing::subscriber::set_default(tracing_subscriber::registry().with(cap.clone()));
+    let warns = WarnCapture::default();
+    let _guard = tracing::subscriber::set_default(
+        tracing_subscriber::registry()
+            .with(cap.clone())
+            .with(warns.clone()),
+    );
     let tmp = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(tmp.path()).unwrap();
     let store = Store::default();
@@ -306,11 +326,19 @@ async fn the_tracked_re_render_writes_the_other_files_when_one_page_id_on_disk_i
         assert!(good.contains("good body edited"), "Good Page {n}: {good}");
     }
     assert_eq!(std::fs::read_to_string(&bad_path).unwrap(), bad_on_disk);
+    // The adapter refused the file's bytes: disclosed once at WARN by the
+    // ingest, not a second time at ERROR by the pass.
+    let bad = bad_path.display().to_string();
+    let warnings = warns.0.lock().unwrap().clone();
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.contains("block:a-bad") && w.contains(&bad)),
+        "the refused file must be disclosed with its id and path; captured: {warnings:?}"
+    );
     let errors = cap.0.lock().unwrap().clone();
     assert!(
-        errors
-            .iter()
-            .any(|e| e.contains("block:a-bad") && e.contains(&bad_path.display().to_string())),
-        "the refused file must be disclosed with its id and path; captured: {errors:?}"
+        !errors.iter().any(|e| e.contains(&bad)),
+        "a refusal the ingest disclosed was logged again at ERROR: {errors:?}"
     );
 }

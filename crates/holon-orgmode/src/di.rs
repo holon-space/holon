@@ -1312,13 +1312,29 @@ pub async fn run_file_sync_controller(
                 path = %file_path.display(),
                 "holon_latency",
             );
-            if let Err(e) = result {
-                error!(
-                    "[OrgMode] Failed to process existing file {}: {}",
-                    file_path.display(),
-                    e
-                );
-                failures.push((file_path, e));
+            match result {
+                Ok(_) => {}
+                // Disclosed by its format's condition; as a scan failure it
+                // would raise the start-failed banner for the same file again.
+                Err(e)
+                    if e.downcast_ref::<holon_filesystem::AdapterRefusal>()
+                        .is_some() =>
+                {
+                    tracing::warn!(
+                        "[OrgMode] existing file {} not read: {:#}; disclosed as a condition, \
+                         not as a failed scan",
+                        file_path.display(),
+                        e
+                    );
+                }
+                Err(e) => {
+                    error!(
+                        "[OrgMode] Failed to process existing file {}: {}",
+                        file_path.display(),
+                        e
+                    );
+                    failures.push((file_path, e));
+                }
             }
         }
         // ONE end-of-scan convergence wait (30s loud ceiling). A stall becomes a
@@ -1531,10 +1547,13 @@ pub async fn run_file_sync_controller(
                                 "[ORGSYNC_TRACE] on_file_changed ERROR for {}: {}",
                                 file_path.display(), e
                             );
-                            error!(
-                                "[OrgMode] File change error {}: {}",
-                                file_path.display(), e
-                            );
+                            // The controller already disclosed a refusal (WARN + condition).
+                            if e.downcast_ref::<holon_filesystem::AdapterRefusal>().is_none() {
+                                error!(
+                                    "[OrgMode] File change error {}: {}",
+                                    file_path.display(), e
+                                );
+                            }
                         } else {
                             tracing::debug!("[ORGSYNC_TRACE] on_file_changed OK for {}", file_path.display());
                         }
@@ -1547,10 +1566,13 @@ pub async fn run_file_sync_controller(
                                 "[ORGSYNC_TRACE] on_file_renamed ERROR for {} -> {}: {}",
                                 from.display(), to.display(), e
                             );
-                            error!(
-                                "[OrgMode] File rename error {} -> {}: {}",
-                                from.display(), to.display(), e
-                            );
+                            // The controller already disclosed a refusal (WARN + condition).
+                            if e.downcast_ref::<holon_filesystem::AdapterRefusal>().is_none() {
+                                error!(
+                                    "[OrgMode] File rename error {} -> {}: {}",
+                                    from.display(), to.display(), e
+                                );
+                            }
                         } else {
                             tracing::debug!("[ORGSYNC_TRACE] on_file_renamed OK for {} -> {}", from.display(), to.display());
                         }
@@ -1658,6 +1680,10 @@ pub async fn run_file_sync_controller(
                                     pending_full_rerender = true;
                                     idle_signal_for_task.set_bulk_pending(true);
                                 }
+                                // The pending external change this render
+                                // ingested first was refused: the controller
+                                // disclosed it (WARN + condition).
+                                Err(e) if e.downcast_ref::<holon_filesystem::AdapterRefusal>().is_some() => {}
                                 Err(e) => {
                                     error!(
                                         "[OrgMode] Block change error for {}: {:#}",

@@ -16,6 +16,7 @@ impl RefConditions for ReferenceState {
                 subject_name: c.subject_name.clone(),
                 kind: c.kind,
                 files: c.files.clone(),
+                count: c.count,
             })
             .collect()
     }

@@ -695,7 +695,7 @@ impl ConditionKind {
             Self::RehydrationFailed(_) => REHYDRATION_FAILED,
             Self::SqlProjectionFailed(_) => SQL_PROJECTION_FAILED,
             Self::ForeignIdCollision(_) => FOREIGN_ID_COLLISION,
-            Self::VaultIngestFailed { .. } => VAULT_INGEST_FAILED,
+            Self::VaultIngestFailed(_) => VAULT_INGEST_FAILED,
             Self::VaultFileEmptied => VAULT_FILE_EMPTIED,
             Self::SharedSubtreeNotMaterialized { .. } => SHARED_SUBTREE_NOT_MATERIALIZED,
             Self::EditRefusedReadOnlyFormat { .. } => EDIT_REFUSED_READ_ONLY_FORMAT,

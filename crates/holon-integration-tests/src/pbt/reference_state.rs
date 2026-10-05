@@ -493,6 +493,9 @@ pub struct ReferenceState {
     /// fails on purpose records its condition here, so the keystone can judge
     /// whether the user was told — not only whether the write was refused.
     pub conditions: super::conditions_state::ConditionsRefState,
+    /// The vault file names of the `.cook` files on disk that the cooklang
+    /// adapter refuses: saved broken, or broken after they ingested.
+    pub refused_recipes: BTreeSet<String>,
 
     /// C2 history-oracle expectation (NOT model state proper): populated by the
     /// harness `run_report` from the id-reconcile map. `history_ever_created`
@@ -854,6 +857,33 @@ impl Resolved<ReferenceState> {
 }
 
 impl ReferenceState {
+    /// The cooklang refusals as the bus groups them (D71.b): ONE condition,
+    /// subject the format, naming the first refused files by path — or none
+    /// once the last one is gone.
+    pub fn disclose_refused_recipes(&mut self) {
+        const FORMAT: &str = "cooklang";
+        let kind = holon_api::ConditionKind::VAULT_INGEST_FAILED;
+        if self.refused_recipes.is_empty() {
+            self.conditions.clear(FORMAT, kind);
+        } else {
+            let named = self
+                .refused_recipes
+                .iter()
+                .take(holon_api::IngestRefusals::EXAMPLES)
+                .cloned()
+                .collect();
+            self.conditions
+                .raise_counting_files(FORMAT, kind, self.refused_recipes.len(), named);
+        }
+    }
+
+    /// The vault file the seeded read-only recipe lives in now, on a draw that
+    /// seeds it.
+    pub fn read_only_recipe_file(&self) -> Option<&str> {
+        self.read_only
+            .refusing_file(&crate::pbt::composed::wide_e2e::read_only_recipe_page())
+    }
+
     /// The oracle's Rhai engine for evaluating the bundled `block` profile.
     ///
     /// The bundled profile's computed fields call entity lookups
@@ -1099,6 +1129,7 @@ impl ReferenceState {
             sharing: super::sharing_state::SharingRefState::default(),
             read_only: super::read_only_state::ReadOnlyRefState::default(),
             conditions: super::conditions_state::ConditionsRefState::default(),
+            refused_recipes: BTreeSet::new(),
             history_ever_created: BTreeSet::new(),
             history_min_op_groups: 0,
             history_removed: BTreeSet::new(),

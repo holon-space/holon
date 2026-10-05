@@ -77,15 +77,18 @@ where
         let missing: Vec<String> = expected
             .iter()
             .filter(|e| !raised.iter().any(|r| e.is_met_by(r)))
-            .map(|e| match &e.files {
-                None => format!(
+            .map(|e| {
+                let mut line = format!(
                     "{} on a subject whose final path component is `{}`",
                     e.kind, e.subject_name
-                ),
-                Some(files) => format!(
-                    "{} on a subject whose final path component is `{}`, naming the files {files:?}",
-                    e.kind, e.subject_name
-                ),
+                );
+                if let Some(count) = e.count {
+                    line.push_str(&format!(", counting {count} file(s)"));
+                }
+                if let Some(files) = &e.files {
+                    line.push_str(&format!(", naming the files {files:?}"));
+                }
+                line
             })
             .collect();
         if !missing.is_empty() {
@@ -155,6 +158,7 @@ mod tests {
                     subject_name: PINNED_NAME.to_string(),
                     kind: KIND,
                     files: None,
+                    count: None,
                 }],
                 governed: [KIND].into_iter().collect(),
             }
@@ -184,6 +188,7 @@ mod tests {
                         subject: (*subject).to_string(),
                         kind: KIND.to_string(),
                         files: Vec::new(),
+                        count: None,
                     })
                     .collect(),
             }
@@ -268,15 +273,38 @@ mod tests {
             subject_name: "block:moved".to_string(),
             kind: KIND,
             files: Some(files.iter().map(|f| f.to_string()).collect()),
+            count: None,
         };
         let raised = RaisedCondition {
             subject: "block:moved".to_string(),
             kind: KIND.to_string(),
             files: vec!["Overview.org".to_string(), "DayPage.org".to_string()],
+            count: None,
         };
         assert!(expected(&["Overview.org", "DayPage.org"]).is_met_by(&raised));
         assert!(!expected(&["DayPage.org", "Overview.org"]).is_met_by(&raised));
         assert!(!expected(&["Overview.org"]).is_met_by(&raised));
+    }
+
+    /// A condition that counts files is met only by a raise counting exactly
+    /// as many: the same named examples over a different total is a different
+    /// disclosure.
+    #[tokio::test]
+    async fn a_raise_counting_other_files_does_not_meet_the_expectation() {
+        let expected = |count: usize| ExpectedDisclosure {
+            subject_name: "cooklang".to_string(),
+            kind: KIND,
+            files: Some(vec!["a.cook".to_string()]),
+            count: Some(count),
+        };
+        let raised = RaisedCondition {
+            subject: "cooklang".to_string(),
+            kind: KIND.to_string(),
+            files: vec!["a.cook".to_string()],
+            count: Some(2),
+        };
+        assert!(expected(2).is_met_by(&raised));
+        assert!(!expected(1).is_met_by(&raised));
     }
 
     /// The rule itself, stated once: identity at a path-component boundary.

@@ -99,6 +99,7 @@ mod arrow_navigate;
 mod attempt_ingest_compound_on_read_only;
 mod attempt_read_only_edit;
 pub(crate) mod block_to_page;
+mod break_ingested_recipe;
 pub mod bulk_external_add;
 pub mod click_block;
 mod concurrent_schema_init;
@@ -115,6 +116,7 @@ mod delete_line_from_file;
 pub mod delete_placed_root;
 pub mod delete_placement_parent;
 pub mod delete_placement_record;
+mod delete_refused_recipe;
 mod dense_projection_edit;
 mod dispatch_unschemed_block_id;
 mod drag_drop_block;
@@ -163,6 +165,8 @@ mod remote_list_sync;
 mod remove_watch;
 mod rename_document;
 pub(crate) mod rename_page;
+mod rename_refused_recipe;
+mod save_refused_recipe;
 mod search;
 mod second_writer_refused;
 mod select_bias;
@@ -199,6 +203,7 @@ pub use arrow_navigate::ArrowNavigate;
 pub use attempt_ingest_compound_on_read_only::AttemptIngestCompoundOnReadOnly;
 pub use attempt_read_only_edit::AttemptReadOnlyEdit;
 pub use block_to_page::BlockToPage;
+pub use break_ingested_recipe::BreakIngestedRecipe;
 pub use bulk_external_add::BulkExternalAdd;
 pub use click_block::ClickBlock;
 pub use concurrent_schema_init::ConcurrentSchemaInit;
@@ -215,6 +220,7 @@ pub use delete_line_from_file::DeleteLineFromFile;
 pub use delete_placed_root::DeletePlacedRoot;
 pub use delete_placement_parent::DeletePlacementParent;
 pub use delete_placement_record::DeletePlacementRecord;
+pub use delete_refused_recipe::DeleteRefusedRecipe;
 pub use deliver_block_content::DeliverBlockContent;
 pub use dense_projection_edit::DenseProjectionEdit;
 pub use dispatch_unschemed_block_id::DispatchUnschemedBlockId;
@@ -274,6 +280,8 @@ pub use remote_list_sync::RemoteListSync;
 pub use remove_watch::RemoveWatch;
 pub use rename_document::RenameDocument;
 pub use rename_page::RenamePage;
+pub use rename_refused_recipe::RenameRefusedRecipe;
+pub use save_refused_recipe::SaveRefusedRecipe;
 pub use search::Search;
 pub use second_writer_refused::SecondWriterRefused;
 pub use set_edge_field::SetEdgeField;
@@ -321,6 +329,10 @@ crate::declare_e2e_transitions! {
         FinishCutPaste(FinishCutPaste),
         EditBlockCopy(EditBlockCopy),
         DeleteLineFromFile(DeleteLineFromFile),
+        SaveRefusedRecipe(SaveRefusedRecipe),
+        DeleteRefusedRecipe(DeleteRefusedRecipe),
+        BreakIngestedRecipe(BreakIngestedRecipe),
+        RenameRefusedRecipe(RenameRefusedRecipe),
         ExternalWriteWhileFocused(ExternalWriteWhileFocused),
         ExternalWriteSameBlockFocused(ExternalWriteSameBlockFocused),
         ClickBlock(ClickBlock),

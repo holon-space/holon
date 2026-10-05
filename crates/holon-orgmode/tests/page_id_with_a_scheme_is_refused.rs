@@ -6,6 +6,7 @@
 #![cfg(feature = "di")]
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -22,6 +23,32 @@ use holon_filesystem::FileSyncController;
 use holon_filesystem::RealFileSystem;
 use holon_markdown::LogseqMarkdownAdapter;
 use holon_orgmode::file_sync_controller::new_org_sync_controller;
+use tracing::field::Field;
+use tracing::field::Visit;
+use tracing_subscriber::Layer;
+use tracing_subscriber::layer::Context;
+use tracing_subscriber::layer::SubscriberExt;
+
+#[derive(Clone, Default)]
+struct ErrorCapture(Arc<Mutex<Vec<String>>>);
+
+struct MsgVisitor<'a>(&'a mut String);
+impl Visit for MsgVisitor<'_> {
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        use std::fmt::Write;
+        write!(self.0, "{}={:?} ", field.name(), value).unwrap();
+    }
+}
+
+impl<S: tracing::Subscriber> Layer<S> for ErrorCapture {
+    fn on_event(&self, event: &tracing::Event<'_>, _: Context<'_, S>) {
+        if *event.metadata().level() == tracing::Level::ERROR {
+            let mut buf = String::new();
+            event.record(&mut MsgVisitor(&mut buf));
+            self.0.lock().unwrap().push(buf);
+        }
+    }
+}
 
 /// A page and its blocks.
 type Page = (Block, Vec<Block>);
@@ -145,7 +172,12 @@ impl holon_filesystem::WritebackDisclosure for Disclosures {
             .unwrap()
             .push(format!("refused {}: {reason}", path.display()));
     }
-    fn ingest_recovered(&self, _: &std::path::Path) {}
+    fn ingest_recovered(&self, path: &std::path::Path) {
+        self.0
+            .lock()
+            .unwrap()
+            .push(format!("recovered {}", path.display()));
+    }
     fn vault_file_emptied(&self, _: &std::path::Path) {}
     fn writeback_lossy(&self, _: &std::path::Path, _: &str) {}
     fn writeback_faithful(&self, _: &std::path::Path) {}
@@ -293,4 +325,101 @@ async fn a_logseq_page_whose_id_names_a_scheme_is_refused_by_name() {
     let path = v.path.clone();
     let result = v.sync.on_file_changed(&path).await;
     assert_refused_by_name(&v, result);
+}
+
+/// A tracked page file edited into a refusal, then restored to the exact bytes
+/// last read from it (an editor undo).
+async fn refused_then_restored(v: &mut Vault) {
+    let mut page = Block::new_text(EntityUri::block("abc"), EntityUri::no_parent(), "Notes");
+    page.set_page(true);
+    let kid = Block::new_text(EntityUri::block("kid"), page.id.clone(), "A");
+    v.store
+        .0
+        .lock()
+        .unwrap()
+        .insert(page.id.clone(), (page.clone(), vec![kid]));
+    v.sync
+        .materialize_missing_page_files()
+        .await
+        .unwrap_or_else(|e| panic!("{e:#}"));
+    let good = std::fs::read_to_string(&v.path).unwrap();
+    let path = v.path.clone();
+    std::fs::write(&v.path, "#+ID: block:abc\n* A\n").unwrap();
+    let refused = v.sync.on_file_changed(&path).await;
+    assert_refused_by_name(v, refused);
+    std::fs::write(&v.path, &good).unwrap();
+
+    let edited = Block::new_text(EntityUri::block("kid"), page.id.clone(), "A edited");
+    v.store
+        .0
+        .lock()
+        .unwrap()
+        .insert(page.id.clone(), (page, vec![edited]));
+}
+
+fn assert_no_longer_refused(v: &Vault) {
+    let path = v.path.display().to_string();
+    let last = v
+        .disclosures
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|d| d.contains(&path))
+        .cloned();
+    assert_eq!(
+        last,
+        Some(format!("recovered {path}")),
+        "bytes that read back as the last good file are not refused"
+    );
+}
+
+/// The restored file is no longer refused, and the next re-render writes it.
+async fn assert_written_back_again(v: &mut Vault, errors: &ErrorCapture) {
+    v.sync
+        .re_render_all_tracked(&HashSet::new())
+        .await
+        .unwrap_or_else(|e| panic!("{e:#}"));
+    assert_no_longer_refused(v);
+    let path = v.path.display().to_string();
+    let on_disk = std::fs::read_to_string(&v.path).unwrap();
+    assert!(
+        on_disk.contains("A edited"),
+        "write-back to the restored file is shut: {on_disk}"
+    );
+    let errors = errors.0.lock().unwrap().clone();
+    assert!(
+        !errors.iter().any(|e| e.contains(&path)),
+        "a restored file is logged at ERROR: {errors:?}"
+    );
+}
+
+/// The change event of the restore is lost; the poll backstop must lift the
+/// refusal although the bytes equal the last projection.
+#[tokio::test]
+async fn a_refused_page_file_restored_without_an_event_is_lifted_by_the_poll() {
+    let errors = ErrorCapture::default();
+    let _guard =
+        tracing::subscriber::set_default(tracing_subscriber::registry().with(errors.clone()));
+    let mut v = vault();
+    refused_then_restored(&mut v).await;
+    v.sync
+        .poll_tracked_files()
+        .await
+        .unwrap_or_else(|e| panic!("{e:#}"));
+    assert_no_longer_refused(&v);
+    assert_written_back_again(&mut v, &errors).await;
+}
+
+/// The change event of the restore is lost and no poll runs before the next
+/// re-render: the re-render's own pending-change read must lift the refusal.
+#[tokio::test]
+async fn a_refused_page_file_restored_without_an_event_is_lifted_by_the_re_render() {
+    let errors = ErrorCapture::default();
+    let _guard =
+        tracing::subscriber::set_default(tracing_subscriber::registry().with(errors.clone()));
+    let mut v = vault();
+    refused_then_restored(&mut v).await;
+    assert_written_back_again(&mut v, &errors).await;
 }

@@ -18,14 +18,12 @@
 use holon_api::condition_bus::Condition;
 use holon_api::condition_bus::ConditionBus;
 use holon_api::condition_bus::ConditionKind;
+use holon_api::condition_bus::RefusedFile;
 
-fn ingest_failure(subject: &str) -> Condition {
+fn emptied_file(subject: &str) -> Condition {
     Condition {
         subject: subject.to_string(),
-        reason: ConditionKind::VaultIngestFailed {
-            format: "org".to_string(),
-            reason: "unreadable".to_string(),
-        },
+        reason: ConditionKind::VaultFileEmptied,
     }
 }
 
@@ -41,9 +39,9 @@ fn subjects(bus: &ConditionBus) -> Vec<String> {
 fn replay_follows_raise_order_not_subject_order() {
     let bus = ConditionBus::new();
     // "zeta" first, "alpha" second: raise order and alphabetical order disagree.
-    bus.emit(ingest_failure("zeta.org"));
-    bus.emit(ingest_failure("alpha.org"));
-    bus.emit(ingest_failure("mid.org"));
+    bus.emit(emptied_file("zeta.org"));
+    bus.emit(emptied_file("alpha.org"));
+    bus.emit(emptied_file("mid.org"));
 
     assert_eq!(
         subjects(&bus),
@@ -59,12 +57,12 @@ fn replay_follows_raise_order_not_subject_order() {
 #[test]
 fn re_raising_keeps_a_conditions_original_position() {
     let bus = ConditionBus::new();
-    bus.emit(ingest_failure("zeta.org"));
-    bus.emit(ingest_failure("alpha.org"));
+    bus.emit(emptied_file("zeta.org"));
+    bus.emit(emptied_file("alpha.org"));
     // The same failure again: it upserts, and must NOT jump to the end. A
     // repeated failure that reorders the stack makes the other toasts move
     // under the reader's eyes for no event they can see.
-    bus.emit(ingest_failure("zeta.org"));
+    bus.emit(emptied_file("zeta.org"));
 
     assert_eq!(
         subjects(&bus),
@@ -76,18 +74,44 @@ fn re_raising_keeps_a_conditions_original_position() {
 #[test]
 fn a_cleared_condition_that_returns_takes_the_newest_position() {
     let bus = ConditionBus::new();
-    let first = ingest_failure("zeta.org");
+    let first = emptied_file("zeta.org");
     bus.emit(first.clone());
-    bus.emit(ingest_failure("alpha.org"));
+    bus.emit(emptied_file("alpha.org"));
     bus.clear(&first.condition_key());
     // It really did end and really did happen again, so it is the newest
     // thing the reader has to look at — unlike a re-raise of one still in
     // effect.
-    bus.emit(ingest_failure("zeta.org"));
+    bus.emit(emptied_file("zeta.org"));
 
     assert_eq!(
         subjects(&bus),
         vec!["alpha.org".to_string(), "zeta.org".to_string()],
         "a condition that was cleared and raised again is the newest one"
+    );
+}
+
+/// A format's refusals are emitted by the bus itself, while it holds its own
+/// record of refused files, rather than by a caller's `emit`.
+#[test]
+fn grouped_refusals_replay_in_the_order_their_formats_were_first_refused() {
+    let bus = ConditionBus::new();
+    let refused = |path: &str| RefusedFile {
+        path: path.to_string(),
+        reason: "unparseable".to_string(),
+    };
+    bus.vault_ingest_refused("org", refused("b.org"));
+    bus.vault_ingest_refused("cooklang", refused("a.cook"));
+    // A second file of the first format re-raises its condition in place.
+    bus.vault_ingest_refused("org", refused("c.org"));
+    bus.emit(emptied_file("aaa.org"));
+
+    assert_eq!(
+        subjects(&bus),
+        vec![
+            "org".to_string(),
+            "cooklang".to_string(),
+            "aaa.org".to_string()
+        ],
+        "a late subscriber replays grouped refusals in the order they were raised"
     );
 }

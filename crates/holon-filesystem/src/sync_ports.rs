@@ -511,15 +511,17 @@ pub trait WritebackDisclosure: Send + Sync {
     /// nothing of it is in the store. `format` is the refusing adapter's own
     /// [`format_name`](holon_core::FileFormatAdapter::format_name).
     ///
-    /// Sticky, keyed by `path`: the file really is still bad until it is fixed.
-    /// Lifted by [`ingest_recovered`](Self::ingest_recovered).
+    /// Sticky per file until it is fixed or gone; the bus groups the files of
+    /// one format into one condition. Lifted by
+    /// [`ingest_recovered`](Self::ingest_recovered).
     fn ingest_refused(&self, path: &Path, format: &str, reason: &str);
 
     /// All-clear for [`ingest_refused`](Self::ingest_refused) and
     /// [`vault_file_emptied`](Self::vault_file_emptied): this file's next
-    /// ingest fully succeeded, so the conditions they raised no longer hold.
-    /// Called on every successful ingest, whether or not one was raised — a
-    /// clear for an unraised condition broadcasts nothing.
+    /// ingest fully succeeded, or the file is gone (deleted, or renamed away),
+    /// so the conditions they raised no longer hold. Called on every such
+    /// event, whether or not one was raised — a clear for an unraised
+    /// condition broadcasts nothing.
     fn ingest_recovered(&self, path: &Path);
 
     /// Signal that `path` is STILL 0 bytes long after the grace period that

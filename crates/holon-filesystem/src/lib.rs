@@ -57,6 +57,8 @@ pub use error::FilesystemError;
 pub use file::ChangesWithMetadata;
 pub use file::File;
 #[cfg(not(target_arch = "wasm32"))]
+pub use file_sync_controller::AdapterRefusal;
+#[cfg(not(target_arch = "wasm32"))]
 pub use file_sync_controller::BlockDelta;
 #[cfg(not(target_arch = "wasm32"))]
 pub use file_sync_controller::ClaimedId;

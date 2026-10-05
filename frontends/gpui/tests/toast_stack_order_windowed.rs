@@ -59,13 +59,10 @@ const FIRST_RAISED: &str = "zeta-notes.org";
 /// Raised SECOND, and sorts FIRST.
 const SECOND_RAISED: &str = "alpha-notes.org";
 
-fn ingest_failure(subject: &str) -> Condition {
+fn emptied_file(subject: &str) -> Condition {
     Condition {
         subject: subject.to_string(),
-        reason: ConditionKind::VaultIngestFailed {
-            format: "org".to_string(),
-            reason: "unreadable".to_string(),
-        },
+        reason: ConditionKind::VaultFileEmptied,
     }
 }
 
@@ -108,8 +105,8 @@ fn the_toast_stack_follows_raise_order_not_subject_order() {
     // sort governs. Raising after the window opens would instead arrive as two
     // live broadcasts, which the toast list appends in arrival order no matter
     // how the replay is sorted, and the rung would have no teeth.
-    bus.emit(ingest_failure(FIRST_RAISED));
-    bus.emit(ingest_failure(SECOND_RAISED));
+    bus.emit(emptied_file(FIRST_RAISED));
+    bus.emit(emptied_file(SECOND_RAISED));
 
     let bounds = BoundsRegistry::new();
     let nav = NavigationState::new();

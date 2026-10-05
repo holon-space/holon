@@ -18,7 +18,9 @@
 //! documents its all-clear; a variant that cannot name one does not belong on
 //! this bus.
 
+use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use tokio::sync::broadcast;
@@ -68,20 +70,20 @@ pub enum ConditionKind {
     /// All-clear: the next successful projection of the same share — that is
     /// the moment an honest diff got through, so the refusal no longer holds.
     ForeignIdCollision(String),
-    /// One vault file was REFUSED by its format adapter, so nothing of it is
-    /// in the store. The app stays up and the OTHER files keep syncing (the
-    /// watch loop is armed), but this file is NOT ingested until it is fixed —
-    /// a visible degraded mode, not a silent sync death.
+    /// Vault files were REFUSED by their format adapter, so nothing of them is
+    /// in the store. The app stays up and the OTHER files keep syncing, but a
+    /// refused file is NOT ingested until it is fixed.
     ///
-    /// `format` is the refusing adapter's own name (`org`, `cooklang`, …), so
-    /// the banner sends the reader to the defect the file can actually have;
-    /// `reason` carries the adapter's error. `subject` is the file —
-    /// one condition per bad file, so a repaired file lifts its own banner and
-    /// leaves the others standing.
+    /// One condition per FORMAT (`org`, `cooklang`, …), never per file: a vault
+    /// can refuse thousands of files of one format. `subject` is the format.
+    /// The bus keeps the per-file record behind it
+    /// ([`ConditionBus::vault_ingest_refused`]), so the count follows every
+    /// refusal and repair, and [`ConditionBus::refused_files`] lists each file
+    /// with its reason.
     ///
-    /// All-clear: the next fully-successful ingest of that same file, emitted
-    /// by `FileSyncController` through its `WritebackDisclosure` seam.
-    VaultIngestFailed { format: String, reason: String },
+    /// All-clear: the last refused file of that format ingests fully or is
+    /// gone ([`ConditionBus::vault_ingest_recovered`]).
+    VaultIngestFailed(IngestRefusals),
     /// One vault file is 0 bytes and stayed that way past the grace period that
     /// covers an atomic save's zero-length intermediate — a file someone really
     /// emptied. Nothing of it is ingested, because an empty file cannot
@@ -553,7 +555,7 @@ impl ConditionKind {
             Self::RehydrationFailed(_) => Self::REHYDRATION_FAILED,
             Self::SqlProjectionFailed(_) => Self::SQL_PROJECTION_FAILED,
             Self::ForeignIdCollision(_) => Self::FOREIGN_ID_COLLISION,
-            Self::VaultIngestFailed { .. } => Self::VAULT_INGEST_FAILED,
+            Self::VaultIngestFailed(_) => Self::VAULT_INGEST_FAILED,
             Self::VaultFileEmptied => Self::VAULT_FILE_EMPTIED,
             Self::SharedSubtreeNotMaterialized { .. } => Self::SHARED_SUBTREE_NOT_MATERIALIZED,
             Self::WritebackDegraded(_) => Self::WRITEBACK_DEGRADED,
@@ -587,6 +589,41 @@ impl ConditionKind {
             Self::DatabaseWatchFailed { .. } => Self::DATABASE_WATCH_FAILED,
             Self::DerivedFieldNotComputed { .. } => Self::DERIVED_FIELD_NOT_COMPUTED,
         }
+    }
+}
+
+/// One vault file a format adapter refused, and the adapter's error.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RefusedFile {
+    pub path: String,
+    pub reason: String,
+}
+
+/// The refused files of one format, as its
+/// [`ConditionKind::VaultIngestFailed`] shows them. Only the bus builds one,
+/// from its per-file record, so `count` always matches that record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IngestRefusals {
+    format: String,
+    count: NonZeroUsize,
+    examples: Vec<RefusedFile>,
+}
+
+impl IngestRefusals {
+    /// How many files a condition shows by name.
+    pub const EXAMPLES: usize = 3;
+
+    pub fn format(&self) -> &str {
+        &self.format
+    }
+
+    pub fn count(&self) -> NonZeroUsize {
+        self.count
+    }
+
+    /// The first [`EXAMPLES`](Self::EXAMPLES) refused files, by path.
+    pub fn examples(&self) -> &[RefusedFile] {
+        &self.examples
     }
 }
 
@@ -745,6 +782,9 @@ pub struct ConditionBus {
     /// must not make its toast jump the queue.
     raised_at: std::sync::Mutex<HashMap<String, u64>>,
     next_raise: std::sync::atomic::AtomicU64,
+    /// Format -> refused path -> reason. The `VaultIngestFailed` condition of
+    /// each format is derived from its entry, under this lock.
+    refused_files: std::sync::Mutex<BTreeMap<String, BTreeMap<String, String>>>,
 }
 
 impl ConditionBus {
@@ -760,6 +800,83 @@ impl ConditionBus {
             conditions: LiveData::in_memory(),
             raised_at: std::sync::Mutex::new(HashMap::new()),
             next_raise: std::sync::atomic::AtomicU64::new(0),
+            refused_files: std::sync::Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    /// Record that `format`'s adapter refused `file`, and raise or update that
+    /// format's [`ConditionKind::VaultIngestFailed`]. A file refused again
+    /// replaces its reason.
+    pub fn vault_ingest_refused(&self, format: &str, file: RefusedFile) {
+        let mut refused = self.refused_files.lock().unwrap();
+        let other_format = refused
+            .iter()
+            .find(|(f, files)| f.as_str() != format && files.contains_key(&file.path));
+        assert!(
+            other_format.is_none(),
+            "{} is refused as {format} while it stands refused as {:?}: a file has one format",
+            file.path,
+            other_format.map(|(f, _)| f)
+        );
+        let files = refused.entry(format.to_string()).or_default();
+        files.insert(file.path, file.reason);
+        self.emit(Self::ingest_refusal_condition(format, files));
+    }
+
+    /// `file` is no longer refused: it ingested fully, or it is gone. Takes it
+    /// out of its format's group, and clears the condition with the last one.
+    /// A file that was never refused changes nothing.
+    pub fn vault_ingest_recovered(&self, file: &str) {
+        let mut refused = self.refused_files.lock().unwrap();
+        let Some(format) = refused
+            .iter_mut()
+            .find_map(|(format, files)| files.remove(file).map(|_| format.clone()))
+        else {
+            return;
+        };
+        let files = &refused[&format];
+        if files.is_empty() {
+            refused.remove(&format);
+            self.clear(&ConditionKey {
+                subject: format,
+                kind: ConditionKind::VAULT_INGEST_FAILED,
+            });
+        } else {
+            self.emit(Self::ingest_refusal_condition(&format, files));
+        }
+    }
+
+    /// Every file `format` refuses, by path, with its reason.
+    pub fn refused_files(&self, format: &str) -> Vec<RefusedFile> {
+        self.refused_files
+            .lock()
+            .unwrap()
+            .get(format)
+            .into_iter()
+            .flatten()
+            .map(|(path, reason)| RefusedFile {
+                path: path.clone(),
+                reason: reason.clone(),
+            })
+            .collect()
+    }
+
+    fn ingest_refusal_condition(format: &str, files: &BTreeMap<String, String>) -> Condition {
+        Condition {
+            subject: format.to_string(),
+            reason: ConditionKind::VaultIngestFailed(IngestRefusals {
+                format: format.to_string(),
+                count: NonZeroUsize::new(files.len())
+                    .expect("a format's group is removed with its last file"),
+                examples: files
+                    .iter()
+                    .take(IngestRefusals::EXAMPLES)
+                    .map(|(path, reason)| RefusedFile {
+                        path: path.clone(),
+                        reason: reason.clone(),
+                    })
+                    .collect(),
+            }),
         }
     }
 
@@ -962,10 +1079,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn every_degradation_reaches_a_subscriber_that_arrives_after_it_was_raised() {
         let raised_before_anyone_listens = vec![
-            ConditionKind::VaultIngestFailed {
-                format: "org".into(),
-                reason: "notes.org: unparseable".into(),
-            },
+            ConditionKind::VaultFileEmptied,
             ConditionKind::SnapshotSaveFailed("disk full".into()),
             ConditionKind::SnapshotLoadFailed("/v/s.loro.corrupt-1".into()),
             ConditionKind::RehydrationFailed("advertiser: port in use".into()),

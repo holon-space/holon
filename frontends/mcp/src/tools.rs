@@ -5369,6 +5369,23 @@ impl HolonMcpServer {
     }
 
     #[tool(
+        description = "List EVERY vault file one format's adapter refused to read, by path, with \
+                       the adapter's error. A `vault-ingest-failed` condition is one per format \
+                       and names only its first few files; this is the whole list behind it. \
+                       `format` is the condition's subject (`org`, `cooklang`, …). Read-only."
+    )]
+    async fn refused_files(
+        &self,
+        Parameters(params): Parameters<RefusedFilesParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let report = crate::conditions_report::refused_files_report(
+            self.debug.conditions.get().map(|b| &**b),
+            &params.format,
+        );
+        Ok(CallToolResult::success(vec![Content::text(report)]))
+    }
+
+    #[tool(
         description = "List the live keybinding registry as action → key chord (e.g. `move_up` → \
                        [\"alt\",\"up\"]). Unions BOTH registries and tags each entry with its \
                        source: `structural` (chords wired to reactive operations — indent, \

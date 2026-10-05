@@ -223,7 +223,7 @@ impl EditorView {
                                         subject: bare_for_copy.clone(),
                                         detail: format!("Copied block ID {bare_for_copy}").into(),
                                         condition: None,
-                                        format: None,
+                                        refusals: None,
                                     },
                                     cx,
                                 );
@@ -1693,7 +1693,7 @@ impl Render for EditorView {
                                             subject: "command".into(),
                                             detail: detail.into(),
                                             condition: None,
-                                            format: None,
+                                            refusals: None,
                                         },
                                         cx,
                                     );
@@ -2113,7 +2113,7 @@ fn apply_popup_action(
                                     subject: "command".into(),
                                     detail: detail.into(),
                                     condition: None,
-                                    format: None,
+                                    refusals: None,
                                 },
                                 cx,
                             );
@@ -2160,7 +2160,7 @@ fn apply_popup_action(
                     subject: "command".into(),
                     detail: message.into(),
                     condition: None,
-                    format: None,
+                    refusals: None,
                 },
                 cx,
             );

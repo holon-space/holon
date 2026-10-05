@@ -242,6 +242,9 @@ impl RefReadOnlyHomes for NullRef {
     fn refuses_creation_under(&self, parent: &EntityUri) -> bool {
         panic!("class-2: invariant read RefReadOnlyHomes::refuses_creation_under")
     }
+    fn read_only_page_titles(&self) -> std::collections::BTreeMap<EntityUri, String> {
+        panic!("class-2: invariant read RefReadOnlyHomes::read_only_page_titles")
+    }
 }
 
 #[allow(unused_variables)]

@@ -1544,3 +1544,426 @@ fn a_second_boot_re_parses_only_the_recipe_that_changed() {
         );
     });
 }
+
+/// A recipe the cooklang adapter refuses: the unclosed brace drops the
+/// quantity, and the plugin refuses that at the boundary.
+fn refused_recipe(step: &str) -> String {
+    format!("{step} @flour{{200%g into the bowl.\n")
+}
+
+/// An org page the org adapter refuses: a page id carries no scheme.
+const REFUSED_ORG: &str = "#+TITLE: Broken\n#+ID: doc:broken\n* A heading\n";
+
+/// The `vault-ingest-failed` conditions in effect.
+fn ingest_refusals(app: &holon_integration_tests::TestEnvironment) -> Vec<holon_api::Condition> {
+    app.injector()
+        .expect("a booted app has an injector")
+        .resolve::<Arc<holon_api::ConditionBus>>()
+        .current()
+        .into_iter()
+        .filter(|c| c.reason.condition_kind() == holon_api::ConditionKind::VAULT_INGEST_FAILED)
+        .collect()
+}
+
+/// Polls until `settled` holds for the refusal conditions, then returns them.
+async fn refusals_once(
+    app: &holon_integration_tests::TestEnvironment,
+    settled: impl Fn(&[holon_api::Condition]) -> bool,
+) -> Vec<holon_api::Condition> {
+    app.wait_for_org_files_stable(25, Duration::from_millis(3000))
+        .await;
+    let deadline = std::time::Instant::now() + SYNC_TIMEOUT;
+    loop {
+        let refusals = ingest_refusals(app);
+        if settled(&refusals) || std::time::Instant::now() >= deadline {
+            return refusals;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+const REFUSED_RECIPES: [&str; 4] = ["Bad1.cook", "Bad2.cook", "Bad3.cook", "Bad4.cook"];
+
+fn file_name(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_name()
+        .expect("a refused path names a file")
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// `format`'s condition as `(count, example file names)`, and the file names
+/// the bus records as refused for it.
+fn refusal_group(
+    app: &holon_integration_tests::TestEnvironment,
+    refusals: &[holon_api::Condition],
+    format: &str,
+) -> ((usize, Vec<String>), Vec<String>) {
+    let condition = refusals
+        .iter()
+        .find(|c| c.subject == format)
+        .unwrap_or_else(|| panic!("no {format} refusal condition in {refusals:?}"));
+    let holon_api::ConditionKind::VaultIngestFailed(group) = &condition.reason else {
+        unreachable!("ingest_refusals keeps only VaultIngestFailed");
+    };
+    assert_eq!(group.format(), format);
+    let shown = (
+        group.count().get(),
+        group
+            .examples()
+            .iter()
+            .map(|f| file_name(&f.path))
+            .collect(),
+    );
+    (shown, refused_names(app, format))
+}
+
+fn refused_names(app: &holon_integration_tests::TestEnvironment, format: &str) -> Vec<String> {
+    app.injector()
+        .expect("a booted app has an injector")
+        .resolve::<Arc<holon_api::ConditionBus>>()
+        .refused_files(format)
+        .iter()
+        .map(|f| file_name(&f.path))
+        .collect()
+}
+
+/// Settles once `formats` conditions are raised and cooklang's counts `count`
+/// files.
+fn cooklang_counts(formats: usize, count: usize) -> impl Fn(&[holon_api::Condition]) -> bool {
+    move |refusals| {
+        refusals.len() == formats
+            && refusals.iter().any(|c| match &c.reason {
+                holon_api::ConditionKind::VaultIngestFailed(group) => {
+                    group.format() == "cooklang" && group.count().get() == count
+                }
+                _ => false,
+            })
+    }
+}
+
+fn names(files: &[&str]) -> Vec<String> {
+    files.iter().map(|f| f.to_string()).collect()
+}
+
+/// N refused files of one format are ONE disclosure for that format, with the
+/// count and a few example files; another format's refusal is its own.
+#[test]
+fn refused_files_are_disclosed_once_per_format() {
+    init_tracing();
+    let rt = runtime();
+    rt.clone().block_on(async {
+        let mut builder = TestEnvironmentBuilder::new()
+            .with_vault_file("Pancakes.cook", PANCAKES_COOK)
+            .with_vault_file("Broken.org", REFUSED_ORG);
+        for file in REFUSED_RECIPES {
+            builder = builder.with_vault_file(file, refused_recipe(file));
+        }
+        let mut app = builder
+            .build(rt.clone())
+            .await
+            .expect("a vault holding refused files must boot");
+        wait_for_recipe(&app, "Pancakes.cook").await;
+
+        let refusals = refusals_once(&app, cooklang_counts(2, 4)).await;
+        assert_eq!(
+            refusals.len(),
+            2,
+            "one condition per refusing format (cooklang, org), got {} subjects: {:?}",
+            refusals.len(),
+            refusals.iter().map(|c| &c.subject).collect::<Vec<_>>()
+        );
+        let expected_cooklang = ((4, names(&REFUSED_RECIPES[..3])), names(&REFUSED_RECIPES));
+        let expected_org = ((1, names(&["Broken.org"])), names(&["Broken.org"]));
+        assert_eq!(
+            refusal_group(&app, &refusals, "cooklang"),
+            expected_cooklang
+        );
+        assert_eq!(refusal_group(&app, &refusals, "org"), expected_org);
+
+        app.stop_app().await.expect("stop the app");
+        app.start_app(true).await.expect("boot the app again");
+        wait_for_recipe(&app, "Pancakes.cook").await;
+        let refusals = refusals_once(&app, cooklang_counts(2, 4)).await;
+        assert_eq!(
+            refusals.len(),
+            2,
+            "after a restart the refused files are one condition per format again: {:?}",
+            refusals.iter().map(|c| &c.subject).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            refusal_group(&app, &refusals, "cooklang"),
+            expected_cooklang
+        );
+        assert_eq!(refusal_group(&app, &refusals, "org"), expected_org);
+    });
+}
+
+/// A file refused at boot is disclosed once, by its format's condition. The
+/// initial scan does not also report it as a failed file: that report is the
+/// start-failed banner, and it would say the same thing a second time, at
+/// ERROR.
+#[test]
+fn a_file_refused_at_boot_is_its_formats_condition_not_a_failed_scan() {
+    // Touched before the SUT runs, or the capture comes back empty (entry
+    // `error-capture-layer-install-gotcha`) — so no `init_tracing` here.
+    let collector = holon_integration_tests::test_tracing::SpanCollector::global();
+    let _scope = holon_integration_tests::test_tracing::begin_test_scope();
+    collector.reset();
+    let rt = runtime();
+    rt.clone().block_on(async {
+        let app = TestEnvironmentBuilder::new()
+            .with_vault_file("Pancakes.cook", PANCAKES_COOK)
+            .with_vault_file("Bad1.cook", refused_recipe("Bad1"))
+            .build(rt.clone())
+            .await
+            .expect("a vault holding a refused file must boot");
+        wait_for_recipe(&app, "Pancakes.cook").await;
+
+        let scan_outcome = app
+            .injector()
+            .expect("a booted app has an injector")
+            .resolve::<holon_orgmode::FileWatcherReadySignal>()
+            .wait_ready()
+            .await;
+        let refusals = refusals_once(&app, cooklang_counts(1, 1)).await;
+        let errors: Vec<String> = collector
+            .captured_problems()
+            .into_iter()
+            .filter(|p| p.message.contains("Bad1.cook"))
+            .map(|p| p.message)
+            .collect();
+
+        assert!(
+            scan_outcome.is_ok(),
+            "the initial scan reported the refused file as a failed scan (start-failed banner) on \
+             top of its format's condition: {:#}",
+            scan_outcome.unwrap_err(),
+        );
+        assert!(
+            errors.is_empty(),
+            "boot logged {} error(s) for a refusal the bus already discloses: {errors:#?}",
+            errors.len()
+        );
+        let one = names(&["Bad1.cook"]);
+        assert_eq!(
+            refusal_group(&app, &refusals, "cooklang"),
+            ((1, one.clone()), one)
+        );
+    });
+}
+
+/// Repairing, deleting or renaming away a refused file takes it out of its
+/// format's group; the last one out clears the condition.
+#[test]
+fn a_formats_refusal_shrinks_as_its_files_are_repaired_and_clears_with_the_last() {
+    init_tracing();
+    let rt = runtime();
+    rt.clone().block_on(async {
+        let mut builder =
+            TestEnvironmentBuilder::new().with_vault_file("Pancakes.cook", PANCAKES_COOK);
+        for file in REFUSED_RECIPES.into_iter().take(3) {
+            builder = builder.with_vault_file(file, refused_recipe(file));
+        }
+        let app = builder
+            .build(rt.clone())
+            .await
+            .expect("a vault holding refused files must boot");
+        wait_for_recipe(&app, "Pancakes.cook").await;
+        let refusals = refusals_once(&app, cooklang_counts(1, 3)).await;
+        assert_eq!(
+            refusals.len(),
+            1,
+            "three refused recipes are one condition: {:?}",
+            refusals.iter().map(|c| &c.subject).collect::<Vec<_>>()
+        );
+        let three = names(&REFUSED_RECIPES[..3]);
+        assert_eq!(
+            refusal_group(&app, &refusals, "cooklang"),
+            ((3, three.clone()), three)
+        );
+
+        app.write_org_file("Bad1.cook", &recipe("Bad1", "Stir"))
+            .await
+            .expect("repair Bad1.cook");
+        wait_for_recipe(&app, "Bad1.cook").await;
+        let refusals = refusals_once(&app, cooklang_counts(1, 2)).await;
+        assert_eq!(refusals.len(), 1, "two refused recipes stay one condition");
+        let two = names(&REFUSED_RECIPES[1..3]);
+        assert_eq!(
+            refusal_group(&app, &refusals, "cooklang"),
+            ((2, two.clone()), two)
+        );
+
+        app.org_fs
+            .remove_file(&app.org_root().join("Bad2.cook"))
+            .expect("delete Bad2.cook");
+        app.org_fs
+            .rename_file(
+                &app.org_root().join("Bad3.cook"),
+                &app.org_root().join("Moved.cook"),
+            )
+            .expect("rename Bad3.cook");
+        let refusals = refusals_once(&app, |r| {
+            cooklang_counts(1, 1)(r) && refused_names(&app, "cooklang") == ["Moved.cook"]
+        })
+        .await;
+        assert_eq!(
+            refusals.len(),
+            1,
+            "the renamed file is still refused, under its new path only"
+        );
+        let moved = names(&["Moved.cook"]);
+        assert_eq!(
+            refusal_group(&app, &refusals, "cooklang"),
+            ((1, moved.clone()), moved)
+        );
+
+        app.write_org_file("Moved.cook", &recipe("Moved", "Fold"))
+            .await
+            .expect("repair Moved.cook");
+        wait_for_recipe(&app, "Moved.cook").await;
+        let refusals = refusals_once(&app, |r| r.is_empty()).await;
+        assert!(
+            refusals.is_empty(),
+            "every refused recipe is repaired or gone, so nothing is disclosed: {:?}",
+            refusals.iter().map(|c| &c.subject).collect::<Vec<_>>()
+        );
+        assert!(refused_names(&app, "cooklang").is_empty());
+    });
+}
+
+/// The problems captured for this test's scope that name one of `files`.
+fn problems_naming(
+    collector: &holon_integration_tests::test_tracing::SpanCollector,
+    files: &[&str],
+) -> Vec<String> {
+    collector
+        .captured_problems()
+        .into_iter()
+        .filter(|p| files.iter().any(|f| p.message.contains(f)))
+        .map(|p| p.message)
+        .collect()
+}
+
+/// The title of the page that owns `file`'s first step.
+async fn recipe_page_title(
+    env: &holon_integration_tests::TestEnvironment,
+    step_file: &str,
+) -> String {
+    let rows = env
+        .query_sql(&format!(
+            "SELECT p.content AS title FROM block_raw p JOIN block_raw s ON s.parent_id = p.id \
+             WHERE s.id = 'block:{step_file}::b::0'"
+        ))
+        .await
+        .expect("query the recipe's page");
+    rows.first()
+        .and_then(|r| r.get("title"))
+        .and_then(|v| v.as_string())
+        .unwrap_or_else(|| panic!("no page owns block:{step_file}::b::0: {rows:?}"))
+        .to_string()
+}
+
+/// A recipe that ingested fine and is then edited into content the adapter
+/// refuses is disclosed by its format's condition and logged at WARN. Every
+/// leg that re-reads it — the watcher and the poll backstop — must treat the
+/// refusal as disclosed, not log it again at ERROR.
+#[test]
+fn an_ingested_recipe_edited_into_a_refusal_logs_no_error() {
+    let collector = holon_integration_tests::test_tracing::SpanCollector::global();
+    let _scope = holon_integration_tests::test_tracing::begin_test_scope();
+    collector.reset();
+    let rt = runtime();
+    rt.clone().block_on(async {
+        let app = TestEnvironmentBuilder::new()
+            .with_vault_file("Good.cook", recipe("Good", "Stir"))
+            .build(rt.clone())
+            .await
+            .expect("a vault of one recipe must boot");
+        wait_for_recipe(&app, "Good.cook").await;
+
+        app.write_org_file("Good.cook", &refused_recipe("Good"))
+            .await
+            .expect("break Good.cook");
+        let refusals = refusals_once(&app, cooklang_counts(1, 1)).await;
+        // Past several poll ticks, so the poll backstop has re-read the file.
+        app.wait_for_org_files_stable(25, Duration::from_millis(3000))
+            .await;
+
+        let one = names(&["Good.cook"]);
+        assert_eq!(
+            refusal_group(&app, &refusals, "cooklang"),
+            ((1, one.clone()), one)
+        );
+        let errors = problems_naming(collector, &["Good.cook"]);
+        assert!(
+            errors.is_empty(),
+            "a refusal the bus already discloses was logged {} more time(s) at ERROR: {errors:#?}",
+            errors.len()
+        );
+    });
+}
+
+/// Renaming a refused file that HAS a document moves the refusal with it: the
+/// old path is gone, so it leaves the group; the new path holds the refused
+/// bytes, so it joins. The page title follows the new file name although its
+/// content is refused, and the repair clears the group.
+#[test]
+fn renaming_a_refused_recipe_with_a_document_moves_its_refusal_to_the_new_path() {
+    let collector = holon_integration_tests::test_tracing::SpanCollector::global();
+    let _scope = holon_integration_tests::test_tracing::begin_test_scope();
+    collector.reset();
+    let rt = runtime();
+    rt.clone().block_on(async {
+        let app = TestEnvironmentBuilder::new()
+            .with_vault_file("Good.cook", recipe("Good", "Stir"))
+            .build(rt.clone())
+            .await
+            .expect("a vault of one recipe must boot");
+        wait_for_recipe(&app, "Good.cook").await;
+        app.write_org_file("Good.cook", &refused_recipe("Good"))
+            .await
+            .expect("break Good.cook");
+        refusals_once(&app, cooklang_counts(1, 1)).await;
+
+        app.org_fs
+            .rename_file(
+                &app.org_root().join("Good.cook"),
+                &app.org_root().join("Renamed.cook"),
+            )
+            .expect("rename Good.cook");
+        let refusals = refusals_once(&app, |r| {
+            cooklang_counts(1, 1)(r) && refused_names(&app, "cooklang") == ["Renamed.cook"]
+        })
+        .await;
+        let renamed = names(&["Renamed.cook"]);
+        assert_eq!(
+            refusal_group(&app, &refusals, "cooklang"),
+            ((1, renamed.clone()), renamed),
+            "the refusal must follow the file to its new path and leave the old one"
+        );
+        assert_eq!(
+            recipe_page_title(&app, "Good.cook").await,
+            "Renamed",
+            "the page title follows the file name even while the file's content is refused"
+        );
+        let errors = problems_naming(collector, &["Good.cook", "Renamed.cook"]);
+        assert!(
+            errors.is_empty(),
+            "a refusal the bus already discloses was logged {} more time(s) at ERROR: {errors:#?}",
+            errors.len()
+        );
+
+        app.write_org_file("Renamed.cook", &recipe("Renamed", "Fold"))
+            .await
+            .expect("repair Renamed.cook");
+        let refusals = refusals_once(&app, |r| r.is_empty()).await;
+        assert!(
+            refusals.is_empty(),
+            "the only refused recipe is repaired, so nothing is disclosed: {:?}",
+            refusals.iter().map(|c| &c.subject).collect::<Vec<_>>()
+        );
+        assert!(refused_names(&app, "cooklang").is_empty());
+    });
+}

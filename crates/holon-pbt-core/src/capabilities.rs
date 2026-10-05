@@ -2681,6 +2681,9 @@ pub trait RefReadOnlyHomes {
     /// Whether the write tier refuses a create under `parent`: the read-only
     /// document's page and its homes alike.
     fn refuses_creation_under(&self, parent: &EntityUri) -> bool;
+    /// The title of each read-only document's page. A page's title is its
+    /// file's stem, so a rename changes it without any write to the file.
+    fn read_only_page_titles(&self) -> BTreeMap<EntityUri, String>;
 }
 
 #[holon_macros::capmap_adapter]
@@ -2763,6 +2766,8 @@ pub struct RaisedCondition {
     /// The final path components of the files the condition names, in its
     /// own order. Empty for a kind that names none.
     pub files: Vec<String>,
+    /// How many files the condition counts, for a kind that counts them.
+    pub count: Option<usize>,
 }
 
 /// One condition the model expects in effect.
@@ -2775,6 +2780,9 @@ pub struct ExpectedDisclosure {
     /// The file names the condition must name, in order, when the model
     /// states them; `None` leaves them unjudged.
     pub files: Option<Vec<String>>,
+    /// How many files the condition must count, when the model states it;
+    /// `None` leaves the count unjudged.
+    pub count: Option<usize>,
 }
 
 impl ExpectedDisclosure {
@@ -2785,6 +2793,7 @@ impl ExpectedDisclosure {
                 .files
                 .as_ref()
                 .is_none_or(|files| *files == raised.files)
+            && self.count.is_none_or(|count| Some(count) == raised.count)
     }
 }
 
@@ -3800,6 +3809,15 @@ pub trait SutSeamMutate {
         root: &holon_api::EntityUri,
         doc: &holon_api::EntityUri,
     );
+    /// The external editor saves `content` as the vault file `name`, and the
+    /// ingest of it completes, whatever the format adapter makes of it.
+    async fn save_vault_file(&self, name: &str, content: &str);
+    /// The external editor deletes the vault file `name`, and the ingest of
+    /// the deletion completes.
+    async fn delete_vault_file(&self, name: &str);
+    /// The user renames the vault file `from` to `to` in one atomic move, and
+    /// the ingest of the rename completes.
+    async fn rename_vault_file(&self, from: &str, to: &str);
 }
 
 /// SUT capability: create a block through the focused panel's creation slot

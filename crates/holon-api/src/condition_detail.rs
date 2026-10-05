@@ -60,16 +60,36 @@ impl ConditionKind {
             | Self::WritebackDegraded(detail)
             | Self::WritebackLossy { detail } => ConditionDetail::prose(detail.clone()),
 
-            // `subject` is the file. The capped headline names it; the path
-            // and the reason, an error chain whose cause comes last, go whole.
-            Self::VaultIngestFailed { reason, .. } => {
-                let name = std::path::Path::new(subject)
-                    .file_name()
-                    .map_or(subject.into(), |name| name.to_string_lossy());
-                ConditionDetail::with_body(
-                    format!("{name} was not read into Holon. The file and why:"),
-                    vec![subject.to_string(), reason.clone()],
-                )
+            // The capped headline names one file or counts them; each example's
+            // path and reason, an error chain whose cause comes last, go whole.
+            Self::VaultIngestFailed(refusals) => {
+                let count = refusals.count().get();
+                let examples = refusals.examples();
+                let headline = if count == 1 {
+                    let path = std::path::Path::new(&examples[0].path);
+                    let name = path
+                        .file_name()
+                        .map_or(path.to_string_lossy(), |name| name.to_string_lossy());
+                    format!("{name} was not read into Holon. The file and why:")
+                } else {
+                    format!(
+                        "{count} {} files were not read into Holon. The first {} and why:",
+                        refusals.format(),
+                        examples.len()
+                    )
+                };
+                let mut body: Vec<String> = examples
+                    .iter()
+                    .flat_map(|file| [file.path.clone(), file.reason.clone()])
+                    .collect();
+                if count > examples.len() {
+                    body.push(format!(
+                        "and {} more {} files",
+                        count - examples.len(),
+                        refusals.format()
+                    ));
+                }
+                ConditionDetail::with_body(headline, body)
             }
 
             Self::VaultFileEmptied => ConditionDetail::prose(format!(

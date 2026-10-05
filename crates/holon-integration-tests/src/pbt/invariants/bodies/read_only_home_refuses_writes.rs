@@ -26,6 +26,7 @@
 //! consults — so a gate that stopped classifying anything shows up as a
 //! declared block that production no longer refuses, not as a quiet pass.
 
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
 use holon_pbt_core::capabilities::RefReadOnlyHomes;
@@ -75,11 +76,12 @@ where
         }
 
         let now = sut.read_only_blocks_now().await;
-        if let Some((id, ingested, stored)) = first_divergence(&at_ingest, &now) {
+        let titles = reference.read_only_page_titles();
+        if let Some((id, expected, stored)) = first_divergence(&at_ingest, &now, &titles) {
             return InvariantResult::Fail(format!(
                 "block `{id}` is homed in a read-only file, yet `block_raw` no longer holds what \
-                 the ingest wrote: ingested {ingested:?}, stored {stored:?}. A write reached the \
-                 store that the disk can never take."
+                 the ingest wrote (a page: the title of its file): expected {expected:?}, stored \
+                 {stored:?}. A write reached the store that the disk can never take."
             ));
         }
 
@@ -136,12 +138,18 @@ where
 }
 
 /// The first block whose stored content left its ingested value, or a block
-/// that vanished from the read-only set entirely.
+/// that vanished from the read-only set entirely. A page's row is held to the
+/// title the model expects, every other row to what the ingest wrote.
 fn first_divergence<'a>(
     at_ingest: &'a [(String, String)],
     now: &'a [(String, String)],
+    titles: &'a BTreeMap<holon_api::EntityUri, String>,
 ) -> Option<(&'a str, &'a str, String)> {
     at_ingest.iter().find_map(|(id, ingested)| {
+        let ingested = titles
+            .iter()
+            .find(|(page, _)| page.as_str() == id)
+            .map_or(ingested, |(_, title)| title);
         let stored = now.iter().find(|(other, _)| other == id).map(|(_, c)| c);
         match stored {
             Some(stored) if stored == ingested => None,

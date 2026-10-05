@@ -32,12 +32,24 @@ pub struct CanonicalPath(PathBuf);
 impl CanonicalPath {
     /// Create a new CanonicalPath by canonicalizing the given path.
     ///
-    /// If canonicalization fails (e.g., the file doesn't exist yet),
-    /// falls back to the original path. This allows working with paths
-    /// before the file is created.
+    /// A path that does not exist (not created yet, or already deleted or
+    /// moved away) resolves through its deepest existing ancestor, so a file
+    /// has the same key before, during and after its life on disk. A path no
+    /// ancestor of which resolves is kept as given.
     pub fn new(path: impl AsRef<Path>) -> Self {
         let path = path.as_ref();
-        Self(std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()))
+        if let Ok(resolved) = std::fs::canonicalize(path) {
+            return Self(resolved);
+        }
+        for ancestor in path.ancestors().skip(1) {
+            if let Ok(resolved) = std::fs::canonicalize(ancestor) {
+                let rest = path
+                    .strip_prefix(ancestor)
+                    .expect("an ancestor is a prefix of its path");
+                return Self(resolved.join(rest));
+            }
+        }
+        Self(path.to_path_buf())
     }
 
     /// Create a CanonicalPath, returning an error if canonicalization fails.
@@ -119,6 +131,23 @@ mod tests {
 
         // Should fall back to the original path
         assert_eq!(cp.as_path_buf(), &nonexistent);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_vanished_file_keeps_the_key_it_had_while_it_existed() {
+        let temp_dir = TempDir::new().unwrap();
+        let real_dir = temp_dir.path().join("real");
+        std::fs::create_dir(&real_dir).unwrap();
+        let link_dir = temp_dir.path().join("link");
+        std::os::unix::fs::symlink(&real_dir, &link_dir).unwrap();
+        let file = link_dir.join("gone.org");
+        std::fs::write(&file, "x").unwrap();
+        let while_present = CanonicalPath::new(&file);
+
+        std::fs::remove_file(&file).unwrap();
+
+        assert_eq!(CanonicalPath::new(&file), while_present);
     }
 
     #[test]

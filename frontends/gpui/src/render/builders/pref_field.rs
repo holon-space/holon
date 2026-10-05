@@ -55,7 +55,7 @@ fn set_preference_or_toast(
                 subject: format!("preference:{key}"),
                 detail: format!("Couldn't save '{key}': {e:#}").into(),
                 condition: None,
-                format: None,
+                refusals: None,
             },
             cx,
         );

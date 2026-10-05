@@ -8,6 +8,7 @@
 //! clearing a condition is the app's business, never an agent's.
 
 use holon_api::ConditionBus;
+use holon_api::ConditionKind;
 use holon_api::condition_source::placement_name;
 use holon_api::condition_source::severity_name;
 
@@ -52,6 +53,32 @@ pub fn report(bus: Option<&ConditionBus>) -> String {
         for line in &detail.body {
             out.push_str(&format!("  | {line}\n"));
         }
+        if let ConditionKind::VaultIngestFailed(refusals) = &condition.reason {
+            out.push_str(&format!(
+                "  every refused file: refused_files(format: \"{}\")\n",
+                refusals.format()
+            ));
+        }
+    }
+    out
+}
+
+/// Every file `format`'s adapter refuses, with its reason — the full list
+/// behind that format's `vault-ingest-failed` condition, which names only the
+/// first few.
+pub fn refused_files_report(bus: Option<&ConditionBus>, format: &str) -> String {
+    let Some(bus) = bus else {
+        return "[no condition bus is wired into this server — it cannot tell you which files \
+                are refused. This is a headless/unwired run, NOT an all-clear.]"
+            .to_string();
+    };
+    let files = bus.refused_files(format);
+    if files.is_empty() {
+        return format!("No {format} files are refused.");
+    }
+    let mut out = format!("{} {format} file(s) refused, by path:\n", files.len());
+    for file in &files {
+        out.push_str(&format!("\n- {}\n  | {}\n", file.path, file.reason));
     }
     out
 }
@@ -59,18 +86,25 @@ pub fn report(bus: Option<&ConditionBus>) -> String {
 #[cfg(test)]
 mod tests {
     use holon_api::Condition;
-    use holon_api::ConditionKind;
+    use holon_api::RefusedFile;
 
     use super::*;
 
-    fn ingest_failure(subject: &str) -> Condition {
+    fn emptied_file(subject: &str) -> Condition {
         Condition {
             subject: subject.to_string(),
-            reason: ConditionKind::VaultIngestFailed {
-                format: "org".to_string(),
+            reason: ConditionKind::VaultFileEmptied,
+        }
+    }
+
+    fn refuse(bus: &ConditionBus, format: &str, path: &str) {
+        bus.vault_ingest_refused(
+            format,
+            RefusedFile {
+                path: path.to_string(),
                 reason: "unreadable".to_string(),
             },
-        }
+        );
     }
 
     #[test]
@@ -92,7 +126,7 @@ mod tests {
     #[test]
     fn a_raised_condition_reads_back_with_its_profile_and_detail() {
         let bus = ConditionBus::new();
-        bus.emit(ingest_failure("notes.org"));
+        refuse(&bus, "org", "notes.org");
 
         let text = report(Some(&bus));
         assert!(text.contains("[error]"), "severity: text={text}");
@@ -109,6 +143,43 @@ mod tests {
             "the stable kind: text={text}"
         );
         assert!(text.contains("placement: toast"), "text={text}");
+        assert!(
+            text.contains("refused_files(format: \"org\")"),
+            "the condition points at its full list: text={text}"
+        );
+    }
+
+    #[test]
+    fn refused_files_lists_every_file_of_the_format_past_the_examples() {
+        let bus = ConditionBus::new();
+        let paths: Vec<String> = (0..holon_api::IngestRefusals::EXAMPLES + 2)
+            .map(|i| format!("/vault/r{i}.cook"))
+            .collect();
+        for path in &paths {
+            refuse(&bus, "cooklang", path);
+        }
+        refuse(&bus, "org", "/vault/notes.org");
+
+        let text = refused_files_report(Some(&bus), "cooklang");
+        assert!(
+            text.starts_with(&format!("{} cooklang file(s) refused", paths.len())),
+            "text={text}"
+        );
+        for path in &paths {
+            assert!(
+                text.contains(&format!("- {path}\n")),
+                "{path} is listed: text={text}"
+            );
+        }
+        assert!(
+            !text.contains("notes.org"),
+            "only the asked format: text={text}"
+        );
+        assert_eq!(
+            refused_files_report(Some(&bus), "markdown"),
+            "No markdown files are refused."
+        );
+        assert!(refused_files_report(None, "org").contains("NOT an all-clear"));
     }
 
     #[test]
@@ -132,7 +203,7 @@ mod tests {
     #[test]
     fn a_cleared_condition_leaves_the_report() {
         let bus = ConditionBus::new();
-        let condition = ingest_failure("notes.org");
+        let condition = emptied_file("notes.org");
         bus.emit(condition.clone());
         bus.clear(&condition.condition_key());
 
@@ -143,8 +214,8 @@ mod tests {
     #[test]
     fn the_report_lists_conditions_in_raise_order() {
         let bus = ConditionBus::new();
-        bus.emit(ingest_failure("zeta.org"));
-        bus.emit(ingest_failure("alpha.org"));
+        bus.emit(emptied_file("zeta.org"));
+        bus.emit(emptied_file("alpha.org"));
 
         let text = report(Some(&bus));
         let zeta = text.find("zeta.org").expect("zeta is listed");

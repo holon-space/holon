@@ -668,3 +668,11 @@ pub struct CompleteTaskParams {
     #[serde(default)]
     pub commit_sha: Option<String>,
 }
+
+/// Parameters for `refused_files`.
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct RefusedFilesParams {
+    /// The refusing format, as a `vault-ingest-failed` condition's subject
+    /// names it (`org`, `cooklang`, …).
+    pub format: String,
+}
