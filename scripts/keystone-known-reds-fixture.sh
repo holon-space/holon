@@ -295,15 +295,124 @@ cat >"$work/fail-leak-known-panic.log" <<'EOF'
  FAIL + LEAK [   6.486s] (197/682) holon-app::integration_toggle_round_trip a_dispatched_switch_reaches_the_seeded_section_without_a_manual_reprojection
 EOF
 expect_outcome fail-leak-known-panic 0 '^\[known-reds\] PASS-WITH-NOTE: 1 known-red' "$work/fail-leak-known-panic.log"
-# A test that returned `Err` printed no panic; its status line stands in.
+# A test that returned `Err` printed no panic: its status line stands in, with
+# the `Error:` it returned, so two root causes in one binary stay apart.
 cat >"$work/fail-leak-no-panic.log" <<'EOF'
  FAIL + LEAK [   0.906s] (36/49) holon::integration_tests test_multiple_containers
   stderr ───
     Error: aborted by peer: the cryptographic handshake failed: error 120: peer doesn't support any known protocol
      Summary [  31.396s] 49 tests run: 48 passed, 1 failed, 0 skipped
 EOF
-expect_outcome fail-leak-no-panic 1 '^ *1 FAIL + LEAK: holon::integration_tests test_multiple_containers$' \
+expect_outcome fail-leak-no-panic 1 "^ *1 FAIL + LEAK: holon::integration_tests test_multiple_containers: Error: aborted by peer: the cryptographic handshake failed: error 120: peer doesn't support any known protocol\$" \
     "$work/fail-leak-no-panic.log"
+cat >"$work/fail-two-errors.log" <<'EOF'
+        FAIL [   1.973s] (356/893) holon::e2e_backend_engine_test test_basic_query_execution
+  stdout ───
+
+    running 1 test
+    test test_basic_query_execution ... FAILED
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out; finished in 1.95s
+
+  stderr ───
+    Error: Failed to insert test data: Database error: Failed to prepare statement: Parse error: cannot modify materialized view block
+
+        FAIL [   2.008s] (357/893) holon::e2e_backend_engine_test test_create_and_delete_workflow
+  stderr ───
+    Error: the certification harness must run
+
+     Summary [ 319.449s] 893 tests run: 891 passed, 2 failed, 0 skipped
+        FAIL [   1.973s] (356/893) holon::e2e_backend_engine_test test_basic_query_execution
+        FAIL [   2.008s] (357/893) holon::e2e_backend_engine_test test_create_and_delete_workflow
+error: test run failed
+EOF
+expect_outcome fail-two-errors/first 1 '^ *1 FAIL: holon::e2e_backend_engine_test test_basic_query_execution: Error: Failed to insert test data: .*cannot modify materialized view block$' \
+    "$work/fail-two-errors.log"
+expect_outcome fail-two-errors/second 1 '^ *1 FAIL: holon::e2e_backend_engine_test test_create_and_delete_workflow: Error: the certification harness must run$' \
+    "$work/fail-two-errors.log"
+# A panic belongs to the test whose output holds it: the captured block under
+# its status line. A `harness = false` binary panics on `main`, not on a thread
+# named after the test, and that panic still stands alone as the signature.
+cat >"$work/known-panic-on-main.log" <<'EOF'
+        PASS [  51.633s] (2807/6521) holon-gpui::gpui_compose_sut_windowed windowed_composed_sut_replays_a_fixture_via_replay_steps_green
+        FAIL [  46.890s] (2808/6521) holon-gpui::gpui_sim_replay_capture gpui_sim_replay_capture
+  stderr ───
+    [Holon Sim Replay Capture] replaying "presskey_loro_split_backspace" (4 steps)
+    thread 'main' (75718365) panicked at crates/holon-integration-tests/src/pbt/op_write_cap.rs:381:17:
+    [SplitBlock/keystroke] cannot place the caret for content byte 0 on block:c1: editable surface not projected by this driver
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+     Summary [  46.900s] 2 tests run: 1 passed, 1 failed, 0 skipped
+        FAIL [  46.890s] (2808/6521) holon-gpui::gpui_sim_replay_capture gpui_sim_replay_capture
+error: test run failed
+EOF
+expect_outcome known-panic-on-main 0 '^\[known-reds\] PASS-WITH-NOTE: 1 known-red panic(s), 0 novel' \
+    "$work/known-panic-on-main.log"
+# The same test name in two binaries, one passing: one failure, one signature.
+cat >"$work/same-name-two-binaries.log" <<'EOF'
+        PASS [   0.010s] (1/2) holon-app::suite shared_name
+        FAIL [   0.010s] (2/2) holon::suite shared_name
+  stderr ───
+    thread 'shared_name' (2) panicked at crates/holon/tests/suite.rs:7:9:
+    the holon copy failed
+     Summary [   0.355s] 2 tests run: 1 passed, 1 failed, 0 skipped
+error: test run failed
+EOF
+expect_outcome same-name-two-binaries 1 '^\[known-reds\] FAIL: 1 novel panic(s)' \
+    "$work/same-name-two-binaries.log"
+# Under `--no-capture` the output runs between the test's `START` and its
+# status line, unindented.
+cat >"$work/no-capture-worker-panic.log" <<'EOF'
+       START [         ] (1/1) holon-integration-tests::latency_slo_gate latency_fence_under_typing_report
+[dense-tools] embedded MCP server up in 86.56425ms
+thread 'tokio-runtime-worker' (224301153) panicked at crates/holon-integration-tests/tests/latency_slo_gate.rs:261:5:
+the fence report is over budget
+        FAIL [  13.874s] (1/1) holon-integration-tests::latency_slo_gate latency_fence_under_typing_report
+     Summary [  13.875s] 1 test run: 0 passed, 1 failed, 12 skipped
+        FAIL [  13.874s] (1/1) holon-integration-tests::latency_slo_gate latency_fence_under_typing_report
+error: test run failed
+EOF
+expect_outcome no-capture-worker-panic 1 '^\[known-reds\] FAIL: 1 novel panic(s)' \
+    "$work/no-capture-worker-panic.log"
+# nextest indents captured output by 4: a passing should_panic test's own panic
+# printed there is no failure, and does not hide a leak of the same test.
+cat >"$work/nextest-should-panic.log" <<'EOF'
+        PASS [   0.010s] (1/3) holon::sp boom_should_panic
+  stdout ───
+
+    running 1 test
+    thread 'boom_should_panic' panicked at crates/holon/tests/sp.rs:9:5:
+    the expected boom
+    test boom_should_panic - should panic ... ok
+
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+ FAIL + LEAK [   0.312s] (2/3) holon::leaky boom_should_panic
+  stdout ───
+    thread 'boom_should_panic' panicked at crates/holon/tests/leaky.rs:9:5:
+    the expected boom
+    test boom_should_panic - should panic ... ok
+    test result: ok. 1 passed; 0 failed; 0 ignored
+        PASS [   0.010s] (3/3) holon::other fine
+     Summary [   1.000s] 3 tests run: 2 passed, 1 failed, 0 skipped
+error: test run failed
+EOF
+expect_outcome nextest-should-panic/no-panic-sig 1 '^\[known-reds\] FAIL: 1 novel panic(s)' \
+    "$work/nextest-should-panic.log"
+expect_outcome nextest-should-panic/leak 1 '^ *1 FAIL + LEAK: holon::leaky boom_should_panic$' \
+    "$work/nextest-should-panic.log"
+# A label outside nextest's vocabulary stops the run instead of being guessed.
+cat >"$work/unknown-label.log" <<'EOF'
+   TRY 1 FROB [   0.120s] (1/1) holon::flaky_suite sometimes
+     Summary [   0.355s] 1 tests run: 0 passed, 1 failed, 0 skipped
+EOF
+expect_outcome unknown-label 3 'UNKNOWN nextest status label "TRY 1 FROB"' "$work/unknown-label.log"
+# A passing retry may end leaky or past its slow bound; neither is a failure.
+cat >"$work/try-success-labels.log" <<'EOF'
+   TRY 2 TMPASS [ 120.034s] (1/2) holon-gpui::bin slowish
+   TRY 2 LEAK [   0.312s] (2/2) holon-gpui::bin leaky
+     Summary [ 120.355s] 2 tests run: 2 passed, 0 skipped
+EOF
+expect_outcome try-success-labels 0 '^\[known-reds\] PASS: 1 green run' "$work/try-success-labels.log"
 # `TERMINATING` is nextest killing the test, not an outcome: the final line decides.
 cat >"$work/terminating-timeout-pass.log" <<'EOF'
         SLOW [> 60.000s] (─────────) holon-gpui::bin allowed

@@ -19,7 +19,8 @@
 # Exit 3  — at least one log admits no verdict: INDETERMINATE (empty, or
 #           truncated before the run said anything) or UNREADABLE (no such
 #           file). Never silently a pass — the input is broken, so nothing can
-#           be said about the run at all.
+#           be said about the run at all. Also a nextest status label this
+#           script does not know: guessing its meaning would guess the verdict.
 #
 # The registry is the single source of truth for the patterns; this script holds
 # none of its own.
@@ -139,27 +140,31 @@ for log in "$@"; do
     # every shrink step, so one failing case yields dozens of near-identical
     # lines — hence the aggregation below.
     #
-    # A panic on the thread of a test cargo reports as `- should panic ... ok`
-    # is that test passing. Test names are unique only within one test binary
-    # (one cargo `Running` section), and a passing should_panic test panics
-    # exactly once, so its panics are dropped only when their count in that
-    # section equals its `ok` lines there; any surplus keeps them all, because
-    # nothing tells the expected panic from the real one.
+    # In a nextest log every line of test output belongs to one test instance:
+    # the captured block (indented by 4) under its status line, or, under
+    # `--no-capture`, the lines between its `START` and its status line. Thread
+    # names cannot do this: a `harness = false` binary panics on `main`, a test
+    # may panic on a worker thread, and names repeat across binaries.
     #
-    # A test nextest killed or failed outside the test body (timeout, signal,
-    # leak after a passing body, could not execute) printed no panic, so its
-    # status line is its signature, keyed on nextest's long label (`TMT` reads
-    # as `TIMEOUT`). A `FAIL`, `FAIL + LEAK` or `FLKY-FL` test carries its own
-    # panic, on the thread named after it, and that panic is the signature; the
-    # status line stands in only when no such panic was printed or the test
-    # name is ambiguous across binaries. Labels are nextest-runner's
-    # reporter/displayer/imp.rs `status_str` / `short_status_str`.
+    # A panic on the thread of a test cargo reports as `- should panic ... ok`
+    # is that test passing. Such a panic is matched by thread name within the
+    # owning nextest instance, else within one cargo `Running` section, and is
+    # dropped only when the panic count there equals the `ok` lines there; any
+    # surplus keeps them all, because nothing tells the expected panic from the
+    # real one.
+    #
+    # A failed test whose output holds a panic has that panic as its signature.
+    # Otherwise its status line is the signature, under nextest's long label
+    # (`TMT` reads as `TIMEOUT`), followed by the first `Error: ` line of its
+    # output when it returned one, so two root causes stay two signatures.
+    # Labels are nextest-runner's reporter/displayer/imp.rs `status_str` /
+    # `short_status_str`; a label outside that set stops the run (exit 3).
     #
     # A retried test's last failing `TRY n` line is its verdict. When a later
-    # try passes (`FLAKY n/m`), its failed tries and the panics printed under
-    # them are not failures. The stress index `[i/n]` is dropped from the
-    # signature so a pattern names the test once; nextest also repeats status
-    # lines in its closing summary, hence the dedup.
+    # try passes (`FLAKY n/m`), its failed tries and their panics are not
+    # failures. The stress index `[i/n]` is dropped from the signature so a
+    # pattern names the test once; nextest also repeats status lines in its
+    # closing summary, hence the dedup.
     sigs_file=$(mktemp)
     awk '
         function thread_of(line,    t) {
@@ -168,13 +173,16 @@ for log in "$@"; do
             t = substr(line, 9)
             return substr(t, 1, index(t, q) - 1)
         }
-        # Sets LABEL, STRESS and UNIT from a nextest status line; returns 0 for
-        # any other line.
+        # Sets LABEL, STRESS and UNIT from a nextest status line, whose label
+        # nextest right-aligns in 12 columns and spells in capitals; returns 0
+        # for any other line.
         function parse_status(line,    head) {
             if (!match(line, /^ *[A-Z][A-Za-z0-9 +\/-]* \[[^]]*\] /)) return 0
             head = substr(line, 1, RLENGTH)
-            UNIT = substr(line, RLENGTH + 1)
+            if (index(head, " [") < 13) return 0
             LABEL = head; sub(/^ +/, "", LABEL); sub(/ \[[^]]*\] $/, "", LABEL)
+            if (LABEL ~ /[a-z]/ && LABEL !~ /^(Summary|Stress test)$/) return 0
+            UNIT = substr(line, RLENGTH + 1)
             STRESS = ""
             if (match(UNIT, /^\[[0-9]+\/[0-9]+\] /)) {
                 STRESS = substr(UNIT, 1, RLENGTH); UNIT = substr(UNIT, RLENGTH + 1)
@@ -182,87 +190,114 @@ for log in "$@"; do
             sub(/^\([^)]*\) /, "", UNIT)
             return 1
         }
-        function long_label(short) {
-            if (short == "TMT") return "TIMEOUT"
-            if (short == "LKFAIL") return "LEAK-FAIL"
-            if (short == "FL+LK") return "FAIL + LEAK"
-            if (short ~ /^SIG [0-9]+$/) return "ABORT " short
-            if (short ~ /^(FAIL|XFAIL|ABORT)$/) return short
-            return "SIG" short
+        function unknown_label(label) {
+            printf "[known-reds] UNKNOWN nextest status label \"%s\" at %s:%d — the classifier cannot read this run.\n", label, FILENAME, FNR >"/dev/stderr"
+            exit 3
         }
-        function is_signature_label(label) {
-            return label ~ /^(TIMEOUT|LEAK-FAIL|XFAIL|ABORT|ABORT SIG [0-9]+|SIG[A-Z0-9]+)$/
+        # The long label of a failing status, short or long form.
+        function long_label(s) {
+            if (s ~ /^(TMT|TIMEOUT)$/) return "TIMEOUT"
+            if (s ~ /^(LKFAIL|LEAK-FAIL)$/) return "LEAK-FAIL"
+            if (s ~ /^(FL\+LK|FAIL \+ LEAK)$/) return "FAIL + LEAK"
+            if (s ~ /^SIG [0-9]+$/) return "ABORT " s
+            if (s ~ /^(FAIL|XFAIL|ABORT|ABORT SIG [0-9]+)$/) return s
+            if (s ~ ("^(" signals ")$")) return "SIG" s
+            if (s ~ ("^SIG(" signals ")$")) return s
+            unknown_label(LABEL)
+        }
+        # "progress", "meta", "pass" or "fail" (setting FAIL_LABEL).
+        function outcome(label,    s) {
+            if (label ~ /^(Summary|Stress test|SKIP|SETUP|SETUP SLOW|SETUP PASS|SETUP LEAK|SETUP TMPASS)$/) return "meta"
+            if (label ~ /^SETUP /) {
+                s = label; sub(/^SETUP /, "", s)
+                FAIL_LABEL = "SETUP " long_label(s)
+                return "fail"
+            }
+            s = label; sub(/^TRY [0-9]+ /, "", s)
+            if (s ~ /^(START|SLOW|TRMNTG|TERMINATING)$/) return "progress"
+            if (s ~ /^(PASS|LEAK|TMPASS|TIMEOUT-PASS|SLOW \+ LEAK|SLOW\+TMPASS)$/ || s ~ /^FLAKY [0-9]+\/[0-9]+$/) return "pass"
+            if (s ~ /^FLKY-FL [0-9]+\/[0-9]+$/) { FAIL_LABEL = "FLKY-FL"; return "fail" }
+            FAIL_LABEL = long_label(s)
+            return "fail"
+        }
+        # OWNER is the test instance whose output the current line is.
+        function track_status(o, inst) {
+            if (o == "progress") {
+                if (LABEL ~ /START$/) live = inst
+                captured = ""
+            } else if (o == "meta") {
+                captured = ""; live = ""
+            } else {
+                if (inst == live) live = ""
+                captured = inst
+            }
+        }
+        function track_line(line) {
+            if (captured != "" && line !~ /^(    |  [a-z]+ ───$|$)/) captured = ""
+            OWNER = captured != "" ? captured : live
+        }
+        function scope() { return OWNER != "" ? OWNER : section }
+        # Whether the output of test instance `inst` holds a panic that is not
+        # a passing should_panic test'"'"'s own.
+        function has_real_panic(inst,    k, parts) {
+            for (k in panics) {
+                split(k, parts, SUBSEP)
+                if (parts[1] == inst && !((k in expected) && expected[k] == panics[k])) return 1
+            }
+            return 0
+        }
+        function try_of(label,    n) {
+            n = label; sub(/^TRY /, "", n); sub(/ .*$/, "", n)
+            return n
         }
         function emit(sig) {
             if (!(sig in killed)) { killed[sig] = 1; print "nextest\t" sig }
         }
-        function test_of(unit,    t) {
-            t = unit; sub(/^[^ ]+ /, "", t)
-            return t
-        }
-        function emit_unless_own_panic(label, unit,    t) {
-            t = test_of(unit)
-            if ((t in panicked) && units_named[t] == 1) return
-            emit(label ": " unit)
-        }
-        FNR == 1 { section = ""; dropping = 0 }
+        FNR == 1 { section = ""; live = ""; captured = "" }
         /^ +Running .* \(.*\)$/ || /^ +Doc-tests / { section = $0 }
         FNR == NR {
-            if (match($0, /^test .* - should panic \.\.\. ok$/)) {
-                name = $0; sub(/^test /, "", name); sub(/ - should panic \.\.\. ok$/, "", name)
-                expected[section SUBSEP name]++
+            if (parse_status($0)) {
+                inst = STRESS UNIT
+                o = outcome(LABEL)
+                track_status(o, inst)
+                if (LABEL ~ /^FLAKY / || (LABEL ~ /^TRY / && o == "pass")) passed[inst] = 1
+                else if (LABEL ~ /^FLKY-FL /) flaky_failed[inst] = 1
+                else if (LABEL ~ /^TRY [0-9]+ / && o == "fail" && try_of(LABEL) + 0 > last_try[inst] + 0) last_try[inst] = try_of(LABEL)
+                next
+            }
+            track_line($0)
+            if (match($0, /^ *test .* - should panic \.\.\. ok$/)) {
+                name = $0; sub(/^ *test /, "", name); sub(/ - should panic \.\.\. ok$/, "", name)
+                expected[scope() SUBSEP name]++
             } else if (/panicked at /) {
-                panics[section SUBSEP thread_of($0)]++
-                panicked[thread_of($0)] = 1
-            } else if (parse_status($0)) {
-                unit = STRESS UNIT
-                if (!((test_of(UNIT) SUBSEP UNIT) in unit_seen)) {
-                    unit_seen[test_of(UNIT) SUBSEP UNIT] = 1
-                    units_named[test_of(UNIT)]++
-                }
-                if (LABEL ~ /^FLAKY [0-9]+\/[0-9]+$/ || LABEL ~ /^TRY [0-9]+ PASS$/) passed[unit] = 1
-                else if (LABEL ~ /^FLKY-FL [0-9]+\/[0-9]+$/) flaky_failed[unit] = 1
-                else if (LABEL ~ /^TRY [0-9]+ / && LABEL !~ /^TRY [0-9]+ (START|SLOW|TRMNTG)$/) {
-                    n = LABEL; sub(/^TRY /, "", n); sub(/ .*$/, "", n)
-                    if (n + 0 > last_try[unit] + 0) last_try[unit] = n
-                }
+                panics[scope() SUBSEP thread_of($0)]++
+            } else if (OWNER != "" && /^ *Error: / && !(OWNER in error_of)) {
+                error_of[OWNER] = $0; sub(/^ +/, "", error_of[OWNER])
             }
             next
         }
         parse_status($0) {
-            unit = STRESS UNIT
-            retried_into_pass = (unit in passed) && !(unit in flaky_failed)
-            dropping = 0
-            if (LABEL ~ /^TRY [0-9]+ /) {
-                if (LABEL ~ /^TRY [0-9]+ (START|SLOW|TRMNTG|PASS)$/) next
-                n = LABEL; sub(/^TRY /, "", n); sub(/ .*$/, "", n)
-                short = LABEL; sub(/^TRY [0-9]+ /, "", short)
-                if (retried_into_pass) { dropping = 1; next }
-                if (n != last_try[unit]) next
-                label = long_label(short)
-                if (is_signature_label(label)) emit(label ": " UNIT)
-                else emit_unless_own_panic(label, UNIT)
-            } else if (LABEL ~ /^SETUP /) {
-                short = LABEL; sub(/^SETUP /, "", short)
-                if (short ~ /^(PASS|LEAK|SLOW|TMPASS)$/) next
-                emit("SETUP " long_label(short) ": " UNIT)
-            } else if (is_signature_label(LABEL)) {
-                emit(LABEL ": " UNIT)
-            } else if (LABEL ~ /^(FAIL|FAIL \+ LEAK)$/) {
-                emit_unless_own_panic(LABEL, UNIT)
-            } else if (LABEL ~ /^FLKY-FL [0-9]+\/[0-9]+$/) {
-                emit_unless_own_panic("FLKY-FL", UNIT)
-            }
+            inst = STRESS UNIT
+            o = outcome(LABEL)
+            track_status(o, inst)
+            if (o != "fail") next
+            if (LABEL ~ /^SETUP /) { emit(FAIL_LABEL ": " UNIT); next }
+            if ((inst in passed) && !(inst in flaky_failed)) next
+            if (LABEL ~ /^TRY [0-9]+ / && try_of(LABEL) != last_try[inst]) next
+            if (FAIL_LABEL !~ /^(FAIL|FAIL \+ LEAK|FLKY-FL)$/) emit(FAIL_LABEL ": " UNIT)
+            else if (!has_real_panic(inst)) emit(FAIL_LABEL ": " UNIT ((inst in error_of) ? ": " error_of[inst] : ""))
             next
         }
+        { track_line($0) }
         /panicked at / {
-            if (dropping) { getline; next }
-            key = section SUBSEP thread_of($0)
+            if ((OWNER in passed) && !(OWNER in flaky_failed)) { getline; next }
+            key = scope() SUBSEP thread_of($0)
             if ((key in expected) && expected[key] == panics[key]) next
             loc = $0; sub(/^.*panicked at /, "", loc); sub(/:$/, "", loc)
             if ((getline msg) > 0) { sub(/^ +/, "", msg); print loc "\t" msg }
             next
-        }' q="'" "$log" "$log" >"$sigs_file"
+        }' q="'" signals="HUP|INT|QUIT|ILL|TRAP|ABRT|BUS|FPE|KILL|USR1|SEGV|USR2|PIPE|ALRM|TERM" "$log" "$log" >"$sigs_file" \
+        || { rc=$?; rm -f "$sigs_file" "$novel_file"; exit "$rc"; }
 
     # Panics ARE failure evidence, and outrank the verdict lines: a run killed
     # mid-shrink is truncated before cargo ever prints `test result:`.
