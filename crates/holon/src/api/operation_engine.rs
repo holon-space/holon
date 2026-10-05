@@ -908,11 +908,12 @@ impl DispatchingOperationEngine {
         F: std::future::Future<Output = Result<T>>,
     {
         let execute = async { execute.await.map_err(Into::into) };
-        let outcome = match ops
-            .iter()
-            .map(|op| footprint(&op.entity_name, &op.op_name, op.params.values()))
-            .reduce(Footprint::union)
-        {
+        let mut footprints = Vec::with_capacity(ops.len());
+        for op in ops {
+            footprints
+                .push(self.footprint(&op.entity_name, &op.op_name, |key| op.params.get(key))?);
+        }
+        let outcome = match footprints.into_iter().reduce(Footprint::union) {
             Some(footprint) => {
                 self.claimed_judged_run(ops, footprint, origin, execute)
                     .await
@@ -1032,8 +1033,8 @@ impl DispatchingOperationEngine {
 
     /// Panics when `request` writes past the claim of the plan this task runs:
     /// a write admission never ordered could land under it.
-    fn assert_plan_claim_covers(&self, request: &OpRequest) {
-        let inner = footprint_of(request);
+    fn assert_plan_claim_covers(&self, request: &OpRequest) -> Result<()> {
+        let inner = self.footprint_of(request)?;
         PLAN_CLAIM.with(|(_, claim)| {
             assert!(
                 claim.covers(&inner),
@@ -1042,6 +1043,7 @@ impl DispatchingOperationEngine {
                 request.entity_name
             )
         });
+        Ok(())
     }
 
     /// Dispatch `ops` as ONE gesture: the shape gate judges them as one plan
@@ -3648,6 +3650,7 @@ impl DispatchingOperationEngine {
                 block_ref("canonical", "The surviving block id"),
                 block_ref("duplicate", "The block id folded away"),
             ],
+            optional_params: vec![],
             param_mappings: vec![],
             target_scope: holon_api::TargetScope::Block,
             // Repair surface, not an authoring gesture: reached through MCP and
@@ -3660,7 +3663,6 @@ impl DispatchingOperationEngine {
             boundary_behavior: holon_api::BoundaryBehavior::PrivateOnly,
             trigger: None,
             bound_params: Default::default(),
-            optional_params: vec![],
             affected_fields: vec![],
             marking_delta: holon_api::marking::MarkingDelta::Undeclared,
             guard: holon_api::pattern::OpGuard::None,
@@ -3689,6 +3691,7 @@ impl DispatchingOperationEngine {
                 },
                 description: "Origin block id to convert".to_string(),
             }],
+            optional_params: vec![],
             // Resolve `target` from the focused block's `id` (the only key live
             // context_params reliably carries), so a plain slash-menu click on a
             // block turns THAT block into a page. `destination_path` is optional
@@ -3711,7 +3714,6 @@ impl DispatchingOperationEngine {
             boundary_behavior: holon_api::BoundaryBehavior::PrivateOnly,
             trigger: None,
             bound_params: Default::default(),
-            optional_params: vec![],
             affected_fields: vec![],
             marking_delta: holon_api::marking::MarkingDelta::Undeclared,
             guard: holon_api::pattern::OpGuard::None,
@@ -4200,51 +4202,6 @@ fn prepare_request(
     })
 }
 
-/// What `request` may write, as admission orders it: the entities its params
-/// name. Compounds reach past those, so they run alone. A source-line write
-/// writes only its own block's content and keyword.
-fn footprint_of(request: &OpRequest) -> Footprint {
-    footprint(
-        &request.entity_name,
-        &request.op_name,
-        request.params.values(),
-    )
-}
-
-/// [`footprint_of`] an `entity_name.op_name` write with `params`.
-fn footprint<'a>(
-    entity_name: &EntityName,
-    op_name: &str,
-    params: impl Iterator<Item = &'a Value>,
-) -> Footprint {
-    const FENCED_OPS: [&str; 8] = [
-        "delete_subtree",
-        "delete_keep_children",
-        INSTANTIATE_TEMPLATE_OP,
-        CONVERT_BLOCK_TO_PAGE_OP,
-        MERGE_BLOCKS_OP,
-        CYCLE_TASK_STATE_OP,
-        ACCEPT_PROPOSAL_OP,
-        REJECT_PROPOSAL_OP,
-    ];
-    if entity_name.is_wildcard() || FENCED_OPS.contains(&op_name) {
-        return Footprint::Fence;
-    }
-    let subjects: std::collections::BTreeSet<EntityUri> = params
-        .filter_map(Value::as_string)
-        .filter_map(EntityUri::schemed)
-        .collect();
-    if subjects.is_empty() {
-        warn_relation_fallback_once(entity_name, op_name);
-        Footprint::Relation(entity_name.clone())
-    } else {
-        Footprint::Subjects {
-            relation: entity_name.clone(),
-            subjects,
-        }
-    }
-}
-
 /// Once per `entity.op` in the process: every run of it serializes against the
 /// whole relation, which costs latency on every write to that relation.
 fn warn_relation_fallback_once(entity_name: &EntityName, op_name: &str) {
@@ -4266,6 +4223,52 @@ fn warn_relation_fallback_once(entity_name: &EntityName, op_name: &str) {
 }
 
 impl DispatchingOperationEngine {
+    /// What `request` may write, as admission orders it: the entities its
+    /// params name. Compounds reach past those, so they run alone. A
+    /// source-line write writes only its own block's content and keyword.
+    fn footprint_of(&self, request: &OpRequest) -> Result<Footprint> {
+        self.footprint(&request.entity_name, &request.op_name, |key| {
+            request.params.get(key)
+        })
+    }
+
+    /// [`Self::footprint_of`] an `entity_name.op_name` write whose params
+    /// `param` reads by name. Its subjects are the params the op declares as
+    /// entity references, never text that parses as a URI.
+    fn footprint<'p>(
+        &self,
+        entity_name: &EntityName,
+        op_name: &str,
+        param: impl Fn(&str) -> Option<&'p Value>,
+    ) -> Result<Footprint> {
+        const FENCED_OPS: [&str; 8] = [
+            "delete_subtree",
+            "delete_keep_children",
+            INSTANTIATE_TEMPLATE_OP,
+            CONVERT_BLOCK_TO_PAGE_OP,
+            MERGE_BLOCKS_OP,
+            CYCLE_TASK_STATE_OP,
+            ACCEPT_PROPOSAL_OP,
+            REJECT_PROPOSAL_OP,
+        ];
+        if entity_name.is_wildcard() || FENCED_OPS.contains(&op_name) {
+            return Ok(Footprint::Fence);
+        }
+        let subjects = self
+            .dispatcher
+            .named_entities(entity_name.as_str(), op_name, param)
+            .map_err(|e| anyhow::anyhow!("the footprint of '{op_name}' on '{entity_name}': {e}"))?;
+        Ok(if subjects.is_empty() {
+            warn_relation_fallback_once(entity_name, op_name);
+            Footprint::Relation(entity_name.clone())
+        } else {
+            Footprint::Subjects {
+                relation: entity_name.clone(),
+                subjects,
+            }
+        })
+    }
+
     /// Admit `op_name` with `carriers` the org parser read from the author's
     /// own text written alongside its `params`, which may name no carrier.
     pub fn admit_with_parsed_carriers(
@@ -4285,7 +4288,7 @@ impl DispatchingOperationEngine {
         #[cfg(feature = "dispatch-hold")]
         self.dispatch_hold
             .admission_checkpoint(entity_name, op_name);
-        let claim = self.admission.admit(footprint_of(&request));
+        let claim = self.admission.admit(self.footprint_of(&request)?);
         Ok(Ticket::new(claim, request))
     }
 
@@ -4299,10 +4302,12 @@ impl DispatchingOperationEngine {
         origin: OpOrigin,
     ) -> BoxFuture<'static, Result<OpOutcome>> {
         if self.runs_claimed_plan() {
-            let request = prepare_request(entity_name, op_name, params, carriers, origin);
-            if let Ok(request) = &request {
-                self.assert_plan_claim_covers(request);
-            }
+            let request = prepare_request(entity_name, op_name, params, carriers, origin).and_then(
+                |request| {
+                    self.assert_plan_claim_covers(&request)?;
+                    Ok(request)
+                },
+            );
             let engine = self.share();
             return Box::pin(async move {
                 let request = request?;
@@ -4357,7 +4362,7 @@ impl DispatchingOperationEngine {
             }
             let refused = claim.seq();
             drop(claim);
-            claim = self.admission.admit(footprint_of(&request));
+            claim = self.admission.admit(self.footprint_of(&request)?);
             tracing::warn!(
                 refused,
                 readmitted = claim.seq(),
@@ -4380,7 +4385,7 @@ impl DispatchingOperationEngine {
         Box::pin(async move {
             let request = prepare_request(entity_name, op_name, params, &[], origin)?;
             if self.runs_claimed_plan() {
-                self.assert_plan_claim_covers(&request);
+                self.assert_plan_claim_covers(&request)?;
             }
             self.execute_admitted(
                 &request.entity_name,
@@ -4715,12 +4720,13 @@ impl OperationEngine for DispatchingOperationEngine {
         if let Some(seq) = keystroke.write_seq {
             params.insert("write_seq".into(), Value::Integer(seq));
         }
-        let mut claim = self.admission.admit(footprint_of(&OpRequest {
-            entity_name: EntityName::new("block"),
-            op_name: "set_field".into(),
-            params: params.clone(),
-            origin: OpOrigin::User,
-        }));
+        let footprint = match self.footprint(&EntityName::new("block"), "set_field", |key| {
+            params.get(key)
+        }) {
+            Ok(footprint) => footprint,
+            Err(e) => return Box::pin(std::future::ready(Err(e))),
+        };
+        let mut claim = self.admission.admit(footprint);
         let engine = self.share();
         Box::pin(async move {
             claim.released().await;

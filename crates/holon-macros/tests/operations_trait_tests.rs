@@ -310,7 +310,7 @@ fn entity_ref_beside_may_be_root_names_the_entity_and_admits_the_root() {
     );
 
     holon_api::validate_entity_references(&ops).expect("the declaration is complete");
-    let parsed = holon_api::entity_reference_params(&ops, "test", "move_maybe_to_root")
+    let parsed = holon_api::entity_reference_params(&ops, "test", "move_maybe_to_root", |_| None)
         .expect("the declaration parses");
     let found = parsed
         .iter()

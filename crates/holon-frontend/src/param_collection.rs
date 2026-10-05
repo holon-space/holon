@@ -187,6 +187,7 @@ fn type_hint_label(hint: &TypeHint) -> &'static str {
         TypeHint::Object { .. } => "object",
         TypeHint::Expr => "expression",
         TypeHint::Collection => "collection",
+        TypeHint::FieldValue { .. } => "value of the named field",
     }
 }
 
@@ -209,10 +210,10 @@ mod tests {
             name: name.into(),
             display_name: name.into(),
             required_params: params,
+            optional_params: vec![],
             param_mappings: vec![],
             id_column: "id".to_string(),
             description: String::new(),
-            optional_params: vec![],
             affected_fields: vec![],
             target_scope: holon_api::TargetScope::Global,
             boundary_behavior: holon_api::BoundaryBehavior::Unclassified,

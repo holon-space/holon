@@ -14,7 +14,10 @@
 //! a registration error, not a silent hole.
 
 use crate::EntityName;
+use crate::Value;
+use crate::entity::TypeDefinition;
 use crate::render_types::OperationDescriptor;
+use crate::render_types::OperationParam;
 use crate::render_types::TypeHint;
 
 /// Whether a parameter's own PROSE calls it an id.
@@ -109,7 +112,9 @@ pub struct EntityReferenceParam<'a> {
 }
 
 /// The entity-reference parameters of one `(entity, op)` pair, over EVERY
-/// descriptor that advertises it.
+/// descriptor that advertises it, required and optional alike. A
+/// [`TypeHint::FieldValue`] param is a reference exactly when the field that
+/// `param` (the dispatched params, by name) names is declared one.
 ///
 /// The PAIR is the unit, not one descriptor: `block/set_field` is advertised
 /// both by the block authority and by a `SqlOperationProvider`, so reading the
@@ -118,10 +123,11 @@ pub struct EntityReferenceParam<'a> {
 /// must mean the same thing by it; when they do not, the disagreement is
 /// refused by name instead of being resolved in favour of whichever the scan
 /// reached first.
-pub fn entity_reference_params<'a>(
+pub fn entity_reference_params<'a, 'p>(
     descriptors: &'a [OperationDescriptor],
     entity_name: &str,
     op_name: &str,
+    param: impl Fn(&str) -> Option<&'p Value>,
 ) -> Result<Vec<EntityReferenceParam<'a>>, String> {
     let mut hints: Vec<(&str, &TypeHint)> = Vec::new();
     for descriptor in descriptors
@@ -178,20 +184,97 @@ pub fn entity_reference_params<'a>(
     }
     Ok(hints
         .into_iter()
-        .filter_map(|(name, hint)| match hint {
-            TypeHint::EntityId { entity_name } => Some(EntityReferenceParam {
-                name,
-                entity_name,
-                admits_root: false,
-            }),
-            TypeHint::EntityIdOrRoot { entity_name } => Some(EntityReferenceParam {
-                name,
-                entity_name,
-                admits_root: true,
-            }),
-            _ => None,
-        })
+        .filter_map(|(name, hint)| reference(name, hint, &param))
         .collect())
+}
+
+/// The reference `name` declared `hint` is, if it is one.
+fn reference<'a, 'p>(
+    name: &'a str,
+    hint: &'a TypeHint,
+    param: &impl Fn(&str) -> Option<&'p Value>,
+) -> Option<EntityReferenceParam<'a>> {
+    match hint {
+        TypeHint::EntityId { entity_name } => Some(EntityReferenceParam {
+            name,
+            entity_name,
+            admits_root: false,
+        }),
+        TypeHint::EntityIdOrRoot { entity_name } => Some(EntityReferenceParam {
+            name,
+            entity_name,
+            admits_root: true,
+        }),
+        TypeHint::FieldValue {
+            field_param,
+            fields,
+        } => {
+            let field = param(field_param)?.as_string()?;
+            let declared = fields.iter().find(|f| f.name == field)?;
+            reference(name, &declared.type_hint, param)
+        }
+        _ => None,
+    }
+}
+
+/// The fields of `type_def`'s rows that reference an entity, as the params a
+/// `create` or `set_field` carries them in. A field referencing the type
+/// itself is a tree edge, and the root is a legal value there.
+pub fn row_field_references(type_def: &TypeDefinition) -> Vec<OperationParam> {
+    type_def
+        .fields
+        .iter()
+        .filter(|field| !field.primary_key)
+        .filter_map(|field| {
+            let target = field.reference_target.as_deref()?;
+            // `#[reference(Block)]` spells the target as the Rust type.
+            let type_hint = if target.eq_ignore_ascii_case(&type_def.name) {
+                TypeHint::EntityIdOrRoot {
+                    entity_name: EntityName::new(type_def.name.clone()),
+                }
+            } else {
+                assert!(
+                    !target.starts_with(|c: char| c.is_ascii_uppercase()),
+                    "field '{}' of '{}' references '{target}', a type name rather than an \
+                     entity name",
+                    field.name,
+                    type_def.name
+                );
+                TypeHint::EntityId {
+                    entity_name: EntityName::new(target),
+                }
+            };
+            Some(OperationParam {
+                name: field.name.clone(),
+                type_hint,
+                description: format!("Reference to a {target}"),
+            })
+        })
+        .collect()
+}
+
+/// The entity references a `create` of `type_def` may carry: the new row's
+/// own key, when the caller picks it, and its reference fields.
+pub fn create_references(type_def: &TypeDefinition) -> Vec<OperationParam> {
+    let own = OperationParam {
+        name: type_def.primary_key.clone(),
+        type_hint: TypeHint::EntityId {
+            entity_name: EntityName::new(type_def.name.clone()),
+        },
+        description: "Entity ID".to_string(),
+    };
+    std::iter::once(own)
+        .chain(row_field_references(type_def))
+        .collect()
+}
+
+/// The hint of `set_field`'s `value` on `type_def`: a reference exactly when
+/// the written field is one.
+pub fn set_field_value_hint(type_def: &TypeDefinition) -> TypeHint {
+    TypeHint::FieldValue {
+        field_param: "field".to_string(),
+        fields: row_field_references(type_def),
+    }
 }
 
 /// Registration gate over a whole descriptor set: [`entity_reference_params`]
@@ -208,7 +291,7 @@ pub fn validate_entity_references(descriptors: &[OperationDescriptor]) -> Result
     pairs.sort_unstable();
     pairs.dedup();
     for (entity_name, op_name) in pairs {
-        entity_reference_params(descriptors, entity_name, op_name)?;
+        entity_reference_params(descriptors, entity_name, op_name, |_| None)?;
     }
     Ok(())
 }
@@ -291,9 +374,9 @@ mod tests {
 
         let forward_order = [authority.clone(), mirror.clone()];
         let reverse_order = [mirror, authority];
-        let forward = entity_reference_params(&forward_order, "block", "indent")
+        let forward = entity_reference_params(&forward_order, "block", "indent", |_| None)
             .expect("agreeing declarations");
-        let reverse = entity_reference_params(&reverse_order, "block", "indent")
+        let reverse = entity_reference_params(&reverse_order, "block", "indent", |_| None)
             .expect("agreeing declarations");
 
         let names = |v: Vec<EntityReferenceParam<'_>>| {
@@ -319,9 +402,13 @@ mod tests {
         let untyped = descriptor("block", "indent", vec![param("id", TypeHint::String)]);
 
         for (first, second) in [(&typed, &untyped), (&untyped, &typed)] {
-            let error =
-                entity_reference_params(&[first.clone(), second.clone()], "block", "indent")
-                    .expect_err("the two declarations disagree");
+            let error = entity_reference_params(
+                &[first.clone(), second.clone()],
+                "block",
+                "indent",
+                |_| None,
+            )
+            .expect_err("the two declarations disagree");
             assert!(error.contains("block/indent"), "{error}");
             assert!(error.contains("'id'"), "{error}");
         }
@@ -359,7 +446,7 @@ mod tests {
                 ),
             ],
         );
-        let found = entity_reference_params(std::slice::from_ref(&d), "block", "create")
+        let found = entity_reference_params(std::slice::from_ref(&d), "block", "create", |_| None)
             .expect("both positions are declared");
         let admits = |name: &str| {
             found
@@ -376,8 +463,9 @@ mod tests {
     fn an_optional_param_declared_an_entity_id_is_a_reference() {
         let mut d = descriptor("block", "move_block", vec![param("id", entity_id("block"))]);
         d.optional_params = vec![param("after_block_id", entity_id("block"))];
-        let found = entity_reference_params(std::slice::from_ref(&d), "block", "move_block")
-            .expect("both are declared");
+        let found =
+            entity_reference_params(std::slice::from_ref(&d), "block", "move_block", |_| None)
+                .expect("both are declared");
         let names: Vec<_> = found.iter().map(|p| p.name).collect();
         assert_eq!(names, ["id", "after_block_id"]);
     }
@@ -452,5 +540,55 @@ mod tests {
             ],
         )])
         .expect("references declared, values left alone");
+    }
+
+    /// `#[reference(Block)]` names the block type itself, so `parent_id` is a
+    /// tree edge whose root is legal; `set_field`'s value is that reference
+    /// only when it writes `parent_id`.
+    #[test]
+    fn a_block_create_and_set_field_declare_the_parent_edge() {
+        let block = crate::Block::type_definition();
+        let parent = param(
+            "parent_id",
+            TypeHint::EntityIdOrRoot {
+                entity_name: EntityName::new("block"),
+            },
+        );
+        assert_eq!(
+            create_references(&block)
+                .into_iter()
+                .map(|p| (p.name, p.type_hint))
+                .collect::<Vec<_>>(),
+            vec![
+                ("id".to_string(), entity_id("block")),
+                (parent.name.clone(), parent.type_hint.clone()),
+            ]
+        );
+        let set_field = descriptor(
+            "block",
+            "set_field",
+            vec![
+                param("id", entity_id("block")),
+                param("field", TypeHint::String),
+                param("value", set_field_value_hint(&block)),
+            ],
+        );
+        let ops = [set_field];
+        let parent_value = Value::String("block:p".to_string());
+        let content_field = Value::String("content".to_string());
+        let parent_field = Value::String("parent_id".to_string());
+        let names = |field: &Value| {
+            entity_reference_params(&ops, "block", "set_field", |k| match k {
+                "field" => Some(field),
+                "value" => Some(&parent_value),
+                _ => None,
+            })
+            .expect("the declaration is complete")
+            .into_iter()
+            .map(|r| (r.name, r.admits_root))
+            .collect::<Vec<_>>()
+        };
+        assert_eq!(names(&content_field), vec![("id", false)]);
+        assert_eq!(names(&parent_field), vec![("id", false), ("value", true)]);
     }
 }

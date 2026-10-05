@@ -1711,12 +1711,32 @@ impl OperationProvider for LoroBlockOperations {
         );
 
         // Add operations from other trait sources
-        ops.extend(__operations_crud_operations::crud_operations(
+        let mut crud = __operations_crud_operations::crud_operations(
             entity_name,
             short_name,
             entity_name,
             id_column,
-        ));
+        );
+        // The macro sees `create`'s row as one opaque `fields` map and
+        // `set_field`'s `value` as any value; the references in them are
+        // the block schema's to declare.
+        for op in &mut crud {
+            match op.name.as_str() {
+                "create" => {
+                    op.optional_params = holon_core::block_op_catalog::block_create_references()
+                }
+                "set_field" => {
+                    let value = op
+                        .required_params
+                        .iter_mut()
+                        .find(|param| param.name == "value")
+                        .expect("set_field takes a value");
+                    value.type_hint = holon_core::block_op_catalog::block_set_field_value_hint();
+                }
+                _ => {}
+            }
+        }
+        ops.extend(crud);
         ops.extend(__operations_block_operations::block_operations(
             entity_name,
             short_name,

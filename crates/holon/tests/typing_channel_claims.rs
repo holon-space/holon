@@ -91,20 +91,34 @@ async fn seed(engine: &BackendEngine) {
 
 /// Park a user's `set_field` on [`HELD`] inside its claim.
 async fn hold_a_write(engine: &Arc<BackendEngine>) -> tokio::task::JoinHandle<()> {
-    engine.dispatch_hold().hold_next("block", "set_field");
+    hold(
+        engine,
+        "set_field",
+        &[("id", HELD), ("field", "content"), ("value", "held")],
+    )
+    .await
+}
+
+/// Park a user's `op` with `pairs` inside its claim.
+async fn hold(
+    engine: &Arc<BackendEngine>,
+    op: &'static str,
+    pairs: &[(&str, &str)],
+) -> tokio::task::JoinHandle<()> {
+    engine.dispatch_hold().hold_next("block", op);
     let held = tokio::spawn(engine.execute_operation(
         &EntityName::new("block"),
-        "set_field",
-        params(&[("id", HELD), ("field", "content"), ("value", "held")]),
+        op,
+        params(pairs),
         OpOrigin::User,
     ));
     let parked = tokio::time::timeout(Duration::from_secs(10), async {
-        while engine.dispatch_hold().parked_runs("block", "set_field") == 0 {
+        while engine.dispatch_hold().parked_runs("block", op) == 0 {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })
     .await;
-    assert!(parked.is_ok(), "the held set_field never reached the hold");
+    assert!(parked.is_ok(), "the held {op} never reached the hold");
     tokio::spawn(async move {
         held.await
             .expect("the held write's task")
@@ -198,6 +212,133 @@ async fn a_source_line_write_does_not_wait_behind_a_held_write_on_another_block(
         .await
         .expect("release the held write");
     held.await.expect("the held write completes");
+}
+
+/// Text that parses as an absolute URI is content, not a reference: two
+/// blocks holding the same link do not serialize.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_keystroke_of_a_uri_does_not_wait_behind_a_held_write_of_the_same_uri() {
+    for text in ["https://example.com/x", "mailto:a@b.c", "doi:10.1/2"] {
+        let engine = block_engine().await;
+        seed(&engine).await;
+        let held = hold(
+            &engine,
+            "set_field",
+            &[("id", HELD), ("field", "content"), ("value", text)],
+        )
+        .await;
+
+        let keystroke = engine.commit_keystroke(SourceKeystroke {
+            id: TYPED.into(),
+            source: text.into(),
+            write_seq: None,
+        });
+        assert_eq!(
+            engine.admission().census().waiting,
+            0,
+            "the keystroke of {text:?} on {TYPED} waits behind the held write of the same text \
+             on {HELD}"
+        );
+        tokio::time::timeout(Duration::from_secs(10), keystroke)
+            .await
+            .expect("the keystroke finishes while the other write is held")
+            .expect("the keystroke lands");
+        assert_eq!(content(&engine, TYPED).await, text);
+
+        engine
+            .dispatch_hold()
+            .release(1, Duration::from_secs(5))
+            .await
+            .expect("release the held write");
+        held.await.expect("the held write completes");
+    }
+}
+
+/// A create claims the row it creates and the parent it lands under, not the
+/// whole relation.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_held_create_claims_its_row_and_parent_only() {
+    let engine = block_engine().await;
+    seed(&engine).await;
+    let held = hold(
+        &engine,
+        "create",
+        &[("id", "block:new"), ("parent_id", HELD), ("content", "new")],
+    )
+    .await;
+
+    let unrelated = engine.commit_keystroke(SourceKeystroke {
+        id: TYPED.into(),
+        source: "typed during a create elsewhere".into(),
+        write_seq: None,
+    });
+    assert_eq!(
+        engine.admission().census().waiting,
+        0,
+        "the keystroke on {TYPED} waits behind a held create under {HELD}"
+    );
+    tokio::time::timeout(Duration::from_secs(10), unrelated)
+        .await
+        .expect("the keystroke finishes while the create is held")
+        .expect("the keystroke lands");
+
+    let on_parent = tokio::spawn(engine.commit_keystroke(SourceKeystroke {
+        id: HELD.into(),
+        source: "typed into the parent".into(),
+        write_seq: None,
+    }));
+    assert_eq!(
+        engine.admission().census().waiting,
+        1,
+        "a keystroke on the parent {HELD} runs past the held create under it"
+    );
+
+    engine
+        .dispatch_hold()
+        .release(1, Duration::from_secs(5))
+        .await
+        .expect("release the held create");
+    held.await.expect("the held create completes");
+    on_parent
+        .await
+        .expect("the parent keystroke's task")
+        .expect("the parent keystroke lands");
+}
+
+/// A move claims the sibling it is placed after: the anchor's position is
+/// what the move reads.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_keystroke_on_the_anchor_waits_behind_a_held_move() {
+    let engine = block_engine().await;
+    seed(&engine).await;
+    let held = hold(
+        &engine,
+        "move_block",
+        &[("id", HELD), ("parent_id", PAGE), ("after_block_id", TYPED)],
+    )
+    .await;
+
+    let keystroke = tokio::spawn(engine.commit_keystroke(SourceKeystroke {
+        id: TYPED.into(),
+        source: "typed into the anchor".into(),
+        write_seq: None,
+    }));
+    assert_eq!(
+        engine.admission().census().waiting,
+        1,
+        "a keystroke on the anchor {TYPED} runs past the held move placed after it"
+    );
+
+    engine
+        .dispatch_hold()
+        .release(1, Duration::from_secs(5))
+        .await
+        .expect("release the held move");
+    held.await.expect("the held move completes");
+    keystroke
+        .await
+        .expect("the keystroke's task")
+        .expect("the keystroke lands");
 }
 
 #[tokio::test(flavor = "multi_thread")]

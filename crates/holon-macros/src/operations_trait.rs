@@ -147,8 +147,9 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
             // Extract doc comments for description
             let description = extract_doc_comments(&method.attrs);
 
-            // Extract parameters (skip &self); `Option<T>` ones are optional
-            let all_params: Vec<(bool, proc_macro2::TokenStream)> = method
+            // Extract parameters (skip &self), each with whether the caller
+            // must supply it.
+            let all_params: Vec<_> = method
                 .sig
                 .inputs
                 .iter()
@@ -189,14 +190,11 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
                     _ => None,
                 })
                 .collect();
-            let params: Vec<_> = all_params
-                .iter()
-                .filter(|(required, _)| *required)
-                .map(|(_, param)| param)
-                .collect();
-            let optional_params: Vec<_> = all_params
-                .iter()
-                .filter(|(required, _)| !*required)
+            let (params, optional_params): (Vec<_>, Vec<_>) =
+                all_params.into_iter().partition(|(required, _)| *required);
+            let params: Vec<_> = params.into_iter().map(|(_, param)| param).collect();
+            let optional_params: Vec<_> = optional_params
+                .into_iter()
                 .map(|(_, param)| param)
                 .collect();
 

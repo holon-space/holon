@@ -251,10 +251,13 @@ pub use entity::{
 };
 // Re-export entity URI type
 pub use entity_reference::EntityReferenceParam;
+pub use entity_reference::create_references;
 pub use entity_reference::description_calls_it_an_id;
 pub use entity_reference::entity_reference_params;
 pub use entity_reference::id_like_but_undeclared;
 pub use entity_reference::names_an_entity_reference;
+pub use entity_reference::row_field_references;
+pub use entity_reference::set_field_value_hint;
 pub use entity_reference::validate_entity_references;
 pub use entity_uri::EntityUri;
 pub use entity_uri::ForeignEntityReference;

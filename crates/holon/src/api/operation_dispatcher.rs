@@ -7,6 +7,7 @@
 //! (QueryableCache<T>) and the dispatcher implement OperationProvider, allowing
 //! recursive composition.
 
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt;
@@ -365,6 +366,42 @@ impl OperationDispatcher {
             .collect()
     }
 
+    /// The entities a dispatch of `op_name` on `entity_name` names: the values
+    /// of the params its descriptors declare as entity references, never
+    /// free text that happens to parse as a URI. A reference that does not
+    /// parse names nothing here; the dispatch refuses it by name
+    /// ([`Self::parse_entity_references`]).
+    pub(crate) fn named_entities<'p>(
+        &self,
+        entity_name: &str,
+        op_name: &str,
+        param: impl Fn(&str) -> Option<&'p holon_api::Value>,
+    ) -> Result<BTreeSet<holon_api::EntityUri>> {
+        let available_ops: Vec<_> = self
+            .all_providers()
+            .iter()
+            .flat_map(|p| p.operations())
+            .collect();
+        let advertised = available_ops
+            .iter()
+            .any(|op| op.entity_name == entity_name && op.name == op_name);
+        let resolved = match advertised {
+            true => None,
+            false => entity_by_id_scheme(&available_ops, op_name, param("id")),
+        };
+        let references = holon_api::entity_reference_params(
+            &available_ops,
+            resolved.as_deref().unwrap_or(entity_name),
+            op_name,
+            &param,
+        )?;
+        Ok(references
+            .iter()
+            .filter_map(|reference| param(reference.name)?.as_string())
+            .filter_map(holon_api::EntityUri::schemed)
+            .collect())
+    }
+
     /// Give a type declared at runtime its write authority.
     ///
     /// Refuses a provider that would make an already-routable operation
@@ -534,8 +571,12 @@ impl OperationDispatcher {
         op_name: &str,
         params: &StorageEntity,
     ) -> Result<()> {
-        let references =
-            holon_api::entity_reference_params(available_ops, resolved_entity_name, op_name)?;
+        let references = holon_api::entity_reference_params(
+            available_ops,
+            resolved_entity_name,
+            op_name,
+            |k| params.get(k),
+        )?;
 
         for reference in references {
             let param = reference.name;
@@ -1519,32 +1560,17 @@ impl OperationDispatcher {
                 // (e.g. "focus_roots") but the actual entity provider is registered under
                 // the scheme (e.g. "block" from "block:xxx").
                 let resolved_entity: String;
-                let resolved_entity_name: &str = if matching_ops.is_empty() {
-                    let scheme = params.get("id").and_then(|v| match v {
-                        holon_api::Value::String(s) => {
-                            s.split_once(':').map(|(scheme, _)| scheme.to_string())
-                        }
-                        _ => None,
-                    });
-
-                    if let Some(scheme) = scheme {
-                        let has_match = available_ops
-                            .iter()
-                            .any(|op| op.entity_name == scheme.as_str() && op.name == op_name);
-                        if has_match {
-                            info!(
-                                "[OperationDispatcher] Entity '{}' not found, resolved to '{}' \
-                                 via id scheme",
-                                entity_name, scheme
-                            );
-                            resolved_entity = scheme;
-                            resolved_entity.as_str()
-                        } else {
-                            entity_name_str
-                        }
-                    } else {
-                        entity_name_str
-                    }
+                let resolved_entity_name: &str = if matching_ops.is_empty()
+                    && let Some(scheme) =
+                        entity_by_id_scheme(&available_ops, op_name, params.get("id"))
+                {
+                    info!(
+                        "[OperationDispatcher] Entity '{}' not found, resolved to '{}' via id \
+                         scheme",
+                        entity_name, scheme
+                    );
+                    resolved_entity = scheme;
+                    resolved_entity.as_str()
                 } else {
                     entity_name_str
                 };
@@ -1979,6 +2005,24 @@ const STRUCTURAL_BLOCK_OP_DUP_ALLOWLIST: &[&str] = &[
     "delete_subtree",
     "delete_keep_children",
 ];
+
+/// The entity an op routes to when no provider advertises it under the name
+/// it was dispatched with: rows of a view carry the view's name, and their
+/// `id`'s scheme names the entity whose provider runs it.
+fn entity_by_id_scheme(
+    available_ops: &[OperationDescriptor],
+    op_name: &str,
+    id: Option<&holon_api::Value>,
+) -> Option<String> {
+    let Some(holon_api::Value::String(id)) = id else {
+        return None;
+    };
+    let (scheme, _) = id.split_once(':')?;
+    available_ops
+        .iter()
+        .any(|op| op.entity_name == scheme && op.name == op_name)
+        .then(|| scheme.to_string())
+}
 
 /// Return the `entity::op` keys advertised more than once across `ops`.
 ///

@@ -218,6 +218,10 @@ pub(crate) struct WriteSchema {
     /// ([`holon_api::entity::SoftDelete`]). `Some` turns `delete` into a
     /// tombstone write and adds `purge` as the op that removes the row.
     soft_delete: Option<String>,
+    /// The entity references a `create` may carry.
+    create_references: Vec<OperationParam>,
+    /// What `set_field`'s `value` is, by the field it writes.
+    set_field_value: TypeHint,
 }
 
 /// What a `delete` or `purge` does to the target row.
@@ -239,17 +243,38 @@ impl WriteSchema {
     /// what keeps the refusal from being a hand-list of operation names.
     pub(crate) const OVERFLOW_COLUMN: &'static str = holon_api::FieldSchema::OVERFLOW_PROPERTIES;
 
-    fn new(columns: impl IntoIterator<Item = String>) -> Self {
+    fn new(
+        columns: impl IntoIterator<Item = String>,
+        create_references: Vec<OperationParam>,
+        set_field_value: TypeHint,
+    ) -> Self {
         Self {
             columns: columns.into_iter().collect(),
             soft_delete: None,
+            create_references,
+            set_field_value,
         }
     }
 
     /// The block write vocabulary, single-sourced from
-    /// `holon_api::schema::BLOCK`.
-    fn block() -> Self {
-        Self::new(blocks_known_columns().iter().map(|s| s.to_string()))
+    /// `holon_api::schema::BLOCK`, for `entity_name`'s table. A block-shaped
+    /// table of another entity declares only its own key as a reference: the
+    /// block schema's reference fields name blocks, not its rows.
+    fn block(entity_name: &str) -> Self {
+        let columns = blocks_known_columns().into_iter().map(str::to_string);
+        if entity_name == holon_api::schema::block::RELATION {
+            return Self::new(
+                columns,
+                holon_core::block_op_catalog::block_create_references(),
+                holon_core::block_op_catalog::block_set_field_value_hint(),
+            );
+        }
+        let keyed_only = TypeDefinition::new(entity_name, Vec::new());
+        Self::new(
+            columns,
+            holon_api::create_references(&keyed_only),
+            holon_api::set_field_value_hint(&keyed_only),
+        )
     }
 
     /// The vocabulary a runtime-declared type's raw table exposes: its
@@ -265,6 +290,8 @@ impl WriteSchema {
                     .persistent_fields()
                     .into_iter()
                     .map(|f| f.name.clone()),
+                holon_api::create_references(type_def),
+                holon_api::set_field_value_hint(type_def),
             )
         }
     }
@@ -414,13 +441,14 @@ impl SqlOperationProvider {
         entity_short_name: String,
         edge_fields: Vec<EdgeFieldDescriptor>,
     ) -> Self {
+        let write_schema = WriteSchema::block(&entity_name);
         Self::with_write_schema(
             db_handle,
             table_name,
             entity_name,
             entity_short_name,
             edge_fields,
-            WriteSchema::block(),
+            write_schema,
         )
     }
 
@@ -3099,44 +3127,6 @@ impl holon_api::identity_minting::IdentityMinting for SqlOperationProvider {
     }
 }
 
-impl SqlOperationProvider {
-    /// The ids a `create` reads from its param bag, declared so the operation
-    /// boundary parses them. `parent_id` and `after_block_id` exist only on a
-    /// table that places rows in a tree.
-    fn create_reference_params(&self) -> Vec<OperationParam> {
-        let entity = EntityName::new(&self.entity_name);
-        let param = |name: &str, type_hint: TypeHint, description: &str| OperationParam {
-            name: name.to_string(),
-            type_hint,
-            description: description.to_string(),
-        };
-        let mut params = vec![param(
-            "id",
-            TypeHint::EntityId {
-                entity_name: entity.clone(),
-            },
-            "Entity ID",
-        )];
-        if self.write_schema.is_column("parent_id") {
-            params.push(param(
-                "parent_id",
-                TypeHint::EntityIdOrRoot {
-                    entity_name: entity.clone(),
-                },
-                "Parent entity ID",
-            ));
-            params.push(param(
-                "after_block_id",
-                TypeHint::EntityId {
-                    entity_name: entity,
-                },
-                "Sibling to place the new row after",
-            ));
-        }
-        params
-    }
-}
-
 #[async_trait]
 impl OperationProvider for SqlOperationProvider {
     /// This IS the Turso block-identity authority (ADR 0029 D1c). The active
@@ -3198,12 +3188,12 @@ impl OperationProvider for SqlOperationProvider {
                     },
                     OperationParam {
                         name: "value".to_string(),
-                        type_hint: TypeHint::String,
+                        type_hint: self.write_schema.set_field_value.clone(),
                         description: "Field value".to_string(),
                     },
                 ],
-                id_column: "id".to_string(),
                 optional_params: vec![],
+                id_column: "id".to_string(),
                 affected_fields: vec![],
                 param_mappings: vec![],
                 target_scope: self.target_scope(),
@@ -3225,7 +3215,7 @@ impl OperationProvider for SqlOperationProvider {
                 description: format!("Create a new {}", self.entity_short_name),
                 id_column: "id".to_string(),
                 required_params: vec![],
-                optional_params: self.create_reference_params(),
+                optional_params: self.write_schema.create_references.clone(),
                 affected_fields: vec![],
                 param_mappings: vec![],
                 target_scope: self.target_scope(),
@@ -3252,8 +3242,8 @@ impl OperationProvider for SqlOperationProvider {
                     },
                     description: "Entity ID".to_string(),
                 }],
-                id_column: "id".to_string(),
                 optional_params: vec![],
+                id_column: "id".to_string(),
                 affected_fields: vec![],
                 param_mappings: vec![],
                 target_scope: self.target_scope(),
@@ -3280,8 +3270,8 @@ impl OperationProvider for SqlOperationProvider {
                     },
                     description: "Entity ID".to_string(),
                 }],
-                id_column: "id".to_string(),
                 optional_params: vec![],
+                id_column: "id".to_string(),
                 affected_fields: vec![],
                 param_mappings: vec![],
                 target_scope: self.target_scope(),
@@ -3314,8 +3304,8 @@ impl OperationProvider for SqlOperationProvider {
                     },
                     description: "Entity ID".to_string(),
                 }],
-                id_column: "id".to_string(),
                 optional_params: vec![],
+                id_column: "id".to_string(),
                 affected_fields: vec![],
                 param_mappings: vec![],
                 target_scope: self.target_scope(),
@@ -3381,8 +3371,8 @@ impl OperationProvider for SqlOperationProvider {
                         type_hint: TypeHint::String,
                         description: "Wiki-link target (e.g. Projects/X)".to_string(),
                     }],
-                    id_column: "id".to_string(),
                     optional_params: vec![],
+                    id_column: "id".to_string(),
                     affected_fields: vec![],
                     param_mappings: vec![],
                     target_scope: self.target_scope(),
@@ -3421,8 +3411,8 @@ impl OperationProvider for SqlOperationProvider {
                             description: "New resolved_id".to_string(),
                         },
                     ],
-                    id_column: "id".to_string(),
                     optional_params: vec![],
+                    id_column: "id".to_string(),
                     affected_fields: vec![],
                     param_mappings: vec![],
                     target_scope: self.target_scope(),
@@ -3449,8 +3439,8 @@ impl OperationProvider for SqlOperationProvider {
                         type_hint: TypeHint::String,
                         description: "Captured block_links rows to restore".to_string(),
                     }],
-                    id_column: "id".to_string(),
                     optional_params: vec![],
+                    id_column: "id".to_string(),
                     affected_fields: vec![],
                     param_mappings: vec![],
                     target_scope: self.target_scope(),
@@ -3478,8 +3468,8 @@ impl OperationProvider for SqlOperationProvider {
                         },
                         description: "Origin block id to convert".to_string(),
                     }],
-                    id_column: "id".to_string(),
                     optional_params: vec![],
+                    id_column: "id".to_string(),
                     affected_fields: vec![],
                     param_mappings: vec![],
                     target_scope: self.target_scope(),
@@ -3519,8 +3509,8 @@ impl OperationProvider for SqlOperationProvider {
                             description: "The block id folded away".to_string(),
                         },
                     ],
-                    id_column: "id".to_string(),
                     optional_params: vec![],
+                    id_column: "id".to_string(),
                     affected_fields: vec![],
                     param_mappings: vec![],
                     target_scope: self.target_scope(),
@@ -5147,7 +5137,7 @@ mod write_schema_tests {
     /// that declares neither must get neither.
     #[test]
     fn overflow_and_timestamps_come_from_the_schema_not_from_block() {
-        let block = WriteSchema::block();
+        let block = WriteSchema::block(holon_api::schema::block::RELATION);
         assert!(block.has_overflow());
         assert!(block.stamps_timestamps());
         assert!(block.is_column("parent_id"));

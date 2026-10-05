@@ -75,6 +75,7 @@ impl<P: OperationProvider> GenericProviderState<P> {
                 }
                 // Primitives, one-of, objects, expr, and collection can always be generated
                 TypeHint::Bool | TypeHint::String | TypeHint::Number => true,
+                TypeHint::FieldValue { .. } => true,
                 TypeHint::RowKey => true,
                 TypeHint::OneOf { .. } | TypeHint::Object { .. } => true,
                 TypeHint::Expr | TypeHint::Collection => true,
@@ -112,7 +113,7 @@ impl<P: OperationProvider> GenericProviderState<P> {
                         prop::sample::select(ids).prop_map(Value::String).boxed()
                     }
                     TypeHint::Bool => any::<bool>().prop_map(Value::Boolean).boxed(),
-                    TypeHint::String | TypeHint::RowKey => {
+                    TypeHint::String | TypeHint::RowKey | TypeHint::FieldValue { .. } => {
                         any::<String>().prop_map(Value::String).boxed()
                     }
                     TypeHint::Number => any::<i64>().prop_map(Value::Integer).boxed(),

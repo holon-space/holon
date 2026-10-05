@@ -92,8 +92,8 @@ impl OperationProvider for RemoteListOperations {
             // No list parameter: the sidecar's tool `url` names the one list
             // this connection syncs.
             required_params: vec![],
-            id_column: "id".to_string(),
             optional_params: vec![],
+            id_column: "id".to_string(),
             affected_fields: vec![],
             param_mappings: vec![],
             target_scope: holon_api::TargetScope::Block,

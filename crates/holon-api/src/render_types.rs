@@ -368,10 +368,11 @@ pub struct OperationDescriptor {
     pub display_name: String, // "Mark as complete", "Indent"
     pub description: String,  // Human-readable description for UI
     pub required_params: Vec<OperationParam>,
-    /// Optional params declared so the boundary parses an id-bearing one by
-    /// name, exactly as it parses a required one. Hand-written descriptors list
-    /// only the id-bearing ones; macro-generated ones list every `Option`
-    /// param.
+    /// Params the op reads when the caller supplies them. Declared like
+    /// [`Self::required_params`], so the operation boundary and admission
+    /// parse an optional entity reference exactly as a required one.
+    /// Hand-written descriptors list only the entity references;
+    /// macro-generated ones list every `Option` param.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub optional_params: Vec<OperationParam>,
     /// Fields that this operation affects (for pie menu auto-attachment)
@@ -584,6 +585,14 @@ pub enum TypeHint {
     /// root is meaningful is a property of the position, and a name like
     /// `parent_id` says where the value goes, not what may be in it.
     EntityIdOrRoot { entity_name: EntityName },
+    /// A value whose type is that of the field the `field_param` param names:
+    /// `set_field`'s `value` is a reference when it writes a reference field
+    /// and text when it writes a text field. `fields` lists every field whose
+    /// value is not text.
+    FieldValue {
+        field_param: String,
+        fields: Vec<OperationParam>,
+    },
     /// A key in the provider's OWN table rather than a reference to an entity:
     /// the identity registry's canonical row id, a proposal row id. It names a
     /// row, forms no [`EntityUri`](crate::EntityUri), and the operation
@@ -1104,6 +1113,16 @@ mod tests {
                 entity_name: block.clone(),
             },
             TypeHint::RowKey,
+            TypeHint::FieldValue {
+                field_param: "field".into(),
+                fields: vec![OperationParam {
+                    name: "parent_id".into(),
+                    type_hint: TypeHint::EntityIdOrRoot {
+                        entity_name: block.clone(),
+                    },
+                    description: String::new(),
+                }],
+            },
             TypeHint::OneOf {
                 values: vec![Value::String("TODO".into())],
             },
