@@ -508,6 +508,7 @@ async fn create_profile_resolver(
             .map_err(|e| anyhow::anyhow!("[ProfileResolver] {e}"))?,
         );
     let computed_conditions = Arc::clone(&conditions);
+    let refusal_conditions = Arc::clone(&conditions);
     match matview_manager.watch(PROFILE_SQL).await {
         Ok(result) => {
             let load =
@@ -532,19 +533,12 @@ async fn create_profile_resolver(
                 move |row| load(row),
             );
             live_profiles.subscribe("entity_profile", result.stream);
-            // Replace is only the initial snapshot, whose rows all passed the load check.
-            let removals = live_profiles.signal_map();
-            tokio::spawn(async move {
-                use futures_signals::signal_map::MapDiff;
-                use futures_signals::signal_map::SignalMapExt;
-                removals
-                    .for_each(|diff| {
-                        if let MapDiff::Remove { key } = diff {
-                            profile_release(&key);
-                        }
-                        std::future::ready(())
-                    })
-                    .await
+            live_profiles.on_delete(move |id| {
+                profile_release(id);
+                refusal_conditions.clear(&holon_api::ConditionKey {
+                    subject: id.to_string(),
+                    kind: holon_api::ConditionKind::PROFILE_REFUSED,
+                });
             });
             Ok(Arc::new(ProfileResolver::with_type_profiles(
                 live_profiles,

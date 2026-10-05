@@ -105,3 +105,39 @@ fn a_profile_loaded_after_a_runtime_type_is_checked_against_that_type() {
         "{err:#}"
     );
 }
+
+/// A type and a profile that disagree about a typed field must not both be
+/// admitted, however their check and record steps interleave.
+#[test]
+fn a_type_and_a_profile_admitted_concurrently_are_never_both_accepted() {
+    const TRIALS: usize = 500;
+    let registry = std::sync::Arc::new(create_default_registry().expect("default registry loads"));
+    let check = std::sync::Arc::new(registry.profile_load_check());
+    let mut both_accepted = 0;
+    for trial in 0..TRIALS {
+        let entity = format!("person_race_{trial}");
+        let profile = parse_profile_yaml(&format!(
+            "entity_name: {entity}\ncomputed:\n  display_name: '\"x\"'\n"
+        ))
+        .expect("profile parses");
+        let type_def = late_person(&registry, &entity);
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let loader = {
+            let (check, barrier) = (check.clone(), barrier.clone());
+            std::thread::spawn(move || {
+                barrier.wait();
+                check("block:vault-profile", &profile).is_ok()
+            })
+        };
+        barrier.wait();
+        let type_accepted = registry.register(type_def).is_ok();
+        let profile_accepted = loader.join().expect("loader thread");
+        if type_accepted && profile_accepted {
+            both_accepted += 1;
+        }
+    }
+    assert_eq!(
+        both_accepted, 0,
+        "in {both_accepted} of {TRIALS} trials the registry holds a typed display_name AND a vault profile redeclares it"
+    );
+}

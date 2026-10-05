@@ -44,17 +44,25 @@ use crate::parse_profile_yaml;
 /// Stores `TypeDefinition`s with computed fields already compiled (in
 /// `FieldLifetime::Computed`) and topo-sorted for correct evaluation order.
 pub struct TypeRegistry {
-    types: Arc<RwLock<HashMap<String, TypeDefinition>>>,
-    /// The computed fields each loaded vault profile declares, by profile id
-    /// and entity key, so a type registered after the profile loaded is
-    /// checked against them ([`Self::register`]).
-    vault_profile_claims: Arc<RwLock<HashMap<String, VaultProfileClaim>>>,
+    admitted: Arc<RwLock<Admitted>>,
     /// Per-entity creation defaults declared in profile YAML (the
     /// `virtual_child:` block). Held alongside `types` because
     /// `TypeDefinition` lives in `holon-api` and shouldn't depend on
     /// profile-side types like `VirtualChildConfig`. `apply_parsed_profile`
     /// inserts here; `profile_from_type_def` callers read here.
     virtual_children: RwLock<HashMap<String, VirtualChildConfig>>,
+}
+
+/// The types and the vault profiles' claims live under ONE lock: admitting a
+/// type checks the claims and admitting a profile checks the types, so each
+/// check and its record must be one critical section.
+#[derive(Default)]
+struct Admitted {
+    types: HashMap<String, TypeDefinition>,
+    /// The computed fields each loaded vault profile declares, by profile id
+    /// and entity key, so a type registered after the profile loaded is
+    /// checked against them ([`TypeRegistry::register`]).
+    vault_profile_claims: HashMap<String, VaultProfileClaim>,
 }
 
 struct VaultProfileClaim {
@@ -111,9 +119,10 @@ impl fmt::Display for TableName {
 /// so the join cannot be written wrong here.
 impl LinkSchemeRegistry for TypeRegistry {
     fn is_registered_entity_scheme(&self, scheme: &LinkScheme<'_>) -> bool {
-        self.types
+        self.admitted
             .read()
             .expect("TypeRegistry poisoned")
+            .types
             .contains_key(TableName::from_scheme(scheme.as_str()).as_str())
     }
 }
@@ -121,8 +130,7 @@ impl LinkSchemeRegistry for TypeRegistry {
 impl TypeRegistry {
     pub fn new() -> Self {
         Self {
-            types: Arc::default(),
-            vault_profile_claims: Arc::default(),
+            admitted: Arc::default(),
             virtual_children: RwLock::new(HashMap::new()),
         }
     }
@@ -155,37 +163,9 @@ impl TypeRegistry {
         check_computed_types_match_columns(&type_def)?;
         topo_sort_fields(&mut type_def);
         let key = TableName::from_scheme(&type_def.name);
-        self.check_against_vault_profiles(&key, &type_def)?;
-        self.types
-            .write()
-            .expect("TypeRegistry poisoned")
-            .insert(key.as_str().to_string(), type_def);
-        Ok(())
-    }
-
-    fn check_against_vault_profiles(
-        &self,
-        key: &TableName,
-        type_def: &TypeDefinition,
-    ) -> Result<()> {
-        let claims = self
-            .vault_profile_claims
-            .read()
-            .expect("TypeRegistry poisoned");
-        for (profile_id, claim) in claims.iter().filter(|(_, c)| &c.entity_key == key) {
-            for (name, spec) in type_def.computed_specs() {
-                if claim.computed.iter().any(|c| c == name)
-                    && !matches!(spec.computation(), Computation::Script(_))
-                {
-                    return Err(crate::TypedComputedFieldOverride {
-                        profile: profile_id.clone(),
-                        entity: type_def.name.clone(),
-                        field: name.to_string(),
-                    }
-                    .into());
-                }
-            }
-        }
+        let mut admitted = self.admitted.write().expect("TypeRegistry poisoned");
+        check_against_vault_profiles(&admitted.vault_profile_claims, &key, &type_def)?;
+        admitted.types.insert(key.as_str().to_string(), type_def);
         Ok(())
     }
 
@@ -203,8 +183,11 @@ impl TypeRegistry {
         fields: Vec<(String, ComputedFieldDecl)>,
     ) -> Result<()> {
         let engine = RhaiEngine::new();
-        let mut types = self.types.write().expect("TypeRegistry poisoned");
-        let Some(type_def) = types.get_mut(TableName::from_scheme(entity_name).as_str()) else {
+        let mut admitted = self.admitted.write().expect("TypeRegistry poisoned");
+        let Some(type_def) = admitted
+            .types
+            .get_mut(TableName::from_scheme(entity_name).as_str())
+        else {
             anyhow::bail!(
                 "TypeRegistry: cannot add computed fields to unknown entity '{entity_name}'"
             );
@@ -265,8 +248,11 @@ impl TypeRegistry {
         entity_name: &str,
         variants: Vec<holon_api::ProfileVariant>,
     ) -> Result<()> {
-        let mut types = self.types.write().expect("TypeRegistry poisoned");
-        let Some(type_def) = types.get_mut(TableName::from_scheme(entity_name).as_str()) else {
+        let mut admitted = self.admitted.write().expect("TypeRegistry poisoned");
+        let Some(type_def) = admitted
+            .types
+            .get_mut(TableName::from_scheme(entity_name).as_str())
+        else {
             anyhow::bail!(
                 "TypeRegistry: cannot add profile variants to unknown entity '{entity_name}'"
             );
@@ -307,9 +293,10 @@ impl TypeRegistry {
     /// Accepts either spelling — table name or URI scheme — since both fold to
     /// the one key entries are stored under.
     pub fn get(&self, name: &str) -> Option<TypeDefinition> {
-        self.types
+        self.admitted
             .read()
             .expect("TypeRegistry poisoned")
+            .types
             .get(TableName::from_scheme(name).as_str())
             .cloned()
     }
@@ -333,44 +320,40 @@ impl TypeRegistry {
     pub fn profile_load_check(
         &self,
     ) -> impl Fn(&str, &ParsedProfile) -> Result<()> + Send + Sync + 'static {
-        let types = Arc::clone(&self.types);
-        let claims = Arc::clone(&self.vault_profile_claims);
+        let admitted = Arc::clone(&self.admitted);
         move |profile_id, profile| {
             let entity_key = TableName::from_scheme(&profile.entity_name);
-            let checked = {
-                let types = types.read().expect("TypeRegistry poisoned");
-                let type_def = types.get(entity_key.as_str());
-                crate::check_profile_scope(profile, type_def)
-                    .and_then(|()| crate::check_profile_write_targets(profile))
-                    .and_then(|()| {
-                        crate::check_profile_computed_overrides(profile_id, profile, type_def)
-                            .map_err(Into::into)
-                    })
-            };
+            let mut admitted = admitted.write().expect("TypeRegistry poisoned");
+            let type_def = admitted.types.get(entity_key.as_str());
+            crate::check_profile_scope(profile, type_def)
+                .and_then(|()| crate::check_profile_write_targets(profile))
+                .and_then(|()| {
+                    crate::check_profile_computed_overrides(profile_id, profile, type_def)
+                        .map_err(Into::into)
+                })?;
             // A refused edit leaves the profile's older version in the mirror,
             // so that version's record stays until the block leaves or a new
             // version is accepted.
-            if checked.is_ok() {
-                claims.write().expect("TypeRegistry poisoned").insert(
-                    profile_id.to_string(),
-                    VaultProfileClaim {
-                        entity_key,
-                        computed: profile.computed.keys().cloned().collect(),
-                    },
-                );
-            }
-            checked
+            admitted.vault_profile_claims.insert(
+                profile_id.to_string(),
+                VaultProfileClaim {
+                    entity_key,
+                    computed: profile.computed.keys().cloned().collect(),
+                },
+            );
+            Ok(())
         }
     }
 
     /// The hook that drops the record [`Self::profile_load_check`] made for a
     /// vault profile whose block is gone. Takes the same profile id.
     pub fn profile_release(&self) -> impl Fn(&str) + Send + Sync + 'static {
-        let claims = Arc::clone(&self.vault_profile_claims);
+        let admitted = Arc::clone(&self.admitted);
         move |profile_id| {
-            claims
+            admitted
                 .write()
                 .expect("TypeRegistry poisoned")
+                .vault_profile_claims
                 .remove(profile_id);
         }
     }
@@ -378,18 +361,20 @@ impl TypeRegistry {
     /// Whether a loaded vault profile for `entity` is recorded.
     pub fn has_vault_profile_for(&self, entity: &str) -> bool {
         let key = TableName::from_scheme(entity);
-        self.vault_profile_claims
+        self.admitted
             .read()
             .expect("TypeRegistry poisoned")
+            .vault_profile_claims
             .values()
             .any(|c| c.entity_key == key)
     }
 
     /// Get all registered type definitions.
     pub fn all(&self) -> Vec<TypeDefinition> {
-        self.types
+        self.admitted
             .read()
             .expect("TypeRegistry poisoned")
+            .types
             .values()
             .cloned()
             .collect()
@@ -398,9 +383,10 @@ impl TypeRegistry {
     /// Get computed fields for an entity, already compiled and topologically
     /// sorted.
     pub fn compiled_fields_for(&self, entity_name: &str) -> Vec<CompiledComputedField> {
-        self.types
+        self.admitted
             .read()
             .expect("TypeRegistry poisoned")
+            .types
             .get(TableName::from_scheme(entity_name).as_str())
             .map(|td| {
                 td.fields
@@ -418,11 +404,34 @@ impl TypeRegistry {
 
     /// Check if an entity is registered. Accepts either spelling.
     pub fn contains(&self, name: &str) -> bool {
-        self.types
+        self.admitted
             .read()
             .expect("TypeRegistry poisoned")
+            .types
             .contains_key(TableName::from_scheme(name).as_str())
     }
+}
+
+fn check_against_vault_profiles(
+    claims: &HashMap<String, VaultProfileClaim>,
+    key: &TableName,
+    type_def: &TypeDefinition,
+) -> Result<()> {
+    for (profile_id, claim) in claims.iter().filter(|(_, c)| &c.entity_key == key) {
+        for (name, spec) in type_def.computed_specs() {
+            if claim.computed.iter().any(|c| c == name)
+                && !matches!(spec.computation(), Computation::Script(_))
+            {
+                return Err(crate::TypedComputedFieldOverride {
+                    profile: profile_id.clone(),
+                    entity: type_def.name.clone(),
+                    field: name.to_string(),
+                }
+                .into());
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Refuse a computed field whose declared column types disagree with the type

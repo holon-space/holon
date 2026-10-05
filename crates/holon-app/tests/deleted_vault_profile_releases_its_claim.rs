@@ -18,7 +18,9 @@ use holon_api::ConditionBus;
 use holon_api::ConditionKind;
 use holon_api::EntityName;
 use holon_api::OpOrigin;
+use holon_api::ProfileResolving as _;
 use holon_api::Value;
+use holon_api::render_requirements::RenderRequirements;
 use holon_frontend::config::HolonConfig;
 use holon_frontend::config::SessionConfig;
 use holon_frontend::config::VaultConfig;
@@ -31,7 +33,7 @@ const PROFILE_ORG: &str = "\
 :ID: late-profile
 :END:
 #+begin_src holon_entity_profile_yaml
-entity_name: person_late
+entity_name: personlate
 computed:
   display_name: '\"x\"'
 #+end_src
@@ -41,7 +43,7 @@ const DEADLINE: Duration = Duration::from_secs(30);
 
 fn late_person(registry: &TypeRegistry) -> holon_api::TypeDefinition {
     let mut late = registry.get("person").expect("person is bundled");
-    late.name = "person_late".to_string();
+    late.name = "personlate".to_string();
     late
 }
 
@@ -56,6 +58,16 @@ struct Booted {
 impl Booted {
     fn profile_file(&self) -> std::path::PathBuf {
         self._dir.path().join("profiles.org")
+    }
+
+    /// Whether the vault profile computes `display_name` for a `personlate`
+    /// row.
+    fn profile_in_effect(&self) -> bool {
+        let row = HashMap::from([("id".to_string(), Value::String("personlate:row".into()))]);
+        self.engine
+            .profile_resolver()
+            .resolve_computed_only(&row, &RenderRequirements::none())
+            .contains_key("display_name")
     }
 }
 
@@ -92,7 +104,7 @@ async fn boot_with_late_profile() -> Booted {
     };
     std::fs::write(booted.profile_file(), PROFILE_ORG).expect("write the vault");
     let start = Instant::now();
-    while !booted.registry.has_vault_profile_for("person_late") {
+    while !(booted.registry.has_vault_profile_for("personlate") && booted.profile_in_effect()) {
         assert!(start.elapsed() < DEADLINE, "the profile never loaded");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -148,22 +160,15 @@ fn a_deleted_vault_profile_stops_refusing_the_type_it_overrode() {
         user_op(&booted, "delete", &[("id", &id)]).await;
 
         let start = Instant::now();
-        loop {
-            match booted.registry.register(late_person(&booted.registry)) {
-                Ok(()) => break,
-                Err(e) => {
-                    assert!(
-                        e.downcast_ref::<TypedComputedFieldOverride>().is_some(),
-                        "{e:#}"
-                    );
-                    assert!(
-                        start.elapsed() < DEADLINE,
-                        "the deleted profile still refuses the type: {e:#}"
-                    );
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                }
-            }
+        while booted.profile_in_effect() {
+            assert!(start.elapsed() < DEADLINE, "the profile is still in effect");
+            tokio::time::sleep(Duration::from_millis(1)).await;
         }
+
+        booted
+            .registry
+            .register(late_person(&booted.registry))
+            .expect("the first declaration after the profile left must be accepted");
     });
 }
 
@@ -202,5 +207,43 @@ fn a_refused_edit_leaves_the_live_profiles_claim_in_force() {
             err.downcast_ref::<TypedComputedFieldOverride>().is_some(),
             "{err:#}"
         );
+    });
+}
+
+#[test]
+fn deleting_a_refused_profile_block_clears_its_refusal() {
+    runtime().block_on(async {
+        let booted = boot_with_late_profile().await;
+        let (id, content) = profile_block(&booted).await;
+        let refused_edit = content.replace(
+            "display_name: '\"x\"'",
+            "display_name: '\"x\"'\n  broken: 'no_such_column'",
+        );
+        user_op(
+            &booted,
+            "set_field",
+            &[("id", &id), ("field", "content"), ("value", &refused_edit)],
+        )
+        .await;
+        let refusal_of_block = || {
+            booted.bus.current().iter().any(|c| {
+                c.subject == id && matches!(c.reason, ConditionKind::ProfileRefused { .. })
+            })
+        };
+        let start = Instant::now();
+        while !refusal_of_block() {
+            assert!(start.elapsed() < DEADLINE, "the edit was never refused");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        user_op(&booted, "delete", &[("id", &id)]).await;
+        let start = Instant::now();
+        while refusal_of_block() {
+            assert!(
+                start.elapsed() < DEADLINE,
+                "the refusal of a deleted block is still raised"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     });
 }

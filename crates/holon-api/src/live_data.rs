@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
@@ -90,7 +91,13 @@ pub struct LiveData<T: Clone + Send + Sync + 'static> {
     /// Written before the keys reach the signal map, so a consumer woken by
     /// the signal always finds the provenance already there.
     provenance: Mutex<HashMap<String, Vec<crate::streaming::BatchTraceContext>>>,
+    /// Runs with the key of every delete just before it is applied, while the
+    /// map is still write-locked, so no reader sees the removal before the
+    /// hook ran.
+    on_delete: OnceLock<DeleteHook>,
 }
+
+type DeleteHook = Box<dyn Fn(&str) + Send + Sync>;
 
 /// Keys retained in [`LiveData::provenance`] before the log is dropped whole.
 ///
@@ -132,7 +139,25 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
             items_changed: Arc::new(Notify::new()),
             rowid_to_key: Mutex::new(rowid_to_key),
             provenance: Mutex::new(HashMap::new()),
+            on_delete: OnceLock::new(),
         })
+    }
+
+    /// Install the hook that runs for every CDC delete this mirror applies,
+    /// before the removal is observable. It also runs for a key the mirror
+    /// never held (a row refused at load). A mirror has one hook; installing a
+    /// second panics.
+    pub fn on_delete(&self, hook: impl Fn(&str) + Send + Sync + 'static) {
+        assert!(
+            self.on_delete.set(Box::new(hook)).is_ok(),
+            "LiveData already has a delete hook"
+        );
+    }
+
+    fn run_delete_hook(&self, key: &str) {
+        if let Some(hook) = self.on_delete.get() {
+            hook(key);
+        }
     }
 
     /// Highest CDC `seq` this mirror has applied. `0` means "no CDC batch
@@ -423,6 +448,12 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
                         let key = rowid_map.get(&id).cloned().unwrap_or_else(|| id.clone());
                         log.insert(key, origins.to_vec());
                     }
+                    let key = if lock.contains_key(&id) {
+                        id.clone()
+                    } else {
+                        rowid_map.get(&id).cloned().unwrap_or_else(|| id.clone())
+                    };
+                    self.run_delete_hook(&key);
                     if lock.remove(&id).is_some() {
                         // Direct match — drop any rowid mapping that pointed
                         // at this user key so the map doesn't grow stale.
@@ -1009,6 +1040,62 @@ mod tests {
                 .unwrap_or_else(|| format!("{payload:?}"));
             panic!("opening a span on the thread the wait left panicked: {message}");
         }
+    }
+
+    fn deleted(id: &str) -> Change<StorageEntity> {
+        Change::Deleted {
+            id: id.to_string(),
+            origin: crate::ChangeOrigin::Local {
+                operation_id: None,
+                trace_id: None,
+            },
+        }
+    }
+
+    fn string_mirror(rows: Vec<StorageEntity>) -> Arc<LiveData<String>> {
+        LiveData::new(
+            rows,
+            |row| Ok(row.get("id").unwrap().as_string().unwrap().to_string()),
+            |row| Ok(row.get("content").unwrap().as_string().unwrap().to_string()),
+        )
+    }
+
+    #[test]
+    fn the_delete_hook_has_run_by_the_time_the_removal_is_observable() {
+        use std::sync::atomic::AtomicBool;
+        for _ in 0..50 {
+            let live = string_mirror(vec![make_row("x", "data")]);
+            let hook_ran = Arc::new(AtomicBool::new(false));
+            let flag = Arc::clone(&hook_ran);
+            live.on_delete(move |key| {
+                assert_eq!(key, "x");
+                flag.store(true, Ordering::SeqCst);
+            });
+            let observer = {
+                let (live, hook_ran) = (Arc::clone(&live), Arc::clone(&hook_ran));
+                std::thread::spawn(move || {
+                    while live.read().contains_key("x") {
+                        std::hint::spin_loop();
+                    }
+                    hook_ran.load(Ordering::SeqCst)
+                })
+            };
+            live.apply_changes(vec![deleted("x")]);
+            assert!(
+                observer.join().expect("observer thread"),
+                "the removal was observable before the delete hook ran"
+            );
+        }
+    }
+
+    #[test]
+    fn the_delete_hook_runs_for_a_key_the_mirror_never_held() {
+        let live = string_mirror(vec![]);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&seen);
+        live.on_delete(move |key| sink.lock().unwrap().push(key.to_string()));
+        live.apply_changes(vec![deleted("refused")]);
+        assert_eq!(*seen.lock().unwrap(), ["refused"]);
     }
 
     #[test]
