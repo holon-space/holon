@@ -309,6 +309,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 
 - `advice-dismiss-prod-session-row-missing`
 - `advice-gate-weave-row-missing`
+- `blur-rung-vacuous-no-cell-leg`
 - `bulk-add-sibling-order`
 - `catalog-advice-step6-weave-dismiss`
 - `concurrent-keystroke-undo-steps-load`
@@ -322,6 +323,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `fs-watcher-no-events-agent-session`
 - `fs-watcher-rename-unpaired-agent-session`
 - `integration-toggle-load`
+- `iroh-accept-drain-recv-stream`
 - `iroh-nat-traversal-address-set`
 - `iroh-pairing-refusal-reads-as-io-failure`
 - `join-then-stale-second-join`
