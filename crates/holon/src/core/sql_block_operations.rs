@@ -1476,6 +1476,19 @@ mod tests {
         Arc<SqlBlockOperations>,
         crate::storage::turso::DbHandle,
     ) {
+        let (backend, ops, handle) = sql_block_ops().await;
+        let ops = match authority {
+            Some(authority) => ops.with_write_authority(authority),
+            None => ops,
+        };
+        (backend, Arc::new(ops), handle)
+    }
+
+    async fn sql_block_ops() -> (
+        TursoBackend,
+        SqlBlockOperations,
+        crate::storage::turso::DbHandle,
+    ) {
         let (backend, handle) = TursoBackend::new_in_memory()
             .await
             .expect("in-memory turso");
@@ -1519,12 +1532,7 @@ mod tests {
                 .await
                 .expect("cache"),
         );
-        let ops = SqlBlockOperations::new(sql_ops, cache);
-        let ops = match authority {
-            Some(authority) => ops.with_write_authority(authority),
-            None => ops,
-        };
-        (backend, Arc::new(ops), handle)
+        (backend, SqlBlockOperations::new(sql_ops, cache), handle)
     }
 
     /// A write authority over `(id, parent)` rows; `children` lists are given
@@ -1660,6 +1668,115 @@ mod tests {
             read_sort_key(&handle, stranded.as_str()).await,
             "a1",
             "a refused op writes nothing"
+        );
+    }
+
+    /// D69.a: in a Loro vault, the SQL write legs never take a write on a
+    /// block the tree does not hold. Each is refused by name, and the
+    /// projection row stays as it was.
+    #[tokio::test]
+    async fn a_loro_vault_refuses_sql_writes_on_a_block_the_tree_does_not_hold() {
+        let (_backend, ops, handle) = sql_block_ops().await;
+        let ops = ops
+            .with_cell_registry(Arc::new(
+                holon_loro::block_cell_registry::BlockCellRegistry::with_loro_doc(
+                    Arc::new(loro::LoroDoc::new()),
+                    Arc::new(holon_core::NoReadOnlyDocuments),
+                ),
+            ))
+            .with_capabilities(holon_api::capability::SessionCapabilities::detect_and_pin(
+                true,
+            ));
+        let page = uri("block:page");
+        let stranded = uri("block:stranded");
+        insert_projection_row(
+            &handle,
+            page.as_str(),
+            EntityUri::no_parent().as_str(),
+            "a0",
+        )
+        .await;
+        insert_projection_row(&handle, stranded.as_str(), page.as_str(), "a1").await;
+        let params = |pairs: &[(&str, &str)]| -> StorageEntity {
+            pairs
+                .iter()
+                .map(|(k, v)| ((*k).into(), holon_api::Value::String((*v).to_string())))
+                .collect()
+        };
+
+        assert_refused(
+            "set_field(content)",
+            holon_core::CrudOperations::set_field(
+                &ops,
+                stranded.as_str(),
+                "content",
+                holon_api::Value::String("rewritten".into()),
+            )
+            .await,
+            &stranded,
+        );
+        assert_refused("place", ops.place(&stranded, &page, None).await, &stranded);
+        assert_refused(
+            "create_in_tree after it",
+            ops.create_in_tree(
+                &page,
+                Some(&stranded),
+                &uri("block:new"),
+                holon_api::BlockContent::text("new"),
+                &HashMap::new(),
+                &holon_api::BlockEdges::default(),
+            )
+            .await,
+            &stranded,
+        );
+        assert_refused(
+            "update_in_tree",
+            ops.update_in_tree(params(&[
+                ("id", stranded.as_str()),
+                ("content", "rewritten"),
+                ("parent_id", page.as_str()),
+            ]))
+            .await,
+            &stranded,
+        );
+        assert_refused(
+            "delete_in_tree",
+            ops.delete_in_tree(params(&[("id", stranded.as_str())]))
+                .await,
+            &stranded,
+        );
+
+        let rows = handle
+            .query(
+                &format!(
+                    "SELECT parent_id, sort_key, content FROM block_raw WHERE id = '{stranded}'"
+                ),
+                HashMap::new(),
+            )
+            .await
+            .expect("read the stranded row");
+        assert_eq!(rows.len(), 1, "a refused delete leaves the row");
+        let row = &rows[0];
+        assert_eq!(
+            row.get("content").and_then(|v| v.as_string()),
+            Some(stranded.as_str()),
+            "a refused write leaves the content"
+        );
+        assert_eq!(row.get("sort_key").and_then(|v| v.as_string()), Some("a1"));
+        assert_eq!(
+            row.get("parent_id").and_then(|v| v.as_string()),
+            Some(page.as_str())
+        );
+        assert!(
+            handle
+                .query(
+                    "SELECT id FROM block_raw WHERE id = 'block:new'",
+                    HashMap::new()
+                )
+                .await
+                .expect("read")
+                .is_empty(),
+            "a refused create writes no row"
         );
     }
 

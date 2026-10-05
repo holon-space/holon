@@ -20,6 +20,7 @@ mod loro_root_deliveries_are_guarded;
 mod loro_snapshot_durability;
 mod loro_sync_controller_pbt;
 mod loro_unseeded_vault_split;
+mod loro_writes_on_unheld_blocks;
 mod projection_harness;
 mod read_model_second_writer_census;
 mod stored_block_column_shapes;

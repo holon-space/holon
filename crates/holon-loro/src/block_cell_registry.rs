@@ -1256,38 +1256,76 @@ mod tests {
         Ok(())
     }
 
-    /// Splitting a block that has no Loro tree node (unseeded vault, synthetic
-    /// SQL-only row) must fall back to the SQL create path WITHOUT mutating
-    /// the tree. The pre-guard regression: `create_entity` used to mint a
-    /// placeholder parent + the new node first and only then fail on the
-    /// unresolvable after-anchor — poisoning the tree with empty-text nodes
-    /// whose "" content shadowed the real SQL content on later reads.
-    #[test]
-    fn create_entity_missing_after_anchor_falls_back_without_tree_mutation() -> Result<()> {
+    /// D69.a: every write on a block the tree does not hold is refused by
+    /// name and leaves the tree as it was. Only the SQL projection could take
+    /// such a write, and it is not the authority.
+    #[tokio::test]
+    async fn writes_on_a_block_the_tree_does_not_hold_are_refused_by_name() -> Result<()> {
         let doc = make_loro_doc_with_block("parent");
         let registry = BlockCellRegistry::with_loro_doc(
             doc.clone(),
             Arc::new(holon_core::NoReadOnlyDocuments),
         );
-        let rt = tokio::runtime::Runtime::new()?;
-        let wrote = rt.block_on(registry.create_entity(
-            &EntityUri::block("parent"),
-            Some(&EntityUri::block("missing-after")),
-            &EntityUri::block("new-block"),
-            holon_api::BlockContent::text("x"),
-            &std::collections::HashMap::new(),
-            &holon_api::BlockEdges::default(),
-        ))?;
-        assert!(
-            !wrote,
-            "expected Ok(false) — the disclosed SQL route for an anchor outside Loro authority"
+        let unheld = EntityUri::block("unheld");
+        let frontier = doc.oplog_frontiers();
+        let refused = |what: &str, result: Result<()>| {
+            let err = result.expect_err(&format!("{what} must be refused"));
+            assert_eq!(
+                err.downcast_ref::<holon_core::BlockNotInWriteAuthority>(),
+                Some(&holon_core::BlockNotInWriteAuthority {
+                    block: unheld.clone()
+                }),
+                "{what} must be refused by name, got: {err:#}"
+            );
+        };
+        refused(
+            "write_position",
+            registry
+                .write_position(&unheld, "block:parent", None)
+                .await
+                .map(|_| ()),
         );
-        let tree = doc.get_tree(TREE_NAME);
+        refused(
+            "create_entity after an unheld anchor",
+            registry
+                .create_entity(
+                    &EntityUri::block("parent"),
+                    Some(&unheld),
+                    &EntityUri::block("new-block"),
+                    holon_api::BlockContent::text("x"),
+                    &std::collections::HashMap::new(),
+                    &holon_api::BlockEdges::default(),
+                )
+                .await
+                .map(|_| ()),
+        );
+        for (field, value) in [
+            ("content", Value::String("x".into())),
+            ("content_type", Value::String("text".into())),
+            ("collapsed", Value::Boolean(true)),
+        ] {
+            refused(
+                &format!("write_field({field})"),
+                registry
+                    .write_field(&unheld, field, value)
+                    .await
+                    .map(|_| ()),
+            );
+        }
+        refused(
+            "delete_entity",
+            registry.delete_entity(&unheld).await.map(|_| ()),
+        );
+        refused(
+            "delete_exiting_shares",
+            registry.delete_exiting_shares(&unheld).await.map(|_| ()),
+        );
         assert_eq!(
-            tree.get_nodes(false).len(),
-            1,
-            "tree must be untouched — no placeholder root or new node minted"
+            doc.oplog_frontiers(),
+            frontier,
+            "a refused write commits no op"
         );
+        assert_eq!(doc.get_tree(TREE_NAME).get_nodes(false).len(), 1);
         Ok(())
     }
 
