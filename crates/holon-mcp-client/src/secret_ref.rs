@@ -28,27 +28,37 @@ pub struct SecretRef {
 }
 
 impl SecretRef {
-    /// Parse an auth value, or say what shape was required.
+    /// Parse an auth header VALUE (`holon.auth.value`), or say what shape was
+    /// required.
     ///
     /// The message never quotes the value: the whole point of the refusal is
     /// that the value may be a live credential, and an error string is written
     /// to a log.
     pub fn parse(raw: &str) -> Result<Self, SecretRefError> {
-        let open = raw.find("${").ok_or(SecretRefError::NoReference)?;
+        Self::parse_in(raw, SecretField::HeaderValue)
+    }
+
+    fn parse_in(raw: &str, field: SecretField) -> Result<Self, SecretRefError> {
+        let refuse = |kind| SecretRefError { field, kind };
+        let open = raw
+            .find("${")
+            .ok_or(refuse(SecretRefErrorKind::NoReference))?;
         let after = &raw[open + 2..];
-        let close = after.find('}').ok_or(SecretRefError::Unterminated)?;
+        let close = after
+            .find('}')
+            .ok_or(refuse(SecretRefErrorKind::Unterminated))?;
         let var = &after[..close];
         let rest = &after[close + 1..];
 
         if !rest.is_empty() {
-            return Err(SecretRefError::TrailingText);
+            return Err(refuse(SecretRefErrorKind::TrailingText));
         }
         if var.is_empty() {
-            return Err(SecretRefError::EmptyName);
+            return Err(refuse(SecretRefErrorKind::EmptyName));
         }
         let prefix = &raw[..open];
         if prefix.contains("${") {
-            return Err(SecretRefError::TrailingText);
+            return Err(refuse(SecretRefErrorKind::TrailingText));
         }
         Ok(Self {
             prefix: prefix.to_string(),
@@ -73,29 +83,95 @@ impl SecretRef {
     }
 }
 
+/// The `auth.static_token` field: exactly one bare `${VAR}`.
+///
+/// A distinct type from [`SecretRef`] because the HTTP transport adds the
+/// `Bearer ` scheme itself, so a literal prefix here would be sent as
+/// `Bearer Bearer <token>`. The prefix cannot be represented.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TokenRef {
+    var: String,
+}
+
+impl TokenRef {
+    pub fn parse(raw: &str) -> Result<Self, SecretRefError> {
+        let r = SecretRef::parse_in(raw, SecretField::StaticToken)?;
+        if !r.prefix.is_empty() {
+            return Err(SecretRefError {
+                field: SecretField::StaticToken,
+                kind: SecretRefErrorKind::PrefixOnBearerToken,
+            });
+        }
+        Ok(Self { var: r.var })
+    }
+
+    pub fn var(&self) -> &str {
+        &self.var
+    }
+
+    /// The value as written (`${VAR}`), for env expansion and serializing.
+    pub fn as_written(&self) -> String {
+        format!("${{{}}}", self.var)
+    }
+}
+
+/// Which sidecar field an auth value was written in. Decides the example the
+/// refusal gives: the right shape differs per field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecretField {
+    /// `auth.static_token` of an MCP HTTP sidecar.
+    StaticToken,
+    /// `holon.auth.value` of a `utcp:` sidecar's static header.
+    HeaderValue,
+}
+
 /// Why an auth value is not a reference. No variant carries the value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SecretRefError {
+pub enum SecretRefErrorKind {
     NoReference,
     Unterminated,
     TrailingText,
     EmptyName,
+    PrefixOnBearerToken,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SecretRefError {
+    pub field: SecretField,
+    pub kind: SecretRefErrorKind,
 }
 
 impl std::fmt::Display for SecretRefError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let why = match self {
-            Self::NoReference => {
+        let (field, shape, example) = match self.field {
+            SecretField::StaticToken => (
+                "auth.static_token",
+                "exactly ONE bare ${VAR} reference with no text around it",
+                "static_token: \"${GITHUB_TOKEN}\"",
+            ),
+            SecretField::HeaderValue => (
+                "holon.auth.value",
+                "an optional literal prefix followed by exactly ONE ${VAR} reference",
+                "value: \"Bearer ${GITHUB_TOKEN}\"",
+            ),
+        };
+        let why = match self.kind {
+            SecretRefErrorKind::NoReference => {
                 "it holds no ${VAR} reference, so it is a secret written into the file"
             }
-            Self::Unterminated => "its ${ is never closed by a '}'",
-            Self::TrailingText => "it holds more than one ${VAR}, or text after the reference",
-            Self::EmptyName => "its ${} names no variable",
+            SecretRefErrorKind::Unterminated => "its ${ is never closed by a '}'",
+            SecretRefErrorKind::TrailingText => {
+                "it holds more than one ${VAR}, or text after the reference"
+            }
+            SecretRefErrorKind::EmptyName => "its ${} names no variable",
+            SecretRefErrorKind::PrefixOnBearerToken => {
+                "it has text before the reference, but the HTTP transport adds \"Bearer \" \
+                 itself, so a prefix would be sent as \"Bearer Bearer <token>\""
+            }
         };
         write!(
             f,
-            "an auth value must be an optional literal prefix followed by exactly ONE ${{VAR}} \
-             reference (for example \"Bearer ${{GITHUB_TOKEN}}\"), but {why}. The value is not \
+            "{field} must be {shape} (for example {example}), but {why}. The value is not \
              quoted here because it may be a live credential. Put the secret in the keychain or \
              the environment and reference it by name."
         )
@@ -117,9 +193,41 @@ impl Serialize for SecretRef {
     }
 }
 
+impl<'de> Deserialize<'de> for TokenRef {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(d)?;
+        Self::parse(&raw).map_err(serde::de::Error::custom)
+    }
+}
+
+impl Serialize for TokenRef {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&self.as_written())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn err(kind: SecretRefErrorKind) -> SecretRefError {
+        SecretRefError {
+            field: SecretField::HeaderValue,
+            kind,
+        }
+    }
+
+    #[test]
+    fn a_token_ref_refuses_a_prefix_and_keeps_only_the_variable() {
+        assert_eq!(TokenRef::parse("${T}").expect("parses").var(), "T");
+        assert_eq!(
+            TokenRef::parse("Bearer ${T}"),
+            Err(SecretRefError {
+                field: SecretField::StaticToken,
+                kind: SecretRefErrorKind::PrefixOnBearerToken
+            })
+        );
+    }
 
     #[test]
     fn a_bare_reference_has_an_empty_prefix() {
@@ -141,18 +249,27 @@ mod tests {
     fn the_refusals() {
         assert_eq!(
             SecretRef::parse("literal"),
-            Err(SecretRefError::NoReference)
+            Err(err(SecretRefErrorKind::NoReference))
         );
-        assert_eq!(SecretRef::parse(""), Err(SecretRefError::NoReference));
-        assert_eq!(SecretRef::parse("${X"), Err(SecretRefError::Unterminated));
-        assert_eq!(SecretRef::parse("${}"), Err(SecretRefError::EmptyName));
+        assert_eq!(
+            SecretRef::parse(""),
+            Err(err(SecretRefErrorKind::NoReference))
+        );
+        assert_eq!(
+            SecretRef::parse("${X"),
+            Err(err(SecretRefErrorKind::Unterminated))
+        );
+        assert_eq!(
+            SecretRef::parse("${}"),
+            Err(err(SecretRefErrorKind::EmptyName))
+        );
         assert_eq!(
             SecretRef::parse("${A}${B}"),
-            Err(SecretRefError::TrailingText)
+            Err(err(SecretRefErrorKind::TrailingText))
         );
         assert_eq!(
             SecretRef::parse("${A}tail"),
-            Err(SecretRefError::TrailingText)
+            Err(err(SecretRefErrorKind::TrailingText))
         );
     }
 

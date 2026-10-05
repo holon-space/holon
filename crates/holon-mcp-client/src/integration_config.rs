@@ -25,6 +25,7 @@ use crate::redaction::Redactor;
 use crate::rest_oauth2::RestOAuth2Config;
 use crate::rest_transport::RestAuth;
 use crate::secret_ref::SecretRef;
+use crate::secret_ref::TokenRef;
 
 /// The sidecar keys a remedy message may send an author to.
 ///
@@ -236,8 +237,8 @@ impl RestAuthConfig {
 /// Set `static_token` for bearer auth, or `oauth: true` for OAuth 2.1.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AuthConfig {
-    /// Parsed, so a literal cannot reach this field: see [`SecretRef`].
-    pub static_token: Option<SecretRef>,
+    /// Parsed, so a literal cannot reach this field: see [`TokenRef`].
+    pub static_token: Option<TokenRef>,
     #[serde(default)]
     pub oauth: bool,
 }
@@ -883,7 +884,8 @@ fn choose_content_for(
                     why: format!(
                         "it declares schema_version {} but this build's sidecar format is \
                          schema_version {SIDECAR_SCHEMA_VERSION}, and there is no bundled copy of \
-                         '{}' to fall back to",
+                         '{}' to fall back to. Declare `schema_version: {SIDECAR_SCHEMA_VERSION}` \
+                         once the file matches this format",
                         match config.schema_version {
                             Some(v) => v.to_string(),
                             None => "none".to_string(),
@@ -895,7 +897,8 @@ fn choose_content_for(
                     why: format!(
                         "it does not parse against this build's sidecar format, so no \
                          schema_version could be established, and there is no bundled copy of \
-                         '{}' to fall back to: {e}",
+                         '{}' to fall back to. Once it parses, it must also declare \
+                         `schema_version: {SIDECAR_SCHEMA_VERSION}`: {e}",
                         entry.name
                     ),
                 }),

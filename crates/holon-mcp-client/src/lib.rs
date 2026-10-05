@@ -121,6 +121,7 @@ pub use roster::ConnectionEntry;
 pub use roster::ConnectionRoster;
 pub use roster::ConnectionSource;
 pub use secret_ref::SecretRef;
+pub use secret_ref::TokenRef;
 pub use sync_freshness::FreshnessPlan;
 pub use sync_freshness::ProbedResourceCapabilities;
 pub use sync_freshness::freshness_plan;

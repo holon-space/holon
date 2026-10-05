@@ -372,3 +372,43 @@ fn a_regular_file_is_still_read() {
         "a regular file must still introduce a connection"
     );
 }
+
+/// Martin's `github.yaml` case: an unbundled provider whose file does not
+/// parse leaves no `schema_version` to read, so the refusal must name both the
+/// field's own defect and the `schema_version` line the file will need.
+#[test]
+fn an_unparseable_unbundled_file_says_what_schema_version_it_must_declare() {
+    let dir = tempfile::tempdir().unwrap();
+    let yaml = r#"
+transport:
+  http:
+    uri: https://api.example/mcp
+auth:
+  static_token: "Bearer ${MY_OWN_THING_TOKEN}"
+entities: {}
+tools: {}
+"#;
+    install(dir.path(), "my-own-thing", yaml);
+    enable(dir.path(), "my-own-thing");
+
+    let loaded = load(dir.path()).expect("one unusable file cannot break the load");
+    let why = loaded
+        .ignored
+        .iter()
+        .find(|i| i.provider == "my-own-thing")
+        .map(|i| match &i.reason {
+            IgnoredReason::Unusable { why } => why.clone(),
+            other => panic!("expected Unusable, got {other:?}"),
+        })
+        .expect("the refused file is disclosed");
+    let current = format!(
+        "schema_version: {}",
+        holon_mcp_client::SIDECAR_SCHEMA_VERSION
+    );
+    assert!(why.contains(&current), "got: {why}");
+    assert!(why.contains("adds \"Bearer \" itself"), "got: {why}");
+    assert!(
+        why.contains("static_token: \"${GITHUB_TOKEN}\""),
+        "got: {why}"
+    );
+}

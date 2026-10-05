@@ -133,14 +133,12 @@ async fn connect(
     // Resolved here rather than passed through, because a sidecar can only
     // ever hold a reference.
     let token = match cfg.auth.as_ref().and_then(|a| a.static_token.as_ref()) {
-        Some(secret) => Some(format!(
-            "{}{}",
-            secret.prefix(),
-            std::env::var(secret.var()).with_context(|| format!(
+        Some(secret) => Some(std::env::var(secret.var()).with_context(|| {
+            format!(
                 "the sidecar references ${{{}}}, which is not set in the environment",
                 secret.var()
-            ))?
-        )),
+            )
+        })?),
         None => None,
     };
     let transport = cfg

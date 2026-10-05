@@ -131,3 +131,50 @@ fn every_bundled_sidecar_references_its_secrets() {
         });
     }
 }
+
+fn refusal(yaml: &str) -> String {
+    parse(yaml).expect_err("must be refused").to_string()
+}
+
+/// The transport adds "Bearer " to a static token itself, so a prefix would
+/// send "Bearer Bearer <token>".
+#[test]
+fn a_static_token_with_a_literal_prefix_is_refused_naming_the_transport() {
+    let msg = refusal(&mcp_sidecar_with_token("Bearer ${GITHUB_TOKEN}"));
+    assert!(
+        msg.contains("static_token") && msg.contains("adds \"Bearer \" itself"),
+        "got: {msg}"
+    );
+    assert!(
+        msg.contains("static_token: \"${GITHUB_TOKEN}\""),
+        "got: {msg}"
+    );
+    assert!(!msg.contains("value: \"Bearer"), "got: {msg}");
+}
+
+#[test]
+fn every_static_token_refusal_gives_the_static_token_example() {
+    for bad in [SYNTHETIC_LITERAL, "${UNCLOSED", "${}", "${A}${B}"] {
+        let msg = refusal(&mcp_sidecar_with_token(bad));
+        assert!(
+            msg.contains("static_token: \"${GITHUB_TOKEN}\""),
+            "got: {msg}"
+        );
+        assert!(!msg.contains("value: \"Bearer"), "got: {msg}");
+    }
+}
+
+#[test]
+fn every_header_value_refusal_gives_the_header_value_example() {
+    for bad in [SYNTHETIC_LITERAL, "Bearer ${UNCLOSED", "${}", "${A}${B}"] {
+        let msg = refusal(&manual_sidecar_with_header_value(bad));
+        assert!(
+            msg.contains("value: \"Bearer ${GITHUB_TOKEN}\""),
+            "got: {msg}"
+        );
+        assert!(
+            !msg.contains("static_token: \"${GITHUB_TOKEN}\""),
+            "got: {msg}"
+        );
+    }
+}
