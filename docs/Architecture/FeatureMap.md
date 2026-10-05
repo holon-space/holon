@@ -345,6 +345,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `ref-diverge-content-text-drift`
 - `ref-diverge-parent-reparent`
 - `shopping-mapping-cost-slo`
+- `task-state-clear-lost-across-cut-paste`
 - `text-undo-manager-load`
 - `toggle-state-sql-read-repeat-budget`
 - `tour-spike-advance-cursor-not-visible`
