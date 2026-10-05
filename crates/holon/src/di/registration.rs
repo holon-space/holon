@@ -471,7 +471,7 @@ async fn create_profile_resolver(
     ui_info: holon_api::UiInfo,
     live_entities: LiveEntities,
     type_profiles: Vec<crate::entity_profile::EntityProfile>,
-    profile_load_check: impl Fn(&crate::entity_profile::ParsedProfile) -> Result<()>
+    profile_load_check: impl Fn(&str, &crate::entity_profile::ParsedProfile) -> Result<()>
     + Send
     + Sync
     + 'static,
@@ -566,7 +566,7 @@ async fn create_profile_resolver(
 /// successful load clears it.
 fn load_profile_row(
     row: &StorageEntity,
-    profile_load_check: &impl Fn(&crate::entity_profile::ParsedProfile) -> Result<()>,
+    profile_load_check: &impl Fn(&str, &crate::entity_profile::ParsedProfile) -> Result<()>,
     conditions: &holon_api::ConditionBus,
 ) -> Result<crate::entity_profile::EntityProfile> {
     let id = row
@@ -579,7 +579,7 @@ fn load_profile_row(
             .and_then(|v| v.as_string())
             .ok_or_else(|| anyhow::anyhow!("profile row missing 'content'"))?;
         let profile = parse_profile_yaml(content)?;
-        profile_load_check(&profile)?;
+        profile_load_check(id, &profile)?;
         profile.to_entity_profile()
     })();
     match &loaded {

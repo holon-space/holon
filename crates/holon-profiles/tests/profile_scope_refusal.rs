@@ -87,7 +87,10 @@ fn an_org_embedded_profile_is_checked_against_the_registered_types() {
         .profile_load_check();
     let refused = parse_profile_yaml(&block_profile_with_condition("asked-by != ()"))
         .expect("profile parses");
-    let msg = format!("{:#}", check(&refused).expect_err("hyphenated key refused"));
+    let msg = format!(
+        "{:#}",
+        check("block-profile-id", &refused).expect_err("hyphenated key refused")
+    );
     assert!(msg.contains("properties[\"asked-by\"]"), "{msg}");
 
     // A bundled computed field (`is_task`), a lone guard and a profile named
@@ -98,7 +101,10 @@ fn an_org_embedded_profile_is_checked_against_the_registered_types() {
         "entity_name: kanban_collection\nvariants:\n  - name: board\n    render: 'text(\"b\")'\n"
             .to_string(),
     ] {
-        check(&parse_profile_yaml(&yaml).expect("profile parses"))
-            .unwrap_or_else(|e| panic!("must load: {e:#}"));
+        check(
+            "block-profile-id",
+            &parse_profile_yaml(&yaml).expect("profile parses"),
+        )
+        .unwrap_or_else(|e| panic!("must load: {e:#}"));
     }
 }

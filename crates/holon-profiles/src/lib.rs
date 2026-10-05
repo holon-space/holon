@@ -19,6 +19,7 @@
 //! and compiles on-demand during resolution. Compilation is fast for small
 //! expressions (<1µs each).
 
+mod profile_computed_override;
 mod profile_scope;
 mod profile_write_targets;
 pub mod trust;
@@ -42,6 +43,8 @@ use holon_api::render_types::OperationDescriptor;
 use holon_api::render_types::RenderExpr;
 use holon_api::render_types::RenderVariant;
 use holon_api::row_id;
+pub use profile_computed_override::TypedComputedFieldOverride;
+pub use profile_computed_override::check_profile_computed_overrides;
 pub use profile_scope::check_profile_scope;
 pub use profile_write_targets::check_profile_write_targets;
 use rhai::Engine as RhaiEngine;

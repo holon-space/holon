@@ -88,7 +88,7 @@ fn an_org_embedded_profile_is_checked_for_write_targets() {
     .expect("profile parses");
     let msg = format!(
         "{:#}",
-        check(&refused).expect_err("lane_field parent_id refused")
+        check("block-profile-id", &refused).expect_err("lane_field parent_id refused")
     );
     assert!(msg.contains("lane_field"), "{msg}");
 }

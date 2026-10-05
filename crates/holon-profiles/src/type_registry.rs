@@ -278,20 +278,22 @@ impl TypeRegistry {
         LinkTargetClassifier::with_registry(self.clone() as Arc<dyn LinkSchemeRegistry>)
     }
 
-    /// The load-time checks [`Self::apply_parsed_profile`] runs, with
-    /// [`crate::check_profile_scope`] against a snapshot of the types
-    /// registered now, for profiles that load after the registry is built
-    /// (org-embedded profile blocks).
+    /// The load-time checks [`Self::apply_parsed_profile`] runs, plus the
+    /// refusal to redeclare a typed computed field
+    /// ([`crate::check_profile_computed_overrides`]), against a snapshot of the
+    /// types registered now, for profiles that load after the registry is built
+    /// (org-embedded profile blocks). The closure takes the id of the block the
+    /// profile was loaded from.
     pub fn profile_load_check(
         &self,
-    ) -> impl Fn(&ParsedProfile) -> Result<()> + Send + Sync + 'static {
+    ) -> impl Fn(&str, &ParsedProfile) -> Result<()> + Send + Sync + 'static {
         let types = self.types.read().expect("TypeRegistry poisoned").clone();
-        move |profile| {
-            crate::check_profile_scope(
-                profile,
-                types.get(TableName::from_scheme(&profile.entity_name).as_str()),
-            )?;
-            crate::check_profile_write_targets(profile)
+        move |profile_id, profile| {
+            let type_def = types.get(TableName::from_scheme(&profile.entity_name).as_str());
+            crate::check_profile_scope(profile, type_def)?;
+            crate::check_profile_write_targets(profile)?;
+            crate::check_profile_computed_overrides(profile_id, profile, type_def)?;
+            Ok(())
         }
     }
 

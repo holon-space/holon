@@ -183,3 +183,73 @@ proptest! {
         prop_assert_eq!(&actual, &expected, "eval vs planted SQL for rows {:?}", rows);
     }
 }
+
+/// `display_name` over every definedness state of `role` and `email`: the live
+/// read seat, `Computation::eval` and the planted SQL column must agree, and
+/// each operand that exists must show.
+#[tokio::test]
+async fn display_name_is_the_same_on_every_seat_for_every_operand_state() {
+    let registry = create_default_registry().expect("default registry boots");
+    let td = registry.get("person").expect("person registered");
+    let spec = td
+        .computed_spec("display_name")
+        .expect("display_name declared on person");
+    let plan = person_plan();
+
+    let handle = setup_person_view(&plan).await;
+    let cases: [(Option<&str>, Option<&str>, Value); 4] = [
+        (
+            Some("Chef"),
+            Some("a@b.c"),
+            Value::String("Chef — a@b.c".into()),
+        ),
+        (Some("Chef"), None, Value::String("Chef".into())),
+        (None, Some("a@b.c"), Value::String("a@b.c".into())),
+        (None, None, Value::Null),
+    ];
+    for (i, (role, email, expected)) in cases.iter().enumerate() {
+        let to_value = |s: &Option<&str>| s.map_or(Value::Null, |s| Value::String(s.into()));
+        let to_sql =
+            |s: &Option<&str>| s.map_or(turso::Value::Null, |s| turso::Value::Text(s.into()));
+        handle
+            .execute(
+                "INSERT INTO person (id, role, email) VALUES (?, ?, ?)",
+                vec![
+                    turso::Value::Text(format!("p{i}")),
+                    to_sql(role),
+                    to_sql(email),
+                ],
+            )
+            .await
+            .expect("insert person");
+
+        let mut ctx = Context::new();
+        ctx.insert("role".into(), to_value(role));
+        ctx.insert("email".into(), to_value(email));
+
+        let evaluated = spec.computation().eval(&ctx).expect("eval");
+        let mut live_row = ctx.clone();
+        let outcomes = holon_api::computed::resolve_computed_fields(
+            &[holon_api::entity_profile::CompiledComputedField::typed(
+                spec,
+            )],
+            &mut live_row,
+        );
+        assert_eq!(
+            outcomes["display_name"],
+            Ok(()),
+            "live seat for {role:?}/{email:?}"
+        );
+
+        assert_eq!(&evaluated, expected, "eval for {role:?}/{email:?}");
+        assert_eq!(
+            &live_row["display_name"], expected,
+            "live seat for {role:?}/{email:?}"
+        );
+        assert_eq!(
+            &read_display_name(&handle, i).await,
+            expected,
+            "planted SQL for {role:?}/{email:?}"
+        );
+    }
+}
