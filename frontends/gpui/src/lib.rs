@@ -803,6 +803,106 @@ fn modal_overlay(
         })
 }
 
+// ── Vault load: what the window shows before the layout seed lands ────────
+
+/// Where the boot's default-layout seed stands, read from the boot ledger.
+/// The seed runs after the org initial scan, so until it ends there is no
+/// `block:root-layout` to render.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum VaultLoad {
+    Loading,
+    Failed(String),
+    Loaded,
+}
+
+impl VaultLoad {
+    fn of(session: &FrontendSession) -> Self {
+        use holon_frontend::platform::BootStep;
+        let report = session.boot_report();
+        if report
+            .in_background()
+            .contains(&BootStep::SeedDefaultLayout)
+        {
+            return Self::Loading;
+        }
+        match report
+            .failed()
+            .into_iter()
+            .find(|(step, _)| *step == BootStep::SeedDefaultLayout)
+        {
+            Some((_, why)) => Self::Failed(why),
+            None => Self::Loaded,
+        }
+    }
+}
+
+const VAULT_LOAD_ID: &str = "vault-load-status";
+
+/// Stands in for the root layout until the seed lands, or says why it never
+/// will.
+fn render_vault_load(load: &VaultLoad, bounds: &BoundsRegistry, cx: &App) -> impl IntoElement {
+    use gpui_component::theme::ActiveTheme;
+    let colors = cx.theme().colors;
+    let (widget_type, message, color) = match load {
+        VaultLoad::Loading => (
+            "vault_loading",
+            "Loading vault…".to_string(),
+            colors.muted_foreground,
+        ),
+        VaultLoad::Failed(why) => (
+            "vault_load_failed",
+            format!("The vault could not be loaded: {why}"),
+            colors.danger,
+        ),
+        VaultLoad::Loaded => unreachable!("a loaded vault renders its layout"),
+    };
+    crate::geometry::TransparentTracker::new(
+        VAULT_LOAD_ID.to_string(),
+        widget_type,
+        bounds.clone(),
+        div()
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .p_4()
+            .text_color(color)
+            .child(message.clone())
+            .into_any_element(),
+    )
+    .with_displayed_text(message)
+}
+
+/// Repaint the window each time a background boot step ends, so the vault-load
+/// placeholder gives way to the layout, or to the error, without user input.
+fn spawn_boot_report_pump(
+    app_model: Entity<AppModel>,
+    session: Arc<FrontendSession>,
+    wh: AnyWindowHandle,
+    cx: &mut App,
+) {
+    let ended = session.boot_report().background_step_ended();
+    cx.spawn(async move |cx| {
+        use futures_signals::signal::SignalExt;
+        ended
+            .for_each(move |_| {
+                let _ = cx.update_window(wh, |_, _, cx| {
+                    app_model.update(cx, |m, cx| {
+                        // Stale pumps (prior rebinds) no-op once the window
+                        // is bound to a different session.
+                        if !Arc::ptr_eq(&m.session, &session) {
+                            return;
+                        }
+                        cx.notify();
+                    });
+                });
+                async {}
+            })
+            .await;
+    })
+    .detach();
+}
+
 // ── HolonApp: GPUI view ────────────────────────────────────────────────────
 
 pub struct HolonApp {
@@ -1054,7 +1154,10 @@ impl Render for HolonApp {
             cx,
         );
         // Render from the reactive tree — dispatches on widget_name()
-        let root = {
+        let vault_load = VaultLoad::of(&self.app_model.read(cx).session);
+        let root = if vault_load != VaultLoad::Loaded {
+            render_vault_load(&vault_load, &self.bounds_registry, cx).into_any_element()
+        } else {
             let model = self.app_model.read(cx);
             #[cfg(feature = "hot-reload")]
             {
@@ -2076,6 +2179,7 @@ impl RebindHandle {
             // re-point it at the new engine so viewport / structural changes drive
             // the rebound window (and the `if_space` breakpoint re-evaluates).
             spawn_root_layout_signal(app_model.clone(), engine.clone(), window, cx);
+            spawn_boot_report_pump(app_model.clone(), session_for_close.clone(), window, cx);
             spawn_overlay_drawer_close(
                 app_model.clone(),
                 engine,
@@ -2459,8 +2563,11 @@ fn launch_holon_window_impl(
     // shows a permanent black screen. Skip the pre-warm and open with the
     // loading state; the tokio root-layout signal drives the first real
     // repaint asynchronously once the event loop is running.
+    //
+    // A seed still in the background (or failed) has no layout to wait for:
+    // the window opens at once on the vault-load placeholder (or its error).
     #[cfg(not(target_os = "android"))]
-    {
+    if VaultLoad::of(&session) == VaultLoad::Loaded {
         let engine = &engine;
         use futures::StreamExt;
         use futures::future::Either;
@@ -3071,6 +3178,7 @@ fn launch_holon_window_impl(
     // window resizes. Focus changes do NOT bump ui_generation so they
     // don't cascade here.
     spawn_root_layout_signal(app_model.clone(), engine.clone(), wh, cx);
+    spawn_boot_report_pump(app_model.clone(), session.clone(), wh, cx);
     spawn_overlay_drawer_close(
         app_model.clone(),
         engine,

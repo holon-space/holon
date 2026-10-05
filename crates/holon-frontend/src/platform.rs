@@ -38,6 +38,9 @@
 use std::sync::Arc;
 use std::sync::Mutex;
 
+use futures_signals::signal::Mutable;
+use futures_signals::signal::MutableSignal;
+
 /// A platform facility a boot step can need.
 ///
 /// Only facilities some boot step actually gates on appear here. Notably absent
@@ -291,6 +294,12 @@ impl BootReport {
     pub fn failed(&self) -> Vec<(BootStep, String)> {
         lock(&self.state).failed.clone()
     }
+
+    /// Ticks each time a background step ends, so a view of
+    /// [`Self::in_background`] and [`Self::failed`] knows to read them again.
+    pub fn background_step_ended(&self) -> MutableSignal<u64> {
+        lock(&self.state).ended.signal()
+    }
 }
 
 /// Records which boot steps a path performed and discloses the rest.
@@ -310,6 +319,14 @@ struct State {
     config_absent: Vec<(BootStep, &'static str)>,
     in_background: Vec<BootStep>,
     failed: Vec<(BootStep, String)>,
+    ended: Mutable<u64>,
+}
+
+impl State {
+    fn end_background(&mut self, step: BootStep) {
+        self.in_background.retain(|s| *s != step);
+        self.ended.replace_with(|n| *n + 1);
+    }
 }
 
 fn lock(state: &Mutex<State>) -> std::sync::MutexGuard<'_, State> {
@@ -327,6 +344,7 @@ impl BootDisclosure {
                 config_absent: Vec::new(),
                 in_background: Vec::new(),
                 failed: Vec::new(),
+                ended: Mutable::new(0),
             })),
         }
     }
@@ -448,8 +466,8 @@ pub struct BackgroundStep {
 impl BackgroundStep {
     pub fn performed(self) {
         let mut state = lock(&self.state);
-        state.in_background.retain(|s| *s != self.step);
         state.performed.push(self.step);
+        state.end_background(self.step);
     }
 
     pub fn failed(self, why: impl Into<String>) {
@@ -465,8 +483,8 @@ impl BackgroundStep {
             "boot [component=platform-capabilities]: step `{}` FAILED: {why}",
             self.step
         );
-        state.in_background.retain(|s| *s != self.step);
         state.failed.push((self.step, why));
+        state.end_background(self.step);
     }
 }
 
@@ -635,6 +653,22 @@ mod tests {
                 "the scan could not run".to_string()
             )]
         );
+    }
+
+    /// A view of the live lists learns that a step ended without polling.
+    #[test]
+    fn a_background_step_ending_ticks_the_report_signal() {
+        use futures::StreamExt;
+        use futures::executor::block_on;
+        use futures_signals::signal::SignalExt;
+
+        let disclosure = BootDisclosure::new(PlatformCapabilities::NATIVE);
+        let seed = disclosure.in_background(BootStep::SeedDefaultLayout);
+        let report = disclosure.finish();
+        let mut ended = report.background_step_ended().to_stream();
+        assert_eq!(block_on(ended.next()), Some(0));
+        seed.failed("the scan could not run");
+        assert_eq!(block_on(ended.next()), Some(1));
     }
 
     /// A task that panics or is aborted drops its handle unreported.

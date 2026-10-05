@@ -23,6 +23,7 @@ use std::time::UNIX_EPOCH;
 
 use async_trait::async_trait;
 use tokio::sync::broadcast;
+use tokio::sync::watch;
 
 use crate::change_source::FileChange;
 use crate::change_source::FileChangeKind;
@@ -67,6 +68,8 @@ struct State {
 pub struct InMemoryFileSystem {
     state: Mutex<State>,
     tx: broadcast::Sender<FileChange>,
+    /// `true` while [`InMemoryFileSystem::hold_scans`] parks every scan.
+    scans_held: watch::Sender<bool>,
 }
 
 impl Default for InMemoryFileSystem {
@@ -87,6 +90,7 @@ impl InMemoryFileSystem {
                 fail_next_write_commit: false,
             }),
             tx,
+            scans_held: watch::Sender::new(false),
         }
     }
 
@@ -115,6 +119,16 @@ impl InMemoryFileSystem {
     /// The target must come out of it holding its complete previous bytes.
     pub fn fail_next_write_commit(&self) {
         self.lock().fail_next_write_commit = true;
+    }
+
+    /// Park every `scan_directory` until [`Self::release_scans`], so a test
+    /// can hold a boot inside its initial vault scan.
+    pub fn hold_scans(&self) {
+        self.scans_held.send_replace(true);
+    }
+
+    pub fn release_scans(&self) {
+        self.scans_held.send_replace(false);
     }
 
     /// Synchronous `create_dir_all` for non-async construction contexts
@@ -360,6 +374,11 @@ impl FileSystem for InMemoryFileSystem {
     }
 
     async fn scan_directory(&self, root: &Path) -> std::io::Result<ScannedEntries> {
+        self.scans_held
+            .subscribe()
+            .wait_for(|held| !held)
+            .await
+            .expect("the file system owns the scan-hold sender");
         let root = normalize(root);
         let st = self.lock();
         if !st.dirs.contains(&root) {

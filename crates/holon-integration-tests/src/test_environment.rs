@@ -320,6 +320,8 @@ pub struct TestEnvironmentBuilder {
     /// the daily-journal auto-create rule) is deterministic regardless of the
     /// real wall-clock date. `None` uses the real `SystemClock`.
     clock: Option<Arc<dyn holon_api::Clock>>,
+    /// Boot with the vault scan parked until `org_fs.release_scans()`.
+    hold_initial_scan: bool,
 }
 
 impl TestEnvironmentBuilder {
@@ -332,7 +334,16 @@ impl TestEnvironmentBuilder {
             enable_fake_mcp: false,
             enable_loro: true,
             clock: None,
+            hold_initial_scan: false,
         }
+    }
+
+    /// Park the boot inside its initial vault scan until the test calls
+    /// `env.org_fs.release_scans()`. Pair with `wait_for_file_watcher(false)`:
+    /// a boot that waits for the scan never returns.
+    pub fn hold_initial_scan(mut self) -> Self {
+        self.hold_initial_scan = true;
+        self
     }
 
     /// Pin the boot clock to a fixed instant so date-derived boot behavior (the
@@ -426,6 +437,10 @@ impl TestEnvironmentBuilder {
 
             let doc_uri = EntityUri::file(filename);
             documents.insert(doc_uri, file_path);
+        }
+
+        if self.hold_initial_scan {
+            org_fs.hold_scans();
         }
 
         let enable_loro = self.enable_loro;
