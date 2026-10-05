@@ -285,6 +285,7 @@ async fn create_under_unheld_parent(runtime: Arc<tokio::runtime::Runtime>) {
             e.downcast_ref::<holon_core::BlockNotInWriteAuthority>()
                 == Some(&holon_core::BlockNotInWriteAuthority::new(
                     stranded_uri.clone(),
+                    holon_core::ProjectionRead::Holds,
                 ))
         }
         Ok(_) => false,

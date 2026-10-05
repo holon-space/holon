@@ -43,6 +43,7 @@ use holon_core::OperationProvider;
 use holon_core::OperationRegistry;
 use holon_core::OperationResult;
 use holon_core::OriginTaggedWrites;
+use holon_core::ProjectionRead;
 use holon_core::Result;
 use holon_core::SqlOnlyCellRegistry;
 use holon_core::UnknownOperationError;
@@ -151,7 +152,7 @@ impl SqlBlockOperations {
             return Ok(Some(stored.block));
         }
         match self.get_by_id(id.as_str()).await? {
-            Some(_) => Err(BlockNotInWriteAuthority::new(id.clone()).into()),
+            Some(_) => Err(BlockNotInWriteAuthority::new(id.clone(), ProjectionRead::Holds).into()),
             None => Ok(None),
         }
     }
@@ -1628,12 +1629,13 @@ mod tests {
         what: &str,
         result: holon_core::Result<impl std::fmt::Debug>,
         block: &EntityUri,
+        seen: holon_core::ProjectionRead,
     ) {
         let err = result.expect_err(&format!("{what} must be refused"));
         assert_eq!(
             err.downcast_ref::<holon_core::BlockNotInWriteAuthority>()
-                .map(|refusal| &refusal.block),
-            Some(block),
+                .map(|refusal| (&refusal.block, refusal.seen)),
+            Some((block, seen)),
             "{what} must be refused by name, got: {err}"
         );
     }
@@ -1658,26 +1660,31 @@ mod tests {
             "block read",
             ops.block_authoritative(&stranded).await,
             &stranded,
+            holon_core::ProjectionRead::Holds,
         );
         assert_refused(
             "prev sibling read",
             ops.prev_sibling_authoritative(&stranded).await,
             &stranded,
+            holon_core::ProjectionRead::Holds,
         );
         assert_refused(
             "next sibling read",
             ops.next_sibling_authoritative(&stranded).await,
             &stranded,
+            holon_core::ProjectionRead::Holds,
         );
         assert_refused(
             "descendants read",
             ops.descendants_authoritative(&stranded).await,
             &stranded,
+            holon_core::ProjectionRead::Holds,
         );
         assert_refused(
             "indent",
             BlockOperations::indent(&*ops, &stranded).await,
             &stranded,
+            holon_core::ProjectionRead::Holds,
         );
         assert_eq!(
             read_sort_key(&handle, stranded.as_str()).await,
@@ -1729,10 +1736,21 @@ mod tests {
         .expect_err("set_field(content) must be refused");
         assert_eq!(
             err.downcast_ref::<holon_core::BlockNotInWriteAuthority>(),
-            Some(&holon_core::BlockNotInWriteAuthority::new(stranded.clone()).on_field("content")),
+            Some(
+                &holon_core::BlockNotInWriteAuthority::new(
+                    stranded.clone(),
+                    holon_core::ProjectionRead::NotRead
+                )
+                .on_field("content")
+            ),
             "set_field(content) must be refused by block and field, got: {err}"
         );
-        assert_refused("place", ops.place(&stranded, &page, None).await, &stranded);
+        assert_refused(
+            "place",
+            ops.place(&stranded, &page, None).await,
+            &stranded,
+            holon_core::ProjectionRead::NotRead,
+        );
         assert_refused(
             "create_in_tree after it",
             ops.create_in_tree(
@@ -1745,6 +1763,7 @@ mod tests {
             )
             .await,
             &stranded,
+            holon_core::ProjectionRead::NotRead,
         );
         assert_refused(
             "update_in_tree",
@@ -1755,12 +1774,14 @@ mod tests {
             ]))
             .await,
             &stranded,
+            holon_core::ProjectionRead::NotRead,
         );
         assert_refused(
             "delete_in_tree",
             ops.delete_in_tree(params(&[("id", stranded.as_str())]))
                 .await,
             &stranded,
+            holon_core::ProjectionRead::NotRead,
         );
 
         let rows = handle

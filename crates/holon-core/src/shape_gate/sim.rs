@@ -23,6 +23,7 @@ use holon_api::Value;
 use holon_api::block::Block;
 
 use crate::BlockNotInWriteAuthority;
+use crate::ProjectionRead;
 use crate::UnknownOperationError;
 use crate::block_ordering::BlockOrdering;
 use crate::block_ordering::MintedPosition;
@@ -98,8 +99,12 @@ impl SimStore {
         Ok(overlay.blocks.entry(id.clone()).or_insert(block).clone())
     }
 
+    /// A block the authority does not hold, and the plan did not write, is
+    /// refused by name, as every write on it is (D69.a).
     async fn must_block(&self, id: &EntityUri) -> Result<Block> {
-        self.block(id).await?.ok_or_else(|| not_found(id))
+        self.block_authoritative(id)
+            .await?
+            .ok_or_else(|| not_found(id))
     }
 
     async fn child_ids(&self, parent: &EntityUri) -> Result<Vec<EntityUri>> {
@@ -568,7 +573,7 @@ impl BlockDataSourceHelpers<Block> for SimStore {
     async fn block_authoritative(&self, id: &EntityUri) -> Result<Option<Block>> {
         let block = self.block(id).await?;
         if block.is_none() && !id.is_no_parent() && !self.lock().written.contains(id) {
-            return Err(BlockNotInWriteAuthority::new(id.clone()).into());
+            return Err(BlockNotInWriteAuthority::new(id.clone(), ProjectionRead::NotRead).into());
         }
         Ok(block)
     }

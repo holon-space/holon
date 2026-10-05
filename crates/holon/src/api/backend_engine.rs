@@ -1559,7 +1559,7 @@ impl BackendEngine {
         carriers: &[holon_org_format::ParsedCarrier],
         origin: holon_api::OpOrigin,
     ) -> BoxFuture<'static, Result<holon_api::OpOutcome>> {
-        if self.op_engine.runs_fenced_plan() {
+        if self.op_engine.runs_claimed_plan() {
             return self.op_engine.execute_with_parsed_carriers(
                 entity_name,
                 op_name,

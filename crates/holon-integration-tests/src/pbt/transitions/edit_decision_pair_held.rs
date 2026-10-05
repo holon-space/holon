@@ -9,7 +9,7 @@
 //! The oracle applies the first edit and then the second, each as
 //! `EditDecisionSubtree` would: the correct SUT serializes them in that order.
 //! Each edit plans exactly one op, so it runs as a single gesture, not a
-//! fenced plan, and only the shape claim orders the two.
+//! plan, and only the shape claim orders the two.
 
 use holon_pbt_core::TransitionFactory;
 use holon_pbt_core::TransitionRef;

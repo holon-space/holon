@@ -9226,9 +9226,10 @@ mod dense_patch_rollback_tests {
 
         assert!(
             err.message.contains(
-                &holon_core::BlockNotInWriteAuthority {
-                    block: EntityUri::block("ghost"),
-                }
+                &holon_core::BlockNotInWriteAuthority::new(
+                    EntityUri::block("ghost"),
+                    holon_core::ProjectionRead::NotRead,
+                )
                 .to_string()
             ),
             "{}",

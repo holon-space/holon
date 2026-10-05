@@ -1,10 +1,10 @@
 //! **How long a local write waits behind an agent's `dense_patch`.**
 //!
-//! A judged plan holds the engine's fence from its judgement to its last op,
-//! so every local write queues behind it. This measures that queue: while the
+//! A judged plan claims the rows it names from its judgement to its last op.
+//! This measures what a local write on another row still waits: while the
 //! real `dense_patch` tool retitles N rows over the wire, the user's writes run
 //! back to back on the same engine, and the slowest of them, less the median
-//! of the same write alone, is the wait the fence added.
+//! of the same write alone, is the wait the patch added.
 //!
 //! A measurement, not a gate: `#[ignore]`, run with `--ignored --nocapture`
 //! and read the `[fence wait]` lines.

@@ -13,6 +13,7 @@ use holon::di::test_helpers::create_test_engine_with_providers;
 use holon::storage::BLOCK_WRITE_TABLE;
 use holon_api::EntityName;
 use holon_api::OpOrigin;
+use holon_api::Operation;
 use holon_api::SOURCE_TEXT_FIELD;
 use holon_api::SourceKeystroke;
 use holon_api::Value;
@@ -228,4 +229,114 @@ async fn a_keystroke_waits_behind_a_held_write_on_its_own_block() {
         .expect("the keystroke's task")
         .expect("the keystroke lands after the held write");
     assert_eq!(content(&engine, HELD).await, "typed after the held write");
+}
+
+fn operation(op: &str, pairs: &[(&str, &str)]) -> Operation {
+    Operation::from_params(
+        "block",
+        op,
+        op,
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), Value::String((*v).to_string()))),
+    )
+}
+
+/// A 40-op patch, three creates then 37 retitles, held before its fourth op.
+/// It claims only the rows it names, so a keystroke on another block neither
+/// waits for it nor is held back by it.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unrelated_keystroke_during_a_held_40_row_patch_finishes() {
+    let engine = block_engine().await;
+    seed(&engine).await;
+    let rows: Vec<String> = (0..37).map(|j| format!("block:row-{j}")).collect();
+    for row in &rows {
+        engine
+            .execute_operation(
+                &EntityName::new("block"),
+                "create",
+                params(&[("id", row), ("parent_id", PAGE), ("content", row)]),
+                OpOrigin::Sync,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("seed {row}: {e:#}"));
+    }
+    let ops: Vec<Operation> = (0..3)
+        .map(|j| {
+            operation(
+                "create",
+                &[
+                    ("id", &format!("block:new-{j}")),
+                    ("parent_id", PAGE),
+                    ("content", "new"),
+                ],
+            )
+        })
+        .chain(rows.iter().map(|row| {
+            operation(
+                "set_field",
+                &[("id", row), ("field", "content"), ("value", "patched")],
+            )
+        }))
+        .collect();
+    assert_eq!(ops.len(), 40);
+
+    engine.dispatch_hold().hold_next("block", "set_field");
+    let patch = {
+        let engine = Arc::clone(&engine);
+        tokio::spawn(async move {
+            engine
+                .execute_judged(&ops, &OpOrigin::User, async {
+                    for op in &ops {
+                        engine
+                            .execute_operation(
+                                &op.entity_name,
+                                &op.op_name,
+                                op.params
+                                    .iter()
+                                    .map(|(k, v)| (k.as_str().into(), v.clone()))
+                                    .collect(),
+                                OpOrigin::User,
+                            )
+                            .await?;
+                    }
+                    Ok(())
+                })
+                .await
+        })
+    };
+    let parked = tokio::time::timeout(Duration::from_secs(10), async {
+        while engine.dispatch_hold().parked_runs("block", "set_field") == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await;
+    assert!(parked.is_ok(), "the patch never reached its fourth op");
+
+    let keystroke = engine.commit_keystroke(SourceKeystroke {
+        id: TYPED.into(),
+        source: "typed during the patch".into(),
+        write_seq: None,
+    });
+    assert_eq!(
+        engine.admission().census().waiting,
+        0,
+        "the keystroke on {TYPED} waits behind the held patch, which never names it"
+    );
+    tokio::time::timeout(Duration::from_secs(10), keystroke)
+        .await
+        .expect("the keystroke finishes while the patch is held")
+        .expect("the keystroke lands");
+    assert_eq!(content(&engine, TYPED).await, "typed during the patch");
+
+    engine
+        .dispatch_hold()
+        .release(1, Duration::from_secs(5))
+        .await
+        .expect("release the patch");
+    patch
+        .await
+        .expect("the patch's task")
+        .expect("the patch lands");
+    assert_eq!(content(&engine, "block:row-36").await, "patched");
 }

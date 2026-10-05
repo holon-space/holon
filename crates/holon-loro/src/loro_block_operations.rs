@@ -44,6 +44,7 @@ use holon_core::MarkOperations;
 use holon_core::OperationProvider;
 use holon_core::OperationRegistry;
 use holon_core::OperationResult;
+use holon_core::ProjectionRead;
 use holon_core::Result;
 use holon_core::TaskOperations;
 use holon_core::TextOperations;
@@ -489,7 +490,7 @@ fn parse_block_id(id: &str) -> Result<EntityUri> {
 
 /// Refuse a write on `block`, which the Loro tree does not hold (D69.a).
 fn not_held<T>(block: EntityUri) -> Result<T> {
-    Err(BlockNotInWriteAuthority::new(block).into())
+    Err(BlockNotInWriteAuthority::new(block, ProjectionRead::NotRead).into())
 }
 
 /// Whether `create` reads `key` as an instruction rather than as a
@@ -3545,9 +3546,10 @@ mod unheld_write_tests {
             .expect_err("not_held always refuses");
         assert_eq!(
             err.downcast_ref::<BlockNotInWriteAuthority>(),
-            Some(&BlockNotInWriteAuthority::new(EntityUri::block(
-                "absent-bare"
-            ))),
+            Some(&BlockNotInWriteAuthority::new(
+                EntityUri::block("absent-bare"),
+                ProjectionRead::NotRead,
+            )),
             "got: {err}"
         );
 

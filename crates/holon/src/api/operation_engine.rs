@@ -896,7 +896,7 @@ impl DispatchingOperationEngine {
     }
 
     /// Run `execute`, which dispatches exactly `ops`, with the shape gate
-    /// judging them once as a whole. See
+    /// judging them once as a whole, under a claim on what `ops` name. See
     /// [`OperationDispatcher::execute_judged`].
     pub async fn execute_judged<F, T>(
         &self,
@@ -907,17 +907,29 @@ impl DispatchingOperationEngine {
     where
         F: std::future::Future<Output = Result<T>>,
     {
-        self.fenced_judged_run(ops, origin, async { execute.await.map_err(Into::into) })
-            .await
-            .map_err(|e| anyhow::anyhow!("{e}"))
+        let execute = async { execute.await.map_err(Into::into) };
+        let outcome = match ops
+            .iter()
+            .map(|op| footprint(&op.entity_name, &op.op_name, op.params.values()))
+            .reduce(Footprint::union)
+        {
+            Some(footprint) => {
+                self.claimed_judged_run(ops, footprint, origin, execute)
+                    .await
+            }
+            None => self.judged_run(ops, origin, execute).await,
+        };
+        outcome.map_err(|e| anyhow::anyhow!("{e}"))
     }
 
-    /// [`Self::judged_run`] holding a fence from the judgement to the plan's
-    /// last op, so no other write lands between what was judged and what
-    /// runs.
-    async fn fenced_judged_run<F, T>(
+    /// [`Self::judged_run`] holding `footprint` from the judgement to the
+    /// plan's last op, so no other write to what the plan names lands between
+    /// what was judged and what runs. Every op the plan dispatches must lie
+    /// inside `footprint`.
+    async fn claimed_judged_run<F, T>(
         &self,
         ops: &[Operation],
+        footprint: Footprint,
         origin: &OpOrigin,
         execute: F,
     ) -> holon_core::Result<T>
@@ -925,18 +937,21 @@ impl DispatchingOperationEngine {
         F: std::future::Future<Output = holon_core::Result<T>>,
     {
         assert!(
-            !self.runs_fenced_plan(),
-            "a judged plan nested in another of the same engine would wait on its own fence"
+            !self.runs_claimed_plan(),
+            "a judged plan nested in another of the same engine would wait on its own claim"
         );
-        let mut fence = self.admission.admit(Footprint::Fence);
-        fence.released().await;
+        let mut claim = self.admission.admit(footprint.clone());
+        claim.released().await;
         // Boxed where it is built: every scope and combinator around it then
         // moves a pointer, not the plan's future.
         let plan = Box::pin(self.judged_run(ops, origin, execute));
-        let (outcome, _) = FENCED_PLAN
-            .scope(self.identity(), self.running_write(&fence).run(plan))
+        let (outcome, _) = PLAN_CLAIM
+            .scope(
+                (self.identity(), footprint),
+                self.running_write(&claim).run(plan),
+            )
             .await;
-        drop(fence);
+        drop(claim);
         outcome
     }
 
@@ -968,11 +983,25 @@ impl DispatchingOperationEngine {
         Arc::as_ptr(&self.state) as usize
     }
 
-    /// Whether this task runs a judged plan of this engine, under its fence.
-    pub(crate) fn runs_fenced_plan(&self) -> bool {
-        FENCED_PLAN
-            .try_with(|engine| *engine == self.identity())
+    /// Whether this task runs a judged plan of this engine, under its claim.
+    pub(crate) fn runs_claimed_plan(&self) -> bool {
+        PLAN_CLAIM
+            .try_with(|(engine, _)| *engine == self.identity())
             .unwrap_or(false)
+    }
+
+    /// Panics when `request` writes past the claim of the plan this task runs:
+    /// a write admission never ordered could land under it.
+    fn assert_plan_claim_covers(&self, request: &OpRequest) {
+        let inner = footprint_of(request);
+        PLAN_CLAIM.with(|(_, claim)| {
+            assert!(
+                claim.covers(&inner),
+                "'{}' on '{}' writes {inner:?}, outside its plan's claim {claim:?}",
+                request.op_name,
+                request.entity_name
+            )
+        });
     }
 
     /// Dispatch `ops` as ONE gesture: the shape gate judges them as one plan
@@ -1006,7 +1035,10 @@ impl DispatchingOperationEngine {
             }
         }
         let ops = expanded;
-        self.fenced_judged_run(&ops, &origin, async {
+        // The fence, not the ops' footprints: the undo group opened below
+        // takes every User-origin write of the engine, so a write running
+        // beside the plan would join the plan's undo entry.
+        self.claimed_judged_run(&ops, Footprint::Fence, &origin, async {
             self.begin_undo_group().await;
             let mut run: Result<()> = Ok(());
             for op in &ops {
@@ -4083,9 +4115,9 @@ pub fn with_parsed_carriers(
 
 tokio::task_local! {
     /// The engine (by [`DispatchingOperationEngine::identity`]) whose judged
-    /// plan this task runs under that engine's fence: the plan's own ops run
-    /// inside the fence instead of queueing behind it.
-    static FENCED_PLAN: usize;
+    /// plan this task runs, and the plan's claim: the plan's own ops run
+    /// inside the claim instead of queueing behind it.
+    static PLAN_CLAIM: (usize, Footprint);
 }
 
 /// How often a write whose shape claim closes a wait cycle runs before its
@@ -4132,6 +4164,19 @@ fn prepare_request(
 /// name. Compounds reach past those, so they run alone. A source-line write
 /// writes only its own block's content and keyword.
 fn footprint_of(request: &OpRequest) -> Footprint {
+    footprint(
+        &request.entity_name,
+        &request.op_name,
+        request.params.values(),
+    )
+}
+
+/// [`footprint_of`] an `entity_name.op_name` write with `params`.
+fn footprint<'a>(
+    entity_name: &EntityName,
+    op_name: &str,
+    params: impl Iterator<Item = &'a Value>,
+) -> Footprint {
     const FENCED_OPS: [&str; 8] = [
         "delete_subtree",
         "delete_keep_children",
@@ -4142,21 +4187,19 @@ fn footprint_of(request: &OpRequest) -> Footprint {
         ACCEPT_PROPOSAL_OP,
         REJECT_PROPOSAL_OP,
     ];
-    if request.entity_name.is_wildcard() || FENCED_OPS.contains(&request.op_name.as_str()) {
+    if entity_name.is_wildcard() || FENCED_OPS.contains(&op_name) {
         return Footprint::Fence;
     }
-    let subjects: std::collections::BTreeSet<EntityUri> = request
-        .params
-        .values()
+    let subjects: std::collections::BTreeSet<EntityUri> = params
         .filter_map(Value::as_string)
         .filter_map(EntityUri::schemed)
         .collect();
     if subjects.is_empty() {
-        warn_relation_fallback_once(&request.entity_name, &request.op_name);
-        Footprint::Relation(request.entity_name.clone())
+        warn_relation_fallback_once(entity_name, op_name);
+        Footprint::Relation(entity_name.clone())
     } else {
         Footprint::Subjects {
-            relation: request.entity_name.clone(),
+            relation: entity_name.clone(),
             subjects,
         }
     }
@@ -4194,9 +4237,9 @@ impl DispatchingOperationEngine {
         origin: OpOrigin,
     ) -> Result<Ticket> {
         anyhow::ensure!(
-            !self.runs_fenced_plan(),
+            !self.runs_claimed_plan(),
             "'{op_name}' on '{entity_name}' asks for a ticket inside a judged plan, which would \
-             wait on the plan's own fence; dispatch it with `execute_with_parsed_carriers`"
+             wait on the plan's own claim; dispatch it with `execute_with_parsed_carriers`"
         );
         let request = prepare_request(entity_name, op_name, params, carriers, origin)?;
         #[cfg(feature = "dispatch-hold")]
@@ -4215,9 +4258,12 @@ impl DispatchingOperationEngine {
         carriers: &[ParsedCarrier],
         origin: OpOrigin,
     ) -> BoxFuture<'static, Result<OpOutcome>> {
-        if self.runs_fenced_plan() {
-            let engine = self.share();
+        if self.runs_claimed_plan() {
             let request = prepare_request(entity_name, op_name, params, carriers, origin);
+            if let Ok(request) = &request {
+                self.assert_plan_claim_covers(request);
+            }
+            let engine = self.share();
             return Box::pin(async move {
                 let request = request?;
                 engine
@@ -4293,6 +4339,9 @@ impl DispatchingOperationEngine {
     ) -> BoxFuture<'a, Result<OpOutcome>> {
         Box::pin(async move {
             let request = prepare_request(entity_name, op_name, params, &[], origin)?;
+            if self.runs_claimed_plan() {
+                self.assert_plan_claim_covers(&request);
+            }
             self.execute_admitted(
                 &request.entity_name,
                 &request.op_name,

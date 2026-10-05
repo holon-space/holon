@@ -536,7 +536,10 @@ async fn a_structural_op_on_a_block_the_authority_does_not_hold_is_refused_by_na
             .unwrap_or_else(|| panic!("{op_name} on a block the authority lacks is refused"));
         assert_eq!(
             err.downcast_ref::<holon_core::BlockNotInWriteAuthority>(),
-            Some(&holon_core::BlockNotInWriteAuthority::new(stranded.clone())),
+            Some(&holon_core::BlockNotInWriteAuthority::new(
+                stranded.clone(),
+                holon_core::ProjectionRead::NotRead,
+            )),
             "{op_name}: {err}"
         );
     }

@@ -539,3 +539,120 @@ async fn a_keystroke_into_a_child_of_a_claimed_decision_waits_for_the_held_write
         Some("Turso db")
     );
 }
+
+/// A plan adds option d and re-decides for b; it is held after its first op.
+/// Three foreign writes reach into the decision: a create under it (its claim
+/// names the decision), an indent of its next sibling into it and an outdent
+/// of option b (their claims name neither; only their judgements find the
+/// decision). Each must wait for the whole plan and be judged against its
+/// result: with `chosen: b` stored, moving option b out breaks DC2.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_foreign_write_into_a_claimed_subtree_waits_and_the_decision_stays_valid() {
+    let engine = block_engine().await;
+    seed(&engine).await;
+    foreign(
+        &engine,
+        vec![(
+            "create",
+            created("block:x", PAGE, "next to the decision", &[], &[]),
+        )],
+    )
+    .await;
+    let hold = engine.dispatch_hold();
+
+    let to_op = |op: &str, p: StorageEntity| {
+        holon_api::Operation::from_params(
+            "block",
+            op,
+            op,
+            p.into_iter().map(|(k, v)| (k.to_string(), v)),
+        )
+    };
+    let ops = vec![
+        to_op(
+            "create",
+            created("block:d-d", DECISION, "DuckDB", &[("option", "d")], &[]),
+        ),
+        to_op(
+            "set_field",
+            params(&[("id", DECISION), ("field", "chosen"), ("value", "b")]),
+        ),
+    ];
+    hold.hold_next("block", "set_field");
+    let plan = {
+        let engine = Arc::clone(&engine);
+        tokio::spawn(async move {
+            engine
+                .execute_judged(&ops, &OpOrigin::User, async {
+                    for op in &ops {
+                        engine
+                            .execute_operation(
+                                &op.entity_name,
+                                &op.op_name,
+                                op.params
+                                    .iter()
+                                    .map(|(k, v)| (k.as_str().into(), v.clone()))
+                                    .collect(),
+                                OpOrigin::User,
+                            )
+                            .await?;
+                    }
+                    Ok(())
+                })
+                .await
+        })
+    };
+    until("the plan is held after its first op", || {
+        hold.parked_runs("block", "set_field") == 1
+    })
+    .await;
+
+    let create = spawn_write(
+        &engine,
+        "create",
+        &[
+            ("id", "block:d-note"),
+            ("parent_id", DECISION),
+            ("content", "a note"),
+        ],
+    );
+    let indent = spawn_write(&engine, "indent", &[("id", "block:x")]);
+    let outdent = spawn_write(&engine, "outdent", &[("id", OPTION_B)]);
+    let waited = waiting(&engine, 3, "the three foreign writes behind the plan").await;
+    hold.release(1, Duration::from_secs(10))
+        .await
+        .expect("release the plan");
+
+    let plan = tokio::time::timeout(Duration::from_secs(10), plan)
+        .await
+        .expect("the plan finishes")
+        .expect("the plan's task");
+    let create = finished(create).await;
+    let indent = finished(indent).await;
+    let outdent = finished(outdent).await;
+    assert!(
+        waited,
+        "a foreign write ran inside the plan's judged window"
+    );
+    plan.expect("the plan adds option d and re-decides for b");
+    create.expect("a note under the decision is legal after the plan");
+    indent.expect("indenting a plain block into the decision is legal after the plan");
+    let refused = outdent.expect_err(
+        "moving option b out while the decision is decided for b breaks DC2; it was judged \
+         against the state before the plan",
+    );
+    assert!(format!("{refused:#}").contains("DC2"), "{refused:#}");
+    assert_eq!(chosen(&engine).await.as_deref(), Some("b"));
+    for (child, why) in [
+        (OPTION_B, "option b stays"),
+        ("block:d-d", "the plan's option"),
+        ("block:d-note", "the create"),
+        ("block:x", "the indent"),
+    ] {
+        assert_eq!(
+            read(&engine, child, "parent_id").await.as_deref(),
+            Some(DECISION),
+            "{why}"
+        );
+    }
+}

@@ -196,6 +196,7 @@ async fn run_test(runtime: Arc<tokio::runtime::Runtime>) {
         .expect_err("split_block on a block the write authority does not hold must be refused");
     let refusal = holon_core::BlockNotInWriteAuthority::new(
         holon_api::EntityUri::parse(stranded_id).expect("stranded uri"),
+        holon_core::ProjectionRead::NotRead,
     )
     .to_string();
     assert!(

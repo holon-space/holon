@@ -49,21 +49,25 @@ pub struct ShareExitRefused {
 }
 
 /// A write on a block the write authority does not hold: the block was just
-/// deleted and the projection still lags, or the vault was never seeded into
-/// its authority.
+/// deleted, or the vault was never seeded into its authority.
 ///
 /// One authority decides each write (D64.b) and takes every write (D69.a), so
 /// the op is refused instead of deciding from, or writing to, the projection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockNotInWriteAuthority {
     pub block: EntityUri,
+    pub seen: ProjectionRead,
     /// The field the refused write targeted, when it targeted one.
     pub field: Option<String>,
 }
 
 impl BlockNotInWriteAuthority {
-    pub fn new(block: EntityUri) -> Self {
-        Self { block, field: None }
+    pub fn new(block: EntityUri, seen: ProjectionRead) -> Self {
+        Self {
+            block,
+            seen,
+            field: None,
+        }
     }
 
     pub fn on_field(mut self, field: &str) -> Self {
@@ -77,16 +81,37 @@ impl fmt::Display for BlockNotInWriteAuthority {
         if let Some(field) = &self.field {
             write!(f, "The write of `{field}` on ")?;
         }
-        write!(
-            f,
-            "{} is not in the write authority, so no write may land on it. It was deleted, or \
-             this vault was never seeded (then re-create it from its org files).",
-            self.block
-        )
+        write!(f, "{} {}", self.block, self.seen)
     }
 }
 
 impl std::error::Error for BlockNotInWriteAuthority {}
+
+/// What the refuser of a [`BlockNotInWriteAuthority`] learned from the SQL
+/// projection about the block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectionRead {
+    /// The projection holds the block.
+    Holds,
+    /// The refuser read only the write authority.
+    NotRead,
+}
+
+impl fmt::Display for ProjectionRead {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            ProjectionRead::Holds => {
+                "is in the SQL projection but not in the write authority, so no write may land \
+                 on it. It was deleted, or this vault was never seeded (then re-create it from \
+                 its org files)."
+            }
+            ProjectionRead::NotRead => {
+                "is not in the write authority (unknown id, deleted, or this vault was never \
+                 seeded), so no write may land on it."
+            }
+        })
+    }
+}
 
 /// A registry error as a boxed error, keeping a [`BlockNotInWriteAuthority`]
 /// refusal downcastable (anyhow's own conversion boxes its wrapper).

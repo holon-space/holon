@@ -148,7 +148,7 @@ impl OverlayState {
             holder.waiting_on.is_empty() && !holder.abandoned,
             "a claim nests under admission {parent}, which is not running"
         );
-        if covers(&holder.footprint, &footprint) {
+        if holder.footprint.covers(&footprint) {
             return Ok(None);
         }
         let waits = self.nested_waits(parent, &footprint)?;
@@ -200,7 +200,7 @@ impl OverlayState {
             "admission {seq} grows but is not running"
         );
         assert!(
-            covers(&footprint, &entry.footprint),
+            footprint.covers(&entry.footprint),
             "admission {seq} grows from {:?} to {footprint:?}, which drops part of it",
             entry.footprint
         );
@@ -427,24 +427,55 @@ impl OverlayState {
     }
 }
 
-/// Whether `outer` lets its holder write everything `inner` names.
-fn covers(outer: &Footprint, inner: &Footprint) -> bool {
-    match (outer, inner) {
-        (Footprint::Fence, _) => true,
-        (_, Footprint::Fence) => false,
-        (Footprint::Relation(r), Footprint::Relation(i))
-        | (Footprint::Relation(r), Footprint::Subjects { relation: i, .. }) => r == i,
-        (Footprint::Subjects { .. }, Footprint::Relation(_)) => false,
-        (
-            Footprint::Subjects {
-                relation: r,
-                subjects: outer,
-            },
-            Footprint::Subjects {
-                relation: i,
-                subjects: inner,
-            },
-        ) => r == i && inner.is_subset(outer),
+impl Footprint {
+    /// The smallest footprint that covers both: one relation's subjects merge,
+    /// two relations take the fence.
+    pub fn union(self, other: Footprint) -> Footprint {
+        match (self, other) {
+            (Footprint::Fence, _) | (_, Footprint::Fence) => Footprint::Fence,
+            (
+                Footprint::Subjects {
+                    relation,
+                    mut subjects,
+                },
+                Footprint::Subjects {
+                    relation: r,
+                    subjects: more,
+                },
+            ) if relation == r => {
+                subjects.extend(more);
+                Footprint::Subjects { relation, subjects }
+            }
+            (Footprint::Relation(relation), Footprint::Relation(r))
+            | (Footprint::Relation(relation), Footprint::Subjects { relation: r, .. })
+            | (Footprint::Subjects { relation: r, .. }, Footprint::Relation(relation))
+                if relation == r =>
+            {
+                Footprint::Relation(relation)
+            }
+            _ => Footprint::Fence,
+        }
+    }
+
+    /// Whether its holder may write everything `inner` names.
+    pub fn covers(&self, inner: &Footprint) -> bool {
+        match (self, inner) {
+            (Footprint::Fence, _) => true,
+            (_, Footprint::Fence) => false,
+            (Footprint::Relation(r), Footprint::Relation(i))
+            | (Footprint::Relation(r), Footprint::Subjects { relation: i, .. }) => r == i,
+            (Footprint::Subjects { .. }, Footprint::Relation(_)) => false,
+            (
+                Footprint::Subjects {
+                    relation: r,
+                    subjects: outer,
+                },
+                Footprint::Subjects {
+                    relation: i,
+                    subjects: inner,
+                },
+            ) => r == i && inner.is_subset(outer),
+        }
     }
 }
 
@@ -853,5 +884,35 @@ mod tests {
         state.settle(second);
         state.settle(second);
         state.settle(first);
+    }
+
+    #[test]
+    fn the_union_covers_both_footprints_and_no_more_than_their_relations() {
+        let doc = Footprint::Relation(EntityName::new("document"));
+        let cases = [
+            (on(&["x"]), on(&["y"]), on(&["x", "y"])),
+            (
+                on(&["x"]),
+                Footprint::Relation(block()),
+                Footprint::Relation(block()),
+            ),
+            (
+                Footprint::Relation(block()),
+                on(&["x"]),
+                Footprint::Relation(block()),
+            ),
+            (on(&["x"]), doc.clone(), Footprint::Fence),
+            (Footprint::Fence, on(&["x"]), Footprint::Fence),
+            (doc.clone(), doc.clone(), doc),
+        ];
+        for (a, b, union) in cases {
+            let got = a.clone().union(b.clone());
+            assert_eq!(got, union, "{a:?} ∪ {b:?}");
+            assert!(
+                got.covers(&a) && got.covers(&b),
+                "{got:?} covers {a:?}, {b:?}"
+            );
+        }
+        assert!(!on(&["x", "y"]).covers(&on(&["z"])));
     }
 }

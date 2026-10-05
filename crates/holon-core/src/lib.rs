@@ -56,6 +56,7 @@ pub use boundary_enforcer::InertBoundaryEnforcer;
 pub use canonical_path::CanonicalPath;
 pub use cell_registry::BlockNotInWriteAuthority;
 pub use cell_registry::ExitedShare;
+pub use cell_registry::ProjectionRead;
 pub use cell_registry::RemovingAction;
 pub use cell_registry::ShareExitRefused;
 pub use cell_registry::TreeDelete;

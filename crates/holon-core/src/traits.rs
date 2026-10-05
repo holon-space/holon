@@ -4050,13 +4050,15 @@ mod cell_leg_refusal_tests {
     use super::*;
     use crate::cell_registry::BlockNotInWriteAuthority;
     use crate::cell_registry::EntityCellRegistry;
+    use crate::cell_registry::ProjectionRead;
     use crate::cell_registry::TreeDelete;
 
     /// A registry whose every removal leg refuses the block.
     struct Refusing;
 
     fn refusal() -> anyhow::Error {
-        BlockNotInWriteAuthority::new(EntityUri::block("held-by-nobody")).into()
+        BlockNotInWriteAuthority::new(EntityUri::block("held-by-nobody"), ProjectionRead::NotRead)
+            .into()
     }
 
     #[async_trait]
@@ -4084,9 +4086,10 @@ mod cell_leg_refusal_tests {
     fn assert_typed(what: &str, err: Box<dyn std::error::Error + Send + Sync>) {
         assert_eq!(
             err.downcast_ref::<BlockNotInWriteAuthority>(),
-            Some(&BlockNotInWriteAuthority::new(EntityUri::block(
-                "held-by-nobody"
-            ))),
+            Some(&BlockNotInWriteAuthority::new(
+                EntityUri::block("held-by-nobody"),
+                ProjectionRead::NotRead,
+            )),
             "{what}: the refusal must stay downcastable, got: {err}"
         );
     }
