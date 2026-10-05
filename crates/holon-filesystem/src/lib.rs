@@ -24,6 +24,7 @@ pub mod file;
 pub mod file_sync_controller;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod fs_port;
+pub mod identity_transfer;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod in_memory;
 #[cfg(not(target_arch = "wasm32"))]
