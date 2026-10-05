@@ -194,9 +194,9 @@ async fn run_test(runtime: Arc<tokio::runtime::Runtime>) {
         .execute_operation("block", "split_block", split_params)
         .await
         .expect_err("split_block on a block the write authority does not hold must be refused");
-    let refusal = holon_core::BlockNotInWriteAuthority {
-        block: holon_api::EntityUri::parse(stranded_id).expect("stranded uri"),
-    }
+    let refusal = holon_core::BlockNotInWriteAuthority::new(
+        holon_api::EntityUri::parse(stranded_id).expect("stranded uri"),
+    )
     .to_string();
     assert!(
         format!("{refused:#}").contains(&refusal),

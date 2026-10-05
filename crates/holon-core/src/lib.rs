@@ -58,6 +58,7 @@ pub use cell_registry::ExitedShare;
 pub use cell_registry::RemovingAction;
 pub use cell_registry::ShareExitRefused;
 pub use cell_registry::TreeDelete;
+pub use cell_registry::registry_error;
 pub use cell_registry::share_exiting_delete_changes;
 pub use consolidator::Consolidator;
 pub use consolidator::Delta;

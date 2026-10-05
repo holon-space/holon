@@ -6554,22 +6554,14 @@ impl FileSyncController {
                                 siblings
                             );
                         }
-                        // Unseeded-vault guard (same family as `create_entity`
-                        // / `write_field` / `live_children`): a PRE-EXISTING
-                        // block (SQL row from a pre-Loro session) with no Loro
-                        // tree node. Loro cannot place it; its order stays
-                        // SQL-owned until a seed/repair pass exists —
-                        // ALLOW(fallback): disclosed via warn; bailing here
-                        // aborted the whole initial scan and the app never
-                        // started on `[loro] enabled = true` over an upgraded
-                        // vault.
-                        tracing::warn!(
-                            block_id = new_block.id.as_str(),
-                            parent = parent.as_str(),
-                            "[on_file_changed] pre-existing block missing from the Loro tree \
-                             (unseeded vault) — skipping Loro placement, SQL owns its order"
-                        );
-                        continue;
+                        // A pre-existing block the tree does not hold and the
+                        // re-seed pass above did not adopt (it is in the tree's
+                        // history, so it was deleted there): placing it is a
+                        // write on an unheld block (D69.a).
+                        return Err(holon_core::BlockNotInWriteAuthority::new(
+                            new_block.id.clone(),
+                        )
+                        .into());
                     }
 
                     self.ordering

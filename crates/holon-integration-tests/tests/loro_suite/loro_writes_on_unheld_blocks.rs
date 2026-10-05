@@ -143,10 +143,10 @@ async fn unheld_writes(runtime: Arc<tokio::runtime::Runtime>) {
         !backend.is_live_anywhere(stranded).await,
         "precondition: the stranded block has no Loro node"
     );
-    let refusal = holon_core::BlockNotInWriteAuthority {
-        block: holon_api::EntityUri::parse(stranded).expect("stranded uri"),
-    }
-    .to_string();
+    let refusal = format!(
+        "{} is not in the write authority",
+        holon_api::EntityUri::parse(stranded).expect("stranded uri")
+    );
 
     let id = || Value::String(stranded.to_string());
     let ops: Vec<(&str, HashMap<String, Value>)> = vec![
@@ -283,9 +283,9 @@ async fn create_under_unheld_parent(runtime: Arc<tokio::runtime::Runtime>) {
     let refused_by_parent = match &outcome {
         Err(e) => {
             e.downcast_ref::<holon_core::BlockNotInWriteAuthority>()
-                == Some(&holon_core::BlockNotInWriteAuthority {
-                    block: stranded_uri.clone(),
-                })
+                == Some(&holon_core::BlockNotInWriteAuthority::new(
+                    stranded_uri.clone(),
+                ))
         }
         Ok(_) => false,
     };

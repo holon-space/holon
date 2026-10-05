@@ -473,8 +473,9 @@ const CREATE_HANDLED_FIELDS: [&str; 12] = [
 /// property to store — the edge fields plus [`CREATE_HANDLED_FIELDS`].
 /// Refuse a write on `id`, which the Loro tree does not hold (D69.a).
 fn not_held<T>(id: &str) -> Result<T> {
-    let block = EntityUri::parse(id).map_err(|e| format!("not_held({id}): {e:#}"))?;
-    Err(BlockNotInWriteAuthority { block }.into())
+    // ALLOW(entity_uri_from_raw): id &str from the CrudOperations API surface,
+    // schemed or bare
+    Err(BlockNotInWriteAuthority::new(EntityUri::from_raw(id)).into())
 }
 
 fn create_handles_field(key: &str) -> bool {
@@ -3496,6 +3497,49 @@ mod tag_op_tests {
         assert!(
             backend.get_block("block:bagged").await.is_err(),
             "a refused create must not leave a block behind"
+        );
+    }
+}
+
+#[cfg(test)]
+mod unheld_write_tests {
+    use super::*;
+
+    /// A bare id on an absent block is refused with the typed refusal, not
+    /// with an id-parse error.
+    #[tokio::test]
+    async fn a_bare_id_on_an_absent_block_is_refused_by_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(RwLock::new(LoroDocumentStore::new(
+            dir.path().to_path_buf(),
+        )));
+        let ops = LoroBlockOperations::new(store);
+        ops.get_backend("").await.expect("backend");
+
+        let err = not_held::<()>("absent-bare").expect_err("not_held always refuses");
+        assert_eq!(
+            err.downcast_ref::<BlockNotInWriteAuthority>(),
+            Some(&BlockNotInWriteAuthority::new(EntityUri::from_raw(
+                "absent-bare"
+            ))),
+            "got: {err}"
+        );
+
+        let err = ops
+            .set_field("absent-bare", "content", Value::String("x".into()))
+            .await
+            .expect_err("set_field on an absent block is refused");
+        assert!(
+            err.downcast_ref::<BlockNotInWriteAuthority>().is_some(),
+            "set_field: {err}"
+        );
+        let err = ops
+            .delete("absent-bare")
+            .await
+            .expect_err("delete of an absent block is refused");
+        assert!(
+            err.downcast_ref::<BlockNotInWriteAuthority>().is_some(),
+            "delete: {err}"
         );
     }
 }

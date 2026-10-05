@@ -1149,12 +1149,12 @@ async fn create_block_via_cells(
             &holon_api::BlockEdges::default(),
         )
         .await
-        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
+        .map_err(crate::cell_registry::registry_error)?;
     if wrote && after_id.is_none() {
         let placed = reg
             .write_position(new_id, parent_id.as_str(), None)
             .await
-            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
+            .map_err(crate::cell_registry::registry_error)?;
         if !placed {
             return Err(anyhow::anyhow!(
                 "create_block_via_cells({new_id}): the cell route created the block but refused \
@@ -1187,7 +1187,7 @@ async fn delete_block_via_cells(
     };
     reg.delete_entity(id)
         .await
-        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })
+        .map_err(crate::cell_registry::registry_error)
 }
 
 /// Refuse `action` on `id` when `id` is a shared page: removing it takes its
@@ -1203,7 +1203,7 @@ async fn refuse_share_exit(
     if reg
         .is_share_root(id)
         .await
-        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?
+        .map_err(crate::cell_registry::registry_error)?
     {
         return Err(crate::cell_registry::ShareExitRefused {
             page: id.clone(),
@@ -1225,7 +1225,7 @@ async fn delete_exiting_shares_via_cells(
     };
     reg.delete_exiting_shares(id)
         .await
-        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })
+        .map_err(crate::cell_registry::registry_error)
 }
 
 /// Pair every member of `descendants` with its hop count from `root`, walking
@@ -3953,6 +3953,85 @@ mod owning_page_walk_tests {
         assert_eq!(
             walk(&rows, ids.last().expect("chain")).await,
             format!("{:?}", OwningPage::Broken(ChainBreak::TooDeep))
+        );
+    }
+}
+
+#[cfg(test)]
+mod cell_leg_refusal_tests {
+    use std::any::Any;
+    use std::any::TypeId;
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::cell_registry::BlockNotInWriteAuthority;
+    use crate::cell_registry::EntityCellRegistry;
+    use crate::cell_registry::TreeDelete;
+
+    /// A registry whose every removal leg refuses the block.
+    struct Refusing;
+
+    fn refusal() -> anyhow::Error {
+        BlockNotInWriteAuthority::new(EntityUri::block("held-by-nobody")).into()
+    }
+
+    #[async_trait]
+    impl EntityCellRegistry for Refusing {
+        fn live_field_any(
+            &self,
+            _: &EntityUri,
+            _: &str,
+            _: TypeId,
+        ) -> anyhow::Result<Arc<dyn Any + Send + Sync>> {
+            unreachable!("the delete legs read no cell")
+        }
+        fn on_entity_deleted(&self, _: &EntityUri) {}
+        async fn delete_entity(&self, _: &EntityUri) -> anyhow::Result<bool> {
+            Err(refusal())
+        }
+        async fn is_share_root(&self, _: &EntityUri) -> anyhow::Result<bool> {
+            Err(refusal())
+        }
+        async fn delete_exiting_shares(&self, _: &EntityUri) -> anyhow::Result<TreeDelete> {
+            Err(refusal())
+        }
+    }
+
+    fn assert_typed(what: &str, err: Box<dyn std::error::Error + Send + Sync>) {
+        assert_eq!(
+            err.downcast_ref::<BlockNotInWriteAuthority>(),
+            Some(&BlockNotInWriteAuthority::new(EntityUri::block(
+                "held-by-nobody"
+            ))),
+            "{what}: the refusal must stay downcastable, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_removal_legs_keep_the_refusal_downcastable() {
+        let id = EntityUri::block("held-by-nobody");
+        let reg: &dyn EntityCellRegistry = &Refusing;
+        assert_typed(
+            "delete_block_via_cells",
+            delete_block_via_cells(Some(reg), &id)
+                .await
+                .expect_err("refused"),
+        );
+        assert_typed(
+            "refuse_share_exit",
+            refuse_share_exit(
+                Some(reg),
+                &id,
+                crate::cell_registry::RemovingAction::DeleteKeepingChildren,
+            )
+            .await
+            .expect_err("refused"),
+        );
+        assert_typed(
+            "delete_exiting_shares_via_cells",
+            delete_exiting_shares_via_cells(Some(reg), &id)
+                .await
+                .expect_err("refused"),
         );
     }
 }

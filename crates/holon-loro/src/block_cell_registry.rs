@@ -283,10 +283,7 @@ impl BlockCellRegistry {
 
 /// The refusal of a write on `block`, which the tree does not hold (D69.a).
 fn not_held(block: &EntityUri) -> anyhow::Error {
-    BlockNotInWriteAuthority {
-        block: block.clone(),
-    }
-    .into()
+    BlockNotInWriteAuthority::new(block.clone()).into()
 }
 
 /// Resolve `parent_id` to a node that exists in the Loro tree, standing up a
@@ -1242,9 +1239,7 @@ mod tests {
             let err = result.expect_err(&format!("{what} must be refused"));
             assert_eq!(
                 err.downcast_ref::<holon_core::BlockNotInWriteAuthority>(),
-                Some(&holon_core::BlockNotInWriteAuthority {
-                    block: unheld.clone()
-                }),
+                Some(&holon_core::BlockNotInWriteAuthority::new(unheld.clone())),
                 "{what} must be refused by name, got: {err:#}"
             );
         };

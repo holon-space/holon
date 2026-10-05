@@ -55,6 +55,7 @@ use holon_core::fractional_index::default_sort_key;
 use holon_core::fractional_index::gen_key_between;
 use holon_core::fractional_index::gen_n_keys;
 use holon_core::fractional_index::is_minted_key;
+use holon_core::registry_error;
 use holon_core::storage::types::StorageEntity;
 
 use crate::core::queryable_cache::HasCache;
@@ -95,16 +96,6 @@ pub struct SqlBlockOperations {
     /// race a just-accepted write are answered here instead. `None` means SQL
     /// IS the authority and its own tables are the truth.
     write_authority: Option<Arc<dyn WriteAuthorityReads>>,
-}
-
-/// A registry error as this crate's error type, keeping a
-/// [`BlockNotInWriteAuthority`] refusal typed (anyhow's own conversion boxes
-/// its wrapper, which no caller can downcast).
-fn registry_error(e: anyhow::Error) -> Box<dyn std::error::Error + Send + Sync> {
-    match e.downcast::<BlockNotInWriteAuthority>() {
-        Ok(refusal) => refusal.into(),
-        Err(e) => format!("{e:#}").into(),
-    }
 }
 
 impl SqlBlockOperations {
@@ -160,7 +151,7 @@ impl SqlBlockOperations {
             return Ok(Some(stored.block));
         }
         match self.get_by_id(id.as_str()).await? {
-            Some(_) => Err(BlockNotInWriteAuthority { block: id.clone() }.into()),
+            Some(_) => Err(BlockNotInWriteAuthority::new(id.clone()).into()),
             None => Ok(None),
         }
     }
@@ -1285,8 +1276,11 @@ impl CrudOperations<Block> for SqlBlockOperations {
             .cell_registry
             .write_field(&uri, field, value.clone())
             .await
-            .map_err(|e| {
-                registry_error(e.context(format!("BlockCellRegistry::write_field({field})")))
+            .map_err(|e| match e.downcast::<BlockNotInWriteAuthority>() {
+                Ok(refusal) => refusal.on_field(field).into(),
+                Err(e) => {
+                    registry_error(e.context(format!("BlockCellRegistry::write_field({field})")))
+                }
             })?;
         if routed {
             // The Loro outbound projector emits the SQL UPDATE and the resulting
@@ -1637,10 +1631,9 @@ mod tests {
     ) {
         let err = result.expect_err(&format!("{what} must be refused"));
         assert_eq!(
-            err.downcast_ref::<holon_core::BlockNotInWriteAuthority>(),
-            Some(&holon_core::BlockNotInWriteAuthority {
-                block: block.clone()
-            }),
+            err.downcast_ref::<holon_core::BlockNotInWriteAuthority>()
+                .map(|refusal| &refusal.block),
+            Some(block),
             "{what} must be refused by name, got: {err}"
         );
     }
@@ -1726,16 +1719,18 @@ mod tests {
                 .collect()
         };
 
-        assert_refused(
-            "set_field(content)",
-            holon_core::CrudOperations::set_field(
-                &ops,
-                stranded.as_str(),
-                "content",
-                holon_api::Value::String("rewritten".into()),
-            )
-            .await,
-            &stranded,
+        let err = holon_core::CrudOperations::set_field(
+            &ops,
+            stranded.as_str(),
+            "content",
+            holon_api::Value::String("rewritten".into()),
+        )
+        .await
+        .expect_err("set_field(content) must be refused");
+        assert_eq!(
+            err.downcast_ref::<holon_core::BlockNotInWriteAuthority>(),
+            Some(&holon_core::BlockNotInWriteAuthority::new(stranded.clone()).on_field("content")),
+            "set_field(content) must be refused by block and field, got: {err}"
         );
         assert_refused("place", ops.place(&stranded, &page, None).await, &stranded);
         assert_refused(

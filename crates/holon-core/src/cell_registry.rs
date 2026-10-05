@@ -13,6 +13,7 @@
 use std::any::Any;
 use std::any::TypeId;
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::Weak;
@@ -53,13 +54,47 @@ pub struct ShareExitRefused {
 ///
 /// One authority decides each write (D64.b) and takes every write (D69.a), so
 /// the op is refused instead of deciding from, or writing to, the projection.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error(
-    "{block} is not in the write authority, so no write may land on it. It was deleted, or this \
-     vault was never seeded (then re-create it from its org files)."
-)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockNotInWriteAuthority {
     pub block: EntityUri,
+    /// The field the refused write targeted, when it targeted one.
+    pub field: Option<String>,
+}
+
+impl BlockNotInWriteAuthority {
+    pub fn new(block: EntityUri) -> Self {
+        Self { block, field: None }
+    }
+
+    pub fn on_field(mut self, field: &str) -> Self {
+        self.field = Some(field.to_string());
+        self
+    }
+}
+
+impl fmt::Display for BlockNotInWriteAuthority {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(field) = &self.field {
+            write!(f, "The write of `{field}` on ")?;
+        }
+        write!(
+            f,
+            "{} is not in the write authority, so no write may land on it. It was deleted, or \
+             this vault was never seeded (then re-create it from its org files).",
+            self.block
+        )
+    }
+}
+
+impl std::error::Error for BlockNotInWriteAuthority {}
+
+/// A registry error as a boxed error, keeping a [`BlockNotInWriteAuthority`]
+/// refusal downcastable (anyhow's own conversion boxes its wrapper).
+pub fn registry_error(e: anyhow::Error) -> Box<dyn std::error::Error + Send + Sync> {
+    match e.downcast::<BlockNotInWriteAuthority>() {
+        Ok(refusal) => refusal.into(),
+        Err(e) => format!("{e:#}").into(),
+    }
 }
 
 /// What [`EntityCellRegistry::delete_exiting_shares`] did.
