@@ -12,6 +12,7 @@ use holon_pbt_core::capabilities::RefBootMut;
 use holon_pbt_core::capabilities::RefLifecycle;
 
 use super::super::reference_state::ReferenceState;
+use super::super::transitions::start_app::SEEDED_SIDEBAR_WATCH_ID;
 
 impl RefLifecycle for ReferenceState {
     fn app_started(&self) -> bool {
@@ -81,7 +82,6 @@ impl RefBootMut for ReferenceState {
         self.files.git_initialized = true; // jj git init also creates .git
     }
     fn boot_app(&mut self) {
-        use crate::pbt::transitions::start_app::SEEDED_SIDEBAR_WATCH_ID;
         use crate::pbt::transitions::start_app::load_seed_profile_into_ref;
         use crate::pbt::transitions::start_app::seed_booted_layout_into_ref;
         use crate::pbt::transitions::start_app::seeded_sidebar_watch_spec;
@@ -168,6 +168,10 @@ impl holon_pbt_core::capabilities::RefReboot for ReferenceState {
     ///   (`inv-sql-budget`'s first-visit allowance).
     /// - `warm_focus_watchers` / `seated_caret_targets` — the frontend's
     ///   watchers and seated editors died with the process.
+    /// - `mcp.active_watches` — a query watch lives in the dead boot's
+    ///   `ReactiveEngine` registry; a client must register it again. The seeded
+    ///   left-sidebar watch is KEPT: the second boot renders the sidebar and
+    ///   registers it itself (`reboot_wide` mirrors that on the SUT).
     /// - the `edit-refused-read-only-format` disclosure —
     ///   `AllClear::UntilRestart`, raised by a refused write only, so the new
     ///   boot shows it again only after the next refusal.
@@ -179,9 +183,46 @@ impl holon_pbt_core::capabilities::RefReboot for ReferenceState {
         self.ui.tab.seen_focus_targets.clear();
         self.ui.tab.warm_focus_watchers.clear();
         self.ui.tab.seated_caret_targets.clear();
+        let seeded = self.mcp.active_watches.remove(SEEDED_SIDEBAR_WATCH_ID);
+        self.mcp.active_watches.clear();
+        if let Some(spec) = seeded {
+            self.mcp
+                .active_watches
+                .insert(SEEDED_SIDEBAR_WATCH_ID.to_string(), spec);
+        }
         self.conditions
             .clear_kind(holon_api::ConditionKind::EDIT_REFUSED_READ_ONLY_FORMAT);
         self.restart_forgets_copy_state();
         self.remote_list.reboot_reseeds_peer_from_mirror();
+    }
+}
+
+#[cfg(test)]
+mod reboot_watch_tests {
+    use holon_pbt_core::capabilities::RefReboot;
+
+    use super::*;
+    use crate::pbt::state_machine::fresh_reference_state;
+    use crate::pbt::transitions::start_app::seeded_sidebar_watch_spec;
+
+    /// A restart keeps the production-seeded sidebar watch (the second boot
+    /// registers it again) and drops every client-registered watch.
+    #[test]
+    fn reboot_keeps_the_seeded_sidebar_watch_and_drops_client_watches() {
+        let mut state = fresh_reference_state(holon_pbt_core::Wiring::loro_backend());
+        state.mcp.active_watches.insert(
+            SEEDED_SIDEBAR_WATCH_ID.to_string(),
+            seeded_sidebar_watch_spec(),
+        );
+        state
+            .mcp
+            .active_watches
+            .insert("query-a".to_string(), seeded_sidebar_watch_spec());
+
+        state.reboot_drops_in_memory_state();
+
+        let mut ids: Vec<_> = state.mcp.active_watches.keys().cloned().collect();
+        ids.sort();
+        assert_eq!(ids, vec![SEEDED_SIDEBAR_WATCH_ID.to_string()]);
     }
 }

@@ -72,6 +72,7 @@ use crate::pbt::op_write_cap::IdResolver;
 use crate::pbt::reference_state::ReferenceState;
 use crate::pbt::transitions::E2ETransition;
 use crate::pbt::transitions::NavigateFocus;
+use crate::pbt::transitions::start_app::SutBootWatches;
 
 /// The seed **page** the working blocks sit directly under. It is the focus
 /// root (so its children are the editable candidates) but is itself excluded
@@ -1516,6 +1517,13 @@ pub async fn reboot_wide(
     let mut caps = bundle.caps;
     insert_frontend_read_caps(&mut caps, &handle, ref_state);
     install_observability_caps(&mut caps, Some(carry));
+    if ref_state
+        .mcp
+        .active_watches
+        .contains_key(crate::pbt::transitions::start_app::SEEDED_SIDEBAR_WATCH_ID)
+    {
+        caps.register_seeded_sidebar_watch().await;
+    }
     converge_projections(&handle, crate::pbt::composed::soak_seed::soak_settle()).await;
     (caps, handle)
 }
