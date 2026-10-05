@@ -116,20 +116,38 @@ impl FileWatcherReadySender {
     }
 }
 
+/// Dropped unsignalled — the controller task panicked or was aborted before
+/// its scan ended — the waiter reads an error instead of parking.
+impl Drop for FileWatcherReadySender {
+    fn drop(&mut self) {
+        self.sender.send_if_modified(|outcome| {
+            if outcome.is_some() {
+                return false;
+            }
+            *outcome = Some(Err(
+                "the file sync controller ended before it reported the initial scan".to_string(),
+            ));
+            true
+        });
+    }
+}
+
 /// Orders a container's programmatic boot seed after the org initial scan.
 ///
 /// The vault files own their blocks: the scan ingests them first, then the
 /// seeder fills in only what the files lack, and the controller's boot phase
 /// (fileless-page materialization, the copy-on-write seed baseline) runs over
 /// the seeded store. A container that seeds registers this gate; without it
-/// the controller ends its boot right after the scan. The seeder MUST answer
-/// [`seeded`](Self::seeded) once [`wait_scanned`](Self::wait_scanned) returns,
-/// or the controller never signals ready.
+/// the controller ends its boot right after the scan. The seeder takes its
+/// [`seed_answer`](Self::seed_answer) before it waits and MUST send it once
+/// [`wait_scanned`](Self::wait_scanned) returns.
 #[derive(Clone)]
 pub struct BootSeedGate {
-    scanned: tokio::sync::watch::Sender<Option<Result<(), String>>>,
-    seeded: tokio::sync::watch::Sender<Option<Result<(), String>>>,
+    scanned: GateSlot,
+    seeded: GateSlot,
 }
+
+type GateSlot = tokio::sync::watch::Sender<Option<Result<(), String>>>;
 
 impl BootSeedGate {
     pub fn new() -> Self {
@@ -139,33 +157,78 @@ impl BootSeedGate {
         }
     }
 
-    /// The initial scan's outcome: `Err` names the files that failed.
-    pub async fn wait_scanned(&self) -> Result<(), String> {
-        Self::wait(&self.scanned).await
+    /// The initial scan's outcome: `Err` when the scan as a whole could not
+    /// run. Files it refused are disclosed per file and do not fail it.
+    pub async fn wait_scanned(
+        &self,
+        shutdown: &holon_api::lifecycle::SessionShutdown,
+    ) -> Result<(), String> {
+        Self::wait(&self.scanned, shutdown, "the org initial scan").await
     }
 
-    pub fn seeded(&self, outcome: Result<(), String>) {
-        self.seeded.send_replace(Some(outcome));
+    pub fn seed_answer(&self) -> BootSeedAnswer {
+        BootSeedAnswer {
+            slot: self.seeded.clone(),
+            unanswered: "the boot seed ended without reporting its outcome",
+        }
     }
 
-    fn scanned(&self, outcome: Result<(), String>) {
-        self.scanned.send_replace(Some(outcome));
+    fn scan_answer(&self) -> BootSeedAnswer {
+        BootSeedAnswer {
+            slot: self.scanned.clone(),
+            unanswered: "the file sync controller ended before it reported the initial scan",
+        }
     }
 
-    async fn wait_seeded(&self) -> Result<(), String> {
-        Self::wait(&self.seeded).await
+    async fn wait_seeded(
+        &self,
+        shutdown: &holon_api::lifecycle::SessionShutdown,
+    ) -> Result<(), String> {
+        Self::wait(&self.seeded, shutdown, "the boot seed").await
     }
 
     async fn wait(
-        sender: &tokio::sync::watch::Sender<Option<Result<(), String>>>,
+        slot: &GateSlot,
+        shutdown: &holon_api::lifecycle::SessionShutdown,
+        what: &str,
     ) -> Result<(), String> {
-        sender
-            .subscribe()
-            .wait_for(Option::is_some)
-            .await
-            .expect("the gate holds its own sender")
-            .clone()
-            .expect("wait_for returned on Some")
+        let mut outcome = slot.subscribe();
+        tokio::select! {
+            ready = outcome.wait_for(Option::is_some) => ready
+                .expect("the gate holds its own sender")
+                .clone()
+                .expect("wait_for returned on Some"),
+            () = shutdown.cancelled() => {
+                Err(format!("the session shut down before {what} reported"))
+            }
+        }
+    }
+}
+
+/// One side's answer through a [`BootSeedGate`]. Dropped unsent — its task
+/// panicked or was aborted — it answers `Err`, so the waiting side fails loud
+/// instead of parking.
+pub struct BootSeedAnswer {
+    slot: GateSlot,
+    unanswered: &'static str,
+}
+
+impl BootSeedAnswer {
+    pub fn send(self, outcome: Result<(), String>) {
+        self.slot.send_replace(Some(outcome));
+    }
+}
+
+impl Drop for BootSeedAnswer {
+    fn drop(&mut self) {
+        self.slot.send_if_modified(|outcome| {
+            if outcome.is_some() {
+                return false;
+            }
+            tracing::error!("[OrgMode] boot seed gate: {}", self.unanswered);
+            *outcome = Some(Err(self.unanswered.to_string()));
+            true
+        });
     }
 }
 
@@ -762,10 +825,14 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                     .optional_resolve_async::<dyn holon_core::file_format::TypedRowSink>()
                     .await;
 
-                let seed_gate = resolver
-                    .optional_resolve_async::<BootSeedGate>()
-                    .await
-                    .map(|gate| (*gate).clone());
+                let seed_handover =
+                    resolver
+                        .optional_resolve_async::<BootSeedGate>()
+                        .await
+                        .map(|gate| SeedHandover {
+                            scan_answer: gate.scan_answer(),
+                            gate: (*gate).clone(),
+                        });
 
                 let idle_signal_weak = std::sync::Arc::downgrade(&idle_signal);
 
@@ -1001,8 +1068,12 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                         config.root_directory.clone(),
                         idle_signal_weak,
                         rerender_rx,
-                        ready_sender,
-                        seed_gate,
+                        ready_sender
+                            .lock()
+                            .unwrap()
+                            .take()
+                            .expect("FileSyncStarted is built once"),
+                        seed_handover,
                         fs,
                         change_source,
                         formats_for_loop,
@@ -1270,23 +1341,29 @@ pub fn route_remove(home: &DocHome, key: &str) -> Option<OrgRerender> {
     }
 }
 
+/// The controller's side of a [`BootSeedGate`]: its scan answer is taken when
+/// the controller starts, so a controller that dies before the hand-over still
+/// answers the seeder.
+struct SeedHandover {
+    gate: BootSeedGate,
+    scan_answer: BootSeedAnswer,
+}
+
 /// Tell the seeder how the scan went and wait for its answer. A failed seed —
-/// including one skipped because the scan failed — is a boot failure.
+/// including one skipped because the scan could not run — is a boot failure.
 async fn hand_over_to_boot_seed(
-    gate: Option<&BootSeedGate>,
+    handover: Option<SeedHandover>,
+    scan: Result<(), String>,
     controller: &FileSyncController,
     root_directory: &std::path::Path,
+    shutdown: &holon_api::lifecycle::SessionShutdown,
     failures: &mut Vec<(PathBuf, anyhow::Error)>,
 ) {
-    let Some(gate) = gate else {
+    let Some(SeedHandover { gate, scan_answer }) = handover else {
         return;
     };
-    gate.scanned(if failures.is_empty() {
-        Ok(())
-    } else {
-        Err(summarize_scan_failures(failures))
-    });
-    if let Err(msg) = gate.wait_seeded().await {
+    scan_answer.send(scan);
+    if let Err(msg) = gate.wait_seeded(shutdown).await {
         let e = anyhow::anyhow!(msg);
         tracing::error!("[OrgMode] boot seed failed: {:#}", e);
         controller.disclose_start_incomplete("seeding the default layout", &e);
@@ -1315,13 +1392,13 @@ fn summarize_scan_failures(failures: &[(PathBuf, anyhow::Error)]) -> String {
 // Many arguments because this is the bootstrap seam both factories call with
 // independently-built collaborators; grouping them is a wiring refactor.
 #[allow(clippy::too_many_arguments)]
-pub async fn run_file_sync_controller(
+async fn run_file_sync_controller(
     mut controller: FileSyncController,
     root_directory: PathBuf,
     idle_signal_weak: std::sync::Weak<OrgSyncIdleSignal>,
     mut rerender_rx: tokio::sync::mpsc::UnboundedReceiver<RerenderMsg>,
-    ready_sender: std::sync::Arc<std::sync::Mutex<Option<FileWatcherReadySender>>>,
-    seed_gate: Option<BootSeedGate>,
+    ready_sender: FileWatcherReadySender,
+    mut seed_handover: Option<SeedHandover>,
     fs: Arc<dyn holon_filesystem::FileSystem>,
     change_source: Arc<dyn holon_filesystem::FileChangeSource>,
     formats: Arc<holon_core::FormatRegistry>,
@@ -1344,12 +1421,10 @@ pub async fn run_file_sync_controller(
             "the file sync could not start, so changes to the files do not reach Holon and \
              edits in Holon do not reach the files: {e:#}"
         ));
-        if let Some(gate) = &seed_gate {
-            gate.scanned(Err(msg.clone()));
+        if let Some(handover) = seed_handover {
+            handover.scan_answer.send(Err(msg.clone()));
         }
-        if let Some(sender) = ready_sender.lock().unwrap().take() {
-            sender.signal_error(msg);
-        }
+        ready_sender.signal_error(msg);
         return;
     }
 
@@ -1383,11 +1458,14 @@ pub async fn run_file_sync_controller(
                 let e = anyhow::Error::from(e)
                     .context(format!("initial scan of {}", root_directory.display()));
                 controller.disclose_start_incomplete("reading the vault's files", &e);
+                let scan = Err(format!("{e:#}"));
                 let mut failures = vec![(root_directory.clone(), e)];
                 hand_over_to_boot_seed(
-                    seed_gate.as_ref(),
+                    seed_handover.take(),
+                    scan,
                     &controller,
                     &root_directory,
+                    &shutdown,
                     &mut failures,
                 )
                 .await;
@@ -1418,6 +1496,10 @@ pub async fn run_file_sync_controller(
         let files = preloaded.len();
         let t_scan = std::time::Instant::now();
         controller.begin_initial_scan();
+        #[cfg(feature = "crash-injection")]
+        if holon_filesystem::crash_injection::fires("initial_scan_ingest") {
+            panic!("[crash-injection] the file-sync controller dies during the initial scan");
+        }
         for (file_path, _content) in preloaded {
             let t_file = std::time::Instant::now();
             let result = controller.on_file_changed(&file_path).await;
@@ -1455,22 +1537,29 @@ pub async fn run_file_sync_controller(
         }
         // ONE end-of-scan convergence wait (30s loud ceiling). A stall becomes a
         // scan failure routed through the existing `signal_error` path below.
-        let converged = match controller.finish_initial_scan(30_000).await {
-            Ok(()) => true,
+        // A file the scan refused is disclosed on its own and does not fail
+        // the scan; a store that did not converge on the ingest does, since
+        // the seed would then fill in blocks the files still own.
+        let scan = match controller.finish_initial_scan(30_000).await {
+            Ok(()) => Ok(()),
             Err(e) => {
                 error!("[OrgMode] initial-scan feed convergence failed: {}", e);
                 controller.disclose_start_incomplete("the initial scan", &e);
+                let scan = Err(format!("{e:#}"));
                 failures.push((root_directory.clone(), e));
-                false
+                scan
             }
         };
+        let converged = scan.is_ok();
         // The seed fills in what the files lack, so it runs on the ingested
         // vault, and the boot phase below (fileless-page materialization, the
         // copy-on-write seed baseline) runs on the seeded store.
         hand_over_to_boot_seed(
-            seed_gate.as_ref(),
+            seed_handover.take(),
+            scan,
             &controller,
             &root_directory,
+            &shutdown,
             &mut failures,
         )
         .await;
@@ -1543,11 +1632,9 @@ pub async fn run_file_sync_controller(
     if !scan_failures.is_empty() {
         let msg = summarize_scan_failures(&scan_failures);
         error!("[OrgMode] {}", msg);
-        if let Some(sender) = ready_sender.lock().unwrap().take() {
-            sender.signal_error(msg);
-        }
+        ready_sender.signal_error(msg);
         // No early return — arm() + the watch loop run below regardless.
-    } else if let Some(sender) = ready_sender.lock().unwrap().take() {
+    } else {
         // Phase 1 fix: signal_ready BEFORE arm(). The
         // 9+ s `notify::watch(Recursive)` on macOS runs
         // detached in the background. Correctness during
@@ -1557,7 +1644,7 @@ pub async fn run_file_sync_controller(
         // `scan_directory` (see file_sync_controller.rs).
         // Without that Phase A→B extension, this fix
         // breaks `create_document`.
-        sender.signal_ready();
+        ready_sender.signal_ready();
     }
 
     // Arm detached, on its own thread.
@@ -1852,6 +1939,53 @@ pub async fn run_file_sync_controller(
                 idle_signal_for_task.mark_progress();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod boot_seed_gate_tests {
+    use holon_api::lifecycle::SessionShutdown;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn an_answer_dropped_unsent_wakes_the_waiter_with_an_error() {
+        let gate = BootSeedGate::new();
+        let shutdown = SessionShutdown::new();
+        let answer = gate.scan_answer();
+        let controller = tokio::spawn(async move {
+            let _answer = answer;
+            panic!("the controller dies before it reports the scan");
+        });
+        assert!(controller.await.unwrap_err().is_panic());
+        let err = gate
+            .wait_scanned(&shutdown)
+            .await
+            .expect_err("a dead controller must not read as a successful scan");
+        assert!(err.contains("ended before it reported"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn a_sent_answer_is_not_overwritten_when_it_drops() {
+        let gate = BootSeedGate::new();
+        gate.seed_answer().send(Ok(()));
+        assert_eq!(gate.wait_seeded(&SessionShutdown::new()).await, Ok(()));
+    }
+
+    #[tokio::test]
+    async fn the_wait_ends_when_the_session_shuts_down() {
+        let gate = BootSeedGate::new();
+        let _unanswered = gate.seed_answer();
+        let shutdown = SessionShutdown::new();
+        shutdown.token().cancel();
+        let err = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            gate.wait_seeded(&shutdown),
+        )
+        .await
+        .expect("the wait must observe the shutdown")
+        .expect_err("no seed was reported");
+        assert!(err.contains("shut down"), "got: {err}");
     }
 }
 

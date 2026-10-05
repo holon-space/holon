@@ -1317,13 +1317,15 @@ impl TestEnvironment {
         // vault — the no-Turso analog of the Turso session's boot seed. Like
         // it, only what the files lack is created.
         let gate = injector.resolve::<holon_orgmode::BootSeedGate>();
-        let seeded: anyhow::Result<()> = match gate.wait_scanned().await {
+        let answer = gate.seed_answer();
+        let shutdown = injector.resolve::<holon_api::lifecycle::SessionShutdown>();
+        let seeded: anyhow::Result<()> = match gate.wait_scanned(&shutdown).await {
             Err(scan) => Err(anyhow::anyhow!(
-                "no-Turso boot seed skipped, the initial scan failed: {scan}"
+                "no-Turso boot seed skipped, the initial scan could not run: {scan}"
             )),
             Ok(()) => seed_no_turso_layout(&backend).await,
         };
-        gate.seeded(seeded.as_ref().map(|_| ()).map_err(|e| format!("{e:#}")));
+        answer.send(seeded.as_ref().map(|_| ()).map_err(|e| format!("{e:#}")));
         seeded?;
         let mut org_ready = (*injector.resolve::<holon_orgmode::FileWatcherReadySignal>())
             .clone()

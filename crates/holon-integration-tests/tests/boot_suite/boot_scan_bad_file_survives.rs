@@ -96,6 +96,70 @@ const BAD_FILE: &str = "\
 :END:
 ";
 
+// A `:Page:` under a plain heading owns no derivable file, so its ingest is
+// refused (`UNRESOLVABLE INGEST DROP`): a real per-file scan failure.
+const REFUSED_FILE: &str = "\
+#+ID: refused-doc
+#+TITLE: Refused Doc
+* Plain Heading
+:PROPERTIES:
+:ID: refused-plain
+:END:
+** Nested :Page:
+:PROPERTIES:
+:ID: refused-nested-page
+:END:
+";
+
+/// One file the scan refuses must not cost the session its default layout:
+/// the seed is skipped only when the scan as a whole could not run.
+#[test]
+fn a_refused_file_does_not_skip_the_default_layout_seed() {
+    init_tracing();
+    let rt = runtime();
+    rt.clone().block_on(async {
+        let env = TestEnvironmentBuilder::new()
+            .with_org_file("mmm_good.org", GOOD_FILE)
+            .with_org_file("zzz_refused.org", REFUSED_FILE)
+            .build(rt.clone())
+            .await
+            .expect("boot must not fail when one vault file is refused");
+
+        let scan_error = format!(
+            "{:#}",
+            env.injector()
+                .expect("the Turso test environment latches its injector")
+                .resolve::<holon_orgmode::FileWatcherReadySignal>()
+                .wait_ready()
+                .await
+                .expect_err(
+                    "the refused file must surface as a per-file scan failure — otherwise this \
+                     test does not exercise one",
+                )
+        );
+        assert!(
+            scan_error.contains("zzz_refused.org"),
+            "the scan failure must name the refused file; got: {scan_error}"
+        );
+
+        assert!(
+            env.wait_for_block("block:good-root", SYNC_TIMEOUT).await,
+            "the clean file did not ingest"
+        );
+        for id in [
+            "block:root-layout",
+            "block:journals::src::0",
+            "block:journals::auto-create",
+        ] {
+            assert!(
+                env.wait_for_block(id, SYNC_TIMEOUT).await,
+                "seeded block {id} is missing: one refused file skipped the whole default-layout \
+                 seed"
+            );
+        }
+    });
+}
+
 /// Core regression: a vault containing one file that fails its initial scan
 /// must still (a) boot WITHOUT panicking, (b) ingest the OTHER files, and
 /// (c) leave the runtime watch loop armed so a post-boot edit still syncs.

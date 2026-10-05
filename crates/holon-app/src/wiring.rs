@@ -748,12 +748,17 @@ impl FrontendInjectorExt for Injector {
                     let resolver_bg = resolver.clone();
                     let ready_signal_bg = ready_signal.clone();
                     let engine_bg = engine.clone();
+                    let seed_step = disclosure.in_background(BootStep::SeedDefaultLayout);
                     let post_ready_work = async move {
-                        boot_seed(&resolver_bg, &engine_bg)
+                        match boot_seed(&resolver_bg, &engine_bg)
                             .instrument(tracing::info_span!(
                                 "di.factory.FrontendSession.seed_default_layout"
                             ))
-                            .await;
+                            .await
+                        {
+                            Ok(()) => seed_step.performed(),
+                            Err(why) => seed_step.failed(why),
+                        }
                         if let Some(mut signal) = ready_signal_bg {
                             // Copy the outcome out and drop the non-`Send`
                             // `watch::Ref` BEFORE any `.await` below.
@@ -815,7 +820,6 @@ impl FrontendInjectorExt for Injector {
                             .await
                             .spawn("boot-post-ready", post_ready_work);
                     }
-                    disclosure.performed(BootStep::SeedDefaultLayout);
                     disclosure.performed(BootStep::PostReady);
                 }
 
@@ -933,9 +937,9 @@ impl Module for HolonFrontendModule {
 /// The boot seed of the default layout, after the org initial scan when the
 /// container has a vault. Answers the [`holon_orgmode::BootSeedGate`], whose
 /// controller turns a failed or skipped seed into a boot failure; never seeds
-/// over a vault the scan did not fully ingest.
+/// over a vault the scan could not run on.
 #[cfg(not(target_arch = "wasm32"))]
-async fn boot_seed(resolver: &Injector, engine: &Arc<BackendEngine>) {
+async fn boot_seed(resolver: &Injector, engine: &Arc<BackendEngine>) -> Result<(), String> {
     let Some(gate) = resolver
         .optional_resolve_async::<holon_orgmode::BootSeedGate>()
         .await
@@ -943,12 +947,16 @@ async fn boot_seed(resolver: &Injector, engine: &Arc<BackendEngine>) {
         seed_and_project_default_layout(resolver, engine)
             .await
             .expect("boot [component=session stage=session-resolve]: seed_default_layout failed");
-        return;
+        return Ok(());
     };
-    let outcome = match gate.wait_scanned().await {
+    let answer = gate.seed_answer();
+    let shutdown = resolver
+        .resolve_async::<holon_api::lifecycle::SessionShutdown>()
+        .await;
+    let outcome = match gate.wait_scanned(&shutdown).await {
         Err(scan) => Err(format!(
-            "the default layout was not seeded, because the org initial scan did not ingest \
-             the whole vault: {scan}"
+            "the default layout was not seeded, because the org initial scan could not run: \
+             {scan}"
         )),
         Ok(()) => seed_and_project_default_layout(resolver, engine)
             .await
@@ -957,7 +965,8 @@ async fn boot_seed(resolver: &Injector, engine: &Arc<BackendEngine>) {
     if let Err(msg) = &outcome {
         tracing::error!("boot [component=session stage=boot-seed]: {msg}");
     }
-    gate.seeded(outcome);
+    answer.send(outcome.clone());
+    outcome
 }
 
 #[cfg(not(target_arch = "wasm32"))]

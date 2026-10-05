@@ -20,6 +20,10 @@
 //! - nothing stopped it ([`SkipReason::NoPlatformReason`], `warn!`) — drift
 //!   between the two paths, i.e. a bug waiting to be found.
 //!
+//! A step that runs in a background task ([`BootDisclosure::in_background`])
+//! is none of these: the report records it as performed or failed when the
+//! task ends.
+//!
 //! **`finish()` cannot be forgotten.** It CONSUMES the disclosure and returns a
 //! [`BootReport`] that `SessionParts` requires, so a boot path that skips the
 //! disclosure does not compile. An earlier design returned the report through a
@@ -238,10 +242,22 @@ pub struct SkippedStep {
 /// `SessionParts` requires one, which is what stops a boot path from quietly
 /// dropping the ledger: there is no way to build a session without having
 /// called [`BootDisclosure::finish`].
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct BootReport {
     capabilities: PlatformCapabilities,
     skipped: Vec<SkippedStep>,
+    state: Arc<Mutex<State>>,
+}
+
+impl std::fmt::Debug for BootReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BootReport")
+            .field("capabilities", &self.capabilities)
+            .field("skipped", &self.skipped)
+            .field("in_background", &self.in_background())
+            .field("failed", &self.failed())
+            .finish()
+    }
 }
 
 impl BootReport {
@@ -263,6 +279,18 @@ impl BootReport {
     pub fn capabilities(&self) -> PlatformCapabilities {
         self.capabilities
     }
+
+    /// The background steps that have not ended yet. Read live: a step leaves
+    /// this list when it ends, after the report was built.
+    pub fn in_background(&self) -> Vec<BootStep> {
+        lock(&self.state).in_background.clone()
+    }
+
+    /// The steps that ran and failed, with why. Read live, like
+    /// [`Self::in_background`].
+    pub fn failed(&self) -> Vec<(BootStep, String)> {
+        lock(&self.state).failed.clone()
+    }
 }
 
 /// Records which boot steps a path performed and discloses the rest.
@@ -280,6 +308,14 @@ pub struct BootDisclosure {
 struct State {
     performed: Vec<BootStep>,
     config_absent: Vec<(BootStep, &'static str)>,
+    in_background: Vec<BootStep>,
+    failed: Vec<(BootStep, String)>,
+}
+
+fn lock(state: &Mutex<State>) -> std::sync::MutexGuard<'_, State> {
+    state
+        .lock()
+        .expect("BootDisclosure mutex poisoned — a boot step panicked while recording")
 }
 
 impl BootDisclosure {
@@ -289,6 +325,8 @@ impl BootDisclosure {
             state: Arc::new(Mutex::new(State {
                 performed: Vec::new(),
                 config_absent: Vec::new(),
+                in_background: Vec::new(),
+                failed: Vec::new(),
             })),
         }
     }
@@ -316,6 +354,23 @@ impl BootDisclosure {
         }
     }
 
+    /// Record that `step` runs in a task that may outlive the boot. The step
+    /// counts as performed only when that task reports success through the
+    /// returned handle; a failure, or a task that ends without reporting,
+    /// records it as failed.
+    pub fn in_background(&self, step: BootStep) -> BackgroundStep {
+        let mut state = self.lock();
+        assert!(
+            !state.performed.contains(&step) && !state.in_background.contains(&step),
+            "boot step `{step}` recorded twice"
+        );
+        state.in_background.push(step);
+        BackgroundStep {
+            state: self.state.clone(),
+            step,
+        }
+    }
+
     /// Close the ledger: log every step that did not run and return the report.
     ///
     /// Consumes the disclosure, and the returned [`BootReport`] is required to
@@ -325,7 +380,11 @@ impl BootDisclosure {
         let state = self.lock();
         let skipped: Vec<SkippedStep> = BootStep::ALL
             .into_iter()
-            .filter(|step| !state.performed.contains(step))
+            .filter(|step| {
+                !state.performed.contains(step)
+                    && !state.in_background.contains(step)
+                    && !state.failed.iter().any(|(s, _)| s == step)
+            })
             .map(|step| {
                 let reason = match state.config_absent.iter().find(|(s, _)| *s == step) {
                     Some((_, why)) => SkipReason::ConfigAbsent(why),
@@ -360,17 +419,60 @@ impl BootDisclosure {
                 ),
             }
         }
+        for step in &state.in_background {
+            tracing::info!(
+                "boot [component=platform-capabilities]: step `{step}` still runs in the \
+                 background; its outcome is recorded when it ends"
+            );
+        }
         drop(state);
         BootReport {
             capabilities: self.capabilities,
             skipped,
+            state: self.state,
         }
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
-        self.state
-            .lock()
-            .expect("BootDisclosure mutex poisoned — a boot step panicked while recording")
+        lock(&self.state)
+    }
+}
+
+/// A boot step that runs in a background task: see
+/// [`BootDisclosure::in_background`].
+pub struct BackgroundStep {
+    state: Arc<Mutex<State>>,
+    step: BootStep,
+}
+
+impl BackgroundStep {
+    pub fn performed(self) {
+        let mut state = lock(&self.state);
+        state.in_background.retain(|s| *s != self.step);
+        state.performed.push(self.step);
+    }
+
+    pub fn failed(self, why: impl Into<String>) {
+        self.fail(why.into());
+    }
+
+    fn fail(&self, why: String) {
+        let mut state = lock(&self.state);
+        if !state.in_background.contains(&self.step) {
+            return;
+        }
+        tracing::error!(
+            "boot [component=platform-capabilities]: step `{}` FAILED: {why}",
+            self.step
+        );
+        state.in_background.retain(|s| *s != self.step);
+        state.failed.push((self.step, why));
+    }
+}
+
+impl Drop for BackgroundStep {
+    fn drop(&mut self) {
+        self.fail("its task ended without reporting an outcome".to_string());
     }
 }
 
@@ -496,6 +598,64 @@ mod tests {
                 step: BootStep::OrgModeIngest,
                 reason: SkipReason::ConfigAbsent("no vault root configured"),
             }]
+        );
+    }
+
+    /// A step still running when the ledger closes is neither skipped nor
+    /// performed; the report learns its outcome when the task ends.
+    #[test]
+    fn a_background_step_counts_only_once_it_succeeds() {
+        let disclosure = BootDisclosure::new(PlatformCapabilities::NATIVE);
+        let seed = disclosure.in_background(BootStep::SeedDefaultLayout);
+        let report = disclosure.finish();
+        assert!(
+            !report
+                .skipped()
+                .iter()
+                .any(|s| s.step == BootStep::SeedDefaultLayout)
+        );
+        assert_eq!(report.in_background(), vec![BootStep::SeedDefaultLayout]);
+
+        seed.performed();
+        assert_eq!(report.in_background(), Vec::new());
+        assert_eq!(report.failed(), Vec::new());
+    }
+
+    #[test]
+    fn a_background_step_that_fails_is_recorded_as_failed() {
+        let disclosure = BootDisclosure::new(PlatformCapabilities::NATIVE);
+        let seed = disclosure.in_background(BootStep::SeedDefaultLayout);
+        let report = disclosure.finish();
+        seed.failed("the scan could not run");
+        assert_eq!(report.in_background(), Vec::new());
+        assert_eq!(
+            report.failed(),
+            vec![(
+                BootStep::SeedDefaultLayout,
+                "the scan could not run".to_string()
+            )]
+        );
+    }
+
+    /// A task that panics or is aborted drops its handle unreported.
+    #[test]
+    fn a_background_step_dropped_without_an_outcome_is_recorded_as_failed() {
+        let disclosure = BootDisclosure::new(PlatformCapabilities::NATIVE);
+        drop(disclosure.in_background(BootStep::SeedDefaultLayout));
+        let report = disclosure.finish();
+        assert_eq!(
+            report
+                .failed()
+                .into_iter()
+                .map(|(s, _)| s)
+                .collect::<Vec<_>>(),
+            vec![BootStep::SeedDefaultLayout]
+        );
+        assert!(
+            !report
+                .skipped()
+                .iter()
+                .any(|s| s.step == BootStep::SeedDefaultLayout)
         );
     }
 

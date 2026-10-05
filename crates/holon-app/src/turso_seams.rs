@@ -961,9 +961,9 @@ impl Module for OrgModeModule {
                 // Resolving FileSyncStarted (registered by
                 // register_org_file_sync_core above) builds the controller over
                 // the DI-provided seams and spawns its loop. Done HERE — after
-                // Phase-1 DDL + seeding — so the initial scan sees a seeded
-                // vault. The no-Turso container resolves the same marker after
-                // its own seeding.
+                // Phase-1 DDL. The default-layout seed waits for the initial
+                // scan through the `BootSeedGate`, in both this container and
+                // the no-Turso one.
                 resolver.resolve_async::<FileSyncStarted>().await;
 
                 // Block command-path provider for the UI dispatcher.
