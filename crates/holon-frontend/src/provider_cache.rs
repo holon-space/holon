@@ -173,6 +173,16 @@ fn hash_expr(e: &holon_api::render_types::RenderExpr, h: &mut impl std::hash::Ha
             hash_expr(left, h);
             hash_expr(right, h);
         }
+        RenderExpr::Not { operand } => hash_expr(operand, h),
+        RenderExpr::If {
+            condition,
+            then,
+            otherwise,
+        } => {
+            hash_expr(condition, h);
+            hash_expr(then, h);
+            hash_expr(otherwise, h);
+        }
         RenderExpr::Array { items } => {
             items.len().hash(h);
             for item in items {

@@ -3,7 +3,7 @@ id: 2026-10-05-render-dsl-col-expressions-evaluated-at-load
 date: 2026-10-05
 gap: ORACLE
 secondary: COVERAGE
-status: OPEN
+status: FIXED
 summary: >-
   Render DSL expressions on `col(...)` (`+`, template strings, `if ... ==`) are
   evaluated once at profile load, so every row shows the same wrong text or the
@@ -49,11 +49,22 @@ render string, and no check refuses a marker map that leaks into a literal
 
 ## Remedy
 
-OPEN. Evidence tests, ignored so the default run stays green, in
-`crates/holon-frontend/tests/shipped_profile_render.rs`:
-`col_plus_string_concatenation_is_evaluated_per_row`,
-`template_string_interpolation_is_evaluated_per_row`,
-`if_on_col_equality_is_decided_per_row`. Run them with `--run-ignored all` to
-see the red output. Candidate fixes (for Martin): refuse a marker map outside a
-widget argument at load, or have the Rhai layer emit `BinaryOp` / a per-row
-`if`.
+FIXED (ruling D72.b: per-row evaluation). `parse_render_dsl` compiles the
+source with Rhai and never evaluates it: `RenderAst`
+(`crates/holon-api/src/render_dsl.rs`) maps the syntax tree onto
+`RenderExpr`. Operators, `!`, `${..}` templates and `if`/`else` over
+`col(..)` become `BinaryOp` / `Not` / `If` nodes, evaluated per row by
+`render_eval::eval_to_interp` with the typed computations' semantics (a
+missing operand gives a missing result, a wrongly typed one is an error, a
+missing `if` condition takes `else`). The grammar is closed: a form with no
+node (variable, method call, index, `??`, `%`, `let`, loop, ...) is refused at
+load, and the profile loader names the profile and the variant. The action
+DSL (`crates/holon-api/src/action_dsl.rs`) parses its params with the same
+walker, so a rule param over `col(..)` is per row too.
+
+Evidence: the three tests above are no longer ignored, and six more pin
+arithmetic, comparisons, `&& || !`, value-level `if` + templates, missing
+columns, and the load refusal
+(`crates/holon-frontend/tests/shipped_profile_render.rs`). Red before the fix:
+`lane-logs/dsl-red.log` (9 failed, 2 passed). Green after:
+`lane-logs/dsl-green.log` (11 passed).

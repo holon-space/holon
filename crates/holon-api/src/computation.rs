@@ -123,7 +123,7 @@ pub enum CmpOp {
 impl CmpOp {
     /// Evaluate the comparison. `Eq`/`Ne` use numeric-aware value equality;
     /// the ordering operators require numeric operands (fail-loud otherwise).
-    fn apply(self, l: &Value, r: &Value) -> Result<bool, ComputeError> {
+    pub fn apply(self, l: &Value, r: &Value) -> Result<bool, ComputeError> {
         match self {
             CmpOp::Eq => Ok(values_match(l, r)),
             CmpOp::Ne => Ok(!values_match(l, r)),
@@ -660,18 +660,7 @@ impl Computation {
                 }
                 else_.eval(ctx)
             }
-            Computation::Concat { lhs, rhs } => {
-                let l = lhs.eval(ctx)?;
-                let r = rhs.eval(ctx)?;
-                if l == Value::Null || r == Value::Null {
-                    return Ok(Value::Null);
-                }
-                Ok(Value::String(format!(
-                    "{}{}",
-                    concat_text(&l, "`||` left operand")?,
-                    concat_text(&r, "`||` right operand")?
-                )))
-            }
+            Computation::Concat { lhs, rhs } => concat_apply(&lhs.eval(ctx)?, &rhs.eval(ctx)?),
             Computation::And { lhs, rhs } => {
                 if !as_bool(&lhs.eval(ctx)?, "`&&` left operand")? {
                     return Ok(Value::Boolean(false));
@@ -1074,7 +1063,7 @@ fn collect_predicate_fields(pred: &Predicate, out: &mut std::collections::BTreeS
     }
 }
 
-fn as_bool(v: &Value, context: &str) -> Result<bool, ComputeError> {
+pub(crate) fn as_bool(v: &Value, context: &str) -> Result<bool, ComputeError> {
     match v {
         Value::Boolean(b) => Ok(*b),
         other => Err(ComputeError::WrongType {
@@ -1083,6 +1072,19 @@ fn as_bool(v: &Value, context: &str) -> Result<bool, ComputeError> {
             value: other.clone(),
         }),
     }
+}
+
+/// [`Computation::Concat`] over two evaluated operands: a NULL operand gives
+/// NULL.
+pub fn concat_apply(l: &Value, r: &Value) -> Result<Value, ComputeError> {
+    if *l == Value::Null || *r == Value::Null {
+        return Ok(Value::Null);
+    }
+    Ok(Value::String(format!(
+        "{}{}",
+        concat_text(l, "`||` left operand")?,
+        concat_text(r, "`||` right operand")?
+    )))
 }
 
 /// The canonical value→text rendering for [`Computation::Concat`], chosen to

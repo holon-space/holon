@@ -54,12 +54,14 @@ fn cell_wraps(cell: &RenderExpr) -> bool {
             });
             wraps_here || args.iter().any(|a| cell_wraps(&a.value))
         }
-        RenderExpr::Array { items } => items.iter().any(cell_wraps),
-        RenderExpr::Object { fields } => fields.values().any(cell_wraps),
-        RenderExpr::BinaryOp { left, right, .. } => cell_wraps(left) || cell_wraps(right),
-        RenderExpr::Literal { .. }
+        RenderExpr::BinaryOp { .. }
+        | RenderExpr::Not { .. }
+        | RenderExpr::If { .. }
+        | RenderExpr::Array { .. }
+        | RenderExpr::Object { .. } => cell.children().into_iter().any(cell_wraps),
+        RenderExpr::LiveBlock { .. }
         | RenderExpr::ColumnRef { .. }
-        | RenderExpr::LiveBlock { .. } => false,
+        | RenderExpr::Literal { .. } => false,
     }
 }
 
@@ -354,7 +356,6 @@ holon_macros::widget_builder! {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
 
     use holon_api::render_types::Arg;
 
@@ -383,7 +384,7 @@ mod tests {
             fields: fields
                 .into_iter()
                 .map(|(k, v)| (k.to_string(), v))
-                .collect::<HashMap<_, _>>(),
+                .collect(),
         }
     }
 

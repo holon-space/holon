@@ -277,6 +277,16 @@ fn walk(expr: &RenderExpr, enclosing: Option<(&str, ParamRef)>, out: &mut BoundN
             walk(left, None, out);
             walk(right, None, out);
         }
+        RenderExpr::Not { operand } => walk(operand, None, out),
+        RenderExpr::If {
+            condition,
+            then,
+            otherwise,
+        } => {
+            walk(condition, None, out);
+            walk(then, None, out);
+            walk(otherwise, None, out);
+        }
         RenderExpr::LiveBlock { .. } => out.dispatches_to_entity = true,
         RenderExpr::Literal { .. } => {}
     }

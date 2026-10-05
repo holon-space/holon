@@ -2,8 +2,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::Value;
+use crate::computation::ArithOp;
+use crate::computation::CmpOp;
 use crate::computation::ComputeError;
-use crate::computation::finite_float;
+use crate::computation::arith_apply;
+use crate::computation::as_bool;
+use crate::computation::concat_apply;
 use crate::interp_value::InterpValue;
 use crate::interp_value::ReactiveRowProvider;
 use crate::render_types::Arg;
@@ -686,6 +690,17 @@ fn concat_invoke(resolved: &ResolvedArgs) -> Value {
 pub trait RowKey: std::borrow::Borrow<str> + std::hash::Hash + Eq {}
 impl<T: std::borrow::Borrow<str> + std::hash::Hash + Eq> RowKey for T {}
 
+/// Everything a render expression's leaves can read while it is evaluated.
+pub struct EvalEnv<'a, K: RowKey> {
+    pub row: &'a HashMap<K, Value>,
+}
+
+impl<'a, K: RowKey> EvalEnv<'a, K> {
+    pub fn of_row(row: &'a HashMap<K, Value>) -> Self {
+        EvalEnv { row }
+    }
+}
+
 /// Scalar-only legacy path (preserved behavior for callers that don't
 /// have a value-fn registry). Thin wrapper over `eval_to_interp` that
 /// drops `Rows` to `Value::Null` with a warning.
@@ -693,7 +708,7 @@ pub fn resolve_args<K: RowKey>(
     args: &[Arg],
     row: &HashMap<K, Value>,
 ) -> Result<ResolvedArgs, ComputeError> {
-    resolve_args_with(args, row, &CORE_VALUE_FN_LOOKUP)
+    resolve_args_with(args, &EvalEnv::of_row(row), &CORE_VALUE_FN_LOOKUP)
 }
 
 /// Resolve arguments with value-function dispatch.
@@ -705,10 +720,10 @@ pub fn resolve_args<K: RowKey>(
 /// evaluation.
 pub fn resolve_args_with<K: RowKey>(
     args: &[Arg],
-    row: &HashMap<K, Value>,
+    env: &EvalEnv<'_, K>,
     fns: &dyn ValueFnLookup,
 ) -> Result<ResolvedArgs, ComputeError> {
-    resolve_args_for_widget(args, row, fns, None)
+    resolve_args_for_widget(args, env, fns, None)
 }
 
 /// `resolve_args_with` for a call site that knows which widget it is
@@ -716,7 +731,7 @@ pub fn resolve_args_with<K: RowKey>(
 /// so a migrated widget needs no entry in `is_template_arg`.
 pub fn resolve_args_for_widget<K: RowKey>(
     args: &[Arg],
-    row: &HashMap<K, Value>,
+    env: &EvalEnv<'_, K>,
     fns: &dyn ValueFnLookup,
     widget: Option<&'static crate::WidgetMeta>,
 ) -> Result<ResolvedArgs, ComputeError> {
@@ -731,7 +746,7 @@ pub fn resolve_args_for_widget<K: RowKey>(
             Some(name) if is_template_arg_for(widget, name) => {
                 templates.insert(name.clone(), arg.value.clone());
             }
-            Some(name) => match eval_to_interp(&arg.value, row, fns)? {
+            Some(name) => match eval_to_interp(&arg.value, env, fns)? {
                 InterpValue::Value(v) => {
                     named.insert(name.clone(), v);
                 }
@@ -741,7 +756,7 @@ pub fn resolve_args_for_widget<K: RowKey>(
             },
             None => {
                 positional_exprs.push(arg.value.clone());
-                match eval_to_interp(&arg.value, row, fns)? {
+                match eval_to_interp(&arg.value, env, fns)? {
                     InterpValue::Value(v) => positional.push(v),
                     InterpValue::Rows(_) => panic!(
                         "value-function returned Rows in positional position; use a named arg \
@@ -808,13 +823,17 @@ pub fn eval_to_value<K: RowKey>(
     expr: &RenderExpr,
     row: &HashMap<K, Value>,
 ) -> Result<Value, ComputeError> {
-    Ok(match eval_to_interp(expr, row, &CORE_VALUE_FN_LOOKUP)? {
-        InterpValue::Value(v) => v,
-        InterpValue::Rows(_) => {
-            tracing::warn!("eval_to_value: FunctionCall returned Rows in scalar context; dropping");
-            Value::Null
-        }
-    })
+    Ok(
+        match eval_to_interp(expr, &EvalEnv::of_row(row), &CORE_VALUE_FN_LOOKUP)? {
+            InterpValue::Value(v) => v,
+            InterpValue::Rows(_) => {
+                tracing::warn!(
+                    "eval_to_value: FunctionCall returned Rows in scalar context; dropping"
+                );
+                Value::Null
+            }
+        },
+    )
 }
 
 /// Evaluate a `RenderExpr` into an `InterpValue`.
@@ -826,26 +845,52 @@ pub fn eval_to_value<K: RowKey>(
 /// function call now produces a visible `Null` at the consumer.
 pub fn eval_to_interp<K: RowKey>(
     expr: &RenderExpr,
-    row: &HashMap<K, Value>,
+    env: &EvalEnv<'_, K>,
     fns: &dyn ValueFnLookup,
 ) -> Result<InterpValue, ComputeError> {
     use InterpValue::*;
     Ok(match expr {
         RenderExpr::Literal { value } => Value(value.clone()),
         RenderExpr::ColumnRef { name } => Value(
-            row.get(name.as_str())
+            env.row
+                .get(name.as_str())
                 .cloned()
                 .unwrap_or(crate::Value::Null),
         ),
+        RenderExpr::BinaryOp {
+            op: op @ (BinaryOperator::And | BinaryOperator::Or),
+            left,
+            right,
+        } => {
+            let context = format!("`{}` left operand", op.to_rhai());
+            let l = as_bool(&eval_operand(left, env, fns)?, &context)?;
+            if l == (*op == BinaryOperator::Or) {
+                return Ok(Value(crate::Value::Boolean(l)));
+            }
+            let r = eval_operand(right, env, fns)?;
+            Value(eval_binary_op(op, &crate::Value::Boolean(l), &r)?)
+        }
         RenderExpr::BinaryOp { op, left, right } => {
-            let l = eval_to_value(left, row)?;
-            let r = eval_to_value(right, row)?;
+            let l = eval_operand(left, env, fns)?;
+            let r = eval_operand(right, env, fns)?;
             Value(eval_binary_op(op, &l, &r)?)
+        }
+        RenderExpr::Not { operand } => Value(crate::Value::Boolean(!as_bool(
+            &eval_operand(operand, env, fns)?,
+            "`!` operand",
+        )?)),
+        RenderExpr::If {
+            condition,
+            then,
+            otherwise,
+        } => {
+            let condition = eval_operand(condition, env, fns)?;
+            return eval_to_interp(choose_branch(&condition, then, otherwise)?, env, fns);
         }
         RenderExpr::FunctionCall { name, args, .. } => {
             // Evaluate args against the same registry so value-fn calls
             // nested under other value-fn calls resolve correctly.
-            let resolved = resolve_args_with(args, row, fns)?;
+            let resolved = resolve_args_with(args, env, fns)?;
             match fns.invoke(name, &resolved) {
                 Some(v) => v,
                 // F1: silent first-arg default removed. Unknown name // ALLOW(fallback): historical
@@ -859,13 +904,13 @@ pub fn eval_to_interp<K: RowKey>(
         RenderExpr::Array { items } => Value(crate::Value::Array(
             items
                 .iter()
-                .map(|i| eval_to_value(i, row))
+                .map(|i| eval_to_value(i, env.row))
                 .collect::<Result<_, _>>()?,
         )),
         RenderExpr::Object { fields } => Value(crate::Value::Object(
             fields
                 .iter()
-                .map(|(k, v)| Ok((k.clone(), eval_to_value(v, row)?)))
+                .map(|(k, v)| Ok((k.clone(), eval_to_value(v, env.row)?)))
                 .collect::<Result<_, ComputeError>>()?,
         )),
         RenderExpr::LiveBlock { block_id } => {
@@ -874,108 +919,66 @@ pub fn eval_to_interp<K: RowKey>(
     })
 }
 
-/// Arithmetic ops (`+ - * /`). Type-mismatched operands yield `Null`; integer
-/// overflow, integer division by zero and a NaN or infinite float result are
-/// errors. Only called by `eval_binary_op` for arithmetic operators.
-fn eval_arithmetic(
-    op: &BinaryOperator,
-    left: &Value,
-    right: &Value,
-) -> Result<Value, ComputeError> {
-    let float =
-        |a: f64, b: f64, r: f64| finite_float(r, || format!("{a:?} {} {b:?}", op.to_rhai()));
-    let int = |a: i64, b: i64, r: Option<i64>| {
-        r.map(Value::Integer)
-            .ok_or_else(|| ComputeError::Arithmetic {
-                detail: format!("integer overflow: {a} {} {b}", op.to_rhai()),
-            })
-    };
-    Ok(match op {
-        BinaryOperator::Add => match (left, right) {
-            (Value::Integer(a), Value::Integer(b)) => int(*a, *b, a.checked_add(*b))?,
-            (Value::Float(a), Value::Float(b)) => float(*a, *b, a + b)?,
-            (Value::String(a), Value::String(b)) => Value::String(format!("{a}{b}")),
-            _ => Value::Null,
-        },
-        BinaryOperator::Sub => match (left, right) {
-            (Value::Integer(a), Value::Integer(b)) => int(*a, *b, a.checked_sub(*b))?,
-            (Value::Float(a), Value::Float(b)) => float(*a, *b, a - b)?,
-            _ => Value::Null,
-        },
-        BinaryOperator::Mul => match (left, right) {
-            (Value::Integer(a), Value::Integer(b)) => int(*a, *b, a.checked_mul(*b))?,
-            (Value::Float(a), Value::Float(b)) => float(*a, *b, a * b)?,
-            _ => Value::Null,
-        },
-        BinaryOperator::Div => match (left, right) {
-            (Value::Integer(a), Value::Integer(0)) => {
-                return Err(ComputeError::Arithmetic {
-                    detail: format!("integer division by zero: {a} / 0"),
-                });
-            }
-            (Value::Integer(a), Value::Integer(b)) => int(*a, *b, a.checked_div(*b))?,
-            (Value::Float(a), Value::Float(b)) => float(*a, *b, a / b)?,
-            _ => Value::Null,
-        },
-        other => unreachable!("eval_arithmetic called with non-arithmetic op {other:?}"),
-    })
-}
-
-/// Ordering comparisons (`> < >= <=`). Non-numeric or mismatched operands
-/// yield `Boolean(false)`. Only called by `eval_binary_op` for ordering ops.
-fn eval_ordering(op: &BinaryOperator, left: &Value, right: &Value) -> Value {
-    match op {
-        BinaryOperator::Gt => match (left, right) {
-            (Value::Integer(a), Value::Integer(b)) => Value::Boolean(a > b),
-            (Value::Float(a), Value::Float(b)) => Value::Boolean(a > b),
-            _ => Value::Boolean(false),
-        },
-        BinaryOperator::Lt => match (left, right) {
-            (Value::Integer(a), Value::Integer(b)) => Value::Boolean(a < b),
-            (Value::Float(a), Value::Float(b)) => Value::Boolean(a < b),
-            _ => Value::Boolean(false),
-        },
-        BinaryOperator::Gte => match (left, right) {
-            (Value::Integer(a), Value::Integer(b)) => Value::Boolean(a >= b),
-            (Value::Float(a), Value::Float(b)) => Value::Boolean(a >= b),
-            _ => Value::Boolean(false),
-        },
-        BinaryOperator::Lte => match (left, right) {
-            (Value::Integer(a), Value::Integer(b)) => Value::Boolean(a <= b),
-            (Value::Float(a), Value::Float(b)) => Value::Boolean(a <= b),
-            _ => Value::Boolean(false),
-        },
-        other => unreachable!("eval_ordering called with non-ordering op {other:?}"),
-    }
-}
-
-/// Boolean ops (`&& ||`). Non-boolean operands yield `Boolean(false)`. Only
-/// called by `eval_binary_op` for logical operators.
-fn eval_logical(op: &BinaryOperator, left: &Value, right: &Value) -> Value {
-    match (op, left, right) {
-        (BinaryOperator::And, Value::Boolean(a), Value::Boolean(b)) => Value::Boolean(*a && *b),
-        (BinaryOperator::Or, Value::Boolean(a), Value::Boolean(b)) => Value::Boolean(*a || *b),
-        (BinaryOperator::And | BinaryOperator::Or, _, _) => Value::Boolean(false),
-        (other, _, _) => unreachable!("eval_logical called with non-logical op {other:?}"),
-    }
-}
-
+/// One operator over two evaluated operands, with the semantics of the typed
+/// computations ([`crate::computation`]): a missing arithmetic or text operand
+/// gives a missing result, a wrongly typed one is an error. `&&` and `||` see
+/// both operands here; [`eval_to_interp`] short-circuits them before this.
 pub fn eval_binary_op(
     op: &BinaryOperator,
     left: &Value,
     right: &Value,
 ) -> Result<Value, ComputeError> {
-    Ok(match op {
-        BinaryOperator::Add | BinaryOperator::Sub | BinaryOperator::Mul | BinaryOperator::Div => {
-            eval_arithmetic(op, left, right)?
-        }
-        BinaryOperator::Eq => Value::Boolean(left == right),
-        BinaryOperator::Neq => Value::Boolean(left != right),
-        BinaryOperator::Gt | BinaryOperator::Lt | BinaryOperator::Gte | BinaryOperator::Lte => {
-            eval_ordering(op, left, right)
-        }
-        BinaryOperator::And | BinaryOperator::Or => eval_logical(op, left, right),
-    })
+    let arith = |op| arith_apply(op, left, right);
+    let cmp = |op: CmpOp| Ok(Value::Boolean(op.apply(left, right)?));
+    match op {
+        BinaryOperator::Add => arith(ArithOp::Add),
+        BinaryOperator::Sub => arith(ArithOp::Sub),
+        BinaryOperator::Mul => arith(ArithOp::Mul),
+        BinaryOperator::Div => arith(ArithOp::Div),
+        BinaryOperator::Concat => concat_apply(left, right),
+        BinaryOperator::Eq => cmp(CmpOp::Eq),
+        BinaryOperator::Neq => cmp(CmpOp::Ne),
+        BinaryOperator::Gt => cmp(CmpOp::Gt),
+        BinaryOperator::Lt => cmp(CmpOp::Lt),
+        BinaryOperator::Gte => cmp(CmpOp::Ge),
+        BinaryOperator::Lte => cmp(CmpOp::Le),
+        BinaryOperator::And => Ok(Value::Boolean(
+            as_bool(left, "`&&` left operand")? && as_bool(right, "`&&` right operand")?,
+        )),
+        BinaryOperator::Or => Ok(Value::Boolean(
+            as_bool(left, "`||` left operand")? || as_bool(right, "`||` right operand")?,
+        )),
+    }
+}
+
+/// The branch an `if` takes for an evaluated condition. A missing condition
+/// is not true, so it takes `otherwise`.
+pub fn choose_branch<'a>(
+    condition: &Value,
+    then: &'a RenderExpr,
+    otherwise: &'a RenderExpr,
+) -> Result<&'a RenderExpr, ComputeError> {
+    let taken = match condition {
+        Value::Null => false,
+        other => as_bool(other, "`if` condition")?,
+    };
+    Ok(if taken { then } else { otherwise })
+}
+
+/// An operand of an operator, `!` or `if`: a scalar, never a row set.
+fn eval_operand<K: RowKey>(
+    expr: &RenderExpr,
+    env: &EvalEnv<'_, K>,
+    fns: &dyn ValueFnLookup,
+) -> Result<Value, ComputeError> {
+    match eval_to_interp(expr, env, fns)? {
+        InterpValue::Value(v) => Ok(v),
+        InterpValue::Rows(_) => Err(ComputeError::WrongType {
+            context: format!("the operand `{}`", expr.to_rhai()),
+            expected: "a scalar value, not a row set",
+            value: Value::Null,
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -1065,7 +1068,7 @@ mod tests {
     fn test_eval_binary_op_string_concat() {
         assert_eq!(
             eval_binary_op(
-                &BinaryOperator::Add,
+                &BinaryOperator::Concat,
                 &Value::String("hello ".into()),
                 &Value::String("world".into())
             ),
@@ -1122,30 +1125,56 @@ mod tests {
     }
 
     #[test]
-    fn test_eval_binary_op_type_mismatch_fallbacks() {
-        // Arithmetic on incompatible types -> Null.
-        assert_eq!(
-            eval_binary_op(
-                &BinaryOperator::Add,
-                &Value::Integer(1),
-                &Value::Boolean(true)
+    fn test_eval_binary_op_missing_in_missing_out() {
+        for op in [
+            BinaryOperator::Add,
+            BinaryOperator::Mul,
+            BinaryOperator::Concat,
+        ] {
+            assert_eq!(
+                eval_binary_op(&op, &Value::Null, &Value::Integer(1)),
+                Value::Null,
+                "{op:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_eval_binary_op_wrongly_typed_operands_are_errors() {
+        let cases = [
+            (BinaryOperator::Add, Value::Integer(1), Value::Boolean(true)),
+            (
+                BinaryOperator::Gt,
+                Value::String("a".into()),
+                Value::String("b".into()),
             ),
-            Value::Null
-        );
-        // Ordering on non-numeric operands -> Boolean(false).
+            (BinaryOperator::And, Value::Integer(1), Value::Integer(0)),
+        ];
+        for (op, l, r) in cases {
+            assert!(
+                super::eval_binary_op(&op, &l, &r).is_err(),
+                "{op:?} on {l:?}, {r:?} must be an error"
+            );
+        }
+    }
+
+    #[test]
+    fn test_if_with_a_missing_condition_takes_otherwise() {
+        let then = RenderExpr::Literal {
+            value: Value::String("then".into()),
+        };
+        let otherwise = RenderExpr::Literal {
+            value: Value::String("otherwise".into()),
+        };
         assert_eq!(
-            eval_binary_op(
-                &BinaryOperator::Gt,
-                &Value::String("a".into()),
-                &Value::String("b".into())
-            ),
-            Value::Boolean(false)
+            choose_branch(&Value::Null, &then, &otherwise).unwrap(),
+            &otherwise
         );
-        // Logical on non-boolean operands -> Boolean(false).
         assert_eq!(
-            eval_binary_op(&BinaryOperator::And, &Value::Integer(1), &Value::Integer(0)),
-            Value::Boolean(false)
+            choose_branch(&Value::Boolean(true), &then, &otherwise).unwrap(),
+            &then
         );
+        assert!(choose_branch(&Value::Integer(1), &then, &otherwise).is_err());
     }
 
     #[test]
@@ -1608,7 +1637,7 @@ mod tests {
                 },
             }],
         };
-        match eval_to_interp(&expr, &row, &MockValueFnLookup).unwrap() {
+        match eval_to_interp(&expr, &EvalEnv::of_row(&row), &MockValueFnLookup).unwrap() {
             InterpValue::Value(v) => assert_eq!(v, Value::Integer(99)),
             InterpValue::Rows(_) => panic!("expected Value"),
         }
@@ -1635,7 +1664,8 @@ mod tests {
         ];
 
         let legacy = resolve_args(&args, &row).unwrap();
-        let with_empty = resolve_args_with(&args, &row, &CORE_VALUE_FN_LOOKUP).unwrap();
+        let with_empty =
+            resolve_args_with(&args, &EvalEnv::of_row(&row), &CORE_VALUE_FN_LOOKUP).unwrap();
 
         assert_eq!(legacy.positional, with_empty.positional);
         assert_eq!(legacy.named, with_empty.named);
@@ -1803,7 +1833,7 @@ mod mutation_gap_tests {
             f(3.75)
         );
         assert_eq!(
-            eval_binary_op(&BinaryOperator::Add, &s("a"), &s("b")),
+            eval_binary_op(&BinaryOperator::Concat, &s("a"), &s("b")),
             s("ab")
         );
 
@@ -1824,11 +1854,7 @@ mod mutation_gap_tests {
             eval_binary_op(&BinaryOperator::Div, &f(3.0), &f(2.0)),
             f(1.5)
         );
-        // Type mismatch yields Null.
-        assert_eq!(
-            eval_binary_op(&BinaryOperator::Add, &i(1), &f(1.0)),
-            Value::Null
-        );
+        assert_eq!(eval_binary_op(&BinaryOperator::Add, &i(1), &f(1.0)), f(2.0));
     }
 
     #[test]

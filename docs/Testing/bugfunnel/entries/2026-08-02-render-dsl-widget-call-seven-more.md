@@ -3,7 +3,7 @@ id: 2026-08-02-render-dsl-widget-call-seven-more
 date: 2026-08-02
 gap: COVERAGE
 secondary: null
-status: OPEN
+status: FIXED
 summary: >-
   Any render-DSL widget call with SEVEN or more positional arguments fails to
   parse — `Function not found: row (map, map, map, map, map, map, map)` —
@@ -39,4 +39,10 @@ naming the arity limit.
 
 ## Remedy
 
-OPEN — diagnosis only.
+FIXED. The render DSL is no longer evaluated by a Rhai engine with
+per-arity registrations: `RenderAst` (`crates/holon-api/src/render_dsl.rs`)
+maps any `name(...)` call of any arity onto `RenderExpr::FunctionCall`.
+Pinned by `render_dsl::tests::a_call_takes_any_number_of_arguments` (eight
+positional arguments).
+
+Earlier diagnosis (superseded):

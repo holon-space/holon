@@ -37,22 +37,8 @@ use crate::render_interpreter::RenderInterpreter;
 ///
 /// If you find yourself reaching for this function from anything that runs
 /// more than once, you probably want `BuilderServices::interpret` instead.
-/// Register the authoritative widget name list for the render DSL parser.
-///
-/// Must be called before any render DSL parsing (entity profile resolution,
-/// block rendering, etc.). Safe to call multiple times — `OnceLock` ignores
-/// subsequent calls.
+/// Register every widget's parameter defaults with the render requirements.
 pub fn register_render_dsl_widget_names() {
-    let mut all_names: Vec<&str> = builder_names().to_vec();
-    all_names.extend_from_slice(&[
-        "ops_of",
-        "focus_chain",
-        "chain_ops",
-        "state_accent",
-        "column",
-        "section_stack",
-    ]);
-    holon_api::render_dsl::register_widget_names(&all_names);
     holon_api::render_requirements::register_widget_param_defaults(
         all_widget_metas().into_iter().map(|meta| {
             let params = meta

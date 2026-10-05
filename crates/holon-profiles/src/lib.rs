@@ -314,7 +314,8 @@ impl ParsedProfile {
             .map(|(name, decl)| (name.clone(), decl.expr.clone()))
             .collect();
         let computed_fields = parse_and_sort_computed_fields(&engine, &sources)?;
-        let variants = profile_variants_to_stored(&self.variants)?;
+        let variants = profile_variants_to_stored(&self.variants)
+            .with_context(|| format!("profile '{}'", self.entity_name))?;
         Ok(EntityProfile {
             entity_name: EntityName::new(&self.entity_name),
             variants,
@@ -623,7 +624,8 @@ pub fn profile_variants_to_stored(
 
         let profile = Arc::new(StoredProfile {
             name: pv.name.clone(),
-            render: parse_render_text(&pv.render)?,
+            render: parse_render_text(&pv.render)
+                .with_context(|| format!("in render of variant '{}'", pv.name))?,
         });
 
         variants.push(StoredVariant {
@@ -1551,53 +1553,18 @@ mod tests {
                     out.push(s.clone());
                 }
             }
-            RenderExpr::FunctionCall { args, .. } => {
-                for a in args {
-                    collect_string_literals(&a.value, out);
+            RenderExpr::FunctionCall { .. }
+            | RenderExpr::BinaryOp { .. }
+            | RenderExpr::Not { .. }
+            | RenderExpr::If { .. }
+            | RenderExpr::Array { .. }
+            | RenderExpr::Object { .. } => {
+                for child in expr.children() {
+                    collect_string_literals(child, out);
                 }
-            }
-            RenderExpr::Array { items } => {
-                for it in items {
-                    collect_string_literals(it, out);
-                }
-            }
-            RenderExpr::Object { fields } => {
-                for v in fields.values() {
-                    collect_string_literals(v, out);
-                }
-            }
-            RenderExpr::BinaryOp { left, right, .. } => {
-                collect_string_literals(left, out);
-                collect_string_literals(right, out);
             }
             RenderExpr::LiveBlock { .. } | RenderExpr::ColumnRef { .. } => {}
         }
-    }
-
-    fn init_render_dsl() {
-        holon_api::render_dsl::register_widget_names(&[
-            "table",
-            "live_block",
-            "columns",
-            "text",
-            "row",
-            "icon",
-            "spacer",
-            "tree",
-            "render_entity",
-            "list",
-            "selectable",
-            "chain_ops",
-            "state_toggle",
-            "drawer",
-            "if_space",
-            "bottom_dock",
-            "op_button",
-            "chat_bubble",
-            "editable_text",
-            "focusable",
-            "live_query",
-        ]);
     }
 
     /// Bug-4 (PERCEPTION): the `rule_card` variant used a literal em-dash
@@ -1609,7 +1576,6 @@ mod tests {
     /// em/en-dash family that regressed).
     #[test]
     fn rule_card_render_has_no_mojibake_bytes() {
-        init_render_dsl();
         let profile = parse_entity_profile(BLOCK_PROFILE_YAML).unwrap();
         let rule_card = profile
             .variants
@@ -1633,7 +1599,6 @@ mod tests {
 
     #[test]
     fn test_parse_render_text_simple() {
-        init_render_dsl();
         let expr = parse_render_text(r#"row(text(#{content: col("content")}))"#).unwrap();
         match &expr {
             RenderExpr::FunctionCall { name, args, .. } => {
@@ -2020,7 +1985,6 @@ variants:
 
     #[test]
     fn test_extract_widget_names() {
-        init_render_dsl();
         let expr = parse_render_text(
             r#"row(state_toggle(col("task_state")), spacer(8), editable_text(col("content")))"#,
         )
@@ -2553,7 +2517,6 @@ variants:
 
     #[tokio::test]
     async fn a_refused_computed_field_is_disclosed_until_it_computes_again() {
-        init_render_dsl();
         type Seat = fn(&ProfileResolver, &HashMap<String, Value>);
         let seats: [(&str, Seat); 3] = [
             ("resolve_computed_only", |r, row| {
@@ -2618,7 +2581,6 @@ variants:
 
     #[tokio::test]
     async fn a_sidecar_success_does_not_clear_a_resolver_condition() {
-        init_render_dsl();
         let bus = Arc::new(holon_api::ConditionBus::new());
         let resolver = ProfileResolver::with_type_profiles(
             holon_api::live_data::LiveData::new(

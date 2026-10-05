@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 
@@ -706,11 +707,21 @@ pub enum RenderExpr {
         left: Box<RenderExpr>,
         right: Box<RenderExpr>,
     },
+    Not {
+        operand: Box<RenderExpr>,
+    },
+    /// Chooses `then` or `otherwise` for each row; a missing condition
+    /// chooses `otherwise`.
+    If {
+        condition: Box<RenderExpr>,
+        then: Box<RenderExpr>,
+        otherwise: Box<RenderExpr>,
+    },
     Array {
         items: Vec<RenderExpr>,
     },
     Object {
-        fields: HashMap<String, RenderExpr>,
+        fields: BTreeMap<String, RenderExpr>,
     },
 }
 
@@ -725,6 +736,7 @@ impl RenderExpr {
     pub fn to_rhai(&self) -> String {
         match self {
             RenderExpr::FunctionCall { name, args, .. } => {
+                let name = crate::render_dsl::rhai_call_name(name);
                 if args.is_empty() {
                     format!("{name}()")
                 } else {
@@ -738,7 +750,13 @@ impl RenderExpr {
                     if !named.is_empty() {
                         let named_str = named
                             .iter()
-                            .map(|a| format!("{}: {}", a.name.as_ref().unwrap(), a.value.to_rhai()))
+                            .map(|a| {
+                                format!(
+                                    "{}: {}",
+                                    rhai_key(a.name.as_ref().unwrap()),
+                                    a.value.to_rhai()
+                                )
+                            })
                             .collect::<Vec<_>>()
                             .join(", ");
                         parts.push(format!("#{{{named_str}}}"));
@@ -746,12 +764,30 @@ impl RenderExpr {
                     format!("{name}({})", parts.join(", "))
                 }
             }
-            RenderExpr::LiveBlock { block_id } => format!("live_block(\"{block_id}\")"),
-            RenderExpr::ColumnRef { name } => format!("col(\"{name}\")"),
-            RenderExpr::Literal { value } => value_to_rhai(value),
-            RenderExpr::BinaryOp { op, left, right } => {
-                format!("{} {} {}", left.to_rhai(), op.to_rhai(), right.to_rhai())
+            RenderExpr::LiveBlock { block_id } => {
+                format!("live_block(\"{}\")", escape_rhai_string(block_id))
             }
+            RenderExpr::ColumnRef { name } => format!("col(\"{}\")", escape_rhai_string(name)),
+            RenderExpr::Literal { value } => value_to_rhai(value),
+            RenderExpr::BinaryOp {
+                op: BinaryOperator::Concat,
+                left,
+                right,
+            } => format!("`${{{}}}${{{}}}`", left.to_rhai(), right.to_rhai()),
+            RenderExpr::BinaryOp { op, left, right } => {
+                format!("({} {} {})", left.to_rhai(), op.to_rhai(), right.to_rhai())
+            }
+            RenderExpr::Not { operand } => format!("!({})", operand.to_rhai()),
+            RenderExpr::If {
+                condition,
+                then,
+                otherwise,
+            } => format!(
+                "if {} {{ {} }} else {{ {} }}",
+                condition.to_rhai(),
+                then.to_rhai(),
+                otherwise.to_rhai()
+            ),
             RenderExpr::Array { items } => {
                 let inner = items
                     .iter()
@@ -763,7 +799,7 @@ impl RenderExpr {
             RenderExpr::Object { fields } => {
                 let inner = fields
                     .iter()
-                    .map(|(k, v)| format!("{k}: {}", v.to_rhai()))
+                    .map(|(k, v)| format!("{}: {}", rhai_key(k), v.to_rhai()))
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!("#{{{inner}}}")
@@ -771,42 +807,103 @@ impl RenderExpr {
         }
     }
 
-    /// Recursively collect all `ColumnRef` names referenced by this expression.
+    /// The direct sub-expressions.
+    ///
+    /// flutter_rust_bridge:ignore
+    pub fn children(&self) -> Vec<&RenderExpr> {
+        match self {
+            RenderExpr::FunctionCall { args, .. } => args.iter().map(|a| &a.value).collect(),
+            RenderExpr::BinaryOp { left, right, .. } => vec![left, right],
+            RenderExpr::Not { operand } => vec![operand],
+            RenderExpr::If {
+                condition,
+                then,
+                otherwise,
+            } => vec![condition, then, otherwise],
+            RenderExpr::Array { items } => items.iter().collect(),
+            RenderExpr::Object { fields } => fields.values().collect(),
+            RenderExpr::LiveBlock { .. }
+            | RenderExpr::ColumnRef { .. }
+            | RenderExpr::Literal { .. } => Vec::new(),
+        }
+    }
+
+    /// This expression with `f` applied to each direct sub-expression.
+    ///
+    /// flutter_rust_bridge:ignore
+    pub fn map_children(self, mut f: impl FnMut(RenderExpr) -> RenderExpr) -> RenderExpr {
+        let mut boxed = |e: Box<RenderExpr>| Box::new(f(*e));
+        match self {
+            RenderExpr::FunctionCall { name, args } => RenderExpr::FunctionCall {
+                name,
+                args: args
+                    .into_iter()
+                    .map(|a| Arg {
+                        name: a.name,
+                        value: f(a.value),
+                    })
+                    .collect(),
+            },
+            RenderExpr::BinaryOp { op, left, right } => RenderExpr::BinaryOp {
+                op,
+                left: boxed(left),
+                right: boxed(right),
+            },
+            RenderExpr::Not { operand } => RenderExpr::Not {
+                operand: boxed(operand),
+            },
+            RenderExpr::If {
+                condition,
+                then,
+                otherwise,
+            } => RenderExpr::If {
+                condition: boxed(condition),
+                then: boxed(then),
+                otherwise: boxed(otherwise),
+            },
+            RenderExpr::Array { items } => RenderExpr::Array {
+                items: items.into_iter().map(f).collect(),
+            },
+            RenderExpr::Object { fields } => RenderExpr::Object {
+                fields: fields.into_iter().map(|(k, v)| (k, f(v))).collect(),
+            },
+            leaf @ (RenderExpr::LiveBlock { .. }
+            | RenderExpr::ColumnRef { .. }
+            | RenderExpr::Literal { .. }) => leaf,
+        }
+    }
+
+    /// Every leaf this expression reads when it is evaluated, depth-first.
+    ///
+    /// flutter_rust_bridge:ignore
+    pub fn referenced_leaves(&self) -> Vec<Leaf<'_>> {
+        let mut out = Vec::new();
+        self.collect_leaves(&mut out);
+        out
+    }
+
+    fn collect_leaves<'a>(&'a self, out: &mut Vec<Leaf<'a>>) {
+        if let RenderExpr::ColumnRef { name } = self {
+            out.push(Leaf::Column(name));
+        }
+        for child in self.children() {
+            child.collect_leaves(out);
+        }
+    }
+
+    /// The names of the columns this expression reads.
     ///
     /// Used to determine which data columns a render template makes visible,
     /// so assertions can filter expected data to only comparable columns.
     ///
     /// flutter_rust_bridge:ignore
     pub fn visible_columns(&self) -> Vec<String> {
-        let mut cols = Vec::new();
-        self.collect_columns(&mut cols);
-        cols
-    }
-
-    fn collect_columns(&self, out: &mut Vec<String>) {
-        match self {
-            RenderExpr::ColumnRef { name } => out.push(name.clone()),
-            RenderExpr::FunctionCall { args, .. } => {
-                for arg in args {
-                    arg.value.collect_columns(out);
-                }
-            }
-            RenderExpr::BinaryOp { left, right, .. } => {
-                left.collect_columns(out);
-                right.collect_columns(out);
-            }
-            RenderExpr::Array { items } => {
-                for item in items {
-                    item.collect_columns(out);
-                }
-            }
-            RenderExpr::Object { fields } => {
-                for expr in fields.values() {
-                    expr.collect_columns(out);
-                }
-            }
-            RenderExpr::LiveBlock { .. } | RenderExpr::Literal { .. } => {}
-        }
+        self.referenced_leaves()
+            .into_iter()
+            .map(|leaf| match leaf {
+                Leaf::Column(name) => name.to_string(),
+            })
+            .collect()
     }
 
     /// Recursively collect every `LiveBlock` target block_id referenced by this
@@ -821,37 +918,46 @@ impl RenderExpr {
     }
 
     fn collect_live_block_targets(&self, out: &mut Vec<String>) {
-        match self {
-            RenderExpr::LiveBlock { block_id } => out.push(block_id.clone()),
-            RenderExpr::FunctionCall { args, .. } => {
-                for arg in args {
-                    arg.value.collect_live_block_targets(out);
-                }
-            }
-            RenderExpr::BinaryOp { left, right, .. } => {
-                left.collect_live_block_targets(out);
-                right.collect_live_block_targets(out);
-            }
-            RenderExpr::Array { items } => {
-                for item in items {
-                    item.collect_live_block_targets(out);
-                }
-            }
-            RenderExpr::Object { fields } => {
-                for expr in fields.values() {
-                    expr.collect_live_block_targets(out);
-                }
-            }
-            RenderExpr::ColumnRef { .. } | RenderExpr::Literal { .. } => {}
+        if let RenderExpr::LiveBlock { block_id } = self {
+            out.push(block_id.clone());
+        }
+        for child in self.children() {
+            child.collect_live_block_targets(out);
         }
     }
 }
 
+/// A leaf of a [`RenderExpr`] whose value comes from outside the expression.
+///
+/// flutter_rust_bridge:ignore
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Leaf<'a> {
+    Column(&'a str),
+}
+
+/// A map key as Rhai source: bare when it is a plain identifier and no keyword,
+/// a string literal otherwise.
+fn rhai_key(key: &str) -> String {
+    if rhai::is_valid_function_name(key) {
+        key.to_string()
+    } else {
+        format!("\"{}\"", escape_rhai_string(key))
+    }
+}
+
+fn escape_rhai_string(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t")
+}
+
 fn value_to_rhai(value: &Value) -> String {
     match value {
-        Value::String(s) => format!("\"{s}\""),
+        Value::String(s) => format!("\"{}\"", escape_rhai_string(s)),
         Value::Integer(n) => n.to_string(),
-        Value::Float(f) => format!("{f}"),
+        Value::Float(f) => format!("{f:?}"),
         Value::Boolean(b) => b.to_string(),
         Value::Null => "()".to_string(),
         Value::Array(items) => {
@@ -891,6 +997,7 @@ impl BinaryOperator {
             BinaryOperator::Sub => "-",
             BinaryOperator::Mul => "*",
             BinaryOperator::Div => "/",
+            BinaryOperator::Concat => "+",
             BinaryOperator::And => "&&",
             BinaryOperator::Or => "||",
         }
@@ -918,6 +1025,8 @@ pub enum BinaryOperator {
     Sub,
     Mul,
     Div,
+    /// Text concatenation (`+` with a text operand, or a template string).
+    Concat,
     And,
     Or,
 }
@@ -949,30 +1058,11 @@ pub fn extract_widget_names(expr: &RenderExpr) -> HashSet<String> {
 }
 
 fn collect_widget_names(expr: &RenderExpr, out: &mut HashSet<String>) {
-    match expr {
-        RenderExpr::FunctionCall { name, args, .. } => {
-            out.insert(name.clone());
-            for arg in args {
-                collect_widget_names(&arg.value, out);
-            }
-        }
-        RenderExpr::BinaryOp { left, right, .. } => {
-            collect_widget_names(left, out);
-            collect_widget_names(right, out);
-        }
-        RenderExpr::Array { items } => {
-            for item in items {
-                collect_widget_names(item, out);
-            }
-        }
-        RenderExpr::Object { fields } => {
-            for expr in fields.values() {
-                collect_widget_names(expr, out);
-            }
-        }
-        RenderExpr::LiveBlock { .. }
-        | RenderExpr::ColumnRef { .. }
-        | RenderExpr::Literal { .. } => {}
+    if let RenderExpr::FunctionCall { name, .. } = expr {
+        out.insert(name.clone());
+    }
+    for child in expr.children() {
+        collect_widget_names(child, out);
     }
 }
 

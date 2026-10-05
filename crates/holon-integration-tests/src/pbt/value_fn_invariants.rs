@@ -131,26 +131,11 @@ pub fn count_bottom_docks(node: &ReactiveViewModel) -> usize {
 /// `focus_chain()` / `ops_of()` / `chain_ops()` without having to re-parse the
 /// Rhai source.
 pub fn rhai_mentions(expr: &RenderExpr, fn_name: &str) -> bool {
-    use holon_api::render_types::Arg;
-    fn walk_args(args: &[Arg], target: &str) -> bool {
-        args.iter().any(|a| rhai_mentions_inner(&a.value, target))
-    }
-    fn rhai_mentions_inner(expr: &RenderExpr, target: &str) -> bool {
-        match expr {
-            RenderExpr::FunctionCall { name, args, .. } => {
-                name == target || walk_args(args, target)
-            }
-            RenderExpr::BinaryOp { left, right, .. } => {
-                rhai_mentions_inner(left, target) || rhai_mentions_inner(right, target)
-            }
-            RenderExpr::Array { items } => items.iter().any(|i| rhai_mentions_inner(i, target)),
-            RenderExpr::Object { fields } => {
-                fields.iter().any(|(_, v)| rhai_mentions_inner(v, target))
-            }
-            _ => false,
-        }
-    }
-    rhai_mentions_inner(expr, fn_name)
+    matches!(expr, RenderExpr::FunctionCall { name, .. } if name == fn_name)
+        || expr
+            .children()
+            .into_iter()
+            .any(|child| rhai_mentions(child, fn_name))
 }
 
 /// Silence unused-import warning when this module is trimmed down —

@@ -778,12 +778,7 @@ pub fn contains_collection_view(expr: &holon_api::render_types::RenderExpr) -> b
             name == COLLECTION_VIEW_MARKER
                 || args.iter().any(|a| contains_collection_view(&a.value))
         }
-        RE::Array { items } => items.iter().any(contains_collection_view),
-        RE::Object { fields } => fields.values().any(contains_collection_view),
-        RE::BinaryOp { left, right, .. } => {
-            contains_collection_view(left) || contains_collection_view(right)
-        }
-        RE::LiveBlock { .. } | RE::ColumnRef { .. } | RE::Literal { .. } => false,
+        other => other.children().into_iter().any(contains_collection_view),
     }
 }
 
@@ -797,38 +792,10 @@ pub fn substitute_collection_view(
     expr: holon_api::render_types::RenderExpr,
     replacement: &holon_api::render_types::RenderExpr,
 ) -> holon_api::render_types::RenderExpr {
-    use holon_api::render_types::Arg;
     use holon_api::render_types::RenderExpr as RE;
     match expr {
         RE::FunctionCall { name, .. } if name == COLLECTION_VIEW_MARKER => replacement.clone(),
-        RE::FunctionCall { name, args } => RE::FunctionCall {
-            name,
-            args: args
-                .into_iter()
-                .map(|a| Arg {
-                    name: a.name,
-                    value: substitute_collection_view(a.value, replacement),
-                })
-                .collect(),
-        },
-        RE::Array { items } => RE::Array {
-            items: items
-                .into_iter()
-                .map(|i| substitute_collection_view(i, replacement))
-                .collect(),
-        },
-        RE::Object { fields } => RE::Object {
-            fields: fields
-                .into_iter()
-                .map(|(k, v)| (k, substitute_collection_view(v, replacement)))
-                .collect(),
-        },
-        RE::BinaryOp { op, left, right } => RE::BinaryOp {
-            op,
-            left: Box::new(substitute_collection_view(*left, replacement)),
-            right: Box::new(substitute_collection_view(*right, replacement)),
-        },
-        leaf @ (RE::LiveBlock { .. } | RE::ColumnRef { .. } | RE::Literal { .. }) => leaf,
+        other => other.map_children(|child| substitute_collection_view(child, replacement)),
     }
 }
 

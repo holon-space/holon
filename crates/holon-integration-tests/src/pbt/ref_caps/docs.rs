@@ -326,7 +326,9 @@ impl RefDocumentsMut for ReferenceState {
                         .layout_blocks
                         .render_source_ids
                         .insert(block_uri.clone());
-                    if let Ok(expr) = self.harness.interpreter.parse_dsl(block.content.as_str()) {
+                    if let Ok(expr) =
+                        holon_api::render_dsl::parse_render_dsl(block.content.as_str())
+                    {
                         self.domain
                             .render_expressions
                             .insert(block_uri.clone(), expr);

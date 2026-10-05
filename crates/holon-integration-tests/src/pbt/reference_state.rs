@@ -245,12 +245,12 @@ pub fn contains_live_block(expr: &RenderExpr) -> bool {
             )
         }
         RenderExpr::FunctionCall { name, .. } if name == LIVE_BLOCK_BUILDER => true,
-        RenderExpr::FunctionCall { args, .. } => args.iter().any(|a| contains_live_block(&a.value)),
-        RenderExpr::Array { items } => items.iter().any(contains_live_block),
-        RenderExpr::Object { fields } => fields.values().any(contains_live_block),
-        RenderExpr::BinaryOp { left, right, .. } => {
-            contains_live_block(left) || contains_live_block(right)
-        }
+        RenderExpr::FunctionCall { .. }
+        | RenderExpr::BinaryOp { .. }
+        | RenderExpr::Not { .. }
+        | RenderExpr::If { .. }
+        | RenderExpr::Array { .. }
+        | RenderExpr::Object { .. } => expr.children().into_iter().any(contains_live_block),
         RenderExpr::ColumnRef { .. } | RenderExpr::Literal { .. } => false,
     }
 }
@@ -266,7 +266,6 @@ pub fn contains_live_block(expr: &RenderExpr) -> bool {
 /// subtree; this is the same model applied to the TEMPLATE those rows render
 /// through.
 pub fn substitute_live_block(expr: RenderExpr, replacement: &RenderExpr) -> RenderExpr {
-    use holon_api::render_types::Arg;
     match expr {
         RenderExpr::LiveBlock { .. } => {
             unreachable!(
@@ -276,34 +275,15 @@ pub fn substitute_live_block(expr: RenderExpr, replacement: &RenderExpr) -> Rend
         RenderExpr::FunctionCall { ref name, .. } if name == LIVE_BLOCK_BUILDER => {
             replacement.clone()
         }
-        RenderExpr::FunctionCall { name, args } => RenderExpr::FunctionCall {
-            name,
-            args: args
-                .into_iter()
-                .map(|a| Arg {
-                    name: a.name,
-                    value: substitute_live_block(a.value, replacement),
-                })
-                .collect(),
-        },
-        RenderExpr::Array { items } => RenderExpr::Array {
-            items: items
-                .into_iter()
-                .map(|i| substitute_live_block(i, replacement))
-                .collect(),
-        },
-        RenderExpr::Object { fields } => RenderExpr::Object {
-            fields: fields
-                .into_iter()
-                .map(|(k, v)| (k, substitute_live_block(v, replacement)))
-                .collect(),
-        },
-        RenderExpr::BinaryOp { op, left, right } => RenderExpr::BinaryOp {
-            op,
-            left: Box::new(substitute_live_block(*left, replacement)),
-            right: Box::new(substitute_live_block(*right, replacement)),
-        },
-        other @ (RenderExpr::ColumnRef { .. } | RenderExpr::Literal { .. }) => other,
+        RenderExpr::FunctionCall { .. }
+        | RenderExpr::BinaryOp { .. }
+        | RenderExpr::Not { .. }
+        | RenderExpr::If { .. }
+        | RenderExpr::Array { .. }
+        | RenderExpr::Object { .. } => {
+            expr.map_children(|child| substitute_live_block(child, replacement))
+        }
+        RenderExpr::ColumnRef { .. } | RenderExpr::Literal { .. } => expr,
     }
 }
 

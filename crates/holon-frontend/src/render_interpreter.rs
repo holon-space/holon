@@ -6,12 +6,13 @@ use holon_api::EntityUri;
 use holon_api::InterpValue;
 use holon_api::Value;
 use holon_api::render_eval::CORE_VALUE_FN_LOOKUP;
+use holon_api::render_eval::EvalEnv;
 use holon_api::render_eval::OutlineTree;
 use holon_api::render_eval::ResolvedArgs;
 use holon_api::render_eval::ValueFnLookup;
+use holon_api::render_eval::choose_branch;
 use holon_api::render_eval::column_ref_name;
-use holon_api::render_eval::eval_binary_op;
-use holon_api::render_eval::eval_to_value;
+use holon_api::render_eval::eval_to_interp;
 use holon_api::render_eval::resolve_args;
 use holon_api::render_eval::resolve_args_for_widget;
 use holon_api::render_types::OperationWiring;
@@ -242,22 +243,6 @@ impl<W> RenderInterpreter<W> {
         self.builders.keys().cloned().collect()
     }
 
-    /// All DSL function names (builders + value functions).
-    pub fn dsl_names(&self) -> Vec<String> {
-        self.builders
-            .keys()
-            .chain(self.value_fns.keys())
-            .cloned()
-            .collect()
-    }
-
-    /// Parse a render DSL string using this interpreter's registered names.
-    pub fn parse_dsl(&self, source: &str) -> anyhow::Result<holon_api::render_types::RenderExpr> {
-        let names = self.dsl_names();
-        let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
-        holon_api::render_dsl::parse_render_dsl_with_names(source, &name_refs)
-    }
-
     #[tracing::instrument(level = "debug", skip_all)]
     pub fn interpret(
         &self,
@@ -282,7 +267,7 @@ impl<W> RenderInterpreter<W> {
                 };
                 let resolved = match resolve_args_for_widget(
                     args,
-                    ctx.row(),
+                    &EvalEnv::of_row(ctx.row()),
                     &binding,
                     self.widget_metas.get(name.as_str()).copied(),
                 ) {
@@ -310,16 +295,47 @@ impl<W> RenderInterpreter<W> {
                 let args = ResolvedArgs::from_positional_value(value.clone());
                 self.dispatch("text", &args, ctx, services, &interpret_fn)
             }
-            RenderExpr::BinaryOp { op, left, right } => {
-                let result = match eval_to_value(left, ctx.row()).and_then(|l| {
-                    let r = eval_to_value(right, ctx.row())?;
-                    eval_binary_op(op, &l, &r)
-                }) {
-                    Ok(v) => v,
+            RenderExpr::BinaryOp { .. } | RenderExpr::Not { .. } => {
+                let binding = ValueFnBinding {
+                    fns: &self.value_fns,
+                    services,
+                    ctx,
+                };
+                let result = match eval_to_interp(expr, &EvalEnv::of_row(ctx.row()), &binding) {
+                    Ok(InterpValue::Value(v)) => v,
+                    Ok(InterpValue::Rows(_)) => {
+                        return W::eval_error(format!("`{}` is a row set", expr.to_rhai()));
+                    }
                     Err(e) => return W::eval_error(e.to_string()),
                 };
                 let args = ResolvedArgs::from_positional_value(result);
                 self.dispatch("text", &args, ctx, services, &interpret_fn)
+            }
+            RenderExpr::If {
+                condition,
+                then,
+                otherwise,
+            } => {
+                let binding = ValueFnBinding {
+                    fns: &self.value_fns,
+                    services,
+                    ctx,
+                };
+                let branch = match eval_to_interp(condition, &EvalEnv::of_row(ctx.row()), &binding)
+                {
+                    Ok(InterpValue::Value(v)) => choose_branch(&v, then, otherwise),
+                    Ok(InterpValue::Rows(_)) => {
+                        return W::eval_error(format!(
+                            "`if` condition `{}` is a row set",
+                            condition.to_rhai()
+                        ));
+                    }
+                    Err(e) => Err(e),
+                };
+                match branch {
+                    Ok(branch) => self.interpret(branch, ctx, services),
+                    Err(e) => W::eval_error(e.to_string()),
+                }
             }
             RenderExpr::Array { items } => {
                 let args = ResolvedArgs::from_positional_exprs(items.clone());

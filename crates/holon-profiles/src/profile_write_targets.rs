@@ -39,15 +39,10 @@ fn check_expr(expr: &RenderExpr, site: &str) -> Result<()> {
             }
             args.iter().try_for_each(|a| check_expr(&a.value, site))
         }
-        RenderExpr::BinaryOp { left, right, .. } => {
-            check_expr(left, site)?;
-            check_expr(right, site)
-        }
-        RenderExpr::Array { items } => items.iter().try_for_each(|e| check_expr(e, site)),
-        RenderExpr::Object { fields } => fields.values().try_for_each(|e| check_expr(e, site)),
-        RenderExpr::LiveBlock { .. }
-        | RenderExpr::ColumnRef { .. }
-        | RenderExpr::Literal { .. } => Ok(()),
+        other => other
+            .children()
+            .into_iter()
+            .try_for_each(|e| check_expr(e, site)),
     }
 }
 

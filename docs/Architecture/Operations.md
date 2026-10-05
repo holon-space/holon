@@ -375,7 +375,7 @@ V1 only supports Local scope. The execution gate belongs in the `execute_operati
 | Path | Description |
 |------|-------------|
 | `crates/holon/src/api/action_watcher.rs` | Discovery loop, per-pair watchers, action DSL parser |
-| `crates/holon-api/src/render_dsl.rs` | `create_render_engine()`, `dynamic_to_render_expr()` — reused by action DSL |
+| `crates/holon-api/src/action_dsl.rs` | Action DSL parser: `block.<op>(#{..})`; each param is a render expression (`render_dsl::render_expr_of`), evaluated against the firing row |
 | `crates/holon-api/src/render_eval.rs` | `resolve_args()` — resolves `col()` against row data (pure, no UI context) |
 
 ## Procedural Macros (holon-macros)
