@@ -6850,7 +6850,11 @@ impl FileSyncController {
                     );
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    // File deleted since we parsed it. Nothing to do.
+                    // Deleted after the blocks reached the store. Tracking the
+                    // ingested bytes lets the poll backstop and the watcher's
+                    // Remove cascade the delete; untracked, the page upsert's
+                    // identity pre-flight would write the file back.
+                    self.last_projection.insert(canonical.clone(), disk_content);
                     return Ok(IngestOutcome::Ingested);
                 }
                 Err(e) => {

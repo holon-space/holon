@@ -5279,6 +5279,12 @@ impl SutAppLifecycle for HeadlessFrontendComponent {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
 
+        assert!(
+            !FileSystem::exists(self.org_fs().as_ref(), &file_path),
+            "[SutAppLifecycle::delete_document] {file_name} exists again after its blocks \
+             vanished — a projection writer recreated a file the user deleted"
+        );
+
         // Untrack the doc so later file-seam lookups don't resolve a dead path.
         self.documents
             .lock()
