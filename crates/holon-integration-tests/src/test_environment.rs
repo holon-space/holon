@@ -1245,6 +1245,10 @@ impl TestEnvironment {
                         fluxdi::Shared::new(holon_orgmode::OrgModeConfig::new(org_root.clone()))
                     },
                 ));
+                let seed_gate = holon_orgmode::BootSeedGate::new();
+                injector.provide::<holon_orgmode::BootSeedGate>(fluxdi::Provider::root(
+                    move |_| fluxdi::Shared::new(seed_gate.clone()),
+                ));
                 {
                     let b = backend.clone();
                     injector.provide::<dyn holon_filesystem::BlockReader>(fluxdi::Provider::root(
@@ -1299,55 +1303,28 @@ impl TestEnvironment {
         self.latch_session(session);
         self.latch_reactive_engine(reactive_engine);
 
-        // Seed the default layout (journals page, `__default__`, the bundled
-        // index.org root-layout/sidebars) as Block instances written straight
-        // into the Loro main storage — the no-Turso analog of
-        // `FrontendSession::seed_default_layout`, which the Turso path runs in
-        // its session factory. Without this the SUT lacks `block:journals` and
-        // the layout blocks the reference seeds at StartApp.
-        {
-            use holon::api::repository::CoreOperations;
-            for block in holon_frontend::FrontendSession::<()>::build_default_layout_blocks(true)? {
-                backend
-                    .create_block(
-                        block.parent_id.clone(),
-                        block.to_block_content(),
-                        Some(block.id.clone()),
-                    )
-                    .await
-                    .map_err(|e| anyhow::anyhow!("seed create_block({}): {e}", block.id))?;
-                if !block.tags.is_empty() {
-                    backend
-                        .set_block_tags(block.id.as_str(), &block.tags.to_vec())
-                        .await
-                        .map_err(|e| anyhow::anyhow!("seed set_block_tags({}): {e}", block.id))?;
-                }
-                if !block.requires.is_empty() {
-                    backend
-                        .set_block_requires(block.id.as_str(), &block.requires)
-                        .await
-                        .map_err(|e| {
-                            anyhow::anyhow!("seed set_block_requires({}): {e}", block.id)
-                        })?;
-                }
-                if !block.properties.is_empty() {
-                    backend
-                        .update_block_properties(block.id.as_str(), &block.properties)
-                        .await
-                        .map_err(|e| {
-                            anyhow::anyhow!("seed update_block_properties({}): {e}", block.id)
-                        })?;
-                }
-            }
-        }
-
         // Start org sync by resolving the backend-blind FileSyncStarted marker
         // (registered above via register_org_file_sync_core). Same self-starting
         // DI path the Turso container uses — no `spawn_*` call, no hardcoded
-        // adapters. Done AFTER seeding so the initial scan sees a seeded vault.
+        // adapters.
         injector
             .resolve_async::<holon_orgmode::di::FileSyncStarted>()
             .await;
+
+        // Seed the default layout (journals page, `__default__`, the bundled
+        // index.org root-layout/sidebars) as Block instances written straight
+        // into the Loro main storage once the initial scan has ingested the
+        // vault — the no-Turso analog of the Turso session's boot seed. Like
+        // it, only what the files lack is created.
+        let gate = injector.resolve::<holon_orgmode::BootSeedGate>();
+        let seeded: anyhow::Result<()> = match gate.wait_scanned().await {
+            Err(scan) => Err(anyhow::anyhow!(
+                "no-Turso boot seed skipped, the initial scan failed: {scan}"
+            )),
+            Ok(()) => seed_no_turso_layout(&backend).await,
+        };
+        gate.seeded(seeded.as_ref().map(|_| ()).map_err(|e| format!("{e:#}")));
+        seeded?;
         let mut org_ready = (*injector.resolve::<holon_orgmode::FileWatcherReadySignal>())
             .clone()
             .into_receiver();
@@ -3176,4 +3153,44 @@ mod crdt_mode_tests {
             );
         }
     }
+}
+
+/// The no-Turso harness's default-layout seed: creates each layout block the
+/// vault does not already hold.
+async fn seed_no_turso_layout(backend: &LoroBackend) -> anyhow::Result<()> {
+    use holon::api::repository::CoreOperations;
+    for block in holon_frontend::FrontendSession::<()>::build_default_layout_blocks(true)? {
+        match backend.get_block(block.id.as_str()).await {
+            Ok(_) => continue,
+            Err(holon_api::ApiError::BlockNotFound { .. }) => {}
+            Err(e) => anyhow::bail!("seed get_block({}): {e}", block.id),
+        }
+        backend
+            .create_block(
+                block.parent_id.clone(),
+                block.to_block_content(),
+                Some(block.id.clone()),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("seed create_block({}): {e}", block.id))?;
+        if !block.tags.is_empty() {
+            backend
+                .set_block_tags(block.id.as_str(), &block.tags.to_vec())
+                .await
+                .map_err(|e| anyhow::anyhow!("seed set_block_tags({}): {e}", block.id))?;
+        }
+        if !block.requires.is_empty() {
+            backend
+                .set_block_requires(block.id.as_str(), &block.requires)
+                .await
+                .map_err(|e| anyhow::anyhow!("seed set_block_requires({}): {e}", block.id))?;
+        }
+        if !block.properties.is_empty() {
+            backend
+                .update_block_properties(block.id.as_str(), &block.properties)
+                .await
+                .map_err(|e| anyhow::anyhow!("seed update_block_properties({}): {e}", block.id))?;
+        }
+    }
+    Ok(())
 }

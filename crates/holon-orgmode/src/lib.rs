@@ -50,6 +50,8 @@ pub mod writeback_guard;
 // build_block_params for seeding default layouts (no di feature needed)
 pub use block_params::build_block_params;
 #[cfg(feature = "di")]
+pub use di::BootSeedGate;
+#[cfg(feature = "di")]
 pub use di::FileWatcherReadySignal;
 #[cfg(feature = "di")]
 pub use di::OrgModeConfig;

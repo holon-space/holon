@@ -1153,6 +1153,9 @@ pub fn wide_seed_files(
 ) -> Vec<(&'static str, &'static str)> {
     let blocks = &ref_state.domain.block_state.blocks;
     let mut files = vec![("structural-page.org", WIDE_TREE_ORG)];
+    if blocks.contains_key(&boot_filler_page()) {
+        files.push((BOOT_FILLER_FILE, boot_filler_org()));
+    }
     if !ref_state.read_only.homes().is_empty() {
         files.push((READ_ONLY_RECIPE_FILE, KEYSTONE_RECIPE_COOK));
     }
@@ -1176,6 +1179,62 @@ pub fn wide_seed_files(
         files.push(("forward-edge-page.org", FORWARD_EDGE_ORG));
     }
     files
+}
+
+/// A vault file that sorts before `Journals.org` and takes long enough to
+/// ingest that `Journals.org` is ingested after the boot seed has started, as
+/// in a real vault. Seeded (by [`boot_and_seed_wide`]) only for a frontend
+/// draw, whose oracle carries it ([`seed_boot_filler`]).
+pub const BOOT_FILLER_FILE: &str = "Archive.org";
+
+const BOOT_FILLER_BLOCKS: usize = 120;
+
+pub fn boot_filler_page() -> EntityUri {
+    EntityUri::block("archive")
+}
+
+fn boot_filler_block(i: usize) -> EntityUri {
+    EntityUri::block(&format!("archive-{i}"))
+}
+
+pub fn boot_filler_org() -> &'static str {
+    static BODY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        let mut body = String::from("#+ID: archive\n");
+        for i in 0..BOOT_FILLER_BLOCKS {
+            body.push_str(&format!(
+                "* archived {i}\n:PROPERTIES:\n:ID: archive-{i}\n:END:\n"
+            ));
+        }
+        body
+    });
+    BODY.as_str()
+}
+
+/// Declare [`BOOT_FILLER_FILE`]'s page and leaf headings in the oracle.
+pub fn seed_boot_filler(state: &mut ReferenceState) {
+    let page = boot_filler_page();
+    let mut page_block = Block::new_text(page.clone(), EntityUri::no_parent(), "Archive");
+    page_block.set_page(true);
+    state
+        .domain
+        .block_state
+        .blocks
+        .insert(page.clone(), page_block);
+    state
+        .domain
+        .block_state
+        .block_documents
+        .insert(page.clone(), EntityUri::no_parent());
+    state
+        .files
+        .documents
+        .insert(page.clone(), BOOT_FILLER_FILE.to_string());
+    for i in 0..BOOT_FILLER_BLOCKS {
+        let id = boot_filler_block(i);
+        let mut block = Block::new_text(id.clone(), page.clone(), format!("archived {i}"));
+        block.set_sequence(i as i64);
+        state.domain.block_state.blocks.insert(id, block);
+    }
 }
 
 /// The bare journals page shell.
@@ -1306,6 +1365,31 @@ pub async fn boot_and_seed_wide_with_peer_id(
     // `seed_boot_journal` gate in `wide_e2e_ref_for`). Await it on every frontend
     // draw so the snapshot is taken AFTER it lands; fail loud on timeout so a
     // genuinely-dropped firing is a RED, not a hang.
+    // The boot seed fills in what the vault lacks and must survive the initial
+    // scan: [`BOOT_FILLER_FILE`] sorts before `Journals.org` and delays its
+    // ingest into the seed's window, where a seed that does not wait for the
+    // scan loses the journal rule to the `Journals.org` delete pass.
+    if let Some(frontend) = &handle.frontend {
+        let org_ready = frontend
+            .injector()
+            .resolve::<holon_orgmode::FileWatcherReadySignal>();
+        tokio::time::timeout(Duration::from_secs(30), org_ready.wait_ready())
+            .await
+            .expect("[boot seed] the org boot did not end within 30s")
+            .expect("[boot seed] the org boot failed");
+        let present = sut_ids(&caps).await;
+        let lost: Vec<EntityUri> = holon_frontend::journals_page_blocks()
+            .into_iter()
+            .chain(holon_frontend::journals_auto_create_blocks())
+            .map(|b| b.id)
+            .filter(|id| !present.contains(id))
+            .collect();
+        assert!(
+            lost.is_empty(),
+            "[boot seed] programmatically seeded blocks are missing after boot: {lost:?}"
+        );
+    }
+
     if has_frontend {
         let journal_id = crate::pbt::frontend_slice::components::keystone_boot_journal_id();
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
@@ -1861,6 +1945,7 @@ pub fn wide_e2e_ref_for(wiring: &Wiring) -> ReferenceState {
     // (no `SutSqlProjection`).
     if set.has_projection(Projection::ViewModel) {
         seed_forward_edge_corpus(&mut state);
+        seed_boot_filler(&mut state);
         seed_read_only_recipe(&mut state);
         // Companion page-tag demotion closure (dogfood 2026-07-12): a top-level
         // page-file (`2026-07-10.org`) whose `Page` doc-root is inlined as a plain

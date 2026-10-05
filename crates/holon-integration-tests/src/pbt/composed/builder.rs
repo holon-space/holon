@@ -669,6 +669,19 @@ async fn compose_sut_seeded_impl(
         // it (don't silently degrade to a no-op quiescence wait). Validated by
         // the A0 probe `headless_loro_sync_controller_resolves_after_boot`.
         if has_editor {
+            // `post_ready_work` resolves the controller after the org boot (scan
+            // + boot seed), so the poll budget below starts when that boot ends.
+            // Its outcome is not this step's concern: the controller resolves
+            // after a failed scan too.
+            let mut org_ready = (*comp
+                .injector()
+                .resolve::<holon_orgmode::FileWatcherReadySignal>())
+            .clone()
+            .into_receiver();
+            tokio::time::timeout(Duration::from_secs(60), org_ready.wait_for(Option::is_some))
+                .await
+                .expect("compose_sut full mode: the org boot did not end within 60s")
+                .expect("compose_sut full mode: FileWatcherReadySignal sender dropped");
             // Scale-soak: a 5-10k-block org ingest delays controller resolution far past
             // the 2s default; scale the poll budget with `HOLON_SOAK_SETTLE_MS` (never
             // below the 2s default) so the fail-loud assert below stays meaningful.

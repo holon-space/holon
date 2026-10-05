@@ -116,6 +116,65 @@ impl FileWatcherReadySender {
     }
 }
 
+/// Orders a container's programmatic boot seed after the org initial scan.
+///
+/// The vault files own their blocks: the scan ingests them first, then the
+/// seeder fills in only what the files lack, and the controller's boot phase
+/// (fileless-page materialization, the copy-on-write seed baseline) runs over
+/// the seeded store. A container that seeds registers this gate; without it
+/// the controller ends its boot right after the scan. The seeder MUST answer
+/// [`seeded`](Self::seeded) once [`wait_scanned`](Self::wait_scanned) returns,
+/// or the controller never signals ready.
+#[derive(Clone)]
+pub struct BootSeedGate {
+    scanned: tokio::sync::watch::Sender<Option<Result<(), String>>>,
+    seeded: tokio::sync::watch::Sender<Option<Result<(), String>>>,
+}
+
+impl BootSeedGate {
+    pub fn new() -> Self {
+        Self {
+            scanned: tokio::sync::watch::channel(None).0,
+            seeded: tokio::sync::watch::channel(None).0,
+        }
+    }
+
+    /// The initial scan's outcome: `Err` names the files that failed.
+    pub async fn wait_scanned(&self) -> Result<(), String> {
+        Self::wait(&self.scanned).await
+    }
+
+    pub fn seeded(&self, outcome: Result<(), String>) {
+        self.seeded.send_replace(Some(outcome));
+    }
+
+    fn scanned(&self, outcome: Result<(), String>) {
+        self.scanned.send_replace(Some(outcome));
+    }
+
+    async fn wait_seeded(&self) -> Result<(), String> {
+        Self::wait(&self.seeded).await
+    }
+
+    async fn wait(
+        sender: &tokio::sync::watch::Sender<Option<Result<(), String>>>,
+    ) -> Result<(), String> {
+        sender
+            .subscribe()
+            .wait_for(Option::is_some)
+            .await
+            .expect("the gate holds its own sender")
+            .clone()
+            .expect("wait_for returned on Some")
+    }
+}
+
+impl Default for BootSeedGate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Event-driven idle signal for the FileSyncController loop.
 ///
 /// The controller's background task calls [`mark_progress`] after each
@@ -703,6 +762,11 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                     .optional_resolve_async::<dyn holon_core::file_format::TypedRowSink>()
                     .await;
 
+                let seed_gate = resolver
+                    .optional_resolve_async::<BootSeedGate>()
+                    .await
+                    .map(|gate| (*gate).clone());
+
                 let idle_signal_weak = std::sync::Arc::downgrade(&idle_signal);
 
                 // Every task this provider spawns is session-scoped: it reads
@@ -938,6 +1002,7 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                         idle_signal_weak,
                         rerender_rx,
                         ready_sender,
+                        seed_gate,
                         fs,
                         change_source,
                         formats_for_loop,
@@ -1205,11 +1270,49 @@ pub fn route_remove(home: &DocHome, key: &str) -> Option<OrgRerender> {
     }
 }
 
+/// Tell the seeder how the scan went and wait for its answer. A failed seed —
+/// including one skipped because the scan failed — is a boot failure.
+async fn hand_over_to_boot_seed(
+    gate: Option<&BootSeedGate>,
+    controller: &FileSyncController,
+    root_directory: &std::path::Path,
+    failures: &mut Vec<(PathBuf, anyhow::Error)>,
+) {
+    let Some(gate) = gate else {
+        return;
+    };
+    gate.scanned(if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(summarize_scan_failures(failures))
+    });
+    if let Err(msg) = gate.wait_seeded().await {
+        let e = anyhow::anyhow!(msg);
+        tracing::error!("[OrgMode] boot seed failed: {:#}", e);
+        controller.disclose_start_incomplete("seeding the default layout", &e);
+        failures.push((root_directory.to_path_buf(), e));
+    }
+}
+
+fn summarize_scan_failures(failures: &[(PathBuf, anyhow::Error)]) -> String {
+    let summary = failures
+        .iter()
+        .map(|(p, e)| format!("{}: {}", p.display(), e))
+        .collect::<Vec<_>>()
+        .join("; ");
+    format!(
+        "OrgMode initial scan failed for {} file(s): {}",
+        failures.len(),
+        summary
+    )
+}
+
 /// Backend-blind FileSyncController driver: initialize, build the file watcher,
-/// run the initial scan, signal readiness, arm the watcher, and run the main
-/// `select!` loop. Shared by the Turso factory and the no-Turso bootstrap —
-/// neither path knows which storage backend the controller's adapters use.
-// Eight arguments because this is the bootstrap seam both factories call with
+/// run the initial scan, hand over to the boot seed (when a [`BootSeedGate`]
+/// is wired), signal readiness, arm the watcher, and run the main `select!`
+/// loop. Shared by the Turso factory and the no-Turso bootstrap — neither path
+/// knows which storage backend the controller's adapters use.
+// Many arguments because this is the bootstrap seam both factories call with
 // independently-built collaborators; grouping them is a wiring refactor.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_file_sync_controller(
@@ -1218,6 +1321,7 @@ pub async fn run_file_sync_controller(
     idle_signal_weak: std::sync::Weak<OrgSyncIdleSignal>,
     mut rerender_rx: tokio::sync::mpsc::UnboundedReceiver<RerenderMsg>,
     ready_sender: std::sync::Arc<std::sync::Mutex<Option<FileWatcherReadySender>>>,
+    seed_gate: Option<BootSeedGate>,
     fs: Arc<dyn holon_filesystem::FileSystem>,
     change_source: Arc<dyn holon_filesystem::FileChangeSource>,
     formats: Arc<holon_core::FormatRegistry>,
@@ -1240,6 +1344,9 @@ pub async fn run_file_sync_controller(
             "the file sync could not start, so changes to the files do not reach Holon and \
              edits in Holon do not reach the files: {e:#}"
         ));
+        if let Some(gate) = &seed_gate {
+            gate.scanned(Err(msg.clone()));
+        }
         if let Some(sender) = ready_sender.lock().unwrap().take() {
             sender.signal_error(msg);
         }
@@ -1276,7 +1383,15 @@ pub async fn run_file_sync_controller(
                 let e = anyhow::Error::from(e)
                     .context(format!("initial scan of {}", root_directory.display()));
                 controller.disclose_start_incomplete("reading the vault's files", &e);
-                return vec![(root_directory.clone(), e)];
+                let mut failures = vec![(root_directory.clone(), e)];
+                hand_over_to_boot_seed(
+                    seed_gate.as_ref(),
+                    &controller,
+                    &root_directory,
+                    &mut failures,
+                )
+                .await;
+                return failures;
             }
         };
         let fs_warm = fs.clone();
@@ -1340,14 +1455,32 @@ pub async fn run_file_sync_controller(
         }
         // ONE end-of-scan convergence wait (30s loud ceiling). A stall becomes a
         // scan failure routed through the existing `signal_error` path below.
-        if let Err(e) = controller.finish_initial_scan(30_000).await {
-            error!("[OrgMode] initial-scan feed convergence failed: {}", e);
-            controller.disclose_start_incomplete("the initial scan", &e);
-            failures.push((root_directory.clone(), e));
-        } else if let Err(e) = controller.materialize_missing_page_files().await {
-            error!("[OrgMode] fileless-page materialization failed: {}", e);
-            controller.disclose_start_incomplete("writing the files of pages that have none", &e);
-            failures.push((root_directory.clone(), e));
+        let converged = match controller.finish_initial_scan(30_000).await {
+            Ok(()) => true,
+            Err(e) => {
+                error!("[OrgMode] initial-scan feed convergence failed: {}", e);
+                controller.disclose_start_incomplete("the initial scan", &e);
+                failures.push((root_directory.clone(), e));
+                false
+            }
+        };
+        // The seed fills in what the files lack, so it runs on the ingested
+        // vault, and the boot phase below (fileless-page materialization, the
+        // copy-on-write seed baseline) runs on the seeded store.
+        hand_over_to_boot_seed(
+            seed_gate.as_ref(),
+            &controller,
+            &root_directory,
+            &mut failures,
+        )
+        .await;
+        if converged {
+            if let Err(e) = controller.materialize_missing_page_files().await {
+                error!("[OrgMode] fileless-page materialization failed: {}", e);
+                controller
+                    .disclose_start_incomplete("writing the files of pages that have none", &e);
+                failures.push((root_directory.clone(), e));
+            }
         }
         if let Err(e) = controller.settle_undone_deletions().await {
             error!(
@@ -1408,16 +1541,7 @@ pub async fn run_file_sync_controller(
     // detached-worker `panic!` that consumed this error at the wiring layer is
     // likewise replaced by the banner. Do NOT reinstate the early return.
     if !scan_failures.is_empty() {
-        let summary = scan_failures
-            .iter()
-            .map(|(p, e)| format!("{}: {}", p.display(), e))
-            .collect::<Vec<_>>()
-            .join("; ");
-        let msg = format!(
-            "OrgMode initial scan failed for {} file(s): {}",
-            scan_failures.len(),
-            summary
-        );
+        let msg = summarize_scan_failures(&scan_failures);
         error!("[OrgMode] {}", msg);
         if let Some(sender) = ready_sender.lock().unwrap().take() {
             sender.signal_error(msg);
@@ -1436,7 +1560,7 @@ pub async fn run_file_sync_controller(
         sender.signal_ready();
     }
 
-    // Spawn arm() on the blocking pool, detached.
+    // Arm detached, on its own thread.
     // Holds a strong ref to the change source alive
     // forever via `pending::<()>().await` — dropping
     // it (e.g. the notify adapter's RecommendedWatcher)
@@ -1448,11 +1572,19 @@ pub async fn run_file_sync_controller(
     let source_for_arm = change_source.clone();
     let arm_task = tokio::spawn(
         async move {
-            let r = tokio::task::spawn_blocking(move || {
-                let r = source_for_arm.arm(&dir_for_arm);
-                (source_for_arm, r)
-            })
-            .await;
+            // Not `spawn_blocking`: the registration takes as long as the OS
+            // takes, and a runtime shutting down waits for its blocking tasks.
+            let (armed_tx, armed_rx) = tokio::sync::oneshot::channel();
+            std::thread::Builder::new()
+                .name("org-arm-watcher".into())
+                .spawn(move || {
+                    let r = source_for_arm.arm(&dir_for_arm);
+                    // ALLOW(dropped-receiver): the controller shut down before the watch
+                    // registered.
+                    let _ = armed_tx.send((source_for_arm, r));
+                })
+                .expect("spawn the org watcher-arming thread");
+            let r = armed_rx.await;
             match r {
                 Ok((source, Ok(()))) => {
                     info!("[OrgMode] watcher armed");
@@ -1467,7 +1599,7 @@ pub async fn run_file_sync_controller(
                     ));
                 }
                 Err(e) => {
-                    error!("[OrgMode] arm spawn_blocking panicked: {}", e);
+                    error!("[OrgMode] the watcher-arming thread panicked: {}", e);
                     disclose_sync_not_started(&format!(
                         "watching the vault panicked, so changes to its files do not reach \
                          Holon: {e}"

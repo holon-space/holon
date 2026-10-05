@@ -465,6 +465,14 @@ impl FrontendInjectorExt for Injector {
                     as Arc<dyn holon_filesystem::ThreeWayTextMerge>
             }));
 
+            // The session factory seeds the default layout; this gate runs that
+            // seed after the initial scan (D83.a). One gate, built here, so
+            // every resolve hands out the same channels.
+            let seed_gate = holon_orgmode::BootSeedGate::new();
+            self.provide::<holon_orgmode::BootSeedGate>(Provider::root(move |_| {
+                Shared::new(seed_gate.clone())
+            }));
+
             OrgModeModule
                 .configure(self)
                 .map_err(|e| anyhow::anyhow!("Failed to register OrgModeModule: {}", e))?;
@@ -668,117 +676,6 @@ impl FrontendInjectorExt for Injector {
                 ))
                 .await;
 
-                // Seed default layout (native only — org parser pulls notify which
-                // has no wasm backend; wasi path uses seed.rs in holon-worker instead).
-                // Seeds the bundled Org assets into Loro via `BlockOrdering`
-                // intents (Loro is the authority; SQL is the projection).
-                #[cfg(not(target_arch = "wasm32"))]
-                async {
-                    let ordering = resolver
-                        .resolve_async::<dyn holon_core::block_ordering::BlockOrdering>()
-                        .await;
-                    // A user `index.org` whose root heading carries
-                    // `:ID: root-layout` is THE layout (the well-known
-                    // `block:root-layout` contract) — suppress the default
-                    // seed so boot doesn't depend on whether this factory
-                    // races the org initial scan. An index.org WITHOUT that
-                    // id never takes the layout over, so the default must
-                    // still seed (otherwise there would be no layout at all).
-                    // Checked through the FileSystem port (in-memory test FS
-                    // included).
-                    let user_index_org_exists = match (
-                        resolver.try_resolve::<holon_orgmode::di::OrgModeConfig>(),
-                        resolver.try_resolve::<dyn holon_filesystem::FileSystem>(),
-                    ) {
-                        (Ok(cfg), Ok(fs)) => fs
-                            .read_to_string(&cfg.root_directory.join("index.org"))
-                            .await
-                            .is_ok_and(|content| content.contains(":ID: root-layout")),
-                        _ => false,
-                    };
-                    // Copy-on-write: a materialized `__default__.org` on disk is
-                    // the durable "user modified the seed layout" marker. When
-                    // present, that file WINS — the org scan owns `__default__`
-                    // and `seed_default_layout` must NOT re-seed/replace it.
-                    // When absent, the seed layout is virtual and re-seeds from
-                    // the current bundled asset (auto-update).
-                    let default_org_exists = match (
-                        resolver.try_resolve::<holon_orgmode::di::OrgModeConfig>(),
-                        resolver.try_resolve::<dyn holon_filesystem::FileSystem>(),
-                    ) {
-                        (Ok(cfg), Ok(fs)) => fs
-                            .read_to_string(&cfg.root_directory.join("__default__.org"))
-                            .await
-                            .is_ok(),
-                        _ => false,
-                    };
-                    crate::seed::seed_default_layout(
-                        &engine,
-                        ordering,
-                        user_index_org_exists,
-                        default_org_exists,
-                    )
-                    .await
-                    .expect(
-                        "boot [component=session stage=session-resolve]: \
-                             seed_default_layout failed",
-                    );
-                    disclosure.performed(BootStep::SeedDefaultLayout);
-                }
-                .instrument(tracing::info_span!(
-                    "di.factory.FrontendSession.seed_default_layout"
-                ))
-                .await;
-
-                // Project the freshly-seeded layout into the SQL sink (`block_raw`)
-                // immediately, so the 3-column shell renders without waiting for
-                // the org initial scan or the (ready-gated) projection run-loop.
-                //
-                // `seed_default_layout` writes the layout into Loro (the
-                // authority) via `create_in_tree` but does not itself project to
-                // SQL; previously the layout only reached `block_raw` once the
-                // org scan's first flush ran (seconds in) or the run-loop started
-                // after orgmode readiness — so the UI shell appeared empty for
-                // seconds after launch. This flush uses the shared, *unarmed*
-                // projection (creates flow, deletes withheld) — the same instance
-                // the scan flushes and the controller later runs — so it is a
-                // safe bootstrap projection of the seed layout.
-                #[cfg(not(target_arch = "wasm32"))]
-                async {
-                    // Optional: a `DownstreamProjection` is only registered by
-                    // `LoroModule`. In the degraded SQL-only config (no Loro)
-                    // it's absent — skip the best-effort seed flush rather than
-                    // panic; the run-loop reconciles either way. Mirrors
-                    // `holon-orgmode`'s `optional_resolve_async` for the same
-                    // service.
-                    if let Some(projection) = resolver
-                        .optional_resolve_async::<dyn holon_core::DownstreamProjection>()
-                        .await
-                    {
-                        match projection.flush().await {
-                            Err(e) => tracing::warn!(
-                                "[FrontendSession] seed-layout projection flush failed (run-loop \
-                                 will reconcile): {e:#}"
-                            ),
-                            Ok(pass) if pass.withheld() > 0 => tracing::warn!(
-                                "[FrontendSession] seed-layout projection flush withheld {} \
-                                 FK-ungrounded op(s) (run-loop will reconcile)",
-                                pass.withheld()
-                            ),
-                            Ok(_) => {}
-                        }
-                    } else {
-                        tracing::debug!(
-                            "[FrontendSession] no DownstreamProjection registered \
-                             (SQL-only/no-Loro); skipping seed-layout flush"
-                        );
-                    }
-                }
-                .instrument(tracing::info_span!(
-                    "di.factory.FrontendSession.flush_seed_layout"
-                ))
-                .await;
-
                 // Mirror the enablement store into `integration_state`, which
                 // the seeded left-sidebar Integrations section queries. Runs
                 // here rather than in the (lazily resolved) integration
@@ -815,9 +712,8 @@ impl FrontendInjectorExt for Injector {
                 ))
                 .await;
 
-                // Start action watchers — streaming discovery picks up action blocks
-                // as FileSyncController inserts them. Must be after seed_default_layout
-                // so the block table and seed data (block:journals) exist.
+                // Start action watchers — streaming discovery picks up action
+                // blocks as the org ingest and the boot seed insert them.
                 #[cfg(not(target_arch = "wasm32"))]
                 async {
                     let shutdown = resolver
@@ -836,9 +732,11 @@ impl FrontendInjectorExt for Injector {
                 ))
                 .await;
 
-                // Wait for orgmode readiness, then resolve the Loro sync
-                // controller so its outbound Loro → SQL projector starts after
-                // the bundled Org assets have been seeded into Loro via intents.
+                // Seed the default layout once the org initial scan has
+                // ingested the vault (D83.a: the files own their blocks, the
+                // seed only fills in what they lack). Then wait for orgmode
+                // readiness and resolve the Loro sync controller, so its
+                // outbound Loro → SQL projector starts after the seed.
                 //
                 // Production (`wait_for_ready=false`): spawn this in the
                 // background so the window paints immediately and data
@@ -849,7 +747,13 @@ impl FrontendInjectorExt for Injector {
                 {
                     let resolver_bg = resolver.clone();
                     let ready_signal_bg = ready_signal.clone();
+                    let engine_bg = engine.clone();
                     let post_ready_work = async move {
+                        boot_seed(&resolver_bg, &engine_bg)
+                            .instrument(tracing::info_span!(
+                                "di.factory.FrontendSession.seed_default_layout"
+                            ))
+                            .await;
                         if let Some(mut signal) = ready_signal_bg {
                             // Copy the outcome out and drop the non-`Send`
                             // `watch::Ref` BEFORE any `.await` below.
@@ -911,6 +815,7 @@ impl FrontendInjectorExt for Injector {
                             .await
                             .spawn("boot-post-ready", post_ready_work);
                     }
+                    disclosure.performed(BootStep::SeedDefaultLayout);
                     disclosure.performed(BootStep::PostReady);
                 }
 
@@ -1023,4 +928,103 @@ impl Module for HolonFrontendModule {
             Ok(())
         })
     }
+}
+
+/// The boot seed of the default layout, after the org initial scan when the
+/// container has a vault. Answers the [`holon_orgmode::BootSeedGate`], whose
+/// controller turns a failed or skipped seed into a boot failure; never seeds
+/// over a vault the scan did not fully ingest.
+#[cfg(not(target_arch = "wasm32"))]
+async fn boot_seed(resolver: &Injector, engine: &Arc<BackendEngine>) {
+    let Some(gate) = resolver
+        .optional_resolve_async::<holon_orgmode::BootSeedGate>()
+        .await
+    else {
+        seed_and_project_default_layout(resolver, engine)
+            .await
+            .expect("boot [component=session stage=session-resolve]: seed_default_layout failed");
+        return;
+    };
+    let outcome = match gate.wait_scanned().await {
+        Err(scan) => Err(format!(
+            "the default layout was not seeded, because the org initial scan did not ingest \
+             the whole vault: {scan}"
+        )),
+        Ok(()) => seed_and_project_default_layout(resolver, engine)
+            .await
+            .map_err(|e| format!("seed_default_layout failed: {e:#}")),
+    };
+    if let Err(msg) = &outcome {
+        tracing::error!("boot [component=session stage=boot-seed]: {msg}");
+    }
+    gate.seeded(outcome);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn seed_and_project_default_layout(
+    resolver: &Injector,
+    engine: &Arc<BackendEngine>,
+) -> Result<()> {
+    let ordering = resolver
+        .resolve_async::<dyn holon_core::block_ordering::BlockOrdering>()
+        .await;
+    // A user `index.org` whose root heading carries `:ID: root-layout` is THE
+    // layout (the well-known `block:root-layout` contract) — suppress the
+    // default seed. An index.org WITHOUT that id never takes the layout over,
+    // so the default must still seed (otherwise there would be no layout at
+    // all). Checked through the FileSystem port (in-memory test FS included).
+    let user_index_org_exists = match (
+        resolver.try_resolve::<holon_orgmode::di::OrgModeConfig>(),
+        resolver.try_resolve::<dyn holon_filesystem::FileSystem>(),
+    ) {
+        (Ok(cfg), Ok(fs)) => fs
+            .read_to_string(&cfg.root_directory.join("index.org"))
+            .await
+            .is_ok_and(|content| content.contains(":ID: root-layout")),
+        _ => false,
+    };
+    // Copy-on-write: a materialized `__default__.org` on disk is the durable
+    // "user modified the seed layout" marker. When present, that file WINS —
+    // the org scan owns `__default__` and `seed_default_layout` must NOT
+    // re-seed/replace it. When absent, the seed layout is virtual and re-seeds
+    // from the current bundled asset (auto-update).
+    let default_org_exists = match (
+        resolver.try_resolve::<holon_orgmode::di::OrgModeConfig>(),
+        resolver.try_resolve::<dyn holon_filesystem::FileSystem>(),
+    ) {
+        (Ok(cfg), Ok(fs)) => fs
+            .read_to_string(&cfg.root_directory.join("__default__.org"))
+            .await
+            .is_ok(),
+        _ => false,
+    };
+    crate::seed::seed_default_layout(engine, ordering, user_index_org_exists, default_org_exists)
+        .await?;
+
+    // Project the seeded layout into the SQL sink (`block_raw`) now, so the
+    // shell renders without waiting for the ready-gated projection run-loop.
+    // `seed_default_layout` writes the layout into Loro (the authority) via
+    // `create_in_tree` but does not itself project to SQL. This flush uses the
+    // shared, *unarmed* projection (creates flow, deletes withheld) — the same
+    // instance the scan flushes and the controller later runs. A
+    // `DownstreamProjection` is only registered by `LoroModule`; SqlOnly has
+    // none and needs no flush.
+    if let Some(projection) = resolver
+        .optional_resolve_async::<dyn holon_core::DownstreamProjection>()
+        .await
+    {
+        match projection.flush().await {
+            Err(e) => tracing::warn!(
+                "[FrontendSession] seed-layout projection flush failed (run-loop will \
+                 reconcile): {e:#}"
+            ),
+            Ok(pass) if pass.withheld() > 0 => tracing::warn!(
+                "[FrontendSession] seed-layout projection flush withheld {} FK-ungrounded op(s) \
+                 (run-loop will reconcile)",
+                pass.withheld()
+            ),
+            Ok(_) => {}
+        }
+    }
+    Ok(())
 }
