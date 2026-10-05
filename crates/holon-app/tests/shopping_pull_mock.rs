@@ -136,14 +136,33 @@ impl ListState {
             let good = &command["good"];
             let name = good["name"].as_str().unwrap_or_default().to_string();
             let cat = good["cat"].as_str().unwrap_or_default().to_string();
+            if let Some(picked) = command["picked"].as_str() {
+                match picked {
+                    "del" => self.picked.retain(|(n, c, _)| !(n == &name && c == &cat)),
+                    "replace" => {
+                        let entry = self
+                            .picked
+                            .iter_mut()
+                            .find(|(n, _, _)| n == &name)
+                            .expect("a picked `replace` names a ticked item");
+                        *entry = (name, cat, good.get("pickedCount").cloned());
+                    }
+                    other => panic!("the mock peer received an unknown picked command '{other}'"),
+                }
+                continue;
+            }
             match command["cmd"].as_str().unwrap_or_default() {
                 // The peer keeps exactly what the command carries: an amount
-                // the command leaves out is an item with no amount.
-                "add" => self.items.push((name, cat, good.get("count").cloned())),
-                "del" => {
-                    self.items.retain(|(n, c, _)| !(n == &name && c == &cat));
-                    self.picked.retain(|(n, c, _)| !(n == &name && c == &cat));
+                // the command leaves out is an item with no amount. An `add`
+                // for a name already listed replaces that entry.
+                "add" => {
+                    let entry = (name, cat, good.get("count").cloned());
+                    match self.items.iter_mut().find(|(n, _, _)| n == &entry.0) {
+                        Some(existing) => *existing = entry,
+                        None => self.items.push(entry),
+                    }
                 }
+                "del" => self.items.retain(|(n, c, _)| !(n == &name && c == &cat)),
                 other => panic!("the mock peer received an unknown command '{other}'"),
             }
         }
@@ -414,14 +433,14 @@ async fn a_served_list_projects_shopping_items() {
 
     let snapshot = peer.pull().await.expect("the peer serves the list");
 
-    // Six wire rows, five keys: `Bread`/`B` is both active and picked, which is
-    // one item. The FOLD happens in the sidecar's own mapping; what the generic
-    // path adds is that a pair which survived the fold and still collided would
-    // be refused.
+    // Six wire rows, five keys: `Bread`/`B` is both active and picked. The
+    // sidecar's own mapping mirrors the active entry and refuses the ticked
+    // one; what the generic path adds is that a pair which survived the mapping
+    // and still collided would be refused.
     assert_eq!(
         snapshot.len(),
         5,
-        "duplicate (name, cat) rows were not folded"
+        "the ticked entry of an active key was not refused"
     );
     assert_eq!(snapshot.version(), 7, "the list version came through");
     // The category vocabulary is a SECOND declared type the same mapping emits.
@@ -465,11 +484,20 @@ async fn a_served_list_projects_shopping_items() {
         "Milk/Ca collapsed into Milk/R"
     );
 
-    // `pickedItems` membership IS the checked flag.
+    // An item both on the list and picked is its active entry; the picked one
+    // is refused by name.
     assert_eq!(
         column("shopping-item:B:Bread", "checked"),
-        Some(Value::Boolean(true)),
-        "a checked-off item arrived unchecked"
+        Some(Value::Boolean(false)),
+        "an item still on the list arrived checked"
+    );
+    assert!(
+        snapshot
+            .refusals()
+            .iter()
+            .any(|reason| reason.contains("`Bread` in `B` both active and ticked")),
+        "the picked Bread was not refused by name: {:?}",
+        snapshot.refusals()
     );
 
     // A code the list did not publish is carried verbatim, never mapped onto a
@@ -831,7 +859,7 @@ async fn a_local_deletion_reaches_the_peer_as_a_del_command() {
     let peer = peer_for(&mock.base_url);
     let compiled = connection();
 
-    let mut gone = local("Bread", "B", None);
+    let mut gone = local("Salmon", "Fish", None);
     // The peer stamps the snapshot with the wall clock, and the reconciler
     // measures the tombstone against THAT — so "still live" has to be written
     // relative to now, or the fixture ages out of the window on a calendar date
@@ -861,9 +889,99 @@ async fn a_local_deletion_reaches_the_peer_as_a_del_command() {
             .expect("mock list")
             .items
             .iter()
-            .any(|(n, c, _)| n == "Bread" && c == "B"),
+            .any(|(n, c, _)| n == "Salmon" && c == "Fish"),
         "the peer still lists a locally deleted item"
     );
+}
+
+#[tokio::test]
+async fn a_local_deletion_of_a_ticked_item_reaches_the_peer_as_a_picked_del() {
+    let mut list = seeded_state(7);
+    list.items.retain(|(n, _, _)| n != "Bread");
+    let mock = start_mock_with(Mode::Live, list).await;
+    let peer = peer_for(&mock.base_url);
+    let compiled = connection();
+
+    let mut gone = local("Bread", "B", None);
+    // The peer stamps the snapshot with the wall clock, and the reconciler
+    // measures the tombstone against THAT — so "still live" has to be written
+    // relative to now, or the fixture ages out of the window on a calendar date
+    // and the test stops exercising the push leg.
+    let half_window = compiled.tombstone_window() / 2;
+    set(
+        &mut gone,
+        "deleted_at",
+        Value::String((chrono::Utc::now() - half_window).to_rfc3339()),
+    );
+
+    let outcome = sync_once(
+        &peer,
+        &Rows(vec![gone]),
+        &RemoteListReconciler::new(compiled),
+        DEVICE_ID,
+        1_756_700_000_000,
+    )
+    .await
+    .expect("one round");
+
+    assert_eq!(outcome.committed, 1);
+    assert!(
+        !mock
+            .state
+            .lock()
+            .expect("mock list")
+            .picked
+            .iter()
+            .any(|(n, c, _)| n == "Bread" && c == "B"),
+        "the peer still lists a locally deleted ticked item"
+    );
+}
+
+/// A removal sends one command per entry the pull counted under
+/// `active_entries`, so a count that contradicts the row's tick is a broken
+/// pull mapping. The request fails by column and item instead of sending no
+/// removal at all.
+#[test]
+fn a_removal_whose_active_entries_contradicts_its_tick_fails_by_name() {
+    let compiled = connection();
+    let surface = surface_for("http://127.0.0.1:9/list");
+    for (checked, active_entries) in [
+        (false, Value::Integer(0)),
+        (false, Value::Null),
+        (true, Value::Integer(1)),
+    ] {
+        let row = local("Salmon", "Fish", None);
+        let key = compiled
+            .key_of(&serde_json::json!({ "name": "Salmon", "cat": "Fish" }))
+            .expect("the connection derives the key");
+        let mut remote = row.clone();
+        set(&mut remote, "checked", Value::Boolean(checked));
+        set(&mut remote, "active_entries", active_entries.clone());
+        let remote = holon_connections::RemoteRow {
+            id: remote.id,
+            columns: remote.columns,
+        };
+        let batch = CommitBatch::from_push_intents(
+            &[PushIntent::Remove { key, row, remote }],
+            &empty_snapshot(&compiled, 7),
+            DEVICE_ID,
+            1_756_700_000_000,
+        );
+        let rows = batch
+            .to_row_stream(compiled.spec())
+            .expect("the batch renders as rows");
+        let err = format!(
+            "{:#}",
+            surface
+                .map_request("commit", &rows)
+                .expect_err("a contradicting `active_entries` must fail the request")
+        );
+        assert!(
+            err.contains("active_entries") && err.contains("Salmon") && err.contains("Fish"),
+            "checked {checked}, active_entries {active_entries:?}: the failure names neither \
+             the column nor the item: {err}"
+        );
+    }
 }
 
 #[tokio::test]

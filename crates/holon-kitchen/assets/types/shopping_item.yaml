@@ -44,6 +44,11 @@ fields:
   - name: last_seen_remote
     sql_type: TEXT
     nullable: true
+  # The connection's merge base: the peer's amount and tick as the last pull
+  # served them, as a JSON object. NULL on a row no pull has carried yet.
+  - name: remote_base
+    sql_type: TEXT
+    nullable: true
   # Overflow bag for properties with no column of their own; the engine's
   # `_provenance` stamp lands here.
   - name: properties

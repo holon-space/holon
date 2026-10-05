@@ -153,7 +153,10 @@ mod tests {
         let state = crate::pbt::composed::wide_e2e::wide_e2e_ref();
         let strat = crate::pbt::composed::wide_e2e::WideE2EMachine::transitions(&state);
         let mut runner = TestRunner::deterministic();
-        let hits = (0..2000)
+        // Weight 1 in an alphabet that weighs over a thousand: a few thousand
+        // draws can miss it, and any change to how the alphabet consumes the
+        // RNG then flips this deterministic run.
+        let hits = (0..20_000)
             .filter(|_| {
                 matches!(
                     strat
@@ -166,7 +169,7 @@ mod tests {
             .count();
         assert!(
             hits > 0,
-            "RegisterEntityScheme was never drawn in 2000 samples of the full-headless \
+            "RegisterEntityScheme was never drawn in 20000 samples of the full-headless \
              alphabet — the registration-vs-ingest interleaving bug #98 needs is still \
              ungeneratable"
         );

@@ -1,44 +1,37 @@
-//! The composed keystone's remote-list SUT component: the fixture peer plus
-//! the REAL production round over the REAL mirror table.
+//! The composed keystone's remote-list SUT component: the shipped shopping
+//! connection over the REAL production round and the REAL mirror table.
 //!
-//! The peer is the only test double. The round is dispatched as the
-//! `remote_list_sync` OPERATION through the production dispatcher — the same
-//! route a frontend takes — so the operation's registration and its entity-name
-//! routing are covered too, and the local writes travel back as the
-//! operation's own follow-ups rather than being rebuilt here. The reconciler,
-//! the sidecar declaration and the mirror read are production as well, so a
-//! round that stops reconciling fails the mirror invariant instead of passing a
-//! reimplementation.
+//! The list app is the only test double (see
+//! [`crate::pbt::remote_list_fixture`]); the peer the round calls is the
+//! production `RestListPeer` running the sidecar's own mappings. The round is
+//! dispatched as the `remote_list_sync` OPERATION through the production
+//! dispatcher — the same route a frontend takes — so the operation's
+//! registration and its entity-name routing are covered too, and the local
+//! writes travel back as the operation's own follow-ups rather than being
+//! rebuilt here.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use holon_api::EntityName;
 use holon_api::OpOrigin;
 use holon_api::Value;
+use holon_app::remote_list::RestListPeer;
 use holon_connections::CompiledListSync;
 use holon_connections::LocalRowReader;
 use holon_connections::REMOTE_LIST_SYNC;
 use holon_connections::RemoteListOperations;
 use holon_connections::RemoteListPeer;
 use holon_connections::RoundClock;
-use holon_connections_testing::CacheMode;
-use holon_connections_testing::ChangeDetection;
-use holon_connections_testing::CommitGranularity;
-use holon_connections_testing::FixtureListPeer;
-use holon_connections_testing::FixtureProfile;
-use holon_connections_testing::KeyShape;
-use holon_connections_testing::ListMutation;
+use holon_core::OperationProvider;
 use holon_pbt_core::capabilities::RemoteListMutation;
 use holon_pbt_core::capabilities::RemoteListRoundOutcome;
 use holon_pbt_core::capabilities::SutRemoteListSync;
 
 use crate::pbt::frontend_slice::components::HeadlessFrontendComponent;
 use crate::pbt::remote_list_fixture;
-
-/// The connection this fixture declares, and the name the operation is
-/// registered under.
-const CONNECTION: &str = "remote-list";
+use crate::pbt::remote_list_fixture::AppEntry;
+use crate::pbt::remote_list_fixture::FakeAppSurface;
+use crate::pbt::remote_list_fixture::FakeListApp;
 
 /// The round timestamp a sync mints command ids under. Fixed so two rounds are
 /// reproducible from their inputs.
@@ -55,188 +48,144 @@ impl RoundClock for FixedRoundClock {
     }
 }
 
-/// The fixture peer the composed keystone owns: a content-keyed snapshot peer
-/// with a cache-bust requirement — the harder of the two shapes the reconciler
-/// declares for.
-fn profile() -> FixtureProfile {
-    FixtureProfile {
-        key_shape: KeyShape::NaturalKey,
-        change_detection: ChangeDetection::FullSnapshot,
-        commit_granularity: CommitGranularity::PerRow,
-        cache_mode: CacheMode::CachedNeedsBust,
-    }
-}
-
 pub struct RemoteListSut {
-    compiled: Arc<CompiledListSync>,
-    peer: Arc<FixtureListPeer>,
+    app: Arc<FakeListApp>,
     rows: Arc<holon_app::remote_list::SqlMirrorRows>,
     component: Arc<HeadlessFrontendComponent>,
 }
 
 impl RemoteListSut {
-    /// Declare the connection's type through the production admission seat,
-    /// compile its sidecar block and build the fixture peer over it.
+    /// Compile the shipped connection against the `shopping_item` type the
+    /// boot registered, and register its round over the fake app.
     pub async fn boot(component: Arc<HeadlessFrontendComponent>) -> Arc<Self> {
-        let type_def = remote_list_fixture::type_definition();
-        let profiles = holon_capability::registry::shipped_profiles()
-            .expect("the shipped capability profiles must parse");
-        let registry = component
+        let type_def = component
             .injector()
-            .resolve::<holon_profiles::TypeRegistry>();
-        holon_app::type_admission::declare_type_admitted(
-            &profiles,
+            .resolve::<holon_profiles::TypeRegistry>()
+            .get(remote_list_fixture::ENTITY)
+            .unwrap_or_else(|| {
+                panic!(
+                    "the boot registered no '{}' type for the remote-list fixture",
+                    remote_list_fixture::ENTITY
+                )
+            });
+        let compiled = CompiledListSync::compile(
+            remote_list_fixture::CONNECTION,
+            remote_list_fixture::list_sync_spec(),
             &type_def,
-            component.engine().db_handle(),
-            &registry,
-            &component.engine().get_dispatcher(),
         )
-        .await
-        .unwrap_or_else(|e| {
-            panic!(
-                "remote-list fixture: declaring '{}' failed: {e}",
-                remote_list_fixture::ENTITY
-            )
-        });
-        let compiled =
-            CompiledListSync::compile(CONNECTION, remote_list_fixture::list_sync_spec(), &type_def)
-                .expect("the remote-list connection compiles");
+        .expect("the shipped shopping connection compiles");
         let rows = Arc::new(holon_app::remote_list::SqlMirrorRows::new(
             component.engine().db_handle().clone(),
             &compiled,
         ));
-        // The peer persists its list independently of Holon's restarts, so a
-        // reboot must not reset it. Seed the rebuilt peer from the mirror the
-        // store kept — the two were in sync before the restart, so the mirror is
-        // the peer's own list back again. (A first boot reads an empty mirror.)
-        let seed = Self::peer_seed_from_mirror(&rows).await;
-        let peer = Arc::new(FixtureListPeer::seeded(
+        let app = component.remote_list_app();
+        let peer = RestListPeer::new(
+            Arc::new(FakeAppSurface::new(app.clone())),
             compiled.clone(),
-            remote_list_fixture::REQUEST,
-            profile(),
-            seed,
-            0,
-        ));
-        let device_id = holon_app::remote_list::device_id().to_string();
-        // Register the ONE generic operation a configured list connection owns,
-        // over this fixture's transport. The keystone then dispatches a round
-        // the way a frontend does, so an unregistered or mis-named
-        // `remote_list_sync` is a keystone failure rather than a silent green.
+            holon_app::remote_list::device_id(),
+        );
         component
             .engine()
             .get_dispatcher()
             .register_provider(Arc::new(RemoteListOperations::new(
-                CONNECTION,
-                compiled.clone(),
-                peer.clone() as Arc<dyn RemoteListPeer>,
+                remote_list_fixture::CONNECTION,
+                compiled,
+                Arc::new(peer) as Arc<dyn RemoteListPeer>,
                 rows.clone() as Arc<dyn LocalRowReader>,
                 Arc::new(FixedRoundClock),
-                device_id,
+                holon_app::remote_list::device_id(),
             )))
             .unwrap_or_else(|e| {
-                panic!("registering the '{CONNECTION}' remote-list operation failed: {e}")
+                panic!(
+                    "registering the '{}' remote-list operation failed: {e}",
+                    remote_list_fixture::CONNECTION
+                )
             });
         Arc::new(Self {
-            compiled,
-            peer,
+            app,
             rows,
             component,
         })
     }
 
-    /// The peer's list, read back out of the surviving mirror table: the
-    /// peer-authoritative columns only, in the peer's own value spellings.
-    async fn peer_seed_from_mirror(
-        rows: &holon_app::remote_list::SqlMirrorRows,
-    ) -> Vec<holon_connections::RemoteRow> {
-        let mirror = rows
-            .load()
+    fn cell(columns: &[(String, String)], name: &str) -> String {
+        columns
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.clone())
+            .unwrap_or_else(|| panic!("a remote-list mutation lacks the '{name}' column"))
+    }
+
+    fn entry(columns: &[(String, String)]) -> AppEntry {
+        AppEntry {
+            name: Self::cell(columns, "name"),
+            cat: Self::cell(columns, "cat"),
+            count: Some(Self::cell(columns, "count")),
+        }
+    }
+
+    fn id_of(columns: &[(String, String)]) -> String {
+        remote_list_fixture::row_id(&Self::cell(columns, "name"), &Self::cell(columns, "cat"))
+    }
+
+    async fn execute(&self, op: &str, params: holon_api::StorageEntity, id: &str) {
+        self.component
+            .engine()
+            .get_dispatcher()
+            .execute_operation(&EntityName::new(remote_list_fixture::ENTITY), op, params)
             .await
-            .expect("reading the mirror to seed the peer");
-        mirror
-            .into_iter()
-            .map(|row| {
-                let mut columns = BTreeMap::new();
-                for col in &remote_list_fixture::PROJECTION[1..] {
-                    let Some(value) = row.columns.get(*col) else {
-                        continue;
-                    };
-                    // A REAL merge column reads the peer's whole-number value
-                    // back as a float; the peer serves it as an integer.
-                    let value = match value {
-                        Value::Float(f) => Value::Integer(*f as i64),
-                        other => other.clone(),
-                    };
-                    columns.insert((*col).to_string(), value);
-                }
-                holon_connections::RemoteRow {
-                    id: row.id,
-                    columns,
-                }
+            .unwrap_or_else(|e| {
+                panic!(
+                    "{op} on {} '{id}' through the dispatcher failed: {e:#}",
+                    remote_list_fixture::ENTITY
+                )
+            });
+    }
+
+    async fn edit_in_holon(&self, columns: &[(String, String)]) {
+        let id = Self::id_of(columns);
+        for (column, value) in columns {
+            if remote_list_fixture::IDENTITY_COLUMNS.contains(&column.as_str()) {
+                continue;
+            }
+            let mut params = holon_api::StorageEntity::default();
+            params.insert("id".into(), Value::String(id.clone()));
+            params.insert("field".into(), Value::String(column.clone()));
+            params.insert("value".into(), Value::String(value.clone()));
+            self.execute("set_field", params, &id).await;
+        }
+    }
+
+    fn edit_in_app(&self, columns: &[(String, String)]) {
+        let name = Self::cell(columns, "name");
+        let amount = Self::cell(columns, "count");
+        self.app.change(|list| list.edit_amount(&name, &amount));
+    }
+
+    /// The text entries of a sync response's `field` list.
+    fn response_list(response: &Value, field: &str) -> Vec<String> {
+        response
+            .as_object()
+            .and_then(|response| response.get(field))
+            .and_then(Value::as_array)
+            .unwrap_or_else(|| panic!("a sync response carries no `{field}` list: {response:?}"))
+            .iter()
+            .map(|entry| match entry {
+                Value::String(text) => text.clone(),
+                other => panic!("a sync response's `{field}` holds a non-text entry: {other:?}"),
             })
             .collect()
     }
 
-    /// The typed remote row a mutation's columns describe: the
-    /// peer-authoritative columns under their declared types.
-    fn typed_remote_row(&self, columns: &[(String, String)]) -> holon_connections::RemoteRow {
-        let cell = |name: &str| {
-            columns
-                .iter()
-                .find(|(n, _)| n == name)
-                .map(|(_, v)| v.clone())
-                .unwrap_or_else(|| panic!("a remote-list mutation lacks the '{name}' column"))
-        };
-        let label = cell("label");
-        let bucket = cell("bucket");
-        let id = remote_list_fixture::row_id(&label, &bucket);
-        let mut cols = BTreeMap::new();
-        cols.insert("id".into(), Value::String(id.clone()));
-        cols.insert("label".into(), Value::String(label));
-        cols.insert("bucket".into(), Value::String(bucket));
-        cols.insert(
-            "rank".into(),
-            Value::Integer(
-                cell("rank")
-                    .parse()
-                    .expect("the remote-list rank is a whole number"),
-            ),
-        );
-        cols.insert("amount".into(), Value::String(cell("amount")));
-        cols.insert(
-            "done".into(),
-            Value::Integer(
-                cell("done")
-                    .parse()
-                    .expect("the remote-list done flag is 0 or 1"),
-            ),
-        );
-        holon_connections::RemoteRow { id, columns: cols }
-    }
-
-    fn key_of(&self, columns: &[(String, String)]) -> holon_connections::RowKey {
-        let map: BTreeMap<String, Value> = columns
-            .iter()
-            .map(|(k, v)| (k.clone(), Value::String(v.clone())))
-            .collect();
-        let doc = serde_json::to_value(&map).expect("mutation columns serialize");
-        self.compiled
-            .key_of(&doc)
-            .expect("the mutation derives its key")
-    }
-
+    /// A mirrored cell as the oracle spells it: text verbatim, a latch as
+    /// `0`/`1` whichever way the column reads back.
     fn canonical_cell(value: Option<&Value>) -> String {
         match value {
             Some(Value::String(s)) => s.clone(),
             Some(Value::Integer(n)) => n.to_string(),
-            // A REAL column reads a whole-number peer value back as a float; the
-            // oracle stores the same number as its generator string, so whole
-            // floats render as integers here to compare equal.
-            Some(Value::Float(f)) if f.fract() == 0.0 => format!("{f:.0}"),
-            Some(Value::Float(f)) => f.to_string(),
-            Some(Value::Boolean(b)) => b.to_string(),
+            Some(Value::Boolean(b)) => u8::from(*b).to_string(),
             Some(Value::Null) | None => String::new(),
-            Some(other) => format!("{other:?}"),
+            Some(other) => panic!("a mirrored cell of an unexpected kind: {other:?}"),
         }
     }
 }
@@ -246,40 +195,59 @@ impl SutRemoteListSync for RemoteListSut {
     async fn remote_list_mutate(&self, mutation: RemoteListMutation) {
         match &mutation {
             RemoteListMutation::Add { columns } => {
-                let row = self.typed_remote_row(columns);
-                self.peer.mutate(&ListMutation::Add(row));
+                let ticked = Self::cell(columns, "checked") == "1";
+                self.app
+                    .change(|list| list.add(Self::entry(columns), ticked));
             }
             RemoteListMutation::Remove { columns } => {
-                let key = self.key_of(columns);
-                self.peer.mutate(&ListMutation::Remove { key });
+                self.app
+                    .change(|list| list.remove(&Self::cell(columns, "name")));
             }
-            RemoteListMutation::AddDuplicate { columns } => {
-                let row = self.typed_remote_row(columns);
-                self.peer.mutate(&ListMutation::AddDuplicate(row));
+            RemoteListMutation::AddDuplicate { columns }
+            | RemoteListMutation::AddActiveOverTicked { columns } => {
+                self.app
+                    .change(|list| list.add(Self::entry(columns), false));
+            }
+            RemoteListMutation::EditRemotely { columns } => self.edit_in_app(columns),
+            RemoteListMutation::UntickRemotely { columns } => {
+                self.app
+                    .change(|list| list.untick(&Self::cell(columns, "name")));
+            }
+            RemoteListMutation::TickLocally { columns } => {
+                let id = Self::id_of(columns);
+                let mut params = holon_api::StorageEntity::default();
+                params.insert("id".into(), Value::String(id.clone()));
+                params.insert("field".into(), Value::String("checked".into()));
+                params.insert("value".into(), Value::Integer(1));
+                self.execute("set_field", params, &id).await;
+            }
+            RemoteListMutation::EditBoth { columns, peer } => {
+                self.edit_in_app(peer);
+                self.edit_in_holon(columns).await;
             }
             RemoteListMutation::AuthorLocally { columns } => {
-                let row = self.typed_remote_row(columns);
-                use holon_core::OperationProvider;
+                let id = Self::id_of(columns);
                 let mut params = holon_api::StorageEntity::default();
-                for (column, value) in row.columns {
-                    params.insert(column.into(), value);
+                params.insert("id".into(), Value::String(id.clone()));
+                for (column, value) in columns {
+                    let value = match column.as_str() {
+                        "checked" => Value::Integer(
+                            value
+                                .parse()
+                                .expect("the remote-list checked flag is 0 or 1"),
+                        ),
+                        _ => Value::String(value.clone()),
+                    };
+                    params.insert(column.as_str().into(), value);
                 }
-                self.component
-                    .engine()
-                    .get_dispatcher()
-                    .execute_operation(
-                        &EntityName::new(remote_list_fixture::ENTITY),
-                        "create",
-                        params,
-                    )
-                    .await
-                    .unwrap_or_else(|e| {
-                        panic!(
-                            "creating {} '{}' through the dispatcher failed: {e:#}",
-                            remote_list_fixture::ENTITY,
-                            row.id
-                        )
-                    });
+                self.execute("create", params, &id).await;
+            }
+            RemoteListMutation::EditLocally { columns } => self.edit_in_holon(columns).await,
+            RemoteListMutation::DeleteLocally { columns } => {
+                let id = Self::id_of(columns);
+                let mut params = holon_api::StorageEntity::default();
+                params.insert("id".into(), Value::String(id.clone()));
+                self.execute("delete", params, &id).await;
             }
         }
     }
@@ -287,7 +255,7 @@ impl SutRemoteListSync for RemoteListSut {
     async fn remote_list_sync_round(&self) -> RemoteListRoundOutcome {
         // The round's push count, read from the peer it pushed to — the remote
         // end of the round, not the round's self-report.
-        let before = self.peer.commands_applied();
+        let before = self.app.commands_applied();
         let result = self
             .component
             .engine()
@@ -309,20 +277,17 @@ impl SutRemoteListSync for RemoteListSut {
                     remote_list_fixture::ENTITY
                 )
             });
-        let refused = match &result.response {
-            None => 0,
-            Some(response) => response
-                .as_object()
-                .and_then(|response| response.get("refused"))
-                .and_then(Value::as_array)
-                .unwrap_or_else(|| {
-                    panic!("a sync response carries no `refused` list: {response:?}")
-                })
-                .len(),
+        let (refused, overwritten) = match &result.response {
+            None => (0, Vec::new()),
+            Some(response) => (
+                Self::response_list(response, "refused").len(),
+                Self::response_list(response, "overwritten"),
+            ),
         };
         RemoteListRoundOutcome {
-            committed: self.peer.commands_applied() - before,
+            committed: self.app.commands_applied() - before,
             refused,
+            overwritten,
         }
     }
 
@@ -343,5 +308,9 @@ impl SutRemoteListSync for RemoteListSut {
             .collect();
         out.sort();
         out
+    }
+
+    async fn remote_list_peer_entries(&self) -> Vec<Vec<String>> {
+        self.app.list().entries()
     }
 }

@@ -175,8 +175,6 @@ impl holon_pbt_core::capabilities::RefReboot for ReferenceState {
     /// - the `edit-refused-read-only-format` and `edit-refused-by-shape`
     ///   disclosures — `AllClear::UntilRestart`, raised by a refused write
     ///   only, so the new boot shows them again only after the next refusal.
-    /// - the remote-list peer's duplicate entries — the fixture peer is rebuilt
-    ///   from the mirror.
     fn reboot_drops_in_memory_state(&mut self) {
         self.ui.tab.active_editor = None;
         self.ui.tab.focused_cursor.clear();
@@ -196,7 +194,6 @@ impl holon_pbt_core::capabilities::RefReboot for ReferenceState {
             .clear_kind(holon_api::ConditionKind::EDIT_REFUSED_BY_SHAPE);
         self.conditions.restart();
         self.restart_forgets_copy_state();
-        self.remote_list.reboot_reseeds_peer_from_mirror();
     }
 }
 

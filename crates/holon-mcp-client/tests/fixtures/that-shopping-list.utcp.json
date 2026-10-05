@@ -50,9 +50,11 @@
                 },
                 "count": {
                   "type": [
+                    "string",
                     "number",
                     "null"
-                  ]
+                  ],
+                  "description": "Free-text amount such as '2kg' or '4 Zehen'."
                 }
               },
               "required": [
@@ -63,7 +65,7 @@
           },
           "pickedItems": {
             "type": "object",
-            "description": "Map keyed by item name; value carries cat and optionally count/date. Membership means checked.",
+            "description": "Map keyed by item name; value carries cat and optionally pickedCount (the amount, free text), count and date. Membership means checked.",
             "additionalProperties": {
               "type": "object"
             }
@@ -103,7 +105,7 @@
     },
     {
       "name": "commit",
-      "description": "Apply a batch of add/del commands. The query 'version' is the version of the pull this batch was reconciled against. Response carries the new version. A command id makes a retry idempotent, so DO NOT remint ids when re-sending the same logical batch.",
+      "description": "Apply a batch of commands: add/del on the active list, replace/del on the picked list. The query 'version' is the version of the pull this batch was reconciled against. Response carries the new version. A command id makes a retry idempotent, so DO NOT remint ids when re-sending the same logical batch.",
       "inputs": {
         "type": "object",
         "properties": {
@@ -141,10 +143,23 @@
                   "properties": {
                     "cmd": {
                       "type": "string",
+                      "description": "A command on the active list.",
                       "enum": [
                         "add",
                         "del"
                       ]
+                    },
+                    "picked": {
+                      "type": "string",
+                      "description": "A command on the picked list; a command carries `cmd` or `picked`.",
+                      "enum": [
+                        "replace",
+                        "del"
+                      ]
+                    },
+                    "name": {
+                      "type": "string",
+                      "description": "The picked item a `replace` replaces."
                     },
                     "good": {
                       "type": "object",
@@ -157,12 +172,17 @@
                         },
                         "new": {
                           "type": "boolean"
+                        },
+                        "count": {
+                          "type": "string"
+                        },
+                        "pickedCount": {
+                          "type": "string"
                         }
                       },
                       "required": [
                         "name",
-                        "cat",
-                        "new"
+                        "cat"
                       ]
                     },
                     "id": {
@@ -171,7 +191,6 @@
                     }
                   },
                   "required": [
-                    "cmd",
                     "good",
                     "id"
                   ]

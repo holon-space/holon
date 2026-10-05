@@ -41,6 +41,10 @@ pub struct ListSyncSpec {
     /// silent fold: under a complete snapshot, a collapsed pair reads as a
     /// deletion.
     pub key: String,
+    /// A `jaq` expression over one item row yielding the text a person knows
+    /// the row by — `.content`, or `.name + " in " + .cat`. A disclosure names
+    /// the row with it, since a key such as `["milk","R"]` is not prose.
+    pub display_name: String,
     /// Column holding the last complete fetch that carried a row, RFC 3339.
     /// NULL marks a row the peer has never sent, whose absence therefore says
     /// nothing about it.
@@ -48,9 +52,15 @@ pub struct ListSyncSpec {
     /// Row types the write leg emits for the `request` mapping to select on.
     pub batch_row_type: String,
     pub command_row_type: String,
-    /// Columns taken from the peer whenever they differ from the local value.
+    /// Columns merged three-way: a value Holon changed since the peer last
+    /// served it is pushed, a value the peer changed is taken, and where both
+    /// changed the peer wins and the overwrite is disclosed by name.
     #[serde(default)]
     pub merge_columns: Vec<String>,
+    /// TEXT column holding the base of that merge: a JSON object of the peer's
+    /// last served value of every merge and latch column. NULL (a row no pull
+    /// has written yet) means no base, and the peer's value is taken.
+    pub base_column: String,
     /// How this connection defeats a cached read, if it needs to at all.
     ///
     /// Declared rather than assumed: a cache-buster is one peer's concern, and
@@ -58,12 +68,14 @@ pub struct ListSyncSpec {
     /// every other connection's request.
     #[serde(default)]
     pub cache_buster: CacheBuster,
-    /// Columns that only ever travel peer→local in the truthy direction.
+    /// Columns a peer's set always reaches Holon, while an unset reaches it
+    /// only where the peer itself un-set the column: the base says the peer
+    /// served it set, and it now serves it unset. A Holon set the peer has not
+    /// served yet stays.
     ///
     /// A shopping list's `checked` is the worked example: with no timestamp to
     /// arbitrate with, a wrong check skips one item while a wrong un-check
-    /// re-buys it every trip, so the losing direction is made unrepresentable
-    /// rather than remembered at each call site.
+    /// re-buys it every trip, so only the peer's own un-check lowers it.
     #[serde(default)]
     pub latch_columns: Vec<String>,
     /// Row type under which the pull mapping reports entries it skipped, each
@@ -110,6 +122,7 @@ impl CacheBuster {
 pub struct CompiledListSync {
     spec: ListSyncSpec,
     key: RowMapper,
+    display_name: RowMapper,
     tombstone_column: String,
     entity_scheme: holon_api::EntityName,
     tombstone_window: Duration,
@@ -155,6 +168,13 @@ impl CompiledListSync {
             .with_context(|| {
                 format!("connection '{connection}': the `list_sync.key` expression")
             })?;
+        let display_name = RowMapper::compile(
+            format!("{connection}: holon.list_sync.display_name"),
+            &spec.display_name,
+        )
+        .with_context(|| {
+            format!("connection '{connection}': the `list_sync.display_name` expression")
+        })?;
 
         let declared_columns: BTreeSet<String> =
             declared.fields.iter().map(|f| f.name.clone()).collect();
@@ -181,6 +201,42 @@ impl CompiledListSync {
             }
         }
 
+        anyhow::ensure!(
+            declared_columns.contains(&spec.base_column),
+            "connection '{connection}' keeps its merge base in '{}' (`list_sync.base_column`), \
+             but the type '{}' declares no such column",
+            spec.base_column,
+            spec.entity
+        );
+        anyhow::ensure!(
+            !policies.contains(spec.base_column.as_str())
+                && spec.base_column != soft_delete.tombstone_field.as_str()
+                && spec.base_column != spec.watermark_column,
+            "connection '{connection}' keeps its merge base in '{}', which already carries a \
+             merge, latch, tombstone or watermark value",
+            spec.base_column
+        );
+        anyhow::ensure!(
+            spec.base_column != declared.primary_key.as_str()
+                && spec.base_column != spec.version_column,
+            "connection '{connection}' keeps its merge base in '{}', which is the type's primary \
+             key or the list's `version_column`; every pull rewrites the base, so it would \
+             overwrite the row's identity or the version cursor",
+            spec.base_column
+        );
+        anyhow::ensure!(
+            !key_reads(&key, &declared_columns, &spec.base_column).with_context(|| {
+                format!(
+                    "connection '{connection}': probing whether `list_sync.key` reads the merge \
+                     base '{}'",
+                    spec.base_column
+                )
+            })?,
+            "connection '{connection}' keeps its merge base in '{}', which its `list_sync.key` \
+             expression reads; every pull rewrites the base, so the row's key would change under it",
+            spec.base_column
+        );
+
         Ok(Arc::new(Self {
             tombstone_column: soft_delete.tombstone_field.to_string(),
             entity_scheme: holon_api::EntityName::new(spec.entity.clone()),
@@ -188,6 +244,7 @@ impl CompiledListSync {
             declared_columns,
             spec,
             key,
+            display_name,
         }))
     }
 
@@ -240,6 +297,42 @@ impl CompiledListSync {
             ),
         }
     }
+
+    /// The text a person knows this row by, as the sidecar names it.
+    pub fn display_name_of(&self, row: &serde_json::Value) -> Result<String> {
+        let emitted = self
+            .display_name
+            .map(row)
+            .with_context(|| format!("deriving the display name of the row {row}"))?;
+        match emitted.as_slice() {
+            [serde_json::Value::String(name)] => Ok(name.clone()),
+            other => anyhow::bail!(
+                "`list_sync.display_name` emitted {other:?} for the row {row}, and a display \
+                 name is exactly one text"
+            ),
+        }
+    }
+}
+
+/// Whether `key` derives another identity for a row holding every declared
+/// column once only `column` changes.
+fn key_reads(key: &RowMapper, columns: &BTreeSet<String>, column: &str) -> Result<bool> {
+    let row = |changed: &str| {
+        serde_json::Value::Object(
+            columns
+                .iter()
+                .map(|name| {
+                    let value = if name == column {
+                        format!("{name}{changed}")
+                    } else {
+                        name.clone()
+                    };
+                    (name.clone(), serde_json::Value::String(value))
+                })
+                .collect(),
+        )
+    };
+    Ok(key.map(&row(""))? != key.map(&row("'"))?)
 }
 
 /// One row's identity, as its connection derives it.

@@ -210,6 +210,8 @@ fn central_invariants() -> Vec<Box<dyn CapInvariant>> {
         // storage-only draw deselects it instead of comparing against a mirror
         // table that was never declared.
         invariants::remote_list_mirror_matches_ref::wire(),
+        // The list app holds what the round must have sent it.
+        invariants::remote_list_peer_matches_ref::wire(),
         // ViewModel liveness/coherence invariants (Bundle C-remainder port,
         // 2026-06-23): need `SutViewSelection` (`frontend_engine`/`frontend_root_not_error`/
         // `live_tree_matches_fresh`) or `SutViewSelection + RefViewSelection` (`view_selection`).

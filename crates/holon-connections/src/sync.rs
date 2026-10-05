@@ -24,7 +24,7 @@ use crate::snapshot::ListSnapshot;
 use crate::snapshot::LocalRowReader;
 use crate::spec::RowKey;
 
-/// The two intents a reconciler can push.
+/// The intents a reconciler can push.
 ///
 /// These are HOLON's names, not any peer's. What a given system spells them as
 /// lives in its sidecar's `request` mapping; this string only has to be stable
@@ -32,6 +32,7 @@ use crate::spec::RowKey;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandVerb {
     Add,
+    Update,
     Remove,
 }
 
@@ -39,6 +40,7 @@ impl CommandVerb {
     pub fn as_intent(&self) -> &'static str {
         match self {
             CommandVerb::Add => "add",
+            CommandVerb::Update => "update",
             CommandVerb::Remove => "remove",
         }
     }
@@ -53,6 +55,9 @@ pub struct CommitCommand {
     /// than the key — a peer adding an item wants its columns, and even a
     /// removal has to name the record in the peer's own vocabulary.
     pub columns: BTreeMap<String, Value>,
+    /// The peer's own record of that row, where it serves one, emitted under
+    /// `remote`: a peer may spell one intent differently by the record's state.
+    pub remote: Option<BTreeMap<String, Value>>,
     /// The idempotency and ordering key, `<round_ms>_<16 hex>`.
     pub id: String,
 }
@@ -68,6 +73,9 @@ impl CommitCommand {
         row.insert("verb".into(), serde_json::json!(self.verb.as_intent()));
         row.insert("key".into(), self.key.as_json().clone());
         row.insert("command_id".into(), serde_json::json!(self.id));
+        if let Some(remote) = &self.remote {
+            row.insert("remote".into(), serde_json::to_value(remote)?);
+        }
         Ok(serde_json::json!({ "type": command_row_type, "row": row }))
     }
 }
@@ -110,19 +118,29 @@ impl CommitBatch {
         let commands = push
             .iter()
             .map(|intent| {
-                let (verb, key, columns) = match intent {
+                let (verb, key, columns, remote) = match intent {
                     PushIntent::Add { key, row } => {
-                        (CommandVerb::Add, key.clone(), row.columns.clone())
+                        (CommandVerb::Add, key.clone(), row.columns.clone(), None)
                     }
-                    PushIntent::Remove { key, row } => {
-                        (CommandVerb::Remove, key.clone(), row.columns.clone())
-                    }
+                    PushIntent::Update { key, row, remote } => (
+                        CommandVerb::Update,
+                        key.clone(),
+                        row.columns.clone(),
+                        Some(remote.columns.clone()),
+                    ),
+                    PushIntent::Remove { key, row, remote } => (
+                        CommandVerb::Remove,
+                        key.clone(),
+                        row.columns.clone(),
+                        Some(remote.columns.clone()),
+                    ),
                 };
                 let id = command_id(round_ms, verb, &key);
                 CommitCommand {
                     verb,
                     key,
                     columns,
+                    remote,
                     id,
                 }
             })
@@ -213,6 +231,8 @@ pub struct SyncOutcome {
     /// Entries of the peer's list the pull mapping skipped, with the reason
     /// for each.
     pub refused: Vec<String>,
+    /// Holon's edits the peer's own edit of the same cell overwrote.
+    pub overwritten: Vec<String>,
 }
 
 /// Run one round: pull the list, reconcile it against the local rows, commit
@@ -251,6 +271,7 @@ pub async fn sync_once(
                 committed,
                 retried,
                 refused: snapshot.refusals().to_vec(),
+                overwritten: outcome.overwritten,
             });
         }
         anyhow::ensure!(

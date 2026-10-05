@@ -4785,6 +4785,31 @@ pub enum RemoteListMutation {
     AddDuplicate { columns: Vec<(String, String)> },
     /// A person creates the row in Holon; the round pushes it to the peer.
     AuthorLocally { columns: Vec<(String, String)> },
+    /// A person changes cells of an existing row in Holon. `columns` carries
+    /// the identity columns and the edited ones; the round pushes the edit.
+    EditLocally { columns: Vec<(String, String)> },
+    /// A person deletes an existing row in Holon; the round pushes the removal.
+    DeleteLocally { columns: Vec<(String, String)> },
+    /// A person changes cells of an existing row on the peer. `columns`
+    /// carries the identity columns and the edited ones.
+    EditRemotely { columns: Vec<(String, String)> },
+    /// The same cells of one row change in Holon (`columns`) and on the peer
+    /// (`peer`) before the next round. The peer's value wins; Holon's losing
+    /// edit is disclosed by name.
+    EditBoth {
+        columns: Vec<(String, String)>,
+        peer: Vec<(String, String)>,
+    },
+    /// The peer's list gains an active entry under the key of a row it holds
+    /// ticked. The connection mirrors the active entry, so Holon shows the row
+    /// active, and refuses the ticked one by name.
+    AddActiveOverTicked { columns: Vec<(String, String)> },
+    /// A person un-ticks, in the app, a row the app holds ticked alone: the
+    /// item goes back on the list, and Holon follows.
+    UntickRemotely { columns: Vec<(String, String)> },
+    /// A person ticks a row in Holon. The tick is never pushed, so it stays
+    /// local while the app serves the item active.
+    TickLocally { columns: Vec<(String, String)> },
 }
 
 impl RemoteListMutation {
@@ -4794,7 +4819,14 @@ impl RemoteListMutation {
             RemoteListMutation::Add { columns }
             | RemoteListMutation::Remove { columns }
             | RemoteListMutation::AddDuplicate { columns }
-            | RemoteListMutation::AuthorLocally { columns } => columns,
+            | RemoteListMutation::AuthorLocally { columns }
+            | RemoteListMutation::EditLocally { columns }
+            | RemoteListMutation::DeleteLocally { columns }
+            | RemoteListMutation::EditRemotely { columns }
+            | RemoteListMutation::EditBoth { columns, .. }
+            | RemoteListMutation::AddActiveOverTicked { columns }
+            | RemoteListMutation::UntickRemotely { columns }
+            | RemoteListMutation::TickLocally { columns } => columns,
         }
     }
 }
@@ -4804,20 +4836,25 @@ crate::step_field_via_json!(
     vec![
         RemoteListMutation::Add {
             columns: vec![
-                ("label".to_string(), "label1".to_string()),
-                ("bucket".to_string(), "bucket".to_string()),
-                ("rank".to_string(), "1".to_string()),
-                ("amount".to_string(), "2kg".to_string()),
-                ("done".to_string(), "0".to_string()),
+                ("name".to_string(), "item1".to_string()),
+                ("cat".to_string(), "R".to_string()),
+                ("count".to_string(), "2kg".to_string()),
+                ("checked".to_string(), "0".to_string()),
+            ],
+        },
+        RemoteListMutation::EditLocally {
+            columns: vec![
+                ("name".to_string(), "item1".to_string()),
+                ("cat".to_string(), "R".to_string()),
+                ("count".to_string(), "500g".to_string()),
             ],
         },
         RemoteListMutation::Remove {
             columns: vec![
-                ("label".to_string(), "label1".to_string()),
-                ("bucket".to_string(), "bucket".to_string()),
-                ("rank".to_string(), "1".to_string()),
-                ("amount".to_string(), "2kg".to_string()),
-                ("done".to_string(), "0".to_string()),
+                ("name".to_string(), "item1".to_string()),
+                ("cat".to_string(), "R".to_string()),
+                ("count".to_string(), "500g".to_string()),
+                ("checked".to_string(), "0".to_string()),
             ],
         },
     ]
@@ -4832,6 +4869,8 @@ pub struct RemoteListRoundOutcome {
     /// How many refusals the round reported, one per key it skipped entries
     /// under.
     pub refused: usize,
+    /// The round's disclosures of a Holon edit the peer's value overwrote.
+    pub overwritten: Vec<String>,
 }
 
 /// SUT side of the remote-list sync axis: a fixture peer the composed keystone
@@ -4857,6 +4896,9 @@ pub trait SutRemoteListSync {
     /// (id + the columns the peer serves), canonically sorted for
     /// order-insensitive diffing.
     async fn remote_list_mirror_rows(&self) -> Vec<Vec<String>>;
+
+    /// The peer's own entries, as the peer stores them, canonically sorted.
+    async fn remote_list_peer_entries(&self) -> Vec<Vec<String>>;
 }
 
 /// Ref-side expectation for the remote-list sync axis: the peer's declared
@@ -4870,6 +4912,14 @@ pub trait RefRemoteListSync {
     /// How many keys the peer's list holds more than one entry under — each is
     /// one refusal per round.
     fn remote_list_expected_refusals(&self) -> usize;
+
+    /// The entries the peer must store once a round has settled, matching
+    /// [`SutRemoteListSync::remote_list_peer_entries`].
+    fn remote_list_expected_peer_entries(&self) -> Vec<Vec<String>>;
+
+    /// The rows whose Holon edit the last change's round must disclose as
+    /// overwritten, as `(name, cat)`.
+    fn remote_list_expected_overwritten(&self) -> Vec<(String, String)>;
 }
 
 /// When the keystone's fake MCP peer starts answering, relative to the boot.

@@ -19,6 +19,7 @@ use holon_api::Value;
 use crate::snapshot::ListSnapshot;
 use crate::snapshot::LocalRow;
 use crate::snapshot::RemoteRow;
+use crate::snapshot::json_of;
 use crate::snapshot::key_of_local;
 use crate::spec::CompiledListSync;
 use crate::spec::RowKey;
@@ -52,12 +53,21 @@ pub enum PushIntent {
         key: RowKey,
         row: LocalRow,
     },
+    /// Holon changed a merge column since the peer last served it. `row` is the
+    /// row as this round leaves it; `remote` is the peer's record, for a
+    /// mapping whose command depends on the peer's own state.
+    Update {
+        key: RowKey,
+        row: LocalRow,
+        remote: RemoteRow,
+    },
     /// The local row travels with the key: a peer's `request` mapping is what
     /// decides how much of it the removal command needs, and a key alone leaves
     /// it nothing to name the record with.
     Remove {
         key: RowKey,
         row: LocalRow,
+        remote: RemoteRow,
     },
 }
 
@@ -66,6 +76,8 @@ pub enum PushIntent {
 pub struct ReconcileOutcome {
     pub local: Vec<LocalIntent>,
     pub push: Vec<PushIntent>,
+    /// Holon's edits the peer's own edit of the same cell overwrote, by name.
+    pub overwritten: Vec<String>,
 }
 
 /// Turns `(local rows, one complete remote snapshot)` into intents, under the
@@ -113,7 +125,7 @@ impl RemoteListReconciler {
             match by_key.get(key) {
                 None => outcome.local.push(LocalIntent::Insert {
                     id: remote.id.clone(),
-                    columns: mirrored_columns(&self.compiled, remote, snapshot.fetched_at()),
+                    columns: mirrored_columns(&self.compiled, remote, snapshot.fetched_at())?,
                 }),
                 Some(row) => match row.timestamp(tombstone_column) {
                     // A live tombstone means WE deleted it and the peer has not
@@ -127,34 +139,89 @@ impl RemoteListReconciler {
                         outcome.push.push(PushIntent::Remove {
                             key: key.clone(),
                             row: (*row).clone(),
+                            remote: remote.clone(),
                         });
                     }
                     // An expired tombstone has outlived its purpose; the peer
                     // still lists the row, so it comes back on the local id.
                     Some(_) => outcome.local.push(LocalIntent::Insert {
                         id: row.id.clone(),
-                        columns: mirrored_columns(&self.compiled, remote, snapshot.fetched_at()),
+                        columns: mirrored_columns(&self.compiled, remote, snapshot.fetched_at())?,
                     }),
                     None => {
+                        let base = base_of(&self.compiled, row)?;
+                        let named = || self.compiled.display_name_of(&json_of(&remote.columns)?);
+                        let mut resolved = (*row).clone();
+                        let mut edited = false;
                         for column in &spec.merge_columns {
                             let incoming =
                                 remote.columns.get(column).cloned().unwrap_or(Value::Null);
-                            if !same_value(row.column(column), &incoming) {
-                                outcome.local.push(LocalIntent::SetColumn {
-                                    id: row.id.clone(),
-                                    column: column.clone(),
-                                    value: incoming,
-                                });
+                            let mine = row.column(column);
+                            if same_value(mine, &incoming) {
+                                continue;
                             }
+                            let base_value = served_before(base.as_ref(), column);
+                            match base_value {
+                                Some(base_value) if same_value(Some(&base_value), &incoming) => {
+                                    edited = true;
+                                    continue;
+                                }
+                                Some(base_value) if same_value(mine, &base_value) => {}
+                                Some(base_value) => outcome.overwritten.push(format!(
+                                    "`{column}` of {}: Holon's {} and the peer's {} both \
+                                     changed {}; the peer's value is kept",
+                                    named()?,
+                                    shown(mine.unwrap_or(&Value::Null))?,
+                                    shown(&incoming)?,
+                                    shown(&base_value)?
+                                )),
+                                None => outcome.overwritten.push(format!(
+                                    "`{column}` of {}: Holon's {} differs from the peer's {} \
+                                     and no value the peer served before is recorded; the peer's \
+                                     value is kept",
+                                    named()?,
+                                    shown(mine.unwrap_or(&Value::Null))?,
+                                    shown(&incoming)?
+                                )),
+                            }
+                            resolved.columns.insert(column.clone(), incoming.clone());
+                            outcome.local.push(LocalIntent::SetColumn {
+                                id: row.id.clone(),
+                                column: column.clone(),
+                                value: incoming,
+                            });
                         }
                         for column in &spec.latch_columns {
-                            if truthy(remote.columns.get(column)) && !truthy(row.column(column)) {
-                                outcome.local.push(LocalIntent::SetColumn {
-                                    id: row.id.clone(),
-                                    column: column.clone(),
-                                    value: Value::Integer(1),
-                                });
-                            }
+                            let set = truthy(remote.columns.get(column));
+                            let held = truthy(row.column(column));
+                            let unset_by_peer =
+                                truthy(served_before(base.as_ref(), column).as_ref());
+                            let value = match (set, held) {
+                                (true, false) => Value::Integer(1),
+                                (false, true) if unset_by_peer => Value::Integer(0),
+                                _ => continue,
+                            };
+                            resolved.columns.insert(column.clone(), value.clone());
+                            outcome.local.push(LocalIntent::SetColumn {
+                                id: row.id.clone(),
+                                column: column.clone(),
+                                value,
+                            });
+                        }
+                        let served = base_value_of(&self.compiled, remote)?;
+                        if base.map(serde_json::Value::Object).as_ref() != Some(&served) {
+                            outcome.local.push(LocalIntent::SetColumn {
+                                id: row.id.clone(),
+                                column: spec.base_column.clone(),
+                                value: Value::String(served.to_string()),
+                            });
+                        }
+                        if edited {
+                            outcome.push.push(PushIntent::Update {
+                                key: key.clone(),
+                                row: resolved,
+                                remote: remote.clone(),
+                            });
                         }
                         outcome.local.push(LocalIntent::TouchWatermark {
                             id: row.id.clone(),
@@ -203,7 +270,7 @@ fn mirrored_columns(
     compiled: &CompiledListSync,
     remote: &RemoteRow,
     fetched_at: &str,
-) -> BTreeMap<String, Value> {
+) -> Result<BTreeMap<String, Value>> {
     let mut columns: BTreeMap<String, Value> = remote
         .columns
         .iter()
@@ -215,7 +282,67 @@ fn mirrored_columns(
         Value::String(fetched_at.to_string()),
     );
     columns.insert(compiled.tombstone_column().to_string(), Value::Null);
-    columns
+    columns.insert(
+        compiled.spec().base_column.clone(),
+        Value::String(base_value_of(compiled, remote)?.to_string()),
+    );
+    Ok(columns)
+}
+
+/// The merge base a pull of `remote` records: the peer's value of every merge
+/// and latch column.
+fn base_value_of(compiled: &CompiledListSync, remote: &RemoteRow) -> Result<serde_json::Value> {
+    let spec = compiled.spec();
+    let served: BTreeMap<String, Value> = spec
+        .merge_columns
+        .iter()
+        .chain(&spec.latch_columns)
+        .map(|column| {
+            let value = remote.columns.get(column).cloned().unwrap_or(Value::Null);
+            (column.clone(), value)
+        })
+        .collect();
+    json_of(&served)
+}
+
+/// The merge base a row holds, `None` where no pull has recorded one yet.
+fn base_of(
+    compiled: &CompiledListSync,
+    row: &LocalRow,
+) -> Result<Option<serde_json::Map<String, serde_json::Value>>> {
+    let column = &compiled.spec().base_column;
+    match row.column(column) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(text)) => match serde_json::from_str(text) {
+            Ok(serde_json::Value::Object(base)) => Ok(Some(base)),
+            other => anyhow::bail!(
+                "the merge base `{column}` of '{}' is not a JSON object ({other:?}): '{text}'",
+                row.id
+            ),
+        },
+        Some(other) => anyhow::bail!(
+            "the merge base `{column}` of '{}' is not text: {other:?}",
+            row.id
+        ),
+    }
+}
+
+/// What the peer served for `column` when the base was recorded, `None` where
+/// no base is. A base recorded before the column was tracked reads as null.
+fn served_before(
+    base: Option<&serde_json::Map<String, serde_json::Value>>,
+    column: &str,
+) -> Option<Value> {
+    base.map(|base| {
+        Value::from_json_value(base.get(column).cloned().unwrap_or(serde_json::Value::Null))
+    })
+}
+
+/// A value as a person reads it in a disclosure: its JSON spelling.
+fn shown(value: &Value) -> Result<String> {
+    Ok(serde_json::to_value(value)
+        .context("rendering a merge value for a disclosure")?
+        .to_string())
 }
 
 /// Whether a local column and the peer's value for it say the same thing.

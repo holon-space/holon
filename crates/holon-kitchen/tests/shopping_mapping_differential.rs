@@ -48,8 +48,9 @@ struct Observed {
     version: (i64, i64),
     /// code → (icon, color)
     cats: BTreeMap<String, (Option<String>, Option<String>)>,
-    /// (name, cat) → (amount text, checked, the category resolved)
-    items: BTreeMap<(String, String), (Option<String>, bool, bool)>,
+    /// (name, cat) → (amount text, checked, the category resolved, how many
+    /// active entries the list holds under the key)
+    items: BTreeMap<(String, String), (Option<String>, bool, bool, usize)>,
     /// How many `(name, cat)` keys held more than one active entry.
     refused: usize,
 }
@@ -121,6 +122,10 @@ fn observe(rows: &[TypedRowSet], snapshot: &ListSnapshot) -> Observed {
                         amount_text(item.columns.get("count")),
                         checked,
                         cats.contains_key(&cat),
+                        match item.columns.get("active_entries") {
+                            Some(holon_api::Value::Integer(n)) => *n as usize,
+                            other => panic!("an item row's `active_entries` is not a whole number (got {other:?})"),
+                        },
                     ),
                 )
             })
@@ -180,6 +185,7 @@ mod model {
         cat: String,
         count: Option<String>,
         checked: bool,
+        active_entries: usize,
     }
 
     pub fn parse(response: &Map<String, Json>) -> Result<Observed> {
@@ -192,6 +198,7 @@ mod model {
 
         let mut items: BTreeMap<(String, String), Item> = BTreeMap::new();
         let mut refused: BTreeSet<(String, String)> = BTreeSet::new();
+        let mut refused_ticked: BTreeSet<(String, String)> = BTreeSet::new();
         for value in required_array(response, "items")? {
             let record = value
                 .as_object()
@@ -204,6 +211,7 @@ mod model {
                     cat: required_cat(record.get("cat"))?,
                     count: optional_amount(record.get("count"))?,
                     checked: false,
+                    active_entries: 1,
                 },
             );
         }
@@ -213,6 +221,7 @@ mod model {
                 .ok_or_else(|| anyhow::anyhow!("`pickedItems['{name}']` is not an object"))?;
             fold_picked(
                 &mut items,
+                &mut refused_ticked,
                 Item {
                     name: required_name(Some(&Json::String(name.to_string())))?,
                     cat: required_cat(record.get("cat"))?,
@@ -221,12 +230,13 @@ mod model {
                         picked_count => picked_count,
                     })?,
                     checked: true,
+                    active_entries: 0,
                 },
             );
         }
 
         Ok(Observed {
-            refused: refused.len(),
+            refused: refused.len() + refused_ticked.len(),
             version: (list, picked),
             cats: by_code
                 .iter()
@@ -237,7 +247,12 @@ mod model {
                 .map(|(key, item)| {
                     (
                         key.clone(),
-                        (item.count, item.checked, by_code.contains_key(&key.1)),
+                        (
+                            item.count,
+                            item.checked,
+                            by_code.contains_key(&key.1),
+                            item.active_entries,
+                        ),
                     )
                 })
                 .collect(),
@@ -254,22 +269,28 @@ mod model {
         item: Item,
     ) {
         let key = (item.name.clone(), item.cat.clone());
-        if items.contains_key(&key) {
+        if let Some(first) = items.get_mut(&key) {
+            first.active_entries += 1;
             refused.insert(key);
         } else {
             items.insert(key, item);
         }
     }
 
-    /// Picked entries come after every active one, and an active entry's
-    /// amount is the one still to buy.
-    fn fold_picked(items: &mut BTreeMap<(String, String), Item>, item: Item) {
+    /// Entry `2026-10-06-a-shopping-item-active-and-ticked-at-once-never-converges-after-an-edit`:
+    /// picked entries come after every active one; a key already held active
+    /// keeps its active entry and the picked one is counted as refused, apart
+    /// from any active duplicates of that key.
+    fn fold_picked(
+        items: &mut BTreeMap<(String, String), Item>,
+        refused: &mut BTreeSet<(String, String)>,
+        item: Item,
+    ) {
         let key = (item.name.clone(), item.cat.clone());
-        match items.get_mut(&key) {
-            Some(held) => held.checked = true,
-            None => {
-                items.insert(key, item);
-            }
+        if items.contains_key(&key) {
+            refused.insert(key);
+        } else {
+            items.insert(key, item);
         }
     }
 
@@ -399,8 +420,8 @@ fn captured() -> Vec<Json> {
                            "pickedItemsVersion": 9, "options": {"cats": []}}),
         serde_json::json!({"items": [], "pickedItems": {}, "version": 3,
                            "pickedItemsVersion": null, "options": {"cats": []}}),
-        // Active and picked under one key: one row, checked, carrying the
-        // amount still to buy.
+        // Active and picked under one key: the active entry, the picked one
+        // refused.
         serde_json::json!({"items": [{"name": "Milk", "cat": "R", "count": "2kg"}],
                            "pickedItems": {"Milk": {"cat": "R", "pickedCount": "500g"}},
                            "version": 1, "options": {"cats": ["R"]}}),
@@ -516,11 +537,11 @@ fn count() -> impl Strategy<Value = Json> {
 /// The `(name, cat)` a generated item lands on.
 ///
 /// Drawn from a SMALL hot pool on purpose: `(name, cat)` is this peer's whole
-/// identity, so an active and a picked item sharing one is the fold arm — the
-/// arm that picks the amount and ORs `checked`. Drawing names widely made that
-/// arm a rare accident that ~256 default cases missed, leaving it defended only
-/// by the captured examples. The wide, adversarial draw stays reachable as the
-/// tail.
+/// identity, so an active and a picked item sharing one is the refusal arm —
+/// the arm that mirrors the active entry and refuses the ticked one. Drawing
+/// names widely made that arm a rare accident that ~256 default cases missed,
+/// leaving it defended only by the captured examples. The wide, adversarial
+/// draw stays reachable as the tail.
 fn item_key() -> impl Strategy<Value = (String, String)> {
     prop_oneof![
         6 => Just(("Milk".to_string(), "R".to_string())),
@@ -609,7 +630,11 @@ fn body() -> impl Strategy<Value = Json> {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig { cases: 256, ..ProptestConfig::default() })]
+    #![proptest_config(ProptestConfig {
+        cases: 256,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
 
     #[test]
     fn the_mapping_matches_the_bespoke_parse_on_generated_responses(body in body()) {

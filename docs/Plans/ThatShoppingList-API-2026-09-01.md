@@ -90,6 +90,10 @@ another `add` for the same name.
 | **Check** | `{"cmd":"del", good}` then `{"picked":"add", good}`, in one commit. By default `count` moves to `pickedCount` (inferred from `list.js`). |
 | **Uncheck** | `{"picked":"del", good}` then `{"cmd":"add", good}` with `count` restored (inferred from `list.js`). |
 | **Edit a checked item** | `{"picked":"replace", "name":<old name>, good}` (inferred from `list.js`). |
+| **Edit an active item's amount** | `{"cmd":"add", good:{name,cat,count}}` — no `new`; replaces the entry of that name (inferred from `list.js`, not captured). Holon sends it as the `update` verb. Open risk: the captured add of a new item carries `new: true`, and no capture shows whether an amount edit carries it too. The fake app ignores `good.new`, so no test can catch a wrong choice; a live capture of an in-app amount edit decides it. |
+| **Edit a checked item's amount** | `{"picked":"replace", name, good:{name,cat,count,pickedCount}}`, `count` and `pickedCount` both the new amount — the app's own in-place edit: `index.html:1405` copies `count` into `pickedCount` and keeps `count`, `app.js:2849-2851` calls `addPickedItem` with `keep_count: true`, which skips the move that deletes `count` (`list.js:1505-1514`) and sends the whole item (`list.js:1521`, queued with both fields at `list.js:1114-1121`). The picked row renders `count` (`index.html:1400-1403`). Agrees with the live capture of 2026-10-05 (both fields present). |
+| **One item active and checked at once** | Reachable from a second device (the app's own add removes the picked entry first, `app.js:2659`). Holon mirrors the active entry and reports the checked one under `shopping_refusal`; a Holon edit then reaches the active entry, a Holon delete sends `cmd: del` and then the picked `del`. |
+| **Delete a checked item** | `{"picked":"del", good:{name,cat}}` (`list.js` `removePickedItem`). A `cmd: del` removes only from the active list. |
 
 `picked` is a command-level key with values `add`, `del` or `replace`. A command carries `cmd`
 OR `picked`, never both. The capture showed only `picked:"del"`; the other `picked` forms come

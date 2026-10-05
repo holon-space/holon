@@ -36,7 +36,7 @@ The one-page answer to *"which features could this change impact?"*. Rows are us
 | **Ruled by** | An ADR under [`docs/adr/`](../adr/), or an invariant number from [Model.md](Model.md). |
 | **Mode axes** | Which of [Model.md](Model.md)'s four orthogonal axes the feature's behaviour varies on: **Storage** (Loro store on/off), **File adapter** (org/none), **Merge fidelity** (op-CRDT / base-3-way / LWW), **Transport** (iroh P2P on/off). `—` means the feature behaves the same everywhere. *Headless vs windowed* is a test-slice axis, not a product mode; it is called out in prose where it matters. |
 
-The composed keystone is [`general_e2e_composed_pbt.rs`](../../crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs). Its alphabet is 118 transitions; the repo declares 97 invariant ids plus 17 correspondence-family ids. Open reds are registered in [KeystoneKnownReds.md](../Testing/KeystoneKnownReds.md) — a red listed there is a pass-with-note, anything else is a regression.
+The composed keystone is [`general_e2e_composed_pbt.rs`](../../crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs). Its alphabet is 118 transitions; the repo declares 98 invariant ids plus 17 correspondence-family ids. Open reds are registered in [KeystoneKnownReds.md](../Testing/KeystoneKnownReds.md) — a red listed there is a pass-with-note, anything else is a regression.
 
 ---
 
@@ -315,6 +315,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `inv-offered-ops-pass-the-write-tier` — the operations offered on a block whose document is homed in a `WriteTier::ReadOnly` file
 - `inv-read-only-home-refuses-writes` — a store-origin write against a block whose document is homed in a `WriteTier::ReadOnly` file
 - `inv-remote-list-mirror-matches-ref` — the `RemoteListSync` transition runs the production round over the fixture peer and writes the local intents into the real mirror table; this compares that table, projected to the peer-authoritative columns, against the peer's list in the reference model.
+- `inv-remote-list-peer-matches-ref` — the `RemoteListSync` transition runs the production round against the fake list app; this compares the app's stored entries against the reference model's app.
 - `inv-render-only-block-draws-its-render` — a block whose only source child is a render draws that render, not a bare entity leaf
 - `inv-shape-gate-refuses-illegal-writes` — a Holon-side edit of a `decision` subtree, legal or not, one gesture at a time
 - `inv-shape-sim-matches-authority` — every block write any transition makes near a tagged block, through any op the dispatcher routes

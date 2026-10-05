@@ -145,7 +145,7 @@ impl OperationProvider for RemoteListOperations {
             .iter()
             .map(|intent| local_intent_operation(spec, intent))
             .collect();
-        for reason in &outcome.refused {
+        for reason in outcome.refused.iter().chain(&outcome.overwritten) {
             tracing::warn!(
                 connection = %self.connection,
                 list = %spec.entity,
@@ -157,9 +157,10 @@ impl OperationProvider for RemoteListOperations {
             // would push the reverse commands at a list that has already moved on.
             OperationResult::declared_irreversible(Vec::new(), "a peer sync cannot be un-sent")
                 .with_follow_ups(follow_ups);
-        if !outcome.refused.is_empty() {
+        if !outcome.refused.is_empty() || !outcome.overwritten.is_empty() {
             result.response = Some(holon_api::Value::from_json_value(serde_json::json!({
-                "refused": outcome.refused
+                "refused": outcome.refused,
+                "overwritten": outcome.overwritten,
             })));
         }
         Ok(result)

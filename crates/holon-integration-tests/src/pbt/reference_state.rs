@@ -772,27 +772,30 @@ impl TypedEntitiesRefState {
     }
 }
 
-/// Reference model of the remote-list sync axis: the fixture peer's declared
-/// list, which after a sync round is also the mirror's content.
+/// Reference model of the remote-list sync axis: the list app's entries and
+/// the mirror a settled round leaves.
 ///
-/// The peer is the oracle: a row is whatever the peer serves, and the mirror
-/// invariant asserts the SUT's mirror equals it after every round. Carries no
-/// product vocabulary — the row shape comes from
-/// [`crate::pbt::remote_list_fixture`], the ONE connection the keystone wires.
+/// The app is the oracle for what a round must have sent: every change made in
+/// Holon has to show up in the app's own entries, in the app's own fields.
+/// Carries no product vocabulary beyond [`crate::pbt::remote_list_fixture`],
+/// the ONE connection the keystone wires.
 #[derive(Debug, Clone, Default)]
 pub struct RemoteListRefState {
     /// id -> cells in [`crate::pbt::remote_list_fixture::PROJECTION`] order
     /// WITHOUT the leading id (the id is the key).
     rows: BTreeMap<String, Vec<String>>,
-    /// ids the peer's list holds more than one entry under. The mirror keeps
-    /// the first entry's cells; each id is one refusal per round.
-    duplicated: BTreeSet<String>,
+    app: crate::pbt::remote_list_fixture::AppList,
+    /// The rows whose Holon edit the last change's round overwrote.
+    overwritten: Vec<(String, String)>,
     /// Monotonic label allocator, so an `Add` never reuses a label a `Remove`
     /// freed and silently folds into a surviving row.
     next_label: u64,
 }
 
 impl RemoteListRefState {
+    const COUNT: usize = 2;
+    const CHECKED: usize = 3;
+
     /// The label the next `Add` draws — a fresh identity by construction.
     pub fn next_label(&self) -> u64 {
         self.next_label
@@ -804,20 +807,35 @@ impl RemoteListRefState {
     pub fn existing_columns(&self) -> Vec<Vec<(String, String)>> {
         self.rows
             .values()
-            .map(|cells| {
-                crate::pbt::remote_list_fixture::PROJECTION[1..]
-                    .iter()
-                    .cloned()
-                    .zip(cells.iter().cloned())
-                    .map(|(name, value)| (name.to_string(), value))
-                    .collect()
-            })
+            .map(|cells| Self::columns_of(cells))
             .collect()
     }
 
-    /// Apply one remote change the transition drew, mirroring the SUT fixture
-    /// peer's mutation.
+    /// The rows the app holds ticked and not also active.
+    pub fn ticked_only_columns(&self) -> Vec<Vec<(String, String)>> {
+        self.rows
+            .values()
+            .filter(|cells| {
+                self.app.picked.contains_key(&cells[0]) && !self.app.is_folded(&cells[0])
+            })
+            .map(|cells| Self::columns_of(cells))
+            .collect()
+    }
+
+    fn columns_of(cells: &[String]) -> Vec<(String, String)> {
+        crate::pbt::remote_list_fixture::PROJECTION[1..]
+            .iter()
+            .zip(cells.iter())
+            .map(|(name, value)| (name.to_string(), value.clone()))
+            .collect()
+    }
+
+    /// Apply one change the transition drew, to the app and to the mirror the
+    /// round must settle on.
     pub fn apply(&mut self, mutation: &holon_pbt_core::capabilities::RemoteListMutation) {
+        use holon_pbt_core::capabilities::RemoteListMutation;
+
+        use crate::pbt::remote_list_fixture::AppEntry;
         let cell = |columns: &[(String, String)], name: &str| {
             columns
                 .iter()
@@ -830,47 +848,124 @@ impl RemoteListRefState {
                     )
                 })
         };
-        let id = crate::pbt::remote_list_fixture::row_id(
-            &cell(mutation.columns(), "label"),
-            &cell(mutation.columns(), "bucket"),
-        );
-        use holon_pbt_core::capabilities::RemoteListMutation;
+        let columns = mutation.columns();
+        let (name, cat) = (cell(columns, "name"), cell(columns, "cat"));
+        let id = crate::pbt::remote_list_fixture::row_id(&name, &cat);
+        let entry = || AppEntry {
+            name: name.clone(),
+            cat: cat.clone(),
+            count: Some(cell(columns, "count")),
+        };
+        self.overwritten.clear();
         match mutation {
             RemoteListMutation::Add { .. } | RemoteListMutation::AuthorLocally { .. } => {
                 let cells = crate::pbt::remote_list_fixture::PROJECTION[1..]
                     .iter()
-                    .map(|name| cell(mutation.columns(), name))
+                    .map(|column| cell(columns, column))
                     .collect();
                 self.rows.insert(id, cells);
+                self.app.add(entry(), cell(columns, "checked") == "1");
                 self.next_label += 1;
             }
-            RemoteListMutation::Remove { .. } => {
+            RemoteListMutation::Remove { .. } | RemoteListMutation::DeleteLocally { .. } => {
                 self.rows.remove(&id);
-                self.duplicated.remove(&id);
+                self.app.remove(&name);
             }
             RemoteListMutation::AddDuplicate { .. } => {
                 assert!(
                     self.rows.contains_key(&id),
                     "the reference model duplicates {id}, which the peer does not hold"
                 );
-                self.duplicated.insert(id);
+                self.app.add(entry(), false);
+            }
+            RemoteListMutation::AddActiveOverTicked { .. } => {
+                assert!(
+                    self.app.picked.contains_key(&name) && !self.app.is_folded(&name),
+                    "the reference model adds an active {id} over a ticked one, and the app does \
+                     not hold it ticked alone"
+                );
+                self.app.add(entry(), false);
+                let row = self.row_mut(&id);
+                row[Self::COUNT] = cell(columns, "count");
+                row[Self::CHECKED] = "0".to_string();
+            }
+            RemoteListMutation::UntickRemotely { .. } => {
+                assert!(
+                    self.app.picked.contains_key(&name) && !self.app.is_folded(&name),
+                    "the reference model un-ticks {id}, which the app does not hold ticked alone"
+                );
+                self.app.untick(&name);
+                self.row_mut(&id)[Self::CHECKED] = "0".to_string();
+            }
+            RemoteListMutation::TickLocally { .. } => {
+                self.row_mut(&id)[Self::CHECKED] = "1".to_string();
+            }
+            RemoteListMutation::EditLocally { .. } => {
+                let amount = cell(columns, "count");
+                if self.row_mut(&id)[Self::COUNT] != amount {
+                    self.app.edit_amount(&name, &amount);
+                    self.row_mut(&id)[Self::COUNT] = amount;
+                }
+            }
+            RemoteListMutation::EditRemotely { .. } => {
+                let amount = cell(columns, "count");
+                self.app.edit_amount(&name, &amount);
+                self.row_mut(&id)[Self::COUNT] = amount;
+            }
+            RemoteListMutation::EditBoth { peer, .. } => {
+                let mine = cell(columns, "count");
+                let theirs = cell(peer, "count");
+                let base = self.row_mut(&id)[Self::COUNT].clone();
+                self.app.edit_amount(&name, &theirs);
+                let kept = if theirs == base {
+                    if mine != base {
+                        self.app.edit_amount(&name, &mine);
+                    }
+                    mine
+                } else {
+                    if mine != base && mine != theirs {
+                        self.overwritten.push((name.clone(), cat.clone()));
+                    }
+                    theirs
+                };
+                self.row_mut(&id)[Self::COUNT] = kept;
             }
         }
     }
 
-    /// Refusals every round reports: one per duplicated id.
+    fn row_mut(&mut self, id: &str) -> &mut Vec<String> {
+        self.rows.get_mut(id).unwrap_or_else(|| {
+            panic!("the reference model changes {id}, which the peer does not hold")
+        })
+    }
+
+    /// Refusals every round reports: one per key the app holds more than one
+    /// active entry under, and one per key it holds both active and ticked.
     pub fn expected_refusals(&self) -> usize {
-        self.duplicated.len()
+        let mut active: BTreeMap<(&str, &str), usize> = BTreeMap::new();
+        for entry in &self.app.items {
+            *active.entry((&entry.name, &entry.cat)).or_default() += 1;
+        }
+        let duplicated = active.values().filter(|n| **n > 1).count();
+        let folded = self
+            .app
+            .picked
+            .iter()
+            .filter(|(name, ticked)| active.contains_key(&(name.as_str(), ticked.cat.as_str())))
+            .count();
+        duplicated + folded
     }
 
-    /// A reboot rebuilds the fixture peer from the mirror, which holds only
-    /// the first entry under each key.
-    pub fn reboot_reseeds_peer_from_mirror(&mut self) {
-        self.duplicated.clear();
+    pub fn expected_peer_entries(&self) -> Vec<Vec<String>> {
+        self.app.entries()
     }
 
-    /// The peer's declared list, as `[id, ..cells]` in projection order,
-    /// canonically sorted for order-insensitive comparison.
+    pub fn expected_overwritten(&self) -> Vec<(String, String)> {
+        self.overwritten.clone()
+    }
+
+    /// The mirror a settled round leaves, as `[id, ..cells]` in projection
+    /// order, canonically sorted for order-insensitive comparison.
     pub fn expected_rows(&self) -> Vec<Vec<String>> {
         let mut rows: Vec<Vec<String>> = self
             .rows

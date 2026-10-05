@@ -351,6 +351,9 @@ pub struct HeadlessFrontendComponent {
     /// The external MCP server every boot of this component connects to.
     /// `None` for the boots that install no integration.
     integration_peer: Option<crate::fake_mcp_module::FakeMcpPeer>,
+    /// The list app every boot's remote-list round talks to; it keeps its list
+    /// across Holon's restarts.
+    remote_list_app: Arc<crate::pbt::remote_list_fixture::FakeListApp>,
 }
 
 /// Does this defining SELECT carry a real BIND PLACEHOLDER (so
@@ -900,6 +903,9 @@ impl HeadlessFrontendComponent {
             rerendered_operations: Arc::new(Mutex::new(HashMap::new())),
             read_only_ingest_compound: Mutex::new((0, 0)),
             integration_peer,
+            remote_list_app: crate::pbt::remote_list_fixture::FakeListApp::seeded(
+                crate::pbt::remote_list_fixture::AppList::default(),
+            ),
         };
         if connect.is_some() {
             for entity in crate::fake_mcp_module::ENTITIES {
@@ -1425,6 +1431,10 @@ impl HeadlessFrontendComponent {
 
     pub(crate) fn injector(&self) -> fluxdi::Injector {
         self.booted().injector.clone()
+    }
+
+    pub(crate) fn remote_list_app(&self) -> Arc<crate::pbt::remote_list_fixture::FakeListApp> {
+        self.remote_list_app.clone()
     }
 
     /// The production windowless `FrontendSession` this component booted.

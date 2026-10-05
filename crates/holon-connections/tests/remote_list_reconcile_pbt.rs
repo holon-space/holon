@@ -44,6 +44,7 @@ fields:
   - { name: checked, sql_type: INTEGER }
   - { name: deleted_at, sql_type: TEXT, nullable: true }
   - { name: last_seen_remote, sql_type: TEXT, nullable: true }
+  - { name: remote_base, sql_type: TEXT, nullable: true }
 soft_delete:
   tombstone_field: deleted_at
   retention_days: 7
@@ -57,7 +58,9 @@ commit_tool: commit
 list_row_type: shopping_list
 version_column: version
 key: "[.name, .cat]"
+display_name: '.name + " in " + .cat'
 watermark_column: last_seen_remote
+base_column: remote_base
 batch_row_type: shopping_commit
 command_row_type: shopping_command
 merge_columns: [count]
@@ -78,6 +81,7 @@ fields:
   - { name: checked, sql_type: INTEGER }
   - { name: removed_at, sql_type: TEXT, nullable: true }
   - { name: synced_at, sql_type: TEXT, nullable: true }
+  - { name: merge_base, sql_type: TEXT, nullable: true }
 soft_delete:
   tombstone_field: removed_at
   retention_days: 3
@@ -91,7 +95,9 @@ commit_tool: sync_commands
 list_row_type: todo_cursor
 version_column: sync_token
 key: .id
+display_name: .content
 watermark_column: synced_at
+base_column: merge_base
 batch_row_type: todo_batch
 command_row_type: todo_command
 merge_columns: [day_order]
@@ -109,6 +115,8 @@ struct Conn {
     row_id: fn(u8) -> String,
     /// The identity-bearing columns of `n`, as both legs spell them.
     identity: fn(u8) -> Vec<(&'static str, Value)>,
+    /// How a disclosure names `n` to a person.
+    display_name: fn(u8) -> String,
     merge_column: &'static str,
     /// Merge value `v` as the mirror column reads it back.
     local_merge: fn(i64) -> Value,
@@ -142,6 +150,7 @@ fn shopping() -> Conn {
                 ("cat", Value::String("staples".into())),
             ]
         },
+        display_name: |n| format!("item{n} in staples"),
         merge_column: "count",
         local_merge: amount,
         remote_merge: amount,
@@ -156,6 +165,7 @@ fn tasks() -> Conn {
         compiled: compile("tasks", TASK_TYPE, TASK_LIST_SYNC),
         row_id: |n| format!("todo-task:{n}"),
         identity: |n| vec![("content", Value::String(format!("task {n}")))],
+        display_name: |n| format!("task {n}"),
         merge_column: "day_order",
         // A REAL column reads the peer's whole number back as a float; the
         // merge comparison has to see through that difference.
@@ -396,6 +406,8 @@ fn apply(conn: &Conn, local: &[LocalRow], outcome: &ReconcileOutcome) -> Vec<Loc
 // ---------------------------------------------------------------------------
 
 proptest! {
+    #![proptest_config(ProptestConfig { failure_persistence: None, ..ProptestConfig::default() })]
+
     /// A second reconcile against the same snapshot decides nothing new. If it
     /// did, a list nobody is editing would keep producing writes — and a round
     /// that never quiesces cannot tell a real remote change from its own echo.
@@ -445,7 +457,9 @@ proptest! {
                 .push
                 .iter()
                 .map(|push| match push {
-                    PushIntent::Add { row, .. } | PushIntent::Remove { row, .. } => row.id.clone(),
+                    PushIntent::Add { row, .. }
+                    | PushIntent::Update { row, .. }
+                    | PushIntent::Remove { row, .. } => row.id.clone(),
                 })
                 .collect();
 
@@ -461,30 +475,132 @@ proptest! {
         }
     }
 
-    /// A latch column only ever travels peer→local in the truthy direction. A
-    /// wrong check skips one item; a wrong un-check re-buys it every trip, so
-    /// the losing direction is made unrepresentable rather than remembered.
+    /// No round unsets a latch column except on a live row Holon holds set,
+    /// whose base says the peer served it set and which the peer now serves
+    /// unset — across a whole list of rows, tombstones and bases at once. A
+    /// row an `Insert` writes is one Holon holds no live copy of, so the insert
+    /// path cannot carry an unset past that rule either.
     #[test]
-    fn a_latch_column_is_never_unset_by_a_round(scenario in scenario()) {
+    fn a_latch_column_is_never_unset_by_a_round(
+        scenario in scenario(),
+        bases in prop::collection::vec(prop::option::of(any::<bool>()), 8),
+    ) {
         for conn in connections() {
-            let (local, snapshot) = sides(&conn, &scenario);
+            let (mut local, snapshot) = sides(&conn, &scenario);
+            for row in &mut local {
+                let index = (0..scenario.0.len())
+                    .find(|n| (conn.row_id)(*n as u8) == row.id)
+                    .expect("every local row comes from a placement");
+                if let Some(checked) = bases[index] {
+                    row.columns.insert(
+                        conn.compiled.spec().base_column.clone(),
+                        Value::String(
+                            serde_json::json!({ "checked": i64::from(checked) }).to_string(),
+                        ),
+                    );
+                }
+            }
             let outcome = RemoteListReconciler::new(conn.compiled.clone())
                 .reconcile(&local, &snapshot)
                 .expect("the round");
             for intent in &outcome.local {
-                let LocalIntent::SetColumn { column, value, .. } = intent else {
-                    continue;
-                };
-                if column != "checked" {
-                    continue;
+                match intent {
+                    LocalIntent::SetColumn { id, column, value } if column == "checked" => {
+                        if *value == Value::Integer(1) {
+                            continue;
+                        }
+                        let index = (0..scenario.0.len())
+                            .find(|n| (conn.row_id)(*n as u8) == *id)
+                            .expect("a set targets a placed row");
+                        let lowered_by_peer = matches!(
+                            scenario.0[index],
+                            Placement::Both {
+                                tomb: Tombstone::None,
+                                local_checked: true,
+                                remote_checked: false,
+                                ..
+                            }
+                        ) && bases[index] == Some(true);
+                        prop_assert!(
+                            *value == Value::Integer(0) && lowered_by_peer,
+                            "{}: a round set the latch of {id} to {value:?} under {:?} with base \
+                             {:?}",
+                            conn.label,
+                            scenario.0[index],
+                            bases[index]
+                        );
+                    }
+                    LocalIntent::Insert { id, .. } => {
+                        let replaced = local.iter().find(|row| row.id == *id);
+                        prop_assert!(
+                            replaced.is_none_or(|row| {
+                                row.column(conn.tombstone_column)
+                                    == Some(&Value::String(EXPIRED_TOMBSTONE.into()))
+                            }),
+                            "{}: an insert replaced the live row {id}",
+                            conn.label
+                        );
+                    }
+                    _ => {}
                 }
-                prop_assert_eq!(
-                    value,
-                    &Value::Integer(1),
-                    "{}: a round unset the latch column",
-                    conn.label
+            }
+        }
+    }
+
+    /// A peer's set latch always reaches Holon; an unset one only where the
+    /// base says the peer served it set. A wrong check skips one item; a wrong
+    /// un-check re-buys it every trip, so a Holon set the peer has not served
+    /// stays. `base` is `Some(None)` for a base recorded before the latch was
+    /// part of it: it holds no `checked` key, so it never lowers.
+    #[test]
+    fn a_latch_column_lowers_only_on_the_peers_own_unset(
+        base in prop::option::of(prop::option::of(any::<bool>())),
+        mine in any::<bool>(),
+        theirs in any::<bool>(),
+    ) {
+        for conn in connections() {
+            let mut row = local_row(&conn, 0, 1, mine, Tombstone::None, true);
+            if let Some(checked) = base {
+                let served = match (conn.remote_merge)(1) {
+                    Value::String(text) => serde_json::Value::String(text),
+                    Value::Integer(number) => serde_json::Value::from(number),
+                    other => panic!("no JSON spelling for the merge value {other:?}"),
+                };
+                let mut recorded = serde_json::json!({ conn.merge_column: served });
+                if let Some(checked) = checked {
+                    recorded["checked"] = serde_json::Value::from(i64::from(checked));
+                }
+                row.columns.insert(
+                    conn.compiled.spec().base_column.clone(),
+                    Value::String(recorded.to_string()),
                 );
             }
+            let snapshot = snapshot_of(&conn, vec![remote_row(&conn, 0, 1, theirs)], 1);
+            let outcome = RemoteListReconciler::new(conn.compiled.clone())
+                .reconcile(&[row], &snapshot)
+                .expect("the round");
+            let latched: Vec<&Value> = outcome
+                .local
+                .iter()
+                .filter_map(|intent| match intent {
+                    LocalIntent::SetColumn { column, value, .. } if column == "checked" => {
+                        Some(value)
+                    }
+                    _ => None,
+                })
+                .collect();
+            let want = match (theirs, mine, base) {
+                (true, false, _) => vec![Value::Integer(1)],
+                (false, true, Some(Some(true))) => vec![Value::Integer(0)],
+                _ => vec![],
+            };
+            prop_assert_eq!(
+                latched,
+                want.iter().collect::<Vec<_>>(),
+                "{}: base {:?}, Holon {}, peer {}",
+                conn.label, base, mine, theirs
+            );
+            prop_assert!(outcome.push.is_empty(), "{}: a latch change was pushed", conn.label);
         }
     }
 
@@ -502,7 +618,7 @@ proptest! {
                 .iter()
                 .filter_map(|push| match push {
                     PushIntent::Remove { row, .. } => Some(row.id.clone()),
-                    PushIntent::Add { .. } => None,
+                    PushIntent::Add { .. } | PushIntent::Update { .. } => None,
                 })
                 .collect();
             let written = ids_of(outcome.local.iter());
@@ -537,7 +653,19 @@ proptest! {
                     })
                     .collect(),
             );
-            let (local, snapshot) = sides(&conn, &scenario);
+            let (mut local, snapshot) = sides(&conn, &scenario);
+            for (row, count) in local.iter_mut().zip(&counts) {
+                let served = match (conn.remote_merge)(*count) {
+                    Value::String(text) => serde_json::Value::String(text),
+                    Value::Integer(number) => serde_json::Value::from(number),
+                    other => panic!("no JSON spelling for the merge value {other:?}"),
+                };
+                let base = serde_json::json!({ conn.merge_column: served, "checked": 1 });
+                row.columns.insert(
+                    conn.compiled.spec().base_column.clone(),
+                    Value::String(base.to_string()),
+                );
+            }
             let outcome = RemoteListReconciler::new(conn.compiled.clone())
                 .reconcile(&local, &snapshot)
                 .expect("the round");
@@ -548,6 +676,69 @@ proptest! {
                 .collect();
             prop_assert!(sets.is_empty(), "{}: rewrote an unchanged row: {sets:?}", conn.label);
             prop_assert!(outcome.push.is_empty(), "{}: pushed an agreed row", conn.label);
+        }
+    }
+
+    /// A merge column settles three-way against the value the peer last
+    /// served: Holon's change alone is pushed, the peer's alone is taken, and
+    /// anything else takes the peer's value and discloses Holon's — an unknown
+    /// base included.
+    #[test]
+    fn a_merge_column_settles_three_way(
+        base in prop::option::of(0i64..3),
+        mine in 0i64..3,
+        theirs in 0i64..3,
+    ) {
+        for conn in connections() {
+            let mut row = local_row(&conn, 0, mine, false, Tombstone::None, true);
+            if let Some(base) = base {
+                let served = match (conn.remote_merge)(base) {
+                    Value::String(text) => serde_json::Value::String(text),
+                    Value::Integer(number) => serde_json::Value::from(number),
+                    other => panic!("no JSON spelling for the merge value {other:?}"),
+                };
+                row.columns.insert(
+                    conn.compiled.spec().base_column.clone(),
+                    Value::String(serde_json::json!({ conn.merge_column: served }).to_string()),
+                );
+            }
+            let snapshot = snapshot_of(&conn, vec![remote_row(&conn, 0, theirs, false)], 1);
+            let outcome = RemoteListReconciler::new(conn.compiled.clone())
+                .reconcile(&[row], &snapshot)
+                .expect("the round");
+            let taken = outcome.local.iter().any(|intent| {
+                matches!(intent, LocalIntent::SetColumn { column, .. } if column == conn.merge_column)
+            });
+            let pushed = outcome
+                .push
+                .iter()
+                .any(|push| matches!(push, PushIntent::Update { .. }));
+            let (want_taken, want_pushed, want_disclosed) = if mine == theirs {
+                (false, false, false)
+            } else if base == Some(theirs) {
+                (false, true, false)
+            } else if base == Some(mine) {
+                (true, false, false)
+            } else {
+                (true, false, true)
+            };
+            prop_assert_eq!(
+                (taken, pushed, !outcome.overwritten.is_empty()),
+                (want_taken, want_pushed, want_disclosed),
+                "{}: base {:?}, Holon {}, peer {} → (taken, pushed, disclosed); disclosed {:?}",
+                conn.label, base, mine, theirs, outcome.overwritten
+            );
+            for disclosure in &outcome.overwritten {
+                let named = format!("`{}` of {}: ", conn.merge_column, (conn.display_name)(0));
+                prop_assert!(
+                    disclosure.starts_with(&named)
+                        && !disclosure.contains('[')
+                        && !disclosure.contains("Some("),
+                    "{}: the disclosure {disclosure:?} does not open with {named:?} or prints a \
+                     key or a debug value",
+                    conn.label
+                );
+            }
         }
     }
 }
@@ -697,6 +888,9 @@ impl holon_connections::RemoteListPeer for FixturePeer {
                 holon_connections::CommandVerb::Remove => {
                     state.items.remove(&n);
                 }
+                holon_connections::CommandVerb::Update => {
+                    unreachable!("this PBT never edits a merge column locally")
+                }
             }
         }
         state.version += 1;
@@ -807,6 +1001,42 @@ fn an_unknown_cache_buster_is_refused_by_name() {
         message.contains("epoch_millis"),
         "the refusal does not say what IS accepted: {message}"
     );
+}
+
+/// Every pull rewrites the merge base, so a base kept in the row's primary key,
+/// the list's version cursor or a column the key reads would move the row's
+/// identity or the cursor under it. The sidecar is refused where it loads.
+#[test]
+fn a_base_column_carrying_identity_or_the_version_is_refused() {
+    let declared: TypeDefinition = serde_yaml::from_str(SHOPPING_TYPE).expect("the declared type");
+    for (what, base, spec_yaml) in [
+        (
+            "the primary key",
+            "id",
+            SHOPPING_LIST_SYNC.replace("base_column: remote_base", "base_column: id"),
+        ),
+        (
+            "the version column",
+            "remote_base",
+            SHOPPING_LIST_SYNC.replace("version_column: version", "version_column: remote_base"),
+        ),
+        (
+            "a column the key reads",
+            "name",
+            SHOPPING_LIST_SYNC.replace("base_column: remote_base", "base_column: name"),
+        ),
+    ] {
+        let spec: ListSyncSpec = serde_yaml::from_str(&spec_yaml).expect("the list_sync block");
+        let message = format!(
+            "{:#}",
+            CompiledListSync::compile("shopping", spec, &declared)
+                .expect_err(&format!("a base kept in {what} was accepted"))
+        );
+        assert!(
+            message.contains(&format!("merge base in '{base}'")),
+            "the refusal of a base kept in {what} does not name it: {message}"
+        );
+    }
 }
 
 /// The common case costs nothing to declare: a sidecar that says nothing about

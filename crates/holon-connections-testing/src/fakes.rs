@@ -91,6 +91,7 @@ fields:
   - { name: done, sql_type: INTEGER }
   - { name: removed_at, sql_type: TEXT, nullable: true }
   - { name: synced_at, sql_type: TEXT, nullable: true }
+  - { name: merge_base, sql_type: TEXT, nullable: true }
 soft_delete:
   tombstone_field: removed_at
   retention_days: 7
@@ -104,7 +105,9 @@ commit_tool: commit_batch
 list_row_type: keyed_cursor
 version_column: version
 key: .id
+display_name: .content
 watermark_column: synced_at
+base_column: merge_base
 batch_row_type: keyed_batch
 command_row_type: keyed_command
 merge_columns: [rank]
@@ -198,6 +201,7 @@ fields:
   - { name: done, sql_type: INTEGER }
   - { name: removed_at, sql_type: TEXT, nullable: true }
   - { name: synced_at, sql_type: TEXT, nullable: true }
+  - { name: merge_base, sql_type: TEXT, nullable: true }
 soft_delete:
   tombstone_field: removed_at
   retention_days: 7
@@ -211,7 +215,9 @@ commit_tool: commit_batch
 list_row_type: content_cursor
 version_column: version
 key: "[.label, .bucket]"
+display_name: '.label + " in " + .bucket'
 watermark_column: synced_at
+base_column: merge_base
 cache_buster: epoch_millis
 batch_row_type: content_batch
 command_row_type: content_command

@@ -281,6 +281,7 @@ impl FixtureListPeer {
             .map(|command| {
                 let verb = match command["op"].as_str() {
                     Some("add") => CommandVerb::Add,
+                    Some("update") => CommandVerb::Update,
                     Some("remove") => CommandVerb::Remove,
                     _ => anyhow::bail!("fixture peer: a command names no known `op`: {command}"),
                 };
@@ -344,7 +345,7 @@ impl RemoteListPeer for FixtureListPeer {
         for (verb, row) in self.received(batch)? {
             let key = self.key_of_row(&row)?;
             match verb {
-                CommandVerb::Add => {
+                CommandVerb::Add | CommandVerb::Update => {
                     state.rows.insert(key, row);
                 }
                 CommandVerb::Remove => {

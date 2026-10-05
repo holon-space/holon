@@ -141,6 +141,7 @@ fn the_write_leg_maps_command_rows_into_the_peers_own_envelope() {
             {"type": "shopping_command", "row": {
                 "id": "1756713600000_a1b2c3d4e5f60718", "list": "shopping",
                 "verb": "remove", "name": "Bread", "cat": "B", "count": "1",
+                "remote": {"checked": false, "active_entries": 1},
                 "command_id": "1756713600000_a1b2c3d4e5f60718"}},
         ],
     });

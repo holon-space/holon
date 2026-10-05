@@ -20,4 +20,12 @@ impl RefRemoteListSync for ReferenceState {
     fn remote_list_expected_refusals(&self) -> usize {
         self.remote_list.expected_refusals()
     }
+
+    fn remote_list_expected_peer_entries(&self) -> Vec<Vec<String>> {
+        self.remote_list.expected_peer_entries()
+    }
+
+    fn remote_list_expected_overwritten(&self) -> Vec<(String, String)> {
+        self.remote_list.expected_overwritten()
+    }
 }

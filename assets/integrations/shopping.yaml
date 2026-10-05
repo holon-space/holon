@@ -107,7 +107,7 @@ utcp:
           - "read"
     -
         name: "commit"
-        description: "Apply a batch of add/del commands. The query 'version' is the version of the pull this batch was reconciled against. Response carries the new version. A command id makes a retry idempotent, so DO NOT remint ids when re-sending the same logical batch."
+        description: "Apply a batch of commands: add/del on the active list, replace/del on the picked list. The query 'version' is the version of the pull this batch was reconciled against. Response carries the new version. A command id makes a retry idempotent, so DO NOT remint ids when re-sending the same logical batch."
         inputs:
           type: "object"
           properties:
@@ -137,9 +137,19 @@ utcp:
                     properties:
                       cmd:
                         type: "string"
+                        description: "A command on the active list."
                         enum:
                           - "add"
                           - "del"
+                      picked:
+                        type: "string"
+                        description: "A command on the picked list; a command carries `cmd` or `picked`."
+                        enum:
+                          - "replace"
+                          - "del"
+                      name:
+                        type: "string"
+                        description: "The picked item a `replace` replaces."
                       good:
                         type: "object"
                         properties:
@@ -151,15 +161,15 @@ utcp:
                             type: "boolean"
                           count:
                             type: "string"
+                          pickedCount:
+                            type: "string"
                         required:
                           - "name"
                           - "cat"
-                          - "new"
                       id:
                         type: "string"
                         description: "Idempotency key, '{roundMillis}_{16 hex}'."
                     required:
-                      - "cmd"
                       - "good"
                       - "id"
               required:
@@ -214,6 +224,8 @@ holon:
     # that fold to one key are a load-bearing failure: under a complete
     # snapshot a collapsed pair reads as a deletion.
     key: "[.name, .cat]"
+    # How a disclosure names an item to a person: its name and its list.
+    display_name: '.name + " in " + .cat'
     watermark_column: last_seen_remote
     # This peer serves a cached body to a repeated read, and the write leg
     # re-reads to confirm its own commit landed — a cached body there reports
@@ -227,8 +239,13 @@ holon:
     command_row_type: shopping_command
     merge_columns:
       - count
+    # The app's amount and tick as this list last served them: what tells an
+    # amount edited in Holon (pushed) from one edited in the app (taken), and
+    # an item the app un-ticked from one Holon ticked.
+    base_column: remote_base
     # With no timestamp to arbitrate with, a wrong check skips one item while a
-    # wrong un-check re-buys it every trip.
+    # wrong un-check re-buys it every trip, so only the app's own un-tick
+    # lowers a tick.
     latch_columns:
       - checked
   tools:
@@ -252,12 +269,13 @@ holon:
       # produce from bad input.
       #
       # An amount is free text ("2kg", "4 Zehen"), kept byte for byte; a picked
-      # entry carries it as `pickedCount`. An active and a picked entry of one
-      # `(name, cat)` fold into ONE row carrying the active amount — the one
-      # still to buy. An amount is opaque text here: never parsed, never added.
-      # A second ACTIVE entry for one `(name, cat)` is skipped (the first by list
-      # position is kept) and reported under `shopping_refusal`, because the
-      # peer names an item by its name and the rest of the list still syncs.
+      # entry carries it as `pickedCount`. An amount is opaque text here: never
+      # parsed, never added.
+      # The peer names an item by its name, so where one `(name, cat)` has more
+      # than one entry the first ACTIVE one by list position is the row and the
+      # rest are skipped and reported under `shopping_refusal`; the rest of the
+      # list still syncs. A command on that row then reaches the entry the row
+      # mirrors.
       response: |
         def code_of: split("_")[0];
         def blank: . == 9 or . == 10 or . == 11 or . == 12 or . == 13 or . == 32
@@ -286,16 +304,12 @@ holon:
                   count: (if .pickedCount != null then .pickedCount | amount("pickedCount") else .count | amount("count") end),
                   checked: true} ]) as $all
         | ($all | group_by([.name, .cat])) as $groups
-        | ($groups | map(
-              map(select(.checked | not)) as $active
-              | {
-                  name: .[0].name,
-                  cat: .[0].cat,
-                  count: (if ($active | length) >= 1 then $active[0].count else .[0].count end),
-                  checked: (map(.checked) | any)
-                })) as $folded
+        | ($groups | map(map(select(.checked | not)) as $active
+                         | if ($active | length) >= 1 then $active[0] + {active_entries: ($active | length)} else .[0] + {active_entries: 0} end)) as $mirrored
         | ([ $groups[] | map(select(.checked | not)) | select(length > 1)
-             | "the list holds `\(.[0].name)` in `\(.[0].cat)` \(length) times as active entries; the first is mirrored and \(length - 1) duplicate(s) are skipped" ]) as $refusals
+             | "the list holds `\(.[0].name)` in `\(.[0].cat)` \(length) times as active entries; the first is mirrored and \(length - 1) duplicate(s) are skipped" ]
+           + [ $groups[] | select((map(.checked) | any) and (map(.checked) | all | not))
+               | "the list holds `\(.[0].name)` in `\(.[0].cat)` both active and ticked; the active entry is mirrored and the ticked one is skipped" ]) as $refusals
         | {holon_rows: 1, scopes: [
             {type: "shopping_list", owner_column: "list", owner_value: "shopping"},
             {type: "shopping_category", owner_column: "list", owner_value: "shopping"},
@@ -305,8 +319,8 @@ holon:
           {type: "shopping_list", row: {id: "shopping", list: "shopping", version: $version, picked_items_version: $picked_version}},
           ($cats[] | . as $raw | split("_") as $s
             | {type: "shopping_category", row: {id: ("shopping_cat:" + $s[0]), list: "shopping", wire: $raw, code: $s[0], icon: $s[1], color: $s[2]}}),
-          ($folded[]
-            | {type: "shopping_item", row: {id: ("shopping-item:" + (.cat | @uri) + ":" + (.name | @uri)), list: "shopping", name: .name, cat: .cat, count: .count, checked: .checked}}),
+          ($mirrored[]
+            | {type: "shopping_item", row: {id: ("shopping-item:" + (.cat | @uri) + ":" + (.name | @uri)), list: "shopping", name: .name, cat: .cat, count: .count, checked: .checked, active_entries: .active_entries}}),
           ($refusals[] | {type: "shopping_refusal", row: {list: "shopping", reason: .}})
 
     commit:
@@ -323,13 +337,23 @@ holon:
       # transport's neutral key so the caller carries no field name of its own.
       response_version_path: version
       # The write leg's mapping: the reconciler's command ROWS become this
-      # peer's `commands` array and the versions the batch is based on. Only
-      # `add` and `del` exist — a check toggle is deliberately unrepresentable,
-      # because the on-versus-off encoding was never isolated in a capture and a
-      # guess paired with an add/del risks deleting the item instead of ticking
-      # it. An `add` carries the amount verbatim: `count` is a merge column, so
+      # peer's `commands` array and the versions the batch is based on. A check
+      # toggle is deliberately unrepresentable: the on-versus-off encoding was
+      # never isolated in a capture, and a guess risks deleting the item instead
+      # of ticking it. The amount travels verbatim: `count` is a merge column, so
       # an amount left off the wire returns from the verifying re-pull as none.
+      #
+      # The app keeps a ticked item in its picked list, so a command on one goes
+      # there, the way the app's own client sends it (`www/js/list.js`
+      # `addPickedItem` / `removePickedItem`): an amount edit is a `replace`
+      # carrying the new amount as both `count` and `pickedCount`, a deletion a
+      # picked `del`. An active amount edit is a repeated `add`, which replaces
+      # the entry of that name. A `del` removes ONE active entry, so the removal
+      # of a key the list holds `active_entries` times is that many `del`s in the
+      # same commit, each under its own id.
       request: |
+        def amount($field): if .count != null then {($field): .count} else {} end;
+        def ticked: .remote.checked == true or .remote.checked == 1;
         .rows as $rows
         | ($rows | map(select(.type == "shopping_commit")) | .[0].row
            // error("the row stream carries no `shopping_commit` row")) as $batch
@@ -338,10 +362,24 @@ holon:
             pickedItemsVersion: $batch.picked_items_version,
             deviceId: $batch.device_id,
             commands: [ $rows[] | select(.type == "shopping_command") | .row
-                        | {cmd: (if .verb == "add" then "add"
-                                 elif .verb == "remove" then "del"
-                                 else error("this peer has no command for the intent \(.verb)") end),
-                           good: ({name: .name, cat: .cat, new: true}
-                                  + (if .verb == "add" and .count != null then {count: .count} else {} end)),
-                           id: .command_id} ]
+                        | .command_id as $id
+                        | (.remote.active_entries) as $n
+                        | if .verb == "remove" and (($n | type) != "number" or (ticked and $n != 0) or ((ticked | not) and $n < 1)) then
+                            error("the removal of `\(.name)` in `\(.cat)` reads `active_entries` \($n | tojson) on a row the list serves \(if ticked then "ticked" else "active" end); a ticked row holds no active entry and an active row at least one")
+                          elif .verb == "remove" and (ticked | not) then
+                            range(0; $n) as $i
+                            | {cmd: "del", good: {name: .name, cat: .cat, new: true},
+                               id: (if $i == 0 then $id else "\($id)_\($i)" end)}
+                          else
+                          (if .verb == "add" then
+                            {cmd: "add", good: ({name: .name, cat: .cat, new: true} + amount("count"))}
+                          elif .verb == "update" and ticked then
+                            {picked: "replace", name: .name, good: ({name: .name, cat: .cat} + amount("count") + amount("pickedCount"))}
+                          elif .verb == "update" then
+                            {cmd: "add", good: ({name: .name, cat: .cat} + amount("count"))}
+                          elif .verb == "remove" and ticked then
+                            {picked: "del", good: {name: .name, cat: .cat}}
+                          else error("this peer has no command for the intent \(.verb)") end
+                          | . + {id: $id})
+                          end ]
           }

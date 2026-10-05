@@ -64,6 +64,7 @@ pub mod offered_ops_pass_the_write_tier;
 pub mod org_render_fixed_point;
 pub mod read_only_home_refuses_writes;
 pub mod remote_list_mirror_matches_ref;
+pub mod remote_list_peer_matches_ref;
 pub mod render_only_block_draws_its_render;
 pub mod settle_budget;
 pub mod shape_gate_refuses_illegal_writes;
