@@ -14408,19 +14408,19 @@ dependencies = [
 [[package]]
 name = "turso"
 version = "0.8.0-pre.12"
-source = "git+https://github.com/nightscape/turso.git?rev=c0d68649e4684974e8c3695a0ef4eea3bf8a705f#c0d68649e4684974e8c3695a0ef4eea3bf8a705f"
+source = "git+https://github.com/nightscape/turso.git?rev=e86bee6cd92ec60d36fc81bc6b54f301546930a4#e86bee6cd92ec60d36fc81bc6b54f301546930a4"
 dependencies = [
  "thiserror 2.0.19",
  "turso_core",
  "turso_sdk_kit",
  "turso_sync_sdk_kit",
- "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=c0d68649e4684974e8c3695a0ef4eea3bf8a705f)",
+ "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=e86bee6cd92ec60d36fc81bc6b54f301546930a4)",
 ]
 
 [[package]]
 name = "turso_core"
 version = "0.8.0-pre.12"
-source = "git+https://github.com/nightscape/turso.git?rev=c0d68649e4684974e8c3695a0ef4eea3bf8a705f#c0d68649e4684974e8c3695a0ef4eea3bf8a705f"
+source = "git+https://github.com/nightscape/turso.git?rev=e86bee6cd92ec60d36fc81bc6b54f301546930a4#e86bee6cd92ec60d36fc81bc6b54f301546930a4"
 dependencies = [
  "aegis",
  "aes",
@@ -14489,35 +14489,35 @@ dependencies = [
  "uncased",
  "uuid",
  "windows-sys 0.61.2",
- "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=c0d68649e4684974e8c3695a0ef4eea3bf8a705f)",
+ "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=e86bee6cd92ec60d36fc81bc6b54f301546930a4)",
 ]
 
 [[package]]
 name = "turso_ext"
 version = "0.8.0-pre.12"
-source = "git+https://github.com/nightscape/turso.git?rev=c0d68649e4684974e8c3695a0ef4eea3bf8a705f#c0d68649e4684974e8c3695a0ef4eea3bf8a705f"
+source = "git+https://github.com/nightscape/turso.git?rev=e86bee6cd92ec60d36fc81bc6b54f301546930a4#e86bee6cd92ec60d36fc81bc6b54f301546930a4"
 dependencies = [
  "chrono",
  "getrandom 0.4.3",
  "turso_macros",
- "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=c0d68649e4684974e8c3695a0ef4eea3bf8a705f)",
+ "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=e86bee6cd92ec60d36fc81bc6b54f301546930a4)",
 ]
 
 [[package]]
 name = "turso_macros"
 version = "0.8.0-pre.12"
-source = "git+https://github.com/nightscape/turso.git?rev=c0d68649e4684974e8c3695a0ef4eea3bf8a705f#c0d68649e4684974e8c3695a0ef4eea3bf8a705f"
+source = "git+https://github.com/nightscape/turso.git?rev=e86bee6cd92ec60d36fc81bc6b54f301546930a4#e86bee6cd92ec60d36fc81bc6b54f301546930a4"
 dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
- "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=c0d68649e4684974e8c3695a0ef4eea3bf8a705f)",
+ "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=e86bee6cd92ec60d36fc81bc6b54f301546930a4)",
 ]
 
 [[package]]
 name = "turso_parser"
 version = "0.8.0-pre.12"
-source = "git+https://github.com/nightscape/turso.git?rev=c0d68649e4684974e8c3695a0ef4eea3bf8a705f#c0d68649e4684974e8c3695a0ef4eea3bf8a705f"
+source = "git+https://github.com/nightscape/turso.git?rev=e86bee6cd92ec60d36fc81bc6b54f301546930a4#e86bee6cd92ec60d36fc81bc6b54f301546930a4"
 dependencies = [
  "bitflags 2.13.1",
  "memchr",
@@ -14526,13 +14526,13 @@ dependencies = [
  "strum_macros 0.26.4",
  "thiserror 2.0.19",
  "turso_macros",
- "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=c0d68649e4684974e8c3695a0ef4eea3bf8a705f)",
+ "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=e86bee6cd92ec60d36fc81bc6b54f301546930a4)",
 ]
 
 [[package]]
 name = "turso_sdk_kit"
 version = "0.8.0-pre.12"
-source = "git+https://github.com/nightscape/turso.git?rev=c0d68649e4684974e8c3695a0ef4eea3bf8a705f#c0d68649e4684974e8c3695a0ef4eea3bf8a705f"
+source = "git+https://github.com/nightscape/turso.git?rev=e86bee6cd92ec60d36fc81bc6b54f301546930a4#e86bee6cd92ec60d36fc81bc6b54f301546930a4"
 dependencies = [
  "bindgen 0.69.5",
  "env_logger 0.11.11",
@@ -14543,24 +14543,24 @@ dependencies = [
  "turso_core",
  "turso_ext",
  "turso_sdk_kit_macros",
- "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=c0d68649e4684974e8c3695a0ef4eea3bf8a705f)",
+ "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=e86bee6cd92ec60d36fc81bc6b54f301546930a4)",
 ]
 
 [[package]]
 name = "turso_sdk_kit_macros"
 version = "0.8.0-pre.12"
-source = "git+https://github.com/nightscape/turso.git?rev=c0d68649e4684974e8c3695a0ef4eea3bf8a705f#c0d68649e4684974e8c3695a0ef4eea3bf8a705f"
+source = "git+https://github.com/nightscape/turso.git?rev=e86bee6cd92ec60d36fc81bc6b54f301546930a4#e86bee6cd92ec60d36fc81bc6b54f301546930a4"
 dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
- "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=c0d68649e4684974e8c3695a0ef4eea3bf8a705f)",
+ "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=e86bee6cd92ec60d36fc81bc6b54f301546930a4)",
 ]
 
 [[package]]
 name = "turso_sync_engine"
 version = "0.8.0-pre.12"
-source = "git+https://github.com/nightscape/turso.git?rev=c0d68649e4684974e8c3695a0ef4eea3bf8a705f#c0d68649e4684974e8c3695a0ef4eea3bf8a705f"
+source = "git+https://github.com/nightscape/turso.git?rev=e86bee6cd92ec60d36fc81bc6b54f301546930a4#e86bee6cd92ec60d36fc81bc6b54f301546930a4"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -14577,13 +14577,13 @@ dependencies = [
  "turso_core",
  "turso_parser",
  "uuid",
- "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=c0d68649e4684974e8c3695a0ef4eea3bf8a705f)",
+ "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=e86bee6cd92ec60d36fc81bc6b54f301546930a4)",
 ]
 
 [[package]]
 name = "turso_sync_sdk_kit"
 version = "0.8.0-pre.12"
-source = "git+https://github.com/nightscape/turso.git?rev=c0d68649e4684974e8c3695a0ef4eea3bf8a705f#c0d68649e4684974e8c3695a0ef4eea3bf8a705f"
+source = "git+https://github.com/nightscape/turso.git?rev=e86bee6cd92ec60d36fc81bc6b54f301546930a4#e86bee6cd92ec60d36fc81bc6b54f301546930a4"
 dependencies = [
  "bindgen 0.69.5",
  "env_logger 0.11.11",
@@ -14595,7 +14595,7 @@ dependencies = [
  "turso_sdk_kit",
  "turso_sdk_kit_macros",
  "turso_sync_engine",
- "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=c0d68649e4684974e8c3695a0ef4eea3bf8a705f)",
+ "workspace-hack 0.1.0 (git+https://github.com/nightscape/turso.git?rev=e86bee6cd92ec60d36fc81bc6b54f301546930a4)",
 ]
 
 [[package]]
@@ -16462,7 +16462,7 @@ checksum = "beffa227304dbaea3ad6a06ac674f9bc83a3dec3b7f63eeb442de37e7cb6bb01"
 [[package]]
 name = "workspace-hack"
 version = "0.1.0"
-source = "git+https://github.com/nightscape/turso.git?rev=c0d68649e4684974e8c3695a0ef4eea3bf8a705f#c0d68649e4684974e8c3695a0ef4eea3bf8a705f"
+source = "git+https://github.com/nightscape/turso.git?rev=e86bee6cd92ec60d36fc81bc6b54f301546930a4#e86bee6cd92ec60d36fc81bc6b54f301546930a4"
 dependencies = [
  "aho-corasick",
  "anstream 0.6.21",

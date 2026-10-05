@@ -214,16 +214,13 @@ async fn distinct_in_the_seed_is_incrementally_maintained() {
     .await;
 }
 
-/// Candidate 2, REJECTED by measurement: a tiny `GROUP BY` key relation the
-/// shared view joins. The engine drops the whole group when ONE of two rows
-/// under a key is deleted, and the descendant view chained onto it goes empty
-/// while a live watch still holds the place.
-///
-/// Asserted as observed, so the defect is pinned rather than remembered. If
-/// this test ever reds, the engine maintains grouped retraction and the
-/// membership can carry per-key columns the `DISTINCT` shape cannot.
+/// Candidate 2: a tiny `GROUP BY` key relation the shared view joins. The
+/// engine keeps the group when ONE of two rows under a key is deleted, so the
+/// descendant view chained onto it keeps the closure while a live watch still
+/// holds the place — the membership could carry per-key columns the
+/// `DISTINCT` shape cannot.
 #[tokio::test]
-async fn a_grouped_key_matview_loses_the_group_on_a_partial_delete() {
+async fn a_grouped_key_matview_keeps_the_group_on_a_partial_delete() {
     let handle = setup().await;
     reconcile_named_view(
         &handle,
@@ -265,9 +262,8 @@ async fn a_grouped_key_matview_loses_the_group_on_a_partial_delete() {
     release(&handle, "root:r", "n1").await;
     assert_eq!(
         view_rows(&handle).await,
-        Vec::new(),
-        "MEASUREMENT: the grouped key relation drops the group on a partial delete. Going green \
-         here means the engine now maintains grouped retraction."
+        closure,
+        "releasing one of two owners must keep the group and its closure"
     );
 }
 
