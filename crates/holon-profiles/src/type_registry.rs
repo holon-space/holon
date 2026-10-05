@@ -19,6 +19,7 @@ use holon_api::ComputedSpec;
 use holon_api::ComputedTier;
 use holon_api::FieldLifetime;
 use holon_api::TypeDefinition;
+use holon_api::computation::Computation;
 use holon_api::computation::FieldKind;
 /// A compiled computed field: name + pre-compiled Rhai AST.
 /// Stored in topological order (dependencies before dependents).
@@ -43,13 +44,22 @@ use crate::parse_profile_yaml;
 /// Stores `TypeDefinition`s with computed fields already compiled (in
 /// `FieldLifetime::Computed`) and topo-sorted for correct evaluation order.
 pub struct TypeRegistry {
-    types: RwLock<HashMap<String, TypeDefinition>>,
+    types: Arc<RwLock<HashMap<String, TypeDefinition>>>,
+    /// The computed fields each loaded vault profile declares, by profile id
+    /// and entity key, so a type registered after the profile loaded is
+    /// checked against them ([`Self::register`]).
+    vault_profile_claims: Arc<RwLock<HashMap<String, VaultProfileClaim>>>,
     /// Per-entity creation defaults declared in profile YAML (the
     /// `virtual_child:` block). Held alongside `types` because
     /// `TypeDefinition` lives in `holon-api` and shouldn't depend on
     /// profile-side types like `VirtualChildConfig`. `apply_parsed_profile`
     /// inserts here; `profile_from_type_def` callers read here.
     virtual_children: RwLock<HashMap<String, VirtualChildConfig>>,
+}
+
+struct VaultProfileClaim {
+    entity_key: TableName,
+    computed: Vec<String>,
 }
 
 impl Default for TypeRegistry {
@@ -111,7 +121,8 @@ impl LinkSchemeRegistry for TypeRegistry {
 impl TypeRegistry {
     pub fn new() -> Self {
         Self {
-            types: RwLock::new(HashMap::new()),
+            types: Arc::default(),
+            vault_profile_claims: Arc::default(),
             virtual_children: RwLock::new(HashMap::new()),
         }
     }
@@ -133,16 +144,48 @@ impl TypeRegistry {
     /// Expressions are already compiled (at deserialization boundary via
     /// `CompiledExpr` serde). This method validates the topo-sort and
     /// stores the reordered definition.
+    ///
+    /// Refused with [`crate::TypedComputedFieldOverride`] when a loaded vault
+    /// profile already redeclares a typed computed field of `type_def`; the
+    /// registry stays unchanged.
+    ///
     /// The key is minted through [`TableName`], never taken raw, so a
     /// hyphenated entity name cannot create a key no scheme lookup will find.
     pub fn register(&self, mut type_def: TypeDefinition) -> Result<()> {
         check_computed_types_match_columns(&type_def)?;
         topo_sort_fields(&mut type_def);
         let key = TableName::from_scheme(&type_def.name);
+        self.check_against_vault_profiles(&key, &type_def)?;
         self.types
             .write()
             .expect("TypeRegistry poisoned")
             .insert(key.as_str().to_string(), type_def);
+        Ok(())
+    }
+
+    fn check_against_vault_profiles(
+        &self,
+        key: &TableName,
+        type_def: &TypeDefinition,
+    ) -> Result<()> {
+        let claims = self
+            .vault_profile_claims
+            .read()
+            .expect("TypeRegistry poisoned");
+        for (profile_id, claim) in claims.iter().filter(|(_, c)| &c.entity_key == key) {
+            for (name, spec) in type_def.computed_specs() {
+                if claim.computed.iter().any(|c| c == name)
+                    && !matches!(spec.computation(), Computation::Script(_))
+                {
+                    return Err(crate::TypedComputedFieldOverride {
+                        profile: profile_id.clone(),
+                        entity: type_def.name.clone(),
+                        field: name.to_string(),
+                    }
+                    .into());
+                }
+            }
+        }
         Ok(())
     }
 
@@ -280,20 +323,41 @@ impl TypeRegistry {
 
     /// The load-time checks [`Self::apply_parsed_profile`] runs, plus the
     /// refusal to redeclare a typed computed field
-    /// ([`crate::check_profile_computed_overrides`]), against a snapshot of the
-    /// types registered now, for profiles that load after the registry is built
-    /// (org-embedded profile blocks). The closure takes the id of the block the
-    /// profile was loaded from.
+    /// ([`crate::check_profile_computed_overrides`]), against the types
+    /// registered at the time of each call, for profiles that load after the
+    /// registry is built (org-embedded profile blocks). The closure takes the
+    /// id of the block the profile was loaded from. A profile it accepts is
+    /// recorded, so [`Self::register`] refuses a later type that the profile
+    /// would override; a profile it refuses releases its earlier record.
     pub fn profile_load_check(
         &self,
     ) -> impl Fn(&str, &ParsedProfile) -> Result<()> + Send + Sync + 'static {
-        let types = self.types.read().expect("TypeRegistry poisoned").clone();
+        let types = Arc::clone(&self.types);
+        let claims = Arc::clone(&self.vault_profile_claims);
         move |profile_id, profile| {
-            let type_def = types.get(TableName::from_scheme(&profile.entity_name).as_str());
-            crate::check_profile_scope(profile, type_def)?;
-            crate::check_profile_write_targets(profile)?;
-            crate::check_profile_computed_overrides(profile_id, profile, type_def)?;
-            Ok(())
+            let entity_key = TableName::from_scheme(&profile.entity_name);
+            let checked = {
+                let types = types.read().expect("TypeRegistry poisoned");
+                let type_def = types.get(entity_key.as_str());
+                crate::check_profile_scope(profile, type_def)
+                    .and_then(|()| crate::check_profile_write_targets(profile))
+                    .and_then(|()| {
+                        crate::check_profile_computed_overrides(profile_id, profile, type_def)
+                            .map_err(Into::into)
+                    })
+            };
+            let mut claims = claims.write().expect("TypeRegistry poisoned");
+            match &checked {
+                Ok(()) => claims.insert(
+                    profile_id.to_string(),
+                    VaultProfileClaim {
+                        entity_key,
+                        computed: profile.computed.keys().cloned().collect(),
+                    },
+                ),
+                Err(_) => claims.remove(profile_id),
+            };
+            checked
         }
     }
 
