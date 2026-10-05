@@ -118,8 +118,8 @@ fn thread_cpu_time() -> Duration {
     Duration::new(now.tv_sec as u64, now.tv_nsec as u32)
 }
 
-/// The paths below are refused whatever the recipe says, so neither may cost a
-/// guest run.
+/// A path with an empty segment names no document whatever the recipe says, so
+/// refusing it may not cost a guest run.
 #[test]
 fn a_recipe_whose_path_cannot_be_stored_is_refused_before_the_guest_runs() {
     let plugin = support::bundled_cook_plugin();
@@ -127,10 +127,7 @@ fn a_recipe_whose_path_cannot_be_stored_is_refused_before_the_guest_runs() {
     let recipe = support::big_recipe(20);
     let files = 20;
 
-    for (name, reason) in [
-        ("Rezepte/Aargauer Rüeblitorte", "is not a storable URI path"),
-        ("Chai:Masala", "already reads as a schemed URI"),
-    ] {
+    for (name, reason) in [("Rezepte//Brot", "names no document")] {
         let parses_before = holon_plugin_host::guest_parses();
         let started = Instant::now();
         let cpu_started = thread_cpu_time();

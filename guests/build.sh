@@ -35,7 +35,7 @@ fi
 # Restaging key. Only files cargo reads are hashed: a stray `target/` left in a
 # checkout by an older build must not count as a source.
 SRC_HASH=$(cd "$HERE" && find "$GUEST/src" "$GUEST/Cargo.toml" "$GUEST/Cargo.lock" \
-    abi-guest/src abi-guest/Cargo.toml -type f \
+    abi-guest/src abi-guest/Cargo.toml plugin-rows/src plugin-rows/Cargo.toml -type f \
     | sort | xargs shasum -a 256 | shasum -a 256 | cut -c1-16)
 
 STAGE_ROOT=${HOLON_GUEST_STAGE:-/tmp/holon-guest-build}
@@ -62,7 +62,7 @@ done
 trap 'rmdir "$LOCK" 2>/dev/null || true' EXIT
 
 if [ "$(cat "$STAGE/guests/.staged" 2>/dev/null || true)" != "$SRC_HASH" ]; then
-    for pkg in "$GUEST" abi-guest; do
+    for pkg in "$GUEST" abi-guest plugin-rows; do
         rm -rf "${STAGE:?}/guests/$pkg"
         cp -R "$HERE/$pkg" "$STAGE/guests/$pkg"
         rm -rf "$STAGE/guests/$pkg/target"

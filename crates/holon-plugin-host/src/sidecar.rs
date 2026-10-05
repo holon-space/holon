@@ -16,11 +16,6 @@ use anyhow::bail;
 use holon_core::file_format::WriteTier;
 use serde::Deserialize;
 
-/// Scope names the CONTRACT owns: they carry the document block and its child
-/// blocks rather than declared-type rows, so a sidecar cannot claim them.
-pub const DOCUMENT_SCOPE: &str = "holon.document";
-pub const BLOCK_SCOPE: &str = "holon.block";
-
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SidecarYaml {
@@ -70,8 +65,8 @@ pub struct DeclaredScope {
     /// declared: a type name is `snake_case` and a URI scheme cannot hold an
     /// underscore, so `ingredient_use` rows land under `ingredient-use`.
     pub id_entity: String,
-    /// Known before the guest runs, so a file whose id cannot be stored is
-    /// refused without running it.
+    /// What every row of this scope must be keyed by; a row keyed otherwise is
+    /// refused.
     pub id_from: Option<IdSource>,
 }
 
@@ -187,14 +182,6 @@ impl PluginFormat {
 
         let mut scopes: Vec<DeclaredScope> = Vec::with_capacity(yaml.scopes.len());
         for scope in yaml.scopes {
-            if scope.type_name == DOCUMENT_SCOPE || scope.type_name == BLOCK_SCOPE {
-                bail!(
-                    "format {:?} declares scope {:?}, which the contract itself owns: it carries \
-                     blocks, not rows of a declared type",
-                    yaml.format,
-                    scope.type_name
-                );
-            }
             if scopes.iter().any(|s| s.type_name == scope.type_name) {
                 bail!(
                     "format {:?} declares type {:?} twice",
@@ -212,6 +199,15 @@ impl PluginFormat {
                         scope.type_name
                     );
                 }
+            }
+            if !is_snake_case(&scope.type_name) {
+                bail!(
+                    "format {:?} declares type {:?}; a type name is snake_case (a lowercase \
+                     letter, then lowercase letters, digits or '_'), because it names the type's \
+                     table and, with '_' as '-', the URI scheme its rows land under",
+                    yaml.format,
+                    scope.type_name
+                );
             }
             let id_entity = scope.type_name.replace('_', "-");
             scopes.push(DeclaredScope {
@@ -248,4 +244,11 @@ impl PluginFormat {
     pub fn scope(&self, type_name: &str) -> Option<&DeclaredScope> {
         self.scopes.iter().find(|s| s.type_name == type_name)
     }
+}
+
+/// `[a-z][a-z0-9_]*`. With `_` read as `-` it is an RFC 3986 scheme.
+fn is_snake_case(s: &str) -> bool {
+    let mut chars = s.chars();
+    chars.next().is_some_and(|c| c.is_ascii_lowercase())
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
 }

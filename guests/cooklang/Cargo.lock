@@ -99,9 +99,18 @@ version = "0.1.0"
 dependencies = [
  "cooklang",
  "holon-abi-guest",
+ "holon-plugin-rows",
  "serde_json",
  "serde_yaml",
  "toml",
+]
+
+[[package]]
+name = "holon-plugin-rows"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

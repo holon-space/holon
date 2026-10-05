@@ -13,6 +13,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 holon-abi-guest = { path = "../abi-guest" }
+holon-plugin-rows = { path = "../plugin-rows" }
 cooklang = "=0.18.7"
 serde_json = "1"
 serde_yaml = "0.9"

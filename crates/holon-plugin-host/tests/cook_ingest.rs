@@ -415,3 +415,50 @@ fn write_back_is_refused_loudly() {
     assert!(verdict.is_err(), "read-only adapter must refuse write-back");
     let _ = r;
 }
+
+/// A recipe's file name is the user's to choose: spaces, umlauts and other
+/// non-ASCII letters are ordinary in a German vault, and the file's own
+/// `file:` id percent-encodes them. The recipe and its ingredient uses must
+/// ingest under such a name too, not refuse the whole file, and every id is
+/// encoded the way the `file:` id is.
+#[test]
+fn a_file_name_with_a_space_and_an_umlaut_ingests() {
+    let root = PathBuf::from("/vault");
+    for (rel, encoded) in [
+        ("Rezepte/Two Words.cook", "Rezepte/Two%20Words.cook"),
+        ("Rezepte/Grüne.cook", "Rezepte/Gr%C3%BCne.cook"),
+    ] {
+        let parsed = support::bundled_cook_plugin()
+            .parse(
+                &root.join(rel),
+                &support::pancakes_fixture(),
+                &EntityUri::no_parent(),
+                &root,
+            )
+            .unwrap_or_else(|e| panic!("{rel} must ingest: {e:#}"));
+        assert_eq!(parsed.document.id.as_str(), format!("file:{encoded}"));
+        assert_eq!(
+            parsed.blocks[0].id.as_str(),
+            format!("block:{encoded}::b::0")
+        );
+
+        let recipe = format!("recipe:{encoded}");
+        let [recipes, uses] = &parsed.typed_rows[..] else {
+            panic!("{rel} must project exactly the recipe and ingredient_use scopes");
+        };
+        assert_eq!(recipes.rows.len(), 1, "{rel} must project its recipe row");
+        assert_eq!(
+            recipes.rows[0].get("id"),
+            Some(&Value::String(recipe.clone()))
+        );
+        assert_eq!(uses.owner_value, recipe);
+        let flour = use_of(&uses.rows, "flour");
+        assert_eq!(flour.get("recipe_id"), Some(&Value::String(recipe.clone())));
+        assert_eq!(
+            flour.get("id"),
+            Some(&Value::String(format!(
+                "ingredient-use:{encoded}::iu::flour-0"
+            )))
+        );
+    }
+}

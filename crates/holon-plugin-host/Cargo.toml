@@ -14,7 +14,7 @@ ignored = ["workspace-hack"]
 anyhow.workspace = true
 holon-api.workspace = true
 holon-core.workspace = true
-holon-rows.workspace = true
+holon-plugin-rows = { path = "../../guests/plugin-rows" }
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true

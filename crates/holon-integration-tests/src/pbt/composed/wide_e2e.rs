@@ -345,9 +345,9 @@ pub const WIDE_TREE_ORG: &str = include_str!("../../../scripts/seed_wide/structu
 /// it. Two steps, because one is enough to be refused and a second proves the
 /// gate is per-document rather than per-block.
 ///
-/// `CookFormatAdapter` ids the steps `block:<vault-relative path>::b::<seq>`,
-/// which is why [`READ_ONLY_STEP_IDS`] can be constants — the ids are derived
-/// from the filename, not minted.
+/// The plugin ids the steps `block:<encoded vault-relative path>::b::<seq>`,
+/// so [`read_only_step_ids`] derives them from the filename rather than
+/// reading them back from the store.
 pub const KEYSTONE_RECIPE_COOK: &str = "\
 ---
 title: Keystone Recipe
@@ -358,15 +358,24 @@ Crack the @eggs{2} into a bowl.
 Whisk in the @flour{200%g}.
 ";
 
-/// The vault filename of [`KEYSTONE_RECIPE_COOK`].
-pub const READ_ONLY_RECIPE_FILE: &str = "keystone-recipe.cook";
+/// The vault filename of [`KEYSTONE_RECIPE_COOK`]. A space and non-ASCII
+/// letters, as a real German recipe vault names its files: every id derived
+/// from it must survive percent-encoding.
+pub const READ_ONLY_RECIPE_FILE: &str = "Grüne Keystone-Soße.cook";
+
+/// [`READ_ONLY_RECIPE_FILE`] without its extension: the page's title and the
+/// name its id is derived from.
+pub const READ_ONLY_RECIPE_STEM: &str = "Grüne Keystone-Soße";
 
 /// The step blocks `KEYSTONE_RECIPE_COOK` ingests as — the oracle's read-only
 /// homes and `AttemptReadOnlyEdit`'s only targets.
-pub const READ_ONLY_STEP_IDS: [&str; 2] = [
-    "block:keystone-recipe.cook::b::0",
-    "block:keystone-recipe.cook::b::1",
-];
+pub fn read_only_step_ids() -> [EntityUri; 2] {
+    let file = EntityUri::file(READ_ONLY_RECIPE_FILE);
+    [0, 1].map(|seq| {
+        EntityUri::parse(&format!("block:{}::b::{seq}", file.id()))
+            .expect("an encoded file path plus a step part forms a URI")
+    })
+}
 
 /// Declare the recipe's steps read-only-homed in the oracle. Seeded ONLY for a
 /// frontend draw, which is the only arm whose boot ingests the vault's files;
@@ -385,7 +394,8 @@ pub fn seed_read_only_recipe(state: &mut ReferenceState) {
     // convergent-by-path (Model.md invariant 13), so it is DERIVED here the way
     // production derives it rather than pasted as a literal.
     let page = read_only_recipe_page();
-    let mut page_block = Block::new_text(page.clone(), EntityUri::no_parent(), "keystone-recipe");
+    let mut page_block =
+        Block::new_text(page.clone(), EntityUri::no_parent(), READ_ONLY_RECIPE_STEM);
     page_block.set_page(true);
     state
         .domain
@@ -410,8 +420,7 @@ pub fn seed_read_only_recipe(state: &mut ReferenceState) {
     // The steps, as the cook adapter de-sugars them. Modeled so the whole-vault
     // watch/query oracles know them; seed-classified like the page, so the
     // block comparison still treats the file as their authority.
-    for (id, text) in READ_ONLY_STEP_IDS.iter().zip(READ_ONLY_STEP_TEXT) {
-        let uri = EntityUri::parse(id).expect("a literal recipe step id");
+    for (uri, text) in read_only_step_ids().into_iter().zip(READ_ONLY_STEP_TEXT) {
         state.domain.block_state.blocks.insert(
             uri.clone(),
             Block::new_text(uri.clone(), page.clone(), text),
@@ -500,7 +509,7 @@ pub const READ_ONLY_STEP_TEXT: [&str; 2] = ["Crack the eggs into a bowl.", "Whis
 /// never reaches the persisted page) and id'd by that same name chain.
 pub fn read_only_recipe_page() -> EntityUri {
     EntityUri::parse(
-        holon_api::link_parser::PageId::for_path("keystone-recipe")
+        holon_api::link_parser::PageId::for_path(READ_ONLY_RECIPE_STEM)
             .expect("a single-segment page path")
             .as_str(),
     )
