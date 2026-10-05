@@ -104,6 +104,8 @@ getrandom_02.workspace = true
 uuid = { workspace = true, features = ["js"] }
 
 [dev-dependencies]
+holon-kitchen.workspace = true
+holon-profiles.workspace = true
 tempfile.workspace = true
 proptest.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
