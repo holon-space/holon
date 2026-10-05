@@ -328,7 +328,8 @@ impl TypeRegistry {
     /// registry is built (org-embedded profile blocks). The closure takes the
     /// id of the block the profile was loaded from. A profile it accepts is
     /// recorded, so [`Self::register`] refuses a later type that the profile
-    /// would override; a profile it refuses releases its earlier record.
+    /// would override; a refused edit keeps the earlier version's record, which
+    /// [`Self::profile_release`] drops when the block leaves.
     pub fn profile_load_check(
         &self,
     ) -> impl Fn(&str, &ParsedProfile) -> Result<()> + Send + Sync + 'static {
@@ -346,19 +347,42 @@ impl TypeRegistry {
                             .map_err(Into::into)
                     })
             };
-            let mut claims = claims.write().expect("TypeRegistry poisoned");
-            match &checked {
-                Ok(()) => claims.insert(
+            // A refused edit leaves the profile's older version in the mirror,
+            // so that version's record stays until the block leaves or a new
+            // version is accepted.
+            if checked.is_ok() {
+                claims.write().expect("TypeRegistry poisoned").insert(
                     profile_id.to_string(),
                     VaultProfileClaim {
                         entity_key,
                         computed: profile.computed.keys().cloned().collect(),
                     },
-                ),
-                Err(_) => claims.remove(profile_id),
-            };
+                );
+            }
             checked
         }
+    }
+
+    /// The hook that drops the record [`Self::profile_load_check`] made for a
+    /// vault profile whose block is gone. Takes the same profile id.
+    pub fn profile_release(&self) -> impl Fn(&str) + Send + Sync + 'static {
+        let claims = Arc::clone(&self.vault_profile_claims);
+        move |profile_id| {
+            claims
+                .write()
+                .expect("TypeRegistry poisoned")
+                .remove(profile_id);
+        }
+    }
+
+    /// Whether a loaded vault profile for `entity` is recorded.
+    pub fn has_vault_profile_for(&self, entity: &str) -> bool {
+        let key = TableName::from_scheme(entity);
+        self.vault_profile_claims
+            .read()
+            .expect("TypeRegistry poisoned")
+            .values()
+            .any(|c| c.entity_key == key)
     }
 
     /// Get all registered type definitions.

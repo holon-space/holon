@@ -199,6 +199,7 @@ async fn create_initialized_engine(
         LiveEntities::new(),
         type_profiles,
         type_registry.profile_load_check(),
+        type_registry.profile_release(),
         conditions,
     )
     .await?;
@@ -475,6 +476,7 @@ async fn create_profile_resolver(
     + Send
     + Sync
     + 'static,
+    profile_release: impl Fn(&str) + Send + Sync + 'static,
     conditions: Arc<holon_api::ConditionBus>,
 ) -> Result<Arc<ProfileResolver>> {
     use holon_api::EntityName;
@@ -530,6 +532,20 @@ async fn create_profile_resolver(
                 move |row| load(row),
             );
             live_profiles.subscribe("entity_profile", result.stream);
+            // Replace is only the initial snapshot, whose rows all passed the load check.
+            let removals = live_profiles.signal_map();
+            tokio::spawn(async move {
+                use futures_signals::signal_map::MapDiff;
+                use futures_signals::signal_map::SignalMapExt;
+                removals
+                    .for_each(|diff| {
+                        if let MapDiff::Remove { key } = diff {
+                            profile_release(&key);
+                        }
+                        std::future::ready(())
+                    })
+                    .await
+            });
             Ok(Arc::new(ProfileResolver::with_type_profiles(
                 live_profiles,
                 ui_info,

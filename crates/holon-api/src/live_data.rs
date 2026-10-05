@@ -771,6 +771,33 @@ mod tests {
         );
     }
 
+    /// A refused (un-parseable) update leaves the row's earlier version in the
+    /// mirror, so a profile edit refused at load keeps its older version
+    /// applied.
+    #[test]
+    fn an_unparseable_update_keeps_the_earlier_version() {
+        let live: Arc<LiveData<String>> = LiveData::new(
+            vec![make_row("k", "old")],
+            |row| Ok(row.get("id").unwrap().as_string().unwrap().to_string()),
+            |row| {
+                let content = row.get("content").unwrap().as_string().unwrap();
+                if content == "POISON" {
+                    anyhow::bail!("poison row rejected by parse_fn");
+                }
+                Ok(content.to_string())
+            },
+        );
+        live.apply_changes(vec![Change::Updated {
+            id: "k".to_string(),
+            data: make_row("k", "POISON"),
+            origin: crate::ChangeOrigin::Local {
+                operation_id: None,
+                trace_id: None,
+            },
+        }]);
+        assert_eq!(**live.read().get("k").unwrap(), "old");
+    }
+
     /// BugFunnel row 24 (actor-level): the `subscribe` background actor must
     /// survive a poison row and keep draining the stream. Before the fix the
     /// `apply_changes` panic unwound the actor task (swallowed by tokio), the

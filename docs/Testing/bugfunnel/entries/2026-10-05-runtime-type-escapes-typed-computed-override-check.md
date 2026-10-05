@@ -36,5 +36,18 @@ computed field names (a refused load releases its record). `register` refuses a
 type whose typed computed field a recorded profile redeclares, with
 `TypedComputedFieldOverride`. Tests: the three added to
 crates/holon-profiles/tests/profile_typed_computed_override_refusal.rs (red
-log lane-logs/d66-red.log). Known limit: a profile block deleted from the
-vault is not observed, so its record stays until the process ends.
+log lane-logs/d66-red.log). A profile block that leaves the vault releases its record:
+`create_profile_resolver` (crates/holon/src/di/registration.rs) watches the
+profile mirror's `MapDiff::Remove` and calls `TypeRegistry::profile_release`.
+Test: crates/holon-app/tests/deleted_vault_profile_releases_its_claim.rs (red
+log lane-logs/d66b-red.log: the type stayed refused after the profile's
+document was deleted).
+
+A refused profile EDIT keeps the older version's record: the mirror drops the
+refused row and the older version stays applied (measured by
+`live_data::tests::an_unparseable_update_keeps_the_earlier_version`, log
+lane-logs/d66c-measure.log), so the load check no longer releases a record on
+refusal. Test: `a_refused_edit_leaves_the_live_profiles_claim_in_force`, run
+inside `a_vault_profile_claim_follows_the_live_version_of_its_block` (red log
+lane-logs/d66c-red.log: the type registered although the older version was still
+applied).
