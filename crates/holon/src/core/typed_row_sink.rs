@@ -131,8 +131,9 @@ impl TypedRowSink for DispatchingTypedRowSink {
 
             // Every row must carry the id the replacement below keys on, and
             // it must already NAME its entity: the file's keyspace is bare and
-            // the scheme is added by the parse that produced these rows
-            // (`holon_rows::parse_local_id`, called from the format adapter).
+            // the scheme is added by the parse that produced these rows (the
+            // plugin adapter renders each typed local id with
+            // `EntityUri::from_segments`).
             // An unschemed id here means a producer skipped that parse, which
             // the dispatcher would refuse further down with less context.
             for row in &owned.rows {

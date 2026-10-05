@@ -1,9 +1,10 @@
 //! A vault file format served by a wasm guest instead of by a Rust crate.
 //!
-//! The guest returns one JSON Lines stream. Two scope names in it are the
-//! contract's own — [`DOCUMENT_SCOPE`] and [`BLOCK_SCOPE`] — and become the
-//! parse result's document and blocks; every other scope is a declared-type
-//! row set, checked against the sidecar before it leaves this file.
+//! The guest returns one [`Stream`] of `holon-plugin-rows` lines: one document,
+//! its child blocks, and rows of the scopes the sidecar declares.
+//! [`Stream::from_jsonl`] is the one parse of that text; every id in it is a
+//! typed [`LocalId`], which this file renders into the [`EntityUri`] it is
+//! stored as.
 //!
 //! Atomicity: everything is validated before anything is returned, so a
 //! refused file yields `Err` and leaves NO document block and NO scope behind.
@@ -28,13 +29,21 @@ use holon_core::file_format::FileFormatParseResult;
 use holon_core::file_format::TypedRowSet;
 use holon_core::file_format::WriteTier;
 use holon_core::file_format::WritebackDropVerdict;
-use holon_rows::parse_local_id;
+use holon_plugin_rows::BlockRow;
+use holon_plugin_rows::DocumentRow;
+use holon_plugin_rows::EntityRef;
+use holon_plugin_rows::Fields;
+use holon_plugin_rows::Line;
+use holon_plugin_rows::LocalId;
+use holon_plugin_rows::Owner;
+use holon_plugin_rows::Row;
+use holon_plugin_rows::Scope;
+use holon_plugin_rows::Stream;
 
 use crate::PluginHost;
 use crate::PluginLimits;
 use crate::params::build_block_params;
-use crate::sidecar::BLOCK_SCOPE;
-use crate::sidecar::DOCUMENT_SCOPE;
+use crate::sidecar::DeclaredScope;
 use crate::sidecar::GuestSource;
 use crate::sidecar::IdSource;
 use crate::sidecar::PluginFormat;
@@ -51,13 +60,8 @@ pub fn guest_parses() -> u64 {
     GUEST_PARSES.load(Ordering::Relaxed)
 }
 
-/// The cell a document row titles the document with; every other cell of that
-/// row is a document property.
-const TITLE_CELL: &str = "title";
-/// The cell a block row carries its text in.
-const CONTENT_CELL: &str = "content";
-/// The cell every block row identifies itself by, LOCAL to its document.
-const ID_CELL: &str = "id";
+/// The column a row's [`Row::id`] is stored in, so no cell or ref may name it.
+const ID_COLUMN: &str = "id";
 
 pub struct PluginFormatAdapter {
     format: PluginFormat,
@@ -193,45 +197,44 @@ impl FileFormatAdapter for PluginFormatAdapter {
             )
         })?;
 
-        for scope in &self.format.scopes {
-            if scope.id_from == Some(IdSource::SourcePath) {
-                parse_local_id(&scope.id_entity, &source_path)?;
-            }
-        }
+        let file_path = LocalId::from_path(&source_path).map_err(|e| {
+            anyhow!("vault path {source_path:?} names no document to hang blocks on: {e}")
+        })?;
 
-        let stream = self.run(&source_path, file_stem, content)?;
-        let sets = holon_rows::parse_row_sets(&stream).with_context(|| {
-            format!(
-                "the {} plugin emitted a stream for {source_path} that is not the row contract",
+        let text = self.run(&source_path, file_stem, content)?;
+        let stream = Stream::from_jsonl(&text).map_err(|e| {
+            anyhow!(
+                "the {} plugin emitted a stream for {source_path} that is not the row contract: \
+                 {e}",
                 self.format.format_name
             )
         })?;
 
         let file_id = EntityUri::file(&source_path);
-        let mut document: Option<Block> = None;
-        let mut blocks: Vec<Block> = Vec::new();
-        let mut typed_rows: Vec<TypedRowSet> = Vec::new();
 
-        for set in sets {
-            match set.type_name.as_str() {
-                DOCUMENT_SCOPE => {
-                    document = Some(self.document_block(set, &file_id, parent_dir_id)?);
-                }
-                BLOCK_SCOPE => blocks = self.child_blocks(set, &file_id)?,
-                _ => typed_rows.push(self.parse_typed_rows(set, &source_path)?),
+        let mut scopes = stream
+            .scopes
+            .into_iter()
+            .map(|scope| self.open_scope(scope))
+            .collect::<Result<Vec<_>>>()?;
+        for (i, scope) in scopes.iter().enumerate() {
+            if scopes[..i]
+                .iter()
+                .any(|s| s.set.type_name == scope.set.type_name)
+            {
+                bail!(
+                    "the {} plugin opened scope {:?} twice for {source_path}, so its rows could \
+                     not be routed to either",
+                    self.format.format_name,
+                    scope.set.type_name
+                );
             }
         }
-
-        let document = document.with_context(|| {
-            format!(
-                "the {} plugin emitted no {DOCUMENT_SCOPE} scope for {source_path}, so the file \
-                 has no entity to hang its blocks and rows on",
-                self.format.format_name
-            )
-        })?;
-
         for declared in &self.format.scopes {
-            if !typed_rows.iter().any(|s| s.type_name == declared.type_name) {
+            if !scopes
+                .iter()
+                .any(|s| s.declared.type_name == declared.type_name)
+            {
                 bail!(
                     "the {} plugin emitted no {:?} scope for {source_path}; a scope left out is \
                      how the last row of that type would never get swept",
@@ -241,13 +244,40 @@ impl FileFormatAdapter for PluginFormatAdapter {
             }
         }
 
+        let mut document: Option<Block> = None;
+        let mut blocks: Vec<Block> = Vec::new();
+        for line in stream.lines {
+            match line {
+                Line::Document(row) => {
+                    if document.is_some() {
+                        bail!(
+                            "the {} plugin emitted a second document for {source_path}; a file is \
+                             exactly one document",
+                            self.format.format_name
+                        );
+                    }
+                    document = Some(self.document_block(row, &file_id, parent_dir_id)?);
+                }
+                Line::Block(row) => blocks.push(self.child_block(row, &file_path, &file_id)?),
+                Line::Row(row) => self.add_row(&mut scopes, row, &file_path)?,
+            }
+        }
+
+        let document = document.with_context(|| {
+            format!(
+                "the {} plugin emitted no document for {source_path}, so the file has no entity \
+                 to hang its blocks and rows on",
+                self.format.format_name
+            )
+        })?;
+
         Ok(FileFormatParseResult {
             document,
             blocks,
             // Nothing is written back, so no block needs an id minted for
             // re-rendering.
             blocks_needing_ids: Vec::new(),
-            typed_rows,
+            typed_rows: scopes.into_iter().map(|s| s.set).collect(),
         })
     }
 
@@ -329,167 +359,207 @@ impl FileFormatAdapter for PluginFormatAdapter {
     }
 }
 
+/// One scope the stream replaces, checked against its declaration, gathering
+/// the rows that follow it.
+struct OpenScope<'a> {
+    declared: &'a DeclaredScope,
+    owner: Owner,
+    set: TypedRowSet,
+}
+
 impl PluginFormatAdapter {
-    /// The document block: `title` names it, every other cell is a property.
     fn document_block(
         &self,
-        set: TypedRowSet,
+        row: DocumentRow,
         file_id: &EntityUri,
         parent_dir_id: &EntityUri,
     ) -> Result<Block> {
-        let [row] = <[StorageEntity; 1]>::try_from(set.rows).map_err(|rows| {
-            anyhow!(
-                "the {} plugin emitted {} {DOCUMENT_SCOPE} rows; a file is exactly one document",
-                self.format.format_name,
-                rows.len()
-            )
-        })?;
-
-        let title = match row.get(TITLE_CELL) {
-            Some(Value::String(title)) => title.clone(),
-            other => bail!(
-                "the {} plugin's {DOCUMENT_SCOPE} row carries title {other:?}; a title we invented \
-                 instead would look like the file's own and quietly become its identity",
-                self.format.format_name
-            ),
-        };
-
-        let mut document = Block::new_text(file_id.clone(), parent_dir_id.clone(), title);
+        let mut document = Block::new_text(file_id.clone(), parent_dir_id.clone(), row.title);
         document.set_page(true);
-        self.apply_properties(&mut document, row, &[TITLE_CELL])?;
+        self.apply_properties(&mut document, row.properties)?;
         Ok(document)
     }
 
-    /// The document's child blocks, in emitted order. The scope carries a flat
-    /// list: no cell nests one block under another, so a format with a real
-    /// tree is not yet expressible here and would need a `parent` cell.
-    fn child_blocks(&self, set: TypedRowSet, file_id: &EntityUri) -> Result<Vec<Block>> {
-        let mut blocks = Vec::with_capacity(set.rows.len());
-        for row in set.rows {
-            let local = match row.get(ID_CELL) {
-                Some(Value::String(local)) => local.clone(),
-                other => bail!(
-                    "the {} plugin's {BLOCK_SCOPE} row carries id {other:?}, which is not a local \
-                     block id",
-                    self.format.format_name
-                ),
-            };
-            let content = match row.get(CONTENT_CELL) {
-                Some(Value::String(content)) => content.clone(),
-                other => bail!(
-                    "the {} plugin's {BLOCK_SCOPE} row {local:?} carries content {other:?}",
-                    self.format.format_name
-                ),
-            };
-            // A block's identity is its document's plus the guest's local id,
-            // so nothing the guest emits can name a block in another file.
-            let id = EntityUri::block(&format!("{}::{local}", file_id.id()));
-            let mut block = Block::new_text(id, file_id.clone(), content);
-            self.apply_properties(&mut block, row, &[ID_CELL, CONTENT_CELL])?;
-            blocks.push(block);
-        }
-        Ok(blocks)
+    /// One child block, in emitted order. The stream carries a flat list: no
+    /// line nests one block under another, so a format with a real tree is not
+    /// yet expressible here and would need a parent key.
+    ///
+    /// A block's identity is its document's path plus the guest's key, so
+    /// nothing the guest emits can name a block in another file.
+    fn child_block(
+        &self,
+        row: BlockRow,
+        file_path: &LocalId,
+        file_id: &EntityUri,
+    ) -> Result<Block> {
+        let id = EntityUri::from_segments("block", file_path.path_segments(), row.key.parts());
+        let mut block = Block::new_text(id, file_id.clone(), row.content);
+        self.apply_properties(&mut block, row.properties)?;
+        Ok(block)
     }
 
-    /// Every cell but `consumed` becomes a property.
-    ///
     /// A key naming a `block_raw` storage column is refused: `partition_params`
     /// routes such a param straight to that column, so emitting one would
     /// overwrite the block's own row state.
     fn apply_properties(
         &self,
         block: &mut Block,
-        row: StorageEntity,
-        consumed: &[&str],
+        properties: Fields<serde_json::Value>,
     ) -> Result<()> {
-        for (key, value) in row {
-            if consumed.contains(&key.as_ref()) {
-                continue;
-            }
-            if holon_api::schema::is_block_column(key.as_ref()) {
+        for (key, value) in properties {
+            if holon_api::schema::is_block_column(&key) {
                 bail!(
                     "the {} plugin emitted property {key:?}, which names a `block_raw` storage \
                      column; storing it would overwrite the block's own row state",
                     self.format.format_name
                 );
             }
-            block.set_property(key.to_string(), value);
+            block.set_property(key, Value::from_json_value(value));
         }
         Ok(())
     }
 
-    /// A row set the sidecar must have declared, cell for cell.
-    /// Check one emitted scope against its declaration and PARSE its row ids
-    /// into the references they are stored as.
-    ///
-    /// The scheme is added here because here is where the entity is known: the
-    /// sidecar's scope declares `id_entity`. Downstream — the typed-row sink,
-    /// the dispatcher — a row id already names its entity.
-    fn parse_typed_rows(&self, mut owned: TypedRowSet, source_path: &str) -> Result<TypedRowSet> {
-        let declared = self.format.scope(&owned.type_name).with_context(|| {
-            format!(
-                "the {} plugin emitted scope {:?}, which its sidecar does not declare",
-                self.format.format_name, owned.type_name
-            )
-        })?;
-
-        if owned.owner_column != declared.owner_column {
+    fn open_scope(&self, scope: Scope) -> Result<OpenScope<'_>> {
+        let declared = self.declared(&scope.type_name)?;
+        if scope.owner_column != declared.owner_column {
             bail!(
                 "the {} plugin scoped {:?} by owner column {:?}, but its sidecar declares {:?} — \
                  re-ingest sweeps by the DECLARED column, so rows would be replaced outside the \
                  scope they were written in",
                 self.format.format_name,
-                owned.type_name,
-                owned.owner_column,
+                scope.type_name,
+                scope.owner_column,
                 declared.owner_column
             );
         }
+        let owner_value = match &scope.owner {
+            Owner::Text(text) => text.clone(),
+            Owner::Ref(entity) => self.entity_uri(entity)?.to_string(),
+        };
+        Ok(OpenScope {
+            declared,
+            owner: scope.owner,
+            set: TypedRowSet {
+                type_name: scope.type_name,
+                owner_column: scope.owner_column,
+                owner_value,
+                rows: Vec::new(),
+            },
+        })
+    }
 
-        for row in &mut owned.rows {
-            for column in row.keys() {
-                if !declared.columns.contains(column.as_ref()) {
-                    bail!(
-                        "the {} plugin emitted column {column:?} on a {:?} row, which its sidecar \
-                         does not declare",
-                        self.format.format_name,
-                        owned.type_name
-                    );
-                }
+    /// File `row` under the scope the envelope opened for its type, as the
+    /// create params it is stored with.
+    fn add_row(&self, scopes: &mut [OpenScope<'_>], row: Row, file_path: &LocalId) -> Result<()> {
+        let scope = scopes
+            .iter_mut()
+            .find(|s| s.set.type_name == row.type_name)
+            .with_context(|| {
+                format!(
+                    "the {} plugin emitted a {:?} row, but its envelope opens no scope of that \
+                     type to sweep it with",
+                    self.format.format_name, row.type_name
+                )
+            })?;
+        let declared = scope.declared;
+
+        let owned = match &scope.owner {
+            Owner::Text(text) => {
+                row.cells.get(&declared.owner_column) == Some(&serde_json::json!(text))
             }
-            match row.get(declared.owner_column.as_str()) {
-                Some(Value::String(owner)) if *owner == owned.owner_value => {}
-                other => bail!(
-                    "a {:?} row carries owner column {:?} = {other:?} while its scope owns {:?}; \
-                     the row would be written outside the scope its own replacement sweeps",
-                    owned.type_name,
-                    declared.owner_column,
-                    owned.owner_value
-                ),
-            }
-            let id = match row.get(ID_CELL) {
-                Some(Value::String(local))
-                    if declared.id_from == Some(IdSource::SourcePath) && local != source_path =>
-                {
-                    bail!(
-                        "the {} plugin emitted a {:?} row with id {local:?}, but its sidecar \
-                         declares that id to be the source path {source_path:?}",
-                        self.format.format_name,
-                        owned.type_name
-                    )
-                }
-                Some(Value::String(local)) => parse_local_id(&declared.id_entity, local)?,
-                other => bail!(
-                    "a {:?} row carries id {other:?}; ids are derived from content and every row \
-                     must have one, because the replacement on re-ingest keys on it",
-                    owned.type_name
-                ),
-            };
-            row.insert(ID_CELL.into(), Value::String(id.to_string()));
+            Owner::Ref(entity) => row.refs.get(&declared.owner_column) == Some(entity),
+        };
+        if !owned {
+            bail!(
+                "a {:?} row carries owner column {:?} = {:?} while its scope owns {:?}; the row \
+                 would be written outside the scope its own replacement sweeps",
+                row.type_name,
+                declared.owner_column,
+                row.refs
+                    .get(&declared.owner_column)
+                    .map(|r| format!("{r:?}"))
+                    .or_else(|| row.cells.get(&declared.owner_column).map(|c| c.to_string())),
+                scope.set.owner_value
+            );
         }
-        Ok(owned)
+
+        if declared.id_from == Some(IdSource::SourcePath) && row.id != *file_path {
+            bail!(
+                "the {} plugin emitted a {:?} row with id {:?}, but its sidecar declares that id \
+                 to be the source path {:?}",
+                self.format.format_name,
+                row.type_name,
+                row.id,
+                file_path
+            );
+        }
+
+        let mut entity = StorageEntity::new();
+        entity.insert(
+            ID_COLUMN.into(),
+            Value::String(
+                EntityUri::from_segments(
+                    &declared.id_entity,
+                    row.id.path_segments(),
+                    row.id.parts(),
+                )
+                .to_string(),
+            ),
+        );
+        let refs = row
+            .refs
+            .into_iter()
+            .map(|(column, target)| {
+                Ok((column, Value::String(self.entity_uri(&target)?.to_string())))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let cells = row
+            .cells
+            .into_iter()
+            .map(|(column, value)| (column, Value::from_json_value(value)));
+        for (column, value) in refs.into_iter().chain(cells) {
+            if !declared.columns.contains(&column) {
+                bail!(
+                    "the {} plugin emitted column {column:?} on a {:?} row, which its sidecar \
+                     does not declare",
+                    self.format.format_name,
+                    declared.type_name
+                );
+            }
+            if entity.contains_key(column.as_str()) {
+                bail!(
+                    "the {} plugin stated column {column:?} of a {:?} row twice — as the row's id, \
+                     or as both a ref and a cell",
+                    self.format.format_name,
+                    declared.type_name
+                );
+            }
+            entity.insert(column.into(), value);
+        }
+        scope.set.rows.push(entity);
+        Ok(())
+    }
+
+    /// The stored reference for a row of a declared type, its scheme the type's
+    /// `id_entity`.
+    fn entity_uri(&self, entity: &EntityRef) -> Result<EntityUri> {
+        let declared = self.declared(&entity.type_name)?;
+        Ok(EntityUri::from_segments(
+            &declared.id_entity,
+            entity.id.path_segments(),
+            entity.id.parts(),
+        ))
+    }
+
+    fn declared(&self, type_name: &str) -> Result<&DeclaredScope> {
+        self.format.scope(type_name).with_context(|| {
+            format!(
+                "the {} plugin emitted type {type_name:?}, which its sidecar does not declare",
+                self.format.format_name
+            )
+        })
     }
 }
-
 impl std::fmt::Debug for PluginFormatAdapter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PluginFormatAdapter")

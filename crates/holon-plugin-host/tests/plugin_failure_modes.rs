@@ -144,12 +144,29 @@ fn a_row_outside_its_own_scope_is_refused() {
     assert!(message.contains("outside the scope"), "{message}");
 }
 
-/// An id that already reads as a schemed URI is stored unprefixed, leaving
-/// every reference to it joining to nothing.
+/// A guest not built on `holon-plugin-rows` can still write an id the typed
+/// [`holon_plugin_rows::LocalId`] cannot spell; the one parse refuses it by
+/// name and line.
 #[test]
-fn an_id_that_would_not_land_is_refused() {
-    let message = refusal(&testkit(), "unstorable_id");
-    assert!(message.contains("already:schemed"), "{message}");
+fn a_malformed_local_id_is_refused_by_name() {
+    let message = refusal(&testkit(), "malformed_id");
+    assert!(
+        message.contains("not the row contract")
+            && message.contains("line 3")
+            && message.contains("malformed local id"),
+        "{message}"
+    );
+}
+
+/// A joined string such as `already:schemed` is no local id at all: the
+/// host, not the guest, decides how an id is spelled.
+#[test]
+fn a_joined_string_id_is_refused() {
+    let message = refusal(&testkit(), "joined_id");
+    assert!(
+        message.contains("not the row contract") && message.contains("line 3"),
+        "{message}"
+    );
 }
 
 #[test]
@@ -329,23 +346,38 @@ fn a_sidecar_claiming_write_back_is_refused() {
     assert!(chain.contains("not admissible"), "{chain}");
 }
 
+/// A type name is spliced into SQL as its table and becomes the scheme of its
+/// rows' ids.
 #[test]
-fn a_sidecar_claiming_a_contract_scope_is_refused() {
+fn a_sidecar_type_that_is_not_snake_case_is_refused() {
     let dir = std::env::temp_dir().join("holon-plugin-host-sidecar-tests");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::copy(fixtures().join("testkit.wasm"), dir.join("testkit.wasm")).unwrap();
-    let sidecar = dir.join("greedy-scope.yaml");
-    std::fs::write(
-        &sidecar,
-        "format: greedy\nguest: testkit.wasm\nextensions: [greedy2]\nscopes:\n  \
-         - type: holon.document\n    owner_column: source_path\n    columns: [id, source_path]\n",
-    )
-    .unwrap();
+    for type_name in [
+        "2nd thing",
+        "holon.document",
+        "holon.block",
+        "Thing",
+        "ingredient-use",
+    ] {
+        let sidecar = dir.join("bad-type-name.yaml");
+        std::fs::write(
+            &sidecar,
+            format!(
+                "format: badtype\nguest: testkit.wasm\nextensions: [badtype]\nscopes:\n  \
+                 - type: {type_name}\n    owner_column: source_path\n    columns: [id, source_path]\n"
+            ),
+        )
+        .unwrap();
 
-    assert!(
-        PluginFormatAdapter::load(&sidecar, PluginLimits::default()).is_err(),
-        "a sidecar cannot claim the scope that carries blocks"
-    );
+        let error = PluginFormatAdapter::load(&sidecar, PluginLimits::default())
+            .expect_err("a type name that is not snake_case must be refused");
+        let chain = format!("{error:#}");
+        assert!(
+            chain.contains("is snake_case") && chain.contains(type_name),
+            "{chain}"
+        );
+    }
 }
 
 #[test]
@@ -363,7 +395,7 @@ fn a_row_id_other_than_the_declared_source_path_is_refused() {
     let adapter = PluginFormatAdapter::load(&sidecar, PluginLimits::default()).unwrap();
 
     run(&adapter, "well_formed").expect("the guest keys `thing` by its path");
-    let message = refusal(&adapter, "unstorable_id");
+    let message = refusal(&adapter, "foreign_id");
     assert!(
         message.contains("declares that id to be the source path"),
         "{message}"

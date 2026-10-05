@@ -2024,7 +2024,7 @@ async fn solo_then_pair(
 /// The recipe step the receiver's OWN `.cook` file ingests as, and the block
 /// this device hung under it before it was ever paired. `CookFormatAdapter`
 /// derives the step id from the file path, so the owner minted the same one.
-const RECEIVER_RECIPE_STEP: &str = "block:keystone-recipe.cook::b::0";
+const RECEIVER_RECIPE_STEP: &str = "block:Gr%C3%BCne%20Keystone-So%C3%9Fe.cook::b::0";
 const SOLO_RECIPE_NOTE: &str = "block:solo-recipe-note";
 /// The negative control's block: same device, same pre-pair seeding route,
 /// same re-import — only the parent's home differs.

@@ -178,17 +178,36 @@ impl EntityUri {
     // parsing and resolved to the page's `block:<uuid>` at startup.
 
     pub fn file(path: &str) -> Self {
-        use fluent_uri::encoding::EString;
+        Self::new("file", &encoded_path(path.split('/')).into_string())
+    }
+
+    /// `{scheme}:{segment}/{segment}::{part}::{part}`, with every segment and
+    /// part percent-encoded as [`Self::file`] encodes a path segment.
+    ///
+    /// Everything outside RFC 3986 `unreserved` is encoded, `/` and `:`
+    /// included, so no separator can occur inside a component and the id can
+    /// never start with the `:` that [`Self::schemed`] reads as a bare id.
+    pub fn from_segments<S: AsRef<str>, P: AsRef<str>>(
+        scheme: &str,
+        segments: &[S],
+        parts: &[P],
+    ) -> Self {
         use fluent_uri::encoding::encoder::Data;
-        use fluent_uri::encoding::encoder::Path;
-        let mut buf = EString::<Path>::new();
-        for (i, segment) in path.split('/').enumerate() {
-            if i > 0 {
-                buf.push('/');
-            }
-            buf.encode::<Data>(segment);
+        assert!(
+            !segments.is_empty() && segments.iter().all(|s| !s.as_ref().is_empty()),
+            "EntityUri::from_segments({scheme:?}): every id names a path of non-empty segments"
+        );
+        assert!(
+            parts.iter().all(|p| !p.as_ref().is_empty()),
+            "EntityUri::from_segments({scheme:?}): an id part is never empty"
+        );
+        let mut buf = encoded_path(segments.iter().map(AsRef::as_ref));
+        for part in parts {
+            buf.push(':');
+            buf.push(':');
+            buf.encode::<Data>(part.as_ref());
         }
-        Self::new("file", &buf.into_string())
+        Self::new(scheme, buf.as_str())
     }
 
     // -- Condition --
@@ -378,6 +397,22 @@ impl EntityUri {
     pub fn to_string_repr(&self) -> String {
         self.0.to_string()
     }
+}
+
+fn encoded_path<'a>(
+    segments: impl Iterator<Item = &'a str>,
+) -> fluent_uri::encoding::EString<fluent_uri::encoding::encoder::Path> {
+    use fluent_uri::encoding::EString;
+    use fluent_uri::encoding::encoder::Data;
+    use fluent_uri::encoding::encoder::Path;
+    let mut buf = EString::<Path>::new();
+    for (i, segment) in segments.enumerate() {
+        if i > 0 {
+            buf.push('/');
+        }
+        buf.encode::<Data>(segment);
+    }
+    buf
 }
 
 // -- Trait impls --
@@ -671,5 +706,81 @@ mod tests {
     #[should_panic(expected = "names its kind")]
     fn an_empty_condition_kind_fails_loudly() {
         let _ = EntityUri::condition("todoist", "");
+    }
+
+    fn decoded(component: &str) -> String {
+        fluent_uri::encoding::EStr::<fluent_uri::encoding::encoder::Path>::new_or_panic(component)
+            .decode()
+            .into_string()
+            .expect("an encoded str decodes to UTF-8")
+            .into_owned()
+    }
+
+    mod from_segments {
+        use proptest::prelude::*;
+
+        use super::super::EntityUri;
+        use super::decoded;
+
+        proptest! {
+            /// Whatever a file name holds, the id names its own entity and
+            /// decodes back to exactly the segments and parts it was built from.
+            #[test]
+            fn any_segments_round_trip_as_their_own_entity(
+                scheme in "[a-z][a-z0-9-]{0,8}",
+                segments in prop::collection::vec("[^/]{1,6}", 1..4),
+                parts in prop::collection::vec(".{1,6}", 0..3),
+            ) {
+                let uri = EntityUri::from_segments(&scheme, &segments, &parts);
+                let schemed = EntityUri::schemed(uri.as_str()).expect("the id names its entity");
+                prop_assert_eq!(schemed.scheme(), scheme.as_str());
+                prop_assert_eq!(&schemed, &uri);
+
+                let mut components = uri.id().split("::");
+                let path = components.next().expect("split yields a first piece");
+                let back: Vec<String> = path.split('/').map(decoded).collect();
+                prop_assert_eq!(back, segments);
+                let back: Vec<String> = components.map(decoded).collect();
+                prop_assert_eq!(back, parts);
+            }
+
+            /// An id of unreserved ASCII is spelled as it was before encoding
+            /// existed, so no stored id of such a file changes.
+            #[test]
+            fn unreserved_ascii_is_spelled_unchanged(
+                scheme in "[a-z][a-z0-9-]{0,8}",
+                segments in prop::collection::vec("[A-Za-z0-9._~-]{1,8}", 1..4),
+                parts in prop::collection::vec("[a-z0-9-]{1,8}", 0..3),
+            ) {
+                let joined: String = parts.iter().map(|p| format!("::{p}")).collect();
+                prop_assert_eq!(
+                    EntityUri::from_segments(&scheme, &segments, &parts).to_string(),
+                    format!("{scheme}:{}{joined}", segments.join("/"))
+                );
+            }
+        }
+
+        #[test]
+        fn a_space_and_umlauts_are_encoded_like_a_file_path() {
+            let uri = EntityUri::from_segments(
+                "recipe",
+                &["Rezepte", "Grüne Soße.cook"],
+                &["iu", "mehl-0"],
+            );
+            assert_eq!(
+                uri.as_str(),
+                "recipe:Rezepte/Gr%C3%BCne%20So%C3%9Fe.cook::iu::mehl-0"
+            );
+            assert_eq!(
+                uri.id().split("::").next(),
+                Some(EntityUri::file("Rezepte/Grüne Soße.cook").id())
+            );
+        }
+
+        #[test]
+        #[should_panic(expected = "non-empty segments")]
+        fn an_empty_segment_fails_loudly() {
+            let _ = EntityUri::from_segments("recipe", &["Rezepte", ""], &[] as &[&str]);
+        }
     }
 }

@@ -1,5 +1,5 @@
-//! The `.cook` format as a wasm guest: cooklang 0.18.7 behind the four-function
-//! ABI, emitting the JSON Lines row contract.
+//! The `.cook` format as a wasm guest: cooklang 0.18.7 behind the five-function
+//! ABI, emitting the plugin row stream of `holon-plugin-rows`.
 //!
 //! A pure function. It imports nothing — no WASI, no clock, no filesystem — so
 //! the only thing that reaches it is the file's bytes and a JSON context
@@ -20,6 +20,17 @@ use cooklang::model::Content;
 use cooklang::quantity::Number;
 use cooklang::quantity::Quantity;
 use cooklang::quantity::Value as CookValue;
+use holon_plugin_rows::BlockKey;
+use holon_plugin_rows::BlockRow;
+use holon_plugin_rows::DocumentRow;
+use holon_plugin_rows::EntityRef;
+use holon_plugin_rows::Fields;
+use holon_plugin_rows::Line;
+use holon_plugin_rows::LocalId;
+use holon_plugin_rows::Owner;
+use holon_plugin_rows::Row;
+use holon_plugin_rows::Scope;
+use holon_plugin_rows::Stream;
 use serde_json::Value;
 use serde_json::json;
 
@@ -65,91 +76,88 @@ fn parse_cook(input: &[u8], ctx: &[u8]) -> Result<String, String> {
         .find(|(key, _)| key == "course")
         .map(|(_, value)| value.clone());
 
-    let recipe_id = format!("recipe:{source_path}");
-    let mut out = String::new();
+    let recipe_id = LocalId::from_path(source_path).map_err(|e| e.to_string())?;
+    let recipe_ref = EntityRef {
+        type_name: "recipe".to_string(),
+        id: recipe_id.clone(),
+    };
+    let scopes = vec![
+        Scope {
+            type_name: "recipe".to_string(),
+            owner_column: "source_path".to_string(),
+            owner: Owner::Text(source_path.to_string()),
+        },
+        Scope {
+            type_name: "ingredient_use".to_string(),
+            owner_column: "recipe_id".to_string(),
+            owner: Owner::Ref(recipe_ref.clone()),
+        },
+    ];
 
-    push(
-        &mut out,
-        json!({
-            "holon_rows": 1,
-            "scopes": [
-                {"type": "holon.document", "owner_column": "source_path", "owner_value": source_path},
-                {"type": "holon.block", "owner_column": "source_path", "owner_value": source_path},
-                {"type": "recipe", "owner_column": "source_path", "owner_value": source_path},
-                {"type": "ingredient_use", "owner_column": "recipe_id", "owner_value": recipe_id},
-            ]
-        }),
-    );
-
-    let mut document = serde_json::Map::new();
-    document.insert("title".to_string(), Value::String(title.clone()));
+    let mut lines = Vec::new();
+    let mut document = Fields::new();
     for (key, value) in properties {
         document.insert(key, Value::String(value));
     }
-    push(
-        &mut out,
-        json!({"type": "holon.document", "row": Value::Object(document)}),
-    );
+    lines.push(Line::Document(DocumentRow {
+        title: title.clone(),
+        properties: document,
+    }));
 
     for (seq, block) in blocks_of(&recipe).into_iter().enumerate() {
-        let mut row = serde_json::Map::new();
-        row.insert("id".to_string(), json!(format!("b::{seq}")));
-        row.insert("content".to_string(), Value::String(block.text));
+        let mut properties = Fields::new();
         if let Some(number) = block.step_number {
-            row.insert(STEP_NUMBER_KEY.to_string(), json!(number.to_string()));
+            properties.insert(STEP_NUMBER_KEY, json!(number.to_string()));
         }
-        push(
-            &mut out,
-            json!({"type": "holon.block", "row": Value::Object(row)}),
-        );
+        lines.push(Line::Block(BlockRow {
+            key: BlockKey::new(["b".to_string(), seq.to_string()]).map_err(|e| e.to_string())?,
+            content: block.text,
+            properties,
+        }));
     }
 
-    push(
-        &mut out,
-        json!({
-            "type": "recipe",
-            "row": {
-                "id": source_path,
-                "source_path": source_path,
-                "title": title,
-                // `servings` is deliberately not written: cooklang admits
-                // non-integer servings (`4|6|8`) that the INTEGER column
-                // cannot hold, and the metadata reaches the recipe page
-                // through the document block's properties either way.
-                "course": course,
-            }
-        }),
-    );
+    let mut cells = Fields::new();
+    cells.insert("source_path", json!(source_path));
+    cells.insert("title", json!(title));
+    // `servings` is deliberately not written: cooklang admits non-integer
+    // servings (`4|6|8`) that the INTEGER column cannot hold, and the metadata
+    // reaches the recipe page through the document block's properties either
+    // way.
+    cells.insert("course", json!(course));
+    lines.push(Line::Row(Row {
+        type_name: "recipe".to_string(),
+        id: recipe_id.clone(),
+        refs: Fields::new(),
+        cells,
+    }));
 
     let mut seen: HashMap<String, usize> = HashMap::new();
     for use_ in uses_of(&recipe)? {
         let slug = id_slug(&use_.name);
         let occurrence = seen.entry(slug.clone()).or_insert(0);
-        let local = format!("{source_path}::iu::{slug}-{occurrence}");
+        let id = recipe_id
+            .clone()
+            .part("iu")
+            .and_then(|id| id.part(format!("{slug}-{occurrence}")))
+            .map_err(|e| e.to_string())?;
         *occurrence += 1;
-        push(
-            &mut out,
-            json!({
-                "type": "ingredient_use",
-                "row": {
-                    "id": local,
-                    "recipe_id": recipe_id,
-                    // The schema's column for what the parser calls `name`.
-                    "raw_name": use_.name,
-                    "quantity": use_.quantity,
-                    "unit": use_.unit,
-                    "step_index": use_.step_index,
-                }
-            }),
-        );
+        let mut refs = Fields::new();
+        refs.insert("recipe_id", recipe_ref.clone());
+        let mut cells = Fields::new();
+        // The schema's column for what the parser calls `name`.
+        cells.insert("raw_name", json!(use_.name));
+        cells.insert("quantity", json!(use_.quantity));
+        cells.insert("unit", json!(use_.unit));
+        cells.insert("step_index", json!(use_.step_index));
+        lines.push(Line::Row(Row {
+            type_name: "ingredient_use".to_string(),
+            id,
+            refs,
+            cells,
+        }));
     }
 
-    Ok(out)
-}
-
-fn push(out: &mut String, line: Value) {
-    out.push_str(&line.to_string());
-    out.push('\n');
+    Ok(Stream { scopes, lines }.to_jsonl())
 }
 
 fn cell<'a>(ctx: &'a Value, key: &str) -> Result<&'a str, String> {
@@ -406,8 +414,8 @@ fn first_reference_steps(recipe: &Recipe) -> HashMap<usize, u32> {
     out
 }
 
-/// An ingredient name reduced to URI-path characters, so `@crème fraîche` and
-/// `@sea salt` yield ids the write path can actually store.
+/// An ingredient name reduced to lowercase ASCII, so `@Sea Salt` and
+/// `@sea salt` share an id part.
 ///
 /// Distinct names may collide here (`sea salt` and `sea-salt`); the occurrence
 /// counter in the caller is keyed on the SLUG, not the name, so a collision

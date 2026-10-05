@@ -6148,7 +6148,7 @@ dependencies = [
  "anyhow",
  "holon-api",
  "holon-core",
- "holon-rows",
+ "holon-plugin-rows",
  "libc",
  "proptest 1.11.0",
  "serde",
@@ -6157,6 +6157,14 @@ dependencies = [
  "tracing",
  "wasmi",
  "workspace-hack 0.1.0",
+]
+
+[[package]]
+name = "holon-plugin-rows"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

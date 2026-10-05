@@ -34,11 +34,13 @@ normalizes to the scheme `shopping-item`; the leading `shopping` is the LIST
 name, and the row already carries it in its own `list` column
 (`owner_value: "shopping"`).
 
-That first segment then reads as a URI scheme, which is the exact shape
-`holon_rows::parse_local_id` refuses for file-derived ids — "it already reads
-as a schemed URI, so it is stored unprefixed and every reference to it joins to
-nothing". Connector-derived rows never pass through that parse, so the shape
-reached storage unchallenged.
+That first segment then reads as a URI scheme of its own. A file-format
+plugin cannot produce this shape: it states each id as a structured `LocalId`
+and the host renders it under the declared type's scheme
+(`EntityUri::from_segments`, `crates/holon-plugin-host/src/adapter.rs`,
+`add_row`). A connector row carries its id as a plain string from the sidecar
+mapping (`crates/holon-rows`, envelope v1), and nothing checks that string, so
+the shape reached storage unchallenged.
 
 The rows do join today, because every leg builds the same string. What is wrong
 is that the id does not name what it is a row of, so nothing downstream can
@@ -55,9 +57,8 @@ the operation boundary compare a reference's scheme against the entity its
 parameter was declared for, which is what turned the convention into a check
 and surfaced this.
 
-COVERAGE secondary: the connector typed-row path has no equivalent of the
-file-format adapter's `parse_local_id`, so a mis-schemed id from a sidecar
-mapping is not refused where it is produced.
+COVERAGE secondary: the connector typed-row path has no id check, so a
+mis-schemed id from a sidecar mapping is not refused where it is produced.
 
 ## Exposure
 
@@ -75,9 +76,11 @@ Open — needs a ruling, and it touches a file another lane owns
 1. Key the rows `shopping-item:<cat>:<name>` — change `row_id`, the sidecar
    mapping, and the door test's literal. The mirror table is re-derived by
    `replace_typed_rows` on each sync, so stored rows heal on the next round.
-2. Route connector-derived typed rows through `holon_rows::parse_local_id` as
-   the file-format adapter now does, so a mis-schemed id is refused where it is
-   produced rather than at the operation boundary.
+2. Give connector rows the typed-id contract that file-format plugins have:
+   the mapping states an id as path segments plus parts, and `holon-rows`
+   renders it with `EntityUri::from_segments` under the scope's declared type.
+   Then a mis-schemed id cannot be stated, rather than being refused at the
+   operation boundary.
 
 Recommendation: both, (1) first. Not done here: it is outside D125.a and the
 sidecar file is contended.
@@ -85,7 +88,6 @@ sidecar file is contended.
 **FIXED by lane `lowcode-inc5`** (2026-09-15): `assets/integrations/shopping.yaml`
 now keys the rows `shopping-item:<cat>:<name>` with `@uri`-escaped segments, and
 the bespoke `crates/holon-kitchen/src/shopping.rs` that carried the second copy
-of the derivation is deleted. Remedy (2) — routing connector typed rows through
-`holon_rows::parse_local_id` — is NOT done, so a sidecar mapping can still emit
-a mis-schemed id; the operation boundary refuses it at dispatch rather than at
-the mapping.
+of the derivation is deleted. Remedy (2) is NOT done. The connector leg has no id check: a sidecar mapping
+can still emit a mis-schemed id, and the operation boundary refuses it only at
+dispatch, not at the mapping.

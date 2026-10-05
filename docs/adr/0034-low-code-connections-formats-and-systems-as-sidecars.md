@@ -60,38 +60,50 @@ logs (`crates/holon-mcp-client/src/rest_transport.rs:50`,
 
 ### 2. The neutral contract: JSON Lines of typed rows
 
-Every provider — a format plugin, a remote system, a future CLI tool — emits the
-existing `TypedRowSet` (`crates/holon-core/src/file_format.rs:52`) on the wire as
-JSON Lines, so the sink (`DispatchingTypedRowSink`,
-`crates/holon/src/core/typed_row_sink.rs:34`) is unchanged.
+Every provider — a format plugin, a remote system, a future CLI tool — emits
+typed lines defined by one shared crate, `holon-plugin-rows`
+(`guests/plugin-rows`, contract version 2). The host parses them into the
+existing `TypedRowSet` (`crates/holon-core/src/file_format.rs:52`), so the sink
+(`DispatchingTypedRowSink`, `crates/holon/src/core/typed_row_sink.rs:34`) is
+unchanged. The wire is JSON Lines; the host's one parse point is
+`Stream::from_jsonl` in `crates/holon-plugin-host/src/adapter.rs`.
 
 ```
-{"holon_rows":1,"scopes":[{"type":"recipe","owner_column":"source_path","owner_value":"Rezepte/Pfannkuchen.cook"},
-                          {"type":"ingredient_use","owner_column":"recipe_id","owner_value":"recipe:Rezepte/Pfannkuchen.cook"}]}
-{"type":"recipe","row":{"id":"Rezepte/Pfannkuchen.cook","title":"Pfannkuchen","servings":"4|6","course":null}}
-{"type":"ingredient_use","row":{"id":"…::iu::mehl-0","recipe_id":"recipe:…","raw_name":"Mehl","quantity":250.0,"unit":"g","step_index":0}}
+{"holon_rows":2,"scopes":[{"type":"recipe","owner_column":"source_path","owner":{"text":"Rezepte/Pfannkuchen.cook"}},
+                          {"type":"ingredient_use","owner_column":"recipe_id","owner":{"ref":{"type":"recipe","id":{"path":["Rezepte","Pfannkuchen.cook"]}}}}]}
+{"document":{"title":"Pfannkuchen"}}
+{"row":{"type":"recipe","id":{"path":["Rezepte","Pfannkuchen.cook"]},"cells":{"title":"Pfannkuchen","servings":"4|6"}}}
+{"row":{"type":"ingredient_use","id":{"path":["Rezepte","Pfannkuchen.cook"],"parts":["iu","mehl-0"]},"refs":{"recipe_id":{"type":"recipe","id":{"path":["Rezepte","Pfannkuchen.cook"]}}},"cells":{"raw_name":"Mehl","quantity":250.0,"unit":"g","step_index":0}}}
 ```
 
 Four rules, each a loud error when broken:
 
 1. **Line 1 declares every scope.** A scope with zero following rows is legal and
    load-bearing — it is how the last row of a set gets swept. Inferring scopes
-   from the rows present would make that unrepresentable.
+   from the rows present would make that unrepresentable. A scope is owned by
+   plain text (a source path) or by a reference to a row of another type.
 2. **Replace-scope semantics**, as the adapter contract already has them.
-3. **Ids derive from content, never position**; the host re-checks with
-   `checked_local_id` promoted out of the kitchen crate
-   (`crates/holon-kitchen/src/rows.rs:115`).
+3. **Ids are structured, never strings.** A plugin states an id as a `LocalId`:
+   path segments plus `::` parts, derived from content, never position. Parsing
+   refuses an empty segment, a `/` inside a segment, and an empty part. The host
+   renders each id to an `EntityUri` in one place, `EntityUri::from_segments`
+   (`crates/holon-api/src/entity_uri.rs`), which percent-encodes every component,
+   so a file name with a space or an umlaut is storable and no id can read as
+   already-schemed. A plugin cannot hand the host a joined id string.
 4. **An undeclared type or owner column is refused**, as `typed_row_sink.rs`
-   already does.
+   already does. A sidecar type name that is not `snake_case` is refused at
+   load: it names the type's table, and with `_` read as `-` it is the URI
+   scheme (`id_entity`) its rows land under.
 
 A format sidecar's scope may declare **`id_from: source_path`**: every row of
 that scope is keyed by the file's vault-relative path, the `source_path` the
 host hands the guest (`crates/holon-plugin-host/plugins/cooklang.yaml` declares
-it for `recipe`). The id is then known before the guest runs, so the adapter
-checks it with `parse_local_id` first and refuses a file whose path cannot be
-stored without running the guest (`crates/holon-plugin-host/src/adapter.rs`,
-`parse`). After the run, a row of that scope whose emitted id is not the source
-path is refused, so a sidecar whose guest breaks the declaration fails loudly.
+it for `recipe`). After the run, a row of that scope whose emitted id is not
+the source path is refused, so a sidecar whose guest breaks the declaration
+fails loudly. Independently of any declaration, the adapter parses the source
+path into its `LocalId` before the guest runs, so a path that names no
+document (an empty segment) is refused without running the guest
+(`crates/holon-plugin-host/src/adapter.rs`, `parse`).
 
 JSON Lines first. CSV and Arrow only on a measured need.
 
@@ -164,7 +176,7 @@ holon:                      # what the standard lacks
     commit:
       query: {version: "{version}"}
       body: {oldVersion: "{version}", device: {id: "{deviceId}"}, commands: "{commands}"}
-      response: "<jaq: one response → a holon-rows stream>"
+      response: "<jaq: one response → a holon-plugin-rows stream>"
       request: "<jaq: a {scopes, rows} stream → this call's arguments>"
 ```
 

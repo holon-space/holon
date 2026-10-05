@@ -133,10 +133,7 @@ fn f_a_and_f_b_populations_over_the_shipped_assets_and_a_source_file() {
         // `build` already ran the boot — a second `start_app` asserts.
         env.wait_for_loro_quiescence(Duration::from_secs(20)).await;
         let with_source = census(&env).await;
-        report(
-            "shipped assets/default + keystone-recipe.cook",
-            &with_source,
-        );
+        report("shipped assets/default + the keystone recipe", &with_source);
         assert!(
             with_source.total >= shipped.total,
             "adding a source file removed blocks — the census is measuring the wrong thing"

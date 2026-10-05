@@ -13,7 +13,6 @@
 
 mod emit;
 mod envelope;
-mod ids;
 mod jaq_library;
 mod mapping;
 mod parse;
@@ -22,7 +21,6 @@ pub use emit::emit_row_sets;
 pub use envelope::CONTRACT_VERSION;
 pub use envelope::Envelope;
 pub use envelope::ScopeHeader;
-pub use ids::parse_local_id;
 pub use jaq_library::MAX_FROMJSON_DEPTH;
 pub use jaq_library::MAX_FROMJSON_NUMBER_DIGITS;
 pub use mapping::MAX_MAPPING_OUTPUT_BYTES;

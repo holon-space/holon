@@ -55,8 +55,8 @@ exclude = [
   "experiments/lorotree-spike",
   # wasm plugin guests: each targets wasm32-unknown-unknown, carries its own
   # `[workspace]` and `Cargo.lock`, and is built into a checked-in `.wasm`
-  # under `crates/holon-plugin-host/plugins/`. Nothing in the workspace
-  # path-depends on them.
+  # under `crates/holon-plugin-host/plugins/`. `holon-plugin-host`
+  # path-depends on `guests/plugin-rows`, the stream types guest and host share.
   "guests",
   # naga 27 (via wgpu) + codespan-reporting 0.12 = WriteColor trait error
   # when features are unified across the workspace. Known upstream bug:
