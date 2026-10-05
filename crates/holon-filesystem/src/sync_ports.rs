@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use async_trait::async_trait;
 use holon_api::EntityUri;
+use holon_api::HolonChange;
 use holon_api::block::Block;
 
 /// What the last ingest recorded for one vault file.
@@ -597,6 +598,17 @@ pub trait WritebackDisclosure: Send + Sync {
     /// edited since: the deletion no longer stands, and the block stays.
     /// Sticky for the rest of the process.
     fn deletion_ended_by_edit(&self, block_id: &EntityUri, file: &Path);
+
+    /// Signal that `block_id`'s line in `file` was edited after Holon
+    /// `change`d the block: Holon's change stands and `file_text` is not
+    /// ingested. Sticky for the rest of the process.
+    fn file_edit_overruled(
+        &self,
+        block_id: &EntityUri,
+        file: &Path,
+        file_text: &str,
+        change: HolonChange,
+    );
 
     /// Signal that the file-sync controller of `vault` failed before it
     /// watched the vault, so nothing syncs; `cause` names the failure. Sticky

@@ -407,6 +407,16 @@ pub enum ConditionKind {
     ///
     /// All-clear: none in this process.
     DeletionEndedByEdit { file: String },
+    /// `subject`, a block id, was edited in `file` after Holon `change`d it.
+    /// Holon's change stands; the file's text, `file_text`, is not ingested,
+    /// and the next write-back replaces it.
+    ///
+    /// All-clear: none in this process.
+    FileEditOverruled {
+        file: String,
+        file_text: String,
+        change: HolonChange,
+    },
     /// `subject`, a vault root, is not synced: the file sync failed before it
     /// watched the vault. `cause` names the failure and what no longer syncs.
     ///
@@ -524,6 +534,7 @@ impl ConditionKind {
     pub const DELETION_UNDONE_BLOCK_IN_OTHER_FILE: &'static str =
         "deletion-undone-block-in-other-file";
     pub const DELETION_ENDED_BY_EDIT: &'static str = "deletion-ended-by-edit";
+    pub const FILE_EDIT_OVERRULED: &'static str = "file-edit-overruled";
     pub const VAULT_SYNC_NOT_STARTED: &'static str = "vault-sync-not-started";
     pub const VAULT_STATE_UNREADABLE: &'static str = "vault-state-unreadable";
     pub const VAULT_START_INCOMPLETE: &'static str = "vault-start-incomplete";
@@ -579,6 +590,7 @@ impl ConditionKind {
                 Self::DELETION_UNDONE_BLOCK_IN_OTHER_FILE
             }
             Self::DeletionEndedByEdit { .. } => Self::DELETION_ENDED_BY_EDIT,
+            Self::FileEditOverruled { .. } => Self::FILE_EDIT_OVERRULED,
             Self::VaultSyncNotStarted { .. } => Self::VAULT_SYNC_NOT_STARTED,
             Self::VaultStateUnreadable { .. } => Self::VAULT_STATE_UNREADABLE,
             Self::VaultStartIncomplete { .. } => Self::VAULT_START_INCOMPLETE,
@@ -624,6 +636,22 @@ impl IngestRefusals {
     /// The first [`EXAMPLES`](Self::EXAMPLES) refused files, by path.
     pub fn examples(&self) -> &[RefusedFile] {
         &self.examples
+    }
+}
+
+/// What Holon did to a block that an org file still holds as it was.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HolonChange {
+    Deleted,
+    Moved,
+}
+
+impl std::fmt::Display for HolonChange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Deleted => "deleted",
+            Self::Moved => "moved",
+        })
     }
 }
 

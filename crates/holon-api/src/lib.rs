@@ -98,6 +98,7 @@ pub use condition_bus::ConditionKey;
 pub use condition_bus::ConditionKind;
 pub use condition_bus::ConditionSubscription;
 pub use condition_bus::DerivedFieldSeat;
+pub use condition_bus::HolonChange;
 pub use condition_bus::IngestRefusals;
 pub use condition_bus::LostTableRows;
 pub use condition_bus::RefusedFile;

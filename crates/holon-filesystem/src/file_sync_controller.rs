@@ -24,6 +24,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use anyhow::Result;
 use holon_api::EntityUri;
+use holon_api::HolonChange;
 use holon_api::POSITION_AFTER_BLOCK_ID_PARAM;
 use holon_api::ROUTING_DOC_URI_KEY;
 use holon_api::Rendered;
@@ -35,6 +36,7 @@ use holon_core::CanonicalPath;
 use holon_core::DownstreamProjection;
 use holon_core::ReadOnlyDocuments;
 use holon_core::ReadOnlyMembers;
+use holon_core::Seen;
 use holon_core::block_ordering::BlockOrdering;
 use holon_core::file_format::FileFormatAdapter;
 use holon_core::file_format::FormatRegistry;
@@ -5747,6 +5749,95 @@ impl FileSyncController {
                 .map(|(id, (stored, _))| (id.clone(), stored.clone())),
         );
 
+        // Classify each block the last ingest saw against the tree. One the
+        // tree never held is re-seeded. One Holon deleted or moved since is
+        // overruled: Holon's change stands, this ingest skips the block, and the
+        // write-back brings the file in line. A deleted block's file subtree
+        // goes with it.
+        let mut reseed: HashSet<EntityUri> = HashSet::new();
+        let mut overruled: HashMap<EntityUri, HolonChange> = HashMap::new();
+        if matches!(self.ordering.consolidator(), Consolidator::Upstream) {
+            let mut base_children: HashMap<EntityUri, Vec<EntityUri>> = HashMap::new();
+            for block in &new_blocks_vec {
+                if block.id == new_parse.document.id
+                    || foreign_subtree_ids.contains(&block.id)
+                    || moved_in.contains_key(&block.id)
+                {
+                    continue;
+                }
+                let old_block = old_blocks.get(&block.id);
+                let change = if overruled.get(&block.parent_id) == Some(&HolonChange::Deleted) {
+                    HolonChange::Deleted
+                } else if let Some(old_block) = old_block {
+                    match self
+                        .ordering
+                        .ever_seen(&block.id)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("ever_seen({}): {e:#}", block.id))?
+                    {
+                        Seen::Never => {
+                            reseed.insert(block.id.clone());
+                            continue;
+                        }
+                        Seen::Deleted(_) => HolonChange::Deleted,
+                        Seen::Live => {
+                            let base_parent = if old_blocks.contains_key(&old_block.parent_id)
+                                && old_block.parent_id != new_parse.document.id
+                                && old_block.parent_id != document_uri
+                            {
+                                old_block.parent_id.clone()
+                            } else {
+                                document_uri.clone()
+                            };
+                            #[allow(clippy::map_entry)]
+                            // async fetch between check + insert, entry API doesn't fit
+                            if !base_children.contains_key(&base_parent) {
+                                ingest_progress::record_children_read();
+                                let kids =
+                                    self.ordering.children(&base_parent).await.map_err(|e| {
+                                        anyhow::anyhow!("ordering.children failed: {e}")
+                                    })?;
+                                base_children.insert(base_parent.clone(), kids);
+                            }
+                            if base_children[&base_parent].contains(&block.id) {
+                                continue;
+                            }
+                            HolonChange::Moved
+                        }
+                        Seen::NoHistory => continue,
+                    }
+                } else {
+                    continue;
+                };
+                let edited = old_block.is_none_or(|old| old.content != block.content);
+                if edited {
+                    tracing::warn!(
+                        block_id = %block.id,
+                        file = %path.display(),
+                        %change,
+                        file_text = %block.content,
+                        "[FileSyncController] the file edited a block Holon {change} since the \
+                         last sync; Holon's change stands and the file's text is not ingested"
+                    );
+                    if let Some(disclosure) = &self.writeback_disclosure {
+                        disclosure.file_edit_overruled(&block.id, path, &block.content, change);
+                    }
+                } else {
+                    tracing::warn!(
+                        block_id = %block.id,
+                        file = %path.display(),
+                        %change,
+                        "[FileSyncController] the file still holds a block Holon {change} since \
+                         the last sync; Holon's change stands"
+                    );
+                }
+                if change == HolonChange::Deleted {
+                    deleted_in_holon.insert(block.id.as_str().to_string());
+                }
+                overruled.insert(block.id.clone(), change);
+            }
+        }
+
         // Blocks the post-ingest gate must NOT expect from `get_blocks(doc)`:
         // its recursive walk stops at `Page`-tagged boundaries, so the skipped
         // foreign subtrees AND any parsed block that itself carries a `Page`
@@ -5758,7 +5849,10 @@ impl FileSyncController {
             if block.id == document_uri || block.id == new_parse.document.id {
                 continue;
             }
-            if block.is_page() || gate_excluded_ids.contains(&block.parent_id) {
+            if block.is_page()
+                || gate_excluded_ids.contains(&block.parent_id)
+                || overruled.contains_key(&block.id)
+            {
                 gate_excluded_ids.insert(block.id.clone());
             }
         }
@@ -5832,10 +5926,11 @@ impl FileSyncController {
         let mut last_block_per_parent: HashMap<EntityUri, EntityUri> = HashMap::new();
         let mut predecessors: HashMap<EntityUri, Option<EntityUri>> = HashMap::new();
         for block in &new_blocks_vec {
-            // A foreign page subtree is not placed in THIS file's tree, so it
-            // must not anchor a later sibling's `after_block_id` — skip it so the
-            // cursor stays on the previous real sibling.
-            if foreign_subtree_ids.contains(&block.id) {
+            // A foreign page subtree or an overruled block is not placed in
+            // THIS file's tree, so it must not anchor a later sibling's
+            // `after_block_id` — skip it so the cursor stays on the previous
+            // real sibling.
+            if foreign_subtree_ids.contains(&block.id) || overruled.contains_key(&block.id) {
                 continue;
             }
             let parent_id = if block.parent_id == new_parse.document.id {
@@ -5896,6 +5991,7 @@ impl FileSyncController {
                     };
                     p == parent
                         && !foreign_subtree_ids.contains(&b.id)
+                        && !overruled.contains_key(&b.id)
                         && matches!(b.content_type, holon_api::ContentType::Text)
                 })
                 .map(|b| b.id.clone())
@@ -5967,25 +6063,15 @@ impl FileSyncController {
             // Foreign page subtree: owned by another page-file, inlined here as
             // headings. Never create/re-seed/re-parent it (root: that is the
             // demote; descendants: that is the steal).
-            if foreign_subtree_ids.contains(&block.id) {
+            if foreign_subtree_ids.contains(&block.id) || overruled.contains_key(&block.id) {
                 continue;
             }
             // Upgrade-path re-seed: a PRE-EXISTING row (SQL populated by a
             // pre-Loro session) whose block the authoritative tree never
             // adopted. `new_blocks_vec` is DFS document order, so parents
             // re-seed before their children — the same parent-first contract
-            // `create_in_tree` requires of genuine creates. Document blocks
-            // are owned by the doc manager and excluded.
-            let needs_reseed = old_blocks.contains_key(&block.id)
-                && block.id != new_parse.document.id
-                && matches!(self.ordering.consolidator(), Consolidator::Upstream)
-                && self
-                    .ordering
-                    .ever_seen(&block.id)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("ever_seen({}): {e:#}", block.id))?
-                    .is_absent_from_history();
-            if needs_reseed {
+            // `create_in_tree` requires of genuine creates.
+            if reseed.contains(&block.id) {
                 let parent_uri = if block.parent_id == new_parse.document.id {
                     document_uri.clone()
                 } else {
@@ -6087,7 +6173,10 @@ impl FileSyncController {
             // authoritative — never emit an update that would strip the root's
             // `Page` tag, rewrite identities/parents, or clobber descendant
             // content.
-            if foreign_subtree_ids.contains(id) || moved_in.contains_key(id) {
+            if foreign_subtree_ids.contains(id)
+                || moved_in.contains_key(id)
+                || overruled.contains_key(id)
+            {
                 continue;
             }
             if let Some(old_block) = old_blocks.get(id) {
@@ -6517,7 +6606,9 @@ impl FileSyncController {
                     progress.advance("place");
                     // Foreign page subtree: it lives in its OWN page-file's tree,
                     // not this companion's — never place it here.
-                    if foreign_subtree_ids.contains(&new_block.id) {
+                    if foreign_subtree_ids.contains(&new_block.id)
+                        || overruled.contains_key(&new_block.id)
+                    {
                         continue;
                     }
                     // Source / image children are grouped ahead of text by
@@ -6554,14 +6645,15 @@ impl FileSyncController {
                                 siblings
                             );
                         }
-                        // A pre-existing block the tree does not hold and the
-                        // re-seed pass above did not adopt (it is in the tree's
-                        // history, so it was deleted there): placing it is a
-                        // write on an unheld block (D69.a).
-                        return Err(holon_core::BlockNotInWriteAuthority::new(
-                            new_block.id.clone(),
-                        )
-                        .into());
+                        anyhow::bail!(
+                            "[on_file_changed] {} of {} is not among the tree's children of \
+                             its file parent {}, and this ingest neither created nor overruled \
+                             it: {:?}",
+                            new_block.id.as_str(),
+                            path.display(),
+                            parent.as_str(),
+                            siblings
+                        );
                     }
 
                     self.ordering
@@ -6759,6 +6851,7 @@ impl FileSyncController {
             && !did_text_merge
             && released_here.is_empty()
             && !puts_back
+            && overruled.is_empty()
         {
             self.last_projection
                 .insert(canonical.clone(), disk_content.to_string());

@@ -800,6 +800,23 @@ impl holon_filesystem::WritebackDisclosure for WritebackDegradedDisclosure {
         });
     }
 
+    fn file_edit_overruled(
+        &self,
+        block_id: &EntityUri,
+        file: &Path,
+        file_text: &str,
+        change: holon_api::HolonChange,
+    ) {
+        self.bus.emit(holon_api::Condition {
+            subject: block_id.as_str().to_string(),
+            reason: holon_api::ConditionKind::FileEditOverruled {
+                file: file.display().to_string(),
+                file_text: file_text.to_string(),
+                change,
+            },
+        });
+    }
+
     fn vault_sync_not_started(&self, vault: &Path, cause: &str) {
         self.bus.emit(holon_api::Condition {
             subject: vault.display().to_string(),

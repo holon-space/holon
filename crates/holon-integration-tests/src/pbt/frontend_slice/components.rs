@@ -7902,7 +7902,8 @@ fn named_file_names(kind: &holon_api::ConditionKind) -> Vec<String> {
             .map(|f| name(f))
             .collect(),
         holon_api::ConditionKind::DeletedBlockKeptInFile { file }
-        | holon_api::ConditionKind::DeletionEndedByEdit { file } => vec![name(file)],
+        | holon_api::ConditionKind::DeletionEndedByEdit { file }
+        | holon_api::ConditionKind::FileEditOverruled { file, .. } => vec![name(file)],
         holon_api::ConditionKind::VaultIngestFailed(refusals) => refusals
             .examples()
             .iter()

@@ -347,6 +347,19 @@ impl ConditionKind {
                 vec![file.clone()],
             ),
 
+            Self::FileEditOverruled {
+                file,
+                file_text,
+                change,
+            } => ConditionDetail::with_body(
+                format!(
+                    "{subject} was {change} in Holon, and {file} was edited before Holon wrote \
+                     that back. Holon's change stands; the file's text was not applied and is \
+                     replaced on the next write. The text was:"
+                ),
+                vec![file_text.clone()],
+            ),
+
             Self::VaultSyncNotStarted { cause } => ConditionDetail::with_body(
                 format!(
                     "Holon is not syncing the files in {subject}: {cause}. Restart Holon after \
