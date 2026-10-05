@@ -648,46 +648,42 @@ async fn apply_plan(
 ) -> Result<AppliedCounts, rmcp::ErrorData> {
     let new_ids = plan_block_ids(plan)?;
 
-    let rollback = service.batch_rollback();
-    let mut window = match rollback {
-        Some(authority) => Some(holon_core::BatchWindow::opened(
-            observe_authority(authority).await?,
-        )),
+    let batch = match service.batch_rollback() {
+        Some(authority) => Some(authority.open().await.map_err(|e| {
+            rmcp::ErrorData::internal_error(
+                format!("dense_patch could not open a rollback at the write authority: {e}"),
+                None,
+            )
+        })?),
         None => None,
     };
-
-    let mut counts = AppliedCounts::default();
-    for (index, op) in plan.ops.iter().enumerate() {
-        // No op of this batch is in flight here, so an advance since the last
-        // one belongs to somebody else and the window stops being rollable.
-        if let (Some(authority), Some(window)) = (rollback, window.as_mut()) {
-            window.observe_between_ops(observe_authority(authority).await?);
-        }
-        let dispatched = dispatch_patch_op(service, op, &new_ids, file_id).await;
-        if let (Some(authority), Some(window)) = (rollback, window.as_mut()) {
-            window.absorb(observe_authority(authority).await?);
-        }
-        match dispatched {
-            Ok(AppliedKind::Created) => counts.created += 1,
-            Ok(AppliedKind::Updated) => counts.updated += 1,
-            Ok(AppliedKind::Moved) => counts.moved += 1,
-            Ok(AppliedKind::Deleted) => counts.deleted += 1,
-            Err(mut cause) => {
-                cause.message = format!("{}: {}", plan.label_of(op), cause.message).into();
-                let outcome = match (rollback, &window) {
-                    (Some(authority), Some(window)) => match authority.rollback_to(window).await {
-                        Ok(()) => RollbackOutcome::RolledBack,
-                        Err(refusal) => RollbackOutcome::Refused(refusal),
-                    },
-                    (None, None) => RollbackOutcome::Unavailable,
-                    _ => unreachable!(
-                        "the window is opened exactly when the authority offers a rollback"
-                    ),
-                };
-                return Err(partial_apply_error(plan, &new_ids, index, cause, outcome));
+    let dispatch_all = async {
+        let mut counts = AppliedCounts::default();
+        for (index, op) in plan.ops.iter().enumerate() {
+            match dispatch_patch_op(service, op, &new_ids, file_id).await {
+                Ok(AppliedKind::Created) => counts.created += 1,
+                Ok(AppliedKind::Updated) => counts.updated += 1,
+                Ok(AppliedKind::Moved) => counts.moved += 1,
+                Ok(AppliedKind::Deleted) => counts.deleted += 1,
+                Err(mut cause) => {
+                    cause.message = format!("{}: {}", plan.label_of(op), cause.message).into();
+                    return Err((index, cause));
+                }
             }
         }
-    }
+        Ok(counts)
+    };
+    let dispatched = match &batch {
+        Some(batch) => batch.id().scope(dispatch_all).await,
+        None => dispatch_all.await,
+    };
+    let counts = match dispatched {
+        Ok(counts) => counts,
+        Err((index, cause)) => {
+            let outcome = roll_back(batch, index).await;
+            return Err(partial_apply_error(plan, &new_ids, index, cause, outcome));
+        }
+    };
 
     // A check that cannot finish leaves the writes unverified: they are taken
     // back like a mismatch.
@@ -699,22 +695,32 @@ async fn apply_plan(
         )],
     };
     if !mismatched.is_empty() {
-        let outcome = match (rollback, window.as_mut()) {
-            (Some(authority), Some(window)) => {
-                // The wait ran none of this batch's ops.
-                window.observe_between_ops(observe_authority(authority).await?);
-                match authority.rollback_to(window).await {
-                    Ok(()) => RollbackOutcome::RolledBack,
-                    Err(refusal) => RollbackOutcome::Refused(refusal),
-                }
-            }
-            (None, None) => RollbackOutcome::Unavailable,
-            _ => unreachable!("the window is opened exactly when the authority offers a rollback"),
-        };
+        let outcome = roll_back(batch, plan.ops.len()).await;
         return Err(readback_error(plan, &new_ids, mismatched, outcome));
     }
 
     Ok(counts)
+}
+
+/// Take back a batch that dispatched `dispatched` ops before it stopped.
+async fn roll_back(
+    batch: Option<Box<dyn holon_core::OpenBatch>>,
+    dispatched: usize,
+) -> RollbackOutcome {
+    let Some(batch) = batch else {
+        return RollbackOutcome::Unavailable;
+    };
+    match batch.roll_back().await {
+        // The failing op may itself have written nothing, so an empty undo is
+        // a refusal only when an op before it ran.
+        Ok(rolled) if rolled.undone_steps == 0 && dispatched > 0 => {
+            RollbackOutcome::Refused(holon_core::RollbackRefused::NothingRecorded {
+                ops: dispatched,
+            })
+        }
+        Ok(rolled) => RollbackOutcome::RolledBack(rolled),
+        Err(refusal) => RollbackOutcome::Refused(refusal),
+    }
 }
 
 /// Settle a plan's deletes against the store, before any write: refuse one
@@ -1728,29 +1734,31 @@ fn readback_error(
         .iter()
         .map(|op| patch_op_row(op, new_ids, Dispatched::Yes))
         .collect();
-    if matches!(rollback, RollbackOutcome::RolledBack) {
-        return rmcp::ErrorData::internal_error(
-            format!(
-                "ROLLED BACK: all {} op(s) landed, but the store or the org file does not read back \
-                 as the edited text, so they were undone at the write authority. Rows: {}",
-                dispatched.len(),
-                mismatched.join("; ")
-            ),
-            Some(serde_json::json!({
-                "partial_apply": false,
-                "rollback": "rolled_back",
-                "applied": [],
-                "reverted": dispatched,
-                "mismatched_rows": mismatched,
-            })),
-        );
-    }
     let refusal = match &rollback {
+        RollbackOutcome::RolledBack(rolled) => {
+            return rmcp::ErrorData::internal_error(
+                format!(
+                    "ROLLED BACK: all {} op(s) landed, but the store or the org file does not \
+                     read back as the edited text, so they were undone at the write authority.{} \
+                     Rows: {}",
+                    dispatched.len(),
+                    lost_disclosure(&rolled.lost),
+                    mismatched.join("; ")
+                ),
+                Some(serde_json::json!({
+                    "partial_apply": false,
+                    "rollback": "rolled_back",
+                    "applied": [],
+                    "reverted": dispatched,
+                    "lost_concurrent_writes": rolled.lost,
+                    "mismatched_rows": mismatched,
+                })),
+            );
+        }
         RollbackOutcome::Refused(reason) => reason.to_string(),
         RollbackOutcome::Unavailable => {
             "this session's SQL write authority offers no batch rollback".to_string()
         }
-        RollbackOutcome::RolledBack => unreachable!("handled above"),
     };
     rmcp::ErrorData::internal_error(
         format!(
@@ -1770,21 +1778,27 @@ fn readback_error(
     )
 }
 
-async fn observe_authority(
-    authority: &dyn holon_core::BatchRollback,
-) -> Result<holon_core::AuthorityVersion, rmcp::ErrorData> {
-    authority.observe().await.map_err(|e| {
-        rmcp::ErrorData::internal_error(
-            format!("dense_patch could not read the write authority's version: {e}"),
-            None,
-        )
-    })
+/// The sentence a rollback report owes for writes the undo took with it.
+fn lost_disclosure(lost: &[holon_core::LostWrite]) -> String {
+    if lost.is_empty() {
+        return String::new();
+    }
+    format!(
+        " The undo also lost {} write(s) that were not this patch's, made inside its window into \
+         a block that only the patch's writes kept alive: {}. Re-check those blocks.",
+        lost.len(),
+        lost.iter()
+            .map(|w| format!("{} ({})", w.block, w.doc))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
 }
 
 /// What became of the ops a failed patch had already dispatched.
 enum RollbackOutcome {
-    /// Taken back at the write authority; the store is at its pre-patch state.
-    RolledBack,
+    /// The patch's own writes were undone at the write authority. Writes that
+    /// were not the patch's stay, except those named in `lost`.
+    RolledBack(holon_core::RolledBack),
     /// The authority has a rollback and would not perform this one. Every
     /// variant leaves the dispatched ops in the store.
     Refused(holon_core::RollbackRefused),
@@ -1855,35 +1869,33 @@ fn partial_apply_error(
     let failed = patch_op_row(&plan.ops[index], new_ids, Dispatched::Yes);
 
     let (op, total) = (index + 1, plan.ops.len());
-    if matches!(rollback, RollbackOutcome::RolledBack) {
-        return rmcp::ErrorData::internal_error(
-            format!(
-                "ROLLED BACK: op {op} of {total} failed, and the {} op(s) dispatched before it \
-                 were undone at the write authority, which is back at the version this patch \
-                 started from. Any edit this session committed WHILE one of those ops was \
-                 running was undone with them — only the gaps between ops are checked for \
-                 writes that are not this patch's. Fix the plan and re-apply the whole patch. \
-                 Cause: {}",
-                dispatched.len(),
-                cause.message
-            ),
-            Some(serde_json::json!({
-                "partial_apply": false,
-                "rollback": "rolled_back",
-                "applied": [],
-                "reverted": dispatched,
-                "failed": failed,
-                "not_applied": not_applied,
-            })),
-        );
-    }
-
     let refusal = match &rollback {
+        RollbackOutcome::RolledBack(rolled) => {
+            return rmcp::ErrorData::internal_error(
+                format!(
+                    "ROLLED BACK: op {op} of {total} failed, and this patch's writes from the {} \
+                     op(s) dispatched before it, and from op {op} itself, were undone at the write \
+                     authority. Writes that were not this patch's stay.{} Fix the plan and \
+                     re-apply the whole patch. Cause: {}",
+                    dispatched.len(),
+                    lost_disclosure(&rolled.lost),
+                    cause.message
+                ),
+                Some(serde_json::json!({
+                    "partial_apply": false,
+                    "rollback": "rolled_back",
+                    "applied": [],
+                    "reverted": dispatched,
+                    "lost_concurrent_writes": rolled.lost,
+                    "failed": failed,
+                    "not_applied": not_applied,
+                })),
+            );
+        }
         RollbackOutcome::Refused(reason) => reason.to_string(),
         RollbackOutcome::Unavailable => "this session's SQL write authority offers no batch \
                                          rollback"
             .to_string(),
-        RollbackOutcome::RolledBack => unreachable!("handled above"),
     };
     let message = if dispatched.is_empty() {
         format!(
@@ -4915,17 +4927,16 @@ impl HolonMcpServer {
                        engine fails once writing has begun, the ops already dispatched are rolled \
                        back at the write authority when it can take them back: that error reads \
                        ROLLED BACK, carries `rollback: \"rolled_back\"`, and the whole corrected \
-                       patch may be re-applied. When the rollback is refused (another writer \
-                       touched a document inside the window, the history was trimmed, or the \
-                       authority has no rollback) the error is a PARTIAL APPLY report carrying \
+                       patch may be re-applied. The rollback undoes only this patch's own \
+                       writes: an edit or a peer's sync that landed meanwhile stays, except one \
+                       made into a block only the patch's writes kept alive, which the report \
+                       names under `lost_concurrent_writes`. When the rollback is refused (the \
+                       undo history no longer holds the patch's writes, a document joined or \
+                       left the authority, or the authority has no rollback, as in a SQL-only \
+                       session) the error is a PARTIAL APPLY report carrying \
                        `rollback_refused` plus every plan row that DID land (`applied`) and every \
                        row that did not (`not_applied`); re-applying then duplicates the landed \
-                       rows — reconcile them first. LIMIT, because it decides whether you can \
-                       trust ROLLED BACK: only the interval BETWEEN two ops is checked for \
-                       writes that are not this patch's. An edit this session commits while one \
-                       of the patch's own ops is running is attributed to the patch and is \
-                       undone with it, silently. That is most of the wall-clock time a patch \
-                       takes, so do not run dense_patch against a document somebody is editing. \
+                       rows — reconcile them first. \
                        After the writes, every written row is read back: a row the store does \
                        not show as you wrote it rolls the patch back (ROLLED BACK) or, when the \
                        rollback is refused, is reported as APPLIED INEXACTLY, both with \
@@ -7079,9 +7090,9 @@ pub(crate) mod engine_harness {
         /// A provider ahead of the others answers `move_block` by landing a
         /// REMOTE peer's op in the vault document and then failing.
         RemotePeerOnMove,
-        /// This session writes a block that is not the batch's, at the
-        /// observation `apply_plan` takes between two of the batch's ops.
-        LocalWriteBetweenOps,
+        /// While the batch's first op is in flight, the editor types into
+        /// a block and another task creates block `uiedit`.
+        ConcurrentWritesDuringOp(super::peer_interference::TypeInto),
         /// The authority stores every `content` write with a suffix, so a
         /// patch lands but does not read back as the agent wrote it.
         RewriteContent,
@@ -7115,18 +7126,18 @@ pub(crate) mod engine_harness {
         (engine, store, projection)
     }
 
-    /// The same engine, plus the flag that says the intruding write actually
-    /// happened — an assertion the test owes itself, since a harness whose
-    /// intruder never fired would pass the refusal test for the wrong reason.
-    pub(crate) async fn fresh_loro_engine_with_local_intruder(
+    /// An engine whose authority lets concurrent writes land while the
+    /// batch's first op is in flight, plus the flag that says they landed.
+    pub(crate) async fn fresh_loro_engine_with_concurrent_writes(
         storage_dir: &std::path::Path,
+        target: super::peer_interference::TypeInto,
     ) -> (
         Arc<holon::api::BackendEngine>,
         Arc<holon_loro::LoroDocumentStore>,
         Arc<dyn holon_core::DownstreamProjection>,
         Arc<std::sync::atomic::AtomicBool>,
     ) {
-        loro_engine(storage_dir, Interference::LocalWriteBetweenOps).await
+        loro_engine(storage_dir, Interference::ConcurrentWritesDuringOp(target)).await
     }
 
     /// An engine whose authority rewrites every `content` write
@@ -7226,12 +7237,13 @@ pub(crate) mod engine_harness {
                     move |resolver| {
                         let loro = resolver.resolve::<holon_loro::LoroBlockOperations>();
                         let authority: Arc<dyn holon_core::OperationProvider> = match interference {
-                            Interference::LocalWriteBetweenOps => {
-                                Arc::new(super::peer_interference::AuthorityWithIntruder::new(
-                                    loro,
-                                    resolver.resolve::<holon_loro::LoroDocumentStore>(),
-                                    intruded_for_di.clone(),
-                                ))
+                            Interference::ConcurrentWritesDuringOp(target) => {
+                                Arc::new(super::peer_interference::ConcurrentWritesDuringOp {
+                                    inner: loro,
+                                    doc_store: resolver.resolve::<holon_loro::LoroDocumentStore>(),
+                                    target,
+                                    fired: intruded_for_di.clone(),
+                                })
                             }
                             Interference::RewriteContent => {
                                 Arc::new(super::peer_interference::TamperingAuthority {
@@ -8456,10 +8468,11 @@ mod dense_patch_atomicity_tests {
     /// An ENGINE-level failure on op 2 of 3 — a move of a block that is not
     /// there, refused by the engine and not by any plan gate.
     ///
-    /// Op 1 is committed by then and cannot be rolled back, so the contract is
-    /// disclosure: the error must name op 1 as applied and op 3 as not, and
-    /// the store must match that report exactly. A caller told only "move
-    /// failed" retries the whole plan and duplicates op 1.
+    /// Op 1 is committed by then, and a SQL-only authority keeps no history to
+    /// undo it from, so the contract is disclosure: the error must name op 1 as
+    /// applied and op 3 as not, and the store must match that report
+    /// exactly. A caller told only "move failed" retries the whole plan and
+    /// duplicates op 1.
     #[tokio::test(flavor = "multi_thread")]
     async fn an_engine_failure_midway_reports_exactly_what_landed() {
         let engine = fresh_engine().await;
@@ -8494,6 +8507,11 @@ mod dense_patch_atomicity_tests {
         );
         let data = err.data.expect("a partial apply reports its rows");
         assert_eq!(data["partial_apply"], serde_json::json!(true));
+        assert_eq!(
+            data["rollback_refused"],
+            serde_json::json!("this session's SQL write authority offers no batch rollback"),
+            "{data}"
+        );
         assert_eq!(
             data["applied"].as_array().expect("applied rows").len(),
             1,
@@ -8655,102 +8673,77 @@ mod peer_interference {
         pub(super) doc_store: Arc<LoroDocumentStore>,
     }
 
-    /// Which observation `apply_plan` takes is the one that must see the
-    /// intruding write: the between-ops check before the batch's SECOND op.
-    ///
-    /// `apply_plan` observes on opening the window, before each dispatch, and
-    /// after each dispatch, so for a two-op plan that check is the fourth.
-    /// Landing the write anywhere else lands it in an interval the batch
-    /// accounts for, which is what the inversion of this test demonstrates.
-    const INTRUDE_BEFORE_OBSERVATION: usize = 3;
-
-    /// Writes a block that is NOT the batch's after the batch's first op and
-    /// before the rollback, and otherwise is the real authority.
-    ///
-    /// It prefers the between-ops observation, which is the interval the guard
-    /// claims to cover. If the batch never takes one it writes immediately
-    /// before the rollback instead — the same moment in the batch's life,
-    /// reached when the observation is missing.
-    pub(crate) struct IntrudingAuthority {
-        inner: Arc<LoroBlockOperations>,
-        doc_store: Arc<LoroDocumentStore>,
-        observations: std::sync::atomic::AtomicUsize,
-        intruded: Arc<std::sync::atomic::AtomicBool>,
+    /// Which block the editor types into while the batch's first op runs.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum TypeInto {
+        /// Block `other`, which the batch never touches.
+        OtherBlock,
+        /// The block the batch's first op created.
+        BatchCreatedBlock,
     }
 
-    impl IntrudingAuthority {
-        async fn intrude(&self) -> anyhow::Result<()> {
+    /// The text the editor types in [`ConcurrentWritesDuringOp`].
+    pub(crate) const KEYSTROKE: &str = "typed:";
+
+    /// The Loro CRUD authority. After it applies the batch's first op, and
+    /// before that op returns, two writes that are not the batch's land: a
+    /// keystroke through the editor's cell on its own thread, and a block
+    /// `uiedit` created by another task.
+    pub(crate) struct ConcurrentWritesDuringOp {
+        pub(super) inner: Arc<LoroBlockOperations>,
+        pub(super) doc_store: Arc<LoroDocumentStore>,
+        pub(super) target: TypeInto,
+        pub(super) fired: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl ConcurrentWritesDuringOp {
+        async fn concurrent_writes(&self, batch_created: &str) -> anyhow::Result<()> {
+            use holon_core::cell_registry::EntityCellRegistry;
+            use holon_core::cell_registry::EntityCellRegistryExt as _;
+
+            let global = self.doc_store.get_doc(DocScope::Global).await?;
+            let layout = self.doc_store.get_doc(DocScope::Layout).await?;
+            let typed_into = match self.target {
+                TypeInto::OtherBlock => EntityUri::block("other"),
+                TypeInto::BatchCreatedBlock => EntityUri::parse(batch_created)?,
+            };
+            std::thread::spawn(move || -> anyhow::Result<()> {
+                let registry = holon_loro::block_cell_registry::BlockCellRegistry::with_loro(
+                    global,
+                    layout,
+                    Arc::new(holon_core::NoReadOnlyDocuments),
+                );
+                let registry: &dyn EntityCellRegistry = &registry;
+                registry
+                    .editable_field::<String>(&typed_into, "content")?
+                    .apply_text_op(holon_core::cell::TextOp::Insert {
+                        pos_codepoint: 0,
+                        text: KEYSTROKE.to_string(),
+                    })
+            })
+            .join()
+            .expect("the editor thread panicked")?;
+
             let doc = self.doc_store.get_doc(DocScope::Global).await?;
-            LoroBackend::from_document(doc)
-                .create_block_with_properties(
-                    EntityUri::block("root"),
-                    BlockContent::text("uiedit"),
-                    Some(EntityUri::block("uiedit")),
-                    &HashMap::new(),
-                    &BlockEdges::default(),
-                )
-                .await
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-            self.intruded
-                .store(true, std::sync::atomic::Ordering::SeqCst);
+            tokio::spawn(async move {
+                LoroBackend::from_document(doc)
+                    .create_block_with_properties(
+                        EntityUri::block("root"),
+                        BlockContent::text("uiedit"),
+                        Some(EntityUri::block("uiedit")),
+                        &HashMap::new(),
+                        &BlockEdges::default(),
+                    )
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{e}"))
+            })
+            .await??;
             Ok(())
         }
     }
 
     #[async_trait]
-    impl holon_core::BatchRollback for IntrudingAuthority {
-        async fn observe(&self) -> holon_core::Result<holon_core::AuthorityVersion> {
-            let nth = self
-                .observations
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            if nth == INTRUDE_BEFORE_OBSERVATION {
-                self.intrude()
-                    .await
-                    .map_err(|e| format!("intruding write: {e}"))?;
-            }
-            self.inner.observe().await
-        }
-
-        async fn rollback_to(
-            &self,
-            window: &holon_core::BatchWindow,
-        ) -> std::result::Result<(), holon_core::RollbackRefused> {
-            if !self.intruded.load(std::sync::atomic::Ordering::SeqCst) {
-                self.intrude()
-                    .await
-                    .expect("the intruding write must land before the rollback");
-            }
-            self.inner.rollback_to(window).await
-        }
-    }
-
-    /// The Loro CRUD authority, with its rollback capability replaced by
-    /// [`IntrudingAuthority`]. Everything else is the real provider.
-    pub(crate) struct AuthorityWithIntruder {
-        pub(super) inner: Arc<LoroBlockOperations>,
-        pub(super) spy: IntrudingAuthority,
-    }
-
-    impl AuthorityWithIntruder {
-        pub(crate) fn new(
-            inner: Arc<LoroBlockOperations>,
-            doc_store: Arc<LoroDocumentStore>,
-            intruded: Arc<std::sync::atomic::AtomicBool>,
-        ) -> Self {
-            Self {
-                spy: IntrudingAuthority {
-                    inner: inner.clone(),
-                    doc_store,
-                    observations: std::sync::atomic::AtomicUsize::new(0),
-                    intruded,
-                },
-                inner,
-            }
-        }
-    }
-
-    #[async_trait]
-    impl OperationProvider for AuthorityWithIntruder {
+    impl OperationProvider for ConcurrentWritesDuringOp {
         fn operations(&self) -> Vec<OperationDescriptor> {
             self.inner.operations()
         }
@@ -8761,7 +8754,21 @@ mod peer_interference {
             op_name: &str,
             params: StorageEntity,
         ) -> holon_core::Result<OperationResult> {
-            self.inner.execute_operation(entity, op_name, params).await
+            let created = params
+                .get("id")
+                .and_then(|v| v.as_string())
+                .map(str::to_string);
+            let result = self
+                .inner
+                .execute_operation(entity, op_name, params)
+                .await?;
+            if !self.fired.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                let created = created.expect("the batch's first op is a create carrying its id");
+                self.concurrent_writes(&created)
+                    .await
+                    .map_err(|e| format!("concurrent writes: {e:#}"))?;
+            }
+            Ok(result)
         }
 
         fn get_last_created_id(&self) -> Option<String> {
@@ -8769,7 +8776,7 @@ mod peer_interference {
         }
 
         fn batch_rollback(&self) -> Option<&dyn holon_core::BatchRollback> {
-            Some(&self.spy)
+            self.inner.batch_rollback()
         }
     }
 
@@ -8974,8 +8981,10 @@ mod dense_patch_rollback_tests {
 
     use super::apply_plan;
     use super::engine_harness::fresh_loro_engine;
-    use super::engine_harness::fresh_loro_engine_with_local_intruder;
+    use super::engine_harness::fresh_loro_engine_with_concurrent_writes;
     use super::engine_harness::server;
+    use super::peer_interference::KEYSTROKE;
+    use super::peer_interference::TypeInto;
     use crate::dense_patch::PatchOp;
     use crate::dense_patch::PatchPlan;
     use crate::dense_patch::Ref as PRef;
@@ -9151,22 +9160,33 @@ mod dense_patch_rollback_tests {
         );
     }
 
-    /// The between-ops check as `dense_patch` actually runs it.
-    ///
-    /// A write this session makes that is not the batch's lands at the one
-    /// observation `apply_plan` takes with nothing of the batch in flight.
-    /// Removing that observation from `apply_plan` leaves every other test
-    /// green, so this is what holds the call in place.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn a_local_write_between_two_ops_refuses_the_rollback_through_dense_patch() {
-        let dir = tempfile::tempdir().expect("temp storage");
-        let (engine, store, _projection, intruded) =
-            fresh_loro_engine_with_local_intruder(dir.path()).await;
-        let backend = backend_of(&store).await;
-        seed_root(&backend).await;
-        let server = server(engine.clone());
+    async fn seed_other(backend: &LoroBackend) {
+        backend
+            .create_block_with_properties(
+                EntityUri::block("root"),
+                BlockContent::text("other"),
+                Some(EntityUri::block("other")),
+                &HashMap::new(),
+                &BlockEdges::default(),
+            )
+            .await
+            .expect("seed block other");
+    }
 
-        let plan = labelled(PatchPlan {
+    async fn text_of(backend: &LoroBackend, id: &str) -> String {
+        backend
+            .get_all_blocks(Traversal::ALL)
+            .await
+            .expect("read the vault tree")
+            .into_iter()
+            .find(|b| b.id.as_str() == id)
+            .unwrap_or_else(|| panic!("{id} is not in the vault tree"))
+            .content_text()
+            .to_string()
+    }
+
+    fn create_then_fail() -> PatchPlan {
+        labelled(PatchPlan {
             ops: vec![
                 create(0, "first"),
                 PatchOp::Move {
@@ -9179,38 +9199,102 @@ mod dense_patch_rollback_tests {
             expected: Vec::new(),
             stays: Vec::new(),
             ..PatchPlan::default()
-        });
+        })
+    }
 
-        let err = apply_plan(&server.service(), None, &plan, &EntityUri::block("root"))
-            .await
-            .expect_err("op 2 moves a block that does not exist");
+    /// A keystroke from the editor's thread and a block another task creates,
+    /// both landing while the batch's first op is in flight, are not the
+    /// batch's and survive its rollback.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn writes_that_land_while_a_batch_op_runs_survive_its_rollback() {
+        let dir = tempfile::tempdir().expect("temp storage");
+        let (engine, store, _projection, fired) =
+            fresh_loro_engine_with_concurrent_writes(dir.path(), TypeInto::OtherBlock).await;
+        let backend = backend_of(&store).await;
+        seed_root(&backend).await;
+        seed_other(&backend).await;
+        let server = server(engine.clone());
+
+        let err = apply_plan(
+            &server.service(),
+            None,
+            &create_then_fail(),
+            &EntityUri::block("root"),
+        )
+        .await
+        .expect_err("op 2 moves a block that does not exist");
 
         assert!(
-            intruded.load(std::sync::atomic::Ordering::SeqCst),
-            "the intruding write never happened, so this test proves nothing"
+            fired.load(std::sync::atomic::Ordering::SeqCst),
+            "the concurrent writes never happened, so this test proves nothing"
         );
         let data = err.data.expect("the report carries its rows");
-        assert_eq!(data["rollback"], serde_json::json!("refused"));
-        let refusal = data["rollback_refused"]
-            .as_str()
-            .expect("the refusal names its reason");
-        assert!(
-            refusal.contains("did not dispatch as part of the batch") && refusal.contains("vault"),
-            "the refusal must name a non-batch write and the document: {refusal}"
+        assert_eq!(data["rollback"], serde_json::json!("rolled_back"), "{data}");
+        assert_eq!(
+            stored_ids(&backend).await,
+            vec!["block:other", "block:root", "block:uiedit"],
+            "the batch's create is undone and the other task's create survives"
         );
-
-        let ids = stored_ids(&backend).await;
+        assert_eq!(
+            text_of(&backend, "block:other").await,
+            format!("{KEYSTROKE}other")
+        );
         assert!(
-            ids.iter().any(|id| id.contains("uiedit")),
-            "the write that was not the batch's must survive: {ids:?}"
+            data["lost_concurrent_writes"]
+                .as_array()
+                .expect("the report lists lost concurrent writes")
+                .is_empty(),
+            "{data}"
         );
     }
 
-    /// The same failure with a peer's op inside the window: the rollback would
-    /// take that op back too, so it is refused and the partial-apply
-    /// disclosure stands.
+    /// A keystroke into a block the batch created cannot outlive the undo of
+    /// that create. The report names it.
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_peers_write_inside_the_window_refuses_the_rollback() {
+    async fn a_keystroke_into_a_block_the_batch_created_is_disclosed_as_lost() {
+        let dir = tempfile::tempdir().expect("temp storage");
+        let (engine, store, _projection, fired) =
+            fresh_loro_engine_with_concurrent_writes(dir.path(), TypeInto::BatchCreatedBlock).await;
+        let backend = backend_of(&store).await;
+        seed_root(&backend).await;
+        seed_other(&backend).await;
+        let server = server(engine.clone());
+
+        let err = apply_plan(
+            &server.service(),
+            None,
+            &create_then_fail(),
+            &EntityUri::block("root"),
+        )
+        .await
+        .expect_err("op 2 moves a block that does not exist");
+
+        assert!(fired.load(std::sync::atomic::Ordering::SeqCst));
+        let data = err.data.expect("the report carries its rows");
+        assert_eq!(data["rollback"], serde_json::json!("rolled_back"), "{data}");
+        let created = data["reverted"][0]["block"].clone();
+        let lost: Vec<_> = data["lost_concurrent_writes"]
+            .as_array()
+            .expect("the report lists lost concurrent writes")
+            .iter()
+            .map(|w| w["block"].clone())
+            .collect();
+        assert_eq!(lost, vec![created], "{data}");
+        assert!(
+            err.message.contains("lost"),
+            "the message must disclose the lost write: {}",
+            err.message
+        );
+        assert_eq!(
+            stored_ids(&backend).await,
+            vec!["block:other", "block:root", "block:uiedit"]
+        );
+    }
+
+    /// The same failure with a peer's op imported inside the window: the undo
+    /// takes back only the batch's own ops, so the peer's block survives.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_peers_write_inside_the_window_survives_the_rollback() {
         let dir = tempfile::tempdir().expect("temp storage");
         let (engine, store, _projection) = fresh_loro_engine(dir.path(), true).await;
         let backend = backend_of(&store).await;
@@ -9236,31 +9320,13 @@ mod dense_patch_rollback_tests {
             .await
             .expect_err("op 2 fails after the peer's write landed");
 
-        assert!(
-            err.message.contains("PARTIAL APPLY") && err.message.contains("Rollback refused"),
-            "a refused rollback must disclose both facts: {}",
-            err.message
-        );
         let data = err.data.expect("the report carries its rows");
-        assert_eq!(data["rollback"], serde_json::json!("refused"));
-        assert_eq!(data["partial_apply"], serde_json::json!(true));
-        let refusal = data["rollback_refused"]
-            .as_str()
-            .expect("the refusal names its reason");
-        assert!(
-            refusal.contains(&super::engine_harness::THEIR_PEER.to_string()),
-            "the refusal must name the peer that wrote: {refusal}"
-        );
-
-        let ids = stored_ids(&backend).await;
-        assert!(
-            ids.iter().any(|id| id.contains("theirs")),
-            "the peer's block must survive a refused rollback: {ids:?}"
-        );
+        assert_eq!(data["rollback"], serde_json::json!("rolled_back"), "{data}");
+        assert_eq!(data["partial_apply"], serde_json::json!(false));
         assert_eq!(
-            ids.len(),
-            3,
-            "root, our dispatched create and the peer's block are all still there: {ids:?}"
+            stored_ids(&backend).await,
+            vec!["block:root", "block:theirs"],
+            "our create is undone and the peer's block survives"
         );
     }
 }

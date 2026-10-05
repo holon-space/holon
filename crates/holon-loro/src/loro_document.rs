@@ -59,6 +59,12 @@ impl<'a> WriteTxn<'a> {
         self.doc.commit();
     }
 
+    /// Label the next commit with the scope's origin, for a commit that a
+    /// third party such as an `UndoManager` makes on the raw doc.
+    pub fn arm_origin(&self) {
+        self.doc.set_next_commit_origin(&self.origin.as_origin());
+    }
+
     /// Carry the doc back to `version`; the doc's stable-id index rebuilds at
     /// its next lookup, inside this batch too.
     pub fn revert_to(&self, version: &loro::Frontiers) -> loro::LoroResult<()> {
@@ -328,7 +334,7 @@ impl LoroDocument {
     {
         let txn = WriteTxn {
             doc: &self.doc,
-            origin,
+            origin: origin.for_current_batch(),
         };
         // Loro batches ops until an explicit `commit()`; tree and text ops
         // alone do not commit, and the pending transaction is per-DOCUMENT.

@@ -22,6 +22,8 @@
 
 use std::borrow::Cow;
 
+use holon_core::BatchId;
+
 /// The seam that produced a Loro commit.
 ///
 /// [`Self::as_origin`] is the single boundary where a variant becomes the
@@ -74,8 +76,12 @@ pub enum WriteOrigin {
     /// nothing. The label exists so that if a stray batch ever DOES reach it,
     /// those ops land excluded from undo rather than under the empty origin.
     SnapshotFlush,
-    /// Carrying the document back to the version a failed multi-op batch
-    /// started from.
+    /// A block operation a multi-op batch made inside its own
+    /// [`BatchId::scope`]. One origin per batch, so the batch's undo manager
+    /// records exactly its writes; the fixed-width spelling keeps one batch's
+    /// origin from being a prefix of another's.
+    Batch(BatchId),
+    /// Undoing a failed multi-op batch's writes.
     BatchRollback,
     /// A test or probe write. Production code never produces this; the label
     /// is what the probe calls itself, so a stray origin in a log names its
@@ -95,7 +101,19 @@ impl WriteOrigin {
             // keystroke to the editor that typed it.
             Self::UiEditorKeystroke => Cow::Borrowed("ui_editor_echo"),
             Self::Probe(label) => Cow::Owned(format!("{}probe.{label}", Self::SYSTEM_PREFIX)),
+            Self::Batch(id) => {
+                Cow::Owned(format!("{}batch.{:016x}", Self::SYSTEM_PREFIX, id.get()))
+            }
             other => Cow::Owned(format!("{}{}", Self::SYSTEM_PREFIX, other.seam_tag())),
+        }
+    }
+
+    /// A block operation running inside a batch's scope commits as that
+    /// batch.
+    pub fn for_current_batch(self) -> Self {
+        match (self, BatchId::current()) {
+            (Self::BlockOps, Some(id)) => Self::Batch(id),
+            (other, _) => other,
         }
     }
 
@@ -118,6 +136,7 @@ impl WriteOrigin {
             Self::ShareLifecycle => "share_lifecycle",
             Self::DevicePairing => "device_pairing",
             Self::BatchRollback => "batch_rollback",
+            Self::Batch(_) => "batch",
             Self::Probe(label) => label,
         }
     }
@@ -142,6 +161,7 @@ mod tests {
             WriteOrigin::ShareLifecycle,
             WriteOrigin::DevicePairing,
             WriteOrigin::BatchRollback,
+            WriteOrigin::Batch(BatchId::fresh()),
             WriteOrigin::Probe("some_test"),
         ];
         let undoable: Vec<_> = every
@@ -169,6 +189,8 @@ mod tests {
             WriteOrigin::ShareLifecycle,
             WriteOrigin::DevicePairing,
             WriteOrigin::BatchRollback,
+            WriteOrigin::Batch(BatchId::fresh()),
+            WriteOrigin::Batch(BatchId::fresh()),
         ];
         let mut strings: Vec<String> = every.iter().map(|o| o.as_origin().to_string()).collect();
         strings.sort();
@@ -179,5 +201,32 @@ mod tests {
             count,
             "two seams share an origin: {strings:?}"
         );
+        assert!(
+            strings
+                .iter()
+                .all(|a| strings.iter().all(|b| a == b || !b.starts_with(a.as_str()))),
+            "an origin is a prefix of another, so an undo manager filtering by it records both: \
+             {strings:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn only_a_block_operation_inside_a_batch_scope_commits_as_the_batch() {
+        let id = BatchId::fresh();
+        assert_eq!(
+            WriteOrigin::BlockOps.for_current_batch(),
+            WriteOrigin::BlockOps
+        );
+        id.scope(async {
+            assert_eq!(
+                WriteOrigin::BlockOps.for_current_batch(),
+                WriteOrigin::Batch(id)
+            );
+            assert_eq!(
+                WriteOrigin::UiEditorKeystroke.for_current_batch(),
+                WriteOrigin::UiEditorKeystroke
+            );
+        })
+        .await;
     }
 }

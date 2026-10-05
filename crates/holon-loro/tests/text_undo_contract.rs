@@ -169,3 +169,29 @@ fn arming_under_concurrent_commits_never_panics_and_arms_once() -> Result<()> {
     }
     Ok(())
 }
+
+/// The manager commits its own undo and redo, so the scope's origin must reach
+/// those commits: a batch-undo manager tells a cmd-z apart from its own batch
+/// only by origin.
+#[test]
+fn undo_and_redo_commit_under_the_ui_undo_origin() -> Result<()> {
+    let doc = Arc::new(LoroDocument::new("undo-origin".to_string())?);
+    let undo = TextUndo::install(doc.clone());
+    typed(&doc, 0, "typed")?;
+
+    let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let sink = seen.clone();
+    let _sub = doc.with_write(WriteOrigin::UndoArm, |txn| {
+        Ok(txn.subscribe_root(Arc::new(move |e| {
+            if matches!(e.triggered_by, loro::EventTriggerKind::Local) {
+                sink.lock().unwrap().push(e.origin.to_string());
+            }
+        })))
+    })?;
+    assert!(undo.undo()?);
+    assert!(undo.redo()?);
+
+    let ui_undo = WriteOrigin::UiUndo.as_origin().to_string();
+    assert_eq!(*seen.lock().unwrap(), vec![ui_undo.clone(), ui_undo]);
+    Ok(())
+}

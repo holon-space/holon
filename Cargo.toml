@@ -399,7 +399,9 @@ core-graphics = { path = ".cargo/patches/core-graphics" }
 # PR upstream is planned (fork-and-contribute); drop this patch when a released
 # loro version ships fork_at-on-shallow.
 #
-loro = { git = "https://github.com/nightscape/loro.git", rev = "6f5b2d7e" }
+# The fork also carries the UndoManager include-only origin filter that the
+# dense_patch batch rollback records its own commits with.
+loro = { git = "https://github.com/nightscape/loro.git", rev = "d302b153" }
 
 # Holon wmi fork — narrows `windows` and `windows-core` to one shared major.
 # wmi 0.18.4 requires each as `>=0.59, <0.63`; cargo resolves the two edges

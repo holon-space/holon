@@ -129,12 +129,12 @@ impl TextUndo {
 
     /// Take back one undo step. Returns whether anything was undone.
     ///
-    /// The manager writes and commits, so it runs inside the document's write
-    /// scope under [`WriteOrigin::UiUndo`] — otherwise the undo's own ops would
-    /// commit under whatever Loro happened to have armed.
+    /// The manager commits by itself, so the scope's [`WriteOrigin::UiUndo`]
+    /// is armed explicitly; Loro's default label for that commit is `"undo"`.
     pub fn undo(&self) -> Result<bool> {
         self.check_peer()?;
-        self.doc.with_write(WriteOrigin::UiUndo, |_txn| {
+        self.doc.with_write(WriteOrigin::UiUndo, |txn| {
+            txn.arm_origin();
             self.inner.lock().undo().context("text undo")
         })
     }
@@ -142,7 +142,8 @@ impl TextUndo {
     /// Reapply one undone step. Returns whether anything was redone.
     pub fn redo(&self) -> Result<bool> {
         self.check_peer()?;
-        self.doc.with_write(WriteOrigin::UiUndo, |_txn| {
+        self.doc.with_write(WriteOrigin::UiUndo, |txn| {
+            txn.arm_origin();
             self.inner.lock().redo().context("text redo")
         })
     }

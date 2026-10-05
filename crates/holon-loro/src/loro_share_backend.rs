@@ -7773,12 +7773,11 @@ mod tests {
     }
 
     /// R1: a batch that left a share cannot be rolled back. Its leave is
-    /// irreversible, and the whole-document rewind would restore a mount whose
-    /// share is gone, so the rollback refuses before reverting anything.
+    /// irreversible, and undoing the batch would restore a mount whose share
+    /// is gone, so the rollback refuses before undoing anything.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial_test::serial]
     async fn a_batch_that_left_a_share_refuses_its_rollback() {
-        use holon_core::BatchWindow;
         use holon_core::batch_rollback::BatchRollback;
         use holon_core::batch_rollback::RollbackRefused;
         use holon_core::traits::CrudOperations;
@@ -7787,19 +7786,20 @@ mod tests {
         let ops = crate::LoroBlockOperations::new(fixture.b.store.clone()).with_shared_trees(
             fixture.b.manager.clone() as Arc<dyn crate::shared_tree::SharedTreeStore>,
         );
-        let mut window = BatchWindow::opened(ops.observe().await.unwrap());
-        ops.delete("block:shared-page")
+        let batch = ops.open().await.unwrap();
+        batch
+            .id()
+            .scope(ops.delete("block:shared-page"))
             .await
             .expect("the batch's delete leaves the share");
-        window.absorb(ops.observe().await.unwrap());
         assert_eq!(
             fixture.mounts_on_b().await,
             0,
             "the leave removed the mount"
         );
 
-        let refused = ops
-            .rollback_to(&window)
+        let refused = batch
+            .roll_back()
             .await
             .expect_err("a rollback across a share exit is refused");
         assert!(

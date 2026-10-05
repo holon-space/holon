@@ -251,6 +251,9 @@ const DOC_ESCAPES: &[(&str, usize)] = &[
     // The vault's `UndoManager`: a long-lived observer registered on the doc,
     // the same shape as a subscription.
     ("crates/holon-loro/src/text_undo.rs", 2),
+    // A batch's `UndoManager`, armed under the write scope: the same
+    // long-lived observer shape, held for the batch window.
+    ("crates/holon-loro/src/batch_undo.rs", 1),
     // The peer-id guard drives Loro's id directly: reading it through the
     // wrapper's cache is the bug the test exists to catch.
     ("crates/holon-loro/tests/text_undo_contract.rs", 3),

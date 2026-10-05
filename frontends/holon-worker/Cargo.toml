@@ -87,7 +87,7 @@ symlink = { path = "patches/symlink" }
 # loro_fractional_index ^1.13.0 and collides with the deliberate `= 1.6.0` pin
 # that crates/holon carries. Keep the source equal to the root's.
 #
-loro = { git = "https://github.com/nightscape/loro.git", rev = "6f5b2d7e" }
+loro = { git = "https://github.com/nightscape/loro.git", rev = "d302b153" }
 
 [build-dependencies]
 napi-build = "2.3.1"

@@ -3,7 +3,7 @@ id: 2026-09-19-rollback-destroys-a-concurrent-local-write
 date: 2026-09-19
 gap: ORACLE
 secondary: null
-status: PARTIAL
+status: FIXED
 summary: >-
   dense_patch's guarded rollback refused only when a REMOTE peer wrote inside
   the batch window, so a write this session made that was not part of the batch
@@ -51,52 +51,24 @@ invariant anywhere judged a local concurrent write.
 
 ## Remedy
 
-PARTIAL. `BatchWindow` (`crates/holon-core/src/batch_rollback.rs`) now
-separates the two writers by what is provable about each:
+FIXED. A rollback now undoes only the batch's own commits instead of
+reverting the whole document. `apply_plan` runs its dispatch loop inside a
+`BatchId` task scope; every Loro write in that scope is committed with the
+origin `sys.batch.<id>` (`WriteOrigin::Batch`,
+`crates/holon-loro/src/write_origin.rs`). Per routable document an
+`UndoManager` records only that origin
+(`crates/holon-loro/src/batch_undo.rs`, using the Loro fork's
+`add_include_origin_prefix`), and `roll_back()` undoes exactly those commits.
+A local write outside the scope, in flight during an op or between ops, has
+another origin and survives. A write into a node the batch created is lost with
+it; `RolledBack::lost` names it and `dense_patch` reports it under
+`lost_concurrent_writes`. The between-ops observation and the
+`LocalWroteInsideWindow` refusal no longer exist.
 
-- A remote peer is attributable wherever it is measured, so
-  `remote_advance_over` checks the whole window.
-- A local write carries no batch identity, so it is separable only across an
-  interval in which the batch wrote nothing. `apply_plan` observes the
-  authority between ops and any advance there poisons the window
-  (`RollbackRefused::LocalWroteInsideWindow`, naming the document). The batch
-  itself is not aborted — it is the rollback that stops being provable.
-
-Pinned by `a_local_write_between_two_batch_ops_refuses_the_rollback_and_survives`
-(`crates/holon-loro/tests/batch_rollback_guard.rs`), which is this entry's
-probe. Red by inversion with the between-ops check removed:
-`lane-logs/RED-3-local-write-unguarded.log` — `must refuse: ()`. Green:
-`lane-logs/d1-loro-guard-2.log`.
-
-The production call site is pinned by
-`a_local_write_between_two_ops_refuses_the_rollback_through_dense_patch`
-(`frontends/mcp/src/tools.rs`), which drives the real `dense_patch` applier.
-Deleting the `observe_between_ops` call reds it with
-`left: "rolled_back" right: "refused"` — the intruding write destroyed
-(`lane-logs/RED-5-call-site-unpinned.log`).
-
-## Still open
-
-1. **The in-flight interval.** A local write that commits while one of the
-   batch's own ops is running falls inside that op's interval and is
-   attributed to the batch, so it is still destroyed. The GUARDED interval is
-   only the gap between two ops; the UNGUARDED one is the whole of
-   `dispatch_patch_op`, which is most of the wall-clock time a patch takes.
-   Ops carry a peer, not a caller, so closing it needs either a lock held
-   across the whole batch (which stalls the editor and was ruled out) or a
-   batch identity carried on every write. Stated on `BatchWindow` under "What
-   it does not", in the `dense_patch` tool description, and in the
-   `ROLLED BACK` message itself.
-2. **The rollback's own intervals.** `rollback_to` releases each document's
-   write lock after the reachability pre-check and re-acquires it to revert. A
-   local write landing between a document's pre-check and its revert, or while
-   an earlier document is being reverted, is destroyed too, and that interval
-   is not covered by (1)'s wording. Narrow today, and it widens with each
-   additional routable document.
-3. **Possible over-refusal in a live session, unmeasured.** The poison fires on
-   ANY local advance between ops, including writes the batch causes indirectly
-   — an org write-back the file watcher re-ingests, a snapshot or undo flush.
-   No harness here runs a watcher. If those are common, `LocalWroteInsideWindow`
-   becomes the normal outcome and `ROLLED BACK` rarely fires: safe, but far less
-   useful than the tests suggest. Needs one dogfood session against a live
-   vault.
+Evidence. Red, through the real applier
+(`dense_patch_rollback_tests` in `frontends/mcp/src/tools.rs`):
+`lane-logs/bu-RED-dense-patch-KEEP.log` (7 run, 3 failed: `uiedit` destroyed,
+no `lost_concurrent_writes` field, peer write refused the rollback). Green:
+`lane-logs/bu-GREEN-dense-patch-1.log` (9 passed) and
+`lane-logs/g/eng.log` and `lane-logs/g/nextest.log` (gate run).
+Mutants: `lane-logs/bu-mutants-summary.log`, `lane-logs/bu-mutants-2-summary.log`.

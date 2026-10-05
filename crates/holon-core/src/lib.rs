@@ -43,11 +43,12 @@ pub mod undo;
 pub mod util;
 pub mod write_tier_gate;
 
-pub use batch_rollback::AuthorityVersion;
+pub use batch_rollback::BatchId;
 pub use batch_rollback::BatchRollback;
-pub use batch_rollback::BatchWindow;
-pub use batch_rollback::DocVersion;
+pub use batch_rollback::LostWrite;
+pub use batch_rollback::OpenBatch;
 pub use batch_rollback::RollbackRefused;
+pub use batch_rollback::RolledBack;
 pub use boundary_enforcer::BoundaryEnforcer;
 pub use boundary_enforcer::BoundaryRejection;
 pub use boundary_enforcer::InertBoundaryEnforcer;

@@ -10,10 +10,10 @@ summary: >-
   applied nothing — but the handler holds no transaction, so a mid-loop failure
   really can leave a batch half-applied and a retry really can duplicate rows.
   Under the CRDT write authority a mid-loop failure is now ROLLED BACK by a
-  guarded `revert_to` across every document a block write routes to, and the
-  loud partial-apply report is the disclosed fallback whenever the guard
-  refuses: SqlOnly mode, a window another writer touched, a trimmed history, or
-  a document that has no pre-batch version. No TRANSACTIONAL seam exists on
+  selective undo of the batch's own commits across every document a block write
+  routes to, and the loud partial-apply report is the disclosed fallback
+  whenever the rollback is refused: SqlOnly mode, a document that left the
+  routing set, or commits the undo manager did not record. No TRANSACTIONAL seam exists on
   either leg — the rollback compensates, it does not span both authorities.
 ---
 
@@ -240,57 +240,44 @@ mirrors `identity_minter`: default `None`, `Some(self)` on
 provider in the wired set. `BackendEngine` and `HolonService` expose it, so
 `dense_patch` reaches the capability without naming a Loro type.
 
-The capability is `holon_core::batch_rollback`. `observe()` reads every
-document a block write can route to — the vault document, the device-local
-layout document, and each shared subtree document, the same set
-`LoroBackend::resolve_write_target_sync` routes over — and returns each one's
-per-peer op counts plus its frontier. The frontier is RECORDED rather than
-recomputed from the counters: measured, after a history trim
-`vv_to_frontiers` on the reloaded document yields a frontier `revert_to`
-accepts, so a recomputed target silently carries the store to a version nobody
-asked for.
+The capability is `holon_core::batch_rollback`. `BatchRollback::open()` mints a
+`BatchId` and returns an `OpenBatch`. `apply_plan` runs its dispatch loop inside
+`BatchId::scope`, so every Loro write the loop causes carries the origin
+`sys.batch.<id>` (`WriteOrigin::Batch`, `crates/holon-loro/src/write_origin.rs`).
+Per routable document (the vault document, the device-local layout document and
+each shared subtree document) the open batch holds an `UndoManager` that
+records only commits with that origin
+(`crates/holon-loro/src/batch_undo.rs`). On a mid-loop failure `roll_back()`
+undoes exactly those commits, so a write that is not part of the batch survives.
+A concurrent write into a node the batch created cannot be separated from the
+batch's own; `RolledBack::lost` names each such block and `dense_patch` reports
+it under `lost_concurrent_writes`.
 
-`BatchWindow` holds what a rollback needs to be provably safe, and is explicit
-about the limit. A remote peer's ops are attributable wherever they are
-measured, so one anywhere in the window refuses. A LOCAL write carries no batch
-identity — the authority attributes ops to a peer, not to a caller — so it is
-separable only across an interval in which the batch wrote nothing:
-`apply_plan` observes between ops and any advance there poisons the window. A
-local write that commits while one of the batch's own ops is in flight is
-attributed to the batch and is NOT detected; see the two 2026-09-19 entries.
-
-`apply_plan` opens a window before its first dispatch and, on a mid-loop
-failure, attempts the rollback. Success is a `ROLLED BACK` error carrying
-`rollback: "rolled_back"`, an empty `applied` and the dispatched rows under
-`reverted`; the caller may re-apply the whole corrected patch. A refusal keeps
-the `PARTIAL APPLY` report and adds `rollback_refused` with the reason, which
-names the document it concerns. Every refusal is decided before the first
-revert, so a refused rollback leaves the store exactly as the failed batch left
-it; `RollbackRefused::Incomplete` is the one variant that does not claim this
-and it names what it did revert.
+Success is a `ROLLED BACK` error carrying `rollback: "rolled_back"`, an empty
+`applied` and the dispatched rows under `reverted`; the caller may re-apply the
+whole corrected patch. A refusal (`RollbackRefused`: `Unreachable`,
+`Unrecorded`, `NothingRecorded`, `Incomplete`) keeps the `PARTIAL APPLY` report
+and adds `rollback_refused` with the reason. Every refusal except `Incomplete`
+is decided before the first undo, so a refused rollback leaves the store as the
+failed batch left it; `Incomplete` names what it did undo.
 
 | test | asserts |
 |---|---|
-| `crates/holon-loro/tests/batch_rollback_guard.rs` (6) | a window the batch alone wrote is rolled back; a local write between two ops refuses and survives; a peer's write refuses and survives; a batch write into the layout document is rolled back too; an intruding layout write refuses and names that document; a window opened before the shallow root refuses typed |
-| `mod dense_patch_rollback_tests` (`frontends/mcp/src/tools.rs`, 3) | a 3-op plan whose op 3 fails is rolled back at the Loro authority and the SQL projection converges on it; a successful patch projects its rows (the control that gives the previous assertion teeth); a peer op inside the window refuses and discloses |
-| `crates/holon-core/src/batch_rollback.rs` (7) | the window admits the batch's own ops, poisons on a local write between ops, keeps the FIRST intruder, refuses a remote write anywhere, measures other routable documents, treats a document that appeared inside the window as all-advance, and refuses one that left the routing set |
+| `crates/holon-loro/tests/batch_rollback_guard.rs` | a batch alone is rolled back; a write outside the batch scope survives; a peer's write survives and converges; a batch write into the layout document is rolled back too; two concurrent batches do not undo each other; a checkout around the batch refuses as `Unrecorded`; keystrokes into a batch-created block are disclosed as lost |
+| `mod dense_patch_rollback_tests` (`frontends/mcp/src/tools.rs`) | a failing plan is rolled back at the Loro authority and the SQL projection converges; a write that lands while a batch op runs survives; a keystroke into a block the batch created is disclosed as lost; a peer write inside the window survives; a SqlOnly session reports `rollback_refused` |
+| `crates/holon-loro/src/batch_undo.rs` | the recorder undoes only batch-origin commits |
 
-Red logs, all by inversion with byte-for-byte restore: with the capability
-forced to `None`, `lane-logs/RED-1-no-rollback.log` reports `PARTIAL APPLY: op
-3 of 3 … the 2 op(s) before it ARE in the store`. With the per-peer guard
-removed, `lane-logs/RED-2-guard-removed.log` and
-`lane-logs/RED-2b-guard-removed-loro.log` destroy the peer's write. With the
-between-ops check removed, `lane-logs/RED-3-local-write-unguarded.log`. With
-the document enumeration cut back to the vault document,
-`lane-logs/RED-4-vault-doc-only.log`. Green: `lane-logs/d1-loro-guard-2.log`,
-`lane-logs/d1-mcp-rollback-2.log`.
+Red/green evidence for the current mechanism: `lane-logs/bu-RED-dense-patch-KEEP.log`
+(3 red rows), `lane-logs/bu-GREEN-dense-patch-1.log`, `lane-logs/bu-loro-4.log`,
+and the mutant logs `lane-logs/bu-RED-mutant-*.log`.
+
 
 ### Still open, ordered by value per unit of work:
 
-1. **A local write inside one of the batch's own ops is still destroyed.**
-   Recorded as `2026-09-19-rollback-destroys-a-concurrent-local-write`
-   (PARTIAL). Needs a batch identity on every write, or a lock across the
-   batch, and the choice is a ruling rather than a lane decision.
+1. **A concurrent write into a node the batch created is lost with it.**
+   It is disclosed under `lost_concurrent_writes`, not prevented. Recorded in
+   `2026-09-19-rollback-destroys-a-concurrent-local-write` (FIXED for every
+   other write).
 2. **The undo journal is not rewound with the store.** A rolled-back op's
    journal entry, if one was pushed, still names a row the rollback removed.
    MCP dispatches as `OpOrigin::Agent`, which pushes no undo entry today

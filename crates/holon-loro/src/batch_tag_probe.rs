@@ -1,13 +1,11 @@
 //! Probe: can a per-commit tag carry a batch identity that a rollback can
 //! audit?
 //!
-//! A whole-document `revert_to` is only honest when every change it undoes
-//! belongs to the batch asking for it. The write authority attributes an op to
-//! a PEER, so a local write that lands inside the window is indistinguishable
-//! from the batch's own (bugfunnel
-//! `2026-09-19-rollback-destroys-a-concurrent-local-write`). A commit-level
-//! tag would make it distinguishable — if loro carries one that is durable,
-//! replicated, and readable back over a counter range.
+//! The write authority attributes an op to a PEER, so a local write that
+//! lands inside a batch window is indistinguishable from the batch's own
+//! (bugfunnel `2026-09-19-rollback-destroys-a-concurrent-local-write`). A
+//! commit-level tag would make it distinguishable — if loro carries one that
+//! is durable, replicated, and readable back over a counter range.
 //!
 //! The pinned loro (1.13.9, rev `6f5b2d7e`) offers two per-commit slots.
 //! `CommitOptions::origin` is documented as NOT persisted

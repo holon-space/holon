@@ -17,6 +17,7 @@
 
 #[cfg(test)]
 mod batch_tag_probe;
+mod batch_undo;
 pub mod block_cell_registry;
 pub mod capability;
 pub mod consolidator;
