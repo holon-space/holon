@@ -293,6 +293,41 @@ async fn indenting_a_later_sibling_of_a_decision_is_not_simulated() {
     );
 }
 
+/// A create that tags its block through its property bag is judged whether
+/// or not it names its own id.
+#[tokio::test]
+async fn a_create_tagged_through_its_properties_is_simulated_with_or_without_an_id() {
+    let validators = ShapeValidators::new(vec![Arc::new(DecisionShape)]);
+    for id in [Some("block:new"), None] {
+        let mut create = params(&[
+            ("parent_id", s("block:page")),
+            ("content", s("Which queue?")),
+            (
+                "properties",
+                Value::Object(HashMap::from([(
+                    "tags".to_string(),
+                    Value::Array(vec![s("decision")]),
+                )])),
+            ),
+        ]);
+        if let Some(id) = id {
+            create.insert(Arc::from("id"), s(id));
+        }
+        let ops = [PlanOp {
+            op_name: "create",
+            params: &create,
+        }];
+        let judged = judge_plan(&validators, Arc::new(vault()), &ops)
+            .await
+            .expect("the in-memory authority answers every read");
+        assert!(
+            !judged.created.is_empty(),
+            "the create with id {id:?} tagged through its properties was admitted without the \
+             simulator"
+        );
+    }
+}
+
 /// The previous sibling of a block outside every decision is the decision
 /// itself: the indent makes it an option, here one whose key is taken.
 #[tokio::test]

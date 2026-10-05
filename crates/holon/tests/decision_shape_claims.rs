@@ -656,3 +656,174 @@ async fn a_foreign_write_into_a_claimed_subtree_waits_and_the_decision_stays_val
         );
     }
 }
+
+/// Run `ops` as one judged plan of the user, each dispatched in turn.
+fn spawn_plan(
+    engine: &Arc<BackendEngine>,
+    ops: Vec<holon_api::Operation>,
+) -> tokio::task::JoinHandle<anyhow::Result<()>> {
+    let engine = Arc::clone(engine);
+    tokio::spawn(async move {
+        engine
+            .execute_judged(&ops, &OpOrigin::User, async {
+                for op in &ops {
+                    engine
+                        .execute_operation(
+                            &op.entity_name,
+                            &op.op_name,
+                            op.params
+                                .iter()
+                                .map(|(k, v)| (k.as_str().into(), v.clone()))
+                                .collect(),
+                            OpOrigin::User,
+                        )
+                        .await?;
+                }
+                Ok(())
+            })
+            .await
+    })
+}
+
+fn set_field(id: &str, field: &str, value: &str) -> holon_api::Operation {
+    holon_api::Operation::from_params(
+        "block",
+        "set_field",
+        "set_field",
+        [
+            ("id".to_string(), s(id)),
+            ("field".to_string(), s(field)),
+            ("value".to_string(), s(value)),
+        ],
+    )
+}
+
+/// H, held before its judgement, holds the page. P, a plan on the decision
+/// and the page, is admitted behind H. W, a judged write on option a, claims
+/// the decision subtree and waits on P. Once H lands, P's shape claim needs
+/// option a, which W holds: a wait cycle. P has written nothing, so it is
+/// admitted again behind W, and all three land.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_wait_cycle_closed_by_a_judged_plan_retries_the_plan_and_all_land() {
+    let engine = block_engine().await;
+    seed(&engine).await;
+    let hold = engine.dispatch_hold();
+
+    hold.hold_next("block", "set_field");
+    let h = spawn_write(
+        &engine,
+        "set_field",
+        &[("id", PAGE), ("field", "content"), ("value", "held page")],
+    );
+    until("H is held before its judgement", || hold.parked() == 1).await;
+    let p = spawn_plan(
+        &engine,
+        vec![
+            set_field(DECISION, "chosen", "c"),
+            set_field(PAGE, "content", "planned page"),
+        ],
+    );
+    assert!(
+        waiting(&engine, 1, "P's claim behind H").await,
+        "P was not admitted behind H"
+    );
+    let w = spawn_write(
+        &engine,
+        "set_field",
+        &[("id", OPTION_A), ("field", "task_state"), ("value", "TODO")],
+    );
+    assert!(
+        waiting(&engine, 2, "W's shape claim behind P").await,
+        "W's shape claim did not wait on P"
+    );
+    hold.release(1, Duration::from_secs(10))
+        .await
+        .expect("release H");
+
+    finished(h).await.expect("H lands");
+    finished(w).await.expect("W lands");
+    tokio::time::timeout(Duration::from_secs(10), p)
+        .await
+        .expect("the plan finishes")
+        .expect("the plan's task")
+        .expect("the plan lands after its retry");
+    assert_eq!(chosen(&engine).await.as_deref(), Some("c"));
+    assert_eq!(
+        read(&engine, PAGE, "content").await.as_deref(),
+        Some("planned page")
+    );
+    assert_eq!(
+        read(
+            &engine,
+            OPTION_A,
+            "json_extract(properties, '$.task_state')"
+        )
+        .await
+        .as_deref(),
+        Some("TODO")
+    );
+}
+
+/// A plan whose shape claim is refused on every attempt fails with an error
+/// that names the refusals, and writes nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plan_refused_its_shape_claim_three_times_fails_by_name_and_writes_nothing() {
+    let engine = block_engine().await;
+    seed(&engine).await;
+    engine
+        .dispatch_hold()
+        .refuse_next_nests("block", "set_field", 3);
+
+    let err = tokio::time::timeout(
+        Duration::from_secs(10),
+        spawn_plan(
+            &engine,
+            vec![
+                set_field(DECISION, "chosen", "c"),
+                set_field(PAGE, "content", "planned page"),
+            ],
+        ),
+    )
+    .await
+    .expect("the plan finishes")
+    .expect("the plan's task")
+    .expect_err("every attempt's shape claim is refused");
+    let text = format!("{err:#}");
+    assert!(text.contains("refused 3 times"), "{text}");
+    assert!(text.contains("could not claim the tagged blocks"), "{text}");
+    assert_eq!(chosen(&engine).await.as_deref(), Some("a"));
+    assert_eq!(
+        read(&engine, PAGE, "content").await.as_deref(),
+        Some("page")
+    );
+}
+
+/// A plan whose shape claim is refused once is admitted again and lands.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plan_refused_its_shape_claim_once_lands_on_its_retry() {
+    let engine = block_engine().await;
+    seed(&engine).await;
+    engine
+        .dispatch_hold()
+        .refuse_next_nests("block", "set_field", 1);
+
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        spawn_plan(
+            &engine,
+            vec![
+                set_field(DECISION, "chosen", "c"),
+                set_field(PAGE, "content", "planned page"),
+            ],
+        ),
+    )
+    .await
+    .expect("the plan finishes")
+    .expect("the plan's task")
+    .expect("the plan lands on its second attempt");
+    assert_eq!(chosen(&engine).await.as_deref(), Some("c"));
+    assert_eq!(
+        read(&engine, PAGE, "content").await.as_deref(),
+        Some("planned page")
+    );
+}

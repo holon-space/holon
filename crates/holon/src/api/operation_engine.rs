@@ -940,19 +940,59 @@ impl DispatchingOperationEngine {
             !self.runs_claimed_plan(),
             "a judged plan nested in another of the same engine would wait on its own claim"
         );
+        // A plan whose shape claim closed a wait cycle was refused before
+        // `execute` was first polled, so it wrote nothing: it gives up its
+        // place and is admitted again, like a single write in `run_ticket`.
+        let mut execute = Some(execute);
         let mut claim = self.admission.admit(footprint.clone());
-        claim.released().await;
-        // Boxed where it is built: every scope and combinator around it then
-        // moves a pointer, not the plan's future.
-        let plan = Box::pin(self.judged_run(ops, origin, execute));
-        let (outcome, _) = PLAN_CLAIM
-            .scope(
-                (self.identity(), footprint),
-                self.running_write(&claim).run(plan),
-            )
-            .await;
-        drop(claim);
-        outcome
+        for attempt in 1..=SHAPE_CLAIM_ATTEMPTS {
+            claim.released().await;
+            let pending = &mut execute;
+            // Boxed where it is built: every scope and combinator around it
+            // then moves a pointer, not the plan's future.
+            let plan = Box::pin(self.judged_run(ops, origin, async move {
+                pending
+                    .take()
+                    .expect("a plan is run again only when its last attempt never started it")
+                    .await
+            }));
+            let (outcome, run) = PLAN_CLAIM
+                .scope(
+                    (self.identity(), footprint.clone()),
+                    self.running_write(&claim).run(plan),
+                )
+                .await;
+            let started = execute.is_none();
+            assert!(
+                started || !run.ran,
+                "a provider wrote for a plan whose ops never started"
+            );
+            if outcome.is_ok() || !run.refused || started {
+                drop(claim);
+                return outcome;
+            }
+            if attempt == SHAPE_CLAIM_ATTEMPTS {
+                drop(claim);
+                return outcome.map_err(|e| {
+                    format!(
+                        "{e}; the plan had its shape claim refused {SHAPE_CLAIM_ATTEMPTS} times \
+                         and wrote nothing"
+                    )
+                    .into()
+                });
+            }
+            let refused = claim.seq();
+            drop(claim);
+            claim = self.admission.admit(footprint.clone());
+            tracing::warn!(
+                refused,
+                readmitted = claim.seq(),
+                "[admission] a judged plan of {} ops closed a wait cycle at its shape claim; \
+                 admitted again",
+                ops.len()
+            );
+        }
+        unreachable!("the last attempt returns")
     }
 
     /// [`Self::execute_admitted`] on the heap, built outside the caller's

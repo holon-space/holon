@@ -150,13 +150,19 @@ fn outside(
         Some(Value::String(raw)) => raw.split([',', ' ']).any(|t| tags.contains(&t)),
         _ => false,
     };
+    let creates_outside = |op: &PlanOp<'_>| -> Result<bool> {
+        Ok(!is_tagged(near, &named(op, "parent_id")?)?
+            && !tags_shape(op.params.get("tags"))
+            && !matches!(
+                op.params.get("properties"),
+                Some(Value::Object(map)) if tags_shape(map.get("tags"))
+            ))
+    };
     let target = named(op, "id")?;
     // Only a create may leave its id to the provider; any other op without
     // one is for the simulator to reject.
     let Some(target) = target else {
-        return Ok(op.op_name == "create"
-            && !is_tagged(near, &named(op, "parent_id")?)?
-            && !tags_shape(op.params.get("tags")));
+        return Ok(op.op_name == "create" && creates_outside(op)?);
     };
     if near.is_tagged(&target)? || near.is_under_tagged(&target)? {
         return Ok(false);
@@ -171,18 +177,7 @@ fn outside(
                 None => false,
             }
         }
-        "create" => {
-            !is_tagged(near, &named(op, "parent_id")?)?
-                && !tags_shape(op.params.get("tags"))
-                && !op
-                    .params
-                    .get("properties")
-                    .and_then(|p| match p {
-                        Value::Object(map) => Some(tags_shape(map.get("tags"))),
-                        _ => None,
-                    })
-                    .unwrap_or(false)
-        }
+        "create" => creates_outside(op)?,
         "move_block" => !is_tagged(near, &named(op, "parent_id")?)?,
         "delete" | "move_up" | "move_down" | "split_block" => true,
         // Both read the block's place before the PLAN, so only a plan of one
