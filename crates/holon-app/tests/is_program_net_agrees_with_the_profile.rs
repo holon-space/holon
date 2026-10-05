@@ -79,6 +79,7 @@ fn resolver_from(blocks: &[Block]) -> Arc<dyn ProfileResolving> {
         live_entities,
         HashMap::new(),
         type_profiles,
+        type_registry.vault_profile_claims(),
         Arc::new(holon_api::ConditionBus::new()),
     ))
 }

@@ -9,6 +9,7 @@
 //! immediately — no invalid expressions can exist in the registry.
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fmt;
 use std::sync::Arc;
 use std::sync::RwLock;
@@ -59,15 +60,55 @@ pub struct TypeRegistry {
 #[derive(Default)]
 struct Admitted {
     types: HashMap<String, TypeDefinition>,
-    /// The computed fields each loaded vault profile declares, by profile id
-    /// and entity key, so a type registered after the profile loaded is
-    /// checked against them ([`TypeRegistry::register`]).
-    vault_profile_claims: HashMap<String, VaultProfileClaim>,
+    /// The `(entity, computed field)` pairs each vault profile computes or is
+    /// about to compute, by profile id, so a type registered later is checked
+    /// against them ([`TypeRegistry::register`]).
+    vault_profile_claims: HashMap<String, HashSet<(TableName, String)>>,
 }
 
-struct VaultProfileClaim {
-    entity_key: TableName,
-    computed: Vec<String>,
+fn claim_of_parsed(profile: &ParsedProfile) -> impl Iterator<Item = (TableName, String)> + '_ {
+    let entity_key = TableName::from_scheme(&profile.entity_name);
+    profile
+        .computed
+        .keys()
+        .map(move |field| (entity_key.clone(), field.clone()))
+}
+
+fn claim_of_applied(profile: &EntityProfile) -> HashSet<(TableName, String)> {
+    let entity_key = TableName::from_scheme(profile.entity_name.as_str());
+    profile
+        .computed_fields
+        .iter()
+        .map(|field| (entity_key.clone(), field.name().to_string()))
+        .collect()
+}
+
+/// The resolver's end of the vault profiles' claims.
+///
+/// [`Self::apply`] makes a set of vault profiles the one in effect and replaces
+/// the claims with theirs in one critical section, so a claim is released
+/// exactly when its profile stops computing.
+pub struct VaultProfileClaims {
+    admitted: Arc<RwLock<Admitted>>,
+}
+
+impl VaultProfileClaims {
+    /// `profiles` is the whole set of vault profiles, by block id, that
+    /// `put_in_effect` puts in effect. The caller holds the source of
+    /// `profiles` locked against writes for the whole call, so no profile
+    /// accepted after `profiles` was read loses its claim here.
+    pub fn apply(
+        &self,
+        profiles: &std::collections::BTreeMap<String, Arc<EntityProfile>>,
+        put_in_effect: impl FnOnce(),
+    ) {
+        let mut admitted = self.admitted.write().expect("TypeRegistry poisoned");
+        put_in_effect();
+        admitted.vault_profile_claims = profiles
+            .iter()
+            .map(|(id, profile)| (id.clone(), claim_of_applied(profile)))
+            .collect();
+    }
 }
 
 impl Default for TypeRegistry {
@@ -313,52 +354,44 @@ impl TypeRegistry {
     /// ([`crate::check_profile_computed_overrides`]), against the types
     /// registered at the time of each call, for profiles that load after the
     /// registry is built (org-embedded profile blocks). The closure takes the
-    /// id of the block the profile was loaded from. A profile it accepts is
-    /// recorded, so [`Self::register`] refuses a later type that the profile
-    /// would override; a refused edit keeps the earlier version's record, which
-    /// [`Self::profile_release`] drops when the block leaves.
+    /// id of the block the profile was loaded from. An accepted profile's
+    /// fields join that block's claim before the profile can take effect, so
+    /// [`Self::register`] refuses a type the profile would override;
+    /// [`VaultProfileClaims::apply`] narrows the claim to what is in effect.
     pub fn profile_load_check(
         &self,
     ) -> impl Fn(&str, &ParsedProfile) -> Result<()> + Send + Sync + 'static {
         let admitted = Arc::clone(&self.admitted);
         move |profile_id, profile| {
-            let entity_key = TableName::from_scheme(&profile.entity_name);
             let mut admitted = admitted.write().expect("TypeRegistry poisoned");
-            let type_def = admitted.types.get(entity_key.as_str());
+            let type_def = admitted
+                .types
+                .get(TableName::from_scheme(&profile.entity_name).as_str());
             crate::check_profile_scope(profile, type_def)
                 .and_then(|()| crate::check_profile_write_targets(profile))
                 .and_then(|()| {
                     crate::check_profile_computed_overrides(profile_id, profile, type_def)
                         .map_err(Into::into)
                 })?;
-            // A refused edit leaves the profile's older version in the mirror,
-            // so that version's record stays until the block leaves or a new
-            // version is accepted.
-            admitted.vault_profile_claims.insert(
-                profile_id.to_string(),
-                VaultProfileClaim {
-                    entity_key,
-                    computed: profile.computed.keys().cloned().collect(),
-                },
-            );
+            // The version this one replaces computes until the resolver
+            // applies the new one, so its claim stays too.
+            admitted
+                .vault_profile_claims
+                .entry(profile_id.to_string())
+                .or_default()
+                .extend(claim_of_parsed(profile));
             Ok(())
         }
     }
 
-    /// The hook that drops the record [`Self::profile_load_check`] made for a
-    /// vault profile whose block is gone. Takes the same profile id.
-    pub fn profile_release(&self) -> impl Fn(&str) + Send + Sync + 'static {
-        let admitted = Arc::clone(&self.admitted);
-        move |profile_id| {
-            admitted
-                .write()
-                .expect("TypeRegistry poisoned")
-                .vault_profile_claims
-                .remove(profile_id);
+    /// The handle the profile resolver applies vault profiles through.
+    pub fn vault_profile_claims(&self) -> VaultProfileClaims {
+        VaultProfileClaims {
+            admitted: Arc::clone(&self.admitted),
         }
     }
 
-    /// Whether a loaded vault profile for `entity` is recorded.
+    /// Whether a vault profile for `entity` holds a claim.
     pub fn has_vault_profile_for(&self, entity: &str) -> bool {
         let key = TableName::from_scheme(entity);
         self.admitted
@@ -366,7 +399,8 @@ impl TypeRegistry {
             .expect("TypeRegistry poisoned")
             .vault_profile_claims
             .values()
-            .any(|c| c.entity_key == key)
+            .flatten()
+            .any(|(entity_key, _)| *entity_key == key)
     }
 
     /// Get all registered type definitions.
@@ -413,13 +447,13 @@ impl TypeRegistry {
 }
 
 fn check_against_vault_profiles(
-    claims: &HashMap<String, VaultProfileClaim>,
+    claims: &HashMap<String, HashSet<(TableName, String)>>,
     key: &TableName,
     type_def: &TypeDefinition,
 ) -> Result<()> {
-    for (profile_id, claim) in claims.iter().filter(|(_, c)| &c.entity_key == key) {
+    for (profile_id, claim) in claims {
         for (name, spec) in type_def.computed_specs() {
-            if claim.computed.iter().any(|c| c == name)
+            if claim.contains(&(key.clone(), name.to_string()))
                 && !matches!(spec.computation(), Computation::Script(_))
             {
                 return Err(crate::TypedComputedFieldOverride {

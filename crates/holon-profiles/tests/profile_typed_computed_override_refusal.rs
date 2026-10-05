@@ -67,24 +67,38 @@ fn a_type_declaring_a_typed_field_a_loaded_vault_profile_redeclares_is_refused()
     );
 }
 
+/// The version an accepted edit replaces computes until the resolver applies
+/// the edit, so its claim lasts exactly that long.
 #[test]
-fn a_profile_edited_to_drop_the_field_releases_its_claim() {
+fn an_edit_dropping_the_field_releases_the_claim_when_the_resolver_applies_it() {
     let registry = create_default_registry().expect("default registry loads");
     let check = registry.profile_load_check();
+    let claims = registry.vault_profile_claims();
     let parse = |yaml| parse_profile_yaml(yaml).expect("profile parses");
-    check(
-        "block:vault-profile",
-        &parse("entity_name: person_late\ncomputed:\n  display_name: '\"x\"'\n"),
-    )
-    .expect("loads");
-    check(
-        "block:vault-profile",
-        &parse("entity_name: person_late\ncomputed:\n  shout: '\"x\"'\n"),
-    )
-    .expect("loads");
+    let original = "entity_name: person_late\ncomputed:\n  display_name: '\"x\"'\n";
+    let edit = "entity_name: person_late\ncomputed:\n  shout: '\"x\"'\n";
+    let applied = |yaml| {
+        std::collections::BTreeMap::from([(
+            "block:vault-profile".to_string(),
+            std::sync::Arc::new(parse(yaml).to_entity_profile().expect("converts")),
+        )])
+    };
+    check("block:vault-profile", &parse(original)).expect("loads");
+    claims.apply(&applied(original), || {});
+    check("block:vault-profile", &parse(edit)).expect("loads");
+
+    let err = registry
+        .register(late_person(&registry, "person_late"))
+        .expect_err("the original version is still in effect");
+    assert!(
+        err.downcast_ref::<TypedComputedFieldOverride>().is_some(),
+        "{err:#}"
+    );
+
+    claims.apply(&applied(edit), || {});
     registry
         .register(late_person(&registry, "person_late"))
-        .expect("the edited profile no longer redeclares display_name");
+        .expect("the applied edit no longer redeclares display_name");
 }
 
 #[test]

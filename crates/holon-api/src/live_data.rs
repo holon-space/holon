@@ -145,18 +145,25 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
 
     /// Install the hook that runs for every CDC delete this mirror applies,
     /// before the removal is observable. It also runs for a key the mirror
-    /// never held (a row refused at load). A mirror has one hook; installing a
-    /// second panics.
+    /// never held (a row refused at load). A mirror has one hook, and it must
+    /// be installed before [`Self::subscribe`]: a later install panics.
     pub fn on_delete(&self, hook: impl Fn(&str) + Send + Sync + 'static) {
         assert!(
             self.on_delete.set(Box::new(hook)).is_ok(),
-            "LiveData already has a delete hook"
+            "LiveData already has a delete hook, or is already subscribed"
         );
     }
 
+    /// A panicking hook must not unwind the `subscribe` actor (the
+    /// Created/Updated arm of `apply_changes_with_origins` says why).
     fn run_delete_hook(&self, key: &str) {
         if let Some(hook) = self.on_delete.get() {
-            hook(key);
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| hook(key))).is_err() {
+                tracing::error!(
+                    "LiveData: delete hook panicked on key={key} — the delete is applied \
+                     and the feed stays alive (degraded)"
+                );
+            }
         }
     }
 
@@ -530,6 +537,7 @@ impl<T: Clone + Send + Sync + 'static> LiveData<T> {
             + 'static,
     {
         use tracing::Instrument;
+        self.on_delete.get_or_init(|| Box::new(|_| {}));
         let live = Arc::clone(self);
         let feed = crate::latency_e2e::Feed::fresh();
         let actor_span =
@@ -1096,6 +1104,60 @@ mod tests {
         live.on_delete(move |key| sink.lock().unwrap().push(key.to_string()));
         live.apply_changes(vec![deleted("refused")]);
         assert_eq!(*seen.lock().unwrap(), ["refused"]);
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "already subscribed")]
+    async fn a_delete_hook_cannot_be_installed_after_subscribe() {
+        let live = string_mirror(vec![]);
+        live.subscribe(
+            "test_feed",
+            tokio_stream::iter(Vec::<
+                crate::streaming::BatchWithMetadata<Change<StorageEntity>>,
+            >::new()),
+        );
+        live.on_delete(|_| {});
+    }
+
+    #[tokio::test]
+    async fn a_panicking_delete_hook_leaves_the_subscribe_actor_alive() {
+        let live = string_mirror(vec![make_row("x", "data")]);
+        live.on_delete(|_| panic!("hook failure"));
+        let batch = |seq: u64, change: Change<StorageEntity>| crate::streaming::WithMetadata {
+            inner: crate::streaming::Batch {
+                items: vec![change],
+            },
+            metadata: crate::streaming::BatchMetadata {
+                seq,
+                ..Default::default()
+            },
+        };
+        live.subscribe(
+            "test_feed",
+            tokio_stream::iter(vec![
+                batch(1, deleted("x")),
+                batch(
+                    2,
+                    Change::Created {
+                        data: make_row("after", "fine"),
+                        origin: crate::ChangeOrigin::Local {
+                            operation_id: None,
+                            trace_id: None,
+                        },
+                    },
+                ),
+            ]),
+        );
+        let landed = live
+            .wait_until(
+                |m| m.contains_key("after") && !m.contains_key("x"),
+                std::time::Duration::from_secs(5),
+            )
+            .await;
+        assert!(
+            landed,
+            "the delete must apply and the actor must survive the hook's panic"
+        );
     }
 
     #[test]

@@ -55,6 +55,7 @@ pub use trust::TrustPolicyParseError;
 pub use trust::TrustRule;
 pub use type_registry::TableName;
 pub use type_registry::TypeRegistry;
+pub use type_registry::VaultProfileClaims;
 pub use type_registry::create_default_registry;
 pub use type_registry::type_profiles_from_registry;
 
@@ -323,7 +324,7 @@ impl ParsedProfile {
             // so no declared schema is known here — every missing required column
             // is treated as expected heterogeneity (silent). The block profile's
             // declared columns come from the type-def base it merges into (see
-            // `profile_from_type_def` + `build_cache_from_source` merge order).
+            // `profile_from_type_def` + `build_cache` merge order).
             declared_columns: BTreeSet::new(),
             render_requirements: Default::default(),
         }
@@ -1054,16 +1055,20 @@ impl ProfileResolver {
         live_entities: LiveEntities,
         entity_operations: HashMap<EntityName, Vec<OperationDescriptor>>,
         type_profiles: Vec<EntityProfile>,
+        vault_profile_claims: VaultProfileClaims,
         conditions: Arc<holon_api::ConditionBus>,
     ) -> Self {
         let entity_operations = Arc::new(entity_operations);
         let type_profiles = Arc::new(type_profiles);
-        let initial_cache = Arc::new(Self::build_cache_from_source(
+        let cache_signal =
+            futures_signals::signal::Mutable::new(Arc::new(ProfileCache::new(HashMap::new())));
+        Self::apply_source(
             &source,
             &ui_info,
             &type_profiles,
-        ));
-        let cache_signal = futures_signals::signal::Mutable::new(initial_cache);
+            &vault_profile_claims,
+            &cache_signal,
+        );
 
         let bg_source = Arc::clone(&source);
         let bg_type_profiles = Arc::clone(&type_profiles);
@@ -1072,12 +1077,13 @@ impl ProfileResolver {
         tokio::spawn(async move {
             signal
                 .for_each(move |_diff| {
-                    let new_cache = Arc::new(Self::build_cache_from_source(
+                    Self::apply_source(
                         &bg_source,
                         &ui_info,
                         &bg_type_profiles,
-                    ));
-                    bg_signal.set(new_cache);
+                        &vault_profile_claims,
+                        &bg_signal,
+                    );
                     async {}
                 })
                 .await;
@@ -1148,8 +1154,24 @@ impl ProfileResolver {
         })
     }
 
-    fn build_cache_from_source(
+    /// Put the source's current vault profiles in effect. The source stays
+    /// read-locked until the cache and the claims are swapped, so a later
+    /// state of the source can never be overwritten by an earlier one.
+    fn apply_source(
         source: &holon_api::live_data::LiveData<EntityProfile>,
+        ui_info: &holon_api::UiInfo,
+        type_profiles: &[EntityProfile],
+        vault_profile_claims: &VaultProfileClaims,
+        cache_signal: &futures_signals::signal::Mutable<Arc<ProfileCache>>,
+    ) {
+        let items = source.read();
+        vault_profile_claims.apply(&items, || {
+            cache_signal.set(Arc::new(Self::build_cache(&items, ui_info, type_profiles)));
+        });
+    }
+
+    fn build_cache(
+        items: &BTreeMap<String, Arc<EntityProfile>>,
         ui_info: &holon_api::UiInfo,
         type_profiles: &[EntityProfile],
     ) -> ProfileCache {
@@ -1163,7 +1185,6 @@ impl ProfileResolver {
         }
 
         // Overlay org-based profiles (org wins via merge — higher priority overrides)
-        let items = source.read();
         for profile in items.values() {
             let filtered = Self::filter_profile(profile, ui_info);
             let name = filtered.entity_name.clone();
@@ -2439,7 +2460,7 @@ variants:
     }
 
     /// The widening must not depend on WHICH source a profile came from.
-    /// `build_cache_from_source` inserts org-sourced profiles directly (no
+    /// `build_cache` inserts org-sourced profiles directly (no
     /// type-registry seat on that path), so the guarantee has to hold at the
     /// cache funnel itself.
     #[test]
@@ -2471,11 +2492,8 @@ variants:
             move |_| Ok(profile.clone()),
         );
 
-        let cache = ProfileResolver::build_cache_from_source(
-            &source,
-            &holon_api::UiInfo::permissive(),
-            &[],
-        );
+        let cache =
+            ProfileResolver::build_cache(&source.read(), &holon_api::UiInfo::permissive(), &[]);
         let defaults = cache
             .get("widget")
             .expect("org-sourced profile is cached")
@@ -2569,6 +2587,7 @@ variants:
     render: 'row(col("content"))'
 "#,
                 )],
+                TypeRegistry::new().vault_profile_claims(),
                 bus.clone(),
             );
             let row = |base: f64| {
@@ -2620,6 +2639,7 @@ variants:
     render: 'row(col("content"))'
 "#,
             )],
+            TypeRegistry::new().vault_profile_claims(),
             bus.clone(),
         );
         let row = HashMap::from([

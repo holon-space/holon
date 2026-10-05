@@ -81,6 +81,7 @@ pub fn build_turso_free_profile_resolver(
         LiveEntities::new(),
         HashMap::new(),
         type_profiles,
+        type_registry.vault_profile_claims(),
         conditions,
     ));
     spawn_live_entity_refresh(source, Arc::downgrade(&resolver), shutdown);

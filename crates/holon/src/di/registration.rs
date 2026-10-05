@@ -199,7 +199,7 @@ async fn create_initialized_engine(
         LiveEntities::new(),
         type_profiles,
         type_registry.profile_load_check(),
-        type_registry.profile_release(),
+        type_registry.vault_profile_claims(),
         conditions,
     )
     .await?;
@@ -476,7 +476,7 @@ async fn create_profile_resolver(
     + Send
     + Sync
     + 'static,
-    profile_release: impl Fn(&str) + Send + Sync + 'static,
+    vault_profile_claims: holon_profiles::VaultProfileClaims,
     conditions: Arc<holon_api::ConditionBus>,
 ) -> Result<Arc<ProfileResolver>> {
     use holon_api::EntityName;
@@ -532,20 +532,20 @@ async fn create_profile_resolver(
                 },
                 move |row| load(row),
             );
-            live_profiles.subscribe("entity_profile", result.stream);
             live_profiles.on_delete(move |id| {
-                profile_release(id);
                 refusal_conditions.clear(&holon_api::ConditionKey {
                     subject: id.to_string(),
                     kind: holon_api::ConditionKind::PROFILE_REFUSED,
                 });
             });
+            live_profiles.subscribe("entity_profile", result.stream);
             Ok(Arc::new(ProfileResolver::with_type_profiles(
                 live_profiles,
                 ui_info,
                 live_entities,
                 entity_operations,
                 type_profiles,
+                vault_profile_claims,
                 computed_conditions,
             )))
         }
@@ -565,6 +565,7 @@ async fn create_profile_resolver(
                 live_entities,
                 entity_operations,
                 type_profiles,
+                vault_profile_claims,
                 computed_conditions,
             )))
         }

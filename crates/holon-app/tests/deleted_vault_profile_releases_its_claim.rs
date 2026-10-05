@@ -18,7 +18,6 @@ use holon_api::ConditionBus;
 use holon_api::ConditionKind;
 use holon_api::EntityName;
 use holon_api::OpOrigin;
-use holon_api::ProfileResolving as _;
 use holon_api::Value;
 use holon_api::render_requirements::RenderRequirements;
 use holon_frontend::config::HolonConfig;
@@ -155,20 +154,34 @@ async fn user_op(booted: &Booted, op: &str, params: &[(&str, &str)]) {
 #[test]
 fn a_deleted_vault_profile_stops_refusing_the_type_it_overrode() {
     runtime().block_on(async {
-        let booted = boot_with_late_profile().await;
+        let booted = Arc::new(boot_with_late_profile().await);
         let (id, _) = profile_block(&booted).await;
+
+        let declarer = {
+            let booted = Arc::clone(&booted);
+            std::thread::spawn(move || {
+                let start = Instant::now();
+                loop {
+                    match booted.registry.register(late_person(&booted.registry)) {
+                        Ok(()) => return booted.profile_in_effect(),
+                        Err(e) if e.downcast_ref::<TypedComputedFieldOverride>().is_some() => {
+                            assert!(start.elapsed() < DEADLINE, "the type was never accepted");
+                        }
+                        Err(e) => panic!("register failed for another reason: {e:#}"),
+                    }
+                }
+            })
+        };
         user_op(&booted, "delete", &[("id", &id)]).await;
 
-        let start = Instant::now();
-        while booted.profile_in_effect() {
-            assert!(start.elapsed() < DEADLINE, "the profile is still in effect");
-            tokio::time::sleep(Duration::from_millis(1)).await;
-        }
-
-        booted
-            .registry
-            .register(late_person(&booted.registry))
-            .expect("the first declaration after the profile left must be accepted");
+        let in_effect_when_accepted = tokio::task::spawn_blocking(move || declarer.join())
+            .await
+            .expect("join task")
+            .expect("declarer thread");
+        assert!(
+            !in_effect_when_accepted,
+            "the typed display_name was accepted while the deleted vault profile still computed it"
+        );
     });
 }
 

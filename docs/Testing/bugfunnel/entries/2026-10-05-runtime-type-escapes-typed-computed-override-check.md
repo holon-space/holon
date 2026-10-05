@@ -36,10 +36,8 @@ computed field names (a refused load releases its record). `register` refuses a
 type whose typed computed field a recorded profile redeclares, with
 `TypedComputedFieldOverride`. Tests: the three added to
 crates/holon-profiles/tests/profile_typed_computed_override_refusal.rs (red
-log lane-logs/d66-red.log). A profile block that leaves the vault releases its record:
-`create_profile_resolver` (crates/holon/src/di/registration.rs) installs
-`TypeRegistry::profile_release` as the profile mirror's delete hook (see the
-release leg below).
+log lane-logs/d66-red.log). A profile block that leaves the vault releases its record
+when the resolver stops applying it (see the release legs below).
 Test: crates/holon-app/tests/deleted_vault_profile_releases_its_claim.rs (red
 log lane-logs/d66b-red.log: the type stayed refused after the profile's
 document was deleted).
@@ -87,3 +85,30 @@ deleted: no accepted load follows, so nothing cleared it. The same delete hook
 now clears it. Test: `deleting_a_refused_profile_block_clears_its_refusal`
 (crates/holon-app/tests/deleted_vault_profile_releases_its_claim.rs); red log
 lane-logs/d66f-red3.log (condition still raised 30 s after the delete).
+
+### Release leg 2: the claim left before the profile stopped computing
+The verifier of round 5 (lane-logs/d45-followups-verify-3.md) raced a spinning
+`register` against an awaited `block.delete`. The delete hook released the
+claim at the EARLIEST step of the deletion, but the resolver kept computing the
+Rhai `display_name` until its spawned cache rebuild swapped in a cache without
+the profile. A `register` accepted in between left two computations for one
+field: 4 of 4 runs. The claim now means "this profile is in effect in the
+resolver". `VaultProfileClaims::apply`
+(crates/holon-profiles/src/type_registry.rs) swaps the resolver cache in and
+sets the claims to exactly the applied profiles, under the registry lock, while
+`ProfileResolver::apply_source` (crates/holon-profiles/src/lib.rs) holds the
+profile mirror read-locked, so a rebuild cannot apply an older mirror state
+after a newer one. The load check still adds an accepted profile's claim before
+it can take effect, and an accepted edit keeps the replaced version's claim
+until the resolver applies the edit. The delete hook only clears
+`ProfileRefused`; it is installed before `subscribe` (a later install panics)
+and a panic inside it is logged and does not end the mirror's CDC actor.
+Tests: `a_deleted_vault_profile_stops_refusing_the_type_it_overrode` now races
+a spinning `register` against the delete and asserts the profile is not in
+effect at the instant `register` is accepted (red log lane-logs/r6-red-5x.log,
+4 of 5 runs failed; green lane-logs/r6-green-5x.log);
+`an_edit_dropping_the_field_releases_the_claim_when_the_resolver_applies_it`
+(crates/holon-profiles/tests/profile_typed_computed_override_refusal.rs);
+`a_delete_hook_cannot_be_installed_after_subscribe` and
+`a_panicking_delete_hook_leaves_the_subscribe_actor_alive`
+(crates/holon-api/src/live_data.rs).
