@@ -45,6 +45,7 @@ LIST_ID is a stable opaque id (e.g. `<LIST_ID>`). Response:
   "options": {"prices": bool, "cats": [<catCode>...]}     // category vocabulary for this list
 }
 ```
+- **Evidence levels.** The capture showed only `name`/`cat` on `items` and `cat`/`date` on `pickedItems`. The richer read shape is inferred from the app's own client code (medium confidence, not seen in a capture): `items[]` entries may also carry `count`, `price`, `pos`, `img`; `pickedItems` values may also carry `pickedCount` and `count`. Source: the bundled Cordova JS (`www/js/list.js`, `app.js`, `utils.js`), read statically with no network. A live capture should confirm it.
 - **Item identity = `(name, cat)`.** There is **NO server-issued item id.** (Confirms §4 and R4.)
 - **`checked` is real**: an item is checked iff its name is a key in `pickedItems`. (Confirms R3 — the app DOES have a checked concept; C1 stores it in the local-only `checked` column.)
 - `cat` is a short code (`"O"`, `"S"`, `"FuV"`, …); the code→label vocabulary is `options.cats`
@@ -67,13 +68,29 @@ Response: `{"version": <newInt>, "pickedItemsVersion": <newInt>, "options": {...
 returns the NEW versions; feed them into the next `oldVersion`/`oldPickedItemsVersion`.
 
 Each command carries `id` = `"<epoch_ms>_<seq>"` (client-generated, idempotency/ordering key)
-and a `good` = `{"name": str, "cat": <catCode>, "new"?: true}` identifying the item by (name,cat):
+and a `good` = `{"name": str, "cat": <catCode>, "new"?: true}` identifying the item by (name,cat).
+Per the client code (`list.js`; inferred, medium confidence) `good` also accepts:
+- `count`: a free-text string such as `"2 kg"` or `"4 Zehen"`. The app parses a leading number
+  (`.` or `,` as decimal separator); the rest is the unit (`numberRangeOfString`,
+  `adjustCountByDelta`). A bare `"1"` means no quantity. Holon must parse and compose `count`
+  with these rules.
+- `price`, `pos` (position), `img`.
+- `pickedItems` side only: `pickedCount`.
 
-| Intent | Command shape (observed) |
+`cmd` is `add`, `del` or `update`. `update` changes the position only. Changing an amount is
+another `add` for the same name.
+
+| Intent | Command shape |
 |---|---|
-| **Add** an item | `{"cmd":"add", "good":{"name","cat","new":true}, "id"}` |
-| **Delete** an item | `{"cmd":"del", "good":{"name","cat","new":true}, "id"}` |
-| **Check / uncheck** (toggle picked) | a command carrying `"picked":"del"` on the `good`, usually PAIRED with an `add`/`del` — the app moves the item between `items` and `pickedItems`. The exact on-vs-off encoding must be pinned by the C2 lane against a fresh 2-action capture (check, then uncheck, isolated) — see "Still open after C2" below. |
+| **Add** an item | `{"cmd":"add", "good":{"name","cat","new":true}, "id"}` (observed) |
+| **Delete** an item | `{"cmd":"del", "good":{"name","cat","new":true}, "id"}` (observed) |
+| **Check** | `{"cmd":"del", good}` then `{"picked":"add", good}`, in one commit. By default `count` moves to `pickedCount` (inferred from `list.js`). |
+| **Uncheck** | `{"picked":"del", good}` then `{"cmd":"add", good}` with `count` restored (inferred from `list.js`). |
+| **Edit a checked item** | `{"picked":"replace", "name":<old name>, good}` (inferred from `list.js`). |
+
+`picked` is a command-level key with values `add`, `del` or `replace`. A command carries `cmd`
+OR `picked`, never both. The capture showed only `picked:"del"`; the other `picked` forms come
+from client code.
 | **Rename** | NOT atomic — emitted as **`del <oldName>` + `add <newName>`** in one commit. This is the mechanism behind **R4: a rename drops any local-only state** (checked flag, product binding) because the new name is a new identity. (R4 accepted as a disclosed limitation — now evidence-backed.) |
 
 ### Concurrency / conflict
@@ -93,11 +110,10 @@ extraction — landed at C2, generic and sidecar-declared, so gmail/gcal write l
 machinery with no engine work.
 
 ## Still open after C2 (built around, not blocked on)
-1. The exact **check-on vs check-off** command encoding (`picked:"del"` semantics). Needs a fresh
-   isolated capture: check ONE item, commit; uncheck it, commit; diff the two commit bodies.
-   Until then a local check is deliberately NOT pushed — a guessed encoding paired with an
-   `add`/`del` risks deleting the item instead of ticking it. Checked still travels INBOUND, from
-   `pickedItems` membership.
+1. Confirm the check/uncheck encoding with one live capture. The client code answers it (see the
+   table above), but it is not yet seen on the wire. Capture: add an item with count `"2 kg"`,
+   check it, uncheck it, and diff the commit bodies. Until then a local check is deliberately NOT
+   pushed. Checked still travels INBOUND, from `pickedItems` membership.
 2. `mode` query values and the **stale-`oldVersion` rejection** response (force a conflict). C2
    needs neither: it does not trust the ack's version as proof a commit landed, it re-pulls and
    lets the reconciler decide, so the conflict is detected from the list itself.
