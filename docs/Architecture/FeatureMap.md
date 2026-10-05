@@ -36,7 +36,7 @@ The one-page answer to *"which features could this change impact?"*. Rows are us
 | **Ruled by** | An ADR under [`docs/adr/`](../adr/), or an invariant number from [Model.md](Model.md). |
 | **Mode axes** | Which of [Model.md](Model.md)'s four orthogonal axes the feature's behaviour varies on: **Storage** (Loro store on/off), **File adapter** (org/none), **Merge fidelity** (op-CRDT / base-3-way / LWW), **Transport** (iroh P2P on/off). `—` means the feature behaves the same everywhere. *Headless vs windowed* is a test-slice axis, not a product mode; it is called out in prose where it matters. |
 
-The composed keystone is [`general_e2e_composed_pbt.rs`](../../crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs). Its alphabet is 100 transitions; the repo declares 88 invariant ids plus 17 correspondence-family ids. Open reds are registered in [KeystoneKnownReds.md](../Testing/KeystoneKnownReds.md) — a red listed there is a pass-with-note, anything else is a regression.
+The composed keystone is [`general_e2e_composed_pbt.rs`](../../crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs). Its alphabet is 101 transitions; the repo declares 88 invariant ids plus 17 correspondence-family ids. Open reds are registered in [KeystoneKnownReds.md](../Testing/KeystoneKnownReds.md) — a red listed there is a pass-with-note, anything else is a regression.
 
 ---
 
@@ -273,6 +273,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `Search` — the hit set equals the reference model's literal substring match over block content and page titles, folded by Unicode simple case folding, with pattern metacharacters matching themselves and an empty query returning nothing.
 - `SecondWriterRefused` — a second session on a held vault is refused by the writer lock, names the holder and writes nothing
 - `StartApp` — application startup + seeded sidebar watch
+- `StructuralKeyBurst` — a structural op decides on the block and parent that earlier admitted keys produced, not on a projection that has not caught up with them
 - `WritePrivateFieldGenerically` — `parent_id` and `sort_key` are written only by `move_block` and its family, so no generic write can store a parent cycle or a sibling-order break
 
 ### Invariant ids
