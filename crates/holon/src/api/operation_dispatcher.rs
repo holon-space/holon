@@ -9,6 +9,7 @@
 
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::fmt;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -34,6 +35,16 @@ use tracing::error;
 use tracing::info;
 
 use crate::api::guard_world::GuardQuery;
+
+/// The param keys an operation names its subject in, and so the keys every
+/// subject-bound gate binds to: the ADR 0028 boundary seam and the write tier
+/// judge both, the ADR 0031 guard binds to `id`.
+///
+/// A gate that learns a new key must add it here, because the wildcard arm
+/// refuses exactly these keys — `*` names no relation, so a subject arriving
+/// under it would be judged against the descriptor of whichever provider
+/// advertises the broadcast.
+pub const SUBJECT_PARAM_KEYS: [&str; 2] = ["id", "parent_id"];
 
 /// Composite dispatcher that aggregates multiple OperationProvider instances
 ///
@@ -641,7 +652,7 @@ impl OperationDispatcher {
         if resolved_entity_name != "block" || matches!(origin, OpOrigin::Ingest) {
             return Ok(());
         }
-        for key in ["id", "parent_id"] {
+        for key in SUBJECT_PARAM_KEYS {
             let Some(subject) = params.get(key).and_then(|v| v.as_string()) else {
                 continue;
             };
@@ -713,6 +724,235 @@ impl OperationDispatcher {
             }
         }
         Ok(())
+    }
+
+    /// The broadcasts this container can run — the ONE place that decides,
+    /// read by [`OperationProvider::operations`], which advertises them, and by
+    /// the wildcard arm, which accepts them.
+    ///
+    /// The op name is caller-supplied, so the two must be the same set: an op
+    /// accepted on a container that advertises it nowhere is an effect no
+    /// composition offered (`*::full_sync` cleared every sync token on a
+    /// container with no syncable provider at all).
+    fn offered_broadcasts(&self, snapshot: &OperationSnapshot) -> Vec<OfferedBroadcast<'_>> {
+        let mut offered = Vec::new();
+        if snapshot.advertises(BroadcastOp::Sync.as_str()) {
+            offered.push(OfferedBroadcast::Sync);
+            offered.push(OfferedBroadcast::FullSync);
+        }
+        if let Some(rebuild) = self.view_rebuild.as_ref() {
+            offered.push(OfferedBroadcast::RebuildViews(rebuild));
+        }
+        offered
+    }
+
+    /// One read of every provider's `operations()`, for a dispatch that must
+    /// decide, judge and run from the same answer.
+    fn snapshot_operations(&self) -> OperationSnapshot {
+        OperationSnapshot {
+            providers: self
+                .all_providers()
+                .into_iter()
+                .map(|provider| {
+                    let ops = provider.operations();
+                    (provider, ops)
+                })
+                .collect(),
+        }
+    }
+
+    /// The gate chain [`Self::execute_operation_with_provenance`] runs for a
+    /// named dispatch, for one fan-out member under that provider's own entity
+    /// name.
+    async fn judge_fan_out_member(
+        &self,
+        available_ops: &[OperationDescriptor],
+        entity: &str,
+        op_name: &str,
+        params: &StorageEntity,
+        origin: &OpOrigin,
+    ) -> Result<()> {
+        self.enforce_boundary(available_ops, entity, op_name, params)?;
+        self.enforce_guard(available_ops, entity, op_name, params)
+            .await?;
+        self.enforce_net_guard(entity, op_name, params).await?;
+        self.enforce_write_tier(entity, params, origin).await
+    }
+
+    /// Judge every provider that advertises `op_name`, and run NONE of them.
+    ///
+    /// The gates bind to the subject an operation's params name and to the
+    /// declarations on its descriptor. A fan-out member names no subject, so
+    /// they normally decide nothing; what matters is that a policy which DOES
+    /// speak about one of these descriptors is consulted rather than skipped,
+    /// so no provider write leaves this dispatcher unjudged.
+    ///
+    /// Judging comes first for the whole fan-out, and one refusal refuses the
+    /// broadcast naming every provider that refused. A broadcast has no
+    /// inverse, so a refusal met half way through would leave effects nothing
+    /// describes — cleared sync tokens, one cache cleared, nothing re-synced —
+    /// and a caller shown one refusal at a time cannot see what the next
+    /// attempt meets.
+    async fn judge_fan_out<'a>(
+        &self,
+        snapshot: &OperationSnapshot,
+        op_name: &'a str,
+        params: &'a StorageEntity,
+        origin: &OpOrigin,
+    ) -> Result<JudgedFanOut<'a>> {
+        let available_ops = snapshot.all_ops();
+        let mut members = Vec::new();
+        let mut refused = Vec::new();
+        for (provider, ops) in &snapshot.providers {
+            let Some(op) = ops.iter().find(|op| op.name == op_name).cloned() else {
+                continue;
+            };
+            match self
+                .judge_fan_out_member(
+                    &available_ops,
+                    op.entity_name.as_str(),
+                    op_name,
+                    params,
+                    origin,
+                )
+                .await
+            {
+                Ok(()) => members.push((Arc::clone(provider), op)),
+                Err(e) => refused.push(format!("{}: {e}", op.entity_name)),
+            }
+        }
+        if !refused.is_empty() {
+            return Err(format!(
+                "*::{op_name} was refused for {} of the {} providers that advertise it, so none of \
+                 them ran: {}",
+                refused.len(),
+                refused.len() + members.len(),
+                refused.join("; ")
+            )
+            .into());
+        }
+        Ok(JudgedFanOut {
+            op_name,
+            params,
+            members,
+        })
+    }
+
+    /// [`BroadcastOp::RebuildViews`]: drop every watch view and recreate the
+    /// ones a live watch listens to.
+    async fn rebuild_views(&self, rebuild: &ViewRebuild) -> Result<OperationResult> {
+        let _running = rebuild.start()?;
+        let rebuilt = rebuild
+            .manager
+            .rebuild_watch_views()
+            .await
+            .map_err(|e| format!("rebuild_views: {e:#}"))?;
+        let summary = format!(
+            "dropped {} watch views; recreated {} for their live subscribers: {}",
+            rebuilt.dropped.len(),
+            rebuilt.recreated.len(),
+            rebuilt.recreated.join(", ")
+        );
+        info!("[OperationDispatcher] rebuild_views {summary}");
+        Ok(OperationResult::irreversible(Vec::new())
+            .with_response(holon_api::Value::String(summary)))
+    }
+
+    /// [`BroadcastOp::FullSync`]: clear every sync token, then every provider
+    /// cache, then re-sync.
+    ///
+    /// Tokens go FIRST: clearing a cache can trigger a `sync_changes` callback
+    /// that would load and re-save the token just cleared. BOTH legs are judged
+    /// before that, so a gate refusal cannot leave the tokens cleared with
+    /// nothing re-synced.
+    async fn full_sync(
+        &self,
+        snapshot: &OperationSnapshot,
+        origin: &OpOrigin,
+    ) -> Result<OperationResult> {
+        let no_params = StorageEntity::new();
+        let clearing = self
+            .judge_fan_out(snapshot, "clear_cache", &no_params, origin)
+            .await?;
+        let syncing = self
+            .judge_fan_out(snapshot, "sync", &no_params, origin)
+            .await?;
+        assert!(
+            !syncing.is_empty(),
+            "full_sync is offered only where a provider advertises `sync` in the snapshot it is \
+             judged from, so the sync leg cannot be empty"
+        );
+
+        let mut ran = Vec::new();
+        match &self.sync_token_store {
+            Some(store) => {
+                store
+                    .clear_all_tokens()
+                    .await
+                    .map_err(|e| format!("full_sync: clearing the sync tokens: {e}"))?;
+                info!("[OperationDispatcher] Cleared all sync tokens");
+                ran.push("the sync tokens were cleared".to_string());
+            }
+            None => info!(
+                "[OperationDispatcher] No sync token store configured, skipping token clearing"
+            ),
+        }
+        let cleared = clearing.run().await;
+        ran.push(cleared.summary("clear_cache"));
+        let synced = syncing.run().await;
+        ran.push(synced.summary("sync"));
+        let summary = ran.join("; ");
+
+        // A leg that lost EVERY provider did not happen, and the caller asked
+        // for the leg. Losing SOME is a single unreachable external system,
+        // which must not fail the providers that did re-sync — it is disclosed
+        // in the summary instead.
+        let lost_legs: Vec<String> = [("clear_cache", &cleared), ("sync", &synced)]
+            .into_iter()
+            .filter(|(_, fan)| fan.lost_every_provider())
+            .map(|(leg, _)| format!("nothing of the {leg} leg happened"))
+            .collect();
+        if !lost_legs.is_empty() {
+            return Err(format!(
+                "*::full_sync failed: {}, because every provider that advertises it failed. \
+                 What ran: {summary}",
+                lost_legs.join("; ")
+            )
+            .into());
+        }
+        info!("[OperationDispatcher] full_sync completed: {summary}");
+        Ok(OperationResult::irreversible(Vec::new())
+            .with_response(holon_api::Value::String(summary)))
+    }
+
+    /// [`BroadcastOp::Sync`]: run `sync` on every provider that advertises one.
+    ///
+    /// The broadcast is irreversible as a whole: several providers may have run
+    /// and no single inverse describes what they did.
+    async fn broadcast_sync(
+        &self,
+        snapshot: &OperationSnapshot,
+        params: &StorageEntity,
+        origin: &OpOrigin,
+    ) -> Result<OperationResult> {
+        let judged = self.judge_fan_out(snapshot, "sync", params, origin).await?;
+        assert!(
+            !judged.is_empty(),
+            "*::sync is offered only where a provider advertises `sync` in the snapshot it is \
+             judged from, so the fan-out cannot be empty"
+        );
+        let fan = judged.run().await;
+        if fan.lost_every_provider() {
+            return Err(format!(
+                "*::sync failed on every provider that has one: {}",
+                fan.failed.join(", ")
+            )
+            .into());
+        }
+        let summary = fan.summary("*::sync");
+        info!("[OperationDispatcher] {summary}");
+        Ok(OperationResult::irreversible(Vec::new())
+            .with_response(holon_api::Value::String(summary)))
     }
 
     /// Execute an operation by routing to the correct provider
@@ -787,222 +1027,33 @@ impl OperationDispatcher {
                 crate::api::param_keys_for_logs(&params)
             );
 
-            // ADR 0031 Increment 3 — guard evaluation does NOT cover this arm,
-            // and the gap is vacuous rather than tolerated. The complete set of
-            // ops advertised under entity `*` is synthesized in
-            // `OperationProvider::operations` below: `sync`, `full_sync` and
-            // `rebuild_views`. All carry `required_params: []`, an empty `id_column`,
-            // `TargetScope::Global` and `OpGuard::None` — they name no subject
-            // block, so a relational guard has nothing to bind.
-            //
-            // A wildcard op that DOES take a subject param would break that
-            // reasoning; adding one means giving this arm its own gate first.
-            if entity_name == "*" {
-                info!(
-                    "[OperationDispatcher] Wildcard operation detected: op={}",
-                    op_name
-                );
-
-                if op_name == "rebuild_views" {
-                    let rebuild = self
-                        .view_rebuild
-                        .as_ref()
-                        .expect("rebuild_views is advertised only when a view rebuild is wired");
-                    let _running = rebuild.start()?;
-                    let rebuilt = rebuild
-                        .manager
-                        .rebuild_watch_views()
-                        .await
-                        .map_err(|e| format!("rebuild_views: {e:#}"))?;
-                    let summary = format!(
-                        "dropped {} watch views; recreated {} for their live subscribers: {}",
-                        rebuilt.dropped.len(),
-                        rebuilt.recreated.len(),
-                        rebuilt.recreated.join(", ")
-                    );
-                    info!("[OperationDispatcher] rebuild_views {summary}");
-                    return Ok(OperationResult::irreversible(Vec::new())
-                        .with_response(holon_api::Value::String(summary)));
-                }
-
-                // Special handling for full_sync: clear sync tokens, clear caches, then sync
-                // IMPORTANT: Tokens must be cleared FIRST because clearing caches can trigger
-                // sync_changes callbacks that would load and re-save the old token.
-                if op_name == "full_sync" {
-                    info!(
-                        "[OperationDispatcher] Executing full_sync: clearing sync tokens and \
-                         caches first"
-                    );
-
-                    // Step 1: Clear all sync tokens FIRST (so any triggered syncs start from
-                    // Beginning)
-                    if let Some(ref token_store) = self.sync_token_store {
-                        match token_store.clear_all_tokens().await {
-                            Ok(_) => {
-                                info!("[OperationDispatcher] Cleared all sync tokens");
-                            }
-                            Err(e) => {
-                                error!("[OperationDispatcher] Failed to clear sync tokens: {}", e);
-                            }
-                        }
-                    } else {
-                        info!(
-                            "[OperationDispatcher] No sync token store configured, skipping token \
-                             clearing"
-                        );
+            // Entity `*` names no relation. The gate chain the named arm below
+            // runs binds to the subject an operation's params name and to the
+            // declarations on the descriptor of its `entity.op` pair; a
+            // broadcast has neither. `BroadcastOp::parse` is what keeps that
+            // sound rather than merely true today: the three ops this
+            // dispatcher synthesizes under `*` take no subject and write no
+            // field, and any other op name is refused here instead of being
+            // routed to whichever provider happens to advertise it.
+            if entity_name.is_wildcard() {
+                let broadcast = BroadcastOp::parse(op_name)?;
+                broadcast.reject_subject_params(&params)?;
+                let snapshot = self.snapshot_operations();
+                let offered = self
+                    .offered_broadcasts(&snapshot)
+                    .into_iter()
+                    .find(|offered| offered.op() == broadcast)
+                    .ok_or(BroadcastNotOffered {
+                        op: broadcast,
+                        requires: broadcast.requires(),
+                    })?;
+                info!("[OperationDispatcher] broadcast operation: {broadcast}");
+                match offered {
+                    OfferedBroadcast::RebuildViews(rebuild) => self.rebuild_views(rebuild).await,
+                    OfferedBroadcast::FullSync => self.full_sync(&snapshot, &origin).await,
+                    OfferedBroadcast::Sync => {
+                        self.broadcast_sync(&snapshot, &params, &origin).await
                     }
-
-                    // Step 2: Clear all caches (execute clear_cache on all providers that have it)
-                    for provider in &self.all_providers() {
-                        if let Some(op) = provider
-                            .operations()
-                            .iter()
-                            .find(|op| op.name == "clear_cache")
-                        {
-                            let entity_name = op.entity_name.as_str();
-                            match provider
-                                .execute_operation(
-                                    &op.entity_name,
-                                    "clear_cache",
-                                    StorageEntity::new(),
-                                )
-                                .await
-                            {
-                                Ok(_) => {
-                                    info!(
-                                        "[OperationDispatcher] Cleared cache for entity '{}'",
-                                        entity_name
-                                    );
-                                }
-                                Err(e) => {
-                                    error!(
-                                        "[OperationDispatcher] Failed to clear cache for entity \
-                                         '{}': {}",
-                                        entity_name, e
-                                    );
-                                }
-                            }
-                        }
-                    }
-
-                    // Step 3: Execute sync on all providers that have it
-                    info!("[OperationDispatcher] Executing sync on all providers");
-                    let mut sync_success_count = 0;
-                    let mut sync_error_count = 0;
-                    for provider in &self.all_providers() {
-                        if let Some(op) = provider.operations().iter().find(|op| op.name == "sync")
-                        {
-                            let entity_name = op.entity_name.as_str();
-                            match provider
-                                .execute_operation(&op.entity_name, "sync", StorageEntity::new())
-                                .await
-                            {
-                                Ok(_) => {
-                                    sync_success_count += 1;
-                                    info!(
-                                        "[OperationDispatcher] Sync succeeded for entity '{}'",
-                                        entity_name
-                                    );
-                                }
-                                Err(e) => {
-                                    sync_error_count += 1;
-                                    error!(
-                                        "[OperationDispatcher] Sync failed for entity '{}': {}",
-                                        entity_name, e
-                                    );
-                                }
-                            }
-                        }
-                    }
-
-                    info!(
-                        "[OperationDispatcher] full_sync completed: {} sync succeeded, {} failed",
-                        sync_success_count, sync_error_count
-                    );
-                    return Ok(OperationResult::irreversible(Vec::new()));
-                }
-
-                // Find all providers that have an operation with matching op_name
-                let mut matching_providers = Vec::new();
-                for provider in &self.all_providers() {
-                    let ops = provider.operations();
-                    if ops.iter().any(|op| op.name == op_name) {
-                        matching_providers.push(provider.clone());
-                    }
-                }
-
-                if matching_providers.is_empty() {
-                    error!(
-                        "[OperationDispatcher] No providers found with operation '{}' for \
-                         wildcard dispatch",
-                        op_name
-                    );
-                    return Err(format!(
-                        "No providers found with operation '{}' for wildcard dispatch",
-                        op_name
-                    )
-                    .into());
-                }
-
-                info!(
-                    "[OperationDispatcher] Found {} providers with operation '{}'",
-                    matching_providers.len(),
-                    op_name
-                );
-
-                // Execute operation on each matching provider
-                let mut success_count = 0;
-                let mut error_count = 0;
-                for provider in matching_providers {
-                    // For wildcard operations, we need to find the actual entity_name from the
-                    // provider Find the first operation with matching op_name
-                    let ops = provider.operations();
-                    if let Some(op) = ops.iter().find(|op| op.name == op_name) {
-                        let actual_entity_name = op.entity_name.as_str();
-                        match provider
-                            .execute_operation(&op.entity_name, op_name, params.clone())
-                            .await
-                        {
-                            Ok(_) => {
-                                success_count += 1;
-                                info!(
-                                    "[OperationDispatcher] Wildcard operation succeeded on entity \
-                                     '{}'",
-                                    actual_entity_name
-                                );
-                            }
-                            Err(e) => {
-                                error_count += 1;
-                                error!(
-                                    "[OperationDispatcher] Wildcard operation failed on entity \
-                                     '{}': {}",
-                                    actual_entity_name, e
-                                );
-                            }
-                        }
-                    }
-                }
-
-                // Return success if at least one provider succeeded
-                // For wildcard operations, we can't return a single inverse operation
-                // since multiple providers might have executed
-                if success_count > 0 {
-                    info!(
-                        "[OperationDispatcher] Wildcard operation completed: {} succeeded, {} \
-                         failed",
-                        success_count, error_count
-                    );
-                    Ok(OperationResult::irreversible(Vec::new())) // Wildcard operations can't be undone as a single operation
-                } else {
-                    error!(
-                        "[OperationDispatcher] Wildcard operation failed on all {} providers",
-                        error_count
-                    );
-                    Err(format!(
-                        "Wildcard operation '{}' failed on all {} providers",
-                        op_name, error_count
-                    )
-                    .into())
                 }
             } else {
                 // Regular operation - route to specific provider
@@ -1498,6 +1549,319 @@ pub enum OpClass {
     Maintenance,
 }
 
+/// Which provider entities a fan-out ran, and which ones it could not.
+#[derive(Default)]
+struct FanOut {
+    succeeded: Vec<String>,
+    failed: Vec<String>,
+}
+
+impl FanOut {
+    /// Every provider that advertises the op failed, so nothing of this leg
+    /// happened. The caller asked for the leg, not for an attempt at it.
+    fn lost_every_provider(&self) -> bool {
+        self.succeeded.is_empty() && !self.failed.is_empty()
+    }
+
+    /// What ran and what was lost, by provider entity. A broadcast that lost
+    /// one provider still succeeded, so this is how the loss reaches the
+    /// caller instead of only the log.
+    fn summary(&self, op_name: &str) -> String {
+        format!(
+            "{op_name} ran on [{}] and failed on [{}]",
+            self.succeeded.join(", "),
+            self.failed.join(", ")
+        )
+    }
+}
+
+/// Every provider paired with the operations it advertised in ONE read.
+///
+/// A broadcast is offered, judged and run from the same snapshot, so a
+/// provider whose `operations()` changes between reads cannot make an offered
+/// broadcast find nobody to run.
+struct OperationSnapshot {
+    providers: Vec<(Arc<dyn OperationProvider>, Vec<OperationDescriptor>)>,
+}
+
+impl OperationSnapshot {
+    fn all_ops(&self) -> Vec<OperationDescriptor> {
+        self.providers
+            .iter()
+            .flat_map(|(_, ops)| ops.iter().cloned())
+            .collect()
+    }
+
+    fn advertises(&self, op_name: &str) -> bool {
+        self.providers
+            .iter()
+            .any(|(_, ops)| ops.iter().any(|op| op.name == op_name))
+    }
+}
+
+/// Every provider that advertises one op of a broadcast, each already judged
+/// by the gate chain a named dispatch runs. Holding one is the proof that no
+/// gate refuses any member, so running them is all that is left — which is why
+/// [`OperationDispatcher::judge_fan_out`] is the only way to obtain one.
+struct JudgedFanOut<'a> {
+    op_name: &'a str,
+    params: &'a StorageEntity,
+    members: Vec<(Arc<dyn OperationProvider>, OperationDescriptor)>,
+}
+
+impl JudgedFanOut<'_> {
+    /// No provider advertises the op. Legitimate for a leg prod wires nobody
+    /// for; an assertion elsewhere where the broadcast is offered only because
+    /// a provider exists.
+    fn is_empty(&self) -> bool {
+        self.members.is_empty()
+    }
+
+    /// Run every judged member.
+    ///
+    /// A provider's OWN failure is counted, not propagated: one unreachable
+    /// external system must not stop the others from syncing. The [`FanOut`]
+    /// carries what ran to the caller, which decides what losing a provider
+    /// means for the broadcast as a whole.
+    async fn run(self) -> FanOut {
+        let mut fan = FanOut::default();
+        let op_name = self.op_name;
+        for (provider, op) in self.members {
+            let entity = op.entity_name.as_str().to_string();
+            match provider
+                .execute_operation(&op.entity_name, op_name, self.params.clone())
+                .await
+            {
+                Ok(_) => {
+                    info!("[OperationDispatcher] {op_name} succeeded on entity '{entity}'");
+                    fan.succeeded.push(entity);
+                }
+                Err(e) => {
+                    error!("[OperationDispatcher] {op_name} failed on entity '{entity}': {e}");
+                    fan.failed.push(entity);
+                }
+            }
+        }
+        fan
+    }
+}
+
+/// A [`BroadcastOp`] THIS container can run, holding the wiring that answers
+/// it. The wildcard arm reaches a broadcast only through one of these, so an
+/// op the container cannot run has no arm to reach.
+enum OfferedBroadcast<'a> {
+    Sync,
+    FullSync,
+    RebuildViews(&'a ViewRebuild),
+}
+
+impl OfferedBroadcast<'_> {
+    fn op(&self) -> BroadcastOp {
+        match self {
+            Self::Sync => BroadcastOp::Sync,
+            Self::FullSync => BroadcastOp::FullSync,
+            Self::RebuildViews(_) => BroadcastOp::RebuildViews,
+        }
+    }
+}
+
+/// The closed set of operations entity `*` dispatches — exactly the ones
+/// [`OperationDispatcher::operations`] synthesizes under that name.
+///
+/// `*` names no relation, so the gate chain a named dispatch runs — the ADR
+/// 0028 boundary seam, the ADR 0031 declared guard, the ADR 0032 net gate, the
+/// write tier — has no subject to bind and no descriptor to read a declaration
+/// off. These three earn that: each takes no subject param and writes no
+/// field, so there is nothing for those gates to decide.
+/// [`Self::reject_subject_params`] holds the caller to the first half, which is
+/// about params rather than about the op name and so cannot be settled by this
+/// set alone.
+///
+/// The set is a type rather than a string match because `entity_name` is
+/// caller-supplied and unconstrained (MCP `execute_operation` passes it
+/// verbatim). Matching the op name against whatever the registered providers
+/// advertise let `*` carry an ordinary subject-taking write — `set_field`,
+/// `delete` — straight to its provider past all four gates
+/// (`2026-10-05-wildcard-entity-dispatches-any-op-past-every-write-gate`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BroadcastOp {
+    Sync,
+    FullSync,
+    RebuildViews,
+}
+
+impl BroadcastOp {
+    /// The closed set, and the only route to a value of this type: [`parse`]
+    /// resolves names against it, so a variant missing here is one the
+    /// dispatcher can never broadcast.
+    ///
+    /// [`parse`]: Self::parse
+    pub const ALL: [Self; 3] = [Self::Sync, Self::FullSync, Self::RebuildViews];
+
+    /// # Errors
+    /// Any other op name: a caller naming entity `*` for an operation this
+    /// dispatcher does not broadcast.
+    pub fn parse(op_name: &str) -> std::result::Result<Self, NotABroadcastOp> {
+        Self::ALL
+            .into_iter()
+            .find(|op| op.as_str() == op_name)
+            .ok_or_else(|| NotABroadcastOp {
+                op_name: op_name.to_string(),
+            })
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Sync => "sync",
+            Self::FullSync => "full_sync",
+            Self::RebuildViews => "rebuild_views",
+        }
+    }
+
+    /// The descriptor a container advertises for this broadcast, written beside
+    /// the arm that runs it: `operations()` builds the `*` menu from exactly
+    /// the broadcasts `offered_broadcasts` offers, so neither list can gain
+    /// an entry the other lacks.
+    pub fn descriptor(self) -> OperationDescriptor {
+        let (display_name, description) = match self {
+            Self::Sync => ("Sync", "Sync registered syncable providers"),
+            Self::FullSync => (
+                "Full Sync",
+                "Clear all caches, reset sync tokens, and re-sync from external systems",
+            ),
+            Self::RebuildViews => (
+                "Rebuild Views",
+                "Drop every watch view and recreate the ones a live watch listens to, correcting \
+                 what each watch holds; reports each view rebuilt and each one that failed",
+            ),
+        };
+        OperationDescriptor {
+            entity_name: "*".into(),
+            entity_short_name: "all".to_string(),
+            id_column: String::new(),
+            name: self.as_str().to_string(),
+            display_name: display_name.to_string(),
+            description: description.to_string(),
+            required_params: vec![],
+            affected_fields: vec![],
+            param_mappings: vec![],
+            target_scope: holon_api::TargetScope::Global,
+            boundary_behavior: holon_api::BoundaryBehavior::Unclassified,
+            menu_exposure: holon_api::MenuExposure::NotListed {
+                surface: holon_api::NonMenuSurface::External,
+            },
+            trigger: None,
+            bound_params: Default::default(),
+            marking_delta: holon_api::marking::MarkingDelta::Undeclared,
+            guard: holon_api::pattern::OpGuard::None,
+            arcs: holon_api::arcs::TransitionArcs::Undeclared,
+        }
+    }
+
+    /// What a container must be wired with to run this broadcast — the
+    /// condition `OperationDispatcher::offered_broadcasts` reads, said in the
+    /// words of whoever composed the container.
+    pub fn requires(self) -> &'static str {
+        match self {
+            Self::Sync | Self::FullSync => "a registered provider that advertises a `sync` op",
+            Self::RebuildViews => "a view rebuild, installed with `set_view_rebuild`",
+        }
+    }
+
+    /// # Errors
+    /// The params name a subject. Params reach a dispatch verbatim from
+    /// whoever asked for it, and no broadcast takes a subject: one arriving
+    /// here would be fanned out to every provider advertising the op, each
+    /// judging it against a descriptor written for an operation that touches
+    /// no block.
+    pub fn reject_subject_params(
+        self,
+        params: &StorageEntity,
+    ) -> std::result::Result<(), BroadcastCarriesASubject> {
+        match SUBJECT_PARAM_KEYS
+            .into_iter()
+            .find(|key| params.get(*key).is_some())
+        {
+            Some(key) => Err(BroadcastCarriesASubject { op: self, key }),
+            None => Ok(()),
+        }
+    }
+}
+
+impl fmt::Display for BroadcastOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// A caller named entity `*` for an operation that is not a [`BroadcastOp`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NotABroadcastOp {
+    pub op_name: String,
+}
+
+impl fmt::Display for NotABroadcastOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "entity '*' broadcasts only sync, full_sync and rebuild_views; '{}' is not one of \
+             them. A broadcast runs under no relation, so the boundary seam, the declared guard, \
+             the net gate and the write tier have no subject to judge — dispatching '{}' this way \
+             would run it past all four. Name the entity the operation belongs to.",
+            self.op_name, self.op_name
+        )
+    }
+}
+
+impl std::error::Error for NotABroadcastOp {}
+
+/// A caller named a broadcast this composition cannot run: nothing it is
+/// wired with answers the op.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BroadcastNotOffered {
+    pub op: BroadcastOp,
+    /// What a composition must have wired to offer `op`
+    /// ([`BroadcastOp::requires`]).
+    pub requires: &'static str,
+}
+
+impl fmt::Display for BroadcastNotOffered {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "entity '*' broadcasts '{}' only where this container has {}, and this one does not, \
+             so there is nothing to broadcast it to. The operation is advertised exactly where it \
+             can run.",
+            self.op, self.requires
+        )
+    }
+}
+
+impl std::error::Error for BroadcastNotOffered {}
+
+/// A caller named entity `*` and put a subject in the params.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BroadcastCarriesASubject {
+    pub op: BroadcastOp,
+    pub key: &'static str,
+}
+
+impl fmt::Display for BroadcastCarriesASubject {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "entity '*' broadcasts '{}', which names no subject, but the params carry '{}'. A \
+             broadcast runs under no relation, so the boundary seam, the declared guard and the \
+             write tier would bind that subject to the descriptor of whichever provider \
+             advertises '{}' — written for an operation that touches no block. Name the entity \
+             the subject belongs to.",
+            self.op, self.key, self.op
+        )
+    }
+}
+
+impl std::error::Error for BroadcastCarriesASubject {}
+
 /// The class of `entity::op`, declared beside the wildcard ops this
 /// dispatcher synthesizes.
 pub fn op_class(entity: &str, op: &str) -> OpClass {
@@ -1530,90 +1894,17 @@ impl OperationProvider for OperationDispatcher {
     /// Aggregates operations from all providers and includes wildcard
     /// operations.
     fn operations(&self) -> Vec<OperationDescriptor> {
-        let mut ops: Vec<OperationDescriptor> = self
-            .all_providers()
-            .iter()
-            .flat_map(|provider| provider.operations())
-            .collect();
+        let snapshot = self.snapshot_operations();
+        let mut ops = snapshot.all_ops();
 
-        // Add wildcard sync operation if any provider has a "sync" operation
-        let has_sync_ops = ops.iter().any(|op| op.name == "sync");
-        if has_sync_ops {
-            ops.push(OperationDescriptor {
-                entity_name: "*".into(),
-                entity_short_name: "all".to_string(),
-                id_column: String::new(),
-                name: "sync".to_string(),
-                display_name: "Sync".to_string(),
-                description: "Sync registered syncable providers".to_string(),
-                required_params: vec![],
-                affected_fields: vec![],
-                param_mappings: vec![],
-                target_scope: holon_api::TargetScope::Global,
-                boundary_behavior: holon_api::BoundaryBehavior::Unclassified,
-                menu_exposure: holon_api::MenuExposure::NotListed {
-                    surface: holon_api::NonMenuSurface::External,
-                },
-                trigger: None,
-                bound_params: Default::default(),
-                marking_delta: holon_api::marking::MarkingDelta::Undeclared,
-                guard: holon_api::pattern::OpGuard::None,
-                arcs: holon_api::arcs::TransitionArcs::Undeclared,
-            });
-
-            // Add wildcard full_sync operation (clear caches + sync)
-            // This is triggered by Ctrl+clicking the sync button in the UI
-            ops.push(OperationDescriptor {
-                entity_name: "*".into(),
-                entity_short_name: "all".to_string(),
-                id_column: String::new(),
-                name: "full_sync".to_string(),
-                display_name: "Full Sync".to_string(),
-                description: "Clear all caches, reset sync tokens, and re-sync from external \
-                              systems"
-                    .to_string(),
-                required_params: vec![],
-                affected_fields: vec![],
-                param_mappings: vec![],
-                target_scope: holon_api::TargetScope::Global,
-                boundary_behavior: holon_api::BoundaryBehavior::Unclassified,
-                menu_exposure: holon_api::MenuExposure::NotListed {
-                    surface: holon_api::NonMenuSurface::External,
-                },
-                trigger: None,
-                bound_params: Default::default(),
-                marking_delta: holon_api::marking::MarkingDelta::Undeclared,
-                guard: holon_api::pattern::OpGuard::None,
-                arcs: holon_api::arcs::TransitionArcs::Undeclared,
-            });
-        }
-
-        if self.view_rebuild.is_some() {
-            ops.push(OperationDescriptor {
-                entity_name: "*".into(),
-                entity_short_name: "all".to_string(),
-                id_column: String::new(),
-                name: "rebuild_views".to_string(),
-                display_name: "Rebuild Views".to_string(),
-                description: "Drop every watch view and recreate the ones a live watch listens \
-                              to, correcting what each watch holds; reports each view rebuilt \
-                              and each one that failed"
-                    .to_string(),
-                required_params: vec![],
-                affected_fields: vec![],
-                param_mappings: vec![],
-                target_scope: holon_api::TargetScope::Global,
-                boundary_behavior: holon_api::BoundaryBehavior::Unclassified,
-                menu_exposure: holon_api::MenuExposure::NotListed {
-                    surface: holon_api::NonMenuSurface::External,
-                },
-                trigger: None,
-                bound_params: Default::default(),
-                marking_delta: holon_api::marking::MarkingDelta::Undeclared,
-                guard: holon_api::pattern::OpGuard::None,
-                arcs: holon_api::arcs::TransitionArcs::Undeclared,
-            });
-        }
+        // The wildcard ops this container can run — the same decision the
+        // wildcard arm reads, so the menu offers no broadcast that arm refuses
+        // and the arm accepts none this container never offered.
+        ops.extend(
+            self.offered_broadcasts(&snapshot)
+                .iter()
+                .map(|offered| offered.op().descriptor()),
+        );
 
         // Registry-uniqueness invariant (fail-loud, debug/test builds): no two
         // providers may advertise the same (entity, op) EXCEPT the known,
@@ -2673,6 +2964,664 @@ mod tests {
         assert_eq!(op_class("*", "rebuild_views"), OpClass::Maintenance);
         for (entity, op) in [("*", "full_sync"), ("*", "sync"), ("block", "set_field")] {
             assert_eq!(op_class(entity, op), OpClass::Interaction, "{entity}::{op}");
+        }
+    }
+
+    /// Refuses one named op and confirms every other, so a test can tell a
+    /// gated write apart from a gate that never ran.
+    struct RefuseOp(&'static str);
+
+    #[async_trait]
+    impl crate::api::net_guard::NetGuard for RefuseOp {
+        async fn check(
+            &self,
+            op: &crate::api::net_guard::NetGuardOp<'_>,
+        ) -> Result<crate::api::net_guard::NetVerdict> {
+            if op.op_name != self.0 {
+                return Ok(crate::api::net_guard::NetVerdict::Confirm);
+            }
+            Ok(crate::api::net_guard::NetVerdict::Refuse(
+                crate::api::net_guard::NetRefusal {
+                    class: crate::api::net_guard::RefusalClass::Authorization,
+                    reason: format!("the test policy refuses every {}", self.0),
+                },
+            ))
+        }
+    }
+
+    fn set_field_params() -> StorageEntity {
+        let mut params = StorageEntity::new();
+        params.insert("id".into(), holon_api::Value::String("block:a".into()));
+        params.insert("field".into(), holon_api::Value::String("content".into()));
+        params.insert("value".into(), holon_api::Value::String("v".into()));
+        params
+    }
+
+    #[tokio::test]
+    async fn the_wildcard_entity_carries_no_write_past_the_net_gate() {
+        let crud = Arc::new(MockProvider {
+            entity_name: "block".to_string(),
+            operations_list: vec![create_test_operation("block", "set_field")],
+        });
+        let mut dispatcher = OperationDispatcher::new(vec![crud]);
+        dispatcher.set_net_guard(Arc::new(RefuseOp("set_field")));
+
+        let named = dispatcher
+            .execute_operation(&EntityName::new("block"), "set_field", set_field_params())
+            .await
+            .expect_err("entity `block` must be refused by the net gate")
+            .to_string();
+        assert!(
+            named.contains("net-guard refusal"),
+            "the named dispatch must be refused BY THE NET GATE, else this test proves nothing \
+             about the wildcard arm: {named}"
+        );
+
+        let wildcard = dispatcher
+            .execute_operation(&EntityName::new("*"), "set_field", set_field_params())
+            .await
+            .expect_err(
+                "entity `*` must not carry `set_field` to a provider: `*` names no relation, so \
+                 the net gate, the boundary seam, the declared guard and the write tier have no \
+                 subject to judge and the write would run unjudged",
+            )
+            .to_string();
+        assert!(
+            wildcard.contains("set_field") && wildcard.contains("sync"),
+            "the refusal must name the op refused and the broadcast ops that exist: {wildcard}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_broadcast_fan_out_asks_the_gates_a_named_dispatch_asks() {
+        let syncable = Arc::new(MockProvider {
+            entity_name: "block".to_string(),
+            operations_list: vec![create_test_operation("block", "sync")],
+        });
+        let mut dispatcher = OperationDispatcher::new(vec![syncable]);
+        dispatcher.set_net_guard(Arc::new(RefuseOp("sync")));
+
+        let err = dispatcher
+            .execute_operation(&EntityName::new("*"), "sync", StorageEntity::new())
+            .await
+            .expect_err(
+                "a broadcast reaches each provider under that provider's own entity name, so the \
+                 gates that judge a named dispatch of it must judge the fan-out too",
+            )
+            .to_string();
+        assert!(
+            err.contains("net-guard refusal") && err.contains("block.sync"),
+            "the fan-out must be refused by the net gate, naming the provider entity it ran \
+             under: {err}"
+        );
+    }
+
+    #[test]
+    fn the_broadcast_set_is_exactly_the_wildcard_ops_the_dispatcher_advertises() {
+        for (op, parsed) in [
+            ("sync", BroadcastOp::Sync),
+            ("full_sync", BroadcastOp::FullSync),
+            ("rebuild_views", BroadcastOp::RebuildViews),
+        ] {
+            assert_eq!(BroadcastOp::parse(op).expect("a broadcast op"), parsed);
+            assert_eq!(parsed.as_str(), op);
+        }
+        for op in ["set_field", "delete", "create", "clear_cache", ""] {
+            let err = BroadcastOp::parse(op)
+                .expect_err("only the three synthesized wildcard ops broadcast")
+                .to_string();
+            assert!(
+                err.contains(op) && err.contains("rebuild_views"),
+                "the refusal must name the op and the closed set: {err}"
+            );
+        }
+    }
+
+    /// Succeeds on every op it advertises and records each subject param it is
+    /// handed, so a test can tell a refused broadcast from one that reached a
+    /// provider carrying a subject.
+    struct RecordingProvider {
+        subjects_seen: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl OperationProvider for RecordingProvider {
+        fn operations(&self) -> Vec<OperationDescriptor> {
+            vec![
+                create_test_operation("block", "sync"),
+                create_test_operation("block", "clear_cache"),
+            ]
+        }
+
+        async fn execute_operation(
+            &self,
+            _: &EntityName,
+            op_name: &str,
+            params: StorageEntity,
+        ) -> Result<OperationResult> {
+            let mut seen = self
+                .subjects_seen
+                .lock()
+                .expect("no test panics holding it");
+            for key in SUBJECT_PARAM_KEYS {
+                if let Some(subject) = params.get(key).and_then(|v| v.as_string()) {
+                    seen.push(format!("{op_name} got {key}={subject}"));
+                }
+            }
+            Ok(OperationResult::irreversible(Vec::new()))
+        }
+    }
+
+    /// Every broadcast names no subject, which is the premise that lets the
+    /// wildcard arm run without the subject-bound gates: under `*` there is no
+    /// relation for the boundary seam, the declared guard or the write tier to
+    /// bind a subject to, so a subject arriving there would be judged against
+    /// the descriptor of whichever provider advertises the broadcast.
+    ///
+    /// The `match` is exhaustive on purpose. A new [`BroadcastOp`] must say
+    /// here which param keys it names a subject in; any answer but none means
+    /// the op belongs under that subject's entity and cannot broadcast.
+    #[tokio::test]
+    async fn every_broadcast_op_is_subjectless() {
+        let provider = Arc::new(RecordingProvider {
+            subjects_seen: std::sync::Mutex::new(Vec::new()),
+        });
+        let dispatcher = OperationDispatcher::new(vec![provider.clone()]);
+
+        for broadcast in BroadcastOp::ALL {
+            let subject_keys: &[&str] = match broadcast {
+                BroadcastOp::Sync | BroadcastOp::FullSync | BroadcastOp::RebuildViews => &[],
+            };
+            assert!(
+                subject_keys.is_empty(),
+                "`*::{broadcast}` declares the subject params {subject_keys:?}, so it names a \
+                 relation and cannot be broadcast"
+            );
+
+            for key in SUBJECT_PARAM_KEYS {
+                let mut params = StorageEntity::new();
+                params.insert(key.into(), holon_api::Value::String("block:a".into()));
+                let refusal = dispatcher
+                    .execute_operation(&EntityName::new("*"), broadcast.as_str(), params)
+                    .await
+                    .expect_err(&format!(
+                        "`*::{broadcast}` must refuse the subject param `{key}`: it reaches every \
+                         provider advertising {broadcast} judged only by that provider's \
+                         subjectless descriptor"
+                    ))
+                    .to_string();
+                assert!(
+                    refusal.contains(&format!("params carry '{key}'"))
+                        && refusal.contains(broadcast.as_str()),
+                    "the refusal must name the subject param and the broadcast: {refusal}"
+                );
+            }
+        }
+
+        dispatcher
+            .execute_operation(
+                &EntityName::new("*"),
+                BroadcastOp::Sync.as_str(),
+                StorageEntity::new(),
+            )
+            .await
+            .expect(
+                "the same dispatcher runs a subjectless broadcast, so the refusals above are \
+                 attributable to the subject param and not to this wiring",
+            );
+
+        let reached = provider
+            .subjects_seen
+            .lock()
+            .expect("no test panics holding it");
+        assert!(
+            reached.is_empty(),
+            "a broadcast carried a subject into a provider: {reached:?}"
+        );
+    }
+
+    /// The wildcard ops a composition ADVERTISES and the ones its wildcard arm
+    /// ACCEPTS must be the same set, in both directions. An op advertised but
+    /// refused is a menu entry that fails. An op accepted but not advertised is
+    /// a caller-reachable effect no composition offered — which `*::full_sync`
+    /// was: on a dispatcher with no syncable provider it cleared every sync
+    /// token and reported success.
+    #[tokio::test]
+    async fn the_wildcard_ops_a_dispatcher_advertises_are_exactly_the_ones_it_accepts() {
+        for (syncable, rebuild_wired) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
+            let providers: Vec<Arc<dyn OperationProvider>> = if syncable {
+                vec![FanOutProbe::new("alpha", &[])]
+            } else {
+                Vec::new()
+            };
+            let mut dispatcher = OperationDispatcher::new(providers);
+            if rebuild_wired {
+                let (backend, db) = holon_turso::turso::TursoBackend::new_in_memory()
+                    .await
+                    .expect("in-memory db");
+                std::mem::forget(backend);
+                dispatcher.set_view_rebuild(
+                    Arc::new(crate::sync::MatviewManager::new(
+                        db,
+                        Arc::new(tokio::sync::Mutex::new(())),
+                    )),
+                    Arc::new(holon_api::ConditionBus::new()),
+                );
+            }
+            let composition = format!("syncable={syncable}, rebuild wired={rebuild_wired}");
+
+            let advertised: std::collections::BTreeSet<String> = dispatcher
+                .operations()
+                .into_iter()
+                .filter(|op| op.entity_name.is_wildcard())
+                .map(|op| op.name)
+                .collect();
+            // Measured, so the comparison below cannot pass by both sides
+            // being empty: a syncable provider earns `sync` + `full_sync`, a
+            // wired view rebuild earns `rebuild_views`.
+            assert_eq!(
+                advertised.len(),
+                usize::from(syncable) * 2 + usize::from(rebuild_wired),
+                "{composition}: advertised {advertised:?}"
+            );
+
+            let mut accepted = std::collections::BTreeSet::new();
+            for broadcast in BroadcastOp::ALL {
+                let outcome = dispatcher
+                    .execute_operation(
+                        &EntityName::new("*"),
+                        broadcast.as_str(),
+                        StorageEntity::new(),
+                    )
+                    .await;
+                let not_offered = match &outcome {
+                    Err(e) => e.downcast_ref::<BroadcastNotOffered>().is_some(),
+                    Ok(_) => false,
+                };
+                if !not_offered {
+                    accepted.insert(broadcast.as_str().to_string());
+                }
+            }
+            assert_eq!(accepted, advertised, "{composition}");
+        }
+    }
+
+    /// Advertises `sync` and `clear_cache` under its own entity name, records
+    /// every call that RAN, and fails the ops named in `fails`.
+    struct FanOutProbe {
+        entity: &'static str,
+        fails: &'static [&'static str],
+        ran: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl FanOutProbe {
+        fn new(entity: &'static str, fails: &'static [&'static str]) -> Arc<Self> {
+            Arc::new(Self {
+                entity,
+                fails,
+                ran: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+
+        fn ran(&self) -> Vec<String> {
+            self.ran.lock().expect("no test panics holding it").clone()
+        }
+    }
+
+    #[async_trait]
+    impl OperationProvider for FanOutProbe {
+        fn operations(&self) -> Vec<OperationDescriptor> {
+            vec![
+                create_test_operation(self.entity, "sync"),
+                create_test_operation(self.entity, "clear_cache"),
+            ]
+        }
+
+        async fn execute_operation(
+            &self,
+            _: &EntityName,
+            op_name: &str,
+            _: StorageEntity,
+        ) -> Result<OperationResult> {
+            self.ran
+                .lock()
+                .expect("no test panics holding it")
+                .push(format!("{}.{op_name}", self.entity));
+            if self.fails.iter().any(|failing| *failing == op_name) {
+                return Err(format!("{}.{op_name}: unreachable in this test", self.entity).into());
+            }
+            Ok(OperationResult::irreversible(Vec::new()))
+        }
+    }
+
+    /// Advertises `sync` on the first `operations()` call after
+    /// [`Self::arm`] and on no other, so a dispatch that reads its operations
+    /// more than once sees the provider vanish.
+    struct FlappingProvider {
+        armed: std::sync::atomic::AtomicBool,
+        ran: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl FlappingProvider {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                armed: std::sync::atomic::AtomicBool::new(false),
+                ran: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+
+        fn arm(&self) {
+            self.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        fn ran(&self) -> Vec<String> {
+            self.ran.lock().expect("no test panics holding it").clone()
+        }
+    }
+
+    #[async_trait]
+    impl OperationProvider for FlappingProvider {
+        fn operations(&self) -> Vec<OperationDescriptor> {
+            if self.armed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                vec![create_test_operation("flap", "sync")]
+            } else {
+                Vec::new()
+            }
+        }
+
+        async fn execute_operation(
+            &self,
+            _: &EntityName,
+            op_name: &str,
+            _: StorageEntity,
+        ) -> Result<OperationResult> {
+            self.ran
+                .lock()
+                .expect("no test panics holding it")
+                .push(op_name.to_string());
+            Ok(OperationResult::irreversible(Vec::new()))
+        }
+    }
+
+    /// The broadcast the dispatcher offered is the broadcast it judges and
+    /// runs: a provider whose `operations()` changes between two reads inside
+    /// one dispatch must not turn an offered `sync` into an empty fan-out.
+    #[tokio::test]
+    async fn a_provider_that_stops_advertising_sync_mid_dispatch_is_still_run() {
+        for broadcast in ["sync", "full_sync"] {
+            let flap = FlappingProvider::new();
+            let dispatcher = OperationDispatcher::new(vec![flap.clone()]);
+            flap.arm();
+
+            dispatcher
+                .execute_operation(&EntityName::new("*"), broadcast, StorageEntity::new())
+                .await
+                .unwrap_or_else(|e| panic!("`*::{broadcast}` was offered, so it must run: {e}"));
+
+            assert_eq!(
+                flap.ran(),
+                vec!["sync".to_string()],
+                "`*::{broadcast}` is offered on the strength of one read of the provider's \
+                 operations, so that read decides who runs"
+            );
+        }
+    }
+
+    /// Records whether the sync tokens were cleared — `full_sync`'s first
+    /// effect, and so the proof that some of it ran.
+    #[derive(Default)]
+    struct TokenProbe {
+        cleared: std::sync::atomic::AtomicBool,
+    }
+
+    impl TokenProbe {
+        fn cleared(&self) -> bool {
+            self.cleared.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl SyncTokenStore for TokenProbe {
+        async fn load_token(&self, _: &str) -> Result<Option<holon_api::StreamPosition>> {
+            Ok(None)
+        }
+
+        async fn save_token(&self, _: &str, _: holon_api::StreamPosition) -> Result<()> {
+            Ok(())
+        }
+
+        async fn clear_all_tokens(&self) -> Result<()> {
+            self.cleared
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    /// Refuses every operation on the entities named here, so a test can tell a
+    /// fan-out that judged all its members BEFORE running any apart from one
+    /// that judged each member as it reached it.
+    struct RefuseEntities(&'static [&'static str]);
+
+    #[async_trait]
+    impl crate::api::net_guard::NetGuard for RefuseEntities {
+        async fn check(
+            &self,
+            op: &crate::api::net_guard::NetGuardOp<'_>,
+        ) -> Result<crate::api::net_guard::NetVerdict> {
+            if !self.0.iter().any(|entity| *entity == op.entity_name) {
+                return Ok(crate::api::net_guard::NetVerdict::Confirm);
+            }
+            Ok(crate::api::net_guard::NetVerdict::Refuse(
+                crate::api::net_guard::NetRefusal {
+                    class: crate::api::net_guard::RefusalClass::Authorization,
+                    reason: format!("the test policy refuses every op on {}", op.entity_name),
+                },
+            ))
+        }
+    }
+
+    /// A broadcast that lost every provider it fanned out to did not happen.
+    /// `*::sync` says so; `*::full_sync` discarded the same count and reported
+    /// success, so the two disagreed about one outcome.
+    #[tokio::test]
+    async fn a_full_sync_that_lost_every_provider_fails_loudly() {
+        let alpha = FanOutProbe::new("alpha", &["sync", "clear_cache"]);
+        let bravo = FanOutProbe::new("bravo", &["sync", "clear_cache"]);
+        let tokens = Arc::new(TokenProbe::default());
+        let mut dispatcher = OperationDispatcher::new(vec![alpha.clone(), bravo.clone()]);
+        dispatcher.set_sync_token_store(tokens.clone());
+
+        let err = dispatcher
+            .execute_operation(&EntityName::new("*"), "full_sync", StorageEntity::new())
+            .await
+            .expect_err(
+                "every provider failed both legs, so nothing of the full sync happened; \
+                 reporting success leaves the caller believing in a re-sync it never got",
+            )
+            .to_string();
+
+        assert!(
+            err.contains("alpha") && err.contains("bravo"),
+            "the error must name every provider it lost: {err}"
+        );
+        assert!(
+            err.contains("sync token"),
+            "the tokens are cleared before any provider runs, so the error must name that as \
+             what already ran: {err}"
+        );
+        assert!(
+            tokens.cleared(),
+            "the token clear is what the error has to disclose, so it must have run"
+        );
+    }
+
+    /// The lost leg is named, and the leg that did run is not reported as lost:
+    /// the caches were not cleared, but the sync leg ran on every provider.
+    #[tokio::test]
+    async fn a_full_sync_that_lost_the_clear_cache_leg_names_that_leg_only() {
+        let alpha = FanOutProbe::new("alpha", &["clear_cache"]);
+        let dispatcher = OperationDispatcher::new(vec![alpha.clone()]);
+
+        let err = dispatcher
+            .execute_operation(&EntityName::new("*"), "full_sync", StorageEntity::new())
+            .await
+            .expect_err("the cache clear lost every provider, so the full sync did not happen")
+            .to_string();
+
+        assert!(
+            err.contains("nothing of the clear_cache leg happened"),
+            "the error must name the leg that was lost: {err}"
+        );
+        assert!(
+            !err.contains("NOT re-synced"),
+            "the sync leg ran on every provider, so the error must not claim it did not: {err}"
+        );
+        assert!(
+            err.contains("sync ran on [alpha] and failed on []"),
+            "the error must state what did run: {err}"
+        );
+        assert_eq!(
+            alpha.ran(),
+            vec!["alpha.clear_cache".to_string(), "alpha.sync".to_string()],
+            "both legs ran, in this order"
+        );
+    }
+
+    /// The mirror case: the sync leg is the lost one, the cache clear ran.
+    #[tokio::test]
+    async fn a_full_sync_that_lost_the_sync_leg_names_that_leg_only() {
+        let alpha = FanOutProbe::new("alpha", &["sync"]);
+        let dispatcher = OperationDispatcher::new(vec![alpha]);
+
+        let err = dispatcher
+            .execute_operation(&EntityName::new("*"), "full_sync", StorageEntity::new())
+            .await
+            .expect_err("the sync lost every provider, so the vault was not re-synced")
+            .to_string();
+
+        assert!(
+            err.contains("nothing of the sync leg happened"),
+            "the error must name the leg that was lost: {err}"
+        );
+        assert!(
+            !err.contains("nothing of the clear_cache leg happened"),
+            "the cache clear ran, so the error must not claim it did not: {err}"
+        );
+        assert!(
+            err.contains("clear_cache ran on [alpha] and failed on []"),
+            "the error must state what did run: {err}"
+        );
+    }
+
+    /// The other half of the same rule: one unreachable provider must not stop
+    /// the others from syncing — but losing it is disclosed, not discarded.
+    #[tokio::test]
+    async fn a_broadcast_that_lost_one_provider_discloses_it_and_succeeds() {
+        let alpha = FanOutProbe::new("alpha", &["sync"]);
+        let bravo = FanOutProbe::new("bravo", &[]);
+        let dispatcher = OperationDispatcher::new(vec![alpha, bravo]);
+
+        let result = dispatcher
+            .execute_operation(&EntityName::new("*"), "sync", StorageEntity::new())
+            .await
+            .expect("one unreachable provider must not stop the others from syncing");
+
+        let disclosed = result
+            .response
+            .expect("a broadcast that lost a provider must say so in its result")
+            .as_string()
+            .expect("the disclosure is text")
+            .to_string();
+        assert!(
+            disclosed.contains("alpha") && disclosed.contains("bravo"),
+            "the disclosure must name the provider lost and the one that synced: {disclosed}"
+        );
+    }
+
+    /// A gate refusal is a refusal of the WHOLE broadcast, so every member is
+    /// judged before any of them runs. A refusal found half way through leaves
+    /// effects no inverse describes — cleared sync tokens, one cache cleared,
+    /// nothing re-synced — and names only the provider it stopped at, so the
+    /// caller cannot see what else would refuse.
+    #[tokio::test]
+    async fn a_broadcast_whose_gates_refuse_runs_nothing() {
+        let alpha = FanOutProbe::new("alpha", &[]);
+        let bravo = FanOutProbe::new("bravo", &[]);
+        let charlie = FanOutProbe::new("charlie", &[]);
+        let tokens = Arc::new(TokenProbe::default());
+        let mut dispatcher =
+            OperationDispatcher::new(vec![alpha.clone(), bravo.clone(), charlie.clone()]);
+        dispatcher.set_net_guard(Arc::new(RefuseEntities(&["bravo", "charlie"])));
+        dispatcher.set_sync_token_store(tokens.clone());
+
+        let err = dispatcher
+            .execute_operation(&EntityName::new("*"), "full_sync", StorageEntity::new())
+            .await
+            .expect_err("the net gate refuses two of the three providers")
+            .to_string();
+
+        assert!(
+            err.contains("bravo") && err.contains("charlie"),
+            "the error must name EVERY refusing provider, or the caller clears one refusal and \
+             meets the next: {err}"
+        );
+        assert_eq!(
+            alpha.ran(),
+            Vec::<String>::new(),
+            "a refused broadcast runs nothing: the provider the fan-out reaches first ran {:?}",
+            alpha.ran()
+        );
+        assert!(
+            !tokens.cleared(),
+            "a refused full_sync must clear no sync token, or the caller is left with a \
+             half-cleared vault and no re-sync"
+        );
+    }
+
+    /// A broadcast no provider can run has no effect and says which wiring it
+    /// wanted. `*::full_sync` was reachable on a composition that advertises
+    /// nothing under `*`, where it cleared every sync token past all four gates
+    /// and reported success.
+    #[tokio::test]
+    async fn a_broadcast_no_provider_can_run_is_refused_with_no_effect() {
+        let tokens = Arc::new(TokenProbe::default());
+        let mut dispatcher = OperationDispatcher::new(vec![]);
+        dispatcher.set_sync_token_store(tokens.clone());
+
+        let mut outcomes = Vec::new();
+        for broadcast in BroadcastOp::ALL {
+            outcomes.push((
+                broadcast,
+                dispatcher
+                    .execute_operation(
+                        &EntityName::new("*"),
+                        broadcast.as_str(),
+                        StorageEntity::new(),
+                    )
+                    .await,
+            ));
+        }
+
+        assert!(
+            !tokens.cleared(),
+            "a full_sync no provider can run must clear no sync token"
+        );
+        for (broadcast, outcome) in outcomes {
+            let err = outcome.expect_err(&format!(
+                "nothing here advertises `*::{broadcast}`, so there is nothing to broadcast it to"
+            ));
+            assert!(
+                err.downcast_ref::<BroadcastNotOffered>().is_some(),
+                "`*::{broadcast}` must be refused as a broadcast this composition cannot run: \
+                 {err}"
+            );
+            let err = err.to_string();
+            assert!(
+                err.contains(broadcast.as_str()) && err.contains(broadcast.requires()),
+                "the refusal must name the broadcast and the wiring it needs: {err}"
+            );
         }
     }
 }

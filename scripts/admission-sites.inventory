@@ -24,7 +24,7 @@
 1 crates/holon/src/api/backend_engine.rs entry
 1 crates/holon/src/api/holon_rule_watcher.rs entry
 2 crates/holon/src/api/holon_service.rs entry
-6 crates/holon/src/api/operation_dispatcher.rs below
+4 crates/holon/src/api/operation_dispatcher.rs below
 4 crates/holon/src/api/operation_engine.rs below
 6 crates/holon/src/core/sql_block_operations.rs below
 3 crates/holon/src/core/sql_operation_provider.rs below
