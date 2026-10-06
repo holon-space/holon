@@ -36,7 +36,7 @@ The one-page answer to *"which features could this change impact?"*. Rows are us
 | **Ruled by** | An ADR under [`docs/adr/`](../adr/), or an invariant number from [Model.md](Model.md). |
 | **Mode axes** | Which of [Model.md](Model.md)'s four orthogonal axes the feature's behaviour varies on: **Storage** (Loro store on/off), **File adapter** (org/none), **Merge fidelity** (op-CRDT / base-3-way / LWW), **Transport** (iroh P2P on/off). `—` means the feature behaves the same everywhere. *Headless vs windowed* is a test-slice axis, not a product mode; it is called out in prose where it matters. |
 
-The composed keystone is [`general_e2e_composed_pbt.rs`](../../crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs). Its alphabet is 105 transitions; the repo declares 88 invariant ids plus 17 correspondence-family ids. Open reds are registered in [KeystoneKnownReds.md](../Testing/KeystoneKnownReds.md) — a red listed there is a pass-with-note, anything else is a regression.
+The composed keystone is [`general_e2e_composed_pbt.rs`](../../crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs). Its alphabet is 107 transitions; the repo declares 90 invariant ids plus 17 correspondence-family ids. Open reds are registered in [KeystoneKnownReds.md](../Testing/KeystoneKnownReds.md) — a red listed there is a pass-with-note, anything else is a regression.
 
 ---
 
@@ -256,6 +256,8 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `DeleteRefusedRecipe` — a file that is gone leaves its format's group; the last one out clears the condition (D71.b)
 - `DispatchUnschemedBlockId` — the id form that let the write leg and the read legs key on different strings
 - `EditBlockCopy` — a copy edited on disk while Holon edits the same block: the later release merges both, or refuses and discloses when both changed the keyword apart (D229.b)
+- `EditDecisionPairHeld` — a judged write holds the decision subtree it judged until it has written, so a second write on that subtree is judged against the first one's result, never beside it
+- `EditDecisionSubtree` — a Holon-side write whose result the decision block adapter refuses must be refused before it lands, and a write whose result it accepts must land, even when only the whole gesture is legal
 - `FailNextDispatch` — the ops that depend on a failed op are cancelled with one disclosure
 - `FinishCutPaste` — the later save resolves a block held by two files: adopted and merged with Holon's edits, refused when both were edited apart (the next deletion decides), or left with its owner (D229.b)
 - `FullSync` — a full re-sync leaves every live watch rendering the synced state
@@ -300,6 +302,8 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `inv-no-machine-keychain-access` — a harness that resolves the OS store instead of the injected in-memory one
 - `inv-read-only-home-refuses-writes` — a store-origin write against a block whose document is homed in a `WriteTier::ReadOnly` file
 - `inv-remote-list-mirror-matches-ref` — the `RemoteListSync` transition runs the production round over the fixture peer and writes the local intents into the real mirror table; this compares that table, projected to the peer-authoritative columns, against the peer's list in the reference model.
+- `inv-shape-gate-refuses-illegal-writes` — a Holon-side edit of a `decision` subtree, legal or not, one gesture at a time
+- `inv-shape-sim-matches-authority` — every block write any transition makes near a tagged block, through any op the dispatcher routes
 - `inv-shows-source-when-no-query`
 - `inv-state-toggle-toy`
 - `inv-two-writer-peer-writes-land` — generic ComposedSut StateMachineTest: per-tick reconcile + catalog check + non-vacuity floor
