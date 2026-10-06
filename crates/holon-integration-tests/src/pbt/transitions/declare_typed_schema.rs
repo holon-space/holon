@@ -98,11 +98,17 @@ const DERIVED_FIELD: &str = "gen_derived";
 /// columns alongside its `id` primary key, plus any `computed` fields planted
 /// into its read matview.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, holon_macros::StepVocabulary)]
-#[step_template("I declare a datatype {type_name} with columns {columns} computed {computed}")]
+#[step_template(
+    "I declare a datatype {type_name} with columns {columns} computed {computed} searchable \
+     {searchable}"
+)]
 pub struct DeclareTypedSchema {
     pub type_name: String,
     pub columns: TypedColumns,
     pub computed: ComputedDecls,
+    /// The type declares the search service over its value columns.
+    #[serde(default)]
+    pub searchable: bool,
 }
 
 impl TransitionFactory<ReferenceState> for DeclareTypedSchema {
@@ -147,8 +153,11 @@ impl TransitionFactory<ReferenceState> for DeclareTypedSchema {
                 // A computed field needs two columns to concatenate, so a
                 // one-column draw declares none.
                 let with_computed = columns.len() >= 2;
-                proptest::bool::weighted(if with_computed { 0.5 } else { 0.0 }).prop_map(
-                    move |declare_computed| {
+                (
+                    proptest::bool::weighted(if with_computed { 0.5 } else { 0.0 }),
+                    proptest::bool::ANY,
+                )
+                    .prop_map(move |(declare_computed, searchable)| {
                         let computed = if declare_computed {
                             vec![(
                                 DERIVED_FIELD.to_string(),
@@ -161,9 +170,9 @@ impl TransitionFactory<ReferenceState> for DeclareTypedSchema {
                             type_name: type_name.clone(),
                             columns: TypedColumns(columns.clone()),
                             computed: ComputedDecls(computed),
+                            searchable,
                         }
-                    },
-                )
+                    })
             })
             .boxed();
             // Lower weight than a create: a run wants several entities per
@@ -236,6 +245,7 @@ impl TransitionRef<ReferenceState> for DeclareTypedSchema {
             self.type_name.clone(),
             self.columns.0.clone(),
             self.parsed_computations(),
+            self.searchable,
         );
     }
 }
@@ -244,7 +254,13 @@ crate::cap_transition! {
     DeclareTypedSchema: SutTypedEntity,
     where R: [ RefLifecycle ],
     |me, _state, sut| {
-        sut.declare_typed_schema(&me.type_name, me.columns.0.clone(), me.computed.0.clone()).await;
+        sut.declare_typed_schema(
+            &me.type_name,
+            me.columns.0.clone(),
+            me.computed.0.clone(),
+            me.searchable,
+        )
+        .await;
     }
     sql_budget: |_me, _state| {
         // DDL only: the raw table plus the matview reconcile. No row writes.

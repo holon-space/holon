@@ -169,7 +169,7 @@ async fn create_initialized_engine(
     dispatcher: Arc<OperationDispatcher>,
     ui_info: holon_api::UiInfo,
     graph_schema_registry: GraphSchemaRegistry,
-    type_registry: &TypeRegistry,
+    type_registry: &Arc<TypeRegistry>,
     clock: Arc<dyn holon_api::Clock>,
     attribution: holon_core::integration_attribution::IntegrationAttribution,
     shutdown: Arc<holon_api::lifecycle::SessionShutdown>,
@@ -211,6 +211,17 @@ async fn create_initialized_engine(
         build_sql_transformers(db_handle.schema_catalog()),
         graph_schema_registry,
         block_write_authority,
+        Arc::new(crate::api::entity_search::UnionAllSearch::new(
+            db_handle.clone(),
+            type_registry.clone(),
+            vec![crate::api::entity_search::SearchGroup {
+                type_name: "block".to_string(),
+                name: crate::api::entity_search::PAGE_GROUP.to_string(),
+                member_sql: "EXISTS (SELECT 1 FROM block_tags t WHERE t.block_id = e.id AND \
+                             t.tag = 'Page')"
+                    .to_string(),
+            }],
+        )),
     )
     .context("Failed to create BackendEngine")?;
     engine.install_integration_attribution(attribution);

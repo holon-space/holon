@@ -160,6 +160,7 @@ pub fn resolve_breadcrumb(
                                     .map(|c| Hit {
                                         id: c.id,
                                         label: c.label,
+                                        snippet: Vec::new(),
                                     })
                                     .collect();
                                 s.error = None;
@@ -309,6 +310,7 @@ mod tests {
             .map(|i| Hit {
                 id: EntityUri::parse(&format!("block:seg{i}")).unwrap(),
                 label: format!("Page {i}"),
+                snippet: Vec::new(),
             })
             .collect()
     }

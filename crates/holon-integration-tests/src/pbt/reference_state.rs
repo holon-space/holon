@@ -567,6 +567,9 @@ pub struct TypedEntitiesRefState {
     computed: BTreeMap<String, Vec<(String, holon_api::computation::Computation)>>,
     /// type name -> entity id -> value cells, aligned with `schemas`.
     by_type: BTreeMap<String, BTreeMap<String, Vec<String>>>,
+    /// Types declaring the search service: title = first value column,
+    /// searchable = every value column.
+    searchable: BTreeSet<String>,
 }
 
 impl TypedEntitiesRefState {
@@ -577,9 +580,40 @@ impl TypedEntitiesRefState {
         type_name: String,
         value_columns: Vec<String>,
         computed: Vec<(String, holon_api::computation::Computation)>,
+        searchable: bool,
     ) {
+        if searchable {
+            self.searchable.insert(type_name.clone());
+        }
         self.schemas.insert(type_name.clone(), value_columns);
         self.computed.insert(type_name, computed);
+    }
+
+    /// Every entity of a type declaring the search service.
+    pub fn searchable_entities(&self) -> Vec<holon_pbt_core::capabilities::SearchableEntity> {
+        self.searchable
+            .iter()
+            .flat_map(|type_name| {
+                let columns = &self.schemas[type_name];
+                self.by_type
+                    .get(type_name)
+                    .into_iter()
+                    .flatten()
+                    .map(
+                        move |(id, values)| holon_pbt_core::capabilities::SearchableEntity {
+                            id: holon_api::EntityUri::parse(id)
+                                .unwrap_or_else(|e| panic!("stored typed id {id:?}: {e}")),
+                            title_field: columns[0].clone(),
+                            searchable: columns
+                                .iter()
+                                .cloned()
+                                .zip(values.iter().cloned())
+                                .collect(),
+                            title: values[0].clone(),
+                        },
+                    )
+            })
+            .collect()
     }
 
     /// The full column list for a type: stored columns then computed ones, in
@@ -1172,6 +1206,7 @@ impl ReferenceState {
                         schema.type_name.clone(),
                         schema.value_columns.clone(),
                         schema.computed_columns.clone(),
+                        false,
                     );
                 }
                 t

@@ -5,9 +5,11 @@
 //!   drives `QueryEngine::quick_open_search` — the exact call the cmd-K
 //!   overlay makes (`frontends/gpui/src/search_ui.rs:run_search`).
 //! @pbt covers quick-open-search — the hit set equals the reference model's
-//! literal substring match over block content and page titles, folded by
-//! Unicode simple case folding, with pattern metacharacters matching themselves
-//! and an empty query returning nothing.
+//! literal substring match over block content and the searchable fields of
+//! every type declaring search, folded by Unicode simple case folding, with
+//! pattern metacharacters matching themselves and an empty query returning
+//! nothing. Each hit shows its title's first line, and under it the other lines
+//! of the matched field that contain the query.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -17,6 +19,9 @@ use holon_pbt_core::TransitionFactory;
 use holon_pbt_core::TransitionRef;
 use holon_pbt_core::capabilities::RefBlockTree;
 use holon_pbt_core::capabilities::RefLifecycle;
+use holon_pbt_core::capabilities::RefTypedEntities;
+use holon_pbt_core::capabilities::SearchHit;
+use holon_pbt_core::capabilities::SearchableEntity;
 use holon_pbt_core::capabilities::SutSearch;
 use holon_pbt_core::validation::Reason;
 use holon_pbt_core::validation::check;
@@ -122,7 +127,7 @@ fn folded_contains(haystack: &str, needle: &str) -> bool {
     fold(haystack).contains(&fold(needle))
 }
 
-impl<R: RefLifecycle + RefBlockTree> TransitionFactory<R> for Search {
+impl<R: RefLifecycle + RefBlockTree + RefTypedEntities> TransitionFactory<R> for Search {
     fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
         Self::declared_caps()
     }
@@ -149,6 +154,11 @@ impl<R: RefLifecycle + RefBlockTree> TransitionFactory<R> for Search {
                     drawn.extend(query_candidates(content));
                 }
             }
+            for entity in state.searchable_typed_entities() {
+                for (_, value) in &entity.searchable {
+                    drawn.extend(query_candidates(value));
+                }
+            }
             drawn.sort();
             drawn.dedup();
 
@@ -170,7 +180,7 @@ impl<R: RefLifecycle + RefBlockTree> TransitionFactory<R> for Search {
     }
 }
 
-impl<R: RefLifecycle + RefBlockTree> TransitionRef<R> for Search {
+impl<R: RefLifecycle + RefBlockTree + RefTypedEntities> TransitionRef<R> for Search {
     type Reason = Reason;
 
     fn preconditions(&self, state: &R) -> Validated<(), Reason> {
@@ -184,7 +194,7 @@ impl<R: RefLifecycle + RefBlockTree> TransitionRef<R> for Search {
 
 crate::cap_transition! {
     Search: SutSearch,
-    where R: [ RefLifecycle + RefBlockTree ],
+    where R: [ RefLifecycle + RefBlockTree + RefTypedEntities ],
     |me, state, sut| {
         let query = me.query.trim().to_string();
         let hits = sut
@@ -214,11 +224,36 @@ crate::cap_transition! {
             })
             .collect();
         let oracle_of = reverse_pairing(&model);
+        let typed: BTreeMap<EntityUri, SearchableEntity> = state
+            .searchable_typed_entities()
+            .into_iter()
+            .map(|e| (e.id.clone(), e))
+            .collect();
 
         // Soundness: every hit the reference model knows really does contain the
         // query as a literal, case-folded substring. An unescaped `%` or `_`
         // fails here — it matches blocks that never held the character.
         for hit in &hits {
+            if let Some(entity) = typed.get(&hit.id) {
+                let (field, value) = entity
+                    .searchable
+                    .iter()
+                    .find(|(_, value)| folded_contains(value, &query))
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "quick_open_search({query:?}) returned {} whose searchable fields {:?} \
+                             do not contain the query",
+                            hit.id, entity.searchable
+                        )
+                    });
+                assert!(
+                    !hit.is_page_section,
+                    "quick_open_search({query:?}) filed {} in the Pages section",
+                    hit.id
+                );
+                assert_display(hit, &query, &entity.title, field == &entity.title_field, value);
+                continue;
+            }
             let oracle = oracle_of.get(&hit.id).unwrap_or(&hit.id);
             let Some(content) = state.block_content(oracle) else {
                 continue;
@@ -236,6 +271,7 @@ crate::cap_transition! {
                 "quick_open_search({query:?}) filed {} (model id {oracle}) in the wrong section",
                 hit.id
             );
+            assert_display(hit, &query, content, true, content);
         }
 
         // Completeness, asserted per section and only where that section's
@@ -243,6 +279,7 @@ crate::cap_transition! {
         // reference model says matches must be in the result set.
         let (page_hits, content_hits): (BTreeSet<EntityUri>, BTreeSet<EntityUri>) = hits
             .iter()
+            .filter(|h| h.id.is_block())
             .fold(Default::default(), |(mut p, mut c), h| {
                 if h.is_page_section {
                     p.insert(h.id.clone());
@@ -281,6 +318,25 @@ crate::cap_transition! {
                 if section == "Pages" { page_hits.len() } else { content_hits.len() }
             );
         }
+        // A typed entity's type has its own branch, and so its own `LIMIT`.
+        for entity in typed.values() {
+            if !entity.searchable.iter().any(|(_, value)| folded_contains(value, &query)) {
+                continue;
+            }
+            let of_type = hits
+                .iter()
+                .filter(|h| h.id.scheme() == entity.id.scheme())
+                .count();
+            assert!(
+                hits.iter().any(|h| h.id == entity.id && !h.is_page_section)
+                    || of_type >= CONTENT_LIMIT,
+                "quick_open_search({query:?}) missed {} in the In content section: its searchable \
+                 fields {:?} contain the query and its type returned only {of_type} of its \
+                 {CONTENT_LIMIT} slots, so nothing was truncated",
+                entity.id,
+                entity.searchable
+            );
+        }
     }
     sql_budget: |_me, _state| {
         // The two one-shot branch reads (pages + content) plus the three the
@@ -288,6 +344,39 @@ crate::cap_transition! {
         // short-circuits below it, and the check is an upper bound.
         ExpectedSql { reads: 5, writes: 0, ddl: 0, tolerance: 2 }
     }
+}
+
+/// The hit shows the first line of `title`, and under it each line of the
+/// matched field `matched` that contains the query. When the matched field is
+/// the title field, its first line is the label and not repeated.
+fn assert_display(
+    hit: &SearchHit,
+    query: &str,
+    title: &str,
+    matched_is_title: bool,
+    matched: &str,
+) {
+    let label = title
+        .split('\n')
+        .next()
+        .expect("split yields at least one piece");
+    let snippet: Vec<&str> = matched
+        .split('\n')
+        .enumerate()
+        .filter(|(i, line)| !(matched_is_title && *i == 0) && folded_contains(line, query))
+        .map(|(_, line)| line)
+        .collect();
+    assert_eq!(
+        (
+            hit.label.as_str(),
+            hit.snippet.iter().map(String::as_str).collect::<Vec<_>>()
+        ),
+        (label, snippet),
+        "quick_open_search({query:?}) shows {} as (label, snippet) {:?}; its title is {title:?} \
+         and its matched field {matched:?}",
+        hit.id,
+        (&hit.label, &hit.snippet)
+    );
 }
 
 /// Reverse the model's id pairing into SUT id -> oracle id, so a returned hit's

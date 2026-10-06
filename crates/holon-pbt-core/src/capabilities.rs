@@ -2218,9 +2218,12 @@ pub trait SutQueryResults {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchHit {
     pub id: EntityUri,
-    /// What the overlay shows for the hit: a page's title line, or a content
-    /// block's full text.
+    /// What the overlay shows for the hit: the first line of its type's title
+    /// field.
     pub label: String,
+    /// The lines the overlay shows under the label: each line of the matched
+    /// field that contains the query, the label's own line excepted.
+    pub snippet: Vec<String>,
     /// True for the Pages section, false for the In-content section.
     pub is_page_section: bool,
 }
@@ -4607,11 +4610,15 @@ pub trait SutTypedEntity {
     /// the `computed_persisted` tier — the same declaration surface a type YAML
     /// uses. Each becomes a planted matview column, which
     /// `typed_entity_rows` then reads back like any stored one.
+    ///
+    /// `searchable` declares the type's search service: the first value
+    /// column is its title and every value column is searchable.
     async fn declare_typed_schema(
         &self,
         type_name: &str,
         value_columns: Vec<String>,
         computed: Vec<(String, String)>,
+        searchable: bool,
     );
 
     /// Insert one row into the type's raw write table (`<type_name>_raw`),
@@ -4648,6 +4655,19 @@ pub trait RefTypedEntities {
     /// Every typed-entity id the oracle created, across all types. The
     /// datatype-axis identity asserts none of them reaches a block table.
     fn typed_entity_ids(&self) -> std::collections::BTreeSet<String>;
+
+    /// Every entity whose type declares the search service.
+    fn searchable_typed_entities(&self) -> Vec<SearchableEntity>;
+}
+
+/// An entity as the search service sees it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchableEntity {
+    pub id: EntityUri,
+    pub title_field: String,
+    /// Each searchable field and its value, in declaration order.
+    pub searchable: Vec<(String, String)>,
+    pub title: String,
 }
 
 /// One change a fixture remote-list peer is asked to apply, in the connection's

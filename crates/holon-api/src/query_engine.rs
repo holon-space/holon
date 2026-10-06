@@ -123,17 +123,12 @@ pub trait QueryEngine: Send + Sync {
         Ok(None)
     }
 
-    /// Search blocks/pages matching `filter` for the `[[` link-autocomplete
-    /// popup. Replaces the raw-SQL `popup_query` capability: the search SQL
-    /// lives behind the impl, the frontend only sees typed candidates.
+    /// Entities of every linkable, searchable type matching `filter`, for the
+    /// `[[` link-autocomplete popup.
     async fn search_link_candidates(&self, filter: &str) -> Result<Vec<LinkCandidate>>;
 
-    /// User-facing quick-open / content search (`cmd-K` modal). Returns two
-    /// sections — `pages` (jump-to-page targets, `Page`-tagged) first, then
-    /// `content` (full-text block matches) — so the modal renders them
-    /// separately without re-deriving which rows are pages. The `Page`-tag
-    /// join and the `LIKE` search live behind this capability, mirroring
-    /// [`Self::search_link_candidates`].
+    /// User-facing quick-open search (`cmd-K` modal) over every searchable
+    /// type, split into the `Page` search group and the rest.
     ///
     /// Default impl fails loud (returns `Err`) rather than faking an empty
     /// result — a `QueryEngine` without quick-open wiring must surface that.

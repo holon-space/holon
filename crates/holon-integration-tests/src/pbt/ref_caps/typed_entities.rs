@@ -6,13 +6,13 @@
 //!
 //! Reads the per-type fragment the datatype transitions maintain. The type set
 //! is whatever has been DECLARED — registry-seeded plus runtime-drawn — never a
-//! name written here. Nothing
-//! else in the model consults it: a free-standing type has no block/tree
-//! coupling, so no other expectation may vary with these sets.
+//! name written here. A free-standing type has no block/tree coupling: only the
+//! matview invariant and `Search` read these sets.
 
 use std::collections::BTreeSet;
 
 use holon_pbt_core::capabilities::RefTypedEntities;
+use holon_pbt_core::capabilities::SearchableEntity;
 
 use super::super::reference_state::ReferenceState;
 
@@ -37,5 +37,9 @@ impl RefTypedEntities for ReferenceState {
 
     fn typed_entity_ids(&self) -> BTreeSet<String> {
         self.typed_entities.all_ids().cloned().collect()
+    }
+
+    fn searchable_typed_entities(&self) -> Vec<SearchableEntity> {
+        self.typed_entities.searchable_entities()
     }
 }

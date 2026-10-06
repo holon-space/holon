@@ -96,7 +96,7 @@ async fn create_block(engine: &holon::api::BackendEngine, local: &str, content: 
 }
 
 /// Ids of the hits, so an assertion names what it expected rather than a count.
-fn ids(candidates: &[holon_api::LinkCandidate]) -> Vec<String> {
+fn ids(candidates: &[holon_api::SearchHit]) -> Vec<String> {
     candidates.iter().map(|c| c.id.to_string()).collect()
 }
 

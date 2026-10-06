@@ -227,6 +227,7 @@ pub struct BackendEngine {
     block_write_authority: Arc<dyn holon_core::WriteAuthorityReads>,
     /// Manages materialized view lifecycle (creation, CDC, querying).
     matview_manager: crate::sync::MatviewManager,
+    search: Arc<dyn holon_api::EntitySearch>,
     /// Entity profile resolver for per-row render + operation resolution
     profile_resolver: Arc<dyn crate::entity_profile::ProfileResolving>,
     /// SQL-level transformers applied after compilation (entity_name,
@@ -307,6 +308,7 @@ impl BackendEngine {
         sql_transformers: Vec<Box<dyn SqlTransformer>>,
         graph_schema_registry: crate::storage::graph_schema::GraphSchemaRegistry,
         block_write_authority: Arc<dyn holon_core::WriteAuthorityReads>,
+        search: Arc<dyn holon_api::EntitySearch>,
     ) -> Result<Self> {
         let ddl_mutex = Arc::new(tokio::sync::Mutex::new(()));
         let matview_manager = crate::sync::MatviewManager::new(db_handle.clone(), ddl_mutex);
@@ -329,6 +331,7 @@ impl BackendEngine {
             op_engine,
             block_write_authority,
             matview_manager,
+            search,
             profile_resolver,
             sql_transformers,
             graph_schema_registry: Arc::new(std::sync::RwLock::new(graph_schema_registry)),
@@ -429,6 +432,10 @@ impl BackendEngine {
     /// Get the database handle for direct database operations
     pub fn db_handle(&self) -> &DbHandle {
         &self.db_handle
+    }
+
+    pub fn search(&self) -> &Arc<dyn holon_api::EntitySearch> {
+        &self.search
     }
 
     /// The block write authority's rollback capability, when this session's

@@ -42,6 +42,7 @@ use holon_frontend::reactive::BuilderServices;
 pub struct Hit {
     pub id: EntityUri,
     pub label: String,
+    pub snippet: Vec<String>,
 }
 
 /// Theme colors for the search overlay (passed from `HolonApp::render`).
@@ -288,17 +289,19 @@ pub fn run_search(
                                 s.pages = results
                                     .pages
                                     .into_iter()
-                                    .map(|c| Hit {
-                                        id: c.id,
-                                        label: c.label,
+                                    .map(|h| Hit {
+                                        id: h.id,
+                                        label: h.label,
+                                        snippet: h.snippet,
                                     })
                                     .collect();
                                 s.content = results
                                     .content
                                     .into_iter()
-                                    .map(|c| Hit {
-                                        id: c.id,
-                                        label: c.label,
+                                    .map(|h| Hit {
+                                        id: h.id,
+                                        label: h.label,
+                                        snippet: h.snippet,
                                     })
                                     .collect();
                                 s.error = None;
@@ -472,6 +475,12 @@ pub fn render_search_overlay(
                                 )
                                 .with_displayed_text(truncate_label(&hit.label)),
                             )
+                            .children(hit.snippet.iter().map(|line| {
+                                div()
+                                    .text_size(px(12.0))
+                                    .child(truncate_label(line))
+                                    .into_any_element()
+                            }))
                             .child(
                                 crate::geometry::TransparentTracker::new(
                                     hit_subtitle_id(idx),

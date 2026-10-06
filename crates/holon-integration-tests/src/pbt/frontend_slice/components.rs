@@ -2461,10 +2461,11 @@ impl holon_pbt_core::capabilities::SutSearch for HeadlessFrontendComponent {
             .quick_open_search(query)
             .await
             .map_err(|e| format!("{e:#}"))?;
-        let hit = |c: holon_api::LinkCandidate, is_page_section: bool| {
+        let hit = |h: holon_api::SearchHit, is_page_section: bool| {
             holon_pbt_core::capabilities::SearchHit {
-                id: c.id,
-                label: c.label,
+                id: h.id,
+                label: h.label,
+                snippet: h.snippet,
                 is_page_section,
             }
         };
@@ -7828,6 +7829,7 @@ impl holon_pbt_core::capabilities::SutTypedEntity for HeadlessFrontendComponent 
         type_name: &str,
         value_columns: Vec<String>,
         computed: Vec<(String, String)>,
+        searchable: bool,
     ) {
         let mut fields = vec![holon_api::FieldSchema::new("id", "TEXT").primary_key()];
         // The overflow pair, on every drawn type: the engine stamps
@@ -7846,6 +7848,21 @@ impl holon_pbt_core::capabilities::SutTypedEntity for HeadlessFrontendComponent 
         type_def.home = Some(
             holon_api::HomeProfileId::parse("holon-native").expect("a well-formed profile id"),
         );
+        if searchable {
+            let field = |c: &String| {
+                holon_api::computation::FieldIdent::try_from(c.clone())
+                    .unwrap_or_else(|e| panic!("drawn column {c:?} is not a field name: {e}"))
+            };
+            type_def.services = Some(holon_api::TypeServices {
+                title: field(&value_columns[0]),
+                searchable: value_columns.iter().map(field).collect(),
+                linkable: false,
+                embeddable: false,
+                dense_view: None,
+                hierarchy: None,
+                rich_text: Vec::new(),
+            });
+        }
 
         // The computed fields are parsed against the stored columns' declared
         // types, exactly as `TypeRegistry::add_computed_fields` parses a YAML
