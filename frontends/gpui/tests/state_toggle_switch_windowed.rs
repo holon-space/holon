@@ -71,6 +71,7 @@ fn set_field_wiring() -> OperationWiring {
                 type_hint: holon_api::TypeHint::String,
                 description: String::new(),
             }],
+            optional_params: vec![],
             affected_fields: vec!["enabled".to_string()],
             param_mappings: vec![],
             target_scope: holon_api::TargetScope::Global,

@@ -3099,6 +3099,44 @@ impl holon_api::identity_minting::IdentityMinting for SqlOperationProvider {
     }
 }
 
+impl SqlOperationProvider {
+    /// The ids a `create` reads from its param bag, declared so the operation
+    /// boundary parses them. `parent_id` and `after_block_id` exist only on a
+    /// table that places rows in a tree.
+    fn create_reference_params(&self) -> Vec<OperationParam> {
+        let entity = EntityName::new(&self.entity_name);
+        let param = |name: &str, type_hint: TypeHint, description: &str| OperationParam {
+            name: name.to_string(),
+            type_hint,
+            description: description.to_string(),
+        };
+        let mut params = vec![param(
+            "id",
+            TypeHint::EntityId {
+                entity_name: entity.clone(),
+            },
+            "Entity ID",
+        )];
+        if self.write_schema.is_column("parent_id") {
+            params.push(param(
+                "parent_id",
+                TypeHint::EntityIdOrRoot {
+                    entity_name: entity.clone(),
+                },
+                "Parent entity ID",
+            ));
+            params.push(param(
+                "after_block_id",
+                TypeHint::EntityId {
+                    entity_name: entity,
+                },
+                "Sibling to place the new row after",
+            ));
+        }
+        params
+    }
+}
+
 #[async_trait]
 impl OperationProvider for SqlOperationProvider {
     /// This IS the Turso block-identity authority (ADR 0029 D1c). The active
@@ -3187,7 +3225,7 @@ impl OperationProvider for SqlOperationProvider {
                 description: format!("Create a new {}", self.entity_short_name),
                 id_column: "id".to_string(),
                 required_params: vec![],
-                optional_params: vec![],
+                optional_params: self.create_reference_params(),
                 affected_fields: vec![],
                 param_mappings: vec![],
                 target_scope: self.target_scope(),

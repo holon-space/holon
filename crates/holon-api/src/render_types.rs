@@ -368,8 +368,10 @@ pub struct OperationDescriptor {
     pub display_name: String, // "Mark as complete", "Indent"
     pub description: String,  // Human-readable description for UI
     pub required_params: Vec<OperationParam>,
-    /// Params the operation reads when present. Declared so the boundary
-    /// parses an id-bearing one by name, exactly as it parses a required one.
+    /// Optional params declared so the boundary parses an id-bearing one by
+    /// name, exactly as it parses a required one. Hand-written descriptors list
+    /// only the id-bearing ones; macro-generated ones list every `Option`
+    /// param.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub optional_params: Vec<OperationParam>,
     /// Fields that this operation affects (for pie menu auto-attachment)

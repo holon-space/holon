@@ -247,3 +247,59 @@ async fn a_malformed_edge_target_is_refused_by_name_under_both_authorities() {
     );
     assert!(junction.is_empty(), "junction rows: {junction:?}");
 }
+
+/// `create` carries its ids in the param bag, so the boundary has to learn
+/// them from the descriptor like for any other op.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_malformed_id_in_create_params_is_refused_by_name() {
+    let cases: Vec<(&str, StorageEntity)> = vec![
+        (
+            "id",
+            params(&[
+                ("id", text("a b")),
+                ("content", text("c")),
+                ("parent_id", text("block:a")),
+            ]),
+        ),
+        (
+            "parent_id",
+            params(&[
+                ("id", text("block:c")),
+                ("content", text("c")),
+                ("parent_id", text("a b")),
+            ]),
+        ),
+        (
+            "after_block_id",
+            params(&[
+                ("id", text("block:c")),
+                ("content", text("c")),
+                ("parent_id", text("block:a")),
+                ("after_block_id", text("a b")),
+            ]),
+        ),
+    ];
+
+    let mut failures = Vec::new();
+    for (param, case) in cases {
+        let outcome = tokio::spawn(async move {
+            let engine = engine_with_two_blocks().await;
+            engine
+                .execute_operation(&EntityName::new("block"), "create", case, OpOrigin::User)
+                .await
+                .map(|_| ())
+        })
+        .await;
+        match outcome {
+            Err(join) => failures.push(format!("create({param} = \"a b\"): panicked: {join}")),
+            Ok(Ok(())) => failures.push(format!("create({param} = \"a b\"): returned Ok")),
+            Ok(Err(e)) => {
+                let e = format!("{e:#}");
+                if !(e.contains(&format!("parameter '{param}'")) && e.contains("\"a b\"")) {
+                    failures.push(format!("create({param} = \"a b\"): unnamed refusal: {e}"));
+                }
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}

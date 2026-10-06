@@ -49,6 +49,7 @@ fn op(name: &str, display: &str, params: Vec<OperationParam>) -> OperationWiring
             required_params: params,
             id_column: "id".to_string(),
             description: String::new(),
+            optional_params: vec![],
             affected_fields: vec![],
             param_mappings: vec![],
             target_scope: holon_api::TargetScope::Block,
