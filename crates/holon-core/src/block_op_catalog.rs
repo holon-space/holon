@@ -183,6 +183,45 @@ pub fn block_update_references() -> Vec<OperationParam> {
     params
 }
 
+/// The `update` (upsert by `id`) descriptor. Each write authority that executes
+/// `update` advertises this one, so its claimed references are declared where
+/// it runs.
+pub fn update_descriptor(
+    entity_name: &EntityName,
+    entity_short_name: &str,
+    target_scope: holon_api::TargetScope,
+    references: Vec<OperationParam>,
+) -> OperationDescriptor {
+    OperationDescriptor {
+        entity_name: entity_name.clone(),
+        entity_short_name: entity_short_name.to_string(),
+        name: "update".to_string(),
+        display_name: "Update".to_string(),
+        description: format!("Update {entity_short_name}"),
+        required_params: vec![OperationParam {
+            name: "id".to_string(),
+            type_hint: TypeHint::EntityId {
+                entity_name: entity_name.clone(),
+            },
+            description: "Entity ID".to_string(),
+        }],
+        optional_params: references,
+        id_column: "id".to_string(),
+        affected_fields: vec![],
+        param_mappings: vec![],
+        target_scope,
+        boundary_behavior: holon_api::BoundaryBehavior::PrivateOnly,
+        menu_exposure: holon_api::MenuExposure::NotListed {
+            surface: holon_api::NonMenuSurface::Internal,
+        },
+        trigger: None,
+        bound_params: Default::default(),
+        marking_delta: holon_api::marking::MarkingDelta::Undeclared,
+        guard: holon_api::pattern::OpGuard::None,
+        arcs: holon_api::arcs::TransitionArcs::Undeclared,
+    }
+}
+
 fn block_anchor(name: &str) -> OperationParam {
     OperationParam {
         name: name.to_string(),

@@ -1756,6 +1756,14 @@ impl OperationProvider for LoroBlockOperations {
             id_column,
         ));
 
+        // `update` is executed by hand below, not by a macro trait.
+        ops.push(holon_core::block_op_catalog::update_descriptor(
+            &EntityName::from(entity_name),
+            short_name,
+            holon_api::TargetScope::Block,
+            holon_core::block_op_catalog::block_update_references(),
+        ));
+
         // Advice dismissal (ADR 0021/0022) — a bespoke read-modify-write append
         // that isn't one of the macro-generated CRUD/block/text traits. Its
         // descriptor is the ONE hand-built op shared by both write authorities,

@@ -1521,7 +1521,7 @@ where
     async fn move_to_position(
         &self,
         id: &EntityUri,
-        parent_id: &EntityUri,
+        #[may_be_root] parent_id: &EntityUri,
         after_block_id: Option<&EntityUri>,
     ) -> Result<Vec<FieldDelta>> {
         let ordering = self.ordering().ok_or_else(|| {
@@ -1805,10 +1805,7 @@ where
         // first makes the outbound `LoroSyncController.on_loro_changed`
         // the only SQL writer, with `EventOrigin::Loro` events that the
         // gate correctly `EchoSuppress`es.
-        let parent_for_split = block
-            .parent_id()
-            .cloned()
-            .unwrap_or_else(EntityUri::no_parent);
+        let parent_for_split = block.stored_parent();
         let new_block_uri = EntityUri::block(&new_block_uuid);
         // Slot for the minted block: directly ABOVE the origin at a position-0
         // split (anchored on the origin's predecessor, `None` = first child),
@@ -1874,13 +1871,10 @@ where
                     Value::String(holon_api::marks_to_json(&minted_marks)),
                 );
             }
-            new_block_fields.insert("parent_id".into(), {
-                if let Some(ref pid) = block.parent_id() {
-                    Value::String(pid.to_string())
-                } else {
-                    Value::Null
-                }
-            });
+            new_block_fields.insert(
+                "parent_id".into(),
+                Value::String(parent_for_split.to_string()),
+            );
             // Positional intent for Full (Loro) mode. The literal key here
             // must match `event_bus::POSITION_AFTER_BLOCK_ID_PARAM` over in the
             // `holon` crate — we can't depend on it from `holon-core`, so the
@@ -1910,10 +1904,6 @@ where
             // AND the sibling re-keys the key is expressed against, landing in
             // the create's OWN transaction (ADR 0030 D1/D4, amended). The
             // re-keys never ride a `_order_rekeys` params key.
-            let parent_for_anchor = block
-                .parent_id()
-                .cloned()
-                .unwrap_or_else(EntityUri::no_parent);
             let minter = self.order_key_minter().ok_or_else(|| {
                 anyhow::anyhow!(
                     "split_block's SqlOnly create path requires an OrderKeyMinting seam (the \
@@ -1922,7 +1912,7 @@ where
                 )
             })?;
             let position = minter
-                .new_child_anchor(&parent_for_anchor, after_uri.as_ref()) // ALLOW(order_minting): routed through the sibling-set owner's OrderKeyMinting seam
+                .new_child_anchor(&parent_for_split, after_uri.as_ref()) // ALLOW(order_minting): routed through the sibling-set owner's OrderKeyMinting seam
                 .await?;
             let (_new_block_id, create_result) = self.create_at(new_block_fields, position).await?;
             changes.extend(create_result.changes);
@@ -2251,10 +2241,7 @@ where
         // case-B-with-children, and this case-A-with-children all stay
         // irreversible by construction.
         let inverse: UndoAction = if !block_had_children {
-            let block_parent = block
-                .parent_id()
-                .cloned()
-                .unwrap_or_else(EntityUri::no_parent);
+            let block_parent = block.stored_parent();
             // Slot anchor: the merged-away block sat directly after its
             // previous SIBLING (not the merge target, which the visible-outline
             // walk may have taken deeper); in the child→parent case it was the
@@ -2323,7 +2310,7 @@ where
         target_content: String,
         block_id: &EntityUri,
         block_content: String,
-        block_parent: &EntityUri,
+        #[may_be_root] block_parent: &EntityUri,
         after_id: Option<&EntityUri>,
     ) -> Result<OperationResult> {
         // Capture the target's current content so the returned inverse can put
@@ -2373,18 +2360,9 @@ where
             let mut fields = crate::storage::types::StorageEntity::new();
             fields.insert("id".into(), Value::String(block_id.as_str().to_string()));
             fields.insert("content".into(), Value::String(block_content.clone()));
-            // A parentless block is stored with a NULL `parent_id` — the
-            // `no_parent` sentinel is the in-memory stand-in `restore_join`
-            // recorded, not a storable value. `split_block`'s own create writes
-            // `Null` here, so writing the sentinel string instead would make a
-            // redo re-create the block under a parent it never had.
             fields.insert(
                 "parent_id".into(),
-                if block_parent.is_no_parent() {
-                    Value::Null
-                } else {
-                    Value::String(block_parent.as_str().to_string())
-                },
+                Value::String(block_parent.as_str().to_string()),
             );
             let (_new_id, create_result) = self.create_at(fields, position).await?;
             changes.extend(create_result.changes);
@@ -2462,10 +2440,7 @@ where
         // inverse (restore_split) can recreate it exactly.
         let block_content = read_content_via_cells(self.cells(), deleted_id)
             .unwrap_or_else(|| block.content().to_string());
-        let block_parent = block
-            .parent_id()
-            .cloned()
-            .unwrap_or_else(EntityUri::no_parent);
+        let block_parent = block.stored_parent();
         let after = self
             .prev_sibling_authoritative(deleted_id)
             .await?

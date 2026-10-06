@@ -3242,34 +3242,12 @@ impl OperationProvider for SqlOperationProvider {
                 guard: holon_api::pattern::OpGuard::None,
                 arcs: create_arcs,
             },
-            OperationDescriptor {
-                entity_name: self.entity_name.clone().into(),
-                entity_short_name: self.entity_short_name.clone(),
-                name: "update".to_string(),
-                display_name: "Update".to_string(),
-                description: format!("Update {}", self.entity_short_name),
-                required_params: vec![OperationParam {
-                    name: "id".to_string(),
-                    type_hint: TypeHint::EntityId {
-                        entity_name: EntityName::new(&self.entity_name),
-                    },
-                    description: "Entity ID".to_string(),
-                }],
-                optional_params: self.write_schema.update_references.clone(),
-                id_column: "id".to_string(),
-                affected_fields: vec![],
-                param_mappings: vec![],
-                target_scope: self.target_scope(),
-                boundary_behavior: holon_api::BoundaryBehavior::PrivateOnly,
-                menu_exposure: holon_api::MenuExposure::NotListed {
-                    surface: holon_api::NonMenuSurface::Internal,
-                },
-                trigger: None,
-                bound_params: Default::default(),
-                marking_delta: holon_api::marking::MarkingDelta::Undeclared,
-                guard: holon_api::pattern::OpGuard::None,
-                arcs: holon_api::arcs::TransitionArcs::Undeclared,
-            },
+            holon_core::block_op_catalog::update_descriptor(
+                &EntityName::new(&self.entity_name),
+                &self.entity_short_name,
+                self.target_scope(),
+                self.write_schema.update_references.clone(),
+            ),
             OperationDescriptor {
                 entity_name: self.entity_name.clone().into(),
                 entity_short_name: self.entity_short_name.clone(),
@@ -4824,7 +4802,10 @@ impl OriginTaggedWrites for SqlOperationProvider {
                 };
                 Ok(OperationResult::new(changes, inverse))
             }
-            _ => Err(format!("Unknown operation: {}", op_name).into()),
+            _ => Err(Box::new(holon_core::UnknownOperationError::new(
+                "SqlOperationProvider",
+                op_name,
+            ))),
         }
     }
 

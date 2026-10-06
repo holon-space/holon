@@ -17,6 +17,7 @@
 //! that no future edit re-forks a catalog-owned descriptor. As increments 1-2
 //! move more op metadata into the catalog, this test's coverage grows with it.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use holon::core::SqlOperationProvider;
@@ -25,6 +26,7 @@ use holon::storage::turso::TursoBackend;
 use holon_api::EntityName;
 use holon_api::OperationDescriptor;
 use holon_core::OperationProvider;
+use holon_core::UnknownOperationError;
 use holon_loro::LoroBlockOperations;
 use holon_loro::LoroDocumentStore;
 use tokio::sync::RwLock;
@@ -98,6 +100,12 @@ async fn both_block_providers_source_catalog_descriptors_identically() {
         holon_core::block_op_catalog::dismiss_advice_descriptor(&entity, SHORT),
         holon_core::block_op_catalog::add_tag_descriptor(&entity, SHORT),
         holon_core::block_op_catalog::remove_tag_descriptor(&entity, SHORT),
+        holon_core::block_op_catalog::update_descriptor(
+            &entity,
+            SHORT,
+            holon_api::TargetScope::Block,
+            holon_core::block_op_catalog::block_update_references(),
+        ),
     ];
 
     for canonical in &catalog {
@@ -114,4 +122,81 @@ async fn both_block_providers_source_catalog_descriptors_identically() {
             canonical.name
         );
     }
+}
+
+fn reference_names(ops: &[OperationDescriptor], op: &str) -> BTreeSet<String> {
+    holon_api::entity_reference_params(ops, ENTITY, op, |_| None)
+        .unwrap_or_else(|e| panic!("{e}"))
+        .into_iter()
+        .map(|reference| reference.name.to_string())
+        .collect()
+}
+
+/// A write authority's claims come from its OWN descriptors: an op it executes
+/// but does not declare is claimed as the whole relation, and a declaration
+/// missing a reference the op carries elsewhere under-claims it. Every block op
+/// either authority declares is run against each one with no params; one it
+/// does not declare must be refused as unknown.
+#[tokio::test]
+async fn each_block_authority_declares_every_op_it_executes_with_its_references() {
+    let (_backend, handle) = TursoBackend::new_in_memory()
+        .await
+        .expect("in-memory turso");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = Arc::new(RwLock::new(LoroDocumentStore::new(
+        dir.path().to_path_buf(),
+    )));
+    let authorities: Vec<(&str, Arc<dyn OperationProvider>)> = vec![
+        (
+            "SqlOperationProvider",
+            Arc::new(SqlOperationProvider::with_edge_fields(
+                handle,
+                "block_raw".to_string(),
+                ENTITY.to_string(),
+                SHORT.to_string(),
+                block_edge_fields(),
+            )),
+        ),
+        (
+            "LoroBlockOperations",
+            Arc::new(LoroBlockOperations::new(store)),
+        ),
+    ];
+    let declared: Vec<Vec<OperationDescriptor>> = authorities
+        .iter()
+        .map(|(_, provider)| provider.operations())
+        .collect();
+    let all: Vec<OperationDescriptor> = declared.iter().flatten().cloned().collect();
+    let op_names: BTreeSet<String> = all
+        .iter()
+        .filter(|op| op.entity_name == ENTITY)
+        .map(|op| op.name.clone())
+        .collect();
+
+    let mut wrong = Vec::new();
+    for ((name, provider), ops) in authorities.iter().zip(&declared) {
+        for op in &op_names {
+            if ops.iter().any(|d| d.entity_name == ENTITY && &d.name == op) {
+                let missing: Vec<String> = reference_names(&all, op)
+                    .difference(&reference_names(ops, op))
+                    .cloned()
+                    .collect();
+                if !missing.is_empty() {
+                    wrong.push(format!("{name} declares {op} without {missing:?}"));
+                }
+                continue;
+            }
+            let outcome = provider
+                .execute_operation(&EntityName::from(ENTITY), op, Default::default())
+                .await;
+            match outcome {
+                Err(e) if UnknownOperationError::is_unknown(e.as_ref()) => {}
+                other => wrong.push(format!(
+                    "{name} executes {op} without declaring it: {:?}",
+                    other.map(|_| ()).map_err(|e| e.to_string())
+                )),
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }

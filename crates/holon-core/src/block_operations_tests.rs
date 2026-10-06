@@ -42,7 +42,7 @@ mod tests {
             &self.id
         }
         fn parent_id(&self) -> Option<&EntityUri> {
-            self.parent_id.as_ref()
+            self.parent_id.as_ref().filter(|parent| parent.is_block())
         }
         fn stored_parent(&self) -> EntityUri {
             self.parent_id.clone().unwrap_or_else(EntityUri::no_parent)
@@ -786,7 +786,7 @@ mod tests {
 
     #[tokio::test]
     /// A position-0 split of a PARENTLESS block. Its predecessor is `None`
-    /// (`get_prev_sibling` short-circuits on a null `parent_id`), so both
+    /// (`get_prev_sibling` short-circuits on a non-block parent), so both
     /// create arms take the first-slot branch — a branch no keystone draw
     /// reaches. Identity routing must be the same as anywhere else: the
     /// text keeps the original id, the minted block is the empty one, and
@@ -794,13 +794,12 @@ mod tests {
     /// `SqlBlockOperations:: root_slot_anchor_sorts_before_the_first_root`
     /// and the Loro registry's
     /// `first_slot_position_among_roots_is_expressible_for_a_parentless_split`
-    /// — because this in-memory store models parentless as a null `parent_id`
-    /// rather than the `sentinel:no_parent` rows the real minter scans.
+    /// — not in this in-memory store.
     async fn split_block_at_start_of_a_parentless_block_routes_identity_and_undoes() {
         let store = MemStore::new();
         store.insert(TestBlock {
             id: EntityUri::block("R"),
-            parent_id: None,
+            parent_id: Some(EntityUri::no_parent()),
             sort_key: gen_key_between(None, None).unwrap(),
             content: "Rooted".to_string(),
             tags: holon_api::Tags::default(),
@@ -823,7 +822,8 @@ mod tests {
             .expect("the split minted a block");
         assert_eq!(minted.content, "", "the minted block is the empty one");
         assert_eq!(
-            minted.parent_id, None,
+            minted.parent_id,
+            Some(EntityUri::no_parent()),
             "the minted block stays parentless, like its origin"
         );
 
