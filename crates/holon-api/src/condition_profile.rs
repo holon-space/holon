@@ -675,6 +675,15 @@ const VIEW_ENGINE_STOPPED: ConditionProfile = ConditionProfile::new(
     &[],
 );
 
+const OPERATION_CATALOG_STOPPED: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Error,
+    "New operations no longer reach rows",
+    icons::BLOCKED,
+    ConditionPlacement::Banner,
+    AllClear::UntilRestart,
+    &[],
+);
+
 const DATABASE_STUCK: ConditionProfile = ConditionProfile::new(
     ConditionSeverity::Error,
     "Holon's database is stuck",
@@ -752,6 +761,7 @@ impl ConditionKind {
             Self::WrittenFilesUnrecorded { .. } => WRITTEN_FILES_UNRECORDED,
             Self::LoroUpdateLogTailDropped { .. } => LORO_UPDATE_LOG_TAIL_DROPPED,
             Self::ViewEngineStopped(_) => VIEW_ENGINE_STOPPED,
+            Self::OperationCatalogStopped(_) => OPERATION_CATALOG_STOPPED,
             Self::DatabaseStuck { .. } => DATABASE_STUCK,
             Self::DatabaseWatchFailed { .. } => DATABASE_WATCH_FAILED,
             Self::DerivedFieldNotComputed { .. } => DERIVED_FIELD_NOT_COMPUTED,

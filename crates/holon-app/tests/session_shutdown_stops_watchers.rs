@@ -61,6 +61,7 @@ async fn shutting_the_session_down_stops_its_watchers_before_the_store_closes() 
         "advice-reconciler",
         "advice-drainer",
         "integration-reprojector",
+        "operation-catalog-follower",
     ] {
         assert!(
             registered.iter().any(|n| n == expected),

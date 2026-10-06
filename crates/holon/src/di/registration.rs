@@ -201,6 +201,7 @@ async fn create_initialized_engine(
         type_registry.profile_load_check(),
         type_registry.vault_profile_claims(),
         conditions,
+        &shutdown,
     )
     .await?;
 
@@ -498,38 +499,21 @@ async fn create_profile_resolver(
     + 'static,
     vault_profile_claims: holon_profiles::VaultProfileClaims,
     conditions: Arc<holon_api::ConditionBus>,
+    shutdown: &holon_api::lifecycle::SessionShutdown,
 ) -> Result<Arc<ProfileResolver>> {
-    use holon_api::EntityName;
-    let mut entity_operations: HashMap<EntityName, Vec<holon_api::OperationDescriptor>> =
-        HashMap::new();
-    for op in dispatcher.operations() {
-        entity_operations
-            .entry(op.entity_name.clone())
-            .or_default()
-            .push(op);
-    }
-    // Engine-synthetic `block` compounds are not dispatcher-registered
-    // providers, so they are absent from the loop above. Inject them from the
-    // SAME single source `available_operations` uses
-    // (`block_synthetic_descriptors`), so the profile resolver and MCP
-    // discovery can never drift. `convert_block_to_page` thus reaches
-    // `resolve_profile(row).operations` and every op-driven UI surface (slash
-    // menu via the `Listed` filter, op-button toolbar, key-chord pump), beside
-    // indent/outdent/move_up/move_down. `instantiate_template` is NOT injected
-    // here (`include_template_picker = false`): it is surfaced via the template
-    // picker, not as a bare profile op.
-    entity_operations
-        .entry(EntityName::new("block"))
-        .or_default()
-        .extend(
-            crate::api::operation_engine::DispatchingOperationEngine::block_synthetic_descriptors(
-                false,
-            )
-            .map_err(|e| anyhow::anyhow!("[ProfileResolver] {e}"))?,
-        );
+    // `instantiate_template` is left out (`include_template_picker = false`):
+    // the template picker surfaces it, never a bare profile op.
+    let block_synthetic =
+        crate::api::operation_engine::DispatchingOperationEngine::block_synthetic_descriptors(
+            false,
+        )
+        .map_err(|e| anyhow::anyhow!("[ProfileResolver] {e}"))?;
+    let catalog = dispatcher.catalog();
+    let entity_operations = entity_operations(&catalog, &block_synthetic);
     let computed_conditions = Arc::clone(&conditions);
+    let stopped_conditions = Arc::clone(&conditions);
     let refusal_conditions = Arc::clone(&conditions);
-    match matview_manager.watch(PROFILE_SQL).await {
+    let resolver = match matview_manager.watch(PROFILE_SQL).await {
         Ok(result) => {
             let load =
                 move |row: &StorageEntity| load_profile_row(row, &profile_load_check, &conditions);
@@ -559,7 +543,7 @@ async fn create_profile_resolver(
                 });
             });
             live_profiles.subscribe("entity_profile", result.stream);
-            Ok(Arc::new(ProfileResolver::with_type_profiles(
+            Arc::new(ProfileResolver::with_type_profiles(
                 live_profiles,
                 ui_info,
                 live_entities,
@@ -567,7 +551,7 @@ async fn create_profile_resolver(
                 type_profiles,
                 vault_profile_claims,
                 computed_conditions,
-            )))
+            ))
         }
         Err(e) => {
             tracing::debug!(
@@ -579,7 +563,7 @@ async fn create_profile_resolver(
                 |_| Ok(String::new()),
                 |_| anyhow::bail!("no profiles"),
             );
-            Ok(Arc::new(ProfileResolver::with_type_profiles(
+            Arc::new(ProfileResolver::with_type_profiles(
                 live_profiles,
                 ui_info,
                 live_entities,
@@ -587,9 +571,89 @@ async fn create_profile_resolver(
                 type_profiles,
                 vault_profile_claims,
                 computed_conditions,
-            )))
+            ))
         }
+    };
+    follow_operation_catalog(
+        dispatcher,
+        catalog,
+        block_synthetic,
+        Arc::downgrade(&resolver),
+        shutdown,
+        stopped_conditions,
+    );
+    Ok(resolver)
+}
+
+/// The dispatcher's catalog grouped by entity, plus the engine-synthetic
+/// `block` compounds.
+///
+/// The synthetic ops come from the SAME source `available_operations` uses
+/// (`block_synthetic_descriptors`), so rendered rows and MCP discovery cannot
+/// drift.
+fn entity_operations(
+    catalog: &[holon_api::OperationDescriptor],
+    block_synthetic: &[holon_api::OperationDescriptor],
+) -> HashMap<holon_api::EntityName, Vec<holon_api::OperationDescriptor>> {
+    let mut entity_operations: HashMap<_, Vec<_>> = HashMap::new();
+    for op in catalog {
+        entity_operations
+            .entry(op.entity_name.clone())
+            .or_default()
+            .push(op.clone());
     }
+    entity_operations
+        .entry(holon_api::EntityName::new("block"))
+        .or_default()
+        .extend(block_synthetic.iter().cloned());
+    entity_operations
+}
+
+/// Keep `resolver`'s operations equal to the dispatcher's catalog after
+/// `seen`, the catalog it was built from. A panic raises
+/// [`holon_api::ConditionKind::OperationCatalogStopped`].
+fn follow_operation_catalog(
+    dispatcher: &OperationDispatcher,
+    seen: Arc<Vec<holon_api::OperationDescriptor>>,
+    block_synthetic: Vec<holon_api::OperationDescriptor>,
+    resolver: std::sync::Weak<ProfileResolver>,
+    shutdown: &holon_api::lifecycle::SessionShutdown,
+    conditions: Arc<holon_api::ConditionBus>,
+) {
+    use futures::StreamExt;
+    use futures_signals::signal::SignalExt;
+    let mut catalogs = dispatcher.catalog_signal().to_stream();
+    let cancelled = shutdown.cancelled();
+    shutdown.spawn_disclosing_panic(
+        "operation-catalog-follower",
+        async move {
+            tokio::pin!(cancelled);
+            loop {
+                let catalog = tokio::select! {
+                    () = &mut cancelled => return,
+                    catalog = catalogs.next() => match catalog {
+                        Some(catalog) => catalog,
+                        None => return,
+                    },
+                };
+                if Arc::ptr_eq(&catalog, &seen) {
+                    continue;
+                }
+                let Some(resolver) = resolver.upgrade() else {
+                    return;
+                };
+                resolver.set_entity_operations(entity_operations(&catalog, &block_synthetic));
+            }
+        },
+        move |message| {
+            conditions.emit(holon_api::condition_bus::Condition {
+                subject: holon_api::condition_bus::OPERATION_CATALOG_SUBJECT.to_string(),
+                reason: holon_api::ConditionKind::OperationCatalogStopped(format!(
+                    "the operation-catalog follower panicked: {message}"
+                )),
+            })
+        },
+    );
 }
 
 /// Parse and check one org-embedded profile row. A refusal is raised as a

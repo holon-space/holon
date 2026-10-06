@@ -409,6 +409,11 @@ impl ConditionKind {
                  error until Holon restarts."
             )),
 
+            Self::OperationCatalogStopped(reason) => ConditionDetail::prose(format!(
+                "Rows stopped following Holon's operation catalog: {reason}. An operation \
+                 registered from now on can be run but appears on no row until Holon restarts."
+            )),
+
             Self::DatabaseStuck {
                 command,
                 running_secs,

@@ -36,7 +36,7 @@ The one-page answer to *"which features could this change impact?"*. Rows are us
 | **Ruled by** | An ADR under [`docs/adr/`](../adr/), or an invariant number from [Model.md](Model.md). |
 | **Mode axes** | Which of [Model.md](Model.md)'s four orthogonal axes the feature's behaviour varies on: **Storage** (Loro store on/off), **File adapter** (org/none), **Merge fidelity** (op-CRDT / base-3-way / LWW), **Transport** (iroh P2P on/off). `—` means the feature behaves the same everywhere. *Headless vs windowed* is a test-slice axis, not a product mode; it is called out in prose where it matters. |
 
-The composed keystone is [`general_e2e_composed_pbt.rs`](../../crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs). Its alphabet is 111 transitions; the repo declares 90 invariant ids plus 17 correspondence-family ids. Open reds are registered in [KeystoneKnownReds.md](../Testing/KeystoneKnownReds.md) — a red listed there is a pass-with-note, anything else is a regression.
+The composed keystone is [`general_e2e_composed_pbt.rs`](../../crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs). Its alphabet is 111 transitions; the repo declares 91 invariant ids plus 17 correspondence-family ids. Open reds are registered in [KeystoneKnownReds.md](../Testing/KeystoneKnownReds.md) — a red listed there is a pass-with-note, anything else is a regression.
 
 ---
 
@@ -105,7 +105,7 @@ The pin / right-sidebar cluster is the largest open family in the registry: one 
 | Matviews / IVM | Incrementally maintained materialized views over blocks | `inv-matview-consistent-with-recompute`, `inv-typed-matview-matches-ref`, `inv-matview-consistent-with-ref/root_layout` | Model.md layer 3 — exactly one writer, verbatim and total | Storage | `crates/holon-turso/src/matview_manager.rs` |
 | CDC → LiveData | Convergent-state stream feeding cells and the ViewModel | `inv-live-children-match-ref`, `inv-live-tree-matches-fresh`, `inv-frontend-engine` | [0018](../adr/0018-reactive-engine-viewmodel.md); Model.md layer 4 | Storage | `crates/holon-api/src/live_data.rs` |
 | Block history | An op-grounded history table over block writes | `inv-history-no-phantom-rows/block_history`, `inv-history-records-all-creates/block_history` | [0025](../adr/0025-op-grounded-projections.md) | Storage | [Schema.md](Schema.md) |
-| Schema & typed entities | Runtime-declared types projected into their own matviews | `DeclareTypedSchema`, `CreateTypedEntity`, `RegisterEntityScheme`, `ConcurrentSchemaInit`; `inv-typed-matview-matches-ref` | [0029](../adr/0029-entity-identity-single-minting-authority.md) | — | `crates/holon-turso/src/dynamic_schema_module.rs` |
+| Schema & typed entities | Runtime-declared types projected into their own matviews | `DeclareTypedSchema`, `CreateTypedEntity`, `RegisterEntityScheme`, `ConcurrentSchemaInit`; `inv-typed-matview-matches-ref`, `inv-typed-operations-reach-profiles` | [0029](../adr/0029-entity-identity-single-minting-authority.md) | — | `crates/holon-turso/src/dynamic_schema_module.rs` |
 
 Open reds here: `history-ingest-create-unrecorded`.
 

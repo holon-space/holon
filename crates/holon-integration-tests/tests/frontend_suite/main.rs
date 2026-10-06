@@ -2,6 +2,7 @@
 
 mod fire_and_forget_dispatch_disclosure;
 mod integration_configure_button_visibility;
+mod integration_connect_stall_blocks_boot;
 mod integration_state_boot_population;
 mod integration_state_boot_records_status;
 mod integration_state_section_refreshes;

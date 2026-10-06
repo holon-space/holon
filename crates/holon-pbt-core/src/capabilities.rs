@@ -4634,6 +4634,23 @@ pub trait SutTypedEntity {
     /// Every id present in the write-side `block_raw` table. The datatype-axis
     /// identity asserts a free-standing entity's id is absent from this set.
     async fn block_raw_ids(&self) -> std::collections::BTreeSet<String>;
+
+    /// The operation names offered for `type_name` by each surface that lists
+    /// operations.
+    async fn typed_entity_operation_surfaces(&self, type_name: &str) -> OperationSurfaces;
+}
+
+/// One entity's operation names as the surfaces see them: the dispatcher's
+/// catalog (what dispatch and MCP discovery accept), the profile resolver (what
+/// a row rendered now carries), and a row re-resolved on the profile signal's
+/// last emission since the type was declared (what an open view re-renders
+/// with; empty if the signal has not fired, `None` for a type registered at
+/// boot).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperationSurfaces {
+    pub dispatcher: std::collections::BTreeSet<String>,
+    pub profile: std::collections::BTreeSet<String>,
+    pub rerendered: Option<std::collections::BTreeSet<String>>,
 }
 
 /// Ref-side expectation for the datatype axis: the free-standing entities the

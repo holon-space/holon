@@ -311,6 +311,10 @@ pub struct HeadlessFrontendComponent {
     read_only_ingest_compound: Mutex<(usize, usize)>,
     /// The outcome of every `EditDecisionSubtree`, in dispatch order.
     shape_edit_outcomes: Mutex<Vec<Result<(), String>>>,
+    /// Per type declared through [`SutTypedEntity::declare_typed_schema`], the
+    /// operation names a row of it resolved with at the last profile-signal
+    /// emission since the declaration: what a re-rendered view offers.
+    rerendered_operations: Arc<Mutex<HashMap<String, BTreeSet<String>>>>,
 }
 
 /// Does this defining SELECT carry a real BIND PLACEHOLDER (so
@@ -827,6 +831,7 @@ impl HeadlessFrontendComponent {
             pasted_copies: Mutex::new(HashMap::new()),
             read_only_attempts: Mutex::new((0, 0)),
             shape_edit_outcomes: Mutex::new(Vec::new()),
+            rerendered_operations: Arc::new(Mutex::new(HashMap::new())),
             read_only_ingest_compound: Mutex::new((0, 0)),
         }
     }
@@ -7892,6 +7897,7 @@ impl holon_pbt_core::capabilities::SutTypedEntity for HeadlessFrontendComponent 
                 ..Default::default()
             });
         }
+        self.follow_rerendered_operations(type_name).await;
         let registry = self.injector().resolve::<holon_profiles::TypeRegistry>();
         // Through the ADMISSION SEAT, not `declare_type` directly: production
         // declares types here, and a keystone that reached around the seat
@@ -7951,6 +7957,88 @@ impl holon_pbt_core::capabilities::SutTypedEntity for HeadlessFrontendComponent 
     async fn block_raw_ids(&self) -> std::collections::BTreeSet<String> {
         let rows = self.sql_query("SELECT id FROM block_raw").await;
         rows.iter().filter_map(|r| Self::cell(r, "id")).collect()
+    }
+
+    async fn typed_entity_operation_surfaces(
+        &self,
+        type_name: &str,
+    ) -> holon_pbt_core::capabilities::OperationSurfaces {
+        use holon_core::OperationProvider;
+        let entity = holon_api::EntityName::new(type_name);
+        let dispatcher = self
+            .engine()
+            .get_dispatcher()
+            .operations()
+            .into_iter()
+            .filter(|op| op.entity_name == entity)
+            .map(|op| op.name)
+            .collect();
+        let profile = self
+            .engine()
+            .profile_resolver()
+            .operations_for(type_name)
+            .into_iter()
+            .map(|op| op.name)
+            .collect();
+        let rerendered = self
+            .rerendered_operations
+            .lock()
+            .expect("rerendered_operations poisoned")
+            .get(type_name)
+            .cloned();
+        holon_pbt_core::capabilities::OperationSurfaces {
+            dispatcher,
+            profile,
+            rerendered,
+        }
+    }
+}
+
+impl HeadlessFrontendComponent {
+    /// Re-resolve a row of `type_name` on every profile-signal emission, as
+    /// `UiWatcher` re-renders on one, into `rerendered_operations`. Returns
+    /// once the signal's initial value is consumed, so every later emission is
+    /// observed.
+    async fn follow_rerendered_operations(&self, type_name: &str) {
+        use futures::StreamExt;
+        use futures_signals::signal::SignalExt;
+        let engine = self.engine();
+        let resolver = engine.profile_resolver();
+        let mut emissions = resolver.profile_signal().signal_cloned().to_stream();
+        emissions
+            .next()
+            .await
+            .expect("a signal yields its current value first");
+        let resolver = Arc::downgrade(resolver);
+        let row = HashMap::from([(
+            "id".to_string(),
+            holon_api::Value::String(
+                EntityUri::new(holon_api::EntityName::new(type_name).as_str(), "probe").to_string(),
+            ),
+        )]);
+        let rerendered = Arc::clone(&self.rerendered_operations);
+        let type_name = type_name.to_string();
+        rerendered
+            .lock()
+            .expect("rerendered_operations poisoned")
+            .insert(type_name.clone(), BTreeSet::new());
+        tokio::spawn(async move {
+            while emissions.next().await.is_some() {
+                let Some(resolver) = resolver.upgrade() else {
+                    return;
+                };
+                let operations = resolver
+                    .resolve(&row)
+                    .operations
+                    .iter()
+                    .map(|op| op.name.clone())
+                    .collect();
+                rerendered
+                    .lock()
+                    .expect("rerendered_operations poisoned")
+                    .insert(type_name.clone(), operations);
+            }
+        });
     }
 }
 

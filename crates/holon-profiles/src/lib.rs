@@ -988,8 +988,9 @@ pub struct ProfileResolver {
     source: Arc<holon_api::live_data::LiveData<EntityProfile>>,
     cache_signal: futures_signals::signal::Mutable<Arc<ProfileCache>>,
     /// Entity operations from the OperationDispatcher, keyed by entity name.
-    /// Injected at DI time — this is the single source of truth for operations.
-    entity_operations: Arc<HashMap<EntityName, Vec<OperationDescriptor>>>,
+    /// Replaced through [`Self::set_entity_operations`] whenever the
+    /// dispatcher's catalog changes.
+    entity_operations: std::sync::RwLock<Arc<HashMap<EntityName, Vec<OperationDescriptor>>>>,
     live_entities: std::sync::RwLock<LiveEntities>,
     /// Cached Rhai engine with entity lookup functions pre-registered.
     /// Rebuilt only when `live_entities` changes via `set_live_entities()`.
@@ -1060,7 +1061,7 @@ impl ProfileResolver {
         vault_profile_claims: VaultProfileClaims,
         conditions: Arc<holon_api::ConditionBus>,
     ) -> Self {
-        let entity_operations = Arc::new(entity_operations);
+        let entity_operations = std::sync::RwLock::new(Arc::new(entity_operations));
         let type_profiles = Arc::new(type_profiles);
         let cache_signal =
             futures_signals::signal::Mutable::new(Arc::new(ProfileCache::new(HashMap::new())));
@@ -1123,12 +1124,29 @@ impl ProfileResolver {
         *self.live_entities.write().unwrap() = entities;
     }
 
+    /// Replace the operations rows are resolved with, and re-publish the
+    /// profile cache so every rendered view re-resolves its rows.
+    pub fn set_entity_operations(
+        &self,
+        entity_operations: HashMap<EntityName, Vec<OperationDescriptor>>,
+    ) {
+        *self
+            .entity_operations
+            .write()
+            .expect("entity operations poisoned") = Arc::new(entity_operations);
+        // Under the signal's own write lock, so a cache the profile actor
+        // publishes concurrently is never overwritten by an older one.
+        self.cache_signal.replace_with(|cache| Arc::clone(cache));
+    }
+
     /// Look up operations for an entity name. Entity-level (keyed by id
     /// scheme), so this returns exactly the operations the renderer
     /// attaches to a row of that entity (see `materialize`). Exposed via
     /// the `ProfileResolving` trait.
     fn lookup_operations(&self, entity_name: &str) -> Vec<OperationDescriptor> {
         self.entity_operations
+            .read()
+            .expect("entity operations poisoned")
             .get(&EntityName::new(entity_name))
             .cloned()
             .unwrap_or_default()

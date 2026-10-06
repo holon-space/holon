@@ -65,9 +65,10 @@ pub struct OperationDispatcher {
     /// `providers`; the two lists differ only in when they were filled.
     declared_providers: std::sync::RwLock<Vec<Arc<dyn OperationProvider>>>,
     /// Every provider's descriptors, collected when a provider is added:
-    /// admission reads them for each op it orders. A provider's `operations()`
-    /// is fixed once it is registered.
-    op_catalog: std::sync::RwLock<Arc<Vec<OperationDescriptor>>>,
+    /// admission reads them for each op it orders, and the profile resolver
+    /// follows it so rendered rows offer what dispatch accepts. A provider's
+    /// `operations()` is fixed once it is registered.
+    op_catalog: futures_signals::signal::Mutable<Arc<Vec<OperationDescriptor>>>,
     observers: Vec<Arc<dyn OperationObserver>>,
     sync_token_store: Option<Arc<dyn SyncTokenStore>>,
     view_rebuild: Option<ViewRebuild>,
@@ -227,7 +228,19 @@ impl OperationDispatcher {
             .iter()
             .flat_map(|p| p.operations())
             .collect();
-        *self.op_catalog.write().expect("operation catalog poisoned") = Arc::new(catalog);
+        self.op_catalog.set(Arc::new(catalog));
+    }
+
+    /// Every registered provider's descriptors.
+    pub fn catalog(&self) -> Arc<Vec<OperationDescriptor>> {
+        self.op_catalog.get_cloned()
+    }
+
+    /// The operation catalog now and after every registration.
+    pub fn catalog_signal(
+        &self,
+    ) -> impl futures_signals::signal::Signal<Item = Arc<Vec<OperationDescriptor>>> + use<> {
+        self.op_catalog.signal_cloned()
     }
 
     pub fn set_sync_token_store(&mut self, store: Arc<dyn SyncTokenStore>) {
@@ -389,8 +402,7 @@ impl OperationDispatcher {
         op_name: &str,
         param: impl Fn(&str) -> Option<&'p holon_api::Value>,
     ) -> Result<BTreeSet<holon_api::EntityUri>> {
-        let available_ops =
-            Arc::clone(&self.op_catalog.read().expect("operation catalog poisoned"));
+        let available_ops = self.op_catalog.get_cloned();
         let advertised = available_ops
             .iter()
             .any(|op| op.entity_name == entity_name && op.name == op_name);

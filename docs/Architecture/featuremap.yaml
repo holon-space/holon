@@ -380,7 +380,7 @@ areas:
       - feature: Schema & typed entities
         what: Runtime-declared types projected into their own matviews
         transitions: [DeclareTypedSchema, CreateTypedEntity, RegisterEntityScheme, ConcurrentSchemaInit]
-        invariants: [inv-typed-matview-matches-ref]
+        invariants: [inv-typed-matview-matches-ref, inv-typed-operations-reach-profiles]
         ruled_by: "[0029](../adr/0029-entity-identity-single-minting-authority.md)"
         mode_axes: "—"
         entry: "`crates/holon-turso/src/dynamic_schema_module.rs`"

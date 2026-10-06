@@ -459,6 +459,11 @@ pub enum ConditionKind {
     ///
     /// All-clear: none in this process; the engine is rebuilt at start.
     ViewEngineStopped(String),
+    /// Rendered rows stopped following the operation catalog (`reason`), so an
+    /// operation registered from now on is dispatchable but offered on no row.
+    ///
+    /// All-clear: none in this process.
+    OperationCatalogStopped(String),
     /// The SQL database has run one `command` (its kind, such as
     /// `Transaction`) for `running_secs` without finishing, so every read and
     /// write waits behind it. `report` is the log's account of it: the
@@ -498,6 +503,9 @@ pub const WATCH_VIEWS_SUBJECT: &str = "watch-views";
 
 /// Subject of [`ConditionKind::ViewEngineStopped`].
 pub const VIEW_ENGINE_SUBJECT: &str = "view-engine";
+
+/// Subject of [`ConditionKind::OperationCatalogStopped`].
+pub const OPERATION_CATALOG_SUBJECT: &str = "operation-catalog";
 
 /// Subject prefix of [`ConditionKind::DatabaseStuck`] and
 /// [`ConditionKind::DatabaseWatchFailed`]; the subject names one SQL actor.
@@ -551,6 +559,7 @@ impl ConditionKind {
     pub const WRITTEN_FILES_UNRECORDED: &'static str = "written-files-unrecorded";
     pub const LORO_UPDATE_LOG_TAIL_DROPPED: &'static str = "loro-update-log-tail-dropped";
     pub const VIEW_ENGINE_STOPPED: &'static str = "view-engine-stopped";
+    pub const OPERATION_CATALOG_STOPPED: &'static str = "operation-catalog-stopped";
     pub const DATABASE_STUCK: &'static str = "database-stuck";
     pub const DATABASE_WATCH_FAILED: &'static str = "database-watch-failed";
     pub const DERIVED_FIELD_NOT_COMPUTED: &'static str = "derived-field-not-computed";
@@ -608,6 +617,7 @@ impl ConditionKind {
             Self::WrittenFilesUnrecorded { .. } => Self::WRITTEN_FILES_UNRECORDED,
             Self::LoroUpdateLogTailDropped { .. } => Self::LORO_UPDATE_LOG_TAIL_DROPPED,
             Self::ViewEngineStopped(_) => Self::VIEW_ENGINE_STOPPED,
+            Self::OperationCatalogStopped(_) => Self::OPERATION_CATALOG_STOPPED,
             Self::DatabaseStuck { .. } => Self::DATABASE_STUCK,
             Self::DatabaseWatchFailed { .. } => Self::DATABASE_WATCH_FAILED,
             Self::DerivedFieldNotComputed { .. } => Self::DERIVED_FIELD_NOT_COMPUTED,
