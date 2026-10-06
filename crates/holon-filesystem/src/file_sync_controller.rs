@@ -5757,8 +5757,8 @@ impl FileSyncController {
         // Classify each block the last ingest saw against the tree. One the
         // tree never held is re-seeded. One Holon deleted or moved since is
         // overruled: Holon's change stands, this ingest skips the block, and the
-        // write-back brings the file in line. A deleted block's file children
-        // go with it, except one Holon keeps live elsewhere.
+        // write-back brings the file in line. A deleted block's file subtree
+        // goes with it.
         let mut reseed: HashSet<EntityUri> = HashSet::new();
         let mut overruled: HashMap<EntityUri, HolonChange> = HashMap::new();
         if matches!(self.ordering.consolidator(), Consolidator::Upstream) {
@@ -5771,15 +5771,15 @@ impl FileSyncController {
                     continue;
                 }
                 let old_block = old_blocks.get(&block.id);
-                let parent_deleted = overruled.get(&block.parent_id) == Some(&HolonChange::Deleted);
-                let change = if let Some(old_block) = old_block {
+                let change = if overruled.get(&block.parent_id) == Some(&HolonChange::Deleted) {
+                    HolonChange::Deleted
+                } else if let Some(old_block) = old_block {
                     match self
                         .ordering
                         .ever_seen(&block.id)
                         .await
                         .map_err(|e| anyhow::anyhow!("ever_seen({}): {e:#}", block.id))?
                     {
-                        Seen::Never if parent_deleted => HolonChange::Deleted,
                         Seen::Never => {
                             reseed.insert(block.id.clone());
                             continue;
@@ -5817,13 +5817,18 @@ impl FileSyncController {
                             path.display()
                         ),
                     }
-                } else if parent_deleted {
-                    HolonChange::Deleted
                 } else {
                     continue;
                 };
                 let positional = self.adapter(path)?.positional_property_keys();
-                let edited = old_block.is_none_or(|old| fields_differ(old, block, positional));
+                let edited = match old_block {
+                    Some(old) => fields_differ(
+                        &self.in_file_terms(path, &document_uri, old)?,
+                        &self.in_file_terms(path, &document_uri, block)?,
+                        positional,
+                    ),
+                    None => true,
+                };
                 if edited {
                     let file_text = self.block_file_text(path, &document_uri, block)?;
                     tracing::warn!(

@@ -151,6 +151,7 @@ impl LoroBlockOperations {
             .get("anchor_id")
             .and_then(|v| v.as_string())
             .ok_or("dismiss_advice: missing 'anchor_id' parameter")?;
+        parse_block_id(anchor_id)?;
         let lesson_id = params
             .get("lesson_id")
             .and_then(|v| v.as_string())
@@ -191,6 +192,7 @@ impl LoroBlockOperations {
             .get("id")
             .and_then(|v| v.as_string())
             .ok_or("add_tag: missing 'id' parameter")?;
+        parse_block_id(id)?;
         let tag = params
             .get("tag")
             .and_then(|v| v.as_string())
@@ -273,6 +275,7 @@ impl LoroBlockOperations {
             .get("id")
             .and_then(|v| v.as_string())
             .ok_or("remove_tag: missing 'id' parameter")?;
+        parse_block_id(id)?;
         let tag = params
             .get("tag")
             .and_then(|v| v.as_string())
@@ -335,6 +338,7 @@ impl DataSource<Block> for LoroBlockOperations {
     }
 
     async fn get_by_id(&self, id: &str) -> Result<Option<Block>> {
+        parse_block_id(id)?;
         let backend = self.get_backend("").await?;
         match backend.get_block(id).await {
             Ok(block) => Ok(Some(block)),
@@ -785,6 +789,7 @@ impl CrudOperations<Block> for LoroBlockOperations {
                 let new_parent = value.as_string().map(String::from).ok_or_else(|| {
                     format!("set_field(\"parent_id\"): expected String, got {value:?}")
                 })?;
+                parse_block_id(&new_parent)?;
                 backend
                     .update_parent_id(id, new_parent)
                     .await
@@ -855,6 +860,7 @@ impl CrudOperations<Block> for LoroBlockOperations {
             .and_then(|v| v.as_string())
             .map(|s| s.to_string())
             .ok_or("parent_id is required for block creation")?;
+        let parent_uri = parse_block_id(&parent_id)?;
         if fields
             .get("task_state")
             .and_then(|v| v.as_string())
@@ -969,16 +975,17 @@ impl CrudOperations<Block> for LoroBlockOperations {
             .and_then(|v| v.as_string())
             .map(|s| s.to_string());
 
-        let block_id = fields
+        let block_uri = fields
             .get("id")
             .and_then(|v| v.as_string())
-            .map(|s| s.to_string());
+            .map(parse_block_id)
+            .transpose()?;
 
         tracing::debug!(
             "[LoroBlockOperations::create] doc_id={:?}, block_id={:?}, parent_id={:?}, \
              content_type={:?}, source_language={:?}",
             doc_id,
-            block_id,
+            block_uri,
             parent_id,
             content_type,
             source_language
@@ -1019,8 +1026,8 @@ impl CrudOperations<Block> for LoroBlockOperations {
         let backend = self.get_backend(&doc_id).await?;
 
         // Check if block already exists (upsert behavior)
-        let existing_block = if let Some(ref id) = block_id {
-            backend.get_block(id).await.ok() // ALLOW(ok): block may not exist
+        let existing_block = if let Some(id) = &block_uri {
+            backend.get_block(id.as_str()).await.ok() // ALLOW(ok): block may not exist
         } else {
             None
         };
@@ -1037,11 +1044,9 @@ impl CrudOperations<Block> for LoroBlockOperations {
             );
 
             // If parent changed, move the block in the tree
-            // ALLOW(entity_uri_from_raw): parent_id from operation params dict
-            let new_parent_ref = holon_api::EntityUri::from_raw(&parent_id);
-            if existing.parent_id != new_parent_ref {
+            if existing.parent_id != parent_uri {
                 backend
-                    .move_block(&existing.id, new_parent_ref.clone(), None)
+                    .move_block(&existing.id, parent_uri.clone(), None)
                     .await
                     .map_err(|e| format!("Failed to move block to new parent: {}", e))?;
             }
@@ -1066,10 +1071,6 @@ impl CrudOperations<Block> for LoroBlockOperations {
                 .map_err(|e| format!("Failed to get updated block: {}", e))?
         } else {
             // Block doesn't exist - create it
-            // ALLOW(entity_uri_from_raw): parent_id from operation params dict
-            let parent_uri = holon_api::EntityUri::from_raw(&parent_id);
-            // ALLOW(entity_uri_from_raw): block_id from operation params 'id' field
-            let block_uri = block_id.map(|id| holon_api::EntityUri::from_raw(&id));
             backend
                 .create_block_with_properties(
                     parent_uri,
@@ -1360,6 +1361,7 @@ impl LoroBlockOperations {
 #[async_trait]
 impl TaskOperations<Block> for LoroBlockOperations {
     async fn set_title(&self, id: &str, title: &str) -> Result<OperationResult> {
+        parse_block_id(id)?;
         // Get current content, replace first line
         let backend = self.get_backend("").await?;
         let block = backend.get_block(id).await?;
@@ -1413,6 +1415,7 @@ impl TaskOperations<Block> for LoroBlockOperations {
     }
 
     async fn cycle_task_state(&self, id: &str) -> Result<OperationResult> {
+        parse_block_id(id)?;
         let backend = self.get_backend("").await?;
         let block = backend.get_block(id).await?;
         let current = block.get_property_str("task_state").unwrap_or_default();
@@ -1456,6 +1459,7 @@ impl MarkOperations<Block> for LoroBlockOperations {
         range_end: i64,
         mark_json: String,
     ) -> Result<OperationResult> {
+        parse_block_id(id)?;
         let start = usize::try_from(range_start).map_err(|_| {
             format!("apply_mark: range_start must be non-negative, got {range_start}")
         })?;
@@ -1511,6 +1515,7 @@ impl MarkOperations<Block> for LoroBlockOperations {
         range_end: i64,
         key: String,
     ) -> Result<OperationResult> {
+        parse_block_id(id)?;
         let start = usize::try_from(range_start).map_err(|_| {
             format!("remove_mark: range_start must be non-negative, got {range_start}")
         })?;
@@ -1562,6 +1567,7 @@ impl MarkOperations<Block> for LoroBlockOperations {
 #[async_trait]
 impl TextOperations<Block> for LoroBlockOperations {
     async fn insert_text(&self, id: &str, pos: i64, text: String) -> Result<OperationResult> {
+        parse_block_id(id)?;
         let pos_usize = usize::try_from(pos)
             .map_err(|_| format!("insert_text: pos must be non-negative, got {pos}"))?;
         let backend = self.find_doc_for_block(id).await?;
@@ -1607,6 +1613,7 @@ impl TextOperations<Block> for LoroBlockOperations {
     }
 
     async fn delete_text(&self, id: &str, pos: i64, len: i64) -> Result<OperationResult> {
+        parse_block_id(id)?;
         let pos_usize = usize::try_from(pos)
             .map_err(|_| format!("delete_text: pos must be non-negative, got {pos}"))?;
         let len_usize = usize::try_from(len)
@@ -1863,6 +1870,7 @@ impl OperationProvider for LoroBlockOperations {
     }
 
     async fn read_block_content_marks(&self, id: &str) -> Result<Option<(String, Value)>> {
+        parse_block_id(id)?;
         let block = match self.find_doc_for_block(id).await?.get_block(id).await {
             Ok(block) => block,
             Err(holon_api::ApiError::BlockNotFound { .. }) => return Ok(None),
@@ -3553,8 +3561,9 @@ mod unheld_write_tests {
         );
     }
 
-    /// An id that forms no URI, or an empty id, is refused with an error that
-    /// names the id — never a panic, never a refusal of `block:`.
+    /// An id that forms no URI, or an empty id, is refused by every entry that
+    /// takes a block id with an error that names the id — never a panic, never
+    /// a refusal of `block:`.
     #[tokio::test]
     async fn a_malformed_or_empty_id_is_refused_by_name() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3563,23 +3572,98 @@ mod unheld_write_tests {
         )));
         let ops = LoroBlockOperations::new(store);
         ops.get_backend("").await.expect("backend");
+        let held: StorageEntity = HashMap::from([
+            ("id".into(), Value::String("block:held".into())),
+            (
+                "parent_id".into(),
+                Value::String(EntityUri::no_parent().to_string()),
+            ),
+            ("content".into(), Value::String("held".into())),
+        ]);
+        ops.create(held).await.expect("create the held block");
 
         for id in ["a b", ""] {
-            let err = ops
-                .set_field(id, "content", Value::String("x".into()))
-                .await
-                .expect_err("set_field on a malformed id is refused");
-            assert!(
-                err.downcast_ref::<BlockNotInWriteAuthority>().is_none()
-                    && err.to_string().contains(&format!("{id:?}")),
-                "set_field({id:?}): {err}"
+            let with_id = |key: &str| -> StorageEntity {
+                HashMap::from([(key.into(), Value::String(id.into()))])
+            };
+            let mut tag = with_id("id");
+            tag.insert("tag".into(), Value::String("t".into()));
+            let mut advice = with_id("anchor_id");
+            advice.insert("lesson_id".into(), Value::String("lesson:l".into()));
+            let mut create_id = with_id("id");
+            create_id.insert(
+                "parent_id".into(),
+                Value::String(EntityUri::no_parent().to_string()),
             );
-            let err = ops.delete(id).await.expect_err("delete is refused");
-            assert!(
-                err.downcast_ref::<BlockNotInWriteAuthority>().is_none()
-                    && err.to_string().contains(&format!("{id:?}")),
-                "delete({id:?}): {err}"
-            );
+            create_id.insert("content".into(), Value::String("x".into()));
+            let mut create_parent = with_id("parent_id");
+            create_parent.insert("content".into(), Value::String("x".into()));
+
+            let entries: Vec<(&str, Result<()>)> = vec![
+                ("get_by_id", ops.get_by_id(id).await.map(|_| ())),
+                (
+                    "set_field",
+                    ops.set_field(id, "content", Value::String("x".into()))
+                        .await
+                        .map(|_| ()),
+                ),
+                (
+                    "set_field parent_id value",
+                    ops.set_field("block:held", "parent_id", Value::String(id.into()))
+                        .await
+                        .map(|_| ()),
+                ),
+                ("create id", ops.create(create_id).await.map(|_| ())),
+                (
+                    "create parent_id",
+                    ops.create(create_parent).await.map(|_| ()),
+                ),
+                ("delete", ops.delete(id).await.map(|_| ())),
+                ("set_title", ops.set_title(id, "x").await.map(|_| ())),
+                (
+                    "set_state",
+                    ops.set_state(id, "TODO".into()).await.map(|_| ()),
+                ),
+                (
+                    "cycle_task_state",
+                    ops.cycle_task_state(id).await.map(|_| ()),
+                ),
+                ("set_due_date", ops.set_due_date(id, None).await.map(|_| ())),
+                ("set_priority", ops.set_priority(id, 1).await.map(|_| ())),
+                (
+                    "apply_mark",
+                    ops.apply_mark(id, 0, 1, r#"{"type":"bold"}"#.into())
+                        .await
+                        .map(|_| ()),
+                ),
+                (
+                    "remove_mark",
+                    ops.remove_mark(id, 0, 1, "bold".into()).await.map(|_| ()),
+                ),
+                (
+                    "insert_text",
+                    ops.insert_text(id, 0, "x".into()).await.map(|_| ()),
+                ),
+                ("delete_text", ops.delete_text(id, 0, 1).await.map(|_| ())),
+                (
+                    "read_block_content_marks",
+                    ops.read_block_content_marks(id).await.map(|_| ()),
+                ),
+                ("add_tag", ops.add_tag(&tag).await.map(|_| ())),
+                ("remove_tag", ops.remove_tag(&tag).await.map(|_| ())),
+                (
+                    "dismiss_advice",
+                    ops.dismiss_advice(&advice).await.map(|_| ()),
+                ),
+            ];
+            for (entry, outcome) in entries {
+                let err = outcome.expect_err(entry);
+                assert!(
+                    err.downcast_ref::<BlockNotInWriteAuthority>().is_none()
+                        && err.to_string().contains(&format!("block id {id:?}")),
+                    "{entry}({id:?}): {err}"
+                );
+            }
         }
     }
 }
