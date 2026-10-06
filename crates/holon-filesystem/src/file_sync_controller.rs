@@ -4489,17 +4489,22 @@ impl FileSyncController {
             .with_context(|| format!("keep the copies {held:?} in {}", path.display()))
     }
 
+    /// `block` alone, as the format writes it into `path`.
+    fn block_file_text(&self, path: &Path, doc: &EntityUri, block: &Block) -> Result<String> {
+        let mut alone = block.clone();
+        alone.parent_id = doc.clone();
+        Ok(self
+            .adapter(path)?
+            .render_blocks(&[alone], path, doc)
+            .with_context(|| format!("render block {} as {} writes it", block.id, path.display()))?
+            .text)
+    }
+
     /// `block` as the format writes and re-reads it, so a field the file
     /// cannot carry never reads as an edit.
     fn in_file_terms(&self, path: &Path, doc: &EntityUri, block: &Block) -> Result<Block> {
-        let adapter = self.adapter(path)?;
-        let mut alone = block.clone();
-        alone.parent_id = doc.clone();
-        let text = adapter
-            .render_blocks(&[alone], path, doc)
-            .with_context(|| format!("render block {} as {} writes it", block.id, path.display()))?
-            .text;
-        adapter
+        let text = self.block_file_text(path, doc, block)?;
+        self.adapter(path)?
             .parse(path, &text, &EntityUri::no_parent(), &self.root_dir)
             .with_context(|| format!("re-read block {} as {} writes it", block.id, path.display()))?
             .blocks
@@ -5752,8 +5757,8 @@ impl FileSyncController {
         // Classify each block the last ingest saw against the tree. One the
         // tree never held is re-seeded. One Holon deleted or moved since is
         // overruled: Holon's change stands, this ingest skips the block, and the
-        // write-back brings the file in line. A deleted block's file subtree
-        // goes with it.
+        // write-back brings the file in line. A deleted block's file children
+        // go with it, except one Holon keeps live elsewhere.
         let mut reseed: HashSet<EntityUri> = HashSet::new();
         let mut overruled: HashMap<EntityUri, HolonChange> = HashMap::new();
         if matches!(self.ordering.consolidator(), Consolidator::Upstream) {
@@ -5766,15 +5771,15 @@ impl FileSyncController {
                     continue;
                 }
                 let old_block = old_blocks.get(&block.id);
-                let change = if overruled.get(&block.parent_id) == Some(&HolonChange::Deleted) {
-                    HolonChange::Deleted
-                } else if let Some(old_block) = old_block {
+                let parent_deleted = overruled.get(&block.parent_id) == Some(&HolonChange::Deleted);
+                let change = if let Some(old_block) = old_block {
                     match self
                         .ordering
                         .ever_seen(&block.id)
                         .await
                         .map_err(|e| anyhow::anyhow!("ever_seen({}): {e:#}", block.id))?
                     {
+                        Seen::Never if parent_deleted => HolonChange::Deleted,
                         Seen::Never => {
                             reseed.insert(block.id.clone());
                             continue;
@@ -5804,23 +5809,33 @@ impl FileSyncController {
                             }
                             HolonChange::Moved
                         }
-                        Seen::NoHistory => continue,
+                        Seen::NoHistory => anyhow::bail!(
+                            "[on_file_changed] {} of {}: the upstream consolidator keeps no \
+                             history, so this ingest cannot tell a block Holon deleted from one \
+                             it never held",
+                            block.id,
+                            path.display()
+                        ),
                     }
+                } else if parent_deleted {
+                    HolonChange::Deleted
                 } else {
                     continue;
                 };
-                let edited = old_block.is_none_or(|old| old.content != block.content);
+                let positional = self.adapter(path)?.positional_property_keys();
+                let edited = old_block.is_none_or(|old| fields_differ(old, block, positional));
                 if edited {
+                    let file_text = self.block_file_text(path, &document_uri, block)?;
                     tracing::warn!(
                         block_id = %block.id,
                         file = %path.display(),
                         %change,
-                        file_text = %block.content,
+                        %file_text,
                         "[FileSyncController] the file edited a block Holon {change} since the \
                          last sync; Holon's change stands and the file's text is not ingested"
                     );
                     if let Some(disclosure) = &self.writeback_disclosure {
-                        disclosure.file_edit_overruled(&block.id, path, &block.content, change);
+                        disclosure.file_edit_overruled(&block.id, path, &file_text, change);
                     }
                 } else {
                     tracing::warn!(

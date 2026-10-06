@@ -3,8 +3,9 @@
 //! Holon change has landed. The saved file then still holds the block where
 //! the Loro tree no longer does. The vault must converge: the edit reaches the
 //! store, the Holon change stands, and the write-back carries it to disk.
-//! When the editor also changed the block Holon changed, the text it loses is
-//! disclosed as a condition naming it.
+//! When the editor also changed the block Holon changed — its text or only a
+//! property — the block's file text it loses is disclosed as a condition
+//! naming it.
 //!
 //! @pbt kind harness
 //! @pbt covers delete-races-file-edit — a Holon delete or move racing an
@@ -35,6 +36,14 @@ const VAULT: &str = "* Alpha
 enum HolonChange {
     DeleteBeta,
     IndentBetaUnderAlpha,
+}
+
+/// What the editor's save changes on Beta, the block Holon changed.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum BetaEdit {
+    Untouched,
+    Content,
+    PropertyOnly,
 }
 
 fn runtime() -> Arc<tokio::runtime::Runtime> {
@@ -97,15 +106,31 @@ async fn disk(env: &TestEnvironment, path: &std::path::Path) -> String {
 #[test]
 fn a_delete_racing_an_external_edit_of_the_same_file_converges() {
     let rt = runtime();
-    rt.clone()
-        .block_on(holon_change_races_edit(rt, HolonChange::DeleteBeta, false));
+    rt.clone().block_on(holon_change_races_edit(
+        rt,
+        HolonChange::DeleteBeta,
+        BetaEdit::Untouched,
+    ));
 }
 
 #[test]
 fn a_delete_racing_an_external_edit_of_the_deleted_block_discloses_the_lost_text() {
     let rt = runtime();
-    rt.clone()
-        .block_on(holon_change_races_edit(rt, HolonChange::DeleteBeta, true));
+    rt.clone().block_on(holon_change_races_edit(
+        rt,
+        HolonChange::DeleteBeta,
+        BetaEdit::Content,
+    ));
+}
+
+#[test]
+fn a_delete_racing_a_property_only_edit_of_the_deleted_block_discloses_the_lost_text() {
+    let rt = runtime();
+    rt.clone().block_on(holon_change_races_edit(
+        rt,
+        HolonChange::DeleteBeta,
+        BetaEdit::PropertyOnly,
+    ));
 }
 
 #[test]
@@ -114,7 +139,7 @@ fn a_move_racing_an_external_edit_of_the_same_file_converges() {
     rt.clone().block_on(holon_change_races_edit(
         rt,
         HolonChange::IndentBetaUnderAlpha,
-        false,
+        BetaEdit::Untouched,
     ));
 }
 
@@ -124,14 +149,24 @@ fn a_move_racing_an_external_edit_of_the_moved_block_discloses_the_lost_text() {
     rt.clone().block_on(holon_change_races_edit(
         rt,
         HolonChange::IndentBetaUnderAlpha,
-        true,
+        BetaEdit::Content,
+    ));
+}
+
+#[test]
+fn a_move_racing_a_property_only_edit_of_the_moved_block_discloses_the_lost_text() {
+    let rt = runtime();
+    rt.clone().block_on(holon_change_races_edit(
+        rt,
+        HolonChange::IndentBetaUnderAlpha,
+        BetaEdit::PropertyOnly,
     ));
 }
 
 async fn holon_change_races_edit(
     runtime: Arc<tokio::runtime::Runtime>,
     change: HolonChange,
-    edit_beta: bool,
+    beta_edit: BetaEdit,
 ) {
     holon_integration_tests::test_tracing::SpanCollector::global();
     let env = TestEnvironment::new(runtime).expect("TestEnvironment::new");
@@ -182,12 +217,19 @@ async fn holon_change_races_edit(
     );
     let mut edited = before.replacen("* Alpha", "* Alpha edited outside", 1);
     assert_ne!(edited, before, "the editor's change must touch Alpha");
-    if edit_beta {
-        edited = edited.replacen("\n* Beta", "\n* Beta edited outside", 1);
-        assert!(
-            edited.contains("* Beta edited outside"),
-            "the editor must edit Beta"
-        );
+    let lost_marker = match beta_edit {
+        BetaEdit::Untouched => None,
+        BetaEdit::Content => {
+            edited = edited.replacen("\n* Beta", "\n* Beta edited outside", 1);
+            Some("* Beta edited outside")
+        }
+        BetaEdit::PropertyOnly => {
+            edited = edited.replacen(":ID: d91-beta\n", ":ID: d91-beta\n:OWNER: editor\n", 1);
+            Some(":OWNER: editor")
+        }
+    };
+    if let Some(marker) = lost_marker {
+        assert!(edited.contains(marker), "the editor must edit Beta");
     }
     env.write_org_file("vault.org", &edited)
         .await
@@ -209,10 +251,13 @@ async fn holon_change_races_edit(
             }
         };
         let disclosed = overruled_text(&env, "block:d91-beta");
-        let disclosure_right = if edit_beta {
-            disclosed.as_deref() == Some("Beta edited outside")
-        } else {
-            disclosed.is_none()
+        let disclosure_right = match (lost_marker, &disclosed) {
+            (Some(marker), Some(text)) => {
+                let text = text.to_lowercase();
+                text.contains(&marker.to_lowercase()) && text.contains("d91-beta")
+            }
+            (None, None) => true,
+            _ => false,
         };
         if edit_landed && change_stands && disclosure_right {
             break;
@@ -222,12 +267,120 @@ async fn holon_change_races_edit(
             "the vault did not converge after the race with a {change:?}: Alpha in the store \
              {alpha:?} (want the editor's text), Beta in the store {beta:?}, Beta's overruled \
              file text disclosed {disclosed:?} (want {}), vault.org on disk:\n{on_disk}",
-            if edit_beta {
-                "the editor's Beta text"
-            } else {
-                "none"
+            match lost_marker {
+                Some(marker) => format!("Beta's org text holding {marker:?}"),
+                None => "none".to_string(),
             }
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+const PARENT_VAULT: &str = "* Alpha
+:PROPERTIES:
+:ID: d92-alpha
+:END:
+** Child
+:PROPERTIES:
+:ID: d92-child
+:END:
+* Gamma
+:PROPERTIES:
+:ID: d92-gamma
+:END:
+";
+
+/// Holon deletes a parent and keeps its child, and the editor saves the file
+/// that still holds the child, edited, under that parent. The child stays live
+/// in Holon, the parent stays deleted, the editor's other edit lands, and the
+/// child's lost edit is disclosed as overruled by a move, not by a delete.
+#[test]
+fn a_parent_delete_keeping_its_child_racing_an_external_edit_keeps_the_child() {
+    let rt = runtime();
+    rt.clone().block_on(async move {
+        holon_integration_tests::test_tracing::SpanCollector::global();
+        let env = TestEnvironment::new(rt).expect("TestEnvironment::new");
+        assert!(env.loro_enabled(), "this race needs the Loro wiring");
+        let path = env
+            .write_org_file("vault.org", PARENT_VAULT)
+            .await
+            .expect("write vault.org");
+        env.start_app(true).await.expect("start_app");
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while row(&env, "block:d92-gamma").await.is_none() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the org scan never projected vault.org into SQL"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        env.wait_for_loro_quiescence(Duration::from_secs(10)).await;
+        env.wait_for_org_files_stable(100, Duration::from_secs(10))
+            .await;
+        let doc = row(&env, "block:d92-alpha").await.expect("Alpha row").1;
+
+        env.write_org_file("bulk.org", &bulk_file())
+            .await
+            .expect("write bulk.org");
+        env.execute_operation(
+            "block",
+            "delete_keep_children",
+            HashMap::from([("id".to_string(), Value::String("block:d92-alpha".into()))]),
+        )
+        .await
+        .expect("delete Alpha, keep Child");
+        let before = disk(&env, &path).await;
+        assert!(
+            before.contains("* Alpha\n") && before.contains("** Child\n"),
+            "the race was not staged: the write-back carried the delete before the editor \
+             saved:\n{before}"
+        );
+        let edited = before
+            .replacen("* Gamma", "* Gamma edited outside", 1)
+            .replacen("** Child", "** Child edited outside", 1);
+        env.write_org_file("vault.org", &edited)
+            .await
+            .expect("the editor saves vault.org");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            let alpha = row(&env, "block:d92-alpha").await;
+            let child = row(&env, "block:d92-child").await;
+            let gamma = row(&env, "block:d92-gamma").await;
+            let on_disk = disk(&env, &path).await;
+            let disclosed = env
+                .injector()
+                .expect("injector")
+                .resolve::<Arc<holon_api::ConditionBus>>()
+                .current()
+                .into_iter()
+                .find_map(|c| match c.reason {
+                    holon_api::ConditionKind::FileEditOverruled { change, .. }
+                        if c.subject == "block:d92-child" =>
+                    {
+                        Some(change)
+                    }
+                    _ => None,
+                });
+            if disclosed == Some(holon_api::HolonChange::Moved)
+                && gamma.as_ref().map(|(c, _)| c.as_str()) == Some("Gamma edited outside")
+                && on_disk.contains("* Gamma edited outside")
+                && alpha.is_none()
+                && !on_disk.contains("d92-alpha")
+                && child.as_ref().map(|(c, p)| (c.as_str(), p.as_str()))
+                    == Some(("Child", doc.as_str()))
+                && on_disk.contains("\n* Child\n")
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the vault did not converge after a parent delete keeping its child raced an \
+                 edit: Alpha {alpha:?} (want none), Child {child:?} (want under {doc}), Gamma \
+                 {gamma:?} (want the editor's text), Child's lost edit disclosed as overruled by \
+                 {disclosed:?} (want Moved), vault.org on disk:\n{on_disk}"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    });
 }

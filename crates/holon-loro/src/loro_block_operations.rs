@@ -469,15 +469,22 @@ const CREATE_HANDLED_FIELDS: [&str; 12] = [
     "after",
 ];
 
-/// Whether `create` reads `key` as an instruction rather than as a
-/// property to store — the edge fields plus [`CREATE_HANDLED_FIELDS`].
-/// Refuse a write on `id`, which the Loro tree does not hold (D69.a).
-fn not_held<T>(id: &str) -> Result<T> {
-    // ALLOW(entity_uri_from_raw): id &str from the CrudOperations API surface,
-    // schemed or bare
-    Err(BlockNotInWriteAuthority::new(EntityUri::from_raw(id)).into())
+/// Parse a block id from the `CrudOperations` surface, schemed or bare. An id
+/// that names no block is an error naming that id.
+fn parse_block_id(id: &str) -> Result<EntityUri> {
+    if id.is_empty() {
+        return Err("block id \"\" is empty".into());
+    }
+    Ok(EntityUri::try_from_raw(id).map_err(|e| format!("block id {id:?}: {e:#}"))?)
 }
 
+/// Refuse a write on `block`, which the Loro tree does not hold (D69.a).
+fn not_held<T>(block: EntityUri) -> Result<T> {
+    Err(BlockNotInWriteAuthority::new(block).into())
+}
+
+/// Whether `create` reads `key` as an instruction rather than as a
+/// property to store — the edge fields plus [`CREATE_HANDLED_FIELDS`].
 fn create_handles_field(key: &str) -> bool {
     holon_api::EdgeField::is_edge_column(key) || CREATE_HANDLED_FIELDS.contains(&key)
 }
@@ -521,6 +528,7 @@ fn edge_string_targets(value: &Value, field: &str) -> std::result::Result<Vec<St
 #[async_trait]
 impl CrudOperations<Block> for LoroBlockOperations {
     async fn set_field(&self, id: &str, field: &str, value: Value) -> Result<OperationResult> {
+        let block_uri = parse_block_id(id)?;
         let backend = self.find_doc_for_block(id).await?;
 
         // Capture the prior block state ONCE, up front, so we can build both a
@@ -537,7 +545,7 @@ impl CrudOperations<Block> for LoroBlockOperations {
         // Rich content (Object with marks) and mark-only edits stay irreversible.
         let prior = match backend.get_block(id).await {
             Ok(block) => block,
-            Err(ApiError::BlockNotFound { .. }) => return not_held(id),
+            Err(ApiError::BlockNotFound { .. }) => return not_held(block_uri),
             Err(e) => return Err(format!("set_field('{field}'): capture prior state: {e}").into()),
         };
 
@@ -1156,6 +1164,7 @@ impl CrudOperations<Block> for LoroBlockOperations {
     }
 
     async fn delete(&self, id: &str) -> Result<OperationResult> {
+        let block_uri = parse_block_id(id)?;
         let backend = self.find_doc_for_block(id).await?;
 
         // A shared page or a share's mount is a handle on a share: its delete
@@ -1201,7 +1210,7 @@ impl CrudOperations<Block> for LoroBlockOperations {
         // MCP/agent path — no caller can cascade by accident.
         let block = match backend.get_block(id).await {
             Ok(block) => block,
-            Err(ApiError::BlockNotFound { .. }) => return not_held(id),
+            Err(ApiError::BlockNotFound { .. }) => return not_held(block_uri),
             Err(e) => return Err(format!("delete: capture block {id}: {e}").into()),
         };
 
@@ -3516,10 +3525,11 @@ mod unheld_write_tests {
         let ops = LoroBlockOperations::new(store);
         ops.get_backend("").await.expect("backend");
 
-        let err = not_held::<()>("absent-bare").expect_err("not_held always refuses");
+        let err = not_held::<()>(parse_block_id("absent-bare").expect("a bare id parses"))
+            .expect_err("not_held always refuses");
         assert_eq!(
             err.downcast_ref::<BlockNotInWriteAuthority>(),
-            Some(&BlockNotInWriteAuthority::new(EntityUri::from_raw(
+            Some(&BlockNotInWriteAuthority::new(EntityUri::block(
                 "absent-bare"
             ))),
             "got: {err}"
@@ -3541,5 +3551,35 @@ mod unheld_write_tests {
             err.downcast_ref::<BlockNotInWriteAuthority>().is_some(),
             "delete: {err}"
         );
+    }
+
+    /// An id that forms no URI, or an empty id, is refused with an error that
+    /// names the id — never a panic, never a refusal of `block:`.
+    #[tokio::test]
+    async fn a_malformed_or_empty_id_is_refused_by_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(RwLock::new(LoroDocumentStore::new(
+            dir.path().to_path_buf(),
+        )));
+        let ops = LoroBlockOperations::new(store);
+        ops.get_backend("").await.expect("backend");
+
+        for id in ["a b", ""] {
+            let err = ops
+                .set_field(id, "content", Value::String("x".into()))
+                .await
+                .expect_err("set_field on a malformed id is refused");
+            assert!(
+                err.downcast_ref::<BlockNotInWriteAuthority>().is_none()
+                    && err.to_string().contains(&format!("{id:?}")),
+                "set_field({id:?}): {err}"
+            );
+            let err = ops.delete(id).await.expect_err("delete is refused");
+            assert!(
+                err.downcast_ref::<BlockNotInWriteAuthority>().is_none()
+                    && err.to_string().contains(&format!("{id:?}")),
+                "delete({id:?}): {err}"
+            );
+        }
     }
 }

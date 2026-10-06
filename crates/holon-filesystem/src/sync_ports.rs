@@ -599,9 +599,9 @@ pub trait WritebackDisclosure: Send + Sync {
     /// Sticky for the rest of the process.
     fn deletion_ended_by_edit(&self, block_id: &EntityUri, file: &Path);
 
-    /// Signal that `block_id`'s line in `file` was edited after Holon
-    /// `change`d the block: Holon's change stands and `file_text` is not
-    /// ingested. Sticky for the rest of the process.
+    /// Signal that `block_id` in `file` was edited after Holon `change`d the
+    /// block: Holon's change stands and `file_text`, the block as the file
+    /// holds it, is not ingested. Sticky for the rest of the process.
     fn file_edit_overruled(
         &self,
         block_id: &EntityUri,

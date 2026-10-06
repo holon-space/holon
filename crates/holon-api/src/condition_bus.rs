@@ -408,8 +408,9 @@ pub enum ConditionKind {
     /// All-clear: none in this process.
     DeletionEndedByEdit { file: String },
     /// `subject`, a block id, was edited in `file` after Holon `change`d it.
-    /// Holon's change stands; the file's text, `file_text`, is not ingested,
-    /// and the next write-back replaces it.
+    /// Holon's change stands; the block as the file holds it, `file_text`
+    /// (text, properties, tags, state), is not ingested, and the next
+    /// write-back replaces it.
     ///
     /// All-clear: none in this process.
     FileEditOverruled {
