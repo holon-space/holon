@@ -317,6 +317,30 @@ debug = "line-tables-only"
 [profile.dev.build-override]
 opt-level = 3
 
+# Unoptimized wasmi interprets a plugin parse ~140x slower than release, so a
+# debug build's boot scan over a recipe vault takes hours. At opt-level 3
+# wasmi dispatches through tail calls, and with debug assertions on those
+# calls are not lowered as tail calls and overflow the native stack.
+[profile.dev.package.wasmi]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
+[profile.dev.package.wasmi_core]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
+[profile.dev.package.wasmi_ir]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
+[profile.dev.package.wasmi_collections]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
 [profile.release]
 debug = "line-tables-only"
 codegen-units = 4

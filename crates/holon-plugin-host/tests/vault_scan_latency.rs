@@ -8,6 +8,7 @@
 //! in both profiles.
 
 use std::path::PathBuf;
+use std::time::Duration;
 use std::time::Instant;
 
 use holon_api::EntityUri;
@@ -89,5 +90,68 @@ fn two_hundred_recipes_on_one_host() {
         vault.len(),
         elapsed.as_secs_f64() * 1000.0,
         elapsed.as_secs_f64() * 1000.0 / vault.len() as f64
+    );
+}
+
+/// The boot scan parses every `.cook` file in the vault on one thread, and a
+/// file is refused only after its parse. Holon is dogfooded on debug builds,
+/// so this budget holds in the profile the tests run in, not only in release.
+/// It is CPU time on the parsing thread, so machine load does not move it.
+const PARSE_BUDGET_PER_RECIPE: Duration = Duration::from_millis(20);
+
+/// Measured cost is 8-10 ms. A reading far below that means the guest ran on
+/// another thread, so the budget above would pass without bounding the scan.
+const PARSE_FLOOR_PER_RECIPE: Duration = Duration::from_millis(2);
+
+fn thread_cpu_time() -> Duration {
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    let rc = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut now) };
+    assert_eq!(
+        rc,
+        0,
+        "clock_gettime(CLOCK_THREAD_CPUTIME_ID) failed: {}",
+        std::io::Error::last_os_error()
+    );
+    Duration::new(now.tv_sec as u64, now.tv_nsec as u32)
+}
+
+#[test]
+fn refusing_a_recipe_stays_within_the_scan_budget_in_every_build_profile() {
+    let plugin = support::bundled_cook_plugin();
+    let root = PathBuf::from("/vault");
+    let recipe = support::big_recipe(20);
+    let files = 20;
+
+    let started = Instant::now();
+    let cpu_started = thread_cpu_time();
+    for i in 0..files {
+        let path = root.join(format!("Rezepte/Aargauer Rüeblitorte {i}.cook"));
+        let Err(refusal) = plugin.parse(&path, &recipe, &EntityUri::no_parent(), &root) else {
+            panic!("a recipe whose path holds a space derives an unstorable id");
+        };
+        assert!(
+            format!("{refusal:#}").contains("is not a storable URI path"),
+            "refused for another reason: {refusal:#}"
+        );
+    }
+    let per_recipe = (thread_cpu_time() - cpu_started) / files;
+    println!(
+        "REFUSAL: {per_recipe:?} CPU per refused recipe ({:?} wall)",
+        started.elapsed() / files
+    );
+
+    assert!(
+        per_recipe < PARSE_BUDGET_PER_RECIPE,
+        "refusing one recipe took {per_recipe:?} of CPU, over the {PARSE_BUDGET_PER_RECIPE:?} budget; a \
+         vault of 4352 recipes would hold the boot scan for {:?}",
+        per_recipe * 4352
+    );
+    assert!(
+        per_recipe > PARSE_FLOOR_PER_RECIPE,
+        "refusing one recipe took only {per_recipe:?} of CPU on this thread, under the \
+         {PARSE_FLOOR_PER_RECIPE:?} floor; the parse no longer runs on the calling thread"
     );
 }

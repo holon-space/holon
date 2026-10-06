@@ -6100,6 +6100,7 @@ dependencies = [
  "holon-api",
  "holon-core",
  "holon-rows",
+ "libc",
  "proptest 1.11.0",
  "serde",
  "serde_json",
