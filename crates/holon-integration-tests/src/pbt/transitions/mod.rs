@@ -95,6 +95,7 @@ pub fn model_chord_click_focus<
 
 mod advance_day;
 pub mod apply_mutation;
+pub mod arm_write_churn;
 mod arrow_navigate;
 mod attempt_ingest_compound_on_read_only;
 mod attempt_read_only_edit;
@@ -118,6 +119,7 @@ pub mod delete_placement_parent;
 pub mod delete_placement_record;
 mod delete_refused_recipe;
 mod dense_projection_edit;
+mod disarm_write_churn;
 mod dispatch_unschemed_block_id;
 mod drag_drop_block;
 mod edit_block_copy;
@@ -126,6 +128,7 @@ pub mod edit_decision_subtree;
 mod emit_mcp_data;
 mod epoch_flip_rejected;
 mod expand_toggle;
+mod external_line_edit;
 pub mod external_write_same_block_focused;
 pub mod external_write_while_focused;
 mod fail_next_dispatch;
@@ -185,6 +188,7 @@ mod switch_view;
 pub mod sync_now;
 mod toggle_collapse;
 pub mod toggle_state;
+mod touch_file;
 pub mod trigger_slash_command;
 pub mod type_chars;
 mod undo_last_mutation;
@@ -201,6 +205,7 @@ mod toggle_drawer;
 
 pub use advance_day::AdvanceDay;
 pub use apply_mutation::ApplyMutation;
+pub use arm_write_churn::ArmWriteChurn;
 pub use arrow_navigate::ArrowNavigate;
 pub use attempt_ingest_compound_on_read_only::AttemptIngestCompoundOnReadOnly;
 pub use attempt_read_only_edit::AttemptReadOnlyEdit;
@@ -225,6 +230,7 @@ pub use delete_placement_record::DeletePlacementRecord;
 pub use delete_refused_recipe::DeleteRefusedRecipe;
 pub use deliver_block_content::DeliverBlockContent;
 pub use dense_projection_edit::DenseProjectionEdit;
+pub use disarm_write_churn::DisarmWriteChurn;
 pub use dispatch_unschemed_block_id::DispatchUnschemedBlockId;
 pub use drag_drop_block::DragDropBlock;
 pub use edit_block_copy::EditBlockCopy;
@@ -233,6 +239,7 @@ pub use edit_decision_subtree::EditDecisionSubtree;
 pub use emit_mcp_data::EmitMcpData;
 pub use epoch_flip_rejected::EpochFlipRejected;
 pub use expand_toggle::ExpandToggle;
+pub use external_line_edit::ExternalLineEdit;
 pub use external_write_same_block_focused::ExternalWriteSameBlockFocused;
 pub use external_write_while_focused::ExternalWriteWhileFocused;
 pub use fail_next_dispatch::FailNextDispatch;
@@ -303,6 +310,7 @@ pub use sync_now::SyncNow;
 pub use toggle_collapse::ToggleCollapse;
 pub use toggle_drawer::ToggleDrawer;
 pub use toggle_state::ToggleState;
+pub use touch_file::TouchFile;
 pub use trigger_slash_command::TriggerSlashCommand;
 pub use type_chars::TypeChars;
 pub use undo_last_mutation::UndoLastMutation;
@@ -426,6 +434,10 @@ crate::declare_e2e_transitions! {
         JoinPlacedRoot(JoinPlacedRoot),
         DeletePlacementParent(DeletePlacementParent),
         DeletePlacementRecord(DeletePlacementRecord),
+        ArmWriteChurn(ArmWriteChurn),
+        DisarmWriteChurn(DisarmWriteChurn),
+        ExternalLineEdit(ExternalLineEdit),
+        TouchFile(TouchFile),
     }
 }
 

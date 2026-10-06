@@ -70,6 +70,26 @@ pub struct FileAdapterState {
     /// Blocks whose undone deletion an edit ended in this process, and the
     /// name of the file the deletion was undone in.
     pub deletions_ended_by_edit: BTreeMap<EntityUri, String>,
+
+    /// Documents whose file some process keeps rewriting with its own bytes.
+    /// Churn only delays a write-back; it never changes the expected end
+    /// state. A deleted document's churn ends with its file.
+    pub write_churn: BTreeSet<EntityUri>,
+
+    /// A churn was armed in this run.
+    pub write_churn_ran: bool,
+}
+
+impl FileAdapterState {
+    pub fn churning_docs(&self) -> impl Iterator<Item = &EntityUri> {
+        self.write_churn
+            .iter()
+            .filter(|doc| self.documents.contains_key(*doc))
+    }
+
+    pub fn write_churn_armed(&self) -> bool {
+        self.churning_docs().next().is_some()
+    }
 }
 
 /// A heading on disk in other files beside its owner's (D229.b).

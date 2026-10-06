@@ -41,6 +41,7 @@
 use std::collections::HashMap;
 
 use holon_pbt_core::capabilities::RefBlockTree;
+use holon_pbt_core::capabilities::RefCopies;
 use holon_pbt_core::capabilities::SutOrgRender;
 use holon_pbt_core::invariant::Invariant;
 use holon_pbt_core::invariant::InvariantId;
@@ -55,7 +56,7 @@ impl InvEveryPageHasItsOwnFile {
 #[allow(async_fn_in_trait)]
 impl<R, S> Invariant<R, S> for InvEveryPageHasItsOwnFile
 where
-    R: RefBlockTree,
+    R: RefBlockTree + RefCopies,
     S: SutOrgRender,
 {
     fn id(&self) -> InvariantId {
@@ -63,6 +64,11 @@ where
     }
 
     async fn check(&self, ref_: &R, sut: &S) -> InvariantResult {
+        if ref_.write_churn_armed() {
+            return InvariantResult::Skipped(
+                "a write churn holds an org file's write-back off".to_string(),
+            );
+        }
         // Index every on-disk file by its own doc-root `#+ID:` (bare).
         let mut files_by_root: HashMap<String, Vec<String>> = HashMap::new();
         for (path, disk, _rendered) in sut.snapshot_org_render_pairs(&Default::default()).await {

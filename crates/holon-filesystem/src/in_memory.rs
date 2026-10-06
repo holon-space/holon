@@ -63,6 +63,8 @@ struct State {
     write_targets: Vec<PathBuf>,
     /// Armed by [`InMemoryFileSystem::fail_next_write_commit`].
     fail_next_write_commit: bool,
+    /// Armed by [`InMemoryFileSystem::arm_write_churn`].
+    churning: BTreeSet<PathBuf>,
 }
 
 pub struct InMemoryFileSystem {
@@ -88,6 +90,7 @@ impl InMemoryFileSystem {
                 clock: 0,
                 write_targets: Vec::new(),
                 fail_next_write_commit: false,
+                churning: BTreeSet::new(),
             }),
             tx,
             scans_held: watch::Sender::new(false),
@@ -131,6 +134,59 @@ impl InMemoryFileSystem {
         self.scans_held.send_replace(false);
     }
 
+    /// Until [`Self::disarm_write_churn`], some process rewrites `path` with
+    /// its own bytes just before every conditional write to it, so each
+    /// `write_if_unchanged` sees a new stamp over unchanged bytes. The arm
+    /// follows the file through a rename and ends with its removal.
+    pub fn arm_write_churn(&self, path: &Path) {
+        let path = normalize(path);
+        let mut st = self.lock();
+        assert!(
+            st.files.contains_key(&path),
+            "arm_write_churn: no file {}",
+            path.display()
+        );
+        assert!(
+            st.churning.insert(path.clone()),
+            "arm_write_churn: {} is already armed",
+            path.display()
+        );
+    }
+
+    pub fn disarm_write_churn(&self, path: &Path) {
+        let path = normalize(path);
+        assert!(
+            self.lock().churning.remove(&path),
+            "disarm_write_churn: {} is not armed",
+            path.display()
+        );
+    }
+
+    /// Give `path` a new stamp over the same bytes, as a no-op save does.
+    pub fn touch_file(&self, path: &Path) -> std::io::Result<()> {
+        let path = normalize(path);
+        let seq = {
+            let mut st = self.lock();
+            Self::retick(&mut st, &path)?
+        };
+        let _ = self.tx.send(FileChange {
+            path,
+            kind: FileChangeKind::Create,
+            seq,
+        });
+        Ok(())
+    }
+
+    fn retick(st: &mut State, path: &Path) -> std::io::Result<u64> {
+        st.clock += 1;
+        let tick = st.clock;
+        st.files
+            .get_mut(path)
+            .ok_or_else(|| not_found(path))?
+            .mtime_tick = tick;
+        Ok(tick)
+    }
+
     /// Synchronous `create_dir_all` for non-async construction contexts
     /// (the trait method delegates here).
     pub fn mkdir_all(&self, path: &Path) {
@@ -154,6 +210,7 @@ impl InMemoryFileSystem {
             if st.files.remove(&path).is_none() {
                 return Err(not_found(&path));
             }
+            st.churning.remove(&path);
             st.clock += 1;
             st.clock
         };
@@ -193,6 +250,9 @@ impl InMemoryFileSystem {
             let Some(entry) = st.files.remove(&from) else {
                 return Err(not_found(&from));
             };
+            if st.churning.remove(&from) {
+                st.churning.insert(to.clone());
+            }
             st.clock += 1;
             let tick = st.clock;
             st.files.insert(
@@ -237,6 +297,16 @@ impl InMemoryFileSystem {
                     ));
                 }
                 None => return Err(not_found(&path)),
+            }
+            if expected.is_some() && st.churning.contains(&path) {
+                let seq = Self::retick(&mut st, &path)?;
+                drop(st);
+                let _ = self.tx.send(FileChange {
+                    path,
+                    kind: FileChangeKind::Create,
+                    seq,
+                });
+                return Ok(WriteBack::Changed);
             }
             if let Some(expected) = expected {
                 let current = st

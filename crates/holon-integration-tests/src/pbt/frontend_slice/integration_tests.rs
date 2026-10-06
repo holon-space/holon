@@ -623,6 +623,10 @@ async fn frontend_slice_org_render_fixed_point_bites() {
         fn model_copies(&self) -> Vec<holon_pbt_core::capabilities::ModelCopy> {
             Vec::new()
         }
+
+        fn write_churn_armed(&self) -> bool {
+            false
+        }
     }
 
     let comp = new_component().await;

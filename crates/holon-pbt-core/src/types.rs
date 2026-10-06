@@ -235,6 +235,27 @@ impl CutPasteFinish {
     pub const ALL: [CutPasteFinish; 2] = [Self::SourceSaved, Self::CopyDeletedFromTarget];
 }
 
+/// One edit an external editor saves into an org file. A block's headline is
+/// found by its `:ID:` drawer, or by its title `disk_text` when the file holds
+/// no id for it.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ExternalFileEdit {
+    /// Replace the headline title `disk_text` of `block` with `text`.
+    EditLine {
+        block: holon_api::EntityUri,
+        disk_text: String,
+        text: String,
+    },
+    /// Cut the section of `block` out of the file.
+    DeleteLine {
+        block: holon_api::EntityUri,
+        disk_text: String,
+    },
+    /// Drop the document's own `:ID:` from the file header. The step does not
+    /// wait for the ingest, so the next step can run before Holon reads it.
+    StripDocId,
+}
+
 /// Parse-don't-validate target state for `ToggleState`: clicking the
 /// state_toggle widget can only ever land on a production-cycle member, so the
 /// type makes off-cycle targets unrepresentable. Serialized as the keyword

@@ -203,6 +203,10 @@ impl crate::capabilities::RefCopies for NullRef {
     fn model_copies(&self) -> Vec<crate::capabilities::ModelCopy> {
         panic!("class-2: invariant read RefCopies::model_copies")
     }
+
+    fn write_churn_armed(&self) -> bool {
+        panic!("class-2: invariant read RefCopies::write_churn_armed")
+    }
 }
 
 #[allow(unused_variables)]

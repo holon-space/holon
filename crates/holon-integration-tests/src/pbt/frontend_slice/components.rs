@@ -4922,6 +4922,127 @@ impl HeadlessFrontendComponent {
 }
 
 #[async_trait::async_trait(?Send)]
+impl holon_pbt_core::capabilities::SutWriteFaults for HeadlessFrontendComponent {
+    async fn arm_write_churn(&self, doc: &EntityUri) {
+        let path = self.doc_file(doc, "arm_write_churn").await;
+        self.org_fs().arm_write_churn(&path);
+    }
+
+    async fn disarm_write_churn(&self, doc: &EntityUri) {
+        let path = self.doc_file(doc, "disarm_write_churn").await;
+        self.org_fs().disarm_write_churn(&path);
+    }
+
+    async fn touch_file(&self, doc: &EntityUri) {
+        const SEAM: &str = "touch_file";
+        let path = self.doc_file(doc, SEAM).await;
+        self.org_fs()
+            .touch_file(&path)
+            .unwrap_or_else(|e| panic!("[{SEAM}] touch {path:?}: {e}"));
+        self.await_ingest(&path, SEAM).await;
+    }
+
+    async fn external_file_edit(
+        &self,
+        doc: &EntityUri,
+        edit: &holon_pbt_core::types::ExternalFileEdit,
+    ) {
+        use holon_pbt_core::types::ExternalFileEdit;
+        const SEAM: &str = "external_file_edit";
+        let path = self.doc_file(doc, SEAM).await;
+        let disk = self.read_vault_file(&path, SEAM).await;
+        let mut lines: Vec<&str> = disk.lines().collect();
+        let replaced;
+        match edit {
+            ExternalFileEdit::EditLine {
+                block,
+                disk_text,
+                text,
+            } => {
+                let at = headline_of(&lines, &self.resolve_id(block), disk_text, &disk);
+                replaced = format!("{} {text}", "*".repeat(headline_level(lines[at])));
+                lines[at] = &replaced;
+            }
+            ExternalFileEdit::DeleteLine { block, disk_text } => {
+                let at = headline_of(&lines, &self.resolve_id(block), disk_text, &disk);
+                let level = headline_level(lines[at]);
+                let end = (at + 1..lines.len())
+                    .find(|&i| is_headline(lines[i]) && headline_level(lines[i]) <= level)
+                    .unwrap_or(lines.len());
+                lines.drain(at..end);
+            }
+            ExternalFileEdit::StripDocId => {
+                let head = lines
+                    .iter()
+                    .position(|l| is_headline(l))
+                    .unwrap_or(lines.len());
+                let ids: Vec<usize> = (0..head)
+                    .filter(|&i| {
+                        let l = lines[i].trim_start();
+                        l.starts_with(":ID:") || l.to_ascii_uppercase().starts_with("#+ID:")
+                    })
+                    .collect();
+                assert_eq!(
+                    ids.len(),
+                    1,
+                    "[{SEAM}] {path:?} has no single document id:\n{disk}"
+                );
+                let at = ids[0];
+                lines.remove(at);
+                if at > 0
+                    && lines[at - 1].trim() == ":PROPERTIES:"
+                    && lines.get(at).is_some_and(|l| l.trim() == ":END:")
+                {
+                    lines.drain(at - 1..=at);
+                }
+            }
+        }
+        let mut edited = lines.join("\n");
+        if disk.ends_with('\n') {
+            edited.push('\n');
+        }
+        if matches!(edit, ExternalFileEdit::StripDocId) {
+            self.write_org_file(&path, &edited, SEAM).await;
+            return;
+        }
+        self.write_org_file_and_await_ingest(&path, &edited, SEAM)
+            .await;
+        self.settle_block_ids_stable(Duration::from_secs(5)).await;
+    }
+}
+
+fn is_headline(line: &str) -> bool {
+    let rest = line.trim_start_matches('*');
+    rest.len() < line.len() && rest.starts_with(' ')
+}
+
+fn headline_level(line: &str) -> usize {
+    line.len() - line.trim_start_matches('*').len()
+}
+
+/// The headline of `block`: the one its `:ID:` drawer sits under, or, in a
+/// file without that id, the one titled `disk_text`.
+fn headline_of(lines: &[&str], block: &EntityUri, disk_text: &str, disk: &str) -> usize {
+    let id_line = format!(":ID: {}", block.id());
+    if let Some(at) = lines.iter().position(|l| l.trim() == id_line) {
+        return (0..at)
+            .rev()
+            .find(|&i| is_headline(lines[i]))
+            .unwrap_or_else(|| panic!("{id_line} sits under no headline:\n{disk}"));
+    }
+    let titled: Vec<usize> = (0..lines.len())
+        .filter(|&i| is_headline(lines[i]) && lines[i].trim_start_matches('*').trim() == disk_text)
+        .collect();
+    assert_eq!(
+        titled.len(),
+        1,
+        "{block} has no id on disk and {} headlines are titled {disk_text:?}:\n{disk}",
+        titled.len()
+    );
+    titled[0]
+}
+
+#[async_trait::async_trait(?Send)]
 impl holon_pbt_core::capabilities::SutEditorSaves for HeadlessFrontendComponent {
     async fn on_disk(&self, doc: &EntityUri) -> Option<String> {
         use holon_filesystem::FileSystem;
@@ -5662,6 +5783,7 @@ impl HeadlessFrontendComponent {
         // un-narrowing both onto any frontend CapMap. A write cap (no invariant
         // `Needs` it), safe here.
         caps.insert(self.clone() as Arc<dyn SutSeamMutate>);
+        caps.insert(self.clone() as Arc<dyn holon_pbt_core::capabilities::SutWriteFaults>);
         // `SutBlockCreate` (CreateBlockUnderFocus) — creation-slot gesture over this
         // component's own `ReactiveEngineDriver` commit seam. A write cap (no invariant
         // `Needs` it); its presence makes the WP-E creation-slot create cap-feasible on

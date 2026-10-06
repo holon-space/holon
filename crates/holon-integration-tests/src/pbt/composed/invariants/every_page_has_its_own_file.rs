@@ -20,6 +20,7 @@
 
 use holon_pbt_core::RunMode;
 use holon_pbt_core::capabilities::RefBlockTree;
+use holon_pbt_core::capabilities::RefCopies;
 use holon_pbt_core::capabilities::SutOrgRender;
 use holon_pbt_core::composition::Attribution;
 use holon_pbt_core::composition::BridgedInvariant;
@@ -37,7 +38,10 @@ pub fn wire() -> Box<dyn CapInvariant> {
         Needs {
             sut_present: vec![CapId::of::<dyn SutOrgRender>()],
             sut_absent: Vec::new(),
-            ref_present: vec![CapId::of::<dyn RefBlockTree>()],
+            ref_present: vec![
+                CapId::of::<dyn RefBlockTree>(),
+                CapId::of::<dyn RefCopies>(),
+            ],
         },
         Attribution::at(Layer::OrgRoundTrip, file!()),
     ))

@@ -548,6 +548,37 @@ expect_sut_order bulk-first known-red:bulk-add-sibling-order '\"block:bulk-1-0\"
 expect_sut_order bulk-second novel '\"block:c1\", \"block:bulk-1-0\"'
 expect_sut_order day-page-first novel '\"block:2026-10-01\", \"block:bulk-1-0\"'
 
+# The write-back state machine rows anchor on ids that only their sidecar
+# fixture uses, and sit above the broader rows that match the same payloads.
+# wb-d7's payload carries no fixture id, so it stays under syn-real-mint.
+cat >"$work/wb-d6.log" <<'EOF'
+thread 'hand_authored_keystone_regressions' (1) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1553:13:
+reconciled composed sequence diverged from the oracle: [("inv-blocks-match-ref/loro", "[inv-blocks-match-ref/loro] fields diverge from reference\n  inv-blocks-match-ref/loro: 13 blocks, reference: 12 blocks\n  only in inv-blocks-match-ref/loro (1): [\"block:wbd6-b\"]\n  only in reference (0): []\n  field deltas (0):\n"), ("inv-blocks-match-ref/block_raw", "[inv-blocks-match-ref/block_raw] block id set diverges from reference\n  spurious in inv-blocks-match-ref/block_raw: [EntityUri(\"block:wbd6-b\")]"), ("inv-blocks-match-ref/matview", "[inv-blocks-match-ref/matview] block id set diverges from reference\n  spurious in inv-blocks-match-ref/matview: [EntityUri(\"block:wbd6-b\")]")]
+test hand_authored_keystone_regressions ... FAILED
+test result: FAILED. 8 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.73s
+EOF
+expect_outcome wb-d6 0 '^PRIMARY: \[known-red:wb-d6-stall-resurrects-deleted-line\]' "$work/wb-d6.log"
+cat >"$work/wb-d7.log" <<'EOF'
+thread 'hand_authored_keystone_regressions' (1) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1853:5:
+assertion `left == right` failed: per-tick reconcile: one synthetic per minted real id (syn=[], real=[EntityUri("block:8a829aea-4bad-47cf-a735-2990f9d4a655")], HeldCreates { parked: 0, parked_other: 0, newly_failed: 0 }); this tick RETIRED [] and the SUT LOST [] from block_raw
+test hand_authored_keystone_regressions ... FAILED
+test result: FAILED. 8 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.73s
+EOF
+expect_outcome wb-d7 0 '^PRIMARY: \[known-red:syn-real-mint\]' "$work/wb-d7.log"
+cat >"$work/wb-d8.log" <<'EOF'
+thread 'hand_authored_keystone_regressions' (1) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1553:13:
+reconciled composed sequence diverged from the oracle: [("inv-conditions-match-ref", "1 condition(s) of a governed kind are in effect that the model does not expect: [RaisedCondition { subject: \"/tmp/vault/wb.org\", kind: \"writeback-degraded\", files: [], count: None }]. Either a degradation happened that no transition caused, or an all-clear that should have fired did not — a stale banner the user learns to ignore. Expected: []"), ("inv-org-render-fixed-point", "[inv-org-render-fixed-point] render != disk PERSISTED for 5s — not a transient projection lag but a real echo-loop / oscillation: the next re_render_all_tracked would keep rewriting the file.\n--- disk (84 bytes) [/tmp/vault/wb.org] ---\n* Buy milk\n:PROPERTIES:\n:ID: wbd8-a\n:END:\n* Call mom\n:PROPERTIES:\n:ID: wbd8-b\n:END:\n\n--- rendered from SQL (104 bytes) ---\n#+ID: ref-doc-0\n* Buy milk oat\n:PROPERTIES:\n:ID: wbd8-a\n:END:\n* Call mom\n:PROPERTIES:\n:ID: wbd8-b\n:END:\n"), ("inv-every-page-has-its-own-file", "[inv-every-page-has-its-own-file] 1 page(s) not homed to exactly one own file: [\"page `ref-doc-0` owns NO file (fileless — content lives only in the store; writeback must MATERIALIZE it into `…/ref-doc-0.org`)\"]"), ("inv-blocks-match-ref/org", "[inv-blocks-match-ref/org] fields diverge from reference\n  inv-blocks-match-ref/org: 10 blocks, reference: 10 blocks\n  only in inv-blocks-match-ref/org (0): []\n  only in reference (0): []\n  field deltas (2):\n    block:wbd8-a: parent_id: sut=EntityUri(\"file:wb.org\") ref=EntityUri(\"block:ref-doc-0\"); content: sut=\"Buy milk\" ref=\"Buy milk oat\"\n    block:wbd8-b: parent_id: sut=EntityUri(\"file:wb.org\") ref=EntityUri(\"block:ref-doc-0\")\n")]
+test hand_authored_keystone_regressions ... FAILED
+test result: FAILED. 8 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.73s
+EOF
+expect_outcome wb-d8 0 '^PRIMARY: \[known-red:wb-d8-stalled-edit-never-reaches-disk\]' "$work/wb-d8.log"
+cat >"$work/wb-i7.log" <<'EOF'
+thread 'hand_authored_keystone_regressions' (1) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1553:13:
+reconciled composed sequence diverged from the oracle: [("inv-conditions-match-ref", "2 condition(s) of a governed kind are in effect that the model does not expect: [RaisedCondition { subject: \"/tmp/vault/wb.org\", kind: \"writeback-degraded\", files: [], count: None }, RaisedCondition { subject: \"/tmp/vault/wb-renamed.org\", kind: \"writeback-degraded\", files: [], count: None }]. Either a degradation happened that no transition caused, or an all-clear that should have fired did not — a stale banner the user learns to ignore. Expected: []"), ("inv-org-render-fixed-point", "[inv-org-render-fixed-point] render != disk PERSISTED for 5s — not a transient projection lag but a real echo-loop / oscillation: the next re_render_all_tracked would keep rewriting the file.\n--- disk (100 bytes) [/tmp/vault/wb-renamed.org] ---\n#+ID: ref-doc-0\n* Buy milk\n:PROPERTIES:\n:ID: wbi7-a\n:END:\n* Call mom\n:PROPERTIES:\n:ID: wbi7-b\n:END:\n\n--- rendered from SQL (104 bytes) ---\n#+ID: ref-doc-0\n* Buy milk oat\n:PROPERTIES:\n:ID: wbi7-a\n:END:\n* Call mom\n:PROPERTIES:\n:ID: wbi7-b\n:END:\n"), ("inv-blocks-match-ref/org", "[inv-blocks-match-ref/org] fields diverge from reference\n  inv-blocks-match-ref/org: 10 blocks, reference: 10 blocks\n  only in inv-blocks-match-ref/org (0): []\n  only in reference (0): []\n  field deltas (1):\n    block:wbi7-a: content: sut=\"Buy milk\" ref=\"Buy milk oat\"\n")]
+test hand_authored_keystone_regressions ... FAILED
+test result: FAILED. 8 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.73s
+EOF
+expect_outcome wb-i7 0 '^PRIMARY: \[known-red:wb-i7-stall-disclosure-keeps-old-path\]' "$work/wb-i7.log"
 if [ "$outcome_fail" -ne 0 ]; then
     echo ""
     echo "[fixture] FAIL: the classifier's outcome verdict changed. A green log read"

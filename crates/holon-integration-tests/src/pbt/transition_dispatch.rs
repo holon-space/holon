@@ -244,6 +244,7 @@ macro_rules! declare_e2e_transitions {
             + ::holon_frontend::pbt_caps::SutArrowNavigate
             + ::holon_pbt_core::capabilities::SutMutate
             + ::holon_pbt_core::capabilities::SutSeamMutate
+            + ::holon_pbt_core::capabilities::SutWriteFaults
             + ::holon_pbt_core::capabilities::SutBlockCreate
             + ::holon_pbt_core::capabilities::SutTemplateInstantiate
             + ::holon_pbt_core::capabilities::SutBlockToPage

@@ -691,6 +691,21 @@ step_field_via_json!(
         holon_api::EntityUri::block("blk-b"),
     ])]
 );
+step_field_via_json!(
+    crate::types::ExternalFileEdit,
+    vec![
+        crate::types::ExternalFileEdit::EditLine {
+            block: holon_api::EntityUri::block("blk-a"),
+            disk_text: "old".to_string(),
+            text: "new".to_string(),
+        },
+        crate::types::ExternalFileEdit::DeleteLine {
+            block: holon_api::EntityUri::block("blk-b"),
+            disk_text: "gone".to_string(),
+        },
+        crate::types::ExternalFileEdit::StripDocId,
+    ]
+);
 step_field_via_json!(Vec<u64>, vec![Vec::new(), vec![60, 40, 20]]);
 step_field_via_json!(
     holon_api::KeyChord,

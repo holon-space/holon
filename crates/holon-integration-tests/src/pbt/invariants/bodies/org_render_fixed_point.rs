@@ -50,6 +50,11 @@ where
     }
 
     async fn check(&self, reference: &R, sut: &S) -> InvariantResult {
+        if reference.write_churn_armed() {
+            return InvariantResult::Skipped(
+                "a write churn holds an org file's write-back off".to_string(),
+            );
+        }
         let copies = copies_by_file(&reference.model_copies());
         // Fast path: already at the fixed point (the settle converged). This is
         // the overwhelming common case, so it must add no latency.

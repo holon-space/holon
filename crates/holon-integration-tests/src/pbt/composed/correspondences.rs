@@ -277,6 +277,11 @@ fn extract_org_snapshot<'a>(
     // (the `journals::auto-create` heading + its `holon_rule` action, and all
     // user blocks) is NOT in `seed_block_ids`, so it is still compared.
     Box::pin(async move {
+        if holon_pbt_core::capabilities::RefCopies::write_churn_armed(refs) {
+            return Extraction::Unobservable(
+                "a write churn holds an org file's write-back off".to_string(),
+            );
+        }
         let seed_block_ids = RefBackend::seed_block_ids(refs);
         let copies = holon_pbt_core::capabilities::copies_by_file(
             &holon_pbt_core::capabilities::RefCopies::model_copies(refs),

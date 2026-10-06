@@ -2596,6 +2596,9 @@ pub type CopiesByFile = BTreeMap<String, BTreeSet<String>>;
 #[holon_macros::capmap_adapter] // sync trait → no async-trait
 pub trait RefCopies {
     fn model_copies(&self) -> Vec<ModelCopy>;
+    /// Some file's write-back is held off by an armed churn, so its disk
+    /// lags the store and the org observations have nothing to compare.
+    fn write_churn_armed(&self) -> bool;
 }
 
 pub fn copies_by_file(copies: &[ModelCopy]) -> CopiesByFile {
@@ -3862,6 +3865,23 @@ pub trait SutSeamMutate {
     /// The user renames the vault file `from` to `to` in one atomic move, and
     /// the ingest of the rename completes.
     async fn rename_vault_file(&self, from: &str, to: &str);
+}
+
+/// SUT capability: faults on a document's org file between Holon's read and
+/// its write-back. Write caps; no invariant `Needs` them.
+#[holon_macros::capmap_adapter]
+pub trait SutWriteFaults {
+    /// Some process keeps rewriting `doc`'s file with its own bytes, so every
+    /// write-back to it stalls until [`SutWriteFaults::disarm_write_churn`].
+    async fn arm_write_churn(&self, doc: &holon_api::EntityUri);
+    async fn disarm_write_churn(&self, doc: &holon_api::EntityUri);
+    /// A new stamp over the same bytes; the ingest of it completes.
+    async fn touch_file(&self, doc: &holon_api::EntityUri);
+    async fn external_file_edit(
+        &self,
+        doc: &holon_api::EntityUri,
+        edit: &crate::types::ExternalFileEdit,
+    );
 }
 
 /// SUT capability: create a block through the focused panel's creation slot
