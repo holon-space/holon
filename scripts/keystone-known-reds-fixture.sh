@@ -295,6 +295,16 @@ cat >"$work/fail-leak-known-panic.log" <<'EOF'
  FAIL + LEAK [   6.486s] (197/682) holon-app::integration_toggle_round_trip a_dispatched_switch_reaches_the_seeded_section_without_a_manual_reprojection
 EOF
 expect_outcome fail-leak-known-panic 0 '^\[known-reds\] PASS-WITH-NOTE: 1 known-red' "$work/fail-leak-known-panic.log"
+# D101.a: the cross-file move re-ingest signature (N+4 per-block reads) is a
+# known red.
+cat >"$work/move-between-files-read-repeat.log" <<'EOF'
+thread 'general_e2e_composed_pbt' (1) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1553:13:
+reconciled composed sequence diverged from the oracle: [("inv-sql-budget", "[inv-sql-budget] 1 budget violation(s):\n  MoveBlockBetweenFiles.sql_read_repeat: one binding-set of `SELECT b.id, b.parent_id, b.sort_key, b.content, b.content_type, b.source_language, b.sour…` re-executed 124x, over the redundancy ratchet 64 — the re-execution defect GREW; find the new consumer, do not raise the ratchet")]
+test general_e2e_composed_pbt ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.00s
+EOF
+expect_outcome move-between-files-read-repeat 0 '^\[known-reds\] PASS-WITH-NOTE: 1 known-red' \
+    "$work/move-between-files-read-repeat.log"
 # A test that returned `Err` printed no panic: its status line stands in, with
 # the `Error:` it returned, so two root causes in one binary stay apart.
 cat >"$work/fail-leak-no-panic.log" <<'EOF'

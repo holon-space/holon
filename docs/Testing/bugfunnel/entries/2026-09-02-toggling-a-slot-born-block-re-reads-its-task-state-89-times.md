@@ -128,6 +128,16 @@ times; the single 16-case run hit it on its first draw and died there
 it and got through 45 known-red panics instead. So smoke-green is no evidence
 about this family.
 
+## Family member: cross-file move re-ingest (2026-10-06)
+
+- `MoveBlockBetweenFiles` out of a 120-block org file re-executes the per-block
+  `SELECT … FROM block_raw b WHERE b.id = $id` N+4 times (124x against the ratchet
+  64), because `org.ingest_file` re-reads every block of the source file one by one.
+- Registered as the sibling known-red row
+  `move-block-between-files-sql-read-repeat-budget` (D101.a, Martin, 2026-10-06),
+  owned by the queued "ingest batch-read" lane. Evidence: `lane-logs/boot-r4-verify.md`
+  section 3 in the `json-prop-boot` workspace.
+
 ## Remedy
 
 OPEN. Not fixed, and not this lane's to fix — it belongs to the `inv-sql-budget`
