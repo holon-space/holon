@@ -419,20 +419,26 @@ impl ColumnValueKind {
 
 /// Schema for a single field in a table.
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct FieldSchema {
+    #[serde(deserialize_with = "nonempty_field_name")]
     pub name: String,
+    #[serde(default = "text_sql_type")]
     pub sql_type: String,
     /// What has to parse out of this column's cells. Defaults to
     /// [`ColumnValueKind::Declared`].
+    #[serde(default)]
     pub value_kind: ColumnValueKind,
+    #[serde(default)]
     pub nullable: bool,
+    #[serde(default)]
     pub primary_key: bool,
+    #[serde(default)]
     pub indexed: bool,
-    #[serde(rename = "jsonb")]
+    #[serde(rename = "jsonb", default)]
     pub is_jsonb: bool,
     /// SQL DEFAULT expression (e.g., `"0"`, `"'text'"`, `"(datetime('now'))"`)
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub default_value: Option<String>,
     /// Where this field's data lives. Defaults to `Persistent`.
     #[serde(default)]
@@ -453,11 +459,25 @@ pub struct FieldSchema {
     pub home: Option<HomeProfileId>,
 }
 
+fn text_sql_type() -> String {
+    "TEXT".to_string()
+}
+
+fn nonempty_field_name<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> std::result::Result<String, D::Error> {
+    let name = String::deserialize(d)?;
+    if name.is_empty() {
+        return Err(serde::de::Error::custom("a field's `name` is empty"));
+    }
+    Ok(name)
+}
+
 impl Default for FieldSchema {
     fn default() -> Self {
         Self {
             name: String::new(),
-            sql_type: "TEXT".to_string(),
+            sql_type: text_sql_type(),
             value_kind: ColumnValueKind::default(),
             nullable: false,
             primary_key: false,
@@ -1302,6 +1322,21 @@ mod mutation_gap_tests {
         .expect_err("an unknown key inside a field entry must be refused")
         .to_string();
         assert!(err.contains("sql_typ"), "got: {err}");
+    }
+
+    #[test]
+    fn a_field_entry_without_a_name_is_refused() {
+        for fields in [
+            r#"[{"sql_type":"TEXT"}]"#,
+            r#"[{"name":"","sql_type":"TEXT"}]"#,
+        ] {
+            let err = serde_json::from_str::<TypeDefinition>(&format!(
+                r#"{{"name":"t","fields":{fields}}}"#
+            ))
+            .expect_err("a field entry with no name must be refused")
+            .to_string();
+            assert!(err.contains("name"), "{fields}: got: {err}");
+        }
     }
 
     #[test]

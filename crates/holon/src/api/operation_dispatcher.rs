@@ -426,6 +426,17 @@ impl OperationDispatcher {
     /// a type is not a recoverable path, and the error says so rather than
     /// naming a teardown that would not help.
     pub fn register_provider(&self, provider: Arc<dyn OperationProvider>) -> Result<()> {
+        self.check_provider(provider.as_ref())?;
+        self.declared_providers
+            .write()
+            .expect("declared-provider registry poisoned")
+            .push(provider);
+        self.collect_op_catalog();
+        Ok(())
+    }
+
+    /// The refusals of [`Self::register_provider`], without registering.
+    pub fn check_provider(&self, provider: &dyn OperationProvider) -> Result<()> {
         let registered: HashSet<(EntityName, String)> = self
             .operations()
             .into_iter()
@@ -456,11 +467,6 @@ impl OperationDispatcher {
         let mut declared = self.operations();
         declared.extend(provider.operations());
         holon_api::validate_entity_references(&declared)?;
-        self.declared_providers
-            .write()
-            .expect("declared-provider registry poisoned")
-            .push(provider);
-        self.collect_op_catalog();
         Ok(())
     }
 

@@ -21,8 +21,8 @@
 //! declared for the life of the dispatcher: the declared-authority registry is
 //! append-only and [`TursoAdapter::teardown`] drops only the SQL artifacts, so
 //! `declare → teardown → declare` does NOT round-trip. Re-declaring therefore
-//! fails at step 3 and cannot be recovered from. Undeclaring is the migrate
-//! primitive's job (OQ-5) and arrives with it.
+//! is refused, before any DDL, and cannot be recovered from. Undeclaring is the
+//! migrate primitive's job (OQ-5) and arrives with it.
 
 use std::sync::Arc;
 
@@ -63,13 +63,23 @@ pub async fn declare_type(
             type_def.name
         )
     })?;
+    let provider = write_authority(type_def, db_handle).map_err(|e| {
+        format!(
+            "declare_type('{}'): deriving the write authority failed: {e}",
+            type_def.name
+        )
+    })?;
+    dispatcher.check_provider(provider.as_ref()).map_err(|e| {
+        format!(
+            "declare_type('{}'): registering the write authority failed: {e}",
+            type_def.name
+        )
+    })?;
 
     // Serialization before admission: the adapter is where a name the engine
     // cannot safely carry (SQL keyword, mixed case, non-identifier shape) is
     // refused, and refusing it here leaves the registry untouched rather than
-    // holding a type nothing can write. A failure at step 3 refuses the
-    // declaration with the registry already mutated, which is unrecoverable
-    // for that name (see the module doc).
+    // holding a type nothing can write.
     let artifacts = TursoAdapter::register(type_def, db_handle)
         .await
         .map_err(|e| {
@@ -86,7 +96,7 @@ pub async fn declare_type(
         )
     })?;
 
-    install_write_authority(type_def, db_handle, dispatcher).map_err(|e| {
+    install_write_authority(type_def, provider, dispatcher).map_err(|e| {
         format!(
             "declare_type('{}'): registering the write authority failed: {e}",
             type_def.name
@@ -109,7 +119,7 @@ pub fn register_write_authority(
     dispatcher: &OperationDispatcher,
 ) -> Result<()> {
     require_declarable(type_def)?;
-    install_write_authority(type_def, db_handle, dispatcher)
+    install_write_authority(type_def, write_authority(type_def, db_handle)?, dispatcher)
 }
 
 fn require_declarable(type_def: &TypeDefinition) -> Result<()> {
@@ -117,13 +127,21 @@ fn require_declarable(type_def: &TypeDefinition) -> Result<()> {
     require_declarable_soft_delete(type_def)
 }
 
-fn install_write_authority(
+fn write_authority(
     type_def: &TypeDefinition,
     db_handle: &DbHandle,
+) -> Result<Arc<dyn OperationProvider>> {
+    Ok(Arc::new(SqlOperationProvider::for_type(
+        db_handle.clone(),
+        type_def,
+    )?))
+}
+
+fn install_write_authority(
+    type_def: &TypeDefinition,
+    provider: Arc<dyn OperationProvider>,
     dispatcher: &OperationDispatcher,
 ) -> Result<()> {
-    let provider: Arc<dyn OperationProvider> =
-        Arc::new(SqlOperationProvider::for_type(db_handle.clone(), type_def)?);
     dispatcher.register_provider(provider)?;
 
     dispatcher
@@ -437,14 +455,14 @@ mod tests {
         assert!(registry.contains("gen_1"), "the type entered the registry");
         assert!(dispatcher.has_provider("gen_1"), "the type became writable");
 
-        // Re-declaring is refused, and refused at the write-authority step.
+        // Re-declaring is refused by the write-authority check.
         let err = declare_type(&type_def, &db_handle, &registry, &dispatcher)
             .await
             .expect_err("re-declaring a live type must be refused")
             .to_string();
         assert!(
             err.contains("registering the write authority failed"),
-            "the refusal must come from step 3; got: {err}"
+            "the refusal must come from the write-authority check; got: {err}"
         );
         assert!(
             !err.contains("Tear the type down"),
@@ -473,6 +491,17 @@ mod tests {
         assert!(
             after_teardown.contains("registering the write authority failed"),
             "the post-teardown retry must fail the same way; got: {after_teardown}"
+        );
+        let recreated = db_handle
+            .query(
+                "SELECT name FROM sqlite_master WHERE name LIKE 'gen_1%'",
+                std::collections::HashMap::new(),
+            )
+            .await
+            .expect("query sqlite_master");
+        assert!(
+            recreated.is_empty(),
+            "a refused re-declaration left {recreated:?}"
         );
     }
 }
