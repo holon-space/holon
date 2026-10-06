@@ -467,11 +467,15 @@ impl SutOrgRead for LiveMcp {
     async fn org_block_snapshot(
         &self,
         copies: &holon_pbt_core::capabilities::CopiesByFile,
+        held: &holon_pbt_core::capabilities::WriteHeld,
     ) -> Vec<Block> {
         use holon_orgmode::parser::parse_org_file;
         let mut all = Vec::new();
         for (alias, _) in self.oracle_org_aliases().await {
             let (path, content) = self.read_org(&alias).await;
+            if held.holds(&path) {
+                continue;
+            }
             let root = path.parent().unwrap_or_else(|| Path::new(""));
             let result = parse_org_file(&path, &content, &EntityUri::no_parent(), root)
                 .unwrap_or_else(|e| panic!("SutOrgRead: parse {} failed: {e:#}", path.display()));
@@ -1226,6 +1230,10 @@ impl ComposedSlice for LiveMcpE2E {
             .refresh_ui(&page_root())
             .await
             .expect("refresh_ui after settle failed");
+    }
+
+    fn disarm_write_churn(doc: EntityUri) -> E2ETransition {
+        crate::pbt::transitions::DisarmWriteChurn { doc }.into()
     }
 
     /// Same per-draw non-vacuity floor as the headless keystone — derived from

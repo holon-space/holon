@@ -548,7 +548,9 @@ async fn frontend_slice_org_read_parses_on_disk_files() {
 
     use holon_pbt_core::capabilities::SutOrgRead;
     let comp = new_component().await;
-    let blocks = comp.org_block_snapshot(&Default::default()).await;
+    let blocks = comp
+        .org_block_snapshot(&Default::default(), &Default::default())
+        .await;
     eprintln!(
         "[org-probe] org_block_snapshot returned {} blocks",
         blocks.len()
@@ -562,7 +564,9 @@ async fn frontend_slice_org_read_parses_on_disk_files() {
     );
     // Stability: a second parse of the same files yields the same id set (the
     // parser is deterministic for these files — required for ref alignment).
-    let again = comp.org_block_snapshot(&Default::default()).await;
+    let again = comp
+        .org_block_snapshot(&Default::default(), &Default::default())
+        .await;
     let ids1: BTreeSet<String> = blocks.iter().map(|b| b.id.to_string()).collect();
     let ids2: BTreeSet<String> = again.iter().map(|b| b.id.to_string()).collect();
     eprintln!("[org-probe] re-parse id-set stable: {}", ids1 == ids2);
@@ -624,8 +628,8 @@ async fn frontend_slice_org_render_fixed_point_bites() {
             Vec::new()
         }
 
-        fn write_churn_armed(&self) -> bool {
-            false
+        fn write_held(&self) -> holon_pbt_core::capabilities::WriteHeld {
+            Default::default()
         }
     }
 
@@ -711,7 +715,9 @@ async fn frontend_slice_org_blocks_match_ref_bites() {
     use crate::pbt::state_machine::fresh_reference_state;
 
     let comp = new_component().await;
-    let parsed = comp.org_block_snapshot(&Default::default()).await;
+    let parsed = comp
+        .org_block_snapshot(&Default::default(), &Default::default())
+        .await;
     assert!(parsed.len() >= 2, "seed org file must parse to ≥2 blocks");
     let sut = frontend_wide(comp);
 

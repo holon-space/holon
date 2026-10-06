@@ -206,6 +206,10 @@ pub trait ComposedSlice: 'static {
     /// The reference machine that generates/applies those transitions over a
     /// [`ReferenceState`].
     type Machine: ReferenceStateMachine<State = ReferenceState, Transition = Self::Transition>;
+    /// The transition that ends the write churn on document `doc`.
+    fn disarm_write_churn(doc: EntityUri) -> Self::Transition {
+        panic!("this slice armed a write churn on {doc} that its alphabet cannot end")
+    }
     /// A slice-owned handle stored beside the caps — e.g. a backend component a
     /// counter-sync slice pushes `next_id` into. `()` when the cap map is
     /// enough (the caps already keep their component alive).
@@ -1634,6 +1638,23 @@ impl<S: ComposedSlice> StateMachineTest for ComposedSut<S> {
                  never checked; end the case with ReleaseHeld"
             );
         }
+        // A churn still armed holds its file out of the org oracles, so it
+        // ends here and the oracles judge that file once more.
+        let disarms: Vec<S::Transition> = ref_state
+            .files
+            .churning_docs()
+            .map(|doc| S::disarm_write_churn(doc.clone()))
+            .collect();
+        let (sut, ref_state) =
+            disarms
+                .into_iter()
+                .fold((sut, ref_state), |(sut, ref_state), transition| {
+                    eprintln!("\nEnding the case's churn: {transition:?}");
+                    let ref_state = S::Machine::apply(ref_state, &transition);
+                    let sut = Self::apply(sut, &ref_state, transition);
+                    Self::check_invariants(&sut, &ref_state);
+                    (sut, ref_state)
+                });
         super::schedule_signature::assert_coverage();
         let ledger = sut.engaged.borrow();
         // Weights-spike telemetry: one machine-parseable per-case line

@@ -2477,6 +2477,10 @@ impl ComposedSlice for WideE2E {
         TransitionImpl::apply_to_sut(transition, ref_state, caps).await;
     }
 
+    fn disarm_write_churn(doc: EntityUri) -> E2ETransition {
+        crate::pbt::transitions::DisarmWriteChurn { doc }.into()
+    }
+
     /// Per-draw non-vacuity floor: every invariant in the WHOLE shared catalog
     /// that THIS draw's caps can actually select MUST run. The SUT axis is
     /// the drawn wiring's cap_set (already carried on the ref by

@@ -204,8 +204,8 @@ impl crate::capabilities::RefCopies for NullRef {
         panic!("class-2: invariant read RefCopies::model_copies")
     }
 
-    fn write_churn_armed(&self) -> bool {
-        panic!("class-2: invariant read RefCopies::write_churn_armed")
+    fn write_held(&self) -> crate::capabilities::WriteHeld {
+        panic!("class-2: invariant read RefCopies::write_held")
     }
 }
 

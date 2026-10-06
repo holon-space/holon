@@ -26,8 +26,10 @@
 //! of the disk text (D229.b: the store renders a copied block into its
 //! owner's file only).
 
+use holon_pbt_core::capabilities::CopiesByFile;
 use holon_pbt_core::capabilities::RefCopies;
 use holon_pbt_core::capabilities::SutOrgRender;
+use holon_pbt_core::capabilities::WriteHeld;
 use holon_pbt_core::capabilities::copies_by_file;
 use holon_pbt_core::invariant::Invariant;
 use holon_pbt_core::invariant::InvariantId;
@@ -50,15 +52,11 @@ where
     }
 
     async fn check(&self, reference: &R, sut: &S) -> InvariantResult {
-        if reference.write_churn_armed() {
-            return InvariantResult::Skipped(
-                "a write churn holds an org file's write-back off".to_string(),
-            );
-        }
         let copies = copies_by_file(&reference.model_copies());
+        let held = reference.write_held();
         // Fast path: already at the fixed point (the settle converged). This is
         // the overwhelming common case, so it must add no latency.
-        if Self::first_mismatch(&sut.snapshot_org_render_pairs(&copies).await).is_none() {
+        if Self::first_mismatch(&Self::unheld_pairs(sut, &copies, &held).await).is_none() {
             return InvariantResult::Ok;
         }
 
@@ -86,7 +84,7 @@ where
                 ));
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
-            let pairs = sut.snapshot_org_render_pairs(&copies).await;
+            let pairs = Self::unheld_pairs(sut, &copies, &held).await;
             match Self::first_mismatch(&pairs) {
                 None => match stable_since {
                     Some(t) if t.elapsed() >= stable_for => return InvariantResult::Ok,
@@ -109,6 +107,16 @@ where
 }
 
 impl InvOrgRenderFixedPoint {
+    async fn unheld_pairs<S: SutOrgRender>(
+        sut: &S,
+        copies: &CopiesByFile,
+        held: &WriteHeld,
+    ) -> Vec<(String, String, String)> {
+        let mut pairs = sut.snapshot_org_render_pairs(copies).await;
+        pairs.retain(|(path, _, _)| !held.holds(std::path::Path::new(path)));
+        pairs
+    }
+
     /// First `(path, disk, rendered)` whose disk bytes differ from the render,
     /// if any.
     fn first_mismatch(pairs: &[(String, String, String)]) -> Option<(&str, &str, &str)> {

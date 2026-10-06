@@ -2762,6 +2762,7 @@ impl SutOrgRead for HeadlessFrontendComponent {
     async fn org_block_snapshot(
         &self,
         copies: &holon_pbt_core::capabilities::CopiesByFile,
+        held: &holon_pbt_core::capabilities::WriteHeld,
     ) -> Vec<Block> {
         use holon_filesystem::FileSystem;
         use holon_orgmode::parser::parse_org_file;
@@ -2790,7 +2791,7 @@ impl SutOrgRead for HeadlessFrontendComponent {
             paths.push(path);
         }
         let mut all_blocks = Vec::new();
-        for path in &paths {
+        for path in paths.iter().filter(|path| !held.holds(path)) {
             let raw = FileSystem::read_to_string(self.org_fs().as_ref(), path)
                 .await
                 .expect("SutOrgRead: read org file");
@@ -6678,7 +6679,9 @@ mod tests {
         // page doc-ROOT is not in `parse_org_file`'s `result.blocks` — only its
         // children — so it is not compared here.)
         use holon_pbt_core::capabilities::SutOrgRead;
-        let org_blocks = comp.org_block_snapshot(&Default::default()).await;
+        let org_blocks = comp
+            .org_block_snapshot(&Default::default(), &Default::default())
+            .await;
         let child = org_blocks
             .iter()
             .find(|b| b.content == child_content)

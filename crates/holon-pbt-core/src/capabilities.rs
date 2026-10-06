@@ -2545,8 +2545,13 @@ pub trait SutOrgRead {
     /// and `file:<filename>` parents for unresolved ones — the reference side
     /// (`RefBackend::org_blocks`) mirrors that same parent resolution.
     /// `copies` names, per file, the copied headings whose subtrees are left
-    /// out: their blocks are the owner file's.
-    async fn org_block_snapshot(&self, copies: &CopiesByFile) -> Vec<holon_api::Block>;
+    /// out: their blocks are the owner file's. The files `held` holds are
+    /// left out whole.
+    async fn org_block_snapshot(
+        &self,
+        copies: &CopiesByFile,
+        held: &WriteHeld,
+    ) -> Vec<holon_api::Block>;
 }
 
 // ─── Phase 6f'' — FsWrites cluster ───────────────────────────────────
@@ -2596,9 +2601,24 @@ pub type CopiesByFile = BTreeMap<String, BTreeSet<String>>;
 #[holon_macros::capmap_adapter] // sync trait → no async-trait
 pub trait RefCopies {
     fn model_copies(&self) -> Vec<ModelCopy>;
-    /// Some file's write-back is held off by an armed churn, so its disk
-    /// lags the store and the org observations have nothing to compare.
-    fn write_churn_armed(&self) -> bool;
+    fn write_held(&self) -> WriteHeld;
+}
+
+/// The org files whose write-back an armed churn holds off: their disk lags
+/// the store, so the org observations leave them out.
+#[derive(Debug, Clone, Default)]
+pub struct WriteHeld {
+    /// By final path component.
+    pub files: BTreeSet<String>,
+    /// Every block those files home, their document pages included.
+    pub blocks: BTreeSet<EntityUri>,
+}
+
+impl WriteHeld {
+    pub fn holds(&self, path: &std::path::Path) -> bool {
+        path.file_name()
+            .is_some_and(|name| self.files.contains(name.to_string_lossy().as_ref()))
+    }
 }
 
 pub fn copies_by_file(copies: &[ModelCopy]) -> CopiesByFile {

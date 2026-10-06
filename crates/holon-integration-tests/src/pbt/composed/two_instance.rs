@@ -905,7 +905,7 @@ async fn backend_ids(backend: &Arc<dyn SutBackend>) -> BTreeSet<EntityUri> {
 async fn org_ids(org: Option<&Arc<dyn SutOrgRead>>) -> BTreeSet<EntityUri> {
     match org {
         Some(org) => org
-            .org_block_snapshot(&Default::default())
+            .org_block_snapshot(&Default::default(), &Default::default())
             .await
             .into_iter()
             .map(|b| b.id)
@@ -1299,6 +1299,10 @@ impl ComposedSlice for TwoInstanceE2E {
     ];
     const SETTLE: Duration = SETTLE;
     const MULTI_THREAD: bool = true;
+
+    fn disarm_write_churn(doc: EntityUri) -> E2ETransition {
+        crate::pbt::transitions::DisarmWriteChurn { doc }.into()
+    }
 
     /// Only the two sharing invariants are required. The rest of the catalog
     /// still RUNS (the owner arm is a full `compose_sut`), but a keystone

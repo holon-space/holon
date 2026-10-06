@@ -389,8 +389,9 @@ impl<'a, S: SutOrgRead> SutOrgRead for CachingProxy<'a, S> {
     async fn org_block_snapshot(
         &self,
         copies: &crate::capabilities::CopiesByFile,
+        held: &crate::capabilities::WriteHeld,
     ) -> Vec<holon_api::Block> {
-        self.inner.org_block_snapshot(copies).await
+        self.inner.org_block_snapshot(copies, held).await
     }
 }
 

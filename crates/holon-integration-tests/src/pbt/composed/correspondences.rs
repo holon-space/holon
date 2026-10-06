@@ -257,7 +257,13 @@ pub fn org_blocks() -> Correspondence<OrgBlocks> {
 }
 
 fn ref_org_blocks(refs: &CapMap) -> Extraction<Vec<Block>> {
-    Extraction::Value(RefBackend::org_blocks(refs))
+    let held = holon_pbt_core::capabilities::RefCopies::write_held(refs);
+    Extraction::Value(
+        RefBackend::org_blocks(refs)
+            .into_iter()
+            .filter(|b| !held.blocks.contains(&b.id))
+            .collect(),
+    )
 }
 
 fn extract_org_snapshot<'a>(
@@ -277,17 +283,13 @@ fn extract_org_snapshot<'a>(
     // (the `journals::auto-create` heading + its `holon_rule` action, and all
     // user blocks) is NOT in `seed_block_ids`, so it is still compared.
     Box::pin(async move {
-        if holon_pbt_core::capabilities::RefCopies::write_churn_armed(refs) {
-            return Extraction::Unobservable(
-                "a write churn holds an org file's write-back off".to_string(),
-            );
-        }
         let seed_block_ids = RefBackend::seed_block_ids(refs);
         let copies = holon_pbt_core::capabilities::copies_by_file(
             &holon_pbt_core::capabilities::RefCopies::model_copies(refs),
         );
+        let held = holon_pbt_core::capabilities::RefCopies::write_held(refs);
         Extraction::Value(
-            sut.org_block_snapshot(&copies)
+            sut.org_block_snapshot(&copies, &held)
                 .await
                 .into_iter()
                 .filter(|b| !seed_block_ids.contains(&b.id))

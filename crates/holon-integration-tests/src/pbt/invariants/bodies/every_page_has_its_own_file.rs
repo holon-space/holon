@@ -64,14 +64,13 @@ where
     }
 
     async fn check(&self, ref_: &R, sut: &S) -> InvariantResult {
-        if ref_.write_churn_armed() {
-            return InvariantResult::Skipped(
-                "a write churn holds an org file's write-back off".to_string(),
-            );
-        }
+        let held = ref_.write_held();
         // Index every on-disk file by its own doc-root `#+ID:` (bare).
         let mut files_by_root: HashMap<String, Vec<String>> = HashMap::new();
         for (path, disk, _rendered) in sut.snapshot_org_render_pairs(&Default::default()).await {
+            if held.holds(std::path::Path::new(&path)) {
+                continue;
+            }
             if let Some(root) = file_root_id(&disk) {
                 files_by_root.entry(root).or_default().push(path);
             }
@@ -79,7 +78,7 @@ where
 
         let mut violations: Vec<String> = Vec::new();
         for page in ref_.all_non_seed_block_ids() {
-            if !ref_.is_page_block(&page) {
+            if !ref_.is_page_block(&page) || held.blocks.contains(&page) {
                 continue;
             }
             // Ids are bare on disk; `EntityUri::block(bare)` <-> `page` scheme.
@@ -192,6 +191,14 @@ mod tests {
         }
         fn all_non_seed_block_ids(&self) -> BTreeSet<EntityUri> {
             self.pages.clone()
+        }
+    }
+    impl RefCopies for RefStub {
+        fn model_copies(&self) -> Vec<holon_pbt_core::capabilities::ModelCopy> {
+            Vec::new()
+        }
+        fn write_held(&self) -> holon_pbt_core::capabilities::WriteHeld {
+            Default::default()
         }
     }
 
