@@ -125,3 +125,16 @@ async fn link_search_lists_each_page_once() {
         "no candidate id may be duplicated, got ids: {ids:?}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_empty_link_search_is_refused() {
+    let engine = block_engine().await;
+    let err = engine
+        .search_link_candidates("")
+        .await
+        .expect_err("an empty search text matches every entity");
+    assert!(
+        format!("{err:#}").contains("empty"),
+        "the refusal must name the empty text, got: {err:#}"
+    );
+}

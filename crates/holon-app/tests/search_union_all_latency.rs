@@ -72,7 +72,7 @@ async fn fresh_engine(
     (engine, types)
 }
 
-/// A searchable, soft-deleting type over `{name}_raw`.
+/// A searchable, soft-deleting type.
 fn searchable_type(name: &str) -> holon_api::TypeDefinition {
     let field = |f: &str| holon_api::computation::FieldIdent::try_from(f.to_string()).unwrap();
     let mut type_def = holon_api::TypeDefinition::new(
@@ -85,7 +85,7 @@ fn searchable_type(name: &str) -> holon_api::TypeDefinition {
         ],
     );
     type_def.soft_delete = Some(holon_api::entity::SoftDelete {
-        tombstone_field: "deleted_at".to_string(),
+        tombstone_field: holon_api::computation::FieldIdent::parse("deleted_at").unwrap(),
         retention_days: 30,
     });
     type_def.services = Some(holon_api::TypeServices {
@@ -150,16 +150,12 @@ async fn seed(
         .expect("tag pages");
     }
     for name in TYPES {
-        types
-            .register(searchable_type(name))
-            .expect("register searchable type");
-        let table = format!("{name}_raw");
-        db.execute_ddl(&format!(
-            "CREATE TABLE {table} (id TEXT PRIMARY KEY, name TEXT NOT NULL, note TEXT, deleted_at \
-             TEXT)"
-        ))
-        .await
-        .expect("create typed table");
+        let type_def = searchable_type(name);
+        let table = holon_turso::turso_adapter::TursoAdapter::register(&type_def, db)
+            .await
+            .expect("create the typed raw table and read matview")
+            .raw_table;
+        types.register(type_def).expect("register searchable type");
         for chunk in (0..typed).collect::<Vec<_>>().chunks(500) {
             let values: Vec<String> = chunk
                 .iter()

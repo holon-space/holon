@@ -227,7 +227,8 @@ pub fn derive_entity_impl(input: DeriveInput) -> TokenStream {
                     fields: vec![
                         #(#schema_fields),*
                     ],
-                    primary_key: #primary_key.to_string(),
+                    primary_key: #api_path::computation::FieldIdent::parse(#primary_key)
+                        .expect("a Rust field name is an identifier"),
                     id_references: None,
                     graph_label: #graph_label_expr,
                     source: #api_path::TypeSource::BuiltIn,

@@ -726,7 +726,7 @@ mod tests {
     fn a_hyphenated_registration_is_still_found_by_scheme() {
         let registry = TypeRegistry::new();
         let mut td = TypeDefinition::new("t-widget", vec![]);
-        td.primary_key = "id".to_string();
+        td.primary_key = holon_api::computation::FieldIdent::parse("id").unwrap();
         registry.register(td).expect("register");
 
         assert!(

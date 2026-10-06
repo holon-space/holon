@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use holon_api::computation::FieldIdent;
 use holon_api::entity::ColumnValueKind;
 use holon_api::entity::FieldSchema;
 use holon_api::entity::TypeDefinition;
@@ -170,7 +171,7 @@ pub struct EntityConfig {
     pub source_name: Option<String>,
     /// Primary key column. Defaults to "id" if omitted.
     #[serde(default)]
-    pub id_column: Option<String>,
+    pub id_column: Option<FieldIdent>,
     /// Schema fields for cache table DDL generation. If present, the entity
     /// can use `QueryableCache::<DynamicEntity>` with a runtime schema.
     #[serde(default)]
@@ -201,7 +202,13 @@ impl EntityConfig {
     /// Resolve id_column with fallback to "id". // ALLOW(fallback): describes
     /// default-branch path, not error swallowing
     pub fn id_column_or_default(&self) -> String {
-        self.id_column.clone().unwrap_or_else(|| "id".to_string())
+        self.primary_key().to_string()
+    }
+
+    fn primary_key(&self) -> FieldIdent {
+        self.id_column
+            .clone()
+            .unwrap_or_else(|| FieldIdent::parse("id").expect("`id` is an identifier"))
     }
 
     /// The columns carrying this entity's row identity, most authoritative
@@ -222,7 +229,7 @@ impl EntityConfig {
             return primary_keys;
         }
         if let Some(ref col) = self.id_column {
-            return vec![col.clone()];
+            return vec![col.to_string()];
         }
         self.schema
             .iter()
@@ -746,7 +753,7 @@ impl EntityConfig {
         }
         let mut td = TypeDefinition::new(table_name, self.schema.overflow_completed());
         td.graph_label = Some(pascal_case(table_name));
-        td.primary_key = self.id_column_or_default();
+        td.primary_key = self.primary_key();
         td.profile_variants = self.profile_variants.clone();
         td.source = holon_api::TypeSource::McpProvider(provider.to_string());
         td.write_authority = match writes {
@@ -1477,7 +1484,7 @@ entities:
             .to_type_definition("email", "test-provider", WriteOwnership::Connector)
             .expect("should produce TypeDefinition");
         assert_eq!(td.name, "email");
-        assert_eq!(td.primary_key, "msg_id");
+        assert_eq!(td.primary_key.as_str(), "msg_id");
         assert_eq!(td.graph_label.as_deref(), Some("Email"));
         assert_eq!(
             td.fields

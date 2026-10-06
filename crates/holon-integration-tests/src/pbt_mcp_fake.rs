@@ -211,7 +211,7 @@ impl PbtMcpIntegration {
             EntityConfig {
                 short_name: None,
                 source_name: None,
-                id_column: Some("id".to_string()),
+                id_column: Some(holon_api::computation::FieldIdent::parse("id").unwrap()),
                 schema: MirrorSchema::parse(
                     &format!("pbt sidecar entity '{ENTITY_NAME}'"),
                     vec![

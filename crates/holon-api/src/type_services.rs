@@ -207,8 +207,12 @@ pub enum UnusableField {
     Missing,
     #[error("which the engine owns; a service reads a field the row's author writes")]
     EngineOwned,
-    #[error("which is transient and has no persisted value")]
+    #[error("which is computed; a service reads a column of the type's stored row")]
+    Computed,
+    #[error("which is transient; a service reads a column of the type's stored row")]
     Transient,
+    #[error("which is historical; a service reads a column of the type's stored row")]
+    Historical,
 }
 
 impl TypeServices {
@@ -232,7 +236,7 @@ impl TypeServices {
         }
         if let Some(hierarchy) = &self.hierarchy {
             authored_field(type_def, "hierarchy.parent", &hierarchy.parent)?;
-            if hierarchy.parent.as_str() == type_def.primary_key {
+            if hierarchy.parent == type_def.primary_key {
                 return Err(ServiceFieldError::SelfParent {
                     type_name: type_def.name.clone(),
                     field: hierarchy.parent.to_string(),
@@ -265,8 +269,12 @@ fn authored_field<'a>(
     let reason = match schema {
         None => UnusableField::Missing,
         Some(s) if s.value_kind.is_engine_owned() => UnusableField::EngineOwned,
-        Some(s) if matches!(s.lifetime, FieldLifetime::Transient) => UnusableField::Transient,
-        Some(s) => return Ok(s),
+        Some(s) => match s.lifetime {
+            FieldLifetime::Persistent => return Ok(s),
+            FieldLifetime::Computed { .. } => UnusableField::Computed,
+            FieldLifetime::Transient => UnusableField::Transient,
+            FieldLifetime::Historical => UnusableField::Historical,
+        },
     };
     Err(ServiceFieldError::Unusable {
         type_name: type_def.name.clone(),

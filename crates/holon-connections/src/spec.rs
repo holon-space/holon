@@ -170,7 +170,8 @@ impl CompiledListSync {
                     spec.entity
                 );
                 anyhow::ensure!(
-                    *column != soft_delete.tombstone_field && *column != spec.watermark_column,
+                    column.as_str() != soft_delete.tombstone_field.as_str()
+                        && *column != spec.watermark_column,
                     "connection '{connection}' lists '{column}' under `list_sync.{policy}`, but                      that column carries this connection's own tombstone or watermark bookkeeping                      and cannot also take the peer's value"
                 );
                 anyhow::ensure!(
@@ -181,7 +182,7 @@ impl CompiledListSync {
         }
 
         Ok(Arc::new(Self {
-            tombstone_column: soft_delete.tombstone_field.clone(),
+            tombstone_column: soft_delete.tombstone_field.to_string(),
             entity_scheme: holon_api::EntityName::new(spec.entity.clone()),
             tombstone_window: soft_delete.retention(),
             declared_columns,

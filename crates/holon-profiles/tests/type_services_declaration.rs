@@ -6,6 +6,10 @@
 use std::path::Path;
 use std::path::PathBuf;
 
+use holon_api::ComputedSpec;
+use holon_api::ComputedTier;
+use holon_api::FieldLifetime;
+use holon_api::FieldSchema;
 use holon_api::TypeDefinition;
 use holon_profiles::TypeRegistry;
 use holon_profiles::create_default_registry;
@@ -29,6 +33,9 @@ fields:
   - name: fetched
     sql_type: TEXT
     lifetime: transient
+  - name: old_text
+    sql_type: TEXT
+    lifetime: historical
   - name: properties
     sql_type: TEXT
     value_kind: overflow_properties
@@ -254,6 +261,44 @@ fn a_service_naming_the_engine_owned_overflow_bag_is_refused() {
 fn a_service_naming_a_transient_field_is_refused() {
     let msg = refusal(&step_yaml("services:\n  title: fetched\n"));
     for needle in ["title", "`fetched`", "transient"] {
+        assert!(msg.contains(needle), "missing {needle:?} in: {msg}");
+    }
+}
+
+#[test]
+fn a_service_naming_a_historical_field_is_refused() {
+    let msg = refusal(&step_yaml(
+        "services:\n  title: text\n  searchable: [text, old_text]\n",
+    ));
+    for needle in ["searchable", "`old_text`", "historical"] {
+        assert!(msg.contains(needle), "missing {needle:?} in: {msg}");
+    }
+}
+
+#[test]
+fn a_service_naming_a_computed_field_is_refused() {
+    let mut type_def = parse(&step_yaml(
+        "services:\n  title: text\n  searchable: [text, shout]\n",
+    ))
+    .unwrap();
+    let spec = ComputedSpec::parse(
+        "shout",
+        "text + \"!\"",
+        ComputedTier::ComputedLive,
+        &type_def.field_types(),
+        &rhai::Engine::new(),
+    )
+    .unwrap();
+    type_def.fields.push(
+        FieldSchema::new("shout", "TEXT").lifetime(FieldLifetime::Computed {
+            spec: Box::new(spec),
+        }),
+    );
+    let msg = match TypeRegistry::new().register(type_def) {
+        Ok(()) => panic!("a searchable computed field was admitted"),
+        Err(e) => format!("{e:#}"),
+    };
+    for needle in ["searchable", "`shout`", "computed"] {
         assert!(msg.contains(needle), "missing {needle:?} in: {msg}");
     }
 }

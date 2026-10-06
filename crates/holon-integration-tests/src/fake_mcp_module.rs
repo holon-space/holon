@@ -285,7 +285,7 @@ async fn build_handle(db_handle: DbHandle) -> anyhow::Result<FakeMcpHandle> {
         EntityConfig {
             short_name: None,
             source_name: None,
-            id_column: Some("id".to_string()),
+            id_column: Some(holon_api::computation::FieldIdent::parse("id").unwrap()),
             schema: id_and_data_schema(ENTITY_NAME),
             sync: Some(SyncConfig {
                 project: Default::default(),
@@ -312,7 +312,7 @@ async fn build_handle(db_handle: DbHandle) -> anyhow::Result<FakeMcpHandle> {
             EntityConfig {
                 short_name: None,
                 source_name: None,
-                id_column: Some("id".to_string()),
+                id_column: Some(holon_api::computation::FieldIdent::parse("id").unwrap()),
                 schema: id_and_data_schema(entity),
                 sync: None,
                 vtable: None,

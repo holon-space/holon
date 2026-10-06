@@ -2550,7 +2550,17 @@ impl HolonMcpServer {
 
         let name = type_def.name.clone();
 
-        // Register in TypeRegistry (validates computed field expressions).
+        if type_def.services.is_some() {
+            return Err(rmcp::ErrorData::invalid_params(
+                format!(
+                    "type '{name}' declares `services`, which MCP-created types cannot carry: \
+                     their rows live in table '{name}', but search reads a type's rows from \
+                     the Turso adapter's raw table, which MCP does not create"
+                ),
+                None,
+            ));
+        }
+
         // A missing registry is a WIRING error, not a reason to skip: silently
         // creating the extension table without registering the type leaves an
         // entity SQL can see but no link, query or profile can resolve.
@@ -2563,11 +2573,13 @@ impl HolonMcpServer {
                 None,
             )
         })?;
-        registry.register(type_def.clone()).map_err(|e| {
+        let refused = |e: anyhow::Error| {
             rmcp::ErrorData::internal_error(format!("Failed to register type '{name}': {e}"), None)
-        })?;
+        };
+        registry.check(&type_def).map_err(refused)?;
 
-        // Create extension table via DynamicSchemaModule
+        // The table exists before the type is registered, so no reader resolves
+        // a type whose table is missing.
         if !type_def.fields.is_empty() {
             use holon::storage::SchemaModule;
             let module =
@@ -2590,6 +2602,8 @@ impl HolonMcpServer {
                     )
                 })?;
         }
+
+        registry.register(type_def.clone()).map_err(refused)?;
 
         // Register in GQL graph for query support
         self.engine().register_entity_type(type_def);

@@ -200,7 +200,7 @@ fn require_declarable_soft_delete(type_def: &TypeDefinition) -> Result<()> {
     let field = type_def
         .persistent_fields()
         .into_iter()
-        .find(|f| f.name == soft_delete.tombstone_field)
+        .find(|f| f.name == soft_delete.tombstone_field.as_str())
         .ok_or_else(|| {
             format!(
                 "type '{name}' declares soft deletion into '{}', which is not one of its \
@@ -277,7 +277,7 @@ mod tests {
             .push(FieldSchema::new("gone_at", "TEXT").nullable());
         type_def.fields.push(FieldSchema::new("count", "INTEGER"));
         type_def.soft_delete = Some(holon_api::entity::SoftDelete {
-            tombstone_field: field.to_string(),
+            tombstone_field: holon_api::computation::FieldIdent::parse(field).unwrap(),
             retention_days,
         });
         type_def
@@ -360,7 +360,7 @@ mod tests {
             .fields
             .push(FieldSchema::new("count", "INTEGER"));
         unhonourable.soft_delete = Some(holon_api::entity::SoftDelete {
-            tombstone_field: "count".to_string(),
+            tombstone_field: holon_api::computation::FieldIdent::parse("count").unwrap(),
             retention_days: 7,
         });
 

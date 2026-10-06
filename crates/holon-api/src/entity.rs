@@ -14,6 +14,7 @@ use serde::Serialize;
 
 use crate::Value;
 use crate::computation::Computation;
+use crate::computation::FieldIdent;
 use crate::computation::FieldTypes;
 
 /// Result type for entity operations
@@ -625,7 +626,7 @@ pub struct TypeDefinition {
     pub fields: Vec<FieldSchema>,
     /// Primary key column name. Defaults to "id".
     #[serde(default = "default_primary_key")]
-    pub primary_key: String,
+    pub primary_key: FieldIdent,
     /// If set, the PK column gets a `REFERENCES {table}(id)` FK constraint.
     /// Used for extension tables that reference the `block` table.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -679,7 +680,7 @@ pub struct TypeDefinition {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SoftDelete {
     /// The nullable TEXT field `delete` stamps with an RFC 3339 timestamp.
-    pub tombstone_field: String,
+    pub tombstone_field: FieldIdent,
     /// How long a tombstone stays authoritative against an incoming snapshot.
     /// Past it, an incoming row wins.
     pub retention_days: i64,
@@ -718,8 +719,8 @@ impl holon_pattern::schema::SchemaSource for TypeDefinition {
     }
 }
 
-fn default_primary_key() -> String {
-    "id".to_string()
+fn default_primary_key() -> FieldIdent {
+    FieldIdent::parse("id").expect("`id` is an identifier")
 }
 
 impl TypeDefinition {
@@ -728,7 +729,7 @@ impl TypeDefinition {
             name: name.into(),
             default_lifetime: FieldLifetime::default(),
             fields,
-            primary_key: "id".to_string(),
+            primary_key: default_primary_key(),
             id_references: None,
             graph_label: None,
             source: TypeSource::default(),
@@ -844,7 +845,7 @@ impl TypeDefinition {
             name: name.into(),
             default_lifetime: FieldLifetime::default(),
             fields: Vec::new(),
-            primary_key: "id".to_string(),
+            primary_key: default_primary_key(),
             id_references: None,
             graph_label: None,
             profile_variants: Vec::new(),
@@ -1180,7 +1181,7 @@ mod create_table_sql_tests {
         let td = TypeDefinition {
             name: "gh_issue".to_string(),
             graph_label: None,
-            primary_key: "owner".to_string(),
+            primary_key: FieldIdent::parse("owner").unwrap(),
             fields: vec![
                 FieldSchema::new("owner", "TEXT").primary_key(),
                 FieldSchema::new("repo", "TEXT").primary_key(),
@@ -1215,7 +1216,7 @@ mod create_table_sql_tests {
         let td = TypeDefinition {
             name: "single".to_string(),
             graph_label: None,
-            primary_key: "id".to_string(),
+            primary_key: default_primary_key(),
             fields: vec![
                 FieldSchema::new("id", "TEXT").primary_key(),
                 FieldSchema::new("name", "TEXT"),
@@ -1342,7 +1343,7 @@ mod mutation_gap_tests {
     #[test]
     fn primary_key_defaults_to_id_on_deserialize() {
         let td: TypeDefinition = serde_json::from_str(r#"{"name":"t","fields":[]}"#).unwrap();
-        assert_eq!(td.primary_key, "id");
+        assert_eq!(td.primary_key.as_str(), "id");
     }
 
     #[test]

@@ -134,6 +134,7 @@ crate::cap_transition! {
 mod tests {
     use std::time::Duration;
 
+    use holon::api::query_engine::QueryEngine;
     use holon_pbt_core::capabilities::SutEntityTypeRegister;
 
     use super::*;
@@ -208,6 +209,83 @@ mod tests {
                 LinkTarget::Resolved(_)
             ),
             "the hyphenated scheme must fold onto the underscored table name — the #71 join"
+        );
+    }
+
+    fn type_with_fields(
+        name: &str,
+        extra: serde_json::Value,
+        services: Option<serde_json::Value>,
+    ) -> serde_json::Value {
+        let mut type_def = serde_json::json!({
+            "name": name,
+            "fields": [
+                { "name": "id", "sql_type": "TEXT", "primary_key": true },
+                { "name": "title", "sql_type": "TEXT", "nullable": true },
+                extra,
+            ],
+        });
+        if let Some(services) = services {
+            type_def["services"] = services;
+        }
+        serde_json::json!({ "type_definition": type_def })
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_type_declaring_services_over_mcp_is_refused_by_name() {
+        let comp = HeadlessFrontendComponent::new(
+            &[("doc0.org", "#+ID: ref-doc-0\n* Doc zero zebra\n")],
+            Duration::from_millis(300),
+        )
+        .await;
+        let msg = comp
+            .call_mcp_tool_expecting_error(
+                "create_entity_type",
+                type_with_fields(
+                    "gen_note",
+                    serde_json::json!({ "name": "body", "sql_type": "TEXT" }),
+                    Some(serde_json::json!({ "title": "title", "searchable": ["title"] })),
+                ),
+            )
+            .await
+            .unwrap_or_else(|accepted| panic!("{accepted}"));
+        for needle in ["gen_note", "services", "search"] {
+            assert!(msg.contains(needle), "missing {needle:?} in: {msg}");
+        }
+        assert!(
+            !comp.type_registry().await.contains("gen_note"),
+            "a refused type must not be registered"
+        );
+        comp.engine()
+            .quick_open_search("zebra")
+            .await
+            .expect("search must survive a refused MCP type");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_type_whose_table_cannot_be_created_over_mcp_is_not_registered() {
+        let comp = HeadlessFrontendComponent::new(
+            &[("doc0.org", "#+ID: ref-doc-0\n* Doc zero zebra\n")],
+            Duration::from_millis(300),
+        )
+        .await;
+        let outcome = comp
+            .call_mcp_tool_outcome(
+                "create_entity_type",
+                type_with_fields(
+                    "gen_broken",
+                    serde_json::json!({ "name": "bad", "sql_type": "TEXT))(" }),
+                    None,
+                ),
+            )
+            .await;
+        assert!(
+            outcome.is_err() || outcome.as_ref().unwrap().is_error == Some(true),
+            "the DDL must fail, got {outcome:?}"
+        );
+        assert!(
+            !comp.type_registry().await.contains("gen_broken"),
+            "a type whose table was never created must not be registered"
         );
     }
 }

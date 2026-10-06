@@ -3898,7 +3898,7 @@ impl HeadlessFrontendComponent {
 
     /// Call one MCP tool that must fail with a protocol error, and return
     /// that error's message.
-    async fn call_mcp_tool_expecting_error(
+    pub(crate) async fn call_mcp_tool_expecting_error(
         &self,
         tool: &str,
         arguments: serde_json::Value,
@@ -3916,7 +3916,7 @@ impl HeadlessFrontendComponent {
     /// The server is built per call rather than kept: it holds no state of its
     /// own (engine, registry and debug services are all shared `Arc`s), so a
     /// fresh one is the same server an integration would reconnect to.
-    async fn call_mcp_tool_outcome(
+    pub(crate) async fn call_mcp_tool_outcome(
         &self,
         tool: &str,
         arguments: serde_json::Value,

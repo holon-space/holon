@@ -217,9 +217,12 @@ async fn create_initialized_engine(
             vec![crate::api::entity_search::SearchGroup {
                 type_name: "block".to_string(),
                 name: crate::api::entity_search::PAGE_GROUP.to_string(),
-                member_sql: "EXISTS (SELECT 1 FROM block_tags t WHERE t.block_id = e.id AND \
-                             t.tag = 'Page')"
-                    .to_string(),
+                member_sql: |pk| {
+                    format!(
+                        "EXISTS (SELECT 1 FROM block_tags t WHERE t.block_id = {pk} AND \
+                         t.tag = 'Page')"
+                    )
+                },
             }],
         )),
     )

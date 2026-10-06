@@ -931,37 +931,7 @@ impl BackendEngine {
         let ctx = context.unwrap_or_else(QueryContext::root);
         self.bind_context_params(&mut params, &ctx);
 
-        // Retry with fresh connections to handle "Database schema changed" errors
-        // that occur when DDL operations race with queries during startup.
-        // Fresh connections don't have stale prepared statement caches.
-        // db_handle used directly
-        let mut last_error = None;
-        for attempt in 0..5 {
-            let result = self.db_handle.query(&sql, params.clone()).await;
-            match result {
-                Ok(result) => return Ok(result),
-                Err(e) => {
-                    let err_str = format!("{:?}", e);
-                    let is_schema_error = err_str.contains("Database schema changed");
-                    if is_schema_error && attempt < 4 {
-                        tracing::debug!(
-                            "[execute_query] Retry {} due to schema change: {}",
-                            attempt + 1,
-                            err_str
-                        );
-                        tokio::time::sleep(std::time::Duration::from_millis(50 * (1 << attempt)))
-                            .await;
-                        last_error = Some(e);
-                    } else {
-                        return Err(anyhow::anyhow!("SQL execution failed: {}", e));
-                    }
-                }
-            }
-        }
-        Err(anyhow::anyhow!(
-            "SQL execution failed after retries: {:?}",
-            last_error
-        ))
+        query_retrying_schema_change(&self.db_handle, &sql, params).await
     }
 
     /// Watch ONE subtree through a SHAPE-KEYED shared view.
@@ -1961,6 +1931,40 @@ impl BackendEngine {
     pub fn get_dispatcher(&self) -> Arc<OperationDispatcher> {
         self.dispatcher.clone()
     }
+}
+
+/// Runs `sql`, retrying with exponential backoff while it fails with "Database
+/// schema changed": DDL racing a query during startup invalidates the query's
+/// prepared statement.
+pub(crate) async fn query_retrying_schema_change(
+    db_handle: &DbHandle,
+    sql: &str,
+    params: HashMap<String, Value>,
+) -> Result<Vec<holon_api::StorageEntity>> {
+    let mut last_error = None;
+    for attempt in 0..5 {
+        match db_handle.query(sql, params.clone()).await {
+            Ok(result) => return Ok(result),
+            Err(e) => {
+                let err_str = format!("{:?}", e);
+                if err_str.contains("Database schema changed") && attempt < 4 {
+                    tracing::debug!(
+                        "[query_retrying_schema_change] Retry {} due to schema change: {}",
+                        attempt + 1,
+                        err_str
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(50 * (1 << attempt))).await;
+                    last_error = Some(e);
+                } else {
+                    return Err(anyhow::anyhow!("SQL execution failed: {}", e));
+                }
+            }
+        }
+    }
+    Err(anyhow::anyhow!(
+        "SQL execution failed after retries: {:?}",
+        last_error
+    ))
 }
 
 #[cfg(test)]

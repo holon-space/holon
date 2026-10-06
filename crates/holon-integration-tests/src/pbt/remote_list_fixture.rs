@@ -54,7 +54,7 @@ pub fn type_definition() -> TypeDefinition {
     let mut def = TypeDefinition::new(ENTITY, fields);
     def.home = Some(HomeProfileId::parse("holon-native").expect("a well-formed profile id"));
     def.soft_delete = Some(SoftDelete {
-        tombstone_field: TOMBSTONE_COLUMN.to_string(),
+        tombstone_field: holon_api::computation::FieldIdent::parse(TOMBSTONE_COLUMN).unwrap(),
         retention_days: 7,
     });
     def

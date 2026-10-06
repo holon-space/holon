@@ -120,7 +120,7 @@ async fn main() -> Result<()> {
             )
             .await
             .with_context(|| format!("fetch page 1 for {entity_name}"))?;
-        let first_ids = sample_ids(&page1.records, entity.id_column.as_deref().unwrap_or("id"));
+        let first_ids = sample_ids(&page1.records, &entity.id_column_or_default());
         println!(
             "{entity_name}: page1 = {} records | new_cursor = {} | sample = {:?}",
             page1.records.len(),
@@ -149,8 +149,7 @@ async fn main() -> Result<()> {
                 )
                 .await
                 .with_context(|| format!("fetch page 2 for {entity_name}"))?;
-            let second_ids =
-                sample_ids(&page2.records, entity.id_column.as_deref().unwrap_or("id"));
+            let second_ids = sample_ids(&page2.records, &entity.id_column_or_default());
             let advanced = second_ids.iter().all(|id| !first_ids.contains(id));
             println!(
                 "{entity_name}: page2 = {} records | cursor advanced (no overlap) = {advanced} | \

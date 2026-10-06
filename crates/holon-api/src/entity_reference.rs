@@ -259,7 +259,7 @@ pub fn row_field_references(type_def: &TypeDefinition) -> Result<Vec<OperationPa
 /// own key, when the caller picks it, and its reference fields.
 pub fn create_references(type_def: &TypeDefinition) -> Result<Vec<OperationParam>, String> {
     let own = OperationParam {
-        name: type_def.primary_key.clone(),
+        name: type_def.primary_key.to_string(),
         type_hint: TypeHint::EntityId {
             entity_name: EntityName::new(type_def.name.clone()),
         },

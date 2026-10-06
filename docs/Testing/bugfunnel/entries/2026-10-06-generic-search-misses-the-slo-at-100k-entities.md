@@ -64,3 +64,9 @@ searchable, soft-deleting types. Release profile, machine load ~15
 | vault (2257 blocks) | 4.5 ms | 4.6 ms | 1.9 ms | 4.6 ms |
 | 20k entities | 22.8 ms | 23.0 ms | 11.6 ms | 23.5 ms |
 | 100k entities | 121.6 ms | 108.6 ms | 66.9 ms | 124.0 ms |
+
+Re-measured with the typed types created by `TursoAdapter::register` (raw
+table plus read matview; search reads the raw table). Release profile,
+100k entities, load 15-18 (`lane-logs/c2r2b/g7-slo-run4.log`, `-run5.log`):
+p95 all prefixes 151.6 ms and 153.0 ms. Runs at load 16-217 gave 217-978 ms
+(`lane-logs/c2r2b/`), so the probe needs an idle machine.

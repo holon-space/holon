@@ -298,7 +298,7 @@ impl WriteSchema {
             soft_delete: type_def
                 .soft_delete
                 .as_ref()
-                .map(|s| s.tombstone_field.clone()),
+                .map(|s| s.tombstone_field.to_string()),
             ..Self::from_references(
                 type_def
                     .persistent_fields()
@@ -6145,7 +6145,7 @@ mod soft_delete_route_tests {
         fields.extend(FieldSchema::overflow_pair());
         let mut type_def = TypeDefinition::new("gen_perishable", fields);
         type_def.soft_delete = Some(SoftDelete {
-            tombstone_field: TOMBSTONE.to_string(),
+            tombstone_field: holon_api::computation::FieldIdent::parse(TOMBSTONE).unwrap(),
             retention_days: 7,
         });
         type_def

@@ -116,7 +116,7 @@ impl GraphSchemaRegistry {
                 label.clone(),
                 Box::new(MappedNodeResolver {
                     table_name: td.name.clone(),
-                    id_col: td.primary_key.clone(),
+                    id_col: td.primary_key.to_string(),
                     label: label.clone(),
                     columns,
                     extension_column: None,
@@ -137,7 +137,7 @@ impl GraphSchemaRegistry {
                     .map(|(_, lbl)| (*lbl).to_string());
                 let (target_table, target_id) = entity_info
                     .get(target_entity_name.as_str())
-                    .map(|(td, _)| (td.name.clone(), td.primary_key.clone()))
+                    .map(|(td, _)| (td.name.clone(), td.primary_key.to_string()))
                     .unwrap_or_else(|| (target_entity_name.clone(), "id".into()));
 
                 edges.insert(
@@ -371,7 +371,7 @@ mod tests {
     fn block_type_def() -> TypeDefinition {
         TypeDefinition {
             name: "block".into(),
-            primary_key: "id".into(),
+            primary_key: holon_api::computation::FieldIdent::parse("id").unwrap(),
             graph_label: Some("block".into()),
             fields: vec![
                 FieldSchema::new("id", "TEXT").primary_key().indexed(),
@@ -384,7 +384,7 @@ mod tests {
     fn block_type_def_with_edge() -> TypeDefinition {
         TypeDefinition {
             name: "block".into(),
-            primary_key: "id".into(),
+            primary_key: holon_api::computation::FieldIdent::parse("id").unwrap(),
             graph_label: Some("block".into()),
             fields: vec![
                 FieldSchema::new("id", "TEXT").primary_key().indexed(),

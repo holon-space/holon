@@ -14,9 +14,11 @@ use holon_api::SearchHit;
 use holon_api::SearchQuery;
 use holon_api::TypeDefinition;
 use holon_api::TypeServices;
+use holon_api::computation::FieldIdent;
 use holon_profiles::TypeRegistry;
 use holon_turso::turso_adapter::TursoAdapter;
 
+use crate::api::backend_engine::query_retrying_schema_change;
 use crate::storage::turso::DbHandle;
 
 /// The search group quick-open lists as its Pages section.
@@ -28,8 +30,8 @@ pub const PAGE_GROUP: &str = "Page";
 pub struct SearchGroup {
     pub type_name: String,
     pub name: String,
-    /// SQL predicate over the type's raw row, aliased `e`.
-    pub member_sql: String,
+    /// SQL predicate over the type's row, given its primary-key column.
+    pub member_sql: fn(pk: &str) -> String,
 }
 
 pub struct UnionAllSearch {
@@ -52,6 +54,7 @@ impl UnionAllSearch {
             if services.searchable.is_empty() || (query.linkable_only && !services.linkable) {
                 continue;
             }
+            let pk = column(&type_def.primary_key);
             let groups: Vec<&SearchGroup> = self
                 .groups
                 .iter()
@@ -74,13 +77,13 @@ impl UnionAllSearch {
                     services,
                     m,
                     Some(group),
-                    &group.member_sql,
+                    &(group.member_sql)(&pk),
                     limit,
                 ));
             }
             let outside = groups
                 .iter()
-                .map(|g| format!("NOT ({})", g.member_sql))
+                .map(|g| format!("NOT ({})", (g.member_sql)(&pk)))
                 .collect::<Vec<_>>()
                 .join(" AND ");
             branches.push(branch(&type_def, services, m, None, &outside, query.limit));
@@ -99,12 +102,11 @@ fn branch(
     membership: &str,
     limit: usize,
 ) -> String {
-    let column = |field: &str| format!("e.\"{field}\"");
-    let title = column(services.title.as_str());
-    let matches: Vec<(String, &str)> = services
+    let title = column(&services.title);
+    let matches: Vec<(String, &FieldIdent)> = services
         .searchable
         .iter()
-        .map(|f| (m.contained_in(&column(f.as_str())), f.as_str()))
+        .map(|f| (m.contained_in(&column(f)), f))
         .collect();
     let matched = matches
         .iter()
@@ -116,7 +118,7 @@ fn branch(
         .map(|(predicate, field)| {
             format!(
                 "WHEN {predicate} THEN {}",
-                i64::from(*field == services.title.as_str())
+                i64::from(*field == &services.title)
             )
         })
         .collect::<Vec<_>>()
@@ -148,6 +150,11 @@ fn branch(
     )
 }
 
+/// `field` of the branch's row, aliased `e`.
+fn column(field: &FieldIdent) -> String {
+    format!("e.\"{field}\"")
+}
+
 fn sql_string(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }
@@ -155,20 +162,13 @@ fn sql_string(s: &str) -> String {
 #[async_trait]
 impl EntitySearch for UnionAllSearch {
     async fn search(&self, query: SearchQuery<'_>) -> Result<Vec<SearchHit>> {
-        assert!(
-            !query.text.is_empty(),
-            "an empty search text matches every entity"
-        );
-        let m = SearchMatch::new(query.text)?;
+        let text = query.text.as_str();
+        let m = SearchMatch::new(text)?;
         let sql = self.sql(&query, &m);
-        let rows = self
-            .db
-            .query(&sql, HashMap::new())
+        let rows = query_retrying_schema_change(&self.db, &sql, HashMap::new())
             .await
-            .with_context(|| format!("search {:?}", query.text))?;
-        rows.into_iter()
-            .map(|row| parse_hit(row, query.text))
-            .collect()
+            .with_context(|| format!("search {text:?}"))?;
+        rows.into_iter().map(|row| parse_hit(row, text)).collect()
     }
 }
 
@@ -370,10 +370,8 @@ mod fold_class_tests {
         Some(inner.chars().collect())
     }
 
-    /// Every character whose fold is shared must be reachable from every other
-    /// spelling of it. This is the property the two-element class violated:
-    /// `ẞ` was absent from `ß`'s class, so all-caps German `STRAẞE` could not
-    /// be found by any query.
+    /// A query for any spelling of a character finds every other spelling that
+    /// folds with it.
     #[test]
     fn glob_class_is_the_oracles_whole_equivalence_class_across_the_bmp() {
         let mut expected: BTreeMap<char, BTreeSet<char>> = BTreeMap::new();
@@ -410,8 +408,7 @@ mod fold_class_tests {
         );
     }
 
-    /// The characters the verifier found unreachable, named so a regression
-    /// says which family broke.
+    /// One case per many-to-one fold family, so a failure names the family.
     #[test]
     fn the_many_to_one_folds_reach_every_spelling() {
         for (query, must_contain) in [

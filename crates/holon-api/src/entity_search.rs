@@ -18,10 +18,31 @@ pub struct SearchHit {
     pub snippet: Vec<String>,
 }
 
+/// Search text, matched case-insensitively as a literal substring. Never
+/// empty: the empty string is a substring of every entity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SearchText<'a>(&'a str);
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[error("the search text is empty, and the empty text matches every entity")]
+pub struct EmptySearchText;
+
+impl<'a> SearchText<'a> {
+    pub fn new(text: &'a str) -> Result<Self, EmptySearchText> {
+        if text.is_empty() {
+            return Err(EmptySearchText);
+        }
+        Ok(Self(text))
+    }
+
+    pub fn as_str(&self) -> &'a str {
+        self.0
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct SearchQuery<'a> {
-    /// Non-blank; matched case-insensitively as a literal substring.
-    pub text: &'a str,
+    pub text: SearchText<'a>,
     /// Only types declaring `services.linkable`.
     pub linkable_only: bool,
     /// Hits per type outside every group.

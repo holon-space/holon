@@ -612,7 +612,16 @@ fn absorb_discovered_entity(
     provider_name: &str,
     meta: ResourceEntityMeta,
 ) -> anyhow::Result<()> {
-    let id_column = meta.primary_keys.first().cloned().unwrap_or("id".into());
+    let id_column = holon_api::computation::FieldIdent::parse(
+        meta.primary_keys.first().map_or("id", String::as_str),
+    )
+    .with_context(|| {
+        format!(
+            "provider '{provider_name}': entity '{}' advertises a primary key that cannot name \
+             a column",
+            meta.entity_name
+        )
+    })?;
     let schema = MirrorSchema::parse(
         &format!(
             "provider '{provider_name}': entity '{}', auto-discovered from resource template \
@@ -620,7 +629,7 @@ fn absorb_discovered_entity(
             meta.entity_name, meta.uri_template
         ),
         meta.fields,
-        &id_column,
+        id_column.as_str(),
     )?;
 
     // Match by direct key name first, then by source_name mapping
@@ -1856,7 +1865,7 @@ mod integration_resilience_tests {
         EntityConfig {
             short_name: None,
             source_name: None,
-            id_column: Some("id".into()),
+            id_column: Some(holon_api::computation::FieldIdent::parse("id").unwrap()),
             schema: MirrorSchema::default(),
             sync,
             vtable: None,

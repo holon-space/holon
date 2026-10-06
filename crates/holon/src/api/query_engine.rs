@@ -12,12 +12,14 @@ use std::collections::HashMap;
 use anyhow::Context;
 use anyhow::Result;
 use async_trait::async_trait;
+use holon_api::EmptySearchText;
 use holon_api::EnrichedChangeStream;
 use holon_api::EntityUri;
 use holon_api::LinkCandidate;
 use holon_api::QueryContext;
 use holon_api::QueryLanguage;
 use holon_api::SearchQuery;
+use holon_api::SearchText;
 use holon_api::Value;
 pub use holon_api::query_engine::QueryEngine;
 
@@ -82,7 +84,7 @@ impl QueryEngine for BackendEngine {
         let hits = self
             .search()
             .search(SearchQuery {
-                text: filter,
+                text: SearchText::new(filter)?,
                 linkable_only: true,
                 limit: 15,
                 group_limits: &[(PAGE_GROUP, 5)],
@@ -98,14 +100,14 @@ impl QueryEngine for BackendEngine {
     }
 
     async fn quick_open_search(&self, filter: &str) -> Result<holon_api::QuickOpenResults> {
-        let trimmed = filter.trim();
-        if trimmed.is_empty() {
-            return Ok(holon_api::QuickOpenResults::default());
-        }
+        let text = match SearchText::new(filter.trim()) {
+            Ok(text) => text,
+            Err(EmptySearchText) => return Ok(holon_api::QuickOpenResults::default()),
+        };
         let hits = self
             .search()
             .search(SearchQuery {
-                text: trimmed,
+                text,
                 linkable_only: false,
                 limit: 30,
                 group_limits: &[(PAGE_GROUP, 20)],
