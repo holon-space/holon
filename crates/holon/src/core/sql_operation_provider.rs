@@ -650,6 +650,7 @@ impl SqlOperationProvider {
                         ),
                     })
                     .collect();
+                Self::refuse_malformed_edge_targets(key, &ids)?;
                 edge_field_params.push((descriptor.clone(), ids));
             } else if self.write_schema.is_column(key.as_ref()) {
                 // Trim trailing whitespace from content — org files don't
@@ -1139,6 +1140,13 @@ impl SqlOperationProvider {
         };
         result.response = response;
         Ok(result)
+    }
+
+    fn refuse_malformed_edge_targets(field: &str, targets: &[String]) -> Result<()> {
+        holon_api::EdgeField::from_drawer_key(field)
+            .unwrap_or_else(|| panic!("edge descriptor '{field}' names no EdgeField"))
+            .refuse_malformed_targets(targets)?;
+        Ok(())
     }
 
     /// Build SQL statements that replace the edge-field rows for `id`.
@@ -3692,6 +3700,7 @@ impl OriginTaggedWrites for SqlOperationProvider {
                             )),
                         })
                         .collect::<std::result::Result<Vec<_>, _>>()?;
+                    Self::refuse_malformed_edge_targets(field, &targets)?;
                     for stmt in Self::edge_field_replace_sql(id, descriptor, &targets) {
                         self.db_handle
                             .execute(&stmt, vec![])

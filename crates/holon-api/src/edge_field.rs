@@ -68,6 +68,18 @@ impl EdgeField {
         })
     }
 
+    /// Refuses `values` unless each is a member this field holds: any tag
+    /// string for [`EdgeField::Tags`], an id that forms a uri for the
+    /// reference fields. The error names the field and the value.
+    pub fn refuse_malformed_targets(self, values: &[String]) -> anyhow::Result<()> {
+        match self {
+            EdgeField::Tags => Ok(()),
+            EdgeField::Requires | EdgeField::AdviceSuppressed | EdgeField::ContributesTo => {
+                uris_from_raw(self, values).map(drop)
+            }
+        }
+    }
+
     /// Whether a drawer / property key spells an edge field. A file parser
     /// lifts such a key into the typed edge, so an ingest must not store it a
     /// second time as a flat string property.
@@ -182,9 +194,9 @@ impl BlockEdges {
     pub fn set_from_raw(&mut self, field: EdgeField, values: Vec<String>) -> anyhow::Result<()> {
         match field {
             EdgeField::Tags => self.tags = values.into_iter().collect(),
-            EdgeField::Requires => self.requires = uris_from_raw(field, values)?,
-            EdgeField::AdviceSuppressed => self.advice_suppressed = uris_from_raw(field, values)?,
-            EdgeField::ContributesTo => self.contributes_to = uris_from_raw(field, values)?,
+            EdgeField::Requires => self.requires = uris_from_raw(field, &values)?,
+            EdgeField::AdviceSuppressed => self.advice_suppressed = uris_from_raw(field, &values)?,
+            EdgeField::ContributesTo => self.contributes_to = uris_from_raw(field, &values)?,
         }
         Ok(())
     }
@@ -209,7 +221,7 @@ impl BlockEdges {
     }
 }
 
-fn uris_from_raw(field: EdgeField, values: Vec<String>) -> anyhow::Result<Vec<EntityUri>> {
+fn uris_from_raw(field: EdgeField, values: &[String]) -> anyhow::Result<Vec<EntityUri>> {
     values
         .iter()
         .map(|s| {

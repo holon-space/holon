@@ -960,6 +960,9 @@ impl EntityCellRegistry for BlockCellRegistry {
                 // over every `EdgeField` member — routing to `properties` (the
                 // `_` cell arm) would drop it from the junction.
                 let targets = Self::parse_edge_string_targets(field, &value)?;
+                holon_api::EdgeField::from_drawer_key(field)
+                    .expect("is_edge_column matched an EdgeField")
+                    .refuse_malformed_targets(&targets)?;
                 backend
                     .set_block_edge_field(&id, field, &targets)
                     .await
@@ -1291,6 +1294,39 @@ mod tests {
             "a refused write commits no op"
         );
         assert_eq!(doc.get_tree(TREE_NAME).get_nodes(false).len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_malformed_edge_target_is_refused_by_name() -> Result<()> {
+        let doc = make_loro_doc_with_block("held");
+        let registry = BlockCellRegistry::with_loro_doc(
+            doc.clone(),
+            Arc::new(holon_core::NoReadOnlyDocuments),
+        );
+        let frontier = doc.oplog_frontiers();
+        for field in ["requires", "advice_suppressed", "contributes_to"] {
+            for target in ["a b", ""] {
+                let err = registry
+                    .write_field(
+                        &EntityUri::block("held"),
+                        field,
+                        Value::Array(vec![Value::String(target.into())]),
+                    )
+                    .await
+                    .expect_err("a malformed edge target must be refused");
+                assert!(
+                    err.to_string().contains(&format!("edge field '{field}'"))
+                        && err.to_string().contains(&format!("{target:?}")),
+                    "write_field({field}, [{target:?}]): {err:#}"
+                );
+            }
+        }
+        assert_eq!(
+            doc.oplog_frontiers(),
+            frontier,
+            "a refused write commits no op"
+        );
         Ok(())
     }
 

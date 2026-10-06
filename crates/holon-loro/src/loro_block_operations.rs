@@ -802,9 +802,9 @@ impl CrudOperations<Block> for LoroBlockOperations {
                 // silently lost — the junction never sees it. Generic over every
                 // `EdgeField` member (no per-field branch).
                 let targets = edge_string_targets(&value, f)?;
-                let edge_field = holon_api::EdgeField::from_drawer_key(f)
-                    .expect("is_edge_column matched an EdgeField");
-                holon_api::BlockEdges::default().set_from_raw(edge_field, targets.clone())?;
+                holon_api::EdgeField::from_drawer_key(f)
+                    .expect("is_edge_column matched an EdgeField")
+                    .refuse_malformed_targets(&targets)?;
                 backend
                     .set_block_edge_field(id, f, &targets)
                     .await

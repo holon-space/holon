@@ -1098,13 +1098,15 @@ fn emit_section_children(
                     }
                 } else if k.eq_ignore_ascii_case("ADVICE_SUPPRESSED") {
                     if let Some(s) = v.as_string() {
-                        src_block.advice_suppressed = s
-                            .split(|c: char| c == ',' || c.is_whitespace())
-                            .filter(|s| !s.is_empty())
-                            // ALLOW(entity_uri_from_raw): org src-block ADVICE_SUPPRESSED
-                            // header arg: bare slug promoted at parse boundary
-                            .map(EntityUri::from_raw)
-                            .collect();
+                        let targets =
+                            parse_edge_targets(s, &k, template).map_err(in_source_header)?;
+                        match edge_ids(&targets) {
+                            Some(ids) => src_block.advice_suppressed = ids,
+                            None => src_block.set_property(
+                                crate::drawer::AuthoredKey::new(&k).property(),
+                                holon_api::Value::String(s.to_string()),
+                            ),
+                        }
                     }
                 } else if k.eq_ignore_ascii_case("TAGS") {
                     // `:TAGS <space-joined>` is emitted by `source_block_to_org`
@@ -2951,6 +2953,8 @@ mod tests {
             "#+begin_src prql :id s0 :contributes-to {{mission}}\nfrom x\n#+end_src\n",
             "#+begin_src prql :id s1 :REQUIRES {{mission}}\nfrom x\n#+end_src\n",
             "#+begin_src prql :id s2 :BLOCKED-BY {{mission}}\nfrom x\n#+end_src\n",
+            "* Task\n:PROPERTIES:\n:ID: p3\n:ADVICE_SUPPRESSED: {{mission}}\n:END:\n",
+            "#+begin_src prql :id s3 :ADVICE_SUPPRESSED {{mission}}\nfrom x\n#+end_src\n",
         ];
 
         for source in sources {

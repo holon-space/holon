@@ -410,6 +410,22 @@ impl OperationDispatcher {
         .into())
     }
 
+    /// [`Self::parse_entity_references`] for a caller that reads an
+    /// operation's params before it dispatches them.
+    pub fn parse_entity_references_of(
+        &self,
+        entity_name: &EntityName,
+        op_name: &str,
+        params: &StorageEntity,
+    ) -> Result<()> {
+        let available_ops: Vec<_> = self
+            .all_providers()
+            .iter()
+            .flat_map(|p| p.operations())
+            .collect();
+        Self::parse_entity_references(&available_ops, entity_name.as_str(), op_name, params)
+    }
+
     /// Parse every entity-reference parameter of one dispatched operation into
     /// an [`holon_api::EntityUri`], and refuse an unschemed value.
     ///

@@ -3834,6 +3834,13 @@ impl DispatchingOperationEngine {
         #[cfg(feature = "dispatch-hold")]
         self.dispatch_hold.checkpoint(entity_name, op_name).await?;
 
+        // The steps below read the op's ids before the dispatcher sees them.
+        self.dispatcher
+            .parse_entity_references_of(entity_name, op_name, &params)
+            .map_err(|e| {
+                anyhow::anyhow!("Operation '{op_name}' on entity '{entity_name}' failed: {e}")
+            })?;
+
         // Trust gate (VisionGapAnalysis C5): a sub-threshold (origin, entity,
         // op) never reaches canonical state — it is coerced into a proposal
         // emission under `block:proposals`. This runs FIRST so every shape
