@@ -83,6 +83,7 @@ pub mod streaming;
 pub mod template;
 pub mod template_instantiation;
 pub mod theme_token;
+pub mod type_services;
 pub mod types;
 pub mod ui_watcher;
 pub mod vault_shape;
@@ -356,6 +357,10 @@ pub use streaming::{
     EnrichedChangeStream, MapChange, StreamPosition, SyncTokenUpdate, UiEvent, WatchHandle,
     WatcherCommand, WithMetadata,
 };
+pub use type_services::DenseView;
+pub use type_services::Hierarchy;
+pub use type_services::ServiceFieldError;
+pub use type_services::TypeServices;
 // Re-export typed domain types
 pub use types::{
     ContentType, DependsOn, EntityName, NavigationOp, Priority, QueryLanguage, Region,

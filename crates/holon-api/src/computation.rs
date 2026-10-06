@@ -179,8 +179,25 @@ fn values_match(a: &Value, b: &Value) -> bool {
 ///
 /// The grammar is exactly the one the subset tokenizer already enforces for a
 /// bare field reference, so `is_def_var("x")` and `x` accept the same names.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(try_from = "String", into = "String")]
 pub struct FieldIdent(String);
+
+impl TryFrom<String> for FieldIdent {
+    type Error = InvalidFieldIdent;
+
+    fn try_from(name: String) -> Result<Self, Self::Error> {
+        Self::parse(&name)
+    }
+}
+
+impl From<FieldIdent> for String {
+    fn from(ident: FieldIdent) -> Self {
+        ident.0
+    }
+}
 
 impl FieldIdent {
     pub fn parse(name: &str) -> Result<Self, InvalidFieldIdent> {

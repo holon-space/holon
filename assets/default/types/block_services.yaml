@@ -1,0 +1,10 @@
+# Block's `services:` declaration. Block's TypeDefinition is generated from
+# the `Block` struct, so its services are declared here and attached at
+# registration.
+title: content
+searchable: [content]
+linkable: true
+embeddable: true
+dense_view: { body: content }
+hierarchy: { parent: parent_id }
+rich_text: [content]

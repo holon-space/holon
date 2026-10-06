@@ -242,6 +242,7 @@ pub fn derive_entity_impl(input: DeriveInput) -> TokenStream {
                     // deletion around to tell someone about it (a sync peer);
                     // an in-tree entity has no such obligation.
                     soft_delete: None,
+                    services: None,
                 }
             }
 

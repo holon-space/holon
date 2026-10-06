@@ -641,6 +641,9 @@ pub struct TypeDefinition {
     /// [`SoftDelete`]. Absent = `delete` removes the row.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub soft_delete: Option<SoftDelete>,
+    /// The services this type declares. Absent = the type gets none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub services: Option<crate::TypeServices>,
 }
 
 /// Soft-delete semantics for a type whose deletions must outlive the row — a
@@ -708,6 +711,7 @@ impl TypeDefinition {
             write_authority: WriteAuthority::Local,
             home: None,
             soft_delete: None,
+            services: None,
         }
     }
 
@@ -823,6 +827,7 @@ impl TypeDefinition {
             write_authority: WriteAuthority::Local,
             home: None,
             soft_delete: None,
+            services: None,
         }
     }
 
@@ -1162,6 +1167,7 @@ mod create_table_sql_tests {
             write_authority: WriteAuthority::Local,
             home: None,
             soft_delete: None,
+            services: None,
             default_lifetime: FieldLifetime::default(),
             source: TypeSource::default(),
         };
@@ -1194,6 +1200,7 @@ mod create_table_sql_tests {
             write_authority: WriteAuthority::Local,
             home: None,
             soft_delete: None,
+            services: None,
             default_lifetime: FieldLifetime::default(),
             source: TypeSource::default(),
         };

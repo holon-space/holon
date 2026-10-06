@@ -201,6 +201,9 @@ impl TypeRegistry {
     /// The key is minted through [`TableName`], never taken raw, so a
     /// hyphenated entity name cannot create a key no scheme lookup will find.
     pub fn register(&self, mut type_def: TypeDefinition) -> Result<()> {
+        if let Some(services) = &type_def.services {
+            services.check_fields(&type_def)?;
+        }
         check_computed_types_match_columns(&type_def)?;
         topo_sort_fields(&mut type_def);
         let key = TableName::from_scheme(&type_def.name);
@@ -575,6 +578,7 @@ fn topo_sort_fields(type_def: &mut TypeDefinition) {
 
 /// Bundled entity profile YAMLs — same format as org-embedded profiles.
 const BLOCK_PROFILE_YAML: &str = include_str!("../../../assets/default/types/block_profile.yaml");
+const BLOCK_SERVICES_YAML: &str = include_str!("../../../assets/default/types/block_services.yaml");
 const PERSON_PROFILE_YAML: &str = include_str!("../../../assets/default/types/person_profile.yaml");
 const COLLECTION_PROFILE_YAML: &str =
     include_str!("../../../assets/default/types/collection_profile.yaml");
@@ -599,8 +603,11 @@ pub fn create_default_registry() -> Result<Arc<TypeRegistry>> {
     use holon_api::block::Block;
 
     let registry = TypeRegistry::new();
+    let mut block = Block::type_definition();
+    block.services =
+        Some(serde_yaml::from_str(BLOCK_SERVICES_YAML).context("Failed to parse block services")?);
     registry
-        .register(Block::type_definition())
+        .register(block)
         .context("Failed to register Block type")?;
 
     for (name, yaml) in BUNDLED_TYPES {
