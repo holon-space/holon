@@ -189,56 +189,20 @@ fn main() -> Result<()> {
     // the desktop launch path is unchanged.
     let mcp_reset_test_mode = std::env::var("HOLON_MCP_ALLOW_RESET").is_ok();
 
-    // Reset-safe debug handles for the MCP inspection tools (`render_org`,
-    // `await_quiescence`, `debug_pbt_snapshot`); a later `reset_vault` swaps the
-    // cell for the fresh session's handles.
+    // The invariant catalog the suite runs lives in the pbt-only test crate,
+    // so a release build carries no suite and `run_self_checks` reports that
+    // absence as an error rather than an empty report.
+    #[cfg(feature = "pbt")]
     {
-        let injector_for_cell = injector.clone();
-        let session_for_cell = session.clone();
-        let engine_for_cell = engine.clone();
-        let cell = runtime.block_on(async move {
-            let loro_sync_handle = injector_for_cell
-                .try_resolve_async::<holon_loro::LoroSyncControllerHandle>()
-                .await
-                .ok();
-            let block_query_source = Some(session_for_cell.block_query().clone());
-            let org_idle_signal = injector_for_cell
-                .try_resolve::<holon_orgmode::OrgSyncIdleSignal>()
-                .ok();
-            let loro_doc_store = injector_for_cell
-                .try_resolve::<holon_loro::LoroBlockOperations>()
-                .ok()
-                .map(|ops| ops.shared_doc_store());
-            let writeback_renderer = injector_for_cell
-                .try_resolve_async::<holon_filesystem::WritebackRenderer>()
-                .await
-                .ok();
-            holon_mcp::server::DebugHandlesCell {
-                loro_sync_handle,
-                org_idle_signal,
-                block_query_source,
-                loro_doc_store,
-                reactive_engine: Some(engine_for_cell),
-                writeback_renderer,
-            }
-        });
-        *debug.live_debug.write().expect("live_debug cell poisoned") = cell;
-
-        // The invariant catalog the suite runs lives in the pbt-only test crate,
-        // so a release build carries no suite and `run_self_checks` reports that
-        // absence as an error rather than an empty report.
-        #[cfg(feature = "pbt")]
-        {
-            assert!(
-                debug
-                    .self_check_suite
-                    .set(std::sync::Arc::new(
-                        holon_integration_tests::pbt::live_self_check::LiveSelfCheck
-                    ))
-                    .is_ok(),
-                "self_check_suite registered twice"
-            );
-        }
+        assert!(
+            debug
+                .self_check_suite
+                .set(std::sync::Arc::new(
+                    holon_integration_tests::pbt::live_self_check::LiveSelfCheck
+                ))
+                .is_ok(),
+            "self_check_suite registered twice"
+        );
     }
 
     #[cfg(feature = "desktop")]

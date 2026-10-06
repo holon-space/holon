@@ -58,19 +58,6 @@ use holon_pbt_core::types::LoroCorruptionType;
 use tempfile::TempDir;
 use tokio::sync::RwLock;
 
-/// Resolve the DI-registered `DebugServices` and pre-populate its
-/// optional fields from other DI services. Mirrors what
-/// `holon_mcp::di::DebugServicesPopulatorModule` does for module-using
-/// consumers — the test path runs it inline because the `extra_resolve`
-/// callback is the natural post-`on_start` hook.
-fn populate_debug_services(injector: &fluxdi::Injector) -> Arc<holon_mcp::server::DebugServices> {
-    let debug = injector.resolve::<holon_mcp::server::DebugServices>();
-    if let Ok(ops) = injector.try_resolve::<holon_loro::LoroBlockOperations>() {
-        debug.loro_doc_store.set(ops.shared_doc_store()).ok();
-    }
-    debug
-}
-
 /// Give `session` an in-memory secret store, so its secret writes have
 /// somewhere to go.
 ///
@@ -139,8 +126,8 @@ pub struct TestEnvironment {
     loro_doc_store: OnceCell<Arc<RwLock<LoroDocumentStore>>>,
 
     /// MCP DebugServices, resolved from DI and pre-populated via
-    /// [`populate_debug_services`]. Threaded into the embedded MCP
-    /// server (`try_start_embedded_mcp`) so inspection tools work in
+    /// [`holon_mcp::di::populate_debug_services`]. Threaded into the embedded
+    /// MCP server (`try_start_embedded_mcp`) so inspection tools work in
     /// PBTs.
     debug_services: OnceCell<Arc<holon_mcp::server::DebugServices>>,
 
@@ -468,7 +455,7 @@ impl TestEnvironmentBuilder {
         let (
             session,
             backend_engine,
-            (doc_store, reactive_engine, sync_handle, idle_signal, debug_services, injector),
+            (doc_store, reactive_engine, sync_handle, idle_signal, injector),
         ) = holon_app::new_from_config_with_di(
             holon_config,
             session_config,
@@ -510,18 +497,18 @@ impl TestEnvironmentBuilder {
                 let idle_signal = injector
                     .try_resolve::<holon_orgmode::OrgSyncIdleSignal>()
                     .ok();
-                let debug_services = populate_debug_services(injector);
                 (
                     doc_store,
                     engine,
                     sync_handle,
                     idle_signal,
-                    debug_services,
                     injector.clone(),
                 )
             },
         )
         .await?;
+        let debug_services =
+            holon_mcp::di::populate_debug_services(&injector, Some(reactive_engine.clone())).await;
 
         // Tests need deterministic state — wait for CDC event propagation
         if settle_delay_ms > 0 {
@@ -1073,7 +1060,7 @@ impl TestEnvironment {
         let (
             session,
             backend_engine,
-            (doc_store, reactive_engine, sync_handle, idle_signal, debug_services, injector),
+            (doc_store, reactive_engine, sync_handle, idle_signal, injector),
         ) = holon_app::new_from_config_with_di(
             holon_config,
             session_config,
@@ -1109,18 +1096,18 @@ impl TestEnvironment {
                 let idle_signal = injector
                     .try_resolve::<holon_orgmode::OrgSyncIdleSignal>()
                     .ok();
-                let debug_services = populate_debug_services(injector);
                 (
                     doc_store,
                     engine,
                     sync_handle,
                     idle_signal,
-                    debug_services,
                     injector.clone(),
                 )
             },
         )
         .await?;
+        let debug_services =
+            holon_mcp::di::populate_debug_services(&injector, Some(reactive_engine.clone())).await;
 
         let ctx = E2ETestContext::from_engine(backend_engine);
 

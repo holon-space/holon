@@ -190,11 +190,9 @@ pub struct WindowKeyBinding {
 }
 
 /// Optional services for debug/inspection tools.
-/// Fields use `OnceLock` so they can be populated after DI resolution
-/// (e.g. Loro doc store is only available after `FrontendSession` is created).
+/// Fields use `OnceLock` so they can be populated after DI resolution, by
+/// [`crate::di::populate_debug_services`] and by the frontend.
 pub struct DebugServices {
-    pub loro_doc_store: std::sync::OnceLock<Arc<RwLock<LoroDocumentStore>>>,
-    pub orgmode_root: std::sync::OnceLock<PathBuf>,
     /// Shared navigation debug state. Written by the GPUI frontend on each
     /// render, read by the `describe_navigation` MCP tool.
     /// Uses std::sync::RwLock (not tokio) since GPUI writes from sync context.
@@ -229,9 +227,8 @@ pub struct DebugServices {
     /// Unset in a headless run — the tool then declares geometry unavailable
     /// rather than reporting zeros.
     pub geometry: std::sync::OnceLock<Arc<dyn holon_frontend::geometry::GeometryProvider>>,
-    /// FileSystem port for org-file reads (ADR 0011). Populated from DI by
-    /// `DebugServicesPopulatorModule` so inspection tools see the same vault
-    /// the session uses (in tests: the in-memory filesystem).
+    /// FileSystem port for org-file reads (ADR 0011): the one the session uses
+    /// (in tests: the in-memory filesystem).
     pub org_fs: std::sync::OnceLock<Arc<dyn holon_filesystem::FileSystem>>,
     /// Channel to the GPUI main-thread reset pump (Phase 1 Option A). The
     /// `reset_vault` tool (tokio) sends a [`ResetRequest`] carrying a freshly
@@ -250,10 +247,8 @@ pub struct DebugServices {
     /// the frontend and SWAPPED in place by `reset_vault` — so a per-case
     /// rebind points these at the fresh session's Loro sync controller /
     /// org idle signal / CDC-driven `BlockQuerySource` instead of the
-    /// retired one. A plain boot-time `OnceLock` (like
-    /// [`Self::loro_doc_store`]) would go stale after a reset and silently
-    /// answer against the retired engine; this cell fails that failure mode
-    /// by being swappable alongside [`LiveMcpBackend`].
+    /// retired one. A plain boot-time `OnceLock` would go stale after a reset
+    /// and silently answer against the retired engine.
     pub live_debug: LiveDebugHandles,
     /// The class-1 invariant suite `run_self_checks` dispatches to. Registered
     /// once at boot by the frontend; only a `pbt`-featured build carries an
@@ -293,8 +288,10 @@ pub struct DebugHandlesCell {
     pub block_query_source: Option<Arc<dyn BlockQuerySource>>,
     /// The live Loro document store — its global doc backs `lamport_height`,
     /// `loro_tree_children`, and the current-frontier side of the Loro signal.
-    /// A reset-safe copy of [`DebugServices::loro_doc_store`] that IS swapped.
     pub loro_doc_store: Option<Arc<RwLock<LoroDocumentStore>>>,
+    /// The vault root write-back puts this session's files under. `None` when
+    /// the session syncs no org files.
+    pub org_root: Option<PathBuf>,
     /// The reactive engine — `focused_block()` is the engine's authoritative
     /// focus, exposed via `debug_pbt_snapshot` so the live-MCP PBT driver can
     /// wait for a click's focus to land before dispatching caret keystrokes.
@@ -334,8 +331,6 @@ impl Default for NavigationDebugState {
 impl Default for DebugServices {
     fn default() -> Self {
         Self {
-            loro_doc_store: std::sync::OnceLock::new(),
-            orgmode_root: std::sync::OnceLock::new(),
             navigation_state: Arc::new(std::sync::RwLock::new(NavigationDebugState::default())),
             input_router: Arc::new(InputRouter::new()),
             window_key_bindings: std::sync::OnceLock::new(),

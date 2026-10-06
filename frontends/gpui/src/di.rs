@@ -125,6 +125,8 @@ impl Module for GpuiModule {
             let services: Arc<dyn BuilderServices> = engine.clone();
             slot.0.set(services.clone()).ok();
 
+            holon_mcp::di::populate_debug_services(&injector, Some(engine.clone())).await;
+
             // NO editor-cell registry here (D113.a): every keystroke commits
             // through the on-blur `set_field` funnel, which carries an inverse.
             // The cell leg has no undo — cmd+z after typing restores nothing

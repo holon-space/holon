@@ -121,7 +121,7 @@ fn mcp_add_subtask_writes_tags_and_requires_edges() {
     unsafe {
         std::env::set_var("MCP_SERVER_PORT", port.to_string());
     }
-    let debug = sut.runtime().block_on(frontend.mcp_debug_services());
+    let debug = frontend.mcp_debug_services();
     {
         let _guard = sut.runtime().enter();
         let services: std::sync::Arc<dyn holon_frontend::reactive::BuilderServices> =

@@ -181,41 +181,6 @@ fn open_holon_window(
         let engine = injector.resolve::<holon_frontend::reactive::ReactiveEngine>();
         let debug = injector.resolve::<holon_mcp::server::DebugServices>();
 
-        // Populate the reset-safe `live_debug` cell so the debug PBT tools
-        // (`await_quiescence`, `debug_pbt_snapshot`) observe the boot session's
-        // convergence/mirror handles. These are `root_async` factories — awaited
-        // here so they are live (not raced) before any tool call; a later
-        // `reset_vault` swaps this cell for the fresh session's handles.
-        {
-            let loro_sync_handle = injector
-                .try_resolve_async::<holon_loro::LoroSyncControllerHandle>()
-                .await
-                .ok();
-            // `BlockQuerySource` is not a DI key — the FrontendSession factory
-            // builds it inline; the session accessor is the only handle.
-            let block_query_source = Some(session.block_query().clone());
-            let org_idle_signal = injector
-                .try_resolve::<holon_orgmode::OrgSyncIdleSignal>()
-                .ok();
-            let loro_doc_store = injector
-                .try_resolve::<holon_loro::LoroBlockOperations>()
-                .ok()
-                .map(|ops| ops.shared_doc_store());
-            let writeback_renderer = injector
-                .try_resolve_async::<holon_filesystem::WritebackRenderer>()
-                .await
-                .ok();
-            *debug.live_debug.write().expect("live_debug cell poisoned") =
-                holon_mcp::server::DebugHandlesCell {
-                    loro_sync_handle,
-                    org_idle_signal,
-                    block_query_source,
-                    loro_doc_store,
-                    reactive_engine: Some(engine.clone()),
-                    writeback_renderer,
-                };
-        }
-
         let degraded_bus = (*injector.resolve::<std::sync::Arc<holon_api::ConditionBus>>()).clone();
 
         (session, engine, debug, degraded_bus, app)

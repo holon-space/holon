@@ -6312,39 +6312,30 @@ impl HolonMcpServer {
         Ok((query, language))
     }
 
-    /// The current Loro doc store: the swappable `live_debug` cell when
-    /// populated (mobile boot + every `reset_vault` swap), else the boot-time
-    /// `OnceLock` (desktop paths that never reset). Tools MUST read through
-    /// this, not `debug.loro_doc_store` directly — the `OnceLock` goes stale
-    /// after a reset and would silently answer against the retired session.
     /// Where write-back puts this session's rows; `None` when it syncs no
     /// files, so no file holds them.
     fn org_files(&self) -> Option<OrgFiles> {
-        let renderer = self
+        let cell = self
             .debug
             .live_debug
             .read()
-            .expect("live_debug cell poisoned")
-            .writeback_renderer
-            .clone()?;
+            .expect("live_debug cell poisoned");
         Some(OrgFiles {
-            renderer,
-            documents: self.current_loro_doc_store(),
-            root: self.debug.orgmode_root.get().cloned(),
+            renderer: cell.writeback_renderer.clone()?,
+            documents: cell.loro_doc_store.clone(),
+            root: cell.org_root.clone(),
         })
     }
 
     fn current_loro_doc_store(
         &self,
     ) -> Option<Arc<tokio::sync::RwLock<holon_loro::LoroDocumentStore>>> {
-        let from_cell = self
-            .debug
+        self.debug
             .live_debug
             .read()
             .expect("live_debug cell poisoned")
             .loro_doc_store
-            .clone();
-        from_cell.or_else(|| self.debug.loro_doc_store.get().cloned())
+            .clone()
     }
 
     /// Build a `LoroBackend` over the live, swappable global doc from the
@@ -6517,8 +6508,14 @@ impl HolonMcpServer {
             if fs.exists(&path) {
                 return Ok(path);
             }
-            // Try under orgmode_root
-            if let Some(root) = self.debug.orgmode_root.get() {
+            let root = self
+                .debug
+                .live_debug
+                .read()
+                .expect("live_debug cell poisoned")
+                .org_root
+                .clone();
+            if let Some(root) = root {
                 let full = root.join(doc_id);
                 if fs.exists(&full) {
                     return Ok(full);
@@ -7985,7 +7982,6 @@ mod render_org_doc_id_tests {
         blocks: Vec<Block>,
     ) -> HolonMcpServer {
         let debug = Arc::new(DebugServices::default());
-        debug.orgmode_root.set(dir.to_path_buf()).ok();
         let renderer = Arc::new(WritebackRenderer::new(
             Arc::new(KeyedReader {
                 declared: doc_uri(),
@@ -8009,6 +8005,7 @@ mod render_org_doc_id_tests {
             let mut cell = debug.live_debug.write().expect("live_debug cell poisoned");
             cell.writeback_renderer = Some(renderer);
             cell.loro_doc_store = loro;
+            cell.org_root = Some(dir.to_path_buf());
         }
         HolonMcpServer::with_type_registry(Some(fresh_engine().await), None, debug, None)
     }

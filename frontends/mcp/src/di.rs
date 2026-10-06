@@ -30,6 +30,7 @@ use fluxdi::Provider;
 use fluxdi::Shared;
 use holon::api::backend_engine::BackendEngine;
 use holon_frontend::reactive::BuilderServices;
+use holon_frontend::reactive::ReactiveEngine;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
@@ -45,56 +46,63 @@ pub fn register_debug_services(injector: &Injector) {
     injector.provide::<DebugServices>(Provider::root(|_| Shared::new(DebugServices::default())));
 }
 
-/// DI module that populates the registered `DebugServices` singleton's
-/// optional fields (`loro_doc_store`, `orgmode_root`) from other DI
-/// services on startup.
-///
-/// Use in any process that wants live MCP inspection (`inspect_loro_blocks`,
-/// `diff_loro_sql`) — the standalone MCP, frontends, and PBT tests can
-/// all add this module instead of duplicating the resolve-and-populate
-/// boilerplate. `register_debug_services` must be called first.
-#[derive(Default)]
-pub struct DebugServicesPopulatorModule {
-    pub orgmode_root: Option<std::path::PathBuf>,
+/// Fill the registered `DebugServices` singleton from the booted session in
+/// `injector`, and return it. Every process that serves the MCP over a session
+/// calls this once after boot. `register_debug_services` must have run.
+/// `reactive_engine` is `None` only in a process that renders nothing.
+pub async fn populate_debug_services(
+    injector: &Injector,
+    reactive_engine: Option<Arc<ReactiveEngine>>,
+) -> Arc<DebugServices> {
+    let debug = injector.resolve::<DebugServices>();
+    if let Ok(fs) = injector.try_resolve::<dyn holon_filesystem::FileSystem>() {
+        assert!(
+            debug.org_fs.set(fs).is_ok(),
+            "DebugServices populated twice"
+        );
+    }
+    *debug.live_debug.write().expect("live_debug cell poisoned") =
+        debug_handles(injector, reactive_engine).await;
+    debug
 }
 
-impl Module for DebugServicesPopulatorModule {
-    fn configure(&self, _: &Injector) -> std::result::Result<(), fluxdi::Error> {
-        Ok(())
-    }
-
-    fn on_start(&self, injector: Shared<Injector>) -> fluxdi::ModuleLifecycleFuture {
-        let orgmode_root = self.orgmode_root.clone();
-        Box::pin(async move {
-            let _session = injector
-                .resolve_async::<holon_frontend::FrontendSession>()
-                .await;
-            let debug = injector.resolve::<DebugServices>();
-            let loro_doc_store = injector
-                .try_resolve::<holon_loro::LoroBlockOperations>()
-                .ok()
-                .map(|ops| ops.shared_doc_store());
-            if let Some(store) = loro_doc_store {
-                debug.loro_doc_store.set(store).ok();
-            }
-            if let Some(root) = orgmode_root {
-                debug.orgmode_root.set(root).ok();
-            }
-            if let Ok(fs) = injector.try_resolve::<dyn holon_filesystem::FileSystem>() {
-                debug.org_fs.set(fs).ok();
-            }
-            if let Ok(renderer) = injector
-                .try_resolve_async::<holon_filesystem::WritebackRenderer>()
-                .await
-            {
-                debug
-                    .live_debug
-                    .write()
-                    .expect("live_debug cell poisoned")
-                    .writeback_renderer = Some(renderer);
-            }
-            Ok(())
-        })
+/// The session-bound handles behind `DebugServices::live_debug`, resolved from
+/// the session's own `injector`. `reset_vault` swaps in a fresh set built here.
+pub async fn debug_handles(
+    injector: &Injector,
+    reactive_engine: Option<Arc<ReactiveEngine>>,
+) -> crate::server::DebugHandlesCell {
+    let session = injector
+        .resolve_async::<holon_frontend::FrontendSession>()
+        .await;
+    let loro_sync_handle = injector
+        .try_resolve_async::<holon_loro::LoroSyncControllerHandle>()
+        .await
+        .ok();
+    let org_idle_signal = injector
+        .try_resolve::<holon_orgmode::OrgSyncIdleSignal>()
+        .ok();
+    let loro_doc_store = injector
+        .try_resolve::<holon_loro::LoroBlockOperations>()
+        .ok()
+        .map(|ops| ops.shared_doc_store());
+    let writeback_renderer = injector
+        .try_resolve_async::<holon_filesystem::WritebackRenderer>()
+        .await
+        .ok();
+    let org_root = injector
+        .try_resolve::<holon_orgmode::OrgModeConfig>()
+        .ok()
+        .map(|config| config.root_directory.clone());
+    crate::server::DebugHandlesCell {
+        loro_sync_handle,
+        org_idle_signal,
+        // `BlockQuerySource` is not a DI key; the session accessor is the only handle.
+        block_query_source: Some(session.block_query().clone()),
+        loro_doc_store,
+        reactive_engine,
+        writeback_renderer,
+        org_root,
     }
 }
 

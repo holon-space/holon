@@ -64,8 +64,8 @@ If `inspect_loro_blocks` returns *"Loro is not enabled in this session"*,
 the test environment didn't wire the populated `DebugServices`. The
 `PbtReadyContext.debug_services` field plumbs it through (registered in
 `TestEnvironmentBuilder::start_app` via
-`holon_mcp::di::register_debug_services` + the inline equivalent of
-`DebugServicesPopulatorModule`). Both `gpui_ui_pbt` and `tui_ui_pbt`
+`holon_mcp::di::register_debug_services` + `holon_mcp::di::populate_debug_services`,
+the populator every frontend runs). Both `gpui_ui_pbt` and `tui_ui_pbt`
 forward this Arc into `try_start_embedded_mcp`.
 
 If you spawn a new MCP-using PBT entrypoint, mirror that pattern.

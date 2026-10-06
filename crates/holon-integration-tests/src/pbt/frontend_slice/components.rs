@@ -694,33 +694,11 @@ impl HeadlessFrontendComponent {
         .await
     }
 
-    /// `DebugServices` wired to THIS component's session, for backing an
-    /// embedded MCP server over it. The test-side twin of
-    /// `holon_mcp::di::DebugServicesPopulatorModule`, which cannot run here
-    /// because the component owns its injector rather than a module lifecycle.
-    pub async fn mcp_debug_services(&self) -> Arc<holon_mcp::server::DebugServices> {
-        let debug = Arc::new(holon_mcp::server::DebugServices::default());
-        debug
-            .org_fs
-            .set(self.org_fs().clone() as Arc<dyn holon_filesystem::FileSystem>)
-            .ok();
-        debug.orgmode_root.set(self.org_root().clone()).ok();
-        if let Ok(ops) = self
-            .injector()
-            .try_resolve::<holon_loro::LoroBlockOperations>()
-        {
-            debug.loro_doc_store.set(ops.shared_doc_store()).ok();
-        }
-        debug
-            .live_debug
-            .write()
-            .expect("live_debug cell poisoned")
-            .writeback_renderer = Some(
-            self.injector()
-                .resolve_async::<holon_filesystem::WritebackRenderer>()
-                .await,
-        );
-        debug
+    /// The `DebugServices` the session's MCP server reads, filled at boot by
+    /// the same populator the app runs.
+    pub fn mcp_debug_services(&self) -> Arc<holon_mcp::server::DebugServices> {
+        self.injector()
+            .resolve::<holon_mcp::server::DebugServices>()
     }
 
     /// The container's live entity registry — the ONE the link classifier
@@ -907,6 +885,7 @@ impl HeadlessFrontendComponent {
                     &org_fs_for_di,
                     &secret_namespace,
                 );
+                holon_mcp::di::register_debug_services(injector);
                 // Image bytes for every image block, so the write-back's
                 // `materialize_images` actually reaches disk — the seat that
                 // turns an image block's content into a filesystem path.
@@ -951,6 +930,14 @@ impl HeadlessFrontendComponent {
         )
         .await
         .expect("build headless frontend session");
+
+        holon_mcp::di::populate_debug_services(
+            injector_slot
+                .get()
+                .expect("DI injector captured during build"),
+            Some(reactive.clone()),
+        )
+        .await;
 
         // Every session this crate boots gets an in-memory secret store and
         // forbids the OS-keychain fallback, so no test can reach the machine's
@@ -3938,7 +3925,7 @@ impl HeadlessFrontendComponent {
         let server = holon_mcp::server::HolonMcpServer::with_type_registry(
             Some(self.engine()),
             Some(self.type_registry().await),
-            self.mcp_debug_services().await,
+            self.mcp_debug_services(),
             None,
         );
         let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);

@@ -104,41 +104,13 @@ pub async fn build_fresh_sut(
     // reset must hand back the same leg start-up gave, or a reset would move
     // the running app onto the cell leg, where cmd+z restores nothing.
 
-    // Resolve the fresh SUT's convergence/mirror handles from its own injector
-    // (root_async factories — awaited so they are live by hand-off, not raced).
-    // These flow into `DebugServices::live_debug` on reset so `await_quiescence`
-    // / `debug_pbt_snapshot` observe the fresh session, never the retired one.
-    let live_debug = {
-        let injector = injector_slot
+    let live_debug = holon_mcp::di::debug_handles(
+        injector_slot
             .get()
-            .expect("injector captured in extra_resolve");
-        let loro_sync_handle = injector
-            .try_resolve_async::<holon_loro::LoroSyncControllerHandle>()
-            .await
-            .ok();
-        // `BlockQuerySource` is not a DI key — the FrontendSession factory
-        // builds it inline; the session accessor is the only handle.
-        let block_query_source = Some(session.block_query().clone());
-        let org_idle_signal = injector
-            .try_resolve::<holon_orgmode::OrgSyncIdleSignal>()
-            .ok();
-        let loro_doc_store = injector
-            .try_resolve::<holon_loro::LoroBlockOperations>()
-            .ok()
-            .map(|ops| ops.shared_doc_store());
-        let writeback_renderer = injector
-            .try_resolve_async::<holon_filesystem::WritebackRenderer>()
-            .await
-            .ok();
-        holon_mcp::server::DebugHandlesCell {
-            loro_sync_handle,
-            org_idle_signal,
-            block_query_source,
-            loro_doc_store,
-            reactive_engine: Some(reactive.clone()),
-            writeback_renderer,
-        }
-    };
+            .expect("injector captured in extra_resolve"),
+        Some(reactive.clone()),
+    )
+    .await;
 
     // Boot settle. The window runs its own settle-to-fixed-point after rebind,
     // so a bounded sleep here is enough to let the org drain + first projection

@@ -65,7 +65,7 @@ fn mcp_list_keybindings_matches_registry() {
     unsafe {
         std::env::set_var("MCP_SERVER_PORT", port.to_string());
     }
-    let debug = sut.runtime().block_on(frontend.mcp_debug_services());
+    let debug = frontend.mcp_debug_services();
     {
         let _guard = sut.runtime().enter();
         let services: std::sync::Arc<dyn BuilderServices> = reactive.clone();

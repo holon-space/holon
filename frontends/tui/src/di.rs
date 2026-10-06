@@ -110,6 +110,8 @@ impl Module for TuiModule {
                 .await
                 .map_err(|e| to_di_err("on_start", &e))?;
 
+            holon_mcp::di::populate_debug_services(&injector, Some(engine.clone())).await;
+
             if mcp_enabled {
                 let mcp = injector.resolve::<McpServerHandle>();
                 mcp.set_builder_services(services);

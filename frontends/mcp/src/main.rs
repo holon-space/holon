@@ -420,8 +420,6 @@ async fn run() -> Result<()> {
     let config_dir = holon_frontend::config::resolve_config_dir(None);
     let session_config = holon_frontend::SessionConfig::new(holon_api::UiInfo::permissive());
 
-    let orgmode_root_for_debug = holon_config.vault.root.clone();
-
     // A stop during boot waits for the boot to finish and then takes the one
     // shutdown path, so the vault is left as a clean quit leaves it.
     let mut stop = holon_app::stop_signal::StopSignals::install()?;
@@ -441,7 +439,6 @@ async fn run() -> Result<()> {
             holon_config: holon_frontend::HolonConfig,
             session_config: holon_frontend::SessionConfig,
             config_dir: std::path::PathBuf,
-            orgmode_root: Option<std::path::PathBuf>,
         }
 
         impl Module for McpStandaloneModule {
@@ -475,30 +472,8 @@ async fn run() -> Result<()> {
             }
 
             fn on_start(&self, injector: Shared<Injector>) -> ModuleLifecycleFuture {
-                let orgmode_root = self.orgmode_root.clone();
                 Box::pin(async move {
-                    let _session = injector
-                        .resolve_async::<holon_frontend::FrontendSession>()
-                        .await;
-
-                    // Populate DebugServices with Loro doc store + orgmode root
-                    let debug = injector.resolve::<DebugServices>();
-                    // ALLOW(ok): optional DI service
-                    let loro_doc_store = injector
-                        .try_resolve::<holon_loro::LoroBlockOperations>()
-                        .ok()
-                        .map(|ops| ops.shared_doc_store());
-                    if let Some(store) = loro_doc_store {
-                        debug.loro_doc_store.set(store).ok(); // ALLOW(ok):
-                        // OnceLock already
-                        // set
-                    }
-                    if let Some(root) = orgmode_root {
-                        debug.orgmode_root.set(root).ok(); // ALLOW(ok):
-                        // OnceLock already
-                        // set
-                    }
-
+                    holon_mcp::di::populate_debug_services(&injector, None).await;
                     Ok(())
                 })
             }
@@ -508,7 +483,6 @@ async fn run() -> Result<()> {
             holon_config,
             session_config,
             config_dir,
-            orgmode_root: orgmode_root_for_debug,
         });
         tracing::info!("holon-mcp: booting the session");
         app.bootstrap()

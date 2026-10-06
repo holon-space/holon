@@ -64,7 +64,7 @@ pub fn connect_embedded_mcp(
         .expect("full_headless boots a frontend component")
         .clone();
     sut.runtime().block_on(async {
-        let debug = frontend.mcp_debug_services().await;
+        let debug = frontend.mcp_debug_services();
         let services: Arc<dyn holon_frontend::reactive::BuilderServices> = reactive.clone();
         connect_embedded_mcp_parts(engine, services, debug, label).await
     })
@@ -145,7 +145,7 @@ pub async fn embedded_dense_tools(
     let mcp = connect_embedded_mcp_parts(
         comp.engine(),
         services,
-        comp.mcp_debug_services().await,
+        comp.mcp_debug_services(),
         "keystone-dense-tools",
     )
     .await;
