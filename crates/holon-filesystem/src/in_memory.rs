@@ -72,6 +72,9 @@ pub struct InMemoryFileSystem {
     tx: broadcast::Sender<FileChange>,
     /// `true` while [`InMemoryFileSystem::hold_scans`] parks every scan.
     scans_held: watch::Sender<bool>,
+    /// Extensions whose reads [`InMemoryFileSystem::hold_reads_with_extension`]
+    /// parks.
+    reads_held: watch::Sender<BTreeSet<String>>,
 }
 
 impl Default for InMemoryFileSystem {
@@ -94,6 +97,7 @@ impl InMemoryFileSystem {
             }),
             tx,
             scans_held: watch::Sender::new(false),
+            reads_held: watch::Sender::new(BTreeSet::new()),
         }
     }
 
@@ -185,6 +189,32 @@ impl InMemoryFileSystem {
             .ok_or_else(|| not_found(path))?
             .mtime_tick = tick;
         Ok(tick)
+    }
+
+    /// Park every read of a file named `*.{ext}` until
+    /// [`Self::release_reads_with_extension`], so a test can hold one format's
+    /// files back while the rest of the vault is read.
+    pub fn hold_reads_with_extension(&self, ext: &str) {
+        self.reads_held.send_modify(|held| {
+            held.insert(ext.to_string());
+        });
+    }
+
+    pub fn release_reads_with_extension(&self, ext: &str) {
+        self.reads_held.send_modify(|held| {
+            held.remove(ext);
+        });
+    }
+
+    async fn wait_until_readable(&self, path: &Path) {
+        let Some(ext) = path.extension().map(|e| e.to_string_lossy().into_owned()) else {
+            return;
+        };
+        self.reads_held
+            .subscribe()
+            .wait_for(|held| !held.contains(&ext))
+            .await
+            .expect("the file system owns the read-hold sender");
     }
 
     /// Synchronous `create_dir_all` for non-async construction contexts
@@ -387,6 +417,7 @@ impl FileSystem for InMemoryFileSystem {
     }
 
     async fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
+        self.wait_until_readable(path).await;
         let path = normalize(path);
         let st = self.lock();
         st.files
@@ -396,6 +427,7 @@ impl FileSystem for InMemoryFileSystem {
     }
 
     async fn read_stamped(&self, path: &Path) -> std::io::Result<StampedRead> {
+        self.wait_until_readable(path).await;
         let path = normalize(path);
         let st = self.lock();
         let Some(entry) = st.files.get(&path) else {
@@ -516,6 +548,26 @@ impl FileChangeSource for InMemoryFileSystem {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_held_extension_parks_its_reads_only() {
+        let fs = std::sync::Arc::new(InMemoryFileSystem::new());
+        fs.create_dir_all(Path::new("/v")).await.unwrap();
+        fs.write(Path::new("/v/a.cook"), b"recipe").await.unwrap();
+        fs.write(Path::new("/v/b.org"), b"page").await.unwrap();
+        fs.hold_reads_with_extension("cook");
+
+        assert_eq!(fs.read(Path::new("/v/b.org")).await.unwrap(), b"page");
+        let held = tokio::spawn({
+            let fs = fs.clone();
+            async move { fs.read_to_string(Path::new("/v/a.cook")).await }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!held.is_finished(), "a read of a held extension returned");
+
+        fs.release_reads_with_extension("cook");
+        assert_eq!(held.await.unwrap().unwrap(), "recipe");
+    }
 
     #[tokio::test]
     async fn write_fires_change_synchronously_and_reads_back() {

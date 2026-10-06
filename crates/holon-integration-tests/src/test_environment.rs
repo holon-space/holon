@@ -312,6 +312,9 @@ pub struct TestEnvironmentBuilder {
     clock: Option<Arc<dyn holon_api::Clock>>,
     /// Boot with the vault scan parked until `org_fs.release_scans()`.
     hold_initial_scan: bool,
+    /// Extensions whose reads are parked from boot until
+    /// `org_fs.release_reads_with_extension(ext)`.
+    held_read_extensions: Vec<String>,
 }
 
 impl TestEnvironmentBuilder {
@@ -325,6 +328,7 @@ impl TestEnvironmentBuilder {
             enable_loro: true,
             clock: None,
             hold_initial_scan: false,
+            held_read_extensions: Vec::new(),
         }
     }
 
@@ -333,6 +337,13 @@ impl TestEnvironmentBuilder {
     /// a boot that waits for the scan never returns.
     pub fn hold_initial_scan(mut self) -> Self {
         self.hold_initial_scan = true;
+        self
+    }
+
+    /// Park every read of a `*.{ext}` vault file from boot until the test calls
+    /// `env.org_fs.release_reads_with_extension(ext)`.
+    pub fn hold_reads_with_extension(mut self, ext: impl Into<String>) -> Self {
+        self.held_read_extensions.push(ext.into());
         self
     }
 
@@ -437,6 +448,9 @@ impl TestEnvironmentBuilder {
 
         if self.hold_initial_scan {
             org_fs.hold_scans();
+        }
+        for ext in &self.held_read_extensions {
+            org_fs.hold_reads_with_extension(ext);
         }
 
         let enable_loro = self.enable_loro;

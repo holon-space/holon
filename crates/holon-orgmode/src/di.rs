@@ -1384,6 +1384,83 @@ fn summarize_scan_failures(failures: &[(PathBuf, anyhow::Error)]) -> String {
     )
 }
 
+/// The vault's files in a read-only format. Nothing writes them back, so the
+/// boot ingests them after every writable file.
+struct VaultBacklog {
+    pending: std::collections::VecDeque<PathBuf>,
+}
+
+impl VaultBacklog {
+    /// Split `files` into the writable ones, in their order, and the backlog.
+    fn partition(
+        files: Vec<PathBuf>,
+        formats: &holon_core::FormatRegistry,
+    ) -> (Vec<PathBuf>, Self) {
+        let mut writable = Vec::new();
+        let mut pending = std::collections::VecDeque::new();
+        for path in files {
+            let adapter = formats
+                .require(&path)
+                .unwrap_or_else(|e| panic!("the vault walk returned a file: {e:#}"));
+            match adapter.write_tier() {
+                holon_core::WriteTier::ReadWrite => writable.push(path),
+                holon_core::WriteTier::ReadOnly => pending.push_back(path),
+            }
+        }
+        (writable, Self { pending })
+    }
+
+    fn len(&self) -> usize {
+        self.pending.len()
+    }
+
+    fn pop(&mut self) -> Option<PathBuf> {
+        self.pending.pop_front()
+    }
+}
+
+/// Ingest one pre-existing vault file. A refusal is disclosed by its format's
+/// condition; any other error joins `failures`.
+async fn ingest_at_boot(
+    controller: &mut FileSyncController,
+    file_path: PathBuf,
+    failures: &mut Vec<(PathBuf, anyhow::Error)>,
+) {
+    let t_file = std::time::Instant::now();
+    let result = controller.on_file_changed(&file_path).await;
+    tracing::info!(
+        target: "holon_latency",
+        stage = "boot_file",
+        ms = t_file.elapsed().as_millis() as u64,
+        path = %file_path.display(),
+        "holon_latency",
+    );
+    match result {
+        Ok(_) => {}
+        // As a scan failure it would raise the start-failed banner for the
+        // same file again.
+        Err(e)
+            if e.downcast_ref::<holon_filesystem::AdapterRefusal>()
+                .is_some() =>
+        {
+            tracing::warn!(
+                "[OrgMode] existing file {} not read: {:#}; disclosed as a condition, \
+                 not as a failed scan",
+                file_path.display(),
+                e
+            );
+        }
+        Err(e) => {
+            tracing::error!(
+                "[OrgMode] Failed to process existing file {}: {}",
+                file_path.display(),
+                e
+            );
+            failures.push((file_path, e));
+        }
+    }
+}
+
 /// Backend-blind FileSyncController driver: initialize, build the file watcher,
 /// run the initial scan, hand over to the boot seed (when a [`BootSeedGate`]
 /// is wired), signal readiness, arm the watcher, and run the main `select!`
@@ -1472,9 +1549,10 @@ async fn run_file_sync_controller(
                 return failures;
             }
         };
+        let (writable, mut backlog) = VaultBacklog::partition(org_files, &formats);
         let fs_warm = fs.clone();
         let preloaded: Vec<(std::path::PathBuf, Option<String>)> =
-            futures::future::join_all(org_files.into_iter().map(|p| {
+            futures::future::join_all(writable.into_iter().map(|p| {
                 let fs_warm = fs_warm.clone();
                 async move {
                     let content = fs_warm.read_to_string(&p).await.ok(); // ALLOW(ok): best-effort OS page-cache warmup; content is dropped below
@@ -1493,7 +1571,7 @@ async fn run_file_sync_controller(
         // cover intra-file correctness; only the sidebar-facing `block`-matview
         // feed is deferred. Scoped to the initial scan — runtime edits keep the
         // per-edit barrier.
-        let files = preloaded.len();
+        let files = preloaded.len() + backlog.len();
         let t_scan = std::time::Instant::now();
         controller.begin_initial_scan();
         #[cfg(feature = "crash-injection")]
@@ -1501,39 +1579,10 @@ async fn run_file_sync_controller(
             panic!("[crash-injection] the file-sync controller dies during the initial scan");
         }
         for (file_path, _content) in preloaded {
-            let t_file = std::time::Instant::now();
-            let result = controller.on_file_changed(&file_path).await;
-            tracing::info!(
-                target: "holon_latency",
-                stage = "boot_file",
-                ms = t_file.elapsed().as_millis() as u64,
-                path = %file_path.display(),
-                "holon_latency",
-            );
-            match result {
-                Ok(_) => {}
-                // Disclosed by its format's condition; as a scan failure it
-                // would raise the start-failed banner for the same file again.
-                Err(e)
-                    if e.downcast_ref::<holon_filesystem::AdapterRefusal>()
-                        .is_some() =>
-                {
-                    tracing::warn!(
-                        "[OrgMode] existing file {} not read: {:#}; disclosed as a condition, \
-                         not as a failed scan",
-                        file_path.display(),
-                        e
-                    );
-                }
-                Err(e) => {
-                    error!(
-                        "[OrgMode] Failed to process existing file {}: {}",
-                        file_path.display(),
-                        e
-                    );
-                    failures.push((file_path, e));
-                }
-            }
+            ingest_at_boot(&mut controller, file_path, &mut failures).await;
+        }
+        while let Some(file_path) = backlog.pop() {
+            ingest_at_boot(&mut controller, file_path, &mut failures).await;
         }
         // ONE end-of-scan convergence wait (30s loud ceiling). A stall becomes a
         // scan failure routed through the existing `signal_error` path below.
