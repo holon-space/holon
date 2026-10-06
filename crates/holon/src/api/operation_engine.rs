@@ -713,6 +713,17 @@ impl DispatchingOperationEngine {
         &self.admission
     }
 
+    /// The footprint admission orders `entity_name.op_name` with `params` by.
+    #[cfg(feature = "dispatch-hold")]
+    pub fn admission_footprint(
+        &self,
+        entity_name: &EntityName,
+        op_name: &str,
+        params: &StorageEntity,
+    ) -> Result<Footprint> {
+        self.footprint(entity_name, op_name, |key| params.get(key))
+    }
+
     /// Override the provenance-stamp clock (test determinism). Production keeps
     /// the [`SystemClock`] default so stamps carry real wall-clock time.
     pub fn with_clock(mut self, clock: Arc<dyn Clock>) -> Self {

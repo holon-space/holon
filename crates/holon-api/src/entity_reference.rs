@@ -218,33 +218,35 @@ fn reference<'a, 'p>(
 }
 
 /// The fields of `type_def`'s rows that reference an entity, as the params a
-/// `create` or `set_field` carries them in. A field referencing the type
-/// itself is a tree edge, and the root is a legal value there.
-pub fn row_field_references(type_def: &TypeDefinition) -> Vec<OperationParam> {
+/// `create`, `update` or `set_field` carries them in. A field referencing the
+/// type itself is a tree edge, and the root is a legal value there.
+///
+/// Refuses a target spelled as a Rust type name (`Project`) that is not the
+/// type's own: only the self-reference has a known entity behind that name.
+pub fn row_field_references(type_def: &TypeDefinition) -> Result<Vec<OperationParam>, String> {
     type_def
         .fields
         .iter()
         .filter(|field| !field.primary_key)
-        .filter_map(|field| {
-            let target = field.reference_target.as_deref()?;
+        .filter_map(|field| Some((field, field.reference_target.as_deref()?)))
+        .map(|(field, target)| {
             // `#[reference(Block)]` spells the target as the Rust type.
             let type_hint = if target.eq_ignore_ascii_case(&type_def.name) {
                 TypeHint::EntityIdOrRoot {
                     entity_name: EntityName::new(type_def.name.clone()),
                 }
-            } else {
-                assert!(
-                    !target.starts_with(|c: char| c.is_ascii_uppercase()),
+            } else if target.starts_with(|c: char| c.is_ascii_uppercase()) {
+                return Err(format!(
                     "field '{}' of '{}' references '{target}', a type name rather than an \
-                     entity name",
-                    field.name,
-                    type_def.name
-                );
+                     entity name: name the referenced entity in lower case",
+                    field.name, type_def.name
+                ));
+            } else {
                 TypeHint::EntityId {
                     entity_name: EntityName::new(target),
                 }
             };
-            Some(OperationParam {
+            Ok(OperationParam {
                 name: field.name.clone(),
                 type_hint,
                 description: format!("Reference to a {target}"),
@@ -255,7 +257,7 @@ pub fn row_field_references(type_def: &TypeDefinition) -> Vec<OperationParam> {
 
 /// The entity references a `create` of `type_def` may carry: the new row's
 /// own key, when the caller picks it, and its reference fields.
-pub fn create_references(type_def: &TypeDefinition) -> Vec<OperationParam> {
+pub fn create_references(type_def: &TypeDefinition) -> Result<Vec<OperationParam>, String> {
     let own = OperationParam {
         name: type_def.primary_key.clone(),
         type_hint: TypeHint::EntityId {
@@ -263,18 +265,18 @@ pub fn create_references(type_def: &TypeDefinition) -> Vec<OperationParam> {
         },
         description: "Entity ID".to_string(),
     };
-    std::iter::once(own)
-        .chain(row_field_references(type_def))
-        .collect()
+    Ok(std::iter::once(own)
+        .chain(row_field_references(type_def)?)
+        .collect())
 }
 
 /// The hint of `set_field`'s `value` on `type_def`: a reference exactly when
 /// the written field is one.
-pub fn set_field_value_hint(type_def: &TypeDefinition) -> TypeHint {
-    TypeHint::FieldValue {
+pub fn set_field_value_hint(type_def: &TypeDefinition) -> Result<TypeHint, String> {
+    Ok(TypeHint::FieldValue {
         field_param: "field".to_string(),
-        fields: row_field_references(type_def),
-    }
+        fields: row_field_references(type_def)?,
+    })
 }
 
 /// Registration gate over a whole descriptor set: [`entity_reference_params`]
@@ -556,6 +558,7 @@ mod tests {
         );
         assert_eq!(
             create_references(&block)
+                .expect("Block's references")
                 .into_iter()
                 .map(|p| (p.name, p.type_hint))
                 .collect::<Vec<_>>(),
@@ -570,7 +573,10 @@ mod tests {
             vec![
                 param("id", entity_id("block")),
                 param("field", TypeHint::String),
-                param("value", set_field_value_hint(&block)),
+                param(
+                    "value",
+                    set_field_value_hint(&block).expect("Block's references"),
+                ),
             ],
         );
         let ops = [set_field];
@@ -590,5 +596,22 @@ mod tests {
         };
         assert_eq!(names(&content_field), vec![("id", false)]);
         assert_eq!(names(&parent_field), vec![("id", false), ("value", true)]);
+    }
+
+    /// A declared type's JSON can name a foreign target as a Rust type; that
+    /// is a refusal of the declaration, not a panic inside the op.
+    #[test]
+    fn a_foreign_type_name_target_is_refused() {
+        let task = TypeDefinition::new(
+            "task",
+            vec![
+                crate::FieldSchema::new("id", "TEXT").primary_key(),
+                crate::FieldSchema::new("project", "TEXT").reference_target("Project"),
+            ],
+        );
+        let err = row_field_references(&task).expect_err("`Project` names no entity");
+        assert!(err.contains("'project' of 'task'"), "{err}");
+        assert!(create_references(&task).is_err());
+        assert!(set_field_value_hint(&task).is_err());
     }
 }

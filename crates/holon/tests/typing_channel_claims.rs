@@ -341,6 +341,71 @@ async fn a_keystroke_on_the_anchor_waits_behind_a_held_move() {
         .expect("the keystroke lands");
 }
 
+/// Hold `op` with `pairs`, then type into `subject`: the keystroke must wait.
+async fn assert_a_keystroke_on_waits_behind(
+    subject: &str,
+    op: &'static str,
+    pairs: &[(&str, &str)],
+) {
+    let engine = block_engine().await;
+    seed(&engine).await;
+    let held = hold(&engine, op, pairs).await;
+
+    let keystroke = tokio::spawn(engine.commit_keystroke(SourceKeystroke {
+        id: subject.into(),
+        source: format!("typed into {subject}"),
+        write_seq: None,
+    }));
+    assert_eq!(
+        engine.admission().census().waiting,
+        1,
+        "a keystroke on {subject} runs past the held {op} {pairs:?}"
+    );
+
+    engine
+        .dispatch_hold()
+        .release(1, Duration::from_secs(5))
+        .await
+        .unwrap_or_else(|e| panic!("release the held {op}: {e:#}"));
+    held.await.expect("the held write completes");
+    keystroke
+        .await
+        .expect("the keystroke's task")
+        .expect("the keystroke lands");
+}
+
+/// A restore recreates a block under its parent: the parent is a subject.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_keystroke_on_the_restore_parent_waits_behind_a_held_restore_split() {
+    assert_a_keystroke_on_waits_behind(
+        HELD,
+        "restore_split",
+        &[
+            ("target_id", TYPED),
+            ("target_content", "kept"),
+            ("block_id", "block:restored"),
+            ("block_content", "restored"),
+            ("block_parent", HELD),
+        ],
+    )
+    .await;
+}
+
+/// An update that places its row after a sibling claims that sibling.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_keystroke_on_the_update_anchor_waits_behind_a_held_update() {
+    assert_a_keystroke_on_waits_behind(
+        HELD,
+        "update",
+        &[
+            ("id", TYPED),
+            ("content", "moved"),
+            ("after_block_id", HELD),
+        ],
+    )
+    .await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_keystroke_waits_behind_a_held_write_on_its_own_block() {
     let engine = block_engine().await;

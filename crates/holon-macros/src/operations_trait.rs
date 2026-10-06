@@ -157,24 +157,21 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
                 .filter_map(|arg| match arg {
                     FnArg::Typed(pat_type) => {
                         let param_name = param_wire_name(&extract_param_name(&pat_type.pat));
-                        let (type_str, required) = infer_type(&pat_type.ty);
+                        let (_, required) = infer_type(&pat_type.ty);
 
                         let param_name_lit = param_name.clone();
-                        let type_str_lit = type_str.clone();
 
                         // Parse type hint with entity ID detection. A
                         // contradiction among the attributes is a compile error.
-                        let type_hint_field = match parse_param_type_hint(
-                            &param_name,
-                            &pat_type.attrs,
-                            &type_str_lit,
-                        ) {
-                            Ok(expr) => quote! { type_hint: #expr, },
-                            Err(err) => {
-                                let err = err.to_compile_error();
-                                quote! { type_hint: { #err }, }
-                            }
-                        };
+                        let type_hint_field =
+                            match parse_param_type_hint(&param_name, &pat_type.attrs, &pat_type.ty)
+                            {
+                                Ok(expr) => quote! { type_hint: #expr, },
+                                Err(err) => {
+                                    let err = err.to_compile_error();
+                                    quote! { type_hint: { #err }, }
+                                }
+                            };
 
                         Some((
                             required,
@@ -1899,11 +1896,9 @@ fn infer_type_string(type_str: &str) -> String {
     }
 }
 
-/// Whether `param_name` names an entity reference rather than a value.
-///
-/// The subject `id`, or a `<role>_id` role name (`parent_id`, `after_id`,
-/// `anchor_id`) — the two spellings every operation surface uses for "this
-/// parameter addresses an entity".
+/// Whether a `String`-typed `param_name` names an entity reference rather
+/// than a value: the subject `id`, or a `<role>_id` role name (`parent_id`,
+/// `after_id`). An `EntityUri` parameter is one by its type.
 fn is_entity_reference_name(param_name: &str) -> bool {
     param_name == "id"
         || param_name
@@ -1913,13 +1908,30 @@ fn is_entity_reference_name(param_name: &str) -> bool {
 
 /// Parse parameter type hint with entity ID detection.
 ///
-/// The one refusal here is a CONTRADICTION between two attributes, which the
-/// caller turns into a compile error naming both.
+/// The refusals here are a CONTRADICTION — between two attributes, or between
+/// an attribute and the type — and a type holding references no hint declares.
+/// The caller turns each into a compile error.
 fn parse_param_type_hint(
     param_name: &str,
     attrs: &[syn::Attribute],
-    rust_type_str: &str,
+    ty: &Type,
 ) -> syn::Result<proc_macro2::TokenStream> {
+    let (rust_type_str, _) = infer_type(ty);
+    // The type is the declaration: an `EntityUri` parameter addresses an
+    // entity whatever it is named. A collection of them has no hint that
+    // carries the reference, so it is refused rather than passed as text.
+    let is_entity_uri = rust_type_str == "EntityUri";
+    if !is_entity_uri && quote! { #ty }.to_string().contains("EntityUri") {
+        return Err(syn::Error::new_spanned(
+            ty,
+            format!(
+                "parameter `{param_name}` holds entity references inside `{}`, which no \
+                 `TypeHint` declares, so admission and the operation boundary would read it as \
+                 text. Take `&EntityUri` or `Option<&EntityUri>` per reference.",
+                quote! { #ty }
+            ),
+        ));
+    }
     let mut entity_ref_override: Option<String> = None;
     let mut not_entity: Option<&syn::Attribute> = None;
     let mut may_be_root: Option<&syn::Attribute> = None;
@@ -1995,14 +2007,23 @@ fn parse_param_type_hint(
                 }
             }
         }
-    } else if not_entity.is_some() {
+    } else if let Some(not_entity) = not_entity {
+        if is_entity_uri {
+            return Err(syn::Error::new_spanned(
+                not_entity,
+                format!(
+                    "`#[not_entity]` on `{param_name}` contradicts its type: an `EntityUri` \
+                     addresses an entity. Take a `String` if the parameter names a value."
+                ),
+            ));
+        }
         // A reference-NAMED parameter that opts out still has to say what it is
         // instead: registration refuses a `TypeHint::String` under one of these
         // names, because the boundary would then pass it through unparsed.
         if is_entity_reference_name(param_name) {
             quote! { holon_api::TypeHint::RowKey }
         } else {
-            infer_type_hint_from_rust_type(rust_type_str)
+            infer_type_hint_from_rust_type(&rust_type_str)
         }
     } else if may_be_root.is_some() {
         // The ROOT is a legal value in this position. Stated on the parameter
@@ -2014,7 +2035,7 @@ fn parse_param_type_hint(
                 entity_name: holon_api::EntityName::new(entity_name),
             }
         }
-    } else if is_entity_reference_name(param_name) {
+    } else if is_entity_uri || is_entity_reference_name(param_name) {
         // The entity the descriptor is generated FOR. `entity_name` is the
         // generator function's own parameter, in scope wherever this token
         // stream is emitted.
@@ -2033,7 +2054,7 @@ fn parse_param_type_hint(
             }
         }
     } else {
-        infer_type_hint_from_rust_type(rust_type_str)
+        infer_type_hint_from_rust_type(&rust_type_str)
     };
     Ok(hint)
 }
@@ -2217,7 +2238,35 @@ mod param_hint_attribute_tests {
     use super::*;
 
     fn hint(param_name: &str, attrs: Vec<syn::Attribute>, rust_type: &str) -> syn::Result<String> {
-        parse_param_type_hint(param_name, &attrs, rust_type).map(|tokens| tokens.to_string())
+        let ty: Type = syn::parse_str(rust_type).expect("a Rust type");
+        parse_param_type_hint(param_name, &attrs, &ty).map(|tokens| tokens.to_string())
+    }
+
+    /// An `EntityUri` parameter is a reference by its type, whatever its name.
+    #[test]
+    fn an_entity_uri_parameter_is_a_reference_under_any_name() {
+        for rust_type in ["&EntityUri", "Option<&EntityUri>", "holon_api::EntityUri"] {
+            let declared = hint("block_parent", vec![], rust_type).expect("expands");
+            assert!(declared.contains("EntityId"), "{rust_type}: {declared}");
+        }
+    }
+
+    #[test]
+    fn not_entity_on_an_entity_uri_is_a_macro_error() {
+        let err = hint(
+            "target",
+            vec![syn::parse_quote!(#[not_entity])],
+            "&EntityUri",
+        )
+        .expect_err("the type says the parameter is a reference");
+        assert!(err.to_string().contains("not_entity"), "{err}");
+    }
+
+    /// No hint declares a list of references, so the macro refuses one.
+    #[test]
+    fn a_collection_of_entity_uris_is_a_macro_error() {
+        let err = hint("blocks", vec![], "Vec<EntityUri>").expect_err("no hint carries it");
+        assert!(err.to_string().contains("blocks"), "{err}");
     }
 
     /// `#[not_entity]` denies that the parameter is an entity reference;

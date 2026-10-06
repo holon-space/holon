@@ -64,6 +64,10 @@ pub struct OperationDispatcher {
     /// type's writes route here exactly as a wired entity's route to
     /// `providers`; the two lists differ only in when they were filled.
     declared_providers: std::sync::RwLock<Vec<Arc<dyn OperationProvider>>>,
+    /// Every provider's descriptors, collected when a provider is added:
+    /// admission reads them for each op it orders. A provider's `operations()`
+    /// is fixed once it is registered.
+    op_catalog: std::sync::RwLock<Arc<Vec<OperationDescriptor>>>,
     observers: Vec<Arc<dyn OperationObserver>>,
     sync_token_store: Option<Arc<dyn SyncTokenStore>>,
     view_rebuild: Option<ViewRebuild>,
@@ -201,21 +205,29 @@ pub enum AuthoredInput {
 }
 impl OperationDispatcher {
     pub fn new(providers: Vec<Arc<dyn OperationProvider>>) -> Self {
-        Self {
-            providers,
-            ..Default::default()
-        }
+        Self::with_observers(providers, Vec::new())
     }
 
     pub fn with_observers(
         providers: Vec<Arc<dyn OperationProvider>>,
         observers: Vec<Arc<dyn OperationObserver>>,
     ) -> Self {
-        Self {
+        let dispatcher = Self {
             providers,
             observers,
             ..Default::default()
-        }
+        };
+        dispatcher.collect_op_catalog();
+        dispatcher
+    }
+
+    fn collect_op_catalog(&self) {
+        let catalog = self
+            .all_providers()
+            .iter()
+            .flat_map(|p| p.operations())
+            .collect();
+        *self.op_catalog.write().expect("operation catalog poisoned") = Arc::new(catalog);
     }
 
     pub fn set_sync_token_store(&mut self, store: Arc<dyn SyncTokenStore>) {
@@ -377,11 +389,8 @@ impl OperationDispatcher {
         op_name: &str,
         param: impl Fn(&str) -> Option<&'p holon_api::Value>,
     ) -> Result<BTreeSet<holon_api::EntityUri>> {
-        let available_ops: Vec<_> = self
-            .all_providers()
-            .iter()
-            .flat_map(|p| p.operations())
-            .collect();
+        let available_ops =
+            Arc::clone(&self.op_catalog.read().expect("operation catalog poisoned"));
         let advertised = available_ops
             .iter()
             .any(|op| op.entity_name == entity_name && op.name == op_name);
@@ -451,6 +460,7 @@ impl OperationDispatcher {
             .write()
             .expect("declared-provider registry poisoned")
             .push(provider);
+        self.collect_op_catalog();
         Ok(())
     }
 

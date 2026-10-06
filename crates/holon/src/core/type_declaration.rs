@@ -97,7 +97,7 @@ pub fn register_write_authority(
     require_declarable_soft_delete(type_def)?;
 
     let provider: Arc<dyn OperationProvider> =
-        Arc::new(SqlOperationProvider::for_type(db_handle.clone(), type_def));
+        Arc::new(SqlOperationProvider::for_type(db_handle.clone(), type_def)?);
     dispatcher.register_provider(provider)?;
 
     dispatcher

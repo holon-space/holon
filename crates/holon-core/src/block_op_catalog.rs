@@ -164,23 +164,40 @@ pub fn remove_tag_descriptor(
 /// ([`holon_api::create_references`]) plus the positional anchors, the
 /// sibling it lands after.
 pub fn block_create_references() -> Vec<OperationParam> {
-    let mut params = holon_api::create_references(&holon_api::Block::type_definition());
-    for anchor in [holon_api::POSITION_AFTER_BLOCK_ID_PARAM, "after"] {
-        params.push(OperationParam {
-            name: anchor.to_string(),
-            type_hint: TypeHint::EntityId {
-                entity_name: EntityName::new(holon_api::schema::block::RELATION),
-            },
-            description: "The sibling the new block is placed after".to_string(),
-        });
-    }
+    let mut params = holon_api::create_references(&holon_api::Block::type_definition())
+        .expect("the Block type's references are its own");
+    params.extend(
+        [holon_api::POSITION_AFTER_BLOCK_ID_PARAM, "after"]
+            .into_iter()
+            .map(block_anchor),
+    );
     params
+}
+
+/// The entity references a block `update` may carry besides its `id`: its
+/// row's reference fields and the sibling it is placed after.
+pub fn block_update_references() -> Vec<OperationParam> {
+    let mut params = holon_api::row_field_references(&holon_api::Block::type_definition())
+        .expect("the Block type's references are its own");
+    params.push(block_anchor(holon_api::POSITION_AFTER_BLOCK_ID_PARAM));
+    params
+}
+
+fn block_anchor(name: &str) -> OperationParam {
+    OperationParam {
+        name: name.to_string(),
+        type_hint: TypeHint::EntityId {
+            entity_name: EntityName::new(holon_api::schema::block::RELATION),
+        },
+        description: "The sibling the block is placed after".to_string(),
+    }
 }
 
 /// The hint of a block `set_field`'s `value`
 /// ([`holon_api::set_field_value_hint`]).
 pub fn block_set_field_value_hint() -> TypeHint {
     holon_api::set_field_value_hint(&holon_api::Block::type_definition())
+        .expect("the Block type's references are its own")
 }
 
 /// Shared shape for the two element-wise tag ops: `{id: EntityId, tag:

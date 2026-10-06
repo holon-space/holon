@@ -7,7 +7,8 @@
 //!
 //! Footprint rule (SP8 overlay): a declared delta binds to ONE subject, the
 //! entity its `id_column` param names, and writes the aspects whose flow moves
-//! tokens. An undeclared op claims every entity URI in its params.
+//! tokens. The `subject claim` column is the footprint admission orders the op
+//! by (`BackendEngine::admission_footprint`).
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -28,6 +29,7 @@ use holon_api::PAGE_TAG;
 use holon_api::SOURCE_TEXT_FIELD;
 use holon_api::SourceKeystroke;
 use holon_api::Value;
+use holon_api::admission::Footprint;
 use holon_api::block::Block;
 use holon_api::marking::ExistenceFlow;
 use holon_api::marking::KindDelta;
@@ -578,18 +580,33 @@ fn effects_text(namer: &Namer, effects: &BTreeSet<Effect>) -> String {
         .join("; ")
 }
 
-fn uris_in(params: &StorageEntity) -> BTreeSet<String> {
-    params
-        .values()
-        .filter_map(|v| v.as_string())
-        .filter(|s| s.contains(':') && !s.contains(' '))
-        .map(str::to_string)
-        .collect()
+/// Whether admission ordering `claim` orders a write of `entity`.
+fn claims(claim: &Footprint, entity: &str) -> bool {
+    match claim {
+        Footprint::Fence => true,
+        Footprint::Relation(relation) => {
+            entity.split_once(':').map(|(scheme, _)| scheme) == Some(relation.as_str())
+        }
+        Footprint::Subjects { subjects, .. } => subjects.iter().any(|s| s.as_str() == entity),
+    }
+}
+
+fn claim_text(namer: &Namer, claim: &Footprint) -> String {
+    match claim {
+        Footprint::Fence => "fence".to_string(),
+        Footprint::Relation(relation) => format!("relation {relation}"),
+        Footprint::Subjects { subjects, .. } => subjects
+            .iter()
+            .map(|s| namer.name(s.as_str()))
+            .collect::<Vec<_>>()
+            .join(" "),
+    }
 }
 
 fn judge(
     d: &OperationDescriptor,
     params: &StorageEntity,
+    claim: anyhow::Result<Footprint>,
     prefix: &str,
     before: &Rows,
     after: &Rows,
@@ -602,16 +619,21 @@ fn judge(
         _ => effects_text(&namer, &effects),
     };
 
-    let claimed = uris_in(params);
-    let escapes: BTreeSet<Effect> = effects
-        .iter()
-        .filter(|e| !claimed.contains(&e.entity))
-        .cloned()
-        .collect();
-    let subject_claim = if escapes.is_empty() {
-        "covers".to_string()
-    } else {
-        format!("misses {}", effects_text(&namer, &escapes))
+    let subject_claim = match claim {
+        Err(e) => format!("ERROR: {}", namer.mask(&format!("{e:#}"))),
+        Ok(claim) => {
+            let escapes: BTreeSet<Effect> = effects
+                .iter()
+                .filter(|e| !claims(&claim, &e.entity))
+                .cloned()
+                .collect();
+            let verdict = if escapes.is_empty() {
+                "covers".to_string()
+            } else {
+                format!("misses {}", effects_text(&namer, &escapes))
+            };
+            format!("{} — {verdict}", claim_text(&namer, &claim))
+        }
     };
 
     let unreported = match &fired {
@@ -705,7 +727,7 @@ fn census(rows: &[Row]) -> String {
            base table except {BOOKKEEPING_TABLES:?}, ignoring {BOOKKEEPING_FIELDS:?}.\n\
          - Footprint = the declared delta's written aspects on ONE subject (the `id_column` param).\n\
          - `inside`: every observed effect is on the subject in a written aspect. `outside`: some is not.\n\
-         - `subject claim`: the overlay's fallback footprint (every entity URI in params).\n\
+         - `subject claim`: the footprint admission orders the op by, and whether it covers the observed effect.\n\
          - `unreported`: observed effects missing from `result.changes` (what D1 alone would miss).\n\
          - Not covered: the Loro write leg (Text/Mark ops such as `insert_text` are not in this catalog).\n"
     )
@@ -794,7 +816,16 @@ async fn footprint_census_report_only() {
             }
         };
         let after = snapshot(&engine).await;
-        rows.push(judge(d, &params, &fixture.prefix, &before, &after, fired));
+        let claim = engine.admission_footprint(&d.entity_name, &d.name, &params);
+        rows.push(judge(
+            d,
+            &params,
+            claim,
+            &fixture.prefix,
+            &before,
+            &after,
+            fired,
+        ));
     }
 
     let fixture = Fixture {
@@ -834,7 +865,15 @@ async fn footprint_census_report_only() {
             marking_delta: MarkingDelta::Undeclared,
             ..fence.clone()
         };
-        let mut row = judge(&d, &created, &fixture.prefix, &before, &after, fired);
+        let mut row = judge(
+            &d,
+            &created,
+            Ok(Footprint::Fence),
+            &fixture.prefix,
+            &before,
+            &after,
+            fired,
+        );
         row.declared = "none (fence)".to_string();
         rows.push(row);
     }
@@ -888,7 +927,8 @@ async fn footprint_census_report_only() {
             marking_delta: MarkingDelta::Undeclared,
             ..fence.clone()
         };
-        let mut row = judge(&d, &params, &fixture.prefix, &before, &after, fired);
+        let claim = engine.admission_footprint(&EntityName::new(BLOCK), "set_field", &params);
+        let mut row = judge(&d, &params, claim, &fixture.prefix, &before, &after, fired);
         row.declared = "none (source line)".to_string();
         rows.push(row);
     }

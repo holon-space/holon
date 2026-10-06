@@ -1652,6 +1652,17 @@ impl BackendEngine {
         self.op_engine.admission()
     }
 
+    #[cfg(feature = "dispatch-hold")]
+    pub fn admission_footprint(
+        &self,
+        entity_name: &EntityName,
+        op_name: &str,
+        params: &StorageEntity,
+    ) -> Result<holon_api::admission::Footprint> {
+        self.op_engine
+            .admission_footprint(entity_name, op_name, params)
+    }
+
     pub async fn enable_undo_persistence(&mut self) -> Result<()> {
         use crate::api::undo_persistence::SqlUndoStateReader;
         use crate::api::undo_persistence::SqlUndoStore;

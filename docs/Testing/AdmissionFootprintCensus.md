@@ -7,7 +7,7 @@ subtree per op (`page` > `a`(tag old), `b` > `b1`, `c`). Observed = before/after
 base table except ["block_derived", "block_history", "clock", "clock_reader", "file", "integration_cache", "integration_state", "local_ui_state", "operation", "sqlite_sequence", "sync_states", "undo_log", "watch_context"], ignoring ["_change_origin", "created_at", "updated_at", "write_seq"].
 - Footprint = the declared delta's written aspects on ONE subject (the `id_column` param).
 - `inside`: every observed effect is on the subject in a written aspect. `outside`: some is not.
-- `subject claim`: the overlay's fallback footprint (every entity URI in params).
+- `subject claim`: the footprint admission orders the op by, and whether it covers the observed effect.
 - `unreported`: observed effects missing from `result.changes` (what D1 alone would miss).
 - Not covered: the Loro write leg (Text/Mark ops such as `insert_text` are not in this catalog).
 
@@ -17,96 +17,96 @@ Counts: 73 ops; inside 4; outside 2; undeclared 67 (of which 22 failed on the fi
 
 | op | declared delta | observed effect | verdict | outside the footprint | subject claim | unreported |
 |---|---|---|---|---|---|---|
-| block.create | block(s=Produces t=Produces e=Produces) | block:n[existence:block_raw+] | Inside |  | covers | - |
-| block.set_field | block(s=Relocates t=Produces e=Reads) envelope by field | block:b[text:content] | Inside |  | covers | - |
-| block.split_block | block(s=Produces t=Produces e=Produces) | block:a[structural:sort_key text:content]; block:b[structural:sort_key]; block:c[structural:sort_key]; minted("text")[existence:block_raw+] | Outside | block:b[structural:sort_key]; block:c[structural:sort_key]; minted("text")[existence:block_raw+] | misses block:b[structural:sort_key]; block:c[structural:sort_key]; minted("text")[existence:block_raw+] | block:a[structural:sort_key]; block:b[structural:sort_key]; block:c[structural:sort_key] |
-| block.join_block | block(s=Consumes t=Produces e=Produces) envelope by position | block:a[text:content]; block:b[existence:block_raw-]; block:b1[structural:parent_id structural:sort_key] | Outside | block:a[text:content]; block:b1[structural:parent_id structural:sort_key] | misses block:a[text:content]; block:b1[structural:parent_id structural:sort_key] | block:b1[structural:parent_id structural:sort_key] |
-| block.indent | none | block:b[structural:parent_id structural:sort_key] | Undeclared |  | covers | block:b[structural:sort_key] |
-| block.outdent | none | block:a[structural:sort_key]; block:b[structural:sort_key]; block:b1[structural:parent_id structural:sort_key]; block:c[structural:sort_key] | Undeclared |  | misses block:a[structural:sort_key]; block:b[structural:sort_key]; block:c[structural:sort_key] | block:a[structural:sort_key]; block:b[structural:sort_key]; block:b1[structural:sort_key]; block:c[structural:sort_key] |
-| block.move_block | block(s=Relocates t=Untouched e=Reads) | block:c[structural:parent_id structural:sort_key] | Inside |  | covers | block:c[structural:sort_key] |
-| block.delete | block(s=Consumes t=Untouched e=Produces) | block:c[existence:block_raw-] | Inside |  | covers | - |
-| block.delete_subtree | none | block:b[existence:block_raw-]; block:b1[existence:block_raw-] | Undeclared |  | misses block:b1[existence:block_raw-] | block:b[existence:block_raw-]; block:b1[existence:block_raw-] |
-| block.delete_keep_children | none | block:a[structural:sort_key]; block:b[existence:block_raw-]; block:b1[structural:parent_id structural:sort_key]; block:c[structural:sort_key] | Undeclared |  | misses block:a[structural:sort_key]; block:b1[structural:parent_id structural:sort_key]; block:c[structural:sort_key] | block:a[structural:sort_key]; block:b1[structural:parent_id structural:sort_key]; block:c[structural:sort_key] |
-| block.convert_block_to_page | none | block:b[text:block_links+ text:marks]; block:b1[structural:parent_id structural:sort_key]; minted("bravo")[existence:block_raw+ text:block_tags+] | Undeclared |  | misses block:b1[structural:parent_id structural:sort_key]; minted("bravo")[existence:block_raw+ text:block_tags+] | n/a (engine compound) |
-| block.merge_blocks | none | block:a[text:properties]; block:c[existence:block_raw- text:block_redirects+]; block:c-merged-body[existence:block_raw+] | Undeclared |  | misses block:c-merged-body[existence:block_raw+] | n/a (engine compound) |
-| engine.undo | none (fence) | block:n[existence:block_raw-] | Undeclared |  | covers | n/a (engine compound) |
-| engine.redo | none (fence) | block:n[existence:block_raw+] | Undeclared |  | covers | n/a (engine compound) |
-| engine.commit_keystroke | none (source line) | block:b[text:content text:properties] | Undeclared |  | covers | n/a (engine compound) |
+| block.create | block(s=Produces t=Produces e=Produces) | block:n[existence:block_raw+] | Inside |  | block:n block:page — covers | - |
+| block.set_field | block(s=Relocates t=Produces e=Reads) envelope by field | block:b[text:content] | Inside |  | block:b — covers | - |
+| block.split_block | block(s=Produces t=Produces e=Produces) | block:a[structural:sort_key text:content]; block:b[structural:sort_key]; block:c[structural:sort_key]; minted("text")[existence:block_raw+] | Outside | block:b[structural:sort_key]; block:c[structural:sort_key]; minted("text")[existence:block_raw+] | block:a — misses block:b[structural:sort_key]; block:c[structural:sort_key]; minted("text")[existence:block_raw+] | block:a[structural:sort_key]; block:b[structural:sort_key]; block:c[structural:sort_key] |
+| block.join_block | block(s=Consumes t=Produces e=Produces) envelope by position | block:a[text:content]; block:b[existence:block_raw-]; block:b1[structural:parent_id structural:sort_key] | Outside | block:a[text:content]; block:b1[structural:parent_id structural:sort_key] | block:b — misses block:a[text:content]; block:b1[structural:parent_id structural:sort_key] | block:b1[structural:parent_id structural:sort_key] |
+| block.indent | none | block:b[structural:parent_id structural:sort_key] | Undeclared |  | block:b — covers | block:b[structural:sort_key] |
+| block.outdent | none | block:a[structural:sort_key]; block:b[structural:sort_key]; block:b1[structural:parent_id structural:sort_key]; block:c[structural:sort_key] | Undeclared |  | block:b1 — misses block:a[structural:sort_key]; block:b[structural:sort_key]; block:c[structural:sort_key] | block:a[structural:sort_key]; block:b[structural:sort_key]; block:b1[structural:sort_key]; block:c[structural:sort_key] |
+| block.move_block | block(s=Relocates t=Untouched e=Reads) | block:c[structural:parent_id structural:sort_key] | Inside |  | block:a block:c — covers | block:c[structural:sort_key] |
+| block.delete | block(s=Consumes t=Untouched e=Produces) | block:c[existence:block_raw-] | Inside |  | block:c — covers | - |
+| block.delete_subtree | none | block:b[existence:block_raw-]; block:b1[existence:block_raw-] | Undeclared |  | fence — covers | block:b[existence:block_raw-]; block:b1[existence:block_raw-] |
+| block.delete_keep_children | none | block:a[structural:sort_key]; block:b[existence:block_raw-]; block:b1[structural:parent_id structural:sort_key]; block:c[structural:sort_key] | Undeclared |  | fence — covers | block:a[structural:sort_key]; block:b1[structural:parent_id structural:sort_key]; block:c[structural:sort_key] |
+| block.convert_block_to_page | none | block:b[text:block_links+ text:marks]; block:b1[structural:parent_id structural:sort_key]; minted("bravo")[existence:block_raw+ text:block_tags+] | Undeclared |  | fence — covers | n/a (engine compound) |
+| block.merge_blocks | none | block:a[text:properties]; block:c[existence:block_raw- text:block_redirects+]; block:c-merged-body[existence:block_raw+] | Undeclared |  | fence — covers | n/a (engine compound) |
+| engine.undo | none (fence) | block:n[existence:block_raw-] | Undeclared |  | fence — covers | n/a (engine compound) |
+| engine.redo | none (fence) | block:n[existence:block_raw+] | Undeclared |  | fence — covers | n/a (engine compound) |
+| engine.commit_keystroke | none (source line) | block:b[text:content text:properties] | Undeclared |  | block:b — covers | n/a (engine compound) |
 
 ## Every op
 
 | op | declared delta | observed effect | verdict | outside the footprint | subject claim | unreported |
 |---|---|---|---|---|---|---|
-| block.add_tag | none | block:b[text:block_tags+] | Undeclared |  | covers | block:b[text:block_tags+] |
-| block.block_to_page_plan | none | (none) | Undeclared |  | covers | - |
-| block.convert_block_to_page | none | block:b[text:block_links+ text:marks]; block:b1[structural:parent_id structural:sort_key]; minted("bravo")[existence:block_raw+ text:block_tags+] | Undeclared |  | misses block:b1[structural:parent_id structural:sort_key]; minted("bravo")[existence:block_raw+ text:block_tags+] | n/a (engine compound) |
-| block.create | block(s=Produces t=Produces e=Produces) | block:n[existence:block_raw+] | Inside |  | covers | - |
-| block.create_page_from_link | none | minted("Linked page")[existence:block_raw+ text:block_tags+] | Undeclared |  | misses minted("Linked page")[existence:block_raw+ text:block_tags+] | minted("Linked page")[existence:block_raw+ text:block_tags+] |
-| block.cycle_task_state | none | block:a[text:properties] | Undeclared |  | covers | block:a[text:properties] |
-| block.delete | block(s=Consumes t=Untouched e=Produces) | block:c[existence:block_raw-] | Inside |  | covers | - |
-| block.delete_keep_children | none | block:a[structural:sort_key]; block:b[existence:block_raw-]; block:b1[structural:parent_id structural:sort_key]; block:c[structural:sort_key] | Undeclared |  | misses block:a[structural:sort_key]; block:b1[structural:parent_id structural:sort_key]; block:c[structural:sort_key] | block:a[structural:sort_key]; block:b1[structural:parent_id structural:sort_key]; block:c[structural:sort_key] |
-| block.delete_subtree | none | block:b[existence:block_raw-]; block:b1[existence:block_raw-] | Undeclared |  | misses block:b1[existence:block_raw-] | block:b[existence:block_raw-]; block:b1[existence:block_raw-] |
-| block.dismiss_advice | none | block:a[text:advice_suppressed+] | Undeclared |  | covers | block:a[text:advice_suppressed+] |
-| block.embed_entity | none | block:a[text:content] | Undeclared |  | covers | - |
-| block.indent | none | block:b[structural:parent_id structural:sort_key] | Undeclared |  | covers | block:b[structural:sort_key] |
-| block.instantiate_template | none | ERROR: block 'block:b' is not a template: missing the 'template' property | Undeclared |  | covers | - |
-| block.join_block | block(s=Consumes t=Produces e=Produces) envelope by position | block:a[text:content]; block:b[existence:block_raw-]; block:b1[structural:parent_id structural:sort_key] | Outside | block:a[text:content]; block:b1[structural:parent_id structural:sort_key] | misses block:a[text:content]; block:b1[structural:parent_id structural:sort_key] | block:b1[structural:parent_id structural:sort_key] |
-| block.merge_blocks | none | block:a[text:properties]; block:c[existence:block_raw- text:block_redirects+]; block:c-merged-body[existence:block_raw+] | Undeclared |  | misses block:c-merged-body[existence:block_raw+] | n/a (engine compound) |
-| block.merge_blocks_plan | none | (none) | Undeclared |  | covers | - |
-| block.move_block | block(s=Relocates t=Untouched e=Reads) | block:c[structural:parent_id structural:sort_key] | Inside |  | covers | block:c[structural:sort_key] |
-| block.move_down | none | block:a[structural:sort_key]; block:b[structural:sort_key]; block:c[structural:sort_key] | Undeclared |  | misses block:b[structural:sort_key]; block:c[structural:sort_key] | block:a[structural:sort_key]; block:b[structural:sort_key]; block:c[structural:sort_key] |
-| block.move_to_position | none | block:c[structural:parent_id structural:sort_key] | Undeclared |  | covers | block:c[structural:parent_id structural:sort_key] |
-| block.move_up | none | block:a[structural:sort_key]; block:b[structural:sort_key]; block:c[structural:sort_key] | Undeclared |  | misses block:a[structural:sort_key]; block:c[structural:sort_key] | block:a[structural:sort_key]; block:b[structural:sort_key]; block:c[structural:sort_key] |
-| block.outdent | none | block:a[structural:sort_key]; block:b[structural:sort_key]; block:b1[structural:parent_id structural:sort_key]; block:c[structural:sort_key] | Undeclared |  | misses block:a[structural:sort_key]; block:b[structural:sort_key]; block:c[structural:sort_key] | block:a[structural:sort_key]; block:b[structural:sort_key]; block:b1[structural:sort_key]; block:c[structural:sort_key] |
-| block.remove_tag | none | block:a[text:block_tags-] | Undeclared |  | covers | block:a[text:block_tags-] |
-| block.restore_join | none | ERROR: block:j is not in the write authority (unknown id, deleted, or this vault was never seeded), so no structural op may decide on it. | Undeclared |  | covers | - |
-| block.restore_link_resolution | none | ERROR: restore_link_resolution: 'rows' must be an Array, got Some(String("[]")) | Undeclared |  | covers | - |
-| block.restore_split | none | block:a[structural:sort_key text:content]; block:b[structural:sort_key]; block:c[structural:sort_key] | Undeclared |  | misses block:b[structural:sort_key] | block:a[structural:sort_key]; block:b[structural:sort_key]; block:c[structural:sort_key] |
-| block.rewrite_link_resolution | none | (none) | Undeclared |  | covers | - |
-| block.set_field | block(s=Relocates t=Produces e=Reads) envelope by field | block:b[text:content] | Inside |  | covers | - |
-| block.split_block | block(s=Produces t=Produces e=Produces) | block:a[structural:sort_key text:content]; block:b[structural:sort_key]; block:c[structural:sort_key]; minted("text")[existence:block_raw+] | Outside | block:b[structural:sort_key]; block:c[structural:sort_key]; minted("text")[existence:block_raw+] | misses block:b[structural:sort_key]; block:c[structural:sort_key]; minted("text")[existence:block_raw+] | block:a[structural:sort_key]; block:b[structural:sort_key]; block:c[structural:sort_key] |
-| block.update | none | block:b[text:content] | Undeclared |  | covers | block:b[text:content] |
-| identity.accept_proposal | none | ERROR: expected integer for 'id', got String("identity-a") | Undeclared |  | covers | - |
-| identity.delete_proposal | none | ERROR: expected integer for 'id', got String("identity-a") | Undeclared |  | covers | - |
-| identity.merge_entities | none | ERROR: merge_entities: select canonical_a: Database error: Failed to prepare query: Parse error: no such table: canonical_entity | Undeclared |  | covers | - |
-| identity.propose_merge | none | ERROR: expected integer for 'id', got String("identity-a") | Undeclared |  | covers | - |
-| identity.reject_proposal | none | ERROR: expected integer for 'id', got String("identity-a") | Undeclared |  | covers | - |
-| identity.restore_canonical_after_merge | none | ERROR: restore_canonical_after_merge: insert canonical: Database error: Failed to prepare query: Parse error: no such table: canonical_entity | Undeclared |  | covers | - |
-| identity.restore_proposal | none | ERROR: expected integer for 'id', got String("identity-a") | Undeclared |  | covers | - |
-| identity.revert_proposal_status | none | ERROR: expected integer for 'id', got String("identity-a") | Undeclared |  | covers | - |
-| ingredient-use.create | none | ERROR: Failed to execute SQL: Database error: Failed to execute statement: NOT NULL constraint failed: ingredient_use_raw.recipe_id | Undeclared |  | covers | - |
-| ingredient-use.delete | none | (none) | Undeclared |  | covers | - |
-| ingredient-use.set_field | none | ERROR: set_field('name') on 'ingredient-use:x' matched no row in `ingredient_use_raw`: the subject does not exist | Undeclared |  | covers | - |
-| ingredient-use.update | none | (none) | Undeclared |  | covers | - |
-| navigation.activate | none | ERROR: Failed to activate history row 1: Query error: Failed to fetch row: FOREIGN KEY constraint failed | Undeclared |  | covers | - |
-| navigation.close | none | (none) | Undeclared |  | covers | - |
-| navigation.focus | none | main[text:navigation_cursor+ text:navigation_cursor-]; navigation_history:Integer(1)[existence:navigation_history+] | Undeclared |  | misses main[text:navigation_cursor+ text:navigation_cursor-]; navigation_history:Integer(1)[existence:navigation_history+] | main[text:navigation_cursor+ text:navigation_cursor-]; navigation_history:Integer(1)[existence:navigation_history+] |
-| navigation.focus_pin | none | navigation_history:Integer(2)[existence:navigation_history+] | Undeclared |  | misses navigation_history:Integer(2)[existence:navigation_history+] | navigation_history:Integer(2)[existence:navigation_history+] |
-| navigation.go_back | none | main[text:navigation_cursor+ text:navigation_cursor-] | Undeclared |  | misses main[text:navigation_cursor+ text:navigation_cursor-] | main[text:navigation_cursor+ text:navigation_cursor-] |
-| navigation.go_forward | none | main[text:navigation_cursor+ text:navigation_cursor-] | Undeclared |  | misses main[text:navigation_cursor+ text:navigation_cursor-] | main[text:navigation_cursor+ text:navigation_cursor-] |
-| navigation.go_home | none | main[text:navigation_cursor+ text:navigation_cursor-]; navigation_history:Integer(1)[text:closed_at]; navigation_history:Integer(2)[existence:navigation_history-]; navigation_history:Integer(3)[existence:navigation_history+] | Undeclared |  | misses main[text:navigation_cursor+ text:navigation_cursor-]; navigation_history:Integer(1)[text:closed_at]; navigation_history:Integer(2)[existence:navigation_history-]; navigation_history:Integer(3)[existence:navigation_history+] | main[text:navigation_cursor+ text:navigation_cursor-]; navigation_history:Integer(1)[text:closed_at]; navigation_history:Integer(2)[existence:navigation_history-]; navigation_history:Integer(3)[existence:navigation_history+] |
-| navigation.new_tab | none | main[text:navigation_cursor+ text:navigation_cursor-]; navigation_history:Integer(4)[existence:navigation_history+] | Undeclared |  | misses main[text:navigation_cursor+ text:navigation_cursor-]; navigation_history:Integer(4)[existence:navigation_history+] | main[text:navigation_cursor+ text:navigation_cursor-]; navigation_history:Integer(4)[existence:navigation_history+] |
-| navigation.open_tab | none | main[text:navigation_cursor+ text:navigation_cursor-]; navigation_history:Integer(5)[existence:navigation_history+] | Undeclared |  | misses main[text:navigation_cursor+ text:navigation_cursor-]; navigation_history:Integer(5)[existence:navigation_history+] | main[text:navigation_cursor+ text:navigation_cursor-]; navigation_history:Integer(5)[existence:navigation_history+] |
-| pantry-item.consume | none | ERROR: consume: no pantry item with id 'pantry-item:x' | Undeclared |  | covers | - |
-| pantry-item.create | none | ERROR: Failed to execute SQL: Database error: Failed to execute statement: NOT NULL constraint failed: pantry_item_raw.quantity | Undeclared |  | covers | - |
-| pantry-item.delete | none | (none) | Undeclared |  | covers | - |
-| pantry-item.set_field | none | ERROR: set_field('name') on 'pantry-item:x' matched no row in `pantry_item_raw`: the subject does not exist | Undeclared |  | covers | - |
-| pantry-item.update | none | (none) | Undeclared |  | covers | - |
-| person.create | none | person:x[existence:person_raw+] | Undeclared |  | covers | - |
-| person.delete | none | (none) | Undeclared |  | covers | - |
-| person.set_field | none | ERROR: set_field('name') on 'person:x' matched no row in `person_raw`: the subject does not exist | Undeclared |  | covers | - |
-| person.update | none | (none) | Undeclared |  | covers | - |
-| recipe.create | none | ERROR: Failed to execute SQL: Database error: Failed to execute statement: NOT NULL constraint failed: recipe_raw.source_path | Undeclared |  | covers | - |
-| recipe.delete | none | (none) | Undeclared |  | covers | - |
-| recipe.set_field | none | ERROR: set_field('name') on 'recipe:x' matched no row in `recipe_raw`: the subject does not exist | Undeclared |  | covers | - |
-| recipe.update | none | (none) | Undeclared |  | covers | - |
-| shopping-item.create | none | ERROR: Failed to execute SQL: Database error: Failed to execute statement: NOT NULL constraint failed: shopping_item_raw.cat | Undeclared |  | covers | - |
-| shopping-item.delete | none | (none) | Undeclared |  | covers | - |
-| shopping-item.purge | none | (none) | Undeclared |  | covers | - |
-| shopping-item.set_field | none | ERROR: set_field('name') on 'shopping-item:x' matched no row in `shopping_item_raw`: the subject does not exist | Undeclared |  | covers | - |
-| shopping-item.update | none | (none) | Undeclared |  | covers | - |
-| engine.undo | none (fence) | block:n[existence:block_raw-] | Undeclared |  | covers | n/a (engine compound) |
-| engine.redo | none (fence) | block:n[existence:block_raw+] | Undeclared |  | covers | n/a (engine compound) |
-| engine.commit_keystroke | none (source line) | block:b[text:content text:properties] | Undeclared |  | covers | n/a (engine compound) |
-| engine.commit_keystroke(multi-line) | none (source line) | block:b[text:content] | Undeclared |  | covers | n/a (engine compound) |
-| engine.set_field(source_text) | none (source line) | block:b[text:content text:properties] | Undeclared |  | covers | n/a (engine compound) |
+| block.add_tag | none | block:b[text:block_tags+] | Undeclared |  | block:b — covers | block:b[text:block_tags+] |
+| block.block_to_page_plan | none | (none) | Undeclared |  | block:b — covers | - |
+| block.convert_block_to_page | none | block:b[text:block_links+ text:marks]; block:b1[structural:parent_id structural:sort_key]; minted("bravo")[existence:block_raw+ text:block_tags+] | Undeclared |  | fence — covers | n/a (engine compound) |
+| block.create | block(s=Produces t=Produces e=Produces) | block:n[existence:block_raw+] | Inside |  | block:n block:page — covers | - |
+| block.create_page_from_link | none | minted("Linked page")[existence:block_raw+ text:block_tags+] | Undeclared |  | relation block — covers | minted("Linked page")[existence:block_raw+ text:block_tags+] |
+| block.cycle_task_state | none | block:a[text:properties] | Undeclared |  | fence — covers | block:a[text:properties] |
+| block.delete | block(s=Consumes t=Untouched e=Produces) | block:c[existence:block_raw-] | Inside |  | block:c — covers | - |
+| block.delete_keep_children | none | block:a[structural:sort_key]; block:b[existence:block_raw-]; block:b1[structural:parent_id structural:sort_key]; block:c[structural:sort_key] | Undeclared |  | fence — covers | block:a[structural:sort_key]; block:b1[structural:parent_id structural:sort_key]; block:c[structural:sort_key] |
+| block.delete_subtree | none | block:b[existence:block_raw-]; block:b1[existence:block_raw-] | Undeclared |  | fence — covers | block:b[existence:block_raw-]; block:b1[existence:block_raw-] |
+| block.dismiss_advice | none | block:a[text:advice_suppressed+] | Undeclared |  | block:a block:b — covers | block:a[text:advice_suppressed+] |
+| block.embed_entity | none | block:a[text:content] | Undeclared |  | block:a block:c — covers | - |
+| block.indent | none | block:b[structural:parent_id structural:sort_key] | Undeclared |  | block:b — covers | block:b[structural:sort_key] |
+| block.instantiate_template | none | ERROR: block 'block:b' is not a template: missing the 'template' property | Undeclared |  | fence — covers | - |
+| block.join_block | block(s=Consumes t=Produces e=Produces) envelope by position | block:a[text:content]; block:b[existence:block_raw-]; block:b1[structural:parent_id structural:sort_key] | Outside | block:a[text:content]; block:b1[structural:parent_id structural:sort_key] | block:b — misses block:a[text:content]; block:b1[structural:parent_id structural:sort_key] | block:b1[structural:parent_id structural:sort_key] |
+| block.merge_blocks | none | block:a[text:properties]; block:c[existence:block_raw- text:block_redirects+]; block:c-merged-body[existence:block_raw+] | Undeclared |  | fence — covers | n/a (engine compound) |
+| block.merge_blocks_plan | none | (none) | Undeclared |  | block:a block:c — covers | - |
+| block.move_block | block(s=Relocates t=Untouched e=Reads) | block:c[structural:parent_id structural:sort_key] | Inside |  | block:a block:c — covers | block:c[structural:sort_key] |
+| block.move_down | none | block:a[structural:sort_key]; block:b[structural:sort_key]; block:c[structural:sort_key] | Undeclared |  | block:a — misses block:b[structural:sort_key]; block:c[structural:sort_key] | block:a[structural:sort_key]; block:b[structural:sort_key]; block:c[structural:sort_key] |
+| block.move_to_position | none | block:c[structural:parent_id structural:sort_key] | Undeclared |  | block:a block:c — covers | block:c[structural:parent_id structural:sort_key] |
+| block.move_up | none | block:a[structural:sort_key]; block:b[structural:sort_key]; block:c[structural:sort_key] | Undeclared |  | block:b — misses block:a[structural:sort_key]; block:c[structural:sort_key] | block:a[structural:sort_key]; block:b[structural:sort_key]; block:c[structural:sort_key] |
+| block.outdent | none | block:a[structural:sort_key]; block:b[structural:sort_key]; block:b1[structural:parent_id structural:sort_key]; block:c[structural:sort_key] | Undeclared |  | block:b1 — misses block:a[structural:sort_key]; block:b[structural:sort_key]; block:c[structural:sort_key] | block:a[structural:sort_key]; block:b[structural:sort_key]; block:b1[structural:sort_key]; block:c[structural:sort_key] |
+| block.remove_tag | none | block:a[text:block_tags-] | Undeclared |  | block:a — covers | block:a[text:block_tags-] |
+| block.restore_join | none | ERROR: block:j is not in the write authority (unknown id, deleted, or this vault was never seeded), so no structural op may decide on it. | Undeclared |  | block:a block:j — covers | - |
+| block.restore_link_resolution | none | ERROR: restore_link_resolution: 'rows' must be an Array, got Some(String("[]")) | Undeclared |  | relation block — covers | - |
+| block.restore_split | none | block:a[structural:sort_key text:content]; block:b[structural:sort_key]; block:c[structural:sort_key] | Undeclared |  | block:a block:c block:page — misses block:b[structural:sort_key] | block:a[structural:sort_key]; block:b[structural:sort_key]; block:c[structural:sort_key] |
+| block.rewrite_link_resolution | none | (none) | Undeclared |  | block:a block:b — covers | - |
+| block.set_field | block(s=Relocates t=Produces e=Reads) envelope by field | block:b[text:content] | Inside |  | block:b — covers | - |
+| block.split_block | block(s=Produces t=Produces e=Produces) | block:a[structural:sort_key text:content]; block:b[structural:sort_key]; block:c[structural:sort_key]; minted("text")[existence:block_raw+] | Outside | block:b[structural:sort_key]; block:c[structural:sort_key]; minted("text")[existence:block_raw+] | block:a — misses block:b[structural:sort_key]; block:c[structural:sort_key]; minted("text")[existence:block_raw+] | block:a[structural:sort_key]; block:b[structural:sort_key]; block:c[structural:sort_key] |
+| block.update | none | block:b[text:content] | Undeclared |  | block:b — covers | block:b[text:content] |
+| identity.accept_proposal | none | ERROR: expected integer for 'id', got String("identity-a") | Undeclared |  | fence — covers | - |
+| identity.delete_proposal | none | ERROR: expected integer for 'id', got String("identity-a") | Undeclared |  | relation identity — covers | - |
+| identity.merge_entities | none | ERROR: merge_entities: select canonical_a: Database error: Failed to prepare query: Parse error: no such table: canonical_entity | Undeclared |  | relation identity — covers | - |
+| identity.propose_merge | none | ERROR: expected integer for 'id', got String("identity-a") | Undeclared |  | relation identity — covers | - |
+| identity.reject_proposal | none | ERROR: expected integer for 'id', got String("identity-a") | Undeclared |  | fence — covers | - |
+| identity.restore_canonical_after_merge | none | ERROR: restore_canonical_after_merge: insert canonical: Database error: Failed to prepare query: Parse error: no such table: canonical_entity | Undeclared |  | relation identity — covers | - |
+| identity.restore_proposal | none | ERROR: expected integer for 'id', got String("identity-a") | Undeclared |  | relation identity — covers | - |
+| identity.revert_proposal_status | none | ERROR: expected integer for 'id', got String("identity-a") | Undeclared |  | relation identity — covers | - |
+| ingredient-use.create | none | ERROR: Failed to execute SQL: Database error: Failed to execute statement: NOT NULL constraint failed: ingredient_use_raw.recipe_id | Undeclared |  | ingredient-use:x — covers | - |
+| ingredient-use.delete | none | (none) | Undeclared |  | ingredient-use:x — covers | - |
+| ingredient-use.set_field | none | ERROR: set_field('name') on 'ingredient-use:x' matched no row in `ingredient_use_raw`: the subject does not exist | Undeclared |  | ingredient-use:x — covers | - |
+| ingredient-use.update | none | (none) | Undeclared |  | ingredient-use:x — covers | - |
+| navigation.activate | none | ERROR: Failed to activate history row 1: Query error: Failed to fetch row: FOREIGN KEY constraint failed | Undeclared |  | relation navigation — covers | - |
+| navigation.close | none | (none) | Undeclared |  | relation navigation — covers | - |
+| navigation.focus | none | main[text:navigation_cursor+ text:navigation_cursor-]; navigation_history:Integer(1)[existence:navigation_history+] | Undeclared |  | block:a — misses main[text:navigation_cursor+ text:navigation_cursor-]; navigation_history:Integer(1)[existence:navigation_history+] | main[text:navigation_cursor+ text:navigation_cursor-]; navigation_history:Integer(1)[existence:navigation_history+] |
+| navigation.focus_pin | none | navigation_history:Integer(2)[existence:navigation_history+] | Undeclared |  | block:a — misses navigation_history:Integer(2)[existence:navigation_history+] | navigation_history:Integer(2)[existence:navigation_history+] |
+| navigation.go_back | none | main[text:navigation_cursor+ text:navigation_cursor-] | Undeclared |  | relation navigation — misses main[text:navigation_cursor+ text:navigation_cursor-] | main[text:navigation_cursor+ text:navigation_cursor-] |
+| navigation.go_forward | none | main[text:navigation_cursor+ text:navigation_cursor-] | Undeclared |  | relation navigation — misses main[text:navigation_cursor+ text:navigation_cursor-] | main[text:navigation_cursor+ text:navigation_cursor-] |
+| navigation.go_home | none | main[text:navigation_cursor+ text:navigation_cursor-]; navigation_history:Integer(1)[text:closed_at]; navigation_history:Integer(2)[existence:navigation_history-]; navigation_history:Integer(3)[existence:navigation_history+] | Undeclared |  | relation navigation — misses main[text:navigation_cursor+ text:navigation_cursor-]; navigation_history:Integer(1)[text:closed_at]; navigation_history:Integer(2)[existence:navigation_history-]; navigation_history:Integer(3)[existence:navigation_history+] | main[text:navigation_cursor+ text:navigation_cursor-]; navigation_history:Integer(1)[text:closed_at]; navigation_history:Integer(2)[existence:navigation_history-]; navigation_history:Integer(3)[existence:navigation_history+] |
+| navigation.new_tab | none | main[text:navigation_cursor+ text:navigation_cursor-]; navigation_history:Integer(4)[existence:navigation_history+] | Undeclared |  | relation navigation — misses main[text:navigation_cursor+ text:navigation_cursor-]; navigation_history:Integer(4)[existence:navigation_history+] | main[text:navigation_cursor+ text:navigation_cursor-]; navigation_history:Integer(4)[existence:navigation_history+] |
+| navigation.open_tab | none | main[text:navigation_cursor+ text:navigation_cursor-]; navigation_history:Integer(5)[existence:navigation_history+] | Undeclared |  | block:a — misses main[text:navigation_cursor+ text:navigation_cursor-]; navigation_history:Integer(5)[existence:navigation_history+] | main[text:navigation_cursor+ text:navigation_cursor-]; navigation_history:Integer(5)[existence:navigation_history+] |
+| pantry-item.consume | none | ERROR: consume: no pantry item with id 'pantry-item:x' | Undeclared |  | pantry-item:x — covers | - |
+| pantry-item.create | none | ERROR: Failed to execute SQL: Database error: Failed to execute statement: NOT NULL constraint failed: pantry_item_raw.quantity | Undeclared |  | pantry-item:x — covers | - |
+| pantry-item.delete | none | (none) | Undeclared |  | pantry-item:x — covers | - |
+| pantry-item.set_field | none | ERROR: set_field('name') on 'pantry-item:x' matched no row in `pantry_item_raw`: the subject does not exist | Undeclared |  | pantry-item:x — covers | - |
+| pantry-item.update | none | (none) | Undeclared |  | pantry-item:x — covers | - |
+| person.create | none | person:x[existence:person_raw+] | Undeclared |  | person:x — covers | - |
+| person.delete | none | (none) | Undeclared |  | person:x — covers | - |
+| person.set_field | none | ERROR: set_field('name') on 'person:x' matched no row in `person_raw`: the subject does not exist | Undeclared |  | person:x — covers | - |
+| person.update | none | (none) | Undeclared |  | person:x — covers | - |
+| recipe.create | none | ERROR: Failed to execute SQL: Database error: Failed to execute statement: NOT NULL constraint failed: recipe_raw.source_path | Undeclared |  | recipe:x — covers | - |
+| recipe.delete | none | (none) | Undeclared |  | recipe:x — covers | - |
+| recipe.set_field | none | ERROR: set_field('name') on 'recipe:x' matched no row in `recipe_raw`: the subject does not exist | Undeclared |  | recipe:x — covers | - |
+| recipe.update | none | (none) | Undeclared |  | recipe:x — covers | - |
+| shopping-item.create | none | ERROR: Failed to execute SQL: Database error: Failed to execute statement: NOT NULL constraint failed: shopping_item_raw.cat | Undeclared |  | shopping-item:x — covers | - |
+| shopping-item.delete | none | (none) | Undeclared |  | shopping-item:x — covers | - |
+| shopping-item.purge | none | (none) | Undeclared |  | shopping-item:x — covers | - |
+| shopping-item.set_field | none | ERROR: set_field('name') on 'shopping-item:x' matched no row in `shopping_item_raw`: the subject does not exist | Undeclared |  | shopping-item:x — covers | - |
+| shopping-item.update | none | (none) | Undeclared |  | shopping-item:x — covers | - |
+| engine.undo | none (fence) | block:n[existence:block_raw-] | Undeclared |  | fence — covers | n/a (engine compound) |
+| engine.redo | none (fence) | block:n[existence:block_raw+] | Undeclared |  | fence — covers | n/a (engine compound) |
+| engine.commit_keystroke | none (source line) | block:b[text:content text:properties] | Undeclared |  | block:b — covers | n/a (engine compound) |
+| engine.commit_keystroke(multi-line) | none (source line) | block:b[text:content] | Undeclared |  | block:b — covers | n/a (engine compound) |
+| engine.set_field(source_text) | none (source line) | block:b[text:content text:properties] | Undeclared |  | block:b — covers | n/a (engine compound) |

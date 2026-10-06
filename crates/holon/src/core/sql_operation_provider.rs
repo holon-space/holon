@@ -220,6 +220,8 @@ pub(crate) struct WriteSchema {
     soft_delete: Option<String>,
     /// The entity references a `create` may carry.
     create_references: Vec<OperationParam>,
+    /// The entity references an `update` may carry besides its `id`.
+    update_references: Vec<OperationParam>,
     /// What `set_field`'s `value` is, by the field it writes.
     set_field_value: TypeHint,
 }
@@ -246,12 +248,14 @@ impl WriteSchema {
     fn new(
         columns: impl IntoIterator<Item = String>,
         create_references: Vec<OperationParam>,
+        update_references: Vec<OperationParam>,
         set_field_value: TypeHint,
     ) -> Self {
         Self {
             columns: columns.into_iter().collect(),
             soft_delete: None,
             create_references,
+            update_references,
             set_field_value,
         }
     }
@@ -266,34 +270,43 @@ impl WriteSchema {
             return Self::new(
                 columns,
                 holon_core::block_op_catalog::block_create_references(),
+                holon_core::block_op_catalog::block_update_references(),
                 holon_core::block_op_catalog::block_set_field_value_hint(),
             );
         }
         let keyed_only = TypeDefinition::new(entity_name, Vec::new());
-        Self::new(
+        Self::from_references(columns, &keyed_only)
+            .expect("a type with no fields references nothing")
+    }
+
+    fn from_references(
+        columns: impl IntoIterator<Item = String>,
+        type_def: &TypeDefinition,
+    ) -> Result<Self> {
+        Ok(Self::new(
             columns,
-            holon_api::create_references(&keyed_only),
-            holon_api::set_field_value_hint(&keyed_only),
-        )
+            holon_api::create_references(type_def)?,
+            holon_api::row_field_references(type_def)?,
+            holon_api::set_field_value_hint(type_def)?,
+        ))
     }
 
     /// The vocabulary a runtime-declared type's raw table exposes: its
     /// PERSISTED fields. Computed and transient fields are not written.
-    fn from_type_def(type_def: &TypeDefinition) -> Self {
-        Self {
+    fn from_type_def(type_def: &TypeDefinition) -> Result<Self> {
+        Ok(Self {
             soft_delete: type_def
                 .soft_delete
                 .as_ref()
                 .map(|s| s.tombstone_field.clone()),
-            ..Self::new(
+            ..Self::from_references(
                 type_def
                     .persistent_fields()
                     .into_iter()
                     .map(|f| f.name.clone()),
-                holon_api::create_references(type_def),
-                holon_api::set_field_value_hint(type_def),
-            )
-        }
+                type_def,
+            )?
+        })
     }
 
     fn is_column(&self, name: &str) -> bool {
@@ -459,21 +472,21 @@ impl SqlOperationProvider {
     /// same code path, parameterized by the type instead of defaulting to
     /// block. Registering it is what makes a declared type writable; see
     /// [`crate::core::type_declaration::declare_type`].
-    pub fn for_type(db_handle: DbHandle, type_def: &TypeDefinition) -> Self {
+    pub fn for_type(db_handle: DbHandle, type_def: &TypeDefinition) -> Result<Self> {
         // Routed by the CANONICAL entity name. `EntityName` folds `_` to `-`
         // so the name is a valid URI scheme; a provider that kept the raw
         // `gen_1` would advertise `gen-1` in its descriptors and match nothing
         // the dispatcher looks up. The TABLE keeps the raw spelling — that is
         // `EntityName::table_name`'s direction, and `TursoAdapter` derives it.
         let entity_name = EntityName::new(type_def.name.clone());
-        Self::with_write_schema(
+        Ok(Self::with_write_schema(
             db_handle,
             holon_turso::turso_adapter::TursoAdapter::raw_table_name(type_def),
             entity_name.as_str().to_string(),
             entity_name.as_str().to_string(),
             Vec::new(),
-            WriteSchema::from_type_def(type_def),
-        )
+            WriteSchema::from_type_def(type_def)?,
+        ))
     }
 
     fn with_write_schema(
@@ -3242,7 +3255,7 @@ impl OperationProvider for SqlOperationProvider {
                     },
                     description: "Entity ID".to_string(),
                 }],
-                optional_params: vec![],
+                optional_params: self.write_schema.update_references.clone(),
                 id_column: "id".to_string(),
                 affected_fields: vec![],
                 param_mappings: vec![],
@@ -5142,7 +5155,8 @@ mod write_schema_tests {
         assert!(block.stamps_timestamps());
         assert!(block.is_column("parent_id"));
 
-        let free_standing = WriteSchema::from_type_def(&declared("person", &["email"]));
+        let free_standing =
+            WriteSchema::from_type_def(&declared("person", &["email"])).expect("schema");
         assert!(free_standing.is_column("email"));
         assert!(
             !free_standing.has_overflow(),
@@ -5159,7 +5173,8 @@ mod write_schema_tests {
     /// column named here can never come from block's vocabulary.
     #[test]
     fn a_declared_types_vocabulary_is_exactly_its_persisted_fields() {
-        let schema = WriteSchema::from_type_def(&declared("gen_1", &["aaa", "bbb"]));
+        let schema =
+            WriteSchema::from_type_def(&declared("gen_1", &["aaa", "bbb"])).expect("schema");
         assert_eq!(schema.column_list(), vec!["aaa", "bbb", "id"]);
     }
 }
@@ -6172,7 +6187,8 @@ mod soft_delete_route_tests {
         )
         .await
         .expect("seed row");
-        let provider = SqlOperationProvider::for_type(db.clone(), &soft_delete_type());
+        let provider =
+            SqlOperationProvider::for_type(db.clone(), &soft_delete_type()).expect("provider");
         std::mem::forget(_backend);
         (db, provider)
     }
