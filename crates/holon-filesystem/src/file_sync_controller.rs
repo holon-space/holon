@@ -413,6 +413,23 @@ impl std::error::Error for AdapterRefusal {
     }
 }
 
+/// Context on an error the controller has already disclosed (WARN plus a
+/// condition). Its `Display` is the context message.
+#[derive(Debug)]
+pub struct AlreadyDisclosed(pub String);
+
+impl std::fmt::Display for AlreadyDisclosed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// True when the controller has already disclosed `e`, so a caller that
+/// reports it again only duplicates the disclosure.
+pub fn already_disclosed(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<AlreadyDisclosed>().is_some() || e.downcast_ref::<AdapterRefusal>().is_some()
+}
+
 /// Why `poll_new_files` is skipping a file it rediscovered, and what ends the
 /// skip. Recorded per path in
 /// [`ingest_quarantine`](FileSyncController::ingest_quarantine).
@@ -7748,7 +7765,10 @@ impl FileSyncController {
                 return Err(StampChurn {
                     path: path.to_path_buf(),
                 })
-                .with_context(|| format!("org write-back to {} stalled", path.display()));
+                .context(AlreadyDisclosed(format!(
+                    "org write-back to {} stalled",
+                    path.display()
+                )));
             }
         }
         self.run_post_write_hook(&path);

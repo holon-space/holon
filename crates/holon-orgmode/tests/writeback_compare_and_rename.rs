@@ -804,6 +804,16 @@ async fn block_write_back_discloses_a_file_that_keeps_rewriting_its_own_bytes() 
         format!("{err:#}").contains("kept changing"),
         "the error does not name the condition: {err:#}"
     );
+    assert_eq!(
+        h.disclosed.of("stalled", &h.path),
+        1,
+        "the stalled write-back raises no write-back condition"
+    );
+    assert!(
+        holon_filesystem::already_disclosed(&err),
+        "the disclosed stall is not marked as disclosed, so the caller logs it again at \
+         ERROR: {err:#}"
+    );
     assert_eq!(h.disk(), before, "the file is not touched");
 }
 

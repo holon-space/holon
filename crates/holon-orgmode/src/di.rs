@@ -1901,10 +1901,7 @@ async fn run_file_sync_controller(
                                     pending_full_rerender = true;
                                     idle_signal_for_task.set_bulk_pending(true);
                                 }
-                                // The pending external change this render
-                                // ingested first was refused: the controller
-                                // disclosed it (WARN + condition).
-                                Err(e) if e.downcast_ref::<holon_filesystem::AdapterRefusal>().is_some() => {}
+                                Err(e) if holon_filesystem::already_disclosed(&e) => {}
                                 Err(e) => {
                                     error!(
                                         "[OrgMode] Block change error for {}: {:#}",

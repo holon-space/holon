@@ -60,6 +60,8 @@ pub use file::File;
 #[cfg(not(target_arch = "wasm32"))]
 pub use file_sync_controller::AdapterRefusal;
 #[cfg(not(target_arch = "wasm32"))]
+pub use file_sync_controller::AlreadyDisclosed;
+#[cfg(not(target_arch = "wasm32"))]
 pub use file_sync_controller::BlockChangeVerdict;
 #[cfg(not(target_arch = "wasm32"))]
 pub use file_sync_controller::BlockDelta;
@@ -73,6 +75,8 @@ pub use file_sync_controller::IngestOutcome;
 pub use file_sync_controller::RENDERER_VERSION;
 #[cfg(not(target_arch = "wasm32"))]
 pub use file_sync_controller::RefusedWritebacks;
+#[cfg(not(target_arch = "wasm32"))]
+pub use file_sync_controller::already_disclosed;
 #[cfg(not(target_arch = "wasm32"))]
 pub use file_sync_controller::tiered_match;
 #[cfg(not(target_arch = "wasm32"))]
