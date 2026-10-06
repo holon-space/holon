@@ -361,6 +361,7 @@ pub use type_services::DenseView;
 pub use type_services::Hierarchy;
 pub use type_services::ServiceFieldError;
 pub use type_services::TypeServices;
+pub use type_services::UnusableField;
 // Re-export typed domain types
 pub use types::{
     ContentType, DependsOn, EntityName, NavigationOp, Priority, QueryLanguage, Region,

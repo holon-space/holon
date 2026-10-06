@@ -201,16 +201,21 @@ impl TypeRegistry {
     /// The key is minted through [`TableName`], never taken raw, so a
     /// hyphenated entity name cannot create a key no scheme lookup will find.
     pub fn register(&self, mut type_def: TypeDefinition) -> Result<()> {
-        if let Some(services) = &type_def.services {
-            services.check_fields(&type_def)?;
-        }
-        check_computed_types_match_columns(&type_def)?;
+        let mut admitted = self.admitted.write().expect("TypeRegistry poisoned");
+        check_declaration(&admitted, &type_def)?;
         topo_sort_fields(&mut type_def);
         let key = TableName::from_scheme(&type_def.name);
-        let mut admitted = self.admitted.write().expect("TypeRegistry poisoned");
-        check_against_vault_profiles(&admitted.vault_profile_claims, &key, &type_def)?;
         admitted.types.insert(key.as_str().to_string(), type_def);
         Ok(())
+    }
+
+    /// Refuses `type_def` exactly as [`Self::register`] would, without
+    /// admitting it.
+    pub fn check(&self, type_def: &TypeDefinition) -> Result<()> {
+        check_declaration(
+            &self.admitted.read().expect("TypeRegistry poisoned"),
+            type_def,
+        )
     }
 
     /// Add computed fields to an existing type definition.
@@ -447,6 +452,18 @@ impl TypeRegistry {
             .types
             .contains_key(TableName::from_scheme(name).as_str())
     }
+}
+
+fn check_declaration(admitted: &Admitted, type_def: &TypeDefinition) -> Result<()> {
+    if let Some(services) = &type_def.services {
+        services.check_fields(type_def)?;
+    }
+    check_computed_types_match_columns(type_def)?;
+    check_against_vault_profiles(
+        &admitted.vault_profile_claims,
+        &TableName::from_scheme(&type_def.name),
+        type_def,
+    )
 }
 
 fn check_against_vault_profiles(

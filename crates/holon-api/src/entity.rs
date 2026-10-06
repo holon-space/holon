@@ -594,6 +594,7 @@ pub struct ProfileVariant {
 /// Replaces the former `Schema` struct. Provides DDL generation, GQL
 /// registration metadata, and field lifetime awareness.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TypeDefinition {
     /// Entity/table name (e.g. "block", "person", "todoist_task").
     pub name: String,
@@ -642,7 +643,11 @@ pub struct TypeDefinition {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub soft_delete: Option<SoftDelete>,
     /// The services this type declares. Absent = the type gets none.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "crate::type_services::declared_services",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub services: Option<crate::TypeServices>,
 }
 

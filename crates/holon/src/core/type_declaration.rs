@@ -49,12 +49,21 @@ pub async fn declare_type(
     registry: &TypeRegistry,
     dispatcher: &OperationDispatcher,
 ) -> Result<TursoArtifacts> {
-    // Serialization FIRST: the adapter is where a name the engine cannot
-    // safely carry (SQL keyword, mixed case, non-identifier shape) is refused,
-    // and refusing it here leaves the registry untouched rather than holding a
-    // type nothing can write. That guarantee covers THIS step only — a failure
-    // at step 3 refuses the declaration with the registry already mutated,
-    // which is unrecoverable for that name (see the module doc).
+    // The registry's checks are pure, so they run before the adapter creates
+    // any artifact.
+    registry.check(type_def).map_err(|e| {
+        format!(
+            "declare_type('{}'): the type registry refused the definition: {e}",
+            type_def.name
+        )
+    })?;
+
+    // Serialization before admission: the adapter is where a name the engine
+    // cannot safely carry (SQL keyword, mixed case, non-identifier shape) is
+    // refused, and refusing it here leaves the registry untouched rather than
+    // holding a type nothing can write. A failure at step 3 refuses the
+    // declaration with the registry already mutated, which is unrecoverable
+    // for that name (see the module doc).
     let artifacts = TursoAdapter::register(type_def, db_handle)
         .await
         .map_err(|e| {
@@ -338,6 +347,42 @@ mod tests {
                 type_def.name
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_declaration_the_registry_refuses_creates_no_turso_artifacts() {
+        let (_backend, db_handle) = TursoBackend::new_in_memory()
+            .await
+            .expect("in-memory backend");
+        let registry = TypeRegistry::new();
+        let dispatcher = OperationDispatcher::new(vec![]);
+        let mut type_def = declared("gen_bad_services");
+        type_def.services = Some(holon_api::TypeServices {
+            title: holon_api::computation::FieldIdent::parse("no_such_field").unwrap(),
+            searchable: vec![],
+            linkable: false,
+            embeddable: false,
+            dense_view: None,
+            hierarchy: None,
+            rich_text: vec![],
+        });
+
+        let err = declare_type(&type_def, &db_handle, &registry, &dispatcher)
+            .await
+            .expect_err("a services block naming a missing field must be refused")
+            .to_string();
+        assert!(err.contains("no_such_field"), "got: {err}");
+
+        let created = db_handle
+            .query(
+                "SELECT name FROM sqlite_master WHERE name IN ('gen_bad_services', \
+                 'gen_bad_services_raw')",
+                std::collections::HashMap::new(),
+            )
+            .await
+            .expect("query sqlite_master");
+        assert!(created.is_empty(), "a refused declaration left {created:?}");
+        assert!(!registry.contains("gen_bad_services"));
     }
 
     /// Declaration is ONE-WAY in this increment, and the error says so. This
