@@ -144,6 +144,7 @@ fn descriptor(op_name: &str, behavior: BoundaryBehavior) -> OperationDescriptor 
         display_name: op_name.to_string(),
         description: op_name.to_string(),
         required_params: vec![],
+        optional_params: vec![],
         affected_fields: vec![],
         param_mappings: vec![],
         target_scope: holon_api::TargetScope::Block,

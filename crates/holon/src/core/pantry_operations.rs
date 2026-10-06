@@ -100,6 +100,7 @@ impl OperationProvider for PantryOperations {
                 },
             ],
             id_column: "id".to_string(),
+            optional_params: vec![],
             affected_fields: vec!["quantity".to_string()],
             param_mappings: vec![],
             target_scope: holon_api::TargetScope::Block,

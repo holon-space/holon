@@ -147,8 +147,8 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
             // Extract doc comments for description
             let description = extract_doc_comments(&method.attrs);
 
-            // Extract parameters (skip &self, only include required params)
-            let params: Vec<_> = method
+            // Extract parameters (skip &self); `Option<T>` ones are optional
+            let all_params: Vec<(bool, proc_macro2::TokenStream)> = method
                 .sig
                 .inputs
                 .iter()
@@ -157,11 +157,6 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
                     FnArg::Typed(pat_type) => {
                         let param_name = param_wire_name(&extract_param_name(&pat_type.pat));
                         let (type_str, required) = infer_type(&pat_type.ty);
-
-                        // Skip optional parameters (Option<T> types)
-                        if !required {
-                            return None;
-                        }
 
                         let param_name_lit = param_name.clone();
                         let type_str_lit = type_str.clone();
@@ -180,16 +175,29 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
                             }
                         };
 
-                        Some(quote! {
-                            holon_api::OperationParam {
-                                name: #param_name_lit.to_string(),
-                                #type_hint_field
-                                description: String::new(), // TODO: Extract from doc comments
-                            }
-                        })
+                        Some((
+                            required,
+                            quote! {
+                                holon_api::OperationParam {
+                                    name: #param_name_lit.to_string(),
+                                    #type_hint_field
+                                    description: String::new(), // TODO: Extract from doc comments
+                                }
+                            },
+                        ))
                     }
                     _ => None,
                 })
+                .collect();
+            let params: Vec<_> = all_params
+                .iter()
+                .filter(|(required, _)| *required)
+                .map(|(_, param)| param)
+                .collect();
+            let optional_params: Vec<_> = all_params
+                .iter()
+                .filter(|(required, _)| !*required)
+                .map(|(_, param)| param)
                 .collect();
 
             // Use stringify! for name and description (compile-time strings)
@@ -331,6 +339,9 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
                         description: #desc_lit.to_string(),
                         required_params: vec![
                             #(#params),*
+                        ],
+                        optional_params: vec![
+                            #(#optional_params),*
                         ],
                         affected_fields: #affected_fields_expr,
                         param_mappings: #param_mappings_expr,

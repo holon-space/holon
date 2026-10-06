@@ -34,7 +34,7 @@ const ROOT_PARENT: &str = "sentinel:no_parent";
 fn descriptor() -> EdgeFieldDescriptor {
     EdgeFieldDescriptor {
         entity: ENTITY.to_string(),
-        field: "requires".to_string(),
+        field: holon_api::EdgeField::Requires,
         join_table: "block_requires".to_string(),
         source_col: "block_id".to_string(),
         target_col: "required_id".to_string(),

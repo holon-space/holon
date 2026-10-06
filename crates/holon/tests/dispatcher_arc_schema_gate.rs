@@ -68,6 +68,7 @@ fn descriptor(entity: &str, op: &str, arcs: TransitionArcs) -> OperationDescript
         display_name: op.to_string(),
         description: String::new(),
         required_params: vec![],
+        optional_params: vec![],
         affected_fields: vec![],
         param_mappings: vec![],
         menu_exposure: MenuExposure::NotListed {

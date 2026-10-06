@@ -119,6 +119,7 @@ mod tests {
                     display_name: name.to_string(),
                     description: String::new(),
                     required_params: vec![],
+                    optional_params: vec![],
                     affected_fields: vec![],
                     param_mappings: vec![],
                     target_scope: holon_api::TargetScope::Block,

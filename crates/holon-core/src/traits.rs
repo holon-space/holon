@@ -3332,6 +3332,7 @@ pub fn generate_sync_operation(provider_name: &str) -> OperationDescriptor {
         display_name: format!("Sync {}", provider_name),
         description: format!("Sync data from {} provider", provider_name),
         required_params: vec![],
+        optional_params: vec![],
         affected_fields: vec![], // Sync operations don't affect specific fields
         param_mappings: vec![],
         target_scope: holon_api::TargetScope::Block,

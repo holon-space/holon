@@ -156,6 +156,7 @@ impl holon_core::OperationProvider for SecondIndentAuthority {
             // parameter, and one of the two directions asserted below would
             // pass a bare reference through.
             required_params: vec![block_ref("after_id", "The sibling it lands under")],
+            optional_params: vec![],
             affected_fields: vec![],
             param_mappings: vec![],
             target_scope: holon_api::TargetScope::Block,

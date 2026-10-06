@@ -128,7 +128,11 @@ pub fn entity_reference_params<'a>(
         .iter()
         .filter(|op| op.entity_name == entity_name && op.name == op_name)
     {
-        for param in &descriptor.required_params {
+        for param in descriptor
+            .required_params
+            .iter()
+            .chain(&descriptor.optional_params)
+        {
             match hints.iter().find(|(name, _)| *name == param.name.as_str()) {
                 Some((_, hint)) if *hint != &param.type_hint => {
                     return Err(format!(
@@ -223,6 +227,7 @@ mod tests {
             display_name: op.to_string(),
             description: op.to_string(),
             required_params: params,
+            optional_params: vec![],
             affected_fields: vec![],
             param_mappings: vec![],
             target_scope: crate::TargetScope::Block,
@@ -365,6 +370,16 @@ mod tests {
         };
         assert!(!admits("id"), "a write's subject may never be the root");
         assert!(admits("parent_id"), "a parent position may be the root");
+    }
+
+    #[test]
+    fn an_optional_param_declared_an_entity_id_is_a_reference() {
+        let mut d = descriptor("block", "move_block", vec![param("id", entity_id("block"))]);
+        d.optional_params = vec![param("after_block_id", entity_id("block"))];
+        let found = entity_reference_params(std::slice::from_ref(&d), "block", "move_block")
+            .expect("both are declared");
+        let names: Vec<_> = found.iter().map(|p| p.name).collect();
+        assert_eq!(names, ["id", "after_block_id"]);
     }
 
     #[test]

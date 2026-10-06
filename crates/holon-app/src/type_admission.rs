@@ -140,6 +140,7 @@ pub fn declare_type_descriptor() -> OperationDescriptor {
             type_hint: TypeHint::String,
             description: "The TypeDefinition, as JSON".to_string(),
         }],
+        optional_params: vec![],
         affected_fields: vec![],
         param_mappings: vec![],
         target_scope: holon_api::TargetScope::Global,

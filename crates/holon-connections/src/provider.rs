@@ -93,6 +93,7 @@ impl OperationProvider for RemoteListOperations {
             // this connection syncs.
             required_params: vec![],
             id_column: "id".to_string(),
+            optional_params: vec![],
             affected_fields: vec![],
             param_mappings: vec![],
             target_scope: holon_api::TargetScope::Block,

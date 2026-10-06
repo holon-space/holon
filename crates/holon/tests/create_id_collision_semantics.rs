@@ -36,7 +36,7 @@ const HELD: &str = "block:held";
 fn tags_descriptor() -> EdgeFieldDescriptor {
     EdgeFieldDescriptor {
         entity: ENTITY.to_string(),
-        field: "tags".to_string(),
+        field: holon_api::EdgeField::Tags,
         join_table: "block_tags".to_string(),
         source_col: "block_id".to_string(),
         target_col: "tag".to_string(),

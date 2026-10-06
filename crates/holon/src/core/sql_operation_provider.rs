@@ -459,7 +459,7 @@ impl SqlOperationProvider {
         let edge_fields = edge_fields
             .into_iter()
             .filter(|d| d.entity == entity_name)
-            .map(|d| (d.field.clone(), d))
+            .map(|d| (d.field.column().to_string(), d))
             .collect();
         Self {
             db_handle,
@@ -650,7 +650,7 @@ impl SqlOperationProvider {
                         ),
                     })
                     .collect();
-                Self::refuse_malformed_edge_targets(key, &ids)?;
+                descriptor.field.refuse_malformed_targets(&ids)?;
                 edge_field_params.push((descriptor.clone(), ids));
             } else if self.write_schema.is_column(key.as_ref()) {
                 // Trim trailing whitespace from content — org files don't
@@ -1140,13 +1140,6 @@ impl SqlOperationProvider {
         };
         result.response = response;
         Ok(result)
-    }
-
-    fn refuse_malformed_edge_targets(field: &str, targets: &[String]) -> Result<()> {
-        holon_api::EdgeField::from_drawer_key(field)
-            .unwrap_or_else(|| panic!("edge descriptor '{field}' names no EdgeField"))
-            .refuse_malformed_targets(targets)?;
-        Ok(())
     }
 
     /// Build SQL statements that replace the edge-field rows for `id`.
@@ -3009,14 +3002,14 @@ impl SqlOperationProvider {
                 .db_handle
                 .query(&sql, HashMap::new())
                 .await
-                .map_err(|e| format!("capture_edges({id}, {}): {e}", descriptor.field))?;
+                .map_err(|e| format!("capture_edges({id}, {}): {e}", descriptor.field.column()))?;
             let targets: Vec<Value> = rows
                 .into_iter()
                 .filter_map(|mut r| r.remove("t"))
                 .filter(|v| !matches!(v, Value::Null))
                 .collect();
             if !targets.is_empty() {
-                out.push((descriptor.field.clone(), Value::Array(targets)));
+                out.push((descriptor.field.column().to_string(), Value::Array(targets)));
             }
         }
         Ok(out)
@@ -3172,6 +3165,7 @@ impl OperationProvider for SqlOperationProvider {
                     },
                 ],
                 id_column: "id".to_string(),
+                optional_params: vec![],
                 affected_fields: vec![],
                 param_mappings: vec![],
                 target_scope: self.target_scope(),
@@ -3193,6 +3187,7 @@ impl OperationProvider for SqlOperationProvider {
                 description: format!("Create a new {}", self.entity_short_name),
                 id_column: "id".to_string(),
                 required_params: vec![],
+                optional_params: vec![],
                 affected_fields: vec![],
                 param_mappings: vec![],
                 target_scope: self.target_scope(),
@@ -3220,6 +3215,7 @@ impl OperationProvider for SqlOperationProvider {
                     description: "Entity ID".to_string(),
                 }],
                 id_column: "id".to_string(),
+                optional_params: vec![],
                 affected_fields: vec![],
                 param_mappings: vec![],
                 target_scope: self.target_scope(),
@@ -3247,6 +3243,7 @@ impl OperationProvider for SqlOperationProvider {
                     description: "Entity ID".to_string(),
                 }],
                 id_column: "id".to_string(),
+                optional_params: vec![],
                 affected_fields: vec![],
                 param_mappings: vec![],
                 target_scope: self.target_scope(),
@@ -3280,6 +3277,7 @@ impl OperationProvider for SqlOperationProvider {
                     description: "Entity ID".to_string(),
                 }],
                 id_column: "id".to_string(),
+                optional_params: vec![],
                 affected_fields: vec![],
                 param_mappings: vec![],
                 target_scope: self.target_scope(),
@@ -3316,6 +3314,7 @@ impl OperationProvider for SqlOperationProvider {
                         },
                         description: "Entity ID".to_string(),
                     }],
+                    optional_params: vec![],
                     affected_fields: vec!["task_state".to_string()],
                     id_column: "id".to_string(),
                     param_mappings: vec![],
@@ -3345,6 +3344,7 @@ impl OperationProvider for SqlOperationProvider {
                         description: "Wiki-link target (e.g. Projects/X)".to_string(),
                     }],
                     id_column: "id".to_string(),
+                    optional_params: vec![],
                     affected_fields: vec![],
                     param_mappings: vec![],
                     target_scope: self.target_scope(),
@@ -3384,6 +3384,7 @@ impl OperationProvider for SqlOperationProvider {
                         },
                     ],
                     id_column: "id".to_string(),
+                    optional_params: vec![],
                     affected_fields: vec![],
                     param_mappings: vec![],
                     target_scope: self.target_scope(),
@@ -3411,6 +3412,7 @@ impl OperationProvider for SqlOperationProvider {
                         description: "Captured block_links rows to restore".to_string(),
                     }],
                     id_column: "id".to_string(),
+                    optional_params: vec![],
                     affected_fields: vec![],
                     param_mappings: vec![],
                     target_scope: self.target_scope(),
@@ -3439,6 +3441,7 @@ impl OperationProvider for SqlOperationProvider {
                         description: "Origin block id to convert".to_string(),
                     }],
                     id_column: "id".to_string(),
+                    optional_params: vec![],
                     affected_fields: vec![],
                     param_mappings: vec![],
                     target_scope: self.target_scope(),
@@ -3479,6 +3482,7 @@ impl OperationProvider for SqlOperationProvider {
                         },
                     ],
                     id_column: "id".to_string(),
+                    optional_params: vec![],
                     affected_fields: vec![],
                     param_mappings: vec![],
                     target_scope: self.target_scope(),
@@ -3700,7 +3704,7 @@ impl OriginTaggedWrites for SqlOperationProvider {
                             )),
                         })
                         .collect::<std::result::Result<Vec<_>, _>>()?;
-                    Self::refuse_malformed_edge_targets(field, &targets)?;
+                    descriptor.field.refuse_malformed_targets(&targets)?;
                     for stmt in Self::edge_field_replace_sql(id, descriptor, &targets) {
                         self.db_handle
                             .execute(&stmt, vec![])
@@ -5780,7 +5784,7 @@ mod two_phase_fk_tests {
 
         let requires_descriptor = EdgeFieldDescriptor {
             entity: "block".to_string(),
-            field: "requires".to_string(),
+            field: holon_api::EdgeField::Requires,
             join_table: "block_requires".to_string(),
             source_col: "block_id".to_string(),
             target_col: "required_id".to_string(),
@@ -5836,7 +5840,7 @@ mod tag_op_tests {
     fn tags_edge() -> EdgeFieldDescriptor {
         EdgeFieldDescriptor {
             entity: "block".to_string(),
-            field: "tags".to_string(),
+            field: holon_api::EdgeField::Tags,
             join_table: "block_tags".to_string(),
             source_col: "block_id".to_string(),
             target_col: "tag".to_string(),

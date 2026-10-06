@@ -441,6 +441,7 @@ impl IdentityProvider {
             display_name: display_name.to_string(),
             description: description.to_string(),
             required_params: required,
+            optional_params: vec![],
             affected_fields: Vec::new(),
             param_mappings: Vec::new(),
             target_scope: holon_api::TargetScope::Block,

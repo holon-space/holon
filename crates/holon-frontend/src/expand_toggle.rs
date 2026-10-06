@@ -124,6 +124,7 @@ pub(crate) fn test_set_field_wiring() -> OperationWiring {
                 type_hint: TypeHint::Bool,
                 description: String::new(),
             }],
+            optional_params: vec![],
             affected_fields: vec!["collapsed".to_string()],
             id_column: "id".to_string(),
             description: String::new(),

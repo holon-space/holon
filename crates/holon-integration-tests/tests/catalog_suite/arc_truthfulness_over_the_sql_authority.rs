@@ -185,7 +185,7 @@ async fn snapshot(handle: &DbHandle) -> Snapshot {
         }
         for (source, targets) in members {
             out.insert(
-                (source, edge.field.clone()),
+                (source, edge.field.column().to_string()),
                 targets.into_iter().collect::<Vec<_>>().join(","),
             );
         }
@@ -323,7 +323,7 @@ fn places_read_by_sql(statements: &[String]) -> BTreeSet<String> {
     let junctions: Vec<(String, String)> = BlockSchemaModule
         .edge_fields()
         .into_iter()
-        .map(|e| (e.join_table, e.field))
+        .map(|e| (e.join_table, e.field.column().to_string()))
         .collect();
 
     let mut places = BTreeSet::new();

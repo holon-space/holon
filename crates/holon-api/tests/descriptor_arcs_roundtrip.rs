@@ -28,6 +28,7 @@ fn descriptor_with(arcs: TransitionArcs) -> OperationDescriptor {
         display_name: "Set field".to_string(),
         description: "Set one field on a block".to_string(),
         required_params: vec![],
+        optional_params: vec![],
         affected_fields: vec![],
         param_mappings: vec![],
         menu_exposure: MenuExposure::NotListed {

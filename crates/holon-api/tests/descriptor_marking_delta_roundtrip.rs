@@ -31,6 +31,7 @@ fn descriptor_with(marking_delta: MarkingDelta) -> OperationDescriptor {
         display_name: "Move block".to_string(),
         description: "Move a block to a new placement".to_string(),
         required_params: vec![],
+        optional_params: vec![],
         affected_fields: vec![],
         param_mappings: vec![],
         menu_exposure: MenuExposure::NotListed {

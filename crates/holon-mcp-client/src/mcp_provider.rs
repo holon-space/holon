@@ -399,6 +399,7 @@ impl McpOperationProvider {
                 display_name,
                 description,
                 required_params,
+                optional_params: vec![],
                 affected_fields,
                 param_mappings,
                 // A sidecar's Rhai `precondition:` is parameter-shaped, which

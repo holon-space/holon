@@ -239,6 +239,7 @@ mod tests {
                 param_mappings: mappings,
                 id_column: "id".to_string(),
                 description: String::new(),
+                optional_params: vec![],
                 affected_fields: vec![],
                 target_scope: holon_api::TargetScope::Block,
                 boundary_behavior: holon_api::BoundaryBehavior::Unclassified,

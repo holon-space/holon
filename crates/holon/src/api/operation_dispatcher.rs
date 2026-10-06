@@ -411,17 +411,20 @@ impl OperationDispatcher {
     }
 
     /// [`Self::parse_entity_references`] for a caller that reads an
-    /// operation's params before it dispatches them.
+    /// operation's params before it dispatches them. `extra_ops` are
+    /// descriptors of operations that run without a provider.
     pub fn parse_entity_references_of(
         &self,
         entity_name: &EntityName,
         op_name: &str,
         params: &StorageEntity,
+        extra_ops: &[OperationDescriptor],
     ) -> Result<()> {
         let available_ops: Vec<_> = self
             .all_providers()
             .iter()
             .flat_map(|p| p.operations())
+            .chain(extra_ops.iter().cloned())
             .collect();
         Self::parse_entity_references(&available_ops, entity_name.as_str(), op_name, params)
     }
@@ -1759,6 +1762,7 @@ impl BroadcastOp {
             display_name: display_name.to_string(),
             description: description.to_string(),
             required_params: vec![],
+            optional_params: vec![],
             affected_fields: vec![],
             param_mappings: vec![],
             target_scope: holon_api::TargetScope::Global,
@@ -2308,6 +2312,7 @@ mod tests {
             display_name: format!("Test {}", op_name),
             description: format!("Test operation {}", op_name),
             required_params: vec![],
+            optional_params: vec![],
             affected_fields: vec![],
             param_mappings: vec![],
             target_scope: holon_api::TargetScope::Block,

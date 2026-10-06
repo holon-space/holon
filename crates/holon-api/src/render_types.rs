@@ -368,6 +368,10 @@ pub struct OperationDescriptor {
     pub display_name: String, // "Mark as complete", "Indent"
     pub description: String,  // Human-readable description for UI
     pub required_params: Vec<OperationParam>,
+    /// Params the operation reads when present. Declared so the boundary
+    /// parses an id-bearing one by name, exactly as it parses a required one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub optional_params: Vec<OperationParam>,
     /// Fields that this operation affects (for pie menu auto-attachment)
     pub affected_fields: Vec<String>, // ["is_collapsed"], ["parent_id", "depth", "sort_key"], etc.
     /// How to derive required params from alternative sources (e.g.,

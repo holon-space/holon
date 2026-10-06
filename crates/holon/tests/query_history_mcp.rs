@@ -47,6 +47,7 @@ impl OperationProvider for DeltaProvider {
                 description: format!("{name} on block"),
                 id_column: "id".to_string(),
                 required_params: vec![],
+                optional_params: vec![],
                 affected_fields: vec![],
                 param_mappings: vec![],
                 target_scope: holon_api::TargetScope::Block,

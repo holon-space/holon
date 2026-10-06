@@ -39,21 +39,21 @@ fn block_edge_fields() -> Vec<EdgeFieldDescriptor> {
     vec![
         EdgeFieldDescriptor {
             entity: ENTITY.to_string(),
-            field: "requires".to_string(),
+            field: holon_api::EdgeField::Requires,
             join_table: "block_requires".to_string(),
             source_col: "block_id".to_string(),
             target_col: "required_id".to_string(),
         },
         EdgeFieldDescriptor {
             entity: ENTITY.to_string(),
-            field: "tags".to_string(),
+            field: holon_api::EdgeField::Tags,
             join_table: "block_tags".to_string(),
             source_col: "block_id".to_string(),
             target_col: "tag".to_string(),
         },
         EdgeFieldDescriptor {
             entity: ENTITY.to_string(),
-            field: "advice_suppressed".to_string(),
+            field: holon_api::EdgeField::AdviceSuppressed,
             join_table: "advice_suppressed".to_string(),
             source_col: "anchor_id".to_string(),
             target_col: "lesson_id".to_string(),

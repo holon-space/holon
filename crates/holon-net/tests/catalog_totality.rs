@@ -250,6 +250,7 @@ fn excluding_descriptor(
         display_name: "Probe".to_string(),
         description: "A synthetic descriptor exercising the exclusion rule".to_string(),
         required_params: vec![],
+        optional_params: vec![],
         affected_fields: vec![],
         param_mappings: vec![],
         menu_exposure: holon_api::MenuExposure::NotListed {

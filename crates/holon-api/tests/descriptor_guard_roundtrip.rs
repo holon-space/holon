@@ -25,6 +25,7 @@ fn descriptor_with(guard: OpGuard) -> OperationDescriptor {
         display_name: "Add tag".to_string(),
         description: "Add one tag to a block".to_string(),
         required_params: vec![],
+        optional_params: vec![],
         affected_fields: vec![],
         param_mappings: vec![],
         menu_exposure: MenuExposure::NotListed {

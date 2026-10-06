@@ -97,6 +97,7 @@ pub fn dismiss_advice_descriptor(
                 description: "The advice lesson block to dismiss".to_string(),
             },
         ],
+        optional_params: vec![],
         affected_fields: vec![],
         param_mappings: vec![],
         // Dismiss-advice is fired from the advice UI affordance, not the slash
@@ -189,6 +190,7 @@ fn tag_descriptor(
                 description: "The tag to add or remove".to_string(),
             },
         ],
+        optional_params: vec![],
         affected_fields: vec![],
         param_mappings: vec![],
         // Element-wise tag mutation is a programmatic/structural op, not a bare

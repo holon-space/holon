@@ -32,9 +32,8 @@ pub struct EdgeFieldDescriptor {
     /// Owning entity type name (e.g. "block") — matches the entity the
     /// field appears on.
     pub entity: String,
-    /// Field name as it appears in `Block.properties` / params (e.g.
-    /// "requires", "tags").
-    pub field: String,
+    /// The edge field as it appears in `Block.properties` / params.
+    pub field: holon_api::EdgeField,
     /// Junction table name (e.g. "block_requires", "block_tags").
     pub join_table: String,
     /// Column on `join_table` holding the source entity's id.

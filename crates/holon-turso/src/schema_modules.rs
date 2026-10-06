@@ -466,28 +466,28 @@ impl SchemaModule for BlockSchemaModule {
         vec![
             EdgeFieldDescriptor {
                 entity: "block".to_string(),
-                field: "requires".to_string(),
+                field: holon_api::EdgeField::Requires,
                 join_table: "block_requires".to_string(),
                 source_col: "block_id".to_string(),
                 target_col: "required_id".to_string(),
             },
             EdgeFieldDescriptor {
                 entity: "block".to_string(),
-                field: "tags".to_string(),
+                field: holon_api::EdgeField::Tags,
                 join_table: "block_tags".to_string(),
                 source_col: "block_id".to_string(),
                 target_col: "tag".to_string(),
             },
             EdgeFieldDescriptor {
                 entity: "block".to_string(),
-                field: "advice_suppressed".to_string(),
+                field: holon_api::EdgeField::AdviceSuppressed,
                 join_table: "advice_suppressed".to_string(),
                 source_col: "anchor_id".to_string(),
                 target_col: "lesson_id".to_string(),
             },
             EdgeFieldDescriptor {
                 entity: "block".to_string(),
-                field: "contributes_to".to_string(),
+                field: holon_api::EdgeField::ContributesTo,
                 join_table: "block_contributes_to".to_string(),
                 source_col: "block_id".to_string(),
                 target_col: "target_id".to_string(),
@@ -573,7 +573,10 @@ fn block_matview_select_with_computed(
     let mut joins = Vec::new();
     for d in descriptors {
         let agg = edge_agg_view_name(d);
-        columns.push(format!("COALESCE({agg}.vals, '[]') AS {}", d.field));
+        columns.push(format!(
+            "COALESCE({agg}.vals, '[]') AS {}",
+            d.field.column()
+        ));
         joins.push(format!("LEFT OUTER JOIN {agg} ON {agg}.source_id = b.id"));
     }
     for c in computed {
@@ -1471,7 +1474,7 @@ mod tests {
     fn requires_descriptor() -> EdgeFieldDescriptor {
         EdgeFieldDescriptor {
             entity: "block".into(),
-            field: "requires".into(),
+            field: holon_api::EdgeField::Requires,
             join_table: "block_requires".into(),
             source_col: "source_id".into(),
             target_col: "target_id".into(),

@@ -3178,6 +3178,7 @@ impl DispatchingOperationEngine {
             boundary_behavior: holon_api::BoundaryBehavior::PrivateOnly,
             trigger: None,
             bound_params: Default::default(),
+            optional_params: vec![],
             affected_fields: vec![],
             marking_delta: holon_api::marking::MarkingDelta::Undeclared,
             guard: holon_api::pattern::OpGuard::None,
@@ -3228,6 +3229,7 @@ impl DispatchingOperationEngine {
             boundary_behavior: holon_api::BoundaryBehavior::PrivateOnly,
             trigger: None,
             bound_params: Default::default(),
+            optional_params: vec![],
             affected_fields: vec![],
             marking_delta: holon_api::marking::MarkingDelta::Undeclared,
             guard: holon_api::pattern::OpGuard::None,
@@ -3278,9 +3280,15 @@ impl DispatchingOperationEngine {
                     TypeHint::String,
                     "Idempotence key: rules pass their firing key; manual callers a fresh key",
                 ),
-                // `replace_block` (optional) is passed by the frontend picker's
-                // empty→in-place placement; not advertised as required.
             ],
+            // Passed by the frontend picker's empty→in-place placement.
+            optional_params: vec![param(
+                "replace_block",
+                TypeHint::EntityId {
+                    entity_name: EntityName::new("block"),
+                },
+                "Id of the empty block the instance root replaces in place",
+            )],
             affected_fields: vec![],
             param_mappings: vec![],
             target_scope: holon_api::TargetScope::Block,
@@ -3836,7 +3844,12 @@ impl DispatchingOperationEngine {
 
         // The steps below read the op's ids before the dispatcher sees them.
         self.dispatcher
-            .parse_entity_references_of(entity_name, op_name, &params)
+            .parse_entity_references_of(
+                entity_name,
+                op_name,
+                &params,
+                &self.firable_block_synthetic_descriptors()?,
+            )
             .map_err(|e| {
                 anyhow::anyhow!("Operation '{op_name}' on entity '{entity_name}' failed: {e}")
             })?;
@@ -4402,6 +4415,29 @@ mod instantiate_template_tests {
             }
             other => panic!("properties: expected object or JSON string, got {other:?}"),
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_malformed_optional_id_param_is_refused_naming_the_parameter() {
+        let engine = block_engine().await;
+        seed_template(&engine).await;
+        let mut params = instantiate_params("k", &[]);
+        params.insert("replace_block".into(), Value::String("a b".into()));
+
+        let err = engine
+            .execute_operation(
+                &EntityName::new("block"),
+                "instantiate_template",
+                params,
+                OpOrigin::User,
+            )
+            .await
+            .expect_err("a malformed replace_block must be refused");
+        let err = format!("{err:#}");
+        assert!(
+            err.contains("parameter 'replace_block'") && err.contains("\"a b\""),
+            "{err}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

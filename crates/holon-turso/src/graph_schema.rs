@@ -204,7 +204,7 @@ impl GraphSchemaRegistry {
                 .get(descriptor.entity.as_str())
                 .map(|(_, lbl)| (*lbl).to_string());
             edges.insert(
-                descriptor.field.clone(),
+                descriptor.field.column().to_string(),
                 EdgeDef {
                     source_label,
                     target_label: None,

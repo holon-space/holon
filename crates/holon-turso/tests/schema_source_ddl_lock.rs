@@ -135,7 +135,7 @@ fn the_block_declaration_and_the_edge_field_registry_name_the_same_edge_sets() {
         .edge_fields()
         .into_iter()
         .filter(|d| d.entity == BLOCK.relation)
-        .map(|d| d.field)
+        .map(|d| d.field.column().to_string())
         .collect();
 
     assert!(!registered.is_empty(), "the lock would be vacuous");

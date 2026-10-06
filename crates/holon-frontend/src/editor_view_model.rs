@@ -1425,6 +1425,7 @@ mod tests {
                 name: name.into(),
                 display_name: name.into(),
                 required_params: params,
+                optional_params: vec![],
                 affected_fields: fields.iter().map(|s| s.to_string()).collect(),
                 id_column: "id".to_string(),
                 description: String::new(),

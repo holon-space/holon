@@ -684,7 +684,7 @@ emit:
                     "block".to_string(),
                     vec![crate::storage::EdgeFieldDescriptor {
                         entity: "block".to_string(),
-                        field: "tags".to_string(),
+                        field: holon_api::EdgeField::Tags,
                         join_table: "block_tags".to_string(),
                         source_col: "block_id".to_string(),
                         target_col: "tag".to_string(),

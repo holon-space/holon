@@ -188,6 +188,7 @@ pub fn rehome_entity_descriptor() -> OperationDescriptor {
                 description: "The home to move it into".to_string(),
             },
         ],
+        optional_params: vec![],
         affected_fields: vec!["parent_id".to_string(), "sort_key".to_string()],
         param_mappings: vec![],
         target_scope: holon_api::TargetScope::Block,
