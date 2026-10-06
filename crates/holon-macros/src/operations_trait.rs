@@ -671,18 +671,20 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
                             quote! {
                                 let #param_name_ident: Option<holon_api::EntityUri> = match params.get(#param_name_str) {
                                     None | Some(holon_api::Value::Null) => None,
-                                    Some(v) => Some(v.as_string()
-                                        // ALLOW(entity_uri_from_raw): MCP operation params HashMap string → EntityUri at dispatch edge
-                                        .map(|s| holon_api::EntityUri::from_raw(s))
-                                        .ok_or_else(|| format!("Invalid type for optional parameter '{}' (expected EntityUri-as-String)", #param_name_str))?),
+                                    Some(v) => Some(holon_api::EntityUri::try_from_raw_param(
+                                        #param_name_str,
+                                        v.as_string().ok_or_else(|| format!("Invalid type for optional parameter '{}' (expected EntityUri-as-String)", #param_name_str))?,
+                                    )?),
                                 };
                             }
                         } else {
                             quote! {
-                                let #param_name_ident: holon_api::EntityUri = params.get(#param_name_str)
-                                    // ALLOW(entity_uri_from_raw): MCP operation params HashMap string → EntityUri at dispatch edge
-                                    .and_then(|v| v.as_string().map(|s| holon_api::EntityUri::from_raw(s)))
-                                    .ok_or_else(|| format!("Missing or invalid parameter '{}' (expected EntityUri-as-String)", #param_name_str))?;
+                                let #param_name_ident: holon_api::EntityUri = holon_api::EntityUri::try_from_raw_param(
+                                    #param_name_str,
+                                    params.get(#param_name_str)
+                                        .and_then(|v| v.as_string())
+                                        .ok_or_else(|| format!("Missing or invalid parameter '{}' (expected EntityUri-as-String)", #param_name_str))?,
+                                )?;
                             }
                         }
                     } else {

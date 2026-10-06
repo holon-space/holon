@@ -802,6 +802,9 @@ impl CrudOperations<Block> for LoroBlockOperations {
                 // silently lost — the junction never sees it. Generic over every
                 // `EdgeField` member (no per-field branch).
                 let targets = edge_string_targets(&value, f)?;
+                let edge_field = holon_api::EdgeField::from_drawer_key(f)
+                    .expect("is_edge_column matched an EdgeField");
+                holon_api::BlockEdges::default().set_from_raw(edge_field, targets.clone())?;
                 backend
                     .set_block_edge_field(id, f, &targets)
                     .await
@@ -1004,7 +1007,7 @@ impl CrudOperations<Block> for LoroBlockOperations {
             let Some(value) = fields.get(field.column()) else {
                 continue;
             };
-            edges.set_from_raw(field, edge_string_targets(value, field.column())?);
+            edges.set_from_raw(field, edge_string_targets(value, field.column())?)?;
             supplied.push(field);
         }
 
@@ -3662,6 +3665,96 @@ mod unheld_write_tests {
                     err.downcast_ref::<BlockNotInWriteAuthority>().is_none()
                         && err.to_string().contains(&format!("block id {id:?}")),
                     "{entry}({id:?}): {err}"
+                );
+            }
+        }
+    }
+
+    /// An edge target that forms no URI is refused by `set_field` and `create`
+    /// with an error naming the field and the value.
+    #[tokio::test]
+    async fn a_malformed_edge_target_is_refused_by_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(RwLock::new(LoroDocumentStore::new(
+            dir.path().to_path_buf(),
+        )));
+        let ops = LoroBlockOperations::new(store);
+        ops.get_backend("").await.expect("backend");
+        let held: StorageEntity = HashMap::from([
+            ("id".into(), Value::String("block:held".into())),
+            (
+                "parent_id".into(),
+                Value::String(EntityUri::no_parent().to_string()),
+            ),
+            ("content".into(), Value::String("held".into())),
+        ]);
+        ops.create(held).await.expect("create the held block");
+
+        for field in ["requires", "advice_suppressed", "contributes_to"] {
+            for target in ["a b", ""] {
+                let targets = Value::Array(vec![Value::String(target.into())]);
+                let err = ops
+                    .set_field("block:held", field, targets.clone())
+                    .await
+                    .expect_err("set_field");
+                assert!(
+                    err.to_string().contains(&format!("edge field '{field}'"))
+                        && err.to_string().contains(&format!("{target:?}")),
+                    "set_field {field}({target:?}): {err}"
+                );
+
+                let create: StorageEntity = HashMap::from([
+                    ("id".into(), Value::String("block:fresh".into())),
+                    (
+                        "parent_id".into(),
+                        Value::String(EntityUri::no_parent().to_string()),
+                    ),
+                    ("content".into(), Value::String("x".into())),
+                    (field.into(), targets),
+                ]);
+                let err = ops.create(create).await.expect_err("create");
+                assert!(
+                    err.to_string().contains(&format!("edge field '{field}'"))
+                        && err.to_string().contains(&format!("{target:?}")),
+                    "create {field}({target:?}): {err}"
+                );
+            }
+        }
+    }
+
+    /// An id that forms no URI, or an empty id, is refused by the shared
+    /// dispatch edge for every structural op, naming the parameter and the
+    /// value.
+    #[tokio::test]
+    async fn a_malformed_or_empty_id_on_a_structural_op_is_refused_by_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(RwLock::new(LoroDocumentStore::new(
+            dir.path().to_path_buf(),
+        )));
+        let ops = LoroBlockOperations::new(store);
+        ops.get_backend("").await.expect("backend");
+        for id in ["a b", ""] {
+            for op in [
+                "indent",
+                "outdent",
+                "move_up",
+                "move_down",
+                "delete_subtree",
+                "delete_keep_children",
+                "split_block",
+                "join_block",
+            ] {
+                let mut params: StorageEntity = HashMap::new();
+                params.insert("id".into(), Value::String(id.into()));
+                params.insert("position".into(), Value::Integer(0));
+                let err = ops
+                    .execute_operation(&EntityName::new("block"), op, params)
+                    .await
+                    .expect_err(op);
+                assert!(
+                    err.to_string().contains("parameter 'id'")
+                        && err.to_string().contains(&format!("{id:?}")),
+                    "{op}({id:?}): {err}"
                 );
             }
         }

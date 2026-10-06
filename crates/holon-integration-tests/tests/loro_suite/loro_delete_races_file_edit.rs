@@ -483,3 +483,78 @@ fn a_demote_under_a_holon_deleted_parent_converges() {
         }
     });
 }
+
+/// Holon deletes Beta and the write-back removes it from the file. The app
+/// restarts, so the base is seeded from the store, which cannot hold Beta. An
+/// editor then restores the file with Beta still in it and Alpha edited. The
+/// edit lands and Beta stays deleted.
+#[test]
+#[ignore = "D97 write-back state machine Inc 2 (A11): seed-from-store path does not ask ever_seen"]
+fn a_restart_then_a_file_still_holding_a_holon_deleted_block_keeps_it_deleted() {
+    let rt = runtime();
+    rt.clone().block_on(async move {
+        holon_integration_tests::test_tracing::SpanCollector::global();
+        let mut env = TestEnvironment::new(rt).expect("TestEnvironment::new");
+        assert!(env.loro_enabled(), "this hole needs the Loro wiring");
+        let path = env
+            .write_org_file("vault.org", VAULT)
+            .await
+            .expect("write vault.org");
+        env.start_app(true).await.expect("start_app");
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while row(&env, "block:d91-gamma").await.is_none() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the org scan never projected vault.org into SQL"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        env.wait_for_loro_quiescence(Duration::from_secs(10)).await;
+        env.wait_for_org_files_stable(100, Duration::from_secs(10))
+            .await;
+        let with_beta = disk(&env, &path).await;
+
+        env.delete_block("d91-beta").await.expect("delete Beta");
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while disk(&env, &path).await.contains("d91-beta") {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the write-back never removed Beta from vault.org"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        env.wait_for_org_files_stable(100, Duration::from_secs(10))
+            .await;
+
+        env.stop_app().await.expect("stop_app");
+        let restored = with_beta.replacen("* Alpha", "* Alpha edited outside", 1);
+        assert_ne!(restored, with_beta, "the editor must touch Alpha");
+        env.write_org_file("vault.org", &restored)
+            .await
+            .expect("the editor restores vault.org");
+        env.start_app(true).await.expect("restart");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            let alpha = row(&env, "block:d91-alpha").await;
+            if alpha.as_ref().map(|(c, _)| c.as_str()) == Some("Alpha edited outside") {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the editor's edit never reached the store: Alpha {alpha:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        env.wait_for_loro_quiescence(Duration::from_secs(10)).await;
+        env.wait_for_org_files_stable(100, Duration::from_secs(10))
+            .await;
+        let beta = row(&env, "block:d91-beta").await;
+        let on_disk = disk(&env, &path).await;
+        assert!(
+            beta.is_none() && !on_disk.contains("d91-beta"),
+            "Beta, deleted in Holon, was resurrected by a file that still held it after a \
+             restart: Beta in the store {beta:?}, vault.org on disk:\n{on_disk}"
+        );
+    });
+}

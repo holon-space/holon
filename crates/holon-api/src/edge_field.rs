@@ -177,14 +177,16 @@ impl BlockEdges {
 
     /// Set `field`'s members from the strings a param bag / Loro meta carries:
     /// tag strings for [`EdgeField::Tags`], raw ids for the reference fields
-    /// (promoted to `block:`-schemed uris).
-    pub fn set_from_raw(&mut self, field: EdgeField, values: Vec<String>) {
+    /// (promoted to `block:`-schemed uris). A reference target that forms no
+    /// uri is an error naming the field and the value; nothing is set then.
+    pub fn set_from_raw(&mut self, field: EdgeField, values: Vec<String>) -> anyhow::Result<()> {
         match field {
             EdgeField::Tags => self.tags = values.into_iter().collect(),
-            EdgeField::Requires => self.requires = uris_from_raw(values),
-            EdgeField::AdviceSuppressed => self.advice_suppressed = uris_from_raw(values),
-            EdgeField::ContributesTo => self.contributes_to = uris_from_raw(values),
+            EdgeField::Requires => self.requires = uris_from_raw(field, values)?,
+            EdgeField::AdviceSuppressed => self.advice_suppressed = uris_from_raw(field, values)?,
+            EdgeField::ContributesTo => self.contributes_to = uris_from_raw(field, values)?,
         }
+        Ok(())
     }
 
     /// `field`'s members in the same string shape [`Self::set_from_raw`] takes,
@@ -207,12 +209,19 @@ impl BlockEdges {
     }
 }
 
-fn uris_from_raw(values: Vec<String>) -> Vec<EntityUri> {
+fn uris_from_raw(field: EdgeField, values: Vec<String>) -> anyhow::Result<Vec<EntityUri>> {
     values
         .iter()
-        // ALLOW(entity_uri_from_raw): edge targets arriving as param-bag /
-        // Loro-meta strings, promoted to schemed uris at this boundary.
-        .map(|s| EntityUri::from_raw(s))
+        .map(|s| {
+            anyhow::ensure!(
+                !s.is_empty(),
+                "edge field '{}': target \"\" is empty",
+                field.column()
+            );
+            EntityUri::try_from_raw(s).map_err(|e| {
+                anyhow::anyhow!("edge field '{}': target {s:?}: {e:#}", field.column())
+            })
+        })
         .collect()
 }
 

@@ -332,6 +332,15 @@ impl EntityUri {
         }
     }
 
+    /// [`try_from_raw`] for an operation parameter: an empty or malformed
+    /// value is an error naming the parameter and the value.
+    pub fn try_from_raw_param(param: &str, s: &str) -> Result<Self, String> {
+        if s.is_empty() {
+            return Err(format!("parameter '{param}': value \"\" is empty"));
+        }
+        Self::try_from_raw(s).map_err(|e| format!("parameter '{param}': value {s:?}: {e:#}"))
+    }
+
     /// THE predicate for "this raw string already names its entity": `Some`
     /// iff `s` parses as a URI whose scheme is its own, `None` for a bare id.
     /// Every boundary that must tell the two apart asks here.
