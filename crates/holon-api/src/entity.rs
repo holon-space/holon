@@ -419,7 +419,7 @@ impl ColumnValueKind {
 
 /// Schema for a single field in a table.
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct FieldSchema {
     pub name: String,
     pub sql_type: String,
@@ -1292,6 +1292,16 @@ mod mutation_gap_tests {
                 "CREATE INDEX IF NOT EXISTS idx_thing_cache ON \"thing\" (\"cache\")".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn a_misspelled_key_in_a_field_entry_is_refused() {
+        let err = serde_json::from_str::<TypeDefinition>(
+            r#"{"name":"t","fields":[{"name":"id","sql_typ":"TEXT"}]}"#,
+        )
+        .expect_err("an unknown key inside a field entry must be refused")
+        .to_string();
+        assert!(err.contains("sql_typ"), "got: {err}");
     }
 
     #[test]

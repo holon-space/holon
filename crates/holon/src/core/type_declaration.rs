@@ -49,8 +49,14 @@ pub async fn declare_type(
     registry: &TypeRegistry,
     dispatcher: &OperationDispatcher,
 ) -> Result<TursoArtifacts> {
-    // The registry's checks are pure, so they run before the adapter creates
-    // any artifact.
+    // These checks are pure, so they run before the adapter creates any
+    // artifact.
+    require_declarable(type_def).map_err(|e| {
+        format!(
+            "declare_type('{}'): the definition cannot be written: {e}",
+            type_def.name
+        )
+    })?;
     registry.check(type_def).map_err(|e| {
         format!(
             "declare_type('{}'): the type registry refused the definition: {e}",
@@ -80,7 +86,7 @@ pub async fn declare_type(
         )
     })?;
 
-    register_write_authority(type_def, db_handle, dispatcher).map_err(|e| {
+    install_write_authority(type_def, db_handle, dispatcher).map_err(|e| {
         format!(
             "declare_type('{}'): registering the write authority failed: {e}",
             type_def.name
@@ -102,9 +108,20 @@ pub fn register_write_authority(
     db_handle: &DbHandle,
     dispatcher: &OperationDispatcher,
 ) -> Result<()> {
-    require_engine_stamp_has_a_home(type_def)?;
-    require_declarable_soft_delete(type_def)?;
+    require_declarable(type_def)?;
+    install_write_authority(type_def, db_handle, dispatcher)
+}
 
+fn require_declarable(type_def: &TypeDefinition) -> Result<()> {
+    require_engine_stamp_has_a_home(type_def)?;
+    require_declarable_soft_delete(type_def)
+}
+
+fn install_write_authority(
+    type_def: &TypeDefinition,
+    db_handle: &DbHandle,
+    dispatcher: &OperationDispatcher,
+) -> Result<()> {
     let provider: Arc<dyn OperationProvider> =
         Arc::new(SqlOperationProvider::for_type(db_handle.clone(), type_def)?);
     dispatcher.register_provider(provider)?;
@@ -346,6 +363,18 @@ mod tests {
                 "'{}' must not become writable",
                 type_def.name
             );
+            let created = db_handle
+                .query(
+                    &format!(
+                        "SELECT name FROM sqlite_master WHERE name LIKE '{}%'",
+                        type_def.name
+                    ),
+                    std::collections::HashMap::new(),
+                )
+                .await
+                .expect("query sqlite_master");
+            assert!(created.is_empty(), "a refused declaration left {created:?}");
+            assert!(!registry.contains(&type_def.name));
         }
     }
 
