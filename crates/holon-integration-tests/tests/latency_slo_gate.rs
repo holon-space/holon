@@ -369,7 +369,10 @@ fn run_drain_test(sut: &ComposedSut<WideE2E>, test: DrainTest, delay_ms: u64) ->
                     .expect("the detached door accepts a content write");
                 }
                 Step::Wait { until } => {
-                    tokio::time::sleep(until.saturating_duration_since(now).min(DRAIN_POLL)).await;
+                    // Not a tokio timer: the SUT's workers starve the runtime's
+                    // timers by up to ~200 ms, which would make the driver late.
+                    // `block_on` runs on no worker, so blocking it stalls nothing.
+                    std::thread::sleep(until.saturating_duration_since(now).min(DRAIN_POLL));
                 }
                 Step::Done => break,
             }
