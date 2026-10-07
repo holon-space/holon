@@ -34,6 +34,7 @@ use holon_core::UndoAction;
 use holon_core::storage::types::StorageEntity;
 use tracing::error;
 use tracing::info;
+use tracing::warn;
 
 use crate::api::guard_world::GuardQuery;
 
@@ -92,6 +93,9 @@ pub struct OperationDispatcher {
     /// states — "no such entity" and "this build turned it off" — and only the
     /// composition root can tell them apart, so it says which one this is.
     unavailable_entities: UnavailableEntities,
+    /// Which integration owns an entity's table, and how far it got. An
+    /// integration entity has no provider until its integration connects.
+    integration_attribution: holon_core::integration_attribution::IntegrationAttribution,
 }
 
 /// What the shape gate (Model.md invariant 17) judges with: the registered
@@ -318,6 +322,33 @@ impl OperationDispatcher {
     /// registration.
     pub fn set_unavailable_entities(&mut self, unavailable: UnavailableEntities) {
         self.unavailable_entities = unavailable;
+    }
+
+    pub fn set_integration_attribution(
+        &mut self,
+        attribution: holon_core::integration_attribution::IntegrationAttribution,
+    ) {
+        self.integration_attribution = attribution;
+    }
+
+    /// Why no provider serves `entity`, when an integration owns it and has
+    /// not put its operations in the dispatcher.
+    fn integration_refusal(&self, entity: &str, op_name: &str) -> Option<String> {
+        let owner = self
+            .integration_attribution
+            .owner_of(&EntityName::new(entity).table_name())
+            .filter(|owner| !owner.status.serves_operations())?;
+        let mut refusal = format!(
+            "No provider serves {entity}.{op_name}: '{entity}' belongs to integration '{}' ({}), \
+             status: {}",
+            owner.integration,
+            owner.display_name,
+            owner.status.label()
+        );
+        if !owner.cause.is_empty() {
+            refusal.push_str(&format!(" ({})", owner.cause));
+        }
+        Some(refusal)
     }
 
     /// Add an observer to this dispatcher
@@ -1749,6 +1780,18 @@ impl OperationDispatcher {
                     .iter()
                     .any(|op| op.entity_name == resolved_entity_name && op.name == op_name)
                 {
+                    // An integration that has not connected yet is a disclosed
+                    // state, not a wiring error.
+                    if self
+                        .unavailable_entities
+                        .reason_for(resolved_entity_name)
+                        .is_none()
+                        && let Some(refusal) =
+                            self.integration_refusal(resolved_entity_name, op_name)
+                    {
+                        warn!("[OperationDispatcher] {refusal}");
+                        return Err(refusal.into());
+                    }
                     let entity_names: std::collections::HashSet<_> =
                         available_ops.iter().map(|op| &op.entity_name).collect();
                     error!(
@@ -1764,7 +1807,7 @@ impl OperationDispatcher {
                             .into(),
                             None => format!(
                                 "No provider registered for entity: {entity_name} (operation: \
-                             '{op_name}')"
+                                 '{op_name}')"
                             )
                             .into(),
                         },
@@ -2691,6 +2734,12 @@ impl Module for OperationModule {
             if let Some(unavailable) = r.optional_resolve_async::<UnavailableEntities>().await {
                 dispatcher.set_unavailable_entities((*unavailable).clone());
             }
+            if let Some(attribution) = r
+                .optional_resolve_async::<holon_core::integration_attribution::IntegrationAttribution>()
+                .await
+            {
+                dispatcher.set_integration_attribution((*attribution).clone());
+            }
 
             // Every free-standing type the registry carries gets a write
             // authority derived from ITS definition. `FreeStandingTypeViews`
@@ -2700,34 +2749,7 @@ impl Module for OperationModule {
             // write path used to hide by being the only authority there is.
             let type_registry = r.resolve_async::<holon_profiles::TypeRegistry>().await;
             for type_def in type_registry.all() {
-                if !crate::di::schema_providers::is_free_standing(&type_def) {
-                    continue;
-                }
-                // A type that mirrors a connector's data is written by that
-                // connector, not by a provider derived from its columns. Its
-                // authority is already registered whenever the connector
-                // declares tools for the entity; deriving a second one over the
-                // mirror table would both be refused here and, if it won a
-                // routing scan, write where the system of record cannot see it.
-                //
-                // TODO(bugfunnel:2026-08-23-todoist-projects-second-write-authority-boot-panic,
-                // "Adjacent hazards"): a sidecar with an `entity_prefix` names
-                // its type `{prefix}{entity}` while its tool descriptors name
-                // the bare entity, so this check does not recognise the pair
-                // and the prefixed mirror keeps a derived SQL authority no
-                // connector serves.
-                let entity = EntityName::new(type_def.name.clone());
-                if let Some(provider) = type_def.owning_integration()
-                    && dispatcher.has_provider(entity.as_str())
-                {
-                    info!(
-                        "[OperationModule] '{}' mirrors integration '{provider}', which already \
-                         holds its write authority — deriving none",
-                        type_def.name
-                    );
-                    continue;
-                }
-                crate::core::type_declaration::register_write_authority(
+                crate::core::type_declaration::derive_write_authority(
                     &type_def,
                     &db_handle_provider.handle(),
                     &dispatcher,

@@ -19,9 +19,14 @@ use std::sync::RwLock;
 /// list or rendering like a healthy one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IntegrationStatus {
-    /// Enabled; the registry has not resolved it yet. Every freshly projected
+    /// Enabled; the supervisor has not spoken yet. Every freshly projected
     /// row starts here.
     Pending,
+    /// The supervisor is connecting it; the peer has not answered yet.
+    Connecting,
+    /// Its `${VAR}` resolution is blocked on the OS keychain, usually on an
+    /// access prompt the user has not answered.
+    WaitingOnKeychain,
     /// Connected, operations registered, and at least one sync batch has
     /// completed since boot — the peer answers AND its rows land.
     Connected,
@@ -52,6 +57,8 @@ impl IntegrationStatus {
     pub fn label(self) -> &'static str {
         match self {
             Self::Pending => "Pending",
+            Self::Connecting => "Connecting",
+            Self::WaitingOnKeychain => "Waiting on keychain",
             Self::Connected => "Connected",
             Self::Syncing => "Syncing",
             Self::NeedsAuth => "Needs auth",
@@ -70,6 +77,19 @@ impl IntegrationStatus {
     /// tables exist, so a failure over them is not explained by it.
     pub fn is_settled_inert(self) -> bool {
         matches!(self, Self::Unavailable | Self::NeedsAuth)
+    }
+
+    /// Whether the integration's operations are in the dispatcher. Only then is
+    /// an operation it does not offer a wiring error rather than its state.
+    pub fn serves_operations(self) -> bool {
+        match self {
+            Self::Connected | Self::Syncing | Self::SyncFailing => true,
+            Self::Pending
+            | Self::Connecting
+            | Self::WaitingOnKeychain
+            | Self::NeedsAuth
+            | Self::Unavailable => false,
+        }
     }
 }
 

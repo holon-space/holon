@@ -180,28 +180,44 @@ parse failure, a foreign secret reference, two files claiming one name, a
 symlink — is disclosed as `IgnoredReason::Unusable` with the reason, never
 silently skipped. `McpIntegrationsModule` in `crates/holon-app/src/mcp_integrations.rs`
 loads the `IntegrationConfigStore` from the integrations directory (default
-`{config_dir}/integrations/`, overridable via `HOLON_MCP_INTEGRATIONS_DIR`) and,
-for each bundled provider whose state says `enabled = true`:
+`{config_dir}/integrations/`, overridable via `HOLON_MCP_INTEGRATIONS_DIR`) and
+registers an `IntegrationSupervisor`. The session factory calls
+`IntegrationSupervisor::start(engine)`, which awaits only local work: it
+discloses superseded, ignored and inert sidecars, populates the
+`integration_state` mirror, records every enabled provider as `Connecting`,
+and spawns one session-scoped task `integration-connect:<name>` per provider.
+The factory does not wait for any connect, so no remote system is on the boot
+path. Each task:
 
-1. Parses an `IntegrationFileConfig` — transport, auth, entities, tools.
-2. Expands `${VAR}` references, layered: environment variable first, then an
+1. Expands `${VAR}` references, layered: environment variable first, then an
    app-settings value whose key matches case-insensitively with `.`/`_` as the
    same separator (`normalize_var_name`, so the `todoist.api_key` setting
-   resolves `${TODOIST_API_KEY}`); empty string counts as unset. An unresolved
-   `${VAR}` is a **disclosed skip** — the typed `UnresolvedVar` error
-   (`integration_config.rs`) is caught, a warning is logged, and an inert
-   `EmptyOperationProvider` is registered for that integration ("not configured
-   yet, e.g. missing API key"). Any *other* config error (malformed YAML,
-   structurally invalid config) fails loud with a panic. Connection failures
-   are also warn-and-skip with the same inert provider.
-3. Calls `build_mcp_integration()` which connects to the MCP server, builds a
+   resolves `${TODOIST_API_KEY}`); empty string counts as unset. A keychain
+   read that takes longer than 2 s sets the status `WaitingOnKeychain` and
+   raises `IntegrationWaitingOnKeychain` until it returns. An unresolved
+   `${VAR}` (the typed `UnresolvedVar` error, `integration_config.rs`) and an
+   unusable config are disclosed and set the status `Unavailable`; the session
+   stays up.
+2. Calls `build_mcp_integration()`, which connects to the MCP server, builds a
    `QueryableCache<DynamicEntity>` Turso table for each entity that declares a
    `schema`, registers an `McpSyncEngine` with one strategy per entity's `sync`
-   config, and wraps the whole thing as an `McpOperationProvider`.
-4. Registers a `RegistryOperationProxy` into the DI `OperationProvider` set so
-   the `OperationDispatcher` routes operations to the right integration.
-5. Spawns a background initial sync and re-syncs individual entities when the
-   MCP server sends resource-update notifications (MCP `subscribe` protocol).
+   config, and wraps the whole thing as an `McpOperationProvider`. A connect
+   still running after 30 s raises `IntegrationConnectSlow`; it is not
+   cancelled. A failed connect is disclosed (`IntegrationConnectFailed`) and
+   sets `Unavailable`; an OAuth integration without a token sets `NeedsAuth`.
+3. On connect, installs the integration into the running engine in this order:
+   entity types, FDW tables, clock grains, the sync engine as an added
+   `MatviewHook`, then its operations into the `OperationDispatcher`
+   (`register_provider`), then the write authority of the types it owns and
+   its remote list. The operations come last because the catalog change is
+   what re-renders pages over the integration's tables.
+4. Enqueues the initial sync and sets the status `Syncing` (or `Connected` when
+   it syncs no entity); later sync batches set the status from the sync health.
+   Individual entities re-sync when the MCP server sends resource-update
+   notifications (MCP `subscribe` protocol).
+
+Until an integration is connected, the dispatcher refuses a write to one of its
+entities with an error that names the integration and its status.
 
 For entities with a `vtable` config, two tables exist: the cache table itself
 (e.g. `cc_session`, created by the cache factory when a schema is declared)
@@ -219,13 +235,15 @@ load_integration_configs(dir, store)
   │  content: the bundled sidecar, or an installed *.yaml declaring
   │  this build's SIDECAR_SCHEMA_VERSION
   ▼
-McpIntegrationsModule::from_dir()
-  │  calls build_mcp_integration() per enabled provider
+McpIntegrationsModule::from_dir()  →  IntegrationSupervisor (DI singleton)
+  │  session factory: start(engine), one connect task per enabled provider
+  ▼
+build_mcp_integration()  (in the provider's own task, after boot)
   ▼
 McpIntegration { operation_provider, sync_engine, fdw_backed_tables, … }
-  │  stored in McpIntegrationRegistry (DI singleton)
+  │  installed into the running engine, held by the supervisor
   ▼
-RegistryOperationProxy  →  OperationDispatcher  (write path)
+ConnectedOperations     →  OperationDispatcher  (write path)
 McpSyncEngine           →  initial sync_all() + notification re-sync
 QueryableCache<DynamicEntity>  →  Turso cache tables (queryable via SQL/PRQL)
 ```
@@ -306,8 +324,8 @@ MCP Server (e.g. ai.todoist.net/mcp)
 | `McpSyncEngine`            | `mcp_sync_engine.rs`                  | Syncs MCP entities into Turso cache tables. Full-diff sync (insert/update/delete) or cursor-based incremental sync. Subscribes to MCP resource-update notifications.  |
 | `McpForeignDataWrapper`    | `mcp_vtable.rs`                       | Turso FDW that translates SQL WHERE constraints into MCP tool parameters for query-time fetch (no background sync required).                                           |
 | `IntegrationFileConfig`    | `integration_config.rs`               | Top-level YAML structure: `transport`, `auth`, `entities`, `tools`. `${VAR}` references expanded from env / app settings.                                             |
-| `McpIntegrationsModule`    | `holon-app/mcp_integrations.rs`       | DI module: scans YAML dir, builds `McpIntegrationRegistry`, registers one `RegistryOperationProxy` per integration into the `OperationProvider` set.                  |
-| `McpIntegrationRegistry`   | `holon-app/mcp_integrations.rs`       | DI singleton holding all live `McpIntegration` handles (keeps services alive) and the list of FDW-backed cache table names.                                            |
+| `McpIntegrationsModule`    | `holon-app/mcp_integrations.rs`       | DI module: loads the enablement store and the YAML dir, registers the `IntegrationSupervisor`.                                                                         |
+| `IntegrationSupervisor`    | `holon-app/mcp_integrations.rs`       | Started by the session factory: connects each enabled integration in its own task and installs it into the running engine on connect; holds the connected `McpIntegration` handles (keeps services alive). |
 | `McpSidecar`               | `mcp_sidecar.rs`                      | Entity and tool annotations parsed from the YAML `entities`/`tools` maps: entity mapping, `affected_fields`, `triggered_by`, `precondition` (Rhai), `undo` config.   |
 | `RhaiPrecondition`         | `mcp_sidecar.rs`                      | Parse-don't-validate wrapper: Rhai expressions are validated at YAML deserialization time. Invalid syntax fails immediately, not at operation execution.               |
 | `mcp_schema_mapping`       | `mcp_schema_mapping.rs`               | Converts JSON Schema types to `TypeHint` (String, Bool, Number, OneOf, EntityId via overrides). Walks `inputSchema.properties` to build `Vec<OperationParam>`.        |
@@ -413,24 +431,18 @@ code exists — the old `holon-todoist` crate has been deleted.
 
 Key pieces registered by `McpIntegrationsModule::configure()`:
 
-- **`McpIntegrationRegistry`** (async DI singleton): resolved concurrently with
-  other DI services at startup, but builds the `McpIntegration` objects
-  themselves sequentially (one awaited `build_mcp_integration()` per config —
-  startup cost is additive per integration); resolves Turso `DbHandle` and
-  `SyncTokenStore` from DI, runs initial `sync_all()` in a background
-  `tokio::spawn`.
-- **`RegistryOperationProxy`** (one per YAML file, added to the
-  `dyn OperationProvider` set): delegates `operations()` and
-  `execute_operation()` to the matching `McpOperationProvider` inside the registry.
+- **`IntegrationSupervisor`** (async DI singleton, local dependencies only):
+  the session factory's step `start_integration_supervisor` calls
+  `start(engine)` and continues without waiting for a connect. Each connected
+  integration registers `ConnectedOperations` (delegating `operations()` and
+  `execute_operation()` to its `McpOperationProvider`) with the dispatcher,
+  calls `engine.register_fdw_table()` for each FDW-backed cache table, and
+  adds its `sync_engine` with `engine.add_matview_hook()` so FDW cache tables
+  subscribe to resource-update notifications at first access. The matview
+  manager keeps every added hook.
 - **`PendingOAuthFlows`** (root singleton): parked state for OAuth integrations
   awaiting user consent; the frontend calls `complete_oauth(provider_name, code, state)`
   after the browser callback.
-
-After the registry is built, `wiring.rs` additionally:
-- Calls `engine.register_fdw_table()` for every cache table that has FDW backing
-  (from `McpIntegrationRegistry::fdw_backed_tables()`).
-- Installs `sync_engine.clone()` as the `MatviewHook` so FDW cache tables
-  subscribe to resource-update notifications at first access.
 
 #### Reuse Across Integrations
 

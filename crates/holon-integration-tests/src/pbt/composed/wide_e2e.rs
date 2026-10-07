@@ -2202,17 +2202,22 @@ pub fn wide_e2e_windowed_ref(cap_set: CapSet) -> ReferenceState {
 pub struct WideE2EMachine;
 
 /// `Instant` unless `HOLON_PBT_INTEGRATION_TIMING=1` admits the deferred
-/// timings, which shrink toward `Instant`.
+/// timings, which shrink toward `Instant`. `=after` and `=never` pin one.
 fn integration_connect_timing() -> BoxedStrategy<IntegrationConnectTiming> {
-    if std::env::var("HOLON_PBT_INTEGRATION_TIMING").is_ok_and(|v| v == "1") {
-        ::proptest::prop_oneof![
-            ::proptest::prelude::Just(IntegrationConnectTiming::Instant),
-            ::proptest::prelude::Just(IntegrationConnectTiming::AfterSessionResolve),
-            ::proptest::prelude::Just(IntegrationConnectTiming::Never),
+    use ::proptest::prelude::Just;
+    match std::env::var("HOLON_PBT_INTEGRATION_TIMING").as_deref() {
+        Ok("1") => ::proptest::prop_oneof![
+            Just(IntegrationConnectTiming::Instant),
+            Just(IntegrationConnectTiming::AfterSessionResolve),
+            Just(IntegrationConnectTiming::Never),
         ]
-        .boxed()
-    } else {
-        ::proptest::prelude::Just(IntegrationConnectTiming::Instant).boxed()
+        .boxed(),
+        Ok("after") => Just(IntegrationConnectTiming::AfterSessionResolve).boxed(),
+        Ok("never") => Just(IntegrationConnectTiming::Never).boxed(),
+        Ok(other) => {
+            panic!("HOLON_PBT_INTEGRATION_TIMING={other:?}: expected `1`, `after` or `never`")
+        }
+        Err(_) => Just(IntegrationConnectTiming::Instant).boxed(),
     }
 }
 

@@ -23,19 +23,16 @@ use holon_connections::CommitAck;
 use holon_connections::CommitBatch;
 use holon_connections::CompiledListSync;
 use holon_connections::ConfiguredList;
-use holon_connections::ConfiguredLists;
 use holon_connections::ListSnapshot;
 use holon_connections::LocalRow;
 use holon_connections::LocalRowReader;
 use holon_connections::RemoteListPeer;
-use holon_mcp_client::integration_config::IntegrationFileConfig;
+use holon_mcp_client::McpIntegration;
 use holon_mcp_client::mcp_call_surface::McpCallSurface;
 use holon_mcp_client::mcp_call_surface::extract_tool_response;
 use holon_mcp_client::rest_transport::RESPONSE_VERSION_KEY;
 use holon_profiles::TypeRegistry;
 use rmcp::model::CallToolRequestParam;
-
-use crate::mcp_integrations::McpIntegrationRegistry;
 
 /// What Holon calls itself on a peer's commits. Not a secret; the peer uses it
 /// for its own bookkeeping only.
@@ -173,37 +170,6 @@ pub fn pull_arguments(
     args
 }
 
-/// A peer whose connection is declared but not connected.
-///
-/// It answers every call with the disclosure rather than being absent: an
-/// operation that silently does not exist would leave the caller with
-/// "no configured connection serves this" and nothing about WHY the one it
-/// configured is not answering.
-pub struct UnreachablePeer {
-    connection: String,
-    why: String,
-}
-
-#[async_trait]
-impl RemoteListPeer for UnreachablePeer {
-    async fn pull(&self) -> Result<ListSnapshot> {
-        anyhow::bail!(
-            "the '{}' connection is declared but not connected, so there is nothing to sync \
-             with: {}",
-            self.connection,
-            self.why
-        )
-    }
-
-    async fn commit(&self, _: &CommitBatch) -> Result<CommitAck> {
-        anyhow::bail!(
-            "the '{}' connection is declared but not connected: {}",
-            self.connection,
-            self.why
-        )
-    }
-}
-
 /// The local rows a round decides against, read from the table the sidecar
 /// names. Read-only by design: the writes go back through the dispatcher as
 /// follow-up operations.
@@ -254,48 +220,18 @@ impl LocalRowReader for SqlMirrorRows {
     }
 }
 
-/// Every list connection this build can reach, assembled from the sidecars it
-/// loaded.
+/// The list connection `name`'s sidecar declares, served by its connected
+/// `integration`.
 ///
-/// A sidecar that declares `holon.list_sync` gets one connection. Everything
-/// that is not the transport is validated here, at boot: a spec whose entity
-/// the registry does not declare, or whose type declares no soft deletion, is
-/// carried back as a refusal rather than a wrong round later.
-///
-/// A connection whose spec cannot compile is NOT skipped silently: the boot
-/// stays up (a bad sidecar must not take the engine down) and the refusal is
-/// reported by name at the dispatch that finds no operation for it.
-pub fn configured_lists(
-    configs: &[(String, IntegrationFileConfig)],
-    registry: &McpIntegrationRegistry,
-    db_handle: &DbHandle,
-    types: &TypeRegistry,
-) -> ConfiguredLists {
-    let mut lists = Vec::new();
-    let mut refusals = Vec::new();
-    for (name, config) in configs {
-        let Some(spec) = config
-            .holon
-            .as_ref()
-            .and_then(|holon| holon.list_sync.clone())
-        else {
-            continue;
-        };
-        match build_one(name, spec, registry, db_handle, types) {
-            Ok(list) => lists.push(list),
-            Err(why) => refusals.push(why),
-        }
-    }
-    ConfiguredLists::new(lists, refusals)
-}
-
 /// The refusal is a STRING, not an error to propagate: a sidecar this build
-/// cannot serve must not take the boot down, and the text is what the dispatch
-/// that finds no operation reports by name.
-fn build_one(
+/// cannot serve must not take the integration down, and the text names the
+/// connection and the reason. A spec whose entity the registry does not
+/// declare, or whose type declares no soft deletion, is refused here rather
+/// than producing a wrong round later.
+pub fn configured_list(
     name: &str,
     spec: holon_connections::ListSyncSpec,
-    registry: &McpIntegrationRegistry,
+    integration: &McpIntegration,
     db_handle: &DbHandle,
     types: &TypeRegistry,
 ) -> std::result::Result<ConfiguredList, String> {
@@ -309,30 +245,15 @@ fn build_one(
     })?;
     let compiled = CompiledListSync::compile(name, spec, &declared)
         .map_err(|e| format!("connection '{name}': {e:#}"))?;
-    let peer: Arc<dyn RemoteListPeer> = match registry.by_name(name) {
-        Some(integration) => Arc::new(RestListPeer::new(
+    Ok(ConfiguredList {
+        connection: name.to_string(),
+        compiled: compiled.clone(),
+        peer: Arc::new(RestListPeer::new(
             integration.sync_engine.call_surface(),
             compiled.clone(),
             device_id(),
         )),
-        None => Arc::new(UnreachablePeer {
-            connection: name.to_string(),
-            why: NOT_CONNECTED_WHY.to_string(),
-        }),
-    };
-    Ok(ConfiguredList {
-        connection: name.to_string(),
-        compiled: compiled.clone(),
-        peer,
         rows: Arc::new(SqlMirrorRows::new(db_handle.clone(), &compiled)),
         device_id: device_id().to_string(),
     })
 }
-
-/// The disclosure a declared-but-unconnected list connection carries. Its boot
-/// outcome is recorded on the `integration_state` mirror by
-/// [`crate::mcp_integrations`]; a missing credential for its `utcp:` URL is the
-/// usual cause.
-const NOT_CONNECTED_WHY: &str = "it is declared but not connected, and its boot outcome was \
-                                 disclosed on the degraded bus — a missing credential for its \
-                                 `utcp:` URL is the usual cause";

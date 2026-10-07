@@ -103,6 +103,7 @@ pub enum ClearingEvent {
     ShareMaterialize,
     WritebackRespawn,
     IntegrationConnect,
+    IntegrationKeychainRead,
     PairReimport,
     ProfileLoad,
     WrittenHashRecord,
@@ -417,6 +418,24 @@ const INTEGRATION_CONNECT_FAILED: ConditionProfile = ConditionProfile::new(
     icons::BLOCKED,
     ConditionPlacement::Toast,
     AllClear::NextSuccessOf(ClearingEvent::IntegrationConnect),
+    &[],
+);
+
+const INTEGRATION_CONNECT_SLOW: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Warning,
+    "Integration still connecting",
+    icons::WARN,
+    ConditionPlacement::Toast,
+    AllClear::NextSuccessOf(ClearingEvent::IntegrationConnect),
+    &[],
+);
+
+const INTEGRATION_WAITING_ON_KEYCHAIN: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Warning,
+    "Integration waiting on the keychain",
+    icons::KEY,
+    ConditionPlacement::Toast,
+    AllClear::NextSuccessOf(ClearingEvent::IntegrationKeychainRead),
     &[],
 );
 
@@ -740,6 +759,8 @@ impl ConditionKind {
             Self::WritebackDegraded(_) => WRITEBACK_DEGRADED,
             Self::WritebackLossy { .. } => WRITEBACK_LOSSY,
             Self::IntegrationConnectFailed { .. } => INTEGRATION_CONNECT_FAILED,
+            Self::IntegrationConnectSlow { .. } => INTEGRATION_CONNECT_SLOW,
+            Self::IntegrationWaitingOnKeychain { .. } => INTEGRATION_WAITING_ON_KEYCHAIN,
             Self::IntegrationNeedsAuth { .. } => INTEGRATION_NEEDS_AUTH,
             Self::IntegrationSidecarSuperseded { .. } => INTEGRATION_SIDECAR_SUPERSEDED,
             Self::IntegrationNotEnabled { .. } => INTEGRATION_NOT_ENABLED,

@@ -72,7 +72,7 @@ pub use holon_mcp_client::PendingWriteEventKind;
 pub use holon_mcp_client::PendingWriteStore;
 pub use holon_mcp_client::PendingWriteView;
 pub use holon_mcp_client::SharedPendingWrites;
-pub use mcp_integrations::McpIntegrationRegistry;
+pub use mcp_integrations::IntegrationSupervisor;
 pub use mcp_integrations::McpIntegrationsModule;
 pub use no_turso::from_block_query_source;
 pub use no_turso::register_block_query_frontend;

@@ -563,7 +563,7 @@ areas:
           refused naming it until then
         transitions: [ReleaseIntegrationPeer]
         invariants: [inv-integration-op-routable-or-refused, inv-integration-operations-reach-profiles]
-        pin_note: "deferred timings drawn only under `HOLON_PBT_INTEGRATION_TIMING=1`"
+        pin_note: "deferred timings drawn only under `HOLON_PBT_INTEGRATION_TIMING=1`; `=after` / `=never` pin one"
         ruled_by: "[Integrations.md](Integrations.md)"
         mode_axes: "—"
         entry: "`crates/holon-app/src/mcp_integrations.rs`"

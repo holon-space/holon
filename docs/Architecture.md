@@ -298,7 +298,7 @@ The ones that govern how Holon reaches other devices and other systems:
 | `crates/holon-mcp-client/src/mcp_schema_mapping.rs` | JSON Schema → TypeHint/OperationParam conversion |
 | `crates/holon-mcp-client/src/mcp_sync_engine.rs` | McpSyncEngine: bulk + incremental cache sync, resource-notification re-sync |
 | `crates/holon-mcp-client/src/integration_config.rs` | IntegrationFileConfig: top-level YAML schema, ${VAR} expansion |
-| `crates/holon-app/src/mcp_integrations.rs` | McpIntegrationsModule + McpIntegrationRegistry + RegistryOperationProxy |
+| `crates/holon-app/src/mcp_integrations.rs` | McpIntegrationsModule + IntegrationSupervisor (connects each integration in the background, installs it into the running engine) |
 | `assets/integrations/todoist.yaml` | Todoist integration config (transport, auth, entities, tools, sync, undo) |
 | `frontends/gpui/src/` | GPUI frontend (primary) |
 | `frontends/mcp/src/tools.rs` | MCP tool implementations (unified `execute_query` for PRQL/GQL/SQL) |

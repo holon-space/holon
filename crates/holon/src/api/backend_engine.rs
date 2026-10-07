@@ -461,9 +461,9 @@ impl BackendEngine {
         self.matview_manager.register_fdw_table(cache_table).await;
     }
 
-    /// Set the matview hook called after FDW cache priming.
-    pub async fn set_matview_hook(&self, hook: Arc<dyn holon_core::MatviewHook>) {
-        self.matview_manager.set_hook(hook).await;
+    /// Add a matview hook called after FDW cache priming.
+    pub async fn add_matview_hook(&self, hook: Arc<dyn holon_core::MatviewHook>) {
+        self.matview_manager.add_hook(hook).await;
     }
 
     /// Snapshot of (cache_hits, exists_calls, ddl_creates) from the matview

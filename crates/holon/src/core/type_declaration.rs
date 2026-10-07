@@ -106,6 +106,40 @@ pub async fn declare_type(
     Ok(artifacts)
 }
 
+/// Give a registered free-standing type the write authority derived from its
+/// columns, unless the integration it mirrors already writes it.
+///
+/// A connector's mirror is written by the connector: a second, derived writer
+/// over the mirror table would be refused by the dispatcher and, if it won a
+/// routing scan, write where the system of record cannot see it.
+///
+/// TODO(bugfunnel:
+/// 2026-08-23-todoist-projects-second-write-authority-boot-panic,
+/// "Adjacent hazards"): a sidecar with an `entity_prefix` names its type
+/// `{prefix}{entity}` while its tool descriptors name the bare entity, so the
+/// connector check does not recognise the pair and the prefixed mirror keeps a
+/// derived SQL authority no connector serves.
+pub fn derive_write_authority(
+    type_def: &TypeDefinition,
+    db_handle: &DbHandle,
+    dispatcher: &OperationDispatcher,
+) -> Result<()> {
+    if !crate::di::schema_providers::is_free_standing(type_def) {
+        return Ok(());
+    }
+    if let Some(provider) = type_def.owning_integration()
+        && dispatcher.has_provider(&type_def.name)
+    {
+        tracing::info!(
+            "[derive_write_authority] '{}' mirrors integration '{provider}', which already holds \
+             its write authority — deriving none",
+            type_def.name
+        );
+        return Ok(());
+    }
+    register_write_authority(type_def, db_handle, dispatcher)
+}
+
 /// Give an already-serialized type its write authority.
 ///
 /// Split out because the two ways a type becomes real share this step: a type

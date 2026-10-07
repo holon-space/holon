@@ -602,8 +602,8 @@ pub struct MatviewManager {
     ddl_mutex: Arc<tokio::sync::Mutex<()>>,
     /// Cache tables that have an associated FDW table (`{name}_fdw`).
     fdw_backed_tables: Arc<tokio::sync::RwLock<HashSet<String>>>,
-    /// Optional hook called after FDW cache priming.
-    hook: Arc<tokio::sync::RwLock<Option<Arc<dyn MatviewHook>>>>,
+    /// Hooks called after FDW cache priming, one per integration.
+    hooks: Arc<tokio::sync::RwLock<Vec<Arc<dyn MatviewHook>>>>,
     /// Seeds the fine clock grains a watch reads. Set once, when the session's
     /// clock scheduler exists.
     clock_seeder: Arc<std::sync::OnceLock<Arc<dyn ClockGrainSeeder>>>,
@@ -742,7 +742,7 @@ impl MatviewManager {
             demux_cmd_tx,
             ddl_mutex: shared.ddl_mutex,
             fdw_backed_tables: Arc::new(tokio::sync::RwLock::new(HashSet::new())),
-            hook: Arc::new(tokio::sync::RwLock::new(None)),
+            hooks: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             clock_seeder: Arc::new(std::sync::OnceLock::new()),
             known_views: shared.known_views,
             view_sql: shared.view_sql,
@@ -773,9 +773,10 @@ impl MatviewManager {
             .insert(cache_table.to_string());
     }
 
-    /// Set the hook called after successful FDW cache priming.
-    pub async fn set_hook(&self, hook: Arc<dyn MatviewHook>) {
-        *self.hook.write().await = Some(hook);
+    /// Add a hook called after every successful FDW cache priming. Members
+    /// that do not own the primed table are expected to no-op.
+    pub async fn add_hook(&self, hook: Arc<dyn MatviewHook>) {
+        self.hooks.write().await.push(hook);
     }
 
     /// Install the session's clock-grain seeder. Once per manager.
@@ -1591,7 +1592,8 @@ impl MatviewManager {
                             table_name,
                         );
                         // Notify hook (e.g. subscribe to resource notifications)
-                        if let Some(hook) = self.hook.read().await.as_ref() {
+                        let hooks = self.hooks.read().await.clone();
+                        for hook in hooks {
                             hook.on_fdw_primed(table_name, &fdw_sql).await;
                         }
                     }

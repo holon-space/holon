@@ -5,7 +5,7 @@
 //! @pbt oracle correspondence
 //! @pbt covers integration-connect-timing — an answering peer's write reaches
 //!   the dispatcher; a silent peer's write is refused with an error naming the
-//!   integration.
+//!   integration and its Connecting status.
 //! @pbt slips-if-removed a write to an integration that never connected would
 //!   fail with a generic "no provider" error, or an integration connected
 //!   after boot would never become dispatchable.
@@ -44,11 +44,16 @@ where
         let timing = ref_.integration_connect_timing();
         if !ref_.integration_peer_answers() {
             return match sut.dispatch_integration_op(WRITTEN_ENTITY, WRITE_OP).await {
-                Err(refusal) if refusal.contains(PROVIDER_NAME) => InvariantResult::Ok,
+                Err(refusal)
+                    if refusal.contains(PROVIDER_NAME)
+                        && refusal.contains("status: Connecting") =>
+                {
+                    InvariantResult::Ok
+                }
                 outcome => InvariantResult::Fail(format!(
                     "[inv-integration-op-routable-or-refused] `{PROVIDER_NAME}` drawn {timing:?} \
-                     has not answered, so {WRITTEN_ENTITY}.{WRITE_OP} must be refused naming it; \
-                     got {outcome:?}"
+                     has not answered, so {WRITTEN_ENTITY}.{WRITE_OP} must be refused naming it \
+                     and its status Connecting; got {outcome:?}"
                 )),
             };
         }

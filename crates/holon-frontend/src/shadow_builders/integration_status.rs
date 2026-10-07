@@ -35,6 +35,8 @@ pub fn status_symbol_and_color(status: &str) -> Option<(&'static str, &'static s
     Some(match status.trim() {
         "Connected" => ("●", "success"),
         "Pending" => ("◐", "muted"),
+        "Connecting" => ("◔", "muted"),
+        "Waiting on keychain" => ("⚿", "warning"),
         "Needs auth" => ("⚠", "warning"),
         "Unavailable" => ("○", "error"),
         "Syncing" => ("◌", "muted"),

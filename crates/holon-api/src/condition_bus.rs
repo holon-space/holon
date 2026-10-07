@@ -167,6 +167,21 @@ pub enum ConditionKind {
     ///
     /// All-clear: the provider connecting.
     IntegrationConnectFailed { integration: String, error: String },
+    /// An MCP integration's connect has been running longer than the slow
+    /// threshold. It is not cancelled: a first-run sidecar can legitimately
+    /// take that long. `subject` carries the integration name.
+    ///
+    /// All-clear: the connect finishing, whatever its outcome.
+    IntegrationConnectSlow {
+        integration: String,
+        elapsed_secs: u64,
+    },
+    /// An MCP integration's `${VAR}` resolution is blocked on the OS keychain,
+    /// which is usually waiting for the user to answer an access prompt.
+    /// `subject` carries the integration name.
+    ///
+    /// All-clear: the keychain read returning.
+    IntegrationWaitingOnKeychain { integration: String },
     /// An MCP integration provider needs an OAuth grant before it can connect.
     /// Same blank-page consequence as `IntegrationConnectFailed`, but the fix
     /// is a user action, so it carries the authorization URL.
@@ -521,6 +536,8 @@ impl ConditionKind {
     /// through the compiler instead of retyping the string.
     pub const FOREIGN_ID_COLLISION: &'static str = "foreign-id-collision";
     pub const INTEGRATION_CONNECT_FAILED: &'static str = "integration-connect-failed";
+    pub const INTEGRATION_CONNECT_SLOW: &'static str = "integration-connect-slow";
+    pub const INTEGRATION_WAITING_ON_KEYCHAIN: &'static str = "integration-waiting-on-keychain";
     pub const INTEGRATION_NEEDS_AUTH: &'static str = "integration-needs-auth";
     pub const INTEGRATION_NOT_ENABLED: &'static str = "integration-not-enabled";
     pub const INTEGRATION_SIDECAR_NOT_BUNDLED: &'static str = "integration-sidecar-not-bundled";
@@ -578,6 +595,8 @@ impl ConditionKind {
     pub fn condition_kind(&self) -> &'static str {
         match self {
             Self::IntegrationConnectFailed { .. } => Self::INTEGRATION_CONNECT_FAILED,
+            Self::IntegrationConnectSlow { .. } => Self::INTEGRATION_CONNECT_SLOW,
+            Self::IntegrationWaitingOnKeychain { .. } => Self::INTEGRATION_WAITING_ON_KEYCHAIN,
             Self::IntegrationNeedsAuth { .. } => Self::INTEGRATION_NEEDS_AUTH,
             Self::IntegrationSidecarSuperseded { .. } => Self::INTEGRATION_SIDECAR_SUPERSEDED,
             Self::IntegrationNotEnabled { .. } => Self::INTEGRATION_NOT_ENABLED,

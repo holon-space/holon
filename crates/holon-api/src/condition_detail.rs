@@ -152,6 +152,19 @@ impl ConditionKind {
                 ConditionDetail::prose(format!("{integration}: {error}"))
             }
 
+            Self::IntegrationConnectSlow {
+                integration,
+                elapsed_secs,
+            } => ConditionDetail::prose(format!(
+                "{integration} has been connecting for {elapsed_secs} s; its pages fill in when it \
+                 answers"
+            )),
+
+            Self::IntegrationWaitingOnKeychain { integration } => ConditionDetail::prose(format!(
+                "{integration} is waiting to read its credentials from the keychain; answer the \
+                 keychain prompt to let it connect"
+            )),
+
             Self::IntegrationNeedsAuth {
                 integration,
                 auth_url,

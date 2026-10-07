@@ -145,7 +145,6 @@ pub use traits::UndoAction;
 pub use traits::UnknownOperationError;
 pub use traits::WriteAuthorityReads;
 pub use traits::classify_for_net;
-pub use traits::combine_matview_hooks;
 pub use traits::generate_sync_operation;
 pub use traits::has_sync_fan_out_name;
 pub use traits::owning_page_by_hops;

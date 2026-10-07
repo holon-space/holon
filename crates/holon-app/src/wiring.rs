@@ -45,7 +45,7 @@ use holon_loro_wiring::EventInfraModule;
 use holon_loro_wiring::LoroConfig;
 use holon_loro_wiring::LoroModule;
 
-use crate::mcp_integrations::McpIntegrationRegistry;
+use crate::mcp_integrations::IntegrationSupervisor;
 
 /// Configuration directory path, stored in DI.
 #[derive(Clone, Debug)]
@@ -582,45 +582,23 @@ impl FrontendInjectorExt for Injector {
                 // OrgModeSyncProvider broadcast in holon-orgmode's DI wiring —
                 // no EventBus subscription here anymore.
 
-                // Register FDW-backed tables and set the matview hook for auto-subscription
+                // Integrations connect in the background; each one installs its
+                // tables, hooks and operations into this engine when it connects.
                 #[cfg(not(target_arch = "wasm32"))]
                 async {
-                    let mcp_result = resolver.try_resolve_async::<McpIntegrationRegistry>().await;
-                    if let Ok(mcp_registry) = mcp_result {
-                        for table in mcp_registry.fdw_backed_tables() {
-                            engine.register_fdw_table(&table).await;
+                    match resolver.try_resolve_async::<IntegrationSupervisor>().await {
+                        Ok(supervisor) => {
+                            supervisor.start(engine.clone()).await;
+                            disclosure.performed(BootStep::McpFdwTables);
                         }
-                        for (name, integration) in mcp_registry.named_integrations() {
-                            for grain in &integration.clock_grains {
-                                engine.hold_clock_grain(*grain).await.unwrap_or_else(|e| {
-                                    panic!(
-                                        "integration '{name}' reads the '{}' clock grain, \
-                                         which could not be started: {e:#}",
-                                        grain.as_str()
-                                    )
-                                });
-                            }
-                        }
-                        let hooks = mcp_registry
-                            .integrations()
-                            .iter()
-                            .map(|i| {
-                                i.sync_engine.clone() as std::sync::Arc<dyn holon_core::MatviewHook>
-                            })
-                            .collect();
-                        if let Some(hook) = holon_core::combine_matview_hooks(hooks) {
-                            engine.set_matview_hook(hook).await;
-                        }
-                        disclosure.performed(BootStep::McpFdwTables);
-                    } else {
-                        disclosure.absent_by_config(
+                        Err(_) => disclosure.absent_by_config(
                             BootStep::McpFdwTables,
-                            "no MCP integration registry in this container",
-                        );
+                            "no MCP integration supervisor in this container",
+                        ),
                     }
                 }
                 .instrument(tracing::info_span!(
-                    "di.factory.FrontendSession.mcp_fdw_register"
+                    "di.factory.FrontendSession.start_integration_supervisor"
                 ))
                 .await;
 

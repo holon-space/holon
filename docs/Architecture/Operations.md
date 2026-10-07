@@ -51,7 +51,7 @@ pub struct OperationDispatcher {
 
 // Routes by entity_name to appropriate provider:
 // "block"          → LoroBlockOperations   (authority for blocks; SqlOperationProvider in SqlOnly mode)
-// "todoist-tasks"  → McpOperationProvider  (via RegistryOperationProxy for MCP integrations)
+// "todoist-tasks"  → McpOperationProvider  (registered by the IntegrationSupervisor once the integration connects)
 // "orgmode.sync"   → OrgModeSyncProvider   (single sync-trigger op; rejects any other entity/op)
 ```
 

@@ -403,6 +403,8 @@ fn every_integration_status_word_has_a_glyph() {
 
     let all = [
         IntegrationStatus::Pending,
+        IntegrationStatus::Connecting,
+        IntegrationStatus::WaitingOnKeychain,
         IntegrationStatus::Connected,
         IntegrationStatus::NeedsAuth,
         IntegrationStatus::Unavailable,
@@ -414,6 +416,8 @@ fn every_integration_status_word_has_a_glyph() {
     fn _covers(status: IntegrationStatus) {
         match status {
             IntegrationStatus::Pending
+            | IntegrationStatus::Connecting
+            | IntegrationStatus::WaitingOnKeychain
             | IntegrationStatus::Connected
             | IntegrationStatus::NeedsAuth
             | IntegrationStatus::Unavailable

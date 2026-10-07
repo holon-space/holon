@@ -4752,11 +4752,12 @@ impl OperationEngine for DispatchingOperationEngine {
     }
 
     async fn available_operations(&self, entity_name: &str) -> Vec<OperationDescriptor> {
+        let entity = EntityName::new(entity_name);
         let mut ops: Vec<OperationDescriptor> = self
             .dispatcher
             .operations()
             .into_iter()
-            .filter(|op| op.entity_name == entity_name)
+            .filter(|op| op.entity_name == entity)
             .collect();
         if entity_name == "block" {
             // Fallible at the source, where the set is BUILT, but infallible
@@ -4785,10 +4786,11 @@ impl OperationEngine for DispatchingOperationEngine {
         {
             return true;
         }
+        let entity = EntityName::new(entity_name);
         self.dispatcher
             .operations()
             .into_iter()
-            .any(|op| op.entity_name == entity_name && op.name == op_name)
+            .any(|op| op.entity_name == entity && op.name == op_name)
     }
 
     async fn undo(&self) -> Result<UndoOutcome> {
