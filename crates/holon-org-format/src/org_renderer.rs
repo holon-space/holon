@@ -209,7 +209,7 @@ impl OrgRenderer {
             &head_after,
             &mut |block: &Block, minted_here: Option<&str>| {
                 let mut block = block.clone();
-                if block.content_type == ContentType::Text {
+                if block.content_type.is_heading() {
                     // render_headline_block records the loss for an unreadable carrier.
                     last_section_blank_lines = block.blank_lines().unwrap_or_default().after;
                     Self::apply_page_keyword_edits(&mut block, edits);
@@ -432,7 +432,7 @@ impl OrgRenderer {
         let mut head_ended = false;
         if let Some(roots) = children_by_parent.get(file_id.as_str()) {
             for place in places(roots, file_id, 0) {
-                if place.block.content_type == ContentType::Text && !head_ended {
+                if place.block.content_type.is_heading() && !head_ended {
                     end_with_blank_lines(&mut result, head_after);
                     head_ended = true;
                 }
@@ -517,7 +517,7 @@ impl OrgRenderer {
         let mut section_ended = false;
         if let Some(kids) = children_by_parent.get(block.id.as_str()) {
             for child in places(kids, &block.id, place.level) {
-                if child.block.content_type == ContentType::Text && !section_ended {
+                if child.block.content_type.is_heading() && !section_ended {
                     end_with_blank_lines(result, &blank_lines_after);
                     section_ended = true;
                 }

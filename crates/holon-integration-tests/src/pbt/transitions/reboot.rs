@@ -56,7 +56,7 @@ pub struct Reboot;
 /// Draw weight, `HOLON_PBT_REBOOT_WEIGHT` (default 1). A reboot costs a whole
 /// boot — seconds, not milliseconds — so the default keeps it rare; the red
 /// hunt raises it to make reboots the dominant transition of a run.
-fn reboot_weight() -> u32 {
+pub(crate) fn reboot_weight() -> u32 {
     std::env::var("HOLON_PBT_REBOOT_WEIGHT")
         .ok()
         .map(|s| {

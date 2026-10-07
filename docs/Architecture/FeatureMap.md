@@ -36,7 +36,7 @@ The one-page answer to *"which features could this change impact?"*. Rows are us
 | **Ruled by** | An ADR under [`docs/adr/`](../adr/), or an invariant number from [Model.md](Model.md). |
 | **Mode axes** | Which of [Model.md](Model.md)'s four orthogonal axes the feature's behaviour varies on: **Storage** (Loro store on/off), **File adapter** (org/none), **Merge fidelity** (op-CRDT / base-3-way / LWW), **Transport** (iroh P2P on/off). `—` means the feature behaves the same everywhere. *Headless vs windowed* is a test-slice axis, not a product mode; it is called out in prose where it matters. |
 
-The composed keystone is [`general_e2e_composed_pbt.rs`](../../crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs). Its alphabet is 111 transitions; the repo declares 91 invariant ids plus 17 correspondence-family ids. Open reds are registered in [KeystoneKnownReds.md](../Testing/KeystoneKnownReds.md) — a red listed there is a pass-with-note, anything else is a regression.
+The composed keystone is [`general_e2e_composed_pbt.rs`](../../crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs). Its alphabet is 112 transitions; the repo declares 91 invariant ids plus 17 correspondence-family ids. Open reds are registered in [KeystoneKnownReds.md](../Testing/KeystoneKnownReds.md) — a red listed there is a pass-with-note, anything else is a regression.
 
 ---
 
@@ -250,6 +250,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `BreakIngestedRecipe` — a file that ingested and is then refused joins its format's group like a file that never ingested (D71.b)
 - `CreateBlockUnderFocus` — creation-slot gesture mint under focus root
 - `DelayAdmissions` — descending delays reverse dispatches that admit on their spawned tasks, and leave dispatches that admit at the call in order
+- `DeleteHeadlineWhileOff` — a headline deleted on disk while the app is off is gone from the store and from the file after the boot
 - `DeleteLineFromFile` — a child deleted from its own file is put back while a copy holds it, and the put-back is disclosed; the same deletion in the copy lets it stand (D229.b)
 - `DeletePlacedRoot` — a recipient delete of a placed page, which leaves the share on the receiver and never deletes the owner's page.
 - `DeletePlacementParent` — a recipient delete of a block the placed page hangs under, which leaves the page's share exactly as a delete of the page does and never deletes the owner's page.

@@ -113,6 +113,7 @@ mod declare_typed_schema;
 mod delay_admissions;
 pub mod delete_backward;
 mod delete_document;
+mod delete_headline_while_off;
 mod delete_line_from_file;
 pub mod delete_placed_root;
 pub mod delete_placement_parent;
@@ -223,6 +224,7 @@ pub use declare_typed_schema::DeclareTypedSchema;
 pub use delay_admissions::DelayAdmissions;
 pub use delete_backward::DeleteBackward;
 pub use delete_document::DeleteDocument;
+pub use delete_headline_while_off::DeleteHeadlineWhileOff;
 pub use delete_line_from_file::DeleteLineFromFile;
 pub use delete_placed_root::DeletePlacedRoot;
 pub use delete_placement_parent::DeletePlacementParent;
@@ -366,6 +368,7 @@ crate::declare_e2e_transitions! {
         FullSync(FullSync),
         RebuildViews(RebuildViews),
         EpochFlipRejected(EpochFlipRejected),
+        DeleteHeadlineWhileOff(DeleteHeadlineWhileOff),
         SecondWriterRefused(SecondWriterRefused),
         ExpandToggle(ExpandToggle),
         FocusEditableText(FocusEditableText),
@@ -736,6 +739,7 @@ mod required_caps_guard {
         one!(DeleteDocument, lc::SutAppLifecycle);
         one!(RenameDocument, lc::SutAppLifecycle);
         one!(EpochFlipRejected, lc::SutAppLifecycle);
+        one!(DeleteHeadlineWhileOff, lc::SutAppLifecycle);
         one!(SecondWriterRefused, lc::SutAppLifecycle);
         one!(Reboot, lc::SutAppLifecycle);
         one!(SimulateRestart, lc::SutAppLifecycle);

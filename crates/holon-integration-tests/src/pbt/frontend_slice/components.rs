@@ -219,11 +219,16 @@ struct BootParams {
 
 /// What a reboot does while the vault is free: after the old session shut
 /// down and before the new one boots.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub enum RebootGap {
     Nothing,
     /// Boot with the consolidator flipped; it must fail with invariant 10.
     EpochFlipRejected,
+    /// An external editor cuts `block_id`'s section out of `doc`'s org file.
+    DeleteHeadline {
+        block_id: EntityUri,
+        doc: EntityUri,
+    },
 }
 
 /// A composition component wrapping a real headless frontend stack. Owns the
@@ -1107,6 +1112,14 @@ impl HeadlessFrontendComponent {
     pub(crate) async fn reboot_through(&self, between: RebootGap) {
         let before = self.store_block_ids().await;
         let loro_enabled = self.loro_doc_store().is_some();
+        // Resolved while the session is up: the file and the store are only
+        // readable through it.
+        let headline_cut = match &between {
+            RebootGap::DeleteHeadline { block_id, doc } => {
+                Some(self.cut_headline_from_file(block_id, doc).await)
+            }
+            RebootGap::Nothing | RebootGap::EpochFlipRejected => None,
+        };
 
         // Drop CDC consumers before the actor goes away (mirrors
         // `TestEnvironment::stop_app`, which this is the composed analogue of).
@@ -1149,6 +1162,11 @@ impl HeadlessFrontendComponent {
                 )
                 .await;
             }
+            RebootGap::DeleteHeadline { .. } => {
+                let cut = headline_cut.as_ref().expect("resolved before shutdown");
+                self.write_org_file(&cut.path, &cut.without, "reboot/delete_headline")
+                    .await;
+            }
         }
 
         let booted = Self::boot_session(&self.store, &self.boot_params).await;
@@ -1167,6 +1185,20 @@ impl HeadlessFrontendComponent {
         // loud rather than tolerate.
         let wedge = crate::pbt::invariants::bodies::settle_budget::wedge_deadline();
         let booted = self.booted();
+        // The org idle signal counts only the watch loop's passes, and the
+        // initial scan runs before that loop: without this wait the projections
+        // look settled while a file changed during the gap is not yet ingested.
+        if let Ok(scanned) = booted
+            .injector
+            .try_resolve::<holon_orgmode::FileWatcherReadySignal>()
+        {
+            tokio::time::timeout(wedge, scanned.wait_ready())
+                .await
+                .unwrap_or_else(|_| {
+                    panic!("[reboot] the second boot's org initial scan did not finish within {wedge:?}")
+                })
+                .unwrap_or_else(|e| panic!("[reboot] the second boot's org initial scan failed: {e:#}"));
+        }
         let converged = Self::converge_boot(&booted.engine, &booted.injector, wedge).await;
         drop(booted);
         assert!(
@@ -1182,15 +1214,67 @@ impl HeadlessFrontendComponent {
         // and every post-reboot oracle would be comparing against a doubled
         // vault while still passing its own shape checks. Assert the identity
         // here, where the two sets are both in hand.
+        let removed: std::collections::BTreeSet<String> = match &headline_cut {
+            None => Default::default(),
+            Some(cut) => {
+                let disk = self
+                    .read_vault_file(&cut.path, "reboot/delete_headline")
+                    .await;
+                let written_back: Vec<&EntityUri> = cut
+                    .removed
+                    .iter()
+                    .filter(|id| holon_orgmode::subtree::cut_subtree(&disk, id.id()).is_some())
+                    .collect();
+                assert!(
+                    written_back.is_empty(),
+                    "[reboot] {written_back:?} were cut from {:?} while the app was off, and the \
+                     boot wrote them back:\n{disk}",
+                    cut.path
+                );
+                cut.removed.iter().map(|id| id.to_string()).collect()
+            }
+        };
+        let expected: std::collections::BTreeSet<String> =
+            before.difference(&removed).cloned().collect();
         let after = self.store_block_ids().await;
         assert_eq!(
-            before,
+            expected,
             after,
-            "[reboot] the block set changed across a reboot — a reboot re-opens the store, it \
-             does not re-seed it. Gained {:?}, lost {:?}",
-            after.difference(&before).collect::<Vec<_>>(),
-            before.difference(&after).collect::<Vec<_>>()
+            "[reboot] the block set after the reboot is not the one before it minus the blocks \
+             cut from their file while the app was off ({removed:?}) — a reboot re-opens the \
+             store, it does not re-seed it. Gained {:?}, lost {:?}",
+            after.difference(&expected).collect::<Vec<_>>(),
+            expected.difference(&after).collect::<Vec<_>>()
         );
+    }
+
+    /// `block_id`'s section cut out of `doc`'s file as an editor saves it, and
+    /// the subtree that leaves the store with it.
+    async fn cut_headline_from_file(&self, block_id: &EntityUri, doc: &EntityUri) -> HeadlineCut {
+        const SEAM: &str = "reboot/delete_headline";
+        let block_id = self.resolve_id(block_id);
+        let path = self.doc_file(doc, SEAM).await;
+        let disk = self.read_vault_file(&path, SEAM).await;
+        let (without, _) = holon_orgmode::subtree::cut_subtree(&disk, block_id.id())
+            .unwrap_or_else(|| panic!("[{SEAM}] {path:?} does not hold {block_id}:\n{disk}"));
+        let blocks = self.all_blocks().await;
+        let mut removed = std::collections::BTreeSet::from([block_id]);
+        loop {
+            let grown: Vec<EntityUri> = blocks
+                .iter()
+                .filter(|b| removed.contains(&b.parent_id) && !removed.contains(&b.id))
+                .map(|b| b.id.clone())
+                .collect();
+            if grown.is_empty() {
+                break;
+            }
+            removed.extend(grown);
+        }
+        HeadlineCut {
+            path,
+            without,
+            removed,
+        }
     }
 
     /// The production `BackendEngine` backing this session — shared (`Arc`) so
@@ -4866,6 +4950,14 @@ impl SutSeamMutate for HeadlessFrontendComponent {
     }
 }
 
+/// An editor's deletion of a headline from its file: the file as saved, and
+/// the blocks it removes.
+struct HeadlineCut {
+    path: PathBuf,
+    without: String,
+    removed: std::collections::BTreeSet<EntityUri>,
+}
+
 /// The two files of an external cut & paste of a block, rendered from the
 /// store: each with the block's subtree and without it.
 struct CutPaste {
@@ -5333,6 +5425,14 @@ impl SutAppLifecycle for HeadlessFrontendComponent {
 
     async fn reboot(&self) {
         HeadlessFrontendComponent::reboot(self).await;
+    }
+
+    async fn reboot_after_deleting_headline(&self, block_id: &EntityUri, doc: &EntityUri) {
+        self.reboot_through(RebootGap::DeleteHeadline {
+            block_id: block_id.clone(),
+            doc: doc.clone(),
+        })
+        .await;
     }
 
     async fn simulate_restart(&self) {

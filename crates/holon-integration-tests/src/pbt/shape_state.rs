@@ -59,6 +59,7 @@ const NOT_JUDGED: &[&str] = &[
     "PasteBlockCopy",
     "EditBlockCopy",
     "DeleteLineFromFile",
+    "DeleteHeadlineWhileOff",
     "FinishCutPaste",
     "MoveBlockBetweenFiles",
     "CreateDocument",

@@ -142,7 +142,10 @@ impl ReferenceState {
     /// copy's pasted ancestor, and the model does not describe a merge
     /// without it: the owner's file is not deleted then.
     pub fn copies_window_gate(&self, variant: &str) -> Validated<(), Reason> {
-        let restart = matches!(variant, "Reboot" | "SimulateRestart" | "EpochFlipRejected");
+        let restart = matches!(
+            variant,
+            "Reboot" | "SimulateRestart" | "EpochFlipRejected" | "DeleteHeadlineWhileOff"
+        );
         let base_forgotten = self.files.copies.values().any(|copy| !copy.base_known);
         check(
             (self.files.copies.is_empty() || ALLOWED_WHILE_COPIES_STAND.contains(&variant))

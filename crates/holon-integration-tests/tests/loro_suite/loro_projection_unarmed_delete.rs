@@ -1,27 +1,29 @@
-//! The UNARMED delete keeps its gate after the fast path stopped checking
-//! `armed`.
+//! The UNARMED delete gate: which rows an unarmed full walk may delete.
+//!
+//! Before `arm()` the sink holds raw-inserted seed-layout rows Loro never
+//! held, and the full walk must keep them. The row of a block Loro held and
+//! tombstoned is deleted like any other: that is how the org initial scan
+//! removes a headline deleted from its file while the app was off (bugfunnel
+//! 2026-10-07-headline-deleted-while-off-is-written-back-at-boot).
 //!
 //! `LoroProjection::project`'s incremental fast path is entered on `seeded`
-//! alone — `armed` gates DELETES, not creates/updates, and gating the fast path
-//! on it made every org-scan commit walk the whole accumulated tree. The delete
-//! gate therefore has exactly one implementation, on the full walk, and an
-//! unarmed batch that carries a delete is routed there
-//! (`FullReason::UnarmedDelete`). These tests pin that routing: without it an
-//! unarmed delete would reach the sink through the fast path, wiping the
-//! SQL-only seed-layout rows the gate exists to protect.
-//!
-//! The route is observable through `MemorySink::read_calls`: only the full walk
-//! reads the sink (`read_sql_snapshot`) for its diff base.
+//! alone, and an unarmed batch that carries a delete is routed to the full
+//! walk (`FullReason::UnarmedDelete`), where the gate has its one
+//! implementation. The route is observable through `MemorySink::read_calls`:
+//! only the full walk reads the sink (`read_sql_snapshot`) for its diff base.
 //!
 //! @pbt kind harness
 //! @pbt covers loro-projection-unarmed-delete — an unarmed batch carrying a
-//! delete (global or layout) routes to the full walk, which withholds it; an
-//! unarmed batch without one stays on the fast path
+//! delete (global or layout) routes to the full walk, which deletes the row of
+//! a block Loro tombstoned and keeps a row Loro never held or a not yet
+//! rehydrated share holds; an unarmed batch without one stays on the fast path
 
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 
 use anyhow::Result;
+use holon_api::EntityUri;
+use holon_api::block::Block;
 use holon_core::DownstreamProjection;
 use holon_core::OriginTaggedWrites;
 use holon_core::ProjectionPass;
@@ -93,17 +95,16 @@ async fn an_unarmed_global_delete_routes_to_the_full_walk_which_withholds_it() -
     );
     assert_eq!(
         sink.row_ids(),
-        ["block:gone-id", "block:keep-id"],
-        "the unarmed delete gate held: the row is still there"
+        ["block:keep-id"],
+        "Loro held the block and tombstoned it, so the unarmed walk deletes its row"
     );
-    // This walk withheld its only op, so it emitted NONE — and it must still be
-    // counted. `full_passes` is the boot's walk budget; a walk invisible to it
-    // is a quadratic that no scale test can see. (nextest gives each test its
-    // own process, so these process-global counters are this test's alone.)
+    // `full_passes` is the boot's walk budget; a walk invisible to it is a
+    // quadratic that no scale test can see. (nextest gives each test its own
+    // process, so these process-global counters are this test's alone.)
     assert_eq!(
         holon_loro::projection_stats::snapshot().full_passes,
         2,
-        "the zero-op full walk counts: the cold-boot seed plus this one"
+        "the cold-boot seed plus this one"
     );
     Ok(())
 }
@@ -132,8 +133,111 @@ async fn an_unarmed_layout_delete_routes_to_the_full_walk_too() -> Result<()> {
     );
     assert_eq!(
         sink.row_ids(),
-        ["block:keep-id", "block:layout-gone-id"],
-        "the unarmed delete gate held for the layout row too"
+        ["block:keep-id"],
+        "a layout block Loro tombstoned is deleted while unarmed too"
+    );
+    Ok(())
+}
+
+/// The reboot shape: the previous session's `holon.db` holds the rows of
+/// `keep-id` and `gone-id`, the boot seed raw-inserted `seed-only-id`, and the
+/// org initial scan tombstoned `gone-id` in Loro before the first pass.
+#[tokio::test]
+async fn the_unarmed_cold_boot_walk_deletes_what_loro_tombstoned_and_keeps_what_it_never_held()
+-> Result<()> {
+    let (_tempdir, doc_store, sink, projection) = subscribed_projection().await?;
+
+    insert_root_block_in(&doc_store, DocScope::Global, "keep-id", "kept").await?;
+    let gone =
+        insert_root_block_in(&doc_store, DocScope::Global, "gone-id", "deleted on disk").await?;
+    for (id, content) in [
+        ("keep-id", "kept"),
+        ("gone-id", "deleted on disk"),
+        ("seed-only-id", "a seed layout row"),
+    ] {
+        sink.plant_row(Block::new_text(
+            EntityUri::block(id),
+            EntityUri::no_parent(),
+            content,
+        ));
+    }
+    delete_block_in(&doc_store, DocScope::Global, gone).await?;
+
+    assert!(!projection.is_armed());
+    assert_eq!(projection.project().await?, ProjectionPass::Converged);
+    assert_eq!(
+        sink.row_ids(),
+        ["block:keep-id", "block:seed-only-id"],
+        "the unarmed walk deletes the row of the block Loro tombstoned and keeps the row Loro \
+         never held"
+    );
+    Ok(())
+}
+
+/// The reboot shape of a persisted block share: sharing tombstoned the subtree
+/// in the global doc and left a mount in its place, and the boot walk runs
+/// before rehydration registers the shared doc again.
+#[tokio::test]
+async fn the_unarmed_cold_boot_walk_keeps_the_rows_of_an_unregistered_share() -> Result<()> {
+    let (_tempdir, doc_store, sink, projection) = subscribed_projection().await?;
+    let projection = projection.with_shared_trees(Arc::new(
+        holon_loro::shared_tree::InMemorySharedTreeStore::new(),
+    ));
+
+    let host = insert_root_block_in(&doc_store, DocScope::Global, "host-id", "host").await?;
+    let collab = doc_store.read().await.get_doc(DocScope::Global).await?;
+    collab.with_write(holon_loro::WriteOrigin::Probe("share"), |txn| {
+        let tree = txn.get_tree(holon_loro::TREE_NAME);
+        let mut parent = host;
+        let mut shared_root = None;
+        for id in ["shared-root-id", "shared-kid-id"] {
+            let node = tree.create(Some(parent))?;
+            holon_loro::write_stable_id(txn, node, id)?;
+            let meta = tree.get_meta(node)?;
+            meta.insert(holon_loro::CONTENT_TYPE, loro::LoroValue::from("text"))?;
+            meta.ensure_mergeable_text(holon_loro::CONTENT_RAW)?
+                .insert(0, id)?;
+            shared_root.get_or_insert(node);
+            parent = node;
+        }
+        let extracted = holon_loro::shared_tree::extract_for_share(
+            txn,
+            shared_root.expect("the loop created the shared root"),
+            Some(host),
+            "share-id".into(),
+            holon_loro::shared_tree::HistoryRetention::None,
+        )?;
+        let mount = holon_loro::shared_tree::commit_share_prune(txn, &extracted)?;
+        holon_loro::write_stable_id(txn, mount, "container-id")?;
+        holon_loro::shared_tree::record_mount(
+            &tree,
+            mount,
+            &holon_loro::shared_tree::ShareKind::Block,
+            holon_loro::shared_tree::MountRole::Owner,
+        )?;
+        Ok(())
+    })?;
+    for (id, parent) in [
+        ("host-id", EntityUri::no_parent()),
+        ("container-id", EntityUri::block("host-id")),
+        ("shared-root-id", EntityUri::block("container-id")),
+        ("shared-kid-id", EntityUri::block("shared-root-id")),
+    ] {
+        sink.plant_row(Block::new_text(EntityUri::block(id), parent, id));
+    }
+
+    assert!(!projection.is_armed());
+    assert_eq!(projection.project().await?, ProjectionPass::Converged);
+    assert_eq!(
+        sink.row_ids(),
+        [
+            "block:container-id",
+            "block:host-id",
+            "block:shared-kid-id",
+            "block:shared-root-id"
+        ],
+        "the shared blocks are tombstoned in the global doc but live in the share the mount \
+         places, so the walk before rehydration keeps their rows"
     );
     Ok(())
 }

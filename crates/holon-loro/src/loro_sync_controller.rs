@@ -279,9 +279,10 @@ fn pass_outcome(ungrounded: usize, settled: bool) -> ProjectionPass {
 /// pass must report [`ProjectionPass::Incomplete`] because of them.
 ///
 /// The delete gate fires for two unrelated reasons and they must not be
-/// conflated. An UNARMED projection withholds deletes by design: Loro is still
-/// being seeded, the sink legitimately holds raw-inserted seed-layout rows Loro
-/// does not have yet, and the all-clear is `arm()`, not another pass. Calling
+/// conflated. An UNARMED projection withholds the deletes of rows Loro never
+/// held by design: Loro is still being seeded, the sink legitimately holds
+/// raw-inserted seed-layout rows Loro does not have yet, and the all-clear is
+/// `arm()`, not another pass. Calling
 /// that incomplete would make every cold boot exhaust its retry budget and
 /// raise a banner — and, since the org path now fails on a still-incomplete
 /// flush, would fail the boot scan outright.
@@ -720,8 +721,9 @@ pub struct LoroProjection {
     /// (via `FileSyncController::on_file_changed`) before the seed has mirrored
     /// raw-inserted layout blocks (`seed_default_layout`'s journals /
     /// root-layout / sidebar) into Loro; an unarmed projection emits creates +
-    /// updates but withholds deletes, so those SQL-only seed rows survive until
-    /// the seed reconciles them into Loro. Creates/updates are never gated.
+    /// updates and deletes only the rows of blocks Loro tombstoned, so those
+    /// SQL-only seed rows survive until the seed reconciles them into Loro.
+    /// Creates/updates are never gated.
     armed: Arc<AtomicBool>,
     /// The last-projected block snapshot, kept live in memory and mutated
     /// **in place** by the incremental fast path (O(changed) per commit). It is
@@ -987,10 +989,10 @@ impl LoroProjection {
     /// Org assets via `create_in_tree` intents, incl. the raw-inserted seed
     /// layout) has populated Loro, so that Loro is now the complete authority
     /// and deletes of sink-only rows are legitimate. Idempotent.
-    /// Whether the DELETE pass is armed. An unarmed projection withholds
-    /// deletes, so SQL can legitimately hold rows Loro has tombstoned —
-    /// a diagnostic a differential oracle needs in order to say WHY the two
-    /// disagree instead of only that they do.
+    /// Whether the DELETE pass is armed. An unarmed projection withholds the
+    /// deletes of rows Loro never held, so SQL can legitimately hold rows Loro
+    /// does not — a diagnostic a differential oracle needs in order to say WHY
+    /// the two disagree instead of only that they do.
     pub fn is_armed(&self) -> bool {
         self.armed.load(Ordering::SeqCst)
     }
@@ -1258,8 +1260,9 @@ impl LoroProjection {
                     self.read_model.publish_delta(&staging);
                     if has_unarmed_delete {
                         // The unarmed delete gate lives on the full walk, which
-                        // withholds deletes and reports the pass complete
-                        // anyway (`withheld_deletes_are_owed`). Routing here
+                        // withholds the deletes of rows Loro never held and
+                        // reports the pass complete anyway
+                        // (`withheld_deletes_are_owed`). Routing here
                         // keeps ONE implementation of that rule instead of a
                         // second copy in the fast path.
                         full_reason = Some(FullReason::UnarmedDelete);
@@ -1405,14 +1408,24 @@ impl LoroProjection {
 
         let mut ops = diff_snapshots_to_ops(&before, &after);
 
-        // Delete-pass gate. Withhold deletes when the projection is not yet armed
-        // (Loro still seeding — raw-inserted seed-layout rows not yet mirrored) or
-        // the snapshot is unsettled (a live node was transiently meta-incomplete,
-        // so a still-live block looks "deleted"). Creates / updates always flow.
+        // Delete-pass gate. An unsettled snapshot withholds every delete: a live
+        // node was transiently meta-incomplete, so a still-live block looks
+        // deleted. An unarmed projection deletes only the rows of blocks Loro
+        // tombstoned; the sink's other rows are seed-layout rows Loro never held.
+        // Creates / updates always flow.
         let mut ungrounded = 0usize;
-        if !armed || !after_settled {
+        if (!armed || !after_settled) && ops.iter().any(|(name, _)| name == "delete") {
+            let deletable = if after_settled {
+                let mut ids = collab.with_read(tombstoned_block_ids)?;
+                ids.extend(layout.with_read(tombstoned_block_ids)?);
+                ids
+            } else {
+                std::collections::HashSet::new()
+            };
             let n = ops.len();
-            ops.retain(|(name, _)| name != "delete");
+            ops.retain(|(name, params)| {
+                name != "delete" || deletable.contains(delete_target(params))
+            });
             let withheld = n - ops.len();
             if withheld > 0 {
                 if withheld_deletes_are_owed(armed) {
@@ -2876,6 +2889,69 @@ fn block_diff_params(old: &SnapshotBlock, new: &SnapshotBlock) -> holon_api::Sto
     }
 
     params
+}
+
+/// The block ids `doc` held and deleted: its tombstoned tree nodes that carry a
+/// `STABLE_ID`. A subtree a live mount places is not deleted: sharing it
+/// tombstoned it here, and the share holds it on.
+fn tombstoned_block_ids(doc: &loro::LoroDoc) -> Result<std::collections::HashSet<String>> {
+    let tree = doc.get_tree(crate::loro_backend::TREE_NAME);
+    let nodes = tree.get_nodes(true);
+    let mut tombstoned = Vec::new();
+    let mut live = Vec::new();
+    for node in &nodes {
+        if !tree.is_node_deleted(&node.id)? {
+            live.push(node.id);
+            continue;
+        }
+        if let Some(sid) = crate::settled_read::read_stable_id(&tree.get_meta(node.id)?) {
+            tombstoned.push((node.id, holon_api::EntityUri::block(&sid).to_string()));
+        }
+    }
+    if tombstoned.is_empty() {
+        return Ok(std::collections::HashSet::new());
+    }
+    let mounted: std::collections::HashSet<loro::TreeID> = live
+        .into_iter()
+        .filter_map(|node| crate::shared_tree::read_mount_info(&tree, node))
+        .map(|info| info.shared_root)
+        .collect();
+    if mounted.is_empty() {
+        return Ok(tombstoned.into_iter().map(|(_, id)| id).collect());
+    }
+    let parents: HashMap<loro::TreeID, loro::TreeParentId> =
+        nodes.iter().map(|node| (node.id, node.parent)).collect();
+    let placed_by_mount = |node: loro::TreeID| -> Result<bool> {
+        let mut id = node;
+        loop {
+            if mounted.contains(&id) {
+                return Ok(true);
+            }
+            match parents.get(&id) {
+                Some(loro::TreeParentId::Node(parent)) => id = *parent,
+                Some(_) => return Ok(false),
+                None => anyhow::bail!(
+                    "tombstoned node {node:?} has the ancestor {id:?}, which is not a node of \
+                     the tree"
+                ),
+            }
+        }
+    };
+    let mut ids = std::collections::HashSet::new();
+    for (node, id) in tombstoned {
+        if !placed_by_mount(node)? {
+            ids.insert(id);
+        }
+    }
+    Ok(ids)
+}
+
+/// The row a `delete` op built by [`diff_snapshots_to_ops`] removes.
+fn delete_target(params: &holon_api::StorageEntity) -> &str {
+    params
+        .get("id")
+        .and_then(|v| v.as_string())
+        .unwrap_or_else(|| panic!("a delete op carries its row id as a string: {params:?}"))
 }
 
 /// The rows the share projections own right now: every live node of every

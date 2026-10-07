@@ -4030,6 +4030,13 @@ pub trait SutAppLifecycle {
     /// survive unchanged; only in-memory UI state (caret, editor buffers,
     /// overlays) resets.
     async fn reboot(&self);
+    /// [`Self::reboot`], with `block_id`'s section cut out of `doc`'s org
+    /// file while no session holds the vault.
+    async fn reboot_after_deleting_headline(
+        &self,
+        block_id: &holon_api::EntityUri,
+        doc: &holon_api::EntityUri,
+    );
     async fn create_document(&self, file_name: &str);
     async fn delete_document(&self, file_name: &str);
     /// `RenameDocument`: move the org file `old_file_name` -> `new_file_name`

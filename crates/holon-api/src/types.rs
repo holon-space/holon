@@ -178,9 +178,15 @@ impl ContentType {
     /// group. Every renderer and the reference oracle order
     /// siblings through this one rule.
     pub fn sibling_order_group(self) -> u8 {
+        u8::from(self.is_heading())
+    }
+
+    /// Outline formats write this kind as a heading (an org headline); the
+    /// other kinds are section content of their parent's heading.
+    pub fn is_heading(self) -> bool {
         match self {
-            ContentType::Source | ContentType::Image => 0,
-            ContentType::Text => 1,
+            ContentType::Text => true,
+            ContentType::Source | ContentType::Image => false,
         }
     }
 

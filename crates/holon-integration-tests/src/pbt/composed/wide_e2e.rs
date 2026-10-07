@@ -2285,7 +2285,9 @@ impl ComposedSlice for WideE2E {
     fn is_reboot(t: &E2ETransition) -> bool {
         matches!(
             t,
-            E2ETransition::Reboot(_) | E2ETransition::EpochFlipRejected(_)
+            E2ETransition::Reboot(_)
+                | E2ETransition::EpochFlipRejected(_)
+                | E2ETransition::DeleteHeadlineWhileOff(_)
         )
     }
 
@@ -2301,6 +2303,10 @@ impl ComposedSlice for WideE2E {
         let between = match transition {
             E2ETransition::Reboot(_) => RebootGap::Nothing,
             E2ETransition::EpochFlipRejected(_) => RebootGap::EpochFlipRejected,
+            E2ETransition::DeleteHeadlineWhileOff(t) => RebootGap::DeleteHeadline {
+                block_id: t.block_id.clone(),
+                doc: t.doc.clone(),
+            },
             other => unreachable!("is_reboot admits only reboots, got {other:?}"),
         };
         Some(reboot_wide(handle, caps, resolver, ref_state, between).await)
