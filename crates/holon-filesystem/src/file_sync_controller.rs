@@ -328,6 +328,7 @@ const BATCH_READ_SITE: &str = "batch-pass-read";
 const DUPLICATE_ID_SITE: &str = "duplicate-doc-id";
 const UNSETTLED_IDENTITY_SITE: &str = "unsettled-doc-identity";
 const DUPLICATE_BLOCK_SLUG_SITE: &str = "duplicate-block-slug";
+const SHARED_NAME_CHAIN_SITE: &str = "shared-name-chain";
 
 /// The identity another file already claims, and therefore the reason a file
 /// is refused.
@@ -382,6 +383,11 @@ pub enum IngestOutcome {
     /// content. The poller re-attempts as soon as the file's size or mtime
     /// changes, which is what the arriving bytes do.
     RefusedEmptyFile,
+    /// Nothing of the file was read into the store: whether another file still
+    /// claims its document could not be determined (the claimant's stat
+    /// failed). Disclosed at the refusal site; the poller re-attempts on its
+    /// next tick.
+    UnsettledIdentity,
 }
 
 /// A format adapter refused a file's bytes, so nothing of the file was
@@ -1683,10 +1689,12 @@ impl FileSyncController {
             Err(e) => {
                 warn!(
                     "[FileSyncController] load_file_projections failed; cold-boot fast path \
-                     disabled, will re-ingest every file. Error: {e}"
+                     disabled, will re-ingest every file, and no persisted read-only home claims \
+                     its page before the writable files ingest. Error: {e}"
                 );
             }
         }
+        self.claim_persisted_read_only_homes()?;
 
         // A matching hash proves the consolidator holds the file's blocks only
         // while the consolidator is not behind the sink that stamped the hash.
@@ -2608,6 +2616,48 @@ impl FileSyncController {
         self.raise_ingest_refused_banner(refused, &detail);
     }
 
+    /// Disclose a refused file whose name chain names a document another file
+    /// on disk already holds: ERROR + a sticky degraded banner the first time,
+    /// DEBUG on every repeat.
+    fn disclose_shared_name_chain(
+        &mut self,
+        doc_id: &EntityUri,
+        claimed_by: &Path,
+        refused: &Path,
+        canonical: &CanonicalPath,
+    ) {
+        if !self
+            .duplicate_id_disclosed
+            .insert((canonical.clone(), SHARED_NAME_CHAIN_SITE))
+        {
+            tracing::debug!(
+                doc_id = %doc_id,
+                claimed_by = %claimed_by.display(),
+                refused = %refused.display(),
+                "[FileSyncController] shared name chain still refused (already disclosed once \
+                 at ERROR)",
+            );
+            return;
+        }
+        let detail = format!(
+            "SHARED PAGE NAME: {} and {} differ only in their extension, so both name the page \
+             '{doc_id}', and {} is NOT ingested — its blocks would merge into that page and the \
+             write-back of one file would carry the other's content. Rename one of the two \
+             files. The claimant is the file that held the page first: a recipe an earlier \
+             run recorded, else whichever file this session ingested first.",
+            claimed_by.display(),
+            refused.display(),
+            refused.display(),
+        );
+        tracing::error!(
+            doc_id = %doc_id,
+            claimed_by = %claimed_by.display(),
+            refused = %refused.display(),
+            "[FileSyncController] {detail} Repeats for this path log at DEBUG.",
+        );
+        self.raise_ingest_refused_banner(refused, &detail);
+    }
+
     /// Raise the sticky degraded banner behind a whole-file ingest refusal.
     ///
     /// Both duplicate-id refusals cost the user the same thing — one whole
@@ -2688,6 +2738,42 @@ impl FileSyncController {
             .insert(canonical.clone(), doc_id.clone());
         self.doc_home.insert(doc_id.clone(), canonical);
         self.publish_write_tier(doc_id, path, members)
+    }
+
+    /// Record the home of every document a persisted read-only `file` row
+    /// names, before any file of this boot ingests.
+    ///
+    /// A boot ingests every writable file before any read-only one, so without
+    /// this a writable file whose name chain names a recipe's page would find
+    /// no claimant and take the page. A row whose file is gone claims nothing:
+    /// [`live_claimant_of`](Self::live_claimant_of) stats the home.
+    fn claim_persisted_read_only_homes(&mut self) -> Result<()> {
+        let mut homes: Vec<(CanonicalPath, EntityUri)> = self
+            .last_projection_doc
+            .iter()
+            .filter(|(path, _)| self.is_read_only_path(path.as_path_buf()))
+            .map(|(path, doc)| (path.clone(), doc.clone()))
+            .collect();
+        homes.sort_by(|a, b| a.0.as_path_buf().cmp(b.0.as_path_buf()));
+        for (canonical, doc_id) in homes {
+            if self.doc_home.contains_key(&doc_id) {
+                continue;
+            }
+            let path = canonical.as_path_buf().clone();
+            match self.persisted_read_only_blocks.get(&canonical).cloned() {
+                Some(blocks) => {
+                    let members = ReadOnlyMembers::from_persisted_row(&path, blocks)
+                        .map_err(|e| anyhow::anyhow!("[FileSyncController] {e}"))?;
+                    self.note_doc_home(&doc_id, &path, HomeMembership::Declared(members))?;
+                }
+                // A damaged row: the claim needs no membership, and the file's
+                // own ingest records one from its parse.
+                None => {
+                    self.doc_home.insert(doc_id, canonical);
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Whether `path`'s format refuses write-back.
@@ -4800,7 +4886,7 @@ impl FileSyncController {
                 Ok(None) => {}
                 Err(e) => {
                     self.disclose_unsettled_identity(root, path, &canonical, &e);
-                    return Ok(IngestOutcome::Ingested);
+                    return Ok(IngestOutcome::UnsettledIdentity);
                 }
             }
         }
@@ -5013,12 +5099,29 @@ impl FileSyncController {
             // the store has no page for this name chain BEFORE
             // `resolve_dir_page_chain` create-if-absents it.
             None => {
-                let existed = self
-                    .doc_manager
-                    .find_by_name_chain(&segment_refs)
-                    .await?
-                    .is_some();
-                (self.resolve_dir_page_chain(&segment_refs).await?, !existed)
+                let existing = self.doc_manager.find_by_name_chain(&segment_refs).await?;
+                // A name chain drops the extension, so `Pasta.org` and
+                // `Pasta.cook` in one folder name the same document. The
+                // second file would take the first one's home.
+                if let Some(doc) = &existing {
+                    match self.live_claimant_of(&doc.id, &canonical).await {
+                        Ok(Some(claimant)) => {
+                            self.disclose_shared_name_chain(&doc.id, &claimant, path, &canonical);
+                            return Ok(IngestOutcome::RefusedWhileClaimed(ClaimedId::Document(
+                                doc.id.clone(),
+                            )));
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            self.disclose_unsettled_identity(&doc.id, path, &canonical, &e);
+                            return Ok(IngestOutcome::UnsettledIdentity);
+                        }
+                    }
+                }
+                (
+                    self.resolve_dir_page_chain(&segment_refs).await?,
+                    existing.is_none(),
+                )
             }
         };
         let document_uri = document.id.clone();
@@ -8356,6 +8459,8 @@ impl FileSyncController {
                         },
                     );
                 }
+                // No entry: the stat that failed is the next tick's question.
+                Ok(IngestOutcome::UnsettledIdentity) => {}
                 Err(e) => {
                     self.ingest_quarantine.insert(
                         canonical.clone(),

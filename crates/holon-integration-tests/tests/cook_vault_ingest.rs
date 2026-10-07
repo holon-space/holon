@@ -1967,3 +1967,181 @@ fn renaming_a_refused_recipe_with_a_document_moves_its_refusal_to_the_new_path()
         assert!(refused_names(&app, "cooklang").is_empty());
     });
 }
+
+/// A recipe and an org page that share the stem `Pasta`. A name chain drops
+/// the extension, so both files name ONE page.
+const PASTA_COOK: &str = "\
+---
+title: Pasta
+---
+Boil the @water{2%l} and add the @pasta{200%g}.
+";
+
+const PASTA_STEP_TEXT: &str = "Boil the water";
+
+const PASTA_ORG_WITH_ID: &str =
+    "#+TITLE: Pasta\n#+ID: pasta-page\n* My pasta notes\n:PROPERTIES:\n:ID: pasta-note\n:END:\n";
+const PASTA_ORG_WITHOUT_ID: &str = "* My pasta notes\n:PROPERTIES:\n:ID: pasta-note\n:END:\n";
+
+/// A boot ingests the org page first, so the org page keeps the page and the
+/// recipe is refused: the org page stays editable, neither file takes the
+/// other's content, and the refusal is disclosed.
+#[test]
+fn an_org_page_and_a_same_stem_recipe_stay_two_files_at_boot() {
+    init_tracing();
+    for org in [PASTA_ORG_WITHOUT_ID, PASTA_ORG_WITH_ID] {
+        let rt = runtime();
+        rt.clone().block_on(async {
+            let app = TestEnvironmentBuilder::new()
+                .with_vault_file("Pasta.cook", PASTA_COOK)
+                .with_vault_file("Pasta.org", org)
+                .build(rt.clone())
+                .await
+                .expect("a vault holding a same-stem org page and recipe must boot");
+            app.wait_for_org_files_stable(25, Duration::from_millis(3000))
+                .await;
+
+            assert_eq!(
+                edit_refusal(&app, "block:pasta-note").await,
+                None,
+                "the org page left the write authority: the recipe that shares its name took \
+                 the page's home (org file:\n{org})"
+            );
+            let deadline = std::time::Instant::now() + SYNC_TIMEOUT;
+            let on_disk = loop {
+                let on_disk = read_vault_file(&app, "Pasta.org")
+                    .await
+                    .expect("Pasta.org stays on disk");
+                if on_disk.contains("TYPED AFTER A REBOOT") || std::time::Instant::now() >= deadline
+                {
+                    break on_disk;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            };
+            assert!(
+                on_disk.contains("TYPED AFTER A REBOOT") && !on_disk.contains(PASTA_STEP_TEXT),
+                "Pasta.org must carry the edit and none of the recipe:\n{on_disk}"
+            );
+            assert_eq!(
+                read_vault_file(&app, "Pasta.cook").await.as_deref(),
+                Some(PASTA_COOK),
+                "the authoritative recipe file was rewritten"
+            );
+            refusals_once(&app, |r| !r.is_empty()).await;
+            assert_eq!(
+                refused_names(&app, "cooklang"),
+                names(&["Pasta.cook"]),
+                "the recipe that collides with the org page must be disclosed as refused"
+            );
+        });
+    }
+}
+
+/// An org file created beside a recipe the session already ingested must not
+/// take the recipe's page: write-back would render the recipe into it.
+#[test]
+fn an_org_file_written_beside_an_ingested_recipe_is_refused() {
+    init_tracing();
+    let rt = runtime();
+    rt.clone().block_on(async {
+        let app = TestEnvironmentBuilder::new()
+            .with_vault_file("Pasta.cook", PASTA_COOK)
+            .build(rt.clone())
+            .await
+            .expect("a vault holding a recipe must boot");
+        assert!(
+            app.wait_for_block("block:Pasta.cook::b::0", SYNC_TIMEOUT)
+                .await,
+            "precondition: the recipe's step must be in the store"
+        );
+
+        app.write_org_file("Pasta.org", PASTA_ORG_WITHOUT_ID)
+            .await
+            .expect("write Pasta.org beside the recipe");
+        app.wait_for_org_files_stable(25, Duration::from_millis(3000))
+            .await;
+
+        assert_eq!(
+            read_vault_file(&app, "Pasta.org").await.as_deref(),
+            Some(PASTA_ORG_WITHOUT_ID),
+            "write-back rewrote the org file that shares the recipe's page name"
+        );
+        let refusal = edit_refusal(&app, "block:Pasta.cook::b::0").await;
+        assert!(
+            refusal
+                .as_deref()
+                .is_some_and(|r| r.contains("read-only format")),
+            "the recipe step must stay homed in Pasta.cook and refused as read-only, got \
+             {refusal:?}"
+        );
+        refusals_once(&app, |r| !r.is_empty()).await;
+        assert_eq!(
+            refused_names(&app, "org"),
+            names(&["Pasta.org"]),
+            "the org file that collides with the recipe must be disclosed as refused"
+        );
+    });
+}
+
+/// The warm-boot leg of the collision: the recipe's page was recorded by an
+/// earlier boot, so it is the first claimant even though this boot ingests
+/// the org file first. The org file is refused and keeps its bytes.
+#[test]
+fn an_org_file_added_beside_a_recipe_between_boots_is_refused() {
+    init_tracing();
+    let rt = runtime();
+    rt.clone().block_on(async {
+        let mut app = TestEnvironmentBuilder::new()
+            .with_vault_file("Pasta.cook", PASTA_COOK)
+            .build(rt.clone())
+            .await
+            .expect("a vault holding a recipe must boot");
+        assert!(
+            app.wait_for_block("block:Pasta.cook::b::0", SYNC_TIMEOUT)
+                .await,
+            "precondition: the recipe's step must be in the store"
+        );
+        let deadline = std::time::Instant::now() + SYNC_TIMEOUT;
+        while file_document_homes(&app)
+            .await
+            .get("file:Pasta.cook")
+            .cloned()
+            .flatten()
+            .is_none()
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "precondition: boot 1 must record the recipe's page on its file row"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        app.stop_app().await.expect("stop_app after boot 1");
+        app.write_org_file("Pasta.org", PASTA_ORG_WITHOUT_ID)
+            .await
+            .expect("write Pasta.org while the app is stopped");
+        app.start_app(true).await.expect("boot 2 start_app");
+        app.wait_for_org_files_stable(25, Duration::from_millis(3000))
+            .await;
+
+        assert_eq!(
+            read_vault_file(&app, "Pasta.org").await.as_deref(),
+            Some(PASTA_ORG_WITHOUT_ID),
+            "boot 2 rewrote the org file that shares the persisted recipe's page name"
+        );
+        let refusal = edit_refusal(&app, "block:Pasta.cook::b::0").await;
+        assert!(
+            refusal
+                .as_deref()
+                .is_some_and(|r| r.contains("read-only format")),
+            "the recipe step must stay homed in Pasta.cook and refused as read-only, got \
+             {refusal:?}"
+        );
+        refusals_once(&app, |r| !r.is_empty()).await;
+        assert_eq!(
+            refused_names(&app, "org"),
+            names(&["Pasta.org"]),
+            "the org file that collides with the persisted recipe must be disclosed as refused"
+        );
+    });
+}

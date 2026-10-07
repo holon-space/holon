@@ -4880,4 +4880,42 @@ mod duplicate_doc_id_tests {
             );
         }
     }
+
+    /// A claimant whose stat fails leaves the second file un-ingested, and the
+    /// outcome must say so: `Ingested` tells the caller the store matches the
+    /// file, which clears its refusal and its write-back quarantine.
+    #[tokio::test]
+    async fn a_claim_that_cannot_be_stated_is_not_reported_as_ingested() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut fixture = TestFixture::new_with(temp_dir.path(), vec!["First".to_string()], false);
+        fixture.controller.initialize().await.expect("initialize");
+
+        let held = fixture.root_dir.join("held");
+        tokio::fs::create_dir(&held).await.unwrap();
+        let first = held.join("First.org");
+        let second = fixture.root_dir.join("Second.org");
+        tokio::fs::write(&first, FIRST).await.unwrap();
+        tokio::fs::write(&second, SECOND).await.unwrap();
+        assert_eq!(
+            fixture.controller.on_file_changed(&first).await.unwrap(),
+            IngestOutcome::Ingested,
+        );
+
+        std::fs::set_permissions(&held, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let outcome = fixture.controller.on_file_changed(&second).await;
+        std::fs::set_permissions(&held, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert_eq!(outcome.unwrap(), IngestOutcome::UnsettledIdentity);
+        assert!(
+            fixture
+                .store
+                .get_block_authoritative(&EntityUri::block("dupdoc-second-only"))
+                .await
+                .unwrap()
+                .is_none(),
+            "an unsettled file must leave nothing of it in the store"
+        );
+    }
 }
