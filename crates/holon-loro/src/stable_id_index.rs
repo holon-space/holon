@@ -50,6 +50,10 @@ pub(crate) struct StableIdIndex {
     by_node: HashMap<TreeID, String>,
     watch: TreeWatch,
     stats: StableIdIndexStats,
+    /// The doc version the index was last checked against; `None` after a
+    /// build.
+    #[cfg(debug_assertions)]
+    checked: Option<loro::Frontiers>,
 }
 
 impl Default for StableIdIndex {
@@ -60,6 +64,8 @@ impl Default for StableIdIndex {
             by_node: HashMap::new(),
             watch: TreeWatch::new(&[], &[STABLE_ID]),
             stats: StableIdIndexStats::default(),
+            #[cfg(debug_assertions)]
+            checked: None,
         }
     }
 }
@@ -133,15 +139,6 @@ impl StableIdIndex {
         if doc.get_pending_txn_len() > 0 {
             return self.scan_open_batch(&tree, stable_id);
         }
-        #[cfg(debug_assertions)]
-        {
-            let scanned = carriers(&tree, tree.get_nodes(false), stable_id);
-            assert!(
-                scanned.is_empty(),
-                "the stable-id index misses `{stable_id}`, but the tree holds it at {scanned:?}: \
-                 a committed change to the tree did not reach the index"
-            );
-        }
         None
     }
 
@@ -166,6 +163,55 @@ impl StableIdIndex {
             Drained::Nodes(nodes) if self.built => self.apply(tree, nodes),
             Drained::Nodes(_) | Drained::Rescan => self.build(tree),
         }
+        #[cfg(debug_assertions)]
+        self.check(doc, tree);
+    }
+
+    /// Checks the index against the tree at every node the doc's history
+    /// changed since the last check, after a build at every node. The changed
+    /// nodes come from the oplog, so a change the watch never heard is checked
+    /// too; ops of an open batch are checked after their commit.
+    #[cfg(debug_assertions)]
+    fn check(&mut self, doc: &LoroDoc, tree: &loro::LoroTree) {
+        if doc.get_pending_txn_len() > 0 {
+            return;
+        }
+        let now = doc.state_frontiers();
+        let nodes = match &self.checked {
+            Some(checked) if *checked == now => return,
+            Some(checked) => subtrees(tree, changed_nodes(doc, tree, checked, &now)),
+            None => tree
+                .get_nodes(false)
+                .into_iter()
+                .map(|node| node.id)
+                .collect(),
+        };
+        for &node in &nodes {
+            let carried = carried(tree, node);
+            let indexed = self.by_node.get(&node);
+            let listed = indexed.is_none_or(|sid| {
+                self.live
+                    .get(sid)
+                    .is_some_and(|carriers| carriers.binary_search(&node).is_ok())
+            });
+            assert!(
+                indexed == carried.as_ref() && listed,
+                "the stable-id index holds {indexed:?} for {node:?}, but the tree holds \
+                 {carried:?}: a committed change to the tree did not reach the index"
+            );
+        }
+        if self.checked.is_none() {
+            let carriers = nodes
+                .iter()
+                .filter(|&&n| carried(tree, n).is_some())
+                .count();
+            assert_eq!(
+                self.by_node.len(),
+                carriers,
+                "the stable-id index holds nodes the tree does not carry an id at"
+            );
+        }
+        self.checked = Some(now);
     }
 
     fn build(&mut self, tree: &loro::LoroTree) {
@@ -185,6 +231,10 @@ impl StableIdIndex {
         }
         self.built = true;
         self.stats.full_builds += 1;
+        #[cfg(debug_assertions)]
+        {
+            self.checked = None;
+        }
     }
 
     /// Re-reads each touched node and its subtree: a delete reports only the
@@ -198,9 +248,7 @@ impl StableIdIndex {
             }
             self.stats.nodes_visited += 1;
             self.forget(node);
-            if !tree.is_node_deleted(&node).unwrap_or(true)
-                && let LiveNode::Settled(sid) = classify(tree, node)
-            {
+            if let Some(sid) = carried(tree, node) {
                 self.insert(sid, node);
             }
             queue.extend(tree.children(node).into_iter().flatten());
@@ -231,8 +279,85 @@ impl StableIdIndex {
 }
 
 fn carries(tree: &loro::LoroTree, node: TreeID, stable_id: &str) -> bool {
-    !tree.is_node_deleted(&node).unwrap_or(true)
-        && matches!(classify(tree, node), LiveNode::Settled(sid) if sid == stable_id)
+    carried(tree, node).is_some_and(|sid| sid == stable_id)
+}
+
+/// The id `node` carries while it is live and settled.
+fn carried(tree: &loro::LoroTree, node: TreeID) -> Option<String> {
+    if tree.is_node_deleted(&node).unwrap_or(true) {
+        return None;
+    }
+    match classify(tree, node) {
+        LiveNode::Settled(sid) => Some(sid),
+        LiveNode::HalfBorn | LiveNode::MetaUnreadable => None,
+    }
+}
+
+/// `roots` and all their descendants, each once.
+#[cfg(debug_assertions)]
+fn subtrees(tree: &loro::LoroTree, roots: Vec<TreeID>) -> Vec<TreeID> {
+    let mut seen = HashSet::new();
+    let mut queue = roots;
+    let mut nodes = Vec::new();
+    while let Some(node) = queue.pop() {
+        if seen.insert(node) {
+            nodes.push(node);
+            queue.extend(tree.children(node).into_iter().flatten());
+        }
+    }
+    nodes
+}
+
+/// The targets of the tree ops and the owners of the `STABLE_ID` meta writes
+/// between `from` and `to`, in either direction.
+#[cfg(debug_assertions)]
+fn changed_nodes(
+    doc: &LoroDoc,
+    tree: &loro::LoroTree,
+    from: &loro::Frontiers,
+    to: &loro::Frontiers,
+) -> Vec<TreeID> {
+    use loro::JsonMapOp;
+    use loro::JsonOpContent;
+    use loro::JsonTreeOp;
+
+    let tree_container = loro::ContainerTrait::id(tree);
+    let spans = doc.find_id_spans_between(from, to);
+    spans
+        .retreat
+        .iter()
+        .chain(spans.forward.iter())
+        .flat_map(|(&peer, span)| {
+            doc.export_json_in_id_span(loro::IdSpan::new(peer, span.start, span.end))
+        })
+        .flat_map(|change| change.ops)
+        .filter_map(|op| match op.content {
+            JsonOpContent::Tree(
+                JsonTreeOp::Create { target, .. }
+                | JsonTreeOp::Move { target, .. }
+                | JsonTreeOp::Delete { target },
+            ) if op.container == tree_container => Some(target),
+            JsonOpContent::Map(JsonMapOp::Insert { key, .. } | JsonMapOp::Delete { key })
+                if key == STABLE_ID =>
+            {
+                meta_owner(&op.container)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The node whose meta map `container` is, when it can be one.
+#[cfg(debug_assertions)]
+fn meta_owner(container: &loro::ContainerID) -> Option<TreeID> {
+    match *container {
+        loro::ContainerID::Normal {
+            peer,
+            counter,
+            container_type: loro::ContainerType::Map,
+        } => Some(TreeID { peer, counter }),
+        _ => None,
+    }
 }
 
 fn carriers(tree: &loro::LoroTree, nodes: Vec<loro::TreeNode>, stable_id: &str) -> Vec<TreeID> {
