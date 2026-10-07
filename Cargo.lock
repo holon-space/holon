@@ -5605,6 +5605,7 @@ dependencies = [
  "ab_glyph",
  "anyhow",
  "async-trait",
+ "axum 0.8.9",
  "chromiumoxide",
  "chrono",
  "console-subscriber",

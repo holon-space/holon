@@ -69,6 +69,7 @@ mod docs;
 mod editor;
 mod entity_schemes;
 mod focus;
+mod integration_connect;
 mod layout;
 mod misc;
 mod nav;
@@ -230,6 +231,7 @@ impl holon_pbt_core::composition::CapProvider for ReferenceState {
         // slices: selection ANDs SUT∧ref cap sets, and only a slice supplying
         // the matching `SutRemoteListSync` selects it.
         caps.insert(self.clone() as Arc<dyn holon_pbt_core::capabilities::RefRemoteListSync>);
+        caps.insert(self.clone() as Arc<dyn holon_pbt_core::capabilities::RefIntegrationConnect>);
         // `RefReadOnlyHomes` names the blocks homed in a read-only format, so
         // `AttemptReadOnlyEdit` can aim at one. Empty on every draw whose
         // fixture seeds no second format, which narrows the transition out

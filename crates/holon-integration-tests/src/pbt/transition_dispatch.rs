@@ -258,6 +258,7 @@ macro_rules! declare_e2e_transitions {
             + ::holon_pbt_core::capabilities::SutEntityTypeRegister
             + ::holon_pbt_core::capabilities::SutTypedEntity
             + ::holon_pbt_core::capabilities::SutRemoteListSync
+            + ::holon_pbt_core::capabilities::SutIntegrationConnect
             + ::holon_pbt_core::capabilities::SutSearch
             + ::holon_pbt_core::capabilities::SutFullSync
             + ::holon_pbt_core::capabilities::SutRebuildViews

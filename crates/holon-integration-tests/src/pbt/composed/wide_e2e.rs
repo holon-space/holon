@@ -40,6 +40,7 @@ use holon_pbt_core::StorageAdapter;
 use holon_pbt_core::TransitionImpl;
 use holon_pbt_core::TransitionRef;
 use holon_pbt_core::Wiring;
+use holon_pbt_core::capabilities::IntegrationConnectTiming;
 use holon_pbt_core::composition::CapMap;
 use holon_pbt_core::composition::CapSet;
 use holon_pbt_core::composition::InvariantId;
@@ -53,9 +54,8 @@ use crate::pbt::composed::boundary::BoundaryOutcome;
 use crate::pbt::composed::boundary::BoundaryWindow;
 use crate::pbt::composed::boundary::settled_and_pending;
 use crate::pbt::composed::builder::compose_sut;
+use crate::pbt::composed::builder::compose_sut_keystone;
 use crate::pbt::composed::builder::compose_sut_over_existing;
-use crate::pbt::composed::builder::compose_sut_seeded;
-use crate::pbt::composed::builder::compose_sut_seeded_with_peer_id;
 use crate::pbt::composed::builder::compose_sut_windowed_base_seeded;
 use crate::pbt::composed::composed_invariant_catalog;
 use crate::pbt::composed::harness::ComposedSlice;
@@ -1309,7 +1309,7 @@ pub fn seed_boot_filler(state: &mut ReferenceState) {
 pub const JOURNALS_SHELL_ORG: &str = include_str!("../../../scripts/seed_wide/Journals.org");
 
 /// Boot the windowless production SUT for the oracle's wiring via the
-/// PRODUCTION builder (`compose_sut_seeded`) and seed the working tree, then
+/// PRODUCTION builder (`compose_sut_keystone`) and seed the working tree, then
 /// (for a focus-capable config) drive the initial focus onto the page root
 /// (matching the oracle) and return the cap map + the scaffold ids to
 /// seed-inject into the oracle.
@@ -1323,6 +1323,10 @@ pub const JOURNALS_SHELL_ORG: &str = include_str!("../../../scripts/seed_wide/Jo
 /// is canonical, org/Loro/Turso are peer adapters): it's just the serialization
 /// the frontend session's file-sync happens to read; the non-frontend face is
 /// structured domain CRUD.
+/// How long the composed boot may wait before an integration that has not
+/// connected counts as blocking it.
+const INTEGRATION_BOOT_BOUND: Duration = Duration::from_secs(60);
+
 pub async fn boot_and_seed_wide(
     resolver: &IdResolver,
     ref_state: &ReferenceState,
@@ -1373,13 +1377,27 @@ pub async fn boot_and_seed_wide_with_peer_id(
     for (name, body) in &soak_files {
         seed_files.push((name.as_str(), body.as_str()));
     }
-    let bundle = match peer_id {
-        Some(peer_id) => {
-            compose_sut_seeded_with_peer_id(&set, resolver, &seed_files, &wide_seed_tree(), peer_id)
-                .await
-        }
-        None => compose_sut_seeded(&set, resolver, &seed_files, &wide_seed_tree()).await,
-    };
+    let connect = ref_state.integration.timing;
+    let bundle = tokio::time::timeout(
+        INTEGRATION_BOOT_BOUND,
+        compose_sut_keystone(
+            &set,
+            resolver,
+            &seed_files,
+            &wide_seed_tree(),
+            peer_id,
+            connect,
+        ),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "the composed boot did not finish within {INTEGRATION_BOOT_BOUND:?} with the \
+             `{provider}` integration peer drawn to answer {connect:?}: the session resolves \
+             only after every enabled integration connected",
+            provider = crate::fake_mcp_module::PROVIDER_NAME,
+        )
+    });
     // The settle handles — the Turso engine (CDC watermark) and the frontend
     // component (Loro sync + org idle). Cloned out before `bundle.caps` is
     // moved so the post-write [`converge_projections`] settle can prove all
@@ -2183,6 +2201,21 @@ pub fn wide_e2e_windowed_ref(cap_set: CapSet) -> ReferenceState {
 /// cap_set).
 pub struct WideE2EMachine;
 
+/// `Instant` unless `HOLON_PBT_INTEGRATION_TIMING=1` admits the deferred
+/// timings, which shrink toward `Instant`.
+fn integration_connect_timing() -> BoxedStrategy<IntegrationConnectTiming> {
+    if std::env::var("HOLON_PBT_INTEGRATION_TIMING").is_ok_and(|v| v == "1") {
+        ::proptest::prop_oneof![
+            ::proptest::prelude::Just(IntegrationConnectTiming::Instant),
+            ::proptest::prelude::Just(IntegrationConnectTiming::AfterSessionResolve),
+            ::proptest::prelude::Just(IntegrationConnectTiming::Never),
+        ]
+        .boxed()
+    } else {
+        ::proptest::prelude::Just(IntegrationConnectTiming::Instant).boxed()
+    }
+}
+
 impl ReferenceStateMachine for WideE2EMachine {
     type State = ReferenceState;
     type Transition = E2ETransition;
@@ -2207,23 +2240,27 @@ impl ReferenceStateMachine for WideE2EMachine {
         // `;Cell` or `;Dispatch` pins the editor leg) — the external-supply seam
         // for bottom-up ladder runs and subset-wiring repros. Mutually exclusive with
         // FORCE_FULL to keep a run's provenance unambiguous.
-        if let Ok(spec) = std::env::var("HOLON_PBT_PIN_WIRING") {
+        let wired = if let Ok(spec) = std::env::var("HOLON_PBT_PIN_WIRING") {
             assert!(
                 std::env::var("HOLON_PBT_FORCE_FULL").is_err(),
                 "HOLON_PBT_PIN_WIRING and HOLON_PBT_FORCE_FULL are mutually exclusive"
             );
             let wiring = holon_pbt_core::wiring_from_exact_spec(&spec);
-            return ::proptest::strategy::Strategy::boxed(::proptest::prelude::Just(
-                wide_e2e_ref_for(&wiring),
-            ));
-        }
-        if std::env::var("HOLON_PBT_FORCE_FULL").is_ok() {
-            return ::proptest::strategy::Strategy::boxed(
-                ::proptest::prelude::Just(wide_e2e_ref()),
-            );
-        }
-        holon_pbt_core::any_valid_wiring()
-            .prop_map(|w| wide_e2e_ref_for(&w))
+            ::proptest::strategy::Strategy::boxed(::proptest::prelude::Just(wide_e2e_ref_for(
+                &wiring,
+            )))
+        } else if std::env::var("HOLON_PBT_FORCE_FULL").is_ok() {
+            ::proptest::strategy::Strategy::boxed(::proptest::prelude::Just(wide_e2e_ref()))
+        } else {
+            holon_pbt_core::any_valid_wiring()
+                .prop_map(|w| wide_e2e_ref_for(&w))
+                .boxed()
+        };
+        (wired, integration_connect_timing())
+            .prop_map(|(mut state, timing)| {
+                state.integration.timing = timing;
+                state
+            })
             .boxed()
     }
 

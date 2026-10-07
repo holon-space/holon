@@ -1,61 +1,44 @@
-//! Fake external MCP provider wired into the FrontendSession DI.
+//! A fake external MCP server the production integration module connects to.
 //!
-//! Replaces the old Todoist fake as the test suite's "external provider that
-//! does concurrent DDL + sync during startup" stressor. It drives the *real*
-//! MCP client pipeline over an in-memory `tokio::io::duplex` transport:
-//!
-//!   in-memory ServerHandler → rmcp duplex → McpSyncEngine → QueryableCache →
-//! Turso
-//!
-//! Registered via [`register_fake_mcp`] from a test's pre-build DI closure
-//! (see `test_environment.rs`). Building the integration creates the cache
-//! table and kicks off an initial sync concurrently with the rest of startup —
-//! the property the PBT harness and `turso_ivm_index_bug` rely on.
+//! [`FakeMcpPeer`] serves it over streamable HTTP on a loopback port, and
+//! [`FakeMcpPeer::install`] writes its sidecar into a config directory and
+//! enables it, so a session booted over that directory connects it like any
+//! user integration: `McpIntegrationsModule` → rmcp HTTP client →
+//! `McpSyncEngine` → `QueryableCache` → Turso. The drawn
+//! [`IntegrationConnectTiming`] decides when the peer starts answering.
 
-use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 
-use fluxdi::Injector;
-use fluxdi::Provider;
-use fluxdi::Shared;
-use holon::core::queryable_cache::QueryableCache;
-use holon::storage::DbHandle;
-use holon_api::DynamicEntity;
-use holon_api::entity::FieldSchema;
-use holon_core::OperationProvider;
-use holon_core::SyncTokenStore;
-use holon_core::SyncableProvider;
-use holon_mcp_client::mcp_sidecar::EntityConfig;
-use holon_mcp_client::mcp_sidecar::McpSidecar;
-use holon_mcp_client::mcp_sidecar::MirrorSchema;
-use holon_mcp_client::mcp_sidecar::SyncConfig;
-use holon_mcp_client::mcp_sidecar::ToolConfig;
-use holon_mcp_client::mcp_sidecar::ToolEffect;
-use holon_mcp_client::mcp_sync_engine::McpSyncEngine;
-use rmcp::RoleClient;
+use axum::response::IntoResponse;
+use holon_mcp_client::IntegrationConfigStore;
+use holon_mcp_client::integration_state::Configuration;
+use holon_mcp_client::integration_state::IntegrationState;
+use holon_pbt_core::capabilities::IntegrationConnectTiming;
 use rmcp::RoleServer;
 use rmcp::ServerHandler;
-use rmcp::ServiceExt;
 use rmcp::model::*;
-use rmcp::service::Peer;
 use rmcp::service::RequestContext;
-use tokio::sync::RwLock;
+use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
+use rmcp::transport::streamable_http_server::tower::StreamableHttpServerConfig;
+use rmcp::transport::streamable_http_server::tower::StreamableHttpService;
+use tokio::sync::watch;
 
-const ENTITY_NAME: &str = "fake_probe";
+/// The integration's provider name: its sidecar file stem.
+pub const PROVIDER_NAME: &str = "fake-mcp";
+/// The entity the connector writes, and the operation it writes it with.
+pub const WRITTEN_ENTITY: &str = "fk_fake_probe";
+pub const WRITE_OP: &str = "update_probe";
+/// Every entity the sidecar mirrors.
+pub const ENTITIES: [&str; 3] = ["fk_fake_probe", "fk_fake_shadow", "fk_fake_readonly"];
+
 const RESOURCE_URI: &str = "fake://probe/items";
-const TOOLLESS_ENTITY: &str = "fake_shadow";
-const READONLY_ENTITY: &str = "fake_readonly";
 const WRITE_TOOL: &str = "update-probe";
 const READ_TOOL: &str = "find-readonly";
-const PROVIDER_NAME: &str = "fake-mcp";
-const PREFIX: &str = "fk_";
 
-// ── In-memory MCP server ──────────────────────────────────────────
-
-/// Minimal MCP server serving a single JSON resource of items.
-struct FakeMcpServer {
-    items: Arc<RwLock<Vec<serde_json::Value>>>,
-}
+/// An MCP server serving one empty JSON resource and two tools.
+#[derive(Clone)]
+struct FakeMcpServer;
 
 impl ServerHandler for FakeMcpServer {
     fn get_info(&self) -> ServerInfo {
@@ -108,10 +91,8 @@ impl ServerHandler for FakeMcpServer {
         if request.uri != RESOURCE_URI {
             return Err(ErrorData::resource_not_found("Unknown resource", None));
         }
-        let items = self.items.read().await;
-        let json = serde_json::to_string(&*items).expect("serialize items");
         Ok(ReadResourceResult {
-            contents: vec![ResourceContents::text(json, RESOURCE_URI)],
+            contents: vec![ResourceContents::text("[]", RESOURCE_URI)],
         })
     }
 
@@ -149,314 +130,149 @@ impl ServerHandler for FakeMcpServer {
     }
 }
 
-// ── In-memory SyncTokenStore ──────────────────────────────────────
-
-struct InMemorySyncTokenStore {
-    tokens: tokio::sync::Mutex<HashMap<String, holon_api::StreamPosition>>,
-}
-
-#[async_trait::async_trait]
-impl SyncTokenStore for InMemorySyncTokenStore {
-    async fn save_token(
-        &self,
-        key: &str,
-        position: holon_api::StreamPosition,
-    ) -> holon_core::Result<()> {
-        self.tokens.lock().await.insert(key.to_string(), position);
-        Ok(())
-    }
-    async fn load_token(&self, key: &str) -> holon_core::Result<Option<holon_api::StreamPosition>> {
-        Ok(self.tokens.lock().await.get(key).cloned())
-    }
-    async fn clear_all_tokens(&self) -> holon_core::Result<()> {
-        self.tokens.lock().await.clear();
-        Ok(())
-    }
-}
-
-// ── DI handle ─────────────────────────────────────────────────────
-
-/// Keeps the in-memory MCP pipeline alive for the lifetime of the session.
-pub struct FakeMcpHandle {
-    sync_engine: Arc<McpSyncEngine>,
-    operation_provider: holon_mcp_client::McpOperationProvider,
-    _server_peer: Peer<RoleServer>,
-    _items: Arc<RwLock<Vec<serde_json::Value>>>,
-}
-
-impl FakeMcpHandle {
-    /// Seed the registry with the sidecar's entity types, the step
-    /// `McpIntegrationsModule` runs on every connected integration. Without it
-    /// a mirrored entity is invisible to everything that reasons over the
-    /// registry, so no test could see what a real connector does to it.
-    fn register_entity_types(&self, type_registry: &holon_profiles::TypeRegistry) {
-        holon_mcp_client::register_sidecar_entity_types(
-            self.sync_engine.sidecar(),
-            PROVIDER_NAME,
-            type_registry,
-        )
-        .expect("[FakeMcp] sidecar entity types register");
-    }
-}
-
-/// The connector's own operations, exactly as `McpIntegrationsModule` publishes
-/// them: descriptors derived from the server's tool list crossed with the
-/// sidecar's `tools:` classification. Registering the handle itself as the
-/// provider is also what keeps the pipeline alive for the session.
-#[async_trait::async_trait]
-impl OperationProvider for FakeMcpHandle {
-    fn operations(&self) -> Vec<holon_api::OperationDescriptor> {
-        self.operation_provider.operations()
-    }
-    async fn execute_operation(
-        &self,
-        entity: &holon_api::EntityName,
-        op: &str,
-        params: holon_core::storage::types::StorageEntity,
-    ) -> holon::core::traits::Result<holon_core::OperationResult> {
-        self.operation_provider
-            .execute_operation(entity, op, params)
-            .await
-    }
-}
-
-fn id_and_data_schema(entity: &str) -> MirrorSchema {
-    MirrorSchema::parse(
-        &format!("fake sidecar entity '{entity}'"),
-        vec![
-            FieldSchema {
-                name: "id".to_string(),
-                sql_type: "TEXT".to_string(),
-                primary_key: true,
-                ..Default::default()
-            },
-            FieldSchema {
-                name: "data".to_string(),
-                sql_type: "TEXT".to_string(),
-                ..Default::default()
-            },
-        ],
-        "id",
-    )
-    .expect("the fake schema names no engine overflow column")
-}
-
-async fn build_handle(db_handle: DbHandle) -> anyhow::Result<FakeMcpHandle> {
-    let server_items: Arc<RwLock<Vec<serde_json::Value>>> = Arc::new(RwLock::new(Vec::new()));
-
-    let (server_transport, client_transport) = tokio::io::duplex(8192);
-    let server = FakeMcpServer {
-        items: server_items.clone(),
-    };
-    let (client_handler, update_rx) = holon_mcp_client::NotifyingClientHandler::new();
-
-    let (server_running, client_running) = tokio::try_join!(
-        async {
-            server
-                .serve(server_transport)
-                .await
-                .map_err(|e| anyhow::anyhow!("Fake MCP server init: {e}"))
-        },
-        async {
-            client_handler
-                .serve(client_transport)
-                .await
-                .map_err(|e| anyhow::anyhow!("Fake MCP client init: {e}"))
-        },
-    )?;
-
-    let server_peer = server_running.peer().clone();
-    let client_peer: Peer<RoleClient> = client_running.peer().clone();
-
-    tokio::spawn(async move {
-        if let Err(e) = server_running.waiting().await {
-            tracing::warn!("[FakeMcp] server task ended: {e}");
-        }
-    });
-    tokio::spawn(async move {
-        if let Err(e) = client_running.waiting().await {
-            tracing::warn!("[FakeMcp] client task ended: {e}");
-        }
-    });
-
-    let mut entities = HashMap::new();
-    entities.insert(
-        ENTITY_NAME.to_string(),
-        EntityConfig {
-            short_name: None,
-            source_name: None,
-            id_column: Some(holon_api::computation::FieldIdent::parse("id").unwrap()),
-            schema: id_and_data_schema(ENTITY_NAME),
-            sync: Some(SyncConfig {
-                project: Default::default(),
-                list_tool: None,
-                extract_path: None,
-                list_params: HashMap::new(),
-                cursor: None,
-                paginate: None,
-                list_resource: Some(RESOURCE_URI.to_string()),
-                uri_params: HashMap::new(),
-                interval: None,
-            }),
-            vtable: None,
-            profile_variants: vec![],
-        },
-    );
-    // Two mirrored entities the connector does NOT write: one it declares no
-    // tool for at all, one it declares only a READ tool for. Neither has an
-    // authority of its own, so the boot sequence must still derive one from
-    // their columns.
-    for entity in [TOOLLESS_ENTITY, READONLY_ENTITY] {
-        entities.insert(
-            entity.to_string(),
-            EntityConfig {
-                short_name: None,
-                source_name: None,
-                id_column: Some(holon_api::computation::FieldIdent::parse("id").unwrap()),
-                schema: id_and_data_schema(entity),
-                sync: None,
-                vtable: None,
-                profile_variants: vec![],
-            },
-        );
-    }
-
-    let mut tools = HashMap::new();
-    tools.insert(
-        WRITE_TOOL.to_string(),
-        ToolConfig {
-            entity: Some(ENTITY_NAME.to_string()),
-            affected_fields: Some(vec!["data".to_string()]),
-            effect: Some(ToolEffect::Idempotent),
-            ..Default::default()
-        },
-    );
-    tools.insert(
-        READ_TOOL.to_string(),
-        ToolConfig {
-            entity: Some(READONLY_ENTITY.to_string()),
-            effect: Some(ToolEffect::Read),
-            ..Default::default()
-        },
-    );
-
-    let sidecar = McpSidecar {
-        // Prefixed on purpose: an unprefixed sidecar whose entity keys have no
-        // underscores is the one corner where the raw key, the canonical
-        // EntityName and the table name coincide, so every lookup succeeds by
-        // accident and no test can see them diverge.
-        entity_prefix: Some(PREFIX.to_string()),
-        entities,
-        writes: Default::default(),
-        once_only: Default::default(),
-        tools,
-        views: vec![],
-    };
-
-    let entity_config = &sidecar.entities[ENTITY_NAME];
-    let entity = sidecar.prefixed_name(ENTITY_NAME);
-    let table_name = entity.table_name();
-    let td = entity_config
-        .to_type_definition(
-            &table_name,
-            PROVIDER_NAME,
-            sidecar.write_ownership(ENTITY_NAME),
-        )
-        .expect("EntityConfig with schema must produce a TypeDefinition");
-    let cache = QueryableCache::<DynamicEntity>::new(db_handle.clone(), td)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to create fake_probe cache: {e}"))?;
-
-    let mut caches: HashMap<String, Arc<dyn holon_core::EntityCache<DynamicEntity>>> =
-        HashMap::new();
-    caches.insert(ENTITY_NAME.to_string(), Arc::new(cache));
-
-    let mut strategies: HashMap<String, Box<dyn holon_mcp_client::SyncStrategy>> = HashMap::new();
-    let sync_config = sidecar.entities[ENTITY_NAME].sync.as_ref().unwrap();
-    strategies.insert(ENTITY_NAME.to_string(), sync_config.into_strategy()?);
-
-    let token_store: Arc<dyn SyncTokenStore> = Arc::new(InMemorySyncTokenStore {
-        tokens: tokio::sync::Mutex::new(HashMap::new()),
-    });
-
-    let operation_provider = holon_mcp_client::McpOperationProvider::from_peer_shared(
-        client_peer.clone(),
-        sidecar.clone(),
-        HashMap::new(),
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!("Failed to build the fake MCP operation provider: {e}"))?;
-
-    let sync_engine = Arc::new(McpSyncEngine::new(
-        Arc::new(client_peer.clone()),
-        Some(client_peer),
-        strategies,
-        caches,
-        token_store,
-        PROVIDER_NAME.to_string(),
-        sidecar,
-        vec![],
-        Some(db_handle),
-    ));
-
-    sync_engine.sync_all().await?;
-    sync_engine.subscribe_all().await?;
-    let (sync_event_tx, sync_event_rx) = tokio::sync::mpsc::unbounded_channel();
-    holon_mcp_client::spawn_sync_event_loop(
-        sync_event_rx,
-        sync_engine.clone(),
-        holon_mcp_client::SyncGate::opened(),
-        holon_mcp_client::SyncLoopTuning::test(),
-    );
-    tokio::spawn(async move {
-        let mut update_rx = update_rx;
-        while let Some(uri) = update_rx.0.recv().await {
-            if sync_event_tx
-                .send(holon_mcp_client::SyncEvent::NotificationUri(uri))
-                .is_err()
-            {
-                break;
-            }
-        }
-    });
-
-    Ok(FakeMcpHandle {
-        sync_engine,
-        operation_provider,
-        _server_peer: server_peer,
-        _items: server_items,
-    })
-}
-
-/// Register the fake external MCP provider into `injector`.
+/// The sidecar the integration module loads. Prefixed on purpose: an
+/// unprefixed sidecar whose entity keys have no underscores is the one corner
+/// where the raw key, the canonical EntityName and the table name coincide, so
+/// every lookup succeeds by accident and no test can see them diverge.
 ///
-/// Call from a test's pre-build DI closure. Mirrors `McpIntegrationsModule`:
-/// a singleton handle builds the pipeline once (table + initial sync), and the
-/// SyncableProvider + OperationProvider set entries resolve from it. Building
-/// happens at startup, concurrently with the rest of session bring-up.
-pub fn register_fake_mcp(injector: &Injector) {
-    injector.provide::<FakeMcpHandle>(Provider::root_async(|resolver| async move {
-        let db_handle = resolver
-            .resolve_async::<dyn holon::di::DbHandleProvider>()
-            .await
-            .handle();
-        let handle = build_handle(db_handle)
-            .await
-            .expect("[FakeMcp] failed to build in-memory MCP integration");
-        handle.register_entity_types(&resolver.resolve::<holon_profiles::TypeRegistry>());
-        Shared::new(handle)
-    }));
+/// `fake_shadow` (no tool) and `fake_readonly` (a read tool only) are mirrored
+/// but not written by the connector, so the boot must derive a writer for them
+/// from their columns.
+fn sidecar_yaml(uri: &str) -> String {
+    format!(
+        r#"
+schema_version: {version}
+display_name: "Fake MCP"
+transport:
+  http:
+    uri: "{uri}"
+entity_prefix: "fk_"
+entities:
+  fake_probe:
+    id_column: id
+    schema:
+      - {{ name: id,   sql_type: TEXT, primary_key: true }}
+      - {{ name: data, sql_type: TEXT }}
+    sync:
+      list_resource: {RESOURCE_URI}
+  fake_shadow:
+    id_column: id
+    schema:
+      - {{ name: id,   sql_type: TEXT, primary_key: true }}
+      - {{ name: data, sql_type: TEXT }}
+  fake_readonly:
+    id_column: id
+    schema:
+      - {{ name: id,   sql_type: TEXT, primary_key: true }}
+      - {{ name: data, sql_type: TEXT }}
+tools:
+  {WRITE_TOOL}:
+    entity: fake_probe
+    effect: idempotent
+    affected_fields: [data]
+  {READ_TOOL}:
+    entity: fake_readonly
+    effect: read
+"#,
+        version = holon_mcp_client::SIDECAR_SCHEMA_VERSION,
+    )
+}
 
-    injector.provide_into_set::<dyn SyncableProvider>(Provider::root_async(
-        |resolver| async move {
-            let handle = resolver.resolve_async::<FakeMcpHandle>().await;
-            handle.sync_engine.clone() as Arc<dyn SyncableProvider>
-        },
-    ));
+/// A loopback HTTP server hosting [`FakeMcpServer`]. Every request waits at
+/// the gate until it opens; the server stops when the peer is dropped.
+pub struct FakeMcpPeer {
+    uri: String,
+    timing: IntegrationConnectTiming,
+    gate: watch::Sender<bool>,
+    server: tokio::task::JoinHandle<()>,
+}
 
-    injector.provide_into_set::<dyn OperationProvider>(Provider::root_async(
-        |resolver| async move {
-            resolver.resolve_async::<FakeMcpHandle>().await as Arc<dyn OperationProvider>
-        },
-    ));
+impl FakeMcpPeer {
+    pub async fn start(timing: IntegrationConnectTiming) -> Self {
+        let (gate, gate_rx) = watch::channel(timing == IntegrationConnectTiming::Instant);
+        let service: StreamableHttpService<FakeMcpServer, LocalSessionManager> =
+            StreamableHttpService::new(
+                || Ok(FakeMcpServer),
+                Arc::new(LocalSessionManager::default()),
+                StreamableHttpServerConfig::default(),
+            );
+        let app =
+            axum::Router::new()
+                .nest_service("/mcp", service)
+                .layer(axum::middleware::from_fn(
+                    move |request: axum::extract::Request, next: axum::middleware::Next| {
+                        let mut gate = gate_rx.clone();
+                        async move {
+                            // A dropped peer leaves its in-flight connections
+                            // running; they answer that the peer is gone.
+                            let released = gate.wait_for(|open| *open).await.is_ok();
+                            if released {
+                                next.run(request).await
+                            } else {
+                                axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response()
+                            }
+                        }
+                    },
+                ));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind the fake MCP peer");
+        let uri = format!(
+            "http://{}/mcp",
+            listener.local_addr().expect("fake MCP peer address")
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("the fake MCP peer's server failed");
+        });
+        Self {
+            uri,
+            timing,
+            gate,
+            server,
+        }
+    }
+
+    pub fn timing(&self) -> IntegrationConnectTiming {
+        self.timing
+    }
+
+    /// Write the sidecar into `<config_dir>/integrations` and enable it.
+    pub fn install(&self, config_dir: &Path) {
+        let integrations_dir = config_dir.join("integrations");
+        std::fs::create_dir_all(&integrations_dir).expect("create the integrations dir");
+        std::fs::write(
+            integrations_dir.join(format!("{PROVIDER_NAME}.yaml")),
+            sidecar_yaml(&self.uri),
+        )
+        .expect("install the fake MCP sidecar");
+        IntegrationConfigStore::load(&integrations_dir)
+            .expect("load the integration config store")
+            .set(
+                PROVIDER_NAME,
+                IntegrationState {
+                    enabled: true,
+                    configuration: Configuration::Unconfigured,
+                },
+            )
+            .expect("enable the fake MCP integration");
+    }
+
+    /// Open the gate. Fails loud unless the peer was drawn to wait for this.
+    pub fn release(&self) {
+        assert_eq!(
+            self.timing,
+            IntegrationConnectTiming::AfterSessionResolve,
+            "only a peer drawn to answer after the session resolved is released"
+        );
+        let was_open = self.gate.send_replace(true);
+        assert!(!was_open, "the fake MCP peer was released twice");
+    }
+}
+
+impl Drop for FakeMcpPeer {
+    fn drop(&mut self) {
+        self.server.abort();
+    }
 }

@@ -143,7 +143,9 @@ futures = { workspace = true, optional = true }
 async-trait = { workspace = true }
 serde_yaml = { workspace = true, optional = true }
 holon-mcp-client = { path = "../holon-mcp-client" }
-rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", tag = "rmcp-v0.12.0", features = ["client", "server", "transport-child-process"] }
+rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", tag = "rmcp-v0.12.0", features = ["client", "server", "transport-child-process", "transport-streamable-http-server"] }
+# The fake MCP peer serves over loopback HTTP, the transport the integration module connects.
+axum = "0.8"
 tracing = { workspace = true }
 image = { version = "0.25", default-features = false, features = ["png"] }
 ab_glyph = "0.2"

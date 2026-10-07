@@ -44,6 +44,7 @@ use holon_frontend::reactive::BuilderServices;
 use holon_frontend::reactive::ReactiveEngine;
 use holon_frontend::reactive::ReactiveRenderedRows;
 use holon_pbt_core::capabilities::CapRegion;
+use holon_pbt_core::capabilities::IntegrationConnectTiming;
 use holon_pbt_core::capabilities::SutAdviceMatview;
 use holon_pbt_core::capabilities::SutAppLifecycle;
 use holon_pbt_core::capabilities::SutBackend;
@@ -316,10 +317,14 @@ pub struct HeadlessFrontendComponent {
     read_only_ingest_compound: Mutex<(usize, usize)>,
     /// The outcome of every `EditDecisionSubtree`, in dispatch order.
     shape_edit_outcomes: Mutex<Vec<Result<(), String>>>,
-    /// Per type declared through [`SutTypedEntity::declare_typed_schema`], the
-    /// operation names a row of it resolved with at the last profile-signal
-    /// emission since the declaration: what a re-rendered view offers.
+    /// Per followed entity (a type declared through
+    /// [`SutTypedEntity::declare_typed_schema`], or one the integration
+    /// mirrors), the operation names a row of it resolved with on the profile
+    /// signal's latest value: what an open view renders.
     rerendered_operations: Arc<Mutex<HashMap<String, BTreeSet<String>>>>,
+    /// The external MCP server every boot of this component connects to.
+    /// `None` for the boots that install no integration.
+    integration_peer: Option<crate::fake_mcp_module::FakeMcpPeer>,
 }
 
 /// Does this defining SELECT carry a real BIND PLACEHOLDER (so
@@ -690,6 +695,7 @@ impl HeadlessFrontendComponent {
         editor_leg: holon_pbt_core::EditorLeg,
         clock: Arc<holon_api::TestClock>,
         peer_id: Option<u64>,
+        connect: IntegrationConnectTiming,
     ) -> Self {
         Self::new_impl_with_leg(
             org_files,
@@ -699,6 +705,7 @@ impl HeadlessFrontendComponent {
             Some(clock),
             peer_id,
             None,
+            Some(connect),
         )
         .await
     }
@@ -756,6 +763,7 @@ impl HeadlessFrontendComponent {
             clock,
             peer_id,
             sidecar_yaml,
+            None,
         )
         .await
     }
@@ -768,6 +776,7 @@ impl HeadlessFrontendComponent {
         clock: Option<Arc<holon_api::TestClock>>,
         peer_id: Option<u64>,
         sidecar_yaml: Option<&str>,
+        connect: Option<IntegrationConnectTiming>,
     ) -> Self {
         assert!(
             loro_enabled || editor_leg == holon_pbt_core::EditorLeg::Dispatch,
@@ -819,10 +828,18 @@ impl HeadlessFrontendComponent {
             peer_id,
             sidecar_yaml: sidecar_yaml.map(str::to_string),
         };
+        let integration_peer = match connect {
+            Some(timing) => {
+                let peer = crate::fake_mcp_module::FakeMcpPeer::start(timing).await;
+                peer.install(store.temp.path());
+                Some(peer)
+            }
+            None => None,
+        };
         let booted = Self::boot_session(&store, &boot_params).await;
         let documents = Self::cache_doc_ids(&store).await;
 
-        Self {
+        let component = Self {
             boot: std::sync::RwLock::new(Some(Arc::new(booted))),
             store,
             boot_params,
@@ -838,7 +855,14 @@ impl HeadlessFrontendComponent {
             shape_edit_outcomes: Mutex::new(Vec::new()),
             rerendered_operations: Arc::new(Mutex::new(HashMap::new())),
             read_only_ingest_compound: Mutex::new((0, 0)),
+            integration_peer,
+        };
+        if connect.is_some() {
+            for entity in crate::fake_mcp_module::ENTITIES {
+                component.follow_rerendered_operations(entity).await;
+            }
         }
+        component
     }
 
     /// Boot a frontend stack over `store`. Called once by `new_impl` and again
@@ -1171,6 +1195,18 @@ impl HeadlessFrontendComponent {
 
         let booted = Self::boot_session(&self.store, &self.boot_params).await;
         *self.boot.write().expect("boot cell poisoned") = Some(Arc::new(booted));
+        // Each follower holds the dead boot's resolver; its last value must
+        // not stand in for the new boot's.
+        let followed: Vec<String> = self
+            .rerendered_operations
+            .lock()
+            .expect("rerendered_operations poisoned")
+            .drain()
+            .map(|(entity, _)| entity)
+            .collect();
+        for entity in followed {
+            self.follow_rerendered_operations(&entity).await;
+        }
         // The refusals' disclosure lived on the dead process's bus.
         *self
             .read_only_attempts
@@ -8125,20 +8161,61 @@ impl holon_pbt_core::capabilities::SutTypedEntity for HeadlessFrontendComponent 
         &self,
         type_name: &str,
     ) -> holon_pbt_core::capabilities::OperationSurfaces {
+        self.operation_surfaces(type_name)
+    }
+}
+
+#[async_trait::async_trait(?Send)]
+impl holon_pbt_core::capabilities::SutIntegrationConnect for HeadlessFrontendComponent {
+    async fn release_integration_peer(&self) {
+        self.integration_peer().release();
+    }
+
+    async fn integration_operation_surfaces(
+        &self,
+        entity: &str,
+    ) -> holon_pbt_core::capabilities::OperationSurfaces {
+        self.operation_surfaces(entity)
+    }
+
+    async fn dispatch_integration_op(&self, entity: &str, op: &str) -> Result<(), String> {
+        self.engine()
+            .execute_operation(
+                &holon_api::EntityName::new(entity),
+                op,
+                HashMap::new(),
+                holon_api::OpOrigin::User,
+            )
+            .await
+            .map(|_| ())
+            .map_err(|e| format!("{e:#}"))
+    }
+}
+
+impl HeadlessFrontendComponent {
+    fn integration_peer(&self) -> &crate::fake_mcp_module::FakeMcpPeer {
+        self.integration_peer
+            .as_ref()
+            .expect("only a component booted with an integration timing hosts a fake MCP peer")
+    }
+
+    /// The operation names `entity` gets from the dispatcher, from the profile
+    /// resolver, and from the last re-render followed for it.
+    fn operation_surfaces(&self, entity: &str) -> holon_pbt_core::capabilities::OperationSurfaces {
         use holon_core::OperationProvider;
-        let entity = holon_api::EntityName::new(type_name);
+        let entity_name = holon_api::EntityName::new(entity);
         let dispatcher = self
             .engine()
             .get_dispatcher()
             .operations()
             .into_iter()
-            .filter(|op| op.entity_name == entity)
+            .filter(|op| op.entity_name == entity_name)
             .map(|op| op.name)
             .collect();
         let profile = self
             .engine()
             .profile_resolver()
-            .operations_for(type_name)
+            .operations_for(entity)
             .into_iter()
             .map(|op| op.name)
             .collect();
@@ -8146,7 +8223,7 @@ impl holon_pbt_core::capabilities::SutTypedEntity for HeadlessFrontendComponent 
             .rerendered_operations
             .lock()
             .expect("rerendered_operations poisoned")
-            .get(type_name)
+            .get(entity)
             .cloned();
         holon_pbt_core::capabilities::OperationSurfaces {
             dispatcher,
@@ -8157,13 +8234,24 @@ impl holon_pbt_core::capabilities::SutTypedEntity for HeadlessFrontendComponent 
 }
 
 impl HeadlessFrontendComponent {
-    /// Re-resolve a row of `type_name` on every profile-signal emission, as
-    /// `UiWatcher` re-renders on one, into `rerendered_operations`. Returns
-    /// once the signal's initial value is consumed, so every later emission is
-    /// observed.
+    /// Resolve a row of `type_name` on the profile signal's current value and
+    /// on every later emission, as `UiWatcher` renders and re-renders, into
+    /// `rerendered_operations`. Returns once the current value is recorded, so
+    /// a profile change before the call is already in it.
     async fn follow_rerendered_operations(&self, type_name: &str) {
         use futures::StreamExt;
         use futures_signals::signal::SignalExt;
+        fn operations_on(
+            resolver: &dyn holon::entity_profile::ProfileResolving,
+            row: &HashMap<String, holon_api::Value>,
+        ) -> BTreeSet<String> {
+            resolver
+                .resolve(row)
+                .operations
+                .iter()
+                .map(|op| op.name.clone())
+                .collect()
+        }
         let engine = self.engine();
         let resolver = engine.profile_resolver();
         let mut emissions = resolver.profile_signal().signal_cloned().to_stream();
@@ -8171,7 +8259,6 @@ impl HeadlessFrontendComponent {
             .next()
             .await
             .expect("a signal yields its current value first");
-        let resolver = Arc::downgrade(resolver);
         let row = HashMap::from([(
             "id".to_string(),
             holon_api::Value::String(
@@ -8183,18 +8270,14 @@ impl HeadlessFrontendComponent {
         rerendered
             .lock()
             .expect("rerendered_operations poisoned")
-            .insert(type_name.clone(), BTreeSet::new());
+            .insert(type_name.clone(), operations_on(resolver.as_ref(), &row));
+        let resolver = Arc::downgrade(resolver);
         tokio::spawn(async move {
             while emissions.next().await.is_some() {
                 let Some(resolver) = resolver.upgrade() else {
                     return;
                 };
-                let operations = resolver
-                    .resolve(&row)
-                    .operations
-                    .iter()
-                    .map(|op| op.name.clone())
-                    .collect();
+                let operations = operations_on(resolver.as_ref(), &row);
                 rerendered
                     .lock()
                     .expect("rerendered_operations poisoned")

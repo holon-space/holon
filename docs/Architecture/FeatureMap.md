@@ -36,7 +36,7 @@ The one-page answer to *"which features could this change impact?"*. Rows are us
 | **Ruled by** | An ADR under [`docs/adr/`](../adr/), or an invariant number from [Model.md](Model.md). |
 | **Mode axes** | Which of [Model.md](Model.md)'s four orthogonal axes the feature's behaviour varies on: **Storage** (Loro store on/off), **File adapter** (org/none), **Merge fidelity** (op-CRDT / base-3-way / LWW), **Transport** (iroh P2P on/off). `—` means the feature behaves the same everywhere. *Headless vs windowed* is a test-slice axis, not a product mode; it is called out in prose where it matters. |
 
-The composed keystone is [`general_e2e_composed_pbt.rs`](../../crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs). Its alphabet is 112 transitions; the repo declares 91 invariant ids plus 17 correspondence-family ids. Open reds are registered in [KeystoneKnownReds.md](../Testing/KeystoneKnownReds.md) — a red listed there is a pass-with-note, anything else is a regression.
+The composed keystone is [`general_e2e_composed_pbt.rs`](../../crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs). Its alphabet is 113 transitions; the repo declares 93 invariant ids plus 17 correspondence-family ids. Open reds are registered in [KeystoneKnownReds.md](../Testing/KeystoneKnownReds.md) — a red listed there is a pass-with-note, anything else is a regression.
 
 ---
 
@@ -154,6 +154,7 @@ Open reds here: `org-blocks-ref-diverge`, `page-without-own-file`, `loro-frontie
 | Feature | What it is | Pinned by | Ruled by | Mode axes | Key entry point |
 |---|---|---|---|---|---|
 | MCP client sidecars | YAML-declared external connectors bridged to `OperationProvider` | `EmitMcpData`; CDC re-eval / duplicate detection only | [0001](../adr/0001-hybrid-sync-architecture.md), [0006](../adr/0006-actor-terminology-and-mcp-dual-role.md) | — | `crates/holon-mcp-client/src/mcp_sidecar.rs` |
+| Integration connect timing | An enabled integration whose peer answers instantly, only after the session resolved, or never — its write is routable once connected and refused naming it until then | `ReleaseIntegrationPeer`; `inv-integration-op-routable-or-refused`, `inv-integration-operations-reach-profiles`; deferred timings drawn only under `HOLON_PBT_INTEGRATION_TIMING=1` | [Integrations.md](Integrations.md) | — | `crates/holon-app/src/mcp_integrations.rs` |
 | Todoist | The reference connector: MCP over HTTP, static token, oauth false, sync policy, undo | *(none — see Unpinned)* | [Integrations.md](Integrations.md) | — | `assets/integrations/todoist.yaml` |
 | Remote list connections | A sidecar's `holon.list_sync` block mirrors a remote LIST through one generic reconciler — identity is the declared `key` expression, so a peer that issues row ids and one that does not reach the same code | `crates/holon-connections/tests/remote_list_reconcile_pbt.rs` (both key shapes) + `crates/holon-app/tests/shopping_pull_mock.rs` (the round over a mock peer) | [0034](../adr/0034-low-code-connections-formats-and-systems-as-sidecars.md) | — | `crates/holon-connections/src/reconcile.rs` |
 | Other sidecars | gcal, gmail, claude-history, jsonplaceholder | *(none)* | [Integrations.md](Integrations.md) | — | `assets/integrations/` |

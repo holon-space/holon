@@ -13,14 +13,14 @@
 //!   offer them.
 
 use std::collections::BTreeSet;
-use std::time::Duration;
-use std::time::Instant;
 
 use holon_pbt_core::capabilities::RefTypedEntities;
 use holon_pbt_core::capabilities::SutTypedEntity;
 use holon_pbt_core::invariant::Invariant;
 use holon_pbt_core::invariant::InvariantId;
 use holon_pbt_core::invariant::InvariantResult;
+
+use super::operation_surfaces_agree::operation_surfaces_agree;
 
 pub struct InvTypedOperationsReachProfiles;
 
@@ -44,28 +44,17 @@ where
             .map(String::from)
             .collect();
         for (type_name, _) in ref_.typed_entity_schemas() {
-            // The profile resolver learns of a registration asynchronously.
-            let deadline = Instant::now() + Duration::from_secs(3);
-            loop {
-                let surfaces = sut.typed_entity_operation_surfaces(&type_name).await;
-                if surfaces.dispatcher.is_superset(&crud)
-                    && surfaces.profile == surfaces.dispatcher
-                    && surfaces
-                        .rerendered
-                        .as_ref()
-                        .is_none_or(|rerendered| rerendered == &surfaces.dispatcher)
-                {
-                    break;
-                }
-                if Instant::now() >= deadline {
-                    return InvariantResult::Fail(format!(
-                        "[inv-typed-operations-reach-profiles] '{type_name}': a rendered row \
-                         offers different operations than the dispatcher accepts\n  \
-                         dispatcher: {:?}\n  profile:    {:?}\n  rerendered: {:?}",
-                        surfaces.dispatcher, surfaces.profile, surfaces.rerendered
-                    ));
-                }
-                tokio::time::sleep(Duration::from_millis(50)).await;
+            if let Err(surfaces) = operation_surfaces_agree(&crud, async || {
+                sut.typed_entity_operation_surfaces(&type_name).await
+            })
+            .await
+            {
+                return InvariantResult::Fail(format!(
+                    "[inv-typed-operations-reach-profiles] '{type_name}': a rendered row offers \
+                     different operations than the dispatcher accepts\n  dispatcher: {:?}\n  \
+                     profile:    {:?}\n  rerendered: {:?}",
+                    surfaces.dispatcher, surfaces.profile, surfaces.rerendered
+                ));
             }
         }
         InvariantResult::Ok

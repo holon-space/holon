@@ -27,6 +27,7 @@ use crate::capabilities::RefEditorMirror;
 use crate::capabilities::RefFocus;
 use crate::capabilities::RefGlobalFocus;
 use crate::capabilities::RefHistoryExpectation;
+use crate::capabilities::RefIntegrationConnect;
 use crate::capabilities::RefJournalFeed;
 use crate::capabilities::RefLayout;
 use crate::capabilities::RefNavHistory;
@@ -49,7 +50,7 @@ pub struct NullRef;
 /// The trait names `NullRef` answers for — the ref caps the classifier
 /// can host. Asserted by the classifier test so a newly registered ref
 /// capability cannot silently escape classification.
-pub const NULL_REF_CAPS: [&str; 24] = [
+pub const NULL_REF_CAPS: [&str; 25] = [
     "RefAdvice",
     "RefAudience",
     "RefBackend",
@@ -61,6 +62,7 @@ pub const NULL_REF_CAPS: [&str; 24] = [
     "RefFocus",
     "RefGlobalFocus",
     "RefHistoryExpectation",
+    "RefIntegrationConnect",
     "RefJournalFeed",
     "RefLayout",
     "RefNavHistory",
@@ -338,6 +340,17 @@ impl RefNavHistory for NullRef {
 }
 
 #[allow(unused_variables)]
+impl RefIntegrationConnect for NullRef {
+    fn integration_connect_timing(&self) -> crate::capabilities::IntegrationConnectTiming {
+        panic!("class-2: invariant read RefIntegrationConnect::integration_connect_timing")
+    }
+
+    fn integration_peer_answers(&self) -> bool {
+        panic!("class-2: invariant read RefIntegrationConnect::integration_peer_answers")
+    }
+}
+
+#[allow(unused_variables)]
 impl RefRemoteListSync for NullRef {
     fn remote_list_expected_rows(&self) -> Vec<Vec<String>> {
         panic!("class-2: invariant read RefRemoteListSync::remote_list_expected_rows")
@@ -510,6 +523,7 @@ pub fn null_ref_caps() -> CapMap {
     caps.insert(nr.clone() as Arc<dyn RefFocus>);
     caps.insert(nr.clone() as Arc<dyn RefGlobalFocus>);
     caps.insert(nr.clone() as Arc<dyn RefHistoryExpectation>);
+    caps.insert(nr.clone() as Arc<dyn RefIntegrationConnect>);
     caps.insert(nr.clone() as Arc<dyn RefJournalFeed>);
     caps.insert(nr.clone() as Arc<dyn RefLayout>);
     caps.insert(nr.clone() as Arc<dyn RefNavHistory>);
@@ -540,6 +554,7 @@ pub fn null_ref_cap_ids() -> Vec<CapId> {
         CapId::of::<dyn RefFocus>(),
         CapId::of::<dyn RefGlobalFocus>(),
         CapId::of::<dyn RefHistoryExpectation>(),
+        CapId::of::<dyn RefIntegrationConnect>(),
         CapId::of::<dyn RefJournalFeed>(),
         CapId::of::<dyn RefLayout>(),
         CapId::of::<dyn RefNavHistory>(),

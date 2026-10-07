@@ -15,9 +15,9 @@
 //! @pbt kind harness
 //! @pbt covers mcp-mirrored-entity-write-authority — write authority for
 //! mirrored entities is decided by what the connector writes, across a restart
-//! @pbt overlaps general_e2e_composed_pbt — kept: the composed SUT implements
-//! no `SutAppLifecycle`, so `StartApp` is cap-gated out of its alphabet and no
-//! transition sequence boots a connector
+//! @pbt overlaps general_e2e_composed_pbt — kept: the composed keystone boots
+//! the same connector but asserts only its first boot; this file asserts the
+//! authority survives the restart over a persisted database
 
 use std::sync::Arc;
 

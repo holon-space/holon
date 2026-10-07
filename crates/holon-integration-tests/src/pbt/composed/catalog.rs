@@ -198,6 +198,8 @@ fn central_invariants() -> Vec<Box<dyn CapInvariant>> {
         invariants::focus_roots::wire(),
         invariants::typed_matview_matches_ref::wire(),
         invariants::typed_operations_reach_profiles::wire(),
+        invariants::integration_op_routable_or_refused::wire(),
+        invariants::integration_operations_reach_profiles::wire(),
         // Remote-list sync: the mirror a round maintains equals the peer's
         // list. `Needs SutRemoteListSync` + `RefRemoteListSync`; only the
         // Turso+frontend arm supplies the SUT half, so a Loro-only /

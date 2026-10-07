@@ -151,6 +151,11 @@ pub enum Reason {
     /// No block is on disk in two files.
     NoCopyStands,
 
+    // ---------- integration connect timing ----------
+    /// The integration peer was not drawn to wait for a release, or already
+    /// answers.
+    IntegrationPeerNotHeld,
+
     // ---------- catch-all buckets ----------
     // Used when a transition's gate is hard to name in one variant; prefer a
     // specific variant whenever possible. Both still appear in the histogram

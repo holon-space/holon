@@ -167,6 +167,7 @@ mod redo;
 pub mod register_entity_scheme;
 mod rehome_entity;
 mod release_held;
+mod release_integration_peer;
 mod remote_list_sync;
 mod remove_watch;
 mod rename_document;
@@ -289,6 +290,7 @@ pub use redo::Redo;
 pub use register_entity_scheme::RegisterEntityScheme;
 pub use rehome_entity::RehomeEntity;
 pub use release_held::ReleaseHeld;
+pub use release_integration_peer::ReleaseIntegrationPeer;
 pub use remote_list_sync::RemoteListSync;
 pub use remove_watch::RemoveWatch;
 pub use rename_document::RenameDocument;
@@ -402,6 +404,7 @@ crate::declare_e2e_transitions! {
         RegisterEntityScheme(RegisterEntityScheme),
         RehomeEntity(RehomeEntity),
         RemoteListSync(RemoteListSync),
+        ReleaseIntegrationPeer(ReleaseIntegrationPeer),
         SimulateRestart(SimulateRestart),
         RemoveWatch(RemoveWatch),
         SetEdgeField(SetEdgeField),
@@ -752,6 +755,7 @@ mod required_caps_guard {
         one!(PeerCharEdit, c::SutLoro);
         one!(SyncWithPeer, c::SutLoro);
         one!(MergeFromPeer, c::SutLoro);
+        one!(ReleaseIntegrationPeer, c::SutIntegrationConnect);
         // No SUT capability needed.
         // Nothing omitted: migrated to `cap_transition!` (no-cap form) —
         // single-sourced.

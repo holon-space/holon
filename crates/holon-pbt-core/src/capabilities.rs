@@ -4649,10 +4649,9 @@ pub trait SutTypedEntity {
 
 /// One entity's operation names as the surfaces see them: the dispatcher's
 /// catalog (what dispatch and MCP discovery accept), the profile resolver (what
-/// a row rendered now carries), and a row re-resolved on the profile signal's
-/// last emission since the type was declared (what an open view re-renders
-/// with; empty if the signal has not fired, `None` for a type registered at
-/// boot).
+/// a row rendered now carries), and a row resolved on the profile signal's
+/// latest value (what an open view renders with; `None` for an entity no view
+/// follows).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OperationSurfaces {
     pub dispatcher: std::collections::BTreeSet<String>,
@@ -4795,4 +4794,42 @@ pub trait RefRemoteListSync {
     /// How many keys the peer's list holds more than one entry under — each is
     /// one refusal per round.
     fn remote_list_expected_refusals(&self) -> usize;
+}
+
+/// When the keystone's fake MCP peer starts answering, relative to the boot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum IntegrationConnectTiming {
+    /// Answers from the first request.
+    Instant,
+    /// Answers once `ReleaseIntegrationPeer` releases it, after the session
+    /// resolved.
+    AfterSessionResolve,
+    /// Never answers.
+    Never,
+}
+
+/// SUT side of the integration connect-timing axis: one fake MCP integration
+/// connected through the production integration module, its peer gated by the
+/// drawn [`IntegrationConnectTiming`].
+#[allow(async_fn_in_trait)]
+#[holon_macros::capmap_adapter] // emits async-trait + CapName + `impl … for CapMap`
+pub trait SutIntegrationConnect {
+    /// Let the gated peer answer. Fails loud if it already does.
+    async fn release_integration_peer(&self);
+
+    /// The operation names each surface offers for the integration's `entity`.
+    async fn integration_operation_surfaces(&self, entity: &str) -> OperationSurfaces;
+
+    /// Dispatch `op` on the integration's `entity` with no params, returning
+    /// the dispatcher's error text if it refuses.
+    async fn dispatch_integration_op(&self, entity: &str, op: &str) -> Result<(), String>;
+}
+
+/// Ref-side expectation for the integration connect-timing axis.
+#[holon_macros::capmap_adapter] // sync trait → no async-trait; emits CapName + `impl … for CapMap`
+pub trait RefIntegrationConnect {
+    fn integration_connect_timing(&self) -> IntegrationConnectTiming;
+
+    /// Whether the peer answers requests now.
+    fn integration_peer_answers(&self) -> bool;
 }

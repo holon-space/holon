@@ -44,6 +44,7 @@ use holon_pbt_core::Actor;
 use holon_pbt_core::ComponentSet;
 use holon_pbt_core::Projection;
 use holon_pbt_core::StorageAdapter;
+use holon_pbt_core::capabilities::IntegrationConnectTiming;
 use holon_pbt_core::capabilities::SutBackend;
 use holon_pbt_core::capabilities::SutBlockCreate;
 use holon_pbt_core::capabilities::SutBlockToPage;
@@ -180,6 +181,7 @@ pub async fn compose_sut_windowed_base(set: &ComponentSet, resolver: &IdResolver
         DriverPlacement::Deferred,
         None,
         None,
+        IntegrationConnectTiming::Instant,
     )
     .await
 }
@@ -203,6 +205,7 @@ pub async fn compose_sut_windowed_base_seeded(
         DriverPlacement::Deferred,
         None,
         None,
+        IntegrationConnectTiming::Instant,
     )
     .await
 }
@@ -243,6 +246,7 @@ pub async fn compose_sut_seeded(
         DriverPlacement::HeadlessReactive,
         None,
         None,
+        IntegrationConnectTiming::Instant,
     )
     .await
 }
@@ -266,6 +270,31 @@ pub async fn compose_sut_seeded_with_peer_id(
         DriverPlacement::HeadlessReactive,
         Some(peer_id),
         None,
+        IntegrationConnectTiming::Instant,
+    )
+    .await
+}
+
+/// The keystone's boot: [`compose_sut_seeded`] with an optional pinned Loro
+/// peer id and the drawn moment the session's integration peer starts
+/// answering.
+pub async fn compose_sut_keystone(
+    set: &ComponentSet,
+    resolver: &IdResolver,
+    frontend_seed_org: &[(&str, &str)],
+    seed_tree: &[NewBlock],
+    peer_id: Option<u64>,
+    connect: IntegrationConnectTiming,
+) -> ComposedSut {
+    compose_sut_seeded_impl(
+        set,
+        resolver,
+        frontend_seed_org,
+        seed_tree,
+        DriverPlacement::HeadlessReactive,
+        peer_id,
+        None,
+        connect,
     )
     .await
 }
@@ -295,6 +324,7 @@ pub async fn compose_sut_over_existing(
         DriverPlacement::HeadlessReactive,
         None,
         Some(frontend),
+        IntegrationConnectTiming::Instant,
     )
     .await
 }
@@ -317,6 +347,7 @@ async fn compose_sut_seeded_impl(
     driver_placement: DriverPlacement,
     peer_id: Option<u64>,
     existing_frontend: Option<Arc<HeadlessFrontendComponent>>,
+    connect: IntegrationConnectTiming,
 ) -> ComposedSut {
     assert!(
         existing_frontend.is_none() || (frontend_seed_org.is_empty() && seed_tree.is_empty()),
@@ -418,6 +449,7 @@ async fn compose_sut_seeded_impl(
                     set.wiring.editor_leg,
                     crate::pbt::frontend_slice::components::keystone_boot_clock(),
                     peer_id,
+                    connect,
                 )
                 .await,
             ),
@@ -481,6 +513,9 @@ async fn compose_sut_seeded_impl(
         // storage); a Loro-only / storage-only slice never reaches here, so
         // the typed-matview invariant deselects honestly there.
         caps.insert(comp.clone() as Arc<dyn holon_pbt_core::capabilities::SutTypedEntity>);
+        // The component's fake MCP peer and the production integration module
+        // that connects it.
+        caps.insert(comp.clone() as Arc<dyn holon_pbt_core::capabilities::SutIntegrationConnect>);
         // `SutRemoteListSync` (remote-list sync axis): a fixture peer + the REAL
         // reconciler + the REAL mirror table, driven by the `RemoteListSync`
         // transition. Hosted only on the Turso+frontend arm (the round needs the

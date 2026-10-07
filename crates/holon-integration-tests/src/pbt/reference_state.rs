@@ -547,6 +547,26 @@ pub struct ReferenceState {
     /// mirror must equal after every round. Read by `RefRemoteListSync`;
     /// mutated by `RemoteListSync`.
     pub remote_list: RemoteListRefState,
+
+    /// The fake MCP integration's drawn connect timing and whether its peer
+    /// was released. Read by `RefIntegrationConnect`; mutated by
+    /// `ReleaseIntegrationPeer`.
+    pub integration: IntegrationRefState,
+}
+
+#[derive(Debug, Clone)]
+pub struct IntegrationRefState {
+    pub timing: holon_pbt_core::capabilities::IntegrationConnectTiming,
+    pub released: bool,
+}
+
+impl Default for IntegrationRefState {
+    fn default() -> Self {
+        Self {
+            timing: holon_pbt_core::capabilities::IntegrationConnectTiming::Instant,
+            released: false,
+        }
+    }
 }
 
 /// Reference model of the datatype axis (BG-1): which free-standing types are
@@ -1212,6 +1232,7 @@ impl ReferenceState {
                 t
             },
             remote_list: RemoteListRefState::default(),
+            integration: IntegrationRefState::default(),
         }
     }
 

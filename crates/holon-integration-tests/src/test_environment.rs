@@ -216,9 +216,12 @@ pub struct TestEnvironment {
     /// Interior-mutable (`Cell`) for the same reason as [`Self::all_blocks`].
     seed_count: Cell<Option<usize>>,
 
-    /// Whether to enable Todoist fake mode (adds concurrent DDL during
-    /// startup). `Cell` so `set_enable_fake_mcp` can write via `&self`.
+    /// Whether the next boot connects the fake MCP integration (adds
+    /// concurrent DDL during startup). `Cell` so `set_enable_fake_mcp` can
+    /// write via `&self`.
     enable_fake_mcp: Cell<bool>,
+    /// The peer the fake MCP integration connects to, once a boot installed it.
+    fake_mcp_peer: RefCell<Option<crate::fake_mcp_module::FakeMcpPeer>>,
 
     /// Whether to enable Loro CRDT layer (default: true for backward compat).
     /// `Cell` so `set_enable_loro` can write via `&self`.
@@ -379,12 +382,9 @@ impl TestEnvironmentBuilder {
         self
     }
 
-    /// Enable a fake external MCP provider via an in-memory duplex transport.
-    ///
-    /// Drives the real MCP client pipeline (McpSyncEngine → QueryableCache →
-    /// Turso), creating its cache table and running an initial sync
-    /// concurrently with startup. Replaces the old Todoist fake as the
-    /// concurrent-DDL race stressor — see `fake_mcp_module`.
+    /// Connect the fake MCP integration at boot: the production integration
+    /// module creates its cache table and runs an initial sync concurrently
+    /// with startup — see `fake_mcp_module`.
     pub fn with_fake_mcp(mut self) -> Self {
         self.enable_fake_mcp = true;
         self
@@ -402,6 +402,15 @@ impl TestEnvironmentBuilder {
     /// Uses FrontendSession to ensure identical initialization path with
     /// production frontends. This simulates the Flutter scenario where
     /// files exist before the app starts.
+    async fn install_fake_mcp(config_dir: &std::path::Path) -> crate::fake_mcp_module::FakeMcpPeer {
+        let peer = crate::fake_mcp_module::FakeMcpPeer::start(
+            holon_pbt_core::capabilities::IntegrationConnectTiming::Instant,
+        )
+        .await;
+        peer.install(config_dir);
+        peer
+    }
+
     pub async fn build(self, runtime: Arc<tokio::runtime::Runtime>) -> Result<TestEnvironment> {
         let temp_dir =
             TempDir::new().map_err(|e| anyhow::anyhow!("Failed to create temp dir: {}", e))?;
@@ -447,7 +456,11 @@ impl TestEnvironmentBuilder {
         if !self.wait_for_file_watcher {
             session_config = session_config.without_wait();
         }
-        let enable_fake_mcp = self.enable_fake_mcp;
+        let fake_mcp_peer = if self.enable_fake_mcp {
+            Some(Self::install_fake_mcp(&config_dir).await)
+        } else {
+            None
+        };
         let org_fs_for_di = org_fs.clone();
         let secret_namespace = config_dir.clone();
         let clock_for_di = self.clock.clone();
@@ -465,9 +478,6 @@ impl TestEnvironmentBuilder {
                 holon::testing::database_stuck_guard::report_database_stuck_in(injector);
                 install_headless_render_interpreter(injector, &org_fs_for_di, &secret_namespace);
                 holon_mcp::di::register_debug_services(injector);
-                if enable_fake_mcp {
-                    crate::fake_mcp_module::register_fake_mcp(injector);
-                }
                 if let Some(clock) = clock_for_di.clone() {
                     let injected = holon_api::InjectedClock(clock);
                     injector.provide::<holon_api::InjectedClock>(fluxdi::Provider::root(
@@ -547,6 +557,7 @@ impl TestEnvironmentBuilder {
             all_blocks_stream: RefCell::new(None),
             seed_count: Cell::new(None),
             enable_fake_mcp: Cell::new(self.enable_fake_mcp),
+            fake_mcp_peer: RefCell::new(fake_mcp_peer),
             enable_loro: Cell::new(enable_loro),
             block_cell_registry: Cell::new(false),
             storage: StorageSelector::Turso,
@@ -844,6 +855,7 @@ impl TestEnvironment {
             all_blocks_stream: RefCell::new(None),
             seed_count: Cell::new(None),
             enable_fake_mcp: Cell::new(false),
+            fake_mcp_peer: RefCell::new(None),
             enable_loro: Cell::new(true),
             block_cell_registry: Cell::new(false),
             storage: StorageSelector::Turso,
@@ -1052,7 +1064,10 @@ impl TestEnvironment {
         if !wait_for_ready {
             session_config = session_config.without_wait();
         }
-        let enable_fake_mcp = self.enable_fake_mcp.get();
+        if self.enable_fake_mcp.get() {
+            let peer = TestEnvironmentBuilder::install_fake_mcp(&config_dir).await;
+            *self.fake_mcp_peer.borrow_mut() = Some(peer);
+        }
         let org_fs_for_di = self.org_fs.clone();
         let secret_namespace = config_dir.clone();
 
@@ -1070,9 +1085,6 @@ impl TestEnvironment {
                 holon::testing::database_stuck_guard::report_database_stuck_in(injector);
                 install_headless_render_interpreter(injector, &org_fs_for_di, &secret_namespace);
                 holon_mcp::di::register_debug_services(injector);
-                if enable_fake_mcp {
-                    crate::fake_mcp_module::register_fake_mcp(injector);
-                }
                 Ok(())
             },
             move |injector| {
