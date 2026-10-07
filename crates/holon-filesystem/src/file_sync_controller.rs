@@ -343,12 +343,16 @@ pub enum ClaimedId {
     Document(EntityUri),
     /// A headline `:ID:` in the file is declared by another file on disk.
     BlockSlug(EntityUri),
+    /// The file's name chain names a page that holds blocks the file does not
+    /// declare, a same-stem file is on disk, and no file this session recorded
+    /// which of the two homes the page.
+    UnrecordedHome(EntityUri),
 }
 
 impl ClaimedId {
     pub fn id(&self) -> &EntityUri {
         match self {
-            Self::Document(id) | Self::BlockSlug(id) => id,
+            Self::Document(id) | Self::BlockSlug(id) | Self::UnrecordedHome(id) => id,
         }
     }
 }
@@ -2411,7 +2415,8 @@ impl FileSyncController {
     /// file recorded as `doc_id`'s home still on disk? (It answers the claim
     /// question only as far as [`live_claimant_of`] does — a home that kept its
     /// path but released the id still reads as claiming it; see the bugfunnel
-    /// entry on [`IngestOutcome::RefusedWhileClaimed`].)
+    /// entry on [`IngestOutcome::RefusedWhileClaimed`].) An unrecorded page
+    /// home stands while it stays unrecorded and a same-stem file is on disk.
     ///
     /// Costs a map lookup and one stat of the claimant, never a read of
     /// `candidate` — which is the whole point of asking here instead of
@@ -2426,7 +2431,13 @@ impl FileSyncController {
         candidate: &CanonicalPath,
     ) -> bool {
         let found = match claimed {
-            ClaimedId::Document(doc_id) => self.live_claimant_of(doc_id, candidate).await,
+            ClaimedId::UnrecordedHome(doc_id) if self.page_home_unrecorded(doc_id) => self
+                .same_stem_files(path)
+                .await
+                .map(|f| f.into_iter().next()),
+            ClaimedId::Document(doc_id) | ClaimedId::UnrecordedHome(doc_id) => {
+                self.live_claimant_of(doc_id, candidate).await
+            }
             ClaimedId::BlockSlug(slug) => self.live_block_claimant_of(slug, candidate).await,
         };
         match found {
@@ -2698,6 +2709,39 @@ impl FileSyncController {
             .collect())
     }
 
+    /// The recorded file state was not loaded and no file this session ingested
+    /// recorded `doc_id`'s home.
+    fn page_home_unrecorded(&self, doc_id: &EntityUri) -> bool {
+        self.recorded_homes_unknown && !self.doc_home.contains_key(doc_id)
+    }
+
+    /// The files on disk beside `path` with its stem and another extension some
+    /// format reads: the files whose name chain is `path`'s.
+    async fn same_stem_files(&self, path: &Path) -> Result<Vec<PathBuf>> {
+        let own = path.extension().and_then(|e| e.to_str());
+        let mut found = Vec::new();
+        for ext in self.formats.extensions() {
+            if own.is_some_and(|own| own.eq_ignore_ascii_case(ext)) {
+                continue;
+            }
+            let sibling = path.with_extension(ext);
+            match self.fs.metadata(&sibling).await {
+                Ok(_) => found.push(sibling),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    return Err(e).with_context(|| {
+                        format!(
+                            "stat {} to learn whether a file shares the name of {}",
+                            sibling.display(),
+                            path.display()
+                        )
+                    });
+                }
+            }
+        }
+        Ok(found)
+    }
+
     /// Disclose a refused file whose name chain names a page that holds
     /// blocks the file does not declare, while no recorded home says which
     /// file holds them: ERROR + a sticky degraded banner the first time,
@@ -2706,6 +2750,7 @@ impl FileSyncController {
         &mut self,
         doc_id: &EntityUri,
         undeclared: &[EntityUri],
+        same_stem: &[PathBuf],
         refused: &Path,
         canonical: &CanonicalPath,
     ) {
@@ -2724,12 +2769,18 @@ impl FileSyncController {
         let detail = format!(
             "PAGE HOME UNKNOWN: {} names the page '{doc_id}' by its file name, and that page \
              holds {} block(s) this file does not declare (first: {}). The recorded state of \
-             the vault's files could not be read at startup, so it is unknown which file holds \
-             them, and {} is NOT ingested — its write-back would write them into it. If another \
-             file has the same name with a different extension, rename one of the two.",
+             the vault's files could not be read at startup, so it is unknown whether {} or {} \
+             holds them, and {} is NOT ingested — its write-back would write them into it. \
+             Rename one of the two files.",
             refused.display(),
             undeclared.len(),
             undeclared[0],
+            refused.display(),
+            same_stem
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", "),
             refused.display(),
         );
         tracing::error!(
@@ -5223,23 +5274,33 @@ impl FileSyncController {
                         }
                         // A page this session recorded a home for is judged
                         // by that home, gone or not.
-                        Ok(None)
-                            if self.recorded_homes_unknown
-                                && !self.doc_home.contains_key(&doc.id) =>
-                        {
-                            let undeclared = self
-                                .undeclared_members_of(&doc.id, &new_parse.blocks)
-                                .await?;
-                            if !undeclared.is_empty() {
-                                self.disclose_unrecorded_page_home(
-                                    &doc.id,
-                                    &undeclared,
-                                    path,
-                                    &canonical,
-                                );
-                                return Ok(IngestOutcome::RefusedWhileClaimed(
-                                    ClaimedId::Document(doc.id.clone()),
-                                ));
+                        // Undeclared blocks alone do not prove another home: a
+                        // file whose headlines carry no `:ID:` re-parses to
+                        // fresh ids. Only a same-stem file can be that home.
+                        Ok(None) if self.page_home_unrecorded(&doc.id) => {
+                            let same_stem = match self.same_stem_files(path).await {
+                                Ok(same_stem) => same_stem,
+                                Err(e) => {
+                                    self.disclose_unsettled_identity(&doc.id, path, &canonical, &e);
+                                    return Ok(IngestOutcome::UnsettledIdentity);
+                                }
+                            };
+                            if !same_stem.is_empty() {
+                                let undeclared = self
+                                    .undeclared_members_of(&doc.id, &new_parse.blocks)
+                                    .await?;
+                                if !undeclared.is_empty() {
+                                    self.disclose_unrecorded_page_home(
+                                        &doc.id,
+                                        &undeclared,
+                                        &same_stem,
+                                        path,
+                                        &canonical,
+                                    );
+                                    return Ok(IngestOutcome::RefusedWhileClaimed(
+                                        ClaimedId::UnrecordedHome(doc.id.clone()),
+                                    ));
+                                }
                             }
                         }
                         Ok(None) => {}

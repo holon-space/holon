@@ -2182,6 +2182,105 @@ fn an_org_file_beside_a_recipe_is_refused_when_the_recorded_file_state_is_unread
     });
 }
 
+/// The refusal above when the recipe beside the org file is refused too, so no
+/// file this session ever records the page's home: the org file's refusal is
+/// still reported once, not re-read and re-logged on every discovery tick.
+#[test]
+fn an_org_file_refused_for_an_unrecorded_page_home_is_reported_once() {
+    let collector = holon_integration_tests::test_tracing::SpanCollector::global();
+    let _scope = holon_integration_tests::test_tracing::begin_test_scope();
+    collector.reset();
+    let rt = runtime();
+    rt.clone().block_on(async {
+        let mut app = boot_a_recorded_recipe(rt.clone()).await;
+        app.stop_app().await.expect("stop_app after boot 1");
+        app.write_org_file("Pasta.cook", &refused_recipe("Boil"))
+            .await
+            .expect("break Pasta.cook while the app is stopped");
+        app.write_org_file("Pasta.org", PASTA_ORG_WITHOUT_ID)
+            .await
+            .expect("write Pasta.org while the app is stopped");
+        holon_filesystem::crash_injection::arm("load_file_projections");
+        app.start_app(true).await.expect("boot 2 start_app");
+        app.wait_for_org_files_stable(25, Duration::from_millis(3000))
+            .await;
+        // Several discovery ticks (2 s each) past the first rediscovery.
+        tokio::time::sleep(Duration::from_secs(7)).await;
+        assert_eq!(
+            refused_names(&app, "org"),
+            names(&["Pasta.org"]),
+            "premise: the org file is refused for the page home nothing recorded"
+        );
+
+        let reports: Vec<String> = problems_naming(collector, &["Pasta.org"])
+            .into_iter()
+            .filter(|m| m.contains("PAGE HOME UNKNOWN"))
+            .collect();
+        assert_eq!(
+            reports.len(),
+            1,
+            "the refusal must be reported once, not once per discovery tick: {reports:#?}"
+        );
+    });
+}
+
+/// With the recorded file state unreadable, an org file whose headlines carry
+/// no `:ID:` re-parses to fresh block ids, so its page holds blocks it does not
+/// declare. No other file shares its name, so it is still that page's home and
+/// is ingested.
+#[test]
+fn an_org_file_without_ids_keeps_its_page_when_the_recorded_file_state_is_unreadable() {
+    init_tracing();
+    const NOTES: &str = "* One\n* Two\n";
+    let rt = runtime();
+    rt.clone().block_on(async {
+        let mut app = TestEnvironmentBuilder::new()
+            .with_vault_file("Notes.org", NOTES)
+            .build(rt.clone())
+            .await
+            .expect("a vault of one org file must boot");
+        let deadline = std::time::Instant::now() + SYNC_TIMEOUT;
+        while !read_vault_file(&app, "Notes.org")
+            .await
+            .is_some_and(|s| s.contains(":ID:"))
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "precondition: boot 1 must write the block ids into Notes.org"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        app.stop_app().await.expect("stop_app after boot 1");
+        app.write_org_file("Notes.org", NOTES)
+            .await
+            .expect("drop the ids from Notes.org while the app is stopped");
+        holon_filesystem::crash_injection::arm("load_file_projections");
+        app.start_app(true).await.expect("boot 2 start_app");
+        app.wait_for_org_files_stable(25, Duration::from_millis(3000))
+            .await;
+        assert_eq!(
+            holon_filesystem::crash_injection::armed(),
+            None,
+            "premise: boot 2 never loaded the recorded file state"
+        );
+
+        assert_eq!(
+            refused_names(&app, "org"),
+            Vec::<String>::new(),
+            "an org file no other file shares a name with must not be refused"
+        );
+        let on_disk = read_vault_file(&app, "Notes.org")
+            .await
+            .expect("Notes.org stays on disk");
+        assert!(
+            on_disk.matches("* One").count() == 1
+                && on_disk.matches("* Two").count() == 1
+                && on_disk.contains(":ID:"),
+            "boot 2 must ingest Notes.org and write its ids back, once each:\n{on_disk}"
+        );
+    });
+}
+
 /// Boot a vault holding only `Pasta.cook`, and wait until its file row records
 /// the recipe's page — the claim the next boot loads.
 async fn boot_a_recorded_recipe(
@@ -2309,6 +2408,128 @@ fn a_recipe_moved_while_the_app_is_off_leaves_nothing_in_an_org_file_at_its_old_
                 .expect("the moved recipe stays on disk"),
             PASTA_COOK,
             "the moved recipe was rewritten"
+        );
+    });
+}
+
+/// Org files of a vault whose recipes form the read-only backlog.
+const BACKLOG_VAULT_ORG: [(&str, &str); 3] = [
+    ("Notes.org", NOTES_ORG),
+    ("Plans.org", "* Plan the week\n** Buy flour\n"),
+    ("Ideas.org", "* An idea\n"),
+];
+
+fn backlog_vault(recipes: usize) -> TestEnvironmentBuilder {
+    let builder = BACKLOG_VAULT_ORG
+        .iter()
+        .fold(TestEnvironmentBuilder::new(), |b, &(name, content)| {
+            b.with_vault_file(name, content)
+        });
+    (0..recipes)
+        .fold(builder, |b, i| {
+            b.with_vault_file(
+                format!("Resources/R{i:04}.cook"),
+                recipe(&format!("R{i:04}"), "Stir"),
+            )
+        })
+        .wait_for_file_watcher(false)
+}
+
+/// How many recipes have their first step in the store.
+async fn ingested_recipes(app: &holon_integration_tests::TestEnvironment) -> usize {
+    let rows = app
+        .query_sql("SELECT count(*) AS n FROM block_raw WHERE id LIKE 'block:%.cook::b::0'")
+        .await
+        .expect("count the recipes' first steps");
+    let n = rows[0]
+        .get("n")
+        .and_then(|v| v.as_i64())
+        .expect("count(*) is an integer");
+    usize::try_from(n).expect("a count is not negative")
+}
+
+/// Wait until all `recipes` recipes are in the store.
+async fn wait_for_backlog(app: &holon_integration_tests::TestEnvironment, recipes: usize) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(1800);
+    loop {
+        let n = ingested_recipes(app).await;
+        if n == recipes {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the backlog stalled: {n} of {recipes} recipes ingested"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+/// The default-layout seed's wait on the org scan, answered.
+async fn wait_scanned(app: &holon_integration_tests::TestEnvironment) {
+    let injector = app.injector().expect("a booted app has an injector");
+    let gate = injector.resolve::<holon_orgmode::BootSeedGate>();
+    let shutdown = injector.resolve::<holon_api::lifecycle::SessionShutdown>();
+    gate.wait_scanned(&shutdown)
+        .await
+        .expect("the org scan must run on this vault");
+}
+
+/// D108.a: the default-layout seed waits for the writable org files only.
+/// While every recipe read is held, the seed is still answered; once the
+/// reads go through, every recipe is ingested.
+#[test]
+fn the_default_layout_seed_is_answered_while_the_recipe_backlog_is_held() {
+    init_tracing();
+    const RECIPES: usize = 50;
+    let rt = runtime();
+    rt.clone().block_on(async {
+        let app = backlog_vault(RECIPES)
+            .hold_reads_with_extension("cook")
+            .build(rt.clone())
+            .await
+            .expect("a vault of org files and recipes must boot");
+        let seeded = tokio::time::timeout(Duration::from_secs(60), wait_scanned(&app)).await;
+        app.org_fs.release_reads_with_extension("cook");
+        assert!(
+            seeded.is_ok(),
+            "the default-layout seed is not answered while the recipe backlog is held: the \
+             org scan waits for the read-only files"
+        );
+        wait_for_backlog(&app, RECIPES).await;
+    });
+}
+
+/// D108.a end to end with an unheld backlog: the seed is answered before the
+/// last recipe is ingested. Prints the time to the seed and to the end of the
+/// backlog.
+#[test]
+fn the_default_layout_seed_does_not_wait_for_the_recipe_backlog() {
+    init_tracing();
+    const RECIPES: usize = 500;
+    let rt = runtime();
+    rt.clone().block_on(async {
+        let t0 = std::time::Instant::now();
+        let app = backlog_vault(RECIPES)
+            .build(rt.clone())
+            .await
+            .expect("a vault of org files and recipes must boot");
+        wait_scanned(&app).await;
+        let seed = t0.elapsed();
+        let at_seed = ingested_recipes(&app).await;
+        wait_for_backlog(&app, RECIPES).await;
+        let backlog = t0.elapsed();
+        eprintln!(
+            "BOOT-TIMING recipes={RECIPES} seed_ms={} recipes_at_seed={at_seed} \
+             backlog_done_ms={}",
+            seed.as_millis(),
+            backlog.as_millis()
+        );
+        assert!(
+            at_seed < RECIPES,
+            "the default-layout seed was answered only after all {RECIPES} recipes were \
+             ingested ({} ms to the seed, {} ms to the last recipe)",
+            seed.as_millis(),
+            backlog.as_millis()
         );
     });
 }
