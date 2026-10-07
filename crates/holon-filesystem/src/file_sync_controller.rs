@@ -329,6 +329,7 @@ const DUPLICATE_ID_SITE: &str = "duplicate-doc-id";
 const UNSETTLED_IDENTITY_SITE: &str = "unsettled-doc-identity";
 const DUPLICATE_BLOCK_SLUG_SITE: &str = "duplicate-block-slug";
 const SHARED_NAME_CHAIN_SITE: &str = "shared-name-chain";
+const UNRECORDED_HOME_SITE: &str = "unrecorded-page-home";
 
 /// The identity another file already claims, and therefore the reason a file
 /// is refused.
@@ -801,6 +802,10 @@ pub struct FileSyncController {
     /// be the parent walk this registry exists to delete.
     persisted_read_only_blocks: HashMap<CanonicalPath, Vec<EntityUri>>,
 
+    /// The `file` rows could not be read at startup, so no file this session
+    /// has not ingested itself is known to hold a page.
+    recorded_homes_unknown: bool,
+
     /// Cheap dirty-check signature `(mtime, size)` per tracked path. Used by
     /// `poll_external_changes` to skip the expensive `read_to_string` when
     /// `stat()` shows the file hasn't changed since we last looked. Updated
@@ -1203,6 +1208,7 @@ impl FileSyncController {
             empty_hash_rows: HashMap::new(),
             last_projection_doc: HashMap::new(),
             persisted_read_only_blocks: HashMap::new(),
+            recorded_homes_unknown: false,
             disk_signatures: HashMap::new(),
             base_store: SyncBaseStore::in_memory(),
             base_source: HashMap::new(),
@@ -1654,7 +1660,16 @@ impl FileSyncController {
         // events. If an on-disk file's `hash(RENDERER_VERSION || disk_bytes)`
         // matches its stored hash, `on_file_changed` skips block ingest
         // entirely — the dominant cold-boot cost. See plan §Phase 1.
-        match self.block_reader.load_file_projections().await {
+        let loaded = self.block_reader.load_file_projections().await;
+        #[cfg(feature = "crash-injection")]
+        let loaded = if crate::crash_injection::fires("load_file_projections") {
+            Err(anyhow::anyhow!(
+                "[crash-injection] loading the recorded file state fails"
+            ))
+        } else {
+            loaded
+        };
+        match loaded {
             Ok(rows) => {
                 for (uri, projection) in rows {
                     // One unusable persisted row must not stop the boot: skip
@@ -1687,14 +1702,17 @@ impl FileSyncController {
                 );
             }
             Err(e) => {
-                warn!(
-                    "[FileSyncController] load_file_projections failed; cold-boot fast path \
-                     disabled, will re-ingest every file, and no persisted read-only home claims \
-                     its page before the writable files ingest. Error: {e}"
+                let e = e.context(
+                    "load the recorded state of the vault's files: every file is re-read, and a \
+                     file named like a page that holds blocks it does not declare is refused",
                 );
+                tracing::error!("[FileSyncController] {e:#}");
+                self.disclose_start_incomplete("reading the recorded state of the files", &e);
+                self.recorded_homes_unknown = true;
             }
         }
         self.claim_persisted_read_only_homes()?;
+        self.retire_vanished_read_only_homes().await?;
 
         // A matching hash proves the consolidator holds the file's blocks only
         // while the consolidator is not behind the sink that stamped the hash.
@@ -2382,7 +2400,7 @@ impl FileSyncController {
             Err(e) => Err(e).with_context(|| {
                 format!(
                     "stat the current claimant of {doc_id} at {} while ingesting another file \
-                     presenting the same `#+ID:`",
+                     naming the same document",
                     home_path.display()
                 )
             }),
@@ -2537,7 +2555,8 @@ impl FileSyncController {
     }
 
     /// Disclose a file whose identity could not be SETTLED — we could not read
-    /// whether another file still claims its `#+ID:`.
+    /// whether another file still claims its document: ERROR + a sticky
+    /// degraded banner the first time, DEBUG on every repeat.
     ///
     /// Deliberately not an `Err`: the ingest never began, so the caller's
     /// partial-ingest quarantine would report a truncated DB state that does
@@ -2554,17 +2573,20 @@ impl FileSyncController {
             .duplicate_id_disclosed
             .insert((canonical.clone(), UNSETTLED_IDENTITY_SITE))
         {
+            let detail = format!(
+                "UNSETTLED DOCUMENT IDENTITY: could not determine whether another file still \
+                 claims the document '{doc_id}' that {} names, so it is NOT ingested — merging on \
+                 a claim we could not read is the outcome that loses data. Nothing of the file \
+                 is in the store and its write-back is untouched; it is re-attempted on every \
+                 tick. Cause: {err:#}",
+                path.display(),
+            );
             tracing::error!(
                 doc_id = %doc_id,
                 path = %path.display(),
-                error = %format!("{err:#}"),
-                "[FileSyncController] UNSETTLED DOCUMENT IDENTITY: could not determine whether \
-                 another file still claims this file's `#+ID:`, so it is NOT ingested — \
-                 merging on a claim we could not read is the outcome that loses data. \
-                 Nothing was written: the store holds none of this file's blocks and its \
-                 write-back is untouched. Re-attempted on the next tick. Repeats for this \
-                 path log at DEBUG.",
+                "[FileSyncController] {detail} Repeats for this path log at DEBUG.",
             );
+            self.raise_ingest_refused_banner(path, &detail);
         } else {
             tracing::debug!(
                 doc_id = %doc_id,
@@ -2658,10 +2680,70 @@ impl FileSyncController {
         self.raise_ingest_refused_banner(refused, &detail);
     }
 
+    /// The blocks of `doc_id` in the store that `declared` does not hold.
+    async fn undeclared_members_of(
+        &self,
+        doc_id: &EntityUri,
+        declared: &[Block],
+    ) -> Result<Vec<EntityUri>> {
+        let declared: HashSet<&EntityUri> = declared.iter().map(|b| &b.id).collect();
+        Ok(self
+            .block_reader
+            .doc_block_topology(doc_id)
+            .await
+            .with_context(|| format!("read the blocks page {doc_id} holds"))?
+            .into_iter()
+            .map(|(id, _)| id)
+            .filter(|id| !declared.contains(id))
+            .collect())
+    }
+
+    /// Disclose a refused file whose name chain names a page that holds
+    /// blocks the file does not declare, while no recorded home says which
+    /// file holds them: ERROR + a sticky degraded banner the first time,
+    /// DEBUG on every repeat.
+    fn disclose_unrecorded_page_home(
+        &mut self,
+        doc_id: &EntityUri,
+        undeclared: &[EntityUri],
+        refused: &Path,
+        canonical: &CanonicalPath,
+    ) {
+        if !self
+            .duplicate_id_disclosed
+            .insert((canonical.clone(), UNRECORDED_HOME_SITE))
+        {
+            tracing::debug!(
+                doc_id = %doc_id,
+                refused = %refused.display(),
+                "[FileSyncController] page with an unrecorded home still refused (already \
+                 disclosed once at ERROR)",
+            );
+            return;
+        }
+        let detail = format!(
+            "PAGE HOME UNKNOWN: {} names the page '{doc_id}' by its file name, and that page \
+             holds {} block(s) this file does not declare (first: {}). The recorded state of \
+             the vault's files could not be read at startup, so it is unknown which file holds \
+             them, and {} is NOT ingested — its write-back would write them into it. If another \
+             file has the same name with a different extension, rename one of the two.",
+            refused.display(),
+            undeclared.len(),
+            undeclared[0],
+            refused.display(),
+        );
+        tracing::error!(
+            doc_id = %doc_id,
+            refused = %refused.display(),
+            "[FileSyncController] {detail} Repeats for this path log at DEBUG.",
+        );
+        self.raise_ingest_refused_banner(refused, &detail);
+    }
+
     /// Raise the sticky degraded banner behind a whole-file ingest refusal.
     ///
-    /// Both duplicate-id refusals cost the user the same thing — one whole
-    /// page — so both reach the banner here, not only the log.
+    /// Every whole-file refusal costs the user the same thing — one whole
+    /// page — so each reaches the banner here, not only the log.
     fn raise_ingest_refused_banner(&self, refused: &Path, detail: &str) {
         let format = self
             .formats
@@ -2771,6 +2853,34 @@ impl FileSyncController {
                 None => {
                     self.doc_home.insert(doc_id, canonical);
                 }
+            }
+        }
+        Ok(())
+    }
+
+    /// Cascade-delete, the way a live deletion does, every persisted
+    /// read-only home that left its path while the app was off.
+    ///
+    /// Its blocks must leave the store before the writable files ingest: a
+    /// writable file at the vacated name would otherwise adopt the page with
+    /// the read-only content still in it, and write that content to disk.
+    async fn retire_vanished_read_only_homes(&mut self) -> Result<()> {
+        let mut homes: Vec<CanonicalPath> = self
+            .doc_home
+            .values()
+            .filter(|home| self.is_read_only_path(home.as_path_buf()))
+            .cloned()
+            .collect();
+        homes.sort_by(|a, b| a.as_path_buf().cmp(b.as_path_buf()));
+        for canonical in homes {
+            let path = canonical.as_path_buf().clone();
+            match self.fs.metadata(&path).await {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    self.on_file_deleted(&path, &canonical).await?;
+                }
+                // A home we could not stat keeps its claim, and every claim
+                // check stats it again and refuses on the same error.
+                Ok(_) | Err(_) => {}
             }
         }
         Ok(())
@@ -5110,6 +5220,27 @@ impl FileSyncController {
                             return Ok(IngestOutcome::RefusedWhileClaimed(ClaimedId::Document(
                                 doc.id.clone(),
                             )));
+                        }
+                        // A page this session recorded a home for is judged
+                        // by that home, gone or not.
+                        Ok(None)
+                            if self.recorded_homes_unknown
+                                && !self.doc_home.contains_key(&doc.id) =>
+                        {
+                            let undeclared = self
+                                .undeclared_members_of(&doc.id, &new_parse.blocks)
+                                .await?;
+                            if !undeclared.is_empty() {
+                                self.disclose_unrecorded_page_home(
+                                    &doc.id,
+                                    &undeclared,
+                                    path,
+                                    &canonical,
+                                );
+                                return Ok(IngestOutcome::RefusedWhileClaimed(
+                                    ClaimedId::Document(doc.id.clone()),
+                                ));
+                            }
                         }
                         Ok(None) => {}
                         Err(e) => {

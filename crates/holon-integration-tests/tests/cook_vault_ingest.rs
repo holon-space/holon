@@ -2091,31 +2091,7 @@ fn an_org_file_added_beside_a_recipe_between_boots_is_refused() {
     init_tracing();
     let rt = runtime();
     rt.clone().block_on(async {
-        let mut app = TestEnvironmentBuilder::new()
-            .with_vault_file("Pasta.cook", PASTA_COOK)
-            .build(rt.clone())
-            .await
-            .expect("a vault holding a recipe must boot");
-        assert!(
-            app.wait_for_block("block:Pasta.cook::b::0", SYNC_TIMEOUT)
-                .await,
-            "precondition: the recipe's step must be in the store"
-        );
-        let deadline = std::time::Instant::now() + SYNC_TIMEOUT;
-        while file_document_homes(&app)
-            .await
-            .get("file:Pasta.cook")
-            .cloned()
-            .flatten()
-            .is_none()
-        {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "precondition: boot 1 must record the recipe's page on its file row"
-            );
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-
+        let mut app = boot_a_recorded_recipe(rt.clone()).await;
         app.stop_app().await.expect("stop_app after boot 1");
         app.write_org_file("Pasta.org", PASTA_ORG_WITHOUT_ID)
             .await
@@ -2142,6 +2118,197 @@ fn an_org_file_added_beside_a_recipe_between_boots_is_refused() {
             refused_names(&app, "org"),
             names(&["Pasta.org"]),
             "the org file that collides with the persisted recipe must be disclosed as refused"
+        );
+    });
+}
+
+/// The warm-boot collision when the recorded file state cannot be read at
+/// boot: no recorded home claims the recipe's page, so the org file must not
+/// adopt the page while it holds blocks the org file does not declare.
+#[test]
+fn an_org_file_beside_a_recipe_is_refused_when_the_recorded_file_state_is_unreadable() {
+    init_tracing();
+    let rt = runtime();
+    rt.clone().block_on(async {
+        let mut app = boot_a_recorded_recipe(rt.clone()).await;
+        app.stop_app().await.expect("stop_app after boot 1");
+        app.write_org_file("Pasta.org", PASTA_ORG_WITHOUT_ID)
+            .await
+            .expect("write Pasta.org while the app is stopped");
+        holon_filesystem::crash_injection::arm("load_file_projections");
+        app.start_app(true).await.expect("boot 2 start_app");
+        app.wait_for_org_files_stable(25, Duration::from_millis(3000))
+            .await;
+        assert_eq!(
+            holon_filesystem::crash_injection::armed(),
+            None,
+            "premise: boot 2 never loaded the recorded file state"
+        );
+
+        assert_eq!(
+            read_vault_file(&app, "Pasta.org").await.as_deref(),
+            Some(PASTA_ORG_WITHOUT_ID),
+            "boot 2 rewrote the org file that shares the recipe's page name"
+        );
+        let refusal = edit_refusal(&app, "block:Pasta.cook::b::0").await;
+        assert!(
+            refusal
+                .as_deref()
+                .is_some_and(|r| r.contains("read-only format")),
+            "the recipe step must stay homed in Pasta.cook and refused as read-only, got \
+             {refusal:?}"
+        );
+        refusals_once(&app, |r| !r.is_empty()).await;
+        assert_eq!(
+            refused_names(&app, "org"),
+            names(&["Pasta.org"]),
+            "the org file must be disclosed as refused"
+        );
+        let incomplete: Vec<_> = app
+            .injector()
+            .expect("a booted app has an injector")
+            .resolve::<Arc<holon_api::ConditionBus>>()
+            .current()
+            .into_iter()
+            .filter(|c| {
+                c.reason.condition_kind() == holon_api::ConditionKind::VAULT_START_INCOMPLETE
+            })
+            .collect();
+        assert_eq!(
+            incomplete.len(),
+            1,
+            "the unreadable recorded file state must be disclosed: {incomplete:?}"
+        );
+    });
+}
+
+/// Boot a vault holding only `Pasta.cook`, and wait until its file row records
+/// the recipe's page — the claim the next boot loads.
+async fn boot_a_recorded_recipe(
+    rt: Arc<tokio::runtime::Runtime>,
+) -> holon_integration_tests::TestEnvironment {
+    let app = TestEnvironmentBuilder::new()
+        .with_vault_file("Pasta.cook", PASTA_COOK)
+        .build(rt)
+        .await
+        .expect("a vault holding a recipe must boot");
+    assert!(
+        app.wait_for_block("block:Pasta.cook::b::0", SYNC_TIMEOUT)
+            .await,
+        "precondition: the recipe's step must be in the store"
+    );
+    let deadline = std::time::Instant::now() + SYNC_TIMEOUT;
+    while file_document_homes(&app)
+        .await
+        .get("file:Pasta.cook")
+        .cloned()
+        .flatten()
+        .is_none()
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "precondition: boot 1 must record the recipe's page on its file row"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    app
+}
+
+/// The path of the vault file named `name`.
+async fn vault_file_path(
+    env: &holon_integration_tests::TestEnvironment,
+    name: &str,
+) -> std::path::PathBuf {
+    use holon_filesystem::FileSystem;
+    env.org_fs
+        .scan_directory(env.org_root())
+        .await
+        .expect("scan the vault root")
+        .files
+        .into_iter()
+        .find(|p| p.file_name().and_then(|n| n.to_str()) == Some(name))
+        .unwrap_or_else(|| panic!("the vault holds no file named {name}"))
+}
+
+/// Boot 2 of a recipe that left `Pasta.cook` while the app was off, with
+/// `Pasta.org` written at its stem: the org file gets a page of its own and
+/// stays editable, and none of the recipe reaches it.
+async fn assert_the_org_file_owns_the_vacated_name(
+    app: &holon_integration_tests::TestEnvironment,
+    leg: &str,
+) {
+    app.wait_for_org_files_stable(25, Duration::from_millis(3000))
+        .await;
+    let on_disk = read_vault_file(app, "Pasta.org")
+        .await
+        .expect("Pasta.org stays on disk");
+    assert!(
+        on_disk.contains("* My pasta notes") && !on_disk.contains(PASTA_STEP_TEXT),
+        "{leg}: boot 2 wrote the recipe that left Pasta.cook into the org file at its stem:\n\
+         {on_disk}"
+    );
+    assert_eq!(
+        edit_refusal(app, "block:pasta-note").await,
+        None,
+        "{leg}: the org file must stay editable once the recipe it named is gone"
+    );
+    assert_eq!(
+        refused_names(app, "org"),
+        Vec::<String>::new(),
+        "{leg}: nothing collides once the recipe is gone"
+    );
+}
+
+/// A recipe deleted while the app is off leaves the store at boot, before an
+/// org file written at its stem can resolve the recipe's page by name.
+#[test]
+fn a_recipe_deleted_while_the_app_is_off_leaves_nothing_in_an_org_file_at_its_stem() {
+    init_tracing();
+    let rt = runtime();
+    rt.clone().block_on(async {
+        use holon_filesystem::FileSystem;
+        let mut app = boot_a_recorded_recipe(rt.clone()).await;
+        app.stop_app().await.expect("stop_app after boot 1");
+        let cook = vault_file_path(&app, "Pasta.cook").await;
+        app.org_fs.remove(&cook).await.expect("delete Pasta.cook");
+        app.write_org_file("Pasta.org", PASTA_ORG_WITHOUT_ID)
+            .await
+            .expect("write Pasta.org while the app is stopped");
+        app.start_app(true).await.expect("boot 2 start_app");
+        assert_the_org_file_owns_the_vacated_name(&app, "deleted while off").await;
+    });
+}
+
+/// A recipe moved into a folder while the app is off is a deletion at its old
+/// path: an org file written there gets none of it, and the moved file keeps
+/// its bytes.
+#[test]
+fn a_recipe_moved_while_the_app_is_off_leaves_nothing_in_an_org_file_at_its_old_path() {
+    init_tracing();
+    let rt = runtime();
+    rt.clone().block_on(async {
+        use holon_filesystem::FileSystem;
+        let mut app = boot_a_recorded_recipe(rt.clone()).await;
+        app.stop_app().await.expect("stop_app after boot 1");
+        let cook = vault_file_path(&app, "Pasta.cook").await;
+        let moved = app.org_root().join("Recipes").join("Pasta.cook");
+        app.org_fs.mkdir_all(&app.org_root().join("Recipes"));
+        app.org_fs
+            .rename(&cook, &moved)
+            .await
+            .expect("move the recipe into Recipes/");
+        app.write_org_file("Pasta.org", PASTA_ORG_WITHOUT_ID)
+            .await
+            .expect("write Pasta.org at the recipe's old path");
+        app.start_app(true).await.expect("boot 2 start_app");
+        assert_the_org_file_owns_the_vacated_name(&app, "moved while off").await;
+        assert_eq!(
+            app.org_fs
+                .read_to_string(&moved)
+                .await
+                .expect("the moved recipe stays on disk"),
+            PASTA_COOK,
+            "the moved recipe was rewritten"
         );
     });
 }

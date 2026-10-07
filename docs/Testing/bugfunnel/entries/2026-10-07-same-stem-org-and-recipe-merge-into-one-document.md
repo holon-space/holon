@@ -3,7 +3,7 @@ id: 2026-10-07-same-stem-org-and-recipe-merge-into-one-document
 date: 2026-10-07
 gap: COVERAGE
 secondary: null
-status: FIXED
+status: PARTIAL
 summary: >-
   `Pasta.org` and `Pasta.cook` in one folder resolve to ONE document by name
   chain, so the file ingested last takes the home: either the recipe's steps
@@ -75,8 +75,7 @@ Warm-boot leg: `FileSyncController::claim_persisted_read_only_homes` runs in
 read-only path records its document's home (`doc_home`, plus the read-only
 registry from the row's `read_only_blocks`). A persisted recipe is therefore
 the first claimant, and a same-stem `.org` added between runs is refused and
-disclosed with its bytes untouched. A row whose file is gone claims nothing,
-because `live_claimant_of` stats the home.
+disclosed with its bytes untouched.
 
 Pinned by `cook_vault_ingest.rs`:
 `an_org_page_and_a_same_stem_recipe_stay_two_files_at_boot`,
@@ -86,3 +85,31 @@ the claim: `lane-logs/r4-warm-red-1.log`, `r4-warm-teeth-1.log`; green:
 `r4-warm-green-1.log`). The keystone still cannot generate the pair (see
 Missing piece). A runtime rename that creates the pair is a separate open
 escape: `2026-10-07-runtime-rename-to-a-same-stem-recipe-collides-silently`.
+
+## Open legs
+- Offline vanish and offline move (verifier osb-verify-3, D4/D5): the recipe
+  is deleted, or moved into a folder, while the app is off, and `Pasta.org`
+  exists at its old stem. Boot 2 writes the recipe's step into `Pasta.org` on
+  disk, with nothing disclosed. Pinned red by `cook_vault_ingest.rs`:
+  `a_recipe_deleted_while_the_app_is_off_leaves_nothing_in_an_org_file_at_its_stem`
+  and `a_recipe_moved_while_the_app_is_off_leaves_nothing_in_an_org_file_at_its_old_path`
+  (`lane-logs/r5-d45-red-1.log`). Retiring the vanished home through the live
+  deletion path at `initialize` is not enough: the boot runs with the Loro→SQL
+  projection unarmed, so the org file's ingest deletes the step in Loro only,
+  and its write-back renders the step back from SQL
+  (`lane-logs/r5-d45-green-3.log`). Same root cause as
+  `2026-10-07-headline-deleted-while-off-is-written-back-at-boot`; with the
+  projection armed both tests pass (`lane-logs/r5-experiment-armed-2.log`).
+
+## Persisted homes not loaded (FIXED)
+If `load_file_projections` fails at `initialize`, no persisted recipe claims
+its page, and the warm-boot leg wrote the step into `Pasta.org` again,
+disclosed only at WARN (osb-verify-3 `loadfail-1.log`). Now the failure raises
+the vault-start-incomplete condition, and for the rest of the session a
+name-chain resolution refuses (and discloses) a page that no home of this
+session holds while it holds blocks the file does not declare. Pinned by
+`cook_vault_ingest.rs`
+`an_org_file_beside_a_recipe_is_refused_when_the_recorded_file_state_is_unreadable`,
+failure injected at the `load_file_projections` crash-injection point (red
+`lane-logs/r6-loadfail-red-1.log`, green `r6-loadfail-green-1.log`, teeth
+`r6-loadfail-teeth-1.log` and `-2.log`).

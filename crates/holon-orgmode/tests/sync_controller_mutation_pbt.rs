@@ -4455,9 +4455,10 @@ mod intermediate_ancestor_writeback_hole {
 
 /// Captures the degraded conditions a refused ingest raises, as
 /// `"<path>|<reason>"` — the banner's own payload, so a test asserts on what
-/// the user would read rather than on a log line.
+/// the user would read rather than on a log line — and the paths whose
+/// condition was lifted.
 #[derive(Default)]
-struct RefusalLog(Mutex<Vec<String>>);
+struct RefusalLog(Mutex<Vec<String>>, Mutex<Vec<std::path::PathBuf>>);
 
 impl holon_filesystem::WritebackDisclosure for RefusalLog {
     fn writeback_degraded(&self, _: &str) {}
@@ -4469,7 +4470,9 @@ impl holon_filesystem::WritebackDisclosure for RefusalLog {
             .unwrap()
             .push(format!("{}|{reason}", path.display()));
     }
-    fn ingest_recovered(&self, _: &std::path::Path) {}
+    fn ingest_recovered(&self, path: &std::path::Path) {
+        self.1.lock().unwrap().push(path.to_path_buf());
+    }
     fn vault_file_emptied(&self, _: &std::path::Path) {}
     fn writeback_lossy(&self, _: &std::path::Path, _: &str) {}
     fn writeback_faithful(&self, _: &std::path::Path) {}
@@ -4916,6 +4919,87 @@ mod duplicate_doc_id_tests {
                 .unwrap()
                 .is_none(),
             "an unsettled file must leave nothing of it in the store"
+        );
+    }
+
+    /// The page `held/Pasta` is claimed by `locked/Claim.org`, whose `#+ID:`
+    /// names it. While that claimant cannot be stat'ed, an id-less
+    /// `held/Pasta.org` is not ingested, and the user is shown why until the
+    /// file settles.
+    #[tokio::test]
+    async fn a_name_chain_whose_claimant_cannot_be_stated_is_disclosed_until_it_settles() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut fixture = TestFixture::new_with(
+            temp_dir.path(),
+            vec!["held".to_string(), "Pasta".to_string()],
+            true,
+        );
+        let log = Arc::new(RefusalLog::default());
+        fixture.controller = fixture.controller.with_writeback_disclosure(log.clone());
+        fixture.controller.initialize().await.expect("initialize");
+
+        let locked = fixture.root_dir.join("locked");
+        tokio::fs::create_dir(&locked).await.unwrap();
+        let claimant = locked.join("Claim.org");
+        tokio::fs::write(
+            &claimant,
+            format!("#+ID: {}\n* The claimant's headline\n", fixture.doc_id.id()),
+        )
+        .await
+        .unwrap();
+        fixture.ensure_parent_dirs().await;
+        let pasta = fixture.file_path();
+        tokio::fs::write(
+            &pasta,
+            "* DONE Only the second file has this\n:PROPERTIES:\n:ID: dupdoc-second-only\n:END:\n",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            fixture.controller.on_file_changed(&claimant).await.unwrap(),
+            IngestOutcome::Ingested,
+        );
+
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let outcome = fixture.controller.on_file_changed(&pasta).await;
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert_eq!(outcome.unwrap(), IngestOutcome::UnsettledIdentity);
+        assert!(
+            fixture
+                .store
+                .get_block_authoritative(&EntityUri::block("dupdoc-second-only"))
+                .await
+                .unwrap()
+                .is_none(),
+            "an unsettled file must leave nothing of it in the store"
+        );
+        let raised = log.0.lock().unwrap().clone();
+        assert_eq!(
+            raised.len(),
+            1,
+            "a file left out of the store because its claimant could not be stat'ed must raise \
+             one condition. Raised: {raised:?}"
+        );
+        for needle in ["held/Pasta.org", "locked/Claim.org"] {
+            assert!(
+                raised[0].contains(needle),
+                "the banner must name the file left out and the claimant it could not stat; \
+                 '{needle}' is missing from: {}",
+                raised[0]
+            );
+        }
+
+        tokio::fs::remove_file(&claimant).await.unwrap();
+        assert_eq!(
+            fixture.controller.on_file_changed(&pasta).await.unwrap(),
+            IngestOutcome::Ingested,
+        );
+        assert!(
+            log.1.lock().unwrap().contains(&pasta),
+            "the condition must lift once the file ingests"
         );
     }
 }
