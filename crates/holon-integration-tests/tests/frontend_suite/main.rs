@@ -9,6 +9,7 @@ mod integration_state_section_refreshes;
 mod integration_state_sync_failing;
 mod integrations_section_renders_every_row;
 mod layout_bridge_smoke;
+mod live_query_serve_failure_is_visible;
 mod local_ui_state_precedence;
 mod navigate_back_keeps_panel_populated;
 #[cfg(feature = "pbt")]
