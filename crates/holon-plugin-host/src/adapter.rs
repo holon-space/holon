@@ -36,6 +36,7 @@ use crate::params::build_block_params;
 use crate::sidecar::BLOCK_SCOPE;
 use crate::sidecar::DOCUMENT_SCOPE;
 use crate::sidecar::GuestSource;
+use crate::sidecar::IdSource;
 use crate::sidecar::PluginFormat;
 
 /// How many files every plugin in this process has run its guest over.
@@ -192,6 +193,12 @@ impl FileFormatAdapter for PluginFormatAdapter {
             )
         })?;
 
+        for scope in &self.format.scopes {
+            if scope.id_from == Some(IdSource::SourcePath) {
+                parse_local_id(&scope.id_entity, &source_path)?;
+            }
+        }
+
         let stream = self.run(&source_path, file_stem, content)?;
         let sets = holon_rows::parse_row_sets(&stream).with_context(|| {
             format!(
@@ -211,7 +218,7 @@ impl FileFormatAdapter for PluginFormatAdapter {
                     document = Some(self.document_block(set, &file_id, parent_dir_id)?);
                 }
                 BLOCK_SCOPE => blocks = self.child_blocks(set, &file_id)?,
-                _ => typed_rows.push(self.parse_typed_rows(set)?),
+                _ => typed_rows.push(self.parse_typed_rows(set, &source_path)?),
             }
         }
 
@@ -418,7 +425,7 @@ impl PluginFormatAdapter {
     /// The scheme is added here because here is where the entity is known: the
     /// sidecar's scope declares `id_entity`. Downstream — the typed-row sink,
     /// the dispatcher — a row id already names its entity.
-    fn parse_typed_rows(&self, mut owned: TypedRowSet) -> Result<TypedRowSet> {
+    fn parse_typed_rows(&self, mut owned: TypedRowSet, source_path: &str) -> Result<TypedRowSet> {
         let declared = self.format.scope(&owned.type_name).with_context(|| {
             format!(
                 "the {} plugin emitted scope {:?}, which its sidecar does not declare",
@@ -460,6 +467,16 @@ impl PluginFormatAdapter {
                 ),
             }
             let id = match row.get(ID_CELL) {
+                Some(Value::String(local))
+                    if declared.id_from == Some(IdSource::SourcePath) && local != source_path =>
+                {
+                    bail!(
+                        "the {} plugin emitted a {:?} row with id {local:?}, but its sidecar \
+                         declares that id to be the source path {source_path:?}",
+                        self.format.format_name,
+                        owned.type_name
+                    )
+                }
                 Some(Value::String(local)) => parse_local_id(&declared.id_entity, local)?,
                 other => bail!(
                     "a {:?} row carries id {other:?}; ids are derived from content and every row \

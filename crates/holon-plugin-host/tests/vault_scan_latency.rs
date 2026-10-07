@@ -93,14 +93,14 @@ fn two_hundred_recipes_on_one_host() {
     );
 }
 
-/// The boot scan parses every `.cook` file in the vault on one thread, and a
-/// file is refused only after its parse. Holon is dogfooded on debug builds,
-/// so this budget holds in the profile the tests run in, not only in release.
-/// It is CPU time on the parsing thread, so machine load does not move it.
+/// The boot scan parses every `.cook` file in the vault on one thread. Holon is
+/// dogfooded on debug builds, so this budget holds in the profile the tests run
+/// in, not only in release. It is CPU time on the parsing thread, so machine
+/// load does not move it.
 const PARSE_BUDGET_PER_RECIPE: Duration = Duration::from_millis(20);
 
-/// Measured cost is 8-10 ms. A reading far below that means the guest ran on
-/// another thread, so the budget above would pass without bounding the scan.
+/// Measured cost is 8-12 ms. A reading far below that, while the guest ran
+/// once per file, means it ran on another thread and the budget bounds nothing.
 const PARSE_FLOOR_PER_RECIPE: Duration = Duration::from_millis(2);
 
 fn thread_cpu_time() -> Duration {
@@ -118,40 +118,83 @@ fn thread_cpu_time() -> Duration {
     Duration::new(now.tv_sec as u64, now.tv_nsec as u32)
 }
 
+/// The paths below are refused whatever the recipe says, so neither may cost a
+/// guest run.
 #[test]
-fn refusing_a_recipe_stays_within_the_scan_budget_in_every_build_profile() {
+fn a_recipe_whose_path_cannot_be_stored_is_refused_before_the_guest_runs() {
     let plugin = support::bundled_cook_plugin();
     let root = PathBuf::from("/vault");
     let recipe = support::big_recipe(20);
     let files = 20;
 
+    for (name, reason) in [
+        ("Rezepte/Aargauer Rüeblitorte", "is not a storable URI path"),
+        ("Chai:Masala", "already reads as a schemed URI"),
+    ] {
+        let parses_before = holon_plugin_host::guest_parses();
+        let started = Instant::now();
+        let cpu_started = thread_cpu_time();
+        for i in 0..files {
+            let path = root.join(format!("{name}-{i}.cook"));
+            let Err(refusal) = plugin.parse(&path, &recipe, &EntityUri::no_parent(), &root) else {
+                panic!("{} derives an unstorable recipe id", path.display());
+            };
+            let refusal = format!("{refusal:#}");
+            assert!(
+                refusal.contains(reason),
+                "refused for another reason: {refusal}"
+            );
+            if i == 0 {
+                println!("REFUSAL MESSAGE: {refusal}");
+            }
+        }
+        println!(
+            "REFUSAL: {:?} CPU per refused recipe ({:?} wall)",
+            (thread_cpu_time() - cpu_started) / files,
+            started.elapsed() / files
+        );
+        let parses = holon_plugin_host::guest_parses() - parses_before;
+        assert_eq!(
+            parses, 0,
+            "refusing {files} recipes named {name:?} ran the guest {parses} times; their ids \
+             derive from the path alone"
+        );
+    }
+}
+
+#[test]
+fn parsing_a_recipe_stays_within_the_scan_budget_in_every_build_profile() {
+    let plugin = support::bundled_cook_plugin();
+    let root = PathBuf::from("/vault");
+    let recipe = support::big_recipe(20);
+    let files = 20;
+
+    let parses_before = holon_plugin_host::guest_parses();
     let started = Instant::now();
     let cpu_started = thread_cpu_time();
     for i in 0..files {
-        let path = root.join(format!("Rezepte/Aargauer Rüeblitorte {i}.cook"));
-        let Err(refusal) = plugin.parse(&path, &recipe, &EntityUri::no_parent(), &root) else {
-            panic!("a recipe whose path holds a space derives an unstorable id");
-        };
-        assert!(
-            format!("{refusal:#}").contains("is not a storable URI path"),
-            "refused for another reason: {refusal:#}"
-        );
+        let path = root.join(format!("Rezepte/Aargauer-Rueeblitorte-{i}.cook"));
+        plugin
+            .parse(&path, &recipe, &EntityUri::no_parent(), &root)
+            .expect("an ordinary recipe at a storable path parses");
     }
     let per_recipe = (thread_cpu_time() - cpu_started) / files;
     println!(
-        "REFUSAL: {per_recipe:?} CPU per refused recipe ({:?} wall)",
+        "PARSE: {per_recipe:?} CPU per recipe ({:?} wall)",
         started.elapsed() / files
     );
 
     assert!(
         per_recipe < PARSE_BUDGET_PER_RECIPE,
-        "refusing one recipe took {per_recipe:?} of CPU, over the {PARSE_BUDGET_PER_RECIPE:?} budget; a \
-         vault of 4352 recipes would hold the boot scan for {:?}",
+        "parsing one recipe took {per_recipe:?} of CPU, over the {PARSE_BUDGET_PER_RECIPE:?} \
+         budget; a vault of 4352 recipes would hold the boot scan for {:?}",
         per_recipe * 4352
     );
+    let parses = holon_plugin_host::guest_parses() - parses_before;
+    assert_eq!(parses, files as u64, "the guest must run once per recipe");
     assert!(
         per_recipe > PARSE_FLOOR_PER_RECIPE,
-        "refusing one recipe took only {per_recipe:?} of CPU on this thread, under the \
-         {PARSE_FLOOR_PER_RECIPE:?} floor; the parse no longer runs on the calling thread"
+        "the guest ran {parses} times but this thread spent only {per_recipe:?} per recipe, under \
+         the {PARSE_FLOOR_PER_RECIPE:?} floor; the parse no longer runs on the calling thread"
     );
 }

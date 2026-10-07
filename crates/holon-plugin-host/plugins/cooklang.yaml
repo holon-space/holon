@@ -9,6 +9,7 @@ write_tier: read_only
 scopes:
   - type: recipe
     owner_column: source_path
+    id_from: source_path
     # `servings` is deliberately absent: cooklang admits non-integer servings
     # (`4|6|8`) that the INTEGER column cannot hold, and the metadata reaches
     # the recipe page through the document block's properties either way.

@@ -35,7 +35,15 @@ keystone PBT uses a few recipes and CI runs release-like timings. Open rungs:
 ## Remedy
 `Cargo.toml`: `[profile.dev.package.wasmi*]` at opt-level 3 without debug
 assertions. Closing rung: Test A,
-`refusing_a_recipe_stays_within_the_scan_budget_in_every_build_profile` in
+`parsing_a_recipe_stays_within_the_scan_budget_in_every_build_profile` in
 `crates/holon-plugin-host/tests/vault_scan_latency.rs`, a 20 ms thread-CPU
-budget per refused recipe, red at 1.03 s with the profile override removed.
+budget per parsed recipe, red at 1.03 s with the profile override removed.
+
+The recipe scope declares `id_from: source_path`
+(`crates/holon-plugin-host/plugins/cooklang.yaml`), so the adapter refuses a
+recipe whose path cannot be stored before the guest runs: a refused recipe
+costs 4-15 µs of CPU instead of 11.3 ms in the test profile. Closing rung:
+`a_recipe_whose_path_cannot_be_stored_is_refused_before_the_guest_runs` in the
+same file asserts that no guest run happens for such a recipe.
+
 Status PARTIAL until Test B bounds the real scan in wall time.

@@ -84,6 +84,15 @@ Four rules, each a loud error when broken:
 4. **An undeclared type or owner column is refused**, as `typed_row_sink.rs`
    already does.
 
+A format sidecar's scope may declare **`id_from: source_path`**: every row of
+that scope is keyed by the file's vault-relative path, the `source_path` the
+host hands the guest (`crates/holon-plugin-host/plugins/cooklang.yaml` declares
+it for `recipe`). The id is then known before the guest runs, so the adapter
+checks it with `parse_local_id` first and refuses a file whose path cannot be
+stored without running the guest (`crates/holon-plugin-host/src/adapter.rs`,
+`parse`). After the run, a row of that scope whose emitted id is not the source
+path is refused, so a sidecar whose guest breaks the declaration fails loudly.
+
 JSON Lines first. CSV and Arrow only on a measured need.
 
 ### 3. One provider host: wasm on `wasmi`

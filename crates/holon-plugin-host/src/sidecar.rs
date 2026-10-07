@@ -48,6 +48,16 @@ struct ScopeYaml {
     type_name: String,
     owner_column: String,
     columns: Vec<String>,
+    #[serde(default)]
+    id_from: Option<IdSource>,
+}
+
+/// What a scope's row id is, when the sidecar declares it.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum IdSource {
+    /// The file's vault-relative path, as the host hands it to the guest.
+    SourcePath,
 }
 
 /// One declared row scope, already checked against itself.
@@ -60,6 +70,9 @@ pub struct DeclaredScope {
     /// declared: a type name is `snake_case` and a URI scheme cannot hold an
     /// underscore, so `ingredient_use` rows land under `ingredient-use`.
     pub id_entity: String,
+    /// Known before the guest runs, so a file whose id cannot be stored is
+    /// refused without running it.
+    pub id_from: Option<IdSource>,
 }
 
 /// Where a format's guest bytes come from.
@@ -206,6 +219,7 @@ impl PluginFormat {
                 owner_column: scope.owner_column,
                 columns,
                 id_entity,
+                id_from: scope.id_from,
             });
         }
         if scopes.is_empty() {

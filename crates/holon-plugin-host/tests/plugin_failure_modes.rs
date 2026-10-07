@@ -348,6 +348,28 @@ fn a_sidecar_claiming_a_contract_scope_is_refused() {
     );
 }
 
+#[test]
+fn a_row_id_other_than_the_declared_source_path_is_refused() {
+    let dir = std::env::temp_dir().join("holon-plugin-host-sidecar-tests");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::copy(fixtures().join("testkit.wasm"), dir.join("testkit.wasm")).unwrap();
+    let sidecar = dir.join("keyed-by-path.yaml");
+    std::fs::write(
+        &sidecar,
+        "format: keyed\nguest: testkit.wasm\nextensions: [keyed]\nscopes:\n  - type: thing\n    \
+         owner_column: source_path\n    id_from: source_path\n    columns: [id, source_path]\n",
+    )
+    .unwrap();
+    let adapter = PluginFormatAdapter::load(&sidecar, PluginLimits::default()).unwrap();
+
+    run(&adapter, "well_formed").expect("the guest keys `thing` by its path");
+    let message = refusal(&adapter, "unstorable_id");
+    assert!(
+        message.contains("declares that id to be the source path"),
+        "{message}"
+    );
+}
+
 /// The cooklang plugin loads from the sidecar the vault ships, claims `.cook`,
 /// and names itself the way a reader of an error would recognise it.
 #[test]
