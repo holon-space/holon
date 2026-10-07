@@ -351,6 +351,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `move-block-between-files-sql-read-repeat-budget`
 - `opentab-sql-reads-budget`
 - `orgmode-file-watcher-no-event`
+- `paste-block-copy-sql-read-repeat-budget`
 - `pinblock-lazy-day-page-shell`
 - `proptest-sm-shrink-seen-transitions`
 - `quick-open-vault-scale-timeout`

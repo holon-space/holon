@@ -172,9 +172,9 @@ impl holon_pbt_core::capabilities::RefReboot for ReferenceState {
     ///   `ReactiveEngine` registry; a client must register it again. The seeded
     ///   left-sidebar watch is KEPT: the second boot renders the sidebar and
     ///   registers it itself (`reboot_wide` mirrors that on the SUT).
-    /// - the `edit-refused-read-only-format` disclosure —
-    ///   `AllClear::UntilRestart`, raised by a refused write only, so the new
-    ///   boot shows it again only after the next refusal.
+    /// - the `edit-refused-read-only-format` and `edit-refused-by-shape`
+    ///   disclosures — `AllClear::UntilRestart`, raised by a refused write
+    ///   only, so the new boot shows them again only after the next refusal.
     /// - the remote-list peer's duplicate entries — the fixture peer is rebuilt
     ///   from the mirror.
     fn reboot_drops_in_memory_state(&mut self) {
@@ -192,6 +192,8 @@ impl holon_pbt_core::capabilities::RefReboot for ReferenceState {
         }
         self.conditions
             .clear_kind(holon_api::ConditionKind::EDIT_REFUSED_READ_ONLY_FORMAT);
+        self.conditions
+            .clear_kind(holon_api::ConditionKind::EDIT_REFUSED_BY_SHAPE);
         self.restart_forgets_copy_state();
         self.remote_list.reboot_reseeds_peer_from_mirror();
     }
