@@ -1,0 +1,31 @@
+/Users/martin/Workspaces/pkm/holon/.claude/worktrees/org-scan-boot
+85124e23604f587ae2fd90c00655b0d62d303ff82ff196a655df0d91aeb90311  crates/holon-orgmode/src/di.rs
+
+running 1 test
+test hand_authored_keystone_regressions ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 20.70s
+
+warning: Cargo.toml: unused manifest key: profile.coverage.package.*.pathfinder_simd
+warning: Cargo.toml: unused manifest key: profile.coverage.package.*.psm
+warning: workspace (manifest) generated 2 warnings
+warning: linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected
+  |
+  = note: `#[warn(linker_messages)]` on by default
+[…]
+[hand-authored regression] running case "the-org-files-sync-while-the-read-only-backlog-is-held" (6 transitions)
+[…]
+Applying transition 1/6: WriteOrgFile(WriteOrgFile { filename: "Two.org", blocks: [Block { id: EntityUri("block:keep-me"), parent_id: EntityUri("block:gen-placeholder"), tags: Tags({}), requires: [], advice_suppressed: [], contributes_to: [], content: "Keep me", content_type: Text, source_language: None, source_name: None, properties: {"ID": String("keep-me")}, marks: None, collapsed: false, widget_only: false, created_at: 0, updated_at: 0 }], keyword_set: None })
+[…]
+Applying transition 2/6: RebootWithBacklogHeld(RebootWithBacklogHeld)
+[…]
+Applying transition 3/6: ToggleState(ToggleState { block_id: EntityUri("block:parent"), new_state: Todo })
+[…]
+Applying transition 4/6: DenseProjectionEdit(DenseProjectionEdit { parent_id: EntityUri("block:ref-doc-0"), edit: EditFirstRow { title: "Renamed", body: None, state: None } })
+[…]
+Applying transition 5/6: AttemptReadOnlyEdit(AttemptReadOnlyEdit { block_id: "block:keystone-recipe.cook::b::0", content: "rewritten" })
+[…]
+Applying transition 6/6: ReleaseBacklog(ReleaseBacklog)
+[…]
+[hand-authored regression] PASSED case "the-org-files-sync-while-the-read-only-backlog-is-held"
+[…]

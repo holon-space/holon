@@ -1,0 +1,38 @@
+/Users/martin/Workspaces/pkm/holon/.claude/worktrees/org-scan-boot
+d9748ba1ddf39be6edc1c34d07084b9aa811408fab10dd1ec2f98a0129661a79  crates/holon-filesystem/src/file_sync_controller.rs
+e9d2da8bcf6063c7996c5ce53c1d9a4f99477b62bfdabdb0bd151e64156dbecf  crates/holon-orgmode/src/di.rs
+
+running 1 test
+test the_default_layout_seed_does_not_wait_for_the_recipe_backlog has been running for over 60 seconds
+test the_default_layout_seed_does_not_wait_for_the_recipe_backlog ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 31 filtered out; finished in 63.24s
+
+
+running 1 test
+test the_default_layout_seed_is_answered_while_the_recipe_backlog_is_held ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 31 filtered out; finished in 6.06s
+
+warning: Cargo.toml: unused manifest key: profile.coverage.package.*.pathfinder_simd
+warning: Cargo.toml: unused manifest key: profile.coverage.package.*.psm
+warning: workspace (manifest) generated 2 warnings
+warning: linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `holon-integration-tests` (test "cook_vault_ingest") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.68s
+────────────
+ Nextest run ID 2cab14c5-0bb5-44f2-adf0-6a0451d1b137 with nextest profile: default
+    Starting 2 tests across 1 binary (30 tests skipped)
+       START [         ] (1/2) holon-integration-tests::cook_vault_ingest the_default_layout_seed_does_not_wait_for_the_recipe_backlog
+        SLOW [> 30.000s] (───) holon-integration-tests::cook_vault_ingest the_default_layout_seed_does_not_wait_for_the_recipe_backlog
+        SLOW [> 60.000s] (───) holon-integration-tests::cook_vault_ingest the_default_layout_seed_does_not_wait_for_the_recipe_backlog
+BOOT-TIMING recipes=500 seed_ms=1183 recipes_at_seed=0 backlog_done_ms=63239
+        PASS [  63.262s] (1/2) holon-integration-tests::cook_vault_ingest the_default_layout_seed_does_not_wait_for_the_recipe_backlog
+       START [         ] (2/2) holon-integration-tests::cook_vault_ingest the_default_layout_seed_is_answered_while_the_recipe_backlog_is_held
+        PASS [   6.075s] (2/2) holon-integration-tests::cook_vault_ingest the_default_layout_seed_is_answered_while_the_recipe_backlog_is_held
+────────────
+     Summary [  69.337s] 2 tests run: 2 passed (1 slow), 30 skipped
+GATE-EXIT=0

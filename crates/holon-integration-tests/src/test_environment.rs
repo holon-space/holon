@@ -533,6 +533,9 @@ impl TestEnvironmentBuilder {
         .await?;
         let debug_services =
             holon_mcp::di::populate_debug_services(&injector, Some(reactive_engine.clone())).await;
+        if self.wait_for_file_watcher {
+            wait_for_vault_backlog(&injector).await?;
+        }
 
         // Tests need deterministic state — wait for CDC event propagation
         if settle_delay_ms > 0 {
@@ -579,6 +582,17 @@ impl TestEnvironmentBuilder {
             loro_org_idle: OnceCell::new(),
         })
     }
+}
+
+/// A session is ready once the writable files are in (D108.a); a test that
+/// waits for the boot also waits for the read-only backlog, so recipes are in
+/// the store as before.
+async fn wait_for_vault_backlog(injector: &fluxdi::Injector) -> Result<()> {
+    injector
+        .resolve::<holon_orgmode::VaultBacklogDrained>()
+        .wait_drained()
+        .await
+        .map_err(|e| e.context("the vault's read-only backlog"))
 }
 
 impl Default for TestEnvironmentBuilder {
@@ -1134,6 +1148,9 @@ impl TestEnvironment {
         .await?;
         let debug_services =
             holon_mcp::di::populate_debug_services(&injector, Some(reactive_engine.clone())).await;
+        if wait_for_ready {
+            wait_for_vault_backlog(&injector).await?;
+        }
 
         let ctx = E2ETestContext::from_engine(backend_engine);
 
@@ -1366,6 +1383,7 @@ impl TestEnvironment {
             Ok(()) => {}
             Err(msg) => anyhow::bail!("no-Turso org sync startup failed: {msg}"),
         }
+        wait_for_vault_backlog(&injector).await?;
         self.latch_loro_org_idle(injector.resolve::<holon_orgmode::OrgSyncIdleSignal>());
 
         self.latch_loro_backend(backend);

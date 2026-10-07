@@ -624,6 +624,14 @@ pub trait WritebackDisclosure: Send + Sync {
     /// sync itself started. Sticky for the rest of the process.
     fn vault_start_incomplete(&self, vault: &Path, step: &str, cause: &str);
 
+    /// Signal that the read-only files of `vault` are still being ingested:
+    /// `done` of `total`. Lifted by
+    /// [`vault_backlog_ingested`](Self::vault_backlog_ingested).
+    fn vault_backlog_ingesting(&self, vault: &Path, done: usize, total: usize);
+
+    /// The read-only backlog of `vault` has ended.
+    fn vault_backlog_ingested(&self, vault: &Path);
+
     /// Signal that Holon wrote each of `files` in `vault` but could not record
     /// which bytes it wrote (`cause`), so the next start reads them again.
     ///

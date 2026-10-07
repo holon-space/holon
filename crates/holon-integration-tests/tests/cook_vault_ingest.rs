@@ -2533,3 +2533,69 @@ fn the_default_layout_seed_does_not_wait_for_the_recipe_backlog() {
         );
     });
 }
+
+/// A boot over a fresh database knows no file of the recipe's document, while
+/// the Loro store still holds it. Until the pending recipe is ingested and
+/// claims its document, no page file is written beside it.
+#[test]
+fn a_recipe_page_waiting_in_the_backlog_gets_no_org_twin() {
+    init_tracing();
+    let rt = runtime();
+    rt.clone().block_on(async {
+        use holon_filesystem::FileSystem;
+        let mut app = backlog_vault(1)
+            .build(rt.clone())
+            .await
+            .expect("a vault of org files and one recipe must boot");
+        wait_for_backlog(&app, 1).await;
+        app.stop_app().await.expect("stop_app after boot 1");
+        for entry in std::fs::read_dir(app.temp_dir.path()).expect("list the vault root") {
+            let path = entry.expect("read a vault root entry").path();
+            if path
+                .file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with("test.db"))
+            {
+                std::fs::remove_file(&path)
+                    .unwrap_or_else(|e| panic!("delete {}: {e}", path.display()));
+            }
+        }
+        app.org_fs.hold_reads_with_extension("cook");
+        app.start_app(false).await.expect("boot 2 start_app");
+        app.injector()
+            .expect("a booted app has an injector")
+            .resolve::<holon_orgmode::FileWatcherReadySignal>()
+            .wait_ready()
+            .await
+            .expect("the writable files are ingested while the recipe reads are held");
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        while ingested_recipes(&app).await == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "premise: the Loro store projects the recipe's blocks into the fresh database \
+                 while its file waits in the backlog"
+            );
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        app.wait_for_org_files_stable(500, Duration::from_secs(30))
+            .await;
+        let twin = app.org_root().join("Resources").join("R0000.org");
+        let while_held = app.org_fs.read_to_string(&twin).await;
+        app.org_fs.release_reads_with_extension("cook");
+        assert!(
+            while_held.is_err(),
+            "a page file was written beside the recipe that waits in the backlog: {while_held:?}"
+        );
+        app.injector()
+            .expect("a booted app has an injector")
+            .resolve::<holon_orgmode::VaultBacklogDrained>()
+            .wait_drained()
+            .await
+            .expect("the backlog drains once the recipe reads go through");
+        app.wait_for_org_files_stable(500, Duration::from_secs(30))
+            .await;
+        assert!(
+            app.org_fs.read_to_string(&twin).await.is_err(),
+            "the ingested recipe owns its page, yet a page file was written beside it"
+        );
+    });
+}

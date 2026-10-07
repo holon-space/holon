@@ -144,7 +144,11 @@ impl ReferenceState {
     pub fn copies_window_gate(&self, variant: &str) -> Validated<(), Reason> {
         let restart = matches!(
             variant,
-            "Reboot" | "SimulateRestart" | "EpochFlipRejected" | "DeleteHeadlineWhileOff"
+            "Reboot"
+                | "SimulateRestart"
+                | "EpochFlipRejected"
+                | "DeleteHeadlineWhileOff"
+                | "RebootWithBacklogHeld"
         );
         let base_forgotten = self.files.copies.values().any(|copy| !copy.base_known);
         check(

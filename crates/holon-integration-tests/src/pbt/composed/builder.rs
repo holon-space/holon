@@ -724,6 +724,17 @@ async fn compose_sut_seeded_impl(
                 .await
                 .expect("compose_sut full mode: the org boot did not end within 60s")
                 .expect("compose_sut full mode: FileWatcherReadySignal sender dropped");
+            // An adopted component's reboot decides whether its backlog is in
+            // (`RebootGap::BacklogHeld` keeps it out).
+            if !adopted {
+                let drained = comp
+                    .injector()
+                    .resolve::<holon_orgmode::VaultBacklogDrained>();
+                tokio::time::timeout(Duration::from_secs(60), drained.wait_drained())
+                    .await
+                    .expect("compose_sut full mode: the read-only backlog did not end within 60s")
+                    .expect("compose_sut full mode: the read-only backlog failed");
+            }
             // Scale-soak: a 5-10k-block org ingest delays controller resolution far past
             // the 2s default; scale the poll budget with `HOLON_SOAK_SETTLE_MS` (never
             // below the 2s default) so the fail-loud assert below stays meaningful.

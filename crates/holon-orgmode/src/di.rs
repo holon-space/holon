@@ -50,7 +50,8 @@ pub fn docs_written_from_holder() -> u64 {
 }
 
 /// Signal that indicates the FileWatcher is ready to receive file change
-/// events.
+/// events: the vault's writable files are ingested. The read-only backlog
+/// follows; [`VaultBacklogDrained`] says when it ends.
 ///
 /// Tests can wait on this signal to ensure the file watcher is established
 /// before making external file modifications.
@@ -96,6 +97,22 @@ impl FileWatcherReadySignal {
                 msg
             )),
         }
+    }
+}
+
+/// Every file of the vault is ingested, the read-only backlog included
+/// (D108.a). `Err` names the backlog files that failed.
+#[derive(Clone)]
+pub struct VaultBacklogDrained(FileWatcherReadySignal);
+
+impl VaultBacklogDrained {
+    pub fn new() -> (FileWatcherReadySender, Self) {
+        let (sender, signal) = FileWatcherReadySignal::new();
+        (sender, Self(signal))
+    }
+
+    pub async fn wait_drained(&self) -> anyhow::Result<()> {
+        self.0.wait_ready().await
     }
 }
 
@@ -715,8 +732,13 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
             .expect("FileWatcherReadySignal factory called twice");
         Shared::new(signal)
     }));
+    let (drained_sender, drained_signal) = VaultBacklogDrained::new();
+    injector.provide::<VaultBacklogDrained>(Provider::root(move |_| {
+        Shared::new(drained_signal.clone())
+    }));
     // Store sender in Arc<Mutex> so we can move it into the spawned task later
-    let ready_sender = std::sync::Arc::new(std::sync::Mutex::new(Some(ready_sender)));
+    let ready_sender =
+        std::sync::Arc::new(std::sync::Mutex::new(Some((ready_sender, drained_sender))));
     let ready_sender_for_factory = ready_sender.clone();
 
     // Create and register OrgSyncIdleSignal
@@ -1384,38 +1406,103 @@ fn summarize_scan_failures(failures: &[(PathBuf, anyhow::Error)]) -> String {
     )
 }
 
-/// The vault's files in a read-only format. Nothing writes them back, so the
-/// boot ingests them after every writable file.
+/// The vault's read-only files whose ids derive from their path
+/// ([`DocumentIdentity::ByRecordedHome`](holon_core::DocumentIdentity)).
+/// Nothing writes them back and none of their blocks can carry an id the boot
+/// seed creates, so the watch loop ingests them after the boot, as its
+/// lowest-priority work (D108.a).
 struct VaultBacklog {
     pending: std::collections::VecDeque<PathBuf>,
 }
 
 impl VaultBacklog {
-    /// Split `files` into the writable ones, in their order, and the backlog.
+    /// Split `files` into the ones the boot ingests, in their order, and the
+    /// backlog. A read-only format that reads ids from the content (LogSeq's
+    /// `id::`) can name a seed block, so its files stay in the boot.
     fn partition(
         files: Vec<PathBuf>,
         formats: &holon_core::FormatRegistry,
     ) -> (Vec<PathBuf>, Self) {
-        let mut writable = Vec::new();
+        let mut boot = Vec::new();
         let mut pending = std::collections::VecDeque::new();
         for path in files {
             let adapter = formats
                 .require(&path)
                 .unwrap_or_else(|e| panic!("the vault walk returned a file: {e:#}"));
-            match adapter.write_tier() {
-                holon_core::WriteTier::ReadWrite => writable.push(path),
-                holon_core::WriteTier::ReadOnly => pending.push_back(path),
+            match (adapter.write_tier(), adapter.document_identity()) {
+                (holon_core::WriteTier::ReadOnly, holon_core::DocumentIdentity::ByRecordedHome) => {
+                    pending.push_back(path)
+                }
+                _ => boot.push(path),
             }
         }
-        (writable, Self { pending })
+        (boot, Self { pending })
     }
 
     fn len(&self) -> usize {
         self.pending.len()
     }
 
-    fn pop(&mut self) -> Option<PathBuf> {
-        self.pending.pop_front()
+    fn paths(&self) -> Vec<PathBuf> {
+        self.pending.iter().cloned().collect()
+    }
+
+    /// The read of the next pending file, yielding its path. It only waits
+    /// until the file is readable — the ingest reads it again — so a slow file
+    /// parks the backlog's arm of the loop and nothing else.
+    fn read_next(
+        &mut self,
+        fs: &Arc<dyn holon_filesystem::FileSystem>,
+    ) -> Option<futures::future::BoxFuture<'static, PathBuf>> {
+        let path = self.pending.pop_front()?;
+        let fs = fs.clone();
+        Some(Box::pin(async move {
+            fs.read_to_string(&path).await.ok(); // ALLOW(ok): the ingest reads the file again and reports its failure
+            path
+        }))
+    }
+}
+
+/// The backlog is ingested: one feed convergence, the page files it held
+/// back, and the [`VaultBacklogDrained`] outcome.
+async fn finish_backlog(
+    controller: &mut FileSyncController,
+    root_directory: &std::path::Path,
+    total: usize,
+    mut failures: Vec<(PathBuf, anyhow::Error)>,
+    drained: FileWatcherReadySender,
+) {
+    if total > 0 {
+        match controller.finish_backlog(30_000).await {
+            Ok(()) => {
+                if let Err(e) = controller.materialize_missing_page_files().await {
+                    tracing::error!("[OrgMode] fileless-page materialization failed: {:#}", e);
+                    controller
+                        .disclose_start_incomplete("writing the files of pages that have none", &e);
+                    failures.push((root_directory.to_path_buf(), e));
+                }
+            }
+            Err(e) => {
+                tracing::error!(
+                    "[OrgMode] read-only backlog feed convergence failed: {:#}",
+                    e
+                );
+                failures.push((root_directory.to_path_buf(), e));
+            }
+        }
+        controller.disclose_backlog_ended();
+    }
+    if failures.is_empty() {
+        tracing::info!("[OrgMode] read-only backlog ingested: {} file(s)", total);
+        drained.signal_ready();
+    } else {
+        let msg = summarize_scan_failures(&failures);
+        tracing::error!("[OrgMode] read-only backlog: {}", msg);
+        controller.disclose_start_incomplete(
+            "reading the read-only files",
+            &anyhow::anyhow!(msg.clone()),
+        );
+        drained.signal_error(msg);
     }
 }
 
@@ -1428,6 +1515,15 @@ async fn ingest_at_boot(
 ) {
     let t_file = std::time::Instant::now();
     let result = controller.on_file_changed(&file_path).await;
+    record_boot_ingest(file_path, t_file, result, failures);
+}
+
+fn record_boot_ingest(
+    file_path: PathBuf,
+    t_file: std::time::Instant,
+    result: anyhow::Result<holon_filesystem::IngestOutcome>,
+    failures: &mut Vec<(PathBuf, anyhow::Error)>,
+) {
     tracing::info!(
         target: "holon_latency",
         stage = "boot_file",
@@ -1474,7 +1570,7 @@ async fn run_file_sync_controller(
     root_directory: PathBuf,
     idle_signal_weak: std::sync::Weak<OrgSyncIdleSignal>,
     mut rerender_rx: tokio::sync::mpsc::UnboundedReceiver<RerenderMsg>,
-    ready_sender: FileWatcherReadySender,
+    (ready_sender, drained_sender): (FileWatcherReadySender, FileWatcherReadySender),
     mut seed_handover: Option<SeedHandover>,
     fs: Arc<dyn holon_filesystem::FileSystem>,
     change_source: Arc<dyn holon_filesystem::FileChangeSource>,
@@ -1501,6 +1597,7 @@ async fn run_file_sync_controller(
         if let Some(handover) = seed_handover {
             handover.scan_answer.send(Err(msg.clone()));
         }
+        drained_sender.signal_error(msg.clone());
         ready_sender.signal_error(msg);
         return;
     }
@@ -1528,7 +1625,7 @@ async fn run_file_sync_controller(
     // ERROR-log level left downstream consumers
     // (LiveData mirrors, matview cursors) wedged
     // because partial-state writes never reconciled.
-    let scan_failures: Vec<(std::path::PathBuf, anyhow::Error)> = async {
+    let (scan_failures, mut backlog) = async {
         let org_files = match scan_vault_files(fs.as_ref(), &root_directory, &formats).await {
             Ok(files) => files,
             Err(e) => {
@@ -1546,10 +1643,16 @@ async fn run_file_sync_controller(
                     &mut failures,
                 )
                 .await;
-                return failures;
+                return (
+                    failures,
+                    VaultBacklog {
+                        pending: Default::default(),
+                    },
+                );
             }
         };
-        let (writable, mut backlog) = VaultBacklog::partition(org_files, &formats);
+        let (writable, backlog) = VaultBacklog::partition(org_files, &formats);
+        controller.defer_to_backlog(&backlog.paths());
         let fs_warm = fs.clone();
         let preloaded: Vec<(std::path::PathBuf, Option<String>)> =
             futures::future::join_all(writable.into_iter().map(|p| {
@@ -1571,7 +1674,7 @@ async fn run_file_sync_controller(
         // cover intra-file correctness; only the sidebar-facing `block`-matview
         // feed is deferred. Scoped to the initial scan — runtime edits keep the
         // per-edit barrier.
-        let files = preloaded.len() + backlog.len();
+        let files = preloaded.len();
         let t_scan = std::time::Instant::now();
         controller.begin_initial_scan();
         #[cfg(feature = "crash-injection")]
@@ -1579,9 +1682,6 @@ async fn run_file_sync_controller(
             panic!("[crash-injection] the file-sync controller dies during the initial scan");
         }
         for (file_path, _content) in preloaded {
-            ingest_at_boot(&mut controller, file_path, &mut failures).await;
-        }
-        while let Some(file_path) = backlog.pop() {
             ingest_at_boot(&mut controller, file_path, &mut failures).await;
         }
         // ONE end-of-scan convergence wait (30s loud ceiling). A stall becomes a
@@ -1660,7 +1760,7 @@ async fn run_file_sync_controller(
             t_scan.elapsed().as_millis(),
             failures.len(),
         );
-        failures
+        (failures, backlog)
     }
     .instrument(tracing::info_span!("org.initial_scan.ingest"))
     .await;
@@ -1787,6 +1887,27 @@ async fn run_file_sync_controller(
     // A failed record is retried only after the loop processes something.
     let mut tick_at_last_discovery = None;
     let mut tick_at_last_stamp = None;
+    let backlog_total = backlog.len();
+    let mut backlog_failures = Vec::new();
+    let mut backlog_disclosed_at = std::time::Instant::now();
+    let mut backlog_read = backlog.read_next(&fs);
+    let mut drained_sender = Some(drained_sender);
+    if backlog_read.is_some() {
+        info!(
+            "[OrgMode] read-only backlog: {} file(s) after the boot",
+            backlog_total
+        );
+        controller.disclose_backlog_progress(0, backlog_total);
+    } else {
+        finish_backlog(
+            &mut controller,
+            &root_directory,
+            backlog_total,
+            Vec::new(),
+            drained_sender.take().expect("taken once"),
+        )
+        .await;
+    }
     loop {
         // Session-alive check: if the strong refs to
         // OrgSyncIdleSignal have all been dropped, the
@@ -1984,6 +2105,31 @@ async fn run_file_sync_controller(
                 }
                 idle_signal_for_task.mark_progress();
             }
+            // Last under `biased`: a read-only file waits for every other arm.
+            // Neither a pass nor progress — a settle waits for the user's
+            // writes, not for the backlog.
+            path = async {
+                backlog_read.as_mut().expect("the arm runs only with a pending read").await
+            }, if backlog_read.is_some() => {
+                backlog_read = backlog.read_next(&fs);
+                let t_file = std::time::Instant::now();
+                let result = controller.ingest_backlog_file(&path).await;
+                record_boot_ingest(path, t_file, result, &mut backlog_failures);
+                let done = backlog_total - backlog.len() - usize::from(backlog_read.is_some());
+                if backlog_read.is_none() {
+                    finish_backlog(
+                        &mut controller,
+                        &root_directory,
+                        backlog_total,
+                        std::mem::take(&mut backlog_failures),
+                        drained_sender.take().expect("the backlog ends once"),
+                    )
+                    .await;
+                } else if backlog_disclosed_at.elapsed() >= std::time::Duration::from_secs(1) {
+                    backlog_disclosed_at = std::time::Instant::now();
+                    controller.disclose_backlog_progress(done, backlog_total);
+                }
+            }
         }
     }
 }
@@ -2086,6 +2232,8 @@ mod writeback_panic_tests {
         fn vault_sync_not_started(&self, _: &std::path::Path, _: &str) {}
         fn vault_state_unreadable(&self, _: &std::path::Path, _: &std::path::Path, _: &str) {}
         fn vault_start_incomplete(&self, _: &std::path::Path, _: &str, _: &str) {}
+        fn vault_backlog_ingesting(&self, _: &std::path::Path, _: usize, _: usize) {}
+        fn vault_backlog_ingested(&self, _: &std::path::Path) {}
         fn written_files_unrecorded(&self, _: &std::path::Path, _: &[&std::path::Path], _: &str) {}
         fn written_files_recorded(&self, _: &std::path::Path) {}
         fn deleted_block_gone_from_file(&self, _: &holon_api::EntityUri) {}

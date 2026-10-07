@@ -167,6 +167,8 @@ impl holon_filesystem::WritebackDisclosure for Disclosures {
     fn vault_sync_not_started(&self, _: &Path, _: &str) {}
     fn vault_state_unreadable(&self, _: &Path, _: &Path, _: &str) {}
     fn vault_start_incomplete(&self, _: &Path, _: &str, _: &str) {}
+    fn vault_backlog_ingesting(&self, _: &Path, _: usize, _: usize) {}
+    fn vault_backlog_ingested(&self, _: &Path) {}
     fn written_files_unrecorded(&self, _: &Path, files: &[&Path], cause: &str) {
         self.0
             .lock()

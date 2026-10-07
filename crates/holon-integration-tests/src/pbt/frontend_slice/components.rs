@@ -230,6 +230,8 @@ pub enum RebootGap {
         block_id: EntityUri,
         doc: EntityUri,
     },
+    /// Every `.cook` read is held from the shutdown on (D108.a).
+    BacklogHeld,
 }
 
 /// A composition component wrapping a real headless frontend stack. Owns the
@@ -1142,7 +1144,7 @@ impl HeadlessFrontendComponent {
             RebootGap::DeleteHeadline { block_id, doc } => {
                 Some(self.cut_headline_from_file(block_id, doc).await)
             }
-            RebootGap::Nothing | RebootGap::EpochFlipRejected => None,
+            RebootGap::Nothing | RebootGap::EpochFlipRejected | RebootGap::BacklogHeld => None,
         };
 
         // Drop CDC consumers before the actor goes away (mirrors
@@ -1177,8 +1179,10 @@ impl HeadlessFrontendComponent {
              shut-down Turso actor. Every holder must release the old boot BEFORE this point.",
             dead.strong_count()
         );
+        let backlog_held = matches!(between, RebootGap::BacklogHeld);
         match between {
             RebootGap::Nothing => {}
+            RebootGap::BacklogHeld => self.store.org_fs.hold_reads_with_extension("cook"),
             RebootGap::EpochFlipRejected => {
                 crate::test_environment::run_epoch_flip_rejection_check(
                     self.store.temp.path(),
@@ -1228,12 +1232,23 @@ impl HeadlessFrontendComponent {
             .injector
             .try_resolve::<holon_orgmode::FileWatcherReadySignal>()
         {
-            tokio::time::timeout(wedge, scanned.wait_ready())
+            // Inside the harness's own reboot wedge, so a held backlog that
+            // parks the boot fails with this targeted message first.
+            let ready_budget = if backlog_held { wedge / 2 } else { wedge };
+            tokio::time::timeout(ready_budget, scanned.wait_ready())
                 .await
                 .unwrap_or_else(|_| {
+                    assert!(
+                        !backlog_held,
+                        "[reboot] the writable phase did not report ready within {ready_budget:?} while \
+                         the read-only backlog is held: the org scan waits for the read-only files"
+                    );
                     panic!("[reboot] the second boot's org initial scan did not finish within {wedge:?}")
                 })
                 .unwrap_or_else(|e| panic!("[reboot] the second boot's org initial scan failed: {e:#}"));
+        }
+        if !backlog_held {
+            Self::await_vault_backlog(&booted.injector, wedge).await;
         }
         let converged = Self::converge_boot(&booted.engine, &booted.injector, wedge).await;
         drop(booted);
@@ -1282,6 +1297,18 @@ impl HeadlessFrontendComponent {
             after.difference(&expected).collect::<Vec<_>>(),
             expected.difference(&after).collect::<Vec<_>>()
         );
+    }
+
+    /// The ready signal means the writable files are in; a boot is judged once
+    /// its read-only backlog is in too.
+    pub(crate) async fn await_vault_backlog(injector: &fluxdi::Injector, budget: Duration) {
+        let drained = injector.resolve::<holon_orgmode::VaultBacklogDrained>();
+        tokio::time::timeout(budget, drained.wait_drained())
+            .await
+            .unwrap_or_else(|_| {
+                panic!("[boot] the read-only backlog did not end within {budget:?}")
+            })
+            .unwrap_or_else(|e| panic!("[boot] the read-only backlog failed: {e:#}"));
     }
 
     /// `block_id`'s section cut out of `doc`'s file as an editor saves it, and
@@ -5722,6 +5749,16 @@ impl SutAppLifecycle for HeadlessFrontendComponent {
                 );
             }
         }
+    }
+
+    async fn reboot_with_backlog_held(&self) {
+        self.reboot_through(RebootGap::BacklogHeld).await;
+    }
+
+    async fn release_backlog(&self) {
+        self.org_fs().release_reads_with_extension("cook");
+        let wedge = crate::pbt::invariants::bodies::settle_budget::wedge_deadline();
+        Self::await_vault_backlog(&self.booted().injector, wedge).await;
     }
 
     async fn assert_epoch_flip_rejected(&self) {

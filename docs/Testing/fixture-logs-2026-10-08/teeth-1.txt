@@ -1,0 +1,142 @@
+/Users/martin/Workspaces/pkm/holon/.claude/worktrees/org-scan-boot
+e11bb711b844554c3fce0a4e2ea56b4e552298076307e1656d3fc8b7e06ef184  crates/holon-orgmode/src/di.rs
+
+running 1 test
+[2m2026-10-08T00:32:51.431470Z[0m [31mERROR[0m [2mholon_app::wiring[0m[2m:[0m boot [component=session stage=boot-seed]: seed_default_layout failed: Operation 'focus' on entity 'navigation' failed: Failed to get cursor position: Database error: Actor channel closed
+[2m2026-10-08T00:32:51.431537Z[0m [31mERROR[0m [2mholon_frontend::platform[0m[2m:[0m boot [component=platform-capabilities]: step `seed-default-layout` FAILED: seed_default_layout failed: Operation 'focus' on entity 'navigation' failed: Failed to get cursor position: Database error: Actor channel closed
+[2m2026-10-08T00:32:51.431574Z[0m [31mERROR[0m [2mholon_app::wiring[0m[2m:[0m OrgMode initial scan or controller start failed: the file sync controller ended before it reported the initial scan
+test the_default_layout_seed_does_not_wait_for_the_recipe_backlog ... FAILED
+
+failures:
+
+failures:
+    the_default_layout_seed_does_not_wait_for_the_recipe_backlog
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 31 filtered out; finished in 34.89s
+
+
+running 1 test
+test the_default_layout_seed_is_answered_while_the_recipe_backlog_is_held has been running for over 60 seconds
+[2m2026-10-08T00:33:52.664338Z[0m [31mERROR[0m [2mholon_orgmode::di[0m[2m:[0m [OrgMode] boot seed gate: the file sync controller ended before it reported the initial scan
+[2m2026-10-08T00:33:52.664403Z[0m [31mERROR[0m [2mholon_orgmode::di[0m[2m:[0m [OrgMode] boot seed gate: the boot seed ended without reporting its outcome
+[2m2026-10-08T00:33:52.664431Z[0m [31mERROR[0m [2mholon_frontend::platform[0m[2m:[0m boot [component=platform-capabilities]: step `seed-default-layout` FAILED: its task ended without reporting an outcome
+test the_default_layout_seed_is_answered_while_the_recipe_backlog_is_held ... FAILED
+
+failures:
+
+failures:
+    the_default_layout_seed_is_answered_while_the_recipe_backlog_is_held
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 31 filtered out; finished in 61.21s
+
+warning: Cargo.toml: unused manifest key: profile.coverage.package.*.pathfinder_simd
+warning: Cargo.toml: unused manifest key: profile.coverage.package.*.psm
+warning: workspace (manifest) generated 2 warnings
+   Compiling holon-orgmode v0.1.0 (/Users/martin/Workspaces/pkm/holon/.claude/worktrees/org-scan-boot/crates/holon-orgmode)
+   Compiling holon-app v0.1.0 (/Users/martin/Workspaces/pkm/holon/.claude/worktrees/org-scan-boot/crates/holon-app)
+   Compiling holon-mcp v0.1.0 (/Users/martin/Workspaces/pkm/holon/.claude/worktrees/org-scan-boot/frontends/mcp)
+   Compiling holon-integration-tests v0.1.0 (/Users/martin/Workspaces/pkm/holon/.claude/worktrees/org-scan-boot/crates/holon-integration-tests)
+warning: linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `holon-integration-tests` (test "cook_vault_ingest") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 14.28s
+────────────
+ Nextest run ID e60bed2b-26d9-46fc-a5f8-f5066c35c560 with nextest profile: default
+    Starting 2 tests across 1 binary (30 tests skipped)
+       START [         ] (1/2) holon-integration-tests::cook_vault_ingest the_default_layout_seed_does_not_wait_for_the_recipe_backlog
+        SLOW [> 30.000s] (───) holon-integration-tests::cook_vault_ingest the_default_layout_seed_does_not_wait_for_the_recipe_backlog
+BOOT-TIMING recipes=500 seed_ms=34723 recipes_at_seed=500 backlog_done_ms=34728
+
+thread 'the_default_layout_seed_does_not_wait_for_the_recipe_backlog' (302245121) panicked at crates/holon-integration-tests/tests/cook_vault_ingest.rs:2527:9:
+the default-layout seed was answered only after all 500 recipes were ingested (34723 ms to the seed, 34728 ms to the last recipe)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+        FAIL [  34.909s] (1/2) holon-integration-tests::cook_vault_ingest the_default_layout_seed_does_not_wait_for_the_recipe_backlog
+       START [         ] (2/2) holon-integration-tests::cook_vault_ingest the_default_layout_seed_is_answered_while_the_recipe_backlog_is_held
+        SLOW [> 30.000s] (───) holon-integration-tests::cook_vault_ingest the_default_layout_seed_is_answered_while_the_recipe_backlog_is_held
+        SLOW [> 60.000s] (───) holon-integration-tests::cook_vault_ingest the_default_layout_seed_is_answered_while_the_recipe_backlog_is_held
+
+thread 'the_default_layout_seed_is_answered_while_the_recipe_backlog_is_held' (302247146) panicked at crates/holon-integration-tests/tests/cook_vault_ingest.rs:2493:9:
+the default-layout seed is not answered while the recipe backlog is held: the org scan waits for the read-only files
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+        FAIL [  61.233s] (2/2) holon-integration-tests::cook_vault_ingest the_default_layout_seed_is_answered_while_the_recipe_backlog_is_held
+────────────
+     Summary [  96.142s] 2 tests run: 0 passed, 2 failed, 30 skipped
+        FAIL [  34.909s] (1/2) holon-integration-tests::cook_vault_ingest the_default_layout_seed_does_not_wait_for_the_recipe_backlog
+        FAIL [  61.233s] (2/2) holon-integration-tests::cook_vault_ingest the_default_layout_seed_is_answered_while_the_recipe_backlog_is_held
+error: test run failed
+SEED-EXIT=100
+
+running 1 test
+test hand_authored_keystone_regressions has been running for over 60 seconds
+test hand_authored_keystone_regressions ... FAILED
+
+failures:
+
+failures:
+    hand_authored_keystone_regressions
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 8 filtered out; finished in 70.05s
+
+warning: Cargo.toml: unused manifest key: profile.coverage.package.*.pathfinder_simd
+warning: Cargo.toml: unused manifest key: profile.coverage.package.*.psm
+warning: workspace (manifest) generated 2 warnings
+   Compiling holon-orgmode v0.1.0 (/Users/martin/Workspaces/pkm/holon/.claude/worktrees/org-scan-boot/crates/holon-orgmode)
+   Compiling holon-app v0.1.0 (/Users/martin/Workspaces/pkm/holon/.claude/worktrees/org-scan-boot/crates/holon-app)
+   Compiling holon-mcp v0.1.0 (/Users/martin/Workspaces/pkm/holon/.claude/worktrees/org-scan-boot/frontends/mcp)
+   Compiling holon-integration-tests v0.1.0 (/Users/martin/Workspaces/pkm/holon/.claude/worktrees/org-scan-boot/crates/holon-integration-tests)
+warning: linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `holon-integration-tests` (test "hand_authored_regressions") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 12.90s
+     Running tests/hand_authored_regressions.rs (target/debug/build/holon-integration-tests/4dfe0c63b4d2e70c/out/hand_authored_regressions-4dfe0c63b4d2e70c)
+[hand-authored regression] running case "the-org-files-sync-while-the-read-only-backlog-is-held" (6 transitions)
+[dense-tools] embedded MCP server up in 6.047959ms
+
+Running a test case with 6 transitions.
+[wide-e2e wiring] drawn: storage={Loro, Org, Turso} sync={} actors={MCPServer, ActionEngine} -> booted storage={Loro, Org, Turso} projections={ViewModel, EditorState} editor-leg=Cell
+[2m2026-10-08T00:34:12.030510Z[0m [33m WARN[0m [2mholon_profiles::type_registry[0m[2m:[0m computed fields are outside the SQL-compilable subset and are served by Rhai alone; they cannot be planted as matview columns [3mentity[0m[2m=[0m"block" [3mfields[0m[2m=[0mhas_query_source, is_holon_source, is_page_row, is_program, is_rule_head, is_widget_only
+[dense-tools] embedded MCP server up in 5.314125ms
+[2m2026-10-08T00:34:14.053416Z[0m [33m WARN[0m [2mholon_profiles::type_registry[0m[2m:[0m computed fields are outside the SQL-compilable subset and are served by Rhai alone; they cannot be planted as matview columns [3mentity[0m[2m=[0m"block" [3mfields[0m[2m=[0mhas_query_source, is_holon_source, is_page_row, is_program, is_rule_head, is_widget_only
+[2m2026-10-08T00:34:14.142207Z[0m [33m WARN[0m [2mholon_filesystem::file_sync_controller[0m[2m:[0m [FileSyncController] write-back SKIPPED: the holder's membership does not match the authority's, so this render would project a partially-folded document over disk. The diff that resolves it is already in flight and will re-trigger the render. (Further skips of this document log at debug until it settles.) [3mdoc[0m[2m=[0mblock:journals [3mdifference[0m[2m=[0mblock:journals::action::0@block:journals::auto-create,block:journals::auto-create@block:journals,block:journals::render::0@block:journals,block:journals::src::0@block:journals [3mheld[0m[2m=[0m0 [3mauthority[0m[2m=[0m4
+[RESEED-ORACLE] case summary: incremental=7 full=1 [coldboot=1] steady_leaks=0
+[inv-watch-context-rows-owned] watch_opens=0 (cumulative 0) places=[]
+
+Applying transition 1/6: WriteOrgFile(WriteOrgFile { filename: "Two.org", blocks: [Block { id: EntityUri("block:keep-me"), parent_id: EntityUri("block:gen-placeholder"), tags: Tags({}), requires: [], advice_suppressed: [], contributes_to: [], content: "Keep me", content_type: Text, source_language: None, source_name: None, properties: {"ID": String("keep-me")}, marks: None, collapsed: false, widget_only: false, created_at: 0, updated_at: 0 }], keyword_set: None })
+[inv-watch-context-rows-owned] watch_opens=1 (cumulative 1) places=["root:block:structural-page"]
+[inv-sql-budget] WriteOrgFile: reads=29 (dedup 13)/25 writes=1/0 ddl=0/0 tol=5 max_q=5ms wall=203ms spans=134 rss=+0.1MB (cum=+0.1MB) state=b172/d7/w0/r4 apply=0ms check=0ms settle=0ms pre_inv16=0ms live_mirrors=0ms assert_quiet=0ms drain_cdc=0ms inv10_drain=0ms files_stable=0ms mark_proc=0ms×0
+[inv-sql-budget N+1] WriteOrgFile: 4 distinct SQL texts fired multiple times:
+  11x (2 distinct bindings — fan-out) [REDUNDANT x7/binding]: SELECT b.id, b.parent_id, b.sort_key, b.content, b.content_type, b.source_language, b.source_name, b.properties, b.property_kinds, b.marks, b.collapsed, b.widget_only, b.completed, b.block_type, b.cre …#82cb8a60e8cf7097… (lesson_id) FROM advice_suppressed WHERE anchor_id = b.id), '  ') AS advice_suppressed, COALESCE((SELECT json_group_array(target_id) FROM block_contributes_to WHERE block_id = b.id), '  ') AS contributes_to FROM block_raw b WHERE b.id = $id origins=6
+         4x origin=org.ingest_file ▸ org.on_block_feed
+         2x origin=org.ingest_file
+         2x origin=org.ingest_file ▸ org.on_block_feed ▸ org.on_block_changed
+         1x origin=home.locate
+         1x origin=org.ingest_file ▸ home.locate
+         1x origin=org.ingest_file ▸ home.locate ▸ home.resolve_doc
+  5x (identical bindings — redundant) [REDUNDANT x5/binding]: SELECT id, parent_id, content, content_type, source_language, source_name, properties, marks, collapsed, widget_only FROM block_raw WHERE id != '                  ' origin=<no-parent>
+  3x (identical bindings — redundant) [REDUNDANT x3/binding]: WITH RECURSIVE descendants(id, depth_acc) AS ( SELECT b.id,   FROM block_raw b WHERE b.parent_id = $doc_id AND NOT EXISTS (SELECT   FROM block_tags bt WHERE bt.block_id = b.id AND bt.tag = '    ') UNI …#cca1767d82a86dad… chor_id = b.id), '  ') AS advice_suppressed, COALESCE((SELECT json_group_array(target_id) FROM block_contributes_to WHERE block_id = b.id), '  ') AS contributes_to FROM block_raw b JOIN descendants d ON d.id = b.id ORDER BY b.sort_key, b.id origin=org.ingest_file
+  2x (identical bindings — redundant) [REDUNDANT x2/binding]: SELECT to_id FROM block_redirects WHERE from_id = $from_id origin=org.ingest_file
+
+Applying transition 2/6: RebootWithBacklogHeld(RebootWithBacklogHeld)
+[2m2026-10-08T00:34:19.514820Z[0m [33m WARN[0m [2mholon_profiles::type_registry[0m[2m:[0m computed fields are outside the SQL-compilable subset and are served by Rhai alone; they cannot be planted as matview columns [3mentity[0m[2m=[0m"block" [3mfields[0m[2m=[0mhas_query_source, is_holon_source, is_page_row, is_program, is_rule_head, is_widget_only
+[2m2026-10-08T00:34:19.583196Z[0m [33m WARN[0m [2mholon_turso::matview_manager[0m[2m:[0m [reconcile_named_view] Dropping matview 'journal_feed' because its base matview 'journal_day_pages' is being recreated; it will be rebuilt by its owning schema module (or on watch registration) — leaving it in place would corrupt it with duplicate rows
+[2m2026-10-08T00:34:19.799891Z[0m [33m WARN[0m [2mholon::api::backend_engine[0m[2m:[0m the database actor is gone, so the membership row of a finished watch stays until the next boot truncates it [3mwatch_key[0m[2m=[0mroot:block:structural-page
+[2m2026-10-08T00:34:19.800894Z[0m [33m WARN[0m [2mholon_turso::matview_manager[0m[2m:[0m [reconcile_named_view] Dropping matview 'watch_view_24b4a986849e9042' because its base matview 'focus_roots' is being recreated; it will be rebuilt by its owning schema module (or on watch registration) — leaving it in place would corrupt it with duplicate rows
+[2m2026-10-08T00:34:19.806655Z[0m [33m WARN[0m [2mholon_turso::matview_manager[0m[2m:[0m [reconcile_named_view] Dropping matview 'watch_view_8a3c1fc12fd386b' because its base matview 'focus_roots' is being recreated; it will be rebuilt by its owning schema module (or on watch registration) — leaving it in place would corrupt it with duplicate rows
+[2m2026-10-08T00:34:19.811586Z[0m [33m WARN[0m [2mholon_turso::matview_manager[0m[2m:[0m [reconcile_named_view] Dropping matview 'watch_view_5e7c968385d62ffc' because its base matview 'focus_roots' is being recreated; it will be rebuilt by its owning schema module (or on watch registration) — leaving it in place would corrupt it with duplicate rows
+[2m2026-10-08T00:34:19.816419Z[0m [33m WARN[0m [2mholon_turso::matview_manager[0m[2m:[0m [reconcile_named_view] Dropping matview 'watch_view_81d8ff0247de31ff' because its base matview 'focus_roots' is being recreated; it will be rebuilt by its owning schema module (or on watch registration) — leaving it in place would corrupt it with duplicate rows
+[2m2026-10-08T00:34:19.822386Z[0m [33m WARN[0m [2mholon_turso::matview_manager[0m[2m:[0m [reconcile_named_view] Dropping matview 'watch_view_fbf85d2c596d5ec0' because its base matview 'focus_roots' is being recreated; it will be rebuilt by its owning schema module (or on watch registration) — leaving it in place would corrupt it with duplicate rows
+[2m2026-10-08T00:35:19.960262Z[0m [33m WARN[0m [2mholon_mcp_client::mcp_integration[0m[2m:[0m sync still deferred — org initial scan in progress [3mwaited_s[0m[2m=[0m60
+[2m2026-10-08T00:35:20.151891Z[0m [33m WARN[0m [2mholon_loro::loro_sync_controller[0m[2m:[0m [LoroSyncController] reconcile loop still deferred — org initial scan in progress [3mwaited_s[0m[2m=[0m60
+
+thread 'hand_authored_keystone_regressions' (302255335) panicked at crates/holon-integration-tests/src/pbt/frontend_slice/components.rs:1241:21:
+[reboot] the writable phase did not report ready within 60s while the read-only backlog is held: the org scan waits for the read-only files
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+[2m2026-10-08T00:35:20.224319Z[0m [31mERROR[0m [2mholon_orgmode::di[0m[2m:[0m [OrgMode] boot seed gate: the boot seed ended without reporting its outcome
+[2m2026-10-08T00:35:20.224451Z[0m [31mERROR[0m [2mholon_frontend::platform[0m[2m:[0m boot [component=platform-capabilities]: step `seed-default-layout` FAILED: its task ended without reporting an outcome
+[2m2026-10-08T00:35:20.224472Z[0m [31mERROR[0m [2mholon_orgmode::di[0m[2m:[0m [OrgMode] boot seed gate: the file sync controller ended before it reported the initial scan
+error: test failed, to rerun pass `-p holon-integration-tests --test hand_authored_regressions`
+KS-EXIT=101

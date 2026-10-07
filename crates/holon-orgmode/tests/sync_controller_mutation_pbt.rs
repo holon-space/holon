@@ -3988,6 +3988,8 @@ mod intermediate_ancestor_writeback_hole {
             fn vault_sync_not_started(&self, _: &std::path::Path, _: &str) {}
             fn vault_state_unreadable(&self, _: &std::path::Path, _: &std::path::Path, _: &str) {}
             fn vault_start_incomplete(&self, _: &std::path::Path, _: &str, _: &str) {}
+            fn vault_backlog_ingesting(&self, _: &std::path::Path, _: usize, _: usize) {}
+            fn vault_backlog_ingested(&self, _: &std::path::Path) {}
             fn written_files_unrecorded(
                 &self,
                 _: &std::path::Path,
@@ -4103,6 +4105,8 @@ mod intermediate_ancestor_writeback_hole {
             fn vault_sync_not_started(&self, _: &std::path::Path, _: &str) {}
             fn vault_state_unreadable(&self, _: &std::path::Path, _: &std::path::Path, _: &str) {}
             fn vault_start_incomplete(&self, _: &std::path::Path, _: &str, _: &str) {}
+            fn vault_backlog_ingesting(&self, _: &std::path::Path, _: usize, _: usize) {}
+            fn vault_backlog_ingested(&self, _: &std::path::Path) {}
             fn written_files_unrecorded(
                 &self,
                 _: &std::path::Path,
@@ -4241,6 +4245,8 @@ mod intermediate_ancestor_writeback_hole {
             fn vault_sync_not_started(&self, _: &std::path::Path, _: &str) {}
             fn vault_state_unreadable(&self, _: &std::path::Path, _: &std::path::Path, _: &str) {}
             fn vault_start_incomplete(&self, _: &std::path::Path, _: &str, _: &str) {}
+            fn vault_backlog_ingesting(&self, _: &std::path::Path, _: usize, _: usize) {}
+            fn vault_backlog_ingested(&self, _: &std::path::Path) {}
             fn written_files_unrecorded(
                 &self,
                 _: &std::path::Path,
@@ -4507,6 +4513,8 @@ impl holon_filesystem::WritebackDisclosure for RefusalLog {
     fn vault_sync_not_started(&self, _: &std::path::Path, _: &str) {}
     fn vault_state_unreadable(&self, _: &std::path::Path, _: &std::path::Path, _: &str) {}
     fn vault_start_incomplete(&self, _: &std::path::Path, _: &str, _: &str) {}
+    fn vault_backlog_ingesting(&self, _: &std::path::Path, _: usize, _: usize) {}
+    fn vault_backlog_ingested(&self, _: &std::path::Path) {}
     fn written_files_unrecorded(&self, _: &std::path::Path, _: &[&std::path::Path], _: &str) {}
     fn written_files_recorded(&self, _: &std::path::Path) {}
     fn deleted_block_gone_from_file(&self, _: &holon_api::EntityUri) {}

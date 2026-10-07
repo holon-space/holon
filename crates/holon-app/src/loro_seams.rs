@@ -846,6 +846,20 @@ impl holon_filesystem::WritebackDisclosure for WritebackDegradedDisclosure {
         });
     }
 
+    fn vault_backlog_ingesting(&self, vault: &Path, done: usize, total: usize) {
+        self.bus.emit(holon_api::Condition {
+            subject: vault.display().to_string(),
+            reason: holon_api::ConditionKind::VaultBacklogIngesting { done, total },
+        });
+    }
+
+    fn vault_backlog_ingested(&self, vault: &Path) {
+        self.bus.clear(&holon_api::ConditionKey {
+            subject: vault.display().to_string(),
+            kind: holon_api::ConditionKind::VAULT_BACKLOG_INGESTING,
+        });
+    }
+
     fn written_files_unrecorded(&self, vault: &Path, files: &[&Path], cause: &str) {
         self.bus.emit(holon_api::Condition {
             subject: vault.display().to_string(),

@@ -288,6 +288,14 @@ impl ConditionKind {
                     .collect(),
             ),
 
+            Self::VaultBacklogIngesting { done, total } => ConditionDetail::with_body(
+                format!(
+                    "Holon syncs the files in {subject}; {done} of its {total} read-only files \
+                     are read so far, and the rest appear as they are read."
+                ),
+                vec![],
+            ),
+
             Self::WatchViewsRebuilding => ConditionDetail::prose(
                 "every watched view is being dropped and recreated; lists may lag until it \
                  finishes",

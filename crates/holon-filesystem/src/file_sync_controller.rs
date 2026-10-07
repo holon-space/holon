@@ -990,6 +990,16 @@ pub struct FileSyncController {
     /// detection.
     scan_feed_ids: Option<Vec<String>>,
 
+    /// Read-only files the boot left to the watch loop that it has not
+    /// ingested yet ([`defer_to_backlog`](Self::defer_to_backlog)).
+    backlog_pending: HashSet<CanonicalPath>,
+    /// The feed ids the backlog's ingests buffered for the one convergence
+    /// wait in [`finish_backlog`](Self::finish_backlog).
+    backlog_feed_ids: Vec<String>,
+    /// Set only while [`ingest_backlog_file`](Self::ingest_backlog_file) runs,
+    /// so a runtime ingest between two backlog files keeps its own barrier.
+    in_backlog_ingest: bool,
+
     /// Write-back quarantine (dogfood 2026-07-10 region data-loss guard). A
     /// file whose ingest FAILED partway (`ingest_file` returned `Err` — a
     /// rejected block op, a parsed-vs-landed count mismatch, a stalled
@@ -1241,6 +1251,9 @@ impl FileSyncController {
             history: None,
             clock: Arc::new(holon_api::SystemClock),
             scan_feed_ids: None,
+            backlog_pending: HashSet::new(),
+            backlog_feed_ids: Vec::new(),
+            in_backlog_ingest: false,
             quarantined: HashMap::new(),
             readonly_rerender_skipped: HashSet::new(),
             gate_skips: HashMap::new(),
@@ -1440,6 +1453,89 @@ impl FileSyncController {
         Ok(())
     }
 
+    /// Leave `paths`, read-only files the boot scan did not ingest, to the
+    /// watch loop's backlog. Until each is ingested, discovery skips it and no
+    /// page file is minted beside it
+    /// ([`backlog_holds_a_twin_of`](Self::backlog_holds_a_twin_of)).
+    pub fn defer_to_backlog(&mut self, paths: &[PathBuf]) {
+        for path in paths {
+            assert!(
+                self.is_read_only_path(path),
+                "{} is written back, so it cannot wait in the read-only backlog",
+                path.display()
+            );
+            self.backlog_pending.insert(CanonicalPath::new(path));
+        }
+    }
+
+    /// Ingest one backlog file. Its feed ids wait for
+    /// [`finish_backlog`](Self::finish_backlog) and its creates stay out of
+    /// history, as in the initial scan; everything else is a runtime
+    /// ingest.
+    pub async fn ingest_backlog_file(&mut self, path: &Path) -> Result<IngestOutcome> {
+        assert!(
+            self.backlog_pending.remove(&CanonicalPath::new(path)),
+            "{} is not pending in the backlog",
+            path.display()
+        );
+        self.in_backlog_ingest = true;
+        let outcome = self.on_file_changed(path).await;
+        self.in_backlog_ingest = false;
+        outcome
+    }
+
+    /// The backlog is ingested: one feed-convergence wait over the ids its
+    /// ingests buffered, failing loud on a stall like
+    /// [`finish_initial_scan`](Self::finish_initial_scan).
+    pub async fn finish_backlog(&mut self, stall_ms: u64) -> Result<()> {
+        assert!(
+            self.backlog_pending.is_empty(),
+            "the backlog ended with {} file(s) not ingested",
+            self.backlog_pending.len()
+        );
+        let mut ids = std::mem::take(&mut self.backlog_feed_ids);
+        ids.sort();
+        ids.dedup();
+        if ids.is_empty() || self.wait_for_feed_progress(&ids, stall_ms).await {
+            return Ok(());
+        }
+        let present = self.block_reader.blocks_in_feed_count(&ids).await;
+        anyhow::bail!(
+            "[finish_backlog] block feed did not converge — no progress for {stall_ms}ms with {} \
+             of {} expected id(s) still missing — projection/CDC stalled during the read-only \
+             backlog",
+            ids.len() - present,
+            ids.len()
+        );
+    }
+
+    /// Whether `doc`, which no file holds yet, must wait for the backlog
+    /// before a page file is minted for it at `path`: a pending read-only file
+    /// with the stem of `path` resolves its document by that name chain when it
+    /// is ingested, so the minted file would be a second home for it.
+    fn backlog_holds_a_twin_of(&self, doc: &EntityUri, path: &Path) -> bool {
+        !self.backlog_pending.is_empty()
+            && !self.doc_home.contains_key(doc)
+            && self.formats.extensions().any(|ext| {
+                self.backlog_pending
+                    .contains(&CanonicalPath::new(&path.with_extension(ext)))
+            })
+    }
+
+    /// Tell the user how far the read-only backlog has come.
+    pub fn disclose_backlog_progress(&self, done: usize, total: usize) {
+        if let Some(disclosure) = &self.writeback_disclosure {
+            disclosure.vault_backlog_ingesting(&self.root_dir, done, total);
+        }
+    }
+
+    /// The read-only backlog has ended.
+    pub fn disclose_backlog_ended(&self) {
+        if let Some(disclosure) = &self.writeback_disclosure {
+            disclosure.vault_backlog_ingested(&self.root_dir);
+        }
+    }
+
     /// Progress-grounded feed wait (replaces the fixed wall-clock ceiling).
     ///
     /// Waits in `stall_ms` slices via `wait_for_blocks_in_feed`; after each
@@ -1485,7 +1581,12 @@ impl FileSyncController {
     /// binds — is measurable per file. `site` is `"updates"` (A) or
     /// `"creates"` (C).
     async fn feed_barrier(&mut self, ids: &[String], site: &'static str) -> bool {
-        if let Some(buf) = self.scan_feed_ids.as_mut() {
+        let buffer = if self.in_backlog_ingest {
+            Some(&mut self.backlog_feed_ids)
+        } else {
+            self.scan_feed_ids.as_mut()
+        };
+        if let Some(buf) = buffer {
             buf.extend(ids.iter().cloned());
             tracing::info!(
                 target: "holon_latency",
@@ -1878,6 +1979,14 @@ impl FileSyncController {
         let mut mounts_skipped = 0usize;
         for file in scanned.files {
             if !self.formats.handles(&file) {
+                continue;
+            }
+            // The heal starts from an id the file declares, which a format
+            // identified by its recorded home never does.
+            if matches!(
+                self.adapter(&file)?.document_identity(),
+                holon_core::DocumentIdentity::ByRecordedHome
+            ) {
                 continue;
             }
             let Some(disk_content) = self.read_if_present(&file).await? else {
@@ -5322,11 +5431,13 @@ impl FileSyncController {
         // genuinely-new doc/day PAGE created by RUNTIME org-ingest (a user
         // CreateDocument / external new file), so the C2 provenance floor
         // (`inv-history-records-all-creates`) covers ingest creates, not only
-        // engine-routed ones. Cold-boot scan is excluded (`in_initial_scan`) so a
+        // engine-routed ones. The boot's scan and its backlog are excluded so a
         // vault load never floods history. Ingest-origin: recorded, never on the
         // undo stack (undo-reach of ingest ops is a separate item).
-        let doc_page_is_new_runtime =
-            doc_was_created && !self.in_initial_scan() && self.history.is_some();
+        let doc_page_is_new_runtime = doc_was_created
+            && !self.in_initial_scan()
+            && !self.in_backlog_ingest
+            && self.history.is_some();
 
         // The document is a block too. Send it to the consolidator as a create
         // intent so it becomes a real node carrying its content + `Page` tag —
@@ -7907,6 +8018,15 @@ impl FileSyncController {
         };
         let path = vault_path.as_path().to_path_buf();
         let canonical = CanonicalPath::new(&path);
+        if self.backlog_holds_a_twin_of(doc_id, &path) {
+            info!(
+                "[FileSyncController] {} waits for the read-only backlog before {} is written: a \
+                 pending file of that name may own it",
+                doc_id,
+                path.display()
+            );
+            return Ok(BlockChangeVerdict::Handled);
+        }
 
         // If disk content differs from last_projection, there's a pending external
         // change that the file watcher hasn't delivered yet. Ingest it first so
@@ -8552,7 +8672,10 @@ impl FileSyncController {
             // this walk is the only periodic re-look at it.
             self.disclose_persistent_emptiness(&path, &canonical)
                 .await?;
-            if self.last_projection.contains_key(&canonical) {
+            // A backlog file is the watch loop's to ingest, one per pass.
+            if self.last_projection.contains_key(&canonical)
+                || self.backlog_pending.contains(&canonical)
+            {
                 continue;
             }
 
@@ -9039,6 +9162,9 @@ impl FileSyncController {
         let vault_path = VaultPath::page_file_from_name_chain(&self.root_dir, &chain)
             .with_context(|| format!("materialize_page_identity_file({page_id})"))?;
         let path = vault_path.as_path().to_path_buf();
+        if self.backlog_holds_a_twin_of(page_id, &path) {
+            return Ok(());
+        }
         let canonical = CanonicalPath::new(&path);
         // D3 / identity plan §5: a page RENAME changes its authoritative title,
         // so its file moves from `<old-title>.org` to this `<new-title>.org`.
@@ -9321,6 +9447,11 @@ impl FileSyncController {
             let path = vault_path.as_path().to_path_buf();
             let canonical = CanonicalPath::new(&path);
             if self.last_projection.contains_key(&canonical) {
+                continue;
+            }
+            // Written by the sweep that runs when the backlog drains, unless
+            // the pending file turns out to own the page.
+            if self.backlog_holds_a_twin_of(&doc_id, &path) {
                 continue;
             }
             let basis = read_basis(&self.fs, &path).await?;

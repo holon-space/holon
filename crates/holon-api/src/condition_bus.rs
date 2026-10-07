@@ -442,6 +442,11 @@ pub enum ConditionKind {
     ///
     /// All-clear: none in this process; a restart runs the step again.
     VaultStartIncomplete { step: String, cause: String },
+    /// `subject`, a vault root, is synced, but `done` of its `total` read-only
+    /// files (recipes) are ingested so far; the rest appear as they are read.
+    ///
+    /// All-clear: the backlog ends, whatever its outcome.
+    VaultBacklogIngesting { done: usize, total: usize },
     /// `subject`, a vault root, holds `files` Holon wrote without recording
     /// which bytes it wrote (`cause`), so the next start reads them again.
     ///
@@ -545,6 +550,7 @@ impl ConditionKind {
     pub const NESTED_SHARE_LOADED: &'static str = "nested-share-loaded";
     pub const DUPLICATE_MOUNT: &'static str = "duplicate-mount";
     pub const WATCH_VIEWS_REBUILDING: &'static str = "watch-views-rebuilding";
+    pub const VAULT_BACKLOG_INGESTING: &'static str = "vault-backlog-ingesting";
     pub const PROFILE_REFUSED: &'static str = "profile-refused";
     pub const BLOCK_IN_TWO_FILES: &'static str = "block-in-two-files";
     pub const BLOCK_EDITED_IN_TWO_FILES: &'static str = "block-edited-in-two-files";
@@ -602,6 +608,7 @@ impl ConditionKind {
             Self::NestedShareLoaded { .. } => Self::NESTED_SHARE_LOADED,
             Self::DuplicateMount { .. } => Self::DUPLICATE_MOUNT,
             Self::WatchViewsRebuilding => Self::WATCH_VIEWS_REBUILDING,
+            Self::VaultBacklogIngesting { .. } => Self::VAULT_BACKLOG_INGESTING,
             Self::ProfileRefused { .. } => Self::PROFILE_REFUSED,
             Self::BlockInTwoFiles { .. } => Self::BLOCK_IN_TWO_FILES,
             Self::BlockEditedInTwoFiles { .. } => Self::BLOCK_EDITED_IN_TWO_FILES,

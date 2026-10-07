@@ -58,6 +58,7 @@ pub use di::FileWatcherReadySignal;
 pub use di::OrgModeConfig;
 #[cfg(feature = "di")]
 pub use di::OrgSyncIdleSignal;
+pub use di::VaultBacklogDrained;
 // Sync providers and adapters
 pub use file_format::OrgFormatAdapter;
 // File I/O utilities for org-mode files

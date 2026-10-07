@@ -549,6 +549,15 @@ const OWNER_RECOVERY_CODE_NOT_SHOWN: ConditionProfile = ConditionProfile::new(
     &[],
 );
 
+const VAULT_BACKLOG_INGESTING: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Warning,
+    "Reading the read-only files",
+    icons::RETRY,
+    ConditionPlacement::Toast,
+    AllClear::RaisingOperationEnds,
+    &[],
+);
+
 const WATCH_VIEWS_REBUILDING: ConditionProfile = ConditionProfile::new(
     ConditionSeverity::Warning,
     "Rebuilding views",
@@ -748,6 +757,7 @@ impl ConditionKind {
             Self::NestedShareLoaded { .. } => NESTED_SHARE_LOADED,
             Self::DuplicateMount { .. } => DUPLICATE_MOUNT,
             Self::WatchViewsRebuilding => WATCH_VIEWS_REBUILDING,
+            Self::VaultBacklogIngesting { .. } => VAULT_BACKLOG_INGESTING,
             Self::ProfileRefused { .. } => PROFILE_REFUSED,
             Self::BlockInTwoFiles { .. } => BLOCK_IN_TWO_FILES,
             Self::BlockEditedInTwoFiles { .. } => BLOCK_EDITED_IN_TWO_FILES,
