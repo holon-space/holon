@@ -1650,6 +1650,68 @@ impl HeadlessFrontendComponent {
             .expect("headless create_block");
     }
 
+    /// Create a query-source block through the production `create` operation,
+    /// the way an MCP client adds a live query to a running app.
+    pub async fn create_source_block(
+        &self,
+        id: &str,
+        parent_id: &str,
+        language: holon_api::QueryLanguage,
+        source: &str,
+    ) {
+        use holon_api::EntityName;
+        use holon_api::StorageEntity;
+        use holon_api::Value;
+        use holon_api::types::ContentType;
+        let mut params: StorageEntity = std::collections::HashMap::new();
+        params.insert(
+            "id".into(),
+            Value::String(EntityUri::from_raw(id).to_string()),
+        );
+        params.insert(
+            "parent_id".into(),
+            Value::String(EntityUri::from_raw(parent_id).to_string()),
+        );
+        params.insert("content".into(), Value::String(source.to_string()));
+        params.insert("content_type".into(), ContentType::Source.into());
+        params.insert(
+            "source_language".into(),
+            Value::String(language.to_string()),
+        );
+        self.engine()
+            .execute_operation(
+                &EntityName::new("block"),
+                "create",
+                params,
+                holon_api::OpOrigin::User,
+            )
+            .await
+            .expect("headless create_source_block");
+    }
+
+    /// Re-parent a block through the production `move_block` operation.
+    pub async fn move_block(&self, id: &str, parent_id: &str) {
+        use holon_api::Value;
+        let mut params: holon_api::StorageEntity = std::collections::HashMap::new();
+        params.insert(
+            "id".into(),
+            Value::String(EntityUri::from_raw(id).to_string()),
+        );
+        params.insert(
+            "parent_id".into(),
+            Value::String(EntityUri::from_raw(parent_id).to_string()),
+        );
+        self.engine()
+            .execute_operation(
+                &holon_api::EntityName::new("block"),
+                "move_block",
+                params,
+                holon_api::OpOrigin::User,
+            )
+            .await
+            .expect("headless move_block");
+    }
+
     /// Create a `Page`-tagged block. A plain page renders its descendants as an
     /// outline, which is what a graft root has to do: `block:journals` — the
     /// boot Main focus root — renders `SELECT * FROM journal_feed`

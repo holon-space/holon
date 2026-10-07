@@ -1,5 +1,6 @@
 mod cdc_base_vs_matview_repro;
 mod navigation_focus_refuses_unresolvable_target;
+mod recursive_cte_over_block_matview;
 mod tabs_close_cursor_follow;
 mod tabs_cursor_filtered_panel;
 mod tabs_main_panel_delivery;
