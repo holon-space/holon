@@ -332,6 +332,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `concurrent-keystroke-undo-steps-load`
 - `cooklang-read-only-split-block-refusal`
 - `cooklang-read-only-write-refusal-any-op`
+- `create-sql-read-repeat-budget`
 - `deletebackward-sql-reads-budget`
 - `external-rewrite-drops-page-body`
 - `failed-slot-create-loro-dispatch-keystrokes-run-anyway`
