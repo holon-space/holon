@@ -100,18 +100,13 @@ struct AndroidStoragePaths {
     orgmode_root: Option<PathBuf>,
 }
 
-/// Open the main Holon window.
-///
-/// `config_dir`, when `Some`, pins the directory `holon.toml` and other
-/// app-local config live in. Mobile platforms MUST pass their app-private dir
-/// here (see [`android_storage_paths`]); passing `None` defers to
-/// [`resolve_config_dir`], whose relative `.holon` default is fatal on Android
-/// (read-only CWD) but correct on iOS/desktop (writable `$HOME`).
+/// Open the main Holon window. `config_dir` holds `holon.toml` and other
+/// app-local config; the entry point has armed the panic record there.
 fn open_holon_window(
     cx: &mut App,
     db_path: Option<PathBuf>,
     orgmode_root: Option<PathBuf>,
-    config_dir: Option<PathBuf>,
+    config_dir: PathBuf,
 ) {
     // Register the embedded icon-coverage font before the window renders any
     // text, so the toolbar/menu Unicode symbols resolve on their first frame.
@@ -133,14 +128,6 @@ fn open_holon_window(
             available_widgets: widgets,
             screen_size: None,
         };
-        // The caller pins the config dir on mobile (app-private storage); only
-        // defer to `resolve_config_dir` when unset. On Android the relative
-        // `.holon` default is on the read-only CWD `/` and any preference write
-        // there aborts the process, so the app-private dir is load-bearing.
-        let config_dir =
-            config_dir.unwrap_or_else(|| holon_frontend::config::resolve_config_dir(None));
-        let conditions = std::sync::Arc::new(holon_api::ConditionBus::new());
-        holon_frontend::panic_record::install(&config_dir, conditions.clone());
         // Load the PERSISTED config from `config_dir` (not `::default()`), so a
         // `ui.theme` (and any other preference) saved by the settings UI in a
         // prior session is applied at boot — desktop reads this via
@@ -168,13 +155,12 @@ fn open_holon_window(
         // host's loopback, so the MCP HTTP server (default `:8520`, override
         // with `MCP_SERVER_PORT`) is reachable from the host — set a distinct
         // port when a desktop Holon already holds 8520.
-        let mut app = fluxdi::Application::new(crate::di::GpuiModule {
+        let mut app = fluxdi::Application::new(crate::di::GpuiModule::new(
             holon_config,
             session_config,
             config_dir,
-            locked_keys: std::collections::HashSet::new(),
-            conditions,
-        });
+            std::collections::HashSet::new(),
+        ));
         if let Err(e) = app.bootstrap().await {
             boot_failed(BootError::from_bootstrap_error(e));
         }
@@ -352,13 +338,14 @@ pub extern "C" fn gpui_ios_register_app() {
     std::panic::set_hook(Box::new(|info| {
         eprintln!("GPUI PANIC: {info}");
     }));
+    // Resolves under the sandbox `$HOME`, which is writable on iOS.
+    let config_dir = holon_frontend::config::resolve_config_dir(None);
+    holon_frontend::panic_record::arm(&config_dir);
 
-    gpui_mobile::ios::ffi::set_app_callback(Box::new(|cx: &mut App| {
+    gpui_mobile::ios::ffi::set_app_callback(Box::new(move |cx: &mut App| {
         let (db_path, orgmode_root) = ios_data_paths();
         eprintln!("GPUI iOS: db_path={db_path:?} orgmode_root={orgmode_root:?}");
-        // iOS: `None` defers to `resolve_config_dir`, which resolves under the
-        // sandbox `$HOME` (writable) — correct here, unlike on Android.
-        open_holon_window(cx, db_path, orgmode_root, None);
+        open_holon_window(cx, db_path, orgmode_root, config_dir.clone());
     }));
 }
 
@@ -394,6 +381,10 @@ fn android_main(app: android_activity::AndroidApp) {
     log::info!(
         "android_main: config_dir={config_dir:?}, db_path={db_path:?}, orgmode_root={orgmode_root:?}"
     );
+    // Only a missing internal data path leaves the relative `.holon` default,
+    // on the read-only CWD `/`; `arm` then discloses that it cannot write.
+    let config_dir = config_dir.unwrap_or_else(|| holon_frontend::config::resolve_config_dir(None));
+    holon_frontend::panic_record::arm(&config_dir);
 
     let _platform = gpui_mobile::android::jni::init_platform(&app);
     log::info!("android_main: platform initialised");

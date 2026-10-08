@@ -29,10 +29,13 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Duration;
+use std::time::Instant;
 
 use fluxdi::Injector;
 use fluxdi::Module;
 use holon_api::ConditionBus;
+use holon_api::ConditionKind;
 use holon_frontend::config::CrdtPreferences;
 use holon_frontend::config::HolonConfig;
 use holon_frontend::config::McpConfig;
@@ -41,8 +44,8 @@ use holon_frontend::config::VaultConfig;
 use holon_gpui::di::GpuiModule;
 
 fn shipped_module(dir: &std::path::Path, crdt_enabled: Option<bool>) -> GpuiModule {
-    GpuiModule {
-        holon_config: HolonConfig {
+    GpuiModule::new(
+        HolonConfig {
             db_path: Some(dir.join("holon.db")),
             vault: VaultConfig {
                 root: Some(dir.to_path_buf()),
@@ -58,11 +61,10 @@ fn shipped_module(dir: &std::path::Path, crdt_enabled: Option<bool>) -> GpuiModu
             },
             ..Default::default()
         },
-        session_config: SessionConfig::new(holon_api::UiInfo::permissive()),
-        config_dir: dir.to_path_buf(),
-        locked_keys: HashSet::new(),
-        conditions: std::sync::Arc::new(holon_api::ConditionBus::new()),
-    }
+        SessionConfig::new(holon_api::UiInfo::permissive()),
+        dir.to_path_buf(),
+        HashSet::new(),
+    )
 }
 
 /// `crdt.enabled = false` — SqlOnly, the configuration the dogfood boot ran in.
@@ -110,6 +112,68 @@ fn assert_bus_resolves(crdt_enabled: Option<bool>) {
                 )
             });
     });
+}
+
+/// The bus `GpuiModule::new` installs the panic hook on is the bus its
+/// container resolves.
+#[test]
+fn a_panic_reaches_the_bus_the_shipped_container_resolves() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("build runtime");
+    rt.block_on(async {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let injector = Injector::root();
+        shipped_module(dir.path(), None)
+            .configure(&injector)
+            .expect("GpuiModule::configure (the shipped container assembly)");
+        let bus = injector
+            .try_resolve_async::<Arc<ConditionBus>>()
+            .await
+            .expect("the shipped container's bus");
+        assert_a_panic_reaches(&bus, "gpui container bus probe").await;
+    });
+}
+
+/// The bus a reset installs the panic hook on is the bus the fresh session's
+/// injector resolves.
+#[test]
+fn a_panic_reaches_the_bus_a_reset_session_resolves() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("build runtime");
+    rt.block_on(async {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let org_root = dir.path().join("org");
+        std::fs::create_dir(&org_root).expect("create the org root");
+        let fresh = holon_gpui::reset::build_fresh_sut(
+            dir.path().join("holon.db"),
+            org_root,
+            dir.path().join("config"),
+            Duration::ZERO,
+        )
+        .await
+        .expect("build the reset session");
+        assert_a_panic_reaches(&fresh.conditions, "gpui reset bus probe").await;
+    });
+}
+
+async fn assert_a_panic_reaches(bus: &ConditionBus, message: &'static str) {
+    let joined = std::thread::spawn(move || panic!("{message}")).join();
+    assert!(joined.is_err(), "the probe thread must die of its panic");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !bus.current().iter().any(
+        |c| matches!(&c.reason, ConditionKind::TaskPanicked { message: m, .. } if m == message),
+    ) {
+        assert!(
+            Instant::now() < deadline,
+            "the panic never reached the session's bus; it has {:?}",
+            bus.current()
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
 }
 
 // Installs the windowed capturing tracing subscriber before this binary's

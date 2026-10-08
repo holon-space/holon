@@ -35,13 +35,16 @@ fn main() -> Result<()> {
 
     let widgets = holon_gpui::render_supported_widgets();
     let (holon_config, session_config, config_dir, locked) = cli::build_session(widgets)?;
-    let conditions = Arc::new(holon_api::ConditionBus::new());
-    holon_frontend::panic_record::install(&config_dir, conditions.clone());
     // Production: don't block window paint on the OrgMode initial scan.
     // The FrontendSession factory spawns the wait + Loro seed in the
     // background; the reactive layer fills in data as it arrives. Tests
     // override this via `SessionConfig` to wait_for_ready=true.
-    let session_config = session_config.without_wait();
+    let module = GpuiModule::new(
+        holon_config,
+        session_config.without_wait(),
+        config_dir,
+        locked,
+    );
 
     let runtime = tokio::runtime::Runtime::new()?;
     // A stop during boot waits for the boot to finish and then takes the one
@@ -54,13 +57,7 @@ fn main() -> Result<()> {
     let boot_result = runtime.block_on(async {
         tracing::info!("Starting GPUI frontend...");
 
-        let mut app = fluxdi::Application::new(GpuiModule {
-            holon_config,
-            session_config,
-            config_dir,
-            locked_keys: locked,
-            conditions,
-        });
+        let mut app = fluxdi::Application::new(module);
         let timeout = std::time::Duration::from_secs(180);
         match tokio::time::timeout(timeout, app.bootstrap()).await {
             Err(_) => Err(BootError::new(

@@ -29,6 +29,8 @@ pub struct FreshSut {
     /// Fresh convergence/mirror handles resolved from this SUT's own injector,
     /// so `reset_vault` can point the debug PBT tools at the fresh session.
     pub live_debug: holon_mcp::server::DebugHandlesCell,
+    /// The fresh session's core bus, as its injector resolves it.
+    pub conditions: Arc<holon_api::ConditionBus>,
 }
 
 /// Build a production-faithful `FrontendSession` + `ReactiveEngine` on the
@@ -76,8 +78,7 @@ pub async fn build_fresh_sut(
         Arc::new(std::sync::OnceLock::new());
     let injector_slot_c = injector_slot.clone();
 
-    let conditions = Arc::new(holon_api::ConditionBus::new());
-    holon_frontend::panic_record::install(&config_dir, conditions.clone());
+    let conditions = holon_frontend::panic_record::install(&config_dir);
 
     let (session, backend, reactive) = holon_app::new_from_config_with_di(
         holon_config,
@@ -108,13 +109,11 @@ pub async fn build_fresh_sut(
     // reset must hand back the same leg start-up gave, or a reset would move
     // the running app onto the cell leg, where cmd+z restores nothing.
 
-    let live_debug = holon_mcp::di::debug_handles(
-        injector_slot
-            .get()
-            .expect("injector captured in extra_resolve"),
-        Some(reactive.clone()),
-    )
-    .await;
+    let injector = injector_slot
+        .get()
+        .expect("injector captured in extra_resolve");
+    let live_debug = holon_mcp::di::debug_handles(injector, Some(reactive.clone())).await;
+    let conditions = (*injector.resolve::<Arc<holon_api::ConditionBus>>()).clone();
 
     // Boot settle. The window runs its own settle-to-fixed-point after rebind,
     // so a bounded sleep here is enough to let the org drain + first projection
@@ -128,6 +127,7 @@ pub async fn build_fresh_sut(
         engine: reactive,
         backend,
         live_debug,
+        conditions,
     })
 }
 

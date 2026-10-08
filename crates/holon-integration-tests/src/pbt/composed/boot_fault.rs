@@ -16,8 +16,8 @@ pub const TASK_PANIC_MESSAGE: &str = "keystone boot fault: injected task panic";
 /// the hook's forwarder thread.
 const TASK_PANIC_DISCLOSURE: Duration = Duration::from_secs(5);
 
-/// One call site for both the model and the injection, so the location the
-/// model expects is the location the panic reports.
+/// The site is `#[track_caller]`, so its panic and its `Location::caller`
+/// both report the call below: the model expects the panic's own location.
 fn injected_task_panic(panic_now: bool) -> String {
     injected_task_panic_site(panic_now)
 }

@@ -3,46 +3,54 @@
 
 use std::path::Path;
 use std::process::Command;
-use std::sync::Arc;
 
 use holon_frontend::panic_record::PanicRecord;
 use holon_frontend::panic_record::RECORD_FILE;
 
 const CHILD_ENV: &str = "HOLON_PANIC_RECORD_CHILD_DIR";
 const CHILD_MESSAGE: &str = "panic-record child probe";
-const TEST_NAME: &str = "a_panic_that_kills_the_process_leaves_its_record";
 
-#[test]
-fn a_panic_that_kills_the_process_leaves_its_record() {
+/// In the child (`CHILD_ENV` set): install on that dir and die of a panic.
+/// In the parent: run `test_name` as that child on `config_dir` and return the
+/// record it left there.
+fn record_of_a_child_that_panics(test_name: &str, config_dir: &Path) -> PanicRecord {
     if let Ok(dir) = std::env::var(CHILD_ENV) {
-        holon_frontend::panic_record::install(
-            Path::new(&dir),
-            Arc::new(holon_api::ConditionBus::new()),
-        );
+        holon_frontend::panic_record::install(Path::new(&dir));
         panic!("{CHILD_MESSAGE}");
     }
 
-    let dir = tempfile::tempdir().expect("temp config dir");
     let output = Command::new(std::env::current_exe().expect("test binary path"))
-        .args(["--exact", TEST_NAME, "--nocapture", "--test-threads=1"])
-        .env(CHILD_ENV, dir.path())
+        .args(["--exact", test_name, "--nocapture", "--test-threads=1"])
+        .env(CHILD_ENV, config_dir)
         .output()
         .expect("spawn the child test process");
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         !output.status.success(),
-        "the child must die of its panic; stderr:\n{}",
-        String::from_utf8_lossy(&output.stderr)
+        "the child must die of its panic; stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(CHILD_MESSAGE),
+        "the chained default hook still prints the panic"
     );
 
-    let path = dir.path().join(RECORD_FILE);
+    let path = config_dir.join(RECORD_FILE);
     let bytes = std::fs::read(&path).unwrap_or_else(|e| {
         panic!(
-            "the dead child left no panic record at {}: {e}; its stderr:\n{}",
-            path.display(),
-            String::from_utf8_lossy(&output.stderr)
+            "the dead child left no panic record at {}: {e}; its stderr:\n{stderr}",
+            path.display()
         )
     });
-    let record: PanicRecord = serde_json::from_slice(&bytes).expect("the record parses");
+    serde_json::from_slice(&bytes).expect("the record parses")
+}
+
+#[test]
+fn a_panic_that_kills_the_process_leaves_its_record() {
+    let dir = tempfile::tempdir().expect("temp config dir");
+    let record = record_of_a_child_that_panics(
+        "a_panic_that_kills_the_process_leaves_its_record",
+        dir.path(),
+    );
     assert_eq!(record.message, CHILD_MESSAGE);
     let this_file = Path::new(file!())
         .file_name()
@@ -54,8 +62,14 @@ fn a_panic_that_kills_the_process_leaves_its_record() {
         "the record must name where the child panicked (in {this_file}); got {}",
         record.location
     );
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains(CHILD_MESSAGE),
-        "the chained default hook still prints the panic"
+}
+
+#[test]
+fn a_config_dir_that_does_not_exist_yet_still_gets_the_record() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let record = record_of_a_child_that_panics(
+        "a_config_dir_that_does_not_exist_yet_still_gets_the_record",
+        &dir.path().join("not").join("created"),
     );
+    assert_eq!(record.message, CHILD_MESSAGE);
 }

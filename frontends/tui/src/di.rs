@@ -45,6 +45,26 @@ pub struct TuiModule {
     pub conditions: Arc<holon_api::ConditionBus>,
 }
 
+impl TuiModule {
+    /// The module an entry point boots; panics are raised on its bus.
+    pub fn new(
+        holon_config: HolonConfig,
+        session_config: SessionConfig,
+        config_dir: PathBuf,
+        locked_keys: HashSet<PrefKey>,
+        vault: SessionVault,
+    ) -> Self {
+        Self {
+            conditions: holon_frontend::panic_record::install(&config_dir),
+            holon_config,
+            session_config,
+            config_dir,
+            locked_keys,
+            vault: Mutex::new(Some(vault)),
+        }
+    }
+}
+
 impl Module for TuiModule {
     fn configure(&self, injector: &Injector) -> Result<(), fluxdi::Error> {
         let vault = self

@@ -11,6 +11,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{self};
 
+mod standalone;
 mod telemetry;
 
 use holon_mcp::server::DebugServices;
@@ -419,76 +420,17 @@ async fn run() -> Result<()> {
     let holon_config = holon_config_for(config);
     let config_dir = holon_frontend::config::resolve_config_dir(None);
     let session_config = holon_frontend::SessionConfig::new(holon_api::UiInfo::permissive());
-    let conditions = std::sync::Arc::new(holon_api::ConditionBus::new());
-    holon_frontend::panic_record::install(&config_dir, conditions.clone());
 
     // A stop during boot waits for the boot to finish and then takes the one
     // shutdown path, so the vault is left as a clean quit leaves it.
     let mut stop = holon_app::stop_signal::StopSignals::install()?;
 
     let app = {
-        use fluxdi::Injector;
-        use fluxdi::Module;
-        use fluxdi::ModuleLifecycleFuture;
-        use fluxdi::Shared;
-        use holon_app::FrontendInjectorExt;
-
-        fn to_di_err(phase: &str, e: &dyn std::fmt::Display) -> fluxdi::Error {
-            fluxdi::Error::module_lifecycle_failed("McpStandaloneModule", phase, &e.to_string())
-        }
-
-        struct McpStandaloneModule {
-            holon_config: holon_frontend::HolonConfig,
-            session_config: holon_frontend::SessionConfig,
-            config_dir: std::path::PathBuf,
-            conditions: std::sync::Arc<holon_api::ConditionBus>,
-        }
-
-        impl Module for McpStandaloneModule {
-            fn configure(&self, injector: &Injector) -> std::result::Result<(), fluxdi::Error> {
-                let vault = holon_app::vault_lock::SessionVault::acquire(
-                    self.holon_config.vault.root.as_deref(),
-                )
-                .map_err(|e| to_di_err("configure", &format!("{e:#}")))?;
-                let db_path = self.holon_config.resolve_db_path(&self.config_dir);
-
-                holon::di::open_and_register_core(
-                    injector,
-                    db_path,
-                    holon::di::StorageSelector::Turso,
-                    self.conditions.clone(),
-                )
-                .map_err(|e| to_di_err("configure", &e))?;
-                vault.register(injector);
-
-                injector
-                    .add_frontend(
-                        self.holon_config.clone(),
-                        self.session_config.clone(),
-                        self.config_dir.clone(),
-                        std::collections::HashSet::new(),
-                    )
-                    .map_err(|e| to_di_err("configure", &e))?;
-
-                holon_mcp::di::register_debug_services(injector);
-
-                Ok(())
-            }
-
-            fn on_start(&self, injector: Shared<Injector>) -> ModuleLifecycleFuture {
-                Box::pin(async move {
-                    holon_mcp::di::populate_debug_services(&injector, None).await;
-                    Ok(())
-                })
-            }
-        }
-
-        let mut app = fluxdi::Application::new(McpStandaloneModule {
+        let mut app = fluxdi::Application::new(standalone::McpStandaloneModule::new(
             holon_config,
             session_config,
             config_dir,
-            conditions,
-        });
+        ));
         tracing::info!("holon-mcp: booting the session");
         app.bootstrap()
             .await

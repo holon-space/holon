@@ -12,17 +12,16 @@ use std::os::fd::AsRawFd;
 use std::os::fd::RawFd;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::fs::PermissionsExt;
-use std::panic::PanicHookInfo;
 use std::path::Path;
 use std::sync::Arc;
-
-type PanicHook = Box<dyn Fn(&PanicHookInfo<'_>) + Send + Sync>;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 
 /// Stderr appends to an owner-only file until [`StderrToLog::restore`]. A
 /// panic until then is also written to the terminal.
 pub struct StderrToLog {
     terminal: Arc<File>,
-    previous_hook: Arc<PanicHook>,
+    redirected: Arc<AtomicBool>,
 }
 
 impl StderrToLog {
@@ -36,26 +35,29 @@ impl StderrToLog {
         let terminal = Arc::new(File::from(io::stderr().as_fd().try_clone_to_owned()?));
         point_stderr_at(file.as_raw_fd())?;
 
-        let previous_hook: Arc<PanicHook> = Arc::new(std::panic::take_hook());
-        let (to_terminal, then) = (Arc::clone(&terminal), Arc::clone(&previous_hook));
+        let redirected = Arc::new(AtomicBool::new(true));
+        let previous_hook = std::panic::take_hook();
+        let (to_terminal, still_redirected) = (Arc::clone(&terminal), Arc::clone(&redirected));
+        // Stays installed after `restore`: hooks installed on top of it chain it.
         std::panic::set_hook(Box::new(move |info| {
-            then(info);
-            // ALLOW(ok): the previous hook has logged the panic; a dead terminal takes
-            // nothing.
-            let _ = writeln!(&*to_terminal, "holon-tui {info}");
+            previous_hook(info);
+            if still_redirected.load(Ordering::SeqCst) {
+                // ALLOW(ok): the previous hook has logged the panic; a dead terminal takes
+                // nothing.
+                let _ = writeln!(&*to_terminal, "holon-tui {info}");
+            }
         }));
         Ok(Self {
             terminal,
-            previous_hook,
+            redirected,
         })
     }
 
     /// Points stderr back at the descriptor it had before [`Self::redirect`].
     pub fn restore(self) -> io::Result<()> {
-        drop(std::panic::take_hook());
-        let previous_hook = self.previous_hook;
-        std::panic::set_hook(Box::new(move |info| previous_hook(info)));
-        point_stderr_at(self.terminal.as_raw_fd())
+        point_stderr_at(self.terminal.as_raw_fd())?;
+        self.redirected.store(false, Ordering::SeqCst);
+        Ok(())
     }
 }
 

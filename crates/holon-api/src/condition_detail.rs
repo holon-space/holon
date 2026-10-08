@@ -472,6 +472,16 @@ impl ConditionKind {
                 ),
                 vec![subject.to_string(), message.clone()],
             ),
+
+            Self::PanicRecordUnwritable { reason } => ConditionDetail::prose(format!(
+                "Holon cannot keep a record of internal errors in {subject}: {reason}. If it \
+                 stops because of one, the next start does not say why."
+            )),
+
+            Self::PanicConditionsUnavailable { reason } => ConditionDetail::prose(format!(
+                "Holon cannot show an internal error while it runs: {reason}. The next start \
+                 shows the last one."
+            )),
         }
     }
 }

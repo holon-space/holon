@@ -76,7 +76,7 @@ pub struct Panicked {
 
 impl Panicked {
     /// The subject a panic condition carries is its location, so the model
-    /// pins its final path component.
+    /// pins its final path component: the file name with `:line:column`.
     fn subject_name(&self) -> String {
         std::path::Path::new(&self.location)
             .file_name()

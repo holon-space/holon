@@ -912,8 +912,7 @@ impl HeadlessFrontendComponent {
         // As every entry point does before its boot: the core bus, with the
         // previous run's panic disclosed on it and this process's panics
         // routed to it.
-        let conditions = Arc::new(holon_api::ConditionBus::new());
-        holon_frontend::panic_record::install(&config_dir, conditions.clone());
+        let conditions = holon_frontend::panic_record::install(&config_dir);
         let mut session_config = SessionConfig::new(holon_api::UiInfo::permissive()).without_wait();
         session_config.loro_peer_id = params.peer_id;
         let org_fs_for_di = org_fs.clone();

@@ -524,6 +524,17 @@ pub enum ConditionKind {
     ///
     /// All-clear: none in this process.
     TaskPanicked { message: String, thread: String },
+    /// Holon cannot keep a panic record in the directory `subject` names
+    /// (`reason`), so a crash is not disclosed at the next start.
+    ///
+    /// All-clear: none in this process.
+    PanicRecordUnwritable { reason: String },
+    /// A panic of this process cannot reach this bus (`reason`); its record
+    /// still discloses it at the next start. Subject:
+    /// [`PANIC_CONDITIONS_SUBJECT`].
+    ///
+    /// All-clear: none in this process.
+    PanicConditionsUnavailable { reason: String },
 }
 
 /// Subject of the device-wide conditions on this bus, which have no share to
@@ -531,6 +542,9 @@ pub enum ConditionKind {
 pub const OWNER_IDENTITY_SUBJECT: &str = "owner-identity";
 
 pub const WATCH_VIEWS_SUBJECT: &str = "watch-views";
+
+/// Subject of [`ConditionKind::PanicConditionsUnavailable`].
+pub const PANIC_CONDITIONS_SUBJECT: &str = "panic-conditions";
 
 /// Subject of [`ConditionKind::ViewEngineStopped`].
 pub const VIEW_ENGINE_SUBJECT: &str = "view-engine";
@@ -599,6 +613,8 @@ impl ConditionKind {
     pub const DERIVED_FIELD_NOT_COMPUTED: &'static str = "derived-field-not-computed";
     pub const PREVIOUS_RUN_PANICKED: &'static str = "previous-run-panicked";
     pub const TASK_PANICKED: &'static str = "task-panicked";
+    pub const PANIC_RECORD_UNWRITABLE: &'static str = "panic-record-unwritable";
+    pub const PANIC_CONDITIONS_UNAVAILABLE: &'static str = "panic-conditions-unavailable";
 
     /// The condition's stable identity, paired with the subject to form a
     /// [`ConditionKey`]. Total: every degradation is a sticky
@@ -662,6 +678,8 @@ impl ConditionKind {
             Self::DerivedFieldNotComputed { .. } => Self::DERIVED_FIELD_NOT_COMPUTED,
             Self::PreviousRunPanicked { .. } => Self::PREVIOUS_RUN_PANICKED,
             Self::TaskPanicked { .. } => Self::TASK_PANICKED,
+            Self::PanicRecordUnwritable { .. } => Self::PANIC_RECORD_UNWRITABLE,
+            Self::PanicConditionsUnavailable { .. } => Self::PANIC_CONDITIONS_UNAVAILABLE,
         }
     }
 }

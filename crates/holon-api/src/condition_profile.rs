@@ -757,6 +757,24 @@ const TASK_PANICKED: ConditionProfile = ConditionProfile::new(
     &[],
 );
 
+const PANIC_RECORD_UNWRITABLE: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Warning,
+    "Holon cannot record internal errors for its next start",
+    icons::WARN,
+    ConditionPlacement::Banner,
+    AllClear::UntilRestart,
+    &[],
+);
+
+const PANIC_CONDITIONS_UNAVAILABLE: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Warning,
+    "Holon cannot show internal errors while it runs",
+    icons::WARN,
+    ConditionPlacement::Banner,
+    AllClear::UntilRestart,
+    &[],
+);
+
 impl ConditionKind {
     /// This kind's profile. Total, like
     /// [`condition_kind`](ConditionKind::condition_kind): a new variant cannot
@@ -816,6 +834,8 @@ impl ConditionKind {
             Self::DerivedFieldNotComputed { .. } => DERIVED_FIELD_NOT_COMPUTED,
             Self::PreviousRunPanicked { .. } => PREVIOUS_RUN_PANICKED,
             Self::TaskPanicked { .. } => TASK_PANICKED,
+            Self::PanicRecordUnwritable { .. } => PANIC_RECORD_UNWRITABLE,
+            Self::PanicConditionsUnavailable { .. } => PANIC_CONDITIONS_UNAVAILABLE,
         }
     }
 }

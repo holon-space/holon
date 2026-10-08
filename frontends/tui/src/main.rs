@@ -65,22 +65,13 @@ async fn main() -> CommonResult<()> {
 async fn run() -> anyhow::Result<()> {
     let widgets = holon_tui::render_supported_widgets();
     let (holon_config, session_config, config_dir, locked) = cli::build_session(widgets)?;
-    let conditions = std::sync::Arc::new(holon_api::ConditionBus::new());
-    holon_frontend::panic_record::install(&config_dir, conditions.clone());
     let vault = SessionVault::acquire(holon_config.vault.root.as_deref())?;
+    let module = TuiModule::new(holon_config, session_config, config_dir, locked, vault);
 
     // A stop during boot waits for the boot to finish and then takes the one
     // shutdown path, so the vault is left as a clean quit leaves it.
     let stop = StopSignals::install()?;
 
-    let module = TuiModule {
-        holon_config,
-        session_config,
-        config_dir,
-        locked_keys: locked,
-        vault: Mutex::new(Some(vault)),
-        conditions,
-    };
     run_session(module, stop).await
 }
 

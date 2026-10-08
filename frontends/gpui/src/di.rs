@@ -45,6 +45,22 @@ pub struct GpuiModule {
 }
 
 impl GpuiModule {
+    /// The module an entry point boots; panics are raised on its bus.
+    pub fn new(
+        holon_config: HolonConfig,
+        session_config: SessionConfig,
+        config_dir: PathBuf,
+        locked_keys: HashSet<PrefKey>,
+    ) -> Self {
+        Self {
+            conditions: holon_frontend::panic_record::install(&config_dir),
+            holon_config,
+            session_config,
+            config_dir,
+            locked_keys,
+        }
+    }
+
     fn core_module(&self) -> CoreInfraModule {
         CoreInfraModule {
             db_path: self.holon_config.resolve_db_path(&self.config_dir),
