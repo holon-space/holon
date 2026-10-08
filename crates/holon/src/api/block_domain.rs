@@ -213,14 +213,23 @@ impl<'a> BlockDomain<'a> {
             .and_then(|v| v.as_string())
             .map(str::to_owned);
 
+        let has_render_source = block_info
+            .get("render_source")
+            .is_some_and(|v| !v.is_null());
+
         let Some(query_source) = query_source else {
-            // A block with no query source of its own renders as a bare leaf,
-            // except when a region has navigated to it: then it stands for its
-            // whole subtree and must supply the descendants query itself.
-            return if self.is_focus_root(block_id).await? {
+            // A block with no query source of its own draws its render child
+            // when it has one. Otherwise it is a bare leaf, except when a
+            // region has navigated to it: then it stands for its whole subtree
+            // and must supply the descendants query itself.
+            return if has_render_source {
+                let render_expr = Self::parse_render_source(block_id, &block_info)?;
+                self.render_leaf_block(block_id, render_expr).await
+            } else if self.is_focus_root(block_id).await? {
                 self.render_region_root(block_id).await
             } else {
-                self.render_leaf_block(block_id).await
+                self.render_leaf_block(block_id, Self::render_entity_expr())
+                    .await
             };
         };
 
@@ -271,10 +280,6 @@ impl<'a> BlockDomain<'a> {
             .query_and_watch(sql, HashMap::new(), Some(context))
             .await?;
 
-        let has_render_source = block_info
-            .get("render_source")
-            .is_some_and(|v| !v.is_null());
-
         // A render source may embed the `collection_view()` marker to compose
         // the block's profile-derived default collection view (tree/table/board
         // switcher) with surrounding chrome — e.g. the main panel wraps its
@@ -284,7 +289,7 @@ impl<'a> BlockDomain<'a> {
         // nest a second result/source switcher above it).
         let mut composes_collection_view = false;
         let result_expr = if has_render_source {
-            let parsed = Self::parse_render_source(&block_info);
+            let parsed = Self::parse_render_source(block_id, &block_info)?;
             if contains_collection_view(&parsed) {
                 composes_collection_view = true;
                 let collection = self.collection_render_expr(block_id).await?;
@@ -527,7 +532,9 @@ impl<'a> BlockDomain<'a> {
                 "[render_root_slot] no {block_id} block in this vault — rendering the root slot \
                  as a plain leaf (no layout to resolve)"
             );
-            return self.render_leaf_block(block_id).await;
+            return self
+                .render_leaf_block(block_id, Self::render_entity_expr())
+                .await;
         };
 
         let spec = holon_api::perspective::PerspectiveSpec::parse(&active, &blocks)
@@ -698,9 +705,11 @@ impl<'a> BlockDomain<'a> {
         Ok((render_expr, change_stream))
     }
 
+    /// Watch `block_id`'s own row and draw it with `render_expr`.
     async fn render_leaf_block(
         &self,
         block_id: &EntityUri,
+        render_expr: RenderExpr,
     ) -> Result<(RenderExpr, RowChangeStream)> {
         let sql = leaf_watch_sql();
 
@@ -715,12 +724,14 @@ impl<'a> BlockDomain<'a> {
             )
             .await?;
 
-        let render_expr = RenderExpr::FunctionCall {
+        Ok((render_expr, change_stream))
+    }
+
+    fn render_entity_expr() -> RenderExpr {
+        RenderExpr::FunctionCall {
             name: "render_entity".to_string(),
             args: Vec::new(),
-        };
-
-        Ok((render_expr, change_stream))
+        }
     }
 
     /// Load a block by ID and find its query source child + optional render
@@ -744,38 +755,25 @@ impl<'a> BlockDomain<'a> {
         Ok(rows.into_iter().next())
     }
 
-    /// Parse a render_source into a RenderExpr.
+    /// Parse the `render_source` column of a `block_with_query_source` row.
     fn parse_render_source(
+        block_id: &EntityUri,
         block_info: &holon_api::StorageEntity,
-    ) -> holon_api::render_types::RenderExpr {
+    ) -> Result<RenderExpr> {
         match block_info.get("render_source") {
-            Some(Value::String(source)) => Self::parse_render_source_content(source),
-            _ => default_table_expr(),
+            Some(Value::String(source)) => Self::render_source_expr(block_id, source),
+            other => anyhow::bail!(
+                "block {block_id}: render_source must be render DSL text, got {other:?}"
+            ),
         }
     }
 
-    /// Parse a render-source block's `content` into a `RenderExpr`, falling
-    /// back to `table()` on a parse error. Shared by the Turso path (which
-    /// reads the content from a SQL row) and the Loro path (which reads it
-    /// straight from the render-source child block).
-    pub(crate) fn parse_render_source_content(source: &str) -> holon_api::render_types::RenderExpr {
-        match holon_api::render_dsl::parse_render_dsl(source) {
-            Ok(expr) => expr,
-            Err(e) => {
-                tracing::warn!("Failed to parse render_source, defaulting to table(): {e}");
-                default_table_expr()
-            }
-        }
-    }
-}
-
-/// The default render expression — a bare `table()` — used when a render
-/// source fails to parse (disclosed via a `warn!`) or a collection has no
-/// profile variants.
-pub(crate) fn default_table_expr() -> holon_api::render_types::RenderExpr {
-    holon_api::render_types::RenderExpr::FunctionCall {
-        name: "table".to_string(),
-        args: Vec::new(),
+    /// Parse the render-source child of `block_id`. Both render arms call
+    /// this, so a render source that does not parse fails the same way in
+    /// each: the watcher draws the error, naming the block.
+    pub fn render_source_expr(block_id: &EntityUri, source: &str) -> Result<RenderExpr> {
+        holon_api::render_dsl::parse_render_dsl(source)
+            .map_err(|e| anyhow::anyhow!("block {block_id}: render source does not parse: {e}"))
     }
 }
 

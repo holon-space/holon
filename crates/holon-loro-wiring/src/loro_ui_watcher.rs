@@ -28,6 +28,7 @@ use holon::entity_profile::ProfileResolver;
 use holon::entity_profile::ProfileResolving;
 use holon_api::EntityUri;
 use holon_api::RenderExpr;
+use holon_api::SourceLanguage;
 use holon_api::UiEvent;
 use holon_api::Value;
 use holon_api::WatchHandle;
@@ -427,8 +428,8 @@ async fn render_state(
 /// the full tree/table/board + source switcher via
 /// [`BlockDomain::render_entity`].
 ///
-/// A block with no query-source child is a leaf, rendered via `render_entity()`
-/// (mirrors `BlockDomain::render_leaf_block`).
+/// A block with no query-source child draws its render child, or else is a
+/// leaf rendered via `render_entity()` (mirrors `BlockDomain::render_entity`).
 fn derive_render_expr(
     snapshot: &holon_core::storage::BlockSnapshot,
     block_id: &EntityUri,
@@ -451,10 +452,16 @@ fn derive_render_expr(
     });
 
     let Some((query_src, query_language)) = query_child else {
-        // Leaf block: no query-source child to drive a collection render.
-        return RenderExpr::FunctionCall {
-            name: "render_entity".to_string(),
-            args: Vec::new(),
+        let render_child = children
+            .iter()
+            .find(|child| matches!(child.source_language, Some(SourceLanguage::Render)));
+        return match render_child {
+            Some(render) => BlockDomain::render_source_expr(block_id, &render.content)
+                .unwrap_or_else(|e| error_render_expr(&format!("{e:#}"))),
+            None => RenderExpr::FunctionCall {
+                name: "render_entity".to_string(),
+                args: Vec::new(),
+            },
         };
     };
 

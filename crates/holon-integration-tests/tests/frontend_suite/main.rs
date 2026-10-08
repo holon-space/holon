@@ -19,6 +19,7 @@ mod page_title_survives_a_never_task_block;
 mod perspective_slot_resolution;
 #[cfg(feature = "pbt")]
 mod recursive_query_renders_descendants;
+mod render_source_panels;
 mod sidebar_modifier_click_open_tab_probe;
 mod split_block_stale_display_regression;
 mod tour_spike;

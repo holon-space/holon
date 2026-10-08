@@ -78,9 +78,15 @@ const P_NAME: &str = "perspective_name";
 const P_PROFILE: &str = "perspective_profile";
 const P_CONCEAL_COMPLETED: &str = "perspective_conceal_completed";
 const P_CONCEAL_TAGS: &str = "perspective_conceal_tags";
+const P_ACTION_BAR: &str = "perspective_action_bar";
 
-const RECOGNIZED_PERSPECTIVE_FIELDS: &[&str] =
-    &[P_NAME, P_PROFILE, P_CONCEAL_COMPLETED, P_CONCEAL_TAGS];
+const RECOGNIZED_PERSPECTIVE_FIELDS: &[&str] = &[
+    P_NAME,
+    P_PROFILE,
+    P_CONCEAL_COMPLETED,
+    P_CONCEAL_TAGS,
+    P_ACTION_BAR,
+];
 
 /// A panel's data source: a query in one of the supported languages.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,6 +153,11 @@ pub struct PerspectiveSpec {
     pub profile_override: Option<EntityName>,
     /// Concealment parameters.
     pub concealment: ConcealmentParams,
+    /// Whether the narrow layout docks the action bar
+    /// (`perspective_action_bar`, default `true`). Its global tier offers
+    /// `navigation:main` ops, so a perspective for a session without that
+    /// entity turns it off.
+    pub action_bar: bool,
 }
 
 impl PerspectiveSpec {
@@ -210,6 +221,14 @@ impl PerspectiveSpec {
             })?,
             None => false,
         };
+        let action_bar = match block.properties.get(P_ACTION_BAR) {
+            Some(v) => parse_bool(v).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "perspective {perspective_id}: {P_ACTION_BAR} must be a boolean, got {v:?}"
+                )
+            })?,
+            None => true,
+        };
         let hide_tags = block
             .get_property_str(P_CONCEAL_TAGS)
             .map(|s| {
@@ -241,6 +260,7 @@ impl PerspectiveSpec {
                 hide_completed,
                 hide_tags,
             },
+            action_bar,
         })
     }
 
@@ -326,13 +346,18 @@ impl PerspectiveSpec {
                 .join(", ")
         };
 
+        let narrow = if self.action_bar {
+            format!(
+                "bottom_dock(\n    columns({}),\n    row(#{{gap: 8}}, {ACTION_BAR_ENTITY_OPS}, \
+                 {ACTION_BAR_GLOBAL_OPS}))",
+                cols(Breakpoint::Narrow)
+            )
+        } else {
+            format!("columns({})", cols(Breakpoint::Narrow))
+        };
         Ok(format!(
-            "if_space(600,\n  bottom_dock(\n    columns({narrow}),\n    \
-             row(#{{gap: 8}}, {entity_ops}, {global_ops})),\n  \
-             if_space(1000,\n    columns({mid}),\n    columns({wide})))",
-            entity_ops = ACTION_BAR_ENTITY_OPS,
-            global_ops = ACTION_BAR_GLOBAL_OPS,
-            narrow = cols(Breakpoint::Narrow),
+            "if_space(600,\n  {narrow},\n  if_space(1000,\n    columns({mid}),\n    \
+             columns({wide})))",
             mid = cols(Breakpoint::Mid),
             wide = cols(Breakpoint::Wide),
         ))
@@ -576,6 +601,35 @@ mod tests {
         let blocks = vec![persp];
         let err = PerspectiveSpec::parse(&EntityUri::block("p"), &blocks).unwrap_err();
         assert!(err.to_string().contains("must be a boolean"), "got: {err}");
+    }
+
+    /// A perspective declares `perspective_action_bar: false` to lay out its
+    /// panels without the narrow-screen action bar, whose global tier needs the
+    /// `navigation` entity.
+    #[test]
+    fn action_bar_off_drops_the_bar_from_the_layout() {
+        let mut persp = panel_block("p", "root-layout");
+        persp.set_property("perspective_action_bar", false);
+        let panel = panel_block("p-main", "p");
+        let render = render_child("p-main::render", "p-main", "text(\"hi\")");
+        let blocks = vec![persp, panel, render];
+        let spec = PerspectiveSpec::parse(&EntityUri::block("p"), &blocks).unwrap();
+        let dsl = spec.layout_dsl().unwrap();
+        assert!(
+            !dsl.contains("navigation:main") && !dsl.contains("bottom_dock"),
+            "the layout must not carry the action bar: {dsl}"
+        );
+        spec.layout_expr().unwrap();
+
+        let mut on = panel_block("q", "root-layout");
+        on.set_property("perspective_action_bar", true);
+        let blocks = vec![
+            on,
+            panel_block("q-main", "q"),
+            render_child("q-main::render", "q-main", "text(\"hi\")"),
+        ];
+        let spec = PerspectiveSpec::parse(&EntityUri::block("q"), &blocks).unwrap();
+        assert!(spec.layout_dsl().unwrap().contains("navigation:main"));
     }
 
     /// Concealment params parse from namespaced fields.

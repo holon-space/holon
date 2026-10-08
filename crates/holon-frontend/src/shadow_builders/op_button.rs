@@ -18,22 +18,30 @@ use super::prelude::*;
 holon_macros::widget_builder! {
     raw fn op_button(ba: BA<'_>) -> ViewModel {
         let row = ba.ctx.row();
-        let op_name = ba
+        let Some(op_name) = ba
             .args
             .get_positional_string(0)
             .or_else(|| row.get("name").and_then(|v| v.as_string().map(String::from)))
-            .expect(
-                "op_button: positional op_name required, and row has no 'name' column \
-                 to fall back on",
+        else {
+            return ViewModel::error(
+                "op_button",
+                "op_button: positional op_name required, and row has no 'name' column to fall \
+                 back on",
             );
-        let target_id = row
+        };
+        let Some(target_id) = row
             .get("target_id")
             .and_then(|v| v.as_string())
             .map(String::from)
-            .expect(
-                "op_button: current row has no 'target_id' column — call sites \
-                 must drive op_button from a chain_ops/ops_of row source",
+        else {
+            return ViewModel::error(
+                "op_button",
+                format!(
+                    "op_button({op_name}): current row has no 'target_id' column — call sites \
+                     must drive op_button from a chain_ops/ops_of row source"
+                ),
             );
+        };
         let display_name = row
             .get("display_name")
             .and_then(|v| v.as_string())
