@@ -831,18 +831,36 @@ pub async fn dense_create_child_via(
         place,
     );
     let edited = text.join();
-    driver
+    dense_patch_via(
+        driver,
+        handle,
+        &edited,
+        format_args!("creating {content:?} at {place:?} under {resolved}"),
+    )
+    .await;
+}
+
+/// `dense_patch` `edited` back through `handle`. A failure is fatal unless it
+/// is the shape refusal the running step's model expects.
+async fn dense_patch_via(
+    driver: &McpUserDriver,
+    handle: &str,
+    edited: &str,
+    what: std::fmt::Arguments<'_>,
+) {
+    if let Err(e) = driver
         .call_tool_json(
             "dense_patch",
             serde_json::json!({ "handle": handle, "text": edited }),
         )
         .await
-        .unwrap_or_else(|e| {
-            panic!(
-                "[DenseProjectionEdit] dense_patch creating {content:?} at {place:?} under {resolved} \
-                 failed: {e:#}"
-            )
-        });
+    {
+        let msg = format!("{e:#}");
+        assert!(
+            crate::pbt::shape_state::is_expected_refusal(&msg),
+            "[DenseProjectionEdit] dense_patch {what} failed: {msg}\n{edited}"
+        );
+    }
 }
 
 /// `dense_move_first_child_to_end` over `driver`, with `resolved` the SUT's
@@ -887,18 +905,13 @@ pub async fn dense_move_first_child_to_end_via(driver: &McpUserDriver, resolved:
     let first: Vec<Vec<String>> = text.rows.drain(0..top[1]).collect();
     text.rows.extend(first);
     let edited = text.join();
-    driver
-        .call_tool_json(
-            "dense_patch",
-            serde_json::json!({ "handle": handle, "text": edited }),
-        )
-        .await
-        .unwrap_or_else(|e| {
-            panic!(
-                "[DenseProjectionEdit] dense_patch move-first-to-end under {resolved} \
-                 failed: {e:#}"
-            )
-        });
+    dense_patch_via(
+        driver,
+        handle,
+        &edited,
+        format_args!("move-first-to-end under {resolved}"),
+    )
+    .await;
 }
 
 /// The dense edits `LiveMcp` and the headless session share: one tool round
@@ -946,18 +959,13 @@ pub async fn dense_edit_first_row_via(
     }
     text.edit_all(0, &edits);
     let edited = text.join();
-    driver
-        .call_tool_json(
-            "dense_patch",
-            serde_json::json!({ "handle": handle, "text": edited }),
-        )
-        .await
-        .unwrap_or_else(|e| {
-            panic!(
-                "[DenseProjectionEdit] dense_patch editing the first row under {parent} failed: \
-                 {e:#}\n{edited}"
-            )
-        });
+    dense_patch_via(
+        driver,
+        handle,
+        &edited,
+        format_args!("editing the first row under {parent}"),
+    )
+    .await;
 }
 
 /// Register every cap the live rung honestly provides. The captured [`CapSet`]

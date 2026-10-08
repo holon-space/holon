@@ -78,6 +78,10 @@ pub fn judged_by_the_shape_gate(variant: &str) -> bool {
     !NOT_JUDGED.contains(&variant)
 }
 
+/// Judged transitions that write as an agent over MCP. Prod discloses a
+/// refusal only to a user; an agent gets the error alone.
+const AGENT_WRITES: &[&str] = &["DenseProjectionEdit"];
+
 /// The first decision a step changed — its own fields or its direct children —
 /// that no longer parses in `after`, and the rule it breaks.
 pub fn broken_shape(
@@ -121,6 +125,7 @@ pub struct WriteSnapshot {
     files: crate::pbt::file_adapter_state::FileAdapterState,
     undo_stack: Vec<crate::pbt::block_state::BlockState>,
     redo_stack: Vec<crate::pbt::block_state::BlockState>,
+    user_write: bool,
 }
 
 /// Taken before every step the shape gate judges: a step may break a decision
@@ -135,13 +140,14 @@ pub fn before_step(
         files: state.files.clone(),
         undo_stack: state.action.undo_stack.clone(),
         redo_stack: state.action.redo_stack.clone(),
+        user_write: !AGENT_WRITES.contains(&variant),
     })
 }
 
 /// A step whose write breaks a decision is refused by the shape gate: the
 /// model keeps its documents and undo history, expects the rule, and expects
-/// the user to be told. What the gesture did besides the write (a focus
-/// click) stands.
+/// a user (not an agent) to be told. What the gesture did besides the write
+/// (a focus click) stands.
 pub fn after_step(
     snapshot: Option<WriteSnapshot>,
     state: &mut crate::pbt::reference_state::ReferenceState,
@@ -161,10 +167,12 @@ pub fn after_step(
     state.action.undo_stack = snapshot.undo_stack;
     state.action.redo_stack = snapshot.redo_stack;
     state.shape.step_refusal = Some(rule);
-    state.conditions.raise(
-        root.to_string(),
-        holon_api::ConditionKind::EDIT_REFUSED_BY_SHAPE,
-    );
+    if snapshot.user_write {
+        state.conditions.raise(
+            root.to_string(),
+            holon_api::ConditionKind::EDIT_REFUSED_BY_SHAPE,
+        );
+    }
 }
 
 /// The shape refusal the SUT half of the running step must meet, if any.
