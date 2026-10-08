@@ -29,8 +29,8 @@ fn booting_the_gpui_module_gives_the_mcp_tools_the_vault_root() {
         .expect("build runtime");
     rt.block_on(async {
         let dir = tempfile::tempdir().expect("tempdir");
-        let mut app = fluxdi::Application::new(GpuiModule {
-            holon_config: HolonConfig {
+        let mut app = fluxdi::Application::new(GpuiModule::new(
+            HolonConfig {
                 db_path: Some(dir.path().join("holon.db")),
                 vault: VaultConfig {
                     root: Some(dir.path().to_path_buf()),
@@ -40,11 +40,10 @@ fn booting_the_gpui_module_gives_the_mcp_tools_the_vault_root() {
                 },
                 ..Default::default()
             },
-            session_config: SessionConfig::new(holon_api::UiInfo::permissive()).without_wait(),
-            config_dir: dir.path().to_path_buf(),
-            locked_keys: HashSet::new(),
-            conditions: std::sync::Arc::new(holon_api::ConditionBus::new()),
-        });
+            SessionConfig::new(holon_api::UiInfo::permissive()).without_wait(),
+            dir.path().to_path_buf(),
+            HashSet::new(),
+        ));
         app.bootstrap().await.expect("GpuiModule boots");
         let injector = app.injector();
 

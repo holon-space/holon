@@ -36,12 +36,11 @@ fn to_di_err(phase: &str, e: &dyn std::fmt::Display) -> fluxdi::Error {
 }
 
 pub struct GpuiModule {
-    pub holon_config: HolonConfig,
-    pub session_config: SessionConfig,
-    pub config_dir: PathBuf,
-    pub locked_keys: HashSet<PrefKey>,
-    /// The core bus, created by the entry point before the boot.
-    pub conditions: Arc<holon_api::ConditionBus>,
+    holon_config: HolonConfig,
+    session_config: SessionConfig,
+    config_dir: PathBuf,
+    locked_keys: HashSet<PrefKey>,
+    conditions: Arc<holon_api::ConditionBus>,
 }
 
 impl GpuiModule {
@@ -190,7 +189,6 @@ mod mcp_toggle_tests {
     //! an unregistered handle cannot be resolved, so the (also-gated)
     //! `on_start` start step is unreachable.
     use std::collections::HashSet;
-    use std::path::PathBuf;
 
     use fluxdi::Injector;
     use holon_frontend::config::HolonConfig;
@@ -199,22 +197,24 @@ mod mcp_toggle_tests {
 
     use super::GpuiModule;
 
-    fn module_with_mcp_enabled(enabled: Option<bool>) -> GpuiModule {
+    fn module_with_mcp_enabled(enabled: Option<bool>) -> (tempfile::TempDir, GpuiModule) {
         let mut holon_config = HolonConfig::default();
         holon_config.mcp.enabled = enabled;
-        GpuiModule {
+        let config_dir = tempfile::tempdir().expect("temp config dir");
+        let module = GpuiModule::new(
             holon_config,
-            session_config: SessionConfig::new(holon_api::UiInfo::permissive()),
-            config_dir: PathBuf::from("/tmp/holon-mcp-toggle-test"),
-            locked_keys: HashSet::new(),
-            conditions: std::sync::Arc::new(holon_api::ConditionBus::new()),
-        }
+            SessionConfig::new(holon_api::UiInfo::permissive()),
+            config_dir.path().to_path_buf(),
+            HashSet::new(),
+        );
+        (config_dir, module)
     }
 
     #[test]
     fn mcp_disabled_registers_no_server_handle() {
         let injector = Injector::root();
         module_with_mcp_enabled(Some(false))
+            .1
             .configure_mcp(&injector)
             .expect("configure_mcp must succeed");
         assert!(
@@ -228,6 +228,7 @@ mod mcp_toggle_tests {
     fn mcp_enabled_by_default_registers_server_handle() {
         let injector = Injector::root();
         module_with_mcp_enabled(None)
+            .1
             .configure_mcp(&injector)
             .expect("configure_mcp must succeed");
         assert!(
@@ -240,6 +241,7 @@ mod mcp_toggle_tests {
     fn mcp_explicitly_enabled_registers_server_handle() {
         let injector = Injector::root();
         module_with_mcp_enabled(Some(true))
+            .1
             .configure_mcp(&injector)
             .expect("configure_mcp must succeed");
         assert!(
@@ -270,13 +272,12 @@ mod write_tier_wiring_tests {
         let mut holon_config = HolonConfig::default();
         holon_config.vault.root = Some(vault.path().to_path_buf());
         holon_config.mcp.enabled = Some(false);
-        let module = GpuiModule {
+        let module = GpuiModule::new(
             holon_config,
-            session_config: SessionConfig::new(holon_api::UiInfo::permissive()),
-            config_dir: config_dir.path().to_path_buf(),
-            locked_keys: HashSet::new(),
-            conditions: std::sync::Arc::new(holon_api::ConditionBus::new()),
-        };
+            SessionConfig::new(holon_api::UiInfo::permissive()),
+            config_dir.path().to_path_buf(),
+            HashSet::new(),
+        );
         let injector = Injector::root();
         module
             .configure(&injector)

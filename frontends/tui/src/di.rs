@@ -34,15 +34,14 @@ fn to_di_err(phase: &str, e: &dyn std::fmt::Display) -> fluxdi::Error {
 }
 
 pub struct TuiModule {
-    pub holon_config: HolonConfig,
-    pub session_config: SessionConfig,
-    pub config_dir: PathBuf,
-    pub locked_keys: HashSet<PrefKey>,
+    holon_config: HolonConfig,
+    session_config: SessionConfig,
+    config_dir: PathBuf,
+    locked_keys: HashSet<PrefKey>,
     /// Acquired before the boot, so a refusal reaches the user as its own
     /// message. `configure` takes it.
-    pub vault: Mutex<Option<SessionVault>>,
-    /// The core bus, created by the entry point before the boot.
-    pub conditions: Arc<holon_api::ConditionBus>,
+    vault: Mutex<Option<SessionVault>>,
+    conditions: Arc<holon_api::ConditionBus>,
 }
 
 impl TuiModule {

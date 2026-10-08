@@ -1000,6 +1000,9 @@ check-android:
     fi
     cargo ndk -t arm64-v8a -P 33 check -p holon-turso \
         2>&1 | tee target/gate-logs/holon-android-check.log
+    # `android_main` and the mobile boot path compile only for this target.
+    cargo ndk -t arm64-v8a -P 33 check -p holon-gpui --no-default-features --features mobile --lib \
+        2>&1 | tee target/gate-logs/holon-gpui-android-check.log
 
 # --- Code Quality -----------------------------------------------------------
 

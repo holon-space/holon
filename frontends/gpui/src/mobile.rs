@@ -25,14 +25,24 @@ use crate::geometry::BoundsRegistry;
 /// to os_log; stderr always). Increment 2 replaces the `exit` with the rung-0
 /// recovery shell without touching any call site. No `catch_unwind` — that is
 /// open question 2, deliberately unresolved.
+#[track_caller]
 fn boot_failed(err: BootError) -> ! {
-    let report = err.structured_report();
-    #[cfg(target_os = "android")]
-    log::error!("BOOT FAILED\n{report}");
-    #[cfg(not(target_os = "android"))]
-    tracing::error!("BOOT FAILED\n{report}");
-    eprintln!("BOOT FAILED\n{report}");
+    let report = format!("BOOT FAILED\n{}", err.structured_report());
+    log_boot_failure(&report);
+    if let Err(e) = holon_frontend::panic_record::record_exit(report) {
+        log_boot_failure(&format!(
+            "the next start cannot show this boot failure: {e}"
+        ));
+    }
     std::process::exit(1);
+}
+
+fn log_boot_failure(message: &str) {
+    #[cfg(target_os = "android")]
+    log::error!("{message}");
+    #[cfg(not(target_os = "android"))]
+    tracing::error!("{message}");
+    eprintln!("{message}");
 }
 
 /// Register the embedded DejaVu Sans coverage font so Android renders the
