@@ -43,6 +43,10 @@ use holon_turso::schema_modules::BlockSchemaModule;
 
 use crate::ordered_block_crud::OrderedBlockCrud;
 
+/// Ids per statement of a batched authoritative read; well under SQLite's
+/// bound-parameter limit.
+const AUTHORITATIVE_BATCH_CHUNK: usize = 500;
+
 /// BlockReader backed by `QueryableCache<Block>`.
 ///
 /// Reads bypass `cache.get_all()` because edge-typed fields like `tags`
@@ -284,6 +288,43 @@ impl BlockReader for CacheBlockReader {
                 Ok((parse(field("id")?)?, parse(field("parent_id")?)?))
             })
             .collect()
+    }
+
+    async fn get_blocks_authoritative(&self, ids: &[EntityUri]) -> anyhow::Result<Vec<Block>> {
+        let mut found = Vec::with_capacity(ids.len());
+        for chunk in ids.chunks(AUTHORITATIVE_BATCH_CHUNK) {
+            let names: Vec<String> = (0..chunk.len()).map(|i| format!("$id{i}")).collect();
+            let sql = format!(
+                "SELECT {HYDRATED_BLOCK_COLUMNS} FROM {BLOCK_WRITE_TABLE} b WHERE b.id IN ({})",
+                names.join(", ")
+            );
+            let params = chunk
+                .iter()
+                .enumerate()
+                .map(|(i, id)| (format!("id{i}"), holon_api::Value::String(id.to_string())))
+                .collect();
+            let rows = self
+                .cache
+                .db_handle()
+                .query(&sql, params)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "[CacheBlockReader::get_blocks_authoritative] batch read of {} id(s) \
+                         failed: {e}",
+                        chunk.len()
+                    )
+                })?;
+            for row in rows {
+                found.push(Block::try_from(row).map_err(|e| {
+                    anyhow::anyhow!(
+                        "[CacheBlockReader::get_blocks_authoritative] Block::try_from row failed: \
+                         {e}"
+                    )
+                })?);
+            }
+        }
+        Ok(found)
     }
 
     async fn get_block_authoritative(&self, id: &EntityUri) -> anyhow::Result<Option<Block>> {

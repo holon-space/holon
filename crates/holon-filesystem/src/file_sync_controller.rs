@@ -4060,15 +4060,23 @@ impl FileSyncController {
     /// ancestor) is absent from the authority: a brand-new / id-less / unknown
     /// block, which is normal ingest and must be left untouched. Depth-bounded.
     async fn resolve_authoritative_doc(&self, id: &EntityUri) -> Result<Option<EntityUri>> {
-        Ok(crate::sync_ports::nearest_page_ancestor(
-            self.block_reader.as_ref(),
-            id,
-            &mut crate::sync_ports::BlockRowMemo::new(),
-            None,
+        self.resolve_authoritative_doc_in(id, &mut crate::sync_ports::BlockRowMemo::new())
+            .await
+    }
+
+    /// As [`resolve_authoritative_doc`](Self::resolve_authoritative_doc),
+    /// sharing `rows` with the rest of the read-only pass that owns it.
+    async fn resolve_authoritative_doc_in(
+        &self,
+        id: &EntityUri,
+        rows: &mut crate::sync_ports::BlockRowMemo,
+    ) -> Result<Option<EntityUri>> {
+        Ok(
+            crate::sync_ports::nearest_page_ancestor(self.block_reader.as_ref(), id, rows, None)
+                .await?
+                .into_page()
+                .map(|page| page.id),
         )
-        .await?
-        .into_page()
-        .map(|page| page.id))
     }
 
     /// The file `owner_doc`'s page lives in, or `None` when it has none.
@@ -6038,6 +6046,18 @@ impl FileSyncController {
         let mut adopted_trees: Vec<(usize, usize, Vec<Block>)> = Vec::new();
         let mut dropped_by_copies: Vec<EntityUri> = Vec::new();
         let mut deleted_in_holon: HashSet<String> = HashSet::new();
+        // The loop below writes nothing to the store, so one batch read of the
+        // file's rows answers every owner walk in it; the document root ends
+        // each walk.
+        let mut owner_rows = crate::sync_ports::BlockRowMemo::new();
+        let file_ids: Vec<EntityUri> = new_blocks_vec
+            .iter()
+            .map(|b| b.id.clone())
+            .chain([document_uri.clone()])
+            .collect();
+        owner_rows
+            .prefetch_batch(self.block_reader.as_ref(), &file_ids)
+            .await?;
         for (index, block) in new_blocks_vec.iter().enumerate() {
             if block.id == document_uri
                 || block.id == new_parse.document.id
@@ -6059,7 +6079,10 @@ impl FileSyncController {
                 .copies
                 .get(&block.id)
                 .filter(|copies| copies.copy_files.contains(&canonical));
-            let Some(owner_doc) = self.resolve_authoritative_doc(&block.id).await? else {
+            let Some(owner_doc) = self
+                .resolve_authoritative_doc_in(&block.id, &mut owner_rows)
+                .await?
+            else {
                 if held_here.is_some_and(|copies| copies.owner_deleted) {
                     brought_back.insert(block.id.clone());
                 }

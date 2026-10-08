@@ -118,6 +118,24 @@ pub trait BlockReader: Send + Sync {
     /// authority boundary. Returns `None` if the id is absent.
     async fn get_block_authoritative(&self, id: &EntityUri) -> Result<Option<Block>>;
 
+    /// The rows among `ids` the write authority holds under exactly that id,
+    /// read like [`get_block_authoritative`](Self::get_block_authoritative)
+    /// but without following merge redirects: an id the authority does not
+    /// hold is simply missing from the answer, and the caller point-reads it
+    /// if a redirect matters. A SQL authority answers in one query per chunk
+    /// instead of one per id.
+    async fn get_blocks_authoritative(&self, ids: &[EntityUri]) -> Result<Vec<Block>> {
+        let mut found = Vec::new();
+        for id in ids {
+            if let Some(block) = self.get_block_authoritative(id).await? {
+                if block.id == *id {
+                    found.push(block);
+                }
+            }
+        }
+        Ok(found)
+    }
+
     /// List all known documents with their blocks (for startup initialization).
     /// Returns (doc_id, blocks) pairs. Path resolution is the caller's concern.
     async fn iter_documents_with_blocks(&self) -> Result<Vec<(EntityUri, Vec<Block>)>>;
@@ -1052,6 +1070,25 @@ impl BlockRowMemo {
     /// not pay for it again.
     pub fn prefetch(&mut self, id: &EntityUri, row: Block) {
         self.rows.insert(id.clone(), Some(row));
+    }
+
+    /// Seed every row among `ids` the authority holds with one batch read. An
+    /// id it does not hold stays unseeded, so a later [`get`](Self::get) of it
+    /// still point-reads and follows a merge redirect.
+    pub async fn prefetch_batch(
+        &mut self,
+        reader: &dyn BlockReader,
+        ids: &[EntityUri],
+    ) -> Result<()> {
+        let wanted: Vec<EntityUri> = ids
+            .iter()
+            .filter(|id| !self.rows.contains_key(*id))
+            .cloned()
+            .collect();
+        for block in reader.get_blocks_authoritative(&wanted).await? {
+            self.rows.insert(block.id.clone(), Some(block));
+        }
+        Ok(())
     }
 
     /// The authoritative row for `id`, served from the memo when present.
