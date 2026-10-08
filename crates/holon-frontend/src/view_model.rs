@@ -1209,10 +1209,11 @@ impl ViewModel {
         self
     }
 
-    pub fn error(_: impl Into<String>, message: impl Into<String>) -> Self {
+    /// An error node whose message names `widget`, the builder that drew it.
+    pub fn error(widget: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             kind: ViewKind::Error {
-                message: message.into(),
+                message: naming_the_builder(&widget.into(), message.into()),
             },
             ..Default::default()
         }
@@ -1959,5 +1960,16 @@ mod tests {
     fn lazy_children_fully_materialized() {
         let lc = LazyChildren::fully_materialized(vec![ViewModel::empty(), ViewModel::empty()]);
         assert_eq!(lc.items.len(), 2);
+    }
+}
+
+/// `message`, led by `widget` unless it already leads with it — the reader of
+/// an error node must learn which builder refused, and most messages already
+/// open with the call (`list(#{wrap: …}) …`).
+pub(crate) fn naming_the_builder(widget: &str, message: String) -> String {
+    if message.starts_with(widget) {
+        message
+    } else {
+        format!("{widget}: {message}")
     }
 }

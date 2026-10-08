@@ -92,7 +92,11 @@ pub fn resolve_active_collection(expr: &RenderExpr) -> Option<&RenderExpr> {
                 .map(|a| &a.value)?;
             resolve_active_collection(tmpl)
         }
-        _ if variant_of(expr).is_some() => Some(expr),
+        RenderExpr::FunctionCall { name, .. }
+            if holon_frontend::collection_layout::is_layout(name) =>
+        {
+            Some(expr)
+        }
         RenderExpr::FunctionCall { args, .. } => args
             .iter()
             .find_map(|a| resolve_active_collection(&a.value)),
@@ -114,17 +118,25 @@ fn active_mode_name(args: &[holon_api::render_types::Arg]) -> String {
         .unwrap_or_else(|| "tree".to_string())
 }
 
-/// Derive the `CollectionVariant` prod renders for `expr` — the *active* view
-/// mode's layout (see [`resolve_active_collection`]).
-pub fn extract_collection_variant(expr: &RenderExpr) -> Option<CollectionVariant> {
-    variant_of(resolve_active_collection(expr)?)
-}
-
-/// The layout prod reads off `expr`. A keyword prod refuses draws an error
-/// node there; an oracle has no node to draw, so it fails the test.
-fn variant_of(expr: &RenderExpr) -> Option<CollectionVariant> {
-    holon_frontend::reactive_view_model::collection_variant_of(expr)
-        .unwrap_or_else(|e| panic!("prod refuses the layout keywords of {expr:?}: {e}"))
+/// The `CollectionVariant` prod draws for `expr`'s *active* collection (see
+/// [`resolve_active_collection`]), built through `services` in `ctx` the way
+/// prod builds it; `Err` with the message of the error node prod draws in its
+/// place.
+pub fn extract_collection_variant(
+    expr: &RenderExpr,
+    services: &dyn holon_frontend::reactive::BuilderServices,
+    ctx: &holon_frontend::RenderContext,
+) -> Result<Option<CollectionVariant>, String> {
+    let Some(collection) = resolve_active_collection(expr) else {
+        return Ok(None);
+    };
+    let built = services.interpret(collection, ctx);
+    if built.is_error() {
+        return Err(built
+            .prop_str("message")
+            .expect("an error node carries a message"));
+    }
+    Ok(built.collection.as_ref().and_then(|view| view.layout()))
 }
 
 /// Extract the `item_template` of the *active* collection (see
@@ -140,5 +152,32 @@ pub fn extract_item_template(expr: &RenderExpr) -> Option<RenderExpr> {
             })
             .map(|a| a.value.clone()),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A source prod renders: `gap:` resolves against the row, and the
+    /// collection is not the first call of the expression.
+    #[test]
+    fn a_row_resolved_gap_off_the_walk_reaches_the_active_collection() {
+        holon_frontend::shadow_builders::register_render_dsl_widget_names();
+        let expr = holon_api::render_dsl::parse_render_dsl(
+            r#"column(text("h"), list(#{gap: col("n"), item_template: text("x")}))"#,
+        )
+        .expect("the source parses");
+        let services = holon_frontend::StubBuilderServices::new();
+        let ctx = holon_frontend::RenderContext::default().with_row(std::sync::Arc::new(
+            holon_api::widget_spec::DataRow::from([(
+                "n".to_string(),
+                holon_api::Value::Integer(9),
+            )]),
+        ));
+        let variant = extract_collection_variant(&expr, &services, &ctx)
+            .expect("prod draws the collection")
+            .expect("the source names a collection");
+        assert_eq!((variant.name(), variant.gap), ("list", 9.0));
     }
 }

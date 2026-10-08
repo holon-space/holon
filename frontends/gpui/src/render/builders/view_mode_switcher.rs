@@ -1,9 +1,6 @@
 use std::sync::Arc;
 
 use holon_frontend::ReactiveViewModel;
-use holon_frontend::collection_variant_of;
-use holon_frontend::extract_item_template;
-use holon_frontend::variants_match;
 use holon_frontend::vms_button_id_for;
 
 use super::prelude::*;
@@ -38,13 +35,7 @@ fn build_switcher_bar(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Opti
     // ALLOW(entity_uri_from_raw): render-spec node.prop_str('entity_uri')
     let entity_uri = holon_api::EntityUri::from_raw(&entity_uri_str);
     let modes = node.prop_str("modes").unwrap_or_else(|| "[]".to_string());
-    let slot = node
-        .slot
-        .as_ref()
-        .expect("view_mode_switcher requires a slot");
-
-    let active_mode_prop = node.prop_str("active_mode").unwrap_or_default();
-    let render_ctx = node.render_ctx.as_ref();
+    let active = node.prop_str("active_mode").unwrap_or_default();
 
     // Shadow builder stores mode templates as individual `tmpl_mode_*` props,
     // each a JSON-serialized RenderExpr. Reconstruct the mode -> expr map.
@@ -85,11 +76,6 @@ fn build_switcher_bar(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Opti
         return None;
     }
 
-    // Use a Mutable for active_mode tracking if we have one stored,
-    // otherwise create one from the prop value
-    let active_mode = futures_signals::signal::Mutable::new(active_mode_prop);
-    let active = active_mode.get_cloned();
-
     let icon_size = 14.0;
     let mut icons_row = div().flex().items_center().gap(px(2.0));
 
@@ -98,10 +84,8 @@ fn build_switcher_bar(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Opti
         let tracked_id = vms_button_id_for(&entity_uri.to_string(), &mode.name);
         let gpui_el_id = format!("vms-{}-{}", entity_uri.id(), mode.name);
 
-        let active_mode_handle = active_mode.clone();
-        let slot_handle = slot.content.clone();
+        let switcher = node.view_mode_switch();
         let mode_templates_clone = mode_templates.clone();
-        let captured_ctx = render_ctx.cloned();
         let services = ctx.services.clone();
         let mode_for_click = mode.name.clone();
         let icon_el = super::icon::render_icon(&mode.icon, icon_size, ctx);
@@ -120,57 +104,10 @@ fn build_switcher_bar(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Opti
                     "[VMS_CLICK] mode={mode_for_click:?} available={:?}",
                     mode_templates_clone.keys().collect::<Vec<_>>(),
                 );
-                active_mode_handle.set(mode_for_click.clone());
-                let template_key = format!("mode_{}", mode_for_click);
-
-                if let Some(new_expr) = mode_templates_clone.get(&template_key) {
-                    // Fast path: intra-variant switch via set_template.
-                    // Extract ReactiveView + check variant in a scoped block,
-                    // then DROP the ReadGuard before any write path.
-                    let target_layout = match collection_variant_of(new_expr) {
-                        Ok(layout) => layout,
-                        Err(msg) => {
-                            slot_handle.set(Arc::new(ReactiveViewModel::error(
-                                "view_mode_switcher",
-                                msg,
-                            )));
-                            window.refresh();
-                            return;
-                        }
-                    };
-                    let fast_path = {
-                        let slot_content = slot_handle.lock_ref();
-                        slot_content.collection.as_ref().and_then(|rv| {
-                            let current_layout = rv.layout();
-                            if variants_match(current_layout, target_layout) {
-                                Some(rv.clone())
-                            } else {
-                                None
-                            }
-                        })
-                    };
-
-                    if let Some(rv) = fast_path {
-                        if let Some(item_template) = extract_item_template(new_expr) {
-                            rv.set_template(item_template);
-                            window.refresh();
-                            return;
-                        }
-                    }
-
-                    // ALLOW(fallback): pre-existing fast-path / full-rebuild structure; not a
-                    // hidden-failure fallback Fallback: full rebuild
-                    // (cross-variant or no collection)
-                    if let Some(ref ctx) = captured_ctx {
-                        let content = services.interpret(new_expr, ctx);
-                        let rt = services.runtime_handle();
-                        let svc_arc: Arc<dyn holon_frontend::reactive::BuilderServices> =
-                            services.clone();
-                        holon_frontend::reactive_view::start_reactive_views(
-                            &content, &svc_arc, &rt,
-                        );
-                        slot_handle.set(Arc::new(content));
-                    }
+                if let Some(template) = mode_templates_clone.get(&format!("mode_{mode_for_click}"))
+                {
+                    let svc: Arc<dyn holon_frontend::reactive::BuilderServices> = services.clone();
+                    switcher.switch(&mode_for_click, template, &svc);
                 }
                 window.refresh();
             });

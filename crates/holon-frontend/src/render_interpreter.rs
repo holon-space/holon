@@ -247,6 +247,11 @@ impl<W> RenderInterpreter<W> {
         self.builders.keys().cloned().collect()
     }
 
+    /// The value functions an authored source can call in an argument.
+    pub fn supported_value_fns(&self) -> HashSet<String> {
+        self.value_fns.keys().cloned().collect()
+    }
+
     #[tracing::instrument(level = "debug", skip_all)]
     pub fn interpret(
         &self,
@@ -527,6 +532,8 @@ pub struct TreeInputs<'a> {
     pub parent_id_col: &'a str,
     /// Row column each sibling bucket is sorted by.
     pub sort_col: &'a str,
+    /// The collection's parsed `rules:`.
+    pub rules: &'a [holon_api::render_types::RuleSpec],
 }
 
 impl<'a> TreeInputs<'a> {
@@ -538,11 +545,13 @@ impl<'a> TreeInputs<'a> {
         item_template: &'a RenderExpr,
         parent_id: Option<&'a RenderExpr>,
         sortkey: Option<&'a RenderExpr>,
+        rules: &'a [holon_api::render_types::RuleSpec],
     ) -> Self {
         Self {
             item_template,
             parent_id_col: parent_id.and_then(column_ref_name).unwrap_or("parent_id"),
             sort_col: sortkey.and_then(column_ref_name).unwrap_or("sort_key"),
+            rules,
         }
     }
 }
@@ -587,6 +596,7 @@ pub fn shared_tree_build<W: WithEntity>(
         item_template: tmpl,
         parent_id_col,
         sort_col,
+        rules,
     } = *inputs;
 
     let rows = &ba.ctx.data_rows;
@@ -594,11 +604,9 @@ pub fn shared_tree_build<W: WithEntity>(
         return vec![((ba.interpret)(tmpl, ba.ctx), 0, HashMap::new())];
     }
 
-    // Optional `rules:` arg — see `crate::row_pipeline::parse_rules_arg`.
     // Tree's positional context injects `level` and `depth` (synonyms) so
-    // predicates can match `eq("level", 0)` for root rows or `gt("depth", 1)`
-    // for deeply-nested rows.
-    let rules = crate::row_pipeline::parse_rules_arg(ba.args.named.get("rules"));
+    // `rules:` predicates can match `eq("level", 0)` for root rows or
+    // `gt("depth", 1)` for deeply-nested rows.
 
     // RULING C1': roots may sort by a per-level ROOT key the render declares
     // through the SAME rules mechanism as the level-0 role/bullet overrides (a
@@ -606,7 +614,7 @@ pub fn shared_tree_build<W: WithEntity>(
     // top-level `ORDER BY` (which the CDC pipeline's `HashMap` accumulator
     // drops the row order of) for roots while child buckets keep `sort_col`.
     // `None` = no declared root key = pre-C1' behavior.
-    let root_sort_key = crate::row_pipeline::extract_root_sort_key(&rules);
+    let root_sort_key = crate::row_pipeline::extract_root_sort_key(rules);
     let context_root_id = collection_context_root_id(ba);
     let tree = OutlineTree::from_rows(rows, parent_id_col, sort_col, root_sort_key.as_deref());
     tree.walk_depth_first(|resolved_row, depth| {
@@ -639,7 +647,7 @@ pub fn shared_tree_build<W: WithEntity>(
         let (node, overrides) = crate::row_pipeline::apply_rules_and_interpret_with_ctx(
             row_ctx,
             tmpl,
-            &rules,
+            rules,
             resolved_row,
             positional,
             |expr, ctx| (ba.interpret)(expr, ctx),

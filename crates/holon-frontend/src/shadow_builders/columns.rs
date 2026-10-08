@@ -1,6 +1,5 @@
 use super::prelude::*;
 use crate::reactive_view::ChildSpaceFn;
-use crate::reactive_view_model::CollectionVariant;
 use crate::render_context::AvailableSpace;
 use crate::render_context::LayoutHint;
 
@@ -30,7 +29,15 @@ use crate::render_context::LayoutHint;
 //    partitioning as (1), applied per-row at interpretation time.
 holon_macros::widget_builder! {
     raw fn columns(ba: BA<'_>) -> ViewModel {
-        let gap = ba.args.get_f64("gap").map(|v| v as f32).unwrap_or(16.0);
+        let layout = match CollectionVariant::parse("columns", "columns", &ba.args.named) {
+            Ok(layout) => layout,
+            Err(msg) => return ViewModel::error("columns", msg),
+        };
+        let rules = match crate::row_pipeline::parse_rules_arg(ba.args.named.get("rules")) {
+            Ok(rules) => rules,
+            Err(msg) => return ViewModel::error("columns", msg),
+        };
+        let gap = layout.gap;
 
         // Branch A — positional children.
         //
@@ -114,8 +121,7 @@ holon_macros::widget_builder! {
                         children_config,
                         gap,
                         Some(parent),
-                        CollectionVariant::from_name("columns", gap)
-                            .expect("`columns` layout is registered as a builtin"),
+                        layout,
                     );
                     return ViewModel {
                         collection: Some(std::sync::Arc::new(view)),
@@ -126,7 +132,7 @@ holon_macros::widget_builder! {
                 None => {
                     let items: Vec<ViewModel> =
                         exprs.iter().map(|e| (ba.interpret)(e, ba.ctx)).collect();
-                    return ViewModel::static_collection("columns", items, gap, ItemFlow::Stacked, Default::default());
+                    return ViewModel::static_collection("columns", items, gap, layout.flow, Default::default());
                 }
             }
         }
@@ -162,13 +168,12 @@ holon_macros::widget_builder! {
                 let parent_space = ba.ctx.available_space;
                 let child_space_fn: Option<Arc<ChildSpaceFn>> =
                     Some(Arc::new(move |p, c| partition(p, c, gap)));
-                let rules = crate::row_pipeline::parse_rules_arg(ba.args.named.get("rules"));
                 ViewModel::streaming_collection(
                     "columns",
                     tmpl,
                     ds,
                     gap,
-                    ItemFlow::Stacked,
+                    layout.flow,
                     sort_key,
                     parent_space,
                     child_space_fn,
@@ -214,11 +219,11 @@ holon_macros::widget_builder! {
                         (ba.interpret)(&tmpl, &row_ctx)
                     })
                     .collect();
-                ViewModel::static_collection("columns", items, gap, ItemFlow::Stacked, Default::default())
+                ViewModel::static_collection("columns", items, gap, layout.flow, Default::default())
             }
             (None, _) => ViewModel::error(
                 "columns",
-                "columns: no positional children and no `item_template:` — nothing to render",
+                "no positional children and no `item_template:` — nothing to render",
             ),
         }
     }

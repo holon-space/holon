@@ -15,7 +15,14 @@ holon_macros::widget_builder! {
 
         let __sort_key: Option<String> = holon_api::render_eval::sort_key_column(ba.args)
             .map(|s| s.to_string());
-        let __rules = crate::row_pipeline::parse_rules_arg(ba.args.named.get("rules"));
+        let __layout = match CollectionVariant::parse("outline", "outline", &ba.args.named) {
+            Ok(layout) => layout,
+            Err(msg) => return ViewModel::error("outline", msg),
+        };
+        let __rules = match crate::row_pipeline::parse_rules_arg(ba.args.named.get("rules")) {
+            Ok(rules) => rules,
+            Err(msg) => return ViewModel::error("outline", msg),
+        };
 
         let __parent_space = ba.ctx.available_space;
         match (__template, ba.ctx.data_source.clone()) {
@@ -25,11 +32,11 @@ holon_macros::widget_builder! {
                     Err(msg) => return ViewModel::error("outline", msg),
                 };
                 let __context_root = crate::render_interpreter::collection_context_root_id(&ba);
-                ViewModel::streaming_collection("outline", tmpl.clone(), ds, 4.0, ItemFlow::Stacked, __sort_key, __parent_space, None, virtual_child, __rules, __context_root, Default::default())
+                ViewModel::streaming_collection("outline", tmpl.clone(), ds, __layout.gap, __layout.flow, __sort_key, __parent_space, None, virtual_child, __rules, __context_root, Default::default())
             }
             (Some(tmpl), None) => {
                 let mut flat: Vec<(ViewModel, usize, std::collections::HashMap<String, Value>)> =
-                    shared_tree_build(&ba, &TreeInputs::new(tmpl, __parent_id, __sortkey));
+                    shared_tree_build(&ba, &TreeInputs::new(tmpl, __parent_id, __sortkey, &__rules));
                 if flat.is_empty() {
                     return ViewModel::error("outline", "no item_template");
                 }
@@ -41,7 +48,7 @@ holon_macros::widget_builder! {
                     flat.push((vc, 0, std::collections::HashMap::new()));
                 }
                 let items = weave_advice_into_items(&ba, flat_tree_items(flat));
-                ViewModel::static_collection("outline", items, 4.0, ItemFlow::Stacked, Default::default())
+                ViewModel::static_collection("outline", items, __layout.gap, __layout.flow, Default::default())
             }
             (None, _) => ViewModel::error("outline", "no item_template"),
         }

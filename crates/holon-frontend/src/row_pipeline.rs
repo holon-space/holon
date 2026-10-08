@@ -40,31 +40,34 @@ use crate::RenderContext;
 use crate::reactive::BuilderServices;
 use crate::render_interpreter::WithEntity;
 
-/// Parse a `rules:` argument value into a `Vec<RuleSpec>`.
+/// Parse a `rules:` argument value into a `Vec<RuleSpec>` — empty when the
+/// call site names no `rules:`.
 ///
 /// The DSL passes the rules array as `Value::Array(Vec<Value::Object>)`;
 /// each Object has `when` (a Predicate-shaped Object) and `override`
-/// (a flat HashMap).
-///
-/// Returns an empty Vec on absent/malformed input — fail-soft because rules
-/// are advisory metadata, not load-bearing semantics. Malformed rules
-/// produce a `tracing::warn` so the misconfig surfaces.
-pub fn parse_rules_arg(value: Option<&Value>) -> Vec<RuleSpec> {
-    let Some(Value::Array(items)) = value else {
-        return Vec::new();
-    };
-    let mut out = Vec::with_capacity(items.len());
-    for item in items {
-        let Ok(json_val) = serde_json::to_value(item) else {
-            tracing::warn!("rules: cannot serialize rule entry to JSON: {item:?}");
-            continue;
-        };
-        match serde_json::from_value::<RuleSpec>(json_val) {
-            Ok(spec) => out.push(spec),
-            Err(e) => tracing::warn!("rules: malformed rule entry, ignoring: {item:?} ({e})"),
+/// (a flat HashMap). Anything else is refused: a dropped rule leaves the row
+/// drawn the default way with nothing said.
+pub fn parse_rules_arg(value: Option<&Value>) -> Result<Vec<RuleSpec>, String> {
+    let items = match value {
+        None => return Ok(Vec::new()),
+        Some(Value::Array(items)) => items,
+        Some(other) => {
+            return Err(format!(
+                "`rules:` takes an array of `#{{when: …, override: …}}` maps, and this call site \
+                 gave {other:?}."
+            ));
         }
-    }
-    out
+    };
+    items
+        .iter()
+        .map(|item| {
+            let json = serde_json::to_value(item)
+                .map_err(|e| format!("`rules:` entry {item:?} has no JSON form: {e}"))?;
+            serde_json::from_value::<RuleSpec>(json).map_err(|e| {
+                format!("`rules:` entry {item:?} is not a `#{{when: …, override: …}}` rule: {e}")
+            })
+        })
+        .collect()
 }
 
 /// Extract the ROOT-level sort-key spec a `tree(..)` render declares via its

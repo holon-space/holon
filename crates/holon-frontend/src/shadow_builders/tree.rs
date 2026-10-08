@@ -17,6 +17,14 @@ holon_macros::widget_builder! {
 
         let __sort_key: Option<String> = holon_api::render_eval::sort_key_column(ba.args)
             .map(|s| s.to_string());
+        let __layout = match CollectionVariant::parse("tree", "tree", &ba.args.named) {
+            Ok(layout) => layout,
+            Err(msg) => return ViewModel::error("tree", msg),
+        };
+        let __rules = match crate::row_pipeline::parse_rules_arg(ba.args.named.get("rules")) {
+            Ok(rules) => rules,
+            Err(msg) => return ViewModel::error("tree", msg),
+        };
 
         let __parent_space = ba.ctx.available_space;
         match (__template, ba.ctx.data_source.clone()) {
@@ -32,13 +40,12 @@ holon_macros::widget_builder! {
                     Ok(slot) => slot,
                     Err(msg) => return ViewModel::error("tree", msg),
                 };
-                let __rules = crate::row_pipeline::parse_rules_arg(ba.args.named.get("rules"));
                 let __context_root = crate::render_interpreter::collection_context_root_id(&ba);
-                ViewModel::streaming_collection("tree", tmpl.clone(), ds, 4.0, ItemFlow::Stacked, __sort_key, __parent_space, None, virtual_child, __rules, __context_root, Default::default())
+                ViewModel::streaming_collection("tree", tmpl.clone(), ds, __layout.gap, __layout.flow, __sort_key, __parent_space, None, virtual_child, __rules, __context_root, Default::default())
             }
             (Some(tmpl), None) => {
                 let mut flat: Vec<(ViewModel, usize, std::collections::HashMap<String, Value>)> =
-                    shared_tree_build(&ba, &TreeInputs::new(tmpl, __parent_id, __sortkey));
+                    shared_tree_build(&ba, &TreeInputs::new(tmpl, __parent_id, __sortkey, &__rules));
                 // Push the creation slot BEFORE the empty check so it renders even
                 // for empty collections — the user needs to create the first child
                 // via the slot. Static/snapshot path only (live-query / MCP / PBT);
@@ -54,7 +61,7 @@ holon_macros::widget_builder! {
                     return ViewModel::leaf("text", Value::String("[tree: no item_template]".into()));
                 }
                 let items = weave_advice_into_items(&ba, flat_tree_items(flat));
-                ViewModel::static_collection("tree", items, 4.0, ItemFlow::Stacked, Default::default())
+                ViewModel::static_collection("tree", items, __layout.gap, __layout.flow, Default::default())
             }
             (None, _) => {
                 ViewModel::leaf("text", Value::String("[tree: no item_template]".into()))

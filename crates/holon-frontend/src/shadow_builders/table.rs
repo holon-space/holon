@@ -275,18 +275,25 @@ fn row_template(columns: &[ColumnDef]) -> RenderExpr {
 }
 
 holon_macros::widget_builder! {
-    fn table(#[default = 4.0] gap: f32, children: Collection) {
+    fn table(children: Collection) {
         let __parent_space = ba.ctx.available_space;
         let virtual_child = match virtual_child_slot_from_arg(&ba) {
                     Ok(slot) => slot,
                     Err(msg) => return ViewModel::error("table", msg),
                 };
 
-        let Some(spec) = ba.args.get_template("columns") else {
+        let columns_spec = ba.args.get_template("columns");
+        let layout_name = if columns_spec.is_some() { "table_columnar" } else { "table" };
+        let layout = match CollectionVariant::parse("table", layout_name, &ba.args.named) {
+            Ok(layout) => layout,
+            Err(msg) => return ViewModel::error("table", msg),
+        };
+        let (gap, flow) = (layout.gap, layout.flow);
+        let Some(spec) = columns_spec else {
             // Bare `table` — the collection widget it has always been.
             return match children {
                 CollectionData::Streaming { item_template, data_source, sort_key, rules } => {
-                    ViewModel::streaming_collection("table", item_template, data_source, gap, ItemFlow::Stacked, sort_key, __parent_space, None, virtual_child, rules, None, Default::default())
+                    ViewModel::streaming_collection("table", item_template, data_source, gap, flow, sort_key, __parent_space, None, virtual_child, rules, None, Default::default())
                 }
                 CollectionData::Static { mut items } => {
                     if let Some(tmpl) = ba.args.get_template("item_template").or(ba.args.get_template("item")) {
@@ -299,7 +306,7 @@ holon_macros::widget_builder! {
                         }
                     }
                     let items = weave_advice_into_items(&ba, items);
-                    ViewModel::static_collection("table", items, gap, ItemFlow::Stacked, Default::default())
+                    ViewModel::static_collection("table", items, gap, flow, Default::default())
                 }
             };
         };
@@ -320,7 +327,10 @@ holon_macros::widget_builder! {
         let props = geometry_props(&columns, min_width);
         let item_template = row_template(&columns);
         let sort_key = holon_api::render_eval::sort_key_column(ba.args).map(|s| s.to_string());
-        let rules = crate::row_pipeline::parse_rules_arg(ba.args.named.get("rules"));
+        let rules = match crate::row_pipeline::parse_rules_arg(ba.args.named.get("rules")) {
+            Ok(rules) => rules,
+            Err(msg) => return ViewModel::error("table", msg),
+        };
 
         // Same data-source precedence the macro's `Collection` param applies:
         // an explicit `collection:` wins over the inherited `ctx.data_source`.
@@ -330,7 +340,7 @@ holon_macros::widget_builder! {
 
         match data_source {
             Some(ds) => ViewModel::streaming_collection(
-                "table_columnar", item_template, ds, gap, ItemFlow::Stacked, sort_key,
+                "table_columnar", item_template, ds, gap, flow, sort_key,
                 __parent_space, None, virtual_child, rules, None, props,
             ),
             None => {
@@ -359,7 +369,7 @@ holon_macros::widget_builder! {
                         node
                     })
                     .collect();
-                ViewModel::static_collection("table_columnar", items, gap, ItemFlow::Stacked, props)
+                ViewModel::static_collection("table_columnar", items, gap, flow, props)
             }
         }
     }

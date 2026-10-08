@@ -55,7 +55,7 @@ holon_macros::widget_builder! {
         let mut __props = std::collections::HashMap::new();
         __props.insert("entity_uri".to_string(), Value::String(entity_uri.to_string()));
         __props.insert("modes".to_string(), Value::String(modes));
-        __props.insert("active_mode".to_string(), Value::String(active_mode.get_cloned()));
+        crate::reactive_view_model::mark_active_mode(&mut __props, &active_mode.get_cloned(), &child);
         // Serialize mode_templates into props for snapshot reconstruction.
         for (k, v) in &mode_templates {
             let json = match serde_json::to_string(v) {

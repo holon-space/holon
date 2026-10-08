@@ -57,8 +57,7 @@ pub enum LayoutShape {
 pub struct LayoutSpec {
     pub name: String,
     pub shape: LayoutShape,
-    /// Default gap (px) when the render expression doesn't specify one.
-    /// Layouts that don't care about gap (tree, table, …) report 0.
+    /// Gap (px) between items when the call site names no `gap:`.
     pub default_gap: f32,
 }
 
@@ -71,11 +70,11 @@ impl LayoutSpec {
         }
     }
 
-    pub fn hierarchical(name: impl Into<String>) -> Self {
+    pub fn hierarchical(name: impl Into<String>, default_gap: f32) -> Self {
         Self {
             name: name.into(),
             shape: LayoutShape::Hierarchical,
-            default_gap: 0.0,
+            default_gap,
         }
     }
 }
@@ -125,14 +124,14 @@ fn registry() -> &'static RwLock<LayoutRegistry> {
 /// the first time the registry is touched.
 fn register_builtins(r: &mut LayoutRegistry) {
     r.register(LayoutSpec::flat("list", 4.0));
-    r.register(LayoutSpec::flat("table", 0.0));
+    r.register(LayoutSpec::flat("table", 4.0));
     // `table(#{columns: …})`. A layout of its own so a bare `table` keeps the
     // default render path exactly as it was.
-    r.register(LayoutSpec::flat("table_columnar", 0.0));
+    r.register(LayoutSpec::flat("table_columnar", 4.0));
     r.register(LayoutSpec::flat("columns", 16.0));
     r.register(LayoutSpec::flat("board", 0.0));
-    r.register(LayoutSpec::hierarchical("tree"));
-    r.register(LayoutSpec::hierarchical("outline"));
+    r.register(LayoutSpec::hierarchical("tree", 4.0));
+    r.register(LayoutSpec::hierarchical("outline", 4.0));
 }
 
 /// Register a layout from outside `holon-frontend` (e.g. a frontend-side

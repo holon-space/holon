@@ -149,7 +149,7 @@ fn parse_param_type(input: ParseStream) -> syn::Result<ParamType> {
 
 // ─── Code Generation ────────────────────────────────────────────────
 
-fn generate_extraction(params: &[WidgetParam]) -> proc_macro2::TokenStream {
+fn generate_extraction(widget_name: &str, params: &[WidgetParam]) -> proc_macro2::TokenStream {
     let mut positional_idx = 0usize;
     let mut extractions = Vec::new();
 
@@ -257,9 +257,12 @@ fn generate_extraction(params: &[WidgetParam]) -> proc_macro2::TokenStream {
                         // and Static both apply the same pipeline; positional
                         // context differs (streaming has no count/is_last,
                         // static has all four).
-                        let __rules = crate::row_pipeline::parse_rules_arg(
+                        let __rules = match crate::row_pipeline::parse_rules_arg(
                             ba.args.named.get("rules"),
-                        );
+                        ) {
+                            Ok(rules) => rules,
+                            Err(msg) => return ViewModel::error(#widget_name, msg),
+                        };
                         match (__template, __ds) {
                             // Live data source + explicit template → Streaming.
                             // Zero eager interpretation — the signal_vec driver
@@ -621,7 +624,7 @@ pub fn widget_builder_impl(input: TokenStream) -> TokenStream {
             syn::parse(input).expect("failed to parse widget_builder input");
         let widget_name = input.name.to_string();
         let meta = generate_meta(&widget_name, &input.params);
-        let extraction = generate_extraction(&input.params);
+        let extraction = generate_extraction(&widget_name, &input.params);
 
         let resolve_props_fn = generate_resolve_props_fn(&input.params);
 

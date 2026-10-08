@@ -445,11 +445,23 @@ impl SutFrontendEmissions for GpuiFrontendEngineComponent {
         if self.live_tree.borrow().is_none() {
             let data_source: Arc<dyn holon_api::ReactiveRowProvider> = mp_results.clone();
             let services: Arc<dyn BuilderServices> = reactive.clone();
-            let layout =
-                holon_layout_testing::live_tree::extract_collection_variant(&mp_render_expr)
-                    .unwrap_or_else(|| {
-                        holon_frontend::reactive_view_model::CollectionVariant::list(0.0)
-                    });
+            let panel_ctx = holon_frontend::RenderContext {
+                data_source: Some(data_source.clone()),
+                ..holon_frontend::RenderContext::default()
+            };
+            let layout = match holon_layout_testing::live_tree::extract_collection_variant(
+                &mp_render_expr,
+                services.as_ref(),
+                &panel_ctx,
+            ) {
+                Ok(layout) => layout.unwrap_or_else(|| {
+                    holon_frontend::reactive_view_model::CollectionVariant::list(0.0)
+                }),
+                // Prod draws this error node in place of the collection, and
+                // the error-widget invariant owns it; no live collection to
+                // mirror.
+                Err(_) => return None,
+            };
             let lt = holon_layout_testing::live_tree::HeadlessLiveTree::new(
                 data_source,
                 item_template.clone(),

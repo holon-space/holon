@@ -30,6 +30,7 @@ use crate::view_model::DrawerMode;
 use crate::view_model::LazyChildren;
 use crate::view_model::ViewKind;
 use crate::view_model::ViewModel;
+use crate::view_model::naming_the_builder;
 
 /// Self-interpretation function stored on each node.
 ///
@@ -128,26 +129,26 @@ pub enum ItemFlow {
 }
 
 impl ItemFlow {
-    /// The flow a call site named, from the raw `horizontal:` and `wrap:`
-    /// values — `None` for a keyword the call site did not name.
+    /// The flow a call site of `widget` named, from the `horizontal:` and
+    /// `wrap:` values the interpreter resolved — `None` for a keyword the call
+    /// site did not name.
     ///
-    /// The ONE place either reader turns those two keywords into a flow, so the
-    /// shadow builder and [`collection_variant_of`] cannot disagree about what
-    /// a source means.
-    ///
-    /// Every value that is not understood is refused here, at the DSL boundary
-    /// — including one of the wrong TYPE. Downstream cannot tell a dropped
-    /// keyword from an absent one, so quietly taking the default would lay the
-    /// collection out the other way and say nothing: the `text(#{style: …})`
-    /// shape, which rendered at body size for a release.
-    pub fn parse(horizontal: Option<&Value>, wrap: Option<&Value>) -> Result<Self, String> {
+    /// Every value that is not understood is refused, including one of the
+    /// wrong TYPE: downstream cannot tell a dropped keyword from an absent one,
+    /// so quietly taking the default would lay the collection out the other
+    /// way and say nothing.
+    pub fn parse(
+        widget: &str,
+        horizontal: Option<&Value>,
+        wrap: Option<&Value>,
+    ) -> Result<Self, String> {
         let horizontal = match horizontal {
             None => false,
             Some(Value::Boolean(b)) => *b,
             Some(other) => {
                 return Err(format!(
-                    "list(#{{horizontal: …}}) takes a boolean, and this call site gave {other:?}. \
-                     Use `true` or `false` (the default)."
+                    "{widget}(#{{horizontal: …}}) takes a boolean, and this call site gave \
+                     {other:?}. Use `true` or `false` (the default)."
                 ));
             }
         };
@@ -156,22 +157,22 @@ impl ItemFlow {
         };
         let Some(keyword) = wrap.as_string() else {
             return Err(format!(
-                "list(#{{wrap: …}}) takes a keyword, and this call site gave {wrap:?}. Use \
+                "{widget}(#{{wrap: …}}) takes a keyword, and this call site gave {wrap:?}. Use \
                  \"wrap\" or \"nowrap\" (the default)."
             ));
         };
         if !horizontal {
             return Err(format!(
-                "list(#{{wrap: {keyword:?}}}) without `horizontal: true` names nothing: a stacked \
-                 collection already gives every item its own line."
+                "{widget}(#{{wrap: {keyword:?}}}) without `horizontal: true` names nothing: a \
+                 stacked collection already gives every item its own line."
             ));
         }
         match keyword {
             "wrap" => Ok(Self::WrappingRow),
             "nowrap" => Ok(Self::Row),
             other => Err(format!(
-                "list(#{{wrap: {other:?}}}) names no wrapping mode. Use \"wrap\" or \"nowrap\" \
-                 (the default)."
+                "{widget}(#{{wrap: {other:?}}}) names no wrapping mode. Use \"wrap\" or \
+                 \"nowrap\" (the default)."
             )),
         }
     }
@@ -183,6 +184,22 @@ impl ItemFlow {
 }
 
 impl CollectionVariant {
+    /// The registered `layout` as a call site of `widget` names it: its
+    /// `gap:`, `horizontal:` and `wrap:`, as the interpreter resolved them
+    /// against the row. The ONE parse of a collection's layout keywords — the
+    /// first paint and a view-mode click both build through it.
+    pub fn parse(
+        widget: &str,
+        layout: &str,
+        named: &HashMap<String, Value>,
+    ) -> Result<Self, String> {
+        let spec = crate::collection_layout::lookup_layout(layout)
+            .unwrap_or_else(|| panic!("`{layout}` is a registered layout"));
+        let gap = parse_gap(widget, named.get("gap"), spec.default_gap)?;
+        let flow = ItemFlow::parse(widget, named.get("horizontal"), named.get("wrap"))?;
+        Ok(Self { spec, gap, flow })
+    }
+
     pub fn new(spec: crate::collection_layout::LayoutSpec, gap: f32) -> Self {
         Self {
             spec,
@@ -243,74 +260,72 @@ impl CollectionVariant {
     }
 }
 
-/// The literal a call site gave for `name`, or `None` when it named none.
-///
-/// A `name:` whose value is not a literal — a `col(...)`, a nested call — is
-/// refused: a layout keyword is authored once, not read per row, and the
-/// alternative is to drop it and lay the collection out the other way with
-/// nothing said. [`ItemFlow::parse`] judges the literal itself.
-fn literal_arg<'a>(
-    args: &'a [holon_api::render_types::Arg],
-    name: &str,
-) -> Result<Option<&'a Value>, String> {
-    let Some(arg) = args.iter().find(|a| a.name.as_deref() == Some(name)) else {
-        return Ok(None);
-    };
-    match &arg.value {
-        RenderExpr::Literal { value } => Ok(Some(value)),
-        other => Err(format!(
-            "`{name}:` takes a literal, and this call site gave {other:?}. A layout keyword is \
-             authored, not read from a row."
-        )),
-    }
-}
-
-/// The `gap:` a call site named, in pixels, or `default` when it named none.
-///
-/// The ONE place either reader turns `gap:` into a number, for the reason
-/// [`ItemFlow::parse`] gives: a value of the wrong type used to be dropped, and
-/// the layout's declared default took its place with nothing said.
-pub fn parse_gap(gap: Option<&Value>, default: f32) -> Result<f32, String> {
+/// The `gap:` a call site of `widget` named, in pixels, or `default` when it
+/// named none. A value of the wrong type is refused rather than replaced by
+/// the default.
+fn parse_gap(widget: &str, gap: Option<&Value>, default: f32) -> Result<f32, String> {
     match gap {
         None => Ok(default),
         Some(Value::Float(f)) => Ok(*f as f32),
         Some(Value::Integer(i)) => Ok(*i as f32),
         Some(other) => Err(format!(
-            "a collection's `gap:` takes a number, and this call site gave {other:?}."
+            "{widget}(#{{gap: …}}) takes a number, and this call site gave {other:?}."
         )),
     }
 }
 
-/// Determine the `CollectionVariant` from a render expression's function name.
-///
-/// `Ok(None)` for non-collection expressions (non-FunctionCall or
-/// unrecognized function names); `Err` for a layout keyword it refuses.
-pub fn collection_variant_of(expr: &RenderExpr) -> Result<Option<CollectionVariant>, String> {
-    let (name, args) = match expr {
-        RenderExpr::FunctionCall { name, args } => (name.as_str(), args),
-        _ => return Ok(None),
-    };
-
-    let Some(spec) = crate::collection_layout::lookup_layout(name) else {
-        return Ok(None);
-    };
-
-    // `gap:` when the call site overrides it, else the layout's declared
-    // default. Layouts that don't care about gap (tree, table, …) see 0.0.
-    let gap = parse_gap(literal_arg(args, "gap")?, spec.default_gap)?;
-    let flow = ItemFlow::parse(literal_arg(args, "horizontal")?, literal_arg(args, "wrap")?)?;
-
-    Ok(Some(CollectionVariant { spec, gap, flow }))
+/// A `view_mode_switcher` node's props, slot and build context: what a click
+/// on its bar needs.
+#[derive(Clone)]
+pub struct ViewModeSwitch {
+    props: Mutable<HashMap<String, Value>>,
+    slot: Mutable<Arc<ReactiveViewModel>>,
+    ctx: crate::render_context::RenderContext,
 }
 
-/// Returns true if both variants are the same kind (same registered name).
-/// Used by `view_mode_switcher`'s fast-path to detect intra-variant switches
-/// (e.g. board → board with a different `item_template`) where the existing
-/// `ReactiveView` can be re-used vs. a full rebuild.
-pub fn variants_match(a: Option<CollectionVariant>, b: Option<CollectionVariant>) -> bool {
-    match (a, b) {
-        (Some(av), Some(bv)) => av.spec.name == bv.spec.name,
-        _ => false,
+impl ViewModeSwitch {
+    /// Switch to mode `mode`. Its `template` is built exactly as the first
+    /// paint builds it, so the click and the first paint give one answer for
+    /// one source; the slot's collection only takes the new item template
+    /// when the built layout equals the one it already draws.
+    pub fn switch(
+        &self,
+        mode: &str,
+        template: &RenderExpr,
+        services: &Arc<dyn crate::reactive::BuilderServices>,
+    ) {
+        let built = services.interpret(template, &self.ctx);
+        mark_active_mode(&mut self.props.lock_mut(), mode, &built);
+        let retemplate = {
+            let current = self.slot.lock_ref();
+            match (current.collection.as_ref(), built.collection.as_ref()) {
+                (Some(current), Some(new)) if current.layout() == new.layout() => new
+                    .item_template()
+                    .map(|template| (current.clone(), template.clone())),
+                _ => None,
+            }
+        };
+        match retemplate {
+            Some((view, template)) => view.set_template(template),
+            None => {
+                crate::reactive_view::start_reactive_views(
+                    &built,
+                    services,
+                    &services.runtime_handle(),
+                );
+                self.slot.set(Arc::new(built));
+            }
+        }
+    }
+}
+
+/// A `view_mode_switcher`'s bar marks `mode` active only while its slot draws
+/// that mode; over an error node no mode is active.
+pub fn mark_active_mode(props: &mut HashMap<String, Value>, mode: &str, slot: &ReactiveViewModel) {
+    if slot.is_error() {
+        props.remove("active_mode");
+    } else {
+        props.insert("active_mode".to_string(), Value::String(mode.to_string()));
     }
 }
 
@@ -1741,11 +1756,32 @@ impl ReactiveViewModel {
         }
     }
 
-    // ALLOW(unused_param): _widget kept in signature for caller readability
-    pub fn error(_widget: impl Into<String>, message: impl Into<String>) -> Self {
+    /// An error node whose message names `widget`, the builder that drew it.
+    pub fn error(widget: impl Into<String>, message: impl Into<String>) -> Self {
         let mut props = HashMap::new();
-        props.insert("message".to_string(), Value::String(message.into()));
+        props.insert(
+            "message".to_string(),
+            Value::String(naming_the_builder(&widget.into(), message.into())),
+        );
         Self::from_widget("error", props)
+    }
+
+    /// The handle a click on this `view_mode_switcher` node's bar switches
+    /// modes through.
+    pub fn view_mode_switch(&self) -> ViewModeSwitch {
+        ViewModeSwitch {
+            props: self.props.clone(),
+            slot: self
+                .slot
+                .as_ref()
+                .expect("a view_mode_switcher node has a slot")
+                .content
+                .clone(),
+            ctx: self
+                .render_ctx
+                .clone()
+                .expect("a view_mode_switcher node carries the context it was built in"),
+        }
     }
 
     pub fn is_error(&self) -> bool {

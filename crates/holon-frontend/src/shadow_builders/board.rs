@@ -46,6 +46,14 @@ holon_macros::widget_builder! {
             ba.ctx.data_source.is_some(),
         );
         let template = item_template.cloned();
+        let layout = match CollectionVariant::parse("board", "board", &ba.args.named) {
+            Ok(layout) => layout,
+            Err(msg) => return ViewModel::error("board", msg),
+        };
+        let rules = match crate::row_pipeline::parse_rules_arg(ba.args.named.get("rules")) {
+            Ok(rules) => rules,
+            Err(msg) => return ViewModel::error("board", msg),
+        };
         let lane_field = ba
             .args
             .get_string("lane_field")
@@ -130,10 +138,8 @@ holon_macros::widget_builder! {
             // observed in BOTH source and target lanes for one frame).
             if let Some(ds) = ba.ctx.data_source.as_ref() {
                 let upstream: Arc<dyn ReactiveRowProvider> = ds.clone();
-                let rules = crate::row_pipeline::parse_rules_arg(ba.args.named.get("rules"));
                 let view = crate::reactive_view::ReactiveView::new_grouped(
-                    crate::reactive_view_model::CollectionVariant::from_name("board", 0.0)
-                        .expect("`board` layout is registered as a builtin"),
+                    layout,
                     upstream,
                     tmpl.clone(),
                     lane_field.clone(),
