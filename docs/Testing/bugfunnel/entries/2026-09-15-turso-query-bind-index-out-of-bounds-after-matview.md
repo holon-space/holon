@@ -3,7 +3,7 @@ id: 2026-09-15-turso-query-bind-index-out-of-bounds-after-matview
 date: 2026-09-15
 gap: COVERAGE
 secondary: null
-status: OPEN
+status: FIXED
 summary: >-
   A Filter query whose OR has a branch that holds only the terms common to all
   branches fails with "bind index 1 is out of bounds": the Turso fork planner
@@ -68,8 +68,22 @@ does not call `StorageBackend::query` with generated filters.
 
 ## Remedy
 
-OPEN. The fork fix is in progress: commit 2d97bdfa in
-/Users/martin/Workspaces/bigdata/turso-or-absorb, not yet pinned. It must keep
-the parameter slots of removed subexpressions and come with a fork test that
-binds through the absorbed shape. Pin a hand-authored regression for the
-filter `Or([And([IsNull(value), Eq(id, ?)]), IsNull(value)])`.
+FIXED in the Turso fork, commit 2d97bdfa53fa34adace480a2632c6fbfa3f80cb9
+(nightscape/turso, bookmark holon-param-table, child of ea212963): the
+parameter table comes from the parser (SQLite nVar semantics), so a rewrite
+that removes a term with a `?` (OR absorption, constant-false elimination)
+keeps its bind slot. The fork test is in
+`tests/integration/query_processing/test_read_path.rs`.
+
+Holon pins the fix: the four turso crates in Cargo.toml move from rev
+ea212963 to rev 2d97bdfa; in Cargo.lock only the turso source lines change.
+
+- Red at ea212963: `PROPTEST_RNG_SEED=28 cargo nextest run -p holon --test
+  turso_storage_pbt test_turso_backend_state_machine` fails with "bind index 1
+  is out of bounds".
+- Green at 2d97bdfa: the same command passes. A sweep of seeds 1-80 gives 80
+  green.
+
+Still missing: a hand-authored regression for the filter
+`Or([And([IsNull(value), Eq(id, ?)]), IsNull(value)])`. Today only the seeds
+of turso_storage_pbt that draw the shape cover it.

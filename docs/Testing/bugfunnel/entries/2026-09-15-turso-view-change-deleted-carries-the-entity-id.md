@@ -24,7 +24,8 @@ entry its name:
 ```
 
 The stream is correct: `Deleted` and `Updated` carry the entity id
-(crates/holon-turso/src/turso.rs:2717, contract doc on `RowChange`). The
+(crates/holon-turso/src/turso.rs:2696 for `Deleted`, contract doc on
+`RowChange`; the decode-failure arm at turso.rs:2715-2716 carries the rowid). The
 reference was wrong. A sweep of seeds 1-80 at a85893600763 gives 4 red: 33, 48
 and 71 are the oracle defects below; 21 is the engine bug
 `2026-09-15-turso-query-bind-index-out-of-bounds-after-matview`.
@@ -34,8 +35,9 @@ and 71 are the oracle defects below; 21 is the engine bug
 1. Delete keying: the reference emitted the rowid as the `Deleted` id, and the
    oracle looked up the actual id in a rowid->entity map, so every compared
    `Deleted` was None != Some. Seed 33.
-2. Transaction delta: a commit's view delta is the net change per row in
-   rowid order. Seed 71: `[Insert a, Update uyn, Update uyn]` gives ONE
+2. Transaction delta: a commit's view delta is the net change per row,
+   sorted by weight first, then by rowid: all retractions come before all
+   insertions. Seed 71: `[Insert a, Update uyn, Update uyn]` gives ONE
    Updated(uyn, final value) then Created(a). The reference emitted one change
    per statement in statement order.
 3. No-op update: an Update that writes the value the row already has gives no

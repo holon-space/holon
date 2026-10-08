@@ -1764,9 +1764,13 @@ fn net_commit_changes(
                 },
             )| {
                 let net = match (rows_before.get(&entity_id), change) {
-                    (None, ChangeData::Deleted { .. }) => return None,
-                    (None, ChangeData::Updated { data, origin, .. }) => {
-                        ChangeData::Created { data, origin }
+                    (None, change @ (ChangeData::Updated { .. } | ChangeData::Deleted { .. })) => {
+                        unreachable!(
+                            "net change {change:?} of '{entity_id}', a row absent before the \
+                         batch: check_preconditions admits Update and Delete only of a row \
+                         present before the batch, so no batch inserts a row and then \
+                         updates or deletes it"
+                        )
                     }
                     (Some(row), ChangeData::Updated { data, .. })
                         if without_rowid(&data) == *row =>
