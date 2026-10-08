@@ -69,6 +69,9 @@ impl TransitionRef<ReferenceState> for DeleteRefusedRecipe {
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
+        if state.read_only_recipe_file() == Some(self.file.as_str()) {
+            state.retire_read_only_file(&self.file);
+        }
         state.refused_recipes.remove(&self.file);
         state.disclose_refused_recipes();
     }
@@ -82,7 +85,8 @@ crate::cap_transition! {
     }
     sql_budget: |_me, _state| {
         // A file that never ingested owns no rows; the deletion drops at most
-        // its file record.
+        // its file record. A broken recipe that once ingested cascades its
+        // page and steps out.
         ExpectedSql {
             reads: 4,
             writes: 2,

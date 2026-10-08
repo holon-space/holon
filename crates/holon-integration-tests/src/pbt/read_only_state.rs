@@ -23,6 +23,9 @@ pub struct ReadOnlyRefState {
     files: BTreeMap<EntityUri, String>,
     /// The read-only documents' pages.
     documents: BTreeSet<EntityUri>,
+    /// Whether the draw's boot ingests read-only formats at all. Outlives the
+    /// documents: deleting the last one leaves the adapter ingesting.
+    seeded: bool,
     attempts: usize,
 }
 
@@ -32,6 +35,11 @@ impl ReadOnlyRefState {
     pub fn seed_document(&mut self, page: EntityUri, file: &str) {
         self.files.insert(page.clone(), file.to_string());
         self.documents.insert(page);
+        self.seeded = true;
+    }
+
+    pub fn seeded(&self) -> bool {
+        self.seeded
     }
 
     pub fn documents(&self) -> &BTreeSet<EntityUri> {
@@ -49,6 +57,26 @@ impl ReadOnlyRefState {
         for file in self.files.values_mut().filter(|file| *file == from) {
             *file = to.to_string();
         }
+    }
+
+    /// The vault file `file` was deleted: its document and steps leave the
+    /// store, so nothing is refused against it any more. Returns the retired
+    /// ids — the document page and its homes.
+    pub fn retire_file(&mut self, file: &str) -> BTreeSet<EntityUri> {
+        let retired: BTreeSet<EntityUri> = self
+            .files
+            .iter()
+            .filter(|(_, home)| *home == file)
+            .map(|(id, _)| id.clone())
+            .collect();
+        assert!(
+            !retired.is_empty(),
+            "retire_file: no read-only block is homed in {file}"
+        );
+        self.files.retain(|_, home| home != file);
+        self.homes.retain(|id| !retired.contains(id));
+        self.documents.retain(|id| !retired.contains(id));
+        retired
     }
 
     pub fn homes(&self) -> &BTreeSet<EntityUri> {

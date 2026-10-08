@@ -964,6 +964,33 @@ impl ReferenceState {
             .refusing_file(&crate::pbt::composed::wide_e2e::read_only_recipe_page())
     }
 
+    /// The read-only `file` was deleted from the vault. Production cascades a
+    /// vanished file's document out of the store whether or not its current
+    /// bytes parse, so the page and steps of its last good ingest go too.
+    pub fn retire_read_only_file(&mut self, file: &str) {
+        let retired = self.read_only.retire_file(file);
+        let blocks = &mut self.domain.block_state.blocks;
+        let orphans: Vec<&EntityUri> = blocks
+            .values()
+            .filter(|b| retired.contains(&b.parent_id) && !retired.contains(&b.id))
+            .map(|b| &b.id)
+            .collect();
+        assert!(
+            orphans.is_empty(),
+            "retire_read_only_file: {file}'s document holds blocks the file never declared: \
+             {orphans:?}"
+        );
+        blocks.retain(|id, _| !retired.contains(id));
+        self.domain
+            .block_state
+            .block_documents
+            .retain(|id, _| !retired.contains(id));
+        for id in &retired {
+            self.clear_focus_if_deleted(id);
+        }
+        self.recanon_and_rebuild();
+    }
+
     /// The oracle's Rhai engine for evaluating the bundled `block` profile.
     ///
     /// The bundled profile's computed fields call entity lookups

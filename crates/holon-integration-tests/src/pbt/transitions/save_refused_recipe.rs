@@ -49,7 +49,7 @@ pub struct SaveRefusedRecipe {
 /// The cooklang adapter ingests only on a draw whose boot reads the vault's
 /// files — the same draw that seeds the read-only recipe.
 fn cooklang_ingests(state: &ReferenceState) -> bool {
-    !state.read_only.homes().is_empty()
+    state.read_only.seeded()
 }
 
 impl TransitionFactory<ReferenceState> for SaveRefusedRecipe {

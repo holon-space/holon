@@ -2337,12 +2337,22 @@ impl FileSyncController {
         if document.is_page() {
             let current_chain = self.authoritative_name_chain(&document_uri).await?;
             if !current_chain.is_empty() {
+                // The name chain fixes the stem; the format of the vanished
+                // file fixes the extension, so a `.cook` home is compared as a
+                // `.cook` file and not as the `.org` it never was.
+                let extension = path.extension().with_context(|| {
+                    format!(
+                        "on_file_deleted: {} has no extension, yet a format adapter read it",
+                        path.display()
+                    )
+                })?;
                 let current_path =
                     VaultPath::page_file_from_name_chain(&self.root_dir, &current_chain)
                         .with_context(|| {
                             format!("on_file_deleted: stale-rename guard for {document_uri}")
                         })?
-                        .into_path_buf();
+                        .into_path_buf()
+                        .with_extension(extension);
                 if CanonicalPath::new(&current_path) != *canonical {
                     info!(
                         "[FileSyncController] Deleted file {} is stale — document {} now lives at \
@@ -8018,6 +8028,13 @@ impl FileSyncController {
         };
         let path = vault_path.as_path().to_path_buf();
         let canonical = CanonicalPath::new(&path);
+        // The TARGET test of the write-tier gate, asked before rendering: a
+        // document whose read-only file was deleted no longer has a home, yet
+        // its alias still routes the cascade's own deltas to that file.
+        if self.is_read_only_path(&path) {
+            self.note_readonly_skip(doc_id, &path, "on_block_changed_target");
+            return Ok(BlockChangeVerdict::Handled);
+        }
         if self.backlog_holds_a_twin_of(doc_id, &path) {
             info!(
                 "[FileSyncController] {} waits for the read-only backlog before {} is written: a \
