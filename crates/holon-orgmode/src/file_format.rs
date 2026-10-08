@@ -145,10 +145,8 @@ impl FileFormatAdapter for OrgFormatAdapter {
                 != b.get_property(crate::models::org_props::STARS)
             || a.get_property(crate::models::org_props::HEADLINE_END)
                 != b.get_property(crate::models::org_props::HEADLINE_END)
-            || a.sequence() != b.sequence()
-        // Sibling order is no longer a per-block field (ADR 0005): it is
-        // derived from document position and applied via `place_all`,
-        // so it is not part of this content-equivalence check.
+        // `positional_property_keys` say where the block sits, which the
+        // ingest applies through `place`/`place_all` (ADR 0005), not an edit.
     }
 
     /// Org carries the ingest contract itself, so it replaces the default: the
@@ -507,8 +505,8 @@ mod tests {
         v = base.clone();
         v.set_sequence(base.sequence() + 1);
         assert!(
-            adapter.content_differs(&base, &v),
-            "sequence change undetected"
+            !adapter.content_differs(&base, &v),
+            "a position change alone is not a content change"
         );
     }
 }

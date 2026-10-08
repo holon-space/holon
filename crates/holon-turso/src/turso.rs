@@ -357,24 +357,27 @@ impl ActorState {
     }
 }
 
-/// Stable short fingerprint of named bound parameters, recorded on `query`
+/// Stable short fingerprint of one execution's binding, recorded on `query`
 /// spans as `params_fp`. The PBT N+1 reporter groups duplicate SQL texts by
-/// this, so a parameterized statement fired for N *different* bindings
-/// (fan-out — possibly a real N+1, judge by count) is distinguishable from
-/// the same statement + bindings executed twice (definitely redundant work).
-/// Values are hashed, never logged, so row content stays out of traces.
-fn named_params_fingerprint(params: &HashMap<String, Value>) -> String {
+/// this, so a statement fired for N *different* bindings (fan-out — possibly a
+/// real N+1, judge by count) is distinguishable from the same statement +
+/// bindings executed twice (definitely redundant work).
+///
+/// A binding is the bound parameters AND the raw statement text: a value a
+/// caller inlined into the text is blanked out of the `sql` attribute, so
+/// only the raw text tells two such executions apart. Both are digested with
+/// the keyed [`params_hasher`], never logged, so row content stays out of
+/// traces.
+fn named_params_fingerprint(sql: &str, params: &HashMap<String, Value>) -> String {
     use std::hash::Hash;
     use std::hash::Hasher;
-    if params.is_empty() {
-        return "-".to_string();
-    }
     let mut entries: Vec<(&str, String)> = params
         .iter()
         .map(|(k, v)| (k.as_str(), format!("{v:?}")))
         .collect();
     entries.sort();
     let mut hasher = params_hasher();
+    sql.hash(&mut hasher);
     entries.hash(&mut hasher);
     format!("{:016x}", hasher.finish())
 }
@@ -899,13 +902,11 @@ fn sql_fingerprint(sql: &str) -> String {
 
 /// Positional-parameter sibling of [`named_params_fingerprint`], for
 /// `execute` spans.
-fn positional_params_fingerprint(params: &[turso::Value]) -> String {
+fn positional_params_fingerprint(sql: &str, params: &[turso::Value]) -> String {
     use std::hash::Hash;
     use std::hash::Hasher;
-    if params.is_empty() {
-        return "-".to_string();
-    }
     let mut hasher = params_hasher();
+    sql.hash(&mut hasher);
     for v in params {
         format!("{v:?}").hash(&mut hasher);
     }
@@ -952,7 +953,7 @@ impl DbHandle {
     // full-table hydrating scan, the doc-scoped CTE and the single-block point
     // read share a longer prefix than that, so a shorter fingerprint merges
     // three different consumers into one bucket and misattributes redundancy.
-    #[tracing::instrument(skip(self, params), fields(sql = %redact_sql_for_logs(sql), params_fp = %named_params_fingerprint(&params)))]
+    #[tracing::instrument(skip(self, params), fields(sql = %redact_sql_for_logs(sql), params_fp = %named_params_fingerprint(sql, &params)))]
     pub async fn query(
         &self,
         sql: &str,
@@ -1005,7 +1006,7 @@ impl DbHandle {
 
     /// Execute a statement (INSERT, UPDATE, DELETE) and return affected row
     /// count
-    #[tracing::instrument(skip(self, params), fields(sql = %redact_sql_for_logs(sql), params_fp = %positional_params_fingerprint(&params)))]
+    #[tracing::instrument(skip(self, params), fields(sql = %redact_sql_for_logs(sql), params_fp = %positional_params_fingerprint(sql, &params)))]
     pub async fn execute(&self, sql: &str, params: Vec<turso::Value>) -> Result<u64> {
         let (response_tx, response_rx) = oneshot::channel();
         self.tx
@@ -4734,17 +4735,32 @@ mod tests {
     }
 
     #[test]
-    fn named_params_fingerprint_empty_is_dash_and_discriminates() {
-        assert_eq!(named_params_fingerprint(&HashMap::new()), "-");
+    fn named_params_fingerprint_discriminates_params_and_inlined_values() {
+        let sql = "SELECT v FROM t WHERE id = $k";
         let mut a = HashMap::new();
         a.insert("k".to_string(), Value::Integer(1));
         let mut b = HashMap::new();
         b.insert("k".to_string(), Value::Integer(2));
-        assert_ne!(named_params_fingerprint(&a), "-");
-        assert_ne!(named_params_fingerprint(&a), named_params_fingerprint(&b));
+        assert_ne!(
+            named_params_fingerprint(sql, &a),
+            named_params_fingerprint(sql, &b)
+        );
         assert_eq!(
-            named_params_fingerprint(&a),
-            named_params_fingerprint(&a.clone())
+            named_params_fingerprint(sql, &a),
+            named_params_fingerprint(sql, &a.clone())
+        );
+        let none = HashMap::new();
+        let x = "SELECT v FROM t WHERE id = 'x'";
+        let y = "SELECT v FROM t WHERE id = 'y'";
+        assert_eq!(redact_sql_for_logs(x), redact_sql_for_logs(y));
+        assert_ne!(
+            named_params_fingerprint(x, &none),
+            named_params_fingerprint(y, &none),
+            "two ids the redacted text blanks alike are two bindings"
+        );
+        assert_eq!(
+            named_params_fingerprint(x, &none),
+            named_params_fingerprint(x, &none)
         );
     }
 
@@ -4880,14 +4896,20 @@ mod tests {
     }
 
     #[test]
-    fn positional_params_fingerprint_empty_is_dash_and_discriminates() {
-        assert_eq!(positional_params_fingerprint(&[]), "-");
+    fn positional_params_fingerprint_discriminates_params_and_inlined_values() {
+        let sql = "UPDATE t SET v = ?";
         let a = [value_to_turso_param(&Value::Integer(1)).unwrap()];
         let b = [value_to_turso_param(&Value::Integer(2)).unwrap()];
-        assert_ne!(positional_params_fingerprint(&a), "-");
         assert_ne!(
-            positional_params_fingerprint(&a),
-            positional_params_fingerprint(&b)
+            positional_params_fingerprint(sql, &a),
+            positional_params_fingerprint(sql, &b)
+        );
+        let x = "UPDATE t SET v = 1 WHERE id = 'x'";
+        let y = "UPDATE t SET v = 1 WHERE id = 'y'";
+        assert_eq!(redact_sql_for_logs(x), redact_sql_for_logs(y));
+        assert_ne!(
+            positional_params_fingerprint(x, &[]),
+            positional_params_fingerprint(y, &[])
         );
     }
 
