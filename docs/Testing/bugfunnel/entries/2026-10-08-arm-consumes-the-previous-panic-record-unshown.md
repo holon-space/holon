@@ -39,10 +39,17 @@ and a non-panic death do not exist in its wiring.
 
 ## Remedy
 `arm` moves the previous run's record into `unshown-panics/<n>.json`;
-`install` emits each one on the bus it returns and only then moves it to
-`last-panic.seen.json`. A run that dies before its bus therefore keeps the
-records of every run before it, and the next bus shows each of them.
+`install` emits each one on the bus it returns, and it moves to
+`last-panic.seen.json` only when a frontend calls `panic_record::seen_on`
+for that bus. The GPUI window calls it on the frame after the one that
+painted the record's toast (`frontends/gpui/src/lib.rs`); the TUI and the
+standalone MCP server draw no conditions and never call it. A run that dies
+before the user saw its bus therefore keeps the records of every run before
+it, and the next bus shows each of them.
 `boot_failed` writes its own record through `panic_record::record_exit`.
 Pinned by `crates/holon-frontend/tests/panic_record_boot_loop.rs` (child
-processes: panic, `exit`, `boot_failed`-shaped exit, then a bus); red on
-d922394e in `lane-logs/a12-fix3/red.log`.
+processes: panic, `exit`, `boot_failed`-shaped exit, an exit after
+`install`, then a bus) and
+`frontends/gpui/tests/panic_records_seen_after_a_drawn_frame_windowed.rs`;
+red on d922394e in `lane-logs/a12-fix3/red.log` and on 9d9ea0da in
+`lane-logs/a12-fix4/red-boot-loop.log`.

@@ -20,6 +20,7 @@
 //! `cx.update_window` to mutate the `ShareUiState` entity, which emits a
 //! `NotifyShareUi` event that triggers the main `HolonApp`'s re-render.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use gpui::AnyElement;
@@ -304,6 +305,11 @@ pub struct ShareUiState {
     pub deferred_reimport: Option<DeferredReimport>,
     pub share_error: Option<String>,
     pub accept_error: Option<String>,
+    /// Banner kinds already logged as drawn in the toast stack.
+    banners_as_toasts: HashSet<&'static str>,
+    /// The bus that raised a previous-run panic this window has not yet drawn;
+    /// the frame after the one that paints it calls `panic_record::seen_on`.
+    pub previous_runs_shown_on: Option<Arc<holon_api::ConditionBus>>,
 }
 
 /// Blocks written on this device before it was paired that are in the archive
@@ -324,6 +330,8 @@ impl ShareUiState {
             deferred_reimport: None,
             share_error: None,
             accept_error: None,
+            banners_as_toasts: HashSet::new(),
+            previous_runs_shown_on: None,
         }
     }
 
@@ -363,8 +371,8 @@ impl ShareUiState {
     ///
     /// Generic: the condition's profile says where it goes and how it is drawn,
     /// and its own `detail` says what it reads. Nothing here is per-kind except
-    /// the two placements that are not a toast, and the one kind whose HEADLINE
-    /// is instance data rather than a constant.
+    /// the modal, the one kind with a banner of its own, and the one kind whose
+    /// HEADLINE is instance data rather than a constant.
     pub fn apply_degraded(&mut self, event: Condition) {
         let condition = event.condition_key();
         let profile = event.reason.profile();
@@ -396,24 +404,43 @@ impl ShareUiState {
             ConditionPlacement::Banner => {
                 if let ConditionKind::PairingReimportDeferred { orphans, archive } = event.reason {
                     self.deferred_reimport = Some(DeferredReimport { orphans, archive });
+                } else {
+                    // This window has no banner for it; ADR 0035 falls back to a toast.
+                    let kind = event.reason.condition_kind();
+                    if self.banners_as_toasts.insert(kind) {
+                        tracing::warn!(
+                            "[share-ui] no banner surface for {kind}; drawing it as a toast"
+                        );
+                    }
+                    self.push_condition_toast(event, profile, condition, detail);
                 }
             }
             ConditionPlacement::Toast | ConditionPlacement::Section(_) => {
-                // The one kind whose headline names instance data — the format
-                // that refused the files — instead of the profile's constant.
-                let refusals = match &event.reason {
-                    ConditionKind::VaultIngestFailed(refusals) => Some(refusals.clone()),
-                    _ => None,
-                };
-                self.push_toast(DegradedToast {
-                    kind: ToastKind::Condition(profile),
-                    subject: event.subject,
-                    detail: ToastDetail::with_body(detail.headline, detail.body),
-                    condition: Some(condition),
-                    refusals,
-                });
+                self.push_condition_toast(event, profile, condition, detail);
             }
         }
+    }
+
+    fn push_condition_toast(
+        &mut self,
+        event: Condition,
+        profile: ConditionProfile,
+        condition: ConditionKey,
+        detail: holon_api::condition_detail::ConditionDetail,
+    ) {
+        // The one kind whose headline names instance data — the format that
+        // refused the files — instead of the profile's constant.
+        let refusals = match &event.reason {
+            ConditionKind::VaultIngestFailed(refusals) => Some(refusals.clone()),
+            _ => None,
+        };
+        self.push_toast(DegradedToast {
+            kind: ToastKind::Condition(profile),
+            subject: event.subject,
+            detail: ToastDetail::with_body(detail.headline, detail.body),
+            condition: Some(condition),
+            refusals,
+        });
     }
 
     /// Drop the toast for a condition the bus reports as no longer in effect.
@@ -605,7 +632,14 @@ pub fn spawn_degraded_bus_bridge(
                 let _ = cx.update_window(window_handle, |_, _window, cx| {
                     share_state.update(cx, |s, cx| {
                         match change.clone() {
-                            ConditionChange::Raised(event) => s.apply_degraded(event),
+                            ConditionChange::Raised(event) => {
+                                if event.reason.condition_kind()
+                                    == ConditionKind::PREVIOUS_RUN_PANICKED
+                                {
+                                    s.previous_runs_shown_on = Some(bus.clone());
+                                }
+                                s.apply_degraded(event)
+                            }
                             ConditionChange::Cleared(key) => s.apply_degraded_cleared(&key),
                         }
                         cx.emit(NotifyShareUi);
@@ -2058,18 +2092,9 @@ fn estimated_toast_height(lines: &[String], text_width: f32) -> f32 {
     wrapped * TOAST_LINE_H + TOAST_BOX_CHROME_H
 }
 
-fn render_toast_stack(
-    toasts: &[DegradedToast],
-    share_state: Entity<ShareUiState>,
-    bounds: crate::geometry::BoundsRegistry,
-    theme: OverlayTheme,
-    viewport_width: f32,
-    viewport_height: f32,
-) -> AnyElement {
-    // Every box in the stack is this wide, so the height estimate below and the
-    // boxes it is estimating cannot disagree about how far a line wraps.
-    let box_w = toast_box_width(viewport_width);
-    let text_w = toast_text_width(box_w);
+/// How many of `toasts`, from the first, the stack paints in this viewport.
+fn painted_toasts(toasts: &[DegradedToast], viewport_width: f32, viewport_height: f32) -> usize {
+    let text_w = toast_text_width(toast_box_width(viewport_width));
     // How many boxes FIT, derived from the window rather than fixed. A fixed
     // number is a guess about payload length: the not-enabled disclosure
     // carries two absolute paths on cap-exempt lines, so one refusal can be
@@ -2090,6 +2115,41 @@ fn render_toast_stack(
         used += h;
         visible += 1;
     }
+    visible
+}
+
+/// The stack paints, in this viewport, every previous-run panic of
+/// [`ShareUiState::previous_runs_shown_on`].
+pub fn previous_runs_painted(
+    state: &ShareUiState,
+    viewport_width: f32,
+    viewport_height: f32,
+) -> bool {
+    if state.previous_runs_shown_on.is_none() {
+        return false;
+    }
+    let painted = painted_toasts(&state.toasts, viewport_width, viewport_height);
+    let is_previous_run = |t: &DegradedToast| {
+        t.condition
+            .as_ref()
+            .is_some_and(|c| c.kind == ConditionKind::PREVIOUS_RUN_PANICKED)
+    };
+    let (shown, hidden) = state.toasts.split_at(painted);
+    shown.iter().any(is_previous_run) && !hidden.iter().any(is_previous_run)
+}
+
+fn render_toast_stack(
+    toasts: &[DegradedToast],
+    share_state: Entity<ShareUiState>,
+    bounds: crate::geometry::BoundsRegistry,
+    theme: OverlayTheme,
+    viewport_width: f32,
+    viewport_height: f32,
+) -> AnyElement {
+    // Every box in the stack is this wide, so the height estimate below and the
+    // boxes it is estimating cannot disagree about how far a line wraps.
+    let box_w = toast_box_width(viewport_width);
+    let visible = painted_toasts(toasts, viewport_width, viewport_height);
     // ZERO is a legal answer. A window can be too short for even one of these
     // disclosures — they carry two absolute paths — and admitting one anyway is
     // how the COUNT line gets pushed off the top, which loses the only thing

@@ -4,8 +4,9 @@
 //! panicking thread before anything else, so a panic that still aborts (one
 //! that crosses `extern "C"`) leaves it too.
 //!
-//! A record leaves [`UNSHOWN_DIR`] only after a bus has shown it, so a run
-//! that dies before its bus exists keeps the records of the runs before it.
+//! A record leaves [`UNSHOWN_DIR`] only once a frontend has drawn the bus that
+//! shows it ([`seen_on`]), so a run that dies before that keeps the records of
+//! the runs before it.
 
 use std::io::ErrorKind;
 use std::panic::Location;
@@ -258,8 +259,9 @@ fn unshown_records(record_dir: &Path) -> std::io::Result<Vec<(u64, PathBuf)>> {
 
 /// [`arm`] for `config_dir`, then return a new bus that holds every condition
 /// raised since and receives every later one, with the records of earlier
-/// runs shown on it. The session must run on this bus. The last call in a
-/// process is the one whose bus shows panics.
+/// runs shown on it; they count as seen once a frontend calls [`seen_on`]. The
+/// session must run on this bus. The last call in a process is the one whose
+/// bus shows panics.
 pub fn install(config_dir: &Path) -> Arc<ConditionBus> {
     install_with(config_dir, spawn_forwarder)
 }
@@ -318,9 +320,16 @@ fn install_with(config_dir: &Path, spawn: SpawnForwarder) -> Arc<ConditionBus> {
         ));
     }
     // A dir that is missing has already been disclosed by `start_run`.
-    if config_dir.is_dir() {
-        show_unshown(config_dir, &conditions);
-    }
+    let records = if config_dir.is_dir() {
+        show_unshown(config_dir, &conditions)
+    } else {
+        Vec::new()
+    };
+    *shown() = Some(Shown {
+        conditions: Arc::downgrade(&conditions),
+        record_dir: config_dir.to_path_buf(),
+        records,
+    });
     if let Err(e) = spawn(forward, conditions.clone()) {
         eprintln!("panic record: cannot start the thread that shows panics while Holon runs: {e}");
         conditions.emit(Condition {
@@ -333,8 +342,21 @@ fn install_with(config_dir: &Path, spawn: SpawnForwarder) -> Arc<ConditionBus> {
     conditions
 }
 
-/// Emit every record in [`UNSHOWN_DIR`] on `conditions`, then mark it seen.
-fn show_unshown(record_dir: &Path, conditions: &ConditionBus) {
+/// The records the last [`install`] showed, until a frontend has drawn them.
+struct Shown {
+    conditions: std::sync::Weak<ConditionBus>,
+    record_dir: PathBuf,
+    records: Vec<PathBuf>,
+}
+
+static SHOWN: Mutex<Option<Shown>> = Mutex::new(None);
+
+fn shown() -> MutexGuard<'static, Option<Shown>> {
+    SHOWN.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Emit every record in [`UNSHOWN_DIR`] on `conditions` and return their paths.
+fn show_unshown(record_dir: &Path, conditions: &ConditionBus) -> Vec<PathBuf> {
     let records = match unshown_records(record_dir) {
         Ok(records) => records,
         Err(e) => {
@@ -346,17 +368,36 @@ fn show_unshown(record_dir: &Path, conditions: &ConditionBus) {
                 &record_dir.join(UNSHOWN_DIR),
                 format!("the records of earlier runs cannot be listed: {e}"),
             ));
-            return;
+            return Vec::new();
         }
     };
-    for (_, path) in records {
-        let record = match std::fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice::<PanicRecord>(&bytes)
-                .unwrap_or_else(|e| unreadable_record(&path, &e.to_string())),
-            Err(e) => unreadable_record(&path, &e.to_string()),
-        };
-        conditions.emit(record.previous_run_panicked());
-        if let Err(e) = std::fs::rename(&path, record_dir.join(SEEN_RECORD_FILE)) {
+    records
+        .into_iter()
+        .map(|(_, path)| {
+            let record = match std::fs::read(&path) {
+                Ok(bytes) => serde_json::from_slice::<PanicRecord>(&bytes)
+                    .unwrap_or_else(|e| unreadable_record(&path, &e.to_string())),
+                Err(e) => unreadable_record(&path, &e.to_string()),
+            };
+            conditions.emit(record.previous_run_panicked());
+            path
+        })
+        .collect()
+}
+
+/// A frontend has drawn `conditions` where the user sees it: the records of
+/// earlier runs that [`install`] showed on it are seen, and the next start
+/// does not show them again. A bus that is not the last one installed showed
+/// records the last one shows too, so this does nothing for it.
+pub fn seen_on(conditions: &ConditionBus) {
+    let mut shown = shown();
+    let Some(on_this_bus) = shown.take_if(|s| std::ptr::eq(s.conditions.as_ptr(), conditions))
+    else {
+        return;
+    };
+    drop(shown);
+    for path in on_this_bus.records {
+        if let Err(e) = std::fs::rename(&path, on_this_bus.record_dir.join(SEEN_RECORD_FILE)) {
             eprintln!("panic record: cannot mark {} as seen: {e}", path.display());
             conditions.emit(record_unwritable(
                 &path,
@@ -468,7 +509,43 @@ mod tests {
         static SERIAL: Mutex<()> = Mutex::new(());
         let serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
         *target() = None;
+        *shown() = None;
         serial
+    }
+
+    fn seed_previous_run(dir: &Path) {
+        PanicRecord {
+            message: "the previous run".to_string(),
+            location: "prior.rs:1:1".to_string(),
+            thread: "main".to_string(),
+        }
+        .write_to(dir)
+        .expect("seed a previous record");
+    }
+
+    #[test]
+    fn a_record_is_seen_only_once_its_own_bus_was_drawn() {
+        let _serial = fresh_process();
+        let dir = tempfile::tempdir().expect("temp config dir");
+        seed_previous_run(dir.path());
+
+        let undrawn = install(dir.path());
+        assert_eq!(kinds(&undrawn), vec![ConditionKind::PREVIOUS_RUN_PANICKED]);
+        let drawn = install(dir.path());
+        assert_eq!(
+            kinds(&drawn),
+            vec![ConditionKind::PREVIOUS_RUN_PANICKED],
+            "no frontend drew the first bus"
+        );
+
+        seen_on(&undrawn);
+        assert!(
+            dir.path().join(UNSHOWN_DIR).join("1.json").exists(),
+            "the first bus is not the last one installed"
+        );
+        seen_on(&drawn);
+        assert!(!dir.path().join(UNSHOWN_DIR).join("1.json").exists());
+        assert!(kinds(&install(dir.path())).is_empty());
     }
 
     fn panic_on_a_thread(message: &'static str) {
