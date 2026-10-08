@@ -26,6 +26,7 @@
 pub mod advice_rows_woven;
 pub mod audience_never_over_approximates;
 pub mod birth_contract;
+pub mod block_render_matches_render_source;
 pub mod boundary_respected;
 pub mod companion_has_no_child_page_headings;
 /// `inv-complexity-class-trend` — `otel-testing`-gated for the same reason

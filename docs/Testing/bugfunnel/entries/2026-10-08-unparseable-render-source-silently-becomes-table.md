@@ -29,4 +29,8 @@ The keystone's render-source mutations draw only valid expressions
 parse error; `render_entity` propagates it, and the watcher draws the `error`
 node. The snapshot arm uses the same function. `default_table_expr` is deleted.
 Pinned by `crates/holon-integration-tests/tests/frontend_suite/render_source_panels.rs`.
-A keystone transition that authors a malformed render remains open.
+Keystone: the `AuthorMalformedRender` transition authors a render that does not
+parse, and `inv-unparseable-render-is-error-node` requires the error node.
+Hand-authored row `unparseable-render-source-is-an-error-node`; red before C1 in
+`lane-logs/c1k/`. The watcher logs the failure at WARN (`UnparseableRenderSource`),
+since the error widget discloses it on the block.

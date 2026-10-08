@@ -379,6 +379,21 @@ async fn render_and_forward(
                     .await;
                 return;
             }
+            if let Some(unparseable) =
+                e.downcast_ref::<crate::api::block_domain::UnparseableRenderSource>()
+            {
+                // WARN, not ERROR: the author's render source is wrong, and the
+                // error widget below discloses that on the block itself.
+                tracing::warn!(block_id = %block_id, "[UiWatcher] {unparseable}");
+                let _ = tx
+                    .send(UiEvent::Structure {
+                        render_expr: error_render_expr(&format!("{e:#}")),
+                        candidates: Vec::new(),
+                        generation,
+                    })
+                    .await;
+                return;
+            }
             let verdict = missing_table_verdict(engine.integration_attribution(), &e);
             if let Some(verdict) = verdict.as_ref().filter(|v| v.is_fully_explained()) {
                 // WARN, not ERROR: every one of these tables belongs to an

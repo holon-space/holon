@@ -32,4 +32,7 @@ query child, so no invariant ever observed one.
 Both arms now parse the render child of a query-less block (the Turso arm on the
 block's leaf watch). Pinned by
 `crates/holon-integration-tests/tests/frontend_suite/render_source_panels.rs`.
-Keystone coverage (generate render-only blocks) remains open.
+Keystone: the `AuthorRenderOnlyBlock` transition authors a render-only block,
+and `inv-render-only-block-draws-its-render` judges every block whose only
+source child is a render, the bundled integration views included. Hand-authored
+row `render-only-block-draws-its-render`; red before C1 in `lane-logs/c1k/`.

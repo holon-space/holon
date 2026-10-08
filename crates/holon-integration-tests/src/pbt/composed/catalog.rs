@@ -265,6 +265,8 @@ fn central_invariants() -> Vec<Box<dyn CapInvariant>> {
         // full-mode `viewmodel_decompiled_rows_match_query` above — selected only by
         // the no-query-engine `block_query_degraded` builder.
         invariants::viewmodel_shows_source_when_no_query::wire(),
+        invariants::block_render_matches_render_source::wire_render_only(),
+        invariants::block_render_matches_render_source::wire_unparseable(),
         invariants::viewmodel_entity_ids_subset_of_data::wire(),
         invariants::viewmodel_state_toggle_correct::wire(),
         invariants::viewmodel_task_rows_have_state_toggle::wire(),

@@ -99,6 +99,8 @@ pub mod arm_write_churn;
 mod arrow_navigate;
 mod attempt_ingest_compound_on_read_only;
 mod attempt_read_only_edit;
+mod author_malformed_render;
+mod author_render_only_block;
 pub(crate) mod block_to_page;
 mod break_ingested_recipe;
 pub mod bulk_external_add;
@@ -213,6 +215,8 @@ pub use arm_write_churn::ArmWriteChurn;
 pub use arrow_navigate::ArrowNavigate;
 pub use attempt_ingest_compound_on_read_only::AttemptIngestCompoundOnReadOnly;
 pub use attempt_read_only_edit::AttemptReadOnlyEdit;
+pub use author_malformed_render::AuthorMalformedRender;
+pub use author_render_only_block::AuthorRenderOnlyBlock;
 pub use block_to_page::BlockToPage;
 pub use break_ingested_recipe::BreakIngestedRecipe;
 pub use bulk_external_add::BulkExternalAdd;
@@ -364,6 +368,8 @@ crate::declare_e2e_transitions! {
         CreateDocument(CreateDocument),
         RenameDocument(RenameDocument),
         WriteOrgFile(WriteOrgFile),
+        AuthorRenderOnlyBlock(AuthorRenderOnlyBlock),
+        AuthorMalformedRender(AuthorMalformedRender),
         CreateDirectory(CreateDirectory),
         DeleteBackward(DeleteBackward),
         DeleteDocument(DeleteDocument),

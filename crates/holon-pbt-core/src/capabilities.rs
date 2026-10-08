@@ -2717,6 +2717,26 @@ pub trait RefReadOnlyHomes {
     fn read_only_page_titles(&self) -> BTreeMap<EntityUri, String>;
 }
 
+/// What a block's own render must be, as decided by its render source child.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExpectedBlockRender {
+    /// The block's only source child is a render that parses, so the block
+    /// draws it: the root widget is `widget`, and every `text("…")` literal in
+    /// the render shows as a `text` widget.
+    Draws { widget: String, texts: Vec<String> },
+    /// The block's render source does not parse: the block draws one `error`
+    /// widget whose message names the block and carries `parse_error`.
+    ParseError { parse_error: String },
+}
+
+/// Reference-side twin of a block's own render (`watch_ui` of the block).
+#[holon_macros::capmap_adapter] // sync trait → no async-trait
+pub trait RefRenderSources {
+    /// Every block with a render source child whose render the model can
+    /// predict, keyed by the block.
+    fn expected_block_renders(&self) -> BTreeMap<EntityUri, ExpectedBlockRender>;
+}
+
 /// What the model expects of one edit of a tagged subtree: the write lands,
 /// or the shape gate refuses it naming `rule` (`B4`, `DC2`, ...).
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -36,7 +36,7 @@ The one-page answer to *"which features could this change impact?"*. Rows are us
 | **Ruled by** | An ADR under [`docs/adr/`](../adr/), or an invariant number from [Model.md](Model.md). |
 | **Mode axes** | Which of [Model.md](Model.md)'s four orthogonal axes the feature's behaviour varies on: **Storage** (Loro store on/off), **File adapter** (org/none), **Merge fidelity** (op-CRDT / base-3-way / LWW), **Transport** (iroh P2P on/off). `—` means the feature behaves the same everywhere. *Headless vs windowed* is a test-slice axis, not a product mode; it is called out in prose where it matters. |
 
-The composed keystone is [`general_e2e_composed_pbt.rs`](../../crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs). Its alphabet is 115 transitions; the repo declares 94 invariant ids plus 17 correspondence-family ids. Open reds are registered in [KeystoneKnownReds.md](../Testing/KeystoneKnownReds.md) — a red listed there is a pass-with-note, anything else is a regression.
+The composed keystone is [`general_e2e_composed_pbt.rs`](../../crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs). Its alphabet is 117 transitions; the repo declares 96 invariant ids plus 17 correspondence-family ids. Open reds are registered in [KeystoneKnownReds.md](../Testing/KeystoneKnownReds.md) — a red listed there is a pass-with-note, anything else is a regression.
 
 ---
 
@@ -248,6 +248,8 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `ArmWriteChurn` — churn only delays a write-back; the end state after `DisarmWriteChurn` is the one without churn
 - `AttemptIngestCompoundOnReadOnly` — a compound's constituents must be judged under the COMPOUND's provenance, not re-judged as a user's edit
 - `AttemptReadOnlyEdit` — the write the dispatcher must refuse, without which `inv-read-only-home-refuses-writes` can only prove that nothing tried
+- `AuthorMalformedRender` — a render source that does not parse draws an error naming the block and the parse error, never a silent `table()`
+- `AuthorRenderOnlyBlock` — a block whose only source child is a render draws that render, not a bare entity leaf
 - `BreakIngestedRecipe` — a file that ingested and is then refused joins its format's group like a file that never ingested (D71.b)
 - `CreateBlockUnderFocus` — creation-slot gesture mint under focus root
 - `DelayAdmissions` — descending delays reverse dispatches that admit on their spawned tasks, and leave dispatches that admit at the call in order
@@ -311,11 +313,13 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `inv-offered-ops-pass-the-write-tier` — the operations offered on a block whose document is homed in a `WriteTier::ReadOnly` file
 - `inv-read-only-home-refuses-writes` — a store-origin write against a block whose document is homed in a `WriteTier::ReadOnly` file
 - `inv-remote-list-mirror-matches-ref` — the `RemoteListSync` transition runs the production round over the fixture peer and writes the local intents into the real mirror table; this compares that table, projected to the peer-authoritative columns, against the peer's list in the reference model.
+- `inv-render-only-block-draws-its-render` — a block whose only source child is a render draws that render, not a bare entity leaf
 - `inv-shape-gate-refuses-illegal-writes` — a Holon-side edit of a `decision` subtree, legal or not, one gesture at a time
 - `inv-shape-sim-matches-authority` — every block write any transition makes near a tagged block, through any op the dispatcher routes
 - `inv-shows-source-when-no-query`
 - `inv-state-toggle-toy`
 - `inv-two-writer-peer-writes-land` — generic ComposedSut StateMachineTest: per-tick reconcile + catalog check + non-vacuity floor
+- `inv-unparseable-render-is-error-node` — a render source that does not parse draws an error naming the block and the parse error, never a silent `table()`
 - `inv-value-fn-provider-arg-variance-13` — the ReactiveEngine / interpret_pure / ProviderCache coupling drops rows, churns Arc identity, or flickers
 - `inv-value-fn-provider-identity` — a transient wrong StateToggle in an intermediate emission that a later structural re-render masks
 - `inv-view-model-matches-store-at-quiescence` — a delta the commit point published but never projected, a delta the projection wrote but never published, and a reseed that leaves the read model holding rows Loro retracted

@@ -76,6 +76,7 @@ mod nav;
 mod peers;
 mod read_only_homes;
 mod remote_list;
+mod render_sources;
 mod shape_edits;
 mod shared_view;
 mod toggle;
@@ -237,6 +238,10 @@ impl holon_pbt_core::composition::CapProvider for ReferenceState {
         // fixture seeds no second format, which narrows the transition out
         // rather than aiming it at a writable block.
         caps.insert(self.clone() as Arc<dyn holon_pbt_core::capabilities::RefReadOnlyHomes>);
+        // `RefRenderSources` predicts each block's own render from its render
+        // source child. Its invariants also need `SutRenderer`, so a slice
+        // without a renderer deselects them.
+        caps.insert(self.clone() as Arc<dyn holon_pbt_core::capabilities::RefRenderSources>);
         caps.insert(self.clone() as Arc<dyn holon_pbt_core::capabilities::RefShapeEdits>);
         //  carries what the model expects to be DISCLOSED. It
         // governs only the kinds a transition has spoken about, so a draw that

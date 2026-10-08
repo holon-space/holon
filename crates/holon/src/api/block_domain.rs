@@ -127,6 +127,29 @@ impl std::fmt::Display for NoBlockRow {
 
 impl std::error::Error for NoBlockRow {}
 
+/// A block's render source does not parse.
+///
+/// The author's text is wrong, not the app: the watcher draws an error widget
+/// that names the block and the parse error, and the block renders again once
+/// the source is fixed.
+#[derive(Debug)]
+pub struct UnparseableRenderSource {
+    pub block_id: EntityUri,
+    pub parse_error: String,
+}
+
+impl std::fmt::Display for UnparseableRenderSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "block {}: render source does not parse: {}",
+            self.block_id, self.parse_error
+        )
+    }
+}
+
+impl std::error::Error for UnparseableRenderSource {}
+
 // NOTE (bug 2A): `virtual_parent: true` on a collection render is a SENTINEL
 // meaning "parent new blocks under the query's focus root". This is a
 // query-source block path (`render_entity` → `collection_render_from_profile`),
@@ -772,8 +795,12 @@ impl<'a> BlockDomain<'a> {
     /// this, so a render source that does not parse fails the same way in
     /// each: the watcher draws the error, naming the block.
     pub fn render_source_expr(block_id: &EntityUri, source: &str) -> Result<RenderExpr> {
-        holon_api::render_dsl::parse_render_dsl(source)
-            .map_err(|e| anyhow::anyhow!("block {block_id}: render source does not parse: {e}"))
+        holon_api::render_dsl::parse_render_dsl(source).map_err(|e| {
+            anyhow::Error::new(UnparseableRenderSource {
+                block_id: block_id.clone(),
+                parse_error: e.to_string(),
+            })
+        })
     }
 }
 
