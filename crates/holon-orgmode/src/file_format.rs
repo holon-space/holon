@@ -145,8 +145,9 @@ impl FileFormatAdapter for OrgFormatAdapter {
                 != b.get_property(crate::models::org_props::STARS)
             || a.get_property(crate::models::org_props::HEADLINE_END)
                 != b.get_property(crate::models::org_props::HEADLINE_END)
-        // `positional_property_keys` say where the block sits, which the
-        // ingest applies through `place`/`place_all` (ADR 0005), not an edit.
+        // `positional_property_keys` are left out: the ingest applies position
+        // through `place`/`place_all` (ADR 0005). `STARS` stays: it is the
+        // authored star count where the parent cannot derive it.
     }
 
     /// Org carries the ingest contract itself, so it replaces the default: the

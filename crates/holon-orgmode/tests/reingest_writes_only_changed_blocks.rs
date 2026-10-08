@@ -4,7 +4,8 @@
 //! so the second diffs against the first's projection exactly as a live
 //! re-ingest does. Removing or inserting one headline moves every later
 //! headline's position in the file, and position is not an edit: the blocks
-//! whose text is untouched must reach the store with zero writes.
+//! whose text is untouched must reach the store with zero writes, while the
+//! file's order still reaches it through `place_all`.
 //!
 //! @pbt kind harness
 //! @pbt covers reingest-writes-only-changed-blocks — a re-ingest writes the
@@ -26,11 +27,13 @@ use holon_filesystem::FileSyncController;
 use holon_filesystem::RealFileSystem;
 use holon_orgmode::file_sync_controller::new_org_sync_controller;
 
+/// The store side of the SQL order owner: `place_all` sets a parent's total
+/// sibling order, as `SqlBlockOperations::place_all` does, and `children`
+/// answers from it.
 #[derive(Clone, Default)]
 struct FakeStore {
-    /// Insertion order is document order: `place` is a no-op here, so the
-    /// write-back renders siblings in the order they were created.
     blocks: Arc<Mutex<Vec<StorageEntity>>>,
+    siblings: Arc<Mutex<HashMap<EntityUri, Vec<EntityUri>>>>,
     docs: Arc<Mutex<HashMap<EntityUri, Block>>>,
     writes: Arc<Mutex<Vec<String>>>,
 }
@@ -41,16 +44,72 @@ impl FakeStore {
         writes.sort();
         writes
     }
+
+    fn unlink(&self, id: &EntityUri) {
+        for kids in self.siblings.lock().unwrap().values_mut() {
+            kids.retain(|k| k != id);
+        }
+    }
+
+    fn sibling_order(&self, parent_id: &EntityUri) -> Vec<String> {
+        self.siblings.lock().unwrap()[parent_id]
+            .iter()
+            .map(|id| id.to_string())
+            .collect()
+    }
+
+    fn parent_of(&self, id: &str) -> EntityUri {
+        let blocks = self.blocks.lock().unwrap();
+        let row = blocks
+            .iter()
+            .find(|row| row_field(row, "id") == id)
+            .unwrap_or_else(|| panic!("no store row for {id}"));
+        row_uri(row_field(row, "parent_id"))
+    }
 }
 
 #[async_trait]
 impl BlockOrdering for FakeStore {
     async fn place(
         &self,
-        _: &EntityUri,
-        _: &EntityUri,
-        _: Option<&EntityUri>,
+        uri: &EntityUri,
+        parent_id: &EntityUri,
+        after_id: Option<&EntityUri>,
     ) -> OrderingResult<()> {
+        self.unlink(uri);
+        let mut siblings = self.siblings.lock().unwrap();
+        let kids = siblings.entry(parent_id.clone()).or_default();
+        let at = match after_id {
+            None => 0,
+            Some(after) => {
+                kids.iter()
+                    .position(|k| k == after)
+                    .unwrap_or_else(|| panic!("place after {after}, absent under {parent_id}"))
+                    + 1
+            }
+        };
+        kids.insert(at, uri.clone());
+        Ok(())
+    }
+    async fn place_all(
+        &self,
+        parent_id: &EntityUri,
+        ordered_ids: &[EntityUri],
+    ) -> OrderingResult<()> {
+        let mut siblings = self.siblings.lock().unwrap();
+        let kids = siblings.entry(parent_id.clone()).or_default();
+        for id in ordered_ids {
+            assert!(
+                kids.contains(id),
+                "place_all of {id}, not a child of {parent_id}"
+            );
+        }
+        let rest: Vec<EntityUri> = kids
+            .iter()
+            .filter(|k| !ordered_ids.contains(k))
+            .cloned()
+            .collect();
+        *kids = ordered_ids.iter().cloned().chain(rest).collect();
         Ok(())
     }
     async fn prev_sibling(&self, _: &EntityUri) -> OrderingResult<Option<EntityUri>> {
@@ -67,28 +126,47 @@ impl BlockOrdering for FakeStore {
     }
     async fn children(&self, parent_id: &EntityUri) -> OrderingResult<Vec<EntityUri>> {
         Ok(self
-            .blocks
+            .siblings
             .lock()
             .unwrap()
-            .iter()
-            .map(row_to_block)
-            .filter(|b| b.parent_id == *parent_id)
-            .map(|b| b.id)
-            .collect())
+            .get(parent_id)
+            .cloned()
+            .unwrap_or_default())
     }
     async fn update_in_tree(&self, params: StorageEntity) -> OrderingResult<()> {
         let id = row_field(&params, "id").to_string();
+        let uri = row_uri(&id);
+        let parent_id = row_uri(row_field(&params, "parent_id"));
         self.writes.lock().unwrap().push(format!("upsert {id}"));
-        let mut blocks = self.blocks.lock().unwrap();
-        match blocks.iter_mut().find(|row| row_field(row, "id") == id) {
-            Some(row) => *row = params,
-            None => blocks.push(params),
+        let moved = {
+            let mut blocks = self.blocks.lock().unwrap();
+            match blocks.iter_mut().find(|row| row_field(row, "id") == id) {
+                Some(row) => {
+                    let moved = row_uri(row_field(row, "parent_id")) != parent_id;
+                    *row = params;
+                    moved
+                }
+                None => {
+                    blocks.push(params);
+                    true
+                }
+            }
+        };
+        if moved {
+            self.unlink(&uri);
+            self.siblings
+                .lock()
+                .unwrap()
+                .entry(parent_id)
+                .or_default()
+                .push(uri);
         }
         Ok(())
     }
     async fn delete_in_tree(&self, params: StorageEntity) -> OrderingResult<()> {
         let id = row_field(&params, "id").to_string();
         self.writes.lock().unwrap().push(format!("delete {id}"));
+        self.unlink(&row_uri(&id));
         self.blocks
             .lock()
             .unwrap()
@@ -204,12 +282,19 @@ fn headline(bare: &str) -> String {
     )
 }
 
+const HEADER: &str = "#+ID: shift-doc\n#+TITLE: Shift\n";
+
 fn document(bares: &[&str]) -> String {
-    let mut text = String::from("#+ID: shift-doc\n#+TITLE: Shift\n");
+    let mut text = String::from(HEADER);
     for bare in bares {
         text.push_str(&headline(bare));
     }
     text
+}
+
+/// One headline with the given stars, id `bare`, and no body.
+fn stars(stars: &str, bare: &str) -> String {
+    format!("{stars} {bare} text\n:PROPERTIES:\n:ID: {bare}\n:END:\n")
 }
 
 struct Vault {
@@ -221,6 +306,10 @@ struct Vault {
 
 impl Vault {
     async fn ingested(bares: &[&str]) -> Self {
+        Self::ingested_text(&document(bares)).await
+    }
+
+    async fn ingested_text(text: &str) -> Self {
         let tmp = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(tmp.path()).unwrap();
         let path = root.join("Shift.org");
@@ -238,13 +327,16 @@ impl Vault {
             store,
             controller,
         };
-        vault.reingest(bares).await;
-        vault.store.take_writes();
+        vault.reingest_text(text).await;
         vault
     }
 
     async fn reingest(&mut self, bares: &[&str]) -> Vec<String> {
-        std::fs::write(&self.path, document(bares)).unwrap();
+        self.reingest_text(&document(bares)).await
+    }
+
+    async fn reingest_text(&mut self, text: &str) -> Vec<String> {
+        std::fs::write(&self.path, text).unwrap();
         self.controller
             .on_file_changed(&self.path)
             .await
@@ -280,4 +372,61 @@ async fn reingesting_identical_bytes_writes_nothing() {
     let mut vault = Vault::ingested(&["a", "b", "c"]).await;
     let writes = vault.reingest(&["a", "b", "c"]).await;
     assert_eq!(writes, Vec::<String>::new());
+}
+
+#[tokio::test]
+async fn reordering_siblings_writes_nothing_and_places_the_new_order() {
+    let mut vault = Vault::ingested(&["a", "b", "c"]).await;
+    let top = vault.store.parent_of("block:a");
+    assert_eq!(
+        vault.store.sibling_order(&top),
+        vec!["block:a", "block:b", "block:c"]
+    );
+    let writes = vault.reingest(&["b", "a", "c"]).await;
+    assert_eq!(
+        writes,
+        Vec::<String>::new(),
+        "a pure reorder edits no block"
+    );
+    assert_eq!(
+        vault.store.sibling_order(&top),
+        vec!["block:b", "block:a", "block:c"],
+        "the file's new order reaches the store through place_all"
+    );
+}
+
+#[tokio::test]
+async fn indenting_a_subtree_writes_only_the_block_whose_parent_changed() {
+    let before = format!(
+        "{HEADER}{}{}{}",
+        stars("*", "a"),
+        stars("*", "b"),
+        stars("**", "b-child")
+    );
+    let after = format!(
+        "{HEADER}{}{}{}",
+        stars("*", "a"),
+        stars("**", "b"),
+        stars("***", "b-child")
+    );
+    let mut vault = Vault::ingested_text(&before).await;
+    let writes = vault.reingest_text(&after).await;
+    assert_eq!(
+        writes,
+        vec!["upsert block:b"],
+        "b-child keeps its parent; its level is positional"
+    );
+}
+
+#[tokio::test]
+async fn changing_an_authored_star_jump_is_a_write() {
+    let before = format!("{HEADER}{}{}", stars("*", "a"), stars("***", "a-child"));
+    let after = format!("{HEADER}{}{}", stars("*", "a"), stars("****", "a-child"));
+    let mut vault = Vault::ingested_text(&before).await;
+    let writes = vault.reingest_text(&after).await;
+    assert_eq!(
+        writes,
+        vec!["upsert block:a-child"],
+        "a star count org cannot derive from the parent is file content"
+    );
 }

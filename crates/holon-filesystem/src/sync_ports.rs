@@ -1012,7 +1012,9 @@ impl MemoSeam {
 
     /// Read the seam from the environment. `HOLON_MEMO_POISON` and
     /// `HOLON_MEMO_DUAL_READ` arm the halves independently; unset means off,
-    /// which is every production process.
+    /// which is every production process. The dual read re-reads every memo
+    /// hit, so it breaches the keystone read-repeat ratchet: run it with
+    /// `HOLON_PERF_BUDGET=0`.
     pub fn from_env() -> Self {
         Self {
             poison: std::env::var("HOLON_MEMO_POISON").is_ok_and(|v| v != "0"),

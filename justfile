@@ -276,12 +276,7 @@ hand-authored *FLAGS:
     # `failed-slot-create-loro-dispatch-keystrokes-run-anyway`) until admission
     # Inc 2; `split-then-two-backspaces-caret-follows-second-join` is registered
     # known red `join-then-stale-second-join` until admission Inc 2.
-    # `headline-moved-in-then-deleted-while-off-stays-deleted-after-reboot` moves
-    # a block out of the 120-heading Archive.org, so the armed budget reds it on
-    # registered known red `move-block-between-files-sql-read-repeat-budget`,
-    # and that move settles in seconds; run it with HOLON_PERF_BUDGET=0
-    # HOLON_PBT_LATENCY_SLACK=50.
-    export HOLON_HAND_AUTHORED_SKIP=${HOLON_HAND_AUTHORED_SKIP-reboot-orphans-the-previous-boots-watchers,external-rewrite-keeps-a-promoted-pages-body,a-failed-create-cancels-its-keystrokes-with-one-disclosure,a-failed-create-cancels-its-keystrokes-with-one-disclosure-loro-dispatch,split-then-two-backspaces-caret-follows-second-join,headline-moved-in-then-deleted-while-off-stays-deleted-after-reboot}
+    export HOLON_HAND_AUTHORED_SKIP=${HOLON_HAND_AUTHORED_SKIP-reboot-orphans-the-previous-boots-watchers,external-rewrite-keeps-a-promoted-pages-body,a-failed-create-cancels-its-keystrokes-with-one-disclosure,a-failed-create-cancels-its-keystrokes-with-one-disclosure-loro-dispatch,split-then-two-backspaces-caret-follows-second-join}
     cargo test \
         {{CANON}} --test hand_authored_regressions \
         -- --nocapture {{FLAGS}} 2>&1 | tee target/gate-logs/pbt-hand-authored.log

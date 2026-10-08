@@ -47,11 +47,11 @@ apart.
 ## Remedy
 `content_differs` no longer compares `sequence`; the ingest still places blocks
 by document order through `place`/`place_all`. Pinned by
-`crates/holon-orgmode/tests/reingest_writes_only_changed_blocks.rs` (red log
-`lane-logs/ibr/red-reingest-writes.log`). The `query`/`execute` span
+`crates/holon-orgmode/tests/reingest_writes_only_changed_blocks.rs`, whose
+pure-reorder case asserts both zero writes and the new order in the store. The `query`/`execute` span
 `params_fp` now digests the raw statement text with the bound params under the
 process-keyed hasher (`crates/holon-turso/src/turso.rs`), so distinct inlined
 ids are distinct bindings. Keystone replay of the w20 move: reads 714 → 44,
-writes 121 → 2, wall 6.4 s → 0.7 s (`lane-logs/ibr/red-move-ab.log`,
-`lane-logs/ibr/green-move-3.log`). Open follow-up: `read_field_old_value` and
+writes 121 → 2, wall 6.4 s → 0.7 s (hand-authored row
+`w20-move-archive0-sourcefirst`). Open follow-up: `read_field_old_value` and
 its siblings should bind the id as a parameter instead of inlining it.
