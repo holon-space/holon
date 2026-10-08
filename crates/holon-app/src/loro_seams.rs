@@ -624,6 +624,11 @@ impl AliasRegistrar for LoroAliasRegistrar {
         let store = self.doc_store.read().await;
         store.resolve_alias_to_path(doc_id.as_str()).await
     }
+
+    async fn forget_aliases_to(&self, path: &Path) {
+        let store = self.doc_store.read().await;
+        store.forget_aliases_to(path).await;
+    }
 }
 
 /// `ShareWritebackDisclosure` (Inc 1) that forwards a shared-subtree

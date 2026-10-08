@@ -332,6 +332,15 @@ impl LoroDocumentStore {
             .insert(alias_doc_id.to_string(), canonical);
     }
 
+    /// Drop every alias that maps to `file_path`.
+    pub async fn forget_aliases_to(&self, file_path: &Path) {
+        let canonical = CanonicalPath::new(file_path);
+        self.doc_id_aliases
+            .write()
+            .await
+            .retain(|_, path| *path != canonical);
+    }
+
     /// Resolve a doc_id to the global LoroDocument.
     pub async fn resolve_by_doc_id(&self, _: &str) -> Option<Arc<LoroDocument>> {
         self.get_doc(DocScope::Global).await.ok() // ALLOW(ok): doc may not be initialized

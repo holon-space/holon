@@ -84,14 +84,14 @@ crate::cap_transition! {
         sut.delete_vault_file(&me.file).await;
     }
     sql_budget: |_me, _state| {
-        // A file that never ingested owns no rows; the deletion drops at most
-        // its file record. A broken recipe that once ingested cascades its
-        // page and steps out.
+        // Bounded by the cascade: a broken recipe that once ingested takes its
+        // page and steps out (up to 15 reads), where a file that never
+        // ingested owns no rows (3). Neither writes SQL.
         ExpectedSql {
-            reads: 4,
-            writes: 2,
+            reads: 15,
+            writes: 0,
             ddl: 0,
-            tolerance: 32,
+            tolerance: 6,
         }
     }
 }

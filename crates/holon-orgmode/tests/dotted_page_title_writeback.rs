@@ -164,6 +164,13 @@ impl holon_filesystem::sync_ports::AliasRegistrar for MapAliasRegistrar {
             .unwrap()
             .insert(doc_id.clone(), path.to_path_buf());
     }
+    async fn forget_aliases_to(&self, path: &Path) {
+        let gone = holon_core::CanonicalPath::new(path);
+        self.0
+            .lock()
+            .unwrap()
+            .retain(|_, p| holon_core::CanonicalPath::new(p.as_path()) != gone);
+    }
     async fn resolve_alias_to_path(&self, doc_id: &EntityUri) -> Option<PathBuf> {
         self.get(doc_id)
     }

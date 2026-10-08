@@ -500,6 +500,7 @@ struct OutOfVaultAliasRegistrar {
 #[async_trait]
 impl holon_filesystem::sync_ports::AliasRegistrar for OutOfVaultAliasRegistrar {
     async fn register_alias(&self, _: &EntityUri, _: &std::path::Path) {}
+    async fn forget_aliases_to(&self, _: &std::path::Path) {}
     async fn resolve_alias_to_path(&self, _: &EntityUri) -> Option<std::path::PathBuf> {
         Some(self.prior.clone())
     }

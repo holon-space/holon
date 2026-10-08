@@ -429,6 +429,9 @@ pub trait ImageDataProvider: Send + Sync {
 pub trait AliasRegistrar: Send + Sync {
     async fn register_alias(&self, doc_id: &EntityUri, path: &Path);
     async fn resolve_alias_to_path(&self, doc_id: &EntityUri) -> Option<PathBuf>;
+    /// Drop every alias that names `path`: the file is gone, so no document
+    /// routes to it any more.
+    async fn forget_aliases_to(&self, path: &Path);
 }
 
 /// 3-way text-content merge for the no-store conflict path (SqlOnly /

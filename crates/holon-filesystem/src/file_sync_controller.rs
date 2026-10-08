@@ -2273,7 +2273,7 @@ impl FileSyncController {
                 "[FileSyncController] Deleted file {} has no document entity — nothing to cascade",
                 path.display()
             );
-            self.forget_file_state(canonical);
+            self.forget_file_state(canonical).await;
             return Ok(());
         };
         let document_uri = document.id.clone();
@@ -2361,7 +2361,7 @@ impl FileSyncController {
                         document_uri,
                         current_path.display(),
                     );
-                    self.forget_file_state(canonical);
+                    self.forget_file_state(canonical).await;
                     return Ok(());
                 }
             }
@@ -2385,7 +2385,7 @@ impl FileSyncController {
                  evidence that this document ever lived at this path, and cascading on one \
                  deletes a live document's content. The vanished path is dropped from tracking.",
             );
-            self.forget_file_state(canonical);
+            self.forget_file_state(canonical).await;
             return Ok(());
         }
 
@@ -2487,7 +2487,7 @@ impl FileSyncController {
         if let Some(disclosure) = &self.writeback_disclosure {
             disclosure.writeback_resumed(path);
         }
-        self.forget_file_state(canonical);
+        self.forget_file_state(canonical).await;
         // Also clear the diff base so a later re-create of the same document
         // id starts from an empty base (all blocks are creates), not from the
         // deleted snapshot.
@@ -3090,7 +3090,10 @@ impl FileSyncController {
     }
 
     /// Drop every per-file tracking entry for a vanished path.
-    fn forget_file_state(&mut self, canonical: &CanonicalPath) {
+    async fn forget_file_state(&mut self, canonical: &CanonicalPath) {
+        if let Some(registrar) = &self.alias_registrar {
+            registrar.forget_aliases_to(canonical.as_path_buf()).await;
+        }
         self.last_projection_doc.remove(canonical);
         self.unstamped.remove(canonical);
         if let Some(docs) = &self.read_only_docs {
@@ -3281,7 +3284,7 @@ impl FileSyncController {
             // `from` was never tracked as a document (e.g. a brand-new file
             // moved in before its first ingest). Drop any stale from-state and
             // ingest `to` as a fresh file — the standard discovery path.
-            self.forget_file_state(&from_canon);
+            self.forget_file_state(&from_canon).await;
             info!(
                 "[FileSyncController] Rename {} -> {}: source had no known document; ingesting                  the destination as a new file",
                 from.display(),
@@ -8028,13 +8031,6 @@ impl FileSyncController {
         };
         let path = vault_path.as_path().to_path_buf();
         let canonical = CanonicalPath::new(&path);
-        // The TARGET test of the write-tier gate, asked before rendering: a
-        // document whose read-only file was deleted no longer has a home, yet
-        // its alias still routes the cascade's own deltas to that file.
-        if self.is_read_only_path(&path) {
-            self.note_readonly_skip(doc_id, &path, "on_block_changed_target");
-            return Ok(BlockChangeVerdict::Handled);
-        }
         if self.backlog_holds_a_twin_of(doc_id, &path) {
             info!(
                 "[FileSyncController] {} waits for the read-only backlog before {} is written: a \
@@ -9281,7 +9277,7 @@ impl FileSyncController {
                             path.display()
                         )
                     })?;
-                    self.forget_file_state(&prior_canonical);
+                    self.forget_file_state(&prior_canonical).await;
                     self.run_post_write_hook(prior);
                     tracing::info!(
                         "[FileSyncController] Removed orphaned old file {} after page {} renamed \
