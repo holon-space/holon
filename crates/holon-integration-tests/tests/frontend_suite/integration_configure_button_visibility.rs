@@ -35,8 +35,8 @@ fn offered_ops(services: &dyn BuilderServices, row: &DataRow) -> Vec<String> {
     let uri = row
         .get("id")
         .and_then(|v| v.as_string())
-        .expect("a mirror row carries its id")
-        .to_string();
+        .map(|id| holon_api::EntityUri::parse(id).expect("a mirror row's id is an entity uri"))
+        .expect("a mirror row carries its id");
     ops_rows_for_uri(&uri, services, row)
         .iter()
         .map(|r| {

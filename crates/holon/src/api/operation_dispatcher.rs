@@ -847,22 +847,40 @@ impl OperationDispatcher {
         params: &StorageEntity,
         origin: &OpOrigin,
     ) -> Result<()> {
-        let Some(authority) = &self.write_tier else {
+        let Some(refusal) = self.write_tier_refusal(resolved_entity_name, params, origin)? else {
             return Ok(());
         };
-        if resolved_entity_name != "block" || matches!(origin, OpOrigin::Ingest) {
-            return Ok(());
+        self.write_tier
+            .as_ref()
+            .expect("a write-tier refusal comes from an installed authority")
+            .disclose(&refusal);
+        Err(Box::new(refusal))
+    }
+
+    /// The write-tier gate's verdict on one operation, without disclosing it.
+    pub fn write_tier_refusal(
+        &self,
+        resolved_entity_name: &str,
+        params: &StorageEntity,
+        origin: &OpOrigin,
+    ) -> Result<Option<holon_core::EditRefused>> {
+        let Some(authority) = &self.write_tier else {
+            return Ok(None);
+        };
+        if resolved_entity_name != holon_core::WRITE_TIER_ENTITY
+            || matches!(origin, OpOrigin::Ingest)
+        {
+            return Ok(None);
         }
         for key in SUBJECT_PARAM_KEYS {
             let Some(subject) = params.get(key).and_then(|v| v.as_string()) else {
                 continue;
             };
             if let Some(refusal) = authority.refusal_for(subject)? {
-                authority.disclose(&refusal);
-                return Err(Box::new(refusal));
+                return Ok(Some(refusal));
             }
         }
-        Ok(())
+        Ok(None)
     }
 
     /// The shape-gate decision for a plan of block operations: every tagged

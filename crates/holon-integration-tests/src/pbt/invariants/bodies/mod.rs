@@ -59,6 +59,7 @@ pub mod no_orphan_blocks;
 pub mod no_page_under_non_page;
 pub mod no_parent_cycles;
 pub mod no_write_outside_vault_root;
+pub mod offered_ops_pass_the_write_tier;
 pub mod org_render_fixed_point;
 pub mod read_only_home_refuses_writes;
 pub mod remote_list_mirror_matches_ref;

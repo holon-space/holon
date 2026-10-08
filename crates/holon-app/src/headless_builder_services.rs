@@ -153,6 +153,13 @@ impl BuilderServices for HeadlessBuilderServices {
         self.engine.profile_resolver().profile_signal()
     }
 
+    fn entity_operations(
+        &self,
+        entity_name: &str,
+    ) -> Vec<holon_api::render_types::OperationDescriptor> {
+        self.engine.profile_resolver().operations_for(entity_name)
+    }
+
     /// One-shot compile + execute, delivered as a single closed batch.
     ///
     /// Headless has no CDC pump, so there is nothing to keep a subscription

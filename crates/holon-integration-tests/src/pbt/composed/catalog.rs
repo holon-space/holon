@@ -55,6 +55,9 @@ fn central_invariants() -> Vec<Box<dyn CapInvariant>> {
         invariants::conditions_match_ref::wire(),
         invariants::copies_stay_on_disk::wire(),
         invariants::read_only_home_refuses_writes::wire(),
+        // D46: no operation offered on a read-only-homed block is one the
+        // dispatcher's write tier refuses.
+        invariants::offered_ops_pass_the_write_tier::wire(),
         // A tagged subtree is a write boundary: every edit is accepted or refused
         // as the block adapter decides for the model's post-edit subtree.
         invariants::shape_gate_refuses_illegal_writes::wire(),

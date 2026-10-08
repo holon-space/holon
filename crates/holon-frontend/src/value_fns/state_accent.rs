@@ -25,6 +25,7 @@
 
 use holon_api::InterpValue;
 use holon_api::Value;
+use holon_api::computation::ComputeError;
 use holon_api::render_eval::ResolvedArgs;
 
 use crate::ReactiveViewModel;
@@ -61,13 +62,15 @@ impl ValueFn for StateAccentValueFn {
         args: &ResolvedArgs,
         _: &dyn BuilderServices,
         _: &RenderContext,
-    ) -> InterpValue {
+    ) -> Result<InterpValue, ComputeError> {
         let state = args
             .positional
             .first()
             .and_then(|v| v.as_string())
             .unwrap_or("");
-        InterpValue::Value(Value::String(accent_for_state(state).to_string()))
+        Ok(InterpValue::Value(Value::String(
+            accent_for_state(state).to_string(),
+        )))
     }
 }
 

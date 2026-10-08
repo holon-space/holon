@@ -547,6 +547,12 @@ impl BuilderServices for TestServices {
     fn resolve_profile(&self, row: &DataRow) -> Option<RowProfile> {
         self.inner.resolve_profile(row)
     }
+    fn entity_operations(
+        &self,
+        entity_name: &str,
+    ) -> Vec<holon_api::render_types::OperationDescriptor> {
+        self.inner.entity_operations(entity_name)
+    }
     fn watch_query(
         &self,
         _: &str,

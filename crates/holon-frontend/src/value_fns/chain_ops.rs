@@ -40,6 +40,7 @@ use holon_api::EntityUri;
 use holon_api::InterpValue;
 use holon_api::ReactiveRowProvider;
 use holon_api::Value;
+use holon_api::computation::ComputeError;
 use holon_api::ptr_identity;
 use holon_api::render_eval::ResolvedArgs;
 use holon_api::widget_spec::DataRow;
@@ -93,7 +94,7 @@ fn build_rows(
     match chain_uri(focused, level) {
         // The focus chain holds no rendered row; a relation-guarded op reaching
         // here is undecidable and `ops_rows_for_uri` says so.
-        Some(uri) => action_bar_rows_for_uri(uri.as_str(), services, &DataRow::new()),
+        Some(uri) => action_bar_rows_for_uri(&uri, services, &DataRow::new()),
         None => Vec::new(),
     }
 }
@@ -148,7 +149,7 @@ impl ValueFn for ChainOpsValueFn {
         args: &ResolvedArgs,
         services: &dyn BuilderServices,
         _: &RenderContext,
-    ) -> InterpValue {
+    ) -> Result<InterpValue, ComputeError> {
         let level = args
             .positional
             .first()
@@ -160,7 +161,9 @@ impl ValueFn for ChainOpsValueFn {
         // set. This is also what keeps `clone_arc()` (which panics on
         // non-participating stubs) out of those paths.
         let Some(focused) = services.focused_block_mutable() else {
-            return InterpValue::Rows(Arc::new(SyntheticRows::from_rows(Vec::new())));
+            return Ok(InterpValue::Rows(Arc::new(SyntheticRows::from_rows(
+                Vec::new(),
+            ))));
         };
 
         let provider: Arc<dyn ReactiveRowProvider> = match services.provider_cache() {
@@ -174,7 +177,7 @@ impl ValueFn for ChainOpsValueFn {
             None => Arc::new(ChainOpsProvider::new(focused, level, services.clone_arc())),
         };
 
-        InterpValue::Rows(provider)
+        Ok(InterpValue::Rows(provider))
     }
 }
 

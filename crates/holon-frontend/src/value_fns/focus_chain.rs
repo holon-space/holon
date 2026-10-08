@@ -34,6 +34,7 @@ use holon_api::EntityUri;
 use holon_api::InterpValue;
 use holon_api::ReactiveRowProvider;
 use holon_api::Value;
+use holon_api::computation::ComputeError;
 use holon_api::ptr_identity;
 use holon_api::render_eval::ResolvedArgs;
 use holon_api::widget_spec::DataRow;
@@ -119,11 +120,13 @@ impl ValueFn for FocusChainValueFn {
         args: &ResolvedArgs,
         services: &dyn BuilderServices,
         _: &RenderContext,
-    ) -> InterpValue {
+    ) -> Result<InterpValue, ComputeError> {
         let focused = match services.focused_block_mutable() {
             Some(f) => f,
             None => {
-                return InterpValue::Rows(Arc::new(SyntheticRows::from_rows(Vec::new())));
+                return Ok(InterpValue::Rows(Arc::new(SyntheticRows::from_rows(
+                    Vec::new(),
+                ))));
             }
         };
         let provider: Arc<dyn ReactiveRowProvider> = match services.provider_cache() {
@@ -132,7 +135,7 @@ impl ValueFn for FocusChainValueFn {
             }),
             None => Arc::new(FocusChainProvider::new(focused)),
         };
-        InterpValue::Rows(provider)
+        Ok(InterpValue::Rows(provider))
     }
 }
 

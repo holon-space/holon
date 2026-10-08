@@ -475,10 +475,10 @@ pub trait BuilderServices: Send + Sync {
         anyhow::bail!("creation affordance {affordance} cannot be birthed by these BuilderServices")
     }
 
-    /// Whether a creation slot may be offered under `parent`: no slot is drawn
-    /// under a parent the write tier refuses. Advisory — it discloses nothing,
-    /// because the birth asks again and discloses when it refuses.
-    fn offers_creation_under(&self, _: &EntityUri) -> bool {
+    /// Whether the write tier admits a block write naming `subject`, as its
+    /// `id` or `parent_id`. Offer paths ask it so they never offer what the
+    /// dispatcher refuses; it discloses nothing, because the write asks again.
+    fn write_tier_admits(&self, _: &EntityUri) -> bool {
         true
     }
 
@@ -4723,8 +4723,8 @@ impl BuilderServices for ReactiveEngine {
         self.birth_creation_affordance(affordance.as_str())
     }
 
-    fn offers_creation_under(&self, parent: &EntityUri) -> bool {
-        tier_allows_creation_under(&*self.write_tier, parent)
+    fn write_tier_admits(&self, subject: &EntityUri) -> bool {
+        tier_admits(&*self.write_tier, subject)
     }
 
     fn focused_block_mutable(&self) -> Option<Mutable<Option<EntityUri>>> {
@@ -4962,8 +4962,9 @@ pub struct StubBuilderServices {
     /// profile/variant path (`render_entity`) that a profile-less stub leaves
     /// unreachable. `None` keeps the stub's documented "no profile" answer.
     profile: Option<holon_api::RenderProfile>,
-    /// Parents `offers_creation_under` refuses, standing in for a write tier.
-    creation_refused_under: std::collections::HashSet<EntityUri>,
+    /// Subjects `write_tier_admits` refuses, standing in for a write tier.
+    write_refused: std::collections::HashSet<EntityUri>,
+    provider_cache: Option<Arc<crate::provider_cache::ProviderCache>>,
 }
 
 fn stub_runtime_handle() -> tokio::runtime::Handle {
@@ -4994,7 +4995,8 @@ impl StubBuilderServices {
             link_classifier: holon_api::link_parser::LinkTargetClassifier::default(),
             widget_states: std::collections::HashMap::new(),
             profile: None,
-            creation_refused_under: std::collections::HashSet::new(),
+            write_refused: std::collections::HashSet::new(),
+            provider_cache: None,
         }
     }
 
@@ -5005,7 +5007,8 @@ impl StubBuilderServices {
             link_classifier: holon_api::link_parser::LinkTargetClassifier::default(),
             widget_states: std::collections::HashMap::new(),
             profile: None,
-            creation_refused_under: std::collections::HashSet::new(),
+            write_refused: std::collections::HashSet::new(),
+            provider_cache: None,
         }
     }
 
@@ -5016,9 +5019,16 @@ impl StubBuilderServices {
         self
     }
 
-    /// Refuse a creation slot under `parent`, as a read-only page does.
-    pub fn with_creation_refused_under(mut self, parent: EntityUri) -> Self {
-        self.creation_refused_under.insert(parent);
+    /// Refuse writes naming `subject`, as a read-only page does.
+    pub fn with_write_refused(mut self, subject: EntityUri) -> Self {
+        self.write_refused.insert(subject);
+        self
+    }
+
+    /// Share `cache` as this stub's provider cache, so two stubs answering
+    /// differently can be judged against one cache, as one engine over time.
+    pub fn with_provider_cache(mut self, cache: Arc<crate::provider_cache::ProviderCache>) -> Self {
+        self.provider_cache = Some(cache);
         self
     }
 
@@ -5057,12 +5067,17 @@ impl BuilderServices for StubBuilderServices {
             link_classifier: holon_api::link_parser::LinkTargetClassifier::default(),
             widget_states: self.widget_states.clone(),
             profile: self.profile.clone(),
-            creation_refused_under: self.creation_refused_under.clone(),
+            write_refused: self.write_refused.clone(),
+            provider_cache: self.provider_cache.clone(),
         })
     }
 
-    fn offers_creation_under(&self, parent: &EntityUri) -> bool {
-        !self.creation_refused_under.contains(parent)
+    fn provider_cache(&self) -> Option<Arc<crate::provider_cache::ProviderCache>> {
+        self.provider_cache.clone()
+    }
+
+    fn write_tier_admits(&self, subject: &EntityUri) -> bool {
+        !self.write_refused.contains(subject)
     }
 
     fn get_block_data(&self, _: &EntityUri) -> (RenderExpr, Vec<Arc<DataRow>>) {
@@ -5075,6 +5090,13 @@ impl BuilderServices for StubBuilderServices {
 
     fn resolve_profile(&self, _: &DataRow) -> Option<holon_api::RenderProfile> {
         self.profile.clone()
+    }
+
+    fn entity_operations(&self, _: &str) -> Vec<holon_api::render_types::OperationDescriptor> {
+        self.profile
+            .as_ref()
+            .map(|p| p.operations.clone())
+            .unwrap_or_default()
     }
 
     fn watch_query(
@@ -5215,12 +5237,9 @@ impl RenderInterpreterInjectorExt for Injector {
     }
 }
 
-fn tier_allows_creation_under(
-    tier: &dyn holon_core::WriteTierAuthority,
-    parent: &EntityUri,
-) -> bool {
-    tier.refusal_for(parent.as_str())
-        .unwrap_or_else(|e| panic!("write-tier lookup of the parsed uri {parent}: {e}"))
+fn tier_admits(tier: &dyn holon_core::WriteTierAuthority, subject: &EntityUri) -> bool {
+    tier.refusal_for(subject.as_str())
+        .unwrap_or_else(|e| panic!("write-tier lookup of the parsed uri {subject}: {e}"))
         .is_none()
 }
 
@@ -5234,7 +5253,7 @@ fn navigation_caret_target(
 ) -> Option<EntityUri> {
     match first_child {
         Some(child) => Some(child),
-        None if !tier_allows_creation_under(tier, destination) => None,
+        None if !tier_admits(tier, destination) => None,
         // ALLOW(entity_uri_from_raw): the destination's creation affordance
         // id, whose `:__virtual:` infix is what makes the first keystroke
         // birth a block under `destination`.

@@ -15,6 +15,10 @@ use std::sync::RwLock;
 use async_trait::async_trait;
 use holon_api::EntityUri;
 
+/// The entity whose operations the write tier judges. An offer path that hides
+/// what the dispatcher would refuse must filter on this same name.
+pub const WRITE_TIER_ENTITY: &str = "block";
+
 /// A write the dispatcher refused, as DATA a caller can act on rather than a
 /// message it can only print.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

@@ -8494,6 +8494,36 @@ impl holon_pbt_core::capabilities::SutReadOnlyHomes for HeadlessFrontendComponen
         children
     }
 
+    async fn offered_ops_refused_by_write_tier(&self, block_id: &str) -> Vec<(String, String)> {
+        let reactive = self.reactive();
+        let offered = holon_frontend::value_fns::ops_of::ops_rows_for_uri(
+            &holon_api::EntityUri::parse(block_id).expect("a block id is an entity uri"),
+            &*reactive,
+            &holon_api::widget_spec::DataRow::new(),
+        );
+        let dispatcher = self.engine().get_dispatcher();
+        let mut subject: holon_api::StorageEntity = std::collections::HashMap::new();
+        subject.insert("id".into(), holon_api::Value::String(block_id.to_string()));
+        offered
+            .iter()
+            .filter_map(|row| {
+                let field = |key: &str| {
+                    row.get(key)
+                        .and_then(|v| v.as_string())
+                        .unwrap_or_else(|| panic!("an ops_of row carries `{key}`: {row:?}"))
+                        .to_string()
+                };
+                let name = field("name");
+                dispatcher
+                    .write_tier_refusal(&field("entity_name"), &subject, &holon_api::OpOrigin::User)
+                    .unwrap_or_else(|e| {
+                        panic!("[read-only homes] write tier failed on {block_id}: {e}")
+                    })
+                    .map(|refusal| (name, refusal.to_string()))
+            })
+            .collect()
+    }
+
     async fn read_only_write_attempts(&self) -> (usize, usize) {
         *self
             .read_only_attempts

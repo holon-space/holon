@@ -163,6 +163,12 @@ impl BuilderServices for RecordingServices {
     fn resolve_profile(&self, row: &DataRow) -> Option<holon_api::RenderProfile> {
         self.inner.resolve_profile(row)
     }
+    fn entity_operations(
+        &self,
+        entity_name: &str,
+    ) -> Vec<holon_api::render_types::OperationDescriptor> {
+        self.inner.entity_operations(entity_name)
+    }
     fn watch_query(
         &self,
         query: &str,

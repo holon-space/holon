@@ -5,9 +5,9 @@
 //! `id`, `name`, `display_name`, `description`, `entity_name`,
 //! `target_id` (= input URI), `icon`.
 //!
-//! Under the hood this calls `services.resolve_profile(&{id: uri})` —
-//! the same path used by widget dispatch — and flattens the resulting
-//! `operations: Vec<OperationWiring>` into synthetic rows.
+//! Under the hood this asks `services.entity_operations(scheme)` — the
+//! operation set every profile of that entity carries — and flattens it into
+//! synthetic rows, minus what the write tier refuses on `uri`.
 //!
 //! Caller pattern:
 //!
@@ -19,8 +19,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use holon_api::EntityUri;
 use holon_api::InterpValue;
 use holon_api::Value;
+use holon_api::computation::ComputeError;
 use holon_api::render_eval::ResolvedArgs;
 use holon_api::render_types::OperationWiring;
 use holon_api::widget_spec::DataRow;
@@ -40,15 +42,18 @@ impl ValueFn for OpsOfValueFn {
         args: &ResolvedArgs,
         services: &dyn BuilderServices,
         ctx: &RenderContext,
-    ) -> InterpValue {
-        let uri = args
-            .positional
-            .first()
-            .and_then(|v| v.as_string().map(|s| s.to_string()))
-            .unwrap_or_else(|| {
-                tracing::warn!("ops_of() called with no URI arg; returning empty provider");
-                String::new()
-            });
+    ) -> Result<InterpValue, ComputeError> {
+        let arg = args.positional.first().cloned().unwrap_or(Value::Null);
+        let not_a_uri = |why: String| ComputeError::WrongType {
+            context: format!("ops_of's first argument ({why})"),
+            expected: "an entity uri (`scheme:id`)",
+            value: arg.clone(),
+        };
+        let subject = match arg.as_string().map(EntityUri::parse) {
+            Some(Ok(subject)) => subject,
+            Some(Err(e)) => return Err(not_a_uri(e.to_string())),
+            None => return Err(not_a_uri("not a string".to_string())),
+        };
 
         // `surface: "action_bar"` narrows to the ops that declared themselves
         // reachable from the mobile bar. Absent (the settings integration rows)
@@ -58,31 +63,45 @@ impl ValueFn for OpsOfValueFn {
             .get("surface")
             .and_then(|v| v.as_string().map(|s| s == ACTION_BAR_SURFACE))
             .unwrap_or(false);
-        let mut ops = resolve_ops(&uri, services);
+        let Offer {
+            mut ops,
+            tier_withheld,
+        } = resolve_ops(&subject, services);
         if action_bar_only {
             ops.retain(on_action_bar);
         }
         let row = ctx.row();
         let build = || -> Arc<dyn holon_api::ReactiveRowProvider> {
-            Arc::new(SyntheticRows::from_rows(rows_from_ops(&ops, &uri, row)))
+            Arc::new(SyntheticRows::from_rows(rows_from_ops(
+                &ops,
+                subject.as_str(),
+                row,
+            )))
         };
 
+        // The key carries the write tier's verdict, so a re-homed subject is
+        // never answered with the offer its old home allowed.
+        let cache_name = if tier_withheld {
+            "ops_of/write-tier-withheld"
+        } else {
+            "ops_of"
+        };
         let provider: Arc<dyn holon_api::ReactiveRowProvider> = match services.provider_cache() {
-            Some(cache) if caches_rows(&ops) => cache.get_or_create("ops_of", args, build),
+            Some(cache) if caches_rows(&ops) => cache.get_or_create(cache_name, args, build),
             _ => build(),
         };
-        InterpValue::Rows(provider)
+        Ok(InterpValue::Rows(provider))
     }
 }
 
 /// Build operation rows for a URI. Shared with `chain_ops` so the
 /// composition shortcut produces identical row shapes.
 pub fn ops_rows_for_uri(
-    uri: &str,
+    uri: &EntityUri,
     services: &dyn BuilderServices,
     row: &DataRow,
 ) -> Vec<Arc<DataRow>> {
-    rows_from_ops(&resolve_ops(uri, services), uri, row)
+    rows_from_ops(&resolve_ops(uri, services).ops, uri.as_str(), row)
 }
 
 /// [`ops_rows_for_uri`] narrowed to the operations that declared themselves
@@ -93,15 +112,16 @@ pub fn ops_rows_for_uri(
 /// op's own call, declared at its descriptor next to its slash-menu exposure,
 /// so the two surfaces never drift into parallel lists.
 pub fn action_bar_rows_for_uri(
-    uri: &str,
+    uri: &EntityUri,
     services: &dyn BuilderServices,
     row: &DataRow,
 ) -> Vec<Arc<DataRow>> {
     let ops: Vec<OperationWiring> = resolve_ops(uri, services)
+        .ops
         .into_iter()
         .filter(on_action_bar)
         .collect();
-    rows_from_ops(&ops, uri, row)
+    rows_from_ops(&ops, uri.as_str(), row)
 }
 
 /// The `surface:` value that narrows an enumeration to the mobile action bar.
@@ -176,17 +196,36 @@ fn caches_rows(ops: &[OperationWiring]) -> bool {
     })
 }
 
-fn resolve_ops(uri: &str, services: &dyn BuilderServices) -> Vec<OperationWiring> {
-    // Synthesize a minimal `{id: uri}` row and feed it to the standard
-    // profile resolver. `resolve_profile` reads the URI scheme to look
-    // up entity-level operations.
-    let mut probe_row: HashMap<String, Value> = HashMap::new();
-    probe_row.insert("id".to_string(), Value::String(uri.to_string()));
-    services
-        .resolve_profile(&probe_row)
-        .map(|p| p.operations)
-        .map(|ops| ops.into_iter().map(|d| d.to_default_wiring()).collect())
-        .unwrap_or_default()
+/// The operations a subject offers.
+struct Offer {
+    ops: Vec<OperationWiring>,
+    /// The write tier refused `subject`, and `ops` lacks the operations it
+    /// judges.
+    tier_withheld: bool,
+}
+
+fn resolve_ops(subject: &EntityUri, services: &dyn BuilderServices) -> Offer {
+    // An entity's operations follow from its scheme alone; resolving a whole
+    // profile would evaluate computed fields over a row this caller lacks.
+    let ops: Vec<OperationWiring> = services
+        .entity_operations(subject.scheme())
+        .into_iter()
+        .map(|d| d.to_default_wiring())
+        .collect();
+    let judged =
+        |w: &OperationWiring| w.descriptor.entity_name.as_str() == holon_core::WRITE_TIER_ENTITY;
+    // A clicked op dispatches with `subject` as its `id`, which is exactly what
+    // the dispatcher's write tier judges.
+    if !ops.iter().any(judged) || services.write_tier_admits(subject) {
+        return Offer {
+            ops,
+            tier_withheld: false,
+        };
+    }
+    Offer {
+        ops: ops.into_iter().filter(|w| !judged(w)).collect(),
+        tier_withheld: true,
+    }
 }
 
 fn build_row(wiring: &OperationWiring, target_uri: &str) -> DataRow {
@@ -347,6 +386,66 @@ mod tests {
         let after = rows_from_ops(&guarded, "integration:gcal", &row("configured"));
         assert_eq!(names(&before), vec!["begin_oauth".to_string()]);
         assert!(names(&after).is_empty());
+    }
+
+    #[test]
+    fn a_cached_offer_set_follows_a_write_tier_flip() {
+        use holon_api::ReactiveRowProvider;
+
+        let mut indent = descriptor("indent", OpGuard::None);
+        indent.descriptor.entity_name = holon_core::WRITE_TIER_ENTITY.into();
+        let profile = holon_api::RenderProfile {
+            name: "block".to_string(),
+            render: holon_api::render_dsl::parse_render_dsl(r#"text("x")"#).expect("parses"),
+            operations: vec![indent.descriptor],
+            variants: vec![],
+        };
+        let subject = holon_api::EntityUri::parse("block:recipe").expect("parses");
+        let cache = Arc::new(crate::provider_cache::ProviderCache::new());
+        let admitting = crate::reactive::StubBuilderServices::new()
+            .with_profile(profile.clone())
+            .with_provider_cache(cache.clone());
+        let refusing = crate::reactive::StubBuilderServices::new()
+            .with_profile(profile)
+            .with_provider_cache(cache)
+            .with_write_refused(subject.clone());
+        let args = ResolvedArgs::from_positional_value(Value::String(subject.to_string()));
+        let ctx = RenderContext::default();
+
+        let rows = |v: InterpValue| match v {
+            InterpValue::Rows(p) => p.rows_snapshot(),
+            InterpValue::Value(v) => panic!("ops_of yields a row set, got {v:?}"),
+        };
+        let before = OpsOfValueFn
+            .invoke(&args, &admitting, &ctx)
+            .expect("a schemed uri resolves");
+        let after = OpsOfValueFn
+            .invoke(&args, &refusing, &ctx)
+            .expect("a schemed uri resolves");
+        assert_eq!(names(&rows(before)), vec!["indent".to_string()]);
+        assert!(
+            names(&rows(after)).is_empty(),
+            "the tier now refuses {subject}, so the live cached offer must not be reused"
+        );
+    }
+
+    #[test]
+    fn a_scheme_less_argument_renders_an_error_naming_it() {
+        let expr = holon_api::render_dsl::parse_render_dsl(
+            r#"list(#{collection: ops_of("recipe"), item_template: text(col("name"))})"#,
+        )
+        .expect("parses");
+        let tree = crate::reactive::interpret_pure(
+            &expr,
+            &[],
+            &crate::reactive::StubBuilderServices::new(),
+        );
+        let message = tree.prop_str("message").unwrap_or_default();
+        assert!(
+            tree.is_error() && message.contains("\"recipe\""),
+            "expected an error node naming the argument, got {:?}: {message}",
+            tree.widget_name()
+        );
     }
 
     fn names(rows: &[Arc<DataRow>]) -> Vec<String> {

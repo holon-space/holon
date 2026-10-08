@@ -380,7 +380,7 @@ pub fn offered_creation_parent(
     services: &dyn crate::reactive::BuilderServices,
 ) -> Option<EntityUri> {
     resolve_creation_parent(rows, container, allow_root_creation, explicit_container)
-        .filter(|parent| services.offers_creation_under(parent))
+        .filter(|parent| services.write_tier_admits(parent))
 }
 
 #[cfg(test)]

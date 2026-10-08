@@ -36,7 +36,7 @@ The one-page answer to *"which features could this change impact?"*. Rows are us
 | **Ruled by** | An ADR under [`docs/adr/`](../adr/), or an invariant number from [Model.md](Model.md). |
 | **Mode axes** | Which of [Model.md](Model.md)'s four orthogonal axes the feature's behaviour varies on: **Storage** (Loro store on/off), **File adapter** (org/none), **Merge fidelity** (op-CRDT / base-3-way / LWW), **Transport** (iroh P2P on/off). `—` means the feature behaves the same everywhere. *Headless vs windowed* is a test-slice axis, not a product mode; it is called out in prose where it matters. |
 
-The composed keystone is [`general_e2e_composed_pbt.rs`](../../crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs). Its alphabet is 115 transitions; the repo declares 93 invariant ids plus 17 correspondence-family ids. Open reds are registered in [KeystoneKnownReds.md](../Testing/KeystoneKnownReds.md) — a red listed there is a pass-with-note, anything else is a regression.
+The composed keystone is [`general_e2e_composed_pbt.rs`](../../crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs). Its alphabet is 115 transitions; the repo declares 94 invariant ids plus 17 correspondence-family ids. Open reds are registered in [KeystoneKnownReds.md](../Testing/KeystoneKnownReds.md) — a red listed there is a pass-with-note, anything else is a regression.
 
 ---
 
@@ -308,6 +308,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `inv-net-totality` — an operation the system can fire that the derived net does not describe, so every net-based analysis (conflicts, cycles, the marking oracle) silently reports on a partial world
 - `inv-no-database-stuck` — a command that spins or blocks inside the engine, which freezes every later read and write of the session, and a failed watch that can no longer report one
 - `inv-no-machine-keychain-access` — a harness that resolves the OS store instead of the injected in-memory one
+- `inv-offered-ops-pass-the-write-tier` — the operations offered on a block whose document is homed in a `WriteTier::ReadOnly` file
 - `inv-read-only-home-refuses-writes` — a store-origin write against a block whose document is homed in a `WriteTier::ReadOnly` file
 - `inv-remote-list-mirror-matches-ref` — the `RemoteListSync` transition runs the production round over the fixture peer and writes the local intents into the real mirror table; this compares that table, projected to the peer-authoritative columns, against the peer's list in the reference model.
 - `inv-shape-gate-refuses-illegal-writes` — a Holon-side edit of a `decision` subtree, legal or not, one gesture at a time

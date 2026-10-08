@@ -5,6 +5,7 @@ use std::sync::Arc;
 use holon_api::EntityUri;
 use holon_api::InterpValue;
 use holon_api::Value;
+use holon_api::computation::ComputeError;
 use holon_api::render_eval::CORE_VALUE_FN_LOOKUP;
 use holon_api::render_eval::EvalEnv;
 use holon_api::render_eval::OutlineTree;
@@ -92,27 +93,30 @@ where
 // value fn needs.
 
 /// A registered render-DSL function whose return type is `InterpValue`
-/// (a scalar `Value` or a reactive `Rows` provider).
+/// (a scalar `Value` or a reactive `Rows` provider). An `Err` renders the
+/// enclosing widget as an error node.
 pub trait ValueFn: Send + Sync {
     fn invoke(
         &self,
         args: &ResolvedArgs,
         services: &dyn BuilderServices,
         ctx: &RenderContext,
-    ) -> InterpValue;
+    ) -> Result<InterpValue, ComputeError>;
 }
 
 /// Blanket impl so plain `fn`-style registrations work.
 impl<F> ValueFn for F
 where
-    F: Fn(&ResolvedArgs, &dyn BuilderServices, &RenderContext) -> InterpValue + Send + Sync,
+    F: Fn(&ResolvedArgs, &dyn BuilderServices, &RenderContext) -> Result<InterpValue, ComputeError>
+        + Send
+        + Sync,
 {
     fn invoke(
         &self,
         args: &ResolvedArgs,
         services: &dyn BuilderServices,
         ctx: &RenderContext,
-    ) -> InterpValue {
+    ) -> Result<InterpValue, ComputeError> {
         (self)(args, services, ctx)
     }
 }
@@ -127,7 +131,7 @@ struct ValueFnBinding<'a> {
 }
 
 impl<'a> ValueFnLookup for ValueFnBinding<'a> {
-    fn invoke(&self, name: &str, args: &ResolvedArgs) -> Option<InterpValue> {
+    fn invoke(&self, name: &str, args: &ResolvedArgs) -> Option<Result<InterpValue, ComputeError>> {
         // User-supplied registry first, then built-in core fns (`concat`,
         // ...). Keeps `concat` working from any DSL context regardless of
         // whether a frontend explicitly registered it.

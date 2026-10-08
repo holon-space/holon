@@ -645,8 +645,11 @@ fn value_to_f64(v: &Value) -> Option<f64> {
 /// in `eval_to_interp` then resolves the name to `Value::Null` (F1 in
 /// the design plan — no silent first-arg fallback). // ALLOW(fallback):
 /// historical name in doc comment
+///
+/// A known function refusing its arguments answers `Some(Err(_))`, which
+/// fails the enclosing evaluation.
 pub trait ValueFnLookup {
-    fn invoke(&self, name: &str, args: &ResolvedArgs) -> Option<InterpValue>;
+    fn invoke(&self, name: &str, args: &ResolvedArgs) -> Option<Result<InterpValue, ComputeError>>;
 }
 
 /// Built-in value functions available to every caller — `concat` for
@@ -660,9 +663,9 @@ pub trait ValueFnLookup {
 pub struct CoreValueFnLookup;
 
 impl ValueFnLookup for CoreValueFnLookup {
-    fn invoke(&self, name: &str, args: &ResolvedArgs) -> Option<InterpValue> {
+    fn invoke(&self, name: &str, args: &ResolvedArgs) -> Option<Result<InterpValue, ComputeError>> {
         match name {
-            "concat" => Some(InterpValue::Value(concat_invoke(args))),
+            "concat" => Some(Ok(InterpValue::Value(concat_invoke(args)))),
             _ => None,
         }
     }
@@ -892,7 +895,7 @@ pub fn eval_to_interp<K: RowKey>(
             // nested under other value-fn calls resolve correctly.
             let resolved = resolve_args_with(args, env, fns)?;
             match fns.invoke(name, &resolved) {
-                Some(v) => v,
+                Some(v) => v?,
                 // F1: silent first-arg default removed. Unknown name // ALLOW(fallback): historical
                 // reference in code comment → Null. Built-in fns (`concat`, ...)
                 // are reachable through `CORE_VALUE_FN_LOOKUP` and should be
@@ -1617,9 +1620,17 @@ mod tests {
 
     struct MockValueFnLookup;
     impl ValueFnLookup for MockValueFnLookup {
-        fn invoke(&self, name: &str, args: &ResolvedArgs) -> Option<InterpValue> {
+        fn invoke(
+            &self,
+            name: &str,
+            args: &ResolvedArgs,
+        ) -> Option<Result<InterpValue, ComputeError>> {
             match name {
-                "echo" => args.positional.first().cloned().map(InterpValue::Value),
+                "echo" => args
+                    .positional
+                    .first()
+                    .cloned()
+                    .map(|v| Ok(InterpValue::Value(v))),
                 _ => None,
             }
         }

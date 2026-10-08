@@ -721,7 +721,7 @@ impl ReactiveEngineDriver {
             }
             tokio::time::sleep(Duration::from_millis(120)).await;
         };
-        if !crate::reactive::BuilderServices::offers_creation_under(&*self.engine, &parent) {
+        if !crate::reactive::BuilderServices::write_tier_admits(&*self.engine, &parent) {
             anyhow::bail!(
                 "main panel root {parent} offers no creation slot: the write tier refuses a \
                  create under it"

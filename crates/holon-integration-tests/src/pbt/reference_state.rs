@@ -3727,6 +3727,13 @@ impl holon_frontend::reactive::BuilderServices for ReferenceState {
             })
     }
 
+    fn entity_operations(&self, _: &str) -> Vec<holon_api::render_types::OperationDescriptor> {
+        match self.domain.seed_profile {
+            Some(_) => self.domain.block_operations.clone(),
+            None => Vec::new(),
+        }
+    }
+
     fn watch_query(
         &self,
         _: &str,

@@ -204,6 +204,12 @@ impl BuilderServices for ExpandStoreServices {
     ) -> Option<holon_api::RowProfile> {
         self.inner.resolve_profile(row)
     }
+    fn entity_operations(
+        &self,
+        entity_name: &str,
+    ) -> Vec<holon_api::render_types::OperationDescriptor> {
+        self.inner.entity_operations(entity_name)
+    }
     /// Ok + an immediately-closed stream: `shared_live_query_build` only checks
     /// Ok-vs-Err before dropping it, so this is what lets a `live_query(...)`
     /// build a real node instead of an error node.

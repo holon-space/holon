@@ -2678,6 +2678,11 @@ pub trait SutReadOnlyHomes {
     /// A peer's import is adopted into the document and so refused itself,
     /// which keeps it out of this list.
     async fn read_only_undeclared_children(&self) -> Vec<(String, String)>;
+
+    /// `(op name, refusal)` for every operation the production `ops_of` offers
+    /// on `block_id` that the dispatcher's write-tier gate refuses when a
+    /// user's click dispatches it against that block.
+    async fn offered_ops_refused_by_write_tier(&self, block_id: &str) -> Vec<(String, String)>;
 }
 
 #[holon_macros::capmap_adapter]

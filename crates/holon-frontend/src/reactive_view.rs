@@ -2856,7 +2856,7 @@ mod tests {
                 row_with_parent("block:step-1", "block:recipe-page"),
             ])),
             &slot,
-            Arc::new(StubBuilderServices::new().with_creation_refused_under(page)),
+            Arc::new(StubBuilderServices::new().with_write_refused(page)),
         );
         assert_eq!(
             provider.rows_snapshot().len(),
