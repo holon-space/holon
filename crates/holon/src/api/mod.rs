@@ -33,6 +33,7 @@ pub mod guard_world;
 pub mod history_store;
 pub mod holon_rule_watcher;
 pub mod holon_service;
+pub mod layout_seed;
 pub mod net_guard;
 pub mod operation_dispatcher;
 pub mod operation_engine;

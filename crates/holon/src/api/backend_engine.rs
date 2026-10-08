@@ -249,6 +249,8 @@ pub struct BackendEngine {
     /// view over an unavailable integration's tables discloses the integration
     /// instead of a matview hash. Empty in a wiring with no integrations.
     integration_attribution: holon_core::integration_attribution::IntegrationAttribution,
+    /// Written by the boot seed, read by the root slot render.
+    layout_seed: crate::api::layout_seed::LayoutSeed,
     /// Reactive-rule (ADR 0024 WP3) compilation/runtime status. Written by the
     /// action watcher (deprecation / parse / compile / exec outcomes), read by
     /// the render path and MCP so a broken or deprecated rule surfaces its
@@ -339,6 +341,7 @@ impl BackendEngine {
             advice_status: holon_advice::AdviceRuleStatusHandle::new(),
             integration_attribution:
                 holon_core::integration_attribution::IntegrationAttribution::new(),
+            layout_seed: crate::api::layout_seed::LayoutSeed::new(),
             rule_status: crate::api::rule_status::RuleStatusHandle::new(),
             accepted_rules: crate::api::accepted_rules::AcceptedRuleHandle::new(),
             watch_places: Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -374,6 +377,10 @@ impl BackendEngine {
         &self,
     ) -> &holon_core::integration_attribution::IntegrationAttribution {
         &self.integration_attribution
+    }
+
+    pub fn layout_seed(&self) -> &crate::api::layout_seed::LayoutSeed {
+        &self.layout_seed
     }
 
     /// Share the attribution map the integration registry declares into.

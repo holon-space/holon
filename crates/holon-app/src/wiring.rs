@@ -727,6 +727,7 @@ impl FrontendInjectorExt for Injector {
                     let ready_signal_bg = ready_signal.clone();
                     let engine_bg = engine.clone();
                     let seed_step = disclosure.in_background(BootStep::SeedDefaultLayout);
+                    let seed_running = engine.layout_seed().begin();
                     let post_ready_work = async move {
                         match boot_seed(&resolver_bg, &engine_bg)
                             .instrument(tracing::info_span!(
@@ -737,6 +738,7 @@ impl FrontendInjectorExt for Injector {
                             Ok(()) => seed_step.performed(),
                             Err(why) => seed_step.failed(why),
                         }
+                        drop(seed_running);
                         if let Some(mut signal) = ready_signal_bg {
                             // Copy the outcome out and drop the non-`Send`
                             // `watch::Ref` BEFORE any `.await` below.

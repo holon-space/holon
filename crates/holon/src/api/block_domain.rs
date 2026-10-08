@@ -10,6 +10,7 @@ use holon_api::Value;
 use holon_api::uri_from_row;
 
 use super::backend_engine::BackendEngine;
+use super::layout_seed::LayoutSeedPhase;
 use crate::storage::turso::RowChangeStream;
 
 const BLOCK_PATH_LOOKUP_SQL: &str = include_str!("../../sql/queries/block_path_lookup.sql");
@@ -18,6 +19,14 @@ const BLOCK_WITH_QUERY_SOURCE_SQL: &str =
     include_str!("../../sql/queries/block_with_query_source.sql");
 
 pub use holon_api::ROOT_LAYOUT_BLOCK_ID;
+
+/// What a frontend shows as pending until the next Structure event.
+fn loading_render_expr() -> RenderExpr {
+    RenderExpr::FunctionCall {
+        name: "loading".to_string(),
+        args: vec![],
+    }
+}
 
 /// The `:REQUIRES:` eligibility fragment — a block qualifies only when EVERY
 /// requirement row of it resolves to a DONE block. A correlated `NOT EXISTS`
@@ -523,9 +532,20 @@ impl<'a> BlockDomain<'a> {
 
         let spec = holon_api::perspective::PerspectiveSpec::parse(&active, &blocks)
             .with_context(|| format!("root slot: resolving active perspective for {block_id}"))?;
-        let render_expr = spec.layout_expr().with_context(|| {
-            format!("root slot: synthesizing layout for perspective {}", spec.id)
-        })?;
+        let render_expr = if !spec.has_displayable_panel()
+            && self.engine.layout_seed().phase() == LayoutSeedPhase::Pending
+        {
+            tracing::info!(
+                "[render_root_slot] perspective {} has no displayable panel yet and the layout \
+                 seed is still running — rendering the root slot as loading",
+                spec.id
+            );
+            loading_render_expr()
+        } else {
+            spec.layout_expr().with_context(|| {
+                format!("root slot: synthesizing layout for perspective {}", spec.id)
+            })?
+        };
 
         let sql = format!(
             "SELECT * FROM {table} WHERE id = $block_id",

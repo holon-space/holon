@@ -19,6 +19,7 @@ use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 
 use super::backend_engine::BackendEngine;
+use super::layout_seed::LayoutSeedPhase;
 use crate::entity_profile::ProfileResolving;
 use crate::storage::turso::RowChangeStream;
 
@@ -35,6 +36,10 @@ enum RenderTrigger {
     /// decides whether it renders as its subtree or as a leaf — increment
     /// generation.
     FocusRootChange,
+    /// The boot seed finished writing the default layout, which decides
+    /// whether a perspective without displayable panels is pending or an
+    /// error — increment generation.
+    LayoutSeedSettled,
     /// User requested a different entity profile variant — same generation,
     /// but the data forwarder restarts with the updated profile context
     /// (fixing the stale-context bug in the previous implementation).
@@ -83,9 +88,12 @@ pub async fn watch_ui(engine: Arc<BackendEngine>, block_id: EntityUri) -> Result
     // Merge structural CDC + commands into a single trigger stream.
     let profile_resolver = engine.profile_resolver().clone();
     let profile_signal = profile_resolver.profile_signal();
+    let layout_seed =
+        (block_id == holon_api::root_layout_block_uri()).then(|| engine.layout_seed().subscribe());
     let trigger_stream = merge_triggers(
         struct_stream,
         focus_stream,
+        layout_seed,
         command_rx,
         profile_signal,
         &mut aborts,
@@ -126,6 +134,7 @@ impl UiWatcher for BackendEngine {
 fn merge_triggers(
     struct_stream: RowChangeStream,
     focus_stream: RowChangeStream,
+    layout_seed: Option<tokio::sync::watch::Receiver<LayoutSeedPhase>>,
     command_rx: mpsc::Receiver<WatcherCommand>,
     profile_signal: futures_signals::signal::Mutable<Arc<crate::entity_profile::ProfileCache>>,
     aborts: &mut ActorAbortGuard,
@@ -165,6 +174,23 @@ fn merge_triggers(
         }
     });
     aborts.push(focus_handle.abort_handle());
+
+    if let Some(mut phase) = layout_seed {
+        let tx_seed = tx.clone();
+        let seed_handle = tokio::spawn(async move {
+            while phase.changed().await.is_ok() {
+                if *phase.borrow_and_update() == LayoutSeedPhase::Settled
+                    && tx_seed
+                        .send(RenderTrigger::LayoutSeedSettled)
+                        .await
+                        .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        aborts.push(seed_handle.abort_handle());
+    }
 
     // Commands → RenderTrigger::VariantChange
     let tx_cmd = tx.clone();
@@ -230,6 +256,10 @@ async fn run_reactive_watcher(
                 tracing::info!(
                     "[UiWatcher] Focus-root membership of block '{block_id}' changed — re-rendering"
                 );
+            }
+            RenderTrigger::LayoutSeedSettled => {
+                generation += 1;
+                tracing::info!("[UiWatcher] Layout seed settled — re-rendering '{block_id}'");
             }
             RenderTrigger::VariantChange(v) => {
                 variant = Some(v.clone());

@@ -270,6 +270,10 @@ impl PerspectiveSpec {
         })
     }
 
+    pub fn has_displayable_panel(&self) -> bool {
+        self.panels.iter().any(PanelSpec::is_displayable)
+    }
+
     /// The DSL text behind [`Self::layout_expr`] — split out so tests can pin
     /// the synthesized shape against the previously-hardcoded YAML variant.
     pub fn layout_dsl(&self) -> anyhow::Result<String> {
