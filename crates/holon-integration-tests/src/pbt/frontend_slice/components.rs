@@ -5578,6 +5578,35 @@ impl SutAppLifecycle for HeadlessFrontendComponent {
     async fn create_document(&self, file_name: &str) {
         use holon_filesystem::FileSystem;
         let file_path = self.org_root().join(file_name);
+        // The pages of the other tracked files, which ingesting this new file
+        // must leave at their ids with their titles.
+        let tracked_before: Vec<(EntityUri, PathBuf, Option<String>)> = {
+            let docs = self.documents.lock().expect("documents lock").clone();
+            let blocks = self.all_blocks().await;
+            docs.into_iter()
+                .filter(|(_, path)| *path != file_path)
+                .map(|(id, path)| {
+                    let title = blocks.iter().find(|b| b.id == id).map(|b| b.title());
+                    (id, path, title)
+                })
+                .collect()
+        };
+        let assert_not_taken_over = |new_id: &EntityUri, blocks: &[Block]| {
+            for (id, path, title) in &tracked_before {
+                assert!(
+                    id != new_id,
+                    "[SutAppLifecycle::create_document] {file_name} took the page {id} of the \
+                     tracked file {path:?}: a new file must become a new page \
+                     (docs/Plans/PageIdentityDeterminism.md §5.3)"
+                );
+                let now = blocks.iter().find(|b| &b.id == id).map(|b| b.title());
+                assert_eq!(
+                    &now, title,
+                    "[SutAppLifecycle::create_document] ingesting {file_name} changed the page {id} \
+                     of the tracked file {path:?}"
+                );
+            }
+        };
         FileSystem::write(self.org_fs().as_ref(), &file_path, b"")
             .await
             .unwrap_or_else(|e| {
@@ -5602,13 +5631,24 @@ impl SutAppLifecycle for HeadlessFrontendComponent {
         let timeout = Duration::from_secs(5);
         let start = std::time::Instant::now();
         let doc_id = loop {
-            if let Some(b) = self
-                .all_blocks()
+            let blocks = self.all_blocks().await;
+            // Ingest writes the page id back as the file's `#+ID:` header.
+            let header_id = FileSystem::read(self.org_fs().as_ref(), &file_path)
                 .await
-                .into_iter()
-                .find(|b| b.title() == stem)
-            {
-                break b.id;
+                .ok()
+                .and_then(|bytes| {
+                    String::from_utf8_lossy(&bytes).lines().find_map(|l| {
+                        l.trim()
+                            .strip_prefix("#+ID:")
+                            .map(|v| EntityUri::block(v.trim()))
+                    })
+                });
+            if let Some(id) = &header_id {
+                assert_not_taken_over(id, &blocks);
+            }
+            if let Some(b) = blocks.iter().find(|b| b.title() == stem) {
+                assert_not_taken_over(&b.id, &blocks);
+                break b.id.clone();
             }
             assert!(
                 start.elapsed() < timeout,

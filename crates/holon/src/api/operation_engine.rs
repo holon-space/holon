@@ -1686,24 +1686,6 @@ impl DispatchingOperationEngine {
         let plan = PageChainPlan::from_value(&plan_value)
             .map_err(|e| anyhow::anyhow!("create_page_from_link: {e}"))?;
 
-        // A derived id still held by a page a rename retitled is refused before
-        // any create, as `run_convert_block_to_page` refuses it.
-        if let Some(reader) = &self.reader {
-            for seg in &plan.missing {
-                // ALLOW(entity_uri_from_raw): seg.id is a derived PageId::for_path id.
-                let seg_uri = EntityUri::from_raw(&seg.id);
-                let holder_title = reader
-                    .field_value(&seg_uri, "content")
-                    .await?
-                    .and_then(|v| v.as_string().map(str::to_string));
-                if let holon_api::Recognition::Collision(collision) =
-                    holon_api::recognize_derived_id(&seg_uri, holder_title.as_deref(), &seg.name)
-                {
-                    return Err(anyhow::Error::new(collision));
-                }
-            }
-        }
-
         let mut all_changes = Vec::new();
         for seg in &plan.missing {
             let mut p = StorageEntity::new();

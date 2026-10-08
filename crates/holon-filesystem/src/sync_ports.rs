@@ -380,6 +380,24 @@ pub trait DocumentManager: Send + Sync {
         Ok(current_doc)
     }
 
+    /// The id a page titled `title` at name-chain path `path` takes when no
+    /// page of that title sits at that place: [`holon_api::page_slot`] over
+    /// this store, so an org page and a `[[path]]` link-created page
+    /// converge on one id and neither takes over a renamed page's id.
+    async fn page_slot(&self, path: &str, title: &str) -> Result<holon_api::PageSlot> {
+        holon_api::page_slot(path, title, |id| async move {
+            Ok(self.get_by_id(&id).await?.map(|page| page.content))
+        })
+        .await
+    }
+
+    /// The page [`page_slot`](Self::page_slot) answered `Existing` for.
+    async fn existing_page(&self, id: &EntityUri) -> Result<Block> {
+        self.get_by_id(id).await?.ok_or_else(|| {
+            anyhow::anyhow!("page {id} held this page path a moment ago and is now gone")
+        })
+    }
+
     /// Get or create the full chain, creating intermediate page blocks as
     /// needed.
     async fn get_or_create_by_name_chain(&self, chain: &[&str]) -> Result<Block> {
@@ -404,21 +422,22 @@ pub trait DocumentManager: Send + Sync {
                     current_doc = Some(existing);
                 }
                 None => {
-                    // DETERMINISTIC page id keyed on the accumulated name-chain
-                    // path (`Life/Areas`), minted through the single `PageId`
-                    // constructor the link-create op also uses. An org file page
-                    // and a `[[Areas]]` link-created page for the same path now
-                    // converge on one CRDT merge key (inv-page-name-unique)
-                    // instead of each peer minting a random UUID.
-                    let page_id = holon_api::link_parser::PageId::for_path(&accumulated)
-                        .map_err(anyhow::Error::msg)?
-                        .into_entity_uri();
-                    let mut new_doc =
-                        Block::new_text(page_id, current_parent_id.clone(), segment.to_string());
-                    new_doc.set_page(true);
-                    let created = self.create(new_doc).await?;
-                    current_parent_id = created.id.clone();
-                    current_doc = Some(created);
+                    let doc = match self.page_slot(&accumulated, segment).await? {
+                        holon_api::PageSlot::Existing(id) => {
+                            self.existing_page(&id.into_entity_uri()).await?
+                        }
+                        holon_api::PageSlot::Create(id) => {
+                            let mut new_doc = Block::new_text(
+                                id.into_entity_uri(),
+                                current_parent_id.clone(),
+                                segment.to_string(),
+                            );
+                            new_doc.set_page(true);
+                            self.create(new_doc).await?
+                        }
+                    };
+                    current_parent_id = doc.id.clone();
+                    current_doc = Some(doc);
                 }
             }
         }
@@ -972,6 +991,80 @@ mod name_chain_tests {
             .await
             .expect("a sentinel-rooted chain resolves without a false non-page-ancestor bail");
         assert_eq!(chain, vec!["todo".to_string()]);
+    }
+
+    /// An in-memory page store answering every method the name-chain defaults
+    /// call.
+    struct PageStore {
+        by_id: std::sync::Mutex<HashMap<EntityUri, Block>>,
+    }
+
+    #[async_trait]
+    impl DocumentManager for PageStore {
+        async fn find_by_parent_and_name(
+            &self,
+            parent_id: &EntityUri,
+            title: &str,
+        ) -> Result<Option<Block>> {
+            Ok(self
+                .by_id
+                .lock()
+                .unwrap()
+                .values()
+                .find(|b| &b.parent_id == parent_id && b.title() == title)
+                .cloned())
+        }
+
+        async fn create(&self, doc: Block) -> Result<Block> {
+            let mut by_id = self.by_id.lock().unwrap();
+            assert!(
+                !by_id.contains_key(&doc.id),
+                "create at {} would overwrite the page titled {:?}",
+                doc.id,
+                by_id[&doc.id].title()
+            );
+            by_id.insert(doc.id.clone(), doc.clone());
+            Ok(doc)
+        }
+
+        async fn get_by_id(&self, id: &EntityUri) -> Result<Option<Block>> {
+            Ok(self.by_id.lock().unwrap().get(id).cloned())
+        }
+
+        async fn update_metadata(&self, _: &Block) -> Result<()> {
+            unimplemented!("not exercised by get_or_create_by_name_chain")
+        }
+    }
+
+    /// A page renamed from `doc_904` to `doc_905` keeps
+    /// `PageId::for_path("doc_904")`; a page created later under `doc_904`
+    /// is a different page with its own id.
+    #[tokio::test]
+    async fn get_or_create_by_name_chain_beside_a_renamed_page_creates_a_new_page() {
+        let held = holon_api::link_parser::PageId::for_path("doc_904")
+            .unwrap()
+            .into_entity_uri();
+        let mut renamed = Block::new_text(held.clone(), EntityUri::no_parent(), "doc_905");
+        renamed.set_page(true);
+        let store = PageStore {
+            by_id: std::sync::Mutex::new(HashMap::from([(held.clone(), renamed)])),
+        };
+
+        let created = store
+            .get_or_create_by_name_chain(&["doc_904"])
+            .await
+            .expect("create doc_904");
+
+        assert_ne!(
+            created.id, held,
+            "the new doc_904 took the renamed page's id"
+        );
+        assert_eq!(created.title(), "doc_904");
+        assert_eq!(
+            store.get_by_id(&held).await.unwrap().map(|b| b.title()),
+            Some("doc_905".to_string()),
+            "the renamed page must keep its id and title"
+        );
     }
 }
 

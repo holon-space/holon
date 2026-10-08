@@ -324,17 +324,13 @@ async fn create_page_from_link_empty_target_is_error() {
 // so the merge is a union by id — keeps BOTH blocks, and the vault now carries
 // two Page-tagged blocks named "Areas".
 //
-// This property drives `create_page_from_link`, the path a `[[Areas]]` click
-// takes when the page doesn't exist yet, on two INDEPENDENT peers (each its own
-// store) for a generated page name and asserts the minted leaf ids converge.
-// Because block ids are the CRDT merge key, `id_a == id_b` is precisely the
-// condition under which the merged vault holds ONE page named `name`.
+// The id a fresh store gives page `name` is `holon_api::page_slot` over an
+// empty store, so the property runs against that function, and one two-peer
+// example pins that `create_page_from_link` mints exactly that id.
 
 /// A well-formed page path: 1–3 non-empty segments joined by a `/` that may
-/// carry surrounding spaces (`"Areas / Sub"`). The multi-segment + spaced-
-/// separator shapes exercise the H2 canonicalization case — the parser trims
-/// segments (`normalize_for_hash` alone would not) so its optimistic id agrees
-/// with the id the writer mints. Shrinking still drives to a minimal witness.
+/// carry surrounding spaces (`"Areas / Sub"`), the shape where the parser must
+/// trim segments to agree with the writer.
 fn page_name_strategy() -> impl Strategy<Value = String> {
     let segment = "[A-Za-z][A-Za-z0-9 ]{0,7}"
         .prop_map(|s| s.trim().to_string())
@@ -351,75 +347,56 @@ fn page_name_strategy() -> impl Strategy<Value = String> {
         .prop_map(|(segments, sep)| segments.join(&sep))
 }
 
-/// Create page `name` via `create_page_from_link` on a fresh, independent peer
-/// (its own in-memory store) and return the minted leaf id.
-async fn create_page_on_fresh_peer(name: &str) -> String {
-    let engine = block_engine().await;
-    create_page_from_link(&engine, name)
-        .await
-        .expect("create_page_from_link")
+/// The id a store holding no page mints for page `name`.
+fn fresh_store_page_id(name: &str) -> String {
+    let leaf = name.rsplit('/').next().unwrap().trim();
+    match futures::executor::block_on(holon_api::page_slot(name, leaf, |_| {
+        std::future::ready(Ok(None))
+    }))
+    .expect("page_slot")
+    {
+        holon_api::PageSlot::Create(id) => id.as_str().to_string(),
+        other => panic!("an empty store holds no page, got {other:?}"),
+    }
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig {
-        cases: 24,
-        failure_persistence: None,
-        ..ProptestConfig::default()
-    })]
-
     /// inv-page-name-unique: independent peers that each create the same-named
-    /// page must converge on one page identity, so a merge yields no duplicate.
-    ///
-    /// Page identity is a deterministic function of the normalized path
-    /// (`PageId::for_path`, minted by every write path), so two independent
-    /// peers that each create page `name` mint the SAME block id and a merge
-    /// yields ONE page. RULING: path-hash for new writes + bounded
-    /// `(name,parent)` repair — see docs/Plans/PageIdentityDeterminism.md.
+    /// page mint the same id, so a merge (a union by id) yields one page; and
+    /// the link parser's optimistic id for the target equals it.
     #[test]
     fn inv_page_name_unique_converges_across_peers(name in page_name_strategy()) {
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .expect("tokio runtime");
-        let (id_a, id_b) = rt.block_on(async {
-            let a = create_page_on_fresh_peer(&name).await;
-            let b = create_page_on_fresh_peer(&name).await;
-            (a, b)
-        });
-
+        let id = fresh_store_page_id(&name);
+        let path_id = holon_api::link_parser::PageId::for_path(&name).unwrap();
+        prop_assert_eq!(&id, &fresh_store_page_id(&name));
         prop_assert_eq!(
-            &id_a,
-            &id_b,
-            "inv-page-name-unique: two independent peers each created page {:?} but minted \
-             divergent block ids ({} vs {}). Block ids are the CRDT merge key, so on merge the \
-             vault holds TWO Page-tagged blocks named {:?} — the duplicate-page bug. Page \
-             identity must be a deterministic function of the (normalized name, position), not a \
-             random UUID.",
-            name, id_a, id_b, name
+            id.as_str(),
+            path_id.as_str(),
+            "a fresh store must mint the path id for {:?}", name
         );
-
-        // H2 guard: the link PARSER's optimistic target id for the same raw
-        // target must equal the id the WRITER minted. Otherwise a click's
-        // healed `resolved_id` would point at a different id than the page that
-        // gets created — divergence that only the name-based re-resolve trigger
-        // papers over. This directly exercises spaced separators ("Areas / Sub")
-        // where the parser trims segments to converge with the writer.
-        if let holon_api::link_parser::LinkTarget::CreationIntent {
-            scheme, target_id, ..
-        } = holon_api::link_parser::LinkTargetClassifier::default().classify(&name)
+        if let holon_api::link_parser::LinkTarget::CreationIntent { scheme, target_id, .. } =
+            holon_api::link_parser::LinkTargetClassifier::default().classify(&name)
             && scheme == "block"
         {
             prop_assert_eq!(
                 target_id.as_str(),
-                id_a.as_str(),
-                "parser/writer page-id divergence for target {:?}: parser optimistic id {} != \
-                 writer-minted id {}",
-                name,
-                target_id.as_str(),
-                id_a
+                id.as_str(),
+                "parser/writer page-id divergence for target {:?}",
+                name
             );
         }
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn two_fresh_peers_mint_the_same_page_chain_ids() {
+    let name = "Areas / Sub";
+    let peer_a = block_engine().await;
+    let peer_b = block_engine().await;
+    let a = create_page_from_link(&peer_a, name).await.expect("peer A");
+    let b = create_page_from_link(&peer_b, name).await.expect("peer B");
+    assert_eq!(a, b, "two fresh peers minted divergent ids for {name:?}");
+    assert_eq!(a, fresh_store_page_id(name));
 }
 
 // ---------------------------------------------------------------------------
@@ -438,8 +415,7 @@ proptest! {
 //   3. create page "A" again    → minting recomputes H("A") … already taken
 //
 // The assertions state what §5.3 PROMISES: step 3 yields a DIFFERENT entity
-// than step 1, and two distinct pages ("B" and "A") coexist. The interim
-// ADR 0029 D1b policy refuses step 3 with `IdentityCollision` instead.
+// than step 1, and two distinct pages ("B" and "A") coexist.
 
 /// Create a `Page`-tagged block with an explicit id/content/parent.
 async fn create_page(engine: &BackendEngine, id: &str, content: &str, parent: &str) {
@@ -525,7 +501,6 @@ async fn page_rows(handle: &DbHandle) -> Vec<(String, String)> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "ADR 0029 D1b end-state pending: unique-random recreate not implemented"]
 async fn recreating_a_renamed_pages_old_name_yields_a_distinct_page() {
     let engine = block_engine().await;
     let handle = engine.db_handle();
@@ -547,10 +522,9 @@ async fn recreating_a_renamed_pages_old_name_yields_a_distinct_page() {
     );
 
     // 3. Create a NEW page A.
-    let id_a2 = create_page_from_link(&engine, "A").await.expect(
-        "recreating page A must succeed (§5.3). Interim ADR 0029 D1b refuses it with \
-         IdentityCollision instead; the end-state unique-random recreate is not implemented",
-    );
+    let id_a2 = create_page_from_link(&engine, "A")
+        .await
+        .expect("recreating page A must succeed (§5.3)");
 
     let pages = page_rows(handle).await;
 
@@ -581,5 +555,74 @@ async fn recreating_a_renamed_pages_old_name_yields_a_distinct_page() {
         "the child must still hang under the RENAMED page B, but its parent \
          {child_parent} is titled {child_parent_title:?} — the new page A overwrote the \
          renamed entity instead of becoming a distinct one; observed pages: {pages:?}"
+    );
+}
+
+/// Create a block `source` whose content links `[[A]]` by name.
+async fn link_to_a(engine: &BackendEngine, source: &str) {
+    let mut p = create_params(source, "see A");
+    p.insert("marks".into(), Value::String(name_link_marks("A", 4, 5)));
+    fixture_op(engine, "create", p).await;
+}
+
+/// A `[[A]]` name link written after page A was renamed resolves to the page
+/// NAMED `A`, never to the renamed page that still holds
+/// `PageId::for_path("A")`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_name_link_resolves_to_the_page_with_that_name_after_its_old_holder_was_renamed() {
+    let engine = block_engine().await;
+    let handle = engine.db_handle();
+
+    let id_a = create_page_from_link(&engine, "A")
+        .await
+        .expect("create page A");
+    rename_page(&engine, &id_a, "B").await;
+    link_to_a(&engine, "before").await;
+    assert_eq!(
+        link_resolved(handle, "before").await,
+        None,
+        "with no page named A, a link to A must dangle, not resolve to the renamed page {id_a}"
+    );
+
+    let id_a2 = create_page_from_link(&engine, "A")
+        .await
+        .expect("create the new page A");
+    assert_ne!(id_a2, id_a);
+    link_to_a(&engine, "after").await;
+
+    for source in ["before", "after"] {
+        assert_eq!(
+            link_resolved(handle, source).await.as_deref(),
+            Some(id_a2.as_str()),
+            "link [[A]] in block {source} must resolve to the page named A ({id_a2}), not to the \
+             renamed page B ({id_a})"
+        );
+    }
+}
+
+/// A `[[A]]` link resolved while page A still had that name.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "a rename does not re-resolve block_links rows; docs/Testing/bugfunnel/entries/2026-10-08-new-file-at-a-renamed-pages-old-path-takes-over-its-id.md"]
+async fn a_link_resolved_before_a_rename_resolves_to_the_page_with_that_name() {
+    let engine = block_engine().await;
+    let handle = engine.db_handle();
+
+    let id_a = create_page_from_link(&engine, "A")
+        .await
+        .expect("create page A");
+    link_to_a(&engine, "early").await;
+    assert_eq!(
+        link_resolved(handle, "early").await.as_deref(),
+        Some(id_a.as_str())
+    );
+    rename_page(&engine, &id_a, "B").await;
+    let id_a2 = create_page_from_link(&engine, "A")
+        .await
+        .expect("create the new page A");
+
+    assert_eq!(
+        link_resolved(handle, "early").await.as_deref(),
+        Some(id_a2.as_str()),
+        "link [[A]] must resolve to the page named A ({id_a2}), not to the renamed page B ({id_a})"
     );
 }

@@ -37,12 +37,6 @@ slow-timeout = { period = "60s", terminate-after = 10 }  # 10 min hard cap
 filter = "binary(two_instance_composed_pbt)"
 slow-timeout = { period = "60s", terminate-after = 20 }  # 20 min hard cap
 
-# The page-name convergence property builds two BackendEngines per case, 24
-# cases: 46s alone, past the 2 min default inside a full workspace run.
-[[profile.default.overrides]]
-filter = "binary_id(holon::create_page_from_link) & test(=inv_page_name_unique_converges_across_peers)"
-slow-timeout = { period = "60s", terminate-after = 5 }  # 5 min hard cap
-
 # The slice PBTs live in the LIB test binary, which the binary() filters above
 # cannot name, so they inherited the 2 min default while legitimately running
 # minutes. Measured 2026-08-12 on the `--features pbt --lib` run:

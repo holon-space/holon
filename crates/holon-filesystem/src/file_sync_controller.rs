@@ -3979,7 +3979,8 @@ impl FileSyncController {
     /// childless. Adopting the companion's `#+ID` up front means whoever
     /// ingests first creates the page under the id the companion resolves to,
     /// so no phantom is ever produced. When the companion has no `#+ID` (or no
-    /// companion file exists) the deterministic id from [`Self::free_page_id`]
+    /// companion file exists) the id from
+    /// [`DocumentManager::page_slot`](crate::sync_ports::DocumentManager::page_slot)
     /// is used — an org page and a `[[link]]`-created page for the same path
     /// still converge on one merge key.
     async fn resolve_dir_page_chain(&self, chain: &[&str]) -> Result<Block> {
@@ -4000,9 +4001,6 @@ impl FileSyncController {
             // path-derived id. Computed even when a page already exists so a
             // divergent claim can be disclosed loudly (never silently picked).
             let companion_id = self.companion_doc_id(&accumulated).await?;
-            let path_id = holon_api::link_parser::PageId::for_path(&accumulated)
-                .map_err(anyhow::Error::msg)?
-                .into_entity_uri();
 
             match self
                 .doc_manager
@@ -4033,43 +4031,33 @@ impl FileSyncController {
                     current_doc = Some(existing);
                 }
                 None => {
-                    let id = match companion_id {
-                        Some(id) => id,
-                        None => self.free_page_id(&accumulated, path_id).await?,
-                    };
-                    let mut new_doc =
-                        Block::new_text(id, current_parent_id.clone(), segment.to_string());
-                    new_doc.set_page(true);
                     // `create_forcing_id`: the adopted companion `#+ID` (or the
-                    // deterministic path id) IS this page's identity — never
-                    // substitute a same-`(parent,title)` row minted elsewhere.
-                    let created = self.doc_manager.create_forcing_id(new_doc).await?;
-                    current_parent_id = created.id.clone();
-                    current_doc = Some(created);
+                    // page_slot id) IS this page's identity — never substitute a
+                    // same-`(parent,title)` row minted elsewhere.
+                    let create = |id: EntityUri| {
+                        let mut new_doc =
+                            Block::new_text(id, current_parent_id.clone(), segment.to_string());
+                        new_doc.set_page(true);
+                        self.doc_manager.create_forcing_id(new_doc)
+                    };
+                    let page = match companion_id {
+                        Some(id) => create(id).await?,
+                        None => match self.doc_manager.page_slot(&accumulated, segment).await? {
+                            holon_api::PageSlot::Create(id) => create(id.into_entity_uri()).await?,
+                            holon_api::PageSlot::Existing(id) => {
+                                self.doc_manager
+                                    .existing_page(&id.into_entity_uri())
+                                    .await?
+                            }
+                        },
+                    };
+                    current_parent_id = page.id.clone();
+                    current_doc = Some(page);
                 }
             }
         }
 
         Ok(current_doc.unwrap())
-    }
-
-    /// The id a NEW page at `path` takes: `path_id` unless some other page
-    /// still holds it, then the first free id along the
-    /// [`PageId::for_path_beside`](holon_api::link_parser::PageId::for_path_beside) chain.
-    async fn free_page_id(&self, path: &str, path_id: EntityUri) -> Result<EntityUri> {
-        let mut id = path_id;
-        while let Some(holder) = self.doc_manager.get_by_id(&id).await? {
-            let next = holon_api::link_parser::PageId::for_path_beside(path, &id)
-                .map_err(anyhow::Error::msg)?
-                .into_entity_uri();
-            info!(
-                "[FileSyncController] page path '{path}' derives id {id}, which page '{}' still \
-                 holds; the new page takes {next}",
-                holder.content
-            );
-            id = next;
-        }
-        Ok(id)
     }
 
     /// Resolve the AUTHORITATIVE owning document of a block by walking its

@@ -2257,7 +2257,7 @@ impl SqlOperationProvider {
     /// Resolve the destination page chain for a block→page transform WITHOUT
     /// writing anything. Walks the `/`-joined `destination_path` segment by
     /// segment: an existing `Page` block is reused; a missing one is recorded
-    /// (with the deterministic id `PageId::for_path` will assign) so the engine
+    /// (with the id `holon_api::page_slot` assigns) so the engine
     /// can create it as an invertible `create`. Returns the leaf parent id plus
     /// the ordered list of pages the engine must mint first.
     ///
@@ -2299,20 +2299,51 @@ impl SqlOperationProvider {
                     parent_id = existing;
                 }
                 None => {
-                    let id = holon_api::link_parser::PageId::for_path(&seg_path)?
-                        .as_str()
-                        .to_string();
-                    missing.push(PlanSegment {
-                        id: id.clone(),
-                        name: name.to_string(),
-                        parent_id: parent_id.clone(),
-                    });
-                    parent_id = id;
+                    let slot = holon_api::page_slot(&seg_path, name, |id| async move {
+                        self.holder_title(&id)
+                            .await
+                            .map_err(|e| anyhow::anyhow!("{e}"))
+                    })
+                    .await
+                    .map_err(|e| format!("{e:#}"))?;
+                    match slot {
+                        holon_api::PageSlot::Existing(id) => parent_id = id.as_str().to_string(),
+                        holon_api::PageSlot::Create(id) => {
+                            let id = id.as_str().to_string();
+                            missing.push(PlanSegment {
+                                id: id.clone(),
+                                name: name.to_string(),
+                                parent_id: parent_id.clone(),
+                            });
+                            parent_id = id;
+                        }
+                    }
                 }
             }
             accumulated = seg_path;
         }
         Ok((parent_id, missing))
+    }
+
+    /// The title of the row holding `id` (`None` = no row; a row without
+    /// `content` reads as untitled).
+    async fn holder_title(&self, id: &EntityUri) -> Result<Option<String>> {
+        let sql = format!(
+            "SELECT content FROM {} WHERE id = '{}'",
+            self.table_name,
+            id.as_str().replace('\'', "''")
+        );
+        let rows = self
+            .db_handle
+            .query(&sql, HashMap::new())
+            .await
+            .map_err(|e| format!("reading the holder of {id}: {e}"))?;
+        Ok(rows.into_iter().next().map(|row| {
+            row.get("content")
+                .and_then(|v| v.as_string())
+                .unwrap_or_default()
+                .to_string()
+        }))
     }
 
     /// The dangling→resolved trigger: when a Page-tagged block is written,

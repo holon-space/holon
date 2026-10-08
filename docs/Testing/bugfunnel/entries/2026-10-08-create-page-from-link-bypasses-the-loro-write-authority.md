@@ -42,5 +42,14 @@ red before the fix (lane-logs/recreate/red1-red.log), green after
 allowlist and shape-gate sim turn it red on `inv-birth-contract-satisfied` and
 `inv-every-page-has-its-own-file` (lane-logs/recreate/red1-teeth.log).
 
-Open: the keystone generator still offers `CreatePageAtFreedPath` only at freed
-paths, so the random keystone does not reach a successful create.
+A click at a path a rename vacated now creates a new page beside the renamed one
+(`holon_api::page_slot`, PageIdentityDeterminism.md §5.3), so
+`CreatePageAtFreedPath` in the random keystone reaches a successful create; the
+reference mirrors the same function and the driver no longer tolerates
+`IdentityCollision`.
+
+## Known limits
+- No rollback mid-chain, as in `run_convert_block_to_page`: a failure while
+  creating segment k leaves segments 1..k-1 created, and a failing
+  `heal_page_links` leaves the chain created with no history entry. The error
+  names the failed segment but not the pages already created.

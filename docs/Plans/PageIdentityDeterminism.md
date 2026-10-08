@@ -191,15 +191,34 @@ different logical page). Convergence is over independent *creation* of the same
 page (the PBT), not over post-hoc renames.
 
 A new page whose path was vacated by a rename still finds
-`PageId::for_path(path)` held by the renamed page. Org-file ingest
-(`FileSyncController::free_page_id`) then mints
-`PageId::for_path_beside(path, held_id)`, a hash of the path and the held id,
-and repeats along that chain until it reaches a free id. The new page never
-upserts onto the renamed one, and write-back stores the minted id as the file's
-`#+ID`. The id depends only on the path and on the pages that already hold its
-earlier ids, so peers that saw the same rename mint the same id for the same new
-file. A dangling-link click at a vacated path is refused instead
-(`IdentityCollision`).
+`PageId::for_path(path)` held by the renamed page. Every page-creating path
+takes its id from one function, `holon_api::page_slot(path, title, holder)`
+(crates/holon-api/src/identity_recognition.rs): org-file ingest
+(`DocumentManager::page_slot`, also behind the default
+`get_or_create_by_name_chain`), a dangling-link click and the destination
+segments of `convert_block_to_page`
+(`SqlOperationProvider::resolve_destination_chain`). It walks
+`PageId::for_path(path)`, then `PageId::for_path_beside(path, previous_id)`, and
+stops at the first id that is unheld or held by an untitled placeholder (create
+there) or held by a page of the same title (that page exists). Each id it passes
+because a page of another title holds it is disclosed with a `warn!`. The new
+page never upserts onto the renamed one, and ingest's write-back stores the
+minted id as the file's `#+ID`. Two paths still refuse a held id: the leaf page
+of `convert_block_to_page` (`IdentityCollision`), and the journal rule
+(`holon_rule_watcher`), which skips the day whose derived id a renamed journal
+page holds.
+
+The id depends on the path and on the titles each peer's store holds at the
+candidate ids when it mints. Two peers mint the same id when their stores agree
+at those ids — in practice, when both have seen the same renames of that path.
+A peer that mints before a rename reaches it does not create a new page: it
+finds the not-yet-renamed page by name and binds to it. So two peers can bind
+the same new file to two ids (one to the beside id, one to the renamed page's id)
+until the CRDT delivers the rename and the `#+ID` write-back of one of them
+reaches the other; the file then carries whichever `#+ID` was written last, and
+no step discloses the disagreement. This was reasoned from the code, not
+measured: the two-instance harness relays CRDT state only, and cannot deliver a
+file to a peer ahead of the rename.
 
 ### 5.4 Bounded repair — `SqlOperationProvider::dedup_pages`
 

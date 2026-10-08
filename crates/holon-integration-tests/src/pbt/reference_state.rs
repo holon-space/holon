@@ -2895,22 +2895,11 @@ impl ReferenceState {
     /// that page as the parent, on a miss mint a page titled by the segment
     /// under the current parent.
     ///
-    /// The minted id is where the ORACLE ENCODES THE SPEC. When
-    /// `PageId::for_path(seg_path)` is FREE the page is minted there. When it
-    /// is already occupied -- the state a `RenamePage` leaves behind (title
-    /// changed, id preserved) -- the INTERIM identity policy (plan §5) has
-    /// production REFUSE the `create` FAIL LOUD rather than let its
-    /// `ON CONFLICT(id) DO UPDATE` clobber the renamed page. So the reference
-    /// models the refusal: no new page, no undo entry, no state change. The SUT
-    /// driver mirrors it by tolerating the `IdentityCollision`.
-    ///
-    /// END-STATE (plan §5, ruled 2026-07-26): a recreate at a freed path will
-    /// mint a DISTINCT id and bind the NAME to it. When that lands, replace the
-    /// refusal below with the unique-mint and single-source the rule with the
-    /// writer the way `BlockToPage` single-sources `PageId::for_page_under`, so
-    /// oracle and writer stay born-equal.
+    /// The minted id is [`holon_api::page_slot`] over the reference's blocks,
+    /// the rule the writer uses: a page a `RenamePage` retitled keeps its id,
+    /// so the new page takes the next id beside it
+    /// (docs/Plans/PageIdentityDeterminism.md §5.3).
     pub fn apply_create_page_at_path(&mut self, path: &str) {
-        use holon_api::link_parser::PageId;
         use holon_orgmode::models::OrgBlockExt;
 
         // `create_page_from_link` returns `declared_irreversible` -- it records
@@ -2937,28 +2926,23 @@ impl ReferenceState {
             match self.ref_resolve_page_name(&hint) {
                 Some(existing) => parent = existing,
                 None => {
-                    let id = PageId::for_path(&seg_path)
-                        .unwrap_or_else(|e| {
-                            panic!("apply_create_page_at_path: PageId::for_path({seg_path:?}): {e}")
-                        })
-                        .into_entity_uri();
-                    // INTERIM identity policy (plan §5): a derived id already held
-                    // by a DIFFERENT entity — exactly the state a `RenamePage`
-                    // leaves (title changed, id preserved) — makes production's
-                    // `create` FAIL LOUD. The op is REFUSED: nothing created,
-                    // nothing clobbered, no undo entry. Model that refusal (no
-                    // state change) and stop; the SUT driver mirrors it by
-                    // tolerating the `IdentityCollision`. (Only the leaf is ever
-                    // minted here — the generator gates every strict prefix to
-                    // resolve — so a refused leaf refuses the whole op.)
-                    //
-                    // END-STATE (plan §5, ruled 2026-07-26): a recreate at a
-                    // freed path mints a DISTINCT id and binds the NAME to it.
-                    // When that lands, replace this early return with the
-                    // unique-mint and single-source the rule with the writer.
-                    if self.domain.block_state.blocks.contains_key(&id) {
-                        return;
-                    }
+                    let blocks = &self.domain.block_state.blocks;
+                    let slot = futures::executor::block_on(holon_api::page_slot(
+                        &seg_path,
+                        trimmed,
+                        |id| std::future::ready(Ok(blocks.get(&id).map(|b| b.content.clone()))),
+                    ))
+                    .unwrap_or_else(|e| {
+                        panic!("apply_create_page_at_path: page_slot({seg_path:?}): {e:#}")
+                    });
+                    let id = match slot {
+                        holon_api::PageSlot::Existing(id) => {
+                            parent = id.into_entity_uri();
+                            accumulated = seg_path;
+                            continue;
+                        }
+                        holon_api::PageSlot::Create(id) => id.into_entity_uri(),
+                    };
                     let mut page = Block::new_text(id.clone(), parent.clone(), trimmed.to_string());
                     page.set_page(true);
                     let max_seq = self

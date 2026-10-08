@@ -19,6 +19,7 @@
 //! executor, never the recognition verdict.
 
 use crate::entity_uri::EntityUri;
+use crate::link_parser::PageId;
 use crate::link_parser::normalize_for_hash;
 use crate::storage_error::IdentityCollision;
 
@@ -81,6 +82,67 @@ pub fn recognize_derived_id(
     }
 }
 
+/// Where a page titled `title` at page path `path` lives, decided by
+/// [`page_slot`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PageSlot {
+    /// Create the page at this id: nothing holds it, or an untitled
+    /// placeholder that the create completes.
+    Create(PageId),
+    /// A page of this title already holds this id.
+    Existing(PageId),
+}
+
+/// Bound on the [`PageId::for_path_beside`] chain: each step means one more
+/// page of another title holds the previous id, i.e. one more rename away
+/// from this path.
+const MAX_PAGE_SLOT_STEPS: usize = 64;
+
+/// The id for a page titled `title` at `path` that the caller did not find by
+/// name: `PageId::for_path(path)`, or, while a page of another title holds
+/// that id (a renamed page keeps its id), the next id along the
+/// [`PageId::for_path_beside`] chain (docs/Plans/PageIdentityDeterminism.md
+/// §5.3). `holder_title` reads the current holder's title of an id (`None` =
+/// unheld) from the caller's write authority. Each passed holder is disclosed
+/// with a warning.
+pub async fn page_slot<F, Fut>(
+    path: &str,
+    title: &str,
+    mut holder_title: F,
+) -> anyhow::Result<PageSlot>
+where
+    F: FnMut(EntityUri) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<Option<String>>>,
+{
+    let mut id = PageId::for_path(path).map_err(anyhow::Error::msg)?;
+    for _ in 0..MAX_PAGE_SLOT_STEPS {
+        let holder = holder_title(id.as_entity_uri().clone()).await?;
+        match recognize_derived_id(id.as_entity_uri(), holder.as_deref(), title) {
+            Recognition::Free | Recognition::UnnamedPlaceholder => {
+                return Ok(PageSlot::Create(id));
+            }
+            Recognition::AlreadySatisfied => return Ok(PageSlot::Existing(id)),
+            Recognition::Collision(collision) => {
+                let next = PageId::for_path_beside(path, id.as_entity_uri())
+                    .map_err(anyhow::Error::msg)?;
+                tracing::warn!(
+                    path,
+                    held_id = %collision.id,
+                    held_title = %collision.held_title,
+                    new_id = %next.as_entity_uri(),
+                    "a page of another title holds the id this page path derives; the new page \
+                     {title:?} takes the next id beside it"
+                );
+                id = next;
+            }
+        }
+    }
+    anyhow::bail!(
+        "page_slot({path:?}): {MAX_PAGE_SLOT_STEPS} consecutive derived ids are held by pages of \
+         other titles; refusing to search further"
+    )
+}
+
 /// Sanitize a raw block-content string into the canonical page TITLE it maps to
 /// (parse-don't-validate). Trim, then strip any TRAILING `/` (the slash-menu
 /// trigger still trailing at plan time, or a stray separator) — `trim_end`
@@ -111,6 +173,78 @@ pub fn sanitize_page_title(content: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn slot(path: &str, title: &str, holders: &[(EntityUri, &str)]) -> PageSlot {
+        let holders: std::collections::HashMap<EntityUri, String> = holders
+            .iter()
+            .map(|(id, t)| (id.clone(), t.to_string()))
+            .collect();
+        futures::executor::block_on(page_slot(path, title, |id| {
+            std::future::ready(Ok(holders.get(&id).cloned()))
+        }))
+        .expect("page_slot")
+    }
+
+    fn path_id(path: &str) -> PageId {
+        PageId::for_path(path).unwrap()
+    }
+
+    #[test]
+    fn page_slot_on_a_free_path_is_the_path_id() {
+        assert_eq!(slot("A/B", "B", &[]), PageSlot::Create(path_id("A/B")));
+    }
+
+    #[test]
+    fn page_slot_steps_past_each_renamed_holder() {
+        let first = path_id("doc_904");
+        let second = PageId::for_path_beside("doc_904", first.as_entity_uri()).unwrap();
+        let third = PageId::for_path_beside("doc_904", second.as_entity_uri()).unwrap();
+        assert_eq!(
+            slot(
+                "doc_904",
+                "doc_904",
+                &[(first.as_entity_uri().clone(), "doc_905")]
+            ),
+            PageSlot::Create(second.clone())
+        );
+        assert_eq!(
+            slot(
+                "doc_904",
+                "doc_904",
+                &[
+                    (first.as_entity_uri().clone(), "doc_905"),
+                    (second.as_entity_uri().clone(), "doc_906"),
+                ]
+            ),
+            PageSlot::Create(third)
+        );
+    }
+
+    #[test]
+    fn page_slot_finds_the_page_of_that_title_beside_a_renamed_holder() {
+        let first = path_id("doc_904");
+        let second = PageId::for_path_beside("doc_904", first.as_entity_uri()).unwrap();
+        assert_eq!(
+            slot(
+                "doc_904",
+                "Doc_904",
+                &[
+                    (first.as_entity_uri().clone(), "doc_905"),
+                    (second.as_entity_uri().clone(), "doc_904"),
+                ]
+            ),
+            PageSlot::Existing(second)
+        );
+    }
+
+    #[test]
+    fn page_slot_completes_an_untitled_placeholder() {
+        let first = path_id("Music");
+        assert_eq!(
+            slot("Music", "Music", &[(first.as_entity_uri().clone(), "")]),
+            PageSlot::Create(first)
+        );
+    }
 
     fn id() -> EntityUri {
         EntityUri::block("61133fe7")

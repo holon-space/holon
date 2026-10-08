@@ -36,16 +36,38 @@ The keystone `CreateDocument` generator always names a fresh `doc_<n>.org`, so
 no generated sequence creates a file at a path that a rename or delete vacated.
 
 ## Remedy
-FIXED. `FileSyncController::free_page_id` gives a new page `for_path(path)`
-when it is free; when another page holds it, it follows
-`PageId::for_path_beside(path, held_id)` (crates/holon-api/src/link_parser.rs)
-to the first free id. Write-back stores that id as the file's `#+ID`.
-PageIdentityDeterminism.md §5.3 describes the rule.
+FIXED. Every page-creating path takes its id from `holon_api::page_slot`
+(crates/holon-api/src/identity_recognition.rs): `PageId::for_path(path)` when it
+is free, else the first free id along `PageId::for_path_beside(path, held_id)`
+(crates/holon-api/src/link_parser.rs), with each passed holder disclosed by a
+`warn!`. The callers are org-file ingest and the default
+`DocumentManager::get_or_create_by_name_chain` (both through
+`DocumentManager::page_slot`) and a dangling-link click
+(`SqlOperationProvider::resolve_destination_chain`). Write-back stores the id as the file's `#+ID`.
+PageIdentityDeterminism.md §5.3 describes the rule and when two peers can still
+mint different ids.
 
-Hand-authored row `a-new-file-at-a-renamed-pages-old-path-is-a-new-page`: red
-before the fix (lane-logs/recreate/red2-red.log), green after
-(lane-logs/recreate/red2-green.log). Teeth: `path_id` put back in place of
-`free_page_id` turns it red with the same timeout
-(lane-logs/recreate/red2-teeth.log).
+Hand-authored row `a-new-file-at-a-renamed-pages-old-path-is-a-new-page`: green
+(lane-logs/recreate3/d5-green.log). The `create_document` driver asserts that a
+new file takes no tracked file's page and changes none; with ingest put back on
+bare `PageId::for_path` the row goes red on that assertion,
+"doc_904.org took the page block:f3b1d47c… of the tracked file doc_905.org"
+(lane-logs/recreate3/d5-teeth.log:59). Red, green and teeth for the link click and
+the trait default: lane-logs/recreate3/red-d2.log, red-d3-d4-engine.log,
+green-cpfl-run*.log, teeth-d2.log, teeth-d3-linkclick.log.
 
-Open: the generator still does not re-create vacated file names.
+## Known limits
+- A `[[name]]` link whose `block_links` row resolved while the page still had
+  that name keeps pointing at the renamed page: no write path re-resolves the
+  junction when a page is renamed. Links written after the rename resolve by
+  name. Pinned by the ignored test
+  `a_link_resolved_before_a_rename_resolves_to_the_page_with_that_name`
+  (crates/holon/tests/create_page_from_link.rs).
+- `convert_block_to_page` still refuses its new page's id when a renamed page
+  holds it (`IdentityCollision`).
+- The journal rule still skips a day whose derived id a renamed journal page
+  holds. Creating the day's page beside it instead makes the rule mint a page
+  whenever it re-evaluates (boot, rule edits, clock moves), which the keystone
+  reference does not model (lane-logs/recreate3/gate-rows.log, row
+  `main-panel-drops-refocused-split-block`).
+- Open: the generator still does not re-create vacated file names.
