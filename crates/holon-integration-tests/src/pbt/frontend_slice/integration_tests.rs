@@ -791,7 +791,7 @@ async fn frontend_slice_org_blocks_match_ref_bites() {
 async fn frontend_slice_runs_no_error_widgets_over_real_render() {
     let comp = new_component().await;
     let sut = frontend_wide(comp);
-    let ref_ = CapMap::new();
+    let ref_ = crate::pbt::composed::fixtures::no_render_sources_ref();
 
     let report = run_selected(&composed_invariant_catalog(), &sut, &ref_).await;
 

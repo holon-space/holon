@@ -2,24 +2,173 @@
 //! stream, and the recovery screen is made of them. They must render from the
 //! parsed text alone, so this test parses each one, builds the root-layout
 //! perspective, parses every render source, and interprets each through the
-//! shadow builders. Authored input that a builder rejects must draw an error
-//! node: a panic there aborts a release build before any pixel.
+//! shadow builders. No asset may draw an `error` node or an unknown widget,
+//! and the root layout draws exactly its perspective's panels.
 
 use std::path::Path;
 use std::sync::Arc;
 
 use holon_api::EntityUri;
+use holon_api::QueryLanguage;
+use holon_api::RenderExpr;
 use holon_api::SourceLanguage;
 use holon_api::widget_spec::DataRow;
+use holon_frontend::ReactiveViewModel;
 use holon_frontend::RenderContext;
-use holon_frontend::StubBuilderServices;
 use holon_frontend::reactive::BuilderServices;
+use holon_frontend::render_interpreter::RenderInterpreter;
 
-fn render_json(expr: &holon_api::RenderExpr) -> serde_json::Value {
-    let services = StubBuilderServices::new();
+/// Services whose live queries start and stay empty, so a `live_query` in an
+/// asset renders as itself and any `error` node comes from the asset.
+struct AssetServices {
+    interpreter: Arc<RenderInterpreter<ReactiveViewModel>>,
+    link_classifier: holon_api::link_parser::LinkTargetClassifier,
+    rt_handle: tokio::runtime::Handle,
+}
+
+impl BuilderServices for AssetServices {
+    fn dispatch_intent_awaitable(
+        &self,
+        intent: holon_frontend::operations::OperationIntent,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = anyhow::Result<holon_core::Delivery>> + Send + 'static,
+        >,
+    > {
+        self.dispatch_intent(intent);
+        Box::pin(std::future::ready(Ok(holon_core::Delivery::Unproven {
+            detail: "AssetServices: test double, no delivery to prove".to_string(),
+        })))
+    }
+
+    fn interpret(&self, expr: &RenderExpr, ctx: &RenderContext) -> ReactiveViewModel {
+        self.interpreter.interpret(expr, ctx, self)
+    }
+
+    fn clone_arc(&self) -> Arc<dyn BuilderServices> {
+        Arc::new(Self {
+            interpreter: self.interpreter.clone(),
+            link_classifier: holon_api::link_parser::LinkTargetClassifier::default(),
+            rt_handle: self.rt_handle.clone(),
+        })
+    }
+
+    fn get_block_data(&self, _: &EntityUri) -> (RenderExpr, Vec<Arc<DataRow>>) {
+        (
+            RenderExpr::FunctionCall {
+                name: "table".to_string(),
+                args: vec![],
+            },
+            vec![],
+        )
+    }
+
+    fn link_classifier(&self) -> &holon_api::link_parser::LinkTargetClassifier {
+        &self.link_classifier
+    }
+
+    fn resolve_profile(&self, _: &DataRow) -> Option<holon_api::RenderProfile> {
+        None
+    }
+
+    fn watch_query(
+        &self,
+        _: &str,
+        _: QueryLanguage,
+        _: Option<holon_frontend::QueryContext>,
+    ) -> anyhow::Result<holon_api::EnrichedChangeStream> {
+        let (_tx, rx) = tokio::sync::mpsc::channel(1);
+        Ok(tokio_stream::wrappers::ReceiverStream::new(rx))
+    }
+
+    fn widget_state(&self, _: &str) -> holon_frontend::WidgetState {
+        holon_frontend::WidgetState::default()
+    }
+
+    fn dispatch_intent(&self, _: holon_frontend::operations::OperationIntent) {}
+
+    fn present_op(
+        &self,
+        op: holon_api::render_types::OperationDescriptor,
+        _: std::collections::HashMap<String, holon_api::Value>,
+    ) {
+        panic!(
+            "present_op({}.{}) is not reached by interpreting an asset",
+            op.entity_name, op.name
+        )
+    }
+
+    fn search_link_candidates(
+        &self,
+        _: &str,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = anyhow::Result<Vec<holon_api::link_candidate::LinkCandidate>>,
+                > + Send,
+        >,
+    > {
+        Box::pin(async { Ok(vec![]) })
+    }
+
+    fn runtime_handle(&self) -> tokio::runtime::Handle {
+        self.rt_handle.clone()
+    }
+}
+
+fn render_json(expr: &RenderExpr) -> serde_json::Value {
+    static RT: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    let rt = RT.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("runtime")
+    });
+    let services = AssetServices {
+        interpreter: Arc::new(holon_frontend::shadow_builders::build_shadow_interpreter()),
+        link_classifier: holon_api::link_parser::LinkTargetClassifier::default(),
+        rt_handle: rt.handle().clone(),
+    };
     let ctx = RenderContext::default().with_row(Arc::new(DataRow::new()));
     let vm = services.interpret(expr, &ctx).snapshot();
     serde_json::to_value(&vm).expect("ViewModel serializes")
+}
+
+/// The message of every `error` node in `node`'s tree.
+fn error_messages(node: &serde_json::Value) -> Vec<String> {
+    match node {
+        serde_json::Value::Object(map) => {
+            let own = (map.get("widget").and_then(|w| w.as_str()) == Some("error")).then(|| {
+                map.get("message")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("<no message>")
+                    .to_string()
+            });
+            own.into_iter()
+                .chain(map.values().flat_map(error_messages))
+                .collect()
+        }
+        serde_json::Value::Array(items) => items.iter().flat_map(error_messages).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// The block ids of every `live_block("…")` in `expr`.
+fn live_block_ids(expr: &RenderExpr) -> Vec<String> {
+    let own = match expr {
+        RenderExpr::FunctionCall { name, args } if name == "live_block" => {
+            args.first().and_then(|a| match &a.value {
+                RenderExpr::Literal {
+                    value: holon_api::Value::String(id),
+                } => Some(id.clone()),
+                _ => None,
+            })
+        }
+        _ => None,
+    };
+    own.into_iter()
+        .chain(expr.children().into_iter().flat_map(live_block_ids))
+        .collect()
 }
 
 fn contains_text(node: &serde_json::Value, needle: &str) -> bool {
@@ -29,21 +178,6 @@ fn contains_text(node: &serde_json::Value, needle: &str) -> bool {
         serde_json::Value::Array(items) => items.iter().any(|v| contains_text(v, needle)),
         _ => false,
     }
-}
-
-#[test]
-fn op_button_without_a_name_or_target_draws_an_error() {
-    let expr = holon_api::render_dsl::parse_render_dsl("op_button()").expect("parses");
-    let json = render_json(&expr);
-    assert_eq!(
-        json.get("widget").and_then(|w| w.as_str()),
-        Some("error"),
-        "op_button over a row with no `name`/`target_id` must draw an error node: {json}"
-    );
-    assert!(
-        contains_text(&json, "op_button"),
-        "the error must name the builder: {json}"
-    );
 }
 
 #[test]
@@ -86,6 +220,12 @@ fn every_default_asset_org_file_parses_and_renders() {
                 "{name}: render source {} names a widget the interpreter lacks: {json}",
                 block.id
             );
+            let errors = error_messages(&json);
+            assert!(
+                errors.is_empty(),
+                "{name}: render source {} draws error nodes: {errors:?}",
+                block.id
+            );
             render_sources += 1;
         }
 
@@ -96,7 +236,30 @@ fn every_default_asset_org_file_parses_and_renders() {
             let layout = spec
                 .layout_expr()
                 .unwrap_or_else(|e| panic!("index.org: layout does not synthesize: {e:#}"));
-            render_json(&layout);
+            let mut panels: Vec<String> = spec
+                .panels
+                .iter()
+                .filter(|p| p.is_displayable())
+                .map(|p| p.id.to_string())
+                .collect();
+            panels.sort();
+            assert!(
+                !panels.is_empty(),
+                "index.org: the root layout has no panel"
+            );
+            let mut drawn = live_block_ids(&layout);
+            drawn.sort();
+            drawn.dedup();
+            assert_eq!(
+                drawn, panels,
+                "index.org: the layout must draw exactly the perspective's displayable panels"
+            );
+            let json = render_json(&layout);
+            let errors = error_messages(&json);
+            assert!(
+                errors.is_empty(),
+                "index.org: the root layout draws error nodes: {errors:?}"
+            );
         }
     }
     assert!(

@@ -94,14 +94,23 @@ async fn the_cdc_rederivation_keeps_the_bool() {
     );
 }
 
-#[test]
-#[should_panic(expected = "String(\"yes\")")]
-fn a_value_that_is_neither_integer_nor_bool_is_refused() {
-    let _ = build(row(&[("enabled", Value::String("yes".to_string()))]));
+/// The toggle draws an `error` node whose message carries `shown`.
+fn assert_refused(value: Value, shown: &str) {
+    let (vm, _) = build(row(&[("enabled", value)]));
+    assert_eq!(vm.widget_name().as_deref(), Some("error"));
+    let message = vm.prop_str("message").unwrap_or_default();
+    assert!(
+        message.contains("enabled") && message.contains(shown),
+        "the refusal must name the field and the value {shown}: {message:?}"
+    );
 }
 
 #[test]
-#[should_panic(expected = "Integer(7)")]
+fn a_value_that_is_neither_integer_nor_bool_is_refused() {
+    assert_refused(Value::String("yes".to_string()), "String(\"yes\")");
+}
+
+#[test]
 fn an_integer_outside_zero_and_one_is_refused() {
-    let _ = build(row(&[("enabled", Value::Integer(7))]));
+    assert_refused(Value::Integer(7), "Integer(7)");
 }

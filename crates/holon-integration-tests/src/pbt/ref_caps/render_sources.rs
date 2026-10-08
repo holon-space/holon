@@ -7,6 +7,9 @@
 //! draws that render, or an error when it does not parse. A block with several
 //! render children is left out: prod picks one of them, and the model does not
 //! say which.
+//!
+//! Only authored blocks are predicted. The bundled seed layout is fixed text,
+//! pinned against the shipped asset by `frontend_suite::render_source_panels`.
 
 use std::collections::BTreeMap;
 
@@ -24,8 +27,12 @@ use crate::pbt::reference_state::ReferenceState;
 impl RefRenderSources for ReferenceState {
     fn expected_block_renders(&self) -> BTreeMap<EntityUri, ExpectedBlockRender> {
         let mut sources: BTreeMap<&EntityUri, Vec<&Block>> = BTreeMap::new();
+        let seed_doc = EntityUri::no_parent();
+        let block_docs = &self.domain.block_state.block_documents;
         for block in self.domain.block_state.blocks.values() {
-            if block.content_type == ContentType::Source {
+            if block.content_type == ContentType::Source
+                && block_docs.get(&block.parent_id) != Some(&seed_doc)
+            {
                 sources.entry(&block.parent_id).or_default().push(block);
             }
         }

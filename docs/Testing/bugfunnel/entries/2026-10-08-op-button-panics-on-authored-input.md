@@ -24,7 +24,6 @@ always carry both columns; no case authors it elsewhere.
 
 ## Remedy
 The builder returns `ViewModel::error("op_button", …)` naming the missing
-column. Pinned by `crates/holon-frontend/tests/default_assets_render_ready.rs`,
-which also parses and renders every `assets/default` org file. Other builders
-that still panic on authored input (`table`, `columns`, `state_toggle`) remain
-open.
+column. Pinned by `crates/holon-frontend/tests/authored_builder_input_draws_error.rs`.
+The same defect in `table`, `columns` and `state_toggle` is
+`2026-10-08-table-columns-state-toggle-panic-on-authored-input`.

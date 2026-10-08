@@ -216,11 +216,10 @@ holon_macros::widget_builder! {
                     .collect();
                 ViewModel::static_collection("columns", items, gap, ItemFlow::Stacked, Default::default())
             }
-            (None, _) => {
-                // No template, no positional children — fail loud rather than
-                // silently producing an empty or wrong result.
-                panic!("columns: no positional children and no item_template — nothing to render");
-            }
+            (None, _) => ViewModel::error(
+                "columns",
+                "columns: no positional children and no `item_template:` — nothing to render",
+            ),
         }
     }
 }

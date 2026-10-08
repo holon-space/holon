@@ -241,15 +241,21 @@ impl<'a> BlockDomain<'a> {
             .is_some_and(|v| !v.is_null());
 
         let Some(query_source) = query_source else {
-            // A block with no query source of its own draws its render child
-            // when it has one. Otherwise it is a bare leaf, except when a
+            // A block with no query source of its own is a leaf, except when a
             // region has navigated to it: then it stands for its whole subtree
-            // and must supply the descendants query itself.
-            return if has_render_source {
+            // and supplies the descendants query itself. Either way its render
+            // child, when it has one, draws those rows.
+            return if self.is_focus_root(block_id).await? {
+                let render_expr = if has_render_source {
+                    let parsed = Self::parse_render_source(block_id, &block_info)?;
+                    self.splice_collection_view(block_id, parsed).await?.0
+                } else {
+                    self.collection_render_expr(block_id).await?
+                };
+                self.render_region_root(block_id, render_expr).await
+            } else if has_render_source {
                 let render_expr = Self::parse_render_source(block_id, &block_info)?;
                 self.render_leaf_block(block_id, render_expr).await
-            } else if self.is_focus_root(block_id).await? {
-                self.render_region_root(block_id).await
             } else {
                 self.render_leaf_block(block_id, Self::render_entity_expr())
                     .await
@@ -310,18 +316,11 @@ impl<'a> BlockDomain<'a> {
         // the marker is present the composed layout owns its own view-mode
         // switcher, so we skip the auto query-source switcher wrap (which would
         // nest a second result/source switcher above it).
-        let mut composes_collection_view = false;
-        let result_expr = if has_render_source {
+        let (result_expr, composes_collection_view) = if has_render_source {
             let parsed = Self::parse_render_source(block_id, &block_info)?;
-            if contains_collection_view(&parsed) {
-                composes_collection_view = true;
-                let collection = self.collection_render_expr(block_id).await?;
-                substitute_collection_view(parsed, &collection)
-            } else {
-                parsed
-            }
+            self.splice_collection_view(block_id, parsed).await?
         } else {
-            self.collection_render_expr(block_id).await?
+            (self.collection_render_expr(block_id).await?, false)
         };
 
         let render_expr = if composes_collection_view {
@@ -336,6 +335,20 @@ impl<'a> BlockDomain<'a> {
         };
 
         Ok((render_expr, change_stream))
+    }
+
+    /// `parsed` with its `collection_view()` marker, if any, replaced by the
+    /// block's collection view; the flag says whether a marker was replaced.
+    async fn splice_collection_view(
+        &self,
+        block_id: &EntityUri,
+        parsed: RenderExpr,
+    ) -> Result<(RenderExpr, bool)> {
+        if !contains_collection_view(&parsed) {
+            return Ok((parsed, false));
+        }
+        let collection = self.collection_render_expr(block_id).await?;
+        Ok((substitute_collection_view(parsed, &collection), true))
     }
 
     /// The block's profile-derived default collection view (tree/table/board
@@ -698,8 +711,8 @@ impl<'a> BlockDomain<'a> {
         Ok(!rows.is_empty())
     }
 
-    /// Render a focus root that authors no query source: its subtree, through
-    /// the profile's collection view.
+    /// Render a focus root that authors no query source: its subtree, drawn
+    /// with `render_expr`.
     ///
     /// The walk descends through plain blocks and stops at `Page` children —
     /// a page owns a file and renders as its own root, so it contributes one
@@ -707,6 +720,7 @@ impl<'a> BlockDomain<'a> {
     async fn render_region_root(
         &self,
         block_id: &EntityUri,
+        render_expr: RenderExpr,
     ) -> Result<(RenderExpr, RowChangeStream)> {
         let sql = root_subtree_watch_sql();
 
@@ -723,7 +737,6 @@ impl<'a> BlockDomain<'a> {
                 crate::api::backend_engine::WatchViewKind::Root,
             )
             .await?;
-        let render_expr = self.collection_render_expr(block_id).await?;
 
         Ok((render_expr, change_stream))
     }

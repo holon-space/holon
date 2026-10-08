@@ -21,14 +21,17 @@ holon_macros::widget_builder! {
         // Both parsed here, at the DSL boundary, so an unknown word is one
         // refusal rather than a mis-painted control every frontend re-derives.
         let appearance = match ba.args.get_string("appearance") {
-            Some(raw) => crate::view_model::StateToggleAppearance::parse(raw)
-                .unwrap_or_else(|e| panic!("{e}")),
+            Some(raw) => match crate::view_model::StateToggleAppearance::parse(raw) {
+                Ok(appearance) => appearance,
+                Err(e) => return ViewModel::error("state_toggle", e),
+            },
             None => crate::view_model::StateToggleAppearance::default(),
         };
         let binding = match ba.args.get_string("binding") {
-            Some(raw) => {
-                crate::view_model::StateToggleBinding::parse(raw).unwrap_or_else(|e| panic!("{e}"))
-            }
+            Some(raw) => match crate::view_model::StateToggleBinding::parse(raw) {
+                Ok(binding) => binding,
+                Err(e) => return ViewModel::error("state_toggle", e),
+            },
             None => crate::view_model::StateToggleBinding::default(),
         };
 
@@ -36,21 +39,24 @@ holon_macros::widget_builder! {
         // bool. `state_display` speaks only the word vocabulary, so the bool
         // arm has no label to show — its control is the switch itself.
         let bound = field.clone();
-        let read_current = move |row: &holon_api::widget_spec::DataRow| -> (Value, String) {
-            match binding {
-                crate::view_model::StateToggleBinding::Bool => {
-                    let on = crate::view_model::bool_from_row_value(&bound, row.get(&bound))
-                        .unwrap_or_else(|e| panic!("{e}"));
-                    (Value::Boolean(on), String::new())
+        let read_current =
+            move |row: &holon_api::widget_spec::DataRow| -> Result<(Value, String), String> {
+                match binding {
+                    crate::view_model::StateToggleBinding::Bool => {
+                        let on = crate::view_model::bool_from_row_value(&bound, row.get(&bound))?;
+                        Ok((Value::Boolean(on), String::new()))
+                    }
+                    crate::view_model::StateToggleBinding::Words => {
+                        let word = row.get(&bound).and_then(|v| v.as_string()).unwrap_or("");
+                        let (label, _semantic) = state_display(word);
+                        Ok((Value::String(word.to_string()), label.to_string()))
+                    }
                 }
-                crate::view_model::StateToggleBinding::Words => {
-                    let word = row.get(&bound).and_then(|v| v.as_string()).unwrap_or("");
-                    let (label, _semantic) = state_display(word);
-                    (Value::String(word.to_string()), label.to_string())
-                }
-            }
+            };
+        let (current, label) = match read_current(&row_arc) {
+            Ok(read) => read,
+            Err(e) => return ViewModel::error("state_toggle", e),
         };
-        let (current, label) = read_current(&row_arc);
 
         let states = match resolve_states(ba.args, ba.ctx.row()) {
             Ok(states) => states.join(","),
@@ -94,11 +100,25 @@ holon_macros::widget_builder! {
         // above is the final value those call sites need.
         if let Some(runtime) = ba.services.try_runtime_handle() {
             let props_handle = vm.props.clone();
-            let derive = move |row: Arc<holon_api::widget_spec::DataRow>| {
-                let (current, label) = read_current(&row);
-                let mut p = props_handle.lock_mut();
-                p.insert("current".to_string(), current);
-                p.insert("label".to_string(), Value::String(label));
+            let expr_handle = vm.expr.clone();
+            let toggle_expr = expr_handle.get_cloned();
+            // A row that stops fitting the binding turns this node into an
+            // `error` node until a fitting value arrives.
+            let derive = move |row: Arc<holon_api::widget_spec::DataRow>| match read_current(&row) {
+                Ok((current, label)) => {
+                    let mut p = props_handle.lock_mut();
+                    p.insert("current".to_string(), current);
+                    p.insert("label".to_string(), Value::String(label));
+                    p.remove("message");
+                    drop(p);
+                    expr_handle.set_neq(toggle_expr.clone());
+                }
+                Err(e) => {
+                    props_handle
+                        .lock_mut()
+                        .insert("message".to_string(), Value::String(e));
+                    expr_handle.set_neq(ViewModel::error("state_toggle", "").expr.get_cloned());
+                }
             };
             // The initial signal emission re-sets the same values we
             // already baked into `__props` — a no-op `.insert()` of the

@@ -489,6 +489,30 @@ pub fn viewmodel_map(error_count: Option<usize>) -> CapMap {
     Config::new().with(FixtureViewModel { error_count }).build()
 }
 
+/// A reference model with no block whose render it predicts.
+pub struct FixtureNoRenderSources;
+
+impl holon_pbt_core::capabilities::RefRenderSources for FixtureNoRenderSources {
+    fn expected_block_renders(
+        &self,
+    ) -> std::collections::BTreeMap<EntityUri, holon_pbt_core::capabilities::ExpectedBlockRender>
+    {
+        std::collections::BTreeMap::new()
+    }
+}
+
+impl CapProvider for FixtureNoRenderSources {
+    fn register(self: Arc<Self>, caps: &mut CapMap) {
+        caps.insert(self as Arc<dyn holon_pbt_core::capabilities::RefRenderSources>);
+    }
+}
+
+/// Build a reference `CapMap` hosting `RefRenderSources` with nothing to
+/// predict.
+pub fn no_render_sources_ref() -> CapMap {
+    Config::new().with(FixtureNoRenderSources).build()
+}
+
 /// A hand-crafted [`ComposedBudget`] SUT — returns a canned
 /// [`SqlBudgetReport`], so the `inv-sql-budget` catch test can inject an
 /// *enforced* violation without a real span collector / `MetricsSut` lifecycle

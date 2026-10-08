@@ -27,11 +27,17 @@
 //!   render — `ui_watcher`'s `error_render_expr` fallback — is outside the
 //!   invariant's reach entirely
 //!   (`2026-08-26-render-failure-invisible-warn-and-root-only-oracle`).
+//!
+//! A block whose render source does not parse is expected to draw an error
+//! (`RefRenderSources`, judged by `inv-unparseable-render-is-error-node`), so
+//! that one block's own error node is not counted.
 
 use std::collections::BTreeSet;
 use std::collections::HashSet;
 
 use holon_pbt_core::capabilities::EntityUri;
+use holon_pbt_core::capabilities::ExpectedBlockRender;
+use holon_pbt_core::capabilities::RefRenderSources;
 use holon_pbt_core::capabilities::SutRenderer;
 use holon_pbt_core::capabilities::SutViewSelection;
 use holon_pbt_core::capabilities::WidgetSnapshot;
@@ -48,20 +54,27 @@ impl InvViewmodelNoErrorWidgets {
 #[allow(async_fn_in_trait)]
 impl<R, S> Invariant<R, S> for InvViewmodelNoErrorWidgets
 where
+    R: RefRenderSources,
     S: SutViewSelection + SutRenderer,
 {
     fn id(&self) -> InvariantId {
         Self::ID
     }
 
-    async fn check(&self, _: &R, sut: &S) -> InvariantResult {
+    async fn check(&self, ref_: &R, sut: &S) -> InvariantResult {
         let Some(root_count) = sut.headless_error_node_count().await else {
             return InvariantResult::Skipped(
                 "headless engine not installed or tree not ready".into(),
             );
         };
 
-        let per_block = per_block_errors(sut).await;
+        let unparseable: HashSet<EntityUri> = ref_
+            .expected_block_renders()
+            .into_iter()
+            .filter(|(_, e)| matches!(e, ExpectedBlockRender::ParseError { .. }))
+            .map(|(id, _)| id)
+            .collect();
+        let per_block = per_block_errors(sut, &unparseable).await;
         if root_count == 0 && per_block.is_empty() {
             return InvariantResult::Ok;
         }
@@ -79,10 +92,14 @@ where
 }
 
 /// `"<block id>: <error message>"` for every error widget in a per-block live
-/// tree, BFS-discovered from the root's `live_block` references. Blocks that
-/// don't resolve (`widget_tree_for` → `None`) are skipped: not-yet-watchable
-/// is the loading state, not a render failure.
-async fn per_block_errors<S: SutRenderer>(sut: &S) -> BTreeSet<String> {
+/// tree, BFS-discovered from the root's `live_block` references, except the
+/// root error node of an `unparseable` block's own tree. Blocks that don't
+/// resolve (`widget_tree_for` → `None`) are skipped: not-yet-watchable is the
+/// loading state, not a render failure.
+async fn per_block_errors<S: SutRenderer>(
+    sut: &S,
+    unparseable: &HashSet<EntityUri>,
+) -> BTreeSet<String> {
     let mut found: BTreeSet<String> = BTreeSet::new();
     let mut visited: HashSet<EntityUri> = HashSet::new();
     let mut worklist: Vec<EntityUri> = live_block_refs(&sut.widget_tree_snapshot().await);
@@ -94,7 +111,9 @@ async fn per_block_errors<S: SutRenderer>(sut: &S) -> BTreeSet<String> {
         let Some(snap) = sut.widget_tree_for(&id).await else {
             continue;
         };
-        for node in snap.walk().filter(|n| n.kind == "error") {
+        let expected_error = unparseable.contains(&id) && snap.kind == "error";
+        let errors = snap.walk().filter(|n| n.kind == "error");
+        for node in errors.skip(usize::from(expected_error)) {
             let message = node
                 .props
                 .get("message")
@@ -118,6 +137,31 @@ fn live_block_refs(tree: &WidgetSnapshot) -> Vec<EntityUri> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A model whose only predicted render-source blocks are `unparseable`.
+    struct Unparseable(Vec<&'static str>);
+
+    impl RefRenderSources for Unparseable {
+        fn expected_block_renders(
+            &self,
+        ) -> std::collections::BTreeMap<EntityUri, ExpectedBlockRender> {
+            self.0
+                .iter()
+                .map(|id| {
+                    (
+                        EntityUri::parse(id).expect("test id"),
+                        ExpectedBlockRender::ParseError {
+                            parse_error: "unclosed".to_string(),
+                        },
+                    )
+                })
+                .collect()
+        }
+    }
+
+    fn no_model() -> Unparseable {
+        Unparseable(Vec::new())
+    }
 
     fn node(kind: &str, entity_id: Option<&str>, children: Vec<WidgetSnapshot>) -> WidgetSnapshot {
         WidgetSnapshot {
@@ -219,7 +263,7 @@ mod tests {
             )],
         };
 
-        let result = InvViewmodelNoErrorWidgets.check(&(), &sut).await;
+        let result = InvViewmodelNoErrorWidgets.check(&no_model(), &sut).await;
 
         let InvariantResult::Fail(msg) = result else {
             panic!("an error widget in a per-block live tree must FAIL; got {result:?}");
@@ -260,11 +304,55 @@ mod tests {
             ],
         };
 
-        let result = InvViewmodelNoErrorWidgets.check(&(), &sut).await;
+        let result = InvViewmodelNoErrorWidgets.check(&no_model(), &sut).await;
 
         assert!(
             matches!(&result, InvariantResult::Fail(m) if m.contains("block:inner")),
             "a two-hop live_block reference must still be walked; got {result:?}",
+        );
+    }
+
+    /// The model expects `block:bad` to draw its parse error: that error node
+    /// alone is not counted, an error in another block still is.
+    #[tokio::test]
+    async fn an_expected_parse_error_is_exempt_only_for_its_block() {
+        let sut = ForestSut {
+            root_error_count: 0,
+            root: node(
+                "column",
+                None,
+                vec![
+                    node("live_block", Some("block:bad"), Vec::new()),
+                    node("live_block", Some("block:other"), Vec::new()),
+                ],
+            ),
+            per_block: vec![
+                (
+                    "block:bad",
+                    error_node("block:bad: render source does not parse"),
+                ),
+                (
+                    "block:other",
+                    node("column", Some("block:other"), vec![error_node("boom")]),
+                ),
+            ],
+        };
+
+        let exempt_bad = Unparseable(vec!["block:bad"]);
+        let result = InvViewmodelNoErrorWidgets.check(&exempt_bad, &sut).await;
+        let InvariantResult::Fail(msg) = result else {
+            panic!("the error in block:other must still FAIL; got {result:?}");
+        };
+        assert!(
+            msg.contains("block:other") && !msg.contains("block:bad"),
+            "only block:other's error must be reported; got {msg:?}"
+        );
+
+        let exempt_both = Unparseable(vec!["block:bad", "block:other"]);
+        let result = InvViewmodelNoErrorWidgets.check(&exempt_both, &sut).await;
+        assert!(
+            matches!(&result, InvariantResult::Fail(m) if m.contains("block:other")),
+            "an error nested below a block's root is not its expected parse error; got {result:?}"
         );
     }
 
@@ -288,7 +376,7 @@ mod tests {
         };
 
         assert!(matches!(
-            InvViewmodelNoErrorWidgets.check(&(), &sut).await,
+            InvViewmodelNoErrorWidgets.check(&no_model(), &sut).await,
             InvariantResult::Ok
         ));
     }
@@ -348,7 +436,9 @@ mod tests {
         }
 
         assert!(matches!(
-            InvViewmodelNoErrorWidgets.check(&(), &Unready).await,
+            InvViewmodelNoErrorWidgets
+                .check(&no_model(), &Unready)
+                .await,
             InvariantResult::Skipped(_)
         ));
     }

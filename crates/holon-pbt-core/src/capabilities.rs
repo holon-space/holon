@@ -2732,8 +2732,8 @@ pub enum ExpectedBlockRender {
 /// Reference-side twin of a block's own render (`watch_ui` of the block).
 #[holon_macros::capmap_adapter] // sync trait → no async-trait
 pub trait RefRenderSources {
-    /// Every block with a render source child whose render the model can
-    /// predict, keyed by the block.
+    /// Every authored block with a render source child whose render the
+    /// model can predict, keyed by the block.
     fn expected_block_renders(&self) -> BTreeMap<EntityUri, ExpectedBlockRender>;
 }
 

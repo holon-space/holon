@@ -65,70 +65,71 @@ fn cell_wraps(cell: &RenderExpr) -> bool {
     }
 }
 
-fn parse_width(expr: Option<&RenderExpr>) -> ColumnWidth {
+fn parse_width(expr: Option<&RenderExpr>) -> Result<ColumnWidth, String> {
     match expr {
-        None => ColumnWidth::Flex(1.0),
+        None => Ok(ColumnWidth::Flex(1.0)),
         Some(RenderExpr::FunctionCall { name, args }) => {
             let n = args.first().and_then(|a| match &a.value {
                 RenderExpr::Literal { value } => value.as_f64(),
                 _ => None,
             });
             match name.as_str() {
-                "flex" => ColumnWidth::Flex(n.unwrap_or(1.0) as f32),
-                "fixed" => ColumnWidth::Fixed(n.unwrap_or_else(|| {
-                    panic!("table column `width: fixed(px)` needs a numeric px, got {expr:?}")
-                }) as f32),
-                other => panic!(
+                "flex" => Ok(ColumnWidth::Flex(n.unwrap_or(1.0) as f32)),
+                "fixed" => n.map(|px| ColumnWidth::Fixed(px as f32)).ok_or_else(|| {
+                    format!("table column `width: fixed(px)` needs a numeric px, got {expr:?}")
+                }),
+                other => Err(format!(
                     "table column `width` must be flex(w) or fixed(px), got `{other}(…)` — \
                      content-max/auto width is unsupported (needs a cross-row measurement pass)"
-                ),
+                )),
             }
         }
-        Some(other) => panic!("table column `width` must be flex(w) or fixed(px), got {other:?}"),
+        Some(other) => Err(format!(
+            "table column `width` must be flex(w) or fixed(px), got {other:?}"
+        )),
     }
 }
 
-fn parse_columns(expr: &RenderExpr) -> Vec<ColumnDef> {
-    let items = match expr {
-        RenderExpr::Array { items } => items,
-        other => panic!("table `columns:` must be a list of column maps, got {other:?}"),
+fn parse_columns(expr: &RenderExpr) -> Result<Vec<ColumnDef>, String> {
+    let RenderExpr::Array { items } = expr else {
+        return Err(format!(
+            "table `columns:` must be a list of column maps, got {expr:?}"
+        ));
     };
-    assert!(
-        !items.is_empty(),
-        "table `columns:` must list at least one column"
-    );
+    if items.is_empty() {
+        return Err("table `columns:` must list at least one column".to_string());
+    }
     items
         .iter()
         .map(|item| {
-            let fields = match item {
-                RenderExpr::Object { fields } => fields,
-                other => {
-                    panic!(
-                        "each table column must be a map #{{header, cell, width}}, got {other:?}"
-                    )
-                }
+            let RenderExpr::Object { fields } = item else {
+                return Err(format!(
+                    "each table column must be a map #{{header, cell, width}}, got {item:?}"
+                ));
             };
             let header = match fields.get("header") {
                 Some(RenderExpr::Literal {
                     value: Value::String(s),
                 }) => s.clone(),
                 Some(other) => {
-                    panic!("table column `header` must be a string literal, got {other:?}")
+                    return Err(format!(
+                        "table column `header` must be a string literal, got {other:?}"
+                    ));
                 }
-                None => panic!("table column is missing `header`: {fields:?}"),
+                None => return Err(format!("table column is missing `header`: {fields:?}")),
             };
             let cell = fields
                 .get("cell")
                 .cloned()
-                .unwrap_or_else(|| panic!("table column `{header}` is missing `cell`"));
-            let width = parse_width(fields.get("width"));
+                .ok_or_else(|| format!("table column `{header}` is missing `cell`"))?;
+            let width = parse_width(fields.get("width"))?;
             let wraps = cell_wraps(&cell);
-            ColumnDef {
+            Ok(ColumnDef {
                 header,
                 cell,
                 width,
                 wraps,
-            }
+            })
         })
         .collect()
 }
@@ -196,17 +197,20 @@ fn column_minimums(columns: &[ColumnDef], authored_w: f32, gap: f32) -> Vec<Opti
 ///
 /// Absent is a legal answer and means no floor — a table that never declared
 /// the width it was sized for has no budget to hold its columns to.
-fn parse_min_width(value: Option<&Value>) -> Option<f32> {
-    let value = value?;
+fn parse_min_width(value: Option<&Value>) -> Result<Option<f32>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
     let n = value
         .as_f64()
-        .unwrap_or_else(|| panic!("table `min_width` must be a number of px, got {value:?}"));
-    assert!(
-        n > 0.0,
-        "table `min_width` is the container width the column weights were authored against, so it \
-         must be positive; got {n}"
-    );
-    Some(n as f32)
+        .ok_or_else(|| format!("table `min_width` must be a number of px, got {value:?}"))?;
+    if n <= 0.0 {
+        return Err(format!(
+            "table `min_width` is the container width the column weights were authored against, \
+             so it must be positive; got {n}"
+        ));
+    }
+    Ok(Some(n as f32))
 }
 
 /// The gap BETWEEN columns. Shipped to the renderer as a prop rather than
@@ -305,8 +309,15 @@ holon_macros::widget_builder! {
         // template comes from `columns:` instead. Keeping the macro's
         // `Collection` param anyway is what makes the bare arm above provably
         // the original widget.
-        let columns = parse_columns(spec);
-        let props = geometry_props(&columns, parse_min_width(ba.args.named.get("min_width")));
+        let columns = match parse_columns(spec) {
+            Ok(columns) => columns,
+            Err(msg) => return ViewModel::error("table", msg),
+        };
+        let min_width = match parse_min_width(ba.args.named.get("min_width")) {
+            Ok(min_width) => min_width,
+            Err(msg) => return ViewModel::error("table", msg),
+        };
+        let props = geometry_props(&columns, min_width);
         let item_template = row_template(&columns);
         let sort_key = holon_api::render_eval::sort_key_column(ba.args).map(|s| s.to_string());
         let rules = crate::row_pipeline::parse_rules_arg(ba.args.named.get("rules"));
@@ -414,7 +425,7 @@ mod tests {
                 ]),
             ],
         };
-        let cols = parse_columns(&spec);
+        let cols = parse_columns(&spec).expect("valid spec");
         assert_eq!(cols.len(), 2);
         assert_eq!(cols[0].header, "Provider");
         assert!(matches!(cols[0].width, ColumnWidth::Flex(w) if (w - 2.0).abs() < f32::EPSILON));
@@ -429,41 +440,7 @@ mod tests {
         let spec = RenderExpr::Array {
             items: vec![column(vec![("header", lit("A")), ("cell", lit("x"))])],
         };
-        let cols = parse_columns(&spec);
+        let cols = parse_columns(&spec).expect("valid spec");
         assert!(matches!(cols[0].width, ColumnWidth::Flex(w) if (w - 1.0).abs() < f32::EPSILON));
-    }
-
-    #[test]
-    #[should_panic(expected = "missing `header`")]
-    fn rejects_column_without_header() {
-        let spec = RenderExpr::Array {
-            items: vec![column(vec![("cell", lit("x"))])],
-        };
-        parse_columns(&spec);
-    }
-
-    #[test]
-    #[should_panic(expected = "content-max/auto width is unsupported")]
-    fn rejects_content_max_width() {
-        let spec = RenderExpr::Array {
-            items: vec![column(vec![
-                ("header", lit("A")),
-                ("cell", lit("x")),
-                (
-                    "width",
-                    RenderExpr::FunctionCall {
-                        name: "auto".to_string(),
-                        args: vec![],
-                    },
-                ),
-            ])],
-        };
-        parse_columns(&spec);
-    }
-
-    #[test]
-    #[should_panic(expected = "must be a list of column maps")]
-    fn rejects_non_array_spec() {
-        parse_columns(&lit("not a list"));
     }
 }

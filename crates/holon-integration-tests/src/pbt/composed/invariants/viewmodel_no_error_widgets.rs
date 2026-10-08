@@ -1,6 +1,6 @@
 //! `inv-viewmodel-no-error-widgets` — the rendered ViewModel FOREST has no
-//! `Error` widget nodes. `Needs SutViewSelection + SutRenderer` (no
-//! reference): a SUT-internal liveness property of the render pipeline.
+//! `Error` widget nodes beyond the parse errors the model expects. `Needs
+//! SutViewSelection + SutRenderer + RefRenderSources`.
 //! Selected by any slice with a renderer/ViewModel — today the frontend
 //! slice's real headless `ReactiveEngine` (where it runs over the actual
 //! CDC→watch→interpret trees) and the window slice; both register both caps.
@@ -10,6 +10,7 @@
 //! `2026-08-26-render-failure-invisible-warn-and-root-only-oracle` records.
 
 use holon_pbt_core::RunMode;
+use holon_pbt_core::capabilities::RefRenderSources;
 use holon_pbt_core::capabilities::SutRenderer;
 use holon_pbt_core::capabilities::SutViewSelection;
 use holon_pbt_core::composition::Attribution;
@@ -31,7 +32,7 @@ pub fn wire() -> Box<dyn CapInvariant> {
                 CapId::of::<dyn SutRenderer>(),
             ],
             sut_absent: Vec::new(),
-            ref_present: Vec::new(),
+            ref_present: vec![CapId::of::<dyn RefRenderSources>()],
         },
         Attribution::at(Layer::ViewModel, file!()),
     ))
@@ -46,7 +47,7 @@ mod tests {
     #[tokio::test]
     async fn frontend_no_error_widgets_passes_on_clean_tree() {
         let sut = viewmodel_map(Some(0));
-        let ref_ = CapMap::new();
+        let ref_ = no_render_sources_ref();
 
         let report = run_selected(&composed_invariant_catalog(), &sut, &ref_).await;
 
@@ -71,7 +72,7 @@ mod tests {
             EntityUri::no_parent(),
             "root",
         )]);
-        let ref_ = CapMap::new();
+        let ref_ = no_render_sources_ref();
 
         let report = run_selected(&composed_invariant_catalog(), &sut, &ref_).await;
 
@@ -90,7 +91,7 @@ mod tests {
     #[tokio::test]
     async fn frontend_no_error_widgets_catches_error_nodes() {
         let sut = viewmodel_map(Some(2));
-        let ref_ = CapMap::new();
+        let ref_ = no_render_sources_ref();
 
         let report = run_selected(&composed_invariant_catalog(), &sut, &ref_).await;
 
