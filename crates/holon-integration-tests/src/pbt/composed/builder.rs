@@ -41,6 +41,7 @@ use holon_loro::LoroBackend;
 use holon_loro::LoroDocumentStore;
 use holon_loro_testing::LoroBackendComponent;
 use holon_pbt_core::Actor;
+use holon_pbt_core::BootFault;
 use holon_pbt_core::ComponentSet;
 use holon_pbt_core::Projection;
 use holon_pbt_core::StorageAdapter;
@@ -182,6 +183,7 @@ pub async fn compose_sut_windowed_base(set: &ComponentSet, resolver: &IdResolver
         None,
         None,
         IntegrationConnectTiming::Instant,
+        &BootFault::None,
     )
     .await
 }
@@ -206,6 +208,7 @@ pub async fn compose_sut_windowed_base_seeded(
         None,
         None,
         IntegrationConnectTiming::Instant,
+        &BootFault::None,
     )
     .await
 }
@@ -247,6 +250,7 @@ pub async fn compose_sut_seeded(
         None,
         None,
         IntegrationConnectTiming::Instant,
+        &BootFault::None,
     )
     .await
 }
@@ -271,6 +275,7 @@ pub async fn compose_sut_seeded_with_peer_id(
         Some(peer_id),
         None,
         IntegrationConnectTiming::Instant,
+        &BootFault::None,
     )
     .await
 }
@@ -285,6 +290,7 @@ pub async fn compose_sut_keystone(
     seed_tree: &[NewBlock],
     peer_id: Option<u64>,
     connect: IntegrationConnectTiming,
+    boot_fault: &BootFault,
 ) -> ComposedSut {
     compose_sut_seeded_impl(
         set,
@@ -295,6 +301,7 @@ pub async fn compose_sut_keystone(
         peer_id,
         None,
         connect,
+        boot_fault,
     )
     .await
 }
@@ -325,6 +332,7 @@ pub async fn compose_sut_over_existing(
         None,
         Some(frontend),
         IntegrationConnectTiming::Instant,
+        &BootFault::None,
     )
     .await
 }
@@ -348,6 +356,7 @@ async fn compose_sut_seeded_impl(
     peer_id: Option<u64>,
     existing_frontend: Option<Arc<HeadlessFrontendComponent>>,
     connect: IntegrationConnectTiming,
+    boot_fault: &BootFault,
 ) -> ComposedSut {
     assert!(
         existing_frontend.is_none() || (frontend_seed_org.is_empty() && seed_tree.is_empty()),
@@ -450,6 +459,7 @@ async fn compose_sut_seeded_impl(
                     crate::pbt::frontend_slice::components::keystone_boot_clock(),
                     peer_id,
                     connect,
+                    boot_fault,
                 )
                 .await,
             ),

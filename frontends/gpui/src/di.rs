@@ -40,12 +40,15 @@ pub struct GpuiModule {
     pub session_config: SessionConfig,
     pub config_dir: PathBuf,
     pub locked_keys: HashSet<PrefKey>,
+    /// The core bus, created by the entry point before the boot.
+    pub conditions: Arc<holon_api::ConditionBus>,
 }
 
 impl GpuiModule {
     fn core_module(&self) -> CoreInfraModule {
         CoreInfraModule {
             db_path: self.holon_config.resolve_db_path(&self.config_dir),
+            conditions: self.conditions.clone(),
         }
     }
 
@@ -188,6 +191,7 @@ mod mcp_toggle_tests {
             session_config: SessionConfig::new(holon_api::UiInfo::permissive()),
             config_dir: PathBuf::from("/tmp/holon-mcp-toggle-test"),
             locked_keys: HashSet::new(),
+            conditions: std::sync::Arc::new(holon_api::ConditionBus::new()),
         }
     }
 
@@ -255,6 +259,7 @@ mod write_tier_wiring_tests {
             session_config: SessionConfig::new(holon_api::UiInfo::permissive()),
             config_dir: config_dir.path().to_path_buf(),
             locked_keys: HashSet::new(),
+            conditions: std::sync::Arc::new(holon_api::ConditionBus::new()),
         };
         let injector = Injector::root();
         module

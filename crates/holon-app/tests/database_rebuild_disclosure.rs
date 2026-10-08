@@ -51,6 +51,7 @@ async fn boot(dir: &std::path::Path, db_file: &str) -> Booted {
         SessionConfig::new(holon_api::UiInfo::permissive()),
         dir.to_path_buf(),
         HashSet::new(),
+        std::sync::Arc::new(holon_api::ConditionBus::new()),
         |injector| {
             holon::testing::database_stuck_guard::report_database_stuck_in(injector);
             Ok(())

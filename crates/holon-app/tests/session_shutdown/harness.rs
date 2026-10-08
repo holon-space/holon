@@ -145,6 +145,7 @@ pub async fn boot_a_working_session() -> Booted {
         SessionConfig::new(holon_api::UiInfo::permissive()),
         dir.path().to_path_buf(),
         HashSet::new(),
+        std::sync::Arc::new(holon_api::ConditionBus::new()),
         |injector| {
             holon::testing::database_stuck_guard::report_database_stuck_in(injector);
             // The render stack the gpui frontend installs. Without it the

@@ -88,6 +88,9 @@ where
                 if let Some(files) = &e.files {
                     line.push_str(&format!(", naming the files {files:?}"));
                 }
+                if let Some(message) = &e.message {
+                    line.push_str(&format!(", carrying the message {message:?}"));
+                }
                 line
             })
             .collect();
@@ -159,6 +162,7 @@ mod tests {
                     kind: KIND,
                     files: None,
                     count: None,
+                    message: None,
                 }],
                 governed: [KIND].into_iter().collect(),
             }
@@ -189,6 +193,7 @@ mod tests {
                         kind: KIND.to_string(),
                         files: Vec::new(),
                         count: None,
+                        message: None,
                     })
                     .collect(),
             }
@@ -274,12 +279,14 @@ mod tests {
             kind: KIND,
             files: Some(files.iter().map(|f| f.to_string()).collect()),
             count: None,
+            message: None,
         };
         let raised = RaisedCondition {
             subject: "block:moved".to_string(),
             kind: KIND.to_string(),
             files: vec!["Overview.org".to_string(), "DayPage.org".to_string()],
             count: None,
+            message: None,
         };
         assert!(expected(&["Overview.org", "DayPage.org"]).is_met_by(&raised));
         assert!(!expected(&["DayPage.org", "Overview.org"]).is_met_by(&raised));
@@ -296,12 +303,14 @@ mod tests {
             kind: KIND,
             files: Some(vec!["a.cook".to_string()]),
             count: Some(count),
+            message: None,
         };
         let raised = RaisedCondition {
             subject: "cooklang".to_string(),
             kind: KIND.to_string(),
             files: vec!["a.cook".to_string()],
             count: Some(2),
+            message: None,
         };
         assert!(expected(2).is_met_by(&raised));
         assert!(!expected(1).is_met_by(&raised));

@@ -76,6 +76,7 @@ pub fn open_and_register_core(
     injector: &Injector,
     db_path: PathBuf,
     storage: StorageSelector,
+    conditions: Arc<holon_api::ConditionBus>,
 ) -> Result<()> {
     // Registered before the storage substrate so no wiring can spawn
     // session-scoped work without a shutdown to register it against.
@@ -120,7 +121,7 @@ pub fn open_and_register_core(
 
             let backend = Arc::new(RwLock::new(backend_inner));
 
-            register_core_services_with_backend(injector, db_path, backend, db_handle)?;
+            register_core_services_with_backend(injector, db_path, backend, db_handle, conditions)?;
         }
         StorageSelector::LoroMemory => {
             tracing::debug!(
@@ -129,7 +130,7 @@ pub fn open_and_register_core(
             injector.provide::<holon_turso::table_classes::BootRebuild>(fluxdi::Provider::root(
                 |_| fluxdi::Shared::new(holon_turso::table_classes::BootRebuild(None)),
             ));
-            register_core_services_no_turso(injector, db_path)?;
+            register_core_services_no_turso(injector, db_path, conditions)?;
         }
     }
     Ok(())
@@ -146,19 +147,21 @@ pub fn open_and_register_core(
 /// (not `imports()`, which creates child injector scopes).
 pub struct CoreInfraModule {
     pub db_path: PathBuf,
+    /// The frontend core's bus, created before any storage opens.
+    pub conditions: Arc<holon_api::ConditionBus>,
 }
 
 impl Module for CoreInfraModule {
     fn configure(&self, injector: &Injector) -> std::result::Result<(), fluxdi::Error> {
-        open_and_register_core(injector, self.db_path.clone(), StorageSelector::Turso).map_err(
-            |e| {
-                fluxdi::Error::module_lifecycle_failed(
-                    "CoreInfraModule",
-                    "configure",
-                    &e.to_string(),
-                )
-            },
+        open_and_register_core(
+            injector,
+            self.db_path.clone(),
+            StorageSelector::Turso,
+            self.conditions.clone(),
         )
+        .map_err(|e| {
+            fluxdi::Error::module_lifecycle_failed("CoreInfraModule", "configure", &e.to_string())
+        })
     }
 }
 
@@ -166,13 +169,17 @@ impl Module for CoreInfraModule {
 ///
 /// Schema initialization is not a separate step — it happens lazily when
 /// services resolve their `DbReady<*>` dependencies.
-async fn build_di_container<F>(db_path: PathBuf, setup_fn: F) -> Result<Arc<Injector>>
+async fn build_di_container<F>(
+    db_path: PathBuf,
+    conditions: Arc<holon_api::ConditionBus>,
+    setup_fn: F,
+) -> Result<Arc<Injector>>
 where
     F: FnOnce(&Injector) -> Result<()>,
 {
     let injector = Injector::root();
 
-    open_and_register_core(&injector, db_path, StorageSelector::Turso)?;
+    open_and_register_core(&injector, db_path, StorageSelector::Turso, conditions)?;
 
     setup_fn(&injector)?;
 
@@ -189,12 +196,16 @@ where
 /// [`create_backend_engine`], this does **not** resolve a `BackendEngine`
 /// (there is none without Turso) — it returns the assembled injector for the
 /// caller to resolve services (e.g. the `BlockQuerySource`) from.
-pub async fn build_no_turso_container<F>(db_path: PathBuf, setup_fn: F) -> Result<Arc<Injector>>
+pub async fn build_no_turso_container<F>(
+    db_path: PathBuf,
+    conditions: Arc<holon_api::ConditionBus>,
+    setup_fn: F,
+) -> Result<Arc<Injector>>
 where
     F: FnOnce(&Injector) -> Result<()>,
 {
     let injector = Injector::root();
-    open_and_register_core(&injector, db_path, StorageSelector::LoroMemory)?;
+    open_and_register_core(&injector, db_path, StorageSelector::LoroMemory, conditions)?;
     setup_fn(&injector)?;
     tracing::debug!("[DI] Turso-free injector built successfully");
     Ok(Arc::new(injector))
@@ -204,11 +215,16 @@ where
 ///
 /// Sets up the DI container and returns a BackendEngine. Can be used by both
 /// TUI and Flutter.
-pub async fn create_backend_engine<F>(db_path: PathBuf, setup_fn: F) -> Result<Arc<BackendEngine>>
+pub async fn create_backend_engine<F>(
+    db_path: PathBuf,
+    conditions: Arc<holon_api::ConditionBus>,
+    setup_fn: F,
+) -> Result<Arc<BackendEngine>>
 where
     F: FnOnce(&Injector) -> Result<()>,
 {
-    let (engine, ()) = create_backend_engine_with_extras(db_path, setup_fn, |_| async {}).await?;
+    let (engine, ()) =
+        create_backend_engine_with_extras(db_path, conditions, setup_fn, |_| async {}).await?;
     Ok(engine)
 }
 
@@ -221,9 +237,13 @@ where
 /// `BackendEngine` resolution and `extra_resolve` run concurrently when
 /// they don't share dependencies (e.g. CacheEventSubscriber wiring is
 /// independent of engine creation).
-#[tracing::instrument(skip(setup_fn, extra_resolve), name = "di.create_backend_engine")]
+#[tracing::instrument(
+    skip(conditions, setup_fn, extra_resolve),
+    name = "di.create_backend_engine"
+)]
 pub async fn create_backend_engine_with_extras<F, G, Fut, T>(
     db_path: PathBuf,
+    conditions: Arc<holon_api::ConditionBus>,
     setup_fn: F,
     extra_resolve: G,
 ) -> Result<(Arc<BackendEngine>, T)>
@@ -233,7 +253,7 @@ where
     Fut: std::future::Future<Output = T> + Send + 'static,
     T: Send + 'static,
 {
-    let injector = build_di_container(db_path, setup_fn).await?;
+    let injector = build_di_container(db_path, conditions, setup_fn).await?;
 
     // Resolve BackendEngine FIRST, then extras. Resolving in parallel causes
     // a fluxdi TOCTOU race: both tasks call resolve_async::<BackendEngine>,
@@ -279,18 +299,22 @@ mod no_turso_tests {
         let block = Block::new_text(EntityUri::block("c1"), parent.clone(), "hello");
         let blocks = vec![block];
 
-        let injector = build_no_turso_container(":memory:".into(), move |inj| {
-            inj.provide::<dyn BlockQuerySource>(Provider::root(move |_| {
-                let blocks = blocks.clone();
-                Arc::new(from_sync(move || {
-                    Ok(BlockSnapshot::from_ordered(
-                        blocks.clone(),
-                        Vec::<FocusRoot>::new(),
-                    ))
-                })) as Arc<dyn BlockQuerySource>
-            }));
-            Ok(())
-        })
+        let injector = build_no_turso_container(
+            ":memory:".into(),
+            std::sync::Arc::new(holon_api::ConditionBus::new()),
+            move |inj| {
+                inj.provide::<dyn BlockQuerySource>(Provider::root(move |_| {
+                    let blocks = blocks.clone();
+                    Arc::new(from_sync(move || {
+                        Ok(BlockSnapshot::from_ordered(
+                            blocks.clone(),
+                            Vec::<FocusRoot>::new(),
+                        ))
+                    })) as Arc<dyn BlockQuerySource>
+                }));
+                Ok(())
+            },
+        )
         .await
         .expect("Turso-free container must assemble");
 

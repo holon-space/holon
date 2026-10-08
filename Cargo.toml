@@ -344,7 +344,9 @@ overflow-checks = false
 [profile.release]
 debug = "line-tables-only"
 codegen-units = 4
-panic = "abort"
+# Needed: a shipped build must catch panics, so a failure is shown to the user
+# instead of ending the process with no trace (boot-always ADR, R1).
+panic = "unwind"
 lto = "thin"
 
 # Debugger profile: full debug info for variable inspection in LLDB/DAP

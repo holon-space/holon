@@ -337,10 +337,14 @@ mod tests {
     async fn no_turso_container_resolves_loro_block_query_source() {
         let (backend, root, expected, _gc) = seed_backend().await;
 
-        let injector = build_no_turso_container(":memory:".into(), move |inj| {
-            register_loro_block_query_source(inj, backend);
-            Ok(())
-        })
+        let injector = build_no_turso_container(
+            ":memory:".into(),
+            std::sync::Arc::new(holon_api::ConditionBus::new()),
+            move |inj| {
+                register_loro_block_query_source(inj, backend);
+                Ok(())
+            },
+        )
         .await
         .expect("Turso-free container must assemble");
 
@@ -363,9 +367,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().to_path_buf();
 
-        let injector = build_no_turso_container(":memory:".into(), |_| Ok(()))
-            .await
-            .expect("Turso-free container must assemble");
+        let injector = build_no_turso_container(
+            ":memory:".into(),
+            std::sync::Arc::new(holon_api::ConditionBus::new()),
+            |_| Ok(()),
+        )
+        .await
+        .expect("Turso-free container must assemble");
         // Async work up front; registers sync providers.
         let store = register_loro_read_stack(&injector, dir).await;
 

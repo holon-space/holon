@@ -35,6 +35,8 @@ fn main() -> Result<()> {
 
     let widgets = holon_gpui::render_supported_widgets();
     let (holon_config, session_config, config_dir, locked) = cli::build_session(widgets)?;
+    let conditions = Arc::new(holon_api::ConditionBus::new());
+    holon_frontend::panic_record::install(&config_dir, conditions.clone());
     // Production: don't block window paint on the OrgMode initial scan.
     // The FrontendSession factory spawns the wait + Loro seed in the
     // background; the reactive layer fills in data as it arrives. Tests
@@ -57,6 +59,7 @@ fn main() -> Result<()> {
             session_config,
             config_dir,
             locked_keys: locked,
+            conditions,
         });
         let timeout = std::time::Duration::from_secs(180);
         match tokio::time::timeout(timeout, app.bootstrap()).await {

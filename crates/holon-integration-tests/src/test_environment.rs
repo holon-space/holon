@@ -488,6 +488,7 @@ impl TestEnvironmentBuilder {
             session_config,
             config_dir,
             std::collections::HashSet::new(),
+            std::sync::Arc::new(holon_api::ConditionBus::new()),
             move |injector| {
                 holon::testing::database_stuck_guard::report_database_stuck_in(injector);
                 install_headless_render_interpreter(injector, &org_fs_for_di, &secret_namespace);
@@ -719,6 +720,7 @@ pub(crate) async fn run_second_writer_refusal_check(temp_path: &std::path::Path)
         SessionConfig::new(holon_api::UiInfo::permissive()).without_wait(),
         temp_path.to_path_buf(),
         std::collections::HashSet::new(),
+        std::sync::Arc::new(holon_api::ConditionBus::new()),
         |_| Ok(()),
         |_| (),
     )
@@ -811,6 +813,7 @@ pub(crate) async fn run_epoch_flip_rejection_check(
         session_config,
         temp_path.to_path_buf(),
         std::collections::HashSet::new(),
+        std::sync::Arc::new(holon_api::ConditionBus::new()),
         |_| Ok(()),
         |_| (),
     )
@@ -1109,6 +1112,7 @@ impl TestEnvironment {
             session_config,
             config_dir,
             std::collections::HashSet::new(),
+            std::sync::Arc::new(holon_api::ConditionBus::new()),
             move |injector| {
                 holon::testing::database_stuck_guard::report_database_stuck_in(injector);
                 install_headless_render_interpreter(injector, &org_fs_for_di, &secret_namespace);
@@ -1265,80 +1269,84 @@ impl TestEnvironment {
         let backend = Arc::new(LoroBackend::from_document(doc));
         let shared_store = Arc::new(RwLock::new(doc_store));
 
-        let injector = build_no_turso_container(storage_dir, {
-            let backend = backend.clone();
-            let shared_store = shared_store.clone();
-            let org_fs = self.org_fs.clone();
-            let org_root = self.org_root.clone();
-            move |injector| {
-                use holon_app::loro_seams::LoroAliasRegistrar;
-                use holon_app::loro_seams::LoroBlockOrdering;
-                use holon_app::loro_seams::LoroBlockReader;
-                use holon_app::loro_seams::LoroDocumentManager;
-                vault.register(injector);
-                register_loro_block_query_source(injector, backend.clone());
-                register_loro_operation_engine(injector, shared_store.clone());
-                register_block_query_frontend(injector);
+        let injector = build_no_turso_container(
+            storage_dir,
+            std::sync::Arc::new(holon_api::ConditionBus::new()),
+            {
+                let backend = backend.clone();
+                let shared_store = shared_store.clone();
+                let org_fs = self.org_fs.clone();
+                let org_root = self.org_root.clone();
+                move |injector| {
+                    use holon_app::loro_seams::LoroAliasRegistrar;
+                    use holon_app::loro_seams::LoroBlockOrdering;
+                    use holon_app::loro_seams::LoroBlockReader;
+                    use holon_app::loro_seams::LoroDocumentManager;
+                    vault.register(injector);
+                    register_loro_block_query_source(injector, backend.clone());
+                    register_loro_operation_engine(injector, shared_store.clone());
+                    register_block_query_frontend(injector);
 
-                // Org file-sync over the Loro seams — the SAME backend-blind
-                // core the Turso path uses (ADR 0004). Register the three seams +
-                // alias registrar + config, then the core; resolving the
-                // `FileSyncStarted` marker (post-seed, below) spawns the
-                // controller. No `spawn_*` call.
-                injector.provide::<holon_orgmode::OrgModeConfig>(fluxdi::Provider::root(
-                    move |_| {
-                        fluxdi::Shared::new(holon_orgmode::OrgModeConfig::new(org_root.clone()))
-                    },
-                ));
-                let seed_gate = holon_orgmode::BootSeedGate::new();
-                injector.provide::<holon_orgmode::BootSeedGate>(fluxdi::Provider::root(
-                    move |_| fluxdi::Shared::new(seed_gate.clone()),
-                ));
-                {
-                    let b = backend.clone();
-                    injector.provide::<dyn holon_filesystem::BlockReader>(fluxdi::Provider::root(
+                    // Org file-sync over the Loro seams — the SAME backend-blind
+                    // core the Turso path uses (ADR 0004). Register the three seams +
+                    // alias registrar + config, then the core; resolving the
+                    // `FileSyncStarted` marker (post-seed, below) spawns the
+                    // controller. No `spawn_*` call.
+                    injector.provide::<holon_orgmode::OrgModeConfig>(fluxdi::Provider::root(
                         move |_| {
-                            Arc::new(LoroBlockReader::new(b.clone()))
-                                as Arc<dyn holon_filesystem::BlockReader>
+                            fluxdi::Shared::new(holon_orgmode::OrgModeConfig::new(org_root.clone()))
                         },
                     ));
+                    let seed_gate = holon_orgmode::BootSeedGate::new();
+                    injector.provide::<holon_orgmode::BootSeedGate>(fluxdi::Provider::root(
+                        move |_| fluxdi::Shared::new(seed_gate.clone()),
+                    ));
+                    {
+                        let b = backend.clone();
+                        injector.provide::<dyn holon_filesystem::BlockReader>(
+                            fluxdi::Provider::root(move |_| {
+                                Arc::new(LoroBlockReader::new(b.clone()))
+                                    as Arc<dyn holon_filesystem::BlockReader>
+                            }),
+                        );
+                    }
+                    {
+                        let b = backend.clone();
+                        injector.provide::<dyn holon_filesystem::DocumentManager>(
+                            fluxdi::Provider::root(move |_| {
+                                Arc::new(LoroDocumentManager::new(b.clone()))
+                                    as Arc<dyn holon_filesystem::DocumentManager>
+                            }),
+                        );
+                    }
+                    {
+                        let b = backend.clone();
+                        injector.provide::<dyn holon_core::block_ordering::BlockOrdering>(
+                            fluxdi::Provider::root(move |_| {
+                                Arc::new(LoroBlockOrdering::new(b.clone()))
+                                    as Arc<dyn holon_core::block_ordering::BlockOrdering>
+                            }),
+                        );
+                    }
+                    {
+                        let store = shared_store.clone();
+                        injector.provide::<dyn holon_filesystem::AliasRegistrar>(
+                            fluxdi::Provider::root(move |_| {
+                                Arc::new(LoroAliasRegistrar {
+                                    doc_store: store.clone(),
+                                })
+                                    as Arc<dyn holon_filesystem::AliasRegistrar>
+                            }),
+                        );
+                    }
+                    holon_orgmode::di::register_org_file_sync_core(injector)
+                        .map_err(|e| anyhow::anyhow!("register_org_file_sync_core: {e}"))?;
+                    // Force the in-memory org fs over the core's real-disk defaults.
+                    override_org_fs_bindings(injector, &org_fs);
+                    Ok(())
                 }
-                {
-                    let b = backend.clone();
-                    injector.provide::<dyn holon_filesystem::DocumentManager>(
-                        fluxdi::Provider::root(move |_| {
-                            Arc::new(LoroDocumentManager::new(b.clone()))
-                                as Arc<dyn holon_filesystem::DocumentManager>
-                        }),
-                    );
-                }
-                {
-                    let b = backend.clone();
-                    injector.provide::<dyn holon_core::block_ordering::BlockOrdering>(
-                        fluxdi::Provider::root(move |_| {
-                            Arc::new(LoroBlockOrdering::new(b.clone()))
-                                as Arc<dyn holon_core::block_ordering::BlockOrdering>
-                        }),
-                    );
-                }
-                {
-                    let store = shared_store.clone();
-                    injector.provide::<dyn holon_filesystem::AliasRegistrar>(
-                        fluxdi::Provider::root(move |_| {
-                            Arc::new(LoroAliasRegistrar {
-                                doc_store: store.clone(),
-                            })
-                                as Arc<dyn holon_filesystem::AliasRegistrar>
-                        }),
-                    );
-                }
-                holon_orgmode::di::register_org_file_sync_core(injector)
-                    .map_err(|e| anyhow::anyhow!("register_org_file_sync_core: {e}"))?;
-                // Force the in-memory org fs over the core's real-disk defaults.
-                override_org_fs_bindings(injector, &org_fs);
-                Ok(())
-            }
-        })
+            },
+        )
         .await?;
 
         let session = injector.resolve::<FrontendSession>();

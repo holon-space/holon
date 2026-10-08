@@ -42,6 +42,7 @@ use holon_mcp::describe_ui_expand::resolve_deferred;
 async fn fresh_engine(db_path: std::path::PathBuf) -> Arc<holon::api::BackendEngine> {
     holon::di::create_backend_engine_with_extras(
         db_path,
+        std::sync::Arc::new(holon_api::ConditionBus::new()),
         |injector| {
             holon_loro_wiring::EventInfraModule
                 .configure(injector)

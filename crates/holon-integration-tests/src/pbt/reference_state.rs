@@ -552,6 +552,10 @@ pub struct ReferenceState {
     /// was released. Read by `RefIntegrationConnect`; mutated by
     /// `ReleaseIntegrationPeer`.
     pub integration: IntegrationRefState,
+
+    /// The fault the case injects at boot (the `BootFault` axis). Read by the
+    /// composed boot; its disclosures are modelled in `conditions`.
+    pub boot_fault: holon_pbt_core::BootFault,
 }
 
 #[derive(Debug, Clone)]
@@ -1260,6 +1264,7 @@ impl ReferenceState {
             },
             remote_list: RemoteListRefState::default(),
             integration: IntegrationRefState::default(),
+            boot_fault: holon_pbt_core::BootFault::None,
         }
     }
 

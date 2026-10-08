@@ -1,7 +1,6 @@
 //! While the TUI runs, stderr belongs in the log: a write to the terminal's
 //! stderr corrupts the screen, and once the terminal is dead `eprintln!`
-//! panics, which a release build (`panic = "abort"`) ends without the session
-//! shutdown.
+//! panics, which skips the session shutdown.
 
 use std::fs::File;
 use std::fs::OpenOptions;

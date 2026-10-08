@@ -40,25 +40,29 @@ async fn boot_fresh_db(
     db_path: std::path::PathBuf,
 ) -> Arc<holon::api::backend_engine::BackendEngine> {
     assert!(!db_path.exists(), "db file must not pre-exist");
-    holon::di::create_backend_engine(db_path, |injector| {
-        EventInfraModule
-            .configure(injector)
-            .map_err(|e| anyhow::anyhow!("configure EventInfraModule: {e}"))?;
-        injector.provide_into_set::<dyn holon_core::OperationProvider>(Provider::root(
-            |resolver| {
-                let db = resolver
-                    .resolve::<dyn holon::di::DbHandleProvider>()
-                    .handle();
-                Arc::new(holon::core::SqlOperationProvider::new(
-                    db,
-                    holon::storage::BLOCK_WRITE_TABLE.to_string(),
-                    "block".to_string(),
-                    "block".to_string(),
-                )) as Arc<dyn holon_core::OperationProvider>
-            },
-        ));
-        Ok(())
-    })
+    holon::di::create_backend_engine(
+        db_path,
+        std::sync::Arc::new(holon_api::ConditionBus::new()),
+        |injector| {
+            EventInfraModule
+                .configure(injector)
+                .map_err(|e| anyhow::anyhow!("configure EventInfraModule: {e}"))?;
+            injector.provide_into_set::<dyn holon_core::OperationProvider>(Provider::root(
+                |resolver| {
+                    let db = resolver
+                        .resolve::<dyn holon::di::DbHandleProvider>()
+                        .handle();
+                    Arc::new(holon::core::SqlOperationProvider::new(
+                        db,
+                        holon::storage::BLOCK_WRITE_TABLE.to_string(),
+                        "block".to_string(),
+                        "block".to_string(),
+                    )) as Arc<dyn holon_core::OperationProvider>
+                },
+            ));
+            Ok(())
+        },
+    )
     .await
     .expect("fresh-db lazy DI graph must build")
 }

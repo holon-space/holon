@@ -18,6 +18,7 @@ impl RefConditions for ReferenceState {
                 kind: c.kind,
                 files: c.files.clone(),
                 count: c.count,
+                message: c.message.clone(),
             })
             .collect()
     }

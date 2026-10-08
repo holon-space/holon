@@ -43,6 +43,7 @@ fn booting_the_gpui_module_gives_the_mcp_tools_the_vault_root() {
             session_config: SessionConfig::new(holon_api::UiInfo::permissive()).without_wait(),
             config_dir: dir.path().to_path_buf(),
             locked_keys: HashSet::new(),
+            conditions: std::sync::Arc::new(holon_api::ConditionBus::new()),
         });
         app.bootstrap().await.expect("GpuiModule boots");
         let injector = app.injector();

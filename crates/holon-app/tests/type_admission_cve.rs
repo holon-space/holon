@@ -44,38 +44,42 @@ fn runtime() -> Arc<tokio::runtime::Runtime> {
 async fn boot_fresh_db(
     db_path: std::path::PathBuf,
 ) -> Arc<holon::api::backend_engine::BackendEngine> {
-    holon::di::create_backend_engine(db_path, |injector| {
-        EventInfraModule
-            .configure(injector)
-            .map_err(|e| anyhow::anyhow!("configure EventInfraModule: {e}"))?;
-        injector.provide_into_set::<dyn holon_core::OperationProvider>(Provider::root(
-            |resolver| {
-                let db = resolver
-                    .resolve::<dyn holon::di::DbHandleProvider>()
-                    .handle();
-                Arc::new(holon::core::SqlOperationProvider::new(
-                    db,
-                    holon::storage::BLOCK_WRITE_TABLE.to_string(),
-                    "block".to_string(),
-                    "block".to_string(),
-                )) as Arc<dyn holon_core::OperationProvider>
-            },
-        ));
-        // Contributed here exactly as `turso_seams.rs` contributes it in
-        // production — the same `provide_into_set` of the same provider. The
-        // sibling `rehome_entity_op.rs` wires its provider the same way.
-        injector.provide_into_set::<dyn holon_core::OperationProvider>(Provider::root_async(
-            |resolver| async move {
-                let profiles = Arc::new(
-                    holon_capability::registry::shipped_profiles().expect("profiles parse"),
-                );
-                Arc::new(holon_app::type_admission::TypeAdmissionProvider::new(
-                    resolver, profiles,
-                )) as Arc<dyn holon_core::OperationProvider>
-            },
-        ));
-        Ok(())
-    })
+    holon::di::create_backend_engine(
+        db_path,
+        std::sync::Arc::new(holon_api::ConditionBus::new()),
+        |injector| {
+            EventInfraModule
+                .configure(injector)
+                .map_err(|e| anyhow::anyhow!("configure EventInfraModule: {e}"))?;
+            injector.provide_into_set::<dyn holon_core::OperationProvider>(Provider::root(
+                |resolver| {
+                    let db = resolver
+                        .resolve::<dyn holon::di::DbHandleProvider>()
+                        .handle();
+                    Arc::new(holon::core::SqlOperationProvider::new(
+                        db,
+                        holon::storage::BLOCK_WRITE_TABLE.to_string(),
+                        "block".to_string(),
+                        "block".to_string(),
+                    )) as Arc<dyn holon_core::OperationProvider>
+                },
+            ));
+            // Contributed here exactly as `turso_seams.rs` contributes it in
+            // production — the same `provide_into_set` of the same provider. The
+            // sibling `rehome_entity_op.rs` wires its provider the same way.
+            injector.provide_into_set::<dyn holon_core::OperationProvider>(Provider::root_async(
+                |resolver| async move {
+                    let profiles = Arc::new(
+                        holon_capability::registry::shipped_profiles().expect("profiles parse"),
+                    );
+                    Arc::new(holon_app::type_admission::TypeAdmissionProvider::new(
+                        resolver, profiles,
+                    )) as Arc<dyn holon_core::OperationProvider>
+                },
+            ));
+            Ok(())
+        },
+    )
     .await
     .expect("fresh-db lazy DI graph must build")
 }

@@ -305,7 +305,10 @@ async fn create_initialized_engine(
 /// Register services shared between `register_core_services` and
 /// `register_core_services_with_backend`: TypeRegistry, OperationObserver,
 /// NavigationProvider, OperationProvider (nav), OperationModule.
-fn register_shared_services(injector: &Injector) -> Result<()> {
+fn register_shared_services(
+    injector: &Injector,
+    conditions: Arc<holon_api::ConditionBus>,
+) -> Result<()> {
     let type_registry =
         create_default_registry().context("Failed to create default TypeRegistry")?;
     holon_kitchen::register_kitchen_types(&type_registry)
@@ -343,7 +346,7 @@ fn register_shared_services(injector: &Injector) -> Result<()> {
         identity_provider as Arc<dyn OperationProvider>
     }));
 
-    register_condition_bus(injector);
+    register_condition_bus(injector, conditions);
 
     // The tagged block shapes the dispatcher's shape gate keeps every Holon-side
     // write inside (Model.md invariant 17).
@@ -359,11 +362,11 @@ fn register_shared_services(injector: &Injector) -> Result<()> {
 }
 
 /// Degraded-state disclosure bus: the only channel through which a frontend
-/// learns that something degraded, so every container has one. It is a
-/// plain broadcast channel, so mode has no say in whether it exists.
-fn register_condition_bus(injector: &Injector) {
-    injector.provide::<Arc<holon_api::ConditionBus>>(Provider::root(|_| {
-        Shared::new(Arc::new(holon_api::ConditionBus::new()))
+/// learns that something degraded, so every container has one. The caller's
+/// core owns it, so it exists before any storage opens.
+fn register_condition_bus(injector: &Injector, conditions: Arc<holon_api::ConditionBus>) {
+    injector.provide::<Arc<holon_api::ConditionBus>>(Provider::root(move |_| {
+        Shared::new(conditions.clone())
     }));
 }
 
@@ -375,7 +378,11 @@ fn register_condition_bus(injector: &Injector) {
 /// `BackendEngine` are registered. The caller's `setup_fn` is responsible for
 /// registering the chosen storage adapter (e.g. Loro) and its
 /// `Arc<dyn holon_core::storage::BlockQuerySource>` producer.
-pub fn register_core_services_no_turso(injector: &Injector, db_path: PathBuf) -> Result<()> {
+pub fn register_core_services_no_turso(
+    injector: &Injector,
+    db_path: PathBuf,
+    conditions: Arc<holon_api::ConditionBus>,
+) -> Result<()> {
     tracing::debug!(
         "[DI] register_core_services_no_turso (Turso-free) called with db_path: {:?}",
         db_path
@@ -396,7 +403,7 @@ pub fn register_core_services_no_turso(injector: &Injector, db_path: PathBuf) ->
     injector.provide::<holon_api::link_parser::LinkTargetClassifier>(Provider::root(move |_| {
         Shared::new(link_classifier.clone())
     }));
-    register_condition_bus(injector);
+    register_condition_bus(injector, conditions);
 
     Ok(())
 }
@@ -681,6 +688,7 @@ pub fn register_core_services_with_backend(
     db_path: PathBuf,
     backend: Arc<RwLock<TursoBackend>>,
     db_handle: DbHandle,
+    conditions: Arc<holon_api::ConditionBus>,
 ) -> Result<()> {
     tracing::debug!(
         "[DI] register_core_services_with_backend called with db_path: {:?}",
@@ -764,7 +772,7 @@ pub fn register_core_services_with_backend(
         ))
     }));
 
-    register_shared_services(injector)?;
+    register_shared_services(injector, conditions)?;
     register_schema_providers(injector);
 
     // The renderer's profile resolver as its own seam, so consumers that must

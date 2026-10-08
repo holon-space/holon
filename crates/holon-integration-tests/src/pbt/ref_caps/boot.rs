@@ -194,6 +194,7 @@ impl holon_pbt_core::capabilities::RefReboot for ReferenceState {
             .clear_kind(holon_api::ConditionKind::EDIT_REFUSED_READ_ONLY_FORMAT);
         self.conditions
             .clear_kind(holon_api::ConditionKind::EDIT_REFUSED_BY_SHAPE);
+        self.conditions.restart();
         self.restart_forgets_copy_state();
         self.remote_list.reboot_reseeds_peer_from_mirror();
     }

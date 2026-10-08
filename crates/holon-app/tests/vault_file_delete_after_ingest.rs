@@ -58,6 +58,7 @@ async fn delete_right_after_ingest() -> Result<(), String> {
         SessionConfig::new(holon_api::UiInfo::permissive()),
         dir.path().to_path_buf(),
         HashSet::new(),
+        std::sync::Arc::new(holon_api::ConditionBus::new()),
         |_| Ok(()),
         |_| (),
     )

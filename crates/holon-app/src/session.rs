@@ -24,12 +24,14 @@ pub async fn new_from_config(
     session_config: SessionConfig,
     config_dir: PathBuf,
     locked_keys: HashSet<PrefKey>,
+    conditions: Arc<holon_api::ConditionBus>,
 ) -> Result<Arc<FrontendSession>> {
     let (session, _engine, ()) = new_from_config_with_di(
         holon_config,
         session_config,
         config_dir,
         locked_keys,
+        conditions,
         |_| Ok(()),
         |_| (),
     )
@@ -50,6 +52,7 @@ pub async fn new_from_config_with_di<F, G, T>(
     session_config: SessionConfig,
     config_dir: PathBuf,
     locked_keys: HashSet<PrefKey>,
+    conditions: Arc<holon_api::ConditionBus>,
     extra_setup: F,
     extra_resolve: G,
 ) -> Result<(Arc<FrontendSession>, Arc<BackendEngine>, T)>
@@ -69,6 +72,7 @@ where
     // and background tasks (see lifecycle.rs TOCTOU note).
     let (engine, (session, extra, types)) = holon::di::create_backend_engine_with_extras(
         db_path,
+        conditions,
         move |injector| {
             #[cfg(not(target_arch = "wasm32"))]
             vault.register(injector);

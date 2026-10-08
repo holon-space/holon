@@ -44,6 +44,8 @@ pub struct ExpectedCondition {
     pub files: Option<Vec<String>>,
     /// How many files the condition counts, when the model states it.
     pub count: Option<usize>,
+    /// The message the condition carries, when the model states it.
+    pub message: Option<String>,
 }
 
 impl ExpectedCondition {
@@ -60,6 +62,28 @@ pub struct ConditionsRefState {
     /// Every kind this state has ever raised or cleared. The invariant judges
     /// only these; a kind never named here is the app's own business.
     governed: BTreeSet<&'static str>,
+    /// The last panic of the running process: its record is on disk, and the
+    /// next start discloses it.
+    unreported_panic: Option<Panicked>,
+}
+
+/// A panic the model knows of, by its location and message.
+#[derive(Debug, Clone)]
+pub struct Panicked {
+    pub location: String,
+    pub message: String,
+}
+
+impl Panicked {
+    /// The subject a panic condition carries is its location, so the model
+    /// pins its final path component.
+    fn subject_name(&self) -> String {
+        std::path::Path::new(&self.location)
+            .file_name()
+            .unwrap_or_else(|| panic!("a panic location names no file: {}", self.location))
+            .to_string_lossy()
+            .into_owned()
+    }
 }
 
 impl ConditionsRefState {
@@ -110,6 +134,43 @@ impl ConditionsRefState {
             kind,
             files,
             count,
+            message: None,
+        });
+    }
+
+    /// The previous run's panic record is disclosed at start.
+    pub fn previous_run_panicked(&mut self, panic: &Panicked) {
+        self.raise_panic(holon_api::ConditionKind::PREVIOUS_RUN_PANICKED, panic);
+    }
+
+    /// A task panicked: it is disclosed now, and its record is disclosed at
+    /// the next start.
+    pub fn task_panicked(&mut self, panic: Panicked) {
+        self.raise_panic(holon_api::ConditionKind::TASK_PANICKED, &panic);
+        self.unreported_panic = Some(panic);
+    }
+
+    /// A restart ends this process's panic conditions; the next start
+    /// discloses the last panic's record, once.
+    pub fn restart(&mut self) {
+        self.clear_kind(holon_api::ConditionKind::TASK_PANICKED);
+        self.clear_kind(holon_api::ConditionKind::PREVIOUS_RUN_PANICKED);
+        if let Some(panic) = self.unreported_panic.take() {
+            self.previous_run_panicked(&panic);
+        }
+    }
+
+    fn raise_panic(&mut self, kind: &'static str, panic: &Panicked) {
+        let subject_name = panic.subject_name();
+        self.governed.insert(kind);
+        self.expected
+            .retain(|c| !(c.kind == kind && c.subject_name == subject_name));
+        self.expected.insert(ExpectedCondition {
+            subject_name,
+            kind,
+            files: None,
+            count: None,
+            message: Some(panic.message.clone()),
         });
     }
 
@@ -145,6 +206,7 @@ impl ConditionsRefState {
                 })
                 .collect(),
             governed: self.governed.clone(),
+            unreported_panic: self.unreported_panic.clone(),
         }
     }
 

@@ -419,6 +419,8 @@ async fn run() -> Result<()> {
     let holon_config = holon_config_for(config);
     let config_dir = holon_frontend::config::resolve_config_dir(None);
     let session_config = holon_frontend::SessionConfig::new(holon_api::UiInfo::permissive());
+    let conditions = std::sync::Arc::new(holon_api::ConditionBus::new());
+    holon_frontend::panic_record::install(&config_dir, conditions.clone());
 
     // A stop during boot waits for the boot to finish and then takes the one
     // shutdown path, so the vault is left as a clean quit leaves it.
@@ -439,6 +441,7 @@ async fn run() -> Result<()> {
             holon_config: holon_frontend::HolonConfig,
             session_config: holon_frontend::SessionConfig,
             config_dir: std::path::PathBuf,
+            conditions: std::sync::Arc<holon_api::ConditionBus>,
         }
 
         impl Module for McpStandaloneModule {
@@ -453,6 +456,7 @@ async fn run() -> Result<()> {
                     injector,
                     db_path,
                     holon::di::StorageSelector::Turso,
+                    self.conditions.clone(),
                 )
                 .map_err(|e| to_di_err("configure", &e))?;
                 vault.register(injector);
@@ -483,6 +487,7 @@ async fn run() -> Result<()> {
             holon_config,
             session_config,
             config_dir,
+            conditions,
         });
         tracing::info!("holon-mcp: booting the session");
         app.bootstrap()

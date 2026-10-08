@@ -76,6 +76,7 @@ async fn boot_and_read_degraded(dir: &Path) -> Vec<holon_api::Condition> {
         SessionConfig::new(holon_api::UiInfo::permissive()).without_wait(),
         dir.to_path_buf(),
         HashSet::new(),
+        std::sync::Arc::new(holon_api::ConditionBus::new()),
         |injector| {
             holon::testing::database_stuck_guard::report_database_stuck_in(injector);
             Ok(())

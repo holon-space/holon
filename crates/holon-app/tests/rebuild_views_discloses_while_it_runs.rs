@@ -34,6 +34,7 @@ async fn rebuild_views_is_disclosed_while_it_runs_and_not_after() {
         SessionConfig::new(holon_api::UiInfo::permissive()),
         dir.path().to_path_buf(),
         HashSet::new(),
+        std::sync::Arc::new(holon_api::ConditionBus::new()),
         |injector| {
             holon::testing::database_stuck_guard::report_database_stuck_in(injector);
             Ok(())

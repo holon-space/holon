@@ -456,6 +456,22 @@ impl ConditionKind {
                 "Holon could not compute {field} of {block_id}: {reason}. It shows no value \
                  until the next computation succeeds."
             )),
+
+            Self::PreviousRunPanicked { message, thread } => ConditionDetail::with_body(
+                format!(
+                    "Holon stopped last time because of an internal error on {thread}. The log \
+                     export has the details."
+                ),
+                vec![subject.to_string(), message.clone()],
+            ),
+
+            Self::TaskPanicked { message, thread } => ConditionDetail::with_body(
+                format!(
+                    "An internal error stopped {thread}; what it was doing does not continue \
+                     until Holon restarts."
+                ),
+                vec![subject.to_string(), message.clone()],
+            ),
         }
     }
 }

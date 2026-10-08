@@ -28,6 +28,7 @@
 //!   any real component, so the catch tests run without
 //!   Turso/Loro/MemoryBackend.
 
+pub mod boot_fault;
 pub mod builder;
 pub mod catalog;
 pub mod correspondences;

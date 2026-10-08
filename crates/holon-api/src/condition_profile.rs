@@ -739,6 +739,24 @@ const DERIVED_FIELD_NOT_COMPUTED: ConditionProfile = ConditionProfile::new(
     &[],
 );
 
+const PREVIOUS_RUN_PANICKED: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Error,
+    "Holon stopped last time because of an internal error",
+    icons::WARN,
+    ConditionPlacement::Banner,
+    AllClear::UntilRestart,
+    &[],
+);
+
+const TASK_PANICKED: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Error,
+    "Part of Holon stopped because of an internal error",
+    icons::BLOCKED,
+    ConditionPlacement::Banner,
+    AllClear::UntilRestart,
+    &[],
+);
+
 impl ConditionKind {
     /// This kind's profile. Total, like
     /// [`condition_kind`](ConditionKind::condition_kind): a new variant cannot
@@ -796,6 +814,8 @@ impl ConditionKind {
             Self::DatabaseStuck { .. } => DATABASE_STUCK,
             Self::DatabaseWatchFailed { .. } => DATABASE_WATCH_FAILED,
             Self::DerivedFieldNotComputed { .. } => DERIVED_FIELD_NOT_COMPUTED,
+            Self::PreviousRunPanicked { .. } => PREVIOUS_RUN_PANICKED,
+            Self::TaskPanicked { .. } => TASK_PANICKED,
         }
     }
 }

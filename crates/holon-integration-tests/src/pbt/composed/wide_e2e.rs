@@ -1387,6 +1387,7 @@ pub async fn boot_and_seed_wide_with_peer_id(
             &wide_seed_tree(),
             peer_id,
             connect,
+            &ref_state.boot_fault,
         ),
     )
     .await
@@ -1410,6 +1411,16 @@ pub async fn boot_and_seed_wide_with_peer_id(
     // it before every mutation) owns this component — see `WideHandle`.
     if let Some(frontend) = &handle.frontend {
         frontend.enable_render_cache();
+    }
+    if ref_state.boot_fault == holon_pbt_core::BootFault::TaskPanic {
+        let frontend = handle
+            .frontend
+            .as_ref()
+            .expect("a TaskPanic boot fault is drawn only for a wiring that boots a session");
+        let bus = frontend
+            .degraded_bus()
+            .expect("a booted session registers its ConditionBus");
+        crate::pbt::composed::boot_fault::inject_task_panic(bus).await;
     }
     let mut caps = bundle.caps;
 
@@ -2261,9 +2272,23 @@ impl ReferenceStateMachine for WideE2EMachine {
                 .prop_map(|w| wide_e2e_ref_for(&w))
                 .boxed()
         };
-        (wired, integration_connect_timing())
-            .prop_map(|(mut state, timing)| {
+        (
+            wired,
+            integration_connect_timing(),
+            crate::pbt::composed::boot_fault::boot_fault_strategy(),
+        )
+            .prop_map(|(mut state, timing, fault)| {
                 state.integration.timing = timing;
+                // A boot fault is disclosed on the session's bus, so only a
+                // wiring that boots a session can draw one.
+                let fault = if set_for_wiring(&state.harness.wiring)
+                    .has_projection(Projection::ViewModel)
+                {
+                    fault
+                } else {
+                    holon_pbt_core::BootFault::None
+                };
+                crate::pbt::composed::boot_fault::model_boot_fault(&mut state, fault);
                 state
             })
             .boxed()

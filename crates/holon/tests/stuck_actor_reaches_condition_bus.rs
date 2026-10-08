@@ -100,6 +100,7 @@ fn a_command_past_the_hang_bound_reaches_the_containers_condition_bus() {
             dir.path().join("unused.db"),
             Arc::new(RwLock::new(backend)),
             handle,
+            std::sync::Arc::new(holon_api::ConditionBus::new()),
         )
         .expect("core services");
         injector.resolve::<dyn DbHandleProvider>().handle()

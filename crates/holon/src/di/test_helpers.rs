@@ -54,7 +54,12 @@ pub async fn create_test_engine() -> Result<Arc<BackendEngine>> {
 /// }
 /// ```
 pub async fn create_test_engine_with_path(db_path: PathBuf) -> Result<Arc<BackendEngine>> {
-    create_backend_engine(db_path, |_| Ok(())).await
+    create_backend_engine(
+        db_path,
+        Arc::new(holon_api::ConditionBus::new()),
+        |_| Ok(()),
+    )
+    .await
 }
 
 /// Create a test engine with custom providers
@@ -85,7 +90,7 @@ pub async fn create_test_engine_with_setup<F>(
 where
     F: FnOnce(&Injector) -> Result<()>,
 {
-    create_backend_engine(db_path, setup_fn).await
+    create_backend_engine(db_path, Arc::new(holon_api::ConditionBus::new()), setup_fn).await
 }
 
 /// Create a test engine with custom setup and resolve additional services from
@@ -101,7 +106,13 @@ where
     Fut: std::future::Future<Output = T> + Send + 'static,
     T: Send + 'static,
 {
-    create_backend_engine_with_extras(db_path, setup_fn, extra_resolve).await
+    create_backend_engine_with_extras(
+        db_path,
+        Arc::new(holon_api::ConditionBus::new()),
+        setup_fn,
+        extra_resolve,
+    )
+    .await
 }
 
 /// Type alias for operation provider factory functions
@@ -294,12 +305,16 @@ pub async fn create_test_engine_with_providers<F>(
 where
     F: FnOnce(TestProviderModule) -> TestProviderModule,
 {
-    create_backend_engine(db_path, |services| {
-        let provider_module = setup_fn(TestProviderModule::new());
-        provider_module
-            .configure(services)
-            .map_err(|e| anyhow::anyhow!("Failed to register TestProviderModule: {}", e))?;
-        Ok(())
-    })
+    create_backend_engine(
+        db_path,
+        Arc::new(holon_api::ConditionBus::new()),
+        |services| {
+            let provider_module = setup_fn(TestProviderModule::new());
+            provider_module
+                .configure(services)
+                .map_err(|e| anyhow::anyhow!("Failed to register TestProviderModule: {}", e))?;
+            Ok(())
+        },
+    )
     .await
 }

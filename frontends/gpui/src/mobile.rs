@@ -139,6 +139,8 @@ fn open_holon_window(
         // there aborts the process, so the app-private dir is load-bearing.
         let config_dir =
             config_dir.unwrap_or_else(|| holon_frontend::config::resolve_config_dir(None));
+        let conditions = std::sync::Arc::new(holon_api::ConditionBus::new());
+        holon_frontend::panic_record::install(&config_dir, conditions.clone());
         // Load the PERSISTED config from `config_dir` (not `::default()`), so a
         // `ui.theme` (and any other preference) saved by the settings UI in a
         // prior session is applied at boot — desktop reads this via
@@ -171,6 +173,7 @@ fn open_holon_window(
             session_config,
             config_dir,
             locked_keys: std::collections::HashSet::new(),
+            conditions,
         });
         if let Err(e) = app.bootstrap().await {
             boot_failed(BootError::from_bootstrap_error(e));

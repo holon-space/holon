@@ -347,6 +347,7 @@ mod backend {
             .block_on(async {
                 create_backend_engine_with_extras(
                     path,
+                    std::sync::Arc::new(holon_api::ConditionBus::new()),
                     |injector| {
                         use fluxdi::Module as _;
 

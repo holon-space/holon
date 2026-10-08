@@ -513,6 +513,17 @@ pub enum ConditionKind {
         field: String,
         reason: String,
     },
+    /// The previous run of Holon panicked at `subject` (a `file:line:column`)
+    /// on `thread` with `message`, as its panic record says. The record is
+    /// read once, at start.
+    ///
+    /// All-clear: none in this process.
+    PreviousRunPanicked { message: String, thread: String },
+    /// A thread or task of this process panicked at `subject` (a
+    /// `file:line:column`) with `message`; what it was doing stopped.
+    ///
+    /// All-clear: none in this process.
+    TaskPanicked { message: String, thread: String },
 }
 
 /// Subject of the device-wide conditions on this bus, which have no share to
@@ -586,6 +597,8 @@ impl ConditionKind {
     pub const DATABASE_STUCK: &'static str = "database-stuck";
     pub const DATABASE_WATCH_FAILED: &'static str = "database-watch-failed";
     pub const DERIVED_FIELD_NOT_COMPUTED: &'static str = "derived-field-not-computed";
+    pub const PREVIOUS_RUN_PANICKED: &'static str = "previous-run-panicked";
+    pub const TASK_PANICKED: &'static str = "task-panicked";
 
     /// The condition's stable identity, paired with the subject to form a
     /// [`ConditionKey`]. Total: every degradation is a sticky
@@ -647,6 +660,8 @@ impl ConditionKind {
             Self::DatabaseStuck { .. } => Self::DATABASE_STUCK,
             Self::DatabaseWatchFailed { .. } => Self::DATABASE_WATCH_FAILED,
             Self::DerivedFieldNotComputed { .. } => Self::DERIVED_FIELD_NOT_COMPUTED,
+            Self::PreviousRunPanicked { .. } => Self::PREVIOUS_RUN_PANICKED,
+            Self::TaskPanicked { .. } => Self::TASK_PANICKED,
         }
     }
 }

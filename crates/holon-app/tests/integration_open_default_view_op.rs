@@ -58,6 +58,7 @@ async fn engine_over(
 ) -> Arc<holon::api::BackendEngine> {
     let (engine, ()) = holon::di::create_backend_engine_with_extras(
         db_path,
+        std::sync::Arc::new(holon_api::ConditionBus::new()),
         move |injector| {
             holon_loro_wiring::EventInfraModule
                 .configure(injector)

@@ -41,6 +41,8 @@ pub struct TuiModule {
     /// Acquired before the boot, so a refusal reaches the user as its own
     /// message. `configure` takes it.
     pub vault: Mutex<Option<SessionVault>>,
+    /// The core bus, created by the entry point before the boot.
+    pub conditions: Arc<holon_api::ConditionBus>,
 }
 
 impl Module for TuiModule {
@@ -54,8 +56,13 @@ impl Module for TuiModule {
         vault.assert_holds(self.holon_config.vault.root.as_deref());
         let db_path = self.holon_config.resolve_db_path(&self.config_dir);
 
-        holon::di::open_and_register_core(injector, db_path, holon::di::StorageSelector::Turso)
-            .map_err(|e| to_di_err("configure", &e))?;
+        holon::di::open_and_register_core(
+            injector,
+            db_path,
+            holon::di::StorageSelector::Turso,
+            self.conditions.clone(),
+        )
+        .map_err(|e| to_di_err("configure", &e))?;
         vault.register(injector);
 
         injector

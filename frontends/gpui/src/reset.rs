@@ -76,11 +76,15 @@ pub async fn build_fresh_sut(
         Arc::new(std::sync::OnceLock::new());
     let injector_slot_c = injector_slot.clone();
 
+    let conditions = Arc::new(holon_api::ConditionBus::new());
+    holon_frontend::panic_record::install(&config_dir, conditions.clone());
+
     let (session, backend, reactive) = holon_app::new_from_config_with_di(
         holon_config,
         session_config,
         config_dir,
         std::collections::HashSet::new(),
+        conditions,
         move |injector| {
             // `GpuiModule::configure` minus MCP (di.rs). NO add_mcp_server, NO
             // register_debug_services — the existing MCP server is reused (C2).

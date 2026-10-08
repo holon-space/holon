@@ -758,6 +758,20 @@ impl SpanCollector {
             .clone()
     }
 
+    /// Remove the one captured panic whose payload is `message`: a panic the
+    /// test raised on purpose and whose disclosure it asserts elsewhere.
+    pub fn take_injected_panic(&self, message: &str) {
+        let sink = scope_sink(current_scope());
+        let mut sink = sink.lock().expect("problem sink lock poisoned");
+        let before = sink.len();
+        sink.retain(|p| !(p.kind == ProblemKind::Panic && p.message == message));
+        assert_eq!(
+            before - sink.len(),
+            1,
+            "expected exactly one captured panic {message:?}; remaining problems: {sink:?}"
+        );
+    }
+
     /// Count of problems captured since the last [`SpanCollector::reset`].
     pub fn problem_count(&self) -> usize {
         self.captured_problems().len()

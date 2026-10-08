@@ -192,6 +192,10 @@ impl HeadlessStore {
     pub(crate) fn db_path(&self) -> PathBuf {
         self.temp.path().join("test.db")
     }
+
+    pub(crate) fn config_dir(&self) -> PathBuf {
+        self.temp.path().to_path_buf()
+    }
 }
 
 /// Everything one boot owns. A reboot drops this whole value and builds a
@@ -698,6 +702,7 @@ impl HeadlessFrontendComponent {
         clock: Arc<holon_api::TestClock>,
         peer_id: Option<u64>,
         connect: IntegrationConnectTiming,
+        boot_fault: &holon_pbt_core::BootFault,
     ) -> Self {
         Self::new_impl_with_leg(
             org_files,
@@ -708,6 +713,7 @@ impl HeadlessFrontendComponent {
             peer_id,
             None,
             Some(connect),
+            boot_fault,
         )
         .await
     }
@@ -766,6 +772,7 @@ impl HeadlessFrontendComponent {
             peer_id,
             sidecar_yaml,
             None,
+            &holon_pbt_core::BootFault::None,
         )
         .await
     }
@@ -779,6 +786,7 @@ impl HeadlessFrontendComponent {
         peer_id: Option<u64>,
         sidecar_yaml: Option<&str>,
         connect: Option<IntegrationConnectTiming>,
+        boot_fault: &holon_pbt_core::BootFault,
     ) -> Self {
         assert!(
             loro_enabled || editor_leg == holon_pbt_core::EditorLeg::Dispatch,
@@ -822,6 +830,15 @@ impl HeadlessFrontendComponent {
             org_root,
             org_paths,
         });
+        if let holon_pbt_core::BootFault::PriorCrash(prior) = boot_fault {
+            holon_frontend::panic_record::PanicRecord {
+                message: prior.message.clone(),
+                location: prior.location.clone(),
+                thread: prior.thread.clone(),
+            }
+            .write_to(&store.config_dir())
+            .expect("seed the prior run's panic record");
+        }
         let boot_params = BootParams {
             settle,
             loro_enabled,
@@ -891,7 +908,12 @@ impl HeadlessFrontendComponent {
             },
             ..Default::default()
         };
-        let config_dir = temp_path.to_path_buf();
+        let config_dir = store.config_dir();
+        // As every entry point does before its boot: the core bus, with the
+        // previous run's panic disclosed on it and this process's panics
+        // routed to it.
+        let conditions = Arc::new(holon_api::ConditionBus::new());
+        holon_frontend::panic_record::install(&config_dir, conditions.clone());
         let mut session_config = SessionConfig::new(holon_api::UiInfo::permissive()).without_wait();
         session_config.loro_peer_id = params.peer_id;
         let org_fs_for_di = org_fs.clone();
@@ -914,6 +936,7 @@ impl HeadlessFrontendComponent {
             session_config,
             config_dir,
             std::collections::HashSet::new(),
+            conditions,
             move |injector| {
                 holon::testing::database_stuck_guard::report_database_stuck_in(injector);
                 crate::test_environment::install_headless_render_interpreter(
@@ -8440,6 +8463,13 @@ impl holon_pbt_core::capabilities::SutConditions for HeadlessFrontendComponent {
                 count: match &c.reason {
                     holon_api::ConditionKind::VaultIngestFailed(refusals) => {
                         Some(refusals.count().get())
+                    }
+                    _ => None,
+                },
+                message: match &c.reason {
+                    holon_api::ConditionKind::PreviousRunPanicked { message, .. }
+                    | holon_api::ConditionKind::TaskPanicked { message, .. } => {
+                        Some(message.clone())
                     }
                     _ => None,
                 },

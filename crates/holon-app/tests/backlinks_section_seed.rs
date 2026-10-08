@@ -99,6 +99,7 @@ async fn fresh_engine(
 ) {
     holon::di::create_backend_engine_with_extras(
         db_path,
+        std::sync::Arc::new(holon_api::ConditionBus::new()),
         |injector| {
             EventInfraModule.configure(injector).map_err(|e| {
                 anyhow::anyhow!("configure EventInfraModule for backlinks-seed test: {e}")

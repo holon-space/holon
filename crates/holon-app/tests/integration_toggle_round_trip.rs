@@ -100,6 +100,7 @@ fn a_dispatched_switch_reaches_the_seeded_section_without_a_manual_reprojection(
         let state_dir_for_module = state_dir.clone();
         let (engine, ordering, store) = holon::di::create_backend_engine_with_extras(
             dir.path().join("fresh.db"),
+            std::sync::Arc::new(holon_api::ConditionBus::new()),
             move |injector| {
                 // The same block-CRUD + event wiring `integration_state_projection`
                 // builds, so the seed has an ordering authority to write through.

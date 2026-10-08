@@ -2863,6 +2863,9 @@ pub struct RaisedCondition {
     pub files: Vec<String>,
     /// How many files the condition counts, for a kind that counts them.
     pub count: Option<usize>,
+    /// The message the condition carries, for a kind that carries one (a
+    /// panic's payload).
+    pub message: Option<String>,
 }
 
 /// One condition the model expects in effect.
@@ -2878,6 +2881,9 @@ pub struct ExpectedDisclosure {
     /// How many files the condition must count, when the model states it;
     /// `None` leaves the count unjudged.
     pub count: Option<usize>,
+    /// The message the condition must carry, when the model states it;
+    /// `None` leaves it unjudged.
+    pub message: Option<String>,
 }
 
 impl ExpectedDisclosure {
@@ -2889,6 +2895,10 @@ impl ExpectedDisclosure {
                 .as_ref()
                 .is_none_or(|files| *files == raised.files)
             && self.count.is_none_or(|count| Some(count) == raised.count)
+            && self
+                .message
+                .as_ref()
+                .is_none_or(|message| Some(message) == raised.message.as_ref())
     }
 }
 

@@ -84,6 +84,7 @@ async fn boot_with_late_profile() -> Booted {
         SessionConfig::new(holon_api::UiInfo::permissive()),
         dir.path().to_path_buf(),
         HashSet::new(),
+        std::sync::Arc::new(holon_api::ConditionBus::new()),
         |_| Ok(()),
         |injector| {
             (

@@ -97,6 +97,7 @@ async fn boot(
         SessionConfig::new(holon_api::UiInfo::permissive()).without_wait(),
         dir.to_path_buf(),
         HashSet::new(),
+        std::sync::Arc::new(holon_api::ConditionBus::new()),
         move |injector| {
             holon::testing::database_stuck_guard::report_database_stuck_in(injector);
             if let Some(type_def) = seed {

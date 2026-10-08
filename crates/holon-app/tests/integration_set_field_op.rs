@@ -67,6 +67,7 @@ async fn engine_over_with_browser(
 ) {
     let (engine, (store, vm)) = holon::di::create_backend_engine_with_extras(
         db_path,
+        std::sync::Arc::new(holon_api::ConditionBus::new()),
         move |injector| {
             holon_app::mcp_integrations::McpIntegrationsModule::from_dir(&state_dir, &state_dir)
                 .with_browser(browser.clone())

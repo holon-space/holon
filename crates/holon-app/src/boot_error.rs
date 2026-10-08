@@ -198,6 +198,7 @@ mod tests {
         let injector = Injector::root();
         let flux_err = CoreInfraModule {
             db_path: bad_db_path,
+            conditions: std::sync::Arc::new(holon_api::ConditionBus::new()),
         }
         .configure(&injector)
         .expect_err("opening a directory as the Turso DB must fail, not succeed");

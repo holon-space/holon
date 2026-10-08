@@ -89,14 +89,18 @@ impl BlockQueryFrontendComponent {
             .expect("seed query-source child");
         let backend = Arc::new(backend);
 
-        let injector = build_no_turso_container(":memory:".into(), {
-            let backend = backend.clone();
-            move |inj| {
-                register_loro_block_query_source(inj, backend.clone());
-                register_block_query_frontend(inj);
-                Ok(())
-            }
-        })
+        let injector = build_no_turso_container(
+            ":memory:".into(),
+            std::sync::Arc::new(holon_api::ConditionBus::new()),
+            {
+                let backend = backend.clone();
+                move |inj| {
+                    register_loro_block_query_source(inj, backend.clone());
+                    register_block_query_frontend(inj);
+                    Ok(())
+                }
+            },
+        )
         .await
         .expect("assemble no-Turso block-query container");
 
