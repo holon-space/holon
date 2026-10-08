@@ -92,9 +92,7 @@ pub fn resolve_active_collection(expr: &RenderExpr) -> Option<&RenderExpr> {
                 .map(|a| &a.value)?;
             resolve_active_collection(tmpl)
         }
-        _ if holon_frontend::reactive_view_model::collection_variant_of(expr).is_some() => {
-            Some(expr)
-        }
+        _ if variant_of(expr).is_some() => Some(expr),
         RenderExpr::FunctionCall { args, .. } => args
             .iter()
             .find_map(|a| resolve_active_collection(&a.value)),
@@ -119,7 +117,14 @@ fn active_mode_name(args: &[holon_api::render_types::Arg]) -> String {
 /// Derive the `CollectionVariant` prod renders for `expr` — the *active* view
 /// mode's layout (see [`resolve_active_collection`]).
 pub fn extract_collection_variant(expr: &RenderExpr) -> Option<CollectionVariant> {
-    holon_frontend::reactive_view_model::collection_variant_of(resolve_active_collection(expr)?)
+    variant_of(resolve_active_collection(expr)?)
+}
+
+/// The layout prod reads off `expr`. A keyword prod refuses draws an error
+/// node there; an oracle has no node to draw, so it fails the test.
+fn variant_of(expr: &RenderExpr) -> Option<CollectionVariant> {
+    holon_frontend::reactive_view_model::collection_variant_of(expr)
+        .unwrap_or_else(|e| panic!("prod refuses the layout keywords of {expr:?}: {e}"))
 }
 
 /// Extract the `item_template` of the *active* collection (see

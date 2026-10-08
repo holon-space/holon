@@ -4,10 +4,12 @@ holon_macros::widget_builder! {
     raw fn view_mode_switcher(ba: BA<'_>) -> ViewModel {
         let modes = ba.args.get_string("modes").unwrap_or("[]").to_string();
 
-        let entity_id = ba
-            .args
-            .get_string("entity_uri")
-            .expect("view_mode_switcher requires an `entity_uri` argument");
+        let Some(entity_id) = ba.args.get_string("entity_uri") else {
+            return ViewModel::error(
+                "view_mode_switcher",
+                "view_mode_switcher requires an `entity_uri` argument",
+            );
+        };
         let entity_uri =
             match crate::render_interpreter::render_spec_block_uri("entity_uri", entity_id) {
                 Ok(uri) => uri,

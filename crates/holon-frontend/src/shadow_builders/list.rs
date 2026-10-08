@@ -19,12 +19,18 @@ holon_macros::widget_builder! {
         // which is how a `wrap: true` used to lay the collection out unwrapped
         // in silence. `ItemFlow::parse` is the one place either reader judges
         // them.
-        let flow = ItemFlow::parse(ba.args.named.get("horizontal"), ba.args.named.get("wrap"));
+        let flow = match ItemFlow::parse(ba.args.named.get("horizontal"), ba.args.named.get("wrap")) {
+            Ok(flow) => flow,
+            Err(msg) => return ViewModel::error("list", msg),
+        };
         // The macro's `gap` param comes from `get_f64`, which has the same
         // wrong-type-reads-as-absent shape, so the declared default would
         // silently stand in for a mistyped one. Re-read it strictly through the
         // parse both readers share; an absent `gap:` keeps the macro's default.
-        let gap = crate::reactive_view_model::parse_gap(ba.args.named.get("gap"), gap);
+        let gap = match crate::reactive_view_model::parse_gap(ba.args.named.get("gap"), gap) {
+            Ok(gap) => gap,
+            Err(msg) => return ViewModel::error("list", msg),
+        };
         match children {
             CollectionData::Streaming { item_template, data_source, sort_key, rules } => {
                 let virtual_child = match virtual_child_slot_from_arg(&ba) {

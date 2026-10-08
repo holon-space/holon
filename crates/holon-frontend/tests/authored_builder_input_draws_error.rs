@@ -230,3 +230,21 @@ fn state_toggle_bool_binding_live_row_turns_non_bool() {
         "a valid value restores the toggle: {json}"
     );
 }
+
+#[test]
+fn text_ellipsis_names_no_end() {
+    assert_error_names(
+        r#"text("x", #{ellipsis: "middle"})"#,
+        no_row(),
+        &["text", "ellipsis", "middle", "\"start\"", "\"end\""],
+    );
+}
+
+#[test]
+fn view_mode_switcher_without_entity_uri() {
+    assert_error_names(
+        r#"view_mode_switcher(#{modes: "[\"tree\"]"})"#,
+        no_row(),
+        &["view_mode_switcher", "entity_uri"],
+    );
+}

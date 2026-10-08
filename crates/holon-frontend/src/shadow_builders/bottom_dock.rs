@@ -17,12 +17,15 @@ use super::prelude::*;
 // entry that would flip silently on append.
 holon_macros::widget_builder! {
     raw fn bottom_dock(ba: BA<'_>) -> ViewModel {
-        assert_eq!(
-            ba.args.positional_exprs.len(),
-            2,
-            "bottom_dock requires exactly 2 positional args (main, dock); got {}",
-            ba.args.positional_exprs.len()
-        );
+        if ba.args.positional_exprs.len() != 2 {
+            return ViewModel::error(
+                "bottom_dock",
+                format!(
+                    "bottom_dock requires exactly 2 positional args (main, dock); got {}",
+                    ba.args.positional_exprs.len()
+                ),
+            );
+        }
         let main = (ba.interpret)(&ba.args.positional_exprs[0], ba.ctx);
         let dock = (ba.interpret)(&ba.args.positional_exprs[1], ba.ctx);
         ViewModel {

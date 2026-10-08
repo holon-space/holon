@@ -74,13 +74,23 @@ fn bottom_dock_has_two_named_slots() {
 }
 
 #[test]
-#[should_panic(expected = "bottom_dock requires exactly 2 positional args")]
-fn bottom_dock_rejects_single_slot() {
+fn bottom_dock_draws_an_error_for_a_single_slot() {
     let expr = RenderExpr::FunctionCall {
         name: "bottom_dock".to_string(),
         args: vec![pos(lit("drop_zone"))],
     };
-    let _ = interpret(&expr, None);
+    let json = serde_json::to_value(interpret(&expr, None).snapshot()).expect("serializes");
+    assert_eq!(
+        json["widget"], "error",
+        "a one-slot bottom_dock draws an error: {json}"
+    );
+    let message = json["message"]
+        .as_str()
+        .expect("an error node carries a message");
+    assert!(
+        message.contains("bottom_dock requires exactly 2 positional args"),
+        "{message:?}"
+    );
 }
 
 #[test]

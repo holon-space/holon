@@ -65,6 +65,31 @@ fn build(e: &RenderExpr) -> ReactiveViewModel {
     services.interpret(e, &RenderContext::default())
 }
 
+/// The builder draws an error node whose message contains `needle`.
+fn builder_refuses(e: &RenderExpr, needle: &str) {
+    let json = serde_json::to_value(build(e).snapshot()).expect("a ViewModel serializes");
+    assert_eq!(
+        json["widget"], "error",
+        "the list must draw an error node: {json}"
+    );
+    let message = json["message"]
+        .as_str()
+        .expect("an error node carries a message");
+    assert!(
+        message.contains(needle),
+        "the error must name {needle:?}: {message:?}"
+    );
+}
+
+/// The pre-pass refuses the source with a message containing `needle`.
+fn pre_pass_refuses(e: &RenderExpr, needle: &str) {
+    let message = collection_variant_of(e).expect_err("the pre-pass must refuse the source");
+    assert!(
+        message.contains(needle),
+        "the refusal must name {needle:?}: {message:?}"
+    );
+}
+
 fn flow_of(vm: &ReactiveViewModel) -> ItemFlow {
     vm.collection
         .as_ref()
@@ -84,7 +109,9 @@ fn wrap_is_read_by_both_the_builder_and_the_pre_pass() {
         "the shadow builder must carry the wrapping mode into the collection's layout"
     );
     assert_eq!(
-        collection_variant_of(&e).map(|v| v.flow),
+        collection_variant_of(&e)
+            .expect("the layout keywords parse")
+            .map(|v| v.flow),
         Some(ItemFlow::WrappingRow),
         "the pre-pass reads the layout off the same source and must reach the same flow, or one \
          path wraps and the other does not"
@@ -100,42 +127,36 @@ fn nowrap_is_the_same_as_naming_no_wrap_at_all() {
 // ── Every unrecognised `wrap:` is refused, in BOTH readers ─────────────────
 
 #[test]
-#[should_panic(expected = "Boolean(true)")]
 fn a_bool_where_a_keyword_belongs_is_refused_by_the_builder() {
-    let _ = build(&expr(", wrap: true"));
+    builder_refuses(&expr(", wrap: true"), "Boolean(true)");
 }
 
 #[test]
-#[should_panic(expected = "Boolean(true)")]
 fn a_bool_where_a_keyword_belongs_is_refused_by_the_pre_pass() {
-    let _ = collection_variant_of(&expr(", wrap: true"));
+    pre_pass_refuses(&expr(", wrap: true"), "Boolean(true)");
 }
 
 #[test]
-#[should_panic(expected = "Integer(1)")]
 fn a_number_where_a_keyword_belongs_is_refused() {
-    let _ = build(&expr(", wrap: 1"));
+    builder_refuses(&expr(", wrap: 1"), "Integer(1)");
 }
 
 #[test]
-#[should_panic(expected = "names no wrapping mode")]
 fn an_unknown_keyword_is_refused_by_the_builder() {
-    let _ = build(&expr(r#", wrap: "maybe""#));
+    builder_refuses(&expr(r#", wrap: "maybe""#), "names no wrapping mode");
 }
 
 #[test]
-#[should_panic(expected = "names no wrapping mode")]
 fn an_unknown_keyword_is_refused_by_the_pre_pass() {
-    let _ = collection_variant_of(&expr(r#", wrap: "maybe""#));
+    pre_pass_refuses(&expr(r#", wrap: "maybe""#), "names no wrapping mode");
 }
 
 #[test]
-#[should_panic(expected = "without `horizontal: true`")]
 fn wrapping_a_stacked_collection_names_nothing() {
     let src = r#"list(#{gap: 8, wrap: "wrap"}, text("a"))"#;
     holon_frontend::shadow_builders::register_render_dsl_widget_names();
     let e = holon_api::render_dsl::parse_render_dsl(src).expect("source parses");
-    let _ = build(&e);
+    builder_refuses(&e, "without `horizontal: true`");
 }
 
 // ── `horizontal:` is judged by the same parse ──────────────────────────────
@@ -145,28 +166,33 @@ fn naming_no_horizontal_stacks_the_items() {
     let e = expr_body("gap: 8");
     assert_eq!(flow_of(&build(&e)), ItemFlow::Stacked);
     assert_eq!(
-        collection_variant_of(&e).map(|v| v.flow),
+        collection_variant_of(&e)
+            .expect("the layout keywords parse")
+            .map(|v| v.flow),
         Some(ItemFlow::Stacked),
         "both readers must agree on the default too, not only on the refusals"
     );
 }
 
 #[test]
-#[should_panic(expected = "String(\"true\")")]
 fn a_string_where_a_boolean_belongs_is_refused_by_the_builder() {
-    let _ = build(&expr_body(r#"gap: 8, horizontal: "true""#));
+    builder_refuses(
+        &expr_body(r#"gap: 8, horizontal: "true""#),
+        "String(\"true\")",
+    );
 }
 
 #[test]
-#[should_panic(expected = "String(\"true\")")]
 fn a_string_where_a_boolean_belongs_is_refused_by_the_pre_pass() {
-    let _ = collection_variant_of(&expr_body(r#"gap: 8, horizontal: "true""#));
+    pre_pass_refuses(
+        &expr_body(r#"gap: 8, horizontal: "true""#),
+        "String(\"true\")",
+    );
 }
 
 #[test]
-#[should_panic(expected = "Integer(1)")]
 fn a_number_where_a_boolean_belongs_is_refused() {
-    let _ = build(&expr_body("gap: 8, horizontal: 1"));
+    builder_refuses(&expr_body("gap: 8, horizontal: 1"), "Integer(1)");
 }
 
 // ── `gap:` is judged by the same parse ─────────────────────────────────────
@@ -177,7 +203,9 @@ fn a_number_where_a_boolean_belongs_is_refused() {
 fn a_named_gap_reaches_both_readers() {
     let e = expr_body("gap: 12");
     assert_eq!(
-        collection_variant_of(&e).map(|v| v.gap),
+        collection_variant_of(&e)
+            .expect("the layout keywords parse")
+            .map(|v| v.gap),
         Some(12.0),
         "the pre-pass must read the authored gap, not the layout default"
     );
@@ -194,24 +222,24 @@ fn a_named_gap_reaches_both_readers() {
 }
 
 #[test]
-#[should_panic(expected = "String(\"8\")")]
 fn a_string_where_a_gap_belongs_is_refused_by_the_builder() {
-    let _ = build(&expr_body(r#"gap: "8", horizontal: true"#));
+    builder_refuses(&expr_body(r#"gap: "8", horizontal: true"#), "String(\"8\")");
 }
 
 #[test]
-#[should_panic(expected = "String(\"8\")")]
 fn a_string_where_a_gap_belongs_is_refused_by_the_pre_pass() {
-    let _ = collection_variant_of(&expr_body(r#"gap: "8", horizontal: true"#));
+    pre_pass_refuses(&expr_body(r#"gap: "8", horizontal: true"#), "String(\"8\")");
 }
 
 // ── A keyword read from a row is refused, not silently dropped ─────────────
 
 #[test]
-#[should_panic(expected = "takes a literal")]
 fn a_column_reference_where_a_keyword_belongs_is_refused() {
     // Only the pre-pass can see this shape: by the time the shadow builder
     // reads its args a `col(...)` has already resolved to the row's value, so
     // the RenderExpr arm is where an authored-vs-data mistake is catchable.
-    let _ = collection_variant_of(&expr_body(r#"gap: 8, horizontal: true, wrap: col("x")"#));
+    pre_pass_refuses(
+        &expr_body(r#"gap: 8, horizontal: true, wrap: col("x")"#),
+        "takes a literal",
+    );
 }

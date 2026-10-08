@@ -140,36 +140,39 @@ impl ItemFlow {
     /// keyword from an absent one, so quietly taking the default would lay the
     /// collection out the other way and say nothing: the `text(#{style: …})`
     /// shape, which rendered at body size for a release.
-    pub fn parse(horizontal: Option<&Value>, wrap: Option<&Value>) -> Self {
+    pub fn parse(horizontal: Option<&Value>, wrap: Option<&Value>) -> Result<Self, String> {
         let horizontal = match horizontal {
             None => false,
             Some(Value::Boolean(b)) => *b,
-            Some(other) => panic!(
-                "list(#{{horizontal: …}}) takes a boolean, and this call site gave {other:?}. Use \
-                 `true` or `false` (the default)."
-            ),
+            Some(other) => {
+                return Err(format!(
+                    "list(#{{horizontal: …}}) takes a boolean, and this call site gave {other:?}. \
+                     Use `true` or `false` (the default)."
+                ));
+            }
         };
         let Some(wrap) = wrap else {
-            return if horizontal { Self::Row } else { Self::Stacked };
+            return Ok(if horizontal { Self::Row } else { Self::Stacked });
         };
         let Some(keyword) = wrap.as_string() else {
-            panic!(
+            return Err(format!(
                 "list(#{{wrap: …}}) takes a keyword, and this call site gave {wrap:?}. Use \
                  \"wrap\" or \"nowrap\" (the default)."
-            )
+            ));
         };
-        assert!(
-            horizontal,
-            "list(#{{wrap: {keyword:?}}}) without `horizontal: true` names nothing: a stacked \
-             collection already gives every item its own line."
-        );
+        if !horizontal {
+            return Err(format!(
+                "list(#{{wrap: {keyword:?}}}) without `horizontal: true` names nothing: a stacked \
+                 collection already gives every item its own line."
+            ));
+        }
         match keyword {
-            "wrap" => Self::WrappingRow,
-            "nowrap" => Self::Row,
-            other => panic!(
+            "wrap" => Ok(Self::WrappingRow),
+            "nowrap" => Ok(Self::Row),
+            other => Err(format!(
                 "list(#{{wrap: {other:?}}}) names no wrapping mode. Use \"wrap\" or \"nowrap\" \
                  (the default)."
-            ),
+            )),
         }
     }
 
@@ -246,14 +249,19 @@ impl CollectionVariant {
 /// refused: a layout keyword is authored once, not read per row, and the
 /// alternative is to drop it and lay the collection out the other way with
 /// nothing said. [`ItemFlow::parse`] judges the literal itself.
-fn literal_arg<'a>(args: &'a [holon_api::render_types::Arg], name: &str) -> Option<&'a Value> {
-    let arg = args.iter().find(|a| a.name.as_deref() == Some(name))?;
+fn literal_arg<'a>(
+    args: &'a [holon_api::render_types::Arg],
+    name: &str,
+) -> Result<Option<&'a Value>, String> {
+    let Some(arg) = args.iter().find(|a| a.name.as_deref() == Some(name)) else {
+        return Ok(None);
+    };
     match &arg.value {
-        RenderExpr::Literal { value } => Some(value),
-        other => panic!(
+        RenderExpr::Literal { value } => Ok(Some(value)),
+        other => Err(format!(
             "`{name}:` takes a literal, and this call site gave {other:?}. A layout keyword is \
              authored, not read from a row."
-        ),
+        )),
     }
 }
 
@@ -262,38 +270,37 @@ fn literal_arg<'a>(args: &'a [holon_api::render_types::Arg], name: &str) -> Opti
 /// The ONE place either reader turns `gap:` into a number, for the reason
 /// [`ItemFlow::parse`] gives: a value of the wrong type used to be dropped, and
 /// the layout's declared default took its place with nothing said.
-pub fn parse_gap(gap: Option<&Value>, default: f32) -> f32 {
+pub fn parse_gap(gap: Option<&Value>, default: f32) -> Result<f32, String> {
     match gap {
-        None => default,
-        Some(Value::Float(f)) => *f as f32,
-        Some(Value::Integer(i)) => *i as f32,
-        Some(other) => {
-            panic!("a collection's `gap:` takes a number, and this call site gave {other:?}.")
-        }
+        None => Ok(default),
+        Some(Value::Float(f)) => Ok(*f as f32),
+        Some(Value::Integer(i)) => Ok(*i as f32),
+        Some(other) => Err(format!(
+            "a collection's `gap:` takes a number, and this call site gave {other:?}."
+        )),
     }
 }
 
 /// Determine the `CollectionVariant` from a render expression's function name.
 ///
-/// Returns `None` for non-collection expressions (non-FunctionCall or
-/// unrecognized function names).
-pub fn collection_variant_of(expr: &RenderExpr) -> Option<CollectionVariant> {
+/// `Ok(None)` for non-collection expressions (non-FunctionCall or
+/// unrecognized function names); `Err` for a layout keyword it refuses.
+pub fn collection_variant_of(expr: &RenderExpr) -> Result<Option<CollectionVariant>, String> {
     let (name, args) = match expr {
         RenderExpr::FunctionCall { name, args } => (name.as_str(), args),
-        _ => return None,
+        _ => return Ok(None),
     };
 
-    let spec = crate::collection_layout::lookup_layout(name)?;
+    let Some(spec) = crate::collection_layout::lookup_layout(name) else {
+        return Ok(None);
+    };
 
     // `gap:` when the call site overrides it, else the layout's declared
     // default. Layouts that don't care about gap (tree, table, …) see 0.0.
-    let gap = parse_gap(literal_arg(args, "gap"), spec.default_gap);
+    let gap = parse_gap(literal_arg(args, "gap")?, spec.default_gap)?;
+    let flow = ItemFlow::parse(literal_arg(args, "horizontal")?, literal_arg(args, "wrap")?)?;
 
-    Some(CollectionVariant {
-        spec,
-        gap,
-        flow: ItemFlow::parse(literal_arg(args, "horizontal"), literal_arg(args, "wrap")),
-    })
+    Ok(Some(CollectionVariant { spec, gap, flow }))
 }
 
 /// Returns true if both variants are the same kind (same registered name).

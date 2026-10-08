@@ -52,11 +52,15 @@ holon_macros::widget_builder! {
         // that fell back to the default would put the ellipsis on the wrong end
         // of a disclosure and nothing would say so.
         if let Some(ref e) = ellipsis {
-            assert!(
-                e == "start" || e == "end",
-                "text(#{{ellipsis: {e:?}}}) names no end. Use \"start\" (for a path) or \"end\" \
-                 (the default)."
-            );
+            if e != "start" && e != "end" {
+                return ViewModel::error(
+                    "text",
+                    format!(
+                        "text(#{{ellipsis: {e:?}}}) names no end. Use \"start\" (for a path) or \
+                         \"end\" (the default)."
+                    ),
+                );
+            }
             __props.insert("ellipsis".to_string(), Value::String(e.clone()));
         }
         if let Some(ref s) = style {

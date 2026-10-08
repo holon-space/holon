@@ -127,11 +127,21 @@ fn build_switcher_bar(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Opti
                     // Fast path: intra-variant switch via set_template.
                     // Extract ReactiveView + check variant in a scoped block,
                     // then DROP the ReadGuard before any write path.
+                    let target_layout = match collection_variant_of(new_expr) {
+                        Ok(layout) => layout,
+                        Err(msg) => {
+                            slot_handle.set(Arc::new(ReactiveViewModel::error(
+                                "view_mode_switcher",
+                                msg,
+                            )));
+                            window.refresh();
+                            return;
+                        }
+                    };
                     let fast_path = {
                         let slot_content = slot_handle.lock_ref();
                         slot_content.collection.as_ref().and_then(|rv| {
                             let current_layout = rv.layout();
-                            let target_layout = collection_variant_of(new_expr);
                             if variants_match(current_layout, target_layout) {
                                 Some(rv.clone())
                             } else {
