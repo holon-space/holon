@@ -243,9 +243,8 @@ The net itself runs on the live path: the planner on boot, pure transitions
 inline (section 4). Simulation does not: it works on a copy and never writes
 the real state. A plan commits by firing real transitions through the
 dispatcher (ADR 0024 P2, `docs/adr/0024-unified-action-execution.md:98-105`).
-ADR 0031 guard 1 ("no PN runtime in the live dispatch path",
-`docs/adr/0031-native-transition-catalog-and-macro-reification.md:74`) is
-still the binding text until an ADR changes it.
+[ADR 0031](../adr/0031-native-transition-catalog-and-macro-reification.md) guard 1
+now states this direction.
 
 ## 4. Pure and effectful transitions
 
@@ -414,7 +413,7 @@ supersedes it.
 10. *Answered (Martin, 2026-10-08).* Boot by pull puts a planner on the boot
     path. Direction: the net takes more work, also on the live path
     (section 3). [Simulation.md](Simulation.md) states this direction. ADR
-    0031 guard 1 still says otherwise until an ADR changes it.
+    0031 guard 1 now states this direction.
 
 ## Related documents
 

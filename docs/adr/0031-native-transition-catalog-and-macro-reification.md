@@ -2,6 +2,8 @@
 
 Date: 2026-08-09. Status: accepted (Martin, ratified 2026-08-08 as decision D7 of the
 agent-op/revert design; this ADR is the in-repo record of that ratification).
+Amended 2026-10-08 — guard 1; see
+[Vision-PetriNetCoordination.md](../Architecture/Vision-PetriNetCoordination.md).
 Companion to ADR 0024 (unified action execution — the PN transition vocabulary and the
 dual-evaluated Pattern AST) and ADR 0030 (birth atomicity — whose Enforcement clause
 names this machinery).
@@ -71,9 +73,18 @@ becomes a runtime lookup miss instead of a compile error.
 These are binding on every increment (they predate this ADR; it restates them so they
 are enforceable in-repo):
 
-1. **No PN runtime in the live dispatch path.** Guard evaluation is a compiled
-   predicate; accept stays semantic replay through the normal dispatcher. The engine
-   stays a simulator.
+1. **The Petri net coordinates Holon, also on the live dispatch path.** Today the
+   net evaluates guards and ranks tasks; it does not yet plan or run transitions
+   on the live path. The direction is that a pull planner also runs at boot and
+   pure transitions run inline, while effectful transitions always go through the
+   normal dispatcher
+   ([Vision-PetriNetCoordination.md](../Architecture/Vision-PetriNetCoordination.md)).
+   Simulation works only on a copy and never writes the real state. A plan commits
+   only when its transitions fire through the dispatcher. Guard evaluation stays a
+   compiled predicate; accept stays semantic replay through the dispatcher. The
+   planner, the dispatcher and the simulator read one catalog. The old rule no
+   longer applies because more duties for the net make the mental model simpler
+   and let Holon extend itself.
 2. **The catalog is derived from op definitions, never hand-maintained in parallel.** A
    hand-maintained parallel catalog that can drift is the kill criterion for the whole
    design.
@@ -276,8 +287,8 @@ repair-by-re-derivation for file mirrors stays blocked exactly as ADR 0030 state
 
 ## Out of scope
 
-- Anything below the intent boundary; a PN runtime in live dispatch; replacing the
-  temporal-LIFO user undo stack; a day-one total catalog.
+- Anything below the intent boundary; replacing the temporal-LIFO user undo stack;
+  a day-one total catalog.
 - Extending `holon-engine`'s flat net (refused option (b)); unifying its Rhai guards
   with the Pattern AST.
 - User-authored rule blocks' authoring surface (they share the grammar, not the track).

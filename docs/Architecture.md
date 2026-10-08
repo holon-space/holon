@@ -259,7 +259,7 @@ See also [wiki/overview.md](../wiki/overview.md) for the navigational layer and 
 
 ## Architecture decisions
 
-Ratified decisions live in [`docs/adr/`](adr/), numbered in ratification order.
+Ratified decisions live in [`docs/adr/`](adr/), numbered in ratification order ([how ADRs are amended](adr/README.md)).
 The ones that govern how Holon reaches other devices and other systems:
 
 | ADR | Covers |

@@ -115,12 +115,11 @@ Three rules stay:
   (ADR 0031). With two catalogs, the check above compares a declaration with
   itself and proves nothing.
 
-One rule changes. ADR 0031 (guard 1, `docs/adr/0031-native-transition-catalog-and-macro-reification.md:74`)
-says: "No PN runtime in the live dispatch path." In the direction, the net
-does run on the live path: the planner on boot, and pure transitions
-inline. Effectful transitions still go through the dispatcher
+One rule changed. The net runs on the live path: the planner on boot, and
+pure transitions inline. Effectful transitions still go through the dispatcher
 ([vision note §4](Vision-PetriNetCoordination.md#4-pure-and-effectful-transitions)).
-ADR 0031 guard 1 is still the binding text until an ADR changes it.
+[ADR 0031](../adr/0031-native-transition-catalog-and-macro-reification.md) guard 1
+now states this direction.
 
 ## Examples by use
 
