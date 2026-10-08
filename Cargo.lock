@@ -3902,7 +3902,7 @@ dependencies = [
 [[package]]
 name = "fluxdi"
 version = "1.2.2"
-source = "git+https://github.com/holon-space/fluxdi?branch=dev#24b6eebb0f6ba4a490f555a353a2add909ffda58"
+source = "git+https://github.com/holon-space/fluxdi?branch=dev#e6c646183c9299ff5dfa74ffc2795db7b511e6cd"
 dependencies = [
  "futures",
  "tokio",
