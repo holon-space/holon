@@ -1855,12 +1855,11 @@ pub fn sdk_config() -> TursoDatabaseConfig {
 ///
 /// **IMPORTANT - UI Keying Requirements**:
 ///
-/// The `id` field in `ChangeData` is the SQLite ROWID, which is:
-/// - Unique per view (not globally unique)
-/// - Can be reused after DELETE operations
-/// - Used for transport and coalescing only
+/// The `id` field of `Updated` and `Deleted` is the entity id (the row's `id`
+/// column). The SQLite ROWID is only in `data["_rowid"]`; it is unique per
+/// view and can be reused after a DELETE.
 ///
-/// **UI MUST KEY BY ENTITY ID from `data.get("id")`, NOT BY ROWID**
+/// **UI MUST KEY BY ENTITY ID, NOT BY ROWID**
 ///
 /// Example (illustrative — `change` is a `RowChange` you received):
 /// ```rust,ignore
@@ -1869,9 +1868,8 @@ pub fn sdk_config() -> TursoDatabaseConfig {
 ///         let entity_id = data.get("id").unwrap(); // Use this for widget key
 ///         // Don't use ROWID (from `data.get("_rowid")`) as widget key!
 ///     }
-///     ChangeData::Updated { id: rowid, data, .. } => {
-///         let entity_id = data.get("id").unwrap(); // Use this for widget key
-///         // Don't use `rowid` as widget key!
+///     ChangeData::Updated { id: entity_id, data, .. } => {
+///         // Use entity_id directly - it's extracted from the updated row data
 ///     }
 ///     ChangeData::Deleted { id: entity_id, .. } => {
 ///         // Use entity_id directly - it's extracted from the deleted row data

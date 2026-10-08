@@ -1,84 +1,76 @@
 ---
 id: 2026-09-15-turso-view-change-deleted-carries-the-entity-id
 date: 2026-09-15
-gap: ENVIRONMENT
-secondary: ORACLE
-status: OPEN
+gap: FALSE-ALARM
+secondary: null
+status: FIXED
 summary: >-
-  Under contention the `entity_view` change stream reports a `Deleted` change
-  carrying the ENTITY id where the rowid is expected, so a consumer that keys
-  events by rowid resolves `None` and sees a deletion it cannot match.
+  turso_storage_pbt went red about 1 run in 20 with no product defect: its
+  view-change oracle expected rowid-keyed deletes, per-statement and
+  statement-ordered changes inside a transaction, a change for an update that
+  changes nothing, and a winner for two creates of one key in one batch.
 ---
 
 ## Bug
 
 `holon::turso_storage_pbt pbt_tests::tests::test_turso_backend_state_machine`
-failed during a CONTENDED nextest run and is green in isolation. Captured
-firing: `.claude/worktrees/docs-w14/lane-logs/turso-state-machine-contended-1789429950.log`,
-whose header records the conditions verbatim — "Captured contended run …,
-integration lqxuknonwyyq `30e2bc43`, 2026-09-15 ~03:05, inside a 2149-test
-nextest run (gate-entity-uri). Isolated 3/3 green afterwards on the same tree."
-
-The assertion at `crates/holon/tests/turso_storage_pbt/pbt_tests.rs:1988` compares
-the change the view stream reported against the change the reference modelled.
-The stream reported the ENTITY id where the reference expected the ROWID:
+fails on drawn cases, deterministically per case. The signature that gave this
+entry its name:
 
 ```
     === View Change Entity ID Mismatch at index 4 for 'entity_view' ===
-    Expected entity ID: Some("xui")
-    Actual entity ID: None
     Expected change: Deleted { id: "2", origin: Remote { … } }
     Actual change: Deleted { id: "xui", origin: Remote { … } }
 ```
 
-The sequence that reaches it is the one the log's last drawn case carries:
-`CreateMaterializedView(entity_view)` … `Delete("nepo")` + `Insert("xui")` …
-`Update("xui")` … `Insert("zzhzx", parent "xui")` … `Delete("xui")`. The mismatch
-fires on the deleted-row event and repeats 22x in the 522-line excerpt, on every
-replay of the same case.
-
-This is the same signature that was first appended to
-`2026-09-01-holon-crate-integration-tests-ungated` under "Captured contended run
-2026-09-15". It gets its own id here because that entry's defect is the missing
-`-p holon` gate, not this one, and a defect recorded only as a section of an
-unrelated entry has no handle to cite and cannot be counted on its own.
-
-Sibling defect, different mechanism, in the same test binary:
+The stream is correct: `Deleted` and `Updated` carry the entity id
+(crates/holon-turso/src/turso.rs:2717, contract doc on `RowChange`). The
+reference was wrong. A sweep of seeds 1-80 at a85893600763 gives 4 red: 33, 48
+and 71 are the oracle defects below; 21 is the engine bug
 `2026-09-15-turso-query-bind-index-out-of-bounds-after-matview`.
 
 ## Root cause
 
-UNATTRIBUTED. The observable is that a consumer keying change events by rowid is
-handed the entity id instead and resolves `None`, i.e. it sees a deletion it
-cannot match to a row it holds. Nothing in the capture names the mechanism, so
-what follows is the shape of the problem, not a located cause.
-
-`Remote { operation_id: None, trace_id: None }` on the actual change says the
-event arrived from the CDC leg with no operation provenance attached, which is
-consistent with a projection-leg emission that did not go through the writer
-that stamps origin — but the excerpt does not distinguish that from an event
-whose provenance was dropped in transit.
+1. Delete keying: the reference emitted the rowid as the `Deleted` id, and the
+   oracle looked up the actual id in a rowid->entity map, so every compared
+   `Deleted` was None != Some. Seed 33.
+2. Transaction delta: a commit's view delta is the net change per row in
+   rowid order. Seed 71: `[Insert a, Update uyn, Update uyn]` gives ONE
+   Updated(uyn, final value) then Created(a). The reference emitted one change
+   per statement in statement order.
+3. No-op update: an Update that writes the value the row already has gives no
+   view change (net delta zero). The reference emitted an Updated.
+4. Same-key ops in one batch: preconditions are checked per op against the
+   state before the batch, so `[Insert g, ..., Insert g]` passed (seed 48), and
+   so did two `CreateMaterializedView entity_view` in one batch. The second op
+   fails in Turso ("UNIQUE constraint failed", "View entity_view already
+   exists"), the concurrent-batch runner only logged that error, and the
+   reference overwrote.
+5. Replay noise: the generator picked ids from HashMap key order, so the same
+   PROPTEST_RNG_SEED could generate a different case in another process.
 
 ## Missing piece
 
-The test environment is single-threaded per case and settles between
-transitions, so the interleaving that produces this never arises. The
-interaction IS generatable — the case above is drawn from the ordinary alphabet
-— but the timing that breaks it is not. That is what makes this ENVIRONMENT
-rather than COVERAGE: the keystone reaches the state and the assertion holds
-every time it runs the way the test runs it.
-
-The ORACLE secondary is that no invariant expresses "every change a view stream
-emits keys to the same identity the reference does" outside this one unit
-assertion, so a consumer-side identity confusion is invisible everywhere except
-this binary, under load.
+An oracle that states the product's view contract: entity-keyed changes, one
+net change per row per commit, no order across rows of one commit. Batch
+preconditions that see ops of the same batch. A runner that fails on an error
+of an op that the preconditions admitted.
 
 ## Remedy
 
-OPEN. The gating decision in
-`2026-09-01-holon-crate-integration-tests-ungated` is unaffected. Attribution
-needs a dedicated lane: run the case concurrently in-process (two draws, shared
-store) and see whether the rowid/entity-id swap reproduces, then follow the
-`Deleted` emission path in the view-stream projection. Until then this is a
-prod-bug candidate of the CDC kind, not a test defect — the assertion is
-comparing the right things and the reference is right.
+FIXED in crates/holon/tests/turso_storage_pbt/pbt_tests.rs:
+- The reference keys `Deleted`/`Updated` by entity id and emits no change for a
+  no-op update.
+- A transaction batch folds into the net change per row (`net_commit_changes`).
+- The oracle compares batch by batch (`view_commit_ends`): batches in order,
+  within a batch one change per entity, no order across rows.
+- The batch precondition refuses a second create (table, view, recursive view,
+  row) of one key, and two writes of one row in a concurrent batch.
+- An op error in a concurrent batch fails the test.
+- The generator sorts the ids and names it picks from.
+
+Red before the fix: seeds 33 (entity-id mismatch), 48 (UNIQUE, then parent_id
+mismatch), 71 (stream timeout: fewer net changes). Green after: 33, 48, 71.
+Sweep of seeds 1-80 after: 79 green, 1 red (seed 28, the bind-index engine
+bug). Teeth: the rowid `Deleted` id put back in the reference turns seeds 1, 8
+and 12 red with an entity mismatch.

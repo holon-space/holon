@@ -63,6 +63,7 @@
 //!   detection
 //! - Complex view scenarios like filtered views with triggers
 
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -126,6 +127,11 @@ pub struct ReferenceState {
     pub materialized_views: HashMap<String, (String, usize)>,
     /// View streams: view_name -> collected changes (expected)
     pub view_stream_changes: HashMap<String, Arc<Mutex<Vec<RowChange>>>>,
+    /// View name -> end index in `view_stream_changes` of each batch's
+    /// changes. A batch's changes carry no order across rows: a transaction
+    /// delivers its net delta in rowid order, a concurrent batch commits its
+    /// ops in any order.
+    pub view_commit_ends: HashMap<String, Vec<usize>>,
     pub handle: tokio::runtime::Handle,
     /// Optional runtime - Some when we own the runtime (standalone tests), None
     /// when using existing runtime
@@ -147,6 +153,7 @@ impl Clone for ReferenceState {
             cdc_events: self.cdc_events.clone(),
             materialized_views: self.materialized_views.clone(),
             view_stream_changes: self.view_stream_changes.clone(),
+            view_commit_ends: self.view_commit_ends.clone(),
             handle: self.handle.clone(),
             _runtime: self._runtime.clone(),
             recursive_cte_view_created: self.recursive_cte_view_created,
@@ -166,6 +173,7 @@ impl Default for ReferenceState {
                 cdc_events: Vec::new(),
                 materialized_views: HashMap::new(),
                 view_stream_changes: HashMap::new(),
+                view_commit_ends: HashMap::new(),
                 handle,
                 _runtime: None,
                 recursive_cte_view_created: false,
@@ -200,6 +208,7 @@ impl Default for ReferenceState {
                     cdc_events: Vec::new(),
                     materialized_views: HashMap::new(),
                     view_stream_changes: HashMap::new(),
+                    view_commit_ends: HashMap::new(),
                     handle,
                     _runtime: Some(runtime),
                     recursive_cte_view_created: false,
@@ -357,82 +366,44 @@ impl StorageTest {
     }
 
     /// Execute a batch of operations concurrently with panic detection.
-    /// Uses a barrier to maximize the chance of concurrent execution.
-    /// Returns the number of panics detected.
+    /// Returns one message per operation that errored or panicked. The batch
+    /// preconditions admit only operations that must succeed, so any entry is
+    /// a test failure.
     pub async fn execute_concurrent_batch(
         &self,
         operations: Vec<StorageTransition>,
         handle: &tokio::runtime::Handle,
-    ) -> usize {
-        use std::sync::atomic::Ordering;
-
-        if operations.is_empty() {
-            return 0;
-        }
-
-        if operations.len() == 1 {
-            // Single operation - no concurrency needed
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                tokio::task::block_in_place(|| {
-                    handle.block_on(apply_to_turso_inner(&self.backend, &operations[0], handle)) // ALLOW(block_on): sync proptest harness bridges to tokio
-                })
-            }));
-
-            return match result {
-                Ok(Ok(_)) => 0,
-                Ok(Err(e)) => {
-                    eprintln!("[concurrent_batch] Operation error: {}", e);
-                    0 // Errors are not panics
-                }
-                Err(panic_info) => {
-                    let panic_msg = format_panic(&panic_info);
-                    eprintln!("[concurrent_batch] PANIC detected: {}", panic_msg);
-                    1
-                }
-            };
-        }
-
-        // Multiple operations - execute concurrently
-        // Note: We can't use a Barrier with single-threaded runtime as it causes
-        // deadlock. Instead, we spawn all tasks and use join_all to drive them
-        // concurrently.
-        let panic_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    ) -> Vec<String> {
+        // We can't use a Barrier with single-threaded runtime as it causes
+        // deadlock. Instead, join_all drives the futures concurrently.
+        let failures = Arc::new(Mutex::new(Vec::new()));
 
         let mut futures = Vec::new();
         for op in operations {
             let backend = Arc::clone(&self.backend);
-            let panic_count = Arc::clone(&panic_count);
+            let failures = Arc::clone(&failures);
             let handle_clone = handle.clone();
 
             let future = async move {
-                // Execute operation with panic detection
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     futures::executor::block_on(apply_to_turso_inner(&backend, &op, &handle_clone))
                 }));
 
-                match result {
-                    Ok(Ok(_)) => {}
-                    Ok(Err(e)) => {
-                        eprintln!("[concurrent_batch] Operation {:?} error: {}", op, e);
-                    }
+                let failure = match result {
+                    Ok(Ok(_)) => return,
+                    Ok(Err(e)) => format!("operation {:?} failed: {}", op, e),
                     Err(panic_info) => {
-                        let panic_msg = format_panic(&panic_info);
-                        eprintln!(
-                            "[concurrent_batch] PANIC in operation {:?}: {}",
-                            op, panic_msg
-                        );
-                        panic_count.fetch_add(1, Ordering::SeqCst);
+                        format!("PANIC in operation {:?}: {}", op, format_panic(&panic_info))
                     }
-                }
+                };
+                failures.lock().unwrap().push(failure);
             };
             futures.push(future);
         }
 
-        // Execute all futures concurrently using join_all
-        // This works with single-threaded runtime unlike spawned tasks with barriers
         tokio::task::block_in_place(|| handle.block_on(futures::future::join_all(futures))); // ALLOW(block_on): sync proptest harness bridges to tokio
 
-        panic_count.load(Ordering::SeqCst)
+        std::mem::take(&mut *failures.lock().unwrap())
     }
 
     /// Execute a batch of operations within an explicit transaction.
@@ -662,7 +633,9 @@ fn apply_to_reference(
             let entities = state.entities.get_mut(entity).unwrap();
             // In concurrent batches, the entity may have been deleted by another operation
             let data = entities.get_mut(id)?;
-            data.insert("value".into(), Value::String(value.clone()));
+            let new_value = Value::String(value.clone());
+            // A view delivers net row changes, and an unchanged row has none.
+            let changed = data.insert("value".into(), new_value.clone()) != Some(new_value);
 
             // Track CDC event if enabled
             if state.cdc_enabled {
@@ -675,6 +648,7 @@ fn apply_to_reference(
             // ONLY if the view stream has been created (callback registered)
             for (view_name, (view_entity, _count)) in &state.materialized_views {
                 if view_entity == entity
+                    && changed
                     && let Some(changes_vec) = state.view_stream_changes.get(view_name)
                 {
                     let updated_data = entities.get(id).unwrap().clone();
@@ -694,7 +668,7 @@ fn apply_to_reference(
                     let change = RowChange {
                         relation_name: view_name.clone(),
                         change: ChangeData::Updated {
-                            id: rowid.to_string(),
+                            id: id.clone(),
                             data: updated_data_with_rowid,
                             origin: ChangeOrigin::Remote {
                                 operation_id: None,
@@ -737,21 +711,19 @@ fn apply_to_reference(
                 if view_entity == entity
                     && let Some(changes_vec) = state.view_stream_changes.get(view_name)
                 {
-                    // Get ROWID for this entity in this view before removing
                     // In concurrent batches, the ROWID may not exist if entity was never in view
-                    let Some(rowid) = state
+                    if !state
                         .view_rowids
                         .get(view_name)
-                        .and_then(|rowids| rowids.get(id))
-                        .copied()
-                    else {
+                        .is_some_and(|rowids| rowids.contains_key(id))
+                    {
                         continue;
-                    };
+                    }
 
                     let change = RowChange {
                         relation_name: view_name.clone(),
                         change: ChangeData::Deleted {
-                            id: rowid.to_string(),
+                            id: id.clone(),
                             origin: ChangeOrigin::Remote {
                                 operation_id: None,
                                 trace_id: None,
@@ -1300,7 +1272,8 @@ fn generate_filter(_: Vec<String>, existing_values: Vec<String>) -> BoxedStrateg
 /// Generate transitions based on current state
 fn generate_transitions(state: &ReferenceState) -> BoxedStrategy<StorageTransition> {
     // List of known entities
-    let entity_names: Vec<String> = state.entities.keys().cloned().collect();
+    let mut entity_names: Vec<String> = state.entities.keys().cloned().collect();
+    entity_names.sort();
 
     // If no entities exist, only allow creating the "entity" table
     // (needed for recursive CTE view which references "entity" table)
@@ -1319,11 +1292,12 @@ fn generate_transitions(state: &ReferenceState) -> BoxedStrategy<StorageTransiti
 
     // Collect existing IDs for parent_id generation (do this before using in insert
     // strategy)
-    let entity_existing_ids: Vec<String> = state
+    let mut entity_existing_ids: Vec<String> = state
         .entities
         .get("entity")
         .map(|e| e.keys().cloned().collect())
         .unwrap_or_default();
+    entity_existing_ids.sort();
 
     // Insert strategy with parent_id support for hierarchical data
     // 60% root entities (no parent), 40% child entities (reference existing ID)
@@ -1380,14 +1354,15 @@ fn generate_transitions(state: &ReferenceState) -> BoxedStrategy<StorageTransiti
     };
 
     // For update/delete/dirty/version operations, we need existing IDs
-    let existing_ids: Vec<(String, String)> = state
+    let mut existing_ids: Vec<(String, String)> = state
         .entities
         .iter()
         .flat_map(|(entity, ids)| ids.keys().map(move |id| (entity.clone(), id.clone())))
         .collect();
+    existing_ids.sort();
 
     // Collect all existing values for filter generation
-    let existing_values: Vec<String> = state
+    let mut existing_values: Vec<String> = state
         .entities
         .values()
         .flat_map(|entities| {
@@ -1399,6 +1374,7 @@ fn generate_transitions(state: &ReferenceState) -> BoxedStrategy<StorageTransiti
             })
         })
         .collect();
+    existing_values.sort();
 
     if existing_ids.is_empty() {
         // Only allow create and insert
@@ -1439,7 +1415,8 @@ fn generate_transitions(state: &ReferenceState) -> BoxedStrategy<StorageTransiti
         .boxed();
 
     // View stream operations
-    let view_names: Vec<String> = state.materialized_views.keys().cloned().collect();
+    let mut view_names: Vec<String> = state.materialized_views.keys().cloned().collect();
+    view_names.sort();
 
     let mut strategies = vec![
         (5, create_entity),
@@ -1653,6 +1630,43 @@ fn check_batch_preconditions(state: &ReferenceState, batch: &TransitionBatch) ->
         }
     }
 
+    // Preconditions are checked against the state before the batch, so they
+    // cannot see a second op of one batch on the same key: a second create or
+    // INSERT fails in Turso where the reference overwrites, and two writes of
+    // one row in a concurrent batch have no single expected outcome.
+    let mut created = HashSet::new();
+    let mut written = HashSet::new();
+    for op in &batch.operations {
+        let created_key = match op {
+            StorageTransition::CreateEntity { name } => Some(("table", name.as_str(), "")),
+            StorageTransition::CreateMaterializedView { view_name, .. } => {
+                Some(("view", view_name.as_str(), ""))
+            }
+            StorageTransition::CreateRecursiveCTEView => Some(("recursive_cte_view", "", "")),
+            StorageTransition::Insert { entity, id, .. } => {
+                Some(("row", entity.as_str(), id.as_str()))
+            }
+            _ => None,
+        };
+        if let Some(key) = created_key
+            && !created.insert(key)
+        {
+            return false;
+        }
+        let written_row = match op {
+            StorageTransition::Insert { entity, id, .. }
+            | StorageTransition::Update { entity, id, .. }
+            | StorageTransition::Delete { entity, id } => Some((entity, id)),
+            _ => None,
+        };
+        if let Some(row) = written_row
+            && matches!(batch.mode, BatchMode::Concurrent)
+            && !written.insert(row)
+        {
+            return false;
+        }
+    }
+
     // Check all operations pass preconditions
     // Note: For concurrent/transaction batches, we check preconditions against
     // initial state. This may reject some valid batches but ensures safety.
@@ -1684,11 +1698,97 @@ impl ReferenceStateMachine for ReferenceState {
         // Apply all operations in the batch to reference state sequentially.
         // The SUT will execute them concurrently, but the reference state
         // applies them sequentially for deterministic comparison.
+        let before: HashMap<String, usize> = state
+            .view_stream_changes
+            .iter()
+            .map(|(view, changes)| (view.clone(), changes.lock().unwrap().len()))
+            .collect();
+        let entities_before = state.entities.clone();
         for operation in &transition.operations {
             let _result = apply_to_reference(&mut state, operation);
         }
+        if matches!(transition.mode, BatchMode::Transaction) {
+            for (view, changes) in &state.view_stream_changes {
+                let (view_entity, _) = &state.materialized_views[view];
+                let mut changes = changes.lock().unwrap();
+                let start = before[view];
+                let net =
+                    net_commit_changes(changes.split_off(start), &entities_before[view_entity]);
+                changes.extend(net);
+            }
+        }
+        for (view, changes) in &state.view_stream_changes {
+            let end = changes.lock().unwrap().len();
+            state
+                .view_commit_ends
+                .entry(view.clone())
+                .or_default()
+                .push(end);
+        }
         state
     }
+}
+
+/// The entity a view change is about: `Deleted` and `Updated` carry it as
+/// their id, `Created` in its `id` column.
+fn change_entity_id(change: &ChangeData) -> String {
+    match change {
+        ChangeData::Created { data, .. } => match data.get("id") {
+            Some(Value::String(id)) => id.clone(),
+            other => panic!("Created change without a string id column: {other:?}"),
+        },
+        ChangeData::Updated { id, .. } | ChangeData::Deleted { id, .. } => id.clone(),
+        ChangeData::FieldsChanged { entity_id, .. } => entity_id.clone(),
+    }
+}
+
+/// A view delivers one commit's delta as the NET change per row: the
+/// per-statement changes of a transaction fold into at most one change per
+/// entity, and into none for a row that ends as it began.
+fn net_commit_changes(
+    changes: Vec<RowChange>,
+    rows_before: &HashMap<String, StorageEntity>,
+) -> Vec<RowChange> {
+    let mut last: BTreeMap<String, RowChange> = BTreeMap::new();
+    for change in changes {
+        last.insert(change_entity_id(&change.change), change);
+    }
+    last.into_iter()
+        .filter_map(
+            |(
+                entity_id,
+                RowChange {
+                    relation_name,
+                    change,
+                    watch_key,
+                },
+            )| {
+                let net = match (rows_before.get(&entity_id), change) {
+                    (None, ChangeData::Deleted { .. }) => return None,
+                    (None, ChangeData::Updated { data, origin, .. }) => {
+                        ChangeData::Created { data, origin }
+                    }
+                    (Some(row), ChangeData::Updated { data, .. })
+                        if without_rowid(&data) == *row =>
+                    {
+                        return None;
+                    }
+                    (_, change) => change,
+                };
+                Some(RowChange {
+                    relation_name,
+                    change: net,
+                    watch_key,
+                })
+            },
+        )
+        .collect()
+}
+
+fn without_rowid(data: &StorageEntity) -> StorageEntity {
+    let mut data = data.clone();
+    data.remove("_rowid");
+    data
 }
 
 /// Compare query results between reference state and Turso.
@@ -1793,20 +1893,21 @@ impl StateMachineTest for StorageTest {
 
             BatchMode::Concurrent => {
                 // Multiple operations: execute concurrently to detect race conditions
-                let num_ops = operations.len();
-                let panics = tokio::task::block_in_place(|| {
+                let failures = tokio::task::block_in_place(|| {
                     ref_state.handle.block_on(
                         state.execute_concurrent_batch(operations.clone(), &ref_state.handle),
                     )
                 });
 
-                if panics > 0 {
-                    panic!(
-                        "Detected {} panics during concurrent execution of {} operations. This \
-                         likely indicates a race condition in Turso IVM.\nOperations: {:?}",
-                        panics, num_ops, operations
-                    );
-                }
+                assert!(
+                    failures.is_empty(),
+                    "Concurrent execution of {} operations had {} failures (a panic likely \
+                     indicates a race condition in Turso IVM):\n{}\nOperations: {:?}",
+                    operations.len(),
+                    failures.len(),
+                    failures.join("\n"),
+                    operations
+                );
 
                 verify_states_match(ref_state, &state.backend, &ref_state.handle);
             }
@@ -1913,139 +2014,76 @@ impl StateMachineTest for StorageTest {
                 *actual_changes
             );
 
-            // Build ROWID mappings incrementally as we compare
-            // entity_id <-> rowid (tracks current state)
-            let mut ref_rowid_to_entity: HashMap<String, String> = HashMap::new();
-            let mut actual_rowid_to_entity: HashMap<String, String> = HashMap::new();
-
-            // Compare each change
-            for (i, (expected, actual)) in expected_changes
-                .iter()
-                .zip(actual_changes.iter())
-                .enumerate()
-            {
-                assert_eq!(
-                    expected.relation_name, actual.relation_name,
-                    "Relation name mismatch at index {} for view '{}'",
-                    i, view_name
-                );
-
-                // Extract entity IDs from data for matching (ROWIDs will differ)
-                let expected_entity_id = match &expected.change {
-                    ChangeData::Created { data, .. } | ChangeData::Updated { data, .. } => {
-                        // Extract entity ID and update mapping
-                        if let Some(Value::String(entity_id)) = data.get("id") {
-                            // Extract ROWID from _rowid field or id field
-                            let rowid = data
-                                .get("_rowid")
-                                .and_then(|v| match v {
-                                    Value::String(s) => Some(s.clone()),
-                                    _ => None,
-                                })
-                                .or_else(|| match &expected.change {
-                                    ChangeData::Updated { id, .. } => Some(id.clone()),
-                                    _ => None,
-                                })
-                                .unwrap_or_default();
-                            ref_rowid_to_entity.insert(rowid, entity_id.clone());
-                            Some(entity_id.clone())
-                        } else {
-                            None
-                        }
-                    }
-                    ChangeData::Deleted { id, .. } => {
-                        // Look up entity ID from mapping
-                        ref_rowid_to_entity.get(id).cloned()
-                    }
-                    ChangeData::FieldsChanged { entity_id, .. } => Some(entity_id.clone()),
-                };
-                let actual_entity_id = match &actual.change {
-                    ChangeData::Created { data, .. } | ChangeData::Updated { data, .. } => {
-                        // Extract entity ID and update mapping
-                        if let Some(Value::String(entity_id)) = data.get("id") {
-                            // Extract ROWID from _rowid field or id field
-                            let rowid = data
-                                .get("_rowid")
-                                .and_then(|v| match v {
-                                    Value::String(s) => Some(s.clone()),
-                                    _ => None,
-                                })
-                                .or_else(|| match &actual.change {
-                                    ChangeData::Updated { id, .. } => Some(id.clone()),
-                                    _ => None,
-                                })
-                                .unwrap_or_default();
-                            actual_rowid_to_entity.insert(rowid, entity_id.clone());
-                            Some(entity_id.clone())
-                        } else {
-                            None
-                        }
-                    }
-                    ChangeData::Deleted { id, .. } => {
-                        // Look up entity ID from mapping
-                        actual_rowid_to_entity.get(id).cloned()
-                    }
-                    ChangeData::FieldsChanged { entity_id, .. } => Some(entity_id.clone()),
-                };
-
-                assert_eq!(
-                    expected_entity_id,
-                    actual_entity_id,
-                    "\n\n=== View Change Entity ID Mismatch at index {} for '{}' ===\nExpected \
-                     entity ID: {:?}\nActual entity ID: {:?}\nExpected change: {:?}\nActual \
-                     change: {:?}\n=================================================\n",
-                    i,
-                    view_name,
-                    expected_entity_id,
-                    actual_entity_id,
-                    expected.change,
-                    actual.change
-                );
-
-                // Compare change types
-                match (&expected.change, &actual.change) {
-                    (
-                        ChangeData::Created { data: exp_data, .. },
-                        ChangeData::Created { data: act_data, .. },
-                    ) => {
-                        // Compare data excluding _rowid (internal implementation detail)
-                        let mut exp_data_filtered = exp_data.clone();
-                        let mut act_data_filtered = act_data.clone();
-                        exp_data_filtered.remove("_rowid");
-                        act_data_filtered.remove("_rowid");
-                        assert_eq!(
-                            exp_data_filtered, act_data_filtered,
-                            "Created data mismatch at index {} for view '{}'",
-                            i, view_name
-                        );
-                    }
-                    (
-                        ChangeData::Updated { data: exp_data, .. },
-                        ChangeData::Updated { data: act_data, .. },
-                    ) => {
-                        // Compare data excluding _rowid (internal implementation detail)
-                        let mut exp_data_filtered = exp_data.clone();
-                        let mut act_data_filtered = act_data.clone();
-                        exp_data_filtered.remove("_rowid");
-                        act_data_filtered.remove("_rowid");
-                        assert_eq!(
-                            exp_data_filtered, act_data_filtered,
-                            "Updated data mismatch at index {} for view '{}'",
-                            i, view_name
-                        );
-                    }
-                    (ChangeData::Deleted { .. }, ChangeData::Deleted { .. }) => {
-                        // IDs already matched, nothing more to check
-                    }
-                    _ => {
+            // Batches must arrive in order; within one batch each entity has
+            // at most one change and rows carry no order.
+            let commit_ends = &ref_state.view_commit_ends[view_name];
+            assert_eq!(
+                commit_ends.last().copied(),
+                Some(expected_changes.len()),
+                "view '{}': batch boundaries do not cover the expected changes",
+                view_name
+            );
+            let by_entity = |changes: &[RowChange], side: &str| {
+                let mut by_entity: BTreeMap<String, RowChange> = BTreeMap::new();
+                for change in changes {
+                    assert_eq!(
+                        change.relation_name, *view_name,
+                        "change for another relation in view '{}' stream",
+                        view_name
+                    );
+                    if let Some(earlier) =
+                        by_entity.insert(change_entity_id(&change.change), change.clone())
+                    {
                         panic!(
-                            "\n\n=== View Change Type Mismatch at index {} for '{}' \
-                             ===\nExpected: {:?}\nActual: \
-                             {:?}\n======================================================\n",
-                            i, view_name, expected.change, actual.change
+                            "\n\n=== {} has two changes for one entity in one batch of '{}' \
+                             ===\nFirst: {:?}\nSecond: {:?}\nBatch: {:#?}\n",
+                            side, view_name, earlier.change, change.change, changes
                         );
                     }
                 }
+                by_entity
+            };
+            let mut start = 0;
+            for (batch, &end) in commit_ends.iter().enumerate() {
+                let expected = by_entity(&expected_changes[start..end], "Reference");
+                let actual = by_entity(&actual_changes[start..end], "Turso");
+                assert_eq!(
+                    expected.keys().collect::<Vec<_>>(),
+                    actual.keys().collect::<Vec<_>>(),
+                    "\n\n=== View Change Entity Mismatch in batch {} of '{}' ===\nExpected: \
+                     {:#?}\nActual: {:#?}\n",
+                    batch,
+                    view_name,
+                    expected,
+                    actual
+                );
+                for (entity_id, expected) in &expected {
+                    let actual = &actual[entity_id];
+                    match (&expected.change, &actual.change) {
+                        (
+                            ChangeData::Created { data: exp, .. },
+                            ChangeData::Created { data: act, .. },
+                        )
+                        | (
+                            ChangeData::Updated { data: exp, .. },
+                            ChangeData::Updated { data: act, .. },
+                        ) => assert_eq!(
+                            without_rowid(exp),
+                            without_rowid(act),
+                            "data mismatch for entity '{}' in batch {} of view '{}'",
+                            entity_id,
+                            batch,
+                            view_name
+                        ),
+                        (ChangeData::Deleted { .. }, ChangeData::Deleted { .. }) => {}
+                        _ => panic!(
+                            "\n\n=== View Change Type Mismatch for entity '{}' in batch {} of \
+                             '{}' ===\nExpected: {:?}\nActual: {:?}\n",
+                            entity_id, batch, view_name, expected.change, actual.change
+                        ),
+                    }
+                }
+                start = end;
             }
         }
     }
