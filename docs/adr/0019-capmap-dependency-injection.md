@@ -17,6 +17,10 @@ runtime-config concern, not separate binaries), ADR 0009
 (component-subset PBTs and bisection), ADR 0012 (reference-model capability
 contract — the trait surface `CapMap` hosts). How-to companion:
 `docs/Testing/PbtSlicing.md`.
+**Direction:** [Vision-PetriNetCoordination.md](../Architecture/Vision-PetriNetCoordination.md)
+(direction, not a decision). A change to production DI (`fluxdi`) should move
+toward an engine behind a substitution transition: declared dependencies, live
+cells as read-only interface places, and resolution as an internal pull.
 
 ## Problem
 

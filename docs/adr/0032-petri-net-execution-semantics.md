@@ -16,6 +16,10 @@ authority store per birth; firing never widens it.
 [ADR 0028](0028-sharing-policy-overlay.md) — container-scoped sharing, which
 the occurrence journal's scope follows.
 `docs/Architecture/Model.md` — five layers, four mode axes, invariants 1–12.
+**Direction:** [Vision-PetriNetCoordination.md](../Architecture/Vision-PetriNetCoordination.md)
+(direction, not a decision). A change to execution should move toward pull
+(backward chaining that outputs a plan), engine interface places as read-only
+environment places, and a kernel net that extends itself by validated subnets.
 
 ## Problem
 

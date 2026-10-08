@@ -2,6 +2,10 @@
 
 Status: Accepted (retroactive — documenting shipped architecture)
 Date: 2026-07-06
+Direction: [Vision-PetriNetCoordination.md](../Architecture/Vision-PetriNetCoordination.md)
+(direction, not a decision). A change to ranking should move toward ranking
+the alternative producers of a pulled plan and checking that plan under
+uncertainty, not toward forward search by trial.
 
 > This ADR is written after the fact to record a decision the code already
 > embodies: personal task prioritisation (WSJF) is computed by a small,

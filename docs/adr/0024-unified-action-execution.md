@@ -19,6 +19,10 @@ every effect through the intent boundary).
 Vault altitude view: `holon-pkm/Projects/Holon/Engine Foundations.org`, headline
 `:ID: deliberative-layer-vision`. UX companion:
 `docs/Proposals/action-ux.md`.
+**Direction:** [Vision-PetriNetCoordination.md](../Architecture/Vision-PetriNetCoordination.md)
+(direction, not a decision). A change to the action language should move
+toward one net that coordinates engines as substitution transitions, with
+pure and effectful transitions declared as two kinds.
 
 ## Context
 

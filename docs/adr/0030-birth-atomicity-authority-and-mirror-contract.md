@@ -6,6 +6,9 @@ against the code — amendments corrected claims of fact and scope, no Decision 
 Companion to ADR 0029 (identity minting) and ADR 0031 (the Holon-native transition
 catalog, which records the ratified D7 decision — this ADR's contract is designed to
 fold into that catalog).
+Direction: [Vision-PetriNetCoordination.md](../Architecture/Vision-PetriNetCoordination.md)
+(direction, not a decision). A birth is an effectful transition: a change here
+should keep it on the dispatcher path, never on the pure fast path.
 
 ## Problem
 

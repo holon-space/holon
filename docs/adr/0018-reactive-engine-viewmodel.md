@@ -2,6 +2,10 @@
 
 Status: Accepted (retroactive — documenting shipped architecture)
 Date: 2026-07-06
+Direction: [Vision-PetriNetCoordination.md](../Architecture/Vision-PetriNetCoordination.md)
+(direction, not a decision). A change to the reactive path should move toward
+pure, memoized, fusable transitions on the render path, with every async or
+world-changing step kept off it.
 
 > Written after the fact to record a decision the code already embodies. The
 > old frontend reactive stack (a CDC accumulator feeding an `AppState`, plus a

@@ -5,6 +5,10 @@ agent-op/revert design; this ADR is the in-repo record of that ratification).
 Companion to ADR 0024 (unified action execution — the PN transition vocabulary and the
 dual-evaluated Pattern AST) and ADR 0030 (birth atomicity — whose Enforcement clause
 names this machinery).
+Direction: [Vision-PetriNetCoordination.md](../Architecture/Vision-PetriNetCoordination.md)
+(direction, not a decision). A change to the catalog should move toward one
+source that the planner, the dispatcher and the simulator all read, with each
+transition's kind (pure or effectful) declared in it.
 
 ## Problem
 

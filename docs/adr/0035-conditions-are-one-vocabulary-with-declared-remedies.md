@@ -13,6 +13,10 @@ rule.
 `docs/Architecture/Reactivity.md` — the derived-data contract the condition
 holder obeys.
 `~/.claude/plans/error-remedy-design.md` — the increment plan this ADR opens.
+**Direction:** [Vision-PetriNetCoordination.md](../Architecture/Vision-PetriNetCoordination.md)
+(direction, not a decision). A change to remedies should move toward recovery
+transitions that a pull puts on a plan's frontier when a place holds a
+`Failed` token.
 
 ## Problem
 
