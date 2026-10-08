@@ -170,6 +170,57 @@ ingredients are the input arcs.
 Not built: recipe transitions, pantry places, a calendar place, and the pull
 itself.
 
+### 2.5 Time
+
+Direction, not built. Martin's idea: a time slot of a resource (a shop, a
+person) is a token. The duration of a step is a property of its transition,
+or an input token that the transition consumes.
+
+Petri-net theory has five well-known ways to add time:
+
+| Model | Where time is | Typical use |
+|---|---|---|
+| Time Petri nets (Merlin and Farber) | each transition has a firing interval [min, max], counted from when it becomes enabled | timeouts, protocols |
+| Timed Petri nets (Ramchandani) | a transition takes a fixed duration to fire | throughput, cycle time |
+| Timed-arc Petri nets (Hanisch; Bolognesi et al.) | each token has an age; an input arc accepts only an age interval | freshness: "chicken is good for 3 days" |
+| Timed colored Petri nets (Jensen, CPN Tools) | each token carries a timestamp; a transition delay adds to it; one global clock | scheduling with typed tokens |
+| Stochastic Petri nets, GSPN (Molloy; Ajmone Marsan et al.) | delays are random | performance and risk |
+
+The fit for Holon:
+
+- **Timed colored tokens.** A token carries a validity interval. Examples:
+  "shop open" is valid until 20:00; a free slot in a person's calendar;
+  chicken with an expiry date. Holon's tokens are already colored (typed
+  rows), so a validity interval is one more attribute.
+- **A duration on each transition.** Cook = 40 min. `holon-engine` already
+  moves its clock forward by the transition's duration when it fires
+  (`crates/holon-engine/src/engine.rs:222-240`).
+- **Resources as tokens.** A person's time slot is a token. The transition
+  that uses it consumes it, so two plans cannot use the same slot.
+- **Pull with time is backward scheduling.** Start at the goal's deadline.
+  Go back along the plan and subtract each duration. The result is the
+  latest start time of each step. MRP calls this lead-time offsetting; the
+  critical-path method calls it the backward pass. A step whose latest start
+  is already past, or whose input token is not valid at that time, makes
+  the plan fail.
+- **Random delays belong to simulation.** The pull uses one fixed duration
+  per step. Simulation samples durations and reports the risk that the plan
+  misses its deadline (section 3).
+
+Chicken Teriyaki with time:
+
+```text
+goal: dinner at 19:00
+cook_teriyaki   40 min              → start by 18:20
+buy_chicken     30 min incl. travel → done by 18:20 → start by 17:50
+  shop open     valid until 20:00   → fits; the shop does not limit this plan
+  my slot       17:50–19:00 free    → consumed by buy_chicken and cook_teriyaki
+```
+
+The dinner time limits the plan, not the shop. If the calendar has a
+meeting until 18:00, the pull fails with that reason, or a different plan
+wins (buy at lunch).
+
 ## 3. Pull versus simulation
 
 Simulation can also find such a plan, by trial and error. It runs forward:
@@ -183,15 +234,18 @@ Simulation keeps a different job: **check a pulled plan against
 uncertainty.** Durations vary. The shop closes at 20:00. A meeting runs late.
 The simulator fires the plan on a cloned marking with sampled durations and
 reports risk ("buy chicken at lunch, not after work"). It can also compare the
-two or three alternative plans that the pull produced. This fits the
-**Search** and **Preview** regimes of [Simulation.md](Simulation.md).
+two or three alternative plans that the pull produced. See
+[Simulation.md](Simulation.md) for the uses of simulation.
 `Engine::rank` today simulates one firing per enabled transition on a clone
 (`crates/holon-engine/src/engine.rs:254`); that is a one-step forward check.
 
-Simulation stays outside the live dispatch path
-([Simulation.md](Simulation.md):88). A plan commits by firing real
-transitions through the dispatcher (ADR 0024 P2,
-`docs/adr/0024-unified-action-execution.md:98-105`).
+The net itself runs on the live path: the planner on boot, pure transitions
+inline (section 4). Simulation does not: it works on a copy and never writes
+the real state. A plan commits by firing real transitions through the
+dispatcher (ADR 0024 P2, `docs/adr/0024-unified-action-execution.md:98-105`).
+ADR 0031 guard 1 ("no PN runtime in the live dispatch path",
+`docs/adr/0031-native-transition-catalog-and-macro-reification.md:74`) is
+still the binding text until an ADR changes it.
 
 ## 4. Pure and effectful transitions
 
@@ -338,16 +392,29 @@ supersedes it.
 5. Which objective ranks producers in a pull: WSJF (ADR 0017), plan cost, or
    risk from simulation?
 6. How does the pull reason about environment places that change with time
-   ("shop open until 20:00")? The clock is data (ADR 0024 P5); temporal
-   planning is not designed.
+   ("shop open until 20:00")? Direction in section 2.5: timed colored tokens
+   with a validity interval, a duration per transition, resources as tokens,
+   and backward scheduling from the deadline. Still open: how a validity
+   interval is stored, how the clock relation (ADR 0024 P5) feeds the pull,
+   and which duration the pull uses (expected or pessimistic).
 7. How does the pull treat a guard the marking cannot decide
    (`Offer::Unknown`)? Optimistic for planning, fail closed for protective
    arcs (ADR 0032 §3, `:258-266`)?
-8. Does a `Partial` token satisfy an input place?
+8. A token can hold a value that is not complete yet. Example: the vault
+   index is a fluxdi live cell in state `Partial`; the writable files are
+   indexed, the recipes are still loading. The transition "show search
+   results" needs the vault index as input. Does it fire now with the
+   partial index, or does it wait for the complete one? Proposal: each input
+   arc declares it. "Complete only" is the default and fits hard DI
+   dependencies. "Accepts partial" fits display. Completeness then flows to
+   the outputs: a result computed from a partial input is itself marked
+   partial.
 9. How does a plan stay current when the marking changes? Incremental
    re-planning (the memo as an IVM view) is not designed.
-10. Boot by pull puts a planner on the boot path. How does this agree with
-    "no PN runtime in the live dispatch path" ([Simulation.md](Simulation.md):88)?
+10. *Answered (Martin, 2026-10-08).* Boot by pull puts a planner on the boot
+    path. Direction: the net takes more work, also on the live path
+    (section 3). [Simulation.md](Simulation.md) states this direction. ADR
+    0031 guard 1 still says otherwise until an ADR changes it.
 
 ## Related documents
 

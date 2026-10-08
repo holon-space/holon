@@ -249,7 +249,7 @@ Detailed documentation lives in `docs/Architecture/`:
 | [integrations.md](Architecture/Integrations.md) | External System Pattern, MCP Client, Dependency Injection, Frontend Architecture |
 | [schema.md](Architecture/Schema.md) | Table/view-level schema reference: module registry, block base table + junctions + hydration matview, hierarchy, navigation, sync/operations/links/identity |
 | [engine.md](Architecture/Engine.md) | Standalone Petri-Net Engine, Fractional Indexing, Platform Support |
-| [simulation.md](Architecture/Simulation.md) | Hypothetical state: search / alternatives / preview regimes, twin-only search, use-case gallery, PN reification guards |
+| [simulation.md](Architecture/Simulation.md) | Simulation on a copy of the marking: search / alternatives / preview, what is built today, direction (simulation checks a pulled plan against uncertainty), examples by use |
 | [Vision-PetriNetCoordination.md](Architecture/Vision-PetriNetCoordination.md) | Direction, not yet built: one Petri net coordinates engines (fluxdi, Turso IVM, Loro) as substitution transitions; pull as backward chaining to a plan; pure vs effectful transitions; kernel net that extends itself |
 | [sync.md](Architecture/Sync.md) | Loro CRDT, CollaborativeDoc, LoroBackend, sync wiring (LiveData<Block> + direct cache feeds), P2P, Consistency Model |
 | [replication.md](Architecture/Replication.md) | Target replication model: capability profiles, per-component base + 3-way merge, single-owner ordering, consolidator/sink roles, two transports |

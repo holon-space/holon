@@ -1,96 +1,158 @@
-# Simulation & Hypothetical State
+# Simulation
 
-Status: design note. The catalog-substrate ruling is RATIFIED and recorded as
-[ADR 0031](../adr/0031-native-transition-catalog-and-macro-reification.md); the D5
-scenario store is still PENDING RATIFICATION. This file holds the durable reasoning and
-the use-case gallery; as each lands, the schema specifics move to
-[Schema.md](Schema.md) and this note stays as the conceptual map.
+*Part of [Architecture](../Architecture.md). Status: design note. The
+"Built today" section describes code. The other sections give the direction.*
+Direction: [Vision-PetriNetCoordination.md](Vision-PetriNetCoordination.md)
+(direction, not a decision). A change to simulation should move toward
+checking a plan that a pull made, not toward searching for a plan by trial.
 
-## The three regimes
+## Terms
 
-Hypothetical state serves workloads with opposite optimization targets. Naming
-the regime first prevents building the wrong substrate:
+- A **place** holds tokens of one kind. Example: the open tasks.
+- A **token** is one value in a place. In Holon a token is usually a block or
+  an entity row (ADR 0024, Terminology).
+- The **marking** is the set of all tokens in all places at one time.
+- A **transition** is a step that takes tokens from its input places and puts
+  tokens into its output places. When it does this, it **fires**.
+- The **dispatcher** runs operations against the real state. It is the only
+  path for a real change (ADR 0024 P2, ADR 0032 §3).
+- **Simulation** fires transitions on a copy of the marking. The real state
+  does not change.
+- A **pull** starts at a goal place and works backward to find the
+  transitions that can fill it. Its output is a **plan**: transitions in a
+  partial order ([vision note §2](Vision-PetriNetCoordination.md#2-the-pull-algorithm)).
 
-| Regime | N | Objective | Substrate |
+## Three uses
+
+Simulation has three uses. They need different tools, so name the use first.
+
+| Use | Candidates | Who scores them | Where the candidates live |
 |---|---|---|---|
-| **Search** | 10⁴–10⁷ candidates | compiled expression, cheap per step | Digital Twins, in-memory engine (holon-engine `ObjectiveDef`/`CompiledExpr` over `TaskMarking`) |
-| **Alternatives** | 3–10 candidates | LLM judge / human | agent sessions (staging) or owned block subtrees |
-| **Preview** | 1 | human | scenario store: fork + firing list, review, accept = fire |
+| **Search** | many (10⁴ and more) | a compiled expression, cheap per step | in memory (`holon-engine`) |
+| **Alternatives** | 3 to 10 | an LLM or a human | real blocks in their own subtrees |
+| **Preview** | 1 | a human | a copy plus a list of firings; accept = fire them for real |
 
-Decisive constraints behind the table:
+Four rules follow from this table.
 
-- **Search never touches block content.** Search needs an enumerable move set
-  and a cheap computable objective; prose has neither (moves are unbounded,
-  scoring needs an LLM, which caps evaluations at ~10² and destroys the search
-  premise). Falsifier that would reopen this: a feature with a *compiled*
-  objective over content. None known.
-- **Search never persists per step.** Turso is single-writer; N parallel
-  chains writing per-step rows serialize on one lock. Memory holds chains and
-  trajectories; Turso stores the run's identity (seed, params, catalog
-  version) and the winner materialized in scenario form, so promotion to a
-  reviewable changeset is a copy, not a translation.
-- **Two-tier fidelity.** Search runs on the cheap in-memory marking; the
-  winner is re-staged once through the faithful substrate (Loro fork for
-  blocks, twin overlay for external state) and its objective re-evaluated
-  there before it is shown. Divergence between the two scores is a bug
-  candidate (differential oracle; the §6.4 marking-equality experiment is the
-  embryo).
-- **Alternatives are not quarantined.** The scenario store exists for state
-  that must not become real until a decision (trust-gated external writes).
-  Research drafts and candidate plans are real PKM content — kept, linked,
-  searched — so they live as blocks. Mechanically: the agent-session flow
-  with a trust policy of auto-accept scoped to a namespace
-  (`research/<topic>/<agent>`); provenance rides `OpOrigin`/`_provenance`.
-  Synthesis across candidates is ordinary block reads — which the scenario
-  store forbids by design (no cross-scenario reads).
+- **Search does not change block text.** Search needs a fixed set of moves and
+  a cheap score. Free text has neither: the moves have no limit, and only an
+  LLM can score text. An LLM allows about 100 evaluations, not thousands.
+- **Search keeps its steps in memory.** Turso has one writer. Many parallel
+  runs that write each step to Turso wait on one lock. Turso stores only the
+  run's identity (seed, parameters, catalog version) and the winning result.
+- **Check the winner twice.** Search runs on the cheap in-memory marking.
+  Before Holon shows the winner, it runs the winner once more on the full
+  model (a Loro copy for blocks) and computes the score again. If the two
+  scores differ, that is probably a bug.
+- **Alternatives are normal content.** Research drafts and candidate plans
+  are kept, linked and searched, so they are real blocks. An agent writes them
+  under its own subtree, for example `research/<topic>/<agent>`. `OpOrigin`
+  records who wrote them (`crates/holon-api/src/operation_engine.rs:37`).
+  Only Preview keeps its changes away from the real state until a human
+  accepts them.
 
-## Use-case gallery
+## Built today
 
-Classify a new idea by regime before designing anything for it.
+- `holon-engine` is a small Petri-net engine. `Engine::enabled` finds the
+  transitions that can fire (`crates/holon-engine/src/engine.rs:49`).
+  `Engine::fire` fires one and moves the marking's clock forward by the
+  transition's duration (`engine.rs:122`, clock at `:222-240`).
+- `Engine::rank` fires each enabled transition once, on a copy of the
+  marking. It sorts them by change in score per minute (WSJF, ADR 0017)
+  (`engine.rs:254`). The score is an expression from the net file
+  (`ObjectiveDef`, `crates/holon-engine/src/yaml/net.rs:31`).
+- `holon-petri` turns task blocks into a net and a `TaskMarking`
+  (`crates/holon-petri/src/lib.rs:258`, `materialize` at `:1040`).
+  `rank_tasks` ranks them (`lib.rs:1514`). The MCP tool `rank_tasks` calls it
+  (`frontends/mcp/src/tools.rs:3103`). This is a one-step look ahead, not a
+  search.
+- The `holon-engine` command line has `simulate` (fire the best transition,
+  N times) and `whatif` (fire one transition on a copy)
+  (`crates/holon-engine/src/main.rs:89`, `:113`). These work on YAML nets, not
+  on the vault.
+- The trust gate can turn an operation into a proposal instead of a real
+  change (`TrustDecision::Propose`, `crates/holon-profiles/src/trust.rs:71`).
+  This is a first part of Preview.
+- ADR 0031 derives one transition catalog from the operation definitions. A
+  test checks that a declared transition writes only the places it declares
+  (`crates/holon-integration-tests/tests/catalog_suite/arc_marking_equality.rs`).
 
-**Search (compiled objective over twin attributes):**
-- Schedule / agenda optimization: assign `SCHEDULED` dates across open tasks
-  under constraints (deadlines, capacity, dependencies).
-- "What if I take on this project": forecast task load / completion over
-  estimated durations. The LLM-at-the-boundary pattern applies — an LLM
-  estimates parameters *once* (effort, durations, dependencies) into twin
-  attributes; the compiled engine runs the thousands of what-ifs. The LLM is
-  never in the evaluation loop.
-- Digital-Twin what-ifs over connector state (Todoist load, calendar
-  density) with simulated external firings scored before anything is sent.
+Not built: the pull, a check of a multi-step plan, random durations, the
+preview store (a copy plus a list of firings), and copies of external systems
+(Todoist, calendar) for simulation.
 
-**Alternatives (small N, judged):**
-- LLM deep research: N agents think divergently in owned subtrees; pick the
-  best or synthesize. The thinking transcript is content, not quarantine
-  material.
-- Multi-alternative replanning: 2–3 candidate reorganizations of open work;
-  the user picks one; losers are archived, not reverted.
-- Draft / rewrite variants of a section as sibling subtrees.
+## Direction: the net coordinates, simulation checks the plan
 
-**Preview (n=1, review-then-accept):**
-- Agent dry-runs: an agent's staged changeset previewed against a Loro fork
-  before its writes are trusted.
-- Trust-gated external effects: a held firing whose consequence is shown on
-  the connector's twin ("task X will be marked done in Todoist"); accept
-  fires it, reject never calls the API.
-- Bulk-operation preview (archive everything done before X, mass retag).
+The Petri net gets more work. It becomes Holon's coordination layer, also on
+the live path. It decides what must happen before a window shows a session,
+why an operation is not available, and what the user must do next. The
+engines (fluxdi, Turso IVM, Loro) still do the work inside
+([vision note §1, §5](Vision-PetriNetCoordination.md#1-the-coordination-layer-idea)).
+One model for boot, operations and plans is simpler to understand. It also
+lets data extend Holon: a vault block can declare a new subnet
+([vision note §7](Vision-PetriNetCoordination.md#7-the-kernel-net-and-self-extension)).
 
-This gallery is deliberately open — add new cases *with their regime* so the
-substrate decision is made consciously.
+In this direction, simulation does not search for plans. A pull finds the
+plan; it goes backward from the goal and visits only the places the goal
+needs. Simulation then **checks** that plan against what is not certain:
 
-## Relation to the PN reification (ADR 0031)
+- **Durations.** Cooking can take 30 or 50 minutes.
+- **Availability.** The shop closes at 20:00. A meeting can run late.
+- **Risk.** How often does the plan miss its deadline?
 
-Ratified and recorded in
-[ADR 0031](../adr/0031-native-transition-catalog-and-macro-reification.md): the catalog
-is Holon-native and macro-reified, and this engine is fed FROM it rather than being it.
+The simulator fires the plan many times on a copy of the marking, with
+random durations. It reports the risk ("buy the chicken at lunch, not after
+work"). It can also compare the two or three plans that the pull ranked.
+Search stays for problems that have no clear goal place, for example the
+best schedule for all open tasks.
 
-User-intent operations as PN transitions pays off as vocabulary plus a shared
-catalog, under three standing guards: no PN runtime in the live dispatch path
-(accept = semantic replay through the normal dispatcher); the catalog is
-derived from op definitions (macro reification), never hand-maintained in
-parallel; adoption is incremental — only ops appearing in scenarios need
-declarations. Effects below the declaration boundary (e.g. the consolidator's
-`sort_key` minting) are not derivable and stay covered by the mutation-proven
-marking-equality oracle. The catalog substrate must be loadable by BOTH the
-in-memory engine and the real dispatcher — one catalog, two consumers, or the
-differential oracle is meaningless.
+Three rules stay:
+
+- Simulation never writes the real state. It works on a copy.
+- A plan becomes real only when its transitions fire through the dispatcher
+  (ADR 0024 P2). Holon never copies simulator state back.
+- The planner, the dispatcher and the simulator read one catalog
+  (ADR 0031). With two catalogs, the check above compares a declaration with
+  itself and proves nothing.
+
+One rule changes. ADR 0031 (guard 1, `docs/adr/0031-native-transition-catalog-and-macro-reification.md:74`)
+says: "No PN runtime in the live dispatch path." In the direction, the net
+does run on the live path: the planner on boot, and pure transitions
+inline. Effectful transitions still go through the dispatcher
+([vision note §4](Vision-PetriNetCoordination.md#4-pure-and-effectful-transitions)).
+ADR 0031 guard 1 is still the binding text until an ADR changes it.
+
+## Examples by use
+
+Find the use of a new idea before you design for it.
+
+**Plan check (a pull makes the plan, simulation checks it):**
+- "Cook Chicken Teriyaki tonight": is there enough time to buy the chicken
+  before the shop closes?
+- Boot: which remedy does the recovery screen offer first?
+- "What if I take on this project": how likely is it that the deadlines
+  hold? An LLM estimates effort and durations once and stores them as
+  attributes. The compiled engine then runs the many what-ifs. The LLM is
+  never inside the loop.
+
+**Search (a compiled score, many candidates):**
+- Plan the `SCHEDULED` dates of all open tasks under deadlines, capacity
+  and dependencies.
+- Load of connected systems (Todoist tasks, calendar density), scored before
+  Holon sends anything.
+
+**Alternatives (few candidates, an LLM or a human decides):**
+- Deep research: several agents work in their own subtrees. Pick the best
+  result or merge them.
+- Two or three ways to reorganize the open work. The user picks one. The
+  others are archived, not reverted.
+- Draft variants of a section as sibling subtrees.
+
+**Preview (one candidate, review, then accept):**
+- An agent's changes, shown on a Loro copy before Holon trusts its writes.
+- A held external change, shown on the copy of the external system ("task X
+  will be done in Todoist"). Accept fires it. Reject never calls the API.
+- Bulk changes: archive everything done before a date, rename a tag
+  everywhere.
+
+Add new examples with their use.
