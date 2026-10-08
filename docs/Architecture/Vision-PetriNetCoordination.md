@@ -422,6 +422,7 @@ supersedes it.
 [Engine.md](Engine.md) ·
 [Reactivity.md](Reactivity.md) ·
 [../Vision/PetriNet.md](../Vision/PetriNet.md) ·
+[DI as a Petri net (open question)](../Design/DI-as-PetriNet.md) ·
 [ADR 0017](../adr/0017-petri-net-task-ranking-engine.md) ·
 [ADR 0024](../adr/0024-unified-action-execution.md) ·
 [ADR 0031](../adr/0031-native-transition-catalog-and-macro-reification.md) ·
