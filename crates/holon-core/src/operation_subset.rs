@@ -14,12 +14,13 @@
 //!
 //! Concretely: under Loro authority the block-CRUD provider is
 //! `LoroBlockOperations`, which does not advertise the SQL-side link/page
-//! transform ops (`create_page_from_link`, `rewrite_link_resolution`,
-//! `restore_link_resolution`, `block_to_page_plan`). A bare
+//! transform ops (`page_chain_plan`, `heal_page_links`,
+//! `rewrite_link_resolution`, `restore_link_resolution`, `block_to_page_plan`).
+//! A bare
 //! `SqlOperationProvider` is registered last to serve exactly those — but as a
 //! full provider it ALSO advertises `create`/`set_field`/`delete`/… which the
 //! Loro provider already owns, duplicating them. Wrapping it in an
-//! `OperationSubset` restricted to the four link/page ops keeps the registry
+//! `OperationSubset` restricted to the link/page ops keeps the registry
 //! duplicate-free while preserving `convert_block_to_page` under Loro.
 //!
 //! `execute_operation` delegates unconditionally — the dispatcher only routes

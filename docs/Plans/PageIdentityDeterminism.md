@@ -190,6 +190,17 @@ created later under the new name gets a new id; that is correct (it is a
 different logical page). Convergence is over independent *creation* of the same
 page (the PBT), not over post-hoc renames.
 
+A new page whose path was vacated by a rename still finds
+`PageId::for_path(path)` held by the renamed page. Org-file ingest
+(`FileSyncController::free_page_id`) then mints
+`PageId::for_path_beside(path, held_id)`, a hash of the path and the held id,
+and repeats along that chain until it reaches a free id. The new page never
+upserts onto the renamed one, and write-back stores the minted id as the file's
+`#+ID`. The id depends only on the path and on the pages that already hold its
+earlier ids, so peers that saw the same rename mint the same id for the same new
+file. A dangling-link click at a vacated path is refused instead
+(`IdentityCollision`).
+
 ### 5.4 Bounded repair — `SqlOperationProvider::dedup_pages`
 
 One-shot, fail-loud collapse of existing `(content, parent_id)` duplicate

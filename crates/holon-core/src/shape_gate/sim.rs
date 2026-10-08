@@ -196,14 +196,14 @@ impl SimStore {
                 let id = uri(param_str(params, "id")?)?;
                 return self.purge(&id).await;
             }
-            // Planners read; the link-resolution ops rewrite link rows; a page
-            // made from a link is a new root page. None changes a tagged
-            // block or its children.
+            // Planners read; the link-resolution ops rewrite link rows. None
+            // changes a tagged block or its children.
             "block_to_page_plan"
             | "merge_blocks_plan"
+            | "page_chain_plan"
             | "rewrite_link_resolution"
             | "restore_link_resolution"
-            | "create_page_from_link" => return Ok(()),
+            | "heal_page_links" => return Ok(()),
             "dismiss_advice" => {
                 param_str(params, "lesson_id")?;
                 let anchor = uri(param_str(params, "anchor_id")?)?;

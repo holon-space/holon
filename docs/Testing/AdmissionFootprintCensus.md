@@ -11,7 +11,7 @@ base table except ["block_derived", "block_history", "clock", "clock_reader", "f
 - `unreported`: observed effects missing from `result.changes` (what D1 alone would miss).
 - Not covered: the Loro write leg (Text/Mark ops such as `insert_text` are not in this catalog).
 
-Counts: 73 ops; inside 4; outside 2; undeclared 67 (of which 22 failed on the fixture binding, so their effect is unmeasured).
+Counts: 75 ops; inside 4; outside 2; undeclared 69 (of which 22 failed on the fixture binding, so their effect is unmeasured).
 
 ## Gesture ops of the slot
 
@@ -41,13 +41,14 @@ Counts: 73 ops; inside 4; outside 2; undeclared 67 (of which 22 failed on the fi
 | block.block_to_page_plan | none | (none) | Undeclared |  | block:b — covers | - |
 | block.convert_block_to_page | none | block:b[text:block_links+ text:marks]; block:b1[structural:parent_id structural:sort_key]; minted("bravo")[existence:block_raw+ text:block_tags+] | Undeclared |  | fence — covers | n/a (engine compound) |
 | block.create | block(s=Produces t=Produces e=Produces) | block:n[existence:block_raw+] | Inside |  | block:n block:page — covers | - |
-| block.create_page_from_link | none | minted("Linked page")[existence:block_raw+ text:block_tags+] | Undeclared |  | relation block — covers | minted("Linked page")[existence:block_raw+ text:block_tags+] |
+| block.create_page_from_link | none | minted("Linked page")[existence:block_raw+ text:block_tags+] | Undeclared |  | fence — covers | n/a (engine compound) |
 | block.cycle_task_state | none | block:a[text:properties] | Undeclared |  | fence — covers | block:a[text:properties] |
 | block.delete | block(s=Consumes t=Untouched e=Produces) | block:c[existence:block_raw-] | Inside |  | block:c — covers | - |
 | block.delete_keep_children | none | block:a[structural:sort_key]; block:b[existence:block_raw-]; block:b1[structural:parent_id structural:sort_key]; block:c[structural:sort_key] | Undeclared |  | fence — covers | block:a[structural:sort_key]; block:b1[structural:parent_id structural:sort_key]; block:c[structural:sort_key] |
 | block.delete_subtree | none | block:b[existence:block_raw-]; block:b1[existence:block_raw-] | Undeclared |  | fence — covers | block:b[existence:block_raw-]; block:b1[existence:block_raw-] |
 | block.dismiss_advice | none | block:a[text:advice_suppressed+] | Undeclared |  | block:a block:b — covers | block:a[text:advice_suppressed+] |
 | block.embed_entity | none | block:a[text:content] | Undeclared |  | block:a block:c — covers | - |
+| block.heal_page_links | none | (none) | Undeclared |  | block:a — covers | - |
 | block.indent | none | block:b[structural:parent_id structural:sort_key] | Undeclared |  | block:b — covers | block:b[structural:sort_key] |
 | block.instantiate_template | none | ERROR: block 'block:b' is not a template: missing the 'template' property | Undeclared |  | fence — covers | - |
 | block.join_block | block(s=Consumes t=Produces e=Produces) envelope by position | block:a[text:content]; block:b[existence:block_raw-]; block:b1[structural:parent_id structural:sort_key] | Outside | block:a[text:content]; block:b1[structural:parent_id structural:sort_key] | block:b — misses block:a[text:content]; block:b1[structural:parent_id structural:sort_key] | block:b1[structural:parent_id structural:sort_key] |
@@ -58,6 +59,7 @@ Counts: 73 ops; inside 4; outside 2; undeclared 67 (of which 22 failed on the fi
 | block.move_to_position | none | block:c[structural:parent_id structural:sort_key] | Undeclared |  | block:a block:c — covers | block:c[structural:parent_id structural:sort_key] |
 | block.move_up | none | block:a[structural:sort_key]; block:b[structural:sort_key]; block:c[structural:sort_key] | Undeclared |  | block:b — misses block:a[structural:sort_key]; block:c[structural:sort_key] | block:a[structural:sort_key]; block:b[structural:sort_key]; block:c[structural:sort_key] |
 | block.outdent | none | block:a[structural:sort_key]; block:b[structural:sort_key]; block:b1[structural:parent_id structural:sort_key]; block:c[structural:sort_key] | Undeclared |  | block:b1 — misses block:a[structural:sort_key]; block:b[structural:sort_key]; block:c[structural:sort_key] | block:a[structural:sort_key]; block:b[structural:sort_key]; block:b1[structural:sort_key]; block:c[structural:sort_key] |
+| block.page_chain_plan | none | (none) | Undeclared |  | relation block — covers | - |
 | block.remove_tag | none | block:a[text:block_tags-] | Undeclared |  | block:a — covers | block:a[text:block_tags-] |
 | block.restore_join | none | ERROR: block:j is not in the write authority (unknown id, deleted, or this vault was never seeded), so no write may land on it. | Undeclared |  | block:a block:j — covers | - |
 | block.restore_link_resolution | none | ERROR: restore_link_resolution: 'rows' must be an Array, got Some(String("[]")) | Undeclared |  | relation block — covers | - |

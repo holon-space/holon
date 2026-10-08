@@ -2282,10 +2282,7 @@ impl SqlOperationProvider {
         for seg in trimmed_path.split('/') {
             let name = seg.trim();
             if name.is_empty() {
-                return Err(format!(
-                    "block_to_page_plan: empty segment in destination_path '{destination_path}'"
-                )
-                .into());
+                return Err(format!("empty segment in page path '{destination_path}'").into());
             }
             let seg_path = if accumulated.is_empty() {
                 name.to_string()
@@ -3354,14 +3351,51 @@ impl OperationProvider for SqlOperationProvider {
                 OperationDescriptor {
                     entity_name: self.entity_name.clone().into(),
                     entity_short_name: self.entity_short_name.clone(),
-                    name: "create_page_from_link".to_string(),
-                    display_name: "Create Page From Link".to_string(),
-                    description: "Create a page chain from a wiki-link target".to_string(),
+                    name: "page_chain_plan".to_string(),
+                    display_name: "Page Chain Plan".to_string(),
+                    description: "Read-only planner for the create_page_from_link compound"
+                        .to_string(),
                     required_params: vec![OperationParam {
                         name: "target".to_string(),
                         type_hint: TypeHint::String,
                         description: "Wiki-link target (e.g. Projects/X)".to_string(),
                     }],
+                    optional_params: vec![],
+                    id_column: "id".to_string(),
+                    affected_fields: vec![],
+                    param_mappings: vec![],
+                    target_scope: self.target_scope(),
+                    boundary_behavior: holon_api::BoundaryBehavior::PrivateOnly,
+                    menu_exposure: holon_api::MenuExposure::NotListed {
+                        surface: holon_api::NonMenuSurface::Internal,
+                    },
+                    trigger: None,
+                    bound_params: Default::default(),
+                    marking_delta: holon_api::marking::MarkingDelta::Undeclared,
+                    guard: holon_api::pattern::OpGuard::None,
+                    arcs: holon_api::arcs::TransitionArcs::Undeclared,
+                },
+                OperationDescriptor {
+                    entity_name: self.entity_name.clone().into(),
+                    entity_short_name: self.entity_short_name.clone(),
+                    name: "heal_page_links".to_string(),
+                    display_name: "Heal Page Links".to_string(),
+                    description: "Resolve the dangling wiki-links a target names to its page"
+                        .to_string(),
+                    required_params: vec![
+                        OperationParam {
+                            name: "page_id".to_string(),
+                            type_hint: TypeHint::EntityId {
+                                entity_name: EntityName::new("block"),
+                            },
+                            description: "The page the target names".to_string(),
+                        },
+                        OperationParam {
+                            name: "target".to_string(),
+                            type_hint: TypeHint::String,
+                            description: "Wiki-link target (e.g. Projects/X)".to_string(),
+                        },
+                    ],
                     optional_params: vec![],
                     id_column: "id".to_string(),
                     affected_fields: vec![],
@@ -4143,119 +4177,50 @@ impl OriginTaggedWrites for SqlOperationProvider {
                 self.execute_operation_with_origin(entity_name, "set_field", set_params, origin)
                     .await
             }
-            "create_page_from_link" => {
+            "page_chain_plan" => {
+                // Read-only planner for the engine-level `create_page_from_link`
+                // compound, which creates `missing` through the write authority.
+                use crate::core::page_chain_plan::PageChainPlan;
+
                 let target = params
                     .get("target")
                     .and_then(|v| v.as_string())
-                    .ok_or_else(|| "Missing 'target' parameter".to_string())?
+                    .ok_or_else(|| "page_chain_plan: missing 'target' parameter".to_string())?
                     .to_string();
-
                 if target.trim().is_empty() {
-                    return Err("create_page_from_link: target must not be empty".into());
+                    return Err("page_chain_plan: target must not be empty".into());
                 }
-
-                let segments: Vec<&str> = target.split('/').collect();
-                let mut parent_id = "sentinel:no_parent".to_string();
-                let mut accumulated = String::new();
-                let mut leaf_id = String::new();
-
-                for (i, seg) in segments.iter().enumerate() {
-                    let trimmed = seg.trim();
-                    if trimmed.is_empty() {
-                        return Err(format!(
-                            "create_page_from_link: empty segment in target '{target}'"
-                        )
-                        .into());
-                    }
-
-                    // Build the context-aware hint for resolve_page_name.
-                    // For the first segment, just pass the segment name.
-                    // For subsequent segments, include the accumulated prefix
-                    // so resolve_page_name prefers pages under the right parent.
-                    let hint = if i == 0 {
-                        trimmed.to_string()
-                    } else {
-                        format!("{}/{}", accumulated, trimmed)
-                    };
-
-                    // Check if page already exists with the right parent.
-                    let existing = self.resolve_page_name(&hint).await?;
-                    match existing {
-                        Some(page_id) => {
-                            parent_id = page_id.clone();
-                            leaf_id = page_id;
-                            accumulated = if accumulated.is_empty() {
-                                trimmed.to_string()
-                            } else {
-                                format!("{}/{}", accumulated, trimmed)
-                            };
-                            continue;
-                        }
-                        None => {
-                            // Create the page at this level with a DETERMINISTIC
-                            // id keyed on the accumulated path (root→this
-                            // segment). Two peers that each lazily create the
-                            // same page thus mint the SAME block id — the CRDT
-                            // merge key — so a later merge yields ONE page, not a
-                            // duplicate (inv-page-name-unique). Minted through the
-                            // single `PageId` constructor so no write path can
-                            // fall back to a random UUID.
-                            let seg_path = if accumulated.is_empty() {
-                                trimmed.to_string()
-                            } else {
-                                format!("{accumulated}/{trimmed}")
-                            };
-                            let id = holon_api::link_parser::PageId::for_path(&seg_path)?
-                                .as_str()
-                                .to_string();
-                            let mut create_params: StorageEntity = HashMap::new();
-                            create_params.insert("id".into(), Value::String(id.clone()));
-                            create_params
-                                .insert("content".into(), Value::String(trimmed.to_string()));
-                            create_params
-                                .insert("parent_id".into(), Value::String(parent_id.clone()));
-                            create_params.insert(
-                                "tags".into(),
-                                Value::Array(vec![Value::String("Page".to_string())]),
-                            );
-                            self.execute_operation_with_origin(
-                                entity_name,
-                                "create",
-                                create_params,
-                                origin.clone(),
-                            )
-                            .await?;
-                            parent_id = id.clone();
-                            leaf_id = id;
-                            accumulated = if accumulated.is_empty() {
-                                trimmed.to_string()
-                            } else {
-                                format!("{}/{}", accumulated, trimmed)
-                            };
-                        }
-                    }
-                }
-
-                // Heal any dangling name-links to this page chain.
-                let link_stmts = Self::page_reresolve_statements(&leaf_id, &target);
+                let (leaf_id, missing) = self.resolve_destination_chain(&target).await?;
+                Ok(OperationResult::declared_irreversible(
+                    Vec::new(),
+                    "page_chain_plan is read-only",
+                )
+                .with_response(PageChainPlan { leaf_id, missing }.to_value()))
+            }
+            "heal_page_links" => {
+                // Resolve the dangling name links a wiki-link `target` names to
+                // the page it now names.
+                let page_id = params
+                    .get("page_id")
+                    .and_then(|v| v.as_string())
+                    .ok_or_else(|| "heal_page_links: missing 'page_id' parameter".to_string())?
+                    .to_string();
+                let target = params
+                    .get("target")
+                    .and_then(|v| v.as_string())
+                    .ok_or_else(|| "heal_page_links: missing 'target' parameter".to_string())?
+                    .to_string();
+                let link_stmts = Self::page_reresolve_statements(&page_id, &target);
                 if !link_stmts.is_empty() {
                     let all_stmts: Vec<_> = link_stmts.into_iter().map(|s| (s, vec![])).collect();
                     self.db_handle.transaction(all_stmts).await.map_err(|e| {
-                        format!("create_page_from_link: failed to heal dangling links: {e}")
+                        format!("heal_page_links: failed to heal dangling links to {target:?}: {e}")
                     })?;
                 }
-
-                // Grafting a new page into the tree is reversible via
-                // `delete`, but we declare it irreversible because undo of
-                // a multi-segment page-chain creation + link healing is
-                // semantically noisy (undoing the chain creates dangling
-                // links pointing nowhere). When ADR 0024 effect retraction
-                // lands we can collapse this into a single undo entry.
                 Ok(OperationResult::declared_irreversible(
                     Vec::new(),
-                    "create_page_from_link — page-chain creation + link healing",
-                )
-                .with_response(Value::String(leaf_id)))
+                    "heal_page_links re-resolves links that pointed nowhere",
+                ))
             }
             "rewrite_link_resolution" => {
                 // Operation-level surface for the block→page transform's inbound

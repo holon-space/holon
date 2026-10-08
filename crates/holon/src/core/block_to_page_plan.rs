@@ -49,11 +49,51 @@ pub struct BlockToPagePlan {
     pub child_ids: Vec<String>,
 }
 
-fn get_str(obj: &std::collections::HashMap<String, Value>, key: &str) -> Result<String, String> {
+impl PlanSegment {
+    pub fn list_to_value(segments: &[PlanSegment]) -> Value {
+        Value::Array(
+            segments
+                .iter()
+                .map(|seg| {
+                    let mut o = std::collections::HashMap::new();
+                    o.insert("id".to_string(), Value::String(seg.id.clone()));
+                    o.insert("name".to_string(), Value::String(seg.name.clone()));
+                    o.insert(
+                        "parent_id".to_string(),
+                        Value::String(seg.parent_id.clone()),
+                    );
+                    Value::Object(o)
+                })
+                .collect(),
+        )
+    }
+
+    pub fn list_from_value(value: Option<&Value>) -> Result<Vec<PlanSegment>, String> {
+        match value {
+            Some(Value::Array(items)) => items
+                .iter()
+                .map(|item| match item {
+                    Value::Object(seg) => Ok(PlanSegment {
+                        id: get_str(seg, "id")?,
+                        name: get_str(seg, "name")?,
+                        parent_id: get_str(seg, "parent_id")?,
+                    }),
+                    other => Err(format!("a segment must be an Object, got {other:?}")),
+                })
+                .collect(),
+            other => Err(format!("expected an Array of segments, got {other:?}")),
+        }
+    }
+}
+
+pub(crate) fn get_str(
+    obj: &std::collections::HashMap<String, Value>,
+    key: &str,
+) -> Result<String, String> {
     match obj.get(key) {
         Some(Value::String(s)) => Ok(s.clone()),
         other => Err(format!(
-            "BlockToPagePlan: field '{key}' must be a string, got {other:?}"
+            "plan field '{key}' must be a string, got {other:?}"
         )),
     }
 }
@@ -90,21 +130,7 @@ impl BlockToPagePlan {
         );
         obj.insert(
             "missing_segments".to_string(),
-            Value::Array(
-                self.missing_segments
-                    .iter()
-                    .map(|seg| {
-                        let mut o = std::collections::HashMap::new();
-                        o.insert("id".to_string(), Value::String(seg.id.clone()));
-                        o.insert("name".to_string(), Value::String(seg.name.clone()));
-                        o.insert(
-                            "parent_id".to_string(),
-                            Value::String(seg.parent_id.clone()),
-                        );
-                        Value::Object(o)
-                    })
-                    .collect(),
-            ),
+            PlanSegment::list_to_value(&self.missing_segments),
         );
         obj.insert(
             "child_ids".to_string(),
@@ -125,26 +151,8 @@ impl BlockToPagePlan {
                 return Err(format!("BlockToPagePlan: expected Object, got {other:?}"));
             }
         };
-        let missing_segments = match obj.get("missing_segments") {
-            Some(Value::Array(items)) => items
-                .iter()
-                .map(|item| match item {
-                    Value::Object(seg) => Ok(PlanSegment {
-                        id: get_str(seg, "id")?,
-                        name: get_str(seg, "name")?,
-                        parent_id: get_str(seg, "parent_id")?,
-                    }),
-                    other => Err(format!(
-                        "BlockToPagePlan: segment must be Object, got {other:?}"
-                    )),
-                })
-                .collect::<Result<Vec<_>, String>>()?,
-            other => {
-                return Err(format!(
-                    "BlockToPagePlan: 'missing_segments' must be an Array, got {other:?}"
-                ));
-            }
-        };
+        let missing_segments = PlanSegment::list_from_value(obj.get("missing_segments"))
+            .map_err(|e| format!("BlockToPagePlan: 'missing_segments': {e}"))?;
         let child_ids = match obj.get("child_ids") {
             Some(Value::Array(items)) => items
                 .iter()

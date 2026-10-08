@@ -2975,6 +2975,13 @@ impl ReferenceState {
                         .block_documents
                         .insert(id.clone(), id.clone());
                     self.domain.block_state.blocks.insert(id.clone(), page);
+                    // The page owns `<name chain>.org` (VaultPath::page_file_from_name_chain).
+                    let chain = self.page_path_of_ref(&id).unwrap_or_else(|| {
+                        panic!("apply_create_page_at_path: minted page {id} has no name chain")
+                    });
+                    self.files
+                        .documents
+                        .insert(id.clone(), format!("{chain}.org"));
                     parent = id;
                 }
             }

@@ -198,6 +198,8 @@ impl Fixture {
             ("block", "create_page_from_link") => {
                 vec![("target", s("Linked page"))]
             }
+            ("block", "page_chain_plan") => vec![("target", s("Linked page"))],
+            ("block", "heal_page_links") => vec![("page_id", id("a")), ("target", s("alpha"))],
             ("block", "rewrite_link_resolution") => vec![("from", id("a")), ("to", id("b"))],
             ("block", "restore_link_resolution") => vec![("rows", s("[]"))],
             ("block", "block_to_page_plan") => vec![("target", id("b"))],

@@ -414,6 +414,18 @@ impl PageId {
         Ok(Self::from_segments(&segments))
     }
 
+    /// Mint the id for a NEW page at `path` while a different page already
+    /// holds `taken`, the id this path would otherwise get (a renamed page
+    /// keeps its id, docs/Plans/PageIdentityDeterminism.md §5.3). Peers that
+    /// see the same holder mint the same id.
+    pub fn for_path_beside(path: &str, taken: &EntityUri) -> Result<Self, String> {
+        let canonical = Self::for_path(path)?;
+        Ok(PageId(deterministic_entity_id(
+            "block",
+            &format!("{}\0{}", canonical.as_str(), taken.as_str()),
+        )))
+    }
+
     /// Mint the id for a NEW page placed directly under `destination_path`
     /// (root→leaf, `/`-joined; empty ⇒ the vault root) whose leaf title is
     /// `leaf`.
@@ -958,6 +970,29 @@ mod tests {
             }
             other => panic!("expected CreationIntent, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_page_beside_a_held_id_gets_a_distinct_convergent_id() {
+        let held = PageId::for_path("doc_904").unwrap().into_entity_uri();
+        let beside = PageId::for_path_beside("doc_904", &held)
+            .unwrap()
+            .into_entity_uri();
+        assert_ne!(beside, held);
+        assert_eq!(
+            PageId::for_path_beside(" Doc_904 ", &held)
+                .unwrap()
+                .into_entity_uri(),
+            beside
+        );
+        let other_holder = PageId::for_path("doc_905").unwrap().into_entity_uri();
+        assert_ne!(
+            PageId::for_path_beside("doc_904", &other_holder)
+                .unwrap()
+                .into_entity_uri(),
+            beside
+        );
+        assert!(PageId::for_path_beside("a//b", &held).is_err());
     }
 
     #[test]

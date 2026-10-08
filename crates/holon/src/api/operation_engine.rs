@@ -204,6 +204,11 @@ const CONVERT_BLOCK_TO_PAGE_OP: &str = "convert_block_to_page";
 /// [`UndoEntry`].
 const MERGE_BLOCKS_OP: &str = "merge_blocks";
 
+/// The engine-level compound behind a click on a dangling wiki-link: create the
+/// page chain the target names and resolve the links that named it. The
+/// creates go to whichever provider owns `block` creation in this wiring.
+const CREATE_PAGE_FROM_LINK_OP: &str = "create_page_from_link";
+
 /// Advance a block one step around its owning document's task-state ring
 /// (Cmd+Enter). Intercepted at the engine because the ring is a function of the
 /// DOCUMENT's declared `#+TODO:` vocabulary, and only the engine holds the
@@ -1650,6 +1655,99 @@ impl DispatchingOperationEngine {
             carry_confirmation(&forward_params, inverse),
             result.changes,
         ))
+    }
+
+    /// Execute [`CREATE_PAGE_FROM_LINK_OP`]. Params: `target` (the `/`-joined
+    /// wiki-link target). Returns the leaf page id. Records no undo entry:
+    /// undoing a chain creation would leave the healed links dangling again.
+    async fn run_create_page_from_link(
+        &self,
+        params: &StorageEntity,
+        origin: &OpOrigin,
+    ) -> Result<Option<Value>> {
+        use holon_api::PAGE_TAG;
+
+        use crate::core::page_chain_plan::PageChainPlan;
+
+        let block = EntityName::new("block");
+        let target = params
+            .get("target")
+            .and_then(|v| v.as_string())
+            .ok_or_else(|| anyhow::anyhow!("create_page_from_link: missing 'target' parameter"))?
+            .to_string();
+        let plan_result = self
+            .dispatcher
+            .execute_operation(&block, "page_chain_plan", params.clone())
+            .await
+            .map_err(|e| anyhow::anyhow!("create_page_from_link: planning failed: {e}"))?;
+        let plan_value = plan_result.response.ok_or_else(|| {
+            anyhow::anyhow!("create_page_from_link: planner returned no plan payload")
+        })?;
+        let plan = PageChainPlan::from_value(&plan_value)
+            .map_err(|e| anyhow::anyhow!("create_page_from_link: {e}"))?;
+
+        // A derived id still held by a page a rename retitled is refused before
+        // any create, as `run_convert_block_to_page` refuses it.
+        if let Some(reader) = &self.reader {
+            for seg in &plan.missing {
+                // ALLOW(entity_uri_from_raw): seg.id is a derived PageId::for_path id.
+                let seg_uri = EntityUri::from_raw(&seg.id);
+                let holder_title = reader
+                    .field_value(&seg_uri, "content")
+                    .await?
+                    .and_then(|v| v.as_string().map(str::to_string));
+                if let holon_api::Recognition::Collision(collision) =
+                    holon_api::recognize_derived_id(&seg_uri, holder_title.as_deref(), &seg.name)
+                {
+                    return Err(anyhow::Error::new(collision));
+                }
+            }
+        }
+
+        let mut all_changes = Vec::new();
+        for seg in &plan.missing {
+            let mut p = StorageEntity::new();
+            p.insert("id".into(), Value::String(seg.id.clone()));
+            p.insert("content".into(), Value::String(seg.name.clone()));
+            p.insert("parent_id".into(), Value::String(seg.parent_id.clone()));
+            p.insert(
+                "tags".into(),
+                Value::Array(vec![Value::String(PAGE_TAG.to_string())]),
+            );
+            let p = self.stamp_provenance("create", p, origin)?;
+            let result = self
+                .dispatch_constituent_op("create", p, origin)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "create_page_from_link: creating page {:?} ({}) failed: {e}",
+                        seg.name,
+                        seg.id
+                    )
+                })?;
+            all_changes.extend(result.changes);
+        }
+
+        let mut heal = StorageEntity::new();
+        heal.insert("page_id".into(), Value::String(plan.leaf_id.clone()));
+        heal.insert("target".into(), Value::String(target));
+        self.dispatcher
+            .execute_operation(&block, "heal_page_links", heal)
+            .await
+            .map_err(|e| anyhow::anyhow!("create_page_from_link: {e}"))?;
+
+        if let Some(history) = &self.history {
+            self.record_history(
+                history.as_ref(),
+                "block",
+                CREATE_PAGE_FROM_LINK_OP,
+                origin,
+                &all_changes,
+            )
+            .await?;
+        }
+
+        Ok(Some(Value::String(plan.leaf_id)))
     }
 
     /// Execute the block → page transform (Option B). See
@@ -3732,6 +3830,36 @@ impl DispatchingOperationEngine {
         }
     }
 
+    fn create_page_from_link_descriptor() -> OperationDescriptor {
+        use holon_api::render_types::TypeHint;
+        OperationDescriptor {
+            entity_name: EntityName::new("block"),
+            entity_short_name: "block".to_string(),
+            id_column: "id".to_string(),
+            name: CREATE_PAGE_FROM_LINK_OP.to_string(),
+            display_name: "Create Page From Link".to_string(),
+            description: "Create a page chain from a wiki-link target".to_string(),
+            required_params: vec![holon_api::OperationParam {
+                name: "target".to_string(),
+                type_hint: TypeHint::String,
+                description: "Wiki-link target (e.g. Projects/X)".to_string(),
+            }],
+            optional_params: vec![],
+            param_mappings: vec![],
+            target_scope: holon_api::TargetScope::Block,
+            menu_exposure: holon_api::MenuExposure::NotListed {
+                surface: holon_api::NonMenuSurface::Internal,
+            },
+            boundary_behavior: holon_api::BoundaryBehavior::PrivateOnly,
+            trigger: None,
+            bound_params: Default::default(),
+            affected_fields: vec![],
+            marking_delta: holon_api::marking::MarkingDelta::Undeclared,
+            guard: holon_api::pattern::OpGuard::None,
+            arcs: holon_api::arcs::TransitionArcs::Undeclared,
+        }
+    }
+
     /// The synthetic descriptor advertising the engine-level
     /// `instantiate_template` op so MCP/UI discover it like any provider op.
     fn instantiate_template_descriptor() -> OperationDescriptor {
@@ -3817,12 +3945,13 @@ impl DispatchingOperationEngine {
     pub fn block_synthetic_descriptors(
         include_template_picker: bool,
     ) -> Result<Vec<OperationDescriptor>> {
-        let mut ops = Vec::with_capacity(2);
+        let mut ops = Vec::with_capacity(4);
         if include_template_picker {
             ops.push(Self::instantiate_template_descriptor());
         }
         ops.push(Self::convert_block_to_page_descriptor());
         ops.push(Self::merge_blocks_descriptor());
+        ops.push(Self::create_page_from_link_descriptor());
         holon_api::validate_entity_references(&ops).map_err(|e| {
             anyhow::anyhow!(
                 "the engine-synthetic block descriptors are a declaration like any provider's, \
@@ -4252,12 +4381,13 @@ impl DispatchingOperationEngine {
         op_name: &str,
         param: impl Fn(&str) -> Option<&'p Value>,
     ) -> Result<Footprint> {
-        const FENCED_OPS: [&str; 8] = [
+        const FENCED_OPS: [&str; 9] = [
             "delete_subtree",
             "delete_keep_children",
             INSTANTIATE_TEMPLATE_OP,
             CONVERT_BLOCK_TO_PAGE_OP,
             MERGE_BLOCKS_OP,
+            CREATE_PAGE_FROM_LINK_OP,
             CYCLE_TASK_STATE_OP,
             ACCEPT_PROPOSAL_OP,
             REJECT_PROPOSAL_OP,
@@ -4481,6 +4611,13 @@ impl DispatchingOperationEngine {
         if op_name == CONVERT_BLOCK_TO_PAGE_OP && entity_name.as_str() == "block" {
             return self
                 .run_convert_block_to_page(&params, &origin)
+                .await
+                .map(OpOutcome::proven);
+        }
+
+        if op_name == CREATE_PAGE_FROM_LINK_OP && entity_name.as_str() == "block" {
+            return self
+                .run_create_page_from_link(&params, &origin)
                 .await
                 .map(OpOutcome::proven);
         }
@@ -4782,7 +4919,12 @@ impl OperationEngine for DispatchingOperationEngine {
             return true;
         }
         if entity_name == "block"
-            && (op_name == CONVERT_BLOCK_TO_PAGE_OP || op_name == MERGE_BLOCKS_OP)
+            && [
+                CONVERT_BLOCK_TO_PAGE_OP,
+                MERGE_BLOCKS_OP,
+                CREATE_PAGE_FROM_LINK_OP,
+            ]
+            .contains(&op_name)
         {
             return true;
         }

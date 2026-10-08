@@ -1,4 +1,4 @@
-//! Integration test for the `create_page_from_link` operation.
+//! Integration test for the engine-level `create_page_from_link` compound.
 //!
 //! Covers:
 //! 1. Creating a multi-segment page chain (`Projects/X`) from a dangling
@@ -12,66 +12,90 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use holon::core::SqlOperationProvider;
-use holon::storage::schema_module::EdgeFieldDescriptor;
-use holon::storage::schema_module::SchemaModule;
-use holon::storage::turso::TursoBackend;
+use holon::api::backend_engine::BackendEngine;
+use holon::core::queryable_cache::QueryableCache;
+use holon::core::sql_block_operations::SqlBlockOperations;
+use holon::core::sql_operation_provider::SqlOperationProvider;
+use holon::di::test_helpers::create_test_engine_with_providers;
+use holon::storage::BLOCK_WRITE_TABLE;
+use holon::storage::turso::DbHandle;
 use holon_api::EntityName;
 use holon_api::EntityRef;
 use holon_api::InlineMark;
 use holon_api::MarkSpan;
+use holon_api::OpOrigin;
 use holon_api::Value;
+use holon_api::block::Block;
 use holon_core::OperationProvider;
-use holon_turso::schema_modules::CoreSchemaModule;
-use holon_turso::schema_modules::LinkSchemaModule;
+use holon_turso::schema_module::SchemaModule;
+use holon_turso::schema_modules::BlockSchemaModule;
 use proptest::prelude::*;
 
 const ENTITY: &str = "block";
-const TABLE: &str = "block_raw";
 
-fn tags_descriptor() -> EdgeFieldDescriptor {
-    EdgeFieldDescriptor {
-        entity: ENTITY.to_string(),
-        field: holon_api::EdgeField::Tags,
-        join_table: "block_tags".to_string(),
-        source_col: "block_id".to_string(),
-        target_col: "tag".to_string(),
-    }
+async fn block_engine() -> Arc<BackendEngine> {
+    create_test_engine_with_providers(":memory:".into(), |module| {
+        module
+            .with_operation_provider_factory(|backend| {
+                let db_handle =
+                    tokio::task::block_in_place(|| backend.blocking_read().handle().clone());
+                Arc::new(SqlOperationProvider::with_edge_fields(
+                    db_handle,
+                    BLOCK_WRITE_TABLE.to_string(),
+                    ENTITY.to_string(),
+                    ENTITY.to_string(),
+                    BlockSchemaModule.edge_fields(),
+                )) as Arc<dyn OperationProvider>
+            })
+            .with_operation_provider_factory(|backend| {
+                let db_handle =
+                    tokio::task::block_in_place(|| backend.blocking_read().handle().clone());
+                let sql_ops = Arc::new(SqlOperationProvider::with_edge_fields(
+                    db_handle.clone(),
+                    BLOCK_WRITE_TABLE.to_string(),
+                    ENTITY.to_string(),
+                    ENTITY.to_string(),
+                    BlockSchemaModule.edge_fields(),
+                ));
+                let mut block_raw_type_def = Block::type_definition();
+                block_raw_type_def.name = BLOCK_WRITE_TABLE.to_string();
+                let cache = tokio::task::block_in_place(|| {
+                    // ALLOW(block_on): sync provider-factory closure on a multi_thread runtime.
+                    tokio::runtime::Handle::current()
+                        .block_on(QueryableCache::<Block>::new(db_handle, block_raw_type_def))
+                })
+                .expect("block_raw cache");
+                Arc::new(SqlBlockOperations::new(sql_ops, Arc::new(cache)))
+                    as Arc<dyn OperationProvider>
+            })
+    })
+    .await
+    .expect("test engine with the SqlOnly block providers")
 }
 
-async fn setup_schema(handle: &holon::storage::turso::DbHandle) {
-    // Bind the PRODUCTION core schema module, not a hand-listed subset: it
-    // silently rots behind the real schema, and re-running only its DDL drops
-    // the `sentinel:no_parent` FK-anchor seed that every root block needs.
-    CoreSchemaModule
-        .ensure_schema(handle)
+/// A fixture write, outside the undo history.
+async fn fixture_op(engine: &BackendEngine, op: &str, params: holon_api::StorageEntity) {
+    engine
+        .execute_operation(&EntityName::new(ENTITY), op, params, OpOrigin::Sync)
         .await
-        .expect("CoreSchemaModule schema");
-    handle
-        .execute_ddl(
-            "CREATE TABLE block_tags (
-                block_id TEXT NOT NULL,
-                tag TEXT NOT NULL,
-                PRIMARY KEY (block_id, tag),
-                FOREIGN KEY (block_id) REFERENCES block_raw(id) ON DELETE CASCADE
-            )",
+        .unwrap_or_else(|e| panic!("fixture {op}: {e:#}"));
+}
+
+async fn create_page_from_link(engine: &BackendEngine, target: &str) -> anyhow::Result<String> {
+    let mut op_params: holon_api::StorageEntity = HashMap::new();
+    op_params.insert("target".into(), Value::String(target.to_string()));
+    let outcome = engine
+        .execute_operation(
+            &EntityName::new(ENTITY),
+            "create_page_from_link",
+            op_params,
+            OpOrigin::User,
         )
-        .await
-        .expect("block_tags table");
-    LinkSchemaModule
-        .ensure_schema(handle)
-        .await
-        .expect("LinkSchemaModule schema");
-}
-
-fn provider(handle: holon::storage::turso::DbHandle) -> Arc<SqlOperationProvider> {
-    Arc::new(SqlOperationProvider::with_edge_fields(
-        handle,
-        TABLE.to_string(),
-        ENTITY.to_string(),
-        ENTITY.to_string(),
-        vec![tags_descriptor()],
-    ))
+        .await?;
+    match outcome.response {
+        Some(Value::String(s)) => Ok(s),
+        other => panic!("expected the leaf page id in the response, got: {other:?}"),
+    }
 }
 
 fn name_link_marks(name: &str, start: usize, end: usize) -> String {
@@ -91,10 +115,14 @@ fn create_params(id: &str, content: &str) -> holon_api::StorageEntity {
     let mut p: holon_api::StorageEntity = HashMap::new();
     p.insert("id".into(), Value::String(format!("block:{id}")));
     p.insert("content".into(), Value::String(content.to_string()));
+    p.insert(
+        "parent_id".into(),
+        Value::String("sentinel:no_parent".to_string()),
+    );
     p
 }
 
-async fn link_resolved(handle: &holon::storage::turso::DbHandle, source: &str) -> Option<String> {
+async fn link_resolved(handle: &DbHandle, source: &str) -> Option<String> {
     let sql = format!(
         "SELECT resolved_id FROM block_links WHERE source_block_id = 'block:{source}' AND kind = \
          'page'"
@@ -108,7 +136,7 @@ async fn link_resolved(handle: &holon::storage::turso::DbHandle, source: &str) -
         })
 }
 
-async fn block_content(handle: &holon::storage::turso::DbHandle, id: &str) -> Option<String> {
+async fn block_content(handle: &DbHandle, id: &str) -> Option<String> {
     let sql = format!(
         "SELECT content FROM block_raw WHERE id = '{}'",
         id.replace('\'', "''")
@@ -126,7 +154,7 @@ async fn block_content(handle: &holon::storage::turso::DbHandle, id: &str) -> Op
         })
 }
 
-async fn block_parent(handle: &holon::storage::turso::DbHandle, id: &str) -> Option<String> {
+async fn block_parent(handle: &DbHandle, id: &str) -> Option<String> {
     let sql = format!(
         "SELECT parent_id FROM block_raw WHERE id = '{}'",
         id.replace('\'', "''")
@@ -145,7 +173,7 @@ async fn block_parent(handle: &holon::storage::turso::DbHandle, id: &str) -> Opt
         })
 }
 
-async fn block_has_page_tag(handle: &holon::storage::turso::DbHandle, id: &str) -> bool {
+async fn block_has_page_tag(handle: &DbHandle, id: &str) -> bool {
     let sql = format!(
         "SELECT 1 FROM block_tags WHERE block_id = '{}' AND tag = 'Page'",
         id.replace('\'', "''")
@@ -157,7 +185,7 @@ async fn block_has_page_tag(handle: &holon::storage::turso::DbHandle, id: &str) 
         .is_empty()
 }
 
-async fn block_count(handle: &holon::storage::turso::DbHandle) -> usize {
+async fn block_count(handle: &DbHandle) -> usize {
     let rows = handle
         .query("SELECT COUNT(*) as cnt FROM block_raw", HashMap::new())
         .await
@@ -171,12 +199,8 @@ async fn block_count(handle: &holon::storage::turso::DbHandle) -> usize {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn create_page_from_link_creates_page_chain_and_heals_dangling_link() {
-    let (_backend, handle) = TursoBackend::new_in_memory()
-        .await
-        .expect("in-memory turso");
-    setup_schema(&handle).await;
-    let provider = provider(handle.clone());
-    let entity: EntityName = ENTITY.to_string().into();
+    let engine = block_engine().await;
+    let handle = engine.db_handle();
 
     // 1. Create a source block with a dangling [[Projects/X]] link.
     let mut p = create_params("src", "see [[Projects/X]] for more");
@@ -184,32 +208,20 @@ async fn create_page_from_link_creates_page_chain_and_heals_dangling_link() {
         "marks".into(),
         Value::String(name_link_marks("Projects/X", 4, 15)),
     );
-    provider
-        .execute_operation(&entity, "create", p)
-        .await
-        .expect("create src");
+    fixture_op(&engine, "create", p).await;
 
     // Verify the link is dangling initially.
     assert!(
-        link_resolved(&handle, "src").await.is_none(),
+        link_resolved(handle, "src").await.is_none(),
         "link should be dangling before create_page_from_link"
     );
 
-    let initial_block_count = block_count(&handle).await;
+    let initial_block_count = block_count(handle).await;
 
     // 2. Invoke create_page_from_link("Projects/X").
-    let mut op_params: holon_api::StorageEntity = HashMap::new();
-    op_params.insert("target".into(), Value::String("Projects/X".to_string()));
-    let result = provider
-        .execute_operation(&entity, "create_page_from_link", op_params)
+    let leaf_id = create_page_from_link(&engine, "Projects/X")
         .await
         .expect("create_page_from_link");
-
-    // The response should contain the leaf page id.
-    let leaf_id = match &result.response {
-        Some(Value::String(s)) => s.clone(),
-        other => panic!("Expected String response with leaf page id, got: {other:?}"),
-    };
     assert!(leaf_id.starts_with("block:"), "leaf id must be a block URI");
 
     // 3. Assert: `Projects` page exists, Page-tagged, at the top-level parent.
@@ -226,14 +238,14 @@ async fn create_page_from_link_creates_page_chain_and_heals_dangling_link() {
         .expect("id")
         .to_string();
     // assert parent is the sentinel (top-level).
-    let parent = block_parent(&handle, &projects_id).await;
+    let parent = block_parent(handle, &projects_id).await;
     assert_eq!(
         parent.as_deref(),
         Some("sentinel:no_parent"),
         "Projects page must be top-level (sentinel:no_parent), got: {parent:?}"
     );
     assert!(
-        block_has_page_tag(&handle, &projects_id).await,
+        block_has_page_tag(handle, &projects_id).await,
         "Projects must be Page-tagged"
     );
 
@@ -255,18 +267,18 @@ async fn create_page_from_link_creates_page_chain_and_heals_dangling_link() {
         .to_string();
     assert_eq!(x_id, leaf_id, "leaf id must match the returned id");
     assert!(
-        block_has_page_tag(&handle, &x_id).await,
+        block_has_page_tag(handle, &x_id).await,
         "X must be Page-tagged"
     );
     assert_eq!(
-        block_content(&handle, &x_id).await.as_deref(),
+        block_content(handle, &x_id).await.as_deref(),
         Some("X"),
         "X block content must be 'X'"
     );
 
     // 5. Assert: the source block's dangling link is now healed (resolved_id = the
     //    X page).
-    let resolved = link_resolved(&handle, "src").await;
+    let resolved = link_resolved(handle, "src").await;
     assert_eq!(
         resolved.as_deref(),
         Some(x_id.as_str()),
@@ -274,29 +286,21 @@ async fn create_page_from_link_creates_page_chain_and_heals_dangling_link() {
     );
 
     // 6. Idempotency: running again returns the same leaf id, no new blocks.
-    let block_count_after_first = block_count(&handle).await;
-    let mut op_params2: holon_api::StorageEntity = HashMap::new();
-    op_params2.insert("target".into(), Value::String("Projects/X".to_string()));
-    let result2 = provider
-        .execute_operation(&entity, "create_page_from_link", op_params2)
+    let block_count_after_first = block_count(handle).await;
+    let leaf_id2 = create_page_from_link(&engine, "Projects/X")
         .await
         .expect("second create_page_from_link");
-
-    let leaf_id2 = match &result2.response {
-        Some(Value::String(s)) => s.clone(),
-        other => panic!("Expected String response, got: {other:?}"),
-    };
     assert_eq!(
         leaf_id2, leaf_id,
         "second invocation must return the same leaf id"
     );
     assert_eq!(
-        block_count(&handle).await,
+        block_count(handle).await,
         block_count_after_first,
         "second invocation must not create new blocks"
     );
     assert_eq!(
-        block_count(&handle).await,
+        block_count(handle).await,
         initial_block_count + 2,
         "only two new blocks (Projects + X) should have been created"
     );
@@ -304,18 +308,8 @@ async fn create_page_from_link_creates_page_chain_and_heals_dangling_link() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn create_page_from_link_empty_target_is_error() {
-    let (_backend, handle) = TursoBackend::new_in_memory()
-        .await
-        .expect("in-memory turso");
-    setup_schema(&handle).await;
-    let provider = provider(handle.clone());
-    let entity: EntityName = ENTITY.to_string().into();
-
-    let mut op_params: holon_api::StorageEntity = HashMap::new();
-    op_params.insert("target".into(), Value::String("".to_string()));
-    let result = provider
-        .execute_operation(&entity, "create_page_from_link", op_params)
-        .await;
+    let engine = block_engine().await;
+    let result = create_page_from_link(&engine, "").await;
     assert!(result.is_err(), "empty target must produce an error");
 }
 
@@ -323,35 +317,18 @@ async fn create_page_from_link_empty_target_is_error() {
 // inv-page-name-unique (cross-peer convergence PBT)
 // ---------------------------------------------------------------------------
 //
-// Reproduces the "two pages named X coexist in the sidebar" bug (user
-// screenshot) as a property, root-cause first.
-//
 // Holon pages live on a CRDT (Loro) substrate. A page has NO independent
 // identity beyond its (normalized name, position): two peers that each create
 // "the Areas page" are creating the SAME logical entity, so they MUST mint the
 // SAME block id. If they don't, a later merge — the ids are the primary key,
 // so the merge is a union by id — keeps BOTH blocks, and the vault now carries
-// two Page-tagged blocks named "Areas". That is exactly the duplicate the user
-// saw.
+// two Page-tagged blocks named "Areas".
 //
-// The SUT is the production lazy-page-creation op `create_page_from_link`,
-// the path a `[[Areas]]` click/link-resolve takes when the page doesn't exist
-// yet. Its within-store dedup (`resolve_page_name`, a name lookup) papers over
-// duplicates as long as everything is in one already-merged store; it cannot
-// see an unmerged peer's page, so it does NOT make the minted id a function of
-// the name.
-//
-// This property drives the op on two INDEPENDENT peers (each its own store)
-// for a generated page name and asserts the minted leaf ids converge. Because
-// block ids are the CRDT merge key, `id_a == id_b` is precisely the condition
-// under which the merged vault holds ONE page named `name` — i.e. asserting
-// equality IS asserting inv-page-name-unique over the merged peer set. The ids
-// come entirely from the SUT (only the name is generated), so the property
-// checks the system, not the seed.
-//
-// RED today: `create_page_from_link` mints `uuid::Uuid::new_v4()`
-// (sql_operation_provider.rs), so the two peers diverge and the property
-// fails, shrinking to a minimal one-character name.
+// This property drives `create_page_from_link`, the path a `[[Areas]]` click
+// takes when the page doesn't exist yet, on two INDEPENDENT peers (each its own
+// store) for a generated page name and asserts the minted leaf ids converge.
+// Because block ids are the CRDT merge key, `id_a == id_b` is precisely the
+// condition under which the merged vault holds ONE page named `name`.
 
 /// A well-formed page path: 1–3 non-empty segments joined by a `/` that may
 /// carry surrounding spaces (`"Areas / Sub"`). The multi-segment + spaced-
@@ -374,26 +351,13 @@ fn page_name_strategy() -> impl Strategy<Value = String> {
         .prop_map(|(segments, sep)| segments.join(&sep))
 }
 
-/// Create page `name` via the production `create_page_from_link` op on a fresh,
-/// independent peer (its own in-memory store) and return the minted leaf id.
+/// Create page `name` via `create_page_from_link` on a fresh, independent peer
+/// (its own in-memory store) and return the minted leaf id.
 async fn create_page_on_fresh_peer(name: &str) -> String {
-    let (_backend, handle) = TursoBackend::new_in_memory()
+    let engine = block_engine().await;
+    create_page_from_link(&engine, name)
         .await
-        .expect("in-memory turso");
-    setup_schema(&handle).await;
-    let provider = provider(handle.clone());
-    let entity: EntityName = ENTITY.to_string().into();
-
-    let mut op_params: holon_api::StorageEntity = HashMap::new();
-    op_params.insert("target".into(), Value::String(name.to_string()));
-    let result = provider
-        .execute_operation(&entity, "create_page_from_link", op_params)
-        .await
-        .expect("create_page_from_link");
-    match result.response {
-        Some(Value::String(s)) => s,
-        other => panic!("expected leaf page id in response, got: {other:?}"),
-    }
+        .expect("create_page_from_link")
 }
 
 proptest! {
@@ -406,7 +370,7 @@ proptest! {
     /// inv-page-name-unique: independent peers that each create the same-named
     /// page must converge on one page identity, so a merge yields no duplicate.
     ///
-    /// Page identity is now a deterministic function of the normalized path
+    /// Page identity is a deterministic function of the normalized path
     /// (`PageId::for_path`, minted by every write path), so two independent
     /// peers that each create page `name` mint the SAME block id and a merge
     /// yields ONE page. RULING: path-hash for new writes + bounded
@@ -459,7 +423,7 @@ proptest! {
 }
 
 // ---------------------------------------------------------------------------
-// Page-id collision after rename (EMPIRICAL probe, 2026-07-26)
+// Page-id collision after rename
 // ---------------------------------------------------------------------------
 //
 // `PageId::for_path` mints a page's id as blake3(normalized path). Per
@@ -474,21 +438,11 @@ proptest! {
 //   3. create page "A" again    → minting recomputes H("A") … already taken
 //
 // The assertions state what §5.3 PROMISES: step 3 yields a DIFFERENT entity
-// than step 1, and two distinct pages ("B" and "A") coexist.
-//
-// RED, and expected to stay red until ADR 0029 D1b's END-STATE lands: the
-// shipped INTERIM policy refuses step 3 with `IdentityCollision` (held "B",
-// requested "A"). The end-state mints unique-random on a recreate-at-a-collided
-// path and binds the name through `resolve_page_name`; only then can this pass.
+// than step 1, and two distinct pages ("B" and "A") coexist. The interim
+// ADR 0029 D1b policy refuses step 3 with `IdentityCollision` instead.
 
 /// Create a `Page`-tagged block with an explicit id/content/parent.
-async fn create_page(
-    provider: &SqlOperationProvider,
-    entity: &EntityName,
-    id: &str,
-    content: &str,
-    parent: &str,
-) {
+async fn create_page(engine: &BackendEngine, id: &str, content: &str, parent: &str) {
     let mut p: holon_api::StorageEntity = HashMap::new();
     p.insert("id".into(), Value::String(id.to_string()));
     p.insert("content".into(), Value::String(content.to_string()));
@@ -497,10 +451,7 @@ async fn create_page(
         "tags".into(),
         Value::Array(vec![Value::String("Page".to_string())]),
     );
-    provider
-        .execute_operation(entity, "create", p)
-        .await
-        .expect("create page");
+    fixture_op(engine, "create", p).await;
 }
 
 /// Clicking a NAME-form link whose page already exists navigates to THAT page
@@ -512,74 +463,48 @@ async fn create_page(
 /// has to carry the id.
 #[tokio::test(flavor = "multi_thread")]
 async fn create_page_from_link_navigates_to_an_existing_page_without_creating_one() {
-    let (_backend, handle) = TursoBackend::new_in_memory()
-        .await
-        .expect("in-memory turso");
-    setup_schema(&handle).await;
-    let provider = provider(handle.clone());
-    let entity: EntityName = ENTITY.to_string().into();
+    let engine = block_engine().await;
+    let handle = engine.db_handle();
 
-    create_page(
-        &provider,
-        &entity,
-        "block:journals",
-        "Journals",
-        "sentinel:no_parent",
-    )
-    .await;
+    create_page(&engine, "block:journals", "Journals", "sentinel:no_parent").await;
 
     let mut p = create_params("src", "see Journals now");
     p.insert(
         "marks".into(),
         Value::String(name_link_marks("Journals", 4, 12)),
     );
-    provider
-        .execute_operation(&entity, "create", p)
-        .await
-        .expect("create src");
+    fixture_op(&engine, "create", p).await;
     assert_eq!(
-        link_resolved(&handle, "src").await.as_deref(),
+        link_resolved(handle, "src").await.as_deref(),
         Some("block:journals"),
         "a name link to an existing page resolves in the junction at write time"
     );
 
-    let before = block_count(&handle).await;
-    let mut op_params: holon_api::StorageEntity = HashMap::new();
-    op_params.insert("target".into(), Value::String("Journals".to_string()));
-    let result = provider
-        .execute_operation(&entity, "create_page_from_link", op_params)
+    let before = block_count(handle).await;
+    let leaf = create_page_from_link(&engine, "Journals")
         .await
         .expect("create_page_from_link");
 
     assert_eq!(
-        result.response,
-        Some(Value::String("block:journals".to_string())),
+        leaf, "block:journals",
         "navigation must land on the EXISTING page, not a freshly minted one"
     );
     assert_eq!(
-        block_count(&handle).await,
+        block_count(handle).await,
         before,
         "no block may be created when the target page already exists"
     );
 }
 
 /// Rename a page: an ordinary content edit on the existing entity (§5.3).
-async fn rename_page(
-    provider: &SqlOperationProvider,
-    entity: &EntityName,
-    id: &str,
-    new_content: &str,
-) {
+async fn rename_page(engine: &BackendEngine, id: &str, new_content: &str) {
     let mut p: holon_api::StorageEntity = HashMap::new();
     p.insert("id".into(), Value::String(id.to_string()));
     p.insert("content".into(), Value::String(new_content.to_string()));
-    provider
-        .execute_operation(entity, "update", p)
-        .await
-        .expect("rename page (update content)");
+    fixture_op(engine, "update", p).await;
 }
 
-async fn page_rows(handle: &holon::storage::turso::DbHandle) -> Vec<(String, String)> {
+async fn page_rows(handle: &DbHandle) -> Vec<(String, String)> {
     let sql = "SELECT b.id AS id, b.content AS content FROM block_raw b JOIN block_tags t ON \
                t.block_id = b.id AND t.tag = 'Page' ORDER BY b.id";
     handle
@@ -602,54 +527,32 @@ async fn page_rows(handle: &holon::storage::turso::DbHandle) -> Vec<(String, Str
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "ADR 0029 D1b end-state pending: unique-random recreate not implemented"]
 async fn recreating_a_renamed_pages_old_name_yields_a_distinct_page() {
-    let (_backend, handle) = TursoBackend::new_in_memory()
-        .await
-        .expect("in-memory turso");
-    setup_schema(&handle).await;
-    let provider = provider(handle.clone());
-    let entity: EntityName = ENTITY.to_string().into();
+    let engine = block_engine().await;
+    let handle = engine.db_handle();
 
     // 1. Create page A via the production lazy-create op.
-    let mut op: holon_api::StorageEntity = HashMap::new();
-    op.insert("target".into(), Value::String("A".to_string()));
-    let id_a = match provider
-        .execute_operation(&entity, "create_page_from_link", op)
+    let id_a = create_page_from_link(&engine, "A")
         .await
-        .expect("create page A")
-        .response
-    {
-        Some(Value::String(s)) => s,
-        other => panic!("expected leaf id, got {other:?}"),
-    };
+        .expect("create page A");
 
     // A child under A, so we can see whether it follows the renamed entity.
-    create_page(&provider, &entity, "block:childOfA", "Child", &id_a).await;
+    create_page(&engine, "block:childOfA", "Child", &id_a).await;
 
     // 2. Rename A → B. Same entity, same id (§5.3).
-    rename_page(&provider, &entity, &id_a, "B").await;
+    rename_page(&engine, &id_a, "B").await;
     assert_eq!(
-        block_content(&handle, &id_a).await.as_deref(),
+        block_content(handle, &id_a).await.as_deref(),
         Some("B"),
         "after rename the entity {id_a} must be titled B"
     );
 
     // 3. Create a NEW page A.
-    let mut op2: holon_api::StorageEntity = HashMap::new();
-    op2.insert("target".into(), Value::String("A".to_string()));
-    let id_a2 = match provider
-        .execute_operation(&entity, "create_page_from_link", op2)
-        .await
-        .expect(
-            "recreating page A must succeed (§5.3). Interim ADR 0029 D1b refuses it with \
-             IdentityCollision instead; the end-state unique-random recreate is not implemented",
-        )
-        .response
-    {
-        Some(Value::String(s)) => s,
-        other => panic!("expected leaf id, got {other:?}"),
-    };
+    let id_a2 = create_page_from_link(&engine, "A").await.expect(
+        "recreating page A must succeed (§5.3). Interim ADR 0029 D1b refuses it with \
+         IdentityCollision instead; the end-state unique-random recreate is not implemented",
+    );
 
-    let pages = page_rows(&handle).await;
+    let pages = page_rows(handle).await;
 
     assert_ne!(
         id_a2, id_a,
@@ -668,10 +571,10 @@ async fn recreating_a_renamed_pages_old_name_yields_a_distinct_page() {
     // collision leaves exactly one entity, so `parent == id_a` holds whether that
     // entity is the surviving "B" or the clobbered "A". Assert on the parent's
     // TITLE, which is what actually distinguishes the two worlds.
-    let child_parent = block_parent(&handle, "block:childOfA")
+    let child_parent = block_parent(handle, "block:childOfA")
         .await
         .expect("child must still have a parent");
-    let child_parent_title = block_content(&handle, &child_parent).await;
+    let child_parent_title = block_content(handle, &child_parent).await;
     assert_eq!(
         child_parent_title.as_deref(),
         Some("B"),

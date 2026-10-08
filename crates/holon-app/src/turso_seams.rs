@@ -1080,7 +1080,7 @@ impl Module for OrgModeModule {
         // SqlOnly this provider is inert (the earlier CRUD provider already wins
         // those ops on registration order).
         //
-        // It advertises ONLY the four link/page-transform ops via
+        // It advertises ONLY the link/page-transform ops via
         // `OperationSubset`, not the full block-op surface. A full
         // `SqlOperationProvider` here re-advertises `create`/`set_field`/… that
         // the primary CRUD provider already owns; the registry's `operations()`
@@ -1088,7 +1088,7 @@ impl Module for OrgModeModule {
         // (BugFunnel N1 — 12 duplicate ops). Narrowing to the unique ops keeps
         // the registry duplicate-free (guarded by the `operations_are_unique`
         // invariant in operation_dispatcher.rs). Under SqlOnly the primary
-        // provider already serves these four, so the allowlist is EMPTY and this
+        // provider already serves them, so the allowlist is EMPTY and this
         // wrapper stays fully inert (advertises nothing) — the earlier provider
         // wins them on registration order.
         injector.provide_into_set::<dyn OperationProvider>(Provider::root_async(
@@ -1116,7 +1116,8 @@ impl Module for OrgModeModule {
                 let loro_authority = resolver.try_resolve::<CrudAuthority>().is_ok();
                 let allowlist: &[&str] = if loro_authority {
                     &[
-                        "create_page_from_link",
+                        "page_chain_plan",
+                        "heal_page_links",
                         "rewrite_link_resolution",
                         "restore_link_resolution",
                         "block_to_page_plan",
