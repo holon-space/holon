@@ -579,6 +579,51 @@ test hand_authored_keystone_regressions ... FAILED
 test result: FAILED. 8 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.73s
 EOF
 expect_outcome wb-i7 0 '^PRIMARY: \[known-red:wb-i7-stall-disclosure-keeps-old-path\]' "$work/wb-i7.log"
+
+# The keystone's `BootFault::TaskPanic` panics on purpose. Only that exact
+# payload at that exact site is no failure; anything else stays a signature.
+injected_site=crates/holon-integration-tests/src/pbt/composed/boot_fault.rs
+injected_payload='keystone boot fault: injected task panic'
+if [ "$(sed -n 22p "$repo_root/$injected_site")" != '    injected_task_panic_site(panic_now)' ]; then
+    echo "[fixture] FAIL injected-panic/site: $injected_site:22:5 is no longer the injected panic's call;"
+    echo "          move the site in scripts/keystone-known-reds.sh with it."
+    outcome_fail=1
+fi
+injected_log() {
+    local name="$1" site="$2" payload="$3" verdict="$4"
+    {
+        printf '%s\n' "thread 'tokio-rt-worker' (311836979) panicked at $site:"
+        printf '%s\n' "$payload"
+        printf '%s\n' 'note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace'
+        if [ "$verdict" = failed ]; then
+            printf '%s\n' "thread 'general_e2e_composed_pbt' (311836306) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1557:13:"
+            printf '%s\n' 'REAL PRODUCT BUG: the projection vanished'
+            printf '%s\n' 'test general_e2e_composed_pbt ... FAILED'
+            printf '%s\n' 'test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.00s'
+        else
+            printf '%s\n' 'test general_e2e_composed_pbt ... ok'
+            printf '%s\n' 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.00s'
+        fi
+    } >"$work/$name.log"
+}
+injected_log injected-only "$injected_site:22:5" "$injected_payload" green
+expect_outcome injected-panic/only-is-green 0 '^\[known-reds\] PASS: 1 green run' "$work/injected-only.log"
+expect_outcome injected-panic/only-is-reported 0 "^\[known-reds\] INJECTED: 1 .*$injected_site:22:5" "$work/injected-only.log"
+injected_log injected-plus-real "$injected_site:22:5" "$injected_payload" failed
+expect_outcome injected-panic/real-is-primary 1 '^PRIMARY: \[novel\] .*REAL PRODUCT BUG: the projection vanished$' \
+    "$work/injected-plus-real.log"
+injected_log injected-other-line "$injected_site:23:5" "$injected_payload" green
+expect_outcome injected-panic/other-line 1 "^PRIMARY: \[novel\] .*$injected_site:23:5: $injected_payload\$" \
+    "$work/injected-other-line.log"
+injected_log injected-other-file crates/holon-integration-tests/src/pbt/composed/harness.rs:22:5 "$injected_payload" green
+expect_outcome injected-panic/other-file 1 "^PRIMARY: \[novel\] .*harness.rs:22:5: $injected_payload\$" \
+    "$work/injected-other-file.log"
+injected_log injected-other-payload "$injected_site:22:5" 'called `Option::unwrap()` on a `None` value' green
+expect_outcome injected-panic/other-payload 1 "^PRIMARY: \[novel\] .*$injected_site:22:5: called .Option::unwrap()." \
+    "$work/injected-other-payload.log"
+injected_log injected-longer-payload "$injected_site:22:5" "$injected_payload and the store is gone" green
+expect_outcome injected-panic/longer-payload 1 "^PRIMARY: \[novel\] .*$injected_site:22:5: $injected_payload and the store is gone\$" \
+    "$work/injected-longer-payload.log"
 if [ "$outcome_fail" -ne 0 ]; then
     echo ""
     echo "[fixture] FAIL: the classifier's outcome verdict changed. A green log read"

@@ -23,7 +23,8 @@
 #           script does not know: guessing its meaning would guess the verdict.
 #
 # The registry is the single source of truth for the patterns; this script holds
-# none of its own.
+# none of its own. Apart from that, it knows exactly one panic: the keystone's
+# injected boot fault (`injected_panic` below), which is no failure at all.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -81,6 +82,13 @@ is_collateral() {
     [[ "$loc" == *"tracing-subscriber-"*"sharded.rs"* ]] && return 0
     return 1
 }
+
+# The keystone's `BootFault::TaskPanic` panics on purpose and asserts the
+# disclosure itself. Only this payload at this site is no failure: it is
+# removed before the outcome is read, so it can neither fail a green run nor
+# take the PRIMARY slot from a real failure.
+injected_panic=$'crates/holon-integration-tests/src/pbt/composed/boot_fault.rs:22:5\tkeystone boot fault: injected task panic'
+injected=0
 
 # What the log says the run DID: `failed`, `green`, or `indeterminate` (it says
 # nothing either way). Read from the harness's own verdict lines — cargo test's
@@ -299,6 +307,14 @@ for log in "$@"; do
         }' q="'" signals="HUP|INT|QUIT|ILL|TRAP|ABRT|BUS|FPE|KILL|USR1|SEGV|USR2|PIPE|ALRM|TERM" "$log" "$log" >"$sigs_file" \
         || { rc=$?; rm -f "$sigs_file" "$novel_file"; exit "$rc"; }
 
+    log_injected=$(grep -cxF -- "$injected_panic" "$sigs_file" || true)
+    if [ "$log_injected" -gt 0 ]; then
+        grep -vxF -- "$injected_panic" "$sigs_file" >"$sigs_file.real" || true
+        mv "$sigs_file.real" "$sigs_file"
+        echo "[known-reds] INJECTED: $log_injected keystone boot-fault panic(s) at ${injected_panic%%$'\t'*} in $log — expected, not a failure."
+        injected=$((injected + log_injected))
+    fi
+
     # Panics ARE failure evidence, and outrank the verdict lines: a run killed
     # mid-shrink is truncated before cargo ever prints `test result:`.
     if [ -s "$sigs_file" ]; then
@@ -416,6 +432,9 @@ fi
 rm -f "$novel_file"
 
 echo ""
+if [ "$injected" -ne 0 ]; then
+    echo "[known-reds] $injected injected boot-fault panic(s) excluded — see INJECTED above."
+fi
 no_verdict=$((indeterminate + unreadable))
 if [ "$no_verdict" -ne 0 ]; then
     echo "[known-reds] $indeterminate log(s) stated no outcome, $unreadable unreadable — see above."

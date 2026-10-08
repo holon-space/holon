@@ -105,6 +105,14 @@ soak of this family is now possible and is what the 2026-09-13 recurrence needs.
 
 ## Registry
 
+One panic is not a red at all and has no row: the keystone's
+`BootFault::TaskPanic` panics on purpose with `keystone boot fault: injected
+task panic` at `crates/holon-integration-tests/src/pbt/composed/boot_fault.rs:22:5`
+and asserts its own disclosure. The classifier drops exactly that payload at
+exactly that site (printed as `INJECTED`), so it never takes the PRIMARY slot;
+the same payload elsewhere, or another payload there, stays novel
+(`scripts/keystone-known-reds-fixture.sh`, `injected-panic/*`).
+
 | Key | Status | Match pattern | Signature | Evidence | Task | Owner |
 | --- | --- | --- | --- | --- | --- | --- |
 | `wb-d6-stall-resurrects-deleted-line` | known-red | `"inv-blocks-match-ref/[a-z_]+".*only in inv-blocks-match-ref/[a-z_]+ \(1\): \[\\"block:wbd6-b\\"\]` | Sidecar case `wb-d6-line-deleted-on-disk-during-an-ingest-stall-stays-deleted`, at `ExternalLineEdit DeleteLine` (step 4/5): `block:wbd6-b` (the line the user deleted on disk while the ingest normalization stalled) stays in loro, `block_raw` and matview; the reference dropped it. Listed before `org-blocks-ref-diverge`, whose shape-blind pattern also matches this payload: same symptom (a SUT-side excess with zero field deltas), different defect (no undo, no image sub-block; the deleted line survives the stalled ingest). The `block:wbd6-` id exists only in the sidecar fixture. | Replay: `crates/holon-integration-tests/hand-authored-regressions/known-red-writeback-state-machine.jsonl` (`HOLON_HAND_AUTHORED_SIDECAR=<it> HOLON_HAND_AUTHORED_SKIP= HOLON_HAND_AUTHORED_CASE=<name> just hand-authored`). Red logs `lane-logs/inc1-red-wb-d6.log`, `lane-logs/a4-red-wb-d6.log` (wb-states lane). Bugfunnel `2026-10-06-ingest-stall-undoes-a-line-deleted-on-disk`. | Write-back state machine (`write-back-state-machine.md`, ruling D97.a) | write-back state machine Inc 2-5 |

@@ -18,7 +18,7 @@ default = []
 # builds never pull the test vocabulary. See docs/Testing/PbtCompositionBacklog.md.
 pbt = ["dep:holon-pbt-core"]
 heap-profile = ["dep:dhat", "dep:ctrlc", "dep:libc"]
-chrome-trace = ["dep:tracing-chrome", "dep:chrono"]
+chrome-trace = ["dep:tracing-chrome"]
 # tokio-console async-stall profiler. Adds a console_subscriber gRPC layer
 # to logging::init(). Requires building with RUSTFLAGS="--cfg tokio_unstable".
 tokio-console = ["dep:console-subscriber", "tokio/tracing"]
@@ -66,7 +66,7 @@ opentelemetry = { workspace = true, optional = true }
 opentelemetry_sdk = { workspace = true, optional = true }
 opentelemetry-otlp = { workspace = true, optional = true }
 opentelemetry-stdout = { workspace = true, optional = true }
-chrono = { workspace = true, optional = true }
+chrono = { workspace = true }
 blinc_core = { git = "https://github.com/project-blinc/Blinc", package = "blinc_core", optional = true }
 blinc_theme = { git = "https://github.com/project-blinc/Blinc", package = "blinc_theme", optional = true }
 workspace-hack = { version = "0.1", path = "../../workspace-hack" }

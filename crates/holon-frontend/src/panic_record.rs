@@ -19,6 +19,8 @@ use std::sync::Once;
 use std::sync::PoisonError;
 use std::sync::mpsc;
 
+use chrono::DateTime;
+use chrono::Utc;
 use holon_api::Condition;
 use holon_api::ConditionBus;
 use holon_api::ConditionKind;
@@ -32,6 +34,14 @@ pub const RECORD_FILE: &str = "last-panic.json";
 /// Records of earlier runs that no bus has shown yet, as `<n>.json` in the
 /// order the runs ended.
 pub const UNSHOWN_DIR: &str = "unshown-panics";
+
+/// How many records [`UNSHOWN_DIR`] keeps. A frontend that never draws the bus
+/// never marks them seen; the newest ten show a crash loop's pattern, and
+/// [`DROPPED_FILE`] counts the rest.
+pub const KEPT_UNSHOWN: usize = 10;
+
+/// The one summary of the records dropped from [`UNSHOWN_DIR`] unshown.
+pub const DROPPED_FILE: &str = "dropped-panics.json";
 
 /// Where a shown record is moved, so it is shown once.
 pub const SEEN_RECORD_FILE: &str = "last-panic.seen.json";
@@ -224,7 +234,81 @@ fn keep_unshown(record_dir: &Path) -> std::io::Result<()> {
     let next = unshown_records(record_dir)?
         .last()
         .map_or(1, |(n, _)| n + 1);
-    std::fs::rename(&record, unshown_dir.join(format!("{next}.json")))
+    std::fs::rename(&record, unshown_dir.join(format!("{next}.json")))?;
+    drop_beyond_kept(record_dir)
+}
+
+/// The panics of runs whose records were dropped from [`UNSHOWN_DIR`].
+#[derive(Debug, Serialize, Deserialize)]
+struct DroppedRecords {
+    count: usize,
+    first_ended: DateTime<Utc>,
+    last_ended: DateTime<Utc>,
+}
+
+impl DroppedRecords {
+    fn read(record_dir: &Path) -> std::io::Result<Option<Self>> {
+        let path = record_dir.join(DROPPED_FILE);
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|e| std::io::Error::other(format!("{} does not parse: {e}", path.display())))
+    }
+
+    fn and(self, ended: DateTime<Utc>) -> Self {
+        Self {
+            count: self.count + 1,
+            first_ended: self.first_ended.min(ended),
+            last_ended: self.last_ended.max(ended),
+        }
+    }
+
+    fn previous_run_panicked(&self, path: &Path) -> Condition {
+        let at = |t: DateTime<Utc>| t.format("%Y-%m-%d %H:%M:%S UTC");
+        PanicRecord {
+            message: format!(
+                "{} earlier panic records were dropped unshown, to keep only the newest {KEPT_UNSHOWN}; those panics happened between {} and {}",
+                self.count,
+                at(self.first_ended),
+                at(self.last_ended)
+            ),
+            location: path.display().to_string(),
+            thread: "an unknown thread".to_string(),
+        }
+        .previous_run_panicked()
+    }
+}
+
+/// Fold the oldest records beyond [`KEPT_UNSHOWN`] into [`DROPPED_FILE`],
+/// written before any of them is removed.
+fn drop_beyond_kept(record_dir: &Path) -> std::io::Result<()> {
+    let records = unshown_records(record_dir)?;
+    let excess = records.len().saturating_sub(KEPT_UNSHOWN);
+    if excess == 0 {
+        return Ok(());
+    }
+    let mut dropped = DroppedRecords::read(record_dir)?;
+    for (_, path) in &records[..excess] {
+        let ended = DateTime::<Utc>::from(std::fs::metadata(path)?.modified()?);
+        dropped = Some(match dropped {
+            Some(d) => d.and(ended),
+            None => DroppedRecords {
+                count: 1,
+                first_ended: ended,
+                last_ended: ended,
+            },
+        });
+    }
+    let bytes = serde_json::to_vec_pretty(&dropped).map_err(std::io::Error::other)?;
+    std::fs::write(record_dir.join(DROPPED_FILE), bytes)?;
+    for (_, path) in &records[..excess] {
+        std::fs::remove_file(path)?;
+    }
+    Ok(())
 }
 
 /// The files in [`UNSHOWN_DIR`], oldest first.
@@ -355,8 +439,22 @@ fn shown() -> MutexGuard<'static, Option<Shown>> {
     SHOWN.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Emit every record in [`UNSHOWN_DIR`] on `conditions` and return their paths.
+/// Emit the [`DROPPED_FILE`] summary and every record in [`UNSHOWN_DIR`] on
+/// `conditions`, and return their paths.
 fn show_unshown(record_dir: &Path, conditions: &ConditionBus) -> Vec<PathBuf> {
+    let dropped_path = record_dir.join(DROPPED_FILE);
+    let dropped = match DroppedRecords::read(record_dir) {
+        Ok(None) => None,
+        Ok(Some(dropped)) => {
+            conditions.emit(dropped.previous_run_panicked(&dropped_path));
+            Some(dropped_path)
+        }
+        Err(e) => {
+            conditions
+                .emit(unreadable_record(&dropped_path, &e.to_string()).previous_run_panicked());
+            Some(dropped_path)
+        }
+    };
     let records = match unshown_records(record_dir) {
         Ok(records) => records,
         Err(e) => {
@@ -368,21 +466,19 @@ fn show_unshown(record_dir: &Path, conditions: &ConditionBus) -> Vec<PathBuf> {
                 &record_dir.join(UNSHOWN_DIR),
                 format!("the records of earlier runs cannot be listed: {e}"),
             ));
-            return Vec::new();
+            return dropped.into_iter().collect();
         }
     };
-    records
-        .into_iter()
-        .map(|(_, path)| {
-            let record = match std::fs::read(&path) {
-                Ok(bytes) => serde_json::from_slice::<PanicRecord>(&bytes)
-                    .unwrap_or_else(|e| unreadable_record(&path, &e.to_string())),
-                Err(e) => unreadable_record(&path, &e.to_string()),
-            };
-            conditions.emit(record.previous_run_panicked());
-            path
-        })
-        .collect()
+    let records = records.into_iter().map(|(_, path)| {
+        let record = match std::fs::read(&path) {
+            Ok(bytes) => serde_json::from_slice::<PanicRecord>(&bytes)
+                .unwrap_or_else(|e| unreadable_record(&path, &e.to_string())),
+            Err(e) => unreadable_record(&path, &e.to_string()),
+        };
+        conditions.emit(record.previous_run_panicked());
+        path
+    });
+    dropped.into_iter().chain(records).collect()
 }
 
 /// A frontend has drawn `conditions` where the user sees it: the records of
@@ -546,6 +642,69 @@ mod tests {
         seen_on(&drawn);
         assert!(!dir.path().join(UNSHOWN_DIR).join("1.json").exists());
         assert!(kinds(&install(dir.path())).is_empty());
+    }
+
+    fn previous_run_messages(bus: &ConditionBus) -> Vec<String> {
+        bus.current()
+            .iter()
+            .filter_map(|c| match &c.reason {
+                ConditionKind::PreviousRunPanicked { message, .. } => Some(message.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn unshown_records_keep_the_newest_and_count_the_dropped_ones() {
+        let _serial = fresh_process();
+        let dir = tempfile::tempdir().expect("temp config dir");
+        let dropped = 3;
+        let start = |run: usize| {
+            PanicRecord {
+                message: format!("run {run}"),
+                location: format!("prior.rs:{run}:1"),
+                thread: "main".to_string(),
+            }
+            .write_to(dir.path())
+            .expect("seed a previous record");
+            *target() = None;
+            arm(dir.path());
+        };
+        for run in 1..=KEPT_UNSHOWN + dropped {
+            start(run);
+        }
+
+        let unshown = unshown_records(dir.path()).expect("list the unshown records");
+        assert_eq!(unshown.len(), KEPT_UNSHOWN);
+        let shown = previous_run_messages(&install(dir.path()));
+        assert_eq!(shown.len(), KEPT_UNSHOWN + 1, "{shown:#?}");
+        assert!(
+            shown[0].starts_with(&format!(
+                "{dropped} earlier panic records were dropped unshown"
+            )),
+            "the summary must say how many were dropped: {shown:#?}"
+        );
+        assert!(shown[0].contains(" between "), "and when: {}", shown[0]);
+        let kept: Vec<String> = (dropped + 1..=KEPT_UNSHOWN + dropped)
+            .map(|run| format!("run {run}"))
+            .collect();
+        assert_eq!(shown[1..], kept[..]);
+
+        start(KEPT_UNSHOWN + dropped + 1);
+        let bus = install(dir.path());
+        let shown = previous_run_messages(&bus);
+        assert!(
+            shown[0].starts_with(&format!("{} earlier panic records", dropped + 1)),
+            "a later drop adds to the one summary: {shown:#?}"
+        );
+        assert_eq!(shown.len(), KEPT_UNSHOWN + 1, "{shown:#?}");
+
+        seen_on(&bus);
+        assert_eq!(
+            previous_run_messages(&install(dir.path())),
+            Vec::<String>::new(),
+            "the summary is seen with the records it summarizes"
+        );
     }
 
     fn panic_on_a_thread(message: &'static str) {
