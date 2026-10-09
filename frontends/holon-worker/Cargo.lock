@@ -2801,7 +2801,6 @@ dependencies = [
  "holon-rules",
  "holon-turso",
  "loro",
- "loro_fractional_index 1.6.0",
  "prqlc",
  "rand 0.9.4",
  "serde",
@@ -2892,7 +2891,7 @@ dependencies = [
  "futures-signals",
  "holon-api",
  "holon-macros",
- "loro_fractional_index 1.6.0",
+ "loro_fractional_index",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -4360,7 +4359,7 @@ dependencies = [
  "loro-delta",
  "loro-kv-store",
  "loro-rle",
- "loro_fractional_index 1.13.0",
+ "loro_fractional_index",
  "md5",
  "nonmax",
  "num",
@@ -4415,17 +4414,6 @@ name = "loro-thunderdome"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f3d053a135388e6b1df14e8af1212af5064746e9b87a06a345a7a779ee9695a"
-
-[[package]]
-name = "loro_fractional_index"
-version = "1.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "427c8ea186958094052b971fe7e322a934b034c3bf62f0458ccea04fcd687ba1"
-dependencies = [
- "once_cell",
- "rand 0.8.6",
- "serde",
-]
 
 [[package]]
 name = "loro_fractional_index"
@@ -8999,7 +8987,7 @@ dependencies = [
  "litemap",
  "lock_api",
  "log",
- "loro_fractional_index 1.6.0",
+ "loro_fractional_index",
  "markdown",
  "memchr",
  "miette",

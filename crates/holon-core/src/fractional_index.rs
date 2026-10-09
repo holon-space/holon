@@ -405,6 +405,114 @@ mod tests {
         }
     }
 
+    /// Inserts `count` keys into the sibling list `keys`, each at the position
+    /// `pick(len)` chooses, minting through `gen_key_between` as an order owner
+    /// does.
+    fn mint_into(keys: &mut Vec<String>, count: usize, mut pick: impl FnMut(usize) -> usize) {
+        for _ in 0..count {
+            let at = pick(keys.len());
+            let prev = at.checked_sub(1).map(|i| keys[i].as_str());
+            let next = keys.get(at).map(String::as_str);
+            let key = gen_key_between(prev, next)
+                .unwrap_or_else(|e| panic!("insert at {at} between {prev:?} and {next:?}: {e:#}"));
+            keys.insert(at, key);
+        }
+    }
+
+    fn mint_list(count: usize, pick: impl FnMut(usize) -> usize) -> Vec<String> {
+        let mut keys = Vec::new();
+        mint_into(&mut keys, count, pick);
+        keys
+    }
+
+    fn seeded_positions(seed: u64) -> impl FnMut(usize) -> usize {
+        let mut state = seed;
+        move |len| {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 33) as usize % (len + 1)
+        }
+    }
+
+    fn assert_strict_sibling_order(label: &str, keys: &[String]) {
+        for (i, pair) in keys.windows(2).enumerate() {
+            assert!(
+                pair[0] < pair[1],
+                "{label}: siblings {i} and {} out of order: {:?} !< {:?}",
+                i + 1,
+                pair[0],
+                pair[1]
+            );
+        }
+        for key in keys {
+            assert!(is_minted_key(key), "{label}: {key:?} is not a minted key");
+        }
+    }
+
+    /// More than 128 inserts at the head of one sibling group drive the keys
+    /// into a zero-prefixed range (`"0080"`, `"007F80"`, ...). Minting between
+    /// two of them must still yield a key strictly between.
+    #[test]
+    fn a_long_head_insert_run_admits_keys_between_its_keys() {
+        let head = mint_list(200, |_| 0);
+        assert_strict_sibling_order("head run", &head);
+        for pair in head.windows(2) {
+            let mid = gen_key_between(Some(&pair[0]), Some(&pair[1]))
+                .unwrap_or_else(|e| panic!("between {:?} and {:?}: {e:#}", pair[0], pair[1]));
+            assert!(
+                pair[0] < mid && mid < pair[1],
+                "between {:?} and {:?} minted {mid:?}, which does not sort between them",
+                pair[0],
+                pair[1]
+            );
+            assert!(is_minted_key(&mid), "{mid:?}");
+        }
+    }
+
+    fn compat_lists() -> Vec<(&'static str, Vec<String>)> {
+        vec![
+            ("head", mint_list(200, |_| 0)),
+            ("tail", mint_list(200, |len| len)),
+            ("gap", mint_list(60, |len| len.min(1))),
+            ("random", mint_list(200, seeded_positions(0x5EED))),
+        ]
+    }
+
+    /// Vaults hold keys minted by `loro_fractional_index` 1.6.0;
+    /// `testdata/fi_1_6_0_keys.txt` is `compat_lists()` recorded under 1.6.0.
+    /// The current generator must mint the same bytes and keep ordering new
+    /// keys among the stored ones.
+    #[test]
+    fn keys_minted_by_1_6_0_stay_valid_and_interleave() {
+        let mut recorded: Vec<(String, Vec<String>)> = Vec::new();
+        for line in include_str!("testdata/fi_1_6_0_keys.txt").lines() {
+            let (label, key) = line
+                .split_once(' ')
+                .unwrap_or_else(|| panic!("fixture line {line:?} is not `<label> <key>`"));
+            match recorded.last_mut() {
+                Some((last, keys)) if last == label => keys.push(key.to_string()),
+                _ => recorded.push((label.to_string(), vec![key.to_string()])),
+            }
+        }
+        let current = compat_lists();
+        assert_eq!(recorded.len(), current.len());
+        for ((label, stored), (current_label, minted)) in recorded.iter().zip(&current) {
+            assert_eq!(label, current_label);
+            assert_strict_sibling_order(label, stored);
+            assert_eq!(
+                stored, minted,
+                "{label}: current generator diverges from 1.6.0"
+            );
+
+            let mut list = stored.clone();
+            mint_into(&mut list, 100, seeded_positions(label.len() as u64));
+            assert_strict_sibling_order(label, &list);
+            let survivors: Vec<&String> = list.iter().filter(|k| stored.contains(k)).collect();
+            assert_eq!(survivors, stored.iter().collect::<Vec<_>>(), "{label}");
+        }
+    }
+
     #[test]
     fn test_gen_key_after() {
         let prev_key = gen_key_between(None, None).unwrap();

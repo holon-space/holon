@@ -143,12 +143,12 @@ fluent-uri = { version = "0.3", features = ["serde"] }
 # on, which implements `fork_at` / `SnapshotAt` on shallow-snapshot docs —
 # required for live share-sync projection (ADR 0028 §H4). The fix is redirected
 # via the `[patch.crates-io]` entry below; a mismatch here makes cargo drop the
-# patch and fail resolution against the `loro_fractional_index = 1.6.0` pin.
+# patch and fail resolution.
 loro = "= 1.13.9"
-# Holon's own crates stay on loro_fractional_index 1.6.0 (registry). The fork's
-# loro-internal pulls its workspace loro_fractional_index 1.13.0 as a separate
-# path package — both are loro-family and coexist without touching other deps.
-loro_fractional_index = "= 1.6.0"
+# The version the loro fork's own workspace carries; `[patch.crates-io]` below
+# redirects it to the fork, so Holon's sort keys and Loro's tree positions come
+# from one loro_fractional_index package.
+loro_fractional_index = "= 1.13.0"
 indexmap = "2.12"
 # Doc-boundary RwLock for `LoroDocument` (commit-granular observation). Chosen
 # over `std::sync::RwLock` for `try_write_for` — a lock wait that exceeds the
@@ -427,7 +427,11 @@ core-graphics = { path = ".cargo/patches/core-graphics" }
 #
 # The fork also carries the UndoManager include-only origin filter that the
 # dense_patch batch rollback records its own commits with.
+#
+# loro_fractional_index comes from the same fork rev: loro-internal depends on
+# it by path, so patching the registry name makes Holon's crates share it.
 loro = { git = "https://github.com/nightscape/loro.git", rev = "d302b153" }
+loro_fractional_index = { git = "https://github.com/nightscape/loro.git", rev = "d302b153" }
 
 # Holon wmi fork — narrows `windows` and `windows-core` to one shared major.
 # wmi 0.18.4 requires each as `>=0.59, <0.63`; cargo resolves the two edges

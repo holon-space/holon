@@ -81,13 +81,12 @@ holon-frontend = { path = "../../crates/holon-frontend", default-features = fals
 [patch.crates-io]
 symlink = { path = "patches/symlink" }
 
-# Mirror of the root workspace's loro fork patch. `[patch]` is only read from the
-# workspace root of the build in progress, and this worker is its own workspace,
-# so without this line it resolves registry `loro` — whose loro-internal wants
-# loro_fractional_index ^1.13.0 and collides with the deliberate `= 1.6.0` pin
-# that crates/holon carries. Keep the source equal to the root's.
-#
+# Mirror of the root workspace's loro fork patches. `[patch]` is only read from
+# the workspace root of the build in progress, and this worker is its own
+# workspace, so without these lines it resolves the registry packages next to
+# the fork's. Keep the source equal to the root's.
 loro = { git = "https://github.com/nightscape/loro.git", rev = "d302b153" }
+loro_fractional_index = { git = "https://github.com/nightscape/loro.git", rev = "d302b153" }
 
 [build-dependencies]
 napi-build = "2.3.1"

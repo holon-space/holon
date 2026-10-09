@@ -8,10 +8,7 @@ publish = false
 # `workspace-hack` is the cargo-hakari feature-unification crate: every
 # member depends on it and no member references it in source, by design.
 [package.metadata.cargo-machete]
-# Holon crates deliberately stay on the registry `loro_fractional_index = "= 1.6.0"`
-# while the loro fork pulls its own 1.13.0 as a path package (see root Cargo.toml).
-# Dropping the dep would change that resolution. TODO verify with Martin.
-ignored = ["loro_fractional_index", "workspace-hack"]
+ignored = ["workspace-hack"]
 
 [lib]
 name = "holon"
@@ -40,7 +37,6 @@ dispatch-hold = []
 
 [dependencies]
 loro.workspace = true
-loro_fractional_index.workspace = true
 tokio-stream.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
