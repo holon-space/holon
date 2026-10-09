@@ -168,7 +168,7 @@ crate::cap_transition! {
                 + state.last_open_tab_caret_seat().reads()
                 + departing.reads()
                 + arriving.reads(),
-            writes: 0,
+            writes: departing.place_releases() + arriving.place_releases(),
             ddl: 0,
             tolerance: 0,
         }

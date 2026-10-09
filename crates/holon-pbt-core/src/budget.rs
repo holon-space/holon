@@ -114,27 +114,43 @@ pub const OPEN_TAB_INSERT_CLICK_RESOLVE_READS: usize = 11;
 /// How a warm watcher re-renders when its block enters or leaves a region's
 /// focus roots (`FocusRootChange`): `render_entity` re-decides between the
 /// block's subtree and the block alone.
+///
+/// A re-render that switches between the two watches a different place
+/// (`root:<id>` vs `leaf:<id>`), so the watcher releases the place it held:
+/// one `watch_context` DELETE in the action that moved the focus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FocusRerender {
     /// No warm watcher for the block, or its membership did not change.
     None,
-    /// It is no focus root any more: the query-source load, the focus-root
-    /// check, and the leaf view's snapshot for its key.
+    /// It was a focus root and is none any more: the query-source load, the
+    /// focus-root check, and the leaf view's snapshot for its key.
     Leaf,
-    /// It is a focus root: the query-source load, the focus-root check, the
-    /// active-perspective read, the block and subtree reads of its profile
-    /// context, and the root-subtree view's snapshot for its key.
+    /// It was a focus root and still is one: the query-source load, the
+    /// focus-root check, the active-perspective read, the block and subtree
+    /// reads of its profile context, and the root-subtree view's snapshot for
+    /// its key.
     Root,
+    /// It rendered as a leaf and is a focus root now: the reads of
+    /// [`Self::Root`].
+    Promoted,
 }
 
 impl FocusRerender {
-    pub const ALL: [FocusRerender; 3] = [Self::None, Self::Leaf, Self::Root];
+    pub const ALL: [FocusRerender; 4] = [Self::None, Self::Leaf, Self::Root, Self::Promoted];
 
     pub fn reads(self) -> usize {
         match self {
             Self::None => 0,
             Self::Leaf => 3,
-            Self::Root => 6,
+            Self::Root | Self::Promoted => 6,
+        }
+    }
+
+    /// The `watch_context` DELETEs the re-render issues.
+    pub fn place_releases(self) -> usize {
+        match self {
+            Self::None | Self::Root => 0,
+            Self::Leaf | Self::Promoted => 1,
         }
     }
 }

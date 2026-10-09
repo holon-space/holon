@@ -352,11 +352,22 @@ impl ReferenceState {
         }
     }
 
+    /// The re-render of the block `region`'s cursor moves to, which is no
+    /// focus root of `region` yet.
     fn arriving_rerender(&self, target: &EntityUri) -> FocusRerender {
-        if self.ui.tab.warm_focus_watchers.contains(target) {
+        if !self.ui.tab.warm_focus_watchers.contains(target) {
+            return FocusRerender::None;
+        }
+        let root_elsewhere = self
+            .ui
+            .tab
+            .navigation_history
+            .values()
+            .any(|h| h.current_focus().as_ref() == Some(target));
+        if root_elsewhere {
             FocusRerender::Root
         } else {
-            FocusRerender::None
+            FocusRerender::Promoted
         }
     }
 

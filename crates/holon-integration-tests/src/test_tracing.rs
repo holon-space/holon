@@ -889,11 +889,16 @@ impl SpanCollector {
         let is_hash_stamp = |s: &&SpanData| {
             sql_attr(s).is_some_and(|sql| sql.starts_with(holon_filesystem::RECORD_FILE_HASH_SQL))
         };
-        let sql_write_count = spans
+        let by_id = span_index(&spans);
+        let writes = spans
             .iter()
             .filter(|s| s.name.as_ref() == "execute")
             .filter(|s| !is_hash_stamp(s))
-            .count();
+            .map(|s| SqlWrite {
+                sql: sql_attr(s).expect("every `execute` span records its `sql` field"),
+                origin: origin_chain(s, &by_id),
+            })
+            .collect();
         let hash_stamp_write_count = spans
             .iter()
             .filter(|s| s.name.as_ref() == "execute")
@@ -986,7 +991,7 @@ impl SpanCollector {
 
         TransitionMetrics {
             sql_read_count,
-            sql_write_count,
+            writes,
             hash_stamp_write_count,
             sql_ddl_count,
             max_query_duration,
@@ -1154,6 +1159,14 @@ fn find_duplicate_sql(all_spans: &[SpanData], names: &[&str]) -> Vec<DuplicateSq
     duplicates
 }
 
+/// One `"execute"` span of a transition window: the statement and the caller
+/// chain [`origin_chain`] renders for it.
+#[derive(Debug, Clone)]
+pub struct SqlWrite {
+    pub sql: String,
+    pub origin: String,
+}
+
 /// Structured metrics from a single transition's span collection.
 #[derive(Debug, Clone)]
 pub struct TransitionMetrics {
@@ -1161,7 +1174,7 @@ pub struct TransitionMetrics {
     pub sql_read_count: usize,
     /// SQL INSERT/UPDATE/DELETE (`"execute"` spans from turso.rs), without
     /// [`Self::hash_stamp_write_count`]
-    pub sql_write_count: usize,
+    pub writes: Vec<SqlWrite>,
     /// Writes of [`holon_filesystem::RECORD_FILE_HASH_SQL`]: the org sync
     /// records the hashes of earlier write-backs when it is idle, so these
     /// belong to no interaction in the window.
@@ -1239,7 +1252,11 @@ pub struct TransitionMetrics {
 impl TransitionMetrics {
     /// Total SQL operations (reads + writes + DDL).
     pub fn sql_total(&self) -> usize {
-        self.sql_read_count + self.sql_write_count + self.sql_ddl_count
+        self.sql_read_count + self.sql_write_count() + self.sql_ddl_count
+    }
+
+    pub fn sql_write_count(&self) -> usize {
+        self.writes.len()
     }
 
     /// Read executions that re-asked a question already asked in this window:

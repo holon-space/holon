@@ -131,7 +131,7 @@ impl MetricsSut {
         self.frozen_at_check
             .borrow()
             .as_ref()
-            .map(|f| (f.metrics.dedup_read_count(), f.metrics.sql_write_count))
+            .map(|f| (f.metrics.dedup_read_count(), f.metrics.sql_write_count()))
     }
 
     /// Snapshot the previous transition's `query` ancestor chains into the
@@ -287,7 +287,7 @@ impl MetricsSut {
             metrics.sql_read_count,
             metrics.dedup_read_count(),
             expected.reads,
-            metrics.sql_write_count,
+            metrics.sql_write_count(),
             expected.writes,
             metrics.sql_ddl_count,
             expected.ddl,
@@ -401,7 +401,7 @@ impl MetricsSut {
             enforce,
             errors,
             observed_statements: metrics.sql_read_count
-                + metrics.sql_write_count
+                + metrics.sql_write_count()
                 + metrics.sql_ddl_count,
         }
     }

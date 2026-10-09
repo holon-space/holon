@@ -471,15 +471,22 @@ pub fn build_samples(
     let writes_limit = expected.writes + expected.tolerance;
     samples.push(MetricSample {
         metric: Metric::SqlWrites,
-        actual: metrics.sql_write_count as f64,
+        actual: metrics.sql_write_count() as f64,
         limit: writes_limit as f64,
         severity: Severity::Error,
         message: format!(
-            "{key}.sql_writes: {actual} exceeds expected {expected} + tolerance {tol} = {limit}",
-            actual = metrics.sql_write_count,
+            "{key}.sql_writes: {actual} exceeds expected {expected} + tolerance {tol} = {limit}; \
+             writes: [{writes}]",
+            actual = metrics.sql_write_count(),
             expected = expected.writes,
             tol = expected.tolerance,
             limit = writes_limit,
+            writes = metrics
+                .writes
+                .iter()
+                .map(|w| format!("`{}` origin={}", short_sql(&w.sql), w.origin))
+                .collect::<Vec<_>>()
+                .join("; "),
         ),
     });
 
