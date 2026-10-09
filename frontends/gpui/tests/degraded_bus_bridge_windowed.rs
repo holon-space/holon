@@ -68,12 +68,10 @@ fn shipped_window_launch_subscribes_to_the_degraded_bus_in_sql_only_mode() {
         .resolve::<Arc<ConditionBus>>())
     .clone();
 
-    assert_eq!(
-        bus.subscriber_count(),
-        0,
-        "nothing should be subscribed before the window opens — a non-zero baseline would make \
-         the post-launch assertion vacuous"
-    );
+    // TestEnvironment arms the database-stuck guard on this bus, which
+    // subscribes; the shipped binary has no such guard. The launch is judged
+    // against that baseline.
+    let before_launch = bus.subscriber_count();
 
     // The production launcher. `share_backend` is `None` (SqlOnly), exactly as
     // in `main.rs` for this configuration.
@@ -92,10 +90,12 @@ fn shipped_window_launch_subscribes_to_the_degraded_bus_in_sql_only_mode() {
     app.run_until_parked();
 
     assert!(
-        bus.subscriber_count() > 0,
+        bus.subscriber_count() > before_launch,
         "the production window launch must subscribe to the ConditionBus in SqlOnly mode — \
          with no subscriber every raised condition (dead MCP integration, failed org ingest) is \
-         written to a channel nobody reads, and the page renders blank with no banner"
+         written to a channel nobody reads, and the page renders blank with no banner \
+         ({before_launch} subscriber(s) before the launch, {} after)",
+        bus.subscriber_count()
     );
 
     // The subscriber must survive delivery, not unsubscribe on the first event.
@@ -109,7 +109,7 @@ fn shipped_window_launch_subscribes_to_the_degraded_bus_in_sql_only_mode() {
     runtime.block_on(async { tokio::time::sleep(Duration::from_millis(50)).await });
     app.run_until_parked();
     assert!(
-        bus.subscriber_count() > 0,
+        bus.subscriber_count() > before_launch,
         "the bridge must stay subscribed after delivering a condition"
     );
 

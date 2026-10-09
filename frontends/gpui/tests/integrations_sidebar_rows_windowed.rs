@@ -90,6 +90,8 @@ const CLAUDE_HISTORY_VIEW: &str = "block:claude-history-view";
 const TODOIST: &str = "todoist";
 const TODOIST_VIEW: &str = "block:todoist-view";
 
+const FAKE_MCP: &str = holon_integration_tests::fake_mcp_module::PROVIDER_NAME;
+
 /// Sub-pixel layout rounding is allowed; anything a reader could see as a
 /// stagger is not.
 const MAX_COLUMN_STAGGER_PX: f32 = 0.5;
@@ -213,6 +215,35 @@ fn visible(bounds: &BoundsRegistry, id: &str) -> Option<ElementInfo> {
     bounds
         .element_info(id)
         .filter(ElementInfo::has_visible_area)
+}
+
+/// Poll `provider`'s mirrored status until it reads `want`; panics with the
+/// last reading after 30 s.
+async fn wait_for_status(db: &holon::storage::DbHandle, provider: &str, want: &str) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let rows = db
+            .query(
+                &format!("SELECT status FROM integration_state WHERE provider_name = '{provider}'"),
+                Default::default(),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("read {provider}'s mirrored status: {e}"));
+        let status = rows
+            .first()
+            .and_then(|r| r.get("status"))
+            .and_then(|v| v.as_string())
+            .map(str::to_string);
+        if status.as_deref() == Some(want) {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{provider} never reached {want:?} in integration_state within 30 s; last status \
+             {status:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 fn main_test(bounds: &BoundsRegistry, mirror: &[MirrorRow]) {
@@ -414,30 +445,60 @@ fn integration_rows_show_name_icon_aligned_status_and_open_their_view() {
         .expect("full_headless -> backend engine");
 
     // The discovery list shows the integrations that are switched ON, so the
-    // rung switches them all on and judges the list it gets. Reading the mirror
-    // back (rather than hardcoding the bundle) keeps the oracle true when the
-    // bundled providers change.
-    let mirror: Vec<MirrorRow> = runtime.block_on(async {
+    // rung switches them all on and judges the list it gets.
+    runtime.block_on(async {
         let db = backend.db_handle();
         db.execute_values("UPDATE integration_state SET enabled = 1", vec![])
             .await
             .expect("switch every mirrored integration on");
-        // Every provider boots `Pending`, and a rung that saw one status word
-        // could not tell a row reading its OWN status from one painting a
-        // constant. Spread the four words across the rows first.
+        // The fake MCP peer really connects, so the registry owns its status
+        // column and keeps writing it until the first sync verdict. Status
+        // words written over a row that is still moving are overwritten after
+        // the oracle is read.
+        wait_for_status(&db, FAKE_MCP, "Connected").await;
+        // Every other provider stays `Pending`, and a rung that saw one status
+        // word could not tell a row reading its OWN status from one painting a
+        // constant. Spread the four words across the rows nobody else writes.
         for (i, status) in STATUS_WORDS.iter().enumerate() {
             db.execute_values(
                 &format!(
                     "UPDATE integration_state SET status = '{status}' WHERE provider_name IN \
-                     (SELECT provider_name FROM integration_state ORDER BY provider_name ASC \
-                      LIMIT 1 OFFSET {i})"
+                     (SELECT provider_name FROM integration_state WHERE provider_name != \
+                      '{FAKE_MCP}' ORDER BY provider_name ASC LIMIT 1 OFFSET {i})"
                 ),
                 vec![],
             )
             .await
             .expect("spread the status words across the rows");
         }
-        db.query(
+    });
+
+    let bounds = BoundsRegistry::new();
+    let nav = NavigationState::new();
+    let rebind = app
+        .update(|cx| {
+            launch_holon_window_rebindable(
+                session.clone(),
+                engine.clone(),
+                runtime.handle().clone(),
+                nav,
+                bounds.clone(),
+                None,
+                None,
+                "Holon-IntegrationsSidebarRows-Windowed",
+                cx,
+            )
+        })
+        .expect("window opened over the booted session");
+    let window = rebind.window();
+
+    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(30));
+
+    // The oracle is the mirror as it stands when the paint is judged. Reading
+    // it back rather than hardcoding the bundle keeps it true when the bundled
+    // providers change.
+    let mirror: Vec<MirrorRow> = runtime.block_on(async {
+        backend.db_handle().query(
             "SELECT provider_name, display_name, status FROM integration_state WHERE enabled = 1 \
              ORDER BY display_name ASC",
             Default::default(),
@@ -465,27 +526,6 @@ fn integration_rows_show_name_icon_aligned_status_and_open_their_view() {
         "no enabled integrations in the mirror — the sidebar section would be empty and every \
          assertion below vacuous"
     );
-
-    let bounds = BoundsRegistry::new();
-    let nav = NavigationState::new();
-    let rebind = app
-        .update(|cx| {
-            launch_holon_window_rebindable(
-                session.clone(),
-                engine.clone(),
-                runtime.handle().clone(),
-                nav,
-                bounds.clone(),
-                None,
-                None,
-                "Holon-IntegrationsSidebarRows-Windowed",
-                cx,
-            )
-        })
-        .expect("window opened over the booted session");
-    let window = rebind.window();
-
-    settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(30));
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         // What ONE row contains first, then the cross-row geometry: a row
