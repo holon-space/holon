@@ -125,9 +125,9 @@ enforced_by:
       site: "crates/holon-filesystem/src/file_sync_controller.rs:573-580 (page-rename path derivation)"
     # Concurrency and merge belong to the consolidator (Model.md layer 2).
     - clause: ordering_concurrent_insert
-      site: "crates/holon-loro/src/text_merge_provider.rs:139 (merge_text, 3-way merge path)"
+      site: "crates/holon-loro/src/text_merge_provider.rs:151 (merge_text, 3-way merge path)"
     - clause: mutation_merge_granularity
-      site: "crates/holon-loro/src/text_merge_provider.rs:139 (merge_text, 3-way merge path)"
+      site: "crates/holon-loro/src/text_merge_provider.rs:151 (merge_text, 3-way merge path)"
     # Surfacing a conflict is a controller concern, above the format entirely.
     - clause: mutation_conflict_surface
       site: "crates/holon-filesystem/src/file_sync_controller.rs:1042 (3-way merger wiring, no-store conflict path)"

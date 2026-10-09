@@ -38,13 +38,20 @@ in-app edit that is not yet on disk, and its reference model has no 3-way
 text merge to compare against.
 
 ## Remedy
-Fixed: each side is applied as the minimal (Myers) char diff from base
-(`similar`), each hunk inserting before it deletes, and the app side gets the
-lower peer id, so same-gap inserts come out app first, then file. The contract
-is on `TransientLoroTextMerge` (crates/holon-loro/src/text_merge_provider.rs).
+Fixed: each side is applied as the minimal (Myers) diff of grapheme clusters
+from base (`similar`), each hunk inserting before it deletes, and the app side
+gets the lower peer id, so same-gap inserts come out app first, then file. The
+edit positions come from a running cursor over the raw Myers ops:
+`similar::capture_diff_slices` compacts its ops, and with repeated chars their
+positions disagree with their order (`a ` → ` b ` put `b ` in the wrong gap,
+so `merge("a ", "a ", " b ")` gave `b  `). A side whose diff exceeds 200 ms
+replaces the whole base, with a warning. The contract is on
+`TransientLoroTextMerge` (crates/holon-loro/src/text_merge_provider.rs).
 Pinned by the property test crates/holon-loro/tests/transient_text_merge_pbt.rs
 (unique-char triples: no resurrection, no lost edit, per-side order, exact
-same-gap order) and the controller test
+same-gap order; repeated-char texts: an unchanged side yields the other
+exactly, char counts against an insert-only side, insert-only sides both
+survive) and the controller test
 crates/holon-app/tests/file_sync_text_merge_keeps_deletes.rs (production
 controller and merger). Strings do not say which of equal chars a side
 deleted, so both sides deleting one `b` of `bbb` counts as one delete.

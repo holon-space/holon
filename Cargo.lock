@@ -5769,6 +5769,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tracing",
+ "unicode-segmentation",
  "uuid",
  "workspace-hack 0.1.0",
 ]

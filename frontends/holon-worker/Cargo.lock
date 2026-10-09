@@ -3018,10 +3018,12 @@ dependencies = [
  "rand 0.9.4",
  "serde",
  "serde_json",
+ "similar",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
  "tracing",
+ "unicode-segmentation",
  "uuid",
  "workspace-hack 0.1.0",
 ]
