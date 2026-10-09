@@ -1184,8 +1184,8 @@ pub fn render_overlays(
 
     // Pending connector-write approval panel (leases/read-write ruling, inc 4c).
     // Built first, from clones, so the modal branches below can still consume
-    // `session`/`async_cx`/`share_state` by value. Rendered last (pushed at the
-    // end) so it sits above content. Shows writes awaiting confirmation and
+    // `session`/`async_cx`/`share_state` by value. Pushed after the modals so it
+    // sits above content. Shows writes awaiting confirmation and
     // disclosed outcome-unknown entries; both must be visible.
     let pending_panel: Option<AnyElement> = pending_store.as_ref().and_then(|store| {
         let rows: Vec<PendingWriteView> = store
@@ -1243,6 +1243,12 @@ pub fn render_overlays(
         overlays.push(render_quarantine_modal(idx, q, share_state.clone(), theme));
     }
 
+    if let Some(panel) = pending_panel {
+        overlays.push(panel);
+    }
+
+    // Last, so nothing paints over the previous-run toast: the window
+    // acknowledges its records once it lies inside the viewport.
     if !state.toasts.is_empty() {
         overlays.push(render_toast_stack(
             &state.toasts,
@@ -1253,10 +1259,6 @@ pub fn render_overlays(
             viewport_width,
             viewport_height,
         ));
-    }
-
-    if let Some(panel) = pending_panel {
-        overlays.push(panel);
     }
 
     overlays
@@ -2002,6 +2004,11 @@ fn toast_message(toast: &DegradedToast) -> String {
         Some((cut, _)) => format!("{}…", &sentence[..cut]),
         None => sentence.to_string(),
     };
+    // The doorbell's headline says what happened; the label would push the
+    // crash site toward the clamp that cuts its end.
+    if is_previous_run(toast) {
+        return format!("{icon}  {sentence}");
+    }
     format!("{icon}  {label} — {sentence}")
 }
 
@@ -2077,8 +2084,9 @@ pub const DEGRADED_TOAST_STACK: &str = "degraded-toast-stack";
 pub const TOAST_LINE: &str = "toast-line";
 
 /// Element id of the previous-run toast's box, recorded with its unclipped
-/// rect: the window acknowledges the records only when that rect lies inside
-/// the viewport of a drawn frame.
+/// rect and its headline as laid out: the window acknowledges the records only
+/// when that rect lies inside the viewport of a drawn frame and the laid out
+/// headline names the newest crash site.
 pub const PREVIOUS_RUN_TOAST: &str = "previous-run-toast";
 
 /// The widths a toast box wants when the window lets it have them.
@@ -2240,10 +2248,16 @@ fn render_toast_stack(
         let lines = toast_lines(toast);
         let close_state = share_state.clone();
         let previous_run = is_previous_run(toast);
+        let mut headline = Some(gpui::StyledText::new(lines[0].clone()));
         let probe = previous_run.then(|| {
             previous_run_probe(
                 bounds.clone(),
-                lines.join(" "),
+                headline
+                    .as_ref()
+                    .expect("the headline is not yet a child")
+                    .layout()
+                    .clone(),
+                toast.subject.clone(),
                 acknowledge.then(|| share_state.clone()),
             )
         });
@@ -2277,7 +2291,10 @@ fn render_toast_stack(
                         // `max_w` — and the window — on the right.
                         .min_w(px(0.0))
                         .children(lines.into_iter().enumerate().map(|(line_idx, l)| {
-                            let line = div().min_w(px(0.0)).child(l.clone());
+                            let line = match headline.take() {
+                                Some(headline) => div().min_w(px(0.0)).child(headline),
+                                None => div().min_w(px(0.0)).child(l.clone()),
+                            };
                             let line = if previous_run {
                                 line.line_clamp(PREVIOUS_RUN_LINES).text_ellipsis()
                             } else {
@@ -2322,17 +2339,22 @@ fn render_toast_stack(
 }
 
 /// Fills the previous-run toast's box: records the box's unclipped rect as
-/// [`PREVIOUS_RUN_TOAST`] and, when `acknowledge` is set and the rect lies
-/// inside the viewport, marks the records seen on the frame after this one.
+/// [`PREVIOUS_RUN_TOAST`], with the headline as laid out after its clamp, and,
+/// when `acknowledge` is set, the rect lies inside the viewport and the laid
+/// out headline names `site`, marks the records seen on the frame after this
+/// one.
 fn previous_run_probe(
     bounds: crate::geometry::BoundsRegistry,
-    headline: String,
+    headline: gpui::TextLayout,
+    site: String,
     acknowledge: Option<Entity<ShareUiState>>,
 ) -> impl IntoElement {
     gpui::canvas(
         move |rect, window, _| {
             let viewport = window.viewport_size();
-            let inside = rect.size.width > px(0.0)
+            let painted = headline.text();
+            let seen = painted.contains(&site)
+                && rect.size.width > px(0.0)
                 && rect.size.height > px(0.0)
                 && rect.origin.x >= px(0.0)
                 && rect.origin.y >= px(0.0)
@@ -2350,7 +2372,7 @@ fn previous_run_probe(
                     entity_id: None,
                     has_content: true,
                     parent_id: None,
-                    displayed_text: Some(Arc::from(headline)),
+                    displayed_text: Some(Arc::from(painted)),
                     focused: None,
                     styled_runs: None,
                     opacity: None,
@@ -2360,7 +2382,7 @@ fn previous_run_probe(
                     painted_bg: None,
                 },
             );
-            if let Some(state) = acknowledge.filter(|_| inside) {
+            if let Some(state) = acknowledge.filter(|_| seen) {
                 window.on_next_frame(move |_, cx| {
                     // `None` when an earlier frame's callback already took it.
                     let drawn = state.update(cx, |s, _| s.previous_runs_shown_on.take());

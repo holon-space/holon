@@ -5,10 +5,12 @@
 //! @pbt kind windowed
 //! @pbt covers panic-record-seen-after-draw — the window acknowledges the
 //! records `install` showed only on the frame after one whose previous-run
-//! toast lay inside the viewport (BugFunnel
+//! toast lay inside the viewport with the newest crash site in its laid out
+//! headline (BugFunnel
 //! 2026-10-08-arm-consumes-the-previous-panic-record-unshown); the toast fits
-//! every window from the 300x200 minimum up, whatever the message's length or
-//! glyph width, and the acknowledged records keep their bytes in the history
+//! every window from the 300x200 minimum and phone sizes up, whatever the
+//! message's length or glyph width, and the acknowledged records keep their
+//! bytes in the history
 //! @pbt overlaps general_e2e_composed_pbt — kept: the keystone is headless and
 //! draws no frame
 
@@ -29,7 +31,6 @@ use holon_frontend::panic_record::UNSHOWN_DIR;
 use holon_gpui::launch_holon_window_with_engine_and_share;
 use holon_gpui::share_ui::DEGRADED_TOAST_STACK;
 use holon_gpui::share_ui::PREVIOUS_RUN_TOAST;
-use holon_gpui::share_ui::TOAST_LINE;
 use holon_integration_tests::test_environment::TestEnvironment;
 
 /// The records `install` showed and nothing has marked seen yet.
@@ -227,28 +228,14 @@ fn records_are_seen_after_a_drawn_frame(size: &str, seed: Seed) {
             .expect("draw the window");
     });
     bounds.flush();
-    let lines: Vec<(String, ElementInfo)> = bounds
-        .all_elements()
-        .into_iter()
-        .filter(|(id, _)| id.starts_with(TOAST_LINE))
-        .collect();
-    let newest_line = lines.iter().find(|(_, info)| {
-        info.displayed_text
-            .as_deref()
-            .is_some_and(|text| text.contains(newest_site.as_str()))
-    });
+    let toast = bounds
+        .element_info(PREVIOUS_RUN_TOAST)
+        .expect("the previous-run toast records its box");
+    let painted = toast.displayed_text.as_deref().unwrap_or_default();
     assert!(
-        newest_line.is_some_and(|(_, info)| inside(info, viewport.0, viewport.1)),
-        "the frame must paint, inside the {size} viewport, a toast line naming the newest \
-         crash site {newest_site}; the toast lines are {:#?}",
-        lines
-            .iter()
-            .map(|(id, info)| (
-                id,
-                &info.displayed_text,
-                (info.x, info.y, info.width, info.height)
-            ))
-            .collect::<Vec<_>>()
+        painted.contains(newest_site.as_str()),
+        "the {size} frame must paint the newest crash site {newest_site} in the clamped \
+         headline; it paints {painted:?}"
     );
     let stack = bounds
         .element_info(DEGRADED_TOAST_STACK)
@@ -257,9 +244,6 @@ fn records_are_seen_after_a_drawn_frame(size: &str, seed: Seed) {
         stack.y > 0.0 && stack.y + stack.height < viewport.1,
         "the toast stack is clipped by the {size} viewport: {stack:?}"
     );
-    let toast = bounds
-        .element_info(PREVIOUS_RUN_TOAST)
-        .expect("the previous-run toast records its box");
     assert!(
         inside(&toast, viewport.0, viewport.1),
         "the previous-run toast lies inside the {size} viewport: {toast:?}"
@@ -317,6 +301,21 @@ fn a_crash_loop_of_long_messages_fits_a_900px_window() {
 #[test]
 fn a_wide_glyph_message_fits_a_900px_window() {
     records_are_seen_after_a_drawn_frame("1400x900", a_wide_glyph_message);
+}
+
+#[test]
+fn a_crash_loop_names_its_site_in_a_390px_phone_window() {
+    records_are_seen_after_a_drawn_frame("390x844", a_crash_loop);
+}
+
+#[test]
+fn a_crash_loop_names_its_site_in_a_360px_phone_window() {
+    records_are_seen_after_a_drawn_frame("360x780", a_crash_loop);
+}
+
+#[test]
+fn a_crash_loop_names_its_site_in_a_400px_tall_window() {
+    records_are_seen_after_a_drawn_frame("820x400", a_crash_loop);
 }
 
 #[test]

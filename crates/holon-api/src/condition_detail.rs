@@ -467,7 +467,7 @@ impl ConditionKind {
                     runs => format!("{runs} earlier runs"),
                 };
                 let headline = format!(
-                    "Holon crashed in {runs} — newest: {} at {subject}",
+                    "Holon crashed in {runs}; the newest at {subject}: {}",
                     one_line(message)
                 );
                 let mut body = vec![format!("{subject} on {thread}: {}", one_line(message))];
@@ -510,11 +510,13 @@ impl ConditionKind {
 /// How many characters of a panic message one line shows.
 const ONE_LINE_CHARS: usize = 120;
 
-/// The first line of `message`, cut to [`ONE_LINE_CHARS`]; `…` marks a cut.
+/// The first line of `message`, cut to [`ONE_LINE_CHARS`]; `…` marks text
+/// left out.
 fn one_line(message: &str) -> String {
-    let first = message.lines().next().unwrap_or("");
+    let mut lines = message.lines();
+    let first = lines.next().unwrap_or("");
     let cut: String = first.chars().take(ONE_LINE_CHARS).collect();
-    if cut.len() < message.len() {
+    if cut.len() < first.len() || lines.any(|l| !l.trim().is_empty()) {
         format!("{cut}…")
     } else {
         cut
@@ -559,5 +561,37 @@ mod tests {
                 && detail.body.iter().any(|l| l.ends_with("DayPage.org")),
             "every file stays in the body: {detail:?}"
         );
+    }
+
+    fn previous_run(message: &str) -> ConditionDetail {
+        ConditionKind::PreviousRunPanicked {
+            message: message.to_string(),
+            thread: "main".to_string(),
+            earlier: crate::EarlierPanics {
+                panics: Vec::new(),
+                dropped: None,
+            },
+        }
+        .detail("boot.rs:1:1")
+    }
+
+    #[test]
+    fn a_line_break_after_the_only_line_cuts_nothing() {
+        for message in ["short message\n", "short message\r\n"] {
+            let headline = previous_run(message).headline;
+            assert!(!headline.contains('…'), "{message:?} -> {headline}");
+        }
+        let headline = previous_run("first line\nsecond line").headline;
+        assert!(headline.ends_with("first line…"), "{headline}");
+    }
+
+    /// A window that cuts the headline short cuts its end, so the count and
+    /// the site come before the message.
+    #[test]
+    fn the_previous_run_headline_names_the_site_before_the_message() {
+        let headline = previous_run("called `Result::unwrap()` on an `Err` value").headline;
+        let site = headline.find("boot.rs:1:1").expect("the site is named");
+        let message = headline.find("called").expect("the message is named");
+        assert!(site < message, "{headline}");
     }
 }

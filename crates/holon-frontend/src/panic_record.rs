@@ -41,12 +41,15 @@ pub const RECORD_FILE: &str = "last-panic.json";
 /// order the runs ended.
 pub const UNSHOWN_DIR: &str = "unshown-panics";
 
-/// How many records [`UNSHOWN_DIR`] keeps. A frontend that never draws the bus
-/// never marks them seen; the condition lists the newest ten, and
-/// [`DROPPED_FILE`] counts the rest.
+/// How many readable records [`UNSHOWN_DIR`] keeps. A frontend that never
+/// draws the bus never marks them seen; the condition lists the newest ten,
+/// and the [`DROPPED_FILE`] summary counts the rest. A file that cannot be
+/// read is not a record: the bound neither removes nor counts it.
 pub const KEPT_UNSHOWN: usize = 10;
 
-/// The one summary of the records dropped from [`UNSHOWN_DIR`] unshown.
+/// The one summary of the records dropped from [`UNSHOWN_DIR`] unshown. While
+/// it cannot be read, it stays and the count goes to `dropped-panics-2.json`,
+/// or the first later number whose file can be read or is missing.
 pub const DROPPED_FILE: &str = "dropped-panics.json";
 
 /// Records a frontend has shown, as `<n>.json` in the order the runs ended:
@@ -56,7 +59,8 @@ pub const SEEN_DIR: &str = "seen-panics";
 /// How many records [`SEEN_DIR`] keeps; [`SEEN_DROPPED_FILE`] counts the rest.
 pub const KEPT_SEEN: usize = 20;
 
-/// The one summary of the records dropped from [`SEEN_DIR`].
+/// The one summary of the records dropped from [`SEEN_DIR`], with the fallback
+/// names [`DROPPED_FILE`] has.
 pub const SEEN_DROPPED_FILE: &str = "seen-dropped-panics.json";
 
 /// Appended to the message of a record whose panic reached no bus.
@@ -250,10 +254,7 @@ fn keep_unshown(record_dir: &Path) -> Result<(), String> {
             Err(e) => return Err(e),
         }
         std::fs::create_dir_all(&unshown_dir)?;
-        let next = list_records(&unshown_dir)?
-            .records
-            .last()
-            .map_or(1, |(n, _)| n + 1);
+        let next = list_records(&unshown_dir)?.next;
         std::fs::rename(&record, unshown_dir.join(format!("{next}.json")))?;
         Ok(true)
     };
@@ -262,7 +263,7 @@ fn keep_unshown(record_dir: &Path) -> Result<(), String> {
     if !kept {
         return Ok(());
     }
-    drop_beyond(&unshown_dir, &record_dir.join(DROPPED_FILE), KEPT_UNSHOWN).map_err(|e| {
+    drop_beyond(&unshown_dir, record_dir, DROPPED_FILE, KEPT_UNSHOWN).map_err(|e| {
         format!(
             "cannot bound the records of earlier runs to the newest {KEPT_UNSHOWN}, so all of \
              them stay: {e}"
@@ -280,6 +281,50 @@ fn read_summary(path: &Path) -> std::io::Result<Option<DroppedPanics>> {
     serde_json::from_slice(&bytes)
         .map(Some)
         .map_err(|e| std::io::Error::other(format!("{} does not parse: {e}", path.display())))
+}
+
+/// Where the summary named `file` in `dir` is read and written: `file`, or,
+/// while it cannot be read, the first of `<stem>-2.json`, `<stem>-3.json`, …
+/// whose file can be read or is missing.
+struct SummarySlot {
+    path: PathBuf,
+    summary: Option<DroppedPanics>,
+    /// The summaries before `path` that cannot be read; they stay where they
+    /// are.
+    unreadable: Vec<(PathBuf, std::io::Error)>,
+}
+
+fn summary_slot(dir: &Path, file: &str) -> std::io::Result<SummarySlot> {
+    let stem = file
+        .strip_suffix(".json")
+        .expect("a summary file is named <stem>.json");
+    let mut unreadable = Vec::new();
+    for n in 1u64.. {
+        let path = match n {
+            1 => dir.join(file),
+            n => dir.join(format!("{stem}-{n}.json")),
+        };
+        match read_summary(&path) {
+            Ok(summary) => {
+                return Ok(SummarySlot {
+                    path,
+                    summary,
+                    unreadable,
+                });
+            }
+            // Only a file that exists is skipped, so the names end with the
+            // files.
+            Err(e) if std::fs::symlink_metadata(&path).is_ok() => {
+                eprintln!(
+                    "panic record: {} cannot be read, so it stays and the count goes on: {e}",
+                    path.display()
+                );
+                unreadable.push((path, e));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    unreachable!("a dir holds fewer than u64::MAX summaries")
 }
 
 fn write_summary(path: &Path, summary: &DroppedPanics) -> std::io::Result<()> {
@@ -303,17 +348,24 @@ fn ended_at(path: &Path) -> std::io::Result<DateTime<Utc>> {
     DateTime::from_timestamp(secs, since_epoch.subsec_nanos()).ok_or_else(beyond)
 }
 
-/// Fold the records of `records_dir` beyond the newest `keep`, by record
-/// number, into the summary at `summary`, written before any of them is
-/// removed. A record whose end time cannot be read counts as undated.
-fn drop_beyond(records_dir: &Path, summary: &Path, keep: usize) -> std::io::Result<()> {
+/// Fold the readable records of `records_dir` beyond the newest `keep`, by
+/// record number, into the summary named `summary_file` in `summary_dir`,
+/// written before any of them is removed. A record whose end time cannot be
+/// read counts as undated.
+fn drop_beyond(
+    records_dir: &Path,
+    summary_dir: &Path,
+    summary_file: &str,
+    keep: usize,
+) -> std::io::Result<()> {
     let records = list_records(records_dir)?.records;
     let excess = records.len().saturating_sub(keep);
     if excess == 0 {
         return Ok(());
     }
-    let mut dropped = read_summary(summary)?;
-    for (_, path) in &records[..excess] {
+    let slot = summary_slot(summary_dir, summary_file)?;
+    let mut dropped = slot.summary;
+    for (_, path, _) in &records[..excess] {
         let ended = ended_at(path)
             .inspect_err(|e| {
                 eprintln!(
@@ -329,8 +381,8 @@ fn drop_beyond(records_dir: &Path, summary: &Path, keep: usize) -> std::io::Resu
         });
     }
     let dropped = dropped.expect("at least one record was folded in");
-    write_summary(summary, &dropped)?;
-    for (_, path) in &records[..excess] {
+    write_summary(&slot.path, &dropped)?;
+    for (_, path, _) in &records[..excess] {
         std::fs::remove_file(path)?;
     }
     Ok(())
@@ -338,16 +390,22 @@ fn drop_beyond(records_dir: &Path, summary: &Path, keep: usize) -> std::io::Resu
 
 /// What a records dir holds.
 struct Records {
-    /// The files named `<n>.json`, oldest first.
-    records: Vec<(u64, PathBuf)>,
-    /// Every other entry, which Holon did not write.
-    strays: Vec<PathBuf>,
+    /// The files named `<n>.json` that read as records, oldest first.
+    records: Vec<(u64, PathBuf, PanicRecord)>,
+    /// Every other entry, with why it is not a record. Holon removes none.
+    strays: Vec<(PathBuf, String)>,
+    /// Above the `<n>` of every entry named `<n>.json`, read or not, so a new
+    /// record replaces none.
+    next: u64,
 }
+
+const NOT_A_RECORD_FILE: &str = "it is not a record file Holon wrote (a file named <n>.json)";
 
 fn list_records(dir: &Path) -> std::io::Result<Records> {
     let mut listed = Records {
         records: Vec::new(),
         strays: Vec::new(),
+        next: 1,
     };
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
@@ -361,14 +419,25 @@ fn list_records(dir: &Path) -> std::io::Result<Records> {
             .file_name()
             .and_then(|name| name.to_str())
             .and_then(|name| name.strip_suffix(".json"))
-            .map(str::parse::<u64>);
-        match n {
-            Some(Ok(n)) if entry.file_type()?.is_file() => listed.records.push((n, path)),
-            Some(_) | None => listed.strays.push(path),
+            // ALLOW(ok): a name that is no record number makes the entry a stray, disclosed as one
+            .and_then(|name| name.parse::<u64>().ok())
+            .filter(|n| *n < u64::MAX);
+        let Some(n) = n else {
+            listed.strays.push((path, NOT_A_RECORD_FILE.to_string()));
+            continue;
+        };
+        listed.next = listed.next.max(n + 1);
+        if !entry.file_type()?.is_file() {
+            listed.strays.push((path, NOT_A_RECORD_FILE.to_string()));
+            continue;
+        }
+        match read_record(&path) {
+            Ok(record) => listed.records.push((n, path, record)),
+            Err(reason) => listed.strays.push((path, reason)),
         }
     }
-    listed.records.sort_unstable();
-    listed.strays.sort_unstable();
+    listed.records.sort_unstable_by_key(|(n, ..)| *n);
+    listed.strays.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
     Ok(listed)
 }
 
@@ -469,8 +538,8 @@ struct Shown {
 struct ShownFiles {
     /// Oldest first.
     records: Vec<PathBuf>,
-    /// [`DROPPED_FILE`] was read and shown.
-    summary: bool,
+    /// The [`DROPPED_FILE`] summary that was read and shown.
+    summary: Option<PathBuf>,
 }
 
 static SHOWN: Mutex<Option<Shown>> = Mutex::new(None);
@@ -486,11 +555,19 @@ fn shown() -> MutexGuard<'static, Option<Shown>> {
 /// the files returned.
 fn show_unshown(record_dir: &Path, conditions: &ConditionBus) -> ShownFiles {
     let unshown_dir = record_dir.join(UNSHOWN_DIR);
-    let summary_path = record_dir.join(DROPPED_FILE);
-    let dropped = read_summary(&summary_path).unwrap_or_else(|e| {
-        conditions.emit(record_unreadable(&summary_path, e.to_string()));
-        None
-    });
+    let (summary_path, dropped) = match summary_slot(record_dir, DROPPED_FILE) {
+        Ok(slot) => {
+            for (path, e) in &slot.unreadable {
+                conditions.emit(record_unreadable(path, e.to_string()));
+            }
+            (slot.path, slot.summary)
+        }
+        Err(e) => {
+            let path = record_dir.join(DROPPED_FILE);
+            conditions.emit(record_unreadable(&path, e.to_string()));
+            (path, None)
+        }
+    };
     let listed = list_records(&unshown_dir).unwrap_or_else(|e| {
         eprintln!(
             "panic record: cannot list the records in {}: {e}",
@@ -503,22 +580,18 @@ fn show_unshown(record_dir: &Path, conditions: &ConditionBus) -> ShownFiles {
         Records {
             records: Vec::new(),
             strays: Vec::new(),
+            next: 1,
         }
     });
-    for stray in &listed.strays {
-        conditions.emit(record_unreadable(
-            stray,
-            "it is not a record file Holon wrote (a file named <n>.json)".to_string(),
-        ));
+    for (stray, reason) in listed.strays {
+        conditions.emit(record_unreadable(&stray, reason));
     }
-    let mut records: Vec<(PathBuf, PanicRecord)> = Vec::new();
-    for (_, path) in listed.records {
-        match read_record(&path) {
-            Ok(record) => records.push((path, record)),
-            Err(reason) => conditions.emit(record_unreadable(&path, reason)),
-        }
-    }
-    let summary = dropped.is_some();
+    let records: Vec<(PathBuf, PanicRecord)> = listed
+        .records
+        .into_iter()
+        .map(|(_, path, record)| (path, record))
+        .collect();
+    let summary = dropped.is_some().then(|| summary_path.clone());
     match (records.last(), dropped) {
         (Some((_, newest)), dropped) => {
             let panics = records
@@ -596,28 +669,26 @@ fn move_to_history(record_dir: &Path, files: &ShownFiles) -> Result<(), (PathBuf
     std::fs::create_dir_all(&seen_dir).map_err(|e| (seen_dir.clone(), e))?;
     let mut next = list_records(&seen_dir)
         .map_err(|e| (seen_dir.clone(), e))?
-        .records
-        .last()
-        .map_or(1, |(n, _)| n + 1);
+        .next;
     for path in &files.records {
         std::fs::rename(path, seen_dir.join(format!("{next}.json")))
             .map_err(|e| (path.clone(), e))?;
         next += 1;
     }
-    let seen_summary = record_dir.join(SEEN_DROPPED_FILE);
-    if files.summary {
-        let summary = record_dir.join(DROPPED_FILE);
-        let unshown = read_summary(&summary)
+    if let Some(summary) = &files.summary {
+        let unshown = read_summary(summary)
             .map_err(|e| (summary.clone(), e))?
             .ok_or_else(|| (summary.clone(), std::io::Error::from(ErrorKind::NotFound)))?;
-        let merged = match read_summary(&seen_summary).map_err(|e| (seen_summary.clone(), e))? {
+        let seen = summary_slot(record_dir, SEEN_DROPPED_FILE)
+            .map_err(|e| (record_dir.join(SEEN_DROPPED_FILE), e))?;
+        let merged = match seen.summary {
             Some(seen) => seen.and(unshown),
             None => unshown,
         };
-        write_summary(&seen_summary, &merged).map_err(|e| (seen_summary.clone(), e))?;
-        std::fs::remove_file(&summary).map_err(|e| (summary, e))?;
+        write_summary(&seen.path, &merged).map_err(|e| (seen.path.clone(), e))?;
+        std::fs::remove_file(summary).map_err(|e| (summary.clone(), e))?;
     }
-    drop_beyond(&seen_dir, &seen_summary, KEPT_SEEN).map_err(|e| (seen_dir, e))
+    drop_beyond(&seen_dir, record_dir, SEEN_DROPPED_FILE, KEPT_SEEN).map_err(|e| (seen_dir, e))
 }
 
 fn spawn_forwarder(
@@ -1124,6 +1195,101 @@ mod tests {
             b"garbage",
             "a summary nobody could read is not removed"
         );
+    }
+
+    /// A run that panicked at `prior.rs:<run>:1` ends, and the next one arms.
+    fn a_run_crashed(dir: &Path, run: usize) {
+        PanicRecord {
+            message: format!("run {run}"),
+            location: format!("prior.rs:{run}:1"),
+            thread: "main".to_string(),
+        }
+        .write_to(dir)
+        .expect("seed a previous record");
+        *target() = None;
+        arm(dir);
+    }
+
+    fn readable_unshown(dir: &Path) -> usize {
+        std::fs::read_dir(dir.join(UNSHOWN_DIR))
+            .expect("list the unshown dir")
+            .filter(|e| read_record(&e.as_ref().expect("an entry").path()).is_ok())
+            .count()
+    }
+
+    #[test]
+    fn a_corrupt_record_is_neither_dropped_nor_counted_by_the_bound() {
+        let _serial = fresh_process();
+        let dir = tempfile::tempdir().expect("temp config dir");
+        std::fs::create_dir_all(dir.path().join(UNSHOWN_DIR)).expect("create the unshown dir");
+        let corrupt = dir.path().join(UNSHOWN_DIR).join("1.json");
+        std::fs::write(&corrupt, b"{not json").expect("write a corrupt record");
+        for run in 1..=KEPT_UNSHOWN + 1 {
+            a_run_crashed(dir.path(), run);
+        }
+
+        let bus = install(dir.path());
+        assert_eq!(
+            std::fs::read(&corrupt).map_err(|e| e.to_string()),
+            Ok(b"{not json".to_vec()),
+            "the bound removes no file it cannot read"
+        );
+        assert_eq!(readable_unshown(dir.path()), KEPT_UNSHOWN);
+        let shown = previous_runs(&bus);
+        assert_eq!(
+            shown[0].2.dropped.as_ref().map(DroppedPanics::count),
+            Some(1),
+            "only the one readable record beyond the bound was dropped unshown: {shown:#?}"
+        );
+        seen_on(&bus);
+        assert_eq!(
+            std::fs::read(&corrupt).map_err(|e| e.to_string()),
+            Ok(b"{not json".to_vec()),
+            "the ack moves no file it cannot read"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_dropped_summary_does_not_lift_the_bound() {
+        let _serial = fresh_process();
+        let dir = tempfile::tempdir().expect("temp config dir");
+        let summary = dir.path().join(DROPPED_FILE);
+        std::fs::write(&summary, b"garbage").expect("write a broken summary");
+        let beyond = 3;
+        for run in 1..=KEPT_UNSHOWN + beyond {
+            a_run_crashed(dir.path(), run);
+        }
+
+        let bus = install(dir.path());
+        assert_eq!(unwritable(&bus), Vec::<String>::new());
+        assert_eq!(readable_unshown(dir.path()), KEPT_UNSHOWN);
+        assert!(
+            unreadable_subjects(&bus)
+                .iter()
+                .any(|(subject, _)| *subject == summary.display().to_string()),
+            "the broken summary is disclosed: {:#?}",
+            disclosed(&bus)
+        );
+        let shown = previous_runs(&bus);
+        assert_eq!(
+            shown[0].2.dropped.as_ref().map(DroppedPanics::count),
+            Some(beyond),
+            "{shown:#?}"
+        );
+
+        seen_on(&bus);
+        assert_eq!(std::fs::read(&summary).expect("still there"), b"garbage");
+        assert!(
+            kinds(&install(dir.path()))
+                .iter()
+                .all(|k| *k != ConditionKind::PREVIOUS_RUN_PANICKED),
+            "the records and the count were acknowledged"
+        );
+        let seen: DroppedPanics = serde_json::from_slice(
+            &std::fs::read(dir.path().join(SEEN_DROPPED_FILE)).expect("the history counts them"),
+        )
+        .expect("parse the history's summary");
+        assert_eq!(seen.count(), beyond);
     }
 
     #[test]

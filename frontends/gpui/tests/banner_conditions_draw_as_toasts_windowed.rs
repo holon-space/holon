@@ -123,7 +123,13 @@ fn banner_conditions_without_a_banner_surface_are_painted_as_one_toast_each() {
         "a toast-placed condition must be painted; the stack reads {painted:?}"
     );
     for condition in banner_conditions() {
-        let headline = format!("{} — ", condition.reason.profile().label());
+        // The crash doorbell leads with its own headline, without the label.
+        let headline = if condition.reason.condition_kind() == ConditionKind::PREVIOUS_RUN_PANICKED
+        {
+            condition.reason.detail(&condition.subject).headline
+        } else {
+            format!("{} — ", condition.reason.profile().label())
+        };
         assert_eq!(
             painted.matches(&headline).count(),
             1,

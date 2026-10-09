@@ -42,11 +42,12 @@ and a non-panic death do not exist in its wiring.
 `install` emits them as one condition on the bus it returns, and they move
 to the bounded history `seen-panics/<n>.json` only when a frontend calls
 `panic_record::seen_on` for that bus. The GPUI window calls it on the frame
-after one whose previous-run toast lay inside the viewport
+after one whose previous-run toast lay inside the viewport with the newest
+crash site in its laid out headline
 (`frontends/gpui/src/share_ui.rs` `previous_run_probe`); the TUI and the
 standalone MCP server draw no conditions and never call it. A run that dies
 before the user saw its bus therefore keeps the records of every run before
-it, and the next bus shows each of them.
+it, and the next bus shows all of them in its one previous-run condition.
 `boot_failed` writes its own record through `panic_record::record_exit`.
 Pinned by `crates/holon-frontend/tests/panic_record_boot_loop.rs` (child
 processes: panic, `exit`, `boot_failed`-shaped exit, an exit after
