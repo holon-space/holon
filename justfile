@@ -1435,6 +1435,19 @@ prepush:
         2>&1 | tee target/gate-logs/prepush-keystone.log
     echo "== Tier 2 PASS =="
 
+# Details (D-gate-windowed.a): WINDOWED_GATE_JOBS binaries at a time (default
+# min(4, cores/4)), each `--test-threads=1`, killed and marked HUNG after
+# WINDOWED_GATE_TIMEOUT seconds (default 900). Reds whose signatures are all
+# registered (docs/Testing/WindowedKnownReds.md, via keystone-known-reds.sh) are
+# pass-with-note; any other red or HUNG fails. Logs: target/gate-logs/windowed/.
+# Windowed GPUI gate: each holon-gpui test binary alone, in parallel.
+windowed-gate:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p target/gate-logs/windowed
+    /usr/bin/python3 scripts/windowed-gate.py --features {{CANON_FEATURES}} \
+        --log-dir target/gate-logs/windowed 2>&1 | tee target/gate-logs/windowed-gate.log
+
 # The composed landing gate: what a lane runs before reporting done and what the
 # orchestrator runs before weaving. One recipe name, so it survives being passed
 # through `parallel ... -- <cmd>` (which sheds a quote layer, so no gate string
@@ -1443,39 +1456,41 @@ landing-gate:
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p target/gate-logs
-    echo "== landing [1/17]: fmt =="
+    echo "== landing [1/18]: fmt =="
     cargo fmt --all -- --check
-    echo "== landing [2/17]: typecheck incl. every test target =="
+    echo "== landing [2/18]: typecheck incl. every test target =="
     just gate-compile
-    echo "== landing [3/17]: typecheck of the release feature set =="
+    echo "== landing [3/18]: typecheck of the release feature set =="
     just check-release-shape
-    echo "== landing [4/17]: browser-target typecheck =="
+    echo "== landing [4/18]: browser-target typecheck =="
     just check-frontend-wasm
-    echo "== landing [5/17]: out-of-workspace browser frontend =="
+    echo "== landing [5/18]: out-of-workspace browser frontend =="
     just check-dioxus-web-wasm
-    echo "== landing [6/17]: out-of-workspace wasi worker =="
+    echo "== landing [6/18]: out-of-workspace wasi worker =="
     just check-worker-wasm
-    echo "== landing [7/17]: architecture rules =="
+    echo "== landing [7/18]: architecture rules =="
     just gate-arch
-    echo "== landing [8/17]: @c4 structure matches the committed baseline =="
+    echo "== landing [8/18]: @c4 structure matches the committed baseline =="
     just arch-validate 2>&1 | tee target/gate-logs/landing-arch-validate.log
-    echo "== landing [9/17]: feature map matches the tree =="
+    echo "== landing [9/18]: feature map matches the tree =="
     /usr/bin/python3 scripts/featuremap.py check 2>&1 | tee target/gate-logs/landing-featuremap.log
-    echo "== landing [10/17]: architecture lints (archlint) =="
+    echo "== landing [10/18]: architecture lints (archlint) =="
     just analyze-arch 2>&1 | tee target/gate-logs/landing-analyze-arch.log
-    echo "== landing [11/17]: keystone smoke =="
+    echo "== landing [11/18]: keystone smoke =="
     just keystone-smoke
-    echo "== landing [12/17]: loro consolidator suite =="
+    echo "== landing [12/18]: loro consolidator suite =="
     just loro-suite
-    echo "== landing [13/17]: hand-authored regressions =="
+    echo "== landing [13/18]: hand-authored regressions =="
     just hand-authored
-    echo "== landing [14/17]: projector-lag lock =="
+    echo "== landing [14/18]: projector-lag lock =="
     just projector-lag-lock
-    echo "== landing [15/17]: latency SLO (D50.a) =="
+    echo "== landing [15/18]: windowed GPUI tests =="
+    just windowed-gate
+    echo "== landing [16/18]: latency SLO (D50.a) =="
     just latency-slo-gate
-    echo "== landing [16/17]: guest wasm artifacts match their source =="
+    echo "== landing [17/18]: guest wasm artifacts match their source =="
     just guests-verify
-    echo "== landing [17/17]: target-gc (D85.c, this lane's own target/ only) =="
+    echo "== landing [18/18]: target-gc (D85.c, this lane's own target/ only) =="
     just target-gc || echo "target-gc: non-fatal (busy or nothing to reclaim), see above"
     echo "== landing gate PASS =="
 

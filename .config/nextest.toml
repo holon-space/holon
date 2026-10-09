@@ -15,6 +15,13 @@ default-filter = "not (binary(latency_slo_gate) | binary(hand_authored_regressio
 filter = "binary(general_e2e_composed_pbt) + binary(petri_e2e_pbt) + binary(round_trip_pbt) + binary(sync_controller_mutation_pbt) + binary(sync_suite)"
 slow-timeout = { period = "60s", terminate-after = 20 }  # 20 min hard cap
 
+# The windowed composed loop boots a composed SUT per case in a real GPUI window:
+# 48-65s on a quiet host, so the 2 min default cap read as TIMEOUT whenever the
+# windowed gate shared the machine (`just windowed-gate`, 4 binaries at once).
+[[profile.default.overrides]]
+filter = "binary(gpui_composed_windowed_loop)"
+slow-timeout = { period = "60s", terminate-after = 10 }  # 10 min hard cap
+
 # The dense_patch exactness table and property seed one page per case into one
 # full_headless session and wait for each patch to read back: ~1-2s per case,
 # 40 table rows and 64 generated cases, minutes in all.

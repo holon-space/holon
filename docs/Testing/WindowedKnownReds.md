@@ -1,6 +1,10 @@
 # Windowed GPUI gate — measured known reds
 
-The windowed gate (D48) runs this nextest subset. It opens real windows.
+The landing gate runs `just windowed-gate` (D-gate-windowed.a): every
+`holon-gpui` test binary as its own process, `--test-threads=1`, several at
+once, per-binary timeout (HUNG). A red whose signatures are all registered
+known-reds is pass-with-note; any other red fails the gate. The subset below is
+the older D48 selection, kept for the measured numbers that follow.
 
 ```
 cargo nextest run --no-fail-fast -p holon-gpui -p holon-loro --lib \
