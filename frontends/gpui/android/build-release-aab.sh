@@ -75,6 +75,7 @@ cp "$LIBCXX" "$BUILD/module/lib/arm64-v8a/"
 JAVA_SRCS=(
     "$SCRIPT_DIR/java/dev/gpui/mobile/GpuiTextInputView.java"
     "$SCRIPT_DIR/java/dev/gpui/mobile/GpuiNativeActivity.java"
+    "$SCRIPT_DIR/java/dev/gpui/mobile/GpuiClipboard.java"
 )
 javac -source 8 -target 8 -cp "$PLATFORM" -d "$BUILD/classes" "${JAVA_SRCS[@]}"
 "$SCRIPT_DIR/check-natives.sh" "$BUILD/classes" "$SO" \

@@ -68,6 +68,7 @@ cp "$NDK/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/lib/aarch64-linux-an
 JAVA_SRCS=(
     "$SCRIPT_DIR/java/dev/gpui/mobile/GpuiTextInputView.java"
     "$SCRIPT_DIR/java/dev/gpui/mobile/GpuiNativeActivity.java"
+    "$SCRIPT_DIR/java/dev/gpui/mobile/GpuiClipboard.java"
 )
 [ -e "$BT/d8" ] || { echo "ERROR: d8 not found: $BT/d8 (install build-tools;36.0.0)" >&2; exit 1; }
 command -v javac >/dev/null || { echo "ERROR: javac not on PATH (a JDK is required to build classes.dex)" >&2; exit 1; }
