@@ -4971,6 +4971,9 @@ impl SutSeamMutate for HeadlessFrontendComponent {
         let keywords: Vec<&str> = holon_pbt_core::types::TASK_STATE_CYCLE
             .iter()
             .copied()
+            .chain(std::iter::once(
+                holon_org_format::task_keyword::QUESTION_KEYWORD,
+            ))
             .filter(|k| !k.is_empty())
             .collect();
         let edited =
