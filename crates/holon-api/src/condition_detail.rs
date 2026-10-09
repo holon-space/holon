@@ -18,6 +18,7 @@
 //! one long headline and the cap ate the actionable half.
 
 use crate::condition_bus::ConditionKind;
+use crate::condition_bus::HolonChange;
 
 /// One condition instance's message.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -422,8 +423,12 @@ impl ConditionKind {
             } => ConditionDetail::with_body(
                 format!(
                     "{subject} was {change} in Holon, and {file} was edited before Holon wrote \
-                     that back. Holon's change stands; the file's text was not applied and is \
-                     replaced on the next write. The text was:"
+                     that back.{too_large} Holon's change stands; the file's text was not \
+                     applied and is replaced on the next write. The text was:",
+                    too_large = match change {
+                        HolonChange::Edited => " The two edits are too large to merge.",
+                        HolonChange::Deleted | HolonChange::Moved => "",
+                    },
                 ),
                 vec![file_text.clone()],
             ),

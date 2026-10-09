@@ -835,11 +835,13 @@ impl IngestRefusals {
     }
 }
 
-/// What Holon did to a block that an org file still holds as it was.
+/// What Holon did to a block whose edit in an org file it overrules.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HolonChange {
     Deleted,
     Moved,
+    /// Edited its text, by more than a merge with the file's edit can take.
+    Edited,
 }
 
 impl std::fmt::Display for HolonChange {
@@ -847,6 +849,7 @@ impl std::fmt::Display for HolonChange {
         f.write_str(match self {
             Self::Deleted => "deleted",
             Self::Moved => "moved",
+            Self::Edited => "edited",
         })
     }
 }

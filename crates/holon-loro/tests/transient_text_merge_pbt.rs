@@ -16,18 +16,32 @@
 
 use std::collections::HashSet;
 
+use holon_filesystem::TextMergeOutcome as Outcome;
 use holon_filesystem::ThreeWayTextMerge;
 use holon_loro::TransientLoroTextMerge;
 use proptest::prelude::*;
 
-const BASE_POOL: &str = "abcdefghijkl𝔞𝔟";
+const BASE_POOL: &str = "abc\ndefghijkl𝔞𝔟";
 const THEIRS_POOL: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZ𝔸";
 const MINE_POOL: &str = "0123456789αβγδεζηθικλμνξ😀";
 
-fn merge(base: &str, theirs: &str, mine: &str) -> String {
-    TransientLoroTextMerge
+fn outcome_within(limit: u64, base: &str, theirs: &str, mine: &str) -> Outcome {
+    TransientLoroTextMerge::with_work_limit(limit)
         .merge_text(base, theirs, mine)
         .unwrap_or_else(|e| panic!("merge_text({base:?}, {theirs:?}, {mine:?}) failed: {e:#}"))
+}
+
+fn outcome(base: &str, theirs: &str, mine: &str) -> Outcome {
+    TransientLoroTextMerge::default()
+        .merge_text(base, theirs, mine)
+        .unwrap_or_else(|e| panic!("merge_text({base:?}, {theirs:?}, {mine:?}) failed: {e:#}"))
+}
+
+fn merge(base: &str, theirs: &str, mine: &str) -> String {
+    match outcome(base, theirs, mine) {
+        Outcome::Merged(merged) => merged,
+        Outcome::TooLarge => panic!("merge_text({base:?}, {theirs:?}, {mine:?}) is too large"),
+    }
 }
 
 /// One side's edit of `base`: which base chars it keeps, and how many fresh
@@ -112,7 +126,10 @@ fn subsequence_of(s: &str, keep: &HashSet<char>) -> String {
 }
 
 fn check(base: &str, theirs: &str, mine: &str) -> Result<(), TestCaseError> {
-    let merged = merge(base, theirs, mine);
+    check_merged(base, theirs, mine, merge(base, theirs, mine))
+}
+
+fn check_merged(base: &str, theirs: &str, mine: &str, merged: String) -> Result<(), TestCaseError> {
     let chars = |s: &str| s.chars().collect::<HashSet<char>>();
     let (b, t, m, r) = (chars(base), chars(theirs), chars(mine), chars(&merged));
 
@@ -172,6 +189,23 @@ proptest! {
     }
 
     #[test]
+    fn under_any_work_limit_a_merge_keeps_every_edit_or_merges_nothing(
+        (base, theirs, mine) in triple(),
+        limit in prop_oneof![Just(0u64), 0..400u64, Just(u64::MAX)],
+    ) {
+        let forward = outcome_within(limit, &base, &theirs, &mine);
+        let swapped = outcome_within(limit, &base, &mine, &theirs);
+        prop_assert_eq!(
+            forward == Outcome::TooLarge,
+            swapped == Outcome::TooLarge,
+            "whether the merge is too large must not depend on which side is which"
+        );
+        if let Outcome::Merged(merged) = forward {
+            check_merged(&base, &theirs, &mine, merged)?;
+        }
+    }
+
+    #[test]
     fn mine_unchanged_gives_theirs((base, theirs, _) in triple()) {
         prop_assert_eq!(merge(&base, &theirs, &base), theirs);
     }
@@ -208,11 +242,11 @@ fn equal_chars_deleted_by_both_sides_are_one_delete() {
 //   (counted as a multiset);
 // - two insert-only sides both survive whole, in their order.
 
-const WORDS: &[&str] = &["a", "b", " ", "  ", "ab", "ba", "the", "at", "cat"];
+const WORDS: &[&str] = &["a", "b", " ", "  ", "\n", "ab", "ba", "the", "at", "cat\n"];
 
 fn repeated_text() -> impl Strategy<Value = String> {
     prop_oneof![
-        "[ab ]{0,16}",
+        "[ab \n]{0,16}",
         prop::collection::vec(prop::sample::select(WORDS), 0..8).prop_map(|w| w.concat()),
     ]
 }
@@ -221,7 +255,7 @@ fn fragment() -> impl Strategy<Value = String> {
     prop_oneof![
         3 => Just(String::new()),
         1 => prop::sample::select(WORDS).prop_map(str::to_owned),
-        1 => "[abc ]{1,3}",
+        1 => "[abc \n]{1,3}",
     ]
 }
 
@@ -303,7 +337,8 @@ proptest! {
 
     #[test]
     fn repeated_chars_against_an_insert_only_side_count_every_edit(
-        (base, edited, inserted) in base_with(|b| (rewrite(b), insert_into(b)))
+        (base, edited, inserted) in base_with(|b| (rewrite(b), insert_into(b))),
+        limit in prop_oneof![Just(0u64), 0..400u64, Just(u64::MAX)],
     ) {
         let mut want = char_counts(&base);
         for (side, sign) in [(&edited, 1), (&inserted, 1), (&base, -2)] {
@@ -313,7 +348,9 @@ proptest! {
         }
         want.retain(|_, n| *n != 0);
         for (theirs, mine) in [(&edited, &inserted), (&inserted, &edited)] {
-            let merged = merge(&base, theirs, mine);
+            let Outcome::Merged(merged) = outcome_within(limit, &base, theirs, mine) else {
+                continue;
+            };
             prop_assert_eq!(
                 char_counts(&merged),
                 want.clone(),
@@ -338,6 +375,19 @@ proptest! {
             theirs.chars().count() + mine.chars().count()
         );
     }
+}
+
+/// `theirs` keeps both base chars, though its line `\n` equals the base's
+/// first line.
+#[test]
+fn an_insert_only_side_keeps_the_chars_of_a_line_it_extends() {
+    let (base, theirs, mine) = ("\n ", "a\n \n\n", "\n\n ");
+    let merged = merge(base, theirs, mine);
+    assert!(
+        is_subsequence(theirs, &merged) && is_subsequence(mine, &merged),
+        "both insert-only sides must survive whole in {merged:?}"
+    );
+    assert_eq!(merged.chars().count(), 6, "{merged:?}");
 }
 
 #[test]
@@ -375,4 +425,83 @@ fn a_combining_mark_stays_with_its_base_char() {
 #[test]
 fn concurrent_edits_of_one_emoji_cluster_keep_both_clusters() {
     assert_eq!(merge("👨‍👩‍👧", "👨‍👩", "👨‍👩‍👧👦"), "👨‍👩👦");
+}
+
+const MARKER: &str = "ZZSECRETZZ";
+const MARKER_AT: usize = 100;
+
+/// xorshift64*, so the large texts below are the same on every run.
+struct Rng(u64);
+
+impl Rng {
+    fn below(&mut self, n: usize) -> usize {
+        self.0 ^= self.0 >> 12;
+        self.0 ^= self.0 << 25;
+        self.0 ^= self.0 >> 27;
+        (self.0.wrapping_mul(0x2545_f491_4f6c_dd1d) >> 33) as usize % n
+    }
+}
+
+/// `len` chars over `abcd` with [`MARKER`] at [`MARKER_AT`], and a line break
+/// after every `line_len` chars when given.
+fn noise(len: usize, line_len: Option<usize>) -> Vec<char> {
+    let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+    let mut text: Vec<char> = (0..len)
+        .map(|i| match line_len {
+            Some(n) if i % n == n - 1 => '\n',
+            _ => b"abcd"[rng.below(4)] as char,
+        })
+        .collect();
+    text.splice(MARKER_AT..MARKER_AT + MARKER.len(), MARKER.chars());
+    text
+}
+
+/// `text` with `count` letters at scattered positions replaced by one of
+/// `wxyz`, none within two chars of [`MARKER`].
+fn substitute(text: &[char], count: usize) -> String {
+    let mut rng = Rng(0x2545_f491_4f6c_dd1d);
+    let mut out = text.to_vec();
+    let near_marker = MARKER_AT - 2..MARKER_AT + MARKER.len() + 2;
+    let mut done = 0;
+    while done < count {
+        let at = rng.below(out.len());
+        if near_marker.contains(&at) || !"abcd".contains(out[at]) {
+            continue;
+        }
+        out[at] = b"wxyz"[rng.below(4)] as char;
+        done += 1;
+    }
+    out.into_iter().collect()
+}
+
+#[test]
+fn a_delete_holds_against_a_side_with_many_edits() {
+    for (line_len, edits) in [(None, 3_000), (Some(60), 50)] {
+        let base = noise(60_000, line_len);
+        let theirs = substitute(&base, edits);
+        let base: String = base.into_iter().collect();
+        let mine = base.replacen(MARKER, "", 1);
+        let want = theirs.replacen(MARKER, "", 1);
+        for (theirs, mine) in [(&theirs, &mine), (&mine, &theirs)] {
+            match outcome(&base, theirs, mine) {
+                Outcome::Merged(merged) => assert!(
+                    merged == want,
+                    "lines of {line_len:?}: the merge must drop the marker one side deleted and \
+                     keep the other side's {edits} substitutions; marker in merge: {}",
+                    merged.contains(MARKER)
+                ),
+                Outcome::TooLarge => assert!(edits > 50, "{edits} edits are merged"),
+            }
+        }
+    }
+}
+
+#[test]
+fn a_side_rewriting_a_long_text_is_too_large_to_merge() {
+    let base: String = noise(60_000, None).into_iter().collect();
+    let theirs: String = base.chars().rev().collect();
+    let mine = format!("{base}Q");
+    for (theirs, mine) in [(&theirs, &mine), (&mine, &theirs)] {
+        assert_eq!(outcome(&base, theirs, mine), Outcome::TooLarge);
+    }
 }

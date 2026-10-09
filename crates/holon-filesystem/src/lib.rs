@@ -121,6 +121,7 @@ pub use sync_ports::PageAncestor;
 pub use sync_ports::PageWalkBreak;
 pub use sync_ports::RECORD_FILE_HASH_SQL;
 pub use sync_ports::ShareWritebackDisclosure;
+pub use sync_ports::TextMergeOutcome;
 pub use sync_ports::ThreeWayTextMerge;
 pub use sync_ports::WritebackDisclosure;
 pub use sync_ports::find_foreign_blocks;

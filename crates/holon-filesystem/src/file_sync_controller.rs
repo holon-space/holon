@@ -69,6 +69,7 @@ use crate::sync_ports::MatchSituation;
 use crate::sync_ports::MatchVerdict;
 use crate::sync_ports::MountRegistry;
 use crate::sync_ports::ShareWritebackDisclosure;
+use crate::sync_ports::TextMergeOutcome;
 use crate::sync_ports::ThreeWayTextMerge;
 use crate::sync_ports::WritebackDisclosure;
 use crate::vault_path::PathCollisionKey;
@@ -6697,21 +6698,47 @@ impl FileSyncController {
                             .text_merge
                             .as_ref()
                             .expect("text_merge_active implies a wired merger");
-                        let (resolved, merged) = three_way_text_content(
+                        let content = match three_way_text_content(
                             &old_block.content,
                             &new_block.content,
                             mine,
                             merger.as_ref(),
-                        )?;
-                        if merged {
-                            tracing::info!(
-                                block = %id,
-                                doc = %document_uri,
-                                "concurrent file-vs-UI edit 3-way text-merged \
-                                 (base/disk/current) in Direct (SqlOnly) mode"
-                            );
+                        )? {
+                            None => None,
+                            Some(TextMergeOutcome::Merged(merged)) => {
+                                tracing::info!(
+                                    block = %id,
+                                    doc = %document_uri,
+                                    "concurrent file-vs-UI edit 3-way text-merged \
+                                     (base/disk/current) in Direct (SqlOnly) mode"
+                                );
+                                Some(merged)
+                            }
+                            Some(TextMergeOutcome::TooLarge) => {
+                                let file_text =
+                                    self.block_file_text(path, &document_uri, new_block)?;
+                                tracing::warn!(
+                                    block_id = %id,
+                                    file = %path.display(),
+                                    %file_text,
+                                    "[FileSyncController] the file and Holon both edited a \
+                                     block's text, too much to merge; Holon's text stands and \
+                                     the file's is not ingested"
+                                );
+                                if let Some(disclosure) = &self.writeback_disclosure {
+                                    disclosure.file_edit_overruled(
+                                        id,
+                                        path,
+                                        &file_text,
+                                        HolonChange::Edited,
+                                    );
+                                }
+                                Some(mine.clone())
+                            }
+                        };
+                        if let Some(content) = content {
                             let mut b = new_block.clone();
-                            b.content = resolved;
+                            b.content = content;
                             merged_block = Some(b);
                             did_text_merge = true;
                         }
@@ -10901,8 +10928,8 @@ fn set_eq<T: Eq + std::hash::Hash>(a: &[T], b: &[T]) -> bool {
 ///   → a genuine concurrent file-vs-UI edit: 3-way merge `(base, theirs, mine)`
 ///   through the transient CRDT text.
 ///
-/// Returns `(content_to_ingest, merged)` where `merged` is `true` only in the
-/// last case (so the caller can disclose it and force a disk write-back).
+/// Returns the merge outcome in the last case, and `None` when the disk's text
+/// is ingested as it is.
 /// Precondition: `theirs != base` (disk changed) — the caller only invokes this
 /// inside the existing disk-vs-base content-diff gate. Structural conflicts
 /// (parent/order) are out of scope: this is text CONTENT only.
@@ -10911,7 +10938,7 @@ fn three_way_text_content(
     theirs: &str,
     mine: &str,
     merger: &dyn ThreeWayTextMerge,
-) -> Result<(String, bool)> {
+) -> Result<Option<TextMergeOutcome>> {
     debug_assert_ne!(
         theirs, base,
         "caller must gate on disk-changed (theirs != base)"
@@ -10919,13 +10946,13 @@ fn three_way_text_content(
     if mine == base || theirs == mine {
         // Only the disk side changed (or both landed on the same text): the
         // store held no competing edit, so the disk content wins as today.
-        return Ok((theirs.to_string(), false));
+        return Ok(None);
     }
     // Both sides diverged from the common ancestor → merge, don't clobber.
-    let merged = merger
+    let outcome = merger
         .merge_text(base, theirs, mine)
         .with_context(|| "3-way text merge of concurrent file-vs-UI edit failed")?;
-    Ok((merged, true))
+    Ok(Some(outcome))
 }
 
 /// The block at `index` of a parse in document order, and its descendants.
@@ -11111,7 +11138,8 @@ fn fields_differ(a: &Block, b: &Block, positional: &[&str]) -> bool {
 /// Merge the copy `disk` a file adopts with the store's version `store`, both
 /// in file terms, against their common ancestor `base`. Per field (the text
 /// with its marks, each property key, every other field whole), the side that
-/// changed wins; unmarked text both sides changed is 3-way merged. Without a
+/// changed wins; unmarked text both sides changed is 3-way merged, and is a
+/// conflict when it is too large to merge. Without a
 /// known `base`, the two must agree. A field both sides changed apart is a
 /// conflict, and takes the side `on_conflict` names (`Refuse` takes the copy's,
 /// for a result the caller discards). Position (the parent, `positional` keys)
@@ -11163,7 +11191,7 @@ fn merge_adopted(
     let text = |b: &Block| (b.content.clone(), b.marks.clone());
     let unmarked =
         |b: Option<&Block>| b.is_none_or(|b| b.marks.as_ref().is_none_or(|m| m.is_empty()));
-    match (base, merger) {
+    let outcome = match (base, merger) {
         (Some(b), Some(merger))
             if disk.content != b.content
                 && store.content != b.content
@@ -11172,12 +11200,22 @@ fn merge_adopted(
                 && unmarked(Some(disk))
                 && unmarked(Some(store)) =>
         {
-            merged.content = merger
-                .merge_text(&b.content, &disk.content, &store.content)
-                .with_context(|| format!("3-way merge of the text of adopted block {}", disk.id))?;
+            Some(
+                merger
+                    .merge_text(&b.content, &disk.content, &store.content)
+                    .with_context(|| {
+                        format!("3-way merge of the text of adopted block {}", disk.id)
+                    })?,
+            )
+        }
+        _ => None,
+    };
+    match outcome {
+        Some(TextMergeOutcome::Merged(content)) => {
+            merged.content = content;
             merged.marks = None;
         }
-        _ => {
+        Some(TextMergeOutcome::TooLarge) | None => {
             let (content, marks) = picker.pick(
                 "content",
                 base.map(text).as_ref(),
@@ -12319,8 +12357,17 @@ mod three_way_text_tests {
     /// can assert whether the controller path chose to merge vs pass through.
     struct StubMerge;
     impl ThreeWayTextMerge for StubMerge {
-        fn merge_text(&self, base: &str, theirs: &str, mine: &str) -> Result<String> {
-            Ok(format!("MERGED({base}|{theirs}|{mine})"))
+        fn merge_text(&self, base: &str, theirs: &str, mine: &str) -> Result<TextMergeOutcome> {
+            Ok(TextMergeOutcome::Merged(format!(
+                "MERGED({base}|{theirs}|{mine})"
+            )))
+        }
+    }
+
+    struct TooLargeMerge;
+    impl ThreeWayTextMerge for TooLargeMerge {
+        fn merge_text(&self, _: &str, _: &str, _: &str) -> Result<TextMergeOutcome> {
+            Ok(TextMergeOutcome::TooLarge)
         }
     }
 
@@ -12393,28 +12440,48 @@ mod three_way_text_tests {
         );
     }
 
+    /// Unmarked text too large to merge is a conflict like any other field.
+    #[test]
+    fn adopted_text_too_large_to_merge_is_a_conflict() {
+        let base = text_block("abc", false);
+        let (merged, conflicts) = merge_adopted(
+            Some(&base),
+            &text_block("Xabc", false),
+            &text_block("abcY", false),
+            &[],
+            Some(&TooLargeMerge),
+            OnConflict::Refuse,
+        )
+        .unwrap();
+        assert_eq!(conflicts, vec!["content".to_string()]);
+        assert_eq!(merged.content, "Xabc");
+    }
+
     #[test]
     fn both_changed_triggers_merge() {
         // base "abc", disk "Xabc", store "abcY" — a true concurrent edit.
-        let (content, merged) = three_way_text_content("abc", "Xabc", "abcY", &StubMerge).unwrap();
-        assert!(merged, "both sides diverged → must merge");
-        assert_eq!(content, "MERGED(abc|Xabc|abcY)");
+        assert_eq!(
+            three_way_text_content("abc", "Xabc", "abcY", &StubMerge).unwrap(),
+            Some(TextMergeOutcome::Merged("MERGED(abc|Xabc|abcY)".into()))
+        );
     }
 
     #[test]
     fn only_disk_changed_passes_theirs_through() {
         // store never touched this block (mine == base): disk wins, no merge.
-        let (content, merged) = three_way_text_content("abc", "Xabc", "abc", &StubMerge).unwrap();
-        assert!(!merged, "only disk changed → no merge");
-        assert_eq!(content, "Xabc");
+        assert_eq!(
+            three_way_text_content("abc", "Xabc", "abc", &StubMerge).unwrap(),
+            None
+        );
     }
 
     #[test]
     fn converged_edits_pass_through() {
         // both sides independently produced the same text: no real conflict.
-        let (content, merged) = three_way_text_content("abc", "abZ", "abZ", &StubMerge).unwrap();
-        assert!(!merged, "theirs == mine → no merge");
-        assert_eq!(content, "abZ");
+        assert_eq!(
+            three_way_text_content("abc", "abZ", "abZ", &StubMerge).unwrap(),
+            None
+        );
     }
 }
 #[cfg(test)]

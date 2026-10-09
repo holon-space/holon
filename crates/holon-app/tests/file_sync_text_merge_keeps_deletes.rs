@@ -20,6 +20,7 @@ use holon_core::consolidator::Seen;
 use holon_core::traits::Result as OrderingResult;
 use holon_filesystem::BlockReader;
 use holon_filesystem::DocumentManager;
+use holon_filesystem::IngestOutcome;
 use holon_filesystem::RealFileSystem;
 use holon_loro::TransientLoroTextMerge;
 use holon_orgmode::file_sync_controller::new_org_sync_controller;
@@ -207,7 +208,7 @@ async fn a_file_edit_does_not_bring_back_text_the_app_deleted() {
         }),
         Arc::new(RealFileSystem),
     )
-    .with_text_merge(Arc::new(TransientLoroTextMerge));
+    .with_text_merge(Arc::new(TransientLoroTextMerge::default()));
     let first = controller
         .on_file_changed(&path)
         .await
@@ -229,5 +230,83 @@ async fn a_file_edit_does_not_bring_back_text_the_app_deleted() {
         "abABCDf",
         "the merge of the app's delete of \"cde\" and the file's edit must keep \
          \"cde\" deleted and keep the file's \"ABC\" and \"D\" (ingest outcome {outcome:?})"
+    );
+}
+
+/// The text of `ALPHA` that an overruled file edit discloses, and Holon's
+/// change that overrules it.
+fn overruled_text(bus: &holon_api::ConditionBus) -> Option<(String, holon_api::HolonChange)> {
+    bus.current().into_iter().find_map(|c| match c.reason {
+        holon_api::ConditionKind::FileEditOverruled {
+            file_text, change, ..
+        } if c.subject == EntityUri::block(ALPHA).as_str() => Some((file_text, change)),
+        _ => None,
+    })
+}
+
+#[tokio::test]
+async fn edits_too_large_to_merge_keep_both_texts_and_disclose_the_files() {
+    let doc = EntityUri::block(DOC_ID);
+    let alpha = EntityUri::block(ALPHA);
+    let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+    let base: String = (0..20_000)
+        .map(|_| {
+            seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            b"abcd"[(seed >> 62) as usize] as char
+        })
+        .collect();
+    let mut page = Block::new_text(doc.clone(), EntityUri::no_parent(), "Notes");
+    page.set_page(true);
+    let docs = PageStore::default();
+    docs.by_id.lock().unwrap().insert(doc.clone(), page);
+    let store: Store = Arc::default();
+    store.lock().unwrap().insert(
+        alpha.clone(),
+        Block::new_text(alpha.clone(), doc.clone(), base.clone()),
+    );
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let path = root.join("Notes.org");
+    std::fs::write(&path, org_file(&base)).unwrap();
+
+    let bus = Arc::new(holon_api::ConditionBus::new());
+    let mut controller = new_org_sync_controller(
+        Arc::new(StoreReader(store.clone())),
+        Arc::new(docs),
+        root,
+        Arc::new(StoreTree {
+            store: store.clone(),
+        }),
+        Arc::new(RealFileSystem),
+    )
+    .with_text_merge(Arc::new(TransientLoroTextMerge::default()))
+    .with_writeback_disclosure(Arc::new(
+        holon_app::loro_seams::WritebackDegradedDisclosure { bus: bus.clone() },
+    ));
+    let first = controller
+        .on_file_changed(&path)
+        .await
+        .expect("first ingest of the file");
+    assert_eq!(first, IngestOutcome::Ingested);
+
+    // The app deletes one char; before the write-back, an editor reverses the
+    // whole line.
+    let mine = format!("{}{}", &base[..100], &base[101..]);
+    let theirs: String = base.chars().rev().collect();
+    store.lock().unwrap().get_mut(&alpha).unwrap().content = mine.clone();
+    std::fs::write(&path, org_file(&theirs)).unwrap();
+    let outcome = controller.on_file_changed(&path).await;
+
+    assert!(
+        store.lock().unwrap()[&alpha].content == mine,
+        "the app's text must stand (ingest outcome {outcome:?})"
+    );
+    let (disclosed, change) =
+        overruled_text(&bus).expect("the file's edit is disclosed as overruled");
+    assert_eq!(change, holon_api::HolonChange::Edited);
+    assert!(
+        disclosed.contains(&theirs),
+        "the disclosure must hold the file's text whole"
     );
 }

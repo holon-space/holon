@@ -22,17 +22,20 @@
 //! [`CapabilityProfile::Projected`]: crate::capability::CapabilityProfile::Projected
 //! [`CapabilityProfile::Direct`]: crate::capability::CapabilityProfile::Direct
 
+use std::collections::HashMap;
+use std::ops::Range;
 use std::sync::Arc;
-use std::time::Duration;
-use std::time::Instant;
 
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::ensure;
+use holon_filesystem::TextMergeOutcome;
 use holon_filesystem::ThreeWayTextMerge;
 use loro::ExportMode;
 use loro::LoroDoc;
 use loro::LoroText;
+use similar::DiffOp;
+use similar::DiffTag;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::capability::CapabilityProfile;
@@ -130,122 +133,176 @@ impl TextMergeProvider for TransientTextMergeProvider {
 ///   then `theirs`. A replacement's inserted text sits in the gap before the
 ///   chars it replaces.
 ///
-/// A side whose diff exceeds [`DIFF_BUDGET`] replaces all of `base` instead,
-/// with a warning: nothing is lost, but text both sides kept appears twice.
+/// When either side's diff costs more than `work_limit`, the outcome is
+/// [`TextMergeOutcome::TooLarge`] and nothing is merged.
 ///
 /// Wired into `FileSyncController` in Direct mode via
 /// `FileSyncController::with_text_merge`. In Full (Loro-the-store) mode this is
 /// never invoked — the live CRDT already merges concurrent edits.
-pub struct TransientLoroTextMerge;
+pub struct TransientLoroTextMerge {
+    work_limit: u64,
+}
+
+impl Default for TransientLoroTextMerge {
+    fn default() -> Self {
+        Self {
+            work_limit: WORK_LIMIT,
+        }
+    }
+}
+
+impl TransientLoroTextMerge {
+    pub fn with_work_limit(work_limit: u64) -> Self {
+        Self { work_limit }
+    }
+}
 
 /// Loro orders concurrent inserts at one position lower peer id first, which
 /// puts `mine` before `theirs`.
 const MINE_PEER: u64 = 1;
 const THEIRS_PEER: u64 = 2;
 
-/// Wall time one side's diff may take. Myers costs O(N·D), so rewriting a
-/// long block can take minutes. `similar` ignores deadlines on wasm32.
-const DIFF_BUDGET: Duration = Duration::from_millis(200);
+/// Work one side's diff may cost: Myers over `n` old and `m` new clusters with
+/// edit distance `d` costs `(n + m + 1) * (d + 1)`.
+const WORK_LIMIT: u64 = 20_000_000;
 
 impl ThreeWayTextMerge for TransientLoroTextMerge {
-    fn merge_text(&self, base: &str, theirs: &str, mine: &str) -> Result<String> {
-        merge_within(base, theirs, mine, DIFF_BUDGET)
+    fn merge_text(&self, base: &str, theirs: &str, mine: &str) -> Result<TextMergeOutcome> {
+        let (Some(theirs_runs), Some(mine_runs)) = (
+            edit_runs(base, theirs, self.work_limit)?,
+            edit_runs(base, mine, self.work_limit)?,
+        ) else {
+            return Ok(TextMergeOutcome::TooLarge);
+        };
+
+        let ancestor = LoroDoc::new();
+        ancestor
+            .set_peer_id(0)
+            .context("transient merge: set ancestor peer id")?;
+        ancestor
+            .get_text("content")
+            .insert(0, base)
+            .context("transient merge: seed base text")?;
+        ancestor.commit();
+        let snapshot = ancestor
+            .export(ExportMode::Snapshot)
+            .context("transient merge: export base snapshot")?;
+
+        let fork = |peer: u64, runs: &[Run], side: &str, label: &str| -> Result<LoroDoc> {
+            let doc = LoroDoc::new();
+            doc.set_peer_id(peer)
+                .with_context(|| format!("transient merge: set {label} peer id"))?;
+            doc.import(&snapshot)
+                .with_context(|| format!("transient merge: import base into {label}"))?;
+            let text = doc.get_text("content");
+            apply_runs(&text, runs).with_context(|| format!("transient merge: apply {label}"))?;
+            let edited = text.to_string();
+            ensure!(
+                edited == side,
+                "the diff of {label} edited {base:?} into {edited:?}, not {side:?}"
+            );
+            doc.commit();
+            Ok(doc)
+        };
+        let theirs_doc = fork(THEIRS_PEER, &theirs_runs, theirs, "theirs")?;
+        let mine_doc = fork(MINE_PEER, &mine_runs, mine, "mine")?;
+
+        let mine_updates = mine_doc
+            .export(ExportMode::all_updates())
+            .context("transient merge: export mine updates")?;
+        theirs_doc
+            .import(&mine_updates)
+            .context("transient merge: merge mine into theirs")?;
+        Ok(TextMergeOutcome::Merged(
+            theirs_doc.get_text("content").to_string(),
+        ))
     }
 }
 
-fn merge_within(base: &str, theirs: &str, mine: &str, budget: Duration) -> Result<String> {
-    let ancestor = LoroDoc::new();
-    ancestor
-        .set_peer_id(0)
-        .context("transient merge: set ancestor peer id")?;
-    ancestor
-        .get_text("content")
-        .insert(0, base)
-        .context("transient merge: seed base text")?;
-    ancestor.commit();
-    let snapshot = ancestor
-        .export(ExportMode::Snapshot)
-        .context("transient merge: export base snapshot")?;
-
-    let fork = |peer: u64, side: &str, label: &str| -> Result<LoroDoc> {
-        let doc = LoroDoc::new();
-        doc.set_peer_id(peer)
-            .with_context(|| format!("transient merge: set {label} peer id"))?;
-        doc.import(&snapshot)
-            .with_context(|| format!("transient merge: import base into {label}"))?;
-        apply_minimal_diff(&doc.get_text("content"), base, side, budget, label)
-            .with_context(|| format!("transient merge: apply {label}"))?;
-        doc.commit();
-        Ok(doc)
-    };
-    let theirs_doc = fork(THEIRS_PEER, theirs, "theirs")?;
-    let mine_doc = fork(MINE_PEER, mine, "mine")?;
-
-    let mine_updates = mine_doc
-        .export(ExportMode::all_updates())
-        .context("transient merge: export mine updates")?;
-    theirs_doc
-        .import(&mine_updates)
-        .context("transient merge: merge mine into theirs")?;
-    Ok(theirs_doc.get_text("content").to_string())
+/// One run of a side's edit of `base`. Counts are in chars, as `LoroText`
+/// indexes.
+#[derive(Debug)]
+enum Run<'a> {
+    Keep(usize),
+    Change { deleted: usize, inserted: &'a str },
 }
 
-/// Edit `text` (holding `base`) into `target` by the minimal diff of grapheme
-/// clusters, so a cluster's chars are kept, deleted or replaced as one unit.
+/// The runs of the minimal diff of grapheme clusters that edits `base` into
+/// `target`, so a cluster's chars are kept, deleted or replaced as one unit.
+/// `None` when the diff costs more than `work_limit`.
 ///
 /// `LoroText::update` is not minimal: it may delete a char and insert an equal
 /// one, and the other side's delete of the old char then misses the new one.
-/// The ops come from the raw Myers hook: `similar::capture_diff_slices` also
-/// compacts them, and its ops' positions then disagree with their order when
-/// chars repeat. Each hunk
-/// inserts before it deletes, so its text sits in the gap before the replaced
-/// chars.
-fn apply_minimal_diff(
-    text: &LoroText,
-    base: &str,
-    target: &str,
-    budget: Duration,
-    label: &str,
-) -> Result<()> {
-    let old: Vec<&str> = base.graphemes(true).collect();
-    let new: Vec<&str> = target.graphemes(true).collect();
-    #[cfg(not(target_arch = "wasm32"))]
-    let deadline = Some(Instant::now() + budget);
-    #[cfg(target_arch = "wasm32")]
-    let deadline = None::<Instant>;
-    let mut capture = similar::algorithms::Capture::new();
-    let Ok(()) = similar::algorithms::myers::diff_deadline(
-        &mut capture,
-        &old,
-        0..old.len(),
-        &new,
-        0..new.len(),
-        deadline,
-    );
-    if deadline.is_some_and(|deadline| Instant::now() > deadline) {
-        tracing::warn!(
-            "3-way text merge: diffing {label} ({} -> {} chars) took over {budget:?}; \
-             {label} replaces the whole base text, so text both sides kept appears twice",
-            base.chars().count(),
-            target.chars().count(),
-        );
-        text.insert(0, target)?;
-        text.delete(target.chars().count(), base.chars().count())?;
-        return Ok(());
+/// A diff of lines first is not minimal either: matching equal lines, it may
+/// replace a char the minimal diff keeps.
+fn edit_runs<'a>(base: &str, target: &'a str, work_limit: u64) -> Result<Option<Vec<Run<'a>>>> {
+    let old = Clusters::new(base);
+    let new = Clusters::new(target);
+    let mut ids = HashMap::new();
+    let old_ids = intern(&mut ids, &old);
+    let new_ids = intern(&mut ids, &new);
+    let Some(ops) = bounded_diff(&old_ids, &new_ids, work_limit) else {
+        return Ok(None);
+    };
+    let mut runs = Vec::with_capacity(ops.len());
+    for (tag, old_range, new_range) in walk(&ops, old.len(), new.len())? {
+        let deleted = old.slice(old_range).chars().count();
+        runs.push(match tag {
+            DiffTag::Equal => Run::Keep(deleted),
+            _ => Run::Change {
+                deleted,
+                inserted: new.slice(new_range),
+            },
+        });
+    }
+    Ok(Some(runs))
+}
+
+/// The clusters of `text` as ids, equal iff the clusters are.
+fn intern<'t>(ids: &mut HashMap<&'t str, u32>, text: &Clusters<'t>) -> Vec<u32> {
+    (0..text.len())
+        .map(|i| {
+            let next = ids.len() as u32;
+            *ids.entry(text.slice(i..i + 1)).or_insert(next)
+        })
+        .collect()
+}
+
+/// A text cut into its grapheme clusters.
+struct Clusters<'a> {
+    text: &'a str,
+    /// Byte offset of each cluster's start, then the text's length.
+    bounds: Vec<usize>,
+}
+
+impl<'a> Clusters<'a> {
+    fn new(text: &'a str) -> Self {
+        let mut bounds: Vec<usize> = text.grapheme_indices(true).map(|(at, _)| at).collect();
+        bounds.push(text.len());
+        Self { text, bounds }
     }
 
-    let chars = |clusters: &[&str]| clusters.iter().map(|g| g.chars().count()).sum::<usize>();
-    let (mut old_at, mut new_at, mut text_at) = (0, 0, 0);
-    let (mut inserted, mut deleted) = (String::new(), 0);
-    let flush = |text_at: &mut usize, inserted: &mut String, deleted: &mut usize| -> Result<()> {
-        text.insert(*text_at, inserted)?;
-        *text_at += inserted.chars().count();
-        text.delete(*text_at, *deleted)?;
-        inserted.clear();
-        *deleted = 0;
-        Ok(())
-    };
-    for op in capture.into_ops() {
+    fn len(&self) -> usize {
+        self.bounds.len() - 1
+    }
+
+    fn slice(&self, clusters: Range<usize>) -> &'a str {
+        &self.text[self.bounds[clusters.start]..self.bounds[clusters.end]]
+    }
+}
+
+/// The ops of a diff of `old_len` into `new_len` items, checked to continue
+/// one another and to cover both. They come from the raw Myers hook:
+/// `similar::capture_diff_slices` also compacts them, and its ops' positions
+/// then disagree with their order when items repeat.
+fn walk(
+    ops: &[DiffOp],
+    old_len: usize,
+    new_len: usize,
+) -> Result<Vec<(DiffTag, Range<usize>, Range<usize>)>> {
+    let (mut old_at, mut new_at) = (0, 0);
+    let mut out = Vec::with_capacity(ops.len());
+    for op in ops {
         let (tag, old_range, new_range) = op.as_tag_tuple();
         ensure!(
             old_range.start == old_at && new_range.start == new_at,
@@ -253,21 +310,84 @@ fn apply_minimal_diff(
         );
         old_at = old_range.end;
         new_at = new_range.end;
-        if tag == similar::DiffTag::Equal {
-            flush(&mut text_at, &mut inserted, &mut deleted)?;
-            text_at += chars(&old[old_range]);
-        } else {
-            inserted.extend(new[new_range].iter().copied());
-            deleted += chars(&old[old_range]);
+        out.push((tag, old_range, new_range));
+    }
+    ensure!(
+        old_at == old_len && new_at == new_len,
+        "diff ops end at old {old_at}, new {new_at}, not {old_len}, {new_len}"
+    );
+    Ok(out)
+}
+
+/// The minimal diff of `old` into `new`, or `None` when it costs more than
+/// `work_limit`.
+fn bounded_diff<T: PartialEq>(old: &[T], new: &[T], work_limit: u64) -> Option<Vec<DiffOp>> {
+    let span = (old.len() + new.len() + 1) as u64;
+    edit_distance_at_most(old, new, (work_limit / span).checked_sub(1)?)?;
+    let mut capture = similar::algorithms::Capture::new();
+    let Ok(()) =
+        similar::algorithms::myers::diff(&mut capture, old, 0..old.len(), new, 0..new.len());
+    Some(capture.into_ops())
+}
+
+/// The edit distance of `a` and `b` when it is at most `max_d`: Myers' greedy
+/// forward search, costing `O((n + m) * d)`.
+fn edit_distance_at_most<T: PartialEq>(a: &[T], b: &[T], max_d: u64) -> Option<u64> {
+    let (n, m) = (a.len() as isize, b.len() as isize);
+    let max_d = max_d.min((a.len() + b.len()) as u64) as isize;
+    let offset = max_d + 1;
+    let mut furthest = vec![0isize; 2 * max_d as usize + 3];
+    for d in 0..=max_d {
+        for k in (-d..=d).step_by(2) {
+            let i = (offset + k) as usize;
+            let mut x = if k == -d || (k != d && furthest[i - 1] < furthest[i + 1]) {
+                furthest[i + 1]
+            } else {
+                furthest[i - 1] + 1
+            };
+            let mut y = x - k;
+            while x < n && y < m && a[x as usize] == b[y as usize] {
+                x += 1;
+                y += 1;
+            }
+            furthest[i] = x;
+            if x >= n && y >= m {
+                return Some(d as u64);
+            }
         }
     }
-    flush(&mut text_at, &mut inserted, &mut deleted)?;
-    let edited = text.to_string();
-    ensure!(
-        edited == target,
-        "minimal diff of {base:?} edited it into {edited:?}, not {target:?}"
-    );
-    Ok(())
+    None
+}
+
+/// Applies `runs` to `text`. A changed run is held until the next kept run,
+/// then inserts before it deletes, so its text sits in the gap before the
+/// chars it replaces.
+fn apply_runs(text: &LoroText, runs: &[Run]) -> Result<()> {
+    let (mut at, mut inserted, mut deleted) = (0, String::new(), 0);
+    let flush = |at: &mut usize, inserted: &mut String, deleted: &mut usize| -> Result<()> {
+        text.insert(*at, inserted)?;
+        *at += inserted.chars().count();
+        text.delete(*at, *deleted)?;
+        inserted.clear();
+        *deleted = 0;
+        Ok(())
+    };
+    for run in runs {
+        match run {
+            Run::Keep(chars) => {
+                flush(&mut at, &mut inserted, &mut deleted)?;
+                at += chars;
+            }
+            Run::Change {
+                deleted: chars,
+                inserted: piece,
+            } => {
+                deleted += chars;
+                inserted.push_str(piece);
+            }
+        }
+    }
+    flush(&mut at, &mut inserted, &mut deleted)
 }
 
 #[cfg(test)]
@@ -276,29 +396,55 @@ mod tests {
 
     use super::*;
 
+    fn merged(text: &str) -> TextMergeOutcome {
+        TextMergeOutcome::Merged(text.to_string())
+    }
+
     #[test]
     fn transient_3way_merges_disjoint_edits() {
         // base "abc"; disk prepends "X", store appends "Y" → both survive.
-        let merger = TransientLoroTextMerge;
-        let merged = merger.merge_text("abc", "Xabc", "abcY").unwrap();
-        assert_eq!(merged, "XabcY");
+        let merger = TransientLoroTextMerge::default();
+        let outcome = merger.merge_text("abc", "Xabc", "abcY").unwrap();
+        assert_eq!(outcome, merged("XabcY"));
     }
 
     #[test]
     fn transient_3way_keeps_the_side_that_changed() {
         // Non-conflict shapes still round-trip through the merger sanely, though
         // the controller never calls it in these cases (it gates on both-changed):
-        let merger = TransientLoroTextMerge;
+        let merger = TransientLoroTextMerge::default();
         // only "theirs" changed (mine == base) → theirs.
-        assert_eq!(merger.merge_text("abc", "abcZ", "abc").unwrap(), "abcZ");
+        assert_eq!(
+            merger.merge_text("abc", "abcZ", "abc").unwrap(),
+            merged("abcZ")
+        );
         // only "mine" changed (theirs == base) → mine.
-        assert_eq!(merger.merge_text("abc", "abc", "Wabc").unwrap(), "Wabc");
+        assert_eq!(
+            merger.merge_text("abc", "abc", "Wabc").unwrap(),
+            merged("Wabc")
+        );
     }
 
     #[test]
-    fn a_side_over_the_diff_budget_replaces_the_whole_base() {
-        let merged = merge_within("abcdef", "abcdef", "abf", Duration::ZERO).unwrap();
-        assert_eq!(merged, "abfabcdef");
+    fn edit_distance_is_found_up_to_the_cap() {
+        let (a, b) = (b"abcabba".as_slice(), b"cbabac".as_slice());
+        assert_eq!(edit_distance_at_most(a, b, 5), Some(5));
+        assert_eq!(edit_distance_at_most(a, b, 4), None);
+        assert_eq!(edit_distance_at_most(b"", b"", 0), Some(0));
+        assert_eq!(edit_distance_at_most(b"ab", b"", 1), None);
+    }
+
+    #[test]
+    fn a_side_over_the_work_limit_merges_nothing() {
+        // (6 + 3 + 1) * (3 + 1)
+        let limit = 40;
+        let merge = |limit| {
+            TransientLoroTextMerge::with_work_limit(limit)
+                .merge_text("abcdef", "abcdef", "abf")
+                .unwrap()
+        };
+        assert_eq!(merge(limit), merged("abf"));
+        assert_eq!(merge(limit - 1), TextMergeOutcome::TooLarge);
     }
 
     #[test]

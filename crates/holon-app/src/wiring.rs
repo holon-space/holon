@@ -461,7 +461,7 @@ impl FrontendInjectorExt for Injector {
             // is safe to construct in both modes; the file-sync controller
             // consults it only when `Consolidator::Store` owns the store.
             self.provide::<dyn holon_filesystem::ThreeWayTextMerge>(Provider::root(|_| {
-                Arc::new(holon_loro::TransientLoroTextMerge)
+                Arc::new(holon_loro::TransientLoroTextMerge::default())
                     as Arc<dyn holon_filesystem::ThreeWayTextMerge>
             }));
 

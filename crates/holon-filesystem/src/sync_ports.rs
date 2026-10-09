@@ -543,11 +543,22 @@ pub trait AliasRegistrar: Send + Sync {
 pub trait ThreeWayTextMerge: Send + Sync {
     /// Merge concurrent edits of one block's text content. `base` is the common
     /// ancestor (last-projected snapshot from the BaseStore), `theirs` the
-    /// on-disk edit, `mine` the current store content. Returns the merged text.
+    /// on-disk edit, `mine` the current store content. The outcome depends on
+    /// the three texts alone.
     /// Callers invoke this only when BOTH `theirs` and `mine` differ from
     /// `base` (a genuine concurrent edit); the non-conflict cases never reach
     /// here.
-    fn merge_text(&self, base: &str, theirs: &str, mine: &str) -> Result<String>;
+    fn merge_text(&self, base: &str, theirs: &str, mine: &str) -> Result<TextMergeOutcome>;
+}
+
+/// What a [`ThreeWayTextMerge`] made of two concurrent edits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TextMergeOutcome {
+    Merged(String),
+    /// The edits are too large to merge within the merger's work limit, and
+    /// nothing was merged. The caller keeps one side, and must disclose the
+    /// other to the user.
+    TooLarge,
 }
 
 /// Disclosure seam for shared-subtree write-back gaps.

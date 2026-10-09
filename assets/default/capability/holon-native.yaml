@@ -122,9 +122,9 @@ enforced_by:
     - clause: identity_rename_stability
       site: "crates/holon-filesystem/src/file_sync_controller.rs:573-580 (page-rename path derivation)"
     - clause: ordering_concurrent_insert
-      site: "crates/holon-loro/src/text_merge_provider.rs:151 (merge_text, 3-way merge path)"
+      site: "crates/holon-loro/src/text_merge_provider.rs:170 (merge_text, 3-way merge path)"
     - clause: mutation_merge_granularity
-      site: "crates/holon-loro/src/text_merge_provider.rs:151 (merge_text, 3-way merge path)"
+      site: "crates/holon-loro/src/text_merge_provider.rs:170 (merge_text, 3-way merge path)"
     - clause: mutation_conflict_surface
       site: "crates/holon-filesystem/src/file_sync_controller.rs:1042 (3-way merger wiring, no-store conflict path)"
     - clause: hierarchy_constraints
