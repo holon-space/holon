@@ -506,7 +506,7 @@ impl ConditionKind {
                 ],
             ),
 
-            Self::TypeTableColumnsAdded {
+            Self::TableColumnsAdded {
                 table,
                 added,
                 undeclared,
@@ -520,6 +520,15 @@ impl ConditionKind {
                     .iter()
                     .map(|c| format!("kept undeclared column {c}"))
                     .collect(),
+            ),
+
+            Self::TableRebuilt { diff, rows } => ConditionDetail::with_body(
+                format!(
+                    "{subject} did not match its declaration, so it was recreated empty and \
+                     refilled from the org files and the Loro store; its {rows} stored rows \
+                     were dropped."
+                ),
+                vec![diff.clone()],
             ),
 
             Self::SchemaModuleFailed { error } => ConditionDetail::with_body(

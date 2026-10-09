@@ -13,11 +13,17 @@
 //! dynamic providers with string
 //! keys and `depends_on_static::<DbReady<CoreTables>>()`.
 
+use std::collections::BTreeMap;
 use std::marker::PhantomData;
+use std::sync::Arc;
+use std::sync::Mutex;
 
 use fluxdi::Injector;
 use fluxdi::Provider;
 use fluxdi::Shared;
+use holon_api::Condition;
+use holon_api::ConditionBus;
+use holon_api::ConditionKind;
 use holon_turso::schema_modules::AutomationsJournalSchemaModule;
 use holon_turso::schema_modules::BlockDerivedSchemaModule;
 use holon_turso::schema_modules::BlockHierarchySchemaModule;
@@ -35,6 +41,10 @@ use holon_turso::schema_modules::NavigationSchemaModule;
 use holon_turso::schema_modules::OperationsSchemaModule;
 use holon_turso::schema_modules::SyncStateSchemaModule;
 use holon_turso::schema_modules::TrustProposalsSchemaModule;
+use holon_turso::table_shape::TableAdapted;
+use holon_turso::table_shape::TableChange;
+use holon_turso::turso_adapter::TursoAdapter;
+use holon_turso::turso_adapter::TypeRegistration;
 
 use super::DbHandleProvider;
 use crate::storage::turso::DbHandle;
@@ -154,8 +164,11 @@ impl DbResource for BlockDerivedTable {}
 use crate::storage::schema_module::SchemaModule;
 
 #[tracing::instrument(skip(module, db_handle), name = "di.schema_module", fields(name = module.name()))]
-async fn run_schema_module(module: &dyn SchemaModule, db_handle: &DbHandle) -> anyhow::Result<()> {
-    module
+async fn run_schema_module(
+    module: &dyn SchemaModule,
+    db_handle: &DbHandle,
+) -> anyhow::Result<Vec<TableChange>> {
+    let changes = module
         .ensure_schema(db_handle)
         .await
         .map_err(|e| anyhow::anyhow!("[{}] ensure_schema failed: {e}", module.name()))?;
@@ -172,7 +185,7 @@ async fn run_schema_module(module: &dyn SchemaModule, db_handle: &DbHandle) -> a
             .await
             .map_err(|e| anyhow::anyhow!("[{}] mark_available failed: {e}", module.name()))?;
     }
-    Ok(())
+    Ok(changes)
 }
 
 // ---------------------------------------------------------------------------
@@ -186,10 +199,7 @@ async fn run_schema_module(module: &dyn SchemaModule, db_handle: &DbHandle) -> a
 pub fn register_schema_providers(injector: &Injector) {
     // -- CoreTables (no deps) --
     injector.provide::<DbReady<CoreTables>>(Provider::root_async(|inj| async move {
-        let db = inj.resolve::<dyn DbHandleProvider>();
-        run_schema_module(&CoreSchemaModule, &db.handle())
-            .await
-            .expect("CoreTables schema init failed");
+        run_or_disclose(&inj, &CoreSchemaModule).await;
         Shared::new(DbReady::<CoreTables>::new())
     }));
 
@@ -199,10 +209,7 @@ pub fn register_schema_providers(injector: &Injector) {
         Provider::root_async(|inj| async move {
             let _core = inj.resolve_async::<DbReady<CoreTables>>().await;
             let _bt = inj.resolve_async::<DbReady<BlockTables>>().await;
-            let db = inj.resolve::<dyn DbHandleProvider>();
-            run_schema_module(&BlockMatviewSchemaModule, &db.handle())
-                .await
-                .expect("BlockMatviewView schema init failed");
+            run_or_disclose(&inj, &BlockMatviewSchemaModule).await;
             Shared::new(DbReady::<BlockMatviewView>::new())
         })
         .with_dependency::<DbReady<CoreTables>>()
@@ -214,10 +221,7 @@ pub fn register_schema_providers(injector: &Injector) {
     injector.provide::<DbReady<BlockHierarchyView>>(
         Provider::root_async(|inj| async move {
             let _bm = inj.resolve_async::<DbReady<BlockMatviewView>>().await;
-            let db = inj.resolve::<dyn DbHandleProvider>();
-            run_schema_module(&BlockHierarchySchemaModule, &db.handle())
-                .await
-                .expect("BlockHierarchyView schema init failed");
+            run_or_disclose(&inj, &BlockHierarchySchemaModule).await;
             Shared::new(DbReady::<BlockHierarchyView>::new())
         })
         .with_dependency::<DbReady<BlockMatviewView>>(),
@@ -228,10 +232,7 @@ pub fn register_schema_providers(injector: &Injector) {
         Provider::root_async(|inj| async move {
             let _bm = inj.resolve_async::<DbReady<BlockMatviewView>>().await;
             let _bt = inj.resolve_async::<DbReady<BlockTables>>().await;
-            let db = inj.resolve::<dyn DbHandleProvider>();
-            run_schema_module(&BlockRequirementEdgesSchemaModule, &db.handle())
-                .await
-                .expect("BlockRequirementEdgesView schema init failed");
+            run_or_disclose(&inj, &BlockRequirementEdgesSchemaModule).await;
             Shared::new(DbReady::<BlockRequirementEdgesView>::new())
         })
         .with_dependency::<DbReady<BlockMatviewView>>()
@@ -243,10 +244,7 @@ pub fn register_schema_providers(injector: &Injector) {
     injector.provide::<DbReady<NavigationTables>>(
         Provider::root_async(|inj| async move {
             let _bm = inj.resolve_async::<DbReady<BlockMatviewView>>().await;
-            let db = inj.resolve::<dyn DbHandleProvider>();
-            run_schema_module(&NavigationSchemaModule, &db.handle())
-                .await
-                .expect("NavigationTables schema init failed");
+            run_or_disclose(&inj, &NavigationSchemaModule).await;
             Shared::new(DbReady::<NavigationTables>::new())
         })
         .with_dependency::<DbReady<BlockMatviewView>>(),
@@ -254,28 +252,19 @@ pub fn register_schema_providers(injector: &Injector) {
 
     // -- SyncStateTables (no deps) --
     injector.provide::<DbReady<SyncStateTables>>(Provider::root_async(|inj| async move {
-        let db = inj.resolve::<dyn DbHandleProvider>();
-        run_schema_module(&SyncStateSchemaModule, &db.handle())
-            .await
-            .expect("SyncStateTables schema init failed");
+        run_or_disclose(&inj, &SyncStateSchemaModule).await;
         Shared::new(DbReady::<SyncStateTables>::new())
     }));
 
     // -- IntegrationStateTables (no deps) --
     injector.provide::<DbReady<IntegrationStateTables>>(Provider::root_async(|inj| async move {
-        let db = inj.resolve::<dyn DbHandleProvider>();
-        run_schema_module(&IntegrationStateSchemaModule, &db.handle())
-            .await
-            .expect("IntegrationStateTables schema init failed");
+        run_or_disclose(&inj, &IntegrationStateSchemaModule).await;
         Shared::new(DbReady::<IntegrationStateTables>::new())
     }));
 
     // -- OperationTables (no deps) --
     injector.provide::<DbReady<OperationTables>>(Provider::root_async(|inj| async move {
-        let db = inj.resolve::<dyn DbHandleProvider>();
-        run_schema_module(&OperationsSchemaModule, &db.handle())
-            .await
-            .expect("OperationTables schema init failed");
+        run_or_disclose(&inj, &OperationsSchemaModule).await;
         Shared::new(DbReady::<OperationTables>::new())
     }));
 
@@ -283,10 +272,7 @@ pub fn register_schema_providers(injector: &Injector) {
     // Table creation is dependency-free; the CDC watcher that populates it
     // binds to the block matview at runtime, not at DDL time. --
     injector.provide::<DbReady<BlockDerivedTable>>(Provider::root_async(|inj| async move {
-        let db = inj.resolve::<dyn DbHandleProvider>();
-        run_schema_module(&BlockDerivedSchemaModule, &db.handle())
-            .await
-            .expect("BlockDerivedTable schema init failed");
+        run_or_disclose(&inj, &BlockDerivedSchemaModule).await;
         Shared::new(DbReady::<BlockDerivedTable>::new())
     }));
 
@@ -294,10 +280,7 @@ pub fn register_schema_providers(injector: &Injector) {
     // here so it is queryable (PRQL/raw SQL/list_tables) from session start —
     // never lazily created by its accessor --
     injector.provide::<DbReady<HistoryTables>>(Provider::root_async(|inj| async move {
-        let db = inj.resolve::<dyn DbHandleProvider>();
-        run_schema_module(&HistorySchemaModule, &db.handle())
-            .await
-            .expect("HistoryTables schema init failed");
+        run_or_disclose(&inj, &HistorySchemaModule).await;
         Shared::new(DbReady::<HistoryTables>::new())
     }));
 
@@ -321,10 +304,7 @@ pub fn register_schema_providers(injector: &Injector) {
     injector.provide::<DbReady<AutomationsJournalView>>(
         Provider::root_async(|inj| async move {
             let _hist = inj.resolve_async::<DbReady<HistoryTables>>().await;
-            let db = inj.resolve::<dyn DbHandleProvider>();
-            run_schema_module(&AutomationsJournalSchemaModule, &db.handle())
-                .await
-                .expect("AutomationsJournalView schema init failed");
+            run_or_disclose(&inj, &AutomationsJournalSchemaModule).await;
             Shared::new(DbReady::<AutomationsJournalView>::new())
         })
         .with_dependency::<DbReady<HistoryTables>>(),
@@ -336,10 +316,7 @@ pub fn register_schema_providers(injector: &Injector) {
         Provider::root_async(|inj| async move {
             let _bm = inj.resolve_async::<DbReady<BlockMatviewView>>().await;
             let _bt = inj.resolve_async::<DbReady<BlockTables>>().await;
-            let db = inj.resolve::<dyn DbHandleProvider>();
-            run_schema_module(&JournalDayPagesSchemaModule, &db.handle())
-                .await
-                .expect("JournalDayPagesView schema init failed");
+            run_or_disclose(&inj, &JournalDayPagesSchemaModule).await;
             Shared::new(DbReady::<JournalDayPagesView>::new())
         })
         .with_dependency::<DbReady<BlockMatviewView>>()
@@ -351,10 +328,7 @@ pub fn register_schema_providers(injector: &Injector) {
     injector.provide::<DbReady<JournalFeedView>>(
         Provider::root_async(|inj| async move {
             let _jdp = inj.resolve_async::<DbReady<JournalDayPagesView>>().await;
-            let db = inj.resolve::<dyn DbHandleProvider>();
-            run_schema_module(&JournalFeedSchemaModule, &db.handle())
-                .await
-                .expect("JournalFeedView schema init failed");
+            run_or_disclose(&inj, &JournalFeedSchemaModule).await;
             Shared::new(DbReady::<JournalFeedView>::new())
         })
         .with_dependency::<DbReady<JournalDayPagesView>>(),
@@ -365,10 +339,7 @@ pub fn register_schema_providers(injector: &Injector) {
     injector.provide::<DbReady<BlockTables>>(
         Provider::root_async(|inj| async move {
             let _core = inj.resolve_async::<DbReady<CoreTables>>().await;
-            let db = inj.resolve::<dyn DbHandleProvider>();
-            run_schema_module(&BlockSchemaModule, &db.handle())
-                .await
-                .expect("BlockTables schema init failed");
+            run_or_disclose(&inj, &BlockSchemaModule).await;
             Shared::new(DbReady::<BlockTables>::new())
         })
         .with_dependency::<DbReady<CoreTables>>(),
@@ -378,10 +349,7 @@ pub fn register_schema_providers(injector: &Injector) {
     injector.provide::<DbReady<LinkTables>>(
         Provider::root_async(|inj| async move {
             let _core = inj.resolve_async::<DbReady<CoreTables>>().await;
-            let db = inj.resolve::<dyn DbHandleProvider>();
-            run_schema_module(&LinkSchemaModule, &db.handle())
-                .await
-                .expect("LinkTables schema init failed");
+            run_or_disclose(&inj, &LinkSchemaModule).await;
             Shared::new(DbReady::<LinkTables>::new())
         })
         .with_dependency::<DbReady<CoreTables>>(),
@@ -389,10 +357,7 @@ pub fn register_schema_providers(injector: &Injector) {
 
     // -- IdentityTables (no deps; tables are independent of block) --
     injector.provide::<DbReady<IdentityTables>>(Provider::root_async(|inj| async move {
-        let db = inj.resolve::<dyn DbHandleProvider>();
-        run_schema_module(&IdentitySchemaModule, &db.handle())
-            .await
-            .expect("IdentityTables schema init failed");
+        run_or_disclose(&inj, &IdentitySchemaModule).await;
         Shared::new(DbReady::<IdentityTables>::new())
     }));
 
@@ -400,14 +365,13 @@ pub fn register_schema_providers(injector: &Injector) {
     injector.provide::<DbReady<TrustProposalsView>>(
         Provider::root_async(|inj| async move {
             let _core = inj.resolve_async::<DbReady<CoreTables>>().await;
-            let db = inj.resolve::<dyn DbHandleProvider>();
-            run_schema_module(&TrustProposalsSchemaModule, &db.handle())
-                .await
-                .expect("TrustProposalsView schema init failed");
+            run_or_disclose(&inj, &TrustProposalsSchemaModule).await;
             Shared::new(DbReady::<TrustProposalsView>::new())
         })
         .with_dependency::<DbReady<CoreTables>>(),
     );
+
+    injector.provide::<UnservedTypes>(Provider::root(|_| Shared::new(UnservedTypes::default())));
 
     // -- FreeStandingTypeViews: every free-standing type's own raw table +
     // read matview, derived from its TypeDefinition by TursoAdapter. No
@@ -415,21 +379,120 @@ pub fn register_schema_providers(injector: &Injector) {
     injector.provide::<DbReady<FreeStandingTypeViews>>(Provider::root_async(|inj| async move {
         let type_registry = inj.resolve::<holon_profiles::TypeRegistry>();
         let db = inj.resolve::<dyn DbHandleProvider>();
+        let bus = inj.resolve::<Arc<ConditionBus>>();
+        let unserved = inj.resolve::<UnservedTypes>();
         for type_def in type_registry.all() {
             if !is_free_standing(&type_def) {
                 continue;
             }
-            holon_turso::turso_adapter::TursoAdapter::register(&type_def, &db.handle())
-                .await
-                .unwrap_or_else(|e| {
-                    panic!(
-                        "FreeStandingTypeViews: registering type '{}' failed: {e}",
-                        type_def.name
-                    )
-                });
+            let name = type_def.name.to_string();
+            match TursoAdapter::reconcile(&type_def, &db.handle()).await {
+                Ok(TypeRegistration::Registered { adapted, .. }) => {
+                    if let Some(adapted) = adapted {
+                        bus.emit(columns_added(name, adapted));
+                    }
+                }
+                Ok(TypeRegistration::Refused(refusal)) => {
+                    unserved.insert(
+                        &name,
+                        format!("{}: {refusal}", ConditionKind::TYPE_TABLE_REFUSED),
+                    );
+                    bus.emit(Condition {
+                        subject: name,
+                        reason: ConditionKind::TypeTableRefused {
+                            table: refusal.diff.table.clone(),
+                            diff: refusal.diff.to_string(),
+                            rows: refusal.rows,
+                        },
+                    });
+                }
+                Err(e) => {
+                    tracing::error!("registering type '{name}' failed: {e:#}");
+                    unserved.insert(
+                        &name,
+                        format!("{}: {e:#}", ConditionKind::SCHEMA_MODULE_FAILED),
+                    );
+                    bus.emit(Condition {
+                        subject: format!("type {name}"),
+                        reason: ConditionKind::SchemaModuleFailed {
+                            error: format!("{e:#}"),
+                        },
+                    });
+                }
+            }
         }
         Shared::new(DbReady::<FreeStandingTypeViews>::new())
     }));
+}
+
+/// The free-standing types this session does not serve, with why: their
+/// stored table could not be brought to their declaration. Their writes fail
+/// with that reason until it is remedied.
+#[derive(Clone, Default)]
+pub struct UnservedTypes(Arc<Mutex<BTreeMap<String, String>>>);
+
+impl UnservedTypes {
+    pub fn insert(&self, type_name: &str, reason: String) {
+        self.0
+            .lock()
+            .expect("UnservedTypes lock")
+            .insert(type_name.to_string(), reason);
+    }
+
+    pub fn remove(&self, type_name: &str) {
+        self.0.lock().expect("UnservedTypes lock").remove(type_name);
+    }
+
+    pub fn entries(&self) -> BTreeMap<String, String> {
+        self.0.lock().expect("UnservedTypes lock").clone()
+    }
+}
+
+fn columns_added(subject: String, adapted: TableAdapted) -> Condition {
+    Condition {
+        subject,
+        reason: ConditionKind::TableColumnsAdded {
+            table: adapted.table,
+            added: adapted.added,
+            undeclared: adapted.undeclared,
+            rows: adapted.rows,
+        },
+    }
+}
+
+/// Run `module` and disclose on the condition bus what it changed in stored
+/// tables, or why it failed. A failed module leaves only its own tables
+/// unserved: boot goes on, and whatever needs them fails naming the error.
+async fn run_or_disclose(inj: &Injector, module: &dyn SchemaModule) {
+    let db = inj.resolve::<dyn DbHandleProvider>();
+    let bus = inj.resolve::<Arc<ConditionBus>>();
+    match run_schema_module(module, &db.handle()).await {
+        Ok(changes) => {
+            for change in changes {
+                bus.emit(match change {
+                    TableChange::ColumnsAdded(adapted) => {
+                        columns_added(adapted.table.clone(), adapted)
+                    }
+                    TableChange::Rebuilt(rebuilt) => Condition {
+                        subject: rebuilt.diff.table.clone(),
+                        reason: ConditionKind::TableRebuilt {
+                            diff: rebuilt.diff.to_string(),
+                            rows: rebuilt.rows,
+                        },
+                    },
+                });
+            }
+        }
+        Err(e) => {
+            tracing::error!("schema module {} failed: {e:#}", module.name());
+            bus.emit(Condition {
+                subject: module.name().to_string(),
+                reason: ConditionKind::SchemaModuleFailed {
+                    error: format!("{e:#}"),
+                },
+            });
+        }
+    }
 }
 
 /// A type is free-standing when its id references nothing and it has persisted

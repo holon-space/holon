@@ -135,6 +135,23 @@ fn described(conditions: &[Condition]) -> Vec<String> {
 async fn seed_then_reshape(dir: &Path, reshape: impl FnOnce(&Arc<turso_core::Connection>)) {
     {
         let first = boot(dir, FIRST_DB).await;
+        let schema_conditions: Vec<String> = described(&conditions(&first.bus))
+            .into_iter()
+            .filter(|c| {
+                [
+                    "[type-table-refused]",
+                    "[table-columns-added]",
+                    "[table-rebuilt]",
+                    "[schema-module-failed]",
+                ]
+                .iter()
+                .any(|kind| c.starts_with(kind))
+            })
+            .collect();
+        assert!(
+            schema_conditions.is_empty(),
+            "a fresh database matches every declaration: {schema_conditions:#?}"
+        );
         stock(&first, "pantry-item:flour", &[])
             .await
             .expect("stock flour");
@@ -276,9 +293,7 @@ async fn a_declared_nullable_column_is_added_and_the_rows_survive() {
     let shown = described(&current);
     let added = current
         .iter()
-        .find(|c| {
-            c.condition_key().kind == "type-table-columns-added" && c.subject == "pantry_item"
-        })
+        .find(|c| c.condition_key().kind == "table-columns-added" && c.subject == "pantry_item")
         .unwrap_or_else(|| panic!("no info condition names the added column: {shown:#?}"));
     let text = described(std::slice::from_ref(added)).join("");
     assert!(
@@ -373,13 +388,35 @@ async fn a_changed_column_type_refuses_only_that_type_until_the_user_drops_the_t
             .is_empty(),
         "the remedy drops the stored rows, as its label says"
     );
-    stock(&later, "pantry-item:sugar", &[])
-        .await
-        .expect("after the remedy the type must be writable");
+    stock(
+        &later,
+        "pantry-item:sugar",
+        &[("unit", Value::String("g".into()))],
+    )
+    .await
+    .expect("after the remedy the type must be writable");
     let sugar = sql(&later, "SELECT id, quantity FROM pantry_item").await;
     assert_eq!(
         sugar.first().and_then(|r| r.get("quantity")),
         Some(&Value::Float(1.0)),
         "the recreated table must have the declared shape: {sugar:?}"
+    );
+    op(
+        &later,
+        "pantry_item",
+        "consume",
+        params(&[
+            ("id", Value::String("pantry-item:sugar".into())),
+            ("quantity", Value::Float(0.25)),
+            ("unit", Value::String("g".into())),
+        ]),
+    )
+    .await
+    .expect("the operations the type adds beside create come back with it");
+    let consumed = sql(&later, "SELECT quantity FROM pantry_item").await;
+    assert_eq!(
+        consumed.first().and_then(|r| r.get("quantity")),
+        Some(&Value::Float(0.75)),
+        "consume ran against the recreated table: {consumed:?}"
     );
 }

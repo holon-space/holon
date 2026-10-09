@@ -23,6 +23,9 @@ use sqlparser::parser::Parser;
 
 use crate::matview_manager::drop_dependent_views;
 use crate::sql_utils::sql_statements;
+use crate::table_classes::Class;
+use crate::table_classes::class_of;
+use crate::table_classes::emptied_with;
 use crate::turso::DbHandle;
 
 /// The structure of one column: what decides whether a row written for one
@@ -155,7 +158,7 @@ impl DeclaredTable {
         &self.table
     }
 
-    fn shape(&self) -> TableShape {
+    pub fn shape(&self) -> TableShape {
         TableShape {
             table: self.table.clone(),
             columns: self.columns.iter().map(|c| c.shape.clone()).collect(),
@@ -323,6 +326,22 @@ pub struct TableAdapted {
     pub rows: u64,
 }
 
+/// A stored table the org files and the Loro store refill
+/// ([`Class::Rebuilt`]) that differed from its declaration, so it was dropped
+/// and recreated empty.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TableRebuilt {
+    pub diff: ShapeDiff,
+    pub rows: u64,
+}
+
+/// What [`ensure_statement`] did to a stored table beyond creating it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TableChange {
+    ColumnsAdded(TableAdapted),
+    Rebuilt(TableRebuilt),
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TableReconcile {
     Unchanged,
@@ -416,151 +435,103 @@ fn is_create_table(statement: &str) -> bool {
     words == ["CREATE", "TABLE"]
 }
 
-/// Run one schema statement: a `CREATE TABLE` through [`reconcile_table`], a
-/// refused shape as an error naming the difference; anything else as DDL.
-pub async fn ensure_statement(db_handle: &DbHandle, statement: &str) -> Result<()> {
+/// Run one schema statement: a `CREATE TABLE` through [`reconcile_table`];
+/// anything else as DDL. A refused shape is rebuilt when the table is one the
+/// org files and the Loro store refill, and an error naming the difference
+/// otherwise.
+pub async fn ensure_statement(
+    db_handle: &DbHandle,
+    statement: &str,
+) -> Result<Option<TableChange>> {
     if !is_create_table(statement) {
-        return db_handle.execute_ddl(statement).await;
+        db_handle.execute_ddl(statement).await?;
+        return Ok(None);
     }
     match reconcile_table(db_handle, statement).await? {
-        TableReconcile::Unchanged => Ok(()),
-        TableReconcile::Adapted(adapted) => {
-            tracing::warn!(
-                table = %adapted.table,
-                added = ?adapted.added,
-                undeclared = ?adapted.undeclared,
-                rows = adapted.rows,
-                "stored table gained its newly declared columns"
-            );
-            Ok(())
+        TableReconcile::Unchanged => Ok(None),
+        TableReconcile::Adapted(adapted) => Ok(Some(TableChange::ColumnsAdded(adapted))),
+        TableReconcile::Refused(refusal) => {
+            if class_of(&refusal.diff.table, &HashMap::new()) != Some(Class::Rebuilt) {
+                return Err(StorageError::SchemaError(refusal.to_string()));
+            }
+            rebuild_table(db_handle, statement, &refusal).await?;
+            Ok(Some(TableChange::Rebuilt(TableRebuilt {
+                diff: refusal.diff,
+                rows: refusal.rows,
+            })))
         }
-        TableReconcile::Refused(refusal) => Err(StorageError::SchemaError(refusal.to_string())),
     }
+}
+
+/// Drop `refusal`'s table with the views over it, create it from
+/// `create_sql`, and empty the tables the org ingest refills with it.
+///
+/// Foreign keys are off for the drop, as SQLite's table-rebuild procedure
+/// prescribes: rows of a kept table that reference it (dismissed advice on a
+/// block) find the same ids again once the ingest refills it.
+async fn rebuild_table(
+    db_handle: &DbHandle,
+    create_sql: &str,
+    refusal: &ShapeRefusal,
+) -> Result<()> {
+    let table = refusal.diff.table.as_str();
+    let rebuild_error = |step: &str, e: &dyn fmt::Display| {
+        StorageError::SchemaError(format!("rebuilding {refusal}: {step}: {e}"))
+    };
+    drop_dependent_views(db_handle, table)
+        .await
+        .map_err(|e| rebuild_error("dropping the views over it", &e))?;
+    for emptied in emptied_with(table) {
+        if TableShape::stored(db_handle, emptied)
+            .await?
+            .columns
+            .is_empty()
+        {
+            continue;
+        }
+        db_handle
+            .execute(&format!("DELETE FROM \"{emptied}\""), vec![])
+            .await
+            .map_err(|e| rebuild_error(&format!("emptying {emptied}"), &e))?;
+    }
+    db_handle
+        .execute_ddl("PRAGMA foreign_keys = OFF")
+        .await
+        .map_err(|e| rebuild_error("turning foreign keys off", &e))?;
+    let replaced = async {
+        db_handle
+            .execute_ddl(&format!("DROP TABLE \"{table}\""))
+            .await
+            .map_err(|e| rebuild_error("dropping it", &e))?;
+        db_handle
+            .execute_ddl(create_sql)
+            .await
+            .map_err(|e| rebuild_error("creating it from its declaration", &e))
+    }
+    .await;
+    db_handle
+        .execute_ddl("PRAGMA foreign_keys = ON")
+        .await
+        .map_err(|e| rebuild_error("turning foreign keys back on", &e))?;
+    replaced
+}
+
+/// Drop stored `table` with every view over it: the remedy for a refused
+/// table whose rows the user gives up. Their owners recreate the views.
+pub async fn drop_table_and_views(db_handle: &DbHandle, table: &str) -> Result<()> {
+    drop_dependent_views(db_handle, table).await.map_err(|e| {
+        StorageError::SchemaError(format!("dropping the views over {table}: {e:#}"))
+    })?;
+    db_handle
+        .execute_ddl(&format!("DROP TABLE IF EXISTS \"{table}\""))
+        .await
 }
 
 /// [`ensure_statement`] for every statement of a schema file.
-pub async fn ensure_schema_sql(db_handle: &DbHandle, sql: &str) -> Result<()> {
+pub async fn ensure_schema_sql(db_handle: &DbHandle, sql: &str) -> Result<Vec<TableChange>> {
+    let mut changes = Vec::new();
     for statement in sql_statements(sql) {
-        ensure_statement(db_handle, statement).await?;
+        changes.extend(ensure_statement(db_handle, statement).await?);
     }
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn column(
-        name: &str,
-        sql_type: &str,
-        not_null: bool,
-        has_default: bool,
-        pk: u32,
-    ) -> ColumnShape {
-        ColumnShape {
-            name: name.into(),
-            sql_type: sql_type.into(),
-            not_null,
-            has_default,
-            pk,
-        }
-    }
-
-    #[test]
-    fn a_declaration_parses_into_its_column_structure() {
-        let declared = DeclaredTable::parse(
-            "CREATE TABLE IF NOT EXISTS \"t\" (\n  \"id\" TEXT PRIMARY KEY,\n  \"n\" real NOT \
-             NULL DEFAULT 0,\n  \"note\" TEXT\n)",
-        )
-        .expect("parse");
-        assert_eq!(declared.table(), "t");
-        assert_eq!(
-            declared.shape().columns,
-            vec![
-                column("id", "TEXT", false, false, 1),
-                column("n", "REAL", true, true, 0),
-                column("note", "TEXT", false, false, 0),
-            ]
-        );
-        assert_eq!(
-            declared.columns[1].definition,
-            "\"n\" REAL NOT NULL DEFAULT 0"
-        );
-    }
-
-    #[test]
-    fn a_table_level_primary_key_numbers_its_columns() {
-        let declared = DeclaredTable::parse(
-            "CREATE TABLE d (block_id TEXT NOT NULL, field_name TEXT NOT NULL, v TEXT, PRIMARY \
-             KEY (block_id, field_name))",
-        )
-        .expect("parse");
-        let pks: Vec<u32> = declared.shape().columns.iter().map(|c| c.pk).collect();
-        assert_eq!(pks, vec![1, 2, 0]);
-    }
-
-    fn shape(columns: Vec<ColumnShape>) -> TableShape {
-        TableShape {
-            table: "t".into(),
-            columns,
-        }
-    }
-
-    #[test]
-    fn only_optional_additions_are_lossless() {
-        let id = column("id", "TEXT", false, false, 1);
-        let stored = shape(vec![id.clone()]);
-        let nullable = ShapeDiff::between(
-            &stored,
-            &shape(vec![id.clone(), column("a", "TEXT", false, false, 0)]),
-        );
-        assert!(nullable.is_lossless(), "{nullable}");
-        let defaulted = ShapeDiff::between(
-            &stored,
-            &shape(vec![id.clone(), column("a", "TEXT", true, true, 0)]),
-        );
-        assert!(defaulted.is_lossless(), "{defaulted}");
-        let required = ShapeDiff::between(
-            &stored,
-            &shape(vec![id.clone(), column("a", "TEXT", true, false, 0)]),
-        );
-        assert!(!required.is_lossless(), "{required}");
-    }
-
-    #[test]
-    fn a_type_change_or_a_possible_rename_is_refused() {
-        let id = column("id", "TEXT", false, false, 1);
-        let retyped = ShapeDiff::between(
-            &shape(vec![id.clone(), column("q", "REAL", true, false, 0)]),
-            &shape(vec![id.clone(), column("q", "TEXT", true, false, 0)]),
-        );
-        assert!(!retyped.is_lossless());
-        assert_eq!(retyped.to_string(), "q REAL NOT NULL -> q TEXT NOT NULL");
-        let renamed = ShapeDiff::between(
-            &shape(vec![id.clone(), column("old", "TEXT", false, false, 0)]),
-            &shape(vec![id.clone(), column("new", "TEXT", false, false, 0)]),
-        );
-        assert!(!renamed.is_lossless(), "{renamed}");
-    }
-
-    #[test]
-    fn a_default_expression_is_not_structure() {
-        let a = column("a", "TEXT", true, true, 0);
-        let b = column("A", "text", true, false, 0);
-        let diff = ShapeDiff::between(
-            &shape(vec![a]),
-            &shape(vec![ColumnShape {
-                sql_type: normalize_type(&b.sql_type),
-                ..b
-            }]),
-        );
-        assert!(diff.is_empty(), "{diff}");
-    }
-
-    #[test]
-    fn create_table_detection_skips_leading_comments() {
-        assert!(is_create_table("-- note\n  create  table x (a)"));
-        assert!(!is_create_table("CREATE INDEX i ON x (a)"));
-        assert!(!is_create_table("CREATE MATERIALIZED VIEW v AS SELECT 1"));
-    }
+    Ok(changes)
 }

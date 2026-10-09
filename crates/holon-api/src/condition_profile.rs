@@ -808,9 +808,18 @@ const TYPE_TABLE_REFUSED: ConditionProfile = ConditionProfile::new(
     &[RemedySlot::Retry(OpId::DropRefusedTypeTable)],
 );
 
-const TYPE_TABLE_COLUMNS_ADDED: ConditionProfile = ConditionProfile::new(
+const TABLE_COLUMNS_ADDED: ConditionProfile = ConditionProfile::new(
     ConditionSeverity::Info,
-    "A type's stored table gained new columns",
+    "A stored table gained new columns",
+    icons::INFO,
+    ConditionPlacement::Toast,
+    AllClear::UntilRestart,
+    &[],
+);
+
+const TABLE_REBUILT: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Info,
+    "A stored table was rebuilt from your notes",
     icons::INFO,
     ConditionPlacement::Toast,
     AllClear::UntilRestart,
@@ -889,7 +898,8 @@ impl ConditionKind {
             Self::PanicRecordUnreadable { .. } => PANIC_RECORD_UNREADABLE,
             Self::PanicConditionsUnavailable { .. } => PANIC_CONDITIONS_UNAVAILABLE,
             Self::TypeTableRefused { .. } => TYPE_TABLE_REFUSED,
-            Self::TypeTableColumnsAdded { .. } => TYPE_TABLE_COLUMNS_ADDED,
+            Self::TableColumnsAdded { .. } => TABLE_COLUMNS_ADDED,
+            Self::TableRebuilt { .. } => TABLE_REBUILT,
             Self::SchemaModuleFailed { .. } => SCHEMA_MODULE_FAILED,
         }
     }

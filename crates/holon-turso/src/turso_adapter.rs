@@ -28,6 +28,7 @@ use super::matview_manager::reconcile_named_view;
 use super::schema_module::SchemaModule;
 use super::table_shape::ShapeRefusal;
 use super::table_shape::TableAdapted;
+use super::table_shape::TableChange;
 use super::table_shape::TableReconcile;
 use super::table_shape::reconcile_table;
 use super::turso::DbHandle;
@@ -565,7 +566,7 @@ impl SchemaModule for DerivedMatviewModule {
         ))]
     }
 
-    async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<()> {
+    async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<Vec<TableChange>> {
         let view = TursoAdapter::matview_name(&self.type_def);
         let select = TursoAdapter::matview_select(&self.type_def);
         tracing::info!(
@@ -577,7 +578,7 @@ impl SchemaModule for DerivedMatviewModule {
             .map_err(|e| {
                 StorageError::DatabaseError(format!("Failed to reconcile matview '{view}': {e}"))
             })?;
-        Ok(())
+        Ok(Vec::new())
     }
 }
 

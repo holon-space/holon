@@ -156,6 +156,23 @@ pub fn register_write_authority(
     install_write_authority(type_def, write_authority(type_def, db_handle)?, dispatcher)
 }
 
+/// Register the operations a bundled type adds beside its write authority,
+/// once that authority is registered. The pantry's `consume` is the
+/// read-modify-write that refuses to go negative; create/set_field/delete stay
+/// the derived authority's.
+pub fn register_companion_operations(
+    type_name: &str,
+    db_handle: &DbHandle,
+    dispatcher: &OperationDispatcher,
+) -> Result<()> {
+    if type_name != "pantry_item" || !dispatcher.has_provider(type_name) {
+        return Ok(());
+    }
+    dispatcher.register_provider(Arc::new(
+        crate::core::pantry_operations::PantryOperations::new(db_handle.clone()),
+    ))
+}
+
 fn require_declarable(type_def: &TypeDefinition) -> Result<()> {
     require_engine_stamp_has_a_home(type_def)?;
     require_declarable_soft_delete(type_def)

@@ -145,6 +145,25 @@ pub fn class_of(table: &str, caches: &HashMap<String, String>) -> Option<Class> 
     None
 }
 
+/// The tables emptied when `table` is rebuilt: the record of what was
+/// already ingested (else the org ingest skips the unchanged files that refill
+/// it) and the tables the same ingest refills with it.
+pub fn emptied_with(table: &str) -> Vec<&'static str> {
+    const BLOCK_TREE: &[&str] = &[
+        "block_raw",
+        "block_tags",
+        "block_requires",
+        "block_contributes_to",
+        "block_links",
+    ];
+    if !BLOCK_TREE.contains(&table) {
+        return Vec::new();
+    }
+    std::iter::once("file")
+        .chain(BLOCK_TREE.iter().copied().filter(|t| *t != table))
+        .collect()
+}
+
 /// Every lost table, with what its loss means.
 pub fn lost_tables() -> &'static [(&'static str, &'static str)] {
     LOST

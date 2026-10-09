@@ -194,7 +194,7 @@ async fn the_derived_home_profile_lookup_fits_the_interaction_budget() {
                     .ensure_schema(&handle)
                     .await
                     .expect("matview schema"),
-            }
+            };
         }
 
         let targets = seed(&handle, scale).await;

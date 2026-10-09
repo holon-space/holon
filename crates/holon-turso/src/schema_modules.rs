@@ -29,6 +29,7 @@ use crate::matview_manager::reconcile_named_view;
 use crate::schema_module::EdgeFieldDescriptor;
 use crate::schema_module::SchemaModule;
 use crate::sql_utils::sql_statements;
+use crate::table_shape::TableChange;
 use crate::table_shape::ensure_schema_sql;
 use crate::table_shape::ensure_statement;
 use crate::turso::DbHandle;
@@ -69,10 +70,11 @@ impl SchemaModule for CoreSchemaModule {
         vec![] // No dependencies - this is the root
     }
 
-    async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<()> {
+    async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<Vec<TableChange>> {
+        let mut changes = Vec::new();
         tracing::info!("[CoreSchemaModule] Creating core tables");
 
-        ensure_schema_sql(db_handle, block_raw_schema_sql()).await?;
+        changes.extend(ensure_schema_sql(db_handle, block_raw_schema_sql()).await?);
         tracing::debug!("[CoreSchemaModule] block_raw table + index created");
 
         // Seed the self-parented `sentinel:no_parent` row so root blocks
@@ -92,14 +94,16 @@ impl SchemaModule for CoreSchemaModule {
             .await?;
         tracing::debug!("[CoreSchemaModule] sentinel:no_parent row seeded");
 
-        ensure_schema_sql(db_handle, include_str!("../sql/schema/files.sql")).await?;
+        changes
+            .extend(ensure_schema_sql(db_handle, include_str!("../sql/schema/files.sql")).await?);
         tracing::debug!("[CoreSchemaModule] files table + indexes created");
 
         // `clock` relation (ADR 0024 P5, time-as-data). Seed a deterministic
         // placeholder row so the boot guard always finds a `day` grain; the
         // `ClockScheduler`'s first tick replaces it with the real local date via
         // a CDC-emitting UPDATE before any temporal-guard matview is created.
-        ensure_schema_sql(db_handle, include_str!("../sql/schema/clock.sql")).await?;
+        changes
+            .extend(ensure_schema_sql(db_handle, include_str!("../sql/schema/clock.sql")).await?);
         db_handle
             .execute(
                 "INSERT OR IGNORE INTO clock (grain, today, epoch_day, updated_at) VALUES ('day', \
@@ -109,14 +113,16 @@ impl SchemaModule for CoreSchemaModule {
             .await?;
         tracing::debug!("[CoreSchemaModule] clock table created + day row seeded");
 
-        ensure_schema_sql(
-            db_handle,
-            include_str!("../sql/schema/integration_cache.sql"),
-        )
-        .await?;
+        changes.extend(
+            ensure_schema_sql(
+                db_handle,
+                include_str!("../sql/schema/integration_cache.sql"),
+            )
+            .await?,
+        );
 
         tracing::info!("[CoreSchemaModule] Core tables created successfully");
-        Ok(())
+        Ok(changes)
     }
 }
 
@@ -315,7 +321,8 @@ impl SchemaModule for BlockSchemaModule {
         vec![Resource::schema("block_raw")]
     }
 
-    async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<()> {
+    async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<Vec<TableChange>> {
+        let mut changes = Vec::new();
         tracing::info!("[BlockSchemaModule] Migrating junction tables");
 
         // `task_blockers` is the pre-rename name of `block_requires`; dropping
@@ -354,28 +361,36 @@ impl SchemaModule for BlockSchemaModule {
         )
         .await?;
 
-        ensure_schema_sql(db_handle, include_str!("../sql/schema/block_requires.sql")).await?;
+        changes.extend(
+            ensure_schema_sql(db_handle, include_str!("../sql/schema/block_requires.sql")).await?,
+        );
         tracing::debug!("[BlockSchemaModule] block_requires table created");
 
-        ensure_schema_sql(db_handle, include_str!("../sql/schema/block_tags.sql")).await?;
+        changes.extend(
+            ensure_schema_sql(db_handle, include_str!("../sql/schema/block_tags.sql")).await?,
+        );
         tracing::debug!("[BlockSchemaModule] block_tags table created");
 
-        ensure_schema_sql(
-            db_handle,
-            include_str!("../sql/schema/advice_suppressed.sql"),
-        )
-        .await?;
+        changes.extend(
+            ensure_schema_sql(
+                db_handle,
+                include_str!("../sql/schema/advice_suppressed.sql"),
+            )
+            .await?,
+        );
         tracing::debug!("[BlockSchemaModule] advice_suppressed table created");
 
-        ensure_schema_sql(
-            db_handle,
-            include_str!("../sql/schema/block_contributes_to.sql"),
-        )
-        .await?;
+        changes.extend(
+            ensure_schema_sql(
+                db_handle,
+                include_str!("../sql/schema/block_contributes_to.sql"),
+            )
+            .await?,
+        );
         tracing::debug!("[BlockSchemaModule] block_contributes_to table created");
 
         tracing::info!("[BlockSchemaModule] Junction tables ready");
-        Ok(())
+        Ok(changes)
     }
 
     fn edge_fields(&self) -> Vec<EdgeFieldDescriptor> {
@@ -567,7 +582,7 @@ impl SchemaModule for BlockMatviewSchemaModule {
         requires
     }
 
-    async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<()> {
+    async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<Vec<TableChange>> {
         tracing::info!("[BlockMatviewSchemaModule] Reconciling block matview chain");
         let descriptors = block_edge_fields();
         assert!(
@@ -598,7 +613,7 @@ impl SchemaModule for BlockMatviewSchemaModule {
         } else {
             tracing::info!("[BlockMatviewSchemaModule] block matview unchanged");
         }
-        Ok(())
+        Ok(Vec::new())
     }
 }
 
@@ -626,7 +641,7 @@ impl SchemaModule for BlockRequirementEdgesSchemaModule {
         ]
     }
 
-    async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<()> {
+    async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<Vec<TableChange>> {
         tracing::info!(
             "[BlockRequirementEdgesSchemaModule] Reconciling block_requirement_edges matview"
         );
@@ -640,7 +655,7 @@ impl SchemaModule for BlockRequirementEdgesSchemaModule {
         tracing::debug!(
             "[BlockRequirementEdgesSchemaModule] block_requirement_edges matview reconciled"
         );
-        Ok(())
+        Ok(Vec::new())
     }
 }
 
@@ -673,7 +688,7 @@ impl SchemaModule for TrustProposalsSchemaModule {
         vec![Resource::schema("block_raw")]
     }
 
-    async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<()> {
+    async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<Vec<TableChange>> {
         tracing::info!("[TrustProposalsSchemaModule] Reconciling trust_proposals matview");
         reconcile_named_view(
             db_handle,
@@ -682,7 +697,7 @@ impl SchemaModule for TrustProposalsSchemaModule {
         )
         .await
         .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
-        Ok(())
+        Ok(Vec::new())
     }
 }
 
@@ -707,7 +722,7 @@ impl SchemaModule for BlockHierarchySchemaModule {
         vec![Resource::schema("block")]
     }
 
-    async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<()> {
+    async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<Vec<TableChange>> {
         tracing::info!("[BlockHierarchySchemaModule] Reconciling block_with_path view");
         let created = reconcile_named_view(
             db_handle,
@@ -722,7 +737,7 @@ impl SchemaModule for BlockHierarchySchemaModule {
         } else {
             tracing::info!("[BlockHierarchySchemaModule] block_with_path view unchanged");
         }
-        Ok(())
+        Ok(Vec::new())
     }
 }
 
@@ -755,12 +770,13 @@ impl SchemaModule for NavigationSchemaModule {
         vec![Resource::schema("block")]
     }
 
-    async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<()> {
+    async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<Vec<TableChange>> {
+        let mut changes = Vec::new();
         tracing::info!("[NavigationSchemaModule] Creating navigation tables");
 
         for stmt in sql_statements(include_str!("../sql/schema/navigation.sql")) {
             match ensure_statement(db_handle, stmt).await {
-                Ok(()) => {}
+                Ok(change) => changes.extend(change),
                 Err(e) if e.to_string().contains("already exists") => {
                     tracing::debug!(
                         "[NavigationSchemaModule] Skipping (already exists): {}",
@@ -796,7 +812,7 @@ impl SchemaModule for NavigationSchemaModule {
         }
 
         tracing::info!("[NavigationSchemaModule] Navigation schema ready");
-        Ok(())
+        Ok(changes)
     }
 
     async fn initialize_data(&self, db_handle: &DbHandle) -> Result<()> {
@@ -888,11 +904,14 @@ impl SchemaModule for SyncStateSchemaModule {
         vec![]
     }
 
-    async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<()> {
+    async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<Vec<TableChange>> {
+        let mut changes = Vec::new();
         tracing::info!("[SyncStateSchemaModule] Creating sync_states table");
-        ensure_schema_sql(db_handle, include_str!("../sql/schema/sync_states.sql")).await?;
+        changes.extend(
+            ensure_schema_sql(db_handle, include_str!("../sql/schema/sync_states.sql")).await?,
+        );
         tracing::info!("[SyncStateSchemaModule] sync_states table created");
-        Ok(())
+        Ok(changes)
     }
 }
 
@@ -915,15 +934,18 @@ impl SchemaModule for IntegrationStateSchemaModule {
         vec![]
     }
 
-    async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<()> {
+    async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<Vec<TableChange>> {
+        let mut changes = Vec::new();
         tracing::info!("[IntegrationStateSchemaModule] Creating integration_state table");
-        ensure_schema_sql(
-            db_handle,
-            include_str!("../sql/schema/integration_state.sql"),
-        )
-        .await?;
+        changes.extend(
+            ensure_schema_sql(
+                db_handle,
+                include_str!("../sql/schema/integration_state.sql"),
+            )
+            .await?,
+        );
         tracing::info!("[IntegrationStateSchemaModule] integration_state table created");
-        Ok(())
+        Ok(changes)
     }
 }
 
@@ -946,11 +968,14 @@ impl SchemaModule for OperationsSchemaModule {
         vec![]
     }
 
-    async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<()> {
+    async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<Vec<TableChange>> {
+        let mut changes = Vec::new();
         tracing::info!("[OperationsSchemaModule] Creating operation table");
-        ensure_schema_sql(db_handle, include_str!("../sql/schema/operations.sql")).await?;
+        changes.extend(
+            ensure_schema_sql(db_handle, include_str!("../sql/schema/operations.sql")).await?,
+        );
         tracing::info!("[OperationsSchemaModule] operation table created");
-        Ok(())
+        Ok(changes)
     }
 }
 
@@ -983,7 +1008,8 @@ impl SchemaModule for HistorySchemaModule {
         vec![]
     }
 
-    async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<()> {
+    async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<Vec<TableChange>> {
+        let mut changes = Vec::new();
         let stored = db_handle
             .query_positional(
                 "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'block_history'",
@@ -1008,9 +1034,10 @@ impl SchemaModule for HistorySchemaModule {
                 db_handle.execute_ddl("DROP TABLE block_history").await?;
             }
         }
-        ensure_schema_sql(db_handle, include_str!("../sql/schema/history.sql")).await?;
+        changes
+            .extend(ensure_schema_sql(db_handle, include_str!("../sql/schema/history.sql")).await?);
         tracing::info!("[HistorySchemaModule] block_history table ready");
-        Ok(())
+        Ok(changes)
     }
 }
 
@@ -1047,19 +1074,22 @@ impl SchemaModule for BlockDerivedSchemaModule {
         vec![]
     }
 
-    async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<()> {
-        ensure_statement(
-            db_handle,
-            "CREATE TABLE IF NOT EXISTS block_derived (\
+    async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<Vec<TableChange>> {
+        let mut changes = Vec::new();
+        changes.extend(
+            ensure_statement(
+                db_handle,
+                "CREATE TABLE IF NOT EXISTS block_derived (\
              block_id TEXT NOT NULL, \
              field_name TEXT NOT NULL, \
              value_json TEXT NOT NULL, \
              provenance TEXT NOT NULL, \
              PRIMARY KEY (block_id, field_name))",
-        )
-        .await?;
+            )
+            .await?,
+        );
         tracing::info!("[BlockDerivedSchemaModule] block_derived sidecar table ready");
-        Ok(())
+        Ok(changes)
     }
 }
 
@@ -1084,7 +1114,7 @@ impl SchemaModule for AutomationsJournalSchemaModule {
         vec![Resource::schema("block_history")]
     }
 
-    async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<()> {
+    async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<Vec<TableChange>> {
         tracing::info!("[AutomationsJournalSchemaModule] Reconciling automations_journal matview");
         reconcile_named_view(
             db_handle,
@@ -1093,7 +1123,7 @@ impl SchemaModule for AutomationsJournalSchemaModule {
         )
         .await
         .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
-        Ok(())
+        Ok(Vec::new())
     }
 }
 
@@ -1119,7 +1149,7 @@ impl SchemaModule for JournalDayPagesSchemaModule {
         vec![Resource::schema("block"), Resource::schema("block_tags")]
     }
 
-    async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<()> {
+    async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<Vec<TableChange>> {
         tracing::info!("[JournalDayPagesSchemaModule] Reconciling journal_day_pages matview");
         reconcile_named_view(
             db_handle,
@@ -1128,7 +1158,7 @@ impl SchemaModule for JournalDayPagesSchemaModule {
         )
         .await
         .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
-        Ok(())
+        Ok(Vec::new())
     }
 }
 
@@ -1153,7 +1183,7 @@ impl SchemaModule for JournalFeedSchemaModule {
         vec![Resource::schema("journal_day_pages")]
     }
 
-    async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<()> {
+    async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<Vec<TableChange>> {
         tracing::info!("[JournalFeedSchemaModule] Reconciling journal_feed matview");
         reconcile_named_view(
             db_handle,
@@ -1162,7 +1192,7 @@ impl SchemaModule for JournalFeedSchemaModule {
         )
         .await
         .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
-        Ok(())
+        Ok(Vec::new())
     }
 }
 
@@ -1214,7 +1244,8 @@ impl SchemaModule for LinkSchemaModule {
         vec![Resource::schema("block_raw")]
     }
 
-    async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<()> {
+    async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<Vec<TableChange>> {
+        let mut changes = Vec::new();
         tracing::info!("[LinkSchemaModule] Creating block_links junction + backlinks matview");
         // The pre-increment-2 `block_link` table (LiveData-subscriber-fed,
         // content-regex extraction) is gone: links now derive from
@@ -1222,19 +1253,23 @@ impl SchemaModule for LinkSchemaModule {
         db_handle
             .execute_ddl("DROP TABLE IF EXISTS block_link")
             .await?;
-        ensure_schema_sql(db_handle, include_str!("../sql/schema/block_links.sql")).await?;
+        changes.extend(
+            ensure_schema_sql(db_handle, include_str!("../sql/schema/block_links.sql")).await?,
+        );
         // Merge redirects live here rather than in their own module: they are
         // the other half of id resolution and are re-derived at the same SQL
         // write boundary (from the survivor's `merged_from` property, as
         // `block_links` is from `marks`). They are read on the block-lookup MISS
         // path, NOT by the `resolved_id` rewrite — `merge_blocks` re-points
         // inbound links eagerly, so a resolved link never needs the redirect.
-        ensure_schema_sql(db_handle, include_str!("../sql/schema/block_redirects.sql")).await?;
+        changes.extend(
+            ensure_schema_sql(db_handle, include_str!("../sql/schema/block_redirects.sql")).await?,
+        );
         reconcile_named_view(db_handle, "backlinks", &backlinks_view_select())
             .await
             .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
         tracing::info!("[LinkSchemaModule] block_links + block_redirects + backlinks ready");
-        Ok(())
+        Ok(changes)
     }
 
     fn graph_contributions(
@@ -1287,11 +1322,14 @@ impl SchemaModule for IdentitySchemaModule {
         vec![]
     }
 
-    async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<()> {
+    async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<Vec<TableChange>> {
+        let mut changes = Vec::new();
         tracing::info!("[IdentitySchemaModule] Creating identity tables");
-        ensure_schema_sql(db_handle, include_str!("../sql/schema/identity.sql")).await?;
+        changes.extend(
+            ensure_schema_sql(db_handle, include_str!("../sql/schema/identity.sql")).await?,
+        );
         tracing::info!("[IdentitySchemaModule] identity tables created");
-        Ok(())
+        Ok(changes)
     }
 }
 

@@ -2749,9 +2749,24 @@ impl Module for OperationModule {
 
             // A container that switched an entity off says which setting did
             // it; one that registers nothing keeps the plain not-found answer.
-            if let Some(unavailable) = r.optional_resolve_async::<UnavailableEntities>().await {
-                dispatcher.set_unavailable_entities((*unavailable).clone());
-            }
+            let unserved = match r
+                .optional_resolve_async::<crate::di::DbReady<crate::di::schema_providers::FreeStandingTypeViews>>()
+                .await
+            {
+                Some(_) => r.resolve_async::<crate::di::schema_providers::UnservedTypes>().await.entries(),
+                None => Default::default(),
+            };
+            let mut unavailable = r
+                .optional_resolve_async::<UnavailableEntities>()
+                .await
+                .map(|u| (*u).clone())
+                .unwrap_or_default();
+            unavailable.0.extend(
+                unserved
+                    .iter()
+                    .map(|(name, reason)| (EntityName::new(name.as_str()), reason.clone())),
+            );
+            dispatcher.set_unavailable_entities(unavailable);
             if let Some(attribution) = r
                 .optional_resolve_async::<holon_core::integration_attribution::IntegrationAttribution>()
                 .await
@@ -2759,38 +2774,32 @@ impl Module for OperationModule {
                 dispatcher.set_integration_attribution((*attribution).clone());
             }
 
-            // Every free-standing type the registry carries gets a write
-            // authority derived from ITS definition. `FreeStandingTypeViews`
-            // creates the type's Turso serialization; without this the type
-            // would be queryable but every write to it would find "No provider
-            // registered for entity: <type>" — the exact gap the block-shaped
-            // write path used to hide by being the only authority there is.
+            // Every served free-standing type gets a write authority derived
+            // from ITS definition, over the Turso serialization
+            // `FreeStandingTypeViews` created. An unserved type gets none, so
+            // its writes fail with the reason recorded above.
             let type_registry = r.resolve_async::<holon_profiles::TypeRegistry>().await;
             for type_def in type_registry.all() {
+                if unserved.contains_key(type_def.name.as_str()) {
+                    continue;
+                }
                 crate::core::type_declaration::derive_write_authority(
                     &type_def,
                     &db_handle_provider.handle(),
                     &dispatcher,
                 )
+                .and_then(|()| {
+                    crate::core::type_declaration::register_companion_operations(
+                        &type_def.name,
+                        &db_handle_provider.handle(),
+                        &dispatcher,
+                    )
+                })
                 .unwrap_or_else(|e| {
                     panic!(
                         "[OperationModule] write authority for free-standing type '{}': {e}",
                         type_def.name
                     )
-                });
-            }
-
-            // The pantry's `consume` sits beside the derived authority rather
-            // than replacing it: the generic create/set_field/delete stay the
-            // write path, and consume adds only the read-modify-write the
-            // pantry needs to refuse going negative.
-            if dispatcher.has_provider("pantry_item") {
-                let pantry: Arc<dyn OperationProvider> =
-                    Arc::new(crate::core::pantry_operations::PantryOperations::new(
-                        db_handle_provider.handle(),
-                    ));
-                dispatcher.register_provider(pantry).unwrap_or_else(|e| {
-                    panic!("[OperationModule] registering the pantry consume authority: {e}")
                 });
             }
 

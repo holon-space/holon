@@ -54,6 +54,7 @@ pub mod session;
 pub mod stop_signal;
 pub mod turso_seams;
 pub mod type_admission;
+pub mod type_table_remedy;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod vault_lock;
 pub mod wiring;

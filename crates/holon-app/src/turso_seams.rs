@@ -1198,6 +1198,16 @@ impl Module for OrgModeModule {
             },
         ));
 
+        // The remedy slot of a refused type table: dropping it serves the type
+        // again in this session.
+        injector.provide_into_set::<dyn OperationProvider>(Provider::root_async(
+            |resolver| async move {
+                Arc::new(crate::type_table_remedy::TypeTableRemedyProvider::new(
+                    resolver,
+                )) as Arc<dyn OperationProvider>
+            },
+        ));
+
         // Type onboarding as a PN action (ADR 0024, ruling D57). Contributed
         // here for the same reason as the two above: admission needs the
         // capability profiles, which `holon` may not link. Registering the

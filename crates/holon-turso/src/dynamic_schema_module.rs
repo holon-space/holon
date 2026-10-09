@@ -52,14 +52,17 @@ impl SchemaModule for DynamicSchemaModule {
         deps
     }
 
-    async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<()> {
+    async fn ensure_schema(
+        &self,
+        db_handle: &DbHandle,
+    ) -> Result<Vec<crate::table_shape::TableChange>> {
         let create_sql = self.type_def.to_create_table_sql();
         tracing::info!(
             "[DynamicSchemaModule] Creating table '{}': {}",
             self.type_def.name,
             crate::turso::redact_sql_for_logs(&create_sql)
         );
-        crate::table_shape::ensure_statement(db_handle, &create_sql)
+        let change = crate::table_shape::ensure_statement(db_handle, &create_sql)
             .await
             .map_err(|e| {
                 holon_core::storage::StorageError::DatabaseError(format!(
@@ -77,7 +80,7 @@ impl SchemaModule for DynamicSchemaModule {
             })?;
         }
 
-        Ok(())
+        Ok(change.into_iter().collect())
     }
 }
 

@@ -558,17 +558,23 @@ pub enum ConditionKind {
         diff: String,
         rows: u64,
     },
-    /// The stored table of type `subject` gained the `added` columns its
-    /// declaration names; its `rows` read them as NULL or their default.
-    /// `undeclared` stored columns are kept as they are.
+    /// Stored `table` (of the type or table `subject`) gained the `added`
+    /// columns its declaration names; its `rows` read them as NULL or their
+    /// default. `undeclared` stored columns are kept as they are.
     ///
     /// All-clear: none in this process.
-    TypeTableColumnsAdded {
+    TableColumnsAdded {
         table: String,
         added: Vec<String>,
         undeclared: Vec<String>,
         rows: u64,
     },
+    /// Stored table `subject` differed from its declaration (`diff`) and is
+    /// one the org files and the Loro store refill, so it was dropped with its
+    /// `rows` and recreated empty from the declaration.
+    ///
+    /// All-clear: none in this process.
+    TableRebuilt { diff: String, rows: u64 },
     /// Schema module `subject` could not set up its tables or views
     /// (`error`); whatever reads or writes them fails.
     ///
@@ -656,7 +662,8 @@ impl ConditionKind {
     pub const PANIC_RECORD_UNREADABLE: &'static str = "panic-record-unreadable";
     pub const PANIC_CONDITIONS_UNAVAILABLE: &'static str = "panic-conditions-unavailable";
     pub const TYPE_TABLE_REFUSED: &'static str = "type-table-refused";
-    pub const TYPE_TABLE_COLUMNS_ADDED: &'static str = "type-table-columns-added";
+    pub const TABLE_COLUMNS_ADDED: &'static str = "table-columns-added";
+    pub const TABLE_REBUILT: &'static str = "table-rebuilt";
     pub const SCHEMA_MODULE_FAILED: &'static str = "schema-module-failed";
 
     /// The condition's stable identity, paired with the subject to form a
@@ -725,7 +732,8 @@ impl ConditionKind {
             Self::PanicRecordUnreadable { .. } => Self::PANIC_RECORD_UNREADABLE,
             Self::PanicConditionsUnavailable { .. } => Self::PANIC_CONDITIONS_UNAVAILABLE,
             Self::TypeTableRefused { .. } => Self::TYPE_TABLE_REFUSED,
-            Self::TypeTableColumnsAdded { .. } => Self::TYPE_TABLE_COLUMNS_ADDED,
+            Self::TableColumnsAdded { .. } => Self::TABLE_COLUMNS_ADDED,
+            Self::TableRebuilt { .. } => Self::TABLE_REBUILT,
             Self::SchemaModuleFailed { .. } => Self::SCHEMA_MODULE_FAILED,
         }
     }

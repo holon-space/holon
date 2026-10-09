@@ -70,7 +70,11 @@ pub trait SchemaModule: Send + Sync {
     ///
     /// This method should be idempotent (safe to call multiple times).
     /// Use `CREATE TABLE IF NOT EXISTS`, `CREATE INDEX IF NOT EXISTS`, etc.
-    async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<()>;
+    /// Returns what it changed in stored tables an older binary created.
+    async fn ensure_schema(
+        &self,
+        db_handle: &DbHandle,
+    ) -> Result<Vec<crate::table_shape::TableChange>>;
 
     /// Optional post-schema initialization (e.g., inserting default data).
     ///
