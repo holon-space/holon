@@ -324,14 +324,17 @@ async fn create_page_from_link_empty_target_is_error() {
 // so the merge is a union by id — keeps BOTH blocks, and the vault now carries
 // two Page-tagged blocks named "Areas".
 //
-// The id a fresh store gives page `name` is `holon_api::page_slot` over an
-// empty store, so the property runs against that function, and one two-peer
-// example pins that `create_page_from_link` mints exactly that id.
+// So a page's id is a function of its path and of the pages already holding
+// the ids that path derives: `PageId::for_path(path)`, stepping along
+// `PageId::for_path_beside` past every page that holds an id but is not this
+// page (docs/Plans/PageIdentityDeterminism.md §5.3). `expected_slot` states
+// that model over the two id primitives; the properties hold `page_slot` and
+// the real `create_page_from_link` writer to it.
 
-/// A well-formed page path: 1–3 non-empty segments joined by a `/` that may
-/// carry surrounding spaces (`"Areas / Sub"`), the shape where the parser must
-/// trim segments to agree with the writer.
-fn page_name_strategy() -> impl Strategy<Value = String> {
+/// 1–3 non-empty page-path segments and a `/` separator that may carry
+/// surrounding spaces (`"Areas / Sub"`), the shape where the parser must trim
+/// segments to agree with the writer.
+fn page_path_parts_strategy() -> impl Strategy<Value = (Vec<String>, String)> {
     let segment = "[A-Za-z][A-Za-z0-9 ]{0,7}"
         .prop_map(|s| s.trim().to_string())
         .prop_filter("segment must be non-empty after trimming", |s| {
@@ -344,43 +347,137 @@ fn page_name_strategy() -> impl Strategy<Value = String> {
         Just(" /".to_string()),
     ];
     (proptest::collection::vec(segment, 1..=3), separator)
-        .prop_map(|(segments, sep)| segments.join(&sep))
 }
 
-/// The id a store holding no page mints for page `name`.
-fn fresh_store_page_id(name: &str) -> String {
-    let leaf = name.rsplit('/').next().unwrap().trim();
-    match futures::executor::block_on(holon_api::page_slot(name, leaf, |_| {
-        std::future::ready(Ok(None))
-    }))
-    .expect("page_slot")
-    {
-        holon_api::PageSlot::Create(id) => id.as_str().to_string(),
-        other => panic!("an empty store holds no page, got {other:?}"),
+/// A well-formed page path.
+fn page_name_strategy() -> impl Strategy<Value = String> {
+    page_path_parts_strategy().prop_map(|(segments, sep)| segments.join(&sep))
+}
+
+/// The trimmed segments of a page path and the `/`-joined path of each prefix.
+fn segment_paths(name: &str) -> Vec<(String, String)> {
+    let mut path = String::new();
+    name.split('/')
+        .map(|seg| {
+            let seg = seg.trim().to_string();
+            path = if path.is_empty() {
+                seg.clone()
+            } else {
+                format!("{path}/{seg}")
+            };
+            (seg, path.clone())
+        })
+        .collect()
+}
+
+/// What holds one id along a page path's id chain.
+#[derive(Debug, Clone)]
+enum Holder {
+    /// A page of another title (a rename kept the id).
+    Renamed,
+    /// A page of this title under another parent (a move kept the id).
+    Moved,
+    /// A page whose title differs from this one only in case or spacing.
+    Variant,
+    /// An untitled placeholder for this id.
+    Placeholder,
+    /// This very page: this title under this parent.
+    Same,
+}
+
+fn holder_strategy() -> impl Strategy<Value = Holder> {
+    prop_oneof![
+        4 => Just(Holder::Renamed),
+        2 => Just(Holder::Moved),
+        2 => Just(Holder::Variant),
+        1 => Just(Holder::Placeholder),
+        1 => Just(Holder::Same),
+    ]
+}
+
+/// The id chain `path` derives: `for_path`, then each `for_path_beside` step.
+fn id_chain(path: &str, len: usize) -> Vec<holon_api::link_parser::PageId> {
+    let mut ids = vec![holon_api::link_parser::PageId::for_path(path).unwrap()];
+    while ids.len() < len {
+        let next = holon_api::link_parser::PageId::for_path_beside(
+            path,
+            ids.last().unwrap().as_entity_uri(),
+        )
+        .unwrap();
+        ids.push(next);
+    }
+    ids
+}
+
+/// The slot the model assigns when `holders[i]` holds the i-th id of the chain.
+fn expected_slot(path: &str, holders: &[Holder]) -> holon_api::PageSlot {
+    let ids = id_chain(path, holders.len() + 1);
+    for (holder, id) in holders.iter().zip(&ids) {
+        match holder {
+            Holder::Renamed | Holder::Moved | Holder::Variant => {}
+            Holder::Placeholder => return holon_api::PageSlot::Create(id.clone()),
+            Holder::Same => return holon_api::PageSlot::Existing(id.clone()),
+        }
+    }
+    holon_api::PageSlot::Create(ids[holders.len()].clone())
+}
+
+fn variant_of(title: &str) -> String {
+    let upper = title.to_uppercase();
+    if upper != title {
+        upper
+    } else {
+        format!("{title} ").replacen(' ', "  ", 1)
     }
 }
 
 proptest! {
-    /// inv-page-name-unique: independent peers that each create the same-named
-    /// page mint the same id, so a merge (a union by id) yields one page; and
-    /// the link parser's optimistic id for the target equals it.
+    /// `page_slot` binds a page only to a holder of exactly its title under its
+    /// parent, and otherwise walks the beside chain as the model says.
+    #[test]
+    fn page_slot_follows_the_id_chain_model(
+        name in page_name_strategy(),
+        holders in proptest::collection::vec(holder_strategy(), 0..5),
+    ) {
+        let (title, path) = segment_paths(&name).pop().unwrap();
+        let parent = holon_api::EntityUri::block("parent-of-the-leaf");
+        let held: HashMap<holon_api::EntityUri, holon_api::PageHolder> = holders
+            .iter()
+            .zip(id_chain(&path, holders.len()))
+            .map(|(holder, id)| {
+                let (title, parent) = match holder {
+                    Holder::Renamed => ("held-elsewhere".to_string(), parent.clone()),
+                    Holder::Moved => (title.clone(), holon_api::EntityUri::block("moved-to")),
+                    Holder::Variant => (variant_of(&title), parent.clone()),
+                    Holder::Placeholder => (String::new(), parent.clone()),
+                    Holder::Same => (title.clone(), parent.clone()),
+                };
+                (id.into_entity_uri(), holon_api::PageHolder { title, parent })
+            })
+            .collect();
+        let slot = futures::executor::block_on(holon_api::page_slot(&path, &parent, &title, |id| {
+            std::future::ready(Ok(held.get(&id).cloned()))
+        }))
+        .expect("page_slot");
+        prop_assert_eq!(slot, expected_slot(&path, &holders), "holders {:?}", holders);
+    }
+
+    /// inv-page-name-unique: the id an empty store gives a page is its path id,
+    /// so independent peers creating the same-named page converge; and the link
+    /// parser's optimistic id for the target equals it.
     #[test]
     fn inv_page_name_unique_converges_across_peers(name in page_name_strategy()) {
-        let id = fresh_store_page_id(&name);
+        let (_, path) = segment_paths(&name).pop().unwrap();
+        let id = expected_slot(&path, &[]);
         let path_id = holon_api::link_parser::PageId::for_path(&name).unwrap();
-        prop_assert_eq!(&id, &fresh_store_page_id(&name));
-        prop_assert_eq!(
-            id.as_str(),
-            path_id.as_str(),
-            "a fresh store must mint the path id for {:?}", name
-        );
+        prop_assert_eq!(&id, &holon_api::PageSlot::Create(path_id.clone()));
         if let holon_api::link_parser::LinkTarget::CreationIntent { scheme, target_id, .. } =
             holon_api::link_parser::LinkTargetClassifier::default().classify(&name)
             && scheme == "block"
         {
             prop_assert_eq!(
                 target_id.as_str(),
-                id.as_str(),
+                path_id.as_str(),
                 "parser/writer page-id divergence for target {:?}",
                 name
             );
@@ -388,15 +485,95 @@ proptest! {
     }
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn two_fresh_peers_mint_the_same_page_chain_ids() {
-    let name = "Areas / Sub";
-    let peer_a = block_engine().await;
-    let peer_b = block_engine().await;
-    let a = create_page_from_link(&peer_a, name).await.expect("peer A");
-    let b = create_page_from_link(&peer_b, name).await.expect("peer B");
-    assert_eq!(a, b, "two fresh peers minted divergent ids for {name:?}");
-    assert_eq!(a, fresh_store_page_id(name));
+/// The cases share one engine, so each case's segments carry the case number:
+/// no case finds another case's pages by name.
+const WRITER_CASES: u32 = 32;
+
+/// The real writer mints every page of a generated path at the model's id,
+/// stepping past renamed pages that hold the ids the path derives, and leaves
+/// those pages untouched. A fresh store (no holders) mints the path ids, which
+/// is what makes two fresh peers converge.
+#[test]
+fn create_page_from_link_mints_the_model_ids() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let engine = rt.block_on(block_engine());
+    let case = std::sync::atomic::AtomicUsize::new(0);
+    let strategy = (
+        page_path_parts_strategy().prop_filter(
+            "a repeated segment resolves to its ancestor by name",
+            |(segments, _)| {
+                segments
+                    .iter()
+                    .collect::<std::collections::HashSet<_>>()
+                    .len()
+                    == segments.len()
+            },
+        ),
+        proptest::collection::vec(0usize..3, 3),
+    );
+    proptest::test_runner::TestRunner::new(ProptestConfig::with_cases(WRITER_CASES))
+        .run(&strategy, |((segments, sep), renamed)| {
+            let n = case.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let name = segments
+                .iter()
+                .map(|s| format!("{s} c{n}"))
+                .collect::<Vec<_>>()
+                .join(&sep);
+            rt.block_on(writer_mints_the_model_ids(&engine, &name, &renamed));
+            Ok(())
+        })
+        .unwrap_or_else(|e| panic!("{e}"));
+}
+
+/// Occupy `renamed[i]` ids of segment i's chain with pages of other titles,
+/// then click a link to `name`.
+async fn writer_mints_the_model_ids(engine: &BackendEngine, name: &str, renamed: &[usize]) {
+    let handle = engine.db_handle();
+    let mut held = Vec::new();
+    let mut expected = Vec::new();
+    for ((title, path), &k) in segment_paths(name).iter().zip(renamed) {
+        let ids = id_chain(path, k + 1);
+        for (j, id) in ids[..k].iter().enumerate() {
+            let held_title = format!("held-{path}-{j}");
+            create_page(engine, id.as_str(), &held_title, "sentinel:no_parent").await;
+            held.push((id.as_str().to_string(), held_title));
+        }
+        expected.push((ids[k].as_str().to_string(), title.clone()));
+    }
+
+    let leaf = create_page_from_link(engine, name)
+        .await
+        .expect("create_page_from_link");
+
+    assert_eq!(
+        leaf,
+        expected.last().unwrap().0,
+        "leaf of {name:?}, renamed {renamed:?}"
+    );
+    let mut parent = "sentinel:no_parent".to_string();
+    for (id, title) in &expected {
+        assert_eq!(
+            block_content(handle, id).await.as_deref(),
+            Some(title.as_str()),
+            "{name:?}: page {id}"
+        );
+        assert_eq!(
+            block_parent(handle, id).await.as_deref(),
+            Some(parent.as_str()),
+            "{name:?}: parent of {id}"
+        );
+        parent = id.clone();
+    }
+    for (id, title) in &held {
+        assert_eq!(
+            block_content(handle, id).await.as_deref(),
+            Some(title.as_str()),
+            "{name:?}: the page holding {id} was changed"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

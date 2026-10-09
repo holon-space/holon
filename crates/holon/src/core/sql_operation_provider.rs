@@ -2299,8 +2299,10 @@ impl SqlOperationProvider {
                     parent_id = existing;
                 }
                 None => {
-                    let slot = holon_api::page_slot(&seg_path, name, |id| async move {
-                        self.holder_title(&id)
+                    let parent = EntityUri::parse(&parent_id)
+                        .map_err(|e| format!("parent of page segment '{seg_path}': {e:#}"))?;
+                    let slot = holon_api::page_slot(&seg_path, &parent, name, |id| async move {
+                        self.page_holder(&id)
                             .await
                             .map_err(|e| anyhow::anyhow!("{e}"))
                     })
@@ -2325,11 +2327,12 @@ impl SqlOperationProvider {
         Ok((parent_id, missing))
     }
 
-    /// The title of the row holding `id` (`None` = no row; a row without
-    /// `content` reads as untitled).
-    async fn holder_title(&self, id: &EntityUri) -> Result<Option<String>> {
+    /// The row holding `id` (`None` = no row), its title being the `content`
+    /// [`resolve_page_name`](Self::resolve_page_name) compares; a row without
+    /// `content` reads as untitled.
+    async fn page_holder(&self, id: &EntityUri) -> Result<Option<holon_api::PageHolder>> {
         let sql = format!(
-            "SELECT content FROM {} WHERE id = '{}'",
+            "SELECT content, parent_id FROM {} WHERE id = '{}'",
             self.table_name,
             id.as_str().replace('\'', "''")
         );
@@ -2338,11 +2341,21 @@ impl SqlOperationProvider {
             .query(&sql, HashMap::new())
             .await
             .map_err(|e| format!("reading the holder of {id}: {e}"))?;
-        Ok(rows.into_iter().next().map(|row| {
-            row.get("content")
+        let Some(row) = rows.into_iter().next() else {
+            return Ok(None);
+        };
+        let parent = row
+            .get("parent_id")
+            .and_then(|v| v.as_string())
+            .ok_or_else(|| format!("the holder of {id} has no parent_id"))?;
+        Ok(Some(holon_api::PageHolder {
+            title: row
+                .get("content")
                 .and_then(|v| v.as_string())
                 .unwrap_or_default()
-                .to_string()
+                .to_string(),
+            parent: EntityUri::parse(parent)
+                .map_err(|e| format!("the holder of {id} has parent_id {parent:?}: {e:#}"))?,
         }))
     }
 

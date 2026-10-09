@@ -131,6 +131,7 @@ pub use identity_minting::IdentityInput;
 pub use identity_minting::IdentityMinting;
 pub use identity_minting::MintedId;
 pub use identity_minting::ResolvedAddress;
+pub use identity_recognition::PageHolder;
 pub use identity_recognition::PageSlot;
 pub use identity_recognition::Recognition;
 pub use identity_recognition::page_slot;

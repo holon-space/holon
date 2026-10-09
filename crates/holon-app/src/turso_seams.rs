@@ -701,6 +701,35 @@ impl LiveDocumentManager {
             .insert(doc.id.as_str().to_string(), Arc::new(doc.clone()));
         Ok(doc)
     }
+
+    /// Write `doc`'s title into the untitled placeholder row holding its id
+    /// (`holon_api::Recognition::UnnamedPlaceholder`): the create completes the
+    /// row rather than adding a second one. A placeholder under another parent
+    /// is refused, since completing it would put the page elsewhere.
+    async fn complete_placeholder(&self, placeholder: Block, doc: Block) -> anyhow::Result<Block> {
+        use holon_orgmode::build_block_params;
+        anyhow::ensure!(
+            placeholder.parent_id == doc.parent_id,
+            "page {:?} at {}: the untitled placeholder holding that id sits under {}, not under \
+             {}",
+            doc.title(),
+            doc.id,
+            placeholder.parent_id,
+            doc.parent_id
+        );
+        let mut params = build_block_params(&doc, &doc.parent_id, &doc.id, Some(&placeholder));
+        // As in `update_metadata`: position is owned by the hierarchy and
+        // `content_type` by the projector.
+        params.remove("parent_id");
+        params.remove("content_type");
+        self.ordering
+            .update_in_tree(params)
+            .await
+            .map_err(|e| anyhow::anyhow!("complete_placeholder({}): {e:#}", doc.id))?;
+        self.live
+            .insert(doc.id.as_str().to_string(), Arc::new(doc.clone()));
+        Ok(doc)
+    }
 }
 
 #[async_trait::async_trait]
@@ -747,10 +776,13 @@ impl DocumentManager for LiveDocumentManager {
         // `(parent, title)` de-dup that `create` performs — that de-dup is what
         // let an earlier sibling's random-id placeholder hijack the file's id.
         let _guard = self.create_lock.lock().await;
-        if let Some(existing) = self.get_by_id(&doc.id).await? {
-            return Ok(existing);
+        match self.get_by_id(&doc.id).await? {
+            None => self.insert_page(doc).await,
+            Some(existing) if existing.title().trim().is_empty() => {
+                self.complete_placeholder(existing, doc).await
+            }
+            Some(existing) => Ok(existing),
         }
-        self.insert_page(doc).await
     }
 
     async fn get_by_id(&self, id: &EntityUri) -> anyhow::Result<Option<Block>> {

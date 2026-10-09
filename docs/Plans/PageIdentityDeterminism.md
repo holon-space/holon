@@ -174,7 +174,7 @@ PageId::for_path(path) == deterministic_entity_id("block", &normalize_for_hash(p
    `sql_operation_provider.rs`): replaced `format!("block:{}", Uuid::new_v4())`
    with `PageId::for_path(&seg_path)`, where `seg_path` is the accumulated
    root→segment path. This was the largest divergence source (random UUID).
-3. **Org-file ingest** (`get_or_create_by_name_chain`, `sync_ports.rs`):
+3. **Org-file ingest** (`resolve_dir_page_chain`, `file_sync_controller.rs`):
    replaced `EntityUri::block_random()` with
    `PageId::for_path(&accumulated_name_chain)`. This is the FileSyncController
    `file:→block:` resolution the memo named: a file-page and a link-created
@@ -190,23 +190,44 @@ created later under the new name gets a new id; that is correct (it is a
 different logical page). Convergence is over independent *creation* of the same
 page (the PBT), not over post-hoc renames.
 
-A new page whose path was vacated by a rename still finds
+A new page whose path was vacated by a rename (or a move) still finds
 `PageId::for_path(path)` held by the renamed page. Every page-creating path
-takes its id from one function, `holon_api::page_slot(path, title, holder)`
+that did not find its page by name takes its id from one function,
+`holon_api::page_slot(path, parent, title, holder)`
 (crates/holon-api/src/identity_recognition.rs): org-file ingest
-(`DocumentManager::page_slot`, also behind the default
-`get_or_create_by_name_chain`), a dangling-link click and the destination
-segments of `convert_block_to_page`
-(`SqlOperationProvider::resolve_destination_chain`). It walks
-`PageId::for_path(path)`, then `PageId::for_path_beside(path, previous_id)`, and
-stops at the first id that is unheld or held by an untitled placeholder (create
-there) or held by a page of the same title (that page exists). Each id it passes
-because a page of another title holds it is disclosed with a `warn!`. The new
-page never upserts onto the renamed one, and ingest's write-back stores the
-minted id as the file's `#+ID`. Two paths still refuse a held id: the leaf page
-of `convert_block_to_page` (`IdentityCollision`), and the journal rule
-(`holon_rule_watcher`), which skips the day whose derived id a renamed journal
-page holds.
+(`DocumentManager::page_slot`, through `resolve_dir_page_chain`), a
+dangling-link click and the destination segments of `convert_block_to_page`
+(`SqlOperationProvider::resolve_destination_chain`). The trait default
+`get_or_create_by_name_chain` uses it too but has no production caller. It
+walks `PageId::for_path(path)`, then `PageId::for_path_beside(path,
+previous_id)`, and stops at the first id that is unheld or held by an untitled
+placeholder (create there; the create completes the placeholder with the
+title) or held by this very page. A holder is this page only when its title is
+exactly `title` and its parent is `parent` — the exact `(parent, title)` match
+the by-name lookups make (`find_by_parent_and_name`, `resolve_page_name`) — so
+a page of the same title elsewhere, or of a title that only normalizes equal
+(`My  Notes` for `My Notes`), is passed, not adopted. Each passed id and each
+adopted page is disclosed with a `warn!`: either means the by-name lookup and
+the id disagree. The new page never upserts onto another, and ingest's
+write-back stores the minted id as the file's `#+ID`.
+
+Three paths still refuse a held id. The leaf page of `convert_block_to_page`
+refuses with `IdentityCollision`. The journal rule (`holon_rule_watcher`) skips
+the day whose derived id a renamed journal page holds. And the generic `create`
+op refuses to write over a row of another title (`IdentityCollision`, pinned by
+crates/holon/tests/create_id_collision_semantics.rs); this last one is the
+backstop that turns any id choice that misses a holder into an error instead
+of an overwrite.
+
+On one peer the two `page_slot` callers read holders from different sets.
+Ingest reads the page LiveData (`LiveDocumentManager::get_by_id`, the
+`Page`-tagged rows of `block_raw` plus pages it just wrote), the link click
+reads any `block_raw` row (`SqlOperationProvider::page_holder`). A row that
+holds a path's id without the `Page` tag is passed by a link click but is
+invisible to ingest, whose page create then goes to the same identity gate as
+the `create` backstop; a page ingest just wrote is visible to ingest before
+`block_raw` has it. Reasoned from the code, not measured; tracked
+as docs/Testing/bugfunnel/entries/2026-10-09-page-slot-holder-sets-differ-between-ingest-and-link-click.md.
 
 The id depends on the path and on the titles each peer's store holds at the
 candidate ids when it mints. Two peers mint the same id when their stores agree

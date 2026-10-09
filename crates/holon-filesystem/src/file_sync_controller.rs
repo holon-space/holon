@@ -4042,7 +4042,11 @@ impl FileSyncController {
                     };
                     let page = match companion_id {
                         Some(id) => create(id).await?,
-                        None => match self.doc_manager.page_slot(&accumulated, segment).await? {
+                        None => match self
+                            .doc_manager
+                            .page_slot(&accumulated, &current_parent_id, segment)
+                            .await?
+                        {
                             holon_api::PageSlot::Create(id) => create(id.into_entity_uri()).await?,
                             holon_api::PageSlot::Existing(id) => {
                                 self.doc_manager

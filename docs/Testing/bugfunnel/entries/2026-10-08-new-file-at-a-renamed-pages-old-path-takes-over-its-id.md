@@ -40,10 +40,11 @@ FIXED. Every page-creating path takes its id from `holon_api::page_slot`
 (crates/holon-api/src/identity_recognition.rs): `PageId::for_path(path)` when it
 is free, else the first free id along `PageId::for_path_beside(path, held_id)`
 (crates/holon-api/src/link_parser.rs), with each passed holder disclosed by a
-`warn!`. The callers are org-file ingest and the default
-`DocumentManager::get_or_create_by_name_chain` (both through
-`DocumentManager::page_slot`) and a dangling-link click
-(`SqlOperationProvider::resolve_destination_chain`). Write-back stores the id as the file's `#+ID`.
+`warn!`. The production callers are org-file ingest
+(`DocumentManager::page_slot` through `resolve_dir_page_chain`) and a
+dangling-link click (`SqlOperationProvider::resolve_destination_chain`). The
+trait default `DocumentManager::get_or_create_by_name_chain` uses it too but has
+no production caller. Write-back stores the id as the file's `#+ID`.
 PageIdentityDeterminism.md §5.3 describes the rule and when two peers can still
 mint different ids.
 

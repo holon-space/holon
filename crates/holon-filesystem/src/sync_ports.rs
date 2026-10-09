@@ -380,13 +380,25 @@ pub trait DocumentManager: Send + Sync {
         Ok(current_doc)
     }
 
-    /// The id a page titled `title` at name-chain path `path` takes when no
-    /// page of that title sits at that place: [`holon_api::page_slot`] over
-    /// this store, so an org page and a `[[path]]` link-created page
-    /// converge on one id and neither takes over a renamed page's id.
-    async fn page_slot(&self, path: &str, title: &str) -> Result<holon_api::PageSlot> {
-        holon_api::page_slot(path, title, |id| async move {
-            Ok(self.get_by_id(&id).await?.map(|page| page.content))
+    /// The id a page titled `title` under `parent` at name-chain path `path`
+    /// takes when [`find_by_parent_and_name`](Self::find_by_parent_and_name)
+    /// found none: [`holon_api::page_slot`] over this store, so an org page and
+    /// a `[[path]]` link-created page converge on one id and neither takes
+    /// over a renamed or moved page's id.
+    async fn page_slot(
+        &self,
+        path: &str,
+        parent: &EntityUri,
+        title: &str,
+    ) -> Result<holon_api::PageSlot> {
+        holon_api::page_slot(path, parent, title, |id| async move {
+            Ok(self
+                .get_by_id(&id)
+                .await?
+                .map(|page| holon_api::PageHolder {
+                    title: page.title(),
+                    parent: page.parent_id,
+                }))
         })
         .await
     }
@@ -422,7 +434,10 @@ pub trait DocumentManager: Send + Sync {
                     current_doc = Some(existing);
                 }
                 None => {
-                    let doc = match self.page_slot(&accumulated, segment).await? {
+                    let doc = match self
+                        .page_slot(&accumulated, &current_parent_id, segment)
+                        .await?
+                    {
                         holon_api::PageSlot::Existing(id) => {
                             self.existing_page(&id.into_entity_uri()).await?
                         }
@@ -1064,6 +1079,60 @@ mod name_chain_tests {
             store.get_by_id(&held).await.unwrap().map(|b| b.title()),
             Some("doc_905".to_string()),
             "the renamed page must keep its id and title"
+        );
+    }
+
+    fn store_holding(id: &EntityUri, parent: EntityUri, title: &str) -> PageStore {
+        let mut holder = Block::new_text(id.clone(), parent, title);
+        holder.set_page(true);
+        PageStore {
+            by_id: std::sync::Mutex::new(HashMap::from([(id.clone(), holder)])),
+        }
+    }
+
+    /// A root page `doc_904` is not the page `doc_904` that was moved under
+    /// another page, although the moved page kept the id the root path derives.
+    #[tokio::test]
+    async fn a_root_page_does_not_bind_to_a_moved_page_of_its_title() {
+        let held = holon_api::link_parser::PageId::for_path("doc_904")
+            .unwrap()
+            .into_entity_uri();
+        let store = store_holding(&held, EntityUri::block("61133fe7"), "doc_904");
+
+        let page = store
+            .get_or_create_by_name_chain(&["doc_904"])
+            .await
+            .expect("create root doc_904");
+
+        assert_eq!(
+            page.parent_id,
+            EntityUri::no_parent(),
+            "asked for a ROOT page, got {} under {}",
+            page.id,
+            page.parent_id
+        );
+        assert_ne!(page.id, held, "the root page took the moved page's id");
+    }
+
+    /// `My  Notes` and `My Notes` are two pages to `find_by_parent_and_name`,
+    /// so a page slot must not adopt one for the other.
+    #[tokio::test]
+    async fn a_page_does_not_bind_to_a_page_whose_title_only_normalizes_equal() {
+        let held = holon_api::link_parser::PageId::for_path("My Notes")
+            .unwrap()
+            .into_entity_uri();
+        let store = store_holding(&held, EntityUri::no_parent(), "My  Notes");
+
+        let page = store
+            .get_or_create_by_name_chain(&["My Notes"])
+            .await
+            .expect("create My Notes");
+
+        assert_eq!(page.title(), "My Notes", "bound to {}", page.id);
+        assert_ne!(page.id, held);
+        assert_eq!(
+            store.get_by_id(&held).await.unwrap().map(|b| b.title()),
+            Some("My  Notes".to_string())
         );
     }
 }

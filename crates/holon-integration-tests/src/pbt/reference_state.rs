@@ -2896,8 +2896,8 @@ impl ReferenceState {
     /// under the current parent.
     ///
     /// The minted id is [`holon_api::page_slot`] over the reference's blocks,
-    /// the rule the writer uses: a page a `RenamePage` retitled keeps its id,
-    /// so the new page takes the next id beside it
+    /// the rule the writer uses: a page a `RenamePage` retitled or a move
+    /// re-parented keeps its id, so the new page takes the next id beside it
     /// (docs/Plans/PageIdentityDeterminism.md §5.3).
     pub fn apply_create_page_at_path(&mut self, path: &str) {
         use holon_orgmode::models::OrgBlockExt;
@@ -2929,8 +2929,14 @@ impl ReferenceState {
                     let blocks = &self.domain.block_state.blocks;
                     let slot = futures::executor::block_on(holon_api::page_slot(
                         &seg_path,
+                        &parent,
                         trimmed,
-                        |id| std::future::ready(Ok(blocks.get(&id).map(|b| b.content.clone()))),
+                        |id| {
+                            std::future::ready(Ok(blocks.get(&id).map(|b| holon_api::PageHolder {
+                                title: b.content.clone(),
+                                parent: b.parent_id.clone(),
+                            })))
+                        },
                     ))
                     .unwrap_or_else(|e| {
                         panic!("apply_create_page_at_path: page_slot({seg_path:?}): {e:#}")
