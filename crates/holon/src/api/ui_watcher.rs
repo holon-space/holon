@@ -15,6 +15,7 @@ use holon_api::streaming::WatchHandle;
 use holon_api::streaming::WatcherCommand;
 use holon_api::widget_spec::EnrichedRow;
 use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 
@@ -238,6 +239,9 @@ async fn run_reactive_watcher(
 ) {
     let mut generation: u64 = 0;
     let mut variant = None;
+    // Dropped by the next generation once its watch is registered, which is
+    // what lets the current one go.
+    let mut release_current: Option<oneshot::Sender<std::convert::Infallible>> = None;
 
     // switch_map: each trigger produces an inner stream of UiEvents.
     // When a new trigger arrives, the previous inner stream is aborted.
@@ -278,6 +282,8 @@ async fn run_reactive_watcher(
         // Inner stream: Structure event followed by Data events.
         // Spawned as a task so render_entity can be awaited.
         let (inner_tx, inner_rx) = mpsc::channel::<UiEvent>(64);
+        let (release_tx, release_rx) = oneshot::channel();
+        let release_predecessor = release_current.replace(release_tx);
         let block_id_clone = block_id.clone();
         crate::util::spawn_actor(async move {
             render_and_forward(
@@ -287,6 +293,10 @@ async fn run_reactive_watcher(
                 &block_id_clone,
                 &current_var,
                 current_gen,
+                Handover {
+                    release_predecessor,
+                    released: release_rx,
+                },
             )
             .await;
         });
@@ -302,6 +312,21 @@ async fn run_reactive_watcher(
     }
 }
 
+/// How one render generation hands its place to the next: make before break.
+///
+/// A generation's data stream owns its claim on the watched place, so it keeps
+/// that stream until the generation after it has registered its own claim. A
+/// re-render of the same place then never leaves the place unwatched, and so
+/// never deletes its membership row only to insert it again; a re-render onto
+/// another place releases the old one exactly once, in the action that moved.
+struct Handover {
+    /// Held until this generation's own claim is registered.
+    release_predecessor: Option<oneshot::Sender<std::convert::Infallible>>,
+    /// Resolves when the next generation holds its claim, or when no next
+    /// generation can come because the watcher ended.
+    released: oneshot::Receiver<std::convert::Infallible>,
+}
+
 /// Render a block and forward the result + data stream into the inner channel.
 ///
 /// On success: emits Structure event, then forwards data CDC as Data events.
@@ -313,7 +338,12 @@ async fn render_and_forward(
     block_id: &EntityUri,
     variant: &Option<String>,
     generation: u64,
+    handover: Handover,
 ) {
+    let Handover {
+        release_predecessor,
+        released,
+    } = handover;
     // Advice-rule status surface (ADR 0022 "rule blocks render their own status"):
     // a rule block whose id carries a NON-Active status has its render replaced
     // by the error surface, so parse errors and async DDL failures are visible
@@ -333,7 +363,8 @@ async fn render_and_forward(
     }
 
     match engine.blocks().render_entity(block_id, variant).await {
-        Ok((render_expr, data_stream)) => {
+        Ok((render_expr, mut data_stream)) => {
+            drop(release_predecessor);
             tracing::info!(
                 "[UiWatcher] render_entity('{}') OK: gen={}, render={:?}",
                 block_id,
@@ -351,12 +382,11 @@ async fn render_and_forward(
                     generation,
                 })
                 .await
-                .is_err()
+                .is_ok()
             {
-                return;
+                forward_data_stream(&mut data_stream, &tx, profile_resolver, generation).await;
             }
-
-            forward_data_stream(data_stream, tx, profile_resolver, generation).await;
+            let Err(oneshot::error::RecvError { .. }) = released.await;
         }
         Err(e) => {
             if e.downcast_ref::<crate::api::block_domain::NoBlockRow>()
@@ -454,12 +484,22 @@ async fn render_and_forward(
 
 /// Forward a data CDC stream as UiEvent::Data events.
 async fn forward_data_stream(
-    mut stream: RowChangeStream,
-    output_tx: mpsc::Sender<UiEvent>,
+    stream: &mut RowChangeStream,
+    output_tx: &mpsc::Sender<UiEvent>,
     profile_resolver: Arc<dyn ProfileResolving>,
     generation: u64,
 ) {
-    while let Some(batch_with_metadata) = stream.next().await {
+    loop {
+        // A superseded generation's output closes while its data stream is
+        // quiet; waiting only for the next batch would hold its watch until
+        // some later, unrelated write.
+        let batch_with_metadata = tokio::select! {
+            () = output_tx.closed() => return,
+            next = stream.next() => match next {
+                Some(batch) => batch,
+                None => return,
+            },
+        };
         tracing::info!(
             "[UiWatcher] forward_data_stream: received batch with {} items for gen={}",
             batch_with_metadata.inner.items.len(),

@@ -85,10 +85,24 @@ impl WatchViewKind {
 struct WatchContextGuard {
     db_handle: DbHandle,
     places: WatchPlaces,
-    /// This engine's count of releases that failed against a LIVE database.
-    failures: Arc<std::sync::atomic::AtomicU64>,
+    releases: Arc<WatchReleases>,
     watch_key: String,
     nonce: String,
+}
+
+/// One engine's tally of the membership rows its watches gave up.
+#[derive(Default)]
+struct WatchReleases {
+    /// Release DELETEs issued, ever.
+    issued: std::sync::atomic::AtomicU64,
+    /// Release DELETEs issued and not yet finished. A release is work the
+    /// action that ended its watch caused, so a reader measuring that action
+    /// waits for this to reach 0.
+    in_flight: std::sync::atomic::AtomicU64,
+    /// Releases that failed against a LIVE database. The row survives its
+    /// watch, which [`BackendEngine::unowned_watch_context_rows`] then reports
+    /// as state; this counter says the database also refused.
+    failed: std::sync::atomic::AtomicU64,
 }
 
 /// Which watches of ONE engine hold each place's membership row, and the
@@ -121,7 +135,7 @@ struct PlaceClaims {
 impl Drop for WatchContextGuard {
     fn drop(&mut self) {
         let db_handle = self.db_handle.clone();
-        let failures = self.failures.clone();
+        let releases = self.releases.clone();
         let watch_key = std::mem::take(&mut self.watch_key);
         let nonce = std::mem::take(&mut self.nonce);
 
@@ -161,6 +175,12 @@ impl Drop for WatchContextGuard {
             return;
         }
 
+        releases
+            .issued
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        releases
+            .in_flight
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         crate::util::spawn_actor(async move {
             // The last owner is gone, so the place itself is no longer
             // watched. A successor can re-take it while this delete is still
@@ -196,7 +216,9 @@ impl Drop for WatchContextGuard {
                     );
                 }
                 Err(e) => {
-                    failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    releases
+                        .failed
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     tracing::error!(
                         watch_key = %watch_key,
                         "failed to drop the membership row of a finished watch; its subtree stays \
@@ -204,6 +226,9 @@ impl Drop for WatchContextGuard {
                     );
                 }
             }
+            releases
+                .in_flight
+                .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
         });
     }
 }
@@ -280,10 +305,7 @@ pub struct BackendEngine {
     /// tests running in parallel attributes nothing and underflows on the
     /// subtraction.
     watch_opens: Arc<std::sync::atomic::AtomicU64>,
-    /// Releases that failed against a LIVE database. The row survives its
-    /// watch, which [`Self::unowned_watch_context_rows`] then reports as
-    /// state; this counter says the database also refused.
-    watch_release_failures: Arc<std::sync::atomic::AtomicU64>,
+    watch_releases: Arc<WatchReleases>,
     /// Keeps the clock scheduler's ticking task alive (ADR 0024 P5,
     /// time-as-data). `None` until installed in
     /// `create_initialized_engine`; the boot guard there fails loud if it
@@ -346,7 +368,7 @@ impl BackendEngine {
             accepted_rules: crate::api::accepted_rules::AcceptedRuleHandle::new(),
             watch_places: Arc::new(std::sync::Mutex::new(HashMap::new())),
             watch_opens: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            watch_release_failures: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            watch_releases: Arc::new(WatchReleases::default()),
             _advice_reconciler: None,
             _clock_scheduler: None,
             session_clock_grains: std::sync::Mutex::new(Vec::new()),
@@ -528,12 +550,37 @@ impl BackendEngine {
         keys
     }
 
+    /// The live watches holding `watch_key`'s place, for diagnostics.
+    pub fn watch_owners(&self, watch_key: &str) -> usize {
+        self.watch_places
+            .lock()
+            .expect("watch places mutex")
+            .get(watch_key)
+            .map_or(0, |claims| claims.owners.len())
+    }
+
+    /// Release DELETEs this engine has issued that have not finished yet.
+    pub fn watch_releases_in_flight(&self) -> u64 {
+        self.watch_releases
+            .in_flight
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Release DELETEs this engine has issued, ever: one per place its
+    /// watches stopped watching.
+    pub fn watch_releases_issued(&self) -> u64 {
+        self.watch_releases
+            .issued
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// Releases of this engine that failed against a live database. Must be
     /// 0; the rows they leave are also reported by
     /// [`Self::unowned_watch_context_rows`].
     pub fn watch_release_failures(&self) -> u64 {
-        self.watch_release_failures
-            .load(std::sync::atomic::Ordering::Relaxed)
+        self.watch_releases
+            .failed
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Membership rows in the database that no LIVE watch of this engine owns,
@@ -612,7 +659,7 @@ impl BackendEngine {
         let guard = WatchContextGuard {
             db_handle: self.db_handle.clone(),
             places: self.watch_places.clone(),
-            failures: self.watch_release_failures.clone(),
+            releases: self.watch_releases.clone(),
             watch_key: watch_key.to_string(),
             nonce: nonce.clone(),
         };

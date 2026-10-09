@@ -690,3 +690,112 @@ async fn the_ownership_oracle_names_a_row_no_watch_owns() -> Result<()> {
     drop(watch);
     Ok(())
 }
+
+/// Wait for the next `Structure` the watcher emits, then for its data stream
+/// to go quiet, so nothing still in flight can wake a generation later.
+async fn next_settled_structure(handle: &mut holon_api::streaming::WatchHandle) -> Result<()> {
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(20), handle.recv())
+            .await
+            .context("the watcher emitted no structure within 20s")?
+            .context("the watcher's output closed before it rendered")?;
+        if let holon_api::streaming::UiEvent::Structure { .. } = event {
+            break;
+        }
+    }
+    while let Ok(event) = tokio::time::timeout(Duration::from_millis(300), handle.recv()).await {
+        event.context("the watcher's output closed while it settled")?;
+    }
+    Ok(())
+}
+
+/// The one place `engine` watches.
+fn only_place(engine: &BackendEngine) -> String {
+    let places = engine.watched_places();
+    assert_eq!(places.len(), 1, "one watcher, one place: {places:?}");
+    places.into_iter().next().expect("asserted one")
+}
+
+/// `watch_ui` re-renders by replacing its render generation, and the
+/// generation it replaces owns a claim on the place. A re-render of the SAME
+/// place must hand that claim over: the place never goes unwatched, so its
+/// membership row is never deleted only to be inserted again, and the
+/// replaced generation lets go once the new one holds the place.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_re_render_hands_the_place_over_without_releasing_it() -> Result<()> {
+    let ctx = E2ETestContext::from_engine(block_engine().await?);
+    let engine = ctx.service().engine().clone();
+    create_block(&ctx, "handover-root", ROOT_PARENT).await?;
+    create_block(&ctx, "handover-child", "block:handover-root").await?;
+    let start = count_membership(&ctx).await?;
+
+    let mut handle = holon::api::watch_ui(
+        engine.clone(),
+        holon_api::EntityUri::from_raw("block:handover-root"),
+    )
+    .await?;
+    next_settled_structure(&mut handle).await?;
+    let place = only_place(&engine);
+    let released_before = engine.watch_releases_issued();
+
+    // Editing the watched block re-renders the watcher AND reaches the old
+    // generation's data stream before the new generation can register.
+    let mut params: holon_api::StorageEntity = HashMap::new();
+    params.insert("id".into(), Value::String("block:handover-root".into()));
+    params.insert("field".into(), Value::String("content".into()));
+    params.insert("value".into(), Value::String("edited".into()));
+    ctx.execute_op("block", "set_field", params).await?;
+    next_settled_structure(&mut handle).await?;
+
+    assert_eq!(
+        engine.watch_releases_issued() - released_before,
+        0,
+        "a re-render of {place} released the place it re-took at once"
+    );
+    assert_eq!(
+        engine.watch_owners(&place),
+        1,
+        "the replaced generation still holds {place}"
+    );
+    assert_eq!(count_membership(&ctx).await?, start + 1);
+    assert_eq!(engine.watch_release_failures(), 0);
+    Ok(())
+}
+
+/// Closing a `watch_ui` releases its place on a quiet database: the watch's
+/// last generation lets go because its consumer is gone, not because a later
+/// write happens to reach its data stream.
+#[tokio::test(flavor = "multi_thread")]
+async fn dropping_a_ui_watch_releases_its_place_on_a_quiet_database() -> Result<()> {
+    let ctx = E2ETestContext::from_engine(block_engine().await?);
+    let engine = ctx.service().engine().clone();
+    create_block(&ctx, "closed-root", ROOT_PARENT).await?;
+    create_block(&ctx, "closed-child", "block:closed-root").await?;
+    let start = count_membership(&ctx).await?;
+
+    let mut handle = holon::api::watch_ui(
+        engine.clone(),
+        holon_api::EntityUri::from_raw("block:closed-root"),
+    )
+    .await?;
+    next_settled_structure(&mut handle).await?;
+    let place = only_place(&engine);
+    assert_eq!(count_membership(&ctx).await?, start + 1);
+
+    drop(handle);
+
+    // NOTHING IS WRITTEN AFTER THIS POINT.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while (count_membership(&ctx).await? != start || engine.watch_owners(&place) != 0)
+        && Instant::now() < deadline
+    {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        (count_membership(&ctx).await?, engine.watch_owners(&place)),
+        (start, 0),
+        "a closed ui watch still holds {place} on a quiet database"
+    );
+    assert_eq!(engine.watch_release_failures(), 0);
+    Ok(())
+}

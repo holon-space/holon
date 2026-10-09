@@ -144,6 +144,12 @@ pub(crate) async fn converge_signals(
                 last_cdc = Some(now_cdc);
                 advanced = true;
             }
+            // A watch the action ended releases its membership row on the
+            // database actor; that DELETE is the action's work, so its window
+            // stays open until it lands.
+            if engine.watch_releases_in_flight() > 0 {
+                active = true;
+            }
         }
 
         // Block-matview mirror delivery. The org write-back is driven off this
