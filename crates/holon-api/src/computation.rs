@@ -445,6 +445,12 @@ pub enum ComputeError {
     Arithmetic {
         detail: String,
     },
+    /// A render-DSL call to a name that is neither a value function nor a
+    /// widget.
+    UnknownFunction {
+        name: String,
+        call: String,
+    },
 }
 
 impl fmt::Display for ComputeError {
@@ -469,6 +475,10 @@ impl fmt::Display for ComputeError {
             ComputeError::Arithmetic { detail } => {
                 write!(f, "arithmetic error: {detail}")
             }
+            ComputeError::UnknownFunction { name, call } => write!(
+                f,
+                "unknown function `{name}` in `{call}`: neither a value function nor a widget"
+            ),
         }
     }
 }

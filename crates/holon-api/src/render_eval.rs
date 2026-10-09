@@ -697,19 +697,23 @@ fn value_to_f64(v: &Value) -> Option<f64> {
 /// Dispatcher for named render-DSL functions that return `InterpValue`.
 ///
 /// Implementations are provided by the render interpreter (widget +
-/// value-function registry). Unknown names return `None`; the caller
-/// in `eval_to_interp` then resolves the name to `Value::Null` (F1 in
-/// the design plan — no silent first-arg fallback). // ALLOW(fallback):
-/// historical name in doc comment
-///
-/// A known function refusing its arguments answers `Some(Err(_))`, which
-/// fails the enclosing evaluation.
+/// value-function registry). A call to a name of neither kind fails the
+/// enclosing evaluation, as does a value function refusing its arguments.
 pub trait ValueFnLookup {
-    /// `invoke` answers `Some` for `name`. A call to any other name is a
-    /// widget, whose arguments are evaluated where it is built, not here.
-    fn knows(&self, name: &str) -> bool;
+    /// `None` for a name that is neither a value function nor a widget.
+    fn call_kind(&self, name: &str) -> Option<CallKind>;
 
+    /// Answers `Some` for every name whose `call_kind` is `ValueFn`.
     fn invoke(&self, name: &str, args: &ResolvedArgs) -> Option<Result<InterpValue, ComputeError>>;
+}
+
+/// What a called name in the render DSL refers to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallKind {
+    ValueFn,
+    /// Its arguments are evaluated where the widget is built, not where the
+    /// call is passed as an argument.
+    Widget,
 }
 
 /// Built-in value functions available to every caller — `concat` for
@@ -723,8 +727,8 @@ pub trait ValueFnLookup {
 pub struct CoreValueFnLookup;
 
 impl ValueFnLookup for CoreValueFnLookup {
-    fn knows(&self, name: &str) -> bool {
-        name == "concat"
+    fn call_kind(&self, name: &str) -> Option<CallKind> {
+        (name == "concat").then_some(CallKind::ValueFn)
     }
 
     fn invoke(&self, name: &str, args: &ResolvedArgs) -> Option<Result<InterpValue, ComputeError>> {
@@ -906,10 +910,8 @@ pub fn eval_to_value<K: RowKey>(
 /// Evaluate a `RenderExpr` into an `InterpValue`.
 ///
 /// Drives argument evaluation for `resolve_args_with`. Dispatches
-/// `FunctionCall`s through the provided registry; unknown names
-/// (other than the legacy `concat` shim) produce `Value::Null`. The
-/// pre-F1 "silently return first arg" behavior is gone — a typo'd
-/// function call now produces a visible `Null` at the consumer.
+/// `FunctionCall`s through the provided registry; a widget call stays `Null`
+/// here, and a call to a name `fns` does not know is an error.
 pub fn eval_to_interp<K: RowKey>(
     expr: &RenderExpr,
     env: &EvalEnv<'_, K>,
@@ -954,31 +956,31 @@ pub fn eval_to_interp<K: RowKey>(
             let condition = eval_operand(condition, env, fns)?;
             return eval_to_interp(choose_branch(&condition, then, otherwise)?, env, fns);
         }
-        RenderExpr::FunctionCall { name, .. } if !fns.knows(name) => Value(crate::Value::Null),
-        RenderExpr::FunctionCall { name, args, .. } => {
-            // Evaluate args against the same registry so value-fn calls
-            // nested under other value-fn calls resolve correctly.
-            let resolved = resolve_args_with(args, env, fns)?;
-            match fns.invoke(name, &resolved) {
-                Some(v) => v?,
-                // F1: silent first-arg default removed. Unknown name // ALLOW(fallback): historical
-                // reference in code comment → Null. Built-in fns (`concat`, ...)
-                // are reachable through `CORE_VALUE_FN_LOOKUP` and should be
-                // chained into the caller's lookup if a frontend wants to keep
-                // them; the api-level entry points already do that.
-                None => Value(crate::Value::Null),
+        RenderExpr::FunctionCall { name, args } => match fns.call_kind(name) {
+            Some(CallKind::Widget) => Value(crate::Value::Null),
+            Some(CallKind::ValueFn) => {
+                let resolved = resolve_args_with(args, env, fns)?;
+                fns.invoke(name, &resolved).unwrap_or_else(|| {
+                    panic!("`{name}` is a value fn by `call_kind`, but `invoke` does not know it")
+                })?
             }
-        }
+            None => {
+                return Err(ComputeError::UnknownFunction {
+                    name: name.clone(),
+                    call: expr.to_rhai(),
+                });
+            }
+        },
         RenderExpr::Array { items } => Value(crate::Value::Array(
             items
                 .iter()
-                .map(|i| eval_to_value(i, env.row))
+                .map(|i| eval_operand(i, env, fns))
                 .collect::<Result<_, _>>()?,
         )),
         RenderExpr::Object { fields } => Value(crate::Value::Object(
             fields
                 .iter()
-                .map(|(k, v)| Ok((k.clone(), eval_to_value(v, env.row)?)))
+                .map(|(k, v)| Ok((k.clone(), eval_operand(v, env, fns)?)))
                 .collect::<Result<_, ComputeError>>()?,
         )),
         RenderExpr::LiveBlock { block_id } => {
@@ -1059,6 +1061,27 @@ mod tests {
     use crate::render_dsl::parse_render_dsl;
     use crate::render_types::Arg;
 
+    /// The core value fns, and every other name a widget: the widget names
+    /// live in the frontend's builder registry, out of this crate's reach.
+    struct EveryOtherNameIsAWidget;
+    impl ValueFnLookup for EveryOtherNameIsAWidget {
+        fn call_kind(&self, name: &str) -> Option<CallKind> {
+            Some(
+                CORE_VALUE_FN_LOOKUP
+                    .call_kind(name)
+                    .unwrap_or(CallKind::Widget),
+            )
+        }
+
+        fn invoke(
+            &self,
+            name: &str,
+            args: &ResolvedArgs,
+        ) -> Option<Result<InterpValue, ComputeError>> {
+            CORE_VALUE_FN_LOOKUP.invoke(name, args)
+        }
+    }
+
     /// First `target`-named call in `expr`, depth-first.
     fn find_call<'a>(expr: &'a RenderExpr, target: &str) -> Option<&'a [Arg]> {
         match expr {
@@ -1091,7 +1114,12 @@ mod tests {
         let expr = parse_render_dsl(source).expect("parse the shipped left-sidebar expression");
         let args =
             find_call(&expr, "selectable").expect("selectable call in the shipped expression");
-        let resolved = resolve_args(args, &HashMap::<String, Value>::new()).unwrap();
+        let resolved = resolve_args_with(
+            args,
+            &EvalEnv::of_row(&HashMap::<String, Value>::new()),
+            &EveryOtherNameIsAWidget,
+        )
+        .unwrap();
 
         // `action` is allowlisted, so its presence proves the fixture parsed and
         // reached `selectable` — a failure below is then specifically about the
@@ -1631,13 +1659,8 @@ mod tests {
         assert_eq!(state_display("CUSTOM"), ("CUSTOM", ThemeToken::Primary));
     }
 
-    // ── F1 regression — unknown FunctionCall returns Value::Null ───────
-    //
-    // Pre-F1, unknown function calls silently returned their first arg,
-    // masking DSL typos. This must fail loud now.
-
     #[test]
-    fn f1_unknown_fn_returns_null_not_first_arg() {
+    fn unknown_fn_is_an_error_naming_it() {
         let row = crate::StorageEntity::new();
         let expr = RenderExpr::FunctionCall {
             name: "definitely_not_registered".to_string(),
@@ -1648,7 +1671,13 @@ mod tests {
                 },
             }],
         };
-        assert_eq!(eval_to_value(&expr, &row).unwrap(), Value::Null);
+        assert_eq!(
+            eval_to_value(&expr, &row),
+            Err(ComputeError::UnknownFunction {
+                name: "definitely_not_registered".to_string(),
+                call: "definitely_not_registered(7)".to_string(),
+            })
+        );
     }
 
     #[test]
@@ -1685,8 +1714,8 @@ mod tests {
 
     struct MockValueFnLookup;
     impl ValueFnLookup for MockValueFnLookup {
-        fn knows(&self, name: &str) -> bool {
-            name == "echo"
+        fn call_kind(&self, name: &str) -> Option<CallKind> {
+            (name == "echo").then_some(CallKind::ValueFn)
         }
 
         fn invoke(

@@ -7,6 +7,7 @@ use holon_api::InterpValue;
 use holon_api::Value;
 use holon_api::computation::ComputeError;
 use holon_api::render_eval::CORE_VALUE_FN_LOOKUP;
+use holon_api::render_eval::CallKind;
 use holon_api::render_eval::EvalEnv;
 use holon_api::render_eval::OutlineTree;
 use holon_api::render_eval::ResolvedArgs;
@@ -125,17 +126,23 @@ where
 }
 
 /// Short-lived `ValueFnLookup` that captures the services + ctx a
-/// value-fn needs. Constructed fresh at the top of `interpret()` and
-/// passed to `resolve_args_for_widget`.
-struct ValueFnBinding<'a> {
+/// value-fn needs, and the widget names a call may also refer to.
+struct ValueFnBinding<'a, W: 'static> {
     fns: &'a HashMap<String, Arc<dyn ValueFn>>,
+    builders: &'a HashMap<String, Box<dyn Builder<W>>>,
     services: &'a dyn BuilderServices,
     ctx: &'a RenderContext,
 }
 
-impl<'a> ValueFnLookup for ValueFnBinding<'a> {
-    fn knows(&self, name: &str) -> bool {
-        self.fns.contains_key(name) || CORE_VALUE_FN_LOOKUP.knows(name)
+impl<'a, W> ValueFnLookup for ValueFnBinding<'a, W> {
+    fn call_kind(&self, name: &str) -> Option<CallKind> {
+        if self.fns.contains_key(name) {
+            Some(CallKind::ValueFn)
+        } else if self.builders.contains_key(name) {
+            Some(CallKind::Widget)
+        } else {
+            CORE_VALUE_FN_LOOKUP.call_kind(name)
+        }
     }
 
     fn invoke(&self, name: &str, args: &ResolvedArgs) -> Option<Result<InterpValue, ComputeError>> {
@@ -259,6 +266,19 @@ impl<W> RenderInterpreter<W> {
         self.value_fns.keys().cloned().collect()
     }
 
+    fn value_fn_binding<'a>(
+        &'a self,
+        services: &'a dyn BuilderServices,
+        ctx: &'a RenderContext,
+    ) -> ValueFnBinding<'a, W> {
+        ValueFnBinding {
+            fns: &self.value_fns,
+            builders: &self.builders,
+            services,
+            ctx,
+        }
+    }
+
     #[tracing::instrument(level = "debug", skip_all)]
     pub fn interpret(
         &self,
@@ -290,11 +310,7 @@ impl<W> RenderInterpreter<W> {
                 // Bind the value-fn registry so `resolve_args_for_widget` can
                 // dispatch `FunctionCall` arg expressions (e.g.
                 // `collection: focus_chain()`) through it.
-                let binding = ValueFnBinding {
-                    fns: &self.value_fns,
-                    services,
-                    ctx,
-                };
+                let binding = self.value_fn_binding(services, ctx);
                 let resolved = match resolve_args_for_widget(
                     args,
                     &EvalEnv::of_row(ctx.row()),
@@ -326,11 +342,7 @@ impl<W> RenderInterpreter<W> {
                 self.dispatch("text", &args, ctx, services, &interpret_fn)
             }
             RenderExpr::BinaryOp { .. } | RenderExpr::Not { .. } => {
-                let binding = ValueFnBinding {
-                    fns: &self.value_fns,
-                    services,
-                    ctx,
-                };
+                let binding = self.value_fn_binding(services, ctx);
                 let result = match eval_to_interp(expr, &EvalEnv::of_row(ctx.row()), &binding) {
                     Ok(InterpValue::Value(v)) => v,
                     Ok(InterpValue::Rows(_)) => {
@@ -346,11 +358,7 @@ impl<W> RenderInterpreter<W> {
                 then,
                 otherwise,
             } => {
-                let binding = ValueFnBinding {
-                    fns: &self.value_fns,
-                    services,
-                    ctx,
-                };
+                let binding = self.value_fn_binding(services, ctx);
                 let branch = match eval_to_interp(condition, &EvalEnv::of_row(ctx.row()), &binding)
                 {
                     Ok(InterpValue::Value(v)) => choose_branch(&v, then, otherwise),
