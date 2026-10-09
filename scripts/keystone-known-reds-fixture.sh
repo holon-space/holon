@@ -624,6 +624,17 @@ expect_outcome injected-panic/other-payload 1 "^PRIMARY: \[novel\] .*$injected_s
 injected_log injected-longer-payload "$injected_site:22:5" "$injected_payload and the store is gone" green
 expect_outcome injected-panic/longer-payload 1 "^PRIMARY: \[novel\] .*$injected_site:22:5: $injected_payload and the store is gone\$" \
     "$work/injected-longer-payload.log"
+# A grep that cannot read the signatures must stop the classifier, not leave it
+# reading a truncated signature file as green.
+real_grep=$(command -v grep)
+for flags in -cxF -vxF; do
+    mkdir -p "$work/grep-fails$flags"
+    printf '#!/usr/bin/env bash\n[ "$1" = %s ] && { echo "grep: simulated read error" >&2; exit 2; }\nexec %s "$@"\n' \
+        "$flags" "$real_grep" >"$work/grep-fails$flags/grep"
+    chmod +x "$work/grep-fails$flags/grep"
+    PATH="$work/grep-fails$flags:$PATH" expect_outcome "injected-panic/grep$flags-error-stops" 2 \
+        "^\[known-reds\] ERROR: grep $flags " "$work/injected-only.log"
+done
 if [ "$outcome_fail" -ne 0 ]; then
     echo ""
     echo "[fixture] FAIL: the classifier's outcome verdict changed. A green log read"

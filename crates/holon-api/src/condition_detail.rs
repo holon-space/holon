@@ -457,13 +457,39 @@ impl ConditionKind {
                  until the next computation succeeds."
             )),
 
-            Self::PreviousRunPanicked { message, thread } => ConditionDetail::with_body(
-                format!(
-                    "Holon stopped last time because of an internal error on {thread}. The log \
-                     export has the details."
-                ),
-                vec![subject.to_string(), message.clone()],
-            ),
+            Self::PreviousRunPanicked {
+                message,
+                thread,
+                earlier,
+            } => {
+                let at = |t: &chrono::DateTime<chrono::Utc>| t.format("%Y-%m-%d %H:%M:%S UTC");
+                let mut body = vec![subject.to_string(), message.clone()];
+                body.extend(
+                    earlier
+                        .sites
+                        .iter()
+                        .map(|(site, runs)| format!("{runs}\u{d7} earlier at {site}")),
+                );
+                body.extend(earlier.dropped.iter().map(|d| {
+                    format!(
+                        "{}\u{d7} earlier, records dropped unshown, between {} and {}",
+                        d.count,
+                        at(&d.first_ended),
+                        at(&d.last_ended)
+                    )
+                }));
+                let headline = match earlier.runs() {
+                    0 => format!(
+                        "Holon stopped last time because of an internal error on {thread}. The \
+                         log export has the details."
+                    ),
+                    runs => format!(
+                        "Holon stopped last time because of an internal error on {thread}, and \
+                         in the {runs} runs before it too. The log export has the details."
+                    ),
+                };
+                ConditionDetail::with_body(headline, body)
+            }
 
             Self::TaskPanicked { message, thread } => ConditionDetail::with_body(
                 format!(
@@ -472,6 +498,11 @@ impl ConditionKind {
                 ),
                 vec![subject.to_string(), message.clone()],
             ),
+
+            Self::PanicRecordUnreadable { reason } => ConditionDetail::prose(format!(
+                "Holon cannot read {subject} among its records of internal errors: {reason}. \
+                 The records beside it are still shown."
+            )),
 
             Self::PanicRecordUnwritable { reason } => ConditionDetail::prose(format!(
                 "Holon cannot keep a record of internal errors in {subject}: {reason}. If it \

@@ -122,11 +122,24 @@ fn every_boot_that_died_before_its_bus_is_shown_by_the_next_bus() {
     boot_and_die(name, dir.path(), "boot-failed");
 
     let bus = holon_frontend::panic_record::install(dir.path());
-    let shown = previous_run_messages(&bus);
+    let shown: Vec<(String, Vec<(String, usize)>)> = bus
+        .current()
+        .into_iter()
+        .filter_map(|c| match c.reason {
+            ConditionKind::PreviousRunPanicked {
+                message, earlier, ..
+            } => Some((message, earlier.sites)),
+            _ => None,
+        })
+        .collect();
     assert!(
-        shown.iter().any(|m| m.starts_with(PANIC_MESSAGE))
-            && shown.iter().any(|m| m == BOOT_FAILED_MESSAGE),
-        "the first boot's panic and the failed boot must both be shown; shown: {shown:?}"
+        matches!(
+            shown.as_slice(),
+            [(message, sites)] if message == BOOT_FAILED_MESSAGE
+                && matches!(sites.as_slice(), [(site, 1)] if site.contains("panic_record_boot_loop.rs"))
+        ),
+        "one condition shows the failed boot and names the first boot's panic site; \
+         shown: {shown:?}"
     );
     holon_frontend::panic_record::seen_on(&bus);
     assert_eq!(

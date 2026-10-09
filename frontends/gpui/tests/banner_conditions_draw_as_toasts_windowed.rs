@@ -17,6 +17,7 @@ use gpui::TestApp;
 use holon_api::Condition;
 use holon_api::ConditionBus;
 use holon_api::ConditionKind;
+use holon_api::EarlierPanics;
 use holon_frontend::geometry::GeometryProvider;
 use holon_gpui::geometry::BoundsRegistry;
 use holon_gpui::launch_holon_window_with_engine_and_share;
@@ -30,6 +31,7 @@ fn banner_conditions() -> Vec<Condition> {
             reason: ConditionKind::PreviousRunPanicked {
                 message: "the previous run".to_string(),
                 thread: "main".to_string(),
+                earlier: EarlierPanics::default(),
             },
         },
         Condition {

@@ -514,11 +514,17 @@ pub enum ConditionKind {
         reason: String,
     },
     /// The previous run of Holon panicked at `subject` (a `file:line:column`)
-    /// on `thread` with `message`, as its panic record says. The record is
-    /// read once, at start.
+    /// on `thread` with `message`, as its panic record says, after the
+    /// `earlier` runs that no frontend has shown either. One condition stands
+    /// for all of them, so a crash loop fits where the user looks. Raised
+    /// once, at start.
     ///
     /// All-clear: none in this process.
-    PreviousRunPanicked { message: String, thread: String },
+    PreviousRunPanicked {
+        message: String,
+        thread: String,
+        earlier: EarlierPanics,
+    },
     /// A thread or task of this process panicked at `subject` (a
     /// `file:line:column`) with `message`; what it was doing stopped.
     ///
@@ -529,6 +535,11 @@ pub enum ConditionKind {
     ///
     /// All-clear: none in this process.
     PanicRecordUnwritable { reason: String },
+    /// The entry `subject` among the panic records cannot be read
+    /// (`reason`); the records beside it are still shown.
+    ///
+    /// All-clear: none in this process.
+    PanicRecordUnreadable { reason: String },
     /// A panic of this process cannot reach this bus (`reason`); its record
     /// still discloses it at the next start. Subject:
     /// [`PANIC_CONDITIONS_SUBJECT`].
@@ -614,6 +625,7 @@ impl ConditionKind {
     pub const PREVIOUS_RUN_PANICKED: &'static str = "previous-run-panicked";
     pub const TASK_PANICKED: &'static str = "task-panicked";
     pub const PANIC_RECORD_UNWRITABLE: &'static str = "panic-record-unwritable";
+    pub const PANIC_RECORD_UNREADABLE: &'static str = "panic-record-unreadable";
     pub const PANIC_CONDITIONS_UNAVAILABLE: &'static str = "panic-conditions-unavailable";
 
     /// The condition's stable identity, paired with the subject to form a
@@ -679,6 +691,7 @@ impl ConditionKind {
             Self::PreviousRunPanicked { .. } => Self::PREVIOUS_RUN_PANICKED,
             Self::TaskPanicked { .. } => Self::TASK_PANICKED,
             Self::PanicRecordUnwritable { .. } => Self::PANIC_RECORD_UNWRITABLE,
+            Self::PanicRecordUnreadable { .. } => Self::PANIC_RECORD_UNREADABLE,
             Self::PanicConditionsUnavailable { .. } => Self::PANIC_CONDITIONS_UNAVAILABLE,
         }
     }
@@ -732,6 +745,42 @@ impl std::fmt::Display for HolonChange {
             Self::Deleted => "deleted",
             Self::Moved => "moved",
         })
+    }
+}
+
+/// The runs before the last one that panicked too, and whose records no
+/// frontend has shown.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct EarlierPanics {
+    /// Each `file:line:column` they panicked at (a record that cannot be read
+    /// names its own path), with how many runs did, newest first.
+    pub sites: Vec<(String, usize)>,
+    pub dropped: Option<DroppedPanics>,
+}
+
+impl EarlierPanics {
+    pub fn runs(&self) -> usize {
+        self.sites.iter().map(|(_, runs)| runs).sum::<usize>()
+            + self.dropped.as_ref().map_or(0, |d| d.count)
+    }
+}
+
+/// Panicked runs whose records were dropped unshown, to bound how many are
+/// kept: how many, and when the first and the last of them ended.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DroppedPanics {
+    pub count: usize,
+    pub first_ended: chrono::DateTime<chrono::Utc>,
+    pub last_ended: chrono::DateTime<chrono::Utc>,
+}
+
+impl DroppedPanics {
+    pub fn and(self, ended: chrono::DateTime<chrono::Utc>) -> Self {
+        Self {
+            count: self.count + 1,
+            first_ended: self.first_ended.min(ended),
+            last_ended: self.last_ended.max(ended),
+        }
     }
 }
 

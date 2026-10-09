@@ -90,6 +90,17 @@ is_collateral() {
 injected_panic=$'crates/holon-integration-tests/src/pbt/composed/boot_fault.rs:22:5\tkeystone boot fault: injected task panic'
 injected=0
 
+# grep whose "no line selected" (exit 1) is a result; a grep error (exit 2) is
+# not, and stops the script rather than leave a truncated signature file.
+grep_selecting() {
+    local rc=0
+    grep "$@" || rc=$?
+    if [ "$rc" -gt 1 ]; then
+        echo "[known-reds] ERROR: grep $* failed (exit $rc); the log is not classified." >&2
+        return "$rc"
+    fi
+}
+
 # What the log says the run DID: `failed`, `green`, or `indeterminate` (it says
 # nothing either way). Read from the harness's own verdict lines — cargo test's
 # `test result:`, cargo's and just's failure diagnostics, nextest's `Summary` /
@@ -307,9 +318,11 @@ for log in "$@"; do
         }' q="'" signals="HUP|INT|QUIT|ILL|TRAP|ABRT|BUS|FPE|KILL|USR1|SEGV|USR2|PIPE|ALRM|TERM" "$log" "$log" >"$sigs_file" \
         || { rc=$?; rm -f "$sigs_file" "$novel_file"; exit "$rc"; }
 
-    log_injected=$(grep -cxF -- "$injected_panic" "$sigs_file" || true)
+    log_injected=$(grep_selecting -cxF -- "$injected_panic" "$sigs_file") \
+        || { rc=$?; rm -f "$sigs_file" "$novel_file"; exit "$rc"; }
     if [ "$log_injected" -gt 0 ]; then
-        grep -vxF -- "$injected_panic" "$sigs_file" >"$sigs_file.real" || true
+        grep_selecting -vxF -- "$injected_panic" "$sigs_file" >"$sigs_file.real" \
+            || { rc=$?; rm -f "$sigs_file" "$sigs_file.real" "$novel_file"; exit "$rc"; }
         mv "$sigs_file.real" "$sigs_file"
         echo "[known-reds] INJECTED: $log_injected keystone boot-fault panic(s) at ${injected_panic%%$'\t'*} in $log — expected, not a failure."
         injected=$((injected + log_injected))

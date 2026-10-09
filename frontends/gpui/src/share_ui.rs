@@ -305,8 +305,8 @@ pub struct ShareUiState {
     pub deferred_reimport: Option<DeferredReimport>,
     pub share_error: Option<String>,
     pub accept_error: Option<String>,
-    /// Banner kinds already logged as drawn in the toast stack.
-    banners_as_toasts: HashSet<&'static str>,
+    /// Modal and banner kinds already logged as drawn in the toast stack.
+    surfaceless_as_toasts: HashSet<&'static str>,
     /// The bus that raised a previous-run panic this window has not yet drawn;
     /// the frame after the one that paints it calls `panic_record::seen_on`.
     pub previous_runs_shown_on: Option<Arc<holon_api::ConditionBus>>,
@@ -330,7 +330,7 @@ impl ShareUiState {
             deferred_reimport: None,
             share_error: None,
             accept_error: None,
-            banners_as_toasts: HashSet::new(),
+            surfaceless_as_toasts: HashSet::new(),
             previous_runs_shown_on: None,
         }
     }
@@ -371,8 +371,8 @@ impl ShareUiState {
     ///
     /// Generic: the condition's profile says where it goes and how it is drawn,
     /// and its own `detail` says what it reads. Nothing here is per-kind except
-    /// the modal, the one kind with a banner of its own, and the one kind whose
-    /// HEADLINE is instance data rather than a constant.
+    /// the one kind with a modal of its own, the one with a banner of its own,
+    /// and the one kind whose HEADLINE is instance data rather than a constant.
     pub fn apply_degraded(&mut self, event: Condition) {
         let condition = event.condition_key();
         let profile = event.reason.profile();
@@ -382,21 +382,25 @@ impl ShareUiState {
             // A full-screen modal, not a toast: this names content that is not
             // in the store, and a toast has a ✕.
             ConditionPlacement::Modal => {
-                // Upsert, like `push_toast`: a sticky condition can arrive
-                // twice (once replayed in `current`, once live), and two
-                // identical quarantine modals for one subject is a dismissal
-                // treadmill.
-                let quarantine = QuarantineEvent {
-                    subject: event.subject,
-                    quarantine_path: detail.headline,
-                };
-                match self
-                    .quarantines
-                    .iter_mut()
-                    .find(|q| q.subject == quarantine.subject)
-                {
-                    Some(existing) => *existing = quarantine,
-                    None => self.quarantines.push(quarantine),
+                if let ConditionKind::SnapshotLoadFailed(quarantine_path) = event.reason {
+                    // Upsert, like `push_toast`: a sticky condition can arrive
+                    // twice (once replayed in `current`, once live), and two
+                    // identical quarantine modals for one subject is a
+                    // dismissal treadmill.
+                    let quarantine = QuarantineEvent {
+                        subject: event.subject,
+                        quarantine_path,
+                    };
+                    match self
+                        .quarantines
+                        .iter_mut()
+                        .find(|q| q.subject == quarantine.subject)
+                    {
+                        Some(existing) => *existing = quarantine,
+                        None => self.quarantines.push(quarantine),
+                    }
+                } else {
+                    self.push_surfaceless_toast("modal", event, profile, condition, detail);
                 }
             }
             // A banner, because the condition offers a remedy the user has to
@@ -405,20 +409,30 @@ impl ShareUiState {
                 if let ConditionKind::PairingReimportDeferred { orphans, archive } = event.reason {
                     self.deferred_reimport = Some(DeferredReimport { orphans, archive });
                 } else {
-                    // This window has no banner for it; ADR 0035 falls back to a toast.
-                    let kind = event.reason.condition_kind();
-                    if self.banners_as_toasts.insert(kind) {
-                        tracing::warn!(
-                            "[share-ui] no banner surface for {kind}; drawing it as a toast"
-                        );
-                    }
-                    self.push_condition_toast(event, profile, condition, detail);
+                    self.push_surfaceless_toast("banner", event, profile, condition, detail);
                 }
             }
             ConditionPlacement::Toast | ConditionPlacement::Section(_) => {
                 self.push_condition_toast(event, profile, condition, detail);
             }
         }
+    }
+
+    /// This window has no `surface` for the condition; ADR 0035 falls back to
+    /// a toast and logs the substitution.
+    fn push_surfaceless_toast(
+        &mut self,
+        surface: &str,
+        event: Condition,
+        profile: ConditionProfile,
+        condition: ConditionKey,
+        detail: holon_api::condition_detail::ConditionDetail,
+    ) {
+        let kind = event.reason.condition_kind();
+        if self.surfaceless_as_toasts.insert(kind) {
+            tracing::warn!("[share-ui] no {surface} surface for {kind}; drawing it as a toast");
+        }
+        self.push_condition_toast(event, profile, condition, detail);
     }
 
     fn push_condition_toast(
@@ -2451,6 +2465,32 @@ mod tests {
         assert!(s.toasts.is_empty());
         assert_eq!(s.quarantines.len(), 1);
         assert_eq!(s.quarantines[0].quarantine_path, "/tmp/x.corrupt-1");
+    }
+
+    /// A modal condition that is no snapshot quarantine has no modal of its
+    /// own, so it is drawn as a toast saying what it is.
+    #[test]
+    fn a_modal_condition_that_is_no_quarantine_is_drawn_as_itself() {
+        let mut s = ShareUiState::new();
+        let condition = Condition {
+            subject: "/vault".into(),
+            reason: ConditionKind::VaultSyncNotStarted {
+                cause: "the watcher did not start".into(),
+            },
+        };
+        let headline = condition.reason.detail(&condition.subject).headline;
+        s.apply_degraded(condition);
+        assert!(
+            s.quarantines.is_empty(),
+            "a vault that is not syncing is no quarantine: {:?}",
+            s.quarantines
+        );
+        assert_eq!(s.toasts.len(), 1);
+        assert_eq!(
+            s.toasts[0].condition.as_ref().map(|c| c.kind),
+            Some(ConditionKind::VAULT_SYNC_NOT_STARTED)
+        );
+        assert_eq!(s.toasts[0].detail.headline, headline);
     }
 
     /// Every degradation is now a sticky condition, so the bridge can deliver

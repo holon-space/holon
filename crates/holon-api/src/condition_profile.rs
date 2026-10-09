@@ -766,6 +766,15 @@ const PANIC_RECORD_UNWRITABLE: ConditionProfile = ConditionProfile::new(
     &[],
 );
 
+const PANIC_RECORD_UNREADABLE: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Warning,
+    "Holon cannot read one of its records of internal errors",
+    icons::WARN,
+    ConditionPlacement::Toast,
+    AllClear::UntilRestart,
+    &[],
+);
+
 const PANIC_CONDITIONS_UNAVAILABLE: ConditionProfile = ConditionProfile::new(
     ConditionSeverity::Warning,
     "Holon cannot show internal errors while it runs",
@@ -835,6 +844,7 @@ impl ConditionKind {
             Self::PreviousRunPanicked { .. } => PREVIOUS_RUN_PANICKED,
             Self::TaskPanicked { .. } => TASK_PANICKED,
             Self::PanicRecordUnwritable { .. } => PANIC_RECORD_UNWRITABLE,
+            Self::PanicRecordUnreadable { .. } => PANIC_RECORD_UNREADABLE,
             Self::PanicConditionsUnavailable { .. } => PANIC_CONDITIONS_UNAVAILABLE,
         }
     }
