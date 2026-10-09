@@ -36,18 +36,29 @@ use crate::watch_view_rebuild::Listened;
 use crate::watch_view_rebuild::ListenedTo;
 use crate::watch_view_rebuild::ViewRebuild;
 
-/// Normalize a SQL statement for comparison: collapse whitespace, strip
-/// trailing semicolons, lowercase keywords, and drop spaces before `(` (Turso's
-/// view pretty-printer emits `iif (` / `strftime (`). This lets us compare
-/// `sqlite_master.sql` against the desired CREATE statement without false
-/// positives from formatting differences.
-fn normalize_view_sql(sql: &str) -> String {
-    sql.split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .trim_end_matches(';')
-        .to_lowercase()
-        .replace(" (", "(")
+/// The token sequence of a SQL statement, for comparing `sqlite_master.sql`
+/// against the desired CREATE. Turso stores a matview's definition re-rendered
+/// from its AST — comments gone, its own spacing (`COUNT (*)`, `(SELECT`) — so
+/// two spellings of one definition agree only below the text. Unquoted words
+/// compare case-insensitively; literals and quoted identifiers exactly.
+fn view_sql_tokens(sql: &str) -> Result<Vec<String>> {
+    use sqlparser::tokenizer::Token;
+    let tokens = sqlparser::tokenizer::Tokenizer::new(&sqlparser::dialect::SQLiteDialect {}, sql)
+        .tokenize()
+        .with_context(|| {
+            format!(
+                "tokenize view definition to compare it: {}",
+                crate::turso::redact_sql_for_logs(sql)
+            )
+        })?;
+    Ok(tokens
+        .into_iter()
+        .filter(|t| !matches!(t, Token::Whitespace(_) | Token::SemiColon))
+        .map(|t| match t {
+            Token::Word(w) if w.quote_style.is_none() => w.value.to_lowercase(),
+            other => other.to_string(),
+        })
+        .collect())
 }
 
 /// Reconcile a named materialized view: only DROP+CREATE if the SELECT changed.
@@ -88,7 +99,7 @@ pub async fn reconcile_named_view(
 
     if let Some(row) = rows.first() {
         if let Some(Value::String(existing_sql)) = row.get("sql") {
-            if normalize_view_sql(existing_sql) == normalize_view_sql(&create_sql) {
+            if view_sql_tokens(existing_sql)? == view_sql_tokens(&create_sql)? {
                 tracing::debug!(
                     "[reconcile_named_view] View '{}' unchanged, skipping",
                     view_name
@@ -1782,29 +1793,42 @@ mod tests {
     }
 
     #[test]
-    fn normalize_collapses_whitespace_and_lowercases() {
+    fn view_tokens_ignore_whitespace_case_and_semicolon() {
         let stored = "CREATE MATERIALIZED VIEW current_focus AS\nSELECT\n    nc.region,\n    \
                       nh.block_id\nFROM navigation_cursor nc\nJOIN navigation_history nh ON \
-                      nc.history_id = nh.id";
-        let desired = "CREATE MATERIALIZED VIEW current_focus AS SELECT nc.region, nh.block_id \
-                       FROM navigation_cursor nc JOIN navigation_history nh ON nc.history_id = \
+                      nc.history_id = nh.id;";
+        let desired = "create materialized view current_focus as select nc.region, nh.block_id \
+                       from navigation_cursor nc join navigation_history nh on nc.history_id = \
                        nh.id";
-        assert_eq!(normalize_view_sql(stored), normalize_view_sql(desired));
-    }
-
-    #[test]
-    fn normalize_strips_trailing_semicolon() {
         assert_eq!(
-            normalize_view_sql("SELECT 1;"),
-            normalize_view_sql("SELECT 1")
+            view_sql_tokens(stored).unwrap(),
+            view_sql_tokens(desired).unwrap()
         );
     }
 
     #[test]
-    fn normalize_detects_actual_change() {
+    fn view_tokens_match_turso_rendering_of_a_commented_source() {
+        let source = "CREATE MATERIALIZED VIEW v AS SELECT * FROM (\n    -- base\n    SELECT \
+                      id, COUNT(*) AS n FROM b\n)";
+        let stored = "CREATE MATERIALIZED VIEW v AS SELECT * FROM (SELECT id, COUNT (*) AS n FROM \
+                      b)";
+        assert_eq!(
+            view_sql_tokens(source).unwrap(),
+            view_sql_tokens(stored).unwrap()
+        );
+    }
+
+    #[test]
+    fn view_tokens_detect_actual_change() {
         let v1 = "CREATE MATERIALIZED VIEW foo AS SELECT id FROM block";
         let v2 = "CREATE MATERIALIZED VIEW foo AS SELECT id, content FROM block";
-        assert_ne!(normalize_view_sql(v1), normalize_view_sql(v2));
+        assert_ne!(view_sql_tokens(v1).unwrap(), view_sql_tokens(v2).unwrap());
+        let lit1 = "CREATE MATERIALIZED VIEW foo AS SELECT id FROM block WHERE tag = 'Page'";
+        let lit2 = "CREATE MATERIALIZED VIEW foo AS SELECT id FROM block WHERE tag = 'page'";
+        assert_ne!(
+            view_sql_tokens(lit1).unwrap(),
+            view_sql_tokens(lit2).unwrap()
+        );
     }
 
     // Word-boundary identifier matching drives the DDL dependency ordering
