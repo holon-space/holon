@@ -117,65 +117,85 @@ impl TextMergeProvider for TransientTextMergeProvider {
 /// doc; every document created here is dropped when the call returns (Model.md:
 /// *transient = merge function only*).
 ///
+/// Merge contract:
+/// - each side's edit is the minimal char diff from `base`, so a base char a
+///   side kept keeps its identity, and a delete of it by the other side holds;
+/// - a char either side inserted survives, in that side's order;
+/// - inserts of both sides into the same gap of `base` come out `mine` first,
+///   then `theirs`. A replacement's inserted text sits in the gap before the
+///   chars it replaces.
+///
 /// Wired into `FileSyncController` in Direct mode via
 /// `FileSyncController::with_text_merge`. In Full (Loro-the-store) mode this is
 /// never invoked — the live CRDT already merges concurrent edits.
 pub struct TransientLoroTextMerge;
 
+/// Loro orders concurrent inserts at one position lower peer id first, which
+/// puts `mine` before `theirs`.
+const MINE_PEER: u64 = 1;
+const THEIRS_PEER: u64 = 2;
+
 impl ThreeWayTextMerge for TransientLoroTextMerge {
     fn merge_text(&self, base: &str, theirs: &str, mine: &str) -> Result<String> {
-        // Common ancestor. Fixed peer ids give a deterministic tie-break for
-        // truly concurrent inserts at the same position.
         let ancestor = LoroDoc::new();
         ancestor
             .set_peer_id(0)
             .context("transient merge: set ancestor peer id")?;
         ancestor
             .get_text("content")
-            .update(base, Default::default())
+            .insert(0, base)
             .context("transient merge: seed base text")?;
         ancestor.commit();
         let snapshot = ancestor
             .export(ExportMode::Snapshot)
             .context("transient merge: export base snapshot")?;
 
-        // "theirs" — the on-disk edit — on peer 1.
-        let peer_a = LoroDoc::new();
-        peer_a
-            .set_peer_id(1)
-            .context("transient merge: set peer_a id")?;
-        peer_a
-            .import(&snapshot)
-            .context("transient merge: import base into peer_a")?;
-        peer_a
-            .get_text("content")
-            .update(theirs, Default::default())
-            .context("transient merge: apply theirs")?;
-        peer_a.commit();
+        let fork = |peer: u64, side: &str, label: &str| -> Result<LoroDoc> {
+            let doc = LoroDoc::new();
+            doc.set_peer_id(peer)
+                .with_context(|| format!("transient merge: set {label} peer id"))?;
+            doc.import(&snapshot)
+                .with_context(|| format!("transient merge: import base into {label}"))?;
+            apply_minimal_diff(&doc.get_text("content"), base, side)
+                .with_context(|| format!("transient merge: apply {label}"))?;
+            doc.commit();
+            Ok(doc)
+        };
+        let theirs_doc = fork(THEIRS_PEER, theirs, "theirs")?;
+        let mine_doc = fork(MINE_PEER, mine, "mine")?;
 
-        // "mine" — the current store edit — on peer 2.
-        let peer_b = LoroDoc::new();
-        peer_b
-            .set_peer_id(2)
-            .context("transient merge: set peer_b id")?;
-        peer_b
-            .import(&snapshot)
-            .context("transient merge: import base into peer_b")?;
-        peer_b
-            .get_text("content")
-            .update(mine, Default::default())
-            .context("transient merge: apply mine")?;
-        peer_b.commit();
-
-        // Merge peer_b's edits into peer_a and read the converged text.
-        let b_updates = peer_b
+        let mine_updates = mine_doc
             .export(ExportMode::all_updates())
             .context("transient merge: export mine updates")?;
-        peer_a
-            .import(&b_updates)
+        theirs_doc
+            .import(&mine_updates)
             .context("transient merge: merge mine into theirs")?;
-        Ok(peer_a.get_text("content").to_string())
+        Ok(theirs_doc.get_text("content").to_string())
     }
+}
+
+/// Edit `text` (holding `base`) into `target` by the minimal char diff.
+///
+/// `LoroText::update` is not minimal: it may delete a char and insert an equal
+/// one, and the other side's delete of the old char then misses the new one.
+/// Each hunk inserts before it deletes, so its text sits in the gap before the
+/// replaced chars; hunks go last to first, so earlier indices stay valid.
+fn apply_minimal_diff(text: &LoroText, base: &str, target: &str) -> Result<()> {
+    let old: Vec<char> = base.chars().collect();
+    let new: Vec<char> = target.chars().collect();
+    for op in similar::capture_diff_slices(similar::Algorithm::Myers, &old, &new)
+        .iter()
+        .rev()
+    {
+        let (tag, old_range, new_range) = op.as_tag_tuple();
+        if tag == similar::DiffTag::Equal {
+            continue;
+        }
+        let inserted: String = new[new_range].iter().collect();
+        text.insert(old_range.start, &inserted)?;
+        text.delete(old_range.start + inserted.chars().count(), old_range.len())?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

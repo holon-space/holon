@@ -5763,6 +5763,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serial_test",
+ "similar",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
