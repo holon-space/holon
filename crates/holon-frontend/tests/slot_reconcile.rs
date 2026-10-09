@@ -44,6 +44,7 @@ fn live_text(services: &StubBuilderServices, cell: &Mutable<Arc<DataRow>>) -> Re
 fn slot_wrapper(content: ReactiveViewModel) -> ReactiveViewModel {
     ReactiveViewModel {
         slot: Some(ReactiveSlot::new(content)),
+        render_ctx: Some(Default::default()),
         ..ReactiveViewModel::from_widget("view_mode_switcher", HashMap::new())
     }
 }

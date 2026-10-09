@@ -65,11 +65,11 @@ pub const ACTIVE_PERSPECTIVE_PROPERTY: &str = "active_perspective";
 /// The entity tier re-targets on every focus change (`chain_ops` projects the
 /// focused block); the global tier does not depend on focus, so the bar keeps
 /// offering navigation even with nothing focused.
-const ACTION_BAR_ENTITY_OPS: &str = "list(#{gap: 8, horizontal: true, collection: chain_ops(0), \
+pub const ACTION_BAR_ENTITY_OPS: &str = "list(#{gap: 8, horizontal: true, collection: chain_ops(0), \
                                      item_template: op_button(col(\"name\"))})";
 /// App-level ops reached through the `navigation` entity — history and home,
 /// which a phone has no keyboard chord for.
-const ACTION_BAR_GLOBAL_OPS: &str = "list(#{gap: 8, horizontal: true, collection: ops_of(\"navigation:main\", #{surface: \
+pub const ACTION_BAR_GLOBAL_OPS: &str = "list(#{gap: 8, horizontal: true, collection: ops_of(\"navigation:main\", #{surface: \
      \"action_bar\"}), item_template: op_button(col(\"name\"))})";
 
 // Recognized `perspective_`-namespaced declaration fields on a perspective

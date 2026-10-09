@@ -924,13 +924,24 @@ fn typed_param_row() -> DataRow {
     ])
 }
 
-/// A builder's typed param, with the positional slot it also reads from.
+/// What a positional arg of a builder binds to, seen from one typed param.
+#[derive(Clone, Copy, Debug)]
+enum Positional {
+    /// The param reads this positional slot.
+    Slot(usize),
+    /// The builder has a Collection param: every positional arg is a child.
+    Child,
+    /// The param is named-only (a Bool).
+    Named,
+}
+
+/// A builder's typed param, with what a positional arg binds to.
 #[derive(Clone, Debug)]
 struct TypedParam {
     builder: &'static str,
     name: &'static str,
     type_hint: &'static str,
-    slot: Option<usize>,
+    positional: Positional,
 }
 
 /// Every String / Number / Bool param a `widget_builder!` builder declares.
@@ -950,7 +961,11 @@ fn typed_params() -> Vec<TypedParam> {
                     builder: meta.name,
                     name: p.name,
                     type_hint: p.type_hint,
-                    slot: consumes_slot.then_some(slot),
+                    positional: match (has_children, consumes_slot) {
+                        (true, _) => Positional::Child,
+                        (false, true) => Positional::Slot(slot),
+                        (false, false) => Positional::Named,
+                    },
                 });
             }
             if consumes_slot {
@@ -958,6 +973,12 @@ fn typed_params() -> Vec<TypedParam> {
             }
         }
     }
+    assert!(
+        params
+            .iter()
+            .any(|p| matches!(p.positional, Positional::Child)),
+        "no typed param of a builder with children: {params:?}"
+    );
     assert!(
         params.len() > 20,
         "suspiciously few typed params: {params:?}"
@@ -994,12 +1015,13 @@ struct TypedParamCase {
 
 impl TypedParamCase {
     fn source(&self) -> String {
-        match (self.positional, self.param.slot) {
-            (true, Some(slot)) => {
+        match (self.positional, self.param.positional) {
+            (true, Positional::Slot(slot)) => {
                 let mut args = vec![r#"col("absent")"#; slot];
                 args.push(self.value);
                 format!("{}({})", self.param.builder, args.join(", "))
             }
+            (true, Positional::Child) => format!("{}({})", self.param.builder, self.value),
             _ => format!(
                 "{}(#{{{}: {}}})",
                 self.param.builder, self.param.name, self.value
@@ -1012,8 +1034,9 @@ impl TypedParamCase {
         let RenderExpr::FunctionCall { args, .. } = expr else {
             panic!("`{}` parses to a call", self.source());
         };
-        let arg = match (self.positional, self.param.slot) {
-            (true, Some(slot)) => args.iter().filter(|a| a.name.is_none()).nth(slot),
+        let arg = match (self.positional, self.param.positional) {
+            (true, Positional::Slot(slot)) => args.iter().filter(|a| a.name.is_none()).nth(slot),
+            (true, Positional::Child) => None,
             _ => args
                 .iter()
                 .find(|a| a.name.as_deref() == Some(self.param.name)),
@@ -1026,8 +1049,17 @@ impl TypedParamCase {
 }
 
 fn typed_param_case() -> impl Strategy<Value = TypedParamCase> {
+    let params = typed_params();
+    let child_params: Vec<TypedParam> = params
+        .iter()
+        .filter(|p| matches!(p.positional, Positional::Child))
+        .cloned()
+        .collect();
     (
-        proptest::sample::select(typed_params()),
+        prop_oneof![
+            3 => proptest::sample::select(params),
+            1 => proptest::sample::select(child_params),
+        ],
         proptest::sample::select(PARAM_VALUES),
         any::<bool>(),
     )
@@ -1059,8 +1091,39 @@ fn every_typed_param_is_honoured_or_refused() {
             }
         };
         let row = Arc::new(typed_param_row());
-        let node = services.interpret(&expr, &RenderContext::default().with_row(row.clone()));
+        let ctx = RenderContext::default().with_row(row.clone());
+        let node = services.interpret(&expr, &ctx);
         let key = case.param.name;
+        if case.positional && matches!(case.param.positional, Positional::Child) {
+            let bare = services.interpret(
+                &holon_api::render_dsl::parse_render_dsl(&format!("{builder}()"))
+                    .expect("a bare call parses"),
+                &ctx,
+            );
+            prop_assert!(
+                !node.is_error(),
+                "`{source}`: a positional arg of a builder with children is a child, but the \
+                 builder drew an error node: {:?}",
+                node.prop_str("message")
+            );
+            prop_assert_eq!(
+                node.props.get_cloned().get(key).cloned(),
+                bare.props.get_cloned().get(key).cloned(),
+                "`{}`: a positional arg must not bind `{}`",
+                source,
+                key
+            );
+            let RenderExpr::FunctionCall { args, .. } = &expr else {
+                panic!("`{source}` parses to a call");
+            };
+            prop_assert_eq!(
+                node.snapshot().children().len(),
+                args.iter().filter(|a| a.name.is_none()).count(),
+                "`{}`: every positional arg is drawn as a child",
+                source
+            );
+            return Ok(());
+        }
         let message = node.prop_str("message").filter(|_| node.is_error());
         let fast = holon_frontend::render_interpreter::is_props_only_widget(builder).then(|| {
             holon_frontend::render_interpreter::resolve_props(

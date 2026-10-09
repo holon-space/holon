@@ -380,6 +380,7 @@ mod split_target_tests {
     fn switcher_over(slot: ReactiveViewModel) -> ReactiveViewModel {
         ReactiveViewModel {
             slot: Some(ReactiveSlot::new(slot)),
+            render_ctx: Some(Default::default()),
             ..ReactiveViewModel::from_widget("view_mode_switcher", HashMap::new())
         }
     }

@@ -5510,6 +5510,7 @@ dependencies = [
  "getrandom 0.3.4",
  "holon-advice",
  "holon-api",
+ "holon-app",
  "holon-core",
  "holon-filesystem",
  "holon-kitchen",

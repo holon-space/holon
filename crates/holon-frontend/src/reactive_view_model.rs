@@ -1384,6 +1384,12 @@ impl ReactiveViewModel {
                 title: self.prop_str("title").unwrap_or_default(),
                 children: snap_children(),
             },
+            "board_lane" => ViewKind::BoardLane {
+                title: self
+                    .prop_str("title")
+                    .expect("board_lane always writes its `title` prop"),
+                children: snap_children(),
+            },
             "column" => ViewKind::Column {
                 gap: self.prop_f64("gap").unwrap_or(0.0) as f32,
                 children: snap_children(),

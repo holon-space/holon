@@ -149,7 +149,7 @@ pub(crate) fn view_model_to_snapshot(
                 props.insert("height".into(), height.to_string());
             }
         }
-        ViewKind::Section { title, .. } => {
+        ViewKind::Section { title, .. } | ViewKind::BoardLane { title, .. } => {
             props.insert("title".into(), title.clone());
         }
         ViewKind::Collapsible { header, icon, .. } => {

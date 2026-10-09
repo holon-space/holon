@@ -285,6 +285,7 @@ fn positional_args_of_a_widget_with_children_are_children() {
     for render in [
         r#"row(col("a"), col("b"))"#,
         r#"section(col("a"), col("b"))"#,
+        r#"board_lane(col("a"), col("b"))"#,
     ] {
         let texts = render_texts(render, row(&[("a", "first"), ("b", "second")]));
         assert_eq!(texts, ["first", "second"], "{render}");

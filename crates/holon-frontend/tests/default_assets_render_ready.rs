@@ -117,7 +117,7 @@ impl BuilderServices for AssetServices {
     }
 }
 
-fn render_json(expr: &RenderExpr, row: DataRow) -> serde_json::Value {
+fn render_json(expr: &RenderExpr, ctx: &RenderContext) -> serde_json::Value {
     static RT: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
     let rt = RT.get_or_init(|| {
         tokio::runtime::Builder::new_multi_thread()
@@ -130,8 +130,7 @@ fn render_json(expr: &RenderExpr, row: DataRow) -> serde_json::Value {
         link_classifier: holon_api::link_parser::LinkTargetClassifier::default(),
         rt_handle: rt.handle().clone(),
     };
-    let ctx = RenderContext::default().with_row(Arc::new(row));
-    let vm = services.interpret(expr, &ctx).snapshot();
+    let vm = services.interpret(expr, ctx).snapshot();
     serde_json::to_value(&vm).expect("ViewModel serializes")
 }
 
@@ -192,6 +191,52 @@ fn column_names(expr: &RenderExpr) -> Vec<String> {
         .collect()
 }
 
+/// Every `item_template:` (or `item:`) in `expr`, with the value fn its host
+/// reads its rows from (`collection:`), if any: the expressions prod
+/// interprets once per delivered row. The snapshot of a `live_query` delivers
+/// no rows, so each is rendered on its own over a row of the shape it gets.
+fn item_templates(expr: &RenderExpr) -> Vec<(&RenderExpr, Option<&str>)> {
+    let own: Vec<(&RenderExpr, Option<&str>)> = match expr {
+        RenderExpr::FunctionCall { args, .. } => {
+            let collection = args
+                .iter()
+                .find(|a| a.name.as_deref() == Some("collection"))
+                .map(|a| match &a.value {
+                    RenderExpr::FunctionCall { name, .. } => name.as_str(),
+                    other => panic!("`collection:` is not a value fn call: {other:?}"),
+                });
+            args.iter()
+                .filter(|a| matches!(a.name.as_deref(), Some("item_template" | "item")))
+                .map(|a| (&a.value, collection))
+                .collect()
+        }
+        _ => Vec::new(),
+    };
+    own.into_iter()
+        .chain(expr.children().into_iter().flat_map(item_templates))
+        .collect()
+}
+
+/// A row as `ops_of` / `chain_ops` deliver it (crates/holon-frontend/src/
+/// value_fns/ops_of.rs `build_row`): one operation on `target`.
+fn operation_row(target: &Value) -> DataRow {
+    DataRow::from([
+        ("id".to_string(), Value::String("op:set_field".into())),
+        ("name".to_string(), Value::String("set_field".into())),
+        (
+            "display_name".to_string(),
+            Value::String("Set field".into()),
+        ),
+        (
+            "description".to_string(),
+            Value::String("Set a field".into()),
+        ),
+        ("entity_name".to_string(), Value::String("block".into())),
+        ("target_id".to_string(), target.clone()),
+        ("icon".to_string(), Value::String("edit".into())),
+    ])
+}
+
 /// The row a shipped source is rendered over, shaped like the rows prod
 /// delivers to it: an entity id, and a text value in every column the source
 /// reads, except the columns whose prod type is not text.
@@ -210,7 +255,8 @@ fn source_row(label: &str, expr: &RenderExpr) -> DataRow {
             row.insert("todo_states".to_string(), Value::Null);
         }
         // The integration mirror's `enabled` is an INTEGER column.
-        "default/types/integration_profile.yaml#0" => {
+        "default/types/integration_profile.yaml#0"
+        | "rust/holon-app::integrations_section::settings_section_src" => {
             row.insert("enabled".to_string(), Value::Integer(1));
         }
         // `pending_question.options` holds the offered answers as a JSON array.
@@ -234,7 +280,8 @@ fn every_shipped_render_source_draws_no_error_node() {
                 .iter()
                 .any(|(l, _)| l.starts_with("default/types/person_profile.yaml"))
             && shipped.iter().any(|(l, _)| l.starts_with("integrations/"))
-            && shipped.iter().any(|(l, _)| l.starts_with("kitchen/")),
+            && shipped.iter().any(|(l, _)| l.starts_with("kitchen/"))
+            && shipped.iter().any(|(l, _)| l.starts_with("rust/")),
         "the shipped corpus lost a source family: {:?}",
         shipped.iter().map(|(l, _)| l).collect::<Vec<_>>()
     );
@@ -242,13 +289,38 @@ fn every_shipped_render_source_draws_no_error_node() {
     for (label, source) in &shipped {
         let expr = holon_api::render_dsl::parse_render_dsl(source)
             .unwrap_or_else(|e| panic!("{label} does not parse: {e:#}"));
-        let json = render_json(&expr, source_row(label, &expr));
-        if contains_text(&json, "[unknown: ") {
-            offenders.push(format!("{label}: names a widget the interpreter lacks"));
-        }
-        let errors = error_messages(&json);
-        if !errors.is_empty() {
-            offenders.push(format!("{label}: {errors:?}\n    SRC: {source}"));
+        let row = Arc::new(source_row(label, &expr));
+        let over = |row: Arc<DataRow>| {
+            RenderContext::default()
+                .with_row(row.clone())
+                .with_data_rows(vec![row])
+        };
+        let renders = std::iter::once(("source".to_string(), &expr, over(row.clone()))).chain(
+            item_templates(&expr)
+                .into_iter()
+                .enumerate()
+                .map(|(i, (template, collection))| {
+                    let item_row = match collection {
+                        None => row.clone(),
+                        Some("ops_of" | "chain_ops") => Arc::new(operation_row(&row["id"])),
+                        Some(other) => {
+                            panic!("{label}: no row shape known for `collection: {other}(…)`")
+                        }
+                    };
+                    (format!("item_template #{i}"), template, over(item_row))
+                }),
+        );
+        for (part, part_expr, ctx) in renders {
+            let json = render_json(part_expr, &ctx);
+            if contains_text(&json, "[unknown: ") {
+                offenders.push(format!(
+                    "{label} {part}: names a widget the interpreter lacks"
+                ));
+            }
+            let errors = error_messages(&json);
+            if !errors.is_empty() {
+                offenders.push(format!("{label} {part}: {errors:?}\n    SRC: {source}"));
+            }
         }
     }
     assert!(
@@ -297,7 +369,10 @@ fn the_root_layout_draws_exactly_its_perspective_panels() {
         drawn, panels,
         "index.org: the layout must draw exactly the perspective's displayable panels"
     );
-    let json = render_json(&layout, DataRow::new());
+    let json = render_json(
+        &layout,
+        &RenderContext::default().with_row(Arc::new(DataRow::new())),
+    );
     let errors = error_messages(&json);
     assert!(
         errors.is_empty(),

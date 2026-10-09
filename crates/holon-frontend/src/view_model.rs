@@ -256,6 +256,11 @@ pub enum ViewKind {
         title: String,
         children: LazyChildren,
     },
+    /// One lane of a `board`: its header and its cards.
+    BoardLane {
+        title: String,
+        children: LazyChildren,
+    },
     List {
         #[serde(default = "default_list_gap")]
         gap: f32,
@@ -520,6 +525,7 @@ impl ViewKind {
             ViewKind::Image { .. } => "image",
             ViewKind::Row { .. } => "row",
             ViewKind::Section { .. } => "section",
+            ViewKind::BoardLane { .. } => "board_lane",
             ViewKind::List { .. } => "list",
             ViewKind::Tree { .. } => "tree",
             ViewKind::Outline { .. } => "outline",
@@ -1321,6 +1327,12 @@ impl ViewModel {
                     child.fmt_indent(out, indent + 1);
                 }
             }
+            ViewKind::BoardLane { title, children } => {
+                let _ = writeln!(out, "{pad}board_lane({title:?}){ops_suffix}");
+                for child in &children.items {
+                    child.fmt_indent(out, indent + 1);
+                }
+            }
 
             // Elements
             ViewKind::SourceBlock {
@@ -1557,6 +1569,7 @@ impl ViewModel {
             // LazyChildren nodes
             ViewKind::Row { children, .. }
             | ViewKind::Section { children, .. }
+            | ViewKind::BoardLane { children, .. }
             | ViewKind::List { children, .. }
             | ViewKind::Tree { children }
             | ViewKind::Outline { children }
@@ -1615,6 +1628,7 @@ impl ViewModel {
             // LazyChildren nodes
             ViewKind::Row { children, .. }
             | ViewKind::Section { children, .. }
+            | ViewKind::BoardLane { children, .. }
             | ViewKind::List { children, .. }
             | ViewKind::Tree { children }
             | ViewKind::Outline { children }
@@ -1700,6 +1714,7 @@ impl ViewModel {
             ViewKind::Image { .. } => "image",
             ViewKind::Row { .. } => "row",
             ViewKind::Section { .. } => "section",
+            ViewKind::BoardLane { .. } => "board_lane",
             ViewKind::List { .. } => "list",
             ViewKind::Tree { .. } => "tree",
             ViewKind::Outline { .. } => "outline",

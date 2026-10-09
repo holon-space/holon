@@ -101,23 +101,30 @@ pub fn resolve_active_collection(expr: &RenderExpr) -> Option<&RenderExpr> {
 
 /// The active mode of a `view_mode_switcher`'s args: explicit `default_mode`
 /// (the backend marks the `Predicate::Always` variant this way), else the
-/// first mode `modes:` lists; `None` where the builder draws an error node.
+/// first mode `modes:` lists; `None` where the builder draws an error node or
+/// where `default_mode`/`modes` is not a string literal this can read.
 fn active_mode_name(args: &[holon_api::render_types::Arg]) -> Option<String> {
-    let literal = |key: &str| {
+    let arg = |key: &str| {
         args.iter()
             .find(|a| a.name.as_deref() == Some(key))
-            .and_then(|a| match &a.value {
-                RenderExpr::Literal {
-                    value: holon_api::Value::String(s),
-                } => Some(s.clone()),
-                _ => None,
-            })
+            .map(|a| &a.value)
     };
-    literal("default_mode").or_else(|| {
-        let modes =
-            holon_frontend::reactive_view_model::parse_view_modes(&literal("modes")?).ok()?;
-        modes.into_iter().next().map(|m| m.name)
-    })
+    let string_literal = |key: &str| match arg(key)? {
+        RenderExpr::Literal {
+            value: holon_api::Value::String(s),
+        } => Some(s.clone()),
+        _ => None,
+    };
+    arg("entity_uri")?;
+    let listed =
+        holon_frontend::reactive_view_model::parse_view_modes(&string_literal("modes")?).ok()?;
+    match arg("default_mode") {
+        None => listed.into_iter().next().map(|m| m.name),
+        Some(_) => {
+            let mode = string_literal("default_mode")?;
+            listed.iter().any(|m| m.name == mode).then_some(mode)
+        }
+    }
 }
 
 /// The `CollectionVariant` prod draws for `expr`'s *active* collection (see

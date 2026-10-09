@@ -1,6 +1,7 @@
 //! Every render source Holon ships: the kitchen profiles, every `render:` in a
-//! yaml under `assets/default` and `assets/integrations`, and every
-//! `#+BEGIN_SRC render` block of an org file there, as the org parser reads it.
+//! yaml under `assets/default` and `assets/integrations`, every
+//! `#+BEGIN_SRC render` block of an org file there, as the org parser reads it,
+//! and the render DSL the Rust crates carry as strings.
 
 use std::path::Path;
 use std::path::PathBuf;
@@ -82,6 +83,36 @@ pub fn shipped_render_strings() -> Vec<(String, String)> {
     ] {
         out.extend(yaml_renders(label, yaml));
     }
+    out.extend([
+        (
+            "rust/holon-app::integrations_section::sidebar_live_query_src".to_string(),
+            holon_app::integrations_section::sidebar_live_query_src(),
+        ),
+        (
+            "rust/holon-app::integrations_section::settings_section_src".to_string(),
+            holon_app::integrations_section::settings_section_src(),
+        ),
+        (
+            "rust/holon-api::perspective::ACTION_BAR_ENTITY_OPS".to_string(),
+            holon_api::perspective::ACTION_BAR_ENTITY_OPS.to_string(),
+        ),
+        (
+            "rust/holon-api::perspective::ACTION_BAR_GLOBAL_OPS".to_string(),
+            holon_api::perspective::ACTION_BAR_GLOBAL_OPS.to_string(),
+        ),
+    ]);
+    out.extend(
+        holon_frontend::journals_page_blocks()
+            .into_iter()
+            .filter(|b| matches!(b.source_language, Some(SourceLanguage::Render)))
+            .enumerate()
+            .map(|(i, b)| {
+                (
+                    format!("rust/holon-frontend::journals_page_blocks#{i}"),
+                    b.content,
+                )
+            }),
+    );
     let mut files = Vec::new();
     files_under(&assets.join("default"), &mut files);
     files_under(&assets.join("integrations"), &mut files);
