@@ -268,6 +268,12 @@ The ones that govern how Holon reaches other devices and other systems:
 | [0033](adr/0033-own-device-pairing-whole-store-replication.md) | Own-device pairing: whole-store replication, device-local layout doc, acceptor-enforced capabilities, archive-and-re-import for a phone used before pairing |
 | [0034](adr/0034-low-code-connections-formats-and-systems-as-sidecars.md) | Low-code connections: JSON-Lines typed rows as the neutral contract, one wasm provider host, jaq as the mapping language, UTCP-manual-plus-`holon` sidecars |
 
+The one that governs the block write path:
+
+| ADR | Covers |
+| --- | --- |
+| [0036](adr/0036-loro-is-the-only-block-write-authority.md) | Loro is the only block write authority in every wiring; the Loro→SQL projection is the only block-SQL writer; deciders read the authority; SqlOnly = Loro durability off |
+
 ## Key Files
 
 | Path | Description |

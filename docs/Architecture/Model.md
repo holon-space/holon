@@ -25,8 +25,8 @@ The read path is **one incremental computation**:
 | # | Layer | Members | The rule |
 |---|-------|---------|----------|
 | 1 | **Replicas** | org files, Loro store, external APIs, UI editor | Every replica has a base; inbound intent = `diff(base, current)`. No replica writes another replica. |
-| 2 | **Consolidator** | one per vault, epoch-pinned (Loro when enabled; Turso-LWW in SqlOnly) | The only merger. Monopolist of order: it mints every fractional index. Text merges via the CRDT merge *function*; structure via the tree CRDT (store present) or AST 3-way (absent). |
-| 3 | **Projection** | Turso | Exactly one writer per mode; verbatim and total; never re-merges; ephemeral by contract. |
+| 2 | **Consolidator** | one per vault, epoch-pinned: Loro, in every wiring ([ADR 0036](../adr/0036-loro-is-the-only-block-write-authority.md); SqlOnly runs Turso-LWW until M5 lands) | The only merger and the only block write authority. Monopolist of order: it mints every fractional index. Text merges via the CRDT merge *function*; structure via the tree CRDT (store present) or AST 3-way (absent). |
+| 3 | **Projection** | Turso | The Loro→SQL projection is the only writer of the block tables; verbatim and total; never re-merges; ephemeral by contract. It lags the authority, so no op decides on it (invariant 18). |
 | 4 | **Reactive pipeline** | matviews → CDC → `LiveData<Block>` / cells | Convergent state, not an event log; recovery is resync (`Replace`), not acks. Every derived holder = live recompute at quiescence — the derived-data contract, [Reactivity.md](Reactivity.md). |
 | 5 | **UI** | ViewModel `Mutable`s + `Cell`s | Displays fields and captures intent; owns no entity values. Structural ops are commit points. |
 
@@ -52,6 +52,13 @@ Every platform ships with the CRDT layer ON (`crdt.enabled` defaults to `true`,
 ruling D69.a 2026-09-02): sharing and offline merge live behind it, and a
 desktop booting without it cannot share with a phone at all. SqlOnly remains a
 first-class point in the grid, reached by an explicit `crdt.enabled = false`.
+
+The storage-backend axis is durability only (ruling D-write-path.a,
+[ADR 0036](../adr/0036-loro-is-the-only-block-write-authority.md)): every
+wiring writes blocks through the same in-memory Loro authority. Full persists
+a Loro snapshot; SqlOnly persists only the SQL projection and rebuilds the
+in-memory Loro document from it at boot. NOT YET (M5): SqlOnly still runs the
+Turso-LWW authority (`SqlOperationProvider` block CRUD, `SqlBlockOperations`).
 
 ## Loro is three capabilities, not one
 
@@ -95,7 +102,14 @@ for any field is: op-fidelity (store) → base-limited 3-way (transient) → LWW
    kind travels with it and the write could only replace the bag while
    leaving `property_kinds` describing values it no longer holds. Properties
    are written one key at a time (ruling D126.a).
-4. Exactly one writer per store; the projection is total.
+4. Exactly one writer per store; the projection is total. For the block
+   tables (`block_raw` and its junctions) that writer is the Loro→SQL
+   projection, in every wiring; `SqlOperationProvider` block CRUD is its sink
+   and nothing else (ADR 0036 D2). NOT YET (M5, "SQL writers"): SqlOnly's
+   SQL authority, ingest's SQL leg, `place_all`, the link-resolution
+   rewrites (`heal_page_links`, `rewrite_link_resolution`) and the default
+   ops' no-cell fallback (`crates/holon-core/src/traits.rs`) still write
+   block SQL directly.
 5. Sinks never re-merge.
 6. Causality is inherited (scalar base now; Loro/git DAG if P2P topology ever
    demands it), never hand-rolled.
@@ -230,7 +244,7 @@ for any field is: op-fidelity (store) → base-limited 3-way (transient) → LWW
     OPEN). Any existence check upstream — a UI affordance, an MCP planner's
     alias resolution — reads a projection and is therefore advisory: it can be
     stale by the time the write runs, so it narrows what gets offered but never
-    licenses skipping the assert. Telling the UI which transitions are
+    licenses skipping the assert (invariant 18). Telling the UI which transitions are
     *enabled* is a separate seam (D149), not this one. Pinned by
     `set_field_missing_subject_test.rs`.
 16. **A private field changes only through its owner.** A field whose
@@ -247,6 +261,8 @@ for any field is: op-fidelity (store) → base-limited 3-way (transient) → LWW
     `SqlOperationProvider` (ingest, the Loro→SQL projection,
     `place_all`) still write the columns directly
     (`2026-10-02-stored-parent-cycle-spins-turso-ivm-commit-forever`).
+    Under invariant 4 only the projection keeps that access, and it writes
+    what the owner already decided.
 17. **A tagged shape is a write boundary** — a tag may register a
     `ShapeValidator` (`crates/holon-core/src/shape_gate.rs`; `decision` is
     the first). The operation dispatcher (invariant 4's one writer) admits a
@@ -325,6 +341,22 @@ for any field is: op-fidelity (store) → base-limited 3-way (transient) → LWW
     which a case carried a decision and the gate admitted no decision edit or the simulator was compared on
     none; a case that carries a decision draws a legal edit of it within its
     first steps.
+18. **An op that decides reads the write authority, never the projection**
+    (ADR 0036 D3). Guards, structural ops, planners and read-backs decide on
+    what the authority holds: the `WriteAuthorityReads` seam
+    (`crates/holon-core/src/traits.rs`) and the `*_authoritative` reads of
+    `BlockDataSourceHelpers`. The projection lags the authority, so an op
+    that reads it decides on an old tree: it refuses a legal write or admits
+    an illegal one. A read that waits for the projection to catch up is not a
+    substitute: it turns lag into a timeout. A block the authority does not
+    hold is refused with the typed `BlockNotInWriteAuthority`. The
+    structural ops, the `move_block` guard and the task-keyword read comply;
+    pinned by `just projector-lag-lock`. NOT YET: the `SqlOperationProvider`
+    planners (`block_to_page_plan`, `merge_blocks_plan`, `page_chain_plan`),
+    the `OperationEngine` reads through `SqlUndoStateReader` (undo staleness,
+    identity collision, task-keyword prior state, proposals) and the MCP
+    `dense_patch` read-back still decide on the projection. The M5 plan
+    lists each one and moves it before SqlOnly moves onto Loro.
 
 ## Conditions: how a degradation reaches the user (ADR 0035)
 

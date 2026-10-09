@@ -1,6 +1,11 @@
 # Write-Path Unification — Options for Ruling (2026-07-17)
 
-**Status: options document for Martin's ruling. No code changes proposed here.**
+**Status: RULED 2026-10-09 (D-write-path.a) — Loro is the only block write
+authority in every wiring, and the Loro→SQL projection is the only writer of
+the block tables; companion rule: an op that decides reads the authority,
+never the projection. See §9 and
+[ADR 0036](../adr/0036-loro-is-the-only-block-write-authority.md).** §1–§8
+are the options as analysed; §8's increments stand.
 
 Question: WHY do SqlOnly and with-Loro wiring have divergent code paths through
 the block-write stack, and can they be unified to shrink the bug surface?
@@ -520,3 +525,39 @@ the write path:
   entangled → stop at increment 0 (the highest-value target — I1 killed, bug
   #2 given one home) and revisit 1–2 alongside the Q1 (undo) and Q3 (marks)
   rulings when step 3–4 are scheduled.
+
+---
+
+## 9. Ruling D-write-path.a (2026-10-09)
+
+The vault offered three options: (a) keep SqlOnly first-class with every op
+written twice, (b) Loro-only writes with SQL as the projection sink, (c) this
+document's Option A. Martin ruled **(b) in its full form**:
+
+- **Loro is the only block write authority, in every wiring.** Full and
+  SqlOnly share the same in-memory Loro; SqlOnly differs only in durability
+  (no Loro on disk; Loro is rebuilt from SQL at boot). That is M5.
+- **The Loro→SQL projection is the only writer of the block tables.**
+  `SqlOperationProvider` block CRUD becomes the projection sink only; ingest,
+  `place_all` and every other direct block writer route through Loro. This
+  clause stays inside M5.
+- **Companion rule: an op that decides (guards, structural ops, planners,
+  read-backs) reads the write authority, never the projection.**
+- **Before SqlOnly moves onto Loro:** fix the open Loro-leg field losses,
+  move every decider to authority reads, and make the projection-latency SLO
+  a landing gate.
+
+Why (b) and not (c): the second-writer class is "two implementations of
+block-write semantics", and it also runs in Full mode (planners, ingest legs,
+direct SQL writers). Deleting the second writer removes the class; one op
+catalog over two strategies keeps both writers. Doc Option B (SQL-canonical)
+is the inverse of the ruling and stays rejected: live P2P needs the CRDT as
+the authority.
+
+The decision is recorded in
+[ADR 0036](../adr/0036-loro-is-the-only-block-write-authority.md) and
+[Model.md](../Architecture/Model.md) invariants 4 and 18. The execution plan
+is the M5 plan (`EditorTextOnLoroText.md`, linked from the vault topic
+`write-path-unification-ruling`). §8's open fork (increments 1–2) is not
+pursued: with one writer there is no second implementation to keep in
+parity, and the increment-0 parity test goes with the SQL authority.
