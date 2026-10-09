@@ -399,6 +399,8 @@ struct AppModel {
     view_model: ViewModel,
     shadow_ctx: RenderContext,
     show_settings: bool,
+    /// The Settings section a remedy opened the modal at; drawn first.
+    settings_section: Option<holon_api::SettingsSection>,
     show_widget_gallery: bool,
     /// Per-window share/accept UI state (modals, toasts, quarantines).
     share_ui: Entity<share_ui::ShareUiState>,
@@ -1113,7 +1115,14 @@ impl Render for HolonApp {
                 tab_strip::resolve_tab_strip(generation, session, rt_handle, state, wh, &async_cx);
             }
         }
-        let (view_model, shadow_ctx, services, show_settings, show_widget_gallery) = {
+        let (
+            view_model,
+            shadow_ctx,
+            services,
+            show_settings,
+            settings_section,
+            show_widget_gallery,
+        ) = {
             let model = self.app_model.read(cx);
             let services: Arc<dyn BuilderServices> = model.engine.clone();
             (
@@ -1121,6 +1130,7 @@ impl Render for HolonApp {
                 model.shadow_ctx.clone(),
                 services,
                 model.show_settings,
+                model.settings_section,
                 model.show_widget_gallery,
             )
         };
@@ -1263,10 +1273,53 @@ impl Render for HolonApp {
                 .border_t_1()
                 .border_color(border_color)
                 .child(integrations);
+            // Read from the record files on every frame the modal is open, so
+            // it shows the records while the engine is down.
+            let crash_history = match holon_frontend::crash_history::render_expr() {
+                Ok(expr) => interpret_and_render(
+                    &expr,
+                    holon_frontend::crash_history::CrashHistory::of_this_process().rows(),
+                    &gpui_ctx,
+                )
+                .into_any_element(),
+                Err(e) => div()
+                    .text_size(px(11.0))
+                    .text_color(theme.danger)
+                    .child(format!(
+                        "Crash history section could not be built — this is a build defect, not \
+                         an empty history: {e}"
+                    ))
+                    .into_any_element(),
+            };
+            let crash_history_block = div()
+                .flex()
+                .flex_col()
+                .pt(px(12.0))
+                .mt(px(12.0))
+                .border_t_1()
+                .border_color(border_color)
+                .child(crash_history);
+            let mut sections = vec![
+                (None, content.into_any_element()),
+                (
+                    Some(holon_api::SettingsSection::Integrations),
+                    integrations_block.into_any_element(),
+                ),
+                (
+                    Some(holon_api::SettingsSection::CrashHistory),
+                    crash_history_block.into_any_element(),
+                ),
+            ];
+            if let Some(at) = sections
+                .iter()
+                .position(|(section, _)| section.is_some() && *section == settings_section)
+            {
+                let opened = sections.remove(at);
+                sections.insert(0, opened);
+            }
             let content = div()
                 .flex_col()
-                .child(content)
-                .child(integrations_block)
+                .children(sections.into_iter().map(|(_, section)| section))
                 .child(build_stamp);
             Some(modal_overlay(
                 "settings",
@@ -1461,6 +1514,7 @@ impl Render for HolonApp {
                                 .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                                     settings_model.update(cx, |m, cx| {
                                         m.show_settings = !m.show_settings;
+                                        m.settings_section = None;
                                         cx.notify();
                                     });
                                 })
@@ -2697,6 +2751,7 @@ fn launch_holon_window_impl(
                 view_model,
                 shadow_ctx,
                 show_settings: false,
+                settings_section: None,
                 show_widget_gallery: false,
                 share_ui: share_ui_entity.clone(),
                 root_live_blocks: std::collections::HashMap::new(),
@@ -2757,6 +2812,20 @@ fn launch_holon_window_impl(
                 &share_ui_entity,
                 move |_, _, _: &share_ui::NotifyShareUi, cx| {
                     cx.notify();
+                },
+            )
+            .detach();
+            let settings_model = app_model.clone();
+            cx.subscribe(
+                &share_ui_entity,
+                move |_, _, open: &share_ui::OpenSettings, cx| {
+                    let share_ui::OpenSettings(section) = open;
+                    tracing::info!("[share-ui] a toast remedy opens Settings at {section:?}");
+                    settings_model.update(cx, |m, cx| {
+                        m.show_settings = true;
+                        m.settings_section = Some(*section);
+                        cx.notify();
+                    });
                 },
             )
             .detach();

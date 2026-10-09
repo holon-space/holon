@@ -64,9 +64,6 @@ pub struct ConditionsRefState {
     /// Every kind this state has ever raised or cleared. The invariant judges
     /// only these; a kind never named here is the app's own business.
     governed: BTreeSet<&'static str>,
-    /// The last panic of the running process: its record is on disk, and the
-    /// next start discloses it.
-    unreported_panic: Option<Panicked>,
     /// Every crash record on disk, oldest first.
     crash_records: Vec<(Kept, Panicked)>,
 }
@@ -158,12 +155,13 @@ impl ConditionsRefState {
     /// the next start.
     pub fn task_panicked(&mut self, panic: Panicked) {
         self.raise_panic(holon_api::ConditionKind::TASK_PANICKED, &panic);
-        self.crash_records.push((Kept::ThisRun, panic.clone()));
-        self.unreported_panic = Some(panic);
+        self.crash_records.push((Kept::ThisRun, panic));
     }
 
-    /// A restart ends this process's panic conditions; the next start
-    /// discloses the last panic's record, once.
+    /// A restart ends this process's panic conditions; this run's record joins
+    /// the unshown ones, and the start discloses the newest unshown record.
+    /// A record stays unshown until a drawn frame shows it, which a headless
+    /// run never does, so every start discloses it again.
     pub fn restart(&mut self) {
         self.clear_kind(holon_api::ConditionKind::TASK_PANICKED);
         self.clear_kind(holon_api::ConditionKind::PREVIOUS_RUN_PANICKED);
@@ -172,7 +170,13 @@ impl ConditionsRefState {
                 *kept = Kept::Unshown;
             }
         }
-        if let Some(panic) = self.unreported_panic.take() {
+        let newest_unshown = self
+            .crash_records
+            .iter()
+            .rev()
+            .find(|(kept, _)| *kept == Kept::Unshown)
+            .map(|(_, panic)| panic.clone());
+        if let Some(panic) = newest_unshown {
             self.previous_run_panicked(&panic);
         }
     }
@@ -223,7 +227,6 @@ impl ConditionsRefState {
                 })
                 .collect(),
             governed: self.governed.clone(),
-            unreported_panic: self.unreported_panic.clone(),
             crash_records: self.crash_records.clone(),
         }
     }

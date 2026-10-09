@@ -11,6 +11,9 @@
 //! every window from the 300x200 minimum and phone sizes up, whatever the
 //! message's length or glyph width, and the acknowledged records keep their
 //! bytes in the history
+//! @pbt covers crash-history-view — the gear opens Settings, whose crash
+//! history paints the full message of every kept record, shown or not, and
+//! reading it changes no record (D-crash-history.a)
 //! @pbt overlaps general_e2e_composed_pbt — kept: the keystone is headless and
 //! draws no frame
 
@@ -20,7 +23,9 @@ use std::time::Duration;
 
 use gpui::AnyWindowHandle;
 use gpui::AssetSource;
+use gpui::InputEvent;
 use gpui::TestApp;
+use holon_api::SettingsSection;
 use holon_frontend::geometry::ElementInfo;
 use holon_frontend::geometry::GeometryProvider;
 use holon_frontend::panic_record::DROPPED_FILE;
@@ -28,9 +33,12 @@ use holon_frontend::panic_record::KEPT_UNSHOWN;
 use holon_frontend::panic_record::PanicRecord;
 use holon_frontend::panic_record::SEEN_DIR;
 use holon_frontend::panic_record::UNSHOWN_DIR;
+use holon_gpui::SETTINGS_GEAR_ID;
+use holon_gpui::geometry::BoundsRegistry;
 use holon_gpui::launch_holon_window_with_engine_and_share;
 use holon_gpui::share_ui::DEGRADED_TOAST_STACK;
 use holon_gpui::share_ui::PREVIOUS_RUN_TOAST;
+use holon_gpui::share_ui::open_settings_id;
 use holon_integration_tests::test_environment::TestEnvironment;
 
 /// The records `install` showed and nothing has marked seen yet.
@@ -156,11 +164,27 @@ fn inside(rect: &ElementInfo, width: f32, height: f32) -> bool {
         && rect.y + rect.height <= height
 }
 
+/// A window whose previous-run toast was drawn and whose records were
+/// acknowledged. Its fields are leaked, never dropped: tearing gpui down trips
+/// its leak detector.
+struct Acknowledged {
+    app: TestApp,
+    window: AnyWindowHandle,
+    bounds: BoundsRegistry,
+    config: tempfile::TempDir,
+    test_env: TestEnvironment,
+}
+
+fn records_are_seen_after_a_drawn_frame(size: &str, seed: Seed) {
+    let shown = open_and_acknowledge(size, seed);
+    std::mem::forget(shown);
+}
+
 /// Open a window of `size` over a bus `install` filled from `seed`, and check
 /// that the frame paints the previous-run toast inside the viewport and that
 /// its records move to the history, byte for byte, exactly on the frame after
 /// it.
-fn records_are_seen_after_a_drawn_frame(size: &str, seed: Seed) {
+fn open_and_acknowledge(size: &str, seed: Seed) -> Acknowledged {
     // Read by `launch_holon_window_impl`; set before the window opens.
     // SAFETY: single-threaded test setup, before any window or runtime thread
     // reads the environment.
@@ -186,7 +210,13 @@ fn records_are_seen_after_a_drawn_frame(size: &str, seed: Seed) {
     let bus = holon_frontend::panic_record::install(config.path());
     let seeded = unshown(config.path());
     assert!(!seeded.is_empty(), "install shows the records on its bus");
-    let seeded_bytes = record_bytes(&config.path().join(UNSHOWN_DIR));
+    let seen_dir = config.path().join(SEEN_DIR);
+    let mut history_bytes = if seen_dir.exists() {
+        record_bytes(&seen_dir)
+    } else {
+        Vec::new()
+    };
+    history_bytes.extend(record_bytes(&config.path().join(UNSHOWN_DIR)));
 
     let bounds = app.update(|cx| {
         launch_holon_window_with_engine_and_share(
@@ -269,13 +299,203 @@ fn records_are_seen_after_a_drawn_frame(size: &str, seed: Seed) {
         "the next frame marks every shown record seen"
     );
     assert_eq!(
+        record_bytes(&seen_dir),
+        history_bytes,
+        "every acknowledged record keeps its bytes in the history, after the ones it held"
+    );
+    Acknowledged {
+        app,
+        window,
+        bounds,
+        config,
+        test_env: env,
+    }
+}
+
+/// A message longer than the toast's one-line headline, over several lines.
+const LONG_MESSAGE: &str = "called `Result::unwrap()` on an `Err` value: the vault index is \
+                            corrupt\nfirst bad entry: Projects/Holon/Now.org\nsecond bad entry: \
+                            Projects/Holon/Plain-Text Layer.org, Projects/Holon/Dogfooding & \
+                            Agents.org, Projects/Holon/Cross-Cutting Concerns.org";
+
+/// A record an earlier start already showed.
+const SEEN_MESSAGE: &str = "an earlier crash, already shown\nwith a second line";
+
+/// One unshown record with [`LONG_MESSAGE`], and one already in the seen dir.
+fn a_long_record_and_a_seen_one(config: &Path) -> String {
+    let seen_dir = config.join(SEEN_DIR);
+    std::fs::create_dir_all(&seen_dir).expect("create the seen dir");
+    let seen = PanicRecord {
+        message: SEEN_MESSAGE.to_string(),
+        location: "earlier.rs:7:3".to_string(),
+        thread: "main".to_string(),
+    };
+    std::fs::write(
+        seen_dir.join("1.json"),
+        serde_json::to_vec_pretty(&seen).expect("serialize a record"),
+    )
+    .expect("seed a seen record");
+    one_run(config, LONG_MESSAGE)
+}
+
+/// Dispatch a real left click at the centre of `info`.
+fn click(app: &mut TestApp, window: AnyWindowHandle, info: &ElementInfo) {
+    let (x, y) = info.center();
+    let position = gpui::point(gpui::px(x), gpui::px(y));
+    app.update(|cx| {
+        window
+            .update(cx, |_, win, cx| {
+                win.dispatch_event(
+                    gpui::MouseMoveEvent {
+                        position,
+                        pressed_button: None,
+                        modifiers: Default::default(),
+                    }
+                    .to_platform_input(),
+                    cx,
+                );
+                win.dispatch_event(
+                    gpui::MouseDownEvent {
+                        position,
+                        button: gpui::MouseButton::Left,
+                        modifiers: Default::default(),
+                        click_count: 1,
+                        first_mouse: false,
+                    }
+                    .to_platform_input(),
+                    cx,
+                );
+                win.dispatch_event(
+                    gpui::MouseUpEvent {
+                        position,
+                        button: gpui::MouseButton::Left,
+                        modifiers: Default::default(),
+                        click_count: 1,
+                    }
+                    .to_platform_input(),
+                    cx,
+                );
+            })
+            .expect("window alive for the click");
+    });
+}
+
+fn draw(app: &mut TestApp, window: AnyWindowHandle, bounds: &BoundsRegistry) {
+    app.run_until_parked();
+    app.update(|cx| {
+        window
+            .update(cx, |_, window, cx| window.draw(cx).clear(cx))
+            .expect("draw the window");
+    });
+    bounds.flush();
+}
+
+/// The text every painted crash-history entry displays, keyed by element id.
+fn painted_history(bounds: &BoundsRegistry) -> Vec<(String, String)> {
+    let mut painted: Vec<(String, String)> = bounds
+        .all_elements()
+        .into_iter()
+        .filter(|(id, _)| id.starts_with("text-crash-record:"))
+        .map(|(id, info)| (id, info.displayed_text.as_deref().unwrap_or("").to_string()))
+        .collect();
+    painted.sort();
+    painted
+}
+
+#[test]
+fn settings_shows_every_crash_record_in_full() {
+    let Acknowledged {
+        mut app,
+        window,
+        bounds,
+        config,
+        test_env,
+    } = open_and_acknowledge("1400x900", a_long_record_and_a_seen_one);
+    let seen_before = record_bytes(&config.path().join(SEEN_DIR));
+
+    let gear = bounds
+        .element_info(SETTINGS_GEAR_ID)
+        .expect("the toolbar gear records its box");
+    click(&mut app, window, &gear);
+    draw(&mut app, window, &bounds);
+
+    let integrations = bounds
+        .all_elements()
+        .into_iter()
+        .filter(|(id, _)| id.starts_with("text-integration:"))
+        .count();
+    assert!(
+        integrations > 0,
+        "the gear click opens the Settings modal, whose integrations section paints its rows"
+    );
+    let painted = painted_history(&bounds);
+    let bodies: Vec<&str> = painted
+        .iter()
+        .filter(|(id, _)| id.ends_with("-body"))
+        .map(|(_, text)| text.as_str())
+        .collect();
+    for message in [LONG_MESSAGE, SEEN_MESSAGE] {
+        assert!(
+            bodies.contains(&message),
+            "the open Settings modal must paint the full message {message:?} of a kept crash \
+             record; the crash history paints {painted:#?}"
+        );
+    }
+    assert_eq!(
         record_bytes(&config.path().join(SEEN_DIR)),
-        seeded_bytes,
-        "every acknowledged record keeps its bytes in the history"
+        seen_before,
+        "reading the crash history changes no record"
     );
 
-    std::mem::forget(app);
-    std::mem::forget(env);
+    std::mem::forget((app, bounds, config, test_env));
+}
+
+#[test]
+fn the_doorbell_opens_the_crash_history() {
+    let Acknowledged {
+        mut app,
+        window,
+        bounds,
+        config,
+        test_env,
+    } = open_and_acknowledge("1400x900", a_long_record_and_a_seen_one);
+    let viewport = (1400.0, 900.0);
+
+    let open = open_settings_id(SettingsSection::CrashHistory);
+    let button = bounds.element_info(&open).unwrap_or_else(|| {
+        panic!(
+            "the previous-run toast offers a {open:?} button into the crash history; the toast \
+             stack paints {:?}",
+            bounds
+                .element_info(DEGRADED_TOAST_STACK)
+                .and_then(|s| s.displayed_text)
+        )
+    });
+    assert!(
+        inside(&button, viewport.0, viewport.1),
+        "the crash history button lies inside the viewport: {button:?}"
+    );
+    click(&mut app, window, &button);
+    draw(&mut app, window, &bounds);
+
+    let bodies: Vec<(String, ElementInfo)> = bounds
+        .all_elements()
+        .into_iter()
+        .filter(|(id, _)| id.starts_with("text-crash-record:") && id.ends_with("-body"))
+        .collect();
+    let long = bodies
+        .iter()
+        .find(|(_, info)| info.displayed_text.as_deref() == Some(LONG_MESSAGE))
+        .unwrap_or_else(|| {
+            panic!("the button opens Settings on the crash history; it paints {bodies:#?}")
+        });
+    assert!(
+        inside(&long.1, viewport.0, viewport.1),
+        "the newest record is inside the viewport once the history opens: {:?}",
+        long.1
+    );
+
+    std::mem::forget((app, bounds, config, test_env));
 }
 
 #[test]

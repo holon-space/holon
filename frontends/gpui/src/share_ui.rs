@@ -530,6 +530,10 @@ impl Default for ShareUiState {
 pub struct NotifyShareUi;
 impl EventEmitter<NotifyShareUi> for ShareUiState {}
 
+/// A toast's remedy asks the window to open a section of Settings.
+pub struct OpenSettings(pub holon_api::SettingsSection);
+impl EventEmitter<OpenSettings> for ShareUiState {}
+
 /// GPUI global that routes a right-click-share event from a block view back
 /// into the window-level share-UI wiring. Any GPUI view that knows a row_id
 /// and receives a right-click dispatches `ShareTrigger::trigger(block_id, cx)`.
@@ -2089,6 +2093,11 @@ pub const TOAST_LINE: &str = "toast-line";
 /// headline names the newest crash site.
 pub const PREVIOUS_RUN_TOAST: &str = "previous-run-toast";
 
+/// Element id of a toast's button that opens `section` of Settings.
+pub fn open_settings_id(section: holon_api::SettingsSection) -> String {
+    format!("toast-open-settings-{section:?}")
+}
+
 /// The widths a toast box wants when the window lets it have them.
 const TOAST_MIN_W: f32 = 280.0;
 const TOAST_MAX_W: f32 = 420.0;
@@ -2143,10 +2152,26 @@ fn estimated_toast_height(lines: &[String], text_width: f32) -> f32 {
 
 fn toast_height(toast: &DegradedToast, text_width: f32) -> f32 {
     let height = estimated_toast_height(&toast_lines(toast), text_width);
-    if is_previous_run(toast) {
+    let text = if is_previous_run(toast) {
         height.min(PREVIOUS_RUN_LINES as f32 * TOAST_LINE_H + TOAST_BOX_CHROME_H)
     } else {
         height
+    };
+    text + settings_remedies(toast).len() as f32 * TOAST_LINE_H
+}
+
+/// The Settings sections a toast's condition offers to open.
+fn settings_remedies(toast: &DegradedToast) -> Vec<holon_api::SettingsSection> {
+    match toast.kind {
+        ToastKind::Condition(profile) => profile
+            .remedies()
+            .iter()
+            .filter_map(|remedy| match remedy {
+                holon_api::RemedySlot::OpenSettings(section) => Some(*section),
+                _ => None,
+            })
+            .collect(),
+        ToastKind::Local(_) => Vec::new(),
     }
 }
 
@@ -2308,6 +2333,31 @@ fn render_toast_stack(
                                 None,
                                 true,
                                 Some(std::sync::Arc::from(l)),
+                            )
+                        }))
+                        .children(settings_remedies(toast).into_iter().map(|section| {
+                            let open_state = share_state.clone();
+                            let label = section.open_label();
+                            crate::geometry::tracked(
+                                open_settings_id(section),
+                                div()
+                                    .id(SharedString::from(format!(
+                                        "toast-{idx}-open-settings-{section:?}"
+                                    )))
+                                    .cursor_pointer()
+                                    .underline()
+                                    .child(label)
+                                    .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                                        open_state.update(cx, |_, cx| {
+                                            cx.emit(OpenSettings(section));
+                                        });
+                                    })
+                                    .into_any_element(),
+                                &bounds,
+                                "toast_remedy",
+                                None,
+                                true,
+                                Some(std::sync::Arc::from(label)),
                             )
                         })),
                 )

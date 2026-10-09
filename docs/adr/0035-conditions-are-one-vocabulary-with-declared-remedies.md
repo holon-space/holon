@@ -1,7 +1,7 @@
 # ADR 0035 — A condition is one vocabulary, and its remedies are declared data
 
 **Status:** Accepted (directive 2026-09-12 in D120.a; D121.a ratified by Martin
-2026-09-14)
+2026-09-14; the `OpenSettings` remedy per D-crash-history.a, 2026-10-09)
 **Date:** 2026-09-14
 **Deciders:** Martin (directive on generic error handling; decision-inbox
 ruling D121)
@@ -81,6 +81,13 @@ an `OpId`, not an op-name string, so an unknown operation cannot be written into
 a profile. A remedy resolves to an `OperationIntent` and travels the path every
 other click takes (ADR 0024), which is also what lets the keystone drive a
 remedy with the existing driver rather than a new one.
+
+**`OpenSettings` is navigation, not an operation.** `RemedySlot::OpenSettings`
+names a `SettingsSection` and dispatches nothing: it opens that section of the
+Settings modal, drawn first so it is in view. A frontend draws every declared
+`OpenSettings` remedy as a button on the condition's surface. The previous-run
+panic declares one into the crash history (D-crash-history.a), so its toast
+stays a one-line doorbell and the records are read in full behind it.
 
 **The all-clear is a typed moment.** `AllClear` names it: a `ClearingEvent`, a
 clean ingest, a remedy applied, an elapsed duration, or `UntilRestart`. The last

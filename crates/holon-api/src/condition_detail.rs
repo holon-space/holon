@@ -457,28 +457,19 @@ impl ConditionKind {
                  until the next computation succeeds."
             )),
 
+            // A doorbell: every record is read in full in the crash history,
+            // which the profile's remedy opens.
             Self::PreviousRunPanicked {
-                message,
-                thread,
-                earlier,
+                message, earlier, ..
             } => {
                 let runs = match 1 + earlier.runs() {
                     1 => "1 earlier run".to_string(),
                     runs => format!("{runs} earlier runs"),
                 };
-                let headline = format!(
+                ConditionDetail::prose(format!(
                     "Holon crashed in {runs}; the newest at {subject}: {}",
                     one_line(message)
-                );
-                let mut body = vec![format!("{subject} on {thread}: {}", one_line(message))];
-                body.extend(
-                    earlier
-                        .panics
-                        .iter()
-                        .map(|p| format!("{}: {}", p.location, one_line(&p.message))),
-                );
-                body.extend(earlier.dropped.iter().map(dropped_line));
-                ConditionDetail::with_body(headline, body)
+                ))
             }
 
             Self::TaskPanicked { message, thread } => ConditionDetail::with_body(
@@ -523,27 +514,6 @@ fn one_line(message: &str) -> String {
     }
 }
 
-fn dropped_line(dropped: &crate::DroppedPanics) -> String {
-    let at = |t: chrono::DateTime<chrono::Utc>| t.format("%Y-%m-%d %H:%M:%S UTC");
-    let count = dropped.count();
-    match (dropped.ended_between(), dropped.undated()) {
-        (Some((first, last)), 0) => format!(
-            "{count}\u{d7} earlier, records dropped unshown, between {} and {}",
-            at(first),
-            at(last)
-        ),
-        (Some((first, last)), undated) => format!(
-            "{count}\u{d7} earlier, records dropped unshown, between {} and {} ({undated} of \
-             them at an unknown time)",
-            at(first),
-            at(last)
-        ),
-        (None, _) => {
-            format!("{count}\u{d7} earlier, records dropped unshown, at an unknown time")
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -583,6 +553,42 @@ mod tests {
         }
         let headline = previous_run("first line\nsecond line").headline;
         assert!(headline.ends_with("first line…"), "{headline}");
+    }
+
+    /// The doorbell is one line plus a way in: the records themselves are
+    /// read in the crash history.
+    #[test]
+    fn the_previous_run_doorbell_is_its_headline_and_opens_the_crash_history() {
+        let kind = ConditionKind::PreviousRunPanicked {
+            message: "run 2 broke".to_string(),
+            thread: "main".to_string(),
+            earlier: crate::EarlierPanics {
+                panics: vec![crate::EarlierPanic {
+                    location: "a.rs:1:1".to_string(),
+                    message: "run 1 broke".to_string(),
+                }],
+                dropped: None,
+            },
+        };
+        let detail = kind.detail("b.rs:2:2");
+        assert!(
+            detail.body.is_empty(),
+            "the doorbell has no body: {detail:?}"
+        );
+        assert!(
+            detail.headline.contains("b.rs:2:2") && detail.headline.contains("run 2 broke"),
+            "the headline names the newest site and message: {}",
+            detail.headline
+        );
+        assert!(
+            kind.profile()
+                .remedies()
+                .contains(&crate::RemedySlot::OpenSettings(
+                    crate::SettingsSection::CrashHistory
+                )),
+            "the doorbell opens the crash history: {:?}",
+            kind.profile().remedies()
+        );
     }
 
     /// A window that cuts the headline short cuts its end, so the count and

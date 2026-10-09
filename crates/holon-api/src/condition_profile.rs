@@ -33,6 +33,17 @@ pub enum ConditionSeverity {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettingsSection {
     Integrations,
+    CrashHistory,
+}
+
+impl SettingsSection {
+    /// What a remedy that opens this section says.
+    pub const fn open_label(self) -> &'static str {
+        match self {
+            Self::Integrations => "Open integrations",
+            Self::CrashHistory => "Show crash history",
+        }
+    }
 }
 
 /// Where the condition is drawn. Declared here rather than chosen by each
@@ -745,7 +756,7 @@ const PREVIOUS_RUN_PANICKED: ConditionProfile = ConditionProfile::new(
     icons::WARN,
     ConditionPlacement::Banner,
     AllClear::UntilRestart,
-    &[],
+    &[RemedySlot::OpenSettings(SettingsSection::CrashHistory)],
 );
 
 const TASK_PANICKED: ConditionProfile = ConditionProfile::new(

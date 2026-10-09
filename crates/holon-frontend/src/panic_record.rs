@@ -1049,11 +1049,32 @@ mod tests {
             .collect()
     }
 
+    /// The one previous-run condition's headline, then every run it carries
+    /// as `location: message`.
     fn previous_run_text(bus: &ConditionBus) -> String {
-        let texts: Vec<String> = disclosed(bus)
+        let texts: Vec<String> = bus
+            .current()
             .into_iter()
-            .filter(|(kind, ..)| *kind == ConditionKind::PREVIOUS_RUN_PANICKED)
-            .map(|(_, _, text)| text)
+            .filter_map(|c| match &c.reason {
+                ConditionKind::PreviousRunPanicked {
+                    message, earlier, ..
+                } => Some(
+                    [
+                        c.reason.detail(&c.subject).headline,
+                        format!("{}: {message}", c.subject),
+                    ]
+                    .into_iter()
+                    .chain(
+                        earlier
+                            .panics
+                            .iter()
+                            .map(|p| format!("{}: {}", p.location, p.message)),
+                    )
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                ),
+                _ => None,
+            })
             .collect();
         assert_eq!(texts.len(), 1, "one previous-run condition: {texts:#?}");
         texts.into_iter().next().expect("one")
