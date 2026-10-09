@@ -795,7 +795,9 @@ impl HeadlessFrontendComponent {
         );
         let temp = TempDir::new().expect("temp dir");
         let org_root = std::fs::canonicalize(temp.path()).expect("canonicalize temp dir");
-        let org_fs = Arc::new(holon_filesystem::InMemoryFileSystem::new());
+        let org_fs = Arc::new(holon_filesystem::InMemoryFileSystem::with_path_case(
+            holon_filesystem::PathCase::Insensitive,
+        ));
         org_fs.mkdir_all(&org_root);
 
         let mut org_paths: Vec<PathBuf> = Vec::new();

@@ -2147,7 +2147,9 @@ impl SqlOperationProvider {
     /// a preceding segment is a disambiguation HINT preferring candidates
     /// whose parent block carries that name. Deterministic (ties by id).
     /// `None` = no matching page yet — the link stays dangling until
-    /// `page_reresolve_statements` fires on a matching Page write.
+    /// `page_reresolve_statements` fires on a matching Page write. This is the
+    /// link-target rule, not the page-position rule: the leaf matches exactly
+    /// (case- and space-sensitive) under any parent.
     async fn resolve_page_name(&self, target: &str) -> Result<Option<String>> {
         let mut segs = target.rsplit('/');
         let leaf = segs.next().unwrap_or(target).trim();
@@ -2256,10 +2258,12 @@ impl SqlOperationProvider {
 
     /// Resolve the destination page chain for a block→page transform WITHOUT
     /// writing anything. Walks the `/`-joined `destination_path` segment by
-    /// segment: an existing `Page` block is reused; a missing one is recorded
-    /// (with the id `holon_api::page_slot` assigns) so the engine
-    /// can create it as an invertible `create`. Returns the leaf parent id plus
-    /// the ordered list of pages the engine must mint first.
+    /// segment: the page a link to the accumulated path resolves to
+    /// ([`resolve_page_name`](Self::resolve_page_name)), else the page at the
+    /// segment's position ([`page_at`](Self::page_at)), is reused; a missing
+    /// one is recorded (with the id `holon_api::page_slot` assigns) so the
+    /// engine can create it as an invertible `create`. Returns the leaf
+    /// parent id plus the ordered list of pages the engine must mint first.
     ///
     /// An empty `destination_path` targets the vault root
     /// (`sentinel:no_parent`).
@@ -2294,13 +2298,17 @@ impl SqlOperationProvider {
             } else {
                 format!("{accumulated}/{name}")
             };
-            match self.resolve_page_name(&hint).await? {
+            let parent = EntityUri::parse(&parent_id)
+                .map_err(|e| format!("parent of page segment '{seg_path}': {e:#}"))?;
+            let found = match self.resolve_page_name(&hint).await? {
+                Some(linked) => Some(linked),
+                None => self.page_at(&parent, name).await?,
+            };
+            match found {
                 Some(existing) => {
                     parent_id = existing;
                 }
                 None => {
-                    let parent = EntityUri::parse(&parent_id)
-                        .map_err(|e| format!("parent of page segment '{seg_path}': {e:#}"))?;
                     let slot = holon_api::page_slot(&seg_path, &parent, name, |id| async move {
                         self.page_holder(&id)
                             .await
@@ -2327,9 +2335,51 @@ impl SqlOperationProvider {
         Ok((parent_id, missing))
     }
 
-    /// The row holding `id` (`None` = no row), its title being the `content`
-    /// [`resolve_page_name`](Self::resolve_page_name) compares; a row without
-    /// `content` reads as untitled.
+    /// The page under `parent` whose title has `title`'s
+    /// [`holon_api::PageTitleKey`] — the page position rule
+    /// `find_by_parent_and_name` applies on the ingest side. Two such pages
+    /// are an error.
+    async fn page_at(&self, parent: &EntityUri, title: &str) -> Result<Option<String>> {
+        let sql = format!(
+            "SELECT b.id, b.content FROM {} b JOIN block_tags t ON t.block_id = b.id AND t.tag = \
+             '{PAGE_TAG}' WHERE b.parent_id = '{}'",
+            self.table_name,
+            parent.as_str().replace('\'', "''")
+        );
+        let rows = self
+            .db_handle
+            .query(&sql, HashMap::new())
+            .await
+            .map_err(|e| format!("reading the pages under {parent}: {e}"))?;
+        let key = holon_api::PageTitleKey::of(title);
+        let mut found: Vec<(String, String)> = Vec::new();
+        for row in rows {
+            let content = row
+                .get("content")
+                .and_then(|v| v.as_string())
+                .unwrap_or_default()
+                .to_string();
+            if holon_api::PageTitleKey::of(&content) == key {
+                let id = row
+                    .get("id")
+                    .and_then(|v| v.as_string())
+                    .ok_or_else(|| format!("a page under {parent} has no id"))?
+                    .to_string();
+                found.push((id, content));
+            }
+        }
+        if found.len() > 1 {
+            return Err(format!(
+                "pages under {parent} titled {title:?} up to case and spacing: {found:?}; a \
+                 page position holds one page"
+            )
+            .into());
+        }
+        Ok(found.pop().map(|(id, _)| id))
+    }
+
+    /// The row holding `id` (`None` = no row) with its `content` as the
+    /// title; a row without `content` reads as untitled.
     async fn page_holder(&self, id: &EntityUri) -> Result<Option<holon_api::PageHolder>> {
         let sql = format!(
             "SELECT content, parent_id FROM {} WHERE id = '{}'",

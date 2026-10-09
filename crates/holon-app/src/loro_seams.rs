@@ -245,11 +245,24 @@ impl DocumentManager for LoroDocumentManager {
         parent_id: &EntityUri,
         title: &str,
     ) -> AnyhowResult<Option<Block>> {
+        let key = holon_api::PageTitleKey::of(title);
         let child_ids = self.backend.list_children(parent_id.as_str()).await?;
         let children = self.backend.get_blocks(child_ids).await?;
-        Ok(children
+        let mut pages = children
             .into_iter()
-            .find(|b| b.is_page() && b.title() == title))
+            .filter(|b| b.is_page() && holon_api::PageTitleKey::of(&b.title()) == key);
+        let found = pages.next();
+        if let Some(other) = pages.next() {
+            anyhow::bail!(
+                "two pages under {parent_id} are titled {title:?} up to case and spacing: {} \
+                 ({:?}) and {} ({:?}); a page position holds one page",
+                found.as_ref().expect("first match").id,
+                found.as_ref().expect("first match").title(),
+                other.id,
+                other.title()
+            );
+        }
+        Ok(found)
     }
 
     async fn get_by_id(&self, id: &EntityUri) -> AnyhowResult<Option<Block>> {

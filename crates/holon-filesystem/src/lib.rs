@@ -95,6 +95,8 @@ pub use fs_port::StampedRead;
 pub use fs_port::WriteBack;
 #[cfg(not(target_arch = "wasm32"))]
 pub use in_memory::InMemoryFileSystem;
+#[cfg(not(target_arch = "wasm32"))]
+pub use in_memory::PathCase;
 pub use sync_base_store::BaseKey;
 pub use sync_base_store::BaseStore;
 pub use sync_base_store::SyncBaseStore;

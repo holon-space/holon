@@ -310,6 +310,19 @@ pub fn normalize_for_hash(input: &str) -> String {
     result
 }
 
+/// What two page titles must share to name one page: the title as
+/// [`normalize_for_hash`] folds it, the form a page id hashes. Titles that
+/// differ only in case or whitespace have one key, so under one parent they
+/// are one page.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PageTitleKey(String);
+
+impl PageTitleKey {
+    pub fn of(title: &str) -> Self {
+        PageTitleKey(normalize_for_hash(title))
+    }
+}
+
 /// Compute a deterministic EntityUri from a scheme and normalized path.
 ///
 /// Uses blake3 to hash the normalized path, then formats as a UUID-style string

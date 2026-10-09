@@ -230,7 +230,9 @@ pub trait BlockReader: Send + Sync {
 /// the first line of `content`.
 #[async_trait]
 pub trait DocumentManager: Send + Sync {
-    /// Find a page block by parent_id and title (first line of content).
+    /// The page under `parent_id` whose title (first line of content) has
+    /// `title`'s [`holon_api::PageTitleKey`]: titles that differ only in case
+    /// or spacing name one page. Two such pages under one parent are an error.
     async fn find_by_parent_and_name(
         &self,
         parent_id: &EntityUri,
@@ -1026,7 +1028,11 @@ mod name_chain_tests {
                 .lock()
                 .unwrap()
                 .values()
-                .find(|b| &b.parent_id == parent_id && b.title() == title)
+                .find(|b| {
+                    &b.parent_id == parent_id
+                        && holon_api::PageTitleKey::of(&b.title())
+                            == holon_api::PageTitleKey::of(title)
+                })
                 .cloned())
         }
 
@@ -1114,26 +1120,24 @@ mod name_chain_tests {
         assert_ne!(page.id, held, "the root page took the moved page's id");
     }
 
-    /// `My  Notes` and `My Notes` are two pages to `find_by_parent_and_name`,
-    /// so a page slot must not adopt one for the other.
+    /// `My  Notes` and `My Notes` are one page at one position: the first
+    /// spelling stays the stored title.
     #[tokio::test]
-    async fn a_page_does_not_bind_to_a_page_whose_title_only_normalizes_equal() {
+    async fn a_page_binds_to_a_page_whose_title_differs_only_in_case_or_spacing() {
         let held = holon_api::link_parser::PageId::for_path("My Notes")
             .unwrap()
             .into_entity_uri();
-        let store = store_holding(&held, EntityUri::no_parent(), "My  Notes");
+        for spelling in ["My  Notes", "my notes"] {
+            let store = store_holding(&held, EntityUri::no_parent(), spelling);
 
-        let page = store
-            .get_or_create_by_name_chain(&["My Notes"])
-            .await
-            .expect("create My Notes");
+            let page = store
+                .get_or_create_by_name_chain(&["My Notes"])
+                .await
+                .expect("create My Notes");
 
-        assert_eq!(page.title(), "My Notes", "bound to {}", page.id);
-        assert_ne!(page.id, held);
-        assert_eq!(
-            store.get_by_id(&held).await.unwrap().map(|b| b.title()),
-            Some("My  Notes".to_string())
-        );
+            assert_eq!(page.id, held, "holder {spelling:?}");
+            assert_eq!(page.title(), spelling);
+        }
     }
 }
 

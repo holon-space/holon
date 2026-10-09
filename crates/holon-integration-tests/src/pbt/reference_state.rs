@@ -2825,6 +2825,48 @@ impl ReferenceState {
         hits.into_iter().next().map(|(_, id)| id)
     }
 
+    /// The page under `parent` titled `title` up to case and spacing: one
+    /// page per position (PageIdentityDeterminism.md §5.3).
+    fn ref_page_at(&self, parent: &EntityUri, title: &str) -> Option<EntityUri> {
+        let mut hits = self.domain.block_state.blocks.values().filter(|b| {
+            b.is_page() && b.parent_id == *parent && same_page_title(&b.content, title)
+        });
+        let hit = hits.next().map(|b| b.id.clone());
+        assert!(
+            hits.next().is_none(),
+            "reference holds two pages titled {title:?} up to case and spacing under {parent}"
+        );
+        hit
+    }
+
+    /// §5.3's id rule, stated over the reference's blocks: walk the
+    /// `for_path` / `for_path_beside` chain to the first id that is unheld,
+    /// held by an untitled row under `parent` (completed), or held by a page
+    /// of this title under `parent` (adopted).
+    fn ref_page_slot(&self, path: &str, parent: &EntityUri, title: &str) -> RefPageSlot {
+        use holon_api::link_parser::PageId;
+        let mut id = PageId::for_path(path)
+            .unwrap_or_else(|e| panic!("ref_page_slot({path:?}): {e}"))
+            .into_entity_uri();
+        for _ in 0..64 {
+            match self.domain.block_state.blocks.get(&id) {
+                None => return RefPageSlot::Create(id),
+                Some(b) if b.parent_id == *parent && b.content.trim().is_empty() => {
+                    return RefPageSlot::Create(id);
+                }
+                Some(b) if b.parent_id == *parent && same_page_title(&b.content, title) => {
+                    return RefPageSlot::Existing(id);
+                }
+                Some(_) => {
+                    id = PageId::for_path_beside(path, &id)
+                        .unwrap_or_else(|e| panic!("ref_page_slot({path:?}): {e}"))
+                        .into_entity_uri();
+                }
+            }
+        }
+        panic!("ref_page_slot({path:?}): 64 consecutive ids are held by other pages")
+    }
+
     /// Page paths a rename has vacated and that NO page currently occupies.
     ///
     /// A path leaves the pool the moment some page re-occupies it (the
@@ -2891,14 +2933,10 @@ impl ReferenceState {
     /// production `block.create_page_from_link(target)` op.
     ///
     /// Walks `path` segment by segment exactly as the op does: resolve the
-    /// accumulated hint through [`Self::ref_resolve_page_name`]; on a hit reuse
+    /// accumulated hint through [`Self::ref_resolve_page_name`], else the
+    /// page at the segment's position ([`Self::ref_page_at`]); on a hit reuse
     /// that page as the parent, on a miss mint a page titled by the segment
-    /// under the current parent.
-    ///
-    /// The minted id is [`holon_api::page_slot`] over the reference's blocks,
-    /// the rule the writer uses: a page a `RenamePage` retitled or a move
-    /// re-parented keeps its id, so the new page takes the next id beside it
-    /// (docs/Plans/PageIdentityDeterminism.md §5.3).
+    /// under the current parent at the id [`Self::ref_page_slot`] assigns.
     pub fn apply_create_page_at_path(&mut self, path: &str) {
         use holon_orgmode::models::OrgBlockExt;
 
@@ -2923,31 +2961,19 @@ impl ReferenceState {
             } else {
                 format!("{accumulated}/{trimmed}")
             };
-            match self.ref_resolve_page_name(&hint) {
+            let found = self
+                .ref_resolve_page_name(&hint)
+                .or_else(|| self.ref_page_at(&parent, trimmed));
+            match found {
                 Some(existing) => parent = existing,
                 None => {
-                    let blocks = &self.domain.block_state.blocks;
-                    let slot = futures::executor::block_on(holon_api::page_slot(
-                        &seg_path,
-                        &parent,
-                        trimmed,
-                        |id| {
-                            std::future::ready(Ok(blocks.get(&id).map(|b| holon_api::PageHolder {
-                                title: b.content.clone(),
-                                parent: b.parent_id.clone(),
-                            })))
-                        },
-                    ))
-                    .unwrap_or_else(|e| {
-                        panic!("apply_create_page_at_path: page_slot({seg_path:?}): {e:#}")
-                    });
-                    let id = match slot {
-                        holon_api::PageSlot::Existing(id) => {
-                            parent = id.into_entity_uri();
+                    let id = match self.ref_page_slot(&seg_path, &parent, trimmed) {
+                        RefPageSlot::Existing(id) => {
+                            parent = id;
                             accumulated = seg_path;
                             continue;
                         }
-                        holon_api::PageSlot::Create(id) => id.into_entity_uri(),
+                        RefPageSlot::Create(id) => id,
                     };
                     let mut page = Block::new_text(id.clone(), parent.clone(), trimmed.to_string());
                     page.set_page(true);
@@ -4028,4 +4054,21 @@ mod remap_tests {
         // next_id preserved.
         assert_eq!(out.next_id, 3);
     }
+}
+
+enum RefPageSlot {
+    Create(EntityUri),
+    Existing(EntityUri),
+}
+
+/// Whether two page titles name one page: equal once lowercased with
+/// whitespace runs collapsed and the ends trimmed.
+fn same_page_title(a: &str, b: &str) -> bool {
+    let fold = |s: &str| {
+        s.split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase()
+    };
+    fold(a) == fold(b)
 }

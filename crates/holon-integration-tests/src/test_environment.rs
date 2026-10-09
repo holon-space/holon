@@ -427,7 +427,9 @@ impl TestEnvironmentBuilder {
             TempDir::new().map_err(|e| anyhow::anyhow!("Failed to create temp dir: {}", e))?;
         let org_root = std::fs::canonicalize(temp_dir.path())
             .map_err(|e| anyhow::anyhow!("Failed to canonicalize temp dir: {}", e))?;
-        let org_fs = Arc::new(holon_filesystem::InMemoryFileSystem::new());
+        let org_fs = Arc::new(holon_filesystem::InMemoryFileSystem::with_path_case(
+            holon_filesystem::PathCase::Insensitive,
+        ));
         org_fs.mkdir_all(&org_root);
 
         // Write pre-populated org files BEFORE engine initialization
@@ -859,7 +861,9 @@ impl TestEnvironment {
             TempDir::new().map_err(|e| anyhow::anyhow!("Failed to create temp dir: {}", e))?;
         let org_root = std::fs::canonicalize(temp_dir.path())
             .map_err(|e| anyhow::anyhow!("Failed to canonicalize temp dir: {}", e))?;
-        let org_fs = Arc::new(holon_filesystem::InMemoryFileSystem::new());
+        let org_fs = Arc::new(holon_filesystem::InMemoryFileSystem::with_path_case(
+            holon_filesystem::PathCase::Insensitive,
+        ));
         org_fs.mkdir_all(&org_root);
 
         Ok(Self {

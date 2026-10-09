@@ -65,6 +65,46 @@ struct State {
     fail_next_write_commit: bool,
     /// Armed by [`InMemoryFileSystem::arm_write_churn`].
     churning: BTreeSet<PathBuf>,
+    case: PathCase,
+}
+
+/// Whether two spellings of a path that differ only in letter case name one
+/// entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathCase {
+    /// Linux file systems.
+    Sensitive,
+    /// The default on macOS (APFS), Windows (NTFS) and Android shared
+    /// storage: an entry keeps the spelling it was created with, and every
+    /// case variant of that spelling reaches it.
+    Insensitive,
+}
+
+impl State {
+    /// The stored spelling of `path` (already normalized): each component
+    /// takes the spelling of the existing entry it names, if any.
+    fn spelled(&self, path: &Path) -> PathBuf {
+        if self.case == PathCase::Sensitive {
+            return path.to_path_buf();
+        }
+        let mut out = PathBuf::new();
+        for comp in path.components() {
+            let wanted = comp.as_os_str().to_string_lossy().to_lowercase();
+            let existing = self
+                .dirs
+                .iter()
+                .chain(self.files.keys())
+                .find(|entry| {
+                    entry.parent() == Some(out.as_path())
+                        && entry
+                            .file_name()
+                            .is_some_and(|name| name.to_string_lossy().to_lowercase() == wanted)
+                })
+                .cloned();
+            out = existing.unwrap_or_else(|| out.join(comp.as_os_str()));
+        }
+        out
+    }
 }
 
 pub struct InMemoryFileSystem {
@@ -85,6 +125,10 @@ impl Default for InMemoryFileSystem {
 
 impl InMemoryFileSystem {
     pub fn new() -> Self {
+        Self::with_path_case(PathCase::Sensitive)
+    }
+
+    pub fn with_path_case(case: PathCase) -> Self {
         let (tx, _) = broadcast::channel(4096);
         Self {
             state: Mutex::new(State {
@@ -94,6 +138,7 @@ impl InMemoryFileSystem {
                 write_targets: Vec::new(),
                 fail_next_write_commit: false,
                 churning: BTreeSet::new(),
+                case,
             }),
             tx,
             scans_held: watch::Sender::new(false),
@@ -143,8 +188,8 @@ impl InMemoryFileSystem {
     /// `write_if_unchanged` sees a new stamp over unchanged bytes. The arm
     /// follows the file through a rename and ends with its removal.
     pub fn arm_write_churn(&self, path: &Path) {
-        let path = normalize(path);
         let mut st = self.lock();
+        let path = st.spelled(&normalize(path));
         assert!(
             st.files.contains_key(&path),
             "arm_write_churn: no file {}",
@@ -158,9 +203,10 @@ impl InMemoryFileSystem {
     }
 
     pub fn disarm_write_churn(&self, path: &Path) {
-        let path = normalize(path);
+        let mut st = self.lock();
+        let path = st.spelled(&normalize(path));
         assert!(
-            self.lock().churning.remove(&path),
+            st.churning.remove(&path),
             "disarm_write_churn: {} is not armed",
             path.display()
         );
@@ -168,10 +214,11 @@ impl InMemoryFileSystem {
 
     /// Give `path` a new stamp over the same bytes, as a no-op save does.
     pub fn touch_file(&self, path: &Path) -> std::io::Result<()> {
-        let path = normalize(path);
-        let seq = {
+        let (path, seq) = {
             let mut st = self.lock();
-            Self::retick(&mut st, &path)?
+            let path = st.spelled(&normalize(path));
+            let seq = Self::retick(&mut st, &path)?;
+            (path, seq)
         };
         let _ = self.tx.send(FileChange {
             path,
@@ -225,7 +272,7 @@ impl InMemoryFileSystem {
         st.write_targets.push(path.clone());
         let mut cur = PathBuf::new();
         for comp in path.components() {
-            cur.push(comp.as_os_str());
+            cur = st.spelled(&cur.join(comp.as_os_str()));
             st.dirs.insert(cur.clone());
         }
     }
@@ -234,15 +281,15 @@ impl InMemoryFileSystem {
     /// Synchronous core the trait's `remove` delegates to; pre-existing
     /// callers simulating external deletion use it directly.
     pub fn remove_file(&self, path: &Path) -> std::io::Result<()> {
-        let path = normalize(path);
-        let seq = {
+        let (path, seq) = {
             let mut st = self.lock();
+            let path = st.spelled(&normalize(path));
             if st.files.remove(&path).is_none() {
                 return Err(not_found(&path));
             }
             st.churning.remove(&path);
             st.clock += 1;
-            st.clock
+            (path, st.clock)
         };
         let _ = self.tx.send(FileChange {
             path,
@@ -260,10 +307,19 @@ impl InMemoryFileSystem {
     /// `Create(to)` pair, so `FileSyncController::on_file_renamed` re-homes the
     /// document without the delete-then-create window a `mv` used to open.
     pub fn rename_file(&self, from: &Path, to: &Path) -> std::io::Result<()> {
-        let from = normalize(from);
-        let to = normalize(to);
-        let seq = {
+        let (from, to, seq) = {
             let mut st = self.lock();
+            let from = st.spelled(&normalize(from));
+            let to = normalize(to);
+            // Onto another entry, the target keeps that entry's spelling; a
+            // rename of an entry onto a case variant of itself respells it.
+            let to = match st.spelled(&to) {
+                existing if existing == from => to.parent().map_or(to.clone(), |parent| {
+                    st.spelled(parent)
+                        .join(to.file_name().expect("a renamed file has a name"))
+                }),
+                existing => existing,
+            };
             match to.parent() {
                 Some(parent) if st.dirs.contains(parent) => {}
                 Some(parent) => {
@@ -292,7 +348,7 @@ impl InMemoryFileSystem {
                     mtime_tick: tick,
                 },
             );
-            tick
+            (from, to, tick)
         };
         let _ = self.tx.send(FileChange {
             path: to,
@@ -310,11 +366,12 @@ impl InMemoryFileSystem {
         contents: &[u8],
         expected: Option<&FileStamp>,
     ) -> std::io::Result<WriteBack> {
-        let path = normalize(path);
-        let temp = crate::fs_port::atomic_temp_path(&path)?;
-        let (kind, tick) = {
+        let (path, kind, tick) = {
             let mut st = self.lock();
-            st.write_targets.push(path.clone());
+            let given = normalize(path);
+            st.write_targets.push(given.clone());
+            let path = st.spelled(&given);
+            let temp = crate::fs_port::atomic_temp_path(&path)?;
             match path.parent() {
                 Some(parent) if st.dirs.contains(parent) => {}
                 Some(parent) => {
@@ -374,7 +431,7 @@ impl InMemoryFileSystem {
             // rename, which `RenamePairing` classifies as a Create. A double
             // that emits a shape the production adapter never produces cannot
             // be trusted to prove anything about the watcher.
-            (FileChangeKind::Create, tick)
+            (path, FileChangeKind::Create, tick)
         };
         // The "close" hook: the full content is committed before anyone is
         // notified. send only errors when there are no subscribers — fine.
@@ -418,8 +475,8 @@ impl FileSystem for InMemoryFileSystem {
 
     async fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
         self.wait_until_readable(path).await;
-        let path = normalize(path);
         let st = self.lock();
+        let path = st.spelled(&normalize(path));
         st.files
             .get(&path)
             .map(|f| f.bytes.clone())
@@ -428,8 +485,8 @@ impl FileSystem for InMemoryFileSystem {
 
     async fn read_stamped(&self, path: &Path) -> std::io::Result<StampedRead> {
         self.wait_until_readable(path).await;
-        let path = normalize(path);
         let st = self.lock();
+        let path = st.spelled(&normalize(path));
         let Some(entry) = st.files.get(&path) else {
             return Ok(StampedRead {
                 content: None,
@@ -481,8 +538,8 @@ impl FileSystem for InMemoryFileSystem {
             .wait_for(|held| !held)
             .await
             .expect("the file system owns the scan-hold sender");
-        let root = normalize(root);
         let st = self.lock();
+        let root = st.spelled(&normalize(root));
         if !st.dirs.contains(&root) {
             return Ok(ScannedEntries::default());
         }
@@ -503,8 +560,8 @@ impl FileSystem for InMemoryFileSystem {
     }
 
     async fn metadata(&self, path: &Path) -> std::io::Result<FileMeta> {
-        let path = normalize(path);
         let st = self.lock();
+        let path = st.spelled(&normalize(path));
         let entry = st.files.get(&path).ok_or_else(|| not_found(&path))?;
         Ok(FileMeta {
             modified: UNIX_EPOCH + Duration::from_nanos(entry.mtime_tick),
@@ -513,13 +570,13 @@ impl FileSystem for InMemoryFileSystem {
     }
 
     fn exists(&self, path: &Path) -> bool {
-        let path = normalize(path);
         let st = self.lock();
+        let path = st.spelled(&normalize(path));
         st.files.contains_key(&path) || st.dirs.contains(&path)
     }
 
     fn canonicalize(&self, path: &Path) -> std::io::Result<PathBuf> {
-        let path = normalize(path);
+        let path = self.lock().spelled(&normalize(path));
         if self.exists(&path) {
             Ok(path)
         } else {
@@ -628,6 +685,67 @@ mod tests {
         // Only the NEXT write fails; the double is not left permanently armed.
         fs.write(page, b"* New complete").await.unwrap();
         assert_eq!(fs.read_to_string(page).await.unwrap(), "* New complete");
+    }
+
+    /// As on APFS: a case variant of a path reaches the stored entry, which
+    /// keeps its first spelling through writes and renames onto it; only a
+    /// rename of an entry onto a variant of itself respells it.
+    #[tokio::test]
+    async fn a_case_insensitive_store_keeps_one_entry_per_folded_path() {
+        let fs = InMemoryFileSystem::with_path_case(PathCase::Insensitive);
+        fs.create_dir_all(Path::new("/v/Sub")).await.unwrap();
+        fs.write(Path::new("/v/My Notes.org"), b"first")
+            .await
+            .unwrap();
+        fs.write(Path::new("/v/my notes.org"), b"second")
+            .await
+            .unwrap();
+        assert_eq!(
+            fs.read(Path::new("/v/MY NOTES.org")).await.unwrap(),
+            b"second"
+        );
+        fs.write(Path::new("/v/sub/a.org"), b"a").await.unwrap();
+        let scanned = fs.scan_directory(Path::new("/V")).await.unwrap();
+        assert_eq!(
+            scanned.files,
+            vec![
+                PathBuf::from("/v/My Notes.org"),
+                PathBuf::from("/v/Sub/a.org")
+            ]
+        );
+        assert_eq!(
+            fs.canonicalize(Path::new("/v/my notes.org")).unwrap(),
+            PathBuf::from("/v/My Notes.org")
+        );
+
+        fs.write(Path::new("/v/b.org"), b"b").await.unwrap();
+        fs.rename_file(Path::new("/v/b.org"), Path::new("/v/MY NOTES.org"))
+            .unwrap();
+        fs.rename_file(Path::new("/v/sub/a.org"), Path::new("/v/Sub/A.org"))
+            .unwrap();
+        let scanned = fs.scan_directory(Path::new("/v")).await.unwrap();
+        assert_eq!(
+            scanned.files,
+            vec![
+                PathBuf::from("/v/My Notes.org"),
+                PathBuf::from("/v/Sub/A.org")
+            ]
+        );
+        assert_eq!(fs.read(Path::new("/v/my notes.org")).await.unwrap(), b"b");
+
+        let sensitive = InMemoryFileSystem::new();
+        sensitive.create_dir_all(Path::new("/v")).await.unwrap();
+        sensitive.write(Path::new("/v/A.org"), b"1").await.unwrap();
+        sensitive.write(Path::new("/v/a.org"), b"2").await.unwrap();
+        assert_eq!(
+            sensitive
+                .scan_directory(Path::new("/v"))
+                .await
+                .unwrap()
+                .files
+                .len(),
+            2
+        );
     }
 
     #[tokio::test]

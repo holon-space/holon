@@ -739,11 +739,25 @@ impl DocumentManager for LiveDocumentManager {
         parent_id: &EntityUri,
         title: &str,
     ) -> anyhow::Result<Option<Block>> {
+        let key = holon_api::PageTitleKey::of(title);
         let docs = self.live.read();
-        Ok(docs
-            .values()
-            .find(|d| d.parent_id == *parent_id && d.is_page() && d.title() == title)
-            .map(|d| (**d).clone()))
+        let mut pages = docs.values().filter(|d| {
+            d.parent_id == *parent_id
+                && d.is_page()
+                && holon_api::PageTitleKey::of(&d.title()) == key
+        });
+        let found = pages.next().map(|d| (**d).clone());
+        if let Some(other) = pages.next() {
+            anyhow::bail!(
+                "two pages under {parent_id} are titled {title:?} up to case and spacing: {} \
+                 ({:?}) and {} ({:?}); a page position holds one page",
+                found.as_ref().expect("first match").id,
+                found.as_ref().expect("first match").title(),
+                other.id,
+                other.title()
+            );
+        }
+        Ok(found)
     }
 
     async fn create(&self, doc: Block) -> anyhow::Result<Block> {
@@ -781,7 +795,21 @@ impl DocumentManager for LiveDocumentManager {
             Some(existing) if existing.title().trim().is_empty() => {
                 self.complete_placeholder(existing, doc).await
             }
-            Some(existing) => Ok(existing),
+            Some(existing)
+                if existing.parent_id == doc.parent_id
+                    && holon_api::PageTitleKey::of(&existing.title())
+                        == holon_api::PageTitleKey::of(&doc.title()) =>
+            {
+                Ok(existing)
+            }
+            Some(existing) => anyhow::bail!(
+                "page {:?} under {} takes id {}, but that id holds page {:?} under {}",
+                doc.title(),
+                doc.parent_id,
+                doc.id,
+                existing.title(),
+                existing.parent_id
+            ),
         }
     }
 

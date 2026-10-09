@@ -190,26 +190,45 @@ created later under the new name gets a new id; that is correct (it is a
 different logical page). Convergence is over independent *creation* of the same
 page (the PBT), not over post-hoc renames.
 
+**One title rule.** Two page titles name one page when their
+`holon_api::PageTitleKey`s are equal: the title folded for case and spacing by
+`normalize_for_hash`, the form `PageId::for_path` hashes. A page position
+(parent, key) holds at most one page, and the first spelling stays the stored
+title. Every page-position comparison uses the key: `find_by_parent_and_name`
+(every `DocumentManager`; two matches are an error), `page_slot`,
+`LiveDocumentManager::create_forcing_id`, and `SqlOperationProvider::page_at`.
+So `[[my notes]]` after `[[My Notes]]` opens the existing page. Without this,
+the two pages would share one file on a case-insensitive file system (macOS,
+Windows, Android), and the second write-back would overwrite the first
+(docs/Testing/bugfunnel/entries/2026-10-09-two-spellings-of-a-page-title-share-one-file.md).
+
+Link resolution is a different rule. `SqlOperationProvider::resolve_page_name`
+(block_links rows and the first lookup of a link click) matches the leaf title
+EXACTLY under ANY parent, and prefers a parent whose title is the preceding
+segment. A `[[my notes]]` link to page `My Notes` therefore stays dangling in
+`block_links`. A click on it still reaches the page through the position
+lookup.
+
 A new page whose path was vacated by a rename (or a move) still finds
 `PageId::for_path(path)` held by the renamed page. Every page-creating path
-that did not find its page by name takes its id from one function,
+that did not find its page takes its id from one function,
 `holon_api::page_slot(path, parent, title, holder)`
 (crates/holon-api/src/identity_recognition.rs): org-file ingest
-(`DocumentManager::page_slot`, through `resolve_dir_page_chain`), a
-dangling-link click and the destination segments of `convert_block_to_page`
-(`SqlOperationProvider::resolve_destination_chain`). The trait default
+(`DocumentManager::page_slot`, through `resolve_dir_page_chain`, after
+`find_by_parent_and_name`), a dangling-link click and the destination segments
+of `convert_block_to_page` (`SqlOperationProvider::resolve_destination_chain`,
+after `resolve_page_name` and `page_at`). The trait default
 `get_or_create_by_name_chain` uses it too but has no production caller. It
 walks `PageId::for_path(path)`, then `PageId::for_path_beside(path,
-previous_id)`, and stops at the first id that is unheld or held by an untitled
-placeholder (create there; the create completes the placeholder with the
-title) or held by this very page. A holder is this page only when its title is
-exactly `title` and its parent is `parent` — the exact `(parent, title)` match
-the by-name lookups make (`find_by_parent_and_name`, `resolve_page_name`) — so
-a page of the same title elsewhere, or of a title that only normalizes equal
-(`My  Notes` for `My Notes`), is passed, not adopted. Each passed id and each
-adopted page is disclosed with a `warn!`: either means the by-name lookup and
-the id disagree. The new page never upserts onto another, and ingest's
-write-back stores the minted id as the file's `#+ID`.
+previous_id)`. It stops at the first id that is unheld, or held under `parent`
+by an untitled placeholder (create there; the create completes the
+placeholder with the title) or by a page with this title's key (adopt it). A
+holder under another parent is always passed. Each passed id and each adopted
+page is disclosed with a `warn!`: either means the caller's lookup and the id
+disagree. The new page never upserts onto another, and ingest's write-back
+stores the minted id as the file's `#+ID`. `create_forcing_id` (the companion
+`#+ID` leg) returns an existing row at the forced id only when it is this
+page (same parent, same key); a row of another page there is an error.
 
 Three paths still refuse a held id. The leaf page of `convert_block_to_page`
 refuses with `IdentityCollision`. The journal rule (`holon_rule_watcher`) skips

@@ -137,6 +137,7 @@ pub use identity_recognition::Recognition;
 pub use identity_recognition::page_slot;
 pub use identity_recognition::recognize_derived_id;
 pub use identity_recognition::sanitize_page_title;
+pub use link_parser::PageTitleKey;
 pub use operation_engine::Delivery;
 pub use operation_engine::OpOrigin;
 pub use operation_engine::OpOutcome;

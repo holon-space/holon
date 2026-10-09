@@ -20,7 +20,7 @@
 
 use crate::entity_uri::EntityUri;
 use crate::link_parser::PageId;
-use crate::link_parser::normalize_for_hash;
+use crate::link_parser::PageTitleKey;
 use crate::storage_error::IdentityCollision;
 
 /// Outcome of recognizing a derived-id create against the id's current holder.
@@ -53,7 +53,7 @@ pub enum Recognition {
 ///
 /// `holder_title` is the derived id's current holder `content`/title as read
 /// from the active block-read authority (`None` = the id is unheld). The
-/// comparison is under [`normalize_for_hash`] — the SAME normalization
+/// comparison is by [`PageTitleKey`] — the SAME normalization
 /// [`PageId::for_path`](crate::link_parser::PageId::for_path) hashes — so
 /// recognition keys on TITLE/PATH, never on `(content, parent)`: content drifts
 /// over time, whereas the normalized title is precisely what the derived id is
@@ -71,7 +71,7 @@ pub fn recognize_derived_id(
         // name, so it can never be the collision case. Same "an empty-content
         // Page is never legal" predicate the title-less doc-root heal uses.
         Some(held) if held.trim().is_empty() => Recognition::UnnamedPlaceholder,
-        Some(held) if normalize_for_hash(held) == normalize_for_hash(requested_title) => {
+        Some(held) if PageTitleKey::of(held) == PageTitleKey::of(requested_title) => {
             Recognition::AlreadySatisfied
         }
         Some(held) => Recognition::Collision(IdentityCollision {
@@ -93,8 +93,8 @@ pub enum PageSlot {
     Existing(PageId),
 }
 
-/// The row holding an id, as [`page_slot`] compares it: `title` is the title
-/// the caller's own by-name lookup compares (exactly), `parent` its parent.
+/// The row holding an id, as [`page_slot`] compares it: its stored title and
+/// its parent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PageHolder {
     pub title: String,
@@ -107,16 +107,16 @@ pub struct PageHolder {
 const MAX_PAGE_SLOT_STEPS: usize = 64;
 
 /// The id for a page titled `title` under `parent` at `path` that the
-/// caller's by-name lookup did not find: `PageId::for_path(path)`, or, while
-/// another page holds that id (a renamed or moved page keeps its id), the
-/// next id along the [`PageId::for_path_beside`] chain
-/// (docs/Plans/PageIdentityDeterminism.md §5.3). A holder is this page only
-/// when its title is EXACTLY `title` and its parent is `parent` — the match
-/// `find_by_parent_and_name` makes — so a slot never binds to a page at
-/// another position or of a merely similar title. `holder` reads the row
-/// holding an id (`None` = unheld) from the caller's write authority. Every
-/// passed holder and every adopted page is disclosed with a warning: either
-/// means the by-name lookup and the id disagree.
+/// caller's by-position lookup did not find: `PageId::for_path(path)`, or,
+/// while another page holds that id (a renamed or moved page keeps its id),
+/// the next id along the [`PageId::for_path_beside`] chain
+/// (docs/Plans/PageIdentityDeterminism.md §5.3). A holder under `parent` is
+/// this page when its [`PageTitleKey`] equals `title`'s, and an untitled one
+/// is a placeholder the create completes; a holder under another parent is
+/// always passed. `holder` reads the row holding an id (`None` = unheld) from
+/// the caller's write authority. Every passed holder and every adopted page
+/// is disclosed with a warning: either means the caller's lookup and the id
+/// disagree.
 pub async fn page_slot<F, Fut>(
     path: &str,
     parent: &EntityUri,
@@ -127,22 +127,29 @@ where
     F: FnMut(EntityUri) -> Fut,
     Fut: std::future::Future<Output = anyhow::Result<Option<PageHolder>>>,
 {
+    let key = PageTitleKey::of(title);
+    let untitled = PageTitleKey::of("");
     let mut id = PageId::for_path(path).map_err(anyhow::Error::msg)?;
     for _ in 0..MAX_PAGE_SLOT_STEPS {
-        let held = match holder(id.as_entity_uri().clone()).await? {
-            None => return Ok(PageSlot::Create(id)),
-            Some(held) if held.title.trim().is_empty() => return Ok(PageSlot::Create(id)),
-            Some(held) => held,
+        let Some(held) = holder(id.as_entity_uri().clone()).await? else {
+            return Ok(PageSlot::Create(id));
         };
-        if held.title == title && held.parent == *parent {
-            tracing::warn!(
-                path,
-                %parent,
-                id = %id.as_entity_uri(),
-                "the by-name lookup missed page {title:?}, but the id its page path derives holds \
-                 that page at that place; adopting it"
-            );
-            return Ok(PageSlot::Existing(id));
+        if held.parent == *parent {
+            let held_key = PageTitleKey::of(&held.title);
+            if held_key == untitled {
+                return Ok(PageSlot::Create(id));
+            }
+            if held_key == key {
+                tracing::warn!(
+                    path,
+                    %parent,
+                    id = %id.as_entity_uri(),
+                    held_title = %held.title,
+                    "the lookup missed page {title:?}, but the id its page path derives holds \
+                     that page at that place; adopting it"
+                );
+                return Ok(PageSlot::Existing(id));
+            }
         }
         let next = PageId::for_path_beside(path, id.as_entity_uri()).map_err(anyhow::Error::msg)?;
         tracing::warn!(
@@ -288,7 +295,7 @@ mod tests {
     }
 
     #[test]
-    fn page_slot_steps_past_a_title_that_only_normalizes_equal() {
+    fn page_slot_adopts_a_title_that_differs_only_in_case_or_spacing() {
         let first = path_id("My Notes");
         for variant in ["My  Notes", "my notes", " My Notes"] {
             assert_eq!(
@@ -297,10 +304,27 @@ mod tests {
                     "My Notes",
                     &[(first.as_entity_uri().clone(), held(variant))]
                 ),
-                PageSlot::Create(beside("My Notes", &first)),
+                PageSlot::Existing(first.clone()),
                 "holder {variant:?}"
             );
         }
+    }
+
+    #[test]
+    fn page_slot_steps_past_a_placeholder_under_another_parent() {
+        let first = path_id("Music");
+        let elsewhere = PageHolder {
+            title: String::new(),
+            parent: EntityUri::block("61133fe7"),
+        };
+        assert_eq!(
+            slot(
+                "Music",
+                "Music",
+                &[(first.as_entity_uri().clone(), elsewhere)]
+            ),
+            PageSlot::Create(beside("Music", &first))
+        );
     }
 
     #[test]
