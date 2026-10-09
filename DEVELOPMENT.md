@@ -20,10 +20,11 @@ Run all tests in the workspace:
 cargo nextest run
 ```
 
-Run tests for a specific package:
+Run tests for a specific package (`holon` tests that need `test-helpers` declare
+`required-features` and are skipped unless the feature is on):
 
 ```bash
-cargo nextest run -p holon
+cargo nextest run -p holon --features test-helpers
 ```
 
 Run tests matching a pattern:

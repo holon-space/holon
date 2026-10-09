@@ -213,3 +213,55 @@ required-features = ["test-helpers"]
 [[test]]
 name = "admission_footprint_sweep"
 required-features = ["test-helpers"]
+
+[[test]]
+name = "cycle_task_state_vocabulary"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "decision_shape_claims"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "empty_question_is_unrepresentable"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "ingest_property_removal"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "malformed_reference_engine_route"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "no_user_value_reaches_a_log_span_or_error"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "schema_catalog_follows_service_ddl"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "shape_gate_cost"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "shape_gate_source_channel"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "sql_write_authority_previous_sibling"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "typing_channel_claims"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "undo_at_the_top_level"
+required-features = ["test-helpers"]
+
+[[test]]
+name = "watch_context_membership_leak"
+required-features = ["test-helpers"]

@@ -51,6 +51,7 @@ pub mod writeback_guard;
 pub use block_params::build_block_params;
 #[cfg(feature = "di")]
 pub use di::BootSeedAnswer;
+#[cfg(feature = "di")]
 pub use di::BootSeedGate;
 #[cfg(feature = "di")]
 pub use di::FileWatcherReadySignal;
@@ -58,6 +59,7 @@ pub use di::FileWatcherReadySignal;
 pub use di::OrgModeConfig;
 #[cfg(feature = "di")]
 pub use di::OrgSyncIdleSignal;
+#[cfg(feature = "di")]
 pub use di::VaultBacklogDrained;
 // Sync providers and adapters
 pub use file_format::OrgFormatAdapter;
