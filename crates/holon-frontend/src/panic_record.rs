@@ -217,6 +217,12 @@ pub fn arm(record_dir: &Path) {
     }
 }
 
+/// The dir this process's panics are recorded in, once [`arm`] or [`install`]
+/// named one.
+pub fn record_dir() -> Option<PathBuf> {
+    target().as_ref().map(|t| t.record_dir.clone())
+}
+
 fn hook_once() {
     static HOOK: Once = Once::new();
     HOOK.call_once(|| {
@@ -286,15 +292,15 @@ fn read_summary(path: &Path) -> std::io::Result<Option<DroppedPanics>> {
 /// Where the summary named `file` in `dir` is read and written: `file`, or,
 /// while it cannot be read, the first of `<stem>-2.json`, `<stem>-3.json`, …
 /// whose file can be read or is missing.
-struct SummarySlot {
-    path: PathBuf,
-    summary: Option<DroppedPanics>,
+pub(crate) struct SummarySlot {
+    pub(crate) path: PathBuf,
+    pub(crate) summary: Option<DroppedPanics>,
     /// The summaries before `path` that cannot be read; they stay where they
     /// are.
-    unreadable: Vec<(PathBuf, std::io::Error)>,
+    pub(crate) unreadable: Vec<(PathBuf, std::io::Error)>,
 }
 
-fn summary_slot(dir: &Path, file: &str) -> std::io::Result<SummarySlot> {
+pub(crate) fn summary_slot(dir: &Path, file: &str) -> std::io::Result<SummarySlot> {
     let stem = file
         .strip_suffix(".json")
         .expect("a summary file is named <stem>.json");
@@ -333,7 +339,7 @@ fn write_summary(path: &Path, summary: &DroppedPanics) -> std::io::Result<()> {
 }
 
 /// When the run that left the record at `path` ended: the file's mtime.
-fn ended_at(path: &Path) -> std::io::Result<DateTime<Utc>> {
+pub(crate) fn ended_at(path: &Path) -> std::io::Result<DateTime<Utc>> {
     let since_epoch = std::fs::metadata(path)?
         .modified()?
         .duration_since(UNIX_EPOCH)
@@ -389,11 +395,11 @@ fn drop_beyond(
 }
 
 /// What a records dir holds.
-struct Records {
+pub(crate) struct Records {
     /// The files named `<n>.json` that read as records, oldest first.
-    records: Vec<(u64, PathBuf, PanicRecord)>,
+    pub(crate) records: Vec<(u64, PathBuf, PanicRecord)>,
     /// Every other entry, with why it is not a record. Holon removes none.
-    strays: Vec<(PathBuf, String)>,
+    pub(crate) strays: Vec<(PathBuf, String)>,
     /// Above the `<n>` of every entry named `<n>.json`, read or not, so a new
     /// record replaces none.
     next: u64,
@@ -401,7 +407,7 @@ struct Records {
 
 const NOT_A_RECORD_FILE: &str = "it is not a record file Holon wrote (a file named <n>.json)";
 
-fn list_records(dir: &Path) -> std::io::Result<Records> {
+pub(crate) fn list_records(dir: &Path) -> std::io::Result<Records> {
     let mut listed = Records {
         records: Vec::new(),
         strays: Vec::new(),
@@ -614,7 +620,7 @@ fn show_unshown(record_dir: &Path, conditions: &ConditionBus) -> ShownFiles {
     }
 }
 
-fn read_record(path: &Path) -> Result<PanicRecord, String> {
+pub(crate) fn read_record(path: &Path) -> Result<PanicRecord, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("it cannot be read: {e}"))?;
     serde_json::from_slice(&bytes).map_err(|e| format!("it does not parse as a panic record: {e}"))
 }

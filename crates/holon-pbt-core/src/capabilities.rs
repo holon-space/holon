@@ -2952,6 +2952,39 @@ pub trait RefConditions {
     fn governed_condition_kinds(&self) -> BTreeSet<&'static str>;
 }
 
+/// One crash record as the crash history shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShownCrash {
+    /// Where the record sits: `this run`, `not yet shown` or `shown`.
+    pub kept: String,
+    pub location: String,
+    pub message: String,
+}
+
+/// What the production crash history read from the record dir.
+#[derive(Debug, Clone)]
+pub struct CrashHistoryRead {
+    /// Newest first.
+    pub records: Vec<ShownCrash>,
+    /// Every entry that is not a record (unreadable files, dropped counts),
+    /// as its headline.
+    pub other_entries: Vec<String>,
+    /// The record-dir files whose bytes or presence differ after the read.
+    pub changed_by_reading: Vec<String>,
+}
+
+/// The crash history over the record dir the session's panics go to.
+#[holon_macros::capmap_adapter]
+pub trait SutCrashHistory {
+    async fn crash_history_now(&self) -> CrashHistoryRead;
+}
+
+/// The crash records the model knows of, newest first.
+#[holon_macros::capmap_adapter] // sync trait → no async-trait
+pub trait RefCrashHistory {
+    fn expected_crash_history(&self) -> Vec<ShownCrash>;
+}
+
 // ─── Reference-side: extended read-only projections ──────────────────
 //
 // Each surfaces `ReferenceState` fields that invariant bodies need. Thin

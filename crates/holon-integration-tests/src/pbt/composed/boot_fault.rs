@@ -35,7 +35,7 @@ fn injected_task_panic_site(panic_now: bool) -> String {
 pub fn model_boot_fault(state: &mut ReferenceState, fault: BootFault) {
     match &fault {
         BootFault::None => {}
-        BootFault::PriorCrash(prior) => state.conditions.previous_run_panicked(&Panicked {
+        BootFault::PriorCrash(prior) => state.conditions.prior_crash(&Panicked {
             location: prior.location.clone(),
             message: prior.message.clone(),
         }),

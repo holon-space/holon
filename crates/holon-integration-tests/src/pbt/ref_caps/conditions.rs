@@ -75,3 +75,17 @@ impl ReferenceState {
         }
     }
 }
+
+impl holon_pbt_core::capabilities::RefCrashHistory for ReferenceState {
+    fn expected_crash_history(&self) -> Vec<holon_pbt_core::capabilities::ShownCrash> {
+        self.conditions
+            .crash_history()
+            .into_iter()
+            .map(|(kept, panic)| holon_pbt_core::capabilities::ShownCrash {
+                kept: kept.label().to_string(),
+                location: panic.location,
+                message: panic.message,
+            })
+            .collect()
+    }
+}

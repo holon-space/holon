@@ -1673,6 +1673,9 @@ fn insert_frontend_read_caps(caps: &mut CapMap, handle: &WideHandle, ref_state: 
     caps.insert(
         frontend.clone() as std::sync::Arc<dyn holon_pbt_core::capabilities::SutEditorSaves>
     );
+    caps.insert(
+        frontend.clone() as std::sync::Arc<dyn holon_pbt_core::capabilities::SutCrashHistory>
+    );
 }
 
 /// Restart the booted app over its RETAINED store and rebuild the SUT around

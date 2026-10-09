@@ -29,6 +29,8 @@
 
 use std::collections::BTreeSet;
 
+use holon_frontend::crash_history::Kept;
+
 /// One condition the model expects to be in effect: the file NAME that owns its
 /// subject, and its stable kind.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -65,6 +67,8 @@ pub struct ConditionsRefState {
     /// The last panic of the running process: its record is on disk, and the
     /// next start discloses it.
     unreported_panic: Option<Panicked>,
+    /// Every crash record on disk, oldest first.
+    crash_records: Vec<(Kept, Panicked)>,
 }
 
 /// A panic the model knows of, by its location and message.
@@ -138,6 +142,13 @@ impl ConditionsRefState {
         });
     }
 
+    /// The previous run left a panic record: it is kept unshown and disclosed
+    /// at start.
+    pub fn prior_crash(&mut self, panic: &Panicked) {
+        self.crash_records.push((Kept::Unshown, panic.clone()));
+        self.previous_run_panicked(panic);
+    }
+
     /// The previous run's panic record is disclosed at start.
     pub fn previous_run_panicked(&mut self, panic: &Panicked) {
         self.raise_panic(holon_api::ConditionKind::PREVIOUS_RUN_PANICKED, panic);
@@ -147,6 +158,7 @@ impl ConditionsRefState {
     /// the next start.
     pub fn task_panicked(&mut self, panic: Panicked) {
         self.raise_panic(holon_api::ConditionKind::TASK_PANICKED, &panic);
+        self.crash_records.push((Kept::ThisRun, panic.clone()));
         self.unreported_panic = Some(panic);
     }
 
@@ -155,6 +167,11 @@ impl ConditionsRefState {
     pub fn restart(&mut self) {
         self.clear_kind(holon_api::ConditionKind::TASK_PANICKED);
         self.clear_kind(holon_api::ConditionKind::PREVIOUS_RUN_PANICKED);
+        for (kept, _) in &mut self.crash_records {
+            if *kept == Kept::ThisRun {
+                *kept = Kept::Unshown;
+            }
+        }
         if let Some(panic) = self.unreported_panic.take() {
             self.previous_run_panicked(&panic);
         }
@@ -207,7 +224,14 @@ impl ConditionsRefState {
                 .collect(),
             governed: self.governed.clone(),
             unreported_panic: self.unreported_panic.clone(),
+            crash_records: self.crash_records.clone(),
         }
+    }
+
+    /// The crash records on disk, newest first. Nothing in a headless run
+    /// draws a bus, so none is ever marked seen.
+    pub fn crash_history(&self) -> Vec<(Kept, Panicked)> {
+        self.crash_records.iter().rev().cloned().collect()
     }
 
     pub fn expected(&self) -> &BTreeSet<ExpectedCondition> {

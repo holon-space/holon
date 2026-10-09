@@ -8523,6 +8523,71 @@ impl holon_pbt_core::capabilities::SutConditions for HeadlessFrontendComponent {
     }
 }
 
+/// The bytes of every file the panic records live in, by path.
+fn panic_record_files(config_dir: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+    use holon_frontend::panic_record::RECORD_FILE;
+    use holon_frontend::panic_record::SEEN_DIR;
+    use holon_frontend::panic_record::UNSHOWN_DIR;
+    let list = |dir: &Path| -> Vec<PathBuf> {
+        match std::fs::read_dir(dir) {
+            Ok(entries) => entries
+                .map(|e| e.expect("[crash history] a record dir entry").path())
+                .collect(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(e) => panic!("[crash history] list {}: {e}", dir.display()),
+        }
+    };
+    let mut paths: Vec<PathBuf> = list(config_dir)
+        .into_iter()
+        .filter(|p| {
+            p.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+                n == RECORD_FILE || (n.contains("dropped-panics") && n.ends_with(".json"))
+            })
+        })
+        .collect();
+    paths.extend(list(&config_dir.join(UNSHOWN_DIR)));
+    paths.extend(list(&config_dir.join(SEEN_DIR)));
+    paths
+        .into_iter()
+        .map(|p| {
+            let bytes = std::fs::read(&p)
+                .unwrap_or_else(|e| panic!("[crash history] read {}: {e}", p.display()));
+            (p, bytes)
+        })
+        .collect()
+}
+
+#[async_trait::async_trait(?Send)]
+impl holon_pbt_core::capabilities::SutCrashHistory for HeadlessFrontendComponent {
+    async fn crash_history_now(&self) -> holon_pbt_core::capabilities::CrashHistoryRead {
+        let dir = self.store.config_dir();
+        let before = panic_record_files(&dir);
+        let history = holon_frontend::crash_history::CrashHistory::read(&dir);
+        let after = panic_record_files(&dir);
+        let changed_by_reading = before
+            .keys()
+            .chain(after.keys())
+            .filter(|p| before.get(*p) != after.get(*p))
+            .map(|p| p.display().to_string())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        holon_pbt_core::capabilities::CrashHistoryRead {
+            records: history
+                .records
+                .iter()
+                .map(|e| holon_pbt_core::capabilities::ShownCrash {
+                    kept: e.kept.label().to_string(),
+                    location: e.record.location.clone(),
+                    message: e.record.message.clone(),
+                })
+                .collect(),
+            other_entries: history.other_headlines(),
+            changed_by_reading,
+        }
+    }
+}
+
 #[async_trait::async_trait(?Send)]
 impl holon_pbt_core::capabilities::SutReadOnlyHomes for HeadlessFrontendComponent {
     async fn read_only_blocks_at_ingest(&self) -> Vec<(String, String)> {

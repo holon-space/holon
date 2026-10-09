@@ -22,6 +22,7 @@ use crate::capabilities::RefBackend;
 use crate::capabilities::RefBlockTree;
 use crate::capabilities::RefClock;
 use crate::capabilities::RefConditions;
+use crate::capabilities::RefCrashHistory;
 use crate::capabilities::RefDocuments;
 use crate::capabilities::RefEditorMirror;
 use crate::capabilities::RefFocus;
@@ -51,13 +52,14 @@ pub struct NullRef;
 /// The trait names `NullRef` answers for — the ref caps the classifier
 /// can host. Asserted by the classifier test so a newly registered ref
 /// capability cannot silently escape classification.
-pub const NULL_REF_CAPS: [&str; 26] = [
+pub const NULL_REF_CAPS: [&str; 27] = [
     "RefAdvice",
     "RefAudience",
     "RefBackend",
     "RefBlockTree",
     "RefClock",
     "RefConditions",
+    "RefCrashHistory",
     "RefDocuments",
     "RefEditorMirror",
     "RefFocus",
@@ -200,6 +202,12 @@ impl RefConditions for NullRef {
     }
     fn governed_condition_kinds(&self) -> BTreeSet<&'static str> {
         panic!("class-2: invariant read RefConditions::governed_condition_kinds")
+    }
+}
+
+impl RefCrashHistory for NullRef {
+    fn expected_crash_history(&self) -> Vec<crate::capabilities::ShownCrash> {
+        panic!("class-2: invariant read RefCrashHistory::expected_crash_history")
     }
 }
 
@@ -527,6 +535,7 @@ pub fn null_ref_caps() -> CapMap {
     caps.insert(nr.clone() as Arc<dyn RefBlockTree>);
     caps.insert(nr.clone() as Arc<dyn RefClock>);
     caps.insert(nr.clone() as Arc<dyn RefConditions>);
+    caps.insert(nr.clone() as Arc<dyn RefCrashHistory>);
     caps.insert(nr.clone() as Arc<dyn crate::capabilities::RefCopies>);
     caps.insert(nr.clone() as Arc<dyn RefDocuments>);
     caps.insert(nr.clone() as Arc<dyn RefEditorMirror>);
@@ -559,6 +568,7 @@ pub fn null_ref_cap_ids() -> Vec<CapId> {
         CapId::of::<dyn RefBlockTree>(),
         CapId::of::<dyn RefClock>(),
         CapId::of::<dyn RefConditions>(),
+        CapId::of::<dyn RefCrashHistory>(),
         CapId::of::<dyn crate::capabilities::RefCopies>(),
         CapId::of::<dyn RefDocuments>(),
         CapId::of::<dyn RefEditorMirror>(),

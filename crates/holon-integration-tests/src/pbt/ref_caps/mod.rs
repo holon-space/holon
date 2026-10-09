@@ -249,6 +249,7 @@ impl holon_pbt_core::composition::CapProvider for ReferenceState {
         // asserting the app is silent.
         caps.insert(self.clone() as Arc<dyn holon_pbt_core::capabilities::RefConditions>);
         caps.insert(self.clone() as Arc<dyn holon_pbt_core::capabilities::RefCopies>);
+        caps.insert(self.clone() as Arc<dyn holon_pbt_core::capabilities::RefCrashHistory>);
         caps.insert(self as Arc<dyn holon_pbt_core::capabilities::RefSharedView>);
     }
 }

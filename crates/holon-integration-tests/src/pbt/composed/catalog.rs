@@ -54,6 +54,7 @@ fn central_invariants() -> Vec<Box<dyn CapInvariant>> {
         // homes, so an org-only draw deselects it instead of passing vacuously.
         invariants::conditions_match_ref::wire(),
         invariants::copies_stay_on_disk::wire(),
+        invariants::crash_history_matches_ref::wire(),
         invariants::read_only_home_refuses_writes::wire(),
         // D46: no operation offered on a read-only-homed block is one the
         // dispatcher's write tier refuses.
