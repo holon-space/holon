@@ -168,13 +168,7 @@ impl DocumentManager for RecordingDocManager {
         parent_id: &EntityUri,
         title: &str,
     ) -> anyhow::Result<Option<Block>> {
-        Ok(self
-            .by_id
-            .lock()
-            .unwrap()
-            .values()
-            .find(|d| d.parent_id == *parent_id && d.is_page() && d.title() == title)
-            .cloned())
+        holon_filesystem::page_at_position(self.by_id.lock().unwrap().values(), parent_id, title)
     }
     async fn create(&self, doc: Block) -> anyhow::Result<Block> {
         self.created.lock().unwrap().push(doc.clone());

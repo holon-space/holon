@@ -493,11 +493,7 @@ impl DocumentManager for MockDocumentManager {
         parent_id: &EntityUri,
         title: &str,
     ) -> Result<Option<Block>> {
-        let docs = self.documents.read().unwrap();
-        Ok(docs
-            .iter()
-            .find(|d| d.parent_id == *parent_id && d.is_page() && d.title() == title)
-            .cloned())
+        holon_filesystem::page_at_position(self.documents.read().unwrap().iter(), parent_id, title)
     }
 
     async fn create(&self, doc: Block) -> Result<Block> {

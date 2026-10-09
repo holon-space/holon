@@ -245,24 +245,9 @@ impl DocumentManager for LoroDocumentManager {
         parent_id: &EntityUri,
         title: &str,
     ) -> AnyhowResult<Option<Block>> {
-        let key = holon_api::PageTitleKey::of(title);
         let child_ids = self.backend.list_children(parent_id.as_str()).await?;
         let children = self.backend.get_blocks(child_ids).await?;
-        let mut pages = children
-            .into_iter()
-            .filter(|b| b.is_page() && holon_api::PageTitleKey::of(&b.title()) == key);
-        let found = pages.next();
-        if let Some(other) = pages.next() {
-            anyhow::bail!(
-                "two pages under {parent_id} are titled {title:?} up to case and spacing: {} \
-                 ({:?}) and {} ({:?}); a page position holds one page",
-                found.as_ref().expect("first match").id,
-                found.as_ref().expect("first match").title(),
-                other.id,
-                other.title()
-            );
-        }
-        Ok(found)
+        holon_filesystem::page_at_position(&children, parent_id, title)
     }
 
     async fn get_by_id(&self, id: &EntityUri) -> AnyhowResult<Option<Block>> {
@@ -298,6 +283,36 @@ impl DocumentManager for LoroDocumentManager {
         Ok(self.backend.get_block(created.id.as_str()).await?)
     }
 
+    /// Honors `doc.id` (see the trait docs). A row already at that id is
+    /// this page when it sits under `doc.parent_id` with `doc`'s
+    /// [`holon_api::PageTitleKey`], and an untitled placeholder there is
+    /// completed with `doc`; any other row there is another page, which the
+    /// create must not overwrite.
+    async fn create_forcing_id(&self, doc: Block) -> AnyhowResult<Block> {
+        let Some(existing) = self.get_by_id(&doc.id).await? else {
+            return self.create(doc).await;
+        };
+        if existing.parent_id == doc.parent_id {
+            if existing.title().trim().is_empty() {
+                self.update_metadata(&doc).await?;
+                return Ok(self.backend.get_block(doc.id.as_str()).await?);
+            }
+            if holon_api::PageTitleKey::of(&existing.title())
+                == holon_api::PageTitleKey::of(&doc.title())
+            {
+                return Ok(existing);
+            }
+        }
+        anyhow::bail!(
+            "page {:?} under {} takes id {}, but that id holds page {:?} under {}",
+            doc.title(),
+            doc.parent_id,
+            doc.id,
+            existing.title(),
+            existing.parent_id
+        )
+    }
+
     /// Persist doc-level metadata (e.g. `todo_keywords`) onto the page block.
     ///
     /// `doc.properties` is the AUTHORITATIVE full set (callers fetch the doc,
@@ -323,7 +338,7 @@ impl DocumentManager for LoroDocumentManager {
     }
 
     // name_chain / find_by_name_chain / get_or_create_by_name_chain: trait
-    // defaults build on the required methods above.
+    // defaults build on the methods above.
 }
 
 // ============================================================================

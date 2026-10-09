@@ -410,6 +410,12 @@ impl Default for Block {
 /// Literal tag value that marks a block as a page (formerly "document").
 pub const PAGE_TAG: &str = "Page";
 
+/// The title a block with `content` has: its first line. A page's body
+/// follows its title in `content`.
+pub fn title_of(content: &str) -> &str {
+    content.lines().next().unwrap_or("")
+}
+
 impl Block {
     /// Whether this block is a page. A block is a page iff its `tags` list
     /// contains the literal string [`PAGE_TAG`].
@@ -631,7 +637,7 @@ impl Block {
     /// Get title (first line of content)
     /// flutter_rust_bridge:ignore
     pub fn title(&self) -> String {
-        self.content.lines().next().unwrap_or("").to_string()
+        title_of(&self.content).to_string()
     }
 
     /// Check if this block contains a source block

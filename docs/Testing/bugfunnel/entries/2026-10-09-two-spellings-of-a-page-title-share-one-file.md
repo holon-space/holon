@@ -5,9 +5,10 @@ gap: ENVIRONMENT
 secondary: null
 status: FIXED
 summary: >-
-  Links `[[My Notes]]` then `[[my notes]]` made two root pages; on a
-  case-insensitive file system both write `My Notes.org`, so the second
-  page's write-back overwrote the first page's file.
+  Two spellings of one page title (`[[My Notes]]`/`[[my notes]]`, `café`
+  composed/decomposed, `Straße`/`Strasse`) made two root pages; on APFS both
+  write one file, so the second page's write-back overwrote the first page's
+  file.
 ---
 
 ## Bug
@@ -21,31 +22,51 @@ are one file. Before the first file exists, `refuse_contested_path` compares
 two different lexical keys and does not refuse, and the second write replaces
 the first page's bytes.
 
+The round-5 verifier (lane-logs/recreate5-verify.md) reproduced two more
+instances on the round-5 fix: a page with a body (`My Notes` + body) was
+passed by the link-click position lookup, which keyed on the whole `content`;
+and `café`/`cafe\u{301}`, `Straße`/`Strasse`, `σ`/`ς` stayed two pages,
+because the key folded with `to_lowercase` only.
+
 ## Root cause
-Two titles that differ only in case or spacing were two pages, but one file
-name on macOS, Windows and Android. The by-name lookups
-(`find_by_parent_and_name` in crates/holon-app/src/turso_seams.rs and
-loro_seams.rs) and `page_slot` (crates/holon-api/src/identity_recognition.rs)
-compared exact strings. The id compared folded strings.
+Two titles that name one file on a Mac were two pages. The by-name lookups
+compared exact strings, then a key that folded less than APFS does
+(simple lowercase, no Unicode normalization), and one of them read the whole
+`content` instead of the title line. The write-back guard against two
+documents on one file (`refuse_contested_path`) compared spellings, which
+fold only when the file system that derived them folds (on a Mac once the
+first file exists).
 
 ## Missing piece
 The keystone file system `InMemoryFileSystem`
 (crates/holon-filesystem/src/in_memory.rs) was case-sensitive (a `BTreeMap`
-keyed by path), so in the harness the two pages got two files. Model and SUT
-agreed, and every row stayed green.
+keyed by path), and then folded with `to_lowercase` only, so in the harness
+the two pages got two files. Model and SUT agreed, and every row stayed green.
 
 ## Remedy
-- Environment: `InMemoryFileSystem` has `PathCase::Insensitive` (an entry
-  keeps its first spelling, as APFS does), and the keystone harness uses it
-  (crates/holon-integration-tests/src/test_environment.rs).
-- Row `two-spellings-of-a-page-link-name-one-page` (keystone.jsonl). It was red
-  on the round-4 code with `inv-every-page-has-its-own-file` and a
-  DUPLICATE DOCUMENT ID error (lane-logs/recreate5/red-row-case.log).
-- Product: one title rule, `holon_api::PageTitleKey`. `page_slot`,
-  `find_by_parent_and_name`, `create_forcing_id` and the new by-position lookup
-  `SqlOperationProvider::page_at` all compare keys. A position (parent, key)
-  holds at most one page, and the first spelling stays the stored title
+- One fold, `holon_api::caseless_fold` (crates/holon-api/src/caseless.rs):
+  `NFD(casefold(NFD(s)))`, full case folding, the APFS rule. Pinned against
+  the real file system of the host by
+  crates/holon-filesystem/tests/path_collision_key_matches_the_host.rs (red
+  with `to_lowercase`: lane-logs/recreate6/red-a-key.log).
+- File boundary: `holon_filesystem::PathCollisionKey` (each path component
+  folded); `refuse_contested_path` compares keys, so a second document is
+  refused (`AMBIGUOUS PAGE-FILE PATH`) also where the deriving file system
+  keeps two files (crates/holon-orgmode/tests/page_rename_retires_old_file.rs,
+  `a_spelling_namesake_is_refused_*`).
+- Environment: `InMemoryFileSystem` `PathCase::Insensitive` folds with
+  `caseless_fold` and keeps the first spelling, as APFS does; the keystone
+  harness uses it. Row `two-spellings-of-a-page-link-name-one-page`
+  (keystone.jsonl) was red on the round-4 code
+  (lane-logs/recreate5/red-row-case.log).
+- Product: one title rule, `holon_api::PageTitleKey` (title line, whitespace
+  collapsed, `caseless_fold`). `find_by_parent_and_name` (all stores, through
+  `holon_filesystem::page_at_position`), `page_slot`, `create_forcing_id`
+  (Live and Loro) and `SqlOperationProvider::page_at` compare keys of the
+  title line. A position (parent, key) holds at most one page; two are an
+  error, also on the link-click path when a link names one of them exactly
   (docs/Plans/PageIdentityDeterminism.md §5.3).
 - Still open: link resolution (`resolve_page_name`, block_links) matches the
-  leaf title exactly, so a `[[my notes]]` link to page `My Notes` stays
-  dangling in block_links, but clicking it opens the existing page.
+  leaf title exactly, so a `[[my notes]]` link to page `My Notes` is dangling
+  in block_links when written; a click opens the existing page and heals the
+  row.

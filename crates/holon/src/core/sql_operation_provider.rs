@@ -2228,11 +2228,11 @@ impl SqlOperationProvider {
     }
 
     /// The `/`-joined page path (root→leaf) of an existing page, reconstructed
-    /// by walking its page-ancestor chain and collecting each page's
-    /// `content` title. Used to seed the transform's DEFAULT destination
-    /// from the origin's nearest page ancestor, so `PageId::for_path`
-    /// computes the new page's id against the same path string the
-    /// destination page was minted with.
+    /// by walking its page-ancestor chain and collecting each page's title
+    /// (the first line of its `content`). Used to seed the transform's DEFAULT
+    /// destination from the origin's nearest page ancestor, so
+    /// `PageId::for_path` computes the new page's id against the same path
+    /// string the destination page was minted with.
     async fn page_path_of(&self, page_id: &str) -> Result<String> {
         let mut segments: Vec<String> = Vec::new();
         let mut cursor = Some(page_id.to_string());
@@ -2246,7 +2246,7 @@ impl SqlOperationProvider {
                 break;
             }
             let title = match self.read_field_old_value(&id, "content").await? {
-                Value::String(s) => s.trim().to_string(),
+                Value::String(s) => holon_api::block::title_of(&s).trim().to_string(),
                 _ => break,
             };
             segments.push(title);
@@ -2260,7 +2260,9 @@ impl SqlOperationProvider {
     /// writing anything. Walks the `/`-joined `destination_path` segment by
     /// segment: the page a link to the accumulated path resolves to
     /// ([`resolve_page_name`](Self::resolve_page_name)), else the page at the
-    /// segment's position ([`page_at`](Self::page_at)), is reused; a missing
+    /// segment's position ([`page_at`](Self::page_at)), is reused. The
+    /// position is read either way, so two pages at it are an error even
+    /// when a link names one of them exactly. A missing
     /// one is recorded (with the id `holon_api::page_slot` assigns) so the
     /// engine can create it as an invertible `create`. Returns the leaf
     /// parent id plus the ordered list of pages the engine must mint first.
@@ -2300,9 +2302,10 @@ impl SqlOperationProvider {
             };
             let parent = EntityUri::parse(&parent_id)
                 .map_err(|e| format!("parent of page segment '{seg_path}': {e:#}"))?;
+            let at_position = self.page_at(&parent, name).await?;
             let found = match self.resolve_page_name(&hint).await? {
                 Some(linked) => Some(linked),
-                None => self.page_at(&parent, name).await?,
+                None => at_position,
             };
             match found {
                 Some(existing) => {
@@ -2335,10 +2338,10 @@ impl SqlOperationProvider {
         Ok((parent_id, missing))
     }
 
-    /// The page under `parent` whose title has `title`'s
-    /// [`holon_api::PageTitleKey`] — the page position rule
-    /// `find_by_parent_and_name` applies on the ingest side. Two such pages
-    /// are an error.
+    /// The page under `parent` whose title (the first line of its
+    /// `content`) has `title`'s [`holon_api::PageTitleKey`] — the page
+    /// position rule `find_by_parent_and_name` applies on the ingest side.
+    /// Two such pages are an error.
     async fn page_at(&self, parent: &EntityUri, title: &str) -> Result<Option<String>> {
         let sql = format!(
             "SELECT b.id, b.content FROM {} b JOIN block_tags t ON t.block_id = b.id AND t.tag = \
@@ -2359,7 +2362,7 @@ impl SqlOperationProvider {
                 .and_then(|v| v.as_string())
                 .unwrap_or_default()
                 .to_string();
-            if holon_api::PageTitleKey::of(&content) == key {
+            if holon_api::PageTitleKey::of(holon_api::block::title_of(&content)) == key {
                 let id = row
                     .get("id")
                     .and_then(|v| v.as_string())
@@ -2378,8 +2381,8 @@ impl SqlOperationProvider {
         Ok(found.pop().map(|(id, _)| id))
     }
 
-    /// The row holding `id` (`None` = no row) with its `content` as the
-    /// title; a row without `content` reads as untitled.
+    /// The row holding `id` (`None` = no row) with the first line of its
+    /// `content` as the title; a row without `content` reads as untitled.
     async fn page_holder(&self, id: &EntityUri) -> Result<Option<holon_api::PageHolder>> {
         let sql = format!(
             "SELECT content, parent_id FROM {} WHERE id = '{}'",
@@ -2399,11 +2402,12 @@ impl SqlOperationProvider {
             .and_then(|v| v.as_string())
             .ok_or_else(|| format!("the holder of {id} has no parent_id"))?;
         Ok(Some(holon_api::PageHolder {
-            title: row
-                .get("content")
-                .and_then(|v| v.as_string())
-                .unwrap_or_default()
-                .to_string(),
+            title: holon_api::block::title_of(
+                row.get("content")
+                    .and_then(|v| v.as_string())
+                    .unwrap_or_default(),
+            )
+            .to_string(),
             parent: EntityUri::parse(parent)
                 .map_err(|e| format!("the holder of {id} has parent_id {parent:?}: {e:#}"))?,
         }))

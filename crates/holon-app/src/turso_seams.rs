@@ -739,25 +739,11 @@ impl DocumentManager for LiveDocumentManager {
         parent_id: &EntityUri,
         title: &str,
     ) -> anyhow::Result<Option<Block>> {
-        let key = holon_api::PageTitleKey::of(title);
-        let docs = self.live.read();
-        let mut pages = docs.values().filter(|d| {
-            d.parent_id == *parent_id
-                && d.is_page()
-                && holon_api::PageTitleKey::of(&d.title()) == key
-        });
-        let found = pages.next().map(|d| (**d).clone());
-        if let Some(other) = pages.next() {
-            anyhow::bail!(
-                "two pages under {parent_id} are titled {title:?} up to case and spacing: {} \
-                 ({:?}) and {} ({:?}); a page position holds one page",
-                found.as_ref().expect("first match").id,
-                found.as_ref().expect("first match").title(),
-                other.id,
-                other.title()
-            );
-        }
-        Ok(found)
+        holon_filesystem::page_at_position(
+            self.live.read().values().map(|d| &**d),
+            parent_id,
+            title,
+        )
     }
 
     async fn create(&self, doc: Block) -> anyhow::Result<Block> {

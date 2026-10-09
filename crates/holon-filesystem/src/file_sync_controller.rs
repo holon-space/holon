@@ -70,6 +70,7 @@ use crate::sync_ports::MountRegistry;
 use crate::sync_ports::ShareWritebackDisclosure;
 use crate::sync_ports::ThreeWayTextMerge;
 use crate::sync_ports::WritebackDisclosure;
+use crate::vault_path::PathCollisionKey;
 use crate::vault_path::VaultPath;
 
 /// Bump when the org renderer changes in a way that alters the canonical
@@ -5450,6 +5451,20 @@ impl FileSyncController {
                             return Ok(IngestOutcome::UnsettledIdentity);
                         }
                     }
+                    let stem = segment_refs.last().expect("a file names a segment");
+                    if doc.title() != *stem {
+                        tracing::warn!(
+                            page = %doc.id,
+                            page_title = %doc.title(),
+                            path = %path.display(),
+                            "[FileSyncController] {} becomes the home of page {:?}, whose title \
+                             differs from the file name {stem:?} only in case, Unicode \
+                             normalization or spacing. A file with another such spelling is \
+                             refused as a second home of this page.",
+                            path.display(),
+                            doc.title()
+                        );
+                    }
                 }
                 (
                     self.resolve_dir_page_chain(&segment_refs).await?,
@@ -10202,20 +10217,24 @@ impl FileSyncController {
     /// lookup passes a block id, whose chain resolves to its own
     /// document's file, and that document homing it is ownership, not a
     /// contest.
+    ///
+    /// The paths are compared by [`PathCollisionKey`], not as spelled: a
+    /// spelling that differs only in case or Unicode normalization names the
+    /// same file on a Mac even where this file system keeps two.
     fn refuse_contested_path(&self, doc_id: &EntityUri, path: &VaultPath) -> Result<()> {
-        let canonical = CanonicalPath::new(path.as_path());
-        if let Some((owner, _)) = self
-            .doc_home
-            .iter()
-            .find(|(other, home)| *other != doc_id && **home == canonical)
-        {
+        let key = PathCollisionKey::of(CanonicalPath::new(path.as_path()).as_path_buf());
+        if let Some((owner, home)) = self.doc_home.iter().find(|(other, home)| {
+            *other != doc_id && PathCollisionKey::of(home.as_path_buf()) == key
+        }) {
             anyhow::bail!(
                 "AMBIGUOUS PAGE-FILE PATH: {doc_id} derives {} from its name chain, but \
-                 {owner} already homes that file. Two documents sharing one name chain \
+                 {owner} already homes {}, the same file on a case- and \
+                 normalization-insensitive file system. Two documents sharing one name chain \
                  both derive it, and only the one that owns the file may be written \
                  there, so this write is REFUSED. Give the two pages distinct titles, or \
                  distinct parents, to separate their files.",
-                path.as_path().display()
+                path.as_path().display(),
+                home.as_path_buf().display()
             );
         }
         Ok(())

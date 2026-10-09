@@ -222,6 +222,39 @@ pub trait BlockReader: Send + Sync {
     }
 }
 
+/// The page among `blocks` at the position (`parent_id`, `title`): a page
+/// under `parent_id` whose title has `title`'s [`holon_api::PageTitleKey`].
+/// Two such pages are an error naming both, in id order. Every
+/// [`DocumentManager::find_by_parent_and_name`] answers through this.
+pub fn page_at_position<'a>(
+    blocks: impl IntoIterator<Item = &'a Block>,
+    parent_id: &EntityUri,
+    title: &str,
+) -> Result<Option<Block>> {
+    let key = holon_api::PageTitleKey::of(title);
+    let mut pages: Vec<&Block> = blocks
+        .into_iter()
+        .filter(|b| {
+            b.parent_id == *parent_id
+                && b.is_page()
+                && holon_api::PageTitleKey::of(&b.title()) == key
+        })
+        .collect();
+    pages.sort_by(|a, b| a.id.as_str().cmp(b.id.as_str()));
+    match pages.as_slice() {
+        [] => Ok(None),
+        [page] => Ok(Some((*page).clone())),
+        [first, second, ..] => anyhow::bail!(
+            "two pages under {parent_id} are titled {title:?} up to case, Unicode normalization \
+             and spacing: {} ({:?}) and {} ({:?}); a page position holds one page",
+            first.id,
+            first.title(),
+            second.id,
+            second.title()
+        ),
+    }
+}
+
 /// CRUD operations on page blocks (blocks tagged `"Page"`).
 ///
 /// Convenience methods (`name_chain`, `find_by_name_chain`,
@@ -231,8 +264,9 @@ pub trait BlockReader: Send + Sync {
 #[async_trait]
 pub trait DocumentManager: Send + Sync {
     /// The page under `parent_id` whose title (first line of content) has
-    /// `title`'s [`holon_api::PageTitleKey`]: titles that differ only in case
-    /// or spacing name one page. Two such pages under one parent are an error.
+    /// `title`'s [`holon_api::PageTitleKey`]: titles that differ only in
+    /// case, Unicode normalization or spacing name one page. Two such pages
+    /// under one parent are an error. Answered by [`page_at_position`].
     async fn find_by_parent_and_name(
         &self,
         parent_id: &EntityUri,
@@ -1023,17 +1057,7 @@ mod name_chain_tests {
             parent_id: &EntityUri,
             title: &str,
         ) -> Result<Option<Block>> {
-            Ok(self
-                .by_id
-                .lock()
-                .unwrap()
-                .values()
-                .find(|b| {
-                    &b.parent_id == parent_id
-                        && holon_api::PageTitleKey::of(&b.title())
-                            == holon_api::PageTitleKey::of(title)
-                })
-                .cloned())
+            page_at_position(self.by_id.lock().unwrap().values(), parent_id, title)
         }
 
         async fn create(&self, doc: Block) -> Result<Block> {

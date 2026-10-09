@@ -21,6 +21,7 @@ pub mod block_mutation;
 pub mod block_read_model;
 pub mod block_write_field;
 pub mod capability;
+pub mod caseless;
 pub mod change_set;
 pub mod clock;
 pub mod commit_clock;
@@ -93,6 +94,7 @@ pub mod widget_meta;
 pub mod widget_spec;
 pub mod write_seq;
 
+pub use caseless::caseless_fold;
 pub use condition_bus::ClearedCacheRows;
 pub use condition_bus::Condition;
 pub use condition_bus::ConditionBus;

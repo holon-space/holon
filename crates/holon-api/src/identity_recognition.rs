@@ -52,9 +52,10 @@ pub enum Recognition {
 /// Recognize a derived-id create against the id's CURRENT holder.
 ///
 /// `holder_title` is the derived id's current holder `content`/title as read
-/// from the active block-read authority (`None` = the id is unheld). The
-/// comparison is by [`PageTitleKey`] — the SAME normalization
-/// [`PageId::for_path`](crate::link_parser::PageId::for_path) hashes — so
+/// from the active block-read authority (`None` = the id is unheld); only its
+/// first line, the holder's title, is compared. The comparison is by
+/// [`PageTitleKey`], which folds every spelling
+/// [`PageId::for_path`](crate::link_parser::PageId::for_path) folds — so
 /// recognition keys on TITLE/PATH, never on `(content, parent)`: content drifts
 /// over time, whereas the normalized title is precisely what the derived id is
 /// a function of. A rename changes the title while preserving the id, so a
@@ -65,7 +66,7 @@ pub fn recognize_derived_id(
     holder_title: Option<&str>,
     requested_title: &str,
 ) -> Recognition {
-    match holder_title {
+    match holder_title.map(crate::block::title_of) {
         None => Recognition::Free,
         // Checked BEFORE the title comparison: a blank holder is not a rival
         // name, so it can never be the collision case. Same "an empty-content

@@ -293,10 +293,14 @@ static BARE_LINK_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"\[\[([^\]\[]+)\]
 /// Lowercase, trim whitespace, collapse internal whitespace runs to single
 /// space.
 pub fn normalize_for_hash(input: &str) -> String {
-    let trimmed = input.trim().to_lowercase();
-    let mut result = String::with_capacity(trimmed.len());
+    collapse_whitespace(&input.trim().to_lowercase())
+}
+
+/// `input` with every whitespace run as one space.
+fn collapse_whitespace(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
     let mut prev_space = false;
-    for ch in trimmed.chars() {
+    for ch in input.chars() {
         if ch.is_whitespace() {
             if !prev_space {
                 result.push(' ');
@@ -310,16 +314,21 @@ pub fn normalize_for_hash(input: &str) -> String {
     result
 }
 
-/// What two page titles must share to name one page: the title as
-/// [`normalize_for_hash`] folds it, the form a page id hashes. Titles that
-/// differ only in case or whitespace have one key, so under one parent they
-/// are one page.
+/// What two page titles must share to name one page: the trimmed title with
+/// whitespace runs collapsed, under [`crate::caseless_fold`] — the fold under
+/// which a Mac names one file by two spellings. Titles that differ only in
+/// case, Unicode normalization or spacing have one key, so under one parent
+/// they are one page.
+///
+/// A page id hashes [`normalize_for_hash`], which folds less (no Unicode
+/// normalization, simple lowercase), so two titles with one key can hash two
+/// ids; every page lookup by title compares keys before it derives an id.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PageTitleKey(String);
 
 impl PageTitleKey {
     pub fn of(title: &str) -> Self {
-        PageTitleKey(normalize_for_hash(title))
+        PageTitleKey(crate::caseless_fold(&collapse_whitespace(title.trim())))
     }
 }
 

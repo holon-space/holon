@@ -2825,8 +2825,9 @@ impl ReferenceState {
         hits.into_iter().next().map(|(_, id)| id)
     }
 
-    /// The page under `parent` titled `title` up to case and spacing: one
-    /// page per position (PageIdentityDeterminism.md §5.3).
+    /// The page under `parent` titled `title` up to case, Unicode
+    /// normalization and spacing: one page per position
+    /// (PageIdentityDeterminism.md §5.3).
     fn ref_page_at(&self, parent: &EntityUri, title: &str) -> Option<EntityUri> {
         let mut hits = self.domain.block_state.blocks.values().filter(|b| {
             b.is_page() && b.parent_id == *parent && same_page_title(&b.content, title)
@@ -2851,7 +2852,10 @@ impl ReferenceState {
         for _ in 0..64 {
             match self.domain.block_state.blocks.get(&id) {
                 None => return RefPageSlot::Create(id),
-                Some(b) if b.parent_id == *parent && b.content.trim().is_empty() => {
+                Some(b)
+                    if b.parent_id == *parent
+                        && b.content.lines().next().unwrap_or("").trim().is_empty() =>
+                {
                     return RefPageSlot::Create(id);
                 }
                 Some(b) if b.parent_id == *parent && same_page_title(&b.content, title) => {
@@ -4061,14 +4065,11 @@ enum RefPageSlot {
     Existing(EntityUri),
 }
 
-/// Whether two page titles name one page: equal once lowercased with
-/// whitespace runs collapsed and the ends trimmed.
-fn same_page_title(a: &str, b: &str) -> bool {
-    let fold = |s: &str| {
-        s.split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
-            .to_lowercase()
-    };
-    fold(a) == fold(b)
+/// Whether a page whose `content` this is has `title`: its first line and
+/// `title` are equal once whitespace runs are collapsed, the ends trimmed,
+/// and both are folded as APFS folds a file name.
+fn same_page_title(content: &str, title: &str) -> bool {
+    let fold =
+        |s: &str| holon_api::caseless_fold(&s.split_whitespace().collect::<Vec<_>>().join(" "));
+    fold(content.lines().next().unwrap_or("")) == fold(title)
 }

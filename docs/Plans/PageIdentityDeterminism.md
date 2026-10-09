@@ -191,23 +191,56 @@ different logical page). Convergence is over independent *creation* of the same
 page (the PBT), not over post-hoc renames.
 
 **One title rule.** Two page titles name one page when their
-`holon_api::PageTitleKey`s are equal: the title folded for case and spacing by
-`normalize_for_hash`, the form `PageId::for_path` hashes. A page position
-(parent, key) holds at most one page, and the first spelling stays the stored
-title. Every page-position comparison uses the key: `find_by_parent_and_name`
-(every `DocumentManager`; two matches are an error), `page_slot`,
-`LiveDocumentManager::create_forcing_id`, and `SqlOperationProvider::page_at`.
-So `[[my notes]]` after `[[My Notes]]` opens the existing page. Without this,
-the two pages would share one file on a case-insensitive file system (macOS,
-Windows, Android), and the second write-back would overwrite the first
+`holon_api::PageTitleKey`s are equal. The key is the title (the first line of
+a page's `content`; the body below it never counts), trimmed, with whitespace
+runs collapsed, under `holon_api::caseless_fold`: Unicode canonical caseless
+matching, `NFD(casefold(NFD(s)))` with full case folding
+(crates/holon-api/src/caseless.rs). That is the fold under which APFS, the
+macOS default, names one file by two spellings: `café` composed and
+decomposed, `Straße`/`Strasse`, `σ`/`ς`, `My Notes`/`my notes`. A page
+position (parent, key) holds at most one page, and the first spelling stays
+the stored title. Every page-position comparison uses the key:
+`find_by_parent_and_name` (every `DocumentManager` answers through
+`holon_filesystem::page_at_position`; two matches are an error naming both),
+`page_slot`, `create_forcing_id` of both `LiveDocumentManager` and
+`LoroDocumentManager`, and `SqlOperationProvider::page_at`. So `[[my notes]]`
+after `[[My Notes]]` opens the existing page. Without this, the two pages
+would share one file on a Mac, and the second write-back would overwrite the
+first
 (docs/Testing/bugfunnel/entries/2026-10-09-two-spellings-of-a-page-title-share-one-file.md).
+
+The key folds more than the id. `PageId::for_path` hashes `normalize_for_hash`
+(simple lowercase, no Unicode normalization), which stays as it is so no
+existing page id changes. Two titles with one key can therefore derive two
+ids (`café` composed and decomposed, `Straße`/`Strasse`). Every lookup by
+title compares positions BEFORE it derives an id (`find_by_parent_and_name`
+before `page_slot` on ingest, `page_at` before `page_slot` on a link click),
+so a page is found by any spelling of its key whatever id it holds.
+
+**The file boundary.** Write-back refuses, independently of titles, to give a
+document a file another document homes under the same
+`holon_filesystem::PathCollisionKey` (every path component under
+`caseless_fold`): `refuse_contested_path` in
+crates/holon-filesystem/src/file_sync_controller.rs refuses with
+`AMBIGUOUS PAGE-FILE PATH`. It compares keys, not spellings, so it refuses
+also where the deriving file system keeps two files (a case-sensitive Linux
+volume whose vault later syncs to a Mac, or the test file system) and before
+the second spelling's file exists. On APFS `CanonicalPath` already resolves an
+existing file to its stored spelling. `InMemoryFileSystem` with
+`PathCase::Insensitive`, the keystone's file system, folds with the same
+function. A file without an `#+ID` whose name spells an existing page's title
+differently (a doubled space: two files on APFS) becomes that page's home
+with a `warn!`; a second file of that page is refused as a second home.
 
 Link resolution is a different rule. `SqlOperationProvider::resolve_page_name`
 (block_links rows and the first lookup of a link click) matches the leaf title
 EXACTLY under ANY parent, and prefers a parent whose title is the preceding
 segment. A `[[my notes]]` link to page `My Notes` therefore stays dangling in
-`block_links`. A click on it still reaches the page through the position
-lookup.
+`block_links` when it is written. A click on it reaches the page through the
+position lookup, and that click heals the link: its `block_links` row then
+resolves to the page. A link click reads the position on every segment, also
+when `resolve_page_name` found a page, so two pages at one position are an
+error on that path too.
 
 A new page whose path was vacated by a rename (or a move) still finds
 `PageId::for_path(path)` held by the renamed page. Every page-creating path
@@ -227,8 +260,9 @@ holder under another parent is always passed. Each passed id and each adopted
 page is disclosed with a `warn!`: either means the caller's lookup and the id
 disagree. The new page never upserts onto another, and ingest's write-back
 stores the minted id as the file's `#+ID`. `create_forcing_id` (the companion
-`#+ID` leg) returns an existing row at the forced id only when it is this
-page (same parent, same key); a row of another page there is an error.
+`#+ID` leg, in both `DocumentManager`s) returns an existing row at the forced
+id only when it is this page (same parent, same key), completes an untitled
+placeholder under the same parent, and errors on a row of another page there.
 
 Three paths still refuse a held id. The leaf page of `convert_block_to_page`
 refuses with `IdentityCollision`. The journal rule (`holon_rule_watcher`) skips

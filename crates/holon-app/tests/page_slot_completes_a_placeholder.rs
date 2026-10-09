@@ -223,3 +223,37 @@ fn create_forcing_id_returns_only_the_page_of_that_title() {
         );
     });
 }
+
+/// One position, any spelling: a page whose title differs only in case,
+/// Unicode normalization or spacing is found, and two pages at one position
+/// are an error.
+#[test]
+fn a_position_is_found_by_any_spelling_and_twins_are_an_error() {
+    run(async |engine, docs| {
+        let root = EntityUri::no_parent();
+        let cafe = EntityUri::block("cafe");
+        page_row(&engine, &docs, &cafe, "caf\u{e9}\nits body", &root).await;
+        let found = docs
+            .find_by_parent_and_name(&root, "CAFE\u{301}")
+            .await
+            .unwrap()
+            .expect("the page titled café");
+        assert_eq!(found.id, cafe);
+
+        page_row(
+            &engine,
+            &docs,
+            &EntityUri::block("cafe-twin"),
+            "Caf\u{e9}",
+            &root,
+        )
+        .await;
+        let twins = docs.find_by_parent_and_name(&root, "caf\u{e9}").await;
+        assert!(
+            twins
+                .as_ref()
+                .is_err_and(|e| e.to_string().contains("a page position holds one page")),
+            "two pages at one position: {twins:?}"
+        );
+    });
+}

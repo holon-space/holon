@@ -202,14 +202,7 @@ impl DocumentManager for Fixtures {
         parent_id: &EntityUri,
         title: &str,
     ) -> anyhow::Result<Option<Block>> {
-        Ok(self
-            .0
-            .lock()
-            .unwrap()
-            .by_id
-            .values()
-            .find(|d| d.parent_id == *parent_id && d.is_page() && d.title() == title)
-            .cloned())
+        holon_filesystem::page_at_position(self.0.lock().unwrap().by_id.values(), parent_id, title)
     }
     async fn create(&self, doc: Block) -> anyhow::Result<Block> {
         Ok(doc)
@@ -864,4 +857,132 @@ async fn a_namesake_docs_writeback_leaves_the_owners_file_writable() {
 #[tokio::test]
 async fn a_namesake_docs_writeback_leaves_the_owners_file_writable_without_a_registrar() {
     a_namesake_never_takes_the_owners_file(None).await;
+}
+
+/// Two pages under one parent whose titles differ only in case or Unicode
+/// normalization derive two spellings of ONE file on a Mac. The second page's
+/// write-back must be refused while the first page homes that file, whatever
+/// the file system that derived the two paths: on a case-sensitive one they
+/// are two files there and one file on every Mac the vault syncs to.
+async fn a_spelling_namesake_never_takes_the_owners_file(
+    fs: Arc<dyn holon_filesystem::FileSystem>,
+    root: PathBuf,
+    owner_title: &str,
+    namesake_title: &str,
+) {
+    let f = Fixtures::seeded(owner_title);
+    let mut controller = new_org_sync_controller(
+        Arc::new(f.clone()),
+        Arc::new(f.clone()),
+        root.clone(),
+        Arc::new(RecordingOrdering::default()),
+        fs.clone(),
+    );
+    write_back(&mut controller, &f.block(&Fixtures::page_id()))
+        .await
+        .expect("the owner's first write-back must land");
+
+    let (namesake, namesake_child) = f.add_fileless_page("pgnamesake", namesake_title);
+    let errors = CapturedErrors::default();
+    let wrote = {
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(errors.clone())
+            .with_max_level(tracing::Level::ERROR)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        write_back_doc(&mut controller, &namesake, &f.block(&namesake_child))
+            .await
+            .expect("a namesake's write-back must not fail the sync loop")
+    };
+
+    let dir = root.join(DIR_TITLE);
+    for title in [owner_title, namesake_title] {
+        let path = dir.join(format!("{title}.org"));
+        if fs.exists(&path) {
+            let body = fs.read_to_string(&path).await.unwrap();
+            assert!(
+                !body.contains("a line only the store holds"),
+                "{namesake_title:?} ({namesake}) was written to {path:?}, which is the file of \
+                 {owner_title:?} on a Mac:\n{body}"
+            );
+        }
+    }
+    assert!(
+        !wrote,
+        "{namesake_title:?} ({namesake}) was allowed to write a spelling of {owner_title:?}'s file"
+    );
+    let disclosed = errors.text();
+    assert!(
+        disclosed.contains("AMBIGUOUS PAGE-FILE PATH"),
+        "the refusal of {namesake_title:?} was silent. ERROR output was:\n{disclosed}"
+    );
+}
+
+const SPELLING_PAIRS: &[(&str, &str)] = &[
+    ("caf\u{e9}", "cafe\u{301}"),
+    ("Stra\u{df}e", "Strasse"),
+    ("My Notes", "my notes"),
+];
+
+#[tokio::test]
+async fn a_spelling_namesake_is_refused_on_a_case_sensitive_file_system() {
+    for (owner, namesake) in SPELLING_PAIRS {
+        let fs = Arc::new(holon_filesystem::InMemoryFileSystem::with_path_case(
+            holon_filesystem::PathCase::Sensitive,
+        ));
+        a_spelling_namesake_never_takes_the_owners_file(
+            fs,
+            PathBuf::from("/holon-virtual/spelling-namesake"),
+            owner,
+            namesake,
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn a_spelling_namesake_is_refused_on_the_host_file_system() {
+    for (owner, namesake) in SPELLING_PAIRS {
+        let tmp = tempfile::tempdir().unwrap();
+        a_spelling_namesake_never_takes_the_owners_file(
+            Arc::new(RealFileSystem),
+            vault_root(&tmp),
+            owner,
+            namesake,
+        )
+        .await;
+    }
+}
+
+/// A file without an `#+ID` whose name spells an existing page's title
+/// differently (here: a doubled space) becomes that page's home only with a
+/// warning: on APFS the two spellings are two files that now name one page.
+#[tokio::test]
+async fn a_file_adopting_a_page_of_another_spelling_is_disclosed() {
+    let f = Fixtures::seeded("My Notes");
+    let tmp = tempfile::tempdir().unwrap();
+    let root = vault_root(&tmp);
+    let dir = root.join(DIR_TITLE);
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("My  Notes.org");
+    std::fs::write(&file, "a line of body text\n").unwrap();
+    let mut controller = build_controller(&f, &root, None);
+
+    let warnings = CapturedErrors::default();
+    {
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(warnings.clone())
+            .with_max_level(tracing::Level::WARN)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        controller
+            .on_file_changed(&file)
+            .await
+            .expect("ingesting the file must not fail the sync loop");
+    }
+    let disclosed = warnings.text();
+    assert!(
+        disclosed.contains("becomes the home of page"),
+        "{file:?} silently took page \"My Notes\" as its home. WARN output was:\n{disclosed}"
+    );
 }

@@ -74,9 +74,9 @@ struct State {
 pub enum PathCase {
     /// Linux file systems.
     Sensitive,
-    /// The default on macOS (APFS), Windows (NTFS) and Android shared
-    /// storage: an entry keeps the spelling it was created with, and every
-    /// case variant of that spelling reaches it.
+    /// APFS, the macOS default: an entry keeps the spelling it was created
+    /// with, and every spelling with its [`holon_api::caseless_fold`] (case
+    /// and Unicode normalization variants) reaches it.
     Insensitive,
 }
 
@@ -89,16 +89,16 @@ impl State {
         }
         let mut out = PathBuf::new();
         for comp in path.components() {
-            let wanted = comp.as_os_str().to_string_lossy().to_lowercase();
+            let wanted = holon_api::caseless_fold(&comp.as_os_str().to_string_lossy());
             let existing = self
                 .dirs
                 .iter()
                 .chain(self.files.keys())
                 .find(|entry| {
                     entry.parent() == Some(out.as_path())
-                        && entry
-                            .file_name()
-                            .is_some_and(|name| name.to_string_lossy().to_lowercase() == wanted)
+                        && entry.file_name().is_some_and(|name| {
+                            holon_api::caseless_fold(&name.to_string_lossy()) == wanted
+                        })
                 })
                 .cloned();
             out = existing.unwrap_or_else(|| out.join(comp.as_os_str()));
@@ -746,6 +746,48 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    /// The Unicode spellings APFS names one file by: writing the first then
+    /// the second leaves the files the host leaves, under the first
+    /// spelling, holding the second write. On macOS the host is asked too.
+    #[tokio::test]
+    async fn a_case_insensitive_store_folds_like_apfs() {
+        let pairs: &[(&str, &str, usize)] = &[
+            ("caf\u{e9}", "cafe\u{301}", 1),
+            ("\u{e4}", "a\u{308}", 1),
+            ("Strasse", "Stra\u{df}e", 1),
+            ("\u{3c3}", "\u{3c2}", 1),
+            ("\u{130}stanbul", "i\u{307}stanbul", 1),
+            ("\u{c4}pfel", "\u{e4}pfel", 1),
+            ("My Notes", "My  Notes", 2),
+        ];
+        for (first, second, files) in pairs {
+            let fs = InMemoryFileSystem::with_path_case(PathCase::Insensitive);
+            fs.create_dir_all(Path::new("/v")).await.unwrap();
+            let first_path = PathBuf::from(format!("/v/{first}.org"));
+            fs.write(&first_path, b"first").await.unwrap();
+            fs.write(Path::new(&format!("/v/{second}.org")), b"second")
+                .await
+                .unwrap();
+            let scanned = fs.scan_directory(Path::new("/v")).await.unwrap().files;
+            assert_eq!(scanned.len(), *files, "{first:?} / {second:?}: {scanned:?}");
+            assert!(
+                scanned.contains(&first_path),
+                "{first:?} / {second:?}: {scanned:?}"
+            );
+            if *files == 1 {
+                assert_eq!(fs.read(&first_path).await.unwrap(), b"second");
+            }
+
+            if cfg!(target_os = "macos") {
+                let tmp = tempfile::tempdir().unwrap();
+                std::fs::write(tmp.path().join(format!("{first}.org")), b"first").unwrap();
+                std::fs::write(tmp.path().join(format!("{second}.org")), b"second").unwrap();
+                let host = std::fs::read_dir(tmp.path()).unwrap().count();
+                assert_eq!(host, *files, "{first:?} / {second:?}: the host disagrees");
+            }
+        }
     }
 
     #[tokio::test]

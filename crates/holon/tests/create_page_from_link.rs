@@ -333,10 +333,18 @@ async fn create_page_from_link_empty_target_is_error() {
 
 /// 1–3 non-empty page-path segments and a `/` separator that may carry
 /// surrounding spaces (`"Areas / Sub"`), the shape where the parser must trim
-/// segments to agree with the writer.
+/// segments to agree with the writer. Segments draw on letters whose spellings
+/// a Mac names one file by — composed or decomposed accents, `ß`, final `ς`,
+/// dotted `İ` — so the page position rule meets them.
 fn page_path_parts_strategy() -> impl Strategy<Value = (Vec<String>, String)> {
-    let segment = "[A-Za-z][A-Za-z0-9 ]{0,7}"
-        .prop_map(|s| s.trim().to_string())
+    let segment = (
+        "[A-Za-z\u{c4}\u{e4}\u{df}\u{3c3}\u{3c2}\u{e9}\u{130}][A-Za-z0-9 \u{c4}\u{e4}\u{df}\u{3c3}\u{3c2}\u{3a3}\u{e9}\u{130}]{0,7}",
+        any::<bool>(),
+    )
+        .prop_map(|(s, nfd)| {
+            let s = s.trim().to_string();
+            if nfd { decomposed(&s) } else { s }
+        })
         .prop_filter("segment must be non-empty after trimming", |s| {
             !s.is_empty()
         });
@@ -377,13 +385,14 @@ enum Holder {
     Renamed,
     /// A page of this title under another parent (a move kept the id).
     Moved,
-    /// A page whose title differs from this one only in case or spacing,
-    /// under another parent.
+    /// A page whose title differs from this one only in case, Unicode
+    /// normalization or spacing, under another parent.
     MovedVariant,
     /// An untitled placeholder under another parent.
     MovedPlaceholder,
-    /// A page whose title differs from this one only in case or spacing: the
-    /// same page (PageIdentityDeterminism.md §5.3).
+    /// A page whose title differs from this one only in case, Unicode
+    /// normalization or spacing: the same page (PageIdentityDeterminism.md
+    /// §5.3).
     Variant,
     /// An untitled placeholder for this id under this parent.
     Placeholder,
@@ -430,8 +439,30 @@ fn expected_slot(path: &str, holders: &[Holder]) -> holon_api::PageSlot {
     holon_api::PageSlot::Create(ids[holders.len()].clone())
 }
 
+/// The canonical decomposition of the precomposed letters
+/// [`page_path_parts_strategy`] draws.
+const DECOMPOSITIONS: &[(char, &str)] = &[
+    ('\u{c4}', "A\u{308}"),
+    ('\u{e4}', "a\u{308}"),
+    ('\u{e9}', "e\u{301}"),
+    ('\u{130}', "I\u{307}"),
+];
+
+fn decomposed(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            DECOMPOSITIONS
+                .iter()
+                .find(|(composed, _)| *composed == c)
+                .map_or_else(|| c.to_string(), |(_, nfd)| nfd.to_string())
+        })
+        .collect()
+}
+
+/// Another spelling of `title` with its [`holon_api::PageTitleKey`]: upper
+/// case (`ß` → `SS`, `ς` → `Σ`) and decomposed, else with a space doubled.
 fn variant_of(title: &str) -> String {
-    let upper = title.to_uppercase();
+    let upper = decomposed(&title.to_uppercase());
     if upper != title {
         upper
     } else {
@@ -514,8 +545,8 @@ proptest! {
 /// no case finds another case's pages by name.
 const WRITER_CASES: u32 = 32;
 
-/// Distinct segments up to case and spacing: a repeated one resolves to its
-/// ancestor by name.
+/// Segments with distinct [`holon_api::PageTitleKey`]s: a repeated one
+/// resolves to its ancestor by name.
 fn writer_path_strategy() -> impl Strategy<Value = (Vec<String>, String)> {
     page_path_parts_strategy().prop_filter(
         "a repeated segment resolves to its ancestor by name",
@@ -935,5 +966,59 @@ async fn a_link_resolved_before_a_rename_resolves_to_the_page_with_that_name() {
         link_resolved(handle, "early").await.as_deref(),
         Some(id_a2.as_str()),
         "link [[A]] must resolve to the page named A ({id_a2}), not to the renamed page B ({id_a})"
+    );
+}
+
+/// A link reaches the page at its position (parent, title key) whatever id
+/// that page holds and whatever body follows its title: the page here sits
+/// at no id its path derives, so only the position lookup finds it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_link_reaches_the_page_at_its_position_whatever_its_id_or_body() {
+    let engine = block_engine().await;
+    let handle = engine.db_handle();
+    for (id, content, link) in [
+        ("block:notes-elsewhere", "My Notes\nintro body", "my notes"),
+        ("block:cafe-elsewhere", "caf\u{e9}", "CAFE\u{301}"),
+        ("block:strasse-elsewhere", "Stra\u{df}e", "strasse"),
+    ] {
+        create_page(&engine, id, content, "sentinel:no_parent").await;
+        let before = block_count(handle).await;
+        let reached = create_page_from_link(&engine, link)
+            .await
+            .unwrap_or_else(|e| panic!("click [[{link}]]: {e:#}"));
+        assert_eq!(
+            reached, id,
+            "[[{link}]] made a second page beside {id} ({content:?}), which derives the same \
+             file on a Mac"
+        );
+        assert_eq!(
+            block_count(handle).await,
+            before,
+            "[[{link}]] created a block"
+        );
+    }
+}
+
+/// Two pages at one position are an error on the link-click path, even when
+/// the link names one of them exactly.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_link_through_a_position_holding_two_pages_is_refused() {
+    let engine = block_engine().await;
+    let handle = engine.db_handle();
+    create_page(&engine, "block:twin-a", "My Notes", "sentinel:no_parent").await;
+    create_page(&engine, "block:twin-b", "my notes", "sentinel:no_parent").await;
+    let before = block_count(handle).await;
+
+    let refused = create_page_from_link(&engine, "My Notes/Child").await;
+    assert!(
+        refused
+            .as_ref()
+            .is_err_and(|e| format!("{e:#}").contains("a page position holds one page")),
+        "a link through twin pages: {refused:?}"
+    );
+    assert_eq!(
+        block_count(handle).await,
+        before,
+        "the refused click created a block"
     );
 }

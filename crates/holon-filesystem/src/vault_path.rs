@@ -13,6 +13,23 @@ use std::path::PathBuf;
 use anyhow::Result;
 use anyhow::bail;
 
+/// What two paths share when APFS (the macOS default) names one entry by
+/// both: every component under [`holon_api::caseless_fold`]. Two pages whose
+/// files share a key write one file on a Mac, whatever the file system that
+/// derived them, so the second one's write-back is refused.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PathCollisionKey(Vec<String>);
+
+impl PathCollisionKey {
+    pub fn of(path: &Path) -> Self {
+        Self(
+            path.components()
+                .map(|c| holon_api::caseless_fold(&c.as_os_str().to_string_lossy()))
+                .collect(),
+        )
+    }
+}
+
 /// A write-back target PROVEN to be a strict descendant of the vault root.
 ///
 /// The invariant is established once, at construction; a value of this type is
