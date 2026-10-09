@@ -13,7 +13,8 @@
 //! bytes in the history
 //! @pbt covers crash-history-view — the gear opens Settings, whose crash
 //! history paints the full message of every kept record, shown or not, and
-//! reading it changes no record (D-crash-history.a)
+//! reading it changes no record (D-crash-history.a); its Copy button puts the
+//! whole history on the clipboard as text
 //! @pbt overlaps general_e2e_composed_pbt — kept: the keystone is headless and
 //! draws no frame
 
@@ -26,6 +27,7 @@ use gpui::AssetSource;
 use gpui::InputEvent;
 use gpui::TestApp;
 use holon_api::SettingsSection;
+use holon_frontend::crash_history::CrashHistory;
 use holon_frontend::geometry::ElementInfo;
 use holon_frontend::geometry::GeometryProvider;
 use holon_frontend::panic_record::DROPPED_FILE;
@@ -33,6 +35,7 @@ use holon_frontend::panic_record::KEPT_UNSHOWN;
 use holon_frontend::panic_record::PanicRecord;
 use holon_frontend::panic_record::SEEN_DIR;
 use holon_frontend::panic_record::UNSHOWN_DIR;
+use holon_gpui::CRASH_HISTORY_COPY_ID;
 use holon_gpui::SETTINGS_GEAR_ID;
 use holon_gpui::geometry::BoundsRegistry;
 use holon_gpui::launch_holon_window_with_engine_and_share;
@@ -446,6 +449,51 @@ fn settings_shows_every_crash_record_in_full() {
         seen_before,
         "reading the crash history changes no record"
     );
+
+    std::mem::forget((app, bounds, config, test_env));
+}
+
+#[test]
+fn copy_puts_the_whole_crash_history_on_the_clipboard() {
+    let Acknowledged {
+        mut app,
+        window,
+        bounds,
+        config,
+        test_env,
+    } = open_and_acknowledge("1400x900", a_long_record_and_a_seen_one);
+    let open = bounds
+        .element_info(&open_settings_id(SettingsSection::CrashHistory))
+        .expect("the previous-run toast offers the crash history");
+    click(&mut app, window, &open);
+    draw(&mut app, window, &bounds);
+
+    let copy = bounds
+        .element_info(CRASH_HISTORY_COPY_ID)
+        .unwrap_or_else(|| {
+            panic!(
+                "the crash history offers a {CRASH_HISTORY_COPY_ID:?} button; it paints {:#?}",
+                painted_history(&bounds)
+            )
+        });
+    assert!(
+        inside(&copy, 1400.0, 900.0),
+        "the Copy button lies inside the viewport: {copy:?}"
+    );
+    click(&mut app, window, &copy);
+    app.run_until_parked();
+
+    let copied = app
+        .read_from_clipboard()
+        .and_then(|item| item.text())
+        .expect("Copy leaves text on the clipboard");
+    assert_eq!(copied, CrashHistory::of_this_process().to_text());
+    for message in [LONG_MESSAGE, SEEN_MESSAGE] {
+        assert!(
+            copied.contains(message),
+            "the copied history holds the full message {message:?}: {copied}"
+        );
+    }
 
     std::mem::forget((app, bounds, config, test_env));
 }

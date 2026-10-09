@@ -382,6 +382,9 @@ fn publish_window_key_bindings(
 /// windowed test locates it by this name.
 pub const SETTINGS_GEAR_ID: &str = "settings-gear";
 
+/// The bounds id of the crash history's Copy button in the Settings modal.
+pub const CRASH_HISTORY_COPY_ID: &str = "crash-history-copy";
+
 /// The ceiling a `ModalHeight::FillAvailable` panel never grows past, so a
 /// modal does not become a full-screen column on a tall display.
 const MODAL_FILL_MAX_H: f32 = 900.0;
@@ -1275,13 +1278,32 @@ impl Render for HolonApp {
                 .child(integrations);
             // Read from the record files on every frame the modal is open, so
             // it shows the records while the engine is down.
+            let history = holon_frontend::crash_history::CrashHistory::of_this_process();
+            let history_text = history.to_text();
+            let copy = crate::geometry::tracked(
+                CRASH_HISTORY_COPY_ID,
+                div()
+                    .id(CRASH_HISTORY_COPY_ID)
+                    .cursor_pointer()
+                    .underline()
+                    .text_size(px(12.0))
+                    .child("Copy")
+                    .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                            history_text.clone(),
+                        ));
+                    })
+                    .into_any_element(),
+                &self.bounds_registry,
+                "crash_history_copy",
+                None,
+                true,
+                Some(std::sync::Arc::from("Copy")),
+            );
             let crash_history = match holon_frontend::crash_history::render_expr() {
-                Ok(expr) => interpret_and_render(
-                    &expr,
-                    holon_frontend::crash_history::CrashHistory::of_this_process().rows(),
-                    &gpui_ctx,
-                )
-                .into_any_element(),
+                Ok(expr) => {
+                    interpret_and_render(&expr, history.rows(), &gpui_ctx).into_any_element()
+                }
                 Err(e) => div()
                     .text_size(px(11.0))
                     .text_color(theme.danger)
@@ -1298,6 +1320,7 @@ impl Render for HolonApp {
                 .mt(px(12.0))
                 .border_t_1()
                 .border_color(border_color)
+                .child(div().flex().flex_row().justify_end().child(copy))
                 .child(crash_history);
             let mut sections = vec![
                 (None, content.into_any_element()),

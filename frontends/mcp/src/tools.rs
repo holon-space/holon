@@ -5448,6 +5448,20 @@ impl HolonMcpServer {
     }
 
     #[tool(
+        description = "List every panic record this app keeps, newest first, each with its full \
+                       message, site and thread: this run's, the ones no start has shown yet, \
+                       and the ones already shown, plus the count of records dropped to keep the \
+                       dirs bounded. The same text the Settings crash history copies. Read-only: \
+                       reading marks nothing as seen."
+    )]
+    async fn crash_records(&self) -> Result<CallToolResult, rmcp::ErrorData> {
+        let history = holon_frontend::crash_history::CrashHistory::of_this_process();
+        Ok(CallToolResult::success(vec![Content::text(
+            history.to_text(),
+        )]))
+    }
+
+    #[tool(
         description = "List EVERY vault file one format's adapter refused to read, by path, with \
                        the adapter's error. A `vault-ingest-failed` condition is one per format \
                        and names only its first few files; this is the whole list behind it. \
@@ -7119,6 +7133,53 @@ mod self_check_wiring_tests {
             err.message.contains("just live-verify"),
             "the error must name the one-command form: {}",
             err.message
+        );
+    }
+}
+
+#[cfg(test)]
+mod crash_records_tests {
+    use std::sync::Arc;
+
+    use crate::server::DebugServices;
+    use crate::server::HolonMcpServer;
+
+    /// A crash is worth reading most when the engine never came up, so the
+    /// tool must be offered without one.
+    #[tokio::test]
+    async fn crash_records_is_offered_without_an_engine() {
+        let server = HolonMcpServer::with_type_registry(
+            None,
+            None,
+            Arc::new(DebugServices::default()),
+            None,
+        );
+
+        let names: Vec<String> = server
+            .tool_router
+            .list_all()
+            .into_iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        assert!(
+            names.iter().any(|n| n == "crash_records"),
+            "an engine-less server must offer crash_records; it offers {names:?}"
+        );
+
+        let result = server.crash_records().await.expect("crash_records answers");
+        let text: Vec<&str> = result
+            .content
+            .iter()
+            .map(|c| {
+                c.as_text()
+                    .expect("crash_records answers in text")
+                    .text
+                    .as_str()
+            })
+            .collect();
+        assert_eq!(
+            text,
+            [holon_frontend::crash_history::CrashHistory::of_this_process().to_text()]
         );
     }
 }
