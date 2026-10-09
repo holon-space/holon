@@ -109,7 +109,7 @@ where
             samples.push(started.elapsed());
             match answer {
                 OwningPage::Page(page) => assert_eq!(
-                    &page.block.id, doc,
+                    &page.id, doc,
                     "{label}: {leaf} walked to the wrong document"
                 ),
                 other => panic!("{label}: {leaf} has no owning page: {other:?}"),
@@ -145,10 +145,9 @@ async fn measure_after_writes(
             .unwrap_or_else(|e| panic!("{label}: owning_page({leaf}): {e}"));
         samples.push(started.elapsed());
         match answer {
-            OwningPage::Page(page) => assert_eq!(
-                &page.block.id, mount,
-                "{label}: {leaf} walked to the wrong mount"
-            ),
+            OwningPage::Page(page) => {
+                assert_eq!(&page.id, mount, "{label}: {leaf} walked to the wrong mount")
+            }
             other => panic!("{label}: {leaf} has no owning page: {other:?}"),
         }
     }

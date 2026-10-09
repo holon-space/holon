@@ -9,6 +9,7 @@ use crate::entity_uri::EntityUri;
 use crate::inline_mark::MarkSpan;
 use crate::row_id;
 use crate::types::ContentType;
+use crate::types::EntityName;
 use crate::types::SourceLanguage;
 use crate::types::Tags;
 use crate::uri_from_row;
@@ -366,14 +367,16 @@ pub struct Block {
     /// Outline fold state: children hidden when `true`. Document state (Martin
     /// ruling 2026-07-11) — shared, synced, survives restart — NOT per-device
     /// view state, so it lives on the domain `Block` like any other field and
-    /// round-trips through org/Loro/SQL like `completed`. Backed by the SQL
-    /// `collapsed` column (`BLOCK_RAW_COLUMNS`).
+    /// round-trips through org/Loro/SQL. Backed by the SQL `collapsed` column.
     pub collapsed: bool,
 
     /// Render the block's query widget WITHOUT its own headline text. Document
     /// state like `collapsed` — shared, synced, survives restart — and backed
     /// by the SQL `widget_only` column (`BLOCK_RAW_COLUMNS`).
     pub widget_only: bool,
+
+    /// The entity this block represents, or `None` for a plain block.
+    pub block_type: Option<EntityName>,
 
     // --- Timestamps (flattened from BlockMetadata) ---
     /// Unix timestamp (milliseconds) when block was created
@@ -401,6 +404,7 @@ impl Default for Block {
             marks: None,
             collapsed: false,
             widget_only: false,
+            block_type: None,
             created_at: now,
             updated_at: now,
         }
@@ -910,6 +914,18 @@ impl Block {
     }
 }
 
+/// The `block_type` every untyped block stored while the column was NOT NULL;
+/// it reads as no entity.
+const LEGACY_UNTYPED_BLOCK_TYPE: &str = "text";
+
+/// Parse a stored `block_type` value.
+pub fn parse_stored_block_type(raw: &str) -> Result<Option<EntityName>, String> {
+    if raw == LEGACY_UNTYPED_BLOCK_TYPE {
+        return Ok(None);
+    }
+    EntityName::parse_named(raw).map(Some)
+}
+
 impl TryFrom<crate::StorageEntity> for Block {
     type Error = anyhow::Error;
     fn try_from(row: crate::StorageEntity) -> Result<Self, Self::Error> {
@@ -975,6 +991,15 @@ impl TryFrom<crate::StorageEntity> for Block {
         };
         let collapsed = optional_bool(&row, "collapsed", &id)?;
         let widget_only = optional_bool(&row, "widget_only", &id)?;
+        let block_type = match row.get("block_type") {
+            None => anyhow::bail!("block {id}: required column 'block_type' absent from row"),
+            Some(Value::Null) => None,
+            Some(Value::String(s)) => parse_stored_block_type(s)
+                .map_err(|e| anyhow::anyhow!("block {id}: invalid 'block_type': {e}"))?,
+            Some(other) => {
+                anyhow::bail!("block {id}: column 'block_type' must be a string, got {other:?}")
+            }
+        };
         let created_at = require_i64(&row, "created_at", &id)?;
         let updated_at = require_i64(&row, "updated_at", &id)?;
         let tags = Tags::from(require_string_array(&row, "tags", &id)?);
@@ -1044,6 +1069,7 @@ impl TryFrom<crate::StorageEntity> for Block {
             marks,
             collapsed,
             widget_only,
+            block_type,
             created_at,
             updated_at,
         })
@@ -1169,6 +1195,8 @@ pub struct BlockWire {
     /// without the field parse as "render the headline too".
     #[serde(default)]
     pub widget_only: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_type: Option<EntityName>,
     pub created_at: i64,
     pub updated_at: i64,
     /// Junction-derived edge field, carried explicitly (disclosed legacy
@@ -1199,6 +1227,7 @@ impl From<&Block> for BlockWire {
             marks: b.marks.clone(),
             collapsed: b.collapsed,
             widget_only: b.widget_only,
+            block_type: b.block_type.clone(),
             created_at: b.created_at,
             updated_at: b.updated_at,
             tags: b.tags.to_vec(),
@@ -1226,6 +1255,7 @@ impl From<BlockWire> for Block {
             marks: w.marks,
             collapsed: w.collapsed,
             widget_only: w.widget_only,
+            block_type: w.block_type,
             created_at: w.created_at,
             updated_at: w.updated_at,
         }
@@ -1252,55 +1282,6 @@ pub mod block_wire_vec {
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<Block>, D::Error> {
         let wires = Vec::<BlockWire>::deserialize(d)?;
         Ok(wires.into_iter().map(Block::from).collect())
-    }
-}
-
-/// A block with the stored `block_type` and `completed` columns, which
-/// [`Block`] has no slot for, as its write authority holds them. `None` means
-/// the store holds no value for that column.
-#[derive(Debug, Clone, PartialEq)]
-pub struct StoredBlock {
-    pub block: Block,
-    pub block_type: Option<String>,
-    pub completed: Option<bool>,
-}
-
-impl StoredBlock {
-    /// The one parse of the two stored columns, shared by every write
-    /// authority. `block_type` is text; `completed` is a boolean or its 0/1
-    /// integer encoding.
-    pub fn from_stored(
-        block: Block,
-        block_type: Option<Value>,
-        completed: Option<Value>,
-    ) -> Result<Self, String> {
-        let block_type = match block_type {
-            None => None,
-            Some(Value::String(s)) => Some(s),
-            Some(other) => {
-                return Err(format!(
-                    "{}: stored block_type is not text: {other:?}",
-                    block.id
-                ));
-            }
-        };
-        let completed = match completed {
-            None => None,
-            Some(Value::Boolean(b)) => Some(b),
-            Some(Value::Integer(0)) => Some(false),
-            Some(Value::Integer(1)) => Some(true),
-            Some(other) => {
-                return Err(format!(
-                    "{}: stored completed is neither a boolean nor 0/1: {other:?}",
-                    block.id
-                ));
-            }
-        };
-        Ok(Self {
-            block,
-            block_type,
-            completed,
-        })
     }
 }
 
@@ -1366,23 +1347,6 @@ impl From<SnapshotBlockWire> for SnapshotBlock {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn stored_columns_parse_absent_as_none_and_refuse_mistyped_values() {
-        let parse = |bt: Option<Value>, done: Option<Value>| {
-            StoredBlock::from_stored(Block::default(), bt, done)
-                .map(|s| (s.block_type, s.completed))
-        };
-        assert_eq!(parse(None, None), Ok((None, None)));
-        assert_eq!(
-            parse(Some(Value::String("note".into())), Some(Value::Integer(1))),
-            Ok((Some("note".to_string()), Some(true)))
-        );
-        assert!(parse(Some(Value::Integer(5)), None).is_err());
-        assert!(parse(Some(Value::Null), None).is_err());
-        assert!(parse(None, Some(Value::Null)).is_err());
-        assert!(parse(None, Some(Value::Integer(2))).is_err());
-    }
 
     #[test]
     fn block_schema_has_correct_jsonb_fields() {
@@ -1611,6 +1575,7 @@ mod mutation_gap_tests {
                 ("contributes_to", Value::Array(vec![])),
                 ("collapsed", Value::Integer(0)),
                 ("widget_only", Value::Integer(0)),
+                ("block_type", Value::Null),
             ]
             .into_iter()
             .map(|(k, v)| (std::sync::Arc::<str>::from(k), v))
@@ -1626,7 +1591,36 @@ mod mutation_gap_tests {
         assert!(ok.advice_suppressed.is_empty());
         assert!(!ok.collapsed);
         assert!(!ok.widget_only);
+        assert_eq!(ok.block_type, None);
         assert!(ok.parent_id.as_block_id().is_none());
+
+        let mut typed = base_row();
+        typed.insert(
+            std::sync::Arc::<str>::from("block_type"),
+            Value::String("note".to_string()),
+        );
+        assert_eq!(
+            Block::try_from(typed).expect("typed row parses").block_type,
+            Some(EntityName::new("note"))
+        );
+        let mut no_block_type = base_row();
+        no_block_type.remove("block_type");
+        let err = Block::try_from(no_block_type).unwrap_err().to_string();
+        assert!(err.contains("block_type"), "got: {err}");
+        let mut legacy = base_row();
+        legacy.insert(
+            std::sync::Arc::<str>::from("block_type"),
+            Value::String("text".to_string()),
+        );
+        assert_eq!(
+            Block::try_from(legacy)
+                .expect("legacy row parses")
+                .block_type,
+            None
+        );
+        let mut bad_block_type = base_row();
+        bad_block_type.insert(std::sync::Arc::<str>::from("block_type"), Value::Integer(5));
+        assert!(Block::try_from(bad_block_type).is_err());
 
         // `collapsed` is stored as SQLite INTEGER 0/1 (turso_value_to_value
         // never produces Value::Boolean on read) — a folded row must parse true.

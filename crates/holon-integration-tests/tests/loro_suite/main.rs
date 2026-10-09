@@ -1,7 +1,7 @@
 //! Loro CRDT store: projection, persistence, restart, and sync-controller
 //! tests.
 
-mod loro_completed_and_block_type_reach_sql;
+mod loro_block_type_reaches_sql;
 mod loro_create_persists_prod_session;
 mod loro_delete_races_file_edit;
 mod loro_engine_versions_equal_the_authority;

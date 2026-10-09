@@ -1033,7 +1033,7 @@ impl EntityCellRegistry for BlockCellRegistry {
                     .map_err(|e| anyhow!("update_block_marked({id}): {e:#}"))?;
                 Ok(true)
             }
-            // Other scalars (completed, collapsed, block_type, properties,
+            // Other scalars (collapsed, widget_only, block_type, properties,
             // created_at, updated_at, …) resolve a `LoroMetaCellBacking` cell
             // and write through it (invariant 12). The cell's `apply_replace`
             // still lands via `update_block_fields` — touching only this key
@@ -1120,32 +1120,30 @@ mod tests {
     }
 
     #[test]
-    fn loro_mode_resolves_scalar_completed_cell() -> Result<()> {
-        // Phase 2 (invariant 12): scalar block fields now resolve a cell in
-        // Full mode. This inverts the old pin that asserted `completed` FAILED.
+    fn loro_mode_resolves_scalar_widget_only_cell() -> Result<()> {
         let doc = make_loro_doc_with_block("abc");
         let registry: Box<dyn EntityCellRegistry> = Box::new(BlockCellRegistry::with_loro_doc(
             doc,
             Arc::new(holon_core::NoReadOnlyDocuments),
         ));
         let uri = EntityUri::block("abc");
-        let cell: Cell<bool> = registry.as_ref().live_field::<bool>(&uri, "completed")?;
+        let cell: Cell<bool> = registry.as_ref().live_field::<bool>(&uri, "widget_only")?;
         assert!(!cell.current(), "absent property decodes to false");
         Ok(())
     }
 
     #[tokio::test]
-    async fn write_field_completed_round_trips_through_cell() -> Result<()> {
+    async fn write_field_widget_only_round_trips_through_cell() -> Result<()> {
         let doc = make_loro_doc_with_block("abc");
         let registry =
             BlockCellRegistry::with_loro_doc(doc, Arc::new(holon_core::NoReadOnlyDocuments));
         let uri = EntityUri::block("abc");
         let routed = registry
-            .write_field(&uri, "completed", Value::Boolean(true))
+            .write_field(&uri, "widget_only", Value::Boolean(true))
             .await?;
         assert!(routed, "scalar write must route through the Loro cell");
         let cell: Cell<bool> =
-            (&registry as &dyn EntityCellRegistry).live_field::<bool>(&uri, "completed")?;
+            (&registry as &dyn EntityCellRegistry).live_field::<bool>(&uri, "widget_only")?;
         assert!(cell.current(), "the write is visible through the cell");
         Ok(())
     }
@@ -1158,7 +1156,7 @@ mod tests {
             Arc::new(holon_core::NoReadOnlyDocuments),
         ));
         let uri = EntityUri::block("abc");
-        let res = registry.as_ref().live_field::<f64>(&uri, "completed");
+        let res = registry.as_ref().live_field::<f64>(&uri, "widget_only");
         let err = res
             .err()
             .expect("expected an error for an unsupported scalar type");

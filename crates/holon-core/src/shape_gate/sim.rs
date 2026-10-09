@@ -80,7 +80,7 @@ impl SimStore {
 
     /// The block as the authority holds it, ignoring the plan.
     pub async fn base_block(&self, id: &EntityUri) -> Result<Option<Block>> {
-        Ok(self.base.block(id).await?.map(|s| s.block))
+        self.base.block(id).await
     }
 
     /// The block after the ops applied so far.
@@ -446,7 +446,7 @@ impl CrudOperations<Block> for SimStore {
             "tags" => block.tags = Tags::from(string_set(&value, field)?),
             f if EdgeField::is_edge_column(f) => {}
             "marks" | "content_type" | "source_language" | "source_name" | "collapsed"
-            | "widget_only" | "completed" | "block_type" => {}
+            | "widget_only" | "block_type" => {}
             "task_state" => match holon_api::TaskStateWrite::parse(&value)? {
                 holon_api::TaskStateWrite::Set(state) => {
                     block

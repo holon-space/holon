@@ -628,7 +628,6 @@ mod tests {
         let stored = ops.block(&EntityUri::from_raw(id)).await.unwrap().unwrap();
         let prop = |key: &str| {
             stored
-                .block
                 .properties
                 .get(key)
                 .and_then(|v| v.as_string())

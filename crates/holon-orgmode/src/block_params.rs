@@ -562,7 +562,7 @@ mod tests {
     #[test]
     fn a_drawer_key_naming_a_storage_column_never_reaches_the_params() {
         let parent = EntityUri::no_parent();
-        // Every one of these is in `holon_api::schema::BLOCK.columns()` and in
+        // Every one of these is a `holon_api::schema::is_block_column` name and in
         // NEITHER `drawer_properties`'s INTERNAL_KEYS nor the `_` namespace, so
         // without the guard each reaches the params.
         let columns = [

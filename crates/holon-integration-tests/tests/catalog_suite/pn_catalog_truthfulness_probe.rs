@@ -680,7 +680,7 @@ fn diff_verdict(
                 for (col, value, default) in [
                     ("sort_key", row.sort_key.as_str(), "A0"),
                     ("content_type", row.content_type.as_str(), "text"),
-                    ("block_type", row.block_type.as_str(), "text"),
+                    ("block_type", row.block_type.as_str(), ""),
                     ("properties", row.properties.as_str(), ""),
                 ] {
                     if value != default && !undeclared_columns.contains(&col.to_string()) {

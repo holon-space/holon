@@ -26,7 +26,6 @@ SELECT
     b.marks,
     b.collapsed,
     b.widget_only,
-    b.completed,
     b.block_type,
     b.created_at,
     b.updated_at,

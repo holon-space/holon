@@ -80,19 +80,8 @@ const PARITY: &[(&str, Parity)] = &[
         Parity::Field(|b| b.block.widget_only.to_string()),
     ),
     (
-        "completed",
-        Parity::NotNeeded(
-            "NOT carried by the Loro authority at all: `read_properties_from_meta` strips it \
-             via RESERVED_PROPERTY_KEYS (crates/holon-loro/src/loro_backend.rs:458,476-491) and \
-             `block_to_params` never emits it, so the Loro->SQL projection does not write this \
-             column either. The read model cannot be more complete than the authority it \
-             publishes. Pre-existing gap on the CRDT path, tracked separately — NOT introduced \
-             by F1a and not closable inside it.",
-        ),
-    ),
-    (
         "block_type",
-        Parity::NotNeeded("same as `completed` — stripped by RESERVED_PROPERTY_KEYS."),
+        Parity::Field(|b| format!("{:?}", b.block.block_type)),
     ),
     (
         "created_at",

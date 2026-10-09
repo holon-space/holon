@@ -384,12 +384,12 @@ pub async fn neighbourhood(
                 let Some(stored) = authority.block(target).await? else {
                     continue;
                 };
-                if validators.is_shaped(&stored.block) {
+                if validators.is_shaped(&stored) {
                     roots.insert(target.clone());
                 }
-                if let Some(parent) = authority.block(&stored.block.parent_id).await? {
-                    if validators.is_shaped(&parent.block) {
-                        roots.insert(parent.block.id);
+                if let Some(parent) = authority.block(&stored.parent_id).await? {
+                    if validators.is_shaped(&parent) {
+                        roots.insert(parent.id);
                     }
                 }
             }
@@ -400,8 +400,8 @@ pub async fn neighbourhood(
             continue;
         };
         for stored in subtree {
-            if validators.is_shaped(&stored.block) {
-                roots.insert(stored.block.id);
+            if validators.is_shaped(&stored) {
+                roots.insert(stored.id);
             }
         }
     }
@@ -423,7 +423,6 @@ pub async fn judge_stored(
         let Some(root) = authority.block(id).await? else {
             continue;
         };
-        let root = root.block;
         let shapes = validators.of(&root);
         if shapes.is_empty() {
             continue;
@@ -434,7 +433,7 @@ pub async fn judge_stored(
                 .block(&child)
                 .await?
                 .ok_or_else(|| format!("child {child} of {id} listed but absent"))?;
-            children.push(child.block);
+            children.push(child);
         }
         for v in shapes {
             if let Err(violation) = v.validate(&root, &children) {
@@ -469,14 +468,12 @@ pub struct AuditLog {
 /// What a shape reads of one block: its tags, its text and its properties,
 /// minus the bookkeeping keys no shape reads.
 fn shape_view(b: &Block) -> (Vec<String>, String, Vec<(String, String)>) {
-    const BOOKKEEPING: [&str; 13] = [
+    const BOOKKEEPING: [&str; 11] = [
         "task_state_category",
         "created_at",
         "updated_at",
         "collapsed",
         "widget_only",
-        "completed",
-        "block_type",
         "content_type",
         "sequence",
         "level",
@@ -538,12 +535,12 @@ impl ShapeAudit {
                 ));
                 continue;
             };
-            if shape_view(&actual.block) != shape_view(root) {
+            if shape_view(&actual) != shape_view(root) {
                 found.push(format!(
                     "{what}: {} predicted {:?}, stored {:?}",
                     root.id,
                     shape_view(root),
-                    shape_view(&actual.block)
+                    shape_view(&actual)
                 ));
             }
             let mut stored = Vec::new();
@@ -552,7 +549,7 @@ impl ShapeAudit {
                     .block(&id)
                     .await?
                     .ok_or_else(|| format!("child {id} of {} listed but absent", root.id))?;
-                stored.push(shape_view(&child.block));
+                stored.push(shape_view(&child));
             }
             let predicted: Vec<_> = children.iter().map(shape_view).collect();
             if stored != predicted {

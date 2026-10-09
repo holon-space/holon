@@ -58,14 +58,6 @@ const SQL_ONLY: &[(&str, &str)] = &[
         "property_kinds",
         "storage-internal encoding of `properties`, already applied to it",
     ),
-    (
-        "block_type",
-        "Loro keeps it in node meta outside `Block`; no shipped profile reads it",
-    ),
-    (
-        "completed",
-        "Loro keeps it in node meta outside `Block`; no shipped profile reads it",
-    ),
 ];
 
 /// Columns both rows carry whose values differ by construction.

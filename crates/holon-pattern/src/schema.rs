@@ -21,7 +21,7 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FieldStorage {
     /// A column of the entity's own table.
-    Column,
+    Column(ColumnSource),
     /// A junction-backed edge set, hydrated into the read matview.
     EdgeSet,
     /// Carried inside the `properties` JSON column, not a column of its own.
@@ -29,6 +29,17 @@ pub enum FieldStorage {
     /// Stored nowhere. Named so an operation can declare it, or so the intent
     /// boundary can refuse it, rather than letting it fall through unnoticed.
     Unstored,
+}
+
+/// Who supplies a column's value on a write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColumnSource {
+    /// The entity value carries it, and the entity's write leg emits it.
+    Value,
+    /// The entity's position among its siblings, carried beside the value.
+    Order,
+    /// Stamped by the storage sink at write time; no write leg emits it.
+    Sink,
 }
 
 /// How a `set_field` intent may treat the field.
@@ -121,7 +132,21 @@ impl EntitySchema {
     /// Every field backed by a column of the entity's own table, in
     /// declaration order. The DDL lock compares exactly this set.
     pub fn columns(&self) -> Vec<&'static str> {
-        self.select(FieldStorage::Column)
+        self.columns_with_source()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect()
+    }
+
+    /// Every column with who supplies its value, in declaration order.
+    pub fn columns_with_source(&self) -> Vec<(&'static str, ColumnSource)> {
+        self.fields
+            .iter()
+            .filter_map(|f| match f.storage {
+                FieldStorage::Column(source) => Some((f.name, source)),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Every junction-backed edge field.
@@ -178,7 +203,8 @@ pub mod block {
     pub const MARKS: &str = "marks";
     pub const COLLAPSED: &str = "collapsed";
     pub const WIDGET_ONLY: &str = "widget_only";
-    pub const COMPLETED: &str = "completed";
+    /// A key older Loro docs hold in block meta. No block field carries it.
+    pub const LEGACY_COMPLETED: &str = "completed";
     pub const BLOCK_TYPE: &str = "block_type";
     pub const CREATED_AT: &str = "created_at";
     pub const UPDATED_AT: &str = "updated_at";
@@ -225,20 +251,36 @@ pub mod integration {
 }
 
 const fn column(name: &'static str, intent: FieldIntent, arc_place: bool) -> SchemaField {
+    column_from(name, ColumnSource::Value, intent, arc_place)
+}
+
+const fn column_from(
+    name: &'static str,
+    source: ColumnSource,
+    intent: FieldIntent,
+    arc_place: bool,
+) -> SchemaField {
     SchemaField {
         name,
-        storage: FieldStorage::Column,
+        storage: FieldStorage::Column(source),
         intent,
         arc_place,
     }
 }
 
 static BLOCK_COLUMNS: std::sync::LazyLock<std::collections::HashSet<&'static str>> =
-    std::sync::LazyLock::new(|| BLOCK.columns().into_iter().collect());
+    std::sync::LazyLock::new(|| {
+        BLOCK
+            .columns()
+            .into_iter()
+            .chain([block::LEGACY_COMPLETED])
+            .collect()
+    });
 
-/// True for a param key that names a `block_raw` storage column. The write
-/// path routes such a param to the column itself, so an ingest must never emit
-/// a user property under that name. Case-sensitive, as that routing is.
+/// True for a param key that names a `block_raw` storage column, or the legacy
+/// `completed` key the Loro read drops. A user property under such a name would
+/// land in the column or be dropped, so an ingest must never emit one.
+/// Case-sensitive, as the write path's routing is.
 pub fn is_block_column(key: &str) -> bool {
     BLOCK_COLUMNS.contains(key)
 }
@@ -251,7 +293,12 @@ pub const BLOCK: EntitySchema = EntitySchema {
     fields: &[
         column(block::ID, FieldIntent::StorageInternal, true),
         column(block::PARENT_ID, FieldIntent::Private(PLACEMENT), true),
-        column(block::SORT_KEY, FieldIntent::Private(PLACEMENT), true),
+        column_from(
+            block::SORT_KEY,
+            ColumnSource::Order,
+            FieldIntent::Private(PLACEMENT),
+            true,
+        ),
         column(block::CONTENT, FieldIntent::Writable, true),
         column(block::CONTENT_TYPE, FieldIntent::Writable, true),
         column(block::SOURCE_LANGUAGE, FieldIntent::Writable, true),
@@ -259,16 +306,30 @@ pub const BLOCK: EntitySchema = EntitySchema {
         column(block::PROPERTIES, FieldIntent::EngineOwnedBag, true),
         // Written only by the properties write leg, alongside the bag it
         // describes. `StorageInternal` so no `set_field` intent can name it.
-        column(block::PROPERTY_KINDS, FieldIntent::StorageInternal, false),
+        column_from(
+            block::PROPERTY_KINDS,
+            ColumnSource::Sink,
+            FieldIntent::StorageInternal,
+            false,
+        ),
         column(block::MARKS, FieldIntent::Writable, true),
         column(block::COLLAPSED, FieldIntent::Writable, true),
         column(block::WIDGET_ONLY, FieldIntent::Writable, true),
-        column(block::COMPLETED, FieldIntent::Writable, true),
         column(block::BLOCK_TYPE, FieldIntent::Writable, true),
         column(block::CREATED_AT, FieldIntent::StorageInternal, false),
         column(block::UPDATED_AT, FieldIntent::StorageInternal, false),
-        column(block::CHANGE_ORIGIN, FieldIntent::StorageInternal, false),
-        column(block::WRITE_SEQ, FieldIntent::StorageInternal, false),
+        column_from(
+            block::CHANGE_ORIGIN,
+            ColumnSource::Sink,
+            FieldIntent::StorageInternal,
+            false,
+        ),
+        column_from(
+            block::WRITE_SEQ,
+            ColumnSource::Sink,
+            FieldIntent::StorageInternal,
+            false,
+        ),
         SchemaField {
             name: block::TASK_STATE,
             storage: FieldStorage::Property,
@@ -311,6 +372,14 @@ pub const BLOCK: EntitySchema = EntitySchema {
         // fails loud instead of landing in `properties` as a user key.
         SchemaField {
             name: block::DEPTH,
+            storage: FieldStorage::Unstored,
+            intent: FieldIntent::StorageInternal,
+            arc_place: false,
+        },
+        // Declared so a write naming it fails loud and a stored legacy key
+        // never surfaces as a user property.
+        SchemaField {
+            name: block::LEGACY_COMPLETED,
             storage: FieldStorage::Unstored,
             intent: FieldIntent::StorageInternal,
             arc_place: false,

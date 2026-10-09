@@ -1397,7 +1397,6 @@ mod tests {
             "SELECT b.id, b.parent_id, b.sort_key, b.content, b.content_type, \
              b.source_language, b.source_name, b.properties, b.property_kinds, b.marks, \
              b.collapsed, b.widget_only, \
-             b.completed, \
              b.block_type, b.created_at, b.updated_at, b._change_origin, b.write_seq, \
              COALESCE(block_requires_agg.vals, '[]') AS requires FROM block_raw b \
              LEFT OUTER JOIN block_requires_agg ON block_requires_agg.source_id = b.id \
@@ -1411,11 +1410,11 @@ mod tests {
             &[requires_descriptor()],
             &[PlantedColumn {
                 name: holon_api::computation::FieldIdent::parse("is_done").expect("identifier"),
-                sql: "completed = 1".into(),
+                sql: "collapsed = 1".into(),
             }],
         );
         assert!(sql.contains("COALESCE(block_requires_agg.vals, '[]') AS requires"));
-        assert!(sql.contains(r#"(completed = 1) AS "is_done""#));
+        assert!(sql.contains(r#"(collapsed = 1) AS "is_done""#));
         assert!(sql.ends_with("WHERE b.id != 'sentinel:no_parent'"));
     }
 

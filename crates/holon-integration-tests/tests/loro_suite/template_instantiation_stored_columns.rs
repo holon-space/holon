@@ -1,13 +1,9 @@
-//! An instance carries each template node's `block_type` and `completed` as
-//! the write authority stores them, under both write authorities.
-//!
-//! Under Loro the SQL projection does not carry either column (bugfunnel
-//! `2026-09-21-loro-path-drops-completed-and-block-type-before-sql`), so that
-//! leg reads the Loro tree through its cells.
+//! An instance carries each template node's `block_type` into `block_raw`,
+//! under both write authorities.
 //!
 //! @pbt kind harness
-//! @pbt covers template-instantiate(stored-columns) — block_type/completed
-//!   survive instantiation under Loro and SqlOnly
+//! @pbt covers template-instantiate(stored-columns) — block_type survives
+//!   instantiation under Loro and SqlOnly
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -16,20 +12,16 @@ use std::time::Duration;
 use holon_api::EntityUri;
 use holon_api::Value;
 use holon_api::effect_id::deterministic_instance_id;
-use holon_core::cell_registry::EntityCellRegistry;
-use holon_core::cell_registry::EntityCellRegistryExt;
 use holon_integration_tests::TestEnvironment;
 use holon_integration_tests::TestEnvironmentBuilder;
-use holon_loro::DocScope;
-use holon_loro::block_cell_registry::BlockCellRegistry;
 
 const TARGET: &str = "block:tsc-target";
 const ROOT: &str = "block:tsc-root";
 const CHILD: &str = "block:tsc-child";
 const CONTEXT: &str = "tsc";
 
-/// (template node, block_type, completed). Neither value is a create default.
-const NODES: [(&str, &str, bool); 2] = [(ROOT, "note", true), (CHILD, "checklist", true)];
+/// (template node, block_type).
+const NODES: [(&str, &str); 2] = [(ROOT, "note"), (CHILD, "checklist")];
 
 fn runtime() -> Arc<tokio::runtime::Runtime> {
     Arc::new(
@@ -68,9 +60,9 @@ async fn boot(rt: Arc<tokio::runtime::Runtime>, loro: bool) -> TestEnvironment {
 }
 
 /// Writes the template and instantiates it; returns (instance id, expected
-/// block_type, expected completed) per template node.
-async fn instantiate(env: &TestEnvironment) -> Vec<(EntityUri, &'static str, bool)> {
-    for (index, (id, block_type, completed)) in NODES.into_iter().enumerate() {
+/// block_type) per template node.
+async fn instantiate(env: &TestEnvironment) -> Vec<(EntityUri, String)> {
+    for (index, (id, block_type)) in NODES.into_iter().enumerate() {
         let parent = if index == 0 {
             EntityUri::no_parent().to_string()
         } else {
@@ -81,7 +73,6 @@ async fn instantiate(env: &TestEnvironment) -> Vec<(EntityUri, &'static str, boo
             ("parent_id", Value::String(parent)),
             ("content", Value::String(format!("{id} content"))),
             ("block_type", Value::String(block_type.to_string())),
-            ("completed", Value::Boolean(completed)),
         ];
         if index == 0 {
             fields.push(("template", Value::String("t".to_string())));
@@ -105,102 +96,56 @@ async fn instantiate(env: &TestEnvironment) -> Vec<(EntityUri, &'static str, boo
     settle(env).await;
     NODES
         .into_iter()
-        .map(|(id, block_type, completed)| {
+        .map(|(id, block_type)| {
             (
                 deterministic_instance_id(ROOT, CONTEXT, id),
-                block_type,
-                completed,
+                block_type.to_string(),
             )
         })
         .collect()
 }
 
-fn assert_carried(observed: Vec<(EntityUri, String, bool)>, expected: &[(EntityUri, &str, bool)]) {
-    let expected: Vec<(EntityUri, String, bool)> = expected
-        .iter()
-        .map(|(id, bt, done)| (id.clone(), bt.to_string(), *done))
-        .collect();
-    assert_eq!(
-        observed, expected,
-        "instance (id, block_type, completed) must equal the template node's"
-    );
+async fn stored_block_types(
+    env: &TestEnvironment,
+    expected: &[(EntityUri, String)],
+) -> Vec<(EntityUri, String)> {
+    let mut observed = Vec::new();
+    for (id, _) in expected {
+        let rows = env
+            .query_sql(&format!(
+                "SELECT block_type FROM block_raw WHERE id = '{id}'"
+            ))
+            .await
+            .expect("query the instance row");
+        let row = rows
+            .first()
+            .unwrap_or_else(|| panic!("no block_raw row for instance {id}"));
+        let block_type = row
+            .get("block_type")
+            .and_then(|v| v.as_string())
+            .unwrap_or_else(|| panic!("{id}: block_type is not a string: {row:?}"))
+            .to_string();
+        observed.push((id.clone(), block_type));
+    }
+    observed
 }
 
 #[test]
-fn loro_instance_carries_the_template_block_type_and_completed() {
+fn loro_instance_carries_the_template_block_type() {
     let rt = runtime();
     rt.clone().block_on(async move {
         let env = boot(rt, true).await;
         let expected = instantiate(&env).await;
-        let store = env
-            .loro_doc_store()
-            .expect("Loro-enabled session")
-            .read()
-            .await;
-        let global = store
-            .get_doc(DocScope::Global)
-            .await
-            .expect("global Loro doc");
-        let layout = store
-            .get_doc(DocScope::Layout)
-            .await
-            .expect("layout Loro doc");
-        drop(store);
-        let registry: Box<dyn EntityCellRegistry> = Box::new(BlockCellRegistry::with_loro(
-            global,
-            layout,
-            std::sync::Arc::new(holon_core::NoReadOnlyDocuments),
-        ));
-        let observed = expected
-            .iter()
-            .map(|(id, _, _)| {
-                let block_type = registry
-                    .as_ref()
-                    .live_field::<String>(id, "block_type")
-                    .unwrap_or_else(|e| panic!("block_type cell of {id}: {e:#}"))
-                    .current();
-                let completed = registry
-                    .as_ref()
-                    .live_field::<bool>(id, "completed")
-                    .unwrap_or_else(|e| panic!("completed cell of {id}: {e:#}"))
-                    .current();
-                (id.clone(), block_type, completed)
-            })
-            .collect();
-        assert_carried(observed, &expected);
+        assert_eq!(stored_block_types(&env, &expected).await, expected);
     });
 }
 
 #[test]
-fn sql_only_instance_carries_the_template_block_type_and_completed() {
+fn sql_only_instance_carries_the_template_block_type() {
     let rt = runtime();
     rt.clone().block_on(async move {
         let env = boot(rt, false).await;
         let expected = instantiate(&env).await;
-        let mut observed = Vec::new();
-        for (id, _, _) in &expected {
-            let rows = env
-                .query_sql(&format!(
-                    "SELECT block_type, completed FROM block_raw WHERE id = '{id}'"
-                ))
-                .await
-                .expect("query the instance row");
-            let row = rows
-                .first()
-                .unwrap_or_else(|| panic!("no block_raw row for instance {id}"));
-            let block_type = row
-                .get("block_type")
-                .and_then(|v| v.as_string())
-                .unwrap_or_else(|| panic!("{id}: block_type is not a string: {row:?}"))
-                .to_string();
-            let completed = match row.get("completed") {
-                Some(Value::Boolean(b)) => *b,
-                Some(Value::Integer(0)) => false,
-                Some(Value::Integer(1)) => true,
-                other => panic!("{id}: completed is not a boolean: {other:?}"),
-            };
-            observed.push((id.clone(), block_type, completed));
-        }
-        assert_carried(observed, &expected);
+        assert_eq!(stored_block_types(&env, &expected).await, expected);
     });
 }

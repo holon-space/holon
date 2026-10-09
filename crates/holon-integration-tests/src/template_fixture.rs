@@ -219,11 +219,7 @@ mod tests {
             bindings: bindings.iter().cloned().collect(),
             replace_block: None,
         };
-        let nodes = [root, child].map(|block| holon_api::StoredBlock {
-            block,
-            block_type: None,
-            completed: None,
-        });
+        let nodes = [root, child];
         let plan = plan_instantiation(&nodes, &request).expect("plan");
 
         let expected_child = instantiated_child(&bindings);

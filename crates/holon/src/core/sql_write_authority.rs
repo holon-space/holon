@@ -8,7 +8,6 @@ use async_trait::async_trait;
 use holon_api::Block;
 use holon_api::EntityUri;
 use holon_api::PAGE_TAG;
-use holon_api::StoredBlock;
 use holon_api::Value;
 use holon_core::WriteAuthorityReads;
 
@@ -29,7 +28,7 @@ impl SqlWriteAuthority {
         Self { db_handle }
     }
 
-    async fn blocks_where(&self, predicate: &str, bound: &str) -> Result<Vec<StoredBlock>> {
+    async fn blocks_where(&self, predicate: &str, bound: &str) -> Result<Vec<Block>> {
         let sql = format!(
             "SELECT {HYDRATED_BLOCK_COLUMNS} FROM {BLOCK_WRITE_TABLE} b WHERE b.{predicate} = \
              $bound ORDER BY b.sort_key, b.id"
@@ -41,12 +40,9 @@ impl SqlWriteAuthority {
             })?;
         rows.into_iter()
             .map(|row| {
-                let context = || format!("{BLOCK_WRITE_TABLE} row with {predicate} = '{bound}'");
-                let block_type = row.get("block_type").cloned();
-                let completed = row.get("completed").cloned();
-                let block = Block::try_from(row).map_err(|e| format!("{}: {e:#}", context()))?;
-                StoredBlock::from_stored(block, block_type, completed)
-                    .map_err(|e| format!("{}: {e}", context()).into())
+                Block::try_from(row).map_err(|e| {
+                    format!("{BLOCK_WRITE_TABLE} row with {predicate} = '{bound}': {e:#}").into()
+                })
             })
             .collect()
     }
@@ -114,11 +110,11 @@ impl WriteAuthorityReads for SqlWriteAuthority {
         Ok(!rows.is_empty())
     }
 
-    async fn block(&self, id: &EntityUri) -> Result<Option<StoredBlock>> {
+    async fn block(&self, id: &EntityUri) -> Result<Option<Block>> {
         Ok(self.blocks_where("id", id.as_str()).await?.pop())
     }
 
-    async fn subtree(&self, root: &EntityUri) -> Result<Option<Vec<StoredBlock>>> {
+    async fn subtree(&self, root: &EntityUri) -> Result<Option<Vec<Block>>> {
         let Some(root_block) = self.blocks_where("id", root.as_str()).await?.pop() else {
             return Ok(None);
         };
@@ -137,7 +133,7 @@ impl WriteAuthorityReads for SqlWriteAuthority {
             }
             let start = nodes.len();
             for i in level {
-                let parent = nodes[i].block.id.to_string();
+                let parent = nodes[i].id.to_string();
                 nodes.extend(self.blocks_where("parent_id", &parent).await?);
             }
             level = start..nodes.len();

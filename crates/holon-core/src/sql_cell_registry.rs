@@ -424,7 +424,7 @@ mod tests {
 
         let registry = SqlOnlyCellRegistry::wired(live.clone(), write);
         let cell: Cell<bool> =
-            (&registry as &dyn EntityCellRegistry).live_field::<bool>(&uri, "completed")?;
+            (&registry as &dyn EntityCellRegistry).live_field::<bool>(&uri, "reviewed")?;
         assert!(!cell.current(), "absent property decodes to false");
         cell.set(true).await?;
         assert!(

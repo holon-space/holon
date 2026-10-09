@@ -81,7 +81,7 @@ async fn block_raw_by_bare_id(
     let rows = env
         .engine()
         .execute_query(
-            "SELECT id, content, marks, properties, completed FROM block_raw".to_string(),
+            "SELECT id, content, marks, properties FROM block_raw".to_string(),
             HashMap::new(),
             None,
         )
@@ -182,15 +182,14 @@ fn logseq_org_vault_ingests_without_loss() {
         // ingest somewhere (content or the task_state property) — never lost.
         let done_block = &blocks["7c9e6a10-0004-4a00-9000-000000000004"];
         let done_blob = format!(
-            "{} {} {}",
+            "{} {}",
             field(done_block, "content"),
             field(done_block, "properties"),
-            field(done_block, "completed"),
         );
         assert!(
-            done_blob.contains("DONE") || field(done_block, "completed") == "1",
-            "DONE keyword lost on ingest (neither task_state nor content nor completed carries \
-             it): {done_blob:?}"
+            done_blob.contains("DONE"),
+            "DONE keyword lost on ingest (neither task_state nor content carries it): \
+             {done_blob:?}"
         );
 
         // LATER / NOW are LogSeq dialect keywords, recognized since WS-3

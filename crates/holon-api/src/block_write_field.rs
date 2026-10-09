@@ -55,7 +55,6 @@ pub enum BlockWriteField {
     Marks,
     Collapsed,
     WidgetOnly,
-    Completed,
     BlockType,
     Tags,
     TaskState,
@@ -187,7 +186,6 @@ impl BlockWriteField {
             "marks" => Ok(Self::Marks),
             "collapsed" => Ok(Self::Collapsed),
             "widget_only" => Ok(Self::WidgetOnly),
-            "completed" => Ok(Self::Completed),
             "block_type" => Ok(Self::BlockType),
             "tags" => Ok(Self::Tags),
             "task_state" => Ok(Self::TaskState),
@@ -216,7 +214,6 @@ impl BlockWriteField {
             Self::Marks => "marks",
             Self::Collapsed => "collapsed",
             Self::WidgetOnly => "widget_only",
-            Self::Completed => "completed",
             Self::BlockType => "block_type",
             Self::Tags => "tags",
             Self::TaskState => "task_state",
@@ -258,7 +255,14 @@ mod tests {
 
     #[test]
     fn storage_internal_fields_are_rejected() {
-        for field in ["id", "depth", "created_at", "updated_at", "_change_origin"] {
+        for field in [
+            "id",
+            "depth",
+            "completed",
+            "created_at",
+            "updated_at",
+            "_change_origin",
+        ] {
             assert_eq!(
                 BlockWriteField::parse(field),
                 Err(BlockWriteFieldError::StorageInternal(field.to_string())),

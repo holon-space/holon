@@ -3,7 +3,7 @@
 //!
 //! Sibling of [`LoroTextCellBacking`](crate::loro_text_cell_backing): where
 //! that one owns `block.content` (rich text) this one owns every scalar field
-//! (`completed`, `collapsed`, `block_type`, arbitrary properties, …). Read is
+//! (`collapsed`, `widget_only`, `block_type`, arbitrary properties, …). Read is
 //! a typed decode of the stored `Value`; write goes through
 //! [`LoroBackend::update_block_fields`] so it touches ONLY the changed key
 //! (per-key LWW, H3 — a whole-map re-stamp would resurrect concurrently
@@ -258,7 +258,7 @@ mod tests {
             backend.clone(),
             meta.clone(),
             "block:abc".into(),
-            "completed".into(),
+            "widget_only".into(),
         )?;
         // A second, independent cell on the same (uri, field) must observe the
         // first cell's write — cross-consumer coherence (invariant 12 surface).
@@ -267,7 +267,7 @@ mod tests {
             backend.clone(),
             meta.clone(),
             "block:abc".into(),
-            "completed".into(),
+            "widget_only".into(),
         )?;
 
         assert!(!writer.current(), "absent property decodes to false");

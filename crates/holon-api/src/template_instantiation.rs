@@ -23,7 +23,6 @@ use crate::MarkSpan;
 // `StorageEntity` is the SAME `HashMap<Arc<str>, Value>` alias in both crates;
 // this planner is pure and backend-free, so it uses holon-api's own alias.
 use crate::StorageEntity;
-use crate::StoredBlock;
 pub use crate::TEMPLATE_MARKER_PROPERTY;
 pub use crate::TEMPLATE_VARS_PROPERTY;
 use crate::Value;
@@ -208,13 +207,12 @@ pub struct InstantiationPlan {
 /// order: the creates come out in that order, and each lands as its parent's
 /// last child, so the instance keeps the template's sibling order.
 pub fn plan_instantiation(
-    nodes: &[StoredBlock],
+    nodes: &[Block],
     request: &InstantiateRequest,
 ) -> Result<InstantiationPlan> {
-    let root = &nodes
+    let root = nodes
         .first()
-        .with_context(|| format!("template '{}' has no blocks", request.template_id))?
-        .block;
+        .with_context(|| format!("template '{}' has no blocks", request.template_id))?;
     if root.id.as_str() != request.template_id {
         bail!(
             "template subtree root '{}' does not match requested template_id '{}'",
@@ -282,7 +280,7 @@ pub fn plan_instantiation(
         }
         Ok(())
     };
-    for StoredBlock { block: node, .. } in nodes {
+    for node in nodes {
         check_text(&node.content)?;
         for value in parse_properties(node)?.values() {
             if let Value::String(s) = value {
@@ -301,15 +299,14 @@ pub fn plan_instantiation(
 
     // Second pass: mint ids, substitute, and build the create params.
     let mut id_map: BTreeMap<&str, String> = BTreeMap::new();
-    for StoredBlock { block: node, .. } in nodes {
+    for node in nodes {
         let new_id =
             deterministic_instance_id(&request.template_id, &request.context_key, node.id.as_str());
         id_map.insert(node.id.as_str(), new_id.as_str().to_string());
     }
 
     let mut creates = Vec::with_capacity(nodes.len());
-    for (index, stored) in nodes.iter().enumerate() {
-        let node = &stored.block;
+    for (index, node) in nodes.iter().enumerate() {
         let is_root = index == 0;
         let new_parent = if is_root {
             request.target_parent.clone()
@@ -377,11 +374,8 @@ pub fn plan_instantiation(
         if let Some(marks_json) = marks {
             put("marks", Value::String(marks_json));
         }
-        if let Some(block_type) = &stored.block_type {
-            put("block_type", Value::String(block_type.clone()));
-        }
-        if let Some(completed) = stored.completed {
-            put("completed", Value::Boolean(completed));
+        if let Some(block_type) = &node.block_type {
+            put("block_type", block_type.clone().into());
         }
         if let Some(task_state) = task_state {
             put(TASK_STATE_PROPERTY, task_state);
@@ -557,14 +551,7 @@ mod tests {
         nodes: impl IntoIterator<Item = Block>,
         request: &InstantiateRequest,
     ) -> Result<InstantiationPlan> {
-        let nodes: Vec<StoredBlock> = nodes
-            .into_iter()
-            .map(|block| StoredBlock {
-                block,
-                block_type: None,
-                completed: None,
-            })
-            .collect();
+        let nodes: Vec<Block> = nodes.into_iter().collect();
         plan_instantiation(&nodes, request)
     }
 
@@ -667,27 +654,17 @@ mod tests {
     }
 
     #[test]
-    fn stored_block_type_and_completed_are_copied_and_absent_ones_stay_absent() {
+    fn a_block_type_is_copied_and_an_absent_one_stays_absent() {
         let nodes = [
-            StoredBlock {
-                block: template_root("block:tpl", "root", ""),
-                block_type: Some("note".to_string()),
-                completed: Some(true),
+            Block {
+                block_type: Some(crate::EntityName::new("note")),
+                ..template_root("block:tpl", "root", "")
             },
-            StoredBlock {
-                block: node("block:c1", "block:tpl", "child"),
-                block_type: None,
-                completed: None,
-            },
+            node("block:c1", "block:tpl", "child"),
         ];
         let plan = plan_instantiation(&nodes, &request(&[])).unwrap();
         assert_eq!(get_str(&plan.creates[0], "block_type"), "note");
-        assert_eq!(
-            plan.creates[0].get("completed"),
-            Some(&Value::Boolean(true))
-        );
         assert_eq!(plan.creates[1].get("block_type"), None);
-        assert_eq!(plan.creates[1].get("completed"), None);
     }
 
     #[test]

@@ -614,14 +614,14 @@ where
     #[holon_macros::reads("block.id", "block.content", "block.content_type")]
     #[holon_macros::reads("block.source_language", "block.source_name")]
     #[holon_macros::reads("block.marks", "block.collapsed", "block.widget_only")]
-    #[holon_macros::reads("block.completed", "block.block_type", "block.properties")]
+    #[holon_macros::reads("block.block_type", "block.properties")]
     #[holon_macros::reads("block.tags", "block.task_state", "block.parent_id")]
     #[holon_macros::reads("block.requires", "block.advice_suppressed")]
     #[holon_macros::reads("block.sort_key", "block.contributes_to")]
     #[holon_macros::emits("block.content", "block.content_type")]
     #[holon_macros::emits("block.source_language", "block.source_name")]
     #[holon_macros::emits("block.marks", "block.collapsed", "block.widget_only")]
-    #[holon_macros::emits("block.completed", "block.block_type", "block.properties")]
+    #[holon_macros::emits("block.block_type", "block.properties")]
     #[holon_macros::emits("block.tags", "block.task_state")]
     #[holon_macros::emits("block.requires", "block.advice_suppressed")]
     #[holon_macros::emits(excluded("block.parent_id", "private: placement owns it"))]
@@ -651,7 +651,7 @@ where
     #[holon_macros::reads("block.content", "block.content_type")]
     #[holon_macros::reads("block.source_language", "block.source_name")]
     #[holon_macros::reads("block.marks", "block.collapsed", "block.widget_only")]
-    #[holon_macros::reads("block.completed", "block.block_type", "block.properties")]
+    #[holon_macros::reads("block.block_type", "block.properties")]
     #[holon_macros::reads("block.tags", "block.task_state")]
     #[holon_macros::reads("block.requires", "block.advice_suppressed")]
     #[holon_macros::reads("block.contributes_to")]
@@ -659,7 +659,7 @@ where
     #[holon_macros::emits("block.content", "block.content_type")]
     #[holon_macros::emits("block.source_language", "block.source_name")]
     #[holon_macros::emits("block.marks", "block.collapsed", "block.widget_only")]
-    #[holon_macros::emits("block.completed", "block.block_type", "block.properties")]
+    #[holon_macros::emits("block.block_type", "block.properties")]
     #[holon_macros::emits("block.tags", "block.task_state")]
     #[holon_macros::emits("block.requires", "block.advice_suppressed")]
     #[holon_macros::emits("block.contributes_to")]
@@ -682,7 +682,7 @@ where
     #[holon_macros::reads("block.content", "block.content_type")]
     #[holon_macros::reads("block.source_language", "block.source_name")]
     #[holon_macros::reads("block.marks", "block.collapsed", "block.widget_only")]
-    #[holon_macros::reads("block.completed", "block.block_type", "block.properties")]
+    #[holon_macros::reads("block.block_type", "block.properties")]
     #[holon_macros::reads("block.tags", "block.task_state")]
     #[holon_macros::reads("block.requires", "block.advice_suppressed")]
     #[holon_macros::reads("block.contributes_to")]
@@ -690,7 +690,7 @@ where
     #[holon_macros::emits("block.content", "block.content_type")]
     #[holon_macros::emits("block.source_language", "block.source_name")]
     #[holon_macros::emits("block.marks", "block.collapsed", "block.widget_only")]
-    #[holon_macros::emits("block.completed", "block.block_type", "block.properties")]
+    #[holon_macros::emits("block.block_type", "block.properties")]
     #[holon_macros::emits("block.tags", "block.task_state")]
     #[holon_macros::emits("block.requires", "block.advice_suppressed")]
     #[holon_macros::emits("block.contributes_to")]
@@ -879,10 +879,10 @@ pub trait WriteAuthorityReads: MaybeSendSync {
     /// Whether the block carries the `Page` tag.
     async fn block_is_page(&self, id: &EntityUri) -> Result<bool>;
     /// The block, or `None` when it does not exist.
-    async fn block(&self, id: &EntityUri) -> Result<Option<holon_api::StoredBlock>>;
+    async fn block(&self, id: &EntityUri) -> Result<Option<holon_api::Block>>;
     /// `root` and every descendant: root first, parent before child, siblings
     /// in order. `None` when `root` does not exist.
-    async fn subtree(&self, root: &EntityUri) -> Result<Option<Vec<holon_api::StoredBlock>>>;
+    async fn subtree(&self, root: &EntityUri) -> Result<Option<Vec<holon_api::Block>>>;
     /// The ids of `parent`'s children, in sibling order. `Err` when the
     /// authority does not hold `parent`.
     async fn children(&self, parent: &EntityUri) -> Result<Vec<EntityUri>>;
@@ -985,7 +985,7 @@ pub const MAX_OWNING_PAGE_WALK: usize = 1024;
 #[derive(Clone, Debug, PartialEq)]
 pub enum OwningPage {
     /// The nearest `Page`-tagged block at or above the start.
-    Page(Box<holon_api::StoredBlock>),
+    Page(Box<holon_api::Block>),
     /// The chain reaches the root sentinel with no `Page` on it.
     NoOwner,
     /// The authority does not hold the start block.
@@ -1055,17 +1055,17 @@ pub async fn owning_page_by_hops<A: WriteAuthorityReads + ?Sized>(
         if !seen.insert(cur.clone()) {
             return Ok(OwningPage::Broken(ChainBreak::ParentCycle(cur)));
         }
-        let Some(stored) = authority.block(&cur).await? else {
+        let Some(block) = authority.block(&cur).await? else {
             return Ok(if cur == *id {
                 OwningPage::Absent
             } else {
                 OwningPage::Broken(ChainBreak::MissingParent(cur))
             });
         };
-        if stored.block.is_page() {
-            return Ok(OwningPage::Page(Box::new(stored)));
+        if block.is_page() {
+            return Ok(OwningPage::Page(Box::new(block)));
         }
-        cur = stored.block.parent_id.clone();
+        cur = block.parent_id.clone();
     }
     Ok(OwningPage::Broken(ChainBreak::TooDeep))
 }
@@ -1551,7 +1551,7 @@ where
     #[holon_macros::reads("block.content", "block.content_type")]
     #[holon_macros::reads("block.source_language", "block.source_name")]
     #[holon_macros::reads("block.marks", "block.collapsed", "block.widget_only")]
-    #[holon_macros::reads("block.completed", "block.block_type", "block.properties")]
+    #[holon_macros::reads("block.block_type", "block.properties")]
     #[holon_macros::reads("block.tags", "block.task_state")]
     #[holon_macros::reads("block.requires", "block.advice_suppressed")]
     #[holon_macros::reads("block.contributes_to")]
@@ -1671,14 +1671,13 @@ where
     #[holon_macros::reads("block.content", "block.content_type")]
     #[holon_macros::reads("block.source_language", "block.source_name")]
     #[holon_macros::reads("block.marks", "block.collapsed", "block.widget_only")]
-    #[holon_macros::reads("block.completed", "block.block_type", "block.properties")]
+    #[holon_macros::reads("block.block_type", "block.properties")]
     #[holon_macros::reads("block.tags", "block.task_state")]
     #[holon_macros::reads("block.requires", "block.advice_suppressed")]
     #[holon_macros::reads("block.contributes_to")]
     #[holon_macros::emits("block.id", "block.content", "block.marks")]
     #[holon_macros::emits("block.parent_id", "block.sort_key")]
     #[holon_macros::emits("block.collapsed", "block.widget_only")]
-    #[holon_macros::emits("block.completed", "block.block_type")]
     #[holon_macros::emits("block.content_type", "block.properties")]
     #[holon_macros::emits("block.source_language", "block.source_name")]
     #[holon_macros::emits(excluded("block.after_block_id", "a positional anchor, not a column"))]
@@ -1895,8 +1894,6 @@ where
             new_block_fields.insert("updated_at".into(), Value::Integer(now));
             new_block_fields.insert("collapsed".into(), Value::Boolean(false));
             new_block_fields.insert("widget_only".into(), Value::Boolean(false));
-            new_block_fields.insert("completed".into(), Value::Boolean(false));
-            new_block_fields.insert("block_type".into(), Value::String("text".to_string()));
 
             // Pre-mint the new block's position through the OrderKeyMinting seam
             // (the SqlOnly Store order owner; the in-memory test substrate
@@ -2043,7 +2040,7 @@ where
     #[holon_macros::reads("block.content", "block.content_type")]
     #[holon_macros::reads("block.source_language", "block.source_name")]
     #[holon_macros::reads("block.marks", "block.collapsed", "block.widget_only")]
-    #[holon_macros::reads("block.completed", "block.block_type", "block.properties")]
+    #[holon_macros::reads("block.block_type", "block.properties")]
     #[holon_macros::reads("block.tags", "block.task_state")]
     #[holon_macros::reads("block.requires", "block.advice_suppressed")]
     #[holon_macros::reads("block.contributes_to")]
@@ -2051,7 +2048,7 @@ where
     #[holon_macros::emits("block.parent_id", "block.sort_key")]
     #[holon_macros::emits("block.source_language", "block.source_name")]
     #[holon_macros::emits("block.marks", "block.collapsed", "block.widget_only")]
-    #[holon_macros::emits("block.completed", "block.block_type", "block.properties")]
+    #[holon_macros::emits("block.block_type", "block.properties")]
     #[holon_macros::emits("block.tags", "block.task_state")]
     #[holon_macros::emits("block.requires", "block.advice_suppressed")]
     #[holon_macros::emits("block.contributes_to")]
@@ -3853,18 +3850,14 @@ mod owning_page_walk_tests {
         async fn block_is_page(&self, id: &EntityUri) -> Result<bool> {
             Ok(self.0.get(id).is_some_and(|(_, page)| *page))
         }
-        async fn block(&self, id: &EntityUri) -> Result<Option<holon_api::StoredBlock>> {
+        async fn block(&self, id: &EntityUri) -> Result<Option<holon_api::Block>> {
             Ok(self.0.get(id).map(|(parent, page)| {
                 let mut block = Block::new_text(id.clone(), parent.clone(), "");
                 block.set_page(*page);
-                holon_api::StoredBlock {
-                    block,
-                    block_type: None,
-                    completed: None,
-                }
+                block
             }))
         }
-        async fn subtree(&self, _: &EntityUri) -> Result<Option<Vec<holon_api::StoredBlock>>> {
+        async fn subtree(&self, _: &EntityUri) -> Result<Option<Vec<holon_api::Block>>> {
             unreachable!("the owning-page walk reads no subtree")
         }
         async fn children(&self, _: &EntityUri) -> Result<Vec<EntityUri>> {
@@ -3878,7 +3871,7 @@ mod owning_page_walk_tests {
 
     async fn walk(rows: &Rows, id: &str) -> String {
         match rows.owning_page(&uri(id)).await.expect("walk") {
-            OwningPage::Page(page) => format!("Page({})", page.block.id),
+            OwningPage::Page(page) => format!("Page({})", page.id),
             other => format!("{other:?}"),
         }
     }

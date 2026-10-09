@@ -84,7 +84,6 @@ async fn authority_parent(authority: &dyn WriteAuthorityReads, id: &str) -> Stri
         .await
         .unwrap_or_else(|e| panic!("authority block({id}): {e:#}"))
         .unwrap_or_else(|| panic!("the write authority holds no {id}"))
-        .block
         .parent_id
         .to_string()
 }

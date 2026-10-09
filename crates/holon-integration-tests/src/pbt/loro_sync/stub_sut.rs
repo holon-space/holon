@@ -382,7 +382,11 @@ impl holon_loro::SinkReader for StubOperationProvider {
                 .and_then(|v| v.as_string())
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| "A0".to_string());
-            let block = holon_api::block::Block::try_from(params.clone())?;
+            let mut row = params.clone();
+            // An omitted `block_type` takes the column default, NULL.
+            row.entry("block_type".into())
+                .or_insert(holon_api::Value::Null);
+            let block = holon_api::block::Block::try_from(row)?;
             out.insert(id.clone(), holon::api::SnapshotBlock { block, sort_key });
         }
         Ok(out)

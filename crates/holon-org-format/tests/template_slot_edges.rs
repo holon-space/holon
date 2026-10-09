@@ -300,11 +300,6 @@ fn instantiating_the_shipped_compass_problem_yields_a_real_contributes_to_edge()
         replace_block: None,
     };
 
-    let root = holon_api::StoredBlock {
-        block: root.clone(),
-        block_type: None,
-        completed: None,
-    };
     let plan = plan_instantiation(std::slice::from_ref(&root), &request)
         .expect("instantiating the shipped compass-problem template must succeed");
 

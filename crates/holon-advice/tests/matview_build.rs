@@ -24,8 +24,8 @@ async fn setup() -> DbHandle {
     std::mem::forget(_backend);
     handle
         .execute_ddl(
-            "CREATE TABLE block_raw (id TEXT PRIMARY KEY, block_type TEXT NOT NULL DEFAULT \
-             'text', properties TEXT, updated_at INTEGER NOT NULL DEFAULT 0)",
+            "CREATE TABLE block_raw (id TEXT PRIMARY KEY, block_type TEXT, properties TEXT, \
+             updated_at INTEGER NOT NULL DEFAULT 0)",
         )
         .await
         .expect("create block_raw");

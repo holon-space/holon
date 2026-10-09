@@ -96,11 +96,9 @@ async fn observe(authority: &dyn WriteAuthorityReads) -> Vec<String> {
         MISSING,
     ] {
         let answer = match authority.owning_page(&uri(id)).await {
-            Ok(OwningPage::Page(page)) => format!(
-                "Page({}, todo={:?})",
-                page.block.id,
-                page.block.todo_keywords()
-            ),
+            Ok(OwningPage::Page(page)) => {
+                format!("Page({}, todo={:?})", page.id, page.todo_keywords())
+            }
             Ok(other) => format!("{other:?}"),
             Err(e) => format!("Err({e})"),
         };
@@ -227,7 +225,7 @@ async fn share(env: &TestEnvironment, id: &str) -> EntityUri {
 
 async fn owning_page_id(authority: &dyn WriteAuthorityReads, id: &str) -> String {
     match authority.owning_page(&uri(id)).await {
-        Ok(OwningPage::Page(page)) => page.block.id.to_string(),
+        Ok(OwningPage::Page(page)) => page.id.to_string(),
         Ok(other) => format!("{other:?}"),
         Err(e) => panic!("owning_page({id}): {e}"),
     }
@@ -300,7 +298,7 @@ fn share_answers_follow_the_file_model() {
             panic!("Loro names no page for block:shr-delta-one");
         };
         assert_eq!(
-            shared_page.block.todo_keywords(),
+            shared_page.todo_keywords(),
             Some(vec![
                 holon_api::TaskState::active("WAIT"),
                 holon_api::TaskState::done("GONE"),

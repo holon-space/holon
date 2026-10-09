@@ -2920,10 +2920,10 @@ mod tests {
         async fn block_is_page(&self, _: &EntityUri) -> Result<bool> {
             unreachable!("the install guard reads no block")
         }
-        async fn block(&self, _: &EntityUri) -> Result<Option<holon_api::StoredBlock>> {
+        async fn block(&self, _: &EntityUri) -> Result<Option<holon_api::Block>> {
             unreachable!("the install guard reads no block")
         }
-        async fn subtree(&self, _: &EntityUri) -> Result<Option<Vec<holon_api::StoredBlock>>> {
+        async fn subtree(&self, _: &EntityUri) -> Result<Option<Vec<holon_api::Block>>> {
             unreachable!("the install guard reads no block")
         }
         async fn children(&self, _: &EntityUri) -> Result<Vec<EntityUri>> {

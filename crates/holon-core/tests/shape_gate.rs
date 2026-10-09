@@ -14,7 +14,6 @@ use std::time::Instant;
 use async_trait::async_trait;
 use holon_api::EntityUri;
 use holon_api::StorageEntity;
-use holon_api::StoredBlock;
 use holon_api::Value;
 use holon_api::block::Block;
 use holon_core::TaggedNeighbourhood;
@@ -71,15 +70,11 @@ impl WriteAuthorityReads for MemAuthority {
         Ok(self.blocks.get(id).is_some_and(Block::is_page))
     }
 
-    async fn block(&self, id: &EntityUri) -> Result<Option<StoredBlock>> {
-        Ok(self.blocks.get(id).map(|b| StoredBlock {
-            block: b.clone(),
-            block_type: None,
-            completed: None,
-        }))
+    async fn block(&self, id: &EntityUri) -> Result<Option<Block>> {
+        Ok(self.blocks.get(id).cloned())
     }
 
-    async fn subtree(&self, _: &EntityUri) -> Result<Option<Vec<StoredBlock>>> {
+    async fn subtree(&self, _: &EntityUri) -> Result<Option<Vec<Block>>> {
         Err("the shape gate reads no subtree".into())
     }
 
@@ -541,11 +536,11 @@ impl WriteAuthorityReads for Unplaced {
         self.0.block_is_page(id).await
     }
 
-    async fn block(&self, id: &EntityUri) -> Result<Option<StoredBlock>> {
+    async fn block(&self, id: &EntityUri) -> Result<Option<Block>> {
         self.0.block(id).await
     }
 
-    async fn subtree(&self, root: &EntityUri) -> Result<Option<Vec<StoredBlock>>> {
+    async fn subtree(&self, root: &EntityUri) -> Result<Option<Vec<Block>>> {
         self.0.subtree(root).await
     }
 

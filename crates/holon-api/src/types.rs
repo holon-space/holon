@@ -149,6 +149,35 @@ impl From<String> for EntityName {
     }
 }
 
+impl EntityName {
+    /// Parse a stored entity name: a valid URI scheme after normalization,
+    /// never the wildcard.
+    pub fn parse_named(raw: &str) -> Result<Self, String> {
+        let normalized = raw.replace('_', "-");
+        if !is_valid_uri_scheme(&normalized) {
+            return Err(format!("{raw:?} is not a valid entity name"));
+        }
+        Ok(Self::Named(normalized))
+    }
+}
+
+impl From<EntityName> for Value {
+    fn from(name: EntityName) -> Self {
+        Value::String(name.as_str().to_string())
+    }
+}
+
+impl TryFrom<Value> for EntityName {
+    type Error = Box<dyn std::error::Error + Send + Sync>;
+
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::String(s) => Ok(Self::parse_named(&s)?),
+            other => Err(format!("an entity name must be a string, got {other:?}").into()),
+        }
+    }
+}
+
 // =============================================================================
 // ContentType
 // =============================================================================

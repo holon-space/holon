@@ -131,6 +131,8 @@ impl SinkReader for MemorySink {
                 row.entry(field.column().into())
                     .or_insert_with(|| Value::String("[]".to_string()));
             }
+            // An omitted `block_type` takes the column default, NULL.
+            row.entry("block_type".into()).or_insert(Value::Null);
             let block = Block::try_from(row)?;
             out.insert(id.clone(), SnapshotBlock { block, sort_key });
         }

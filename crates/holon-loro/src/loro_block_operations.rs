@@ -367,21 +367,18 @@ impl holon_core::WriteAuthorityReads for LoroBlockOperations {
             .unwrap_or(false))
     }
 
-    async fn block(&self, id: &holon_api::EntityUri) -> Result<Option<holon_api::StoredBlock>> {
+    async fn block(&self, id: &holon_api::EntityUri) -> Result<Option<Block>> {
         let backend = self.get_backend("").await?;
-        match backend.get_stored_block(id.as_str()).await {
+        match backend.get_block(id.as_str()).await {
             Ok(block) => Ok(Some(block)),
             Err(ApiError::BlockNotFound { .. }) => Ok(None),
             Err(e) => Err(e.into()),
         }
     }
 
-    async fn subtree(
-        &self,
-        root: &holon_api::EntityUri,
-    ) -> Result<Option<Vec<holon_api::StoredBlock>>> {
+    async fn subtree(&self, root: &holon_api::EntityUri) -> Result<Option<Vec<Block>>> {
         let backend = self.get_backend("").await?;
-        let root = match backend.get_stored_block(root.as_str()).await {
+        let root = match backend.get_block(root.as_str()).await {
             Ok(root) => root,
             Err(ApiError::BlockNotFound { .. }) => return Ok(None),
             Err(e) => return Err(e.into()),
@@ -389,9 +386,9 @@ impl holon_core::WriteAuthorityReads for LoroBlockOperations {
         let mut nodes = vec![root];
         let mut next = 0;
         while next < nodes.len() {
-            let parent = nodes[next].block.id.clone();
+            let parent = nodes[next].id.clone();
             for child in backend.list_children(parent.as_str()).await? {
-                nodes.push(backend.get_stored_block(&child).await?);
+                nodes.push(backend.get_block(&child).await?);
             }
             next += 1;
         }
@@ -684,7 +681,11 @@ impl CrudOperations<Block> for LoroBlockOperations {
                 // properties blob is not a column the `SqlUndoStateReader`
                 // fingerprints, so `changes` stays empty (single-writer safe)
                 // while the inverse is a real, provably-correct restore.
-                let old = prior.get_property(field).unwrap_or(Value::REMOVED);
+                let old = match field {
+                    "block_type" => prior.block_type.clone().map(Value::from),
+                    _ => prior.get_property(field),
+                }
+                .unwrap_or(Value::REMOVED);
                 let mut params = HashMap::new();
                 params.insert("id".to_string(), Value::String(id.to_string()));
                 params.insert("field".to_string(), Value::String(field.to_string()));

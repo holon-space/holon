@@ -78,7 +78,6 @@ fn runtime_authored_holon_rule_is_discovered_by_the_live_watcher() {
             "content".to_string(),
             Value::String("Row28 rule host".to_string()),
         );
-        parent_params.insert("block_type".to_string(), Value::String("text".to_string()));
         session
             .execute_operation(&EntityName::new("block"), "create", parent_params)
             .await

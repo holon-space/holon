@@ -1548,22 +1548,15 @@ impl DispatchingOperationEngine {
     async fn refuse_template_keywords(
         &self,
         target_parent: &str,
-        nodes: &[holon_api::StoredBlock],
+        nodes: &[holon_api::Block],
     ) -> Result<()> {
         let op = "instantiate_template";
         let (document, ring) = self.document_ring(op, target_parent).await?;
         let refusals: Vec<String> = nodes
             .iter()
             .filter_map(|node| {
-                let keyword = stored_keyword(&node.block)?;
-                state_in_ring(
-                    op,
-                    node.block.id.as_str(),
-                    &keyword,
-                    document.as_ref(),
-                    &ring,
-                )
-                .err()
+                let keyword = stored_keyword(node)?;
+                state_in_ring(op, node.id.as_str(), &keyword, document.as_ref(), &ring).err()
             })
             .map(|refusal| format!("{refusal:#}"))
             .collect();
@@ -1805,14 +1798,11 @@ impl DispatchingOperationEngine {
             .document_page(CONVERT_BLOCK_TO_PAGE_OP, &plan.origin_id)
             .await?;
         let ring = holon_org_format::TaskKeywordVocabulary::from_declared(
-            source.as_ref().and_then(|page| page.block.todo_keywords()),
+            source.as_ref().and_then(|page| page.todo_keywords()),
         );
         let declared_ring = source
             .filter(|_| ring != holon_org_format::TaskKeywordVocabulary::default())
-            .and_then(|page| {
-                page.block
-                    .get_property(holon_org_format::org_props::TODO_KEYWORDS)
-            });
+            .and_then(|page| page.get_property(holon_org_format::org_props::TODO_KEYWORDS));
         // ALLOW(entity_uri_from_raw): plan.page_id is a derived PageId::for_path id.
         let page = EntityUri::from_raw(&plan.page_id);
         for child in &plan.child_ids {
@@ -2275,8 +2265,8 @@ impl DispatchingOperationEngine {
         else {
             return Ok(None);
         };
-        let is_page = stored.block.is_page();
-        let parent = stored.block.parent_id.clone();
+        let is_page = stored.is_page();
+        let parent = stored.parent_id.clone();
         let destination = match change {
             DocumentChange::Parent(parent) if !is_page => {
                 // ALLOW(entity_uri_from_raw): the operation's own `parent_id` param.
@@ -2297,11 +2287,11 @@ impl DispatchingOperationEngine {
                 .block(&parent)
                 .await
                 .map_err(|e| anyhow::anyhow!("{op}: reading {parent}: {e}"))?
-                .map(|p| p.block.parent_id),
+                .map(|p| p.parent_id),
             DocumentChange::Page(becomes_page) if becomes_page != is_page => {
                 if becomes_page {
                     let ring = holon_org_format::TaskKeywordVocabulary::from_declared(
-                        stored.block.todo_keywords(),
+                        stored.todo_keywords(),
                     );
                     self.refuse_undeclared_keywords(op, &root, Some(&root), &ring)
                         .await?;
@@ -2310,7 +2300,7 @@ impl DispatchingOperationEngine {
                 Some(parent)
             }
             DocumentChange::Ring(declared) if is_page => {
-                let mut edited = stored.block.clone();
+                let mut edited = stored.clone();
                 match declared {
                     Some(value) => {
                         edited.set_property(holon_org_format::org_props::TODO_KEYWORDS, value)
@@ -2360,7 +2350,7 @@ impl DispatchingOperationEngine {
         let mut elsewhere: HashSet<EntityUri> = HashSet::new();
         let mut refusals = Vec::new();
         for stored in &blocks {
-            let block = &stored.block;
+            let block = &stored;
             if block.id != *root && (block.is_page() || elsewhere.contains(&block.parent_id)) {
                 elsewhere.insert(block.id.clone());
                 continue;
@@ -2394,14 +2384,14 @@ impl DispatchingOperationEngine {
     }
 
     /// `id` when it is a page, else `None`. Fails loud on a missing block.
-    async fn page_block(&self, op: &str, id: &EntityUri) -> Result<Option<holon_api::StoredBlock>> {
+    async fn page_block(&self, op: &str, id: &EntityUri) -> Result<Option<holon_api::Block>> {
         let stored = self
             .block_authority(op)?
             .block(id)
             .await
             .map_err(|e| anyhow::anyhow!("{op}: reading {id}: {e}"))?
             .ok_or_else(|| anyhow::anyhow!("{op}: block {id} is not in the store"))?;
-        Ok(stored.block.is_page().then_some(stored))
+        Ok(stored.is_page().then_some(stored))
     }
 
     /// The document `id` belongs to as a child of a block of `parent`.
@@ -2414,7 +2404,7 @@ impl DispatchingOperationEngine {
         Ok(match self.page_block(op, &id).await? {
             Some(page) => (
                 Some(id),
-                holon_org_format::TaskKeywordVocabulary::from_declared(page.block.todo_keywords()),
+                holon_org_format::TaskKeywordVocabulary::from_declared(page.todo_keywords()),
             ),
             None => parent.clone(),
         })
@@ -2446,14 +2436,14 @@ impl DispatchingOperationEngine {
             bail!("{op}: canonical {canonical} is not in the store");
         };
         let becomes_page =
-            !stored.block.is_page() && plan.union_tags.iter().any(|t| t == holon_api::PAGE_TAG);
+            !stored.is_page() && plan.union_tags.iter().any(|t| t == holon_api::PAGE_TAG);
         let adopted_ring = plan
             .adopted_properties
             .iter()
             .find(|(key, _)| key == holon_org_format::org_props::TODO_KEYWORDS)
-            .filter(|_| becomes_page || stored.block.is_page())
+            .filter(|_| becomes_page || stored.is_page())
             .map(|(_, declared)| {
-                let mut adopting = stored.block.clone();
+                let mut adopting = stored.clone();
                 adopting.set_property(holon_org_format::org_props::TODO_KEYWORDS, declared.clone());
                 TaskKeywordVocabulary::from_declared(adopting.todo_keywords())
             });
@@ -2513,9 +2503,7 @@ impl DispatchingOperationEngine {
 
         let mut rings = Vec::new();
         if becomes_page {
-            rings.push(TaskKeywordVocabulary::from_declared(
-                stored.block.todo_keywords(),
-            ));
+            rings.push(TaskKeywordVocabulary::from_declared(stored.todo_keywords()));
         }
         rings.extend(adopted_ring);
         for ring in &rings {
@@ -2593,7 +2581,7 @@ impl DispatchingOperationEngine {
             ),
         > = HashMap::new();
         for stored in blocks {
-            let block = &stored.block;
+            let block = &stored;
             let (document, ring) = if block.is_page() {
                 (
                     Some(block.id.clone()),
@@ -2662,15 +2650,15 @@ impl DispatchingOperationEngine {
     ) -> Result<(Option<EntityUri>, holon_org_format::TaskKeywordVocabulary)> {
         Ok(match self.document_page(op, id).await? {
             Some(page) => (
-                Some(page.block.id.clone()),
-                holon_org_format::TaskKeywordVocabulary::from_declared(page.block.todo_keywords()),
+                Some(page.id.clone()),
+                holon_org_format::TaskKeywordVocabulary::from_declared(page.todo_keywords()),
             ),
             None => (None, holon_org_format::TaskKeywordVocabulary::default()),
         })
     }
 
     /// The page of the document holding `id`; `None` when no document holds it.
-    async fn document_page(&self, op: &str, id: &str) -> Result<Option<holon_api::StoredBlock>> {
+    async fn document_page(&self, op: &str, id: &str) -> Result<Option<holon_api::Block>> {
         // ALLOW(entity_uri_from_raw): `id` is an operation's own block id.
         let uri = EntityUri::from_raw(id);
         let owner = self
@@ -2708,7 +2696,6 @@ impl DispatchingOperationEngine {
             .map_err(|e| anyhow::anyhow!("task-keyword convergence: reading {id}: {e}"))?;
         Ok(block.and_then(|stored| {
             stored
-                .block
                 .properties
                 .get("task_state")
                 .and_then(|v| v.as_string())

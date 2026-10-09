@@ -465,18 +465,14 @@ fn read_properties_from_meta(meta: &loro::LoroMap) -> HashMap<String, Value> {
     props
 }
 
-/// Block columns / typed fields that must never appear in the generic
-/// `properties` map — each has a dedicated typed `Block` slot and, except
-/// `depth` (no SQL column; depth is derived from the tree wherever needed),
-/// a `holon_turso::schema_modules::BLOCK_RAW_COLUMNS` entry. Edge fields
-/// (`tags`/`requires`/`advice_suppressed`) are stripped separately above.
-/// Kept as a local const (rather than a cross-crate import) to match the
-/// existing hardcoded edge strip in this module.
+/// Block field names that must never appear in the generic `properties` map:
+/// fields with their own Loro home, derived or storage-internal names, and the
+/// legacy `completed` key older docs hold. Edge fields are stripped separately
+/// above.
 ///
-/// `collapsed` and `widget_only` are deliberately EXCLUDED: unlike the other
-/// columns they ARE stored in the Loro properties map (a `set_field` scalar),
-/// and `read_block_from_tree` lifts them out of `properties` into their typed
-/// slots — stripping them here would make that lift always read the default.
+/// `collapsed`, `widget_only` and `block_type` are EXCLUDED: they are stored in
+/// the Loro properties map (a `set_field` scalar), and `read_block_from_tree`
+/// lifts them out of `properties` into their typed slots.
 const RESERVED_PROPERTY_KEYS: &[&str] = &[
     "id",
     "parent_id",
@@ -487,8 +483,7 @@ const RESERVED_PROPERTY_KEYS: &[&str] = &[
     "source_language",
     "source_name",
     "marks",
-    "completed",
-    "block_type",
+    holon_api::schema::block::LEGACY_COMPLETED,
     "created_at",
     "updated_at",
     "_change_origin",
@@ -546,6 +541,12 @@ fn read_block_from_tree(
         Some(Value::Integer(i)) => i != 0,
         Some(other) => panic!("corrupt `widget_only` property in Loro tree: {other:?}"),
     };
+    let block_type = match properties.remove("block_type") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) => holon_api::block::parse_stored_block_type(&s)
+            .unwrap_or_else(|e| panic!("corrupt `block_type` property in Loro tree: {e}")),
+        Some(other) => panic!("corrupt `block_type` property in Loro tree: {other:?}"),
+    };
 
     let id = block_uri_from_meta(&meta, node);
     let parent_id = match parent_tree_id {
@@ -575,6 +576,7 @@ fn read_block_from_tree(
     block.contributes_to = read_edge_from_meta(&meta, "contributes_to");
     block.collapsed = collapsed;
     block.widget_only = widget_only;
+    block.block_type = block_type;
     block.created_at = created_at;
     block.updated_at = updated_at;
     block
@@ -590,10 +592,10 @@ pub use holon_api::SnapshotBlock;
 
 /// Where a walk up one doc's tree stopped.
 enum WalkEnd {
-    Page(Box<holon_api::StoredBlock>),
+    Page(Box<Block>),
     Mount {
         info: crate::shared_tree::MountInfo,
-        mount: Box<holon_api::StoredBlock>,
+        mount: Box<Block>,
     },
     /// A node with no parent in this doc, and no page on the way.
     Root,
@@ -606,11 +608,11 @@ fn walk_to_page(tree: &loro::LoroTree, start: loro::TreeID) -> anyhow::Result<Wa
         if let Some(info) = read_mount_info(tree, node) {
             return Ok(WalkEnd::Mount {
                 info,
-                mount: Box::new(stored_block_at(tree, node)?),
+                mount: Box::new(block_at(tree, node)),
             });
         }
         if node_is_page(tree, node)? {
-            return Ok(WalkEnd::Page(Box::new(stored_block_at(tree, node)?)));
+            return Ok(WalkEnd::Page(Box::new(block_at(tree, node))));
         }
         match get_node_parent(tree, node) {
             Some(parent) => node = parent,
@@ -777,35 +779,9 @@ fn mount_node_of(
     Ok(answer)
 }
 
-/// The block at `node` plus the `block_type` and `completed` values its meta
-/// holds.
-fn stored_block_at(
-    tree: &loro::LoroTree,
-    node: loro::TreeID,
-) -> anyhow::Result<holon_api::StoredBlock> {
-    stored_block_with_meta(
-        tree,
-        node,
-        read_block_from_tree(tree, node, get_node_parent(tree, node)),
-    )
-}
-
-/// `block`, read from `node`, plus the `block_type` and `completed` values
-/// the node's meta holds.
-fn stored_block_with_meta(
-    tree: &loro::LoroTree,
-    node: loro::TreeID,
-    block: Block,
-) -> anyhow::Result<holon_api::StoredBlock> {
-    let meta = tree
-        .get_meta(node)
-        .map_err(|e| anyhow::anyhow!("get_meta({node:?}): {e}"))?;
-    holon_api::StoredBlock::from_stored(
-        block,
-        read_scalar_field_from_meta(&meta, "block_type"),
-        read_scalar_field_from_meta(&meta, "completed"),
-    )
-    .map_err(anyhow::Error::msg)
+/// The block at `node`, with its parent read from the same tree.
+fn block_at(tree: &loro::LoroTree, node: loro::TreeID) -> Block {
+    read_block_from_tree(tree, node, get_node_parent(tree, node))
 }
 
 /// Read the `tags` JSON-encoded list from a node's metadata. Returns an empty
@@ -4509,12 +4485,6 @@ impl LoroBackend {
         Ok(Seen::Never)
     }
 
-    /// The block plus the `block_type` and `completed` values its meta holds;
-    /// both live in the property map, which [`Block::properties`] never shows.
-    pub async fn get_stored_block(&self, id: &str) -> Result<holon_api::StoredBlock, ApiError> {
-        self.read_placed_block(id, stored_block_with_meta).await
-    }
-
     /// The block at `id`, routed the way writes route, with the parent this
     /// device places it under: a placed page share's root answers its mount's
     /// parent ([`Self::placement_mount`]), as SQL does. `finish` reads more
@@ -4579,7 +4549,7 @@ impl LoroBackend {
                         })?;
                     let tree = doc.get_tree(TREE_NAME);
                     Ok(match mount {
-                        Some(mount) => OwningPage::Page(Box::new(stored_block_at(&tree, mount)?)),
+                        Some(mount) => OwningPage::Page(Box::new(block_at(&tree, mount))),
                         None => OwningPage::Broken(holon_core::ChainBreak::OrphanedShare {
                             shared_tree_id: shared_tree_id.clone(),
                         }),
@@ -4598,7 +4568,7 @@ impl LoroBackend {
                     .with_read(|doc| {
                         let tree = doc.get_tree(TREE_NAME);
                         if node_is_page(&tree, info.shared_root)? {
-                            return Ok(Some(stored_block_at(&tree, info.shared_root)?));
+                            return Ok(Some(block_at(&tree, info.shared_root)));
                         }
                         Ok(None)
                     })

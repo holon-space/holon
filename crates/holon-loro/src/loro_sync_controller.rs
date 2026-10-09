@@ -2627,26 +2627,43 @@ fn retain_grounded_parent_updates(
     n - ops.len()
 }
 
+/// The create params for one block. `Block` is destructured without `..`, so
+/// a new field fails to compile until it is projected here; the declared
+/// columns it must cover are locked by
+/// `block_to_params_covers_every_declared_column`.
 pub fn block_to_params(snap: &SnapshotBlock) -> holon_api::StorageEntity {
     let block = &snap.block;
+    let Block {
+        id,
+        parent_id,
+        // Edge fields are emitted through `EdgeField::ALL` below.
+        tags: _,
+        requires: _,
+        advice_suppressed: _,
+        contributes_to: _,
+        content,
+        content_type,
+        source_language,
+        source_name,
+        properties,
+        marks,
+        collapsed,
+        widget_only,
+        block_type,
+        created_at,
+        updated_at: _,
+    } = block;
     let mut params = holon_api::StorageEntity::new();
-    params.insert("id".into(), Value::String(block.id.to_string()));
-    params.insert(
-        "parent_id".into(),
-        Value::String(block.parent_id.to_string()),
-    );
-    params.insert("content".into(), Value::String(block.content.clone()));
+    params.insert("id".into(), Value::String(id.to_string()));
+    params.insert("parent_id".into(), Value::String(parent_id.to_string()));
+    params.insert("content".into(), Value::String(content.clone()));
     params.insert(
         "content_type".into(),
-        Value::String(block.content_type.to_string()),
+        Value::String(content_type.to_string()),
     );
 
     let now = holon_api::clock::now_millis();
-    let created = if block.created_at > 0 {
-        block.created_at
-    } else {
-        now
-    };
+    let created = if *created_at > 0 { *created_at } else { now };
     params.insert("created_at".into(), Value::Integer(created));
     params.insert("updated_at".into(), Value::Integer(now));
     // Projection-totality guard (R-1): every owned Loro block MUST have a
@@ -2657,72 +2674,52 @@ pub fn block_to_params(snap: &SnapshotBlock) -> holon_api::StorageEntity {
     debug_assert!(
         !snap.sort_key.is_empty(),
         "projection-totality violation: block {} has empty sort_key",
-        block.id
+        id
     );
     params.insert("sort_key".into(), Value::String(snap.sort_key.clone()));
 
-    // Edge fields (`block_tags`/`block_requires` junctions). Emit each non-empty
-    // set as a typed Array — the SQL provider's edge partition routes it to the
-    // junction table. Iterating `EdgeField::ALL` (rather than hand-listing) is
-    // what keeps a newly added edge field from being silently dropped here.
+    // The SQL provider's edge partition routes each typed Array to its
+    // junction table.
     for field in EdgeField::ALL {
         if !field.is_empty(block) {
             params.insert(field.column().into(), field.param_value(block));
         }
     }
 
-    if block.content_type == ContentType::Source {
-        if let Some(ref lang) = block.source_language {
+    if *content_type == ContentType::Source {
+        if let Some(lang) = source_language {
             params.insert("source_language".into(), Value::String(lang.to_string()));
         }
-        if let Some(ref name) = block.source_name {
+        if let Some(name) = source_name {
             params.insert("source_name".into(), Value::String(name.clone()));
         }
-        // `_source_header_args` rides into params via the
-        // `block.properties` flatten below. Don't also write a
-        // no-underscore copy — that landed in the `properties` JSON column
-        // alongside the underscore form, polluted `drawer_properties()`,
-        // and made `Block::get_source_header_args` (which reads the
-        // underscore key) the only canonical reader.
     }
 
-    // `collapsed` and `widget_only` are typed Block fields that live in the
-    // Loro property map, and `read_block_from_tree` has already LIFTED them out
-    // of `block.properties` into their typed slots — so the flatten below can
-    // never carry them and they must be emitted explicitly. Always emitted (as
-    // in `build_block_params`) so unfolding a block clears the column rather
-    // than leaving the last `true` pinned. `block_diff_params` emits the same
-    // pair on change.
-    params.insert("collapsed".into(), Value::Boolean(block.collapsed));
-    params.insert("widget_only".into(), Value::Boolean(block.widget_only));
+    // Always emitted, so unfolding a block clears the column rather than
+    // leaving the last `true` pinned.
+    params.insert("collapsed".into(), Value::Boolean(*collapsed));
+    params.insert("widget_only".into(), Value::Boolean(*widget_only));
+    // Omitted when `None`, so the column takes its default.
+    if let Some(block_type) = block_type {
+        params.insert("block_type".into(), block_type.clone().into());
+    }
 
-    // Flatten all raw block properties onto the top-level params map. The
-    // downstream `OperationProvider` (e.g. `SqlOperationProvider`) partitions
-    // them into SQL columns vs. the `properties` JSON column based on its own
-    // `known_columns` table. The Loro side never has to know which fields are
-    // first-class columns.
-    for (k, v) in &block.properties {
-        // Edge-typed fields live in junction tables and are emitted via their
-        // dedicated params/paths above — never as flattened properties. A stray
-        // edge key in `properties` (data pollution) would otherwise reach
-        // SqlOperationProvider's edge partition as a non-Array and panic.
-        //
-        // Operation-control keys (`_order_rekeys`, …) are INSTRUCTIONS to the
-        // writer, never stored properties. This projection runs over a shared
-        // doc RECEIVED FROM A REMOTE PEER (`project_descendants_to_sql`), so a
-        // peer-supplied `_order_rekeys` would otherwise flatten onto params and
-        // reach the guarded writer as a live control key — a re-key primitive
-        // fed by untrusted data. Strip it here, at the projection boundary.
+    // Each property becomes its own param; the downstream `OperationProvider`
+    // packs every non-column key into the `properties` JSON column.
+    for (k, v) in properties {
+        // Edge-typed keys in `properties` are data pollution: the SQL
+        // provider's edge partition would panic on a non-Array. Operation-
+        // control keys (`_order_rekeys`, …) are writer instructions, and this
+        // projection also runs over docs received from remote peers, so they
+        // are stripped at this boundary.
         if EdgeField::is_edge_column(k) || holon_api::entity::is_operation_control_param(k) {
             continue;
         }
         params.entry(k.as_str().into()).or_insert_with(|| v.clone());
     }
 
-    // Project Block.marks → SQL `marks` TEXT column as a JSON string. None →
-    // omit (NULL); Some(empty or non-empty) → JSON-encode. The SQL column
-    // discriminator is `marks IS NOT NULL`.
-    if let Some(ref marks) = block.marks {
+    // `None` → omitted (NULL); the SQL discriminator is `marks IS NOT NULL`.
+    if let Some(marks) = marks {
         params.insert(
             "marks".into(),
             Value::String(holon_api::marks_to_json(marks)),
@@ -2801,6 +2798,9 @@ fn block_diff_params(old: &SnapshotBlock, new: &SnapshotBlock) -> holon_api::Sto
     }
     if old.widget_only != new.widget_only {
         params.insert("widget_only".into(), Value::Boolean(new.widget_only));
+    }
+    if old.block_type != new.block_type {
+        params.insert("block_type".into(), new.block_type.clone().into());
     }
     if old_sort_key != new_sort_key {
         params.insert("sort_key".into(), Value::String(new_sort_key.clone()));
@@ -2993,16 +2993,125 @@ fn registered_share_rows(
     Ok(rows)
 }
 
+/// Whether projecting `b` over `a` writes anything. Destructured without `..`
+/// so a new `Block` field fails to compile until it is compared here.
 fn blocks_differ(a: &SnapshotBlock, b: &SnapshotBlock) -> bool {
+    let Block {
+        id: _,
+        parent_id,
+        tags: _,
+        requires: _,
+        advice_suppressed: _,
+        contributes_to: _,
+        content,
+        content_type,
+        source_language,
+        source_name,
+        properties: _,
+        marks,
+        collapsed,
+        widget_only,
+        block_type,
+        // The projection stamps its own timestamps, so they never differ in
+        // a way worth a write.
+        created_at: _,
+        updated_at: _,
+    } = &a.block;
     a.sort_key != b.sort_key
-        || a.block.content != b.block.content
-        || a.block.parent_id != b.block.parent_id
-        || a.block.content_type != b.block.content_type
-        || a.block.source_language != b.block.source_language
-        || a.block.source_name != b.block.source_name
+        || *content != b.block.content
+        || *parent_id != b.block.parent_id
+        || *content_type != b.block.content_type
+        || *source_language != b.block.source_language
+        || *source_name != b.block.source_name
         || EdgeField::ALL.iter().any(|f| f.differs(&a.block, &b.block))
         || a.block.properties_map() != b.block.properties_map()
-        || a.block.marks != b.block.marks
+        || *marks != b.block.marks
+        || *collapsed != b.block.collapsed
+        || *widget_only != b.block.widget_only
+        || *block_type != b.block.block_type
+}
+
+#[cfg(test)]
+mod projection_totality_tests {
+    use holon_api::EntityName;
+    use holon_api::EntityUri;
+    use holon_api::schema::BLOCK;
+    use holon_api::schema::ColumnSource;
+    use holon_api::schema::FieldIntent;
+
+    use super::*;
+
+    const PROPERTY: &str = "projected-property";
+
+    /// `populated(1)` sets every optional field; `populated(2)` differs from
+    /// it in every field.
+    fn populated(n: i64) -> SnapshotBlock {
+        let id = EntityUri::block(&format!("b{n}"));
+        let parent = EntityUri::block(&format!("parent{n}"));
+        let content = format!("print({n})");
+        let mut block = if n == 1 {
+            Block::new_source(id, parent, "python", &content)
+        } else {
+            Block::new_text(id, parent, &content)
+        };
+        block.source_name = Some(format!("name{n}"));
+        block.tags = vec![format!("tag{n}")].into();
+        block.requires = vec![EntityUri::block(&format!("req{n}"))];
+        block.advice_suppressed = vec![EntityUri::block(&format!("lesson{n}"))];
+        block.contributes_to = vec![EntityUri::block(&format!("goal{n}"))];
+        block
+            .properties
+            .insert(PROPERTY.to_string(), Value::Integer(n));
+        block.marks = Some(Vec::new()).filter(|_| n == 1);
+        block.collapsed = n == 1;
+        block.widget_only = n == 1;
+        block.block_type = Some(EntityName::new(format!("kind{n}")));
+        block.created_at = n;
+        SnapshotBlock {
+            block,
+            sort_key: format!("a{n}"),
+        }
+    }
+
+    /// Every declared column the projection owns that `params` misses. The
+    /// bag column counts as covered when its property arrives as a param.
+    fn uncovered(params: &holon_api::StorageEntity, skip: &[&str]) -> Vec<&'static str> {
+        BLOCK
+            .columns_with_source()
+            .into_iter()
+            .filter(|(_, source)| *source != ColumnSource::Sink)
+            .map(|(name, _)| name)
+            .filter(|name| !skip.contains(name))
+            .filter(|name| {
+                let key = match BLOCK.field(name).expect("declared").intent {
+                    FieldIntent::EngineOwnedBag => PROPERTY,
+                    _ => name,
+                };
+                !params.contains_key(key)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn block_to_params_covers_every_declared_column() {
+        let params = block_to_params(&populated(1));
+        assert_eq!(
+            uncovered(&params, &[]),
+            Vec::<&str>::new(),
+            "declared block columns the Loro->SQL create never writes: {params:?}"
+        );
+    }
+
+    #[test]
+    fn block_diff_params_covers_every_declared_column_that_changed() {
+        let params = block_diff_params(&populated(1), &populated(2));
+        // `id` names the row and `created_at` never changes after a create.
+        assert_eq!(
+            uncovered(&params, &["created_at"]),
+            Vec::<&str>::new(),
+            "declared block columns the Loro->SQL update never writes: {params:?}"
+        );
+    }
 }
 
 #[cfg(test)]

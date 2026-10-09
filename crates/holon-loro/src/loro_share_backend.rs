@@ -8601,7 +8601,7 @@ mod tests {
 
     fn page_id(answer: holon_core::OwningPage) -> String {
         match answer {
-            holon_core::OwningPage::Page(p) => p.block.id.to_string(),
+            holon_core::OwningPage::Page(p) => p.id.to_string(),
             other => panic!("expected a page, got {other:?}"),
         }
     }

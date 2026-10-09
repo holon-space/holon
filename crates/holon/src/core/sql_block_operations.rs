@@ -148,8 +148,8 @@ impl SqlBlockOperations {
         authority: &dyn WriteAuthorityReads,
         id: &holon_api::EntityUri,
     ) -> Result<Option<Block>> {
-        if let Some(stored) = authority.block(id).await? {
-            return Ok(Some(stored.block));
+        if let Some(block) = authority.block(id).await? {
+            return Ok(Some(block));
         }
         match self.get_by_id(id.as_str()).await? {
             Some(_) => Err(BlockNotInWriteAuthority::new(id.clone(), ProjectionRead::Holds).into()),
@@ -445,7 +445,6 @@ impl BlockDataSourceHelpers<Block> for SqlBlockOperations {
             .ok_or_else(|| format!("the write authority holds {id} but no subtree at it"))?
             .into_iter()
             .skip(1)
-            .map(|stored| stored.block)
             .collect())
     }
 
@@ -532,8 +531,7 @@ async fn authority_block(
     Ok(authority
         .block(id)
         .await?
-        .ok_or_else(|| format!("the write authority holds no block {id}"))?
-        .block)
+        .ok_or_else(|| format!("the write authority holds no block {id}"))?)
 }
 
 impl BlockOperations<Block> for SqlBlockOperations {
@@ -1568,20 +1566,16 @@ mod tests {
         async fn block_is_page(&self, _: &EntityUri) -> holon_core::Result<bool> {
             Ok(false)
         }
-        async fn block(
-            &self,
-            id: &EntityUri,
-        ) -> holon_core::Result<Option<holon_api::StoredBlock>> {
-            Ok(self.parents.get(id).map(|parent| holon_api::StoredBlock {
-                block: Block::new_text(id.clone(), parent.clone(), ""),
-                block_type: None,
-                completed: None,
-            }))
+        async fn block(&self, id: &EntityUri) -> holon_core::Result<Option<holon_api::Block>> {
+            Ok(self
+                .parents
+                .get(id)
+                .map(|parent| Block::new_text(id.clone(), parent.clone(), "")))
         }
         async fn subtree(
             &self,
             root: &EntityUri,
-        ) -> holon_core::Result<Option<Vec<holon_api::StoredBlock>>> {
+        ) -> holon_core::Result<Option<Vec<holon_api::Block>>> {
             if !self.parents.contains_key(root) {
                 return Ok(None);
             }
