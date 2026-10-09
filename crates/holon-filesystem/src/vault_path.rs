@@ -30,6 +30,40 @@ impl PathCollisionKey {
     }
 }
 
+/// Why the files `a` and `b` name one page, as a sentence: a page's name
+/// chain drops the extension and compares titles by
+/// [`holon_api::PageTitleKey`], and this names which of those differences the
+/// two paths actually have.
+pub fn why_two_files_name_one_page(a: &Path, b: &Path) -> String {
+    let extension = a.extension() != b.extension();
+    let stem = |p: &Path| p.with_extension("").to_string_lossy().into_owned();
+    let Some(spelling) = holon_api::SpellingDifference::between(&stem(a), &stem(b)) else {
+        return format!(
+            "{} and {} name one page by their name chains",
+            a.display(),
+            b.display()
+        );
+    };
+    let differ = match (extension, spelling.to_string().as_str()) {
+        (true, "nothing") => "only in their extension".to_string(),
+        (true, d) => format!("only in their extension and in {d}"),
+        (false, d) => format!("only in {d}"),
+    };
+    let mut why = format!(
+        "{} and {} differ {differ}; a page name drops the extension and compares titles up to \
+         case, Unicode normalization and spacing",
+        a.display(),
+        b.display()
+    );
+    if spelling.spacing {
+        why.push_str(
+            ". Page identity trims a title and collapses its runs of whitespace, as a page id \
+             does, so the two files name ONE page although the file system keeps them apart",
+        );
+    }
+    why
+}
+
 /// A write-back target PROVEN to be a strict descendant of the vault root.
 ///
 /// The invariant is established once, at construction; a value of this type is

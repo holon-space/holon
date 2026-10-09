@@ -986,3 +986,61 @@ async fn a_file_adopting_a_page_of_another_spelling_is_disclosed() {
         "{file:?} silently took page \"My Notes\" as its home. WARN output was:\n{disclosed}"
     );
 }
+
+/// `My Notes.org` and `My  Notes.org` are two files on APFS, and one page:
+/// page identity collapses whitespace runs. The second file ingested is
+/// refused, and the refusal names that rule as its reason.
+#[tokio::test]
+async fn a_second_file_differing_only_in_spacing_is_refused_for_that_reason() {
+    for (first, second) in [
+        ("My Notes.org", "My  Notes.org"),
+        ("My  Notes.org", "My Notes.org"),
+    ] {
+        let f = Fixtures::seeded("My Notes");
+        let tmp = tempfile::tempdir().unwrap();
+        let root = vault_root(&tmp);
+        let dir = root.join(DIR_TITLE);
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in [first, second] {
+            std::fs::write(dir.join(name), format!("a line of {name}\n")).unwrap();
+        }
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            2,
+            "the host file system folded {first:?} and {second:?} into one file"
+        );
+        let mut controller = build_controller(&f, &root, None);
+        controller
+            .on_file_changed(&dir.join(first))
+            .await
+            .expect("the first file ingests");
+
+        let errors = CapturedErrors::default();
+        let outcome = {
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(errors.clone())
+                .with_max_level(tracing::Level::ERROR)
+                .finish();
+            let _guard = tracing::subscriber::set_default(subscriber);
+            controller
+                .on_file_changed(&dir.join(second))
+                .await
+                .expect("a refused file must not fail the sync loop")
+        };
+        assert!(
+            matches!(
+                outcome,
+                holon_filesystem::IngestOutcome::RefusedWhileClaimed(_)
+            ),
+            "{second:?} after {first:?}: {outcome:?}"
+        );
+        let disclosed = errors.text();
+        assert!(
+            disclosed.contains("differ only in spacing")
+                && disclosed.contains("collapses its runs of whitespace")
+                && !disclosed.contains("in their extension"),
+            "{second:?} after {first:?}: the refusal must say the names differ only in spacing \
+             and that page identity collapses whitespace. ERROR output was:\n{disclosed}"
+        );
+    }
+}

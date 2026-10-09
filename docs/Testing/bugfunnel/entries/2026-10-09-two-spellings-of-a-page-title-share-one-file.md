@@ -59,6 +59,11 @@ the two pages got two files. Model and SUT agreed, and every row stayed green.
   harness uses it. Row `two-spellings-of-a-page-link-name-one-page`
   (keystone.jsonl) was red on the round-4 code
   (lane-logs/recreate5/red-row-case.log).
+  Rows `a-page-with-a-body-reached-by-a-second-spelling-is-one-page` and
+  `cafe-composed-and-decomposed-name-one-page` were red on the round-5 rule
+  (whole content, `to_lowercase` fold; lane-logs/recreate8/red-row-*.log).
+  `RenamePage` and `CreatePageAtFreedPath` generate second spellings
+  (`holon_api::spelling::another_spelling`: case, NFD, `ß`/`SS`, spacing).
 - Product: one title rule, `holon_api::PageTitleKey` (title line, whitespace
   collapsed, `caseless_fold`). `find_by_parent_and_name` (all stores, through
   `holon_filesystem::page_at_position`), `page_slot`, `create_forcing_id`

@@ -52,6 +52,7 @@ use crate::BaseKey;
 use crate::BaseStore;
 use crate::FileSystem;
 use crate::SyncBaseStore;
+use crate::doc_homes::DocHomes;
 use crate::fs_port::StampedRead;
 use crate::fs_port::WriteBack;
 use crate::ingest_progress;
@@ -72,6 +73,7 @@ use crate::sync_ports::ThreeWayTextMerge;
 use crate::sync_ports::WritebackDisclosure;
 use crate::vault_path::PathCollisionKey;
 use crate::vault_path::VaultPath;
+use crate::vault_path::why_two_files_name_one_page;
 
 /// Bump when the org renderer changes in a way that alters the canonical
 /// projection bytes (formatting, property ordering, directive layout, …), OR
@@ -863,7 +865,7 @@ pub struct FileSyncController {
     /// DOUBLE-HOMED (`inv-every-page-has-its-own-file`). This map is
     /// mode-independent: the controller is the sole writer of page files, so it
     /// can always record where it put one.
-    doc_home: HashMap<EntityUri, CanonicalPath>,
+    doc_home: DocHomes,
 
     /// The read-only slice of `doc_home`, published upward. The controller is
     /// the only component that knows both a document and the file homing it,
@@ -1232,7 +1234,7 @@ impl FileSyncController {
             doc_manager,
             root_dir,
             alias_registrar: None,
-            doc_home: HashMap::new(),
+            doc_home: DocHomes::default(),
             read_only_docs: None,
             post_write_hook: None,
             image_data: None,
@@ -2793,13 +2795,12 @@ impl FileSyncController {
             return;
         }
         let detail = format!(
-            "SHARED PAGE NAME: {} and {} differ only in their extension, so both name the page \
-             '{doc_id}', and {} is NOT ingested — its blocks would merge into that page and the \
-             write-back of one file would carry the other's content. Rename one of the two \
-             files. The claimant is the file that held the page first: a recipe an earlier \
-             run recorded, else whichever file this session ingested first.",
-            claimed_by.display(),
-            refused.display(),
+            "SHARED PAGE NAME: {}. Both name the page '{doc_id}', and {} is NOT ingested — \
+             its blocks would merge into that page and the write-back of one file would carry \
+             the other's content. Rename one of the two files. The claimant is the file that \
+             held the page first: a recipe an earlier run recorded, else whichever file this \
+             session ingested first.",
+            why_two_files_name_one_page(claimed_by, refused),
             refused.display(),
         );
         tracing::error!(
@@ -3097,14 +3098,12 @@ impl FileSyncController {
         }
         self.last_projection_doc.remove(canonical);
         self.unstamped.remove(canonical);
+        let gone = self.doc_home.remove_at(canonical);
         if let Some(docs) = &self.read_only_docs {
-            for (doc_id, home) in &self.doc_home {
-                if home == canonical {
-                    docs.forget(doc_id);
-                }
+            for doc_id in &gone {
+                docs.forget(doc_id);
             }
         }
-        self.doc_home.retain(|_, home| home != canonical);
         self.block_home.retain(|_, home| home != canonical);
         let gone: Vec<EntityUri> = self
             .copies
@@ -3165,13 +3164,7 @@ impl FileSyncController {
     /// The diff `base` itself is keyed by document id, not path, so it needs no
     /// migration.
     fn migrate_file_state(&mut self, from: &CanonicalPath, to: &CanonicalPath) -> Result<()> {
-        let mut moved: Vec<EntityUri> = Vec::new();
-        for (doc_id, home) in self.doc_home.iter_mut() {
-            if home == from {
-                *home = to.clone();
-                moved.push(doc_id.clone());
-            }
-        }
+        let moved = self.doc_home.move_homes(from, to);
         if let Some(v) = self.persisted_read_only_blocks.remove(from) {
             self.persisted_read_only_blocks.insert(to.clone(), v);
         }
@@ -5453,14 +5446,18 @@ impl FileSyncController {
                     }
                     let stem = segment_refs.last().expect("a file names a segment");
                     if doc.title() != *stem {
+                        let differ =
+                            match holon_api::SpellingDifference::between(&doc.title(), stem) {
+                                Some(spelling) => format!("only in {spelling}"),
+                                None => "in more than spelling".to_string(),
+                            };
                         tracing::warn!(
                             page = %doc.id,
                             page_title = %doc.title(),
                             path = %path.display(),
                             "[FileSyncController] {} becomes the home of page {:?}, whose title \
-                             differs from the file name {stem:?} only in case, Unicode \
-                             normalization or spacing. A file with another such spelling is \
-                             refused as a second home of this page.",
+                             differs from the file name {stem:?} {differ}. A file with another \
+                             such spelling is refused as a second home of this page.",
                             path.display(),
                             doc.title()
                         );
@@ -10223,9 +10220,7 @@ impl FileSyncController {
     /// same file on a Mac even where this file system keeps two.
     fn refuse_contested_path(&self, doc_id: &EntityUri, path: &VaultPath) -> Result<()> {
         let key = PathCollisionKey::of(CanonicalPath::new(path.as_path()).as_path_buf());
-        if let Some((owner, home)) = self.doc_home.iter().find(|(other, home)| {
-            *other != doc_id && PathCollisionKey::of(home.as_path_buf()) == key
-        }) {
+        if let Some((owner, home)) = self.doc_home.other_at_key(doc_id, &key) {
             anyhow::bail!(
                 "AMBIGUOUS PAGE-FILE PATH: {doc_id} derives {} from its name chain, but \
                  {owner} already homes {}, the same file on a case- and \

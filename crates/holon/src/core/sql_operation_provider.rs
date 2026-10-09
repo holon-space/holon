@@ -2372,9 +2372,10 @@ impl SqlOperationProvider {
             }
         }
         if found.len() > 1 {
+            found.sort();
             return Err(format!(
-                "pages under {parent} titled {title:?} up to case and spacing: {found:?}; a \
-                 page position holds one page"
+                "pages under {parent} titled {title:?} up to case, Unicode normalization and \
+                 spacing: {found:?}; a page position holds one page"
             )
             .into());
         }

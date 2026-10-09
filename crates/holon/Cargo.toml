@@ -99,6 +99,7 @@ wasm-bindgen-futures = "0.4"
 web-time = "1"
 
 [dev-dependencies]
+holon-api = { workspace = true, features = ["test-helpers"] }
 holon-block-roundtrip-testing.workspace = true
 # TEST-ONLY, and it must stay that way: a production dep would make the
 # substrate read its own profile, and the profile would stop being an

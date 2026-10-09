@@ -179,12 +179,26 @@ impl BlockState {
         }
     }
 
-    /// Find a page block by its title (first line of content, e.g. "index").
+    /// The top-level page (a vault-root file's document, e.g. "index") at the
+    /// position `title` names: its title has `title`'s
+    /// [`holon_api::PageTitleKey`], as production's `page_at_position`.
     pub fn doc_uri_by_name(&self, title: &str) -> Option<EntityUri> {
-        self.blocks
-            .values()
-            .find(|b| b.is_page() && b.title() == title)
-            .map(|b| b.id.clone())
+        let key = holon_api::PageTitleKey::of(title);
+        let mut hits = self.blocks.values().filter(|b| {
+            b.is_page()
+                && (b.parent_id.is_no_parent() || b.parent_id.is_sentinel())
+                && holon_api::PageTitleKey::of(&b.title()) == key
+        });
+        let hit = hits.next().map(|b| b.id.clone());
+        if let Some(second) = hits.next() {
+            panic!(
+                "reference holds two top-level pages at the position of {title:?}: {hit:?} and \
+                 {} ({:?})",
+                second.id,
+                second.title()
+            );
+        }
+        hit
     }
 
     /// Get IDs of text blocks only (not source blocks).

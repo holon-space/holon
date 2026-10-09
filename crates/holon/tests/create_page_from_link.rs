@@ -459,17 +459,6 @@ fn decomposed(s: &str) -> String {
         .collect()
 }
 
-/// Another spelling of `title` with its [`holon_api::PageTitleKey`]: upper
-/// case (`ß` → `SS`, `ς` → `Σ`) and decomposed, else with a space doubled.
-fn variant_of(title: &str) -> String {
-    let upper = decomposed(&title.to_uppercase());
-    if upper != title {
-        upper
-    } else {
-        format!("{title} ").replacen(' ', "  ", 1)
-    }
-}
-
 /// The title and parent a `holder` of the page `title` under `parent` carries;
 /// `elsewhere` is another parent.
 fn holder_row(
@@ -482,9 +471,12 @@ fn holder_row(
     let (title, parent) = match holder {
         Holder::Renamed => (renamed_title, parent.clone()),
         Holder::Moved => (title.to_string(), elsewhere.clone()),
-        Holder::MovedVariant => (variant_of(title), elsewhere.clone()),
+        Holder::MovedVariant => (
+            holon_api::spelling::another_spelling(title),
+            elsewhere.clone(),
+        ),
         Holder::MovedPlaceholder => (String::new(), elsewhere.clone()),
-        Holder::Variant => (variant_of(title), parent.clone()),
+        Holder::Variant => (holon_api::spelling::another_spelling(title), parent.clone()),
         Holder::Placeholder => (String::new(), parent.clone()),
         Holder::Same => (title.to_string(), parent.clone()),
     };
@@ -654,7 +646,7 @@ async fn writer_mints_the_model_ids(
             holon_api::PageSlot::Create(id) | holon_api::PageSlot::Existing(id) => id,
         };
         let stored_title = match chain.last() {
-            Some(Holder::Variant) => variant_of(title),
+            Some(Holder::Variant) => holon_api::spelling::another_spelling(title),
             _ => title.clone(),
         };
         expected.push((id.as_str().to_string(), stored_title, parent.clone()));

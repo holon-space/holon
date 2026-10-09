@@ -2835,7 +2835,7 @@ impl ReferenceState {
         let hit = hits.next().map(|b| b.id.clone());
         assert!(
             hits.next().is_none(),
-            "reference holds two pages titled {title:?} up to case and spacing under {parent}"
+            "reference holds two pages titled {title:?} up to case, Unicode normalization and spacing under {parent}"
         );
         hit
     }
@@ -4068,6 +4068,11 @@ enum RefPageSlot {
 /// Whether a page whose `content` this is has `title`: its first line and
 /// `title` are equal once whitespace runs are collapsed, the ends trimmed,
 /// and both are folded as APFS folds a file name.
+///
+/// The fold is the SUT's own [`holon_api::caseless_fold`], so no keystone
+/// invariant can see a defect inside it. Its external oracle is the host file
+/// system: `holon-filesystem/tests/path_collision_key_matches_the_host.rs` and
+/// `in_memory::tests::a_case_insensitive_store_folds_like_apfs`.
 fn same_page_title(content: &str, title: &str) -> bool {
     let fold =
         |s: &str| holon_api::caseless_fold(&s.split_whitespace().collect::<Vec<_>>().join(" "));

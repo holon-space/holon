@@ -81,6 +81,8 @@ pub mod row_source;
 pub mod share_props;
 pub mod sharing;
 pub mod spawner;
+#[cfg(feature = "test-helpers")]
+pub mod spelling;
 pub mod storage_error;
 pub mod streaming;
 pub mod template;
@@ -140,6 +142,7 @@ pub use identity_recognition::page_slot;
 pub use identity_recognition::recognize_derived_id;
 pub use identity_recognition::sanitize_page_title;
 pub use link_parser::PageTitleKey;
+pub use link_parser::SpellingDifference;
 pub use operation_engine::Delivery;
 pub use operation_engine::OpOrigin;
 pub use operation_engine::OpOutcome;

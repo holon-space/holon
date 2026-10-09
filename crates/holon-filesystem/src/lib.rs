@@ -18,6 +18,8 @@
 pub mod change_source;
 #[cfg(all(feature = "crash-injection", not(target_arch = "wasm32")))]
 pub mod crash_injection;
+#[cfg(not(target_arch = "wasm32"))]
+mod doc_homes;
 pub mod error;
 pub mod file;
 #[cfg(not(target_arch = "wasm32"))]

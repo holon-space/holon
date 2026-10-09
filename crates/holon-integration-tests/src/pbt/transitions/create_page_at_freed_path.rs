@@ -25,6 +25,10 @@
 //! The generator only offers a path whose ancestor chain already resolves and
 //! whose LEAF does not, so the op mints exactly one page and the reference can
 //! predict the effect without mirroring the whole chain-creation search.
+//!
+//! It also offers an existing page's path with its leaf respelled (case,
+//! Unicode normalization, spacing): one title, so the op must reach that page
+//! and mint nothing (PageIdentityDeterminism.md §5.3).
 
 use holon_api::link_parser::PageId;
 use holon_pbt_core::TransitionFactory;
@@ -63,27 +67,58 @@ fn candidates<R: RefPageIdentity>(state: &R) -> Vec<String> {
     state
         .freed_page_paths()
         .into_iter()
-        .filter(|path| {
-            let segments: Vec<&str> = path.split('/').map(str::trim).collect();
-            if segments.iter().any(|s| s.is_empty()) || PageId::for_path(path).is_err() {
-                return false;
-            }
-            let mut accumulated = String::new();
-            for (i, seg) in segments.iter().enumerate() {
-                let hint = if i == 0 {
-                    (*seg).to_string()
-                } else {
-                    format!("{accumulated}/{seg}")
-                };
-                let is_leaf = i + 1 == segments.len();
-                if state.ref_resolve_page_name(&hint).is_some() == is_leaf {
-                    return false;
-                }
-                accumulated = hint;
-            }
-            true
-        })
+        .filter(|path| op_reaches_only_the_leaf(state, path))
         .collect()
+}
+
+/// The path of each page under a page, its leaf in another spelling
+/// (`holon_api::spelling::another_spelling`): a link that names an existing
+/// page by a spelling its title-only `resolve_page_name` misses, so the op
+/// must find the page at its position and mint nothing.
+fn respelled<R: RefBlockTree + RefPageIdentity>(state: &R) -> Vec<String> {
+    let mut out: Vec<String> = state
+        .all_non_seed_block_ids()
+        .into_iter()
+        .filter(|id| state.is_page_block(id))
+        .filter(|id| {
+            state
+                .parent_of(id)
+                .is_some_and(|parent| state.is_page_block(&parent))
+        })
+        .filter_map(|id| state.page_path_of_ref(&id))
+        .filter_map(|path| {
+            let (prefix, leaf) = path.rsplit_once('/')?;
+            Some(format!(
+                "{prefix}/{}",
+                holon_api::spelling::another_spelling(leaf)
+            ))
+        })
+        .filter(|path| op_reaches_only_the_leaf(state, path))
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn op_reaches_only_the_leaf<R: RefPageIdentity>(state: &R, path: &str) -> bool {
+    let segments: Vec<&str> = path.split('/').map(str::trim).collect();
+    if segments.iter().any(|s| s.is_empty()) || PageId::for_path(path).is_err() {
+        return false;
+    }
+    let mut accumulated = String::new();
+    for (i, seg) in segments.iter().enumerate() {
+        let hint = if i == 0 {
+            (*seg).to_string()
+        } else {
+            format!("{accumulated}/{seg}")
+        };
+        let is_leaf = i + 1 == segments.len();
+        if state.ref_resolve_page_name(&hint).is_some() == is_leaf {
+            return false;
+        }
+        accumulated = hint;
+    }
+    true
 }
 
 impl<R: RefLifecycle + RefBlockTree + RefPageIdentity> TransitionFactory<R>
@@ -96,22 +131,24 @@ impl<R: RefLifecycle + RefBlockTree + RefPageIdentity> TransitionFactory<R>
     type Reason = Reason;
 
     fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
-        let candidates = candidates(state);
+        let freed = candidates(state);
+        // Weight 3 for a freed path: the pool is only ever non-empty in the
+        // narrow window after a rename, and the transition exists to be drawn
+        // inside it. A respelling of an existing page is always on offer.
+        let weight = if freed.is_empty() { 1 } else { 3 };
+        let paths: Vec<String> = freed.into_iter().chain(respelled(state)).collect();
         let checks: Vec<Validated<(), Reason>> = vec![
             check(state.app_started(), Reason::AppNotStarted),
-            check(!candidates.is_empty(), Reason::PreconditionFailed),
+            check(!paths.is_empty(), Reason::PreconditionFailed),
         ];
         checks
             .into_iter()
             .collect::<Validated<Vec<()>, _>>()
             .map(|_| {
-                let strat = prop::sample::select(candidates)
+                let strat = prop::sample::select(paths)
                     .prop_map(|path| CreatePageAtFreedPath { path })
                     .boxed();
-                // Weight 3: the pool is only ever non-empty in the narrow window
-                // after a rename, and the whole point of the transition is to be
-                // drawn inside it.
-                (3, strat)
+                (weight, strat)
             })
     }
 }
@@ -123,7 +160,7 @@ impl<R: RefLifecycle + RefBlockTree + RefPageIdentity> TransitionRef<R> for Crea
         let checks: Vec<Validated<(), Reason>> = vec![
             check(state.app_started(), Reason::AppNotStarted),
             check(
-                candidates(state).contains(&self.path),
+                candidates(state).contains(&self.path) || respelled(state).contains(&self.path),
                 Reason::PreconditionFailed,
             ),
         ];

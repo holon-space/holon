@@ -230,7 +230,12 @@ existing file to its stored spelling. `InMemoryFileSystem` with
 `PathCase::Insensitive`, the keystone's file system, folds with the same
 function. A file without an `#+ID` whose name spells an existing page's title
 differently (a doubled space: two files on APFS) becomes that page's home
-with a `warn!`; a second file of that page is refused as a second home.
+with a `warn!`; a second file of that page is refused as a second home, and
+its content is NOT ingested. The refusal names why the two files name one page
+(`holon_api::SpellingDifference`: case, Unicode normalization, spacing, or the
+extension a name chain drops). Spacing is the one difference APFS keeps apart:
+page identity trims a title and collapses whitespace runs, as a page id does,
+so `My Notes.org` and `My  Notes.org` are two files and one page.
 
 Link resolution is a different rule. `SqlOperationProvider::resolve_page_name`
 (block_links rows and the first lookup of a link click) matches the leaf title

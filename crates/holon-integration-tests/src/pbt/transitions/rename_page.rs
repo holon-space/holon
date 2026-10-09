@@ -55,7 +55,19 @@ pub struct RenamePage {
 /// the title it drew. The dotted coverage is therefore DETERMINISTIC — the
 /// hand-authored cases `page-renamed-to-a-dotted-title-rehomes` and
 /// `dotted-page-title-owns-its-own-file` — not a lucky draw.
-const TITLE_POOL: [&str; 4] = ["Renamed", "Retitled", "Moved", "Renamed2"];
+///
+/// `Café` and `Straße` carry the spellings ASCII cannot: a decomposed accent
+/// and a fold that changes length. A page is also renamed to another spelling
+/// of its own title (`holon_api::spelling::another_spelling`), and
+/// `CreatePageAtFreedPath` links to such spellings of existing pages.
+const TITLE_POOL: [&str; 6] = [
+    "Renamed",
+    "Retitled",
+    "Moved",
+    "Renamed2",
+    "Caf\u{e9}",
+    "Stra\u{df}e",
+];
 
 /// Pages that may be renamed:
 ///
@@ -89,15 +101,26 @@ fn candidates<R: RefBlockTree + RefPageIdentity>(state: &R) -> Vec<EntityUri> {
         .collect()
 }
 
-/// Titles from [`TITLE_POOL`] that no page currently carries. A title already
-/// in use would make the backend's title-only `resolve_page_name` ambiguous,
-/// and the reference would have to guess which page a later link resolves to.
-fn free_titles<R: RefPageIdentity>(state: &R) -> Vec<String> {
-    let taken = state.page_titles();
+/// Titles `page_id` may take: those from [`TITLE_POOL`] whose
+/// [`holon_api::PageTitleKey`] no page carries, and another spelling of its
+/// own title. A title another page holds would make the backend's title-only
+/// `resolve_page_name` ambiguous, and the reference would have to guess which
+/// page a later link resolves to.
+fn titles_for<R: RefBlockTree + RefPageIdentity>(state: &R, page_id: &EntityUri) -> Vec<String> {
+    let taken: Vec<holon_api::PageTitleKey> = state
+        .page_titles()
+        .iter()
+        .map(|t| holon_api::PageTitleKey::of(t))
+        .collect();
+    let own = state
+        .block_content(page_id)
+        .and_then(|content| content.lines().next())
+        .expect("a rename candidate is a titled page");
     TITLE_POOL
         .iter()
         .map(|t| (*t).to_string())
-        .filter(|t| !taken.contains(t))
+        .filter(|t| !taken.contains(&holon_api::PageTitleKey::of(t)))
+        .chain(std::iter::once(holon_api::spelling::another_spelling(own)))
         .collect()
 }
 
@@ -109,22 +132,28 @@ impl<R: RefLifecycle + RefBlockTree + RefPageIdentity> TransitionFactory<R> for 
     type Reason = Reason;
 
     fn weighted_generator(state: &R) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
-        let candidates = candidates(state);
-        let titles = free_titles(state);
+        let choices: Vec<(EntityUri, Vec<String>)> = candidates(state)
+            .into_iter()
+            .map(|id| {
+                let titles = titles_for(state, &id);
+                (id, titles)
+            })
+            .collect();
         let checks: Vec<Validated<(), Reason>> = vec![
             check(state.app_started(), Reason::AppNotStarted),
-            check(!candidates.is_empty(), Reason::PreconditionFailed),
-            check(!titles.is_empty(), Reason::PreconditionFailed),
+            check(!choices.is_empty(), Reason::PreconditionFailed),
         ];
         checks
             .into_iter()
             .collect::<Validated<Vec<()>, _>>()
             .map(|_| {
-                let strat = (
-                    prop::sample::select(candidates),
-                    prop::sample::select(titles),
-                )
-                    .prop_map(|(page_id, new_title)| RenamePage { page_id, new_title })
+                let strat = prop::sample::select(choices)
+                    .prop_flat_map(|(page_id, titles)| {
+                        prop::sample::select(titles).prop_map(move |new_title| RenamePage {
+                            page_id: page_id.clone(),
+                            new_title,
+                        })
+                    })
                     .boxed();
                 // Weight 2: this transition is the ONLY producer of freed page
                 // paths, and `CreatePageAtFreedPath` has nothing to draw from

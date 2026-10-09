@@ -17,6 +17,8 @@ ignored = ["workspace-hack"]
 # Enabled only by `holon-integration-tests`, whose SLO gate rungs are the one
 # caller.
 slo-fault-injection = []
+# `spelling::another_spelling`, for test generators.
+test-helpers = []
 
 [dependencies]
 anyhow.workspace = true

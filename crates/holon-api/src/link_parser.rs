@@ -332,6 +332,53 @@ impl PageTitleKey {
     }
 }
 
+/// How two spellings of one [`PageTitleKey`] differ — the reason a
+/// disclosure gives for two names collapsing onto one page. `spacing` is the
+/// one difference APFS does not fold: two files differing only in it are two
+/// files on disk that still name one page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpellingDifference {
+    pub case: bool,
+    pub normalization: bool,
+    pub spacing: bool,
+}
+
+impl SpellingDifference {
+    /// `None` when `a` and `b` have different keys: they are not two
+    /// spellings of one title.
+    pub fn between(a: &str, b: &str) -> Option<Self> {
+        if PageTitleKey::of(a) != PageTitleKey::of(b) {
+            return None;
+        }
+        let (wa, wb) = (collapse_whitespace(a.trim()), collapse_whitespace(b.trim()));
+        Some(SpellingDifference {
+            case: crate::caseless::nfc(&wa) != crate::caseless::nfc(&wb),
+            normalization: crate::caseless::case_fold(&wa) != crate::caseless::case_fold(&wb),
+            spacing: crate::caseless_fold(a) != crate::caseless_fold(b),
+        })
+    }
+}
+
+/// The differences joined for a sentence: `case, Unicode normalization and
+/// spacing`.
+impl std::fmt::Display for SpellingDifference {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let parts: Vec<&str> = [
+            (self.case, "case"),
+            (self.normalization, "Unicode normalization"),
+            (self.spacing, "spacing"),
+        ]
+        .into_iter()
+        .filter_map(|(on, name)| on.then_some(name))
+        .collect();
+        match parts.as_slice() {
+            [] => f.write_str("nothing"),
+            [one] => f.write_str(one),
+            [init @ .., last] => write!(f, "{} and {last}", init.join(", ")),
+        }
+    }
+}
+
 /// Compute a deterministic EntityUri from a scheme and normalized path.
 ///
 /// Uses blake3 to hash the normalized path, then formats as a UUID-style string
@@ -1056,5 +1103,26 @@ mod tests {
         // empty leaves fail loud.
         assert!(PageId::for_page_under("a//b", "leaf").is_err());
         assert!(PageId::for_page_under("Home", "   ").is_err());
+    }
+
+    #[test]
+    fn a_spelling_difference_names_what_differs() {
+        let named = |a: &str, b: &str| {
+            SpellingDifference::between(a, b)
+                .unwrap_or_else(|| panic!("{a:?} / {b:?} share no key"))
+                .to_string()
+        };
+        assert_eq!(named("My Notes", "My Notes"), "nothing");
+        assert_eq!(named("My Notes", "MY NOTES"), "case");
+        assert_eq!(named("Stra\u{df}e", "STRASSE"), "case");
+        assert_eq!(named("caf\u{e9}", "cafe\u{301}"), "Unicode normalization");
+        assert_eq!(named("My Notes", "My  Notes"), "spacing");
+        assert_eq!(named("My Notes", "My Notes "), "spacing");
+        assert_eq!(named("My Notes", "my\u{a0}notes"), "case and spacing");
+        assert_eq!(
+            named("Caf\u{e9} Notes", "cafe\u{301}  notes"),
+            "case, Unicode normalization and spacing"
+        );
+        assert_eq!(SpellingDifference::between("My Notes", "Other"), None);
     }
 }

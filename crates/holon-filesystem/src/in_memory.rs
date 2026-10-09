@@ -14,6 +14,7 @@
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::collections::HashMap;
 use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
@@ -66,6 +67,10 @@ struct State {
     /// Armed by [`InMemoryFileSystem::arm_write_churn`].
     churning: BTreeSet<PathBuf>,
     case: PathCase,
+    /// [`PathCase::Insensitive`] only: every file and directory, keyed by its
+    /// parent's stored spelling and the [`holon_api::caseless_fold`] of its
+    /// name, so [`State::spelled`] folds the path it is given, not the store.
+    folded: HashMap<(PathBuf, String), PathBuf>,
 }
 
 /// Whether two spellings of a path that differ only in letter case name one
@@ -89,22 +94,51 @@ impl State {
         }
         let mut out = PathBuf::new();
         for comp in path.components() {
-            let wanted = holon_api::caseless_fold(&comp.as_os_str().to_string_lossy());
-            let existing = self
-                .dirs
-                .iter()
-                .chain(self.files.keys())
-                .find(|entry| {
-                    entry.parent() == Some(out.as_path())
-                        && entry.file_name().is_some_and(|name| {
-                            holon_api::caseless_fold(&name.to_string_lossy()) == wanted
-                        })
-                })
-                .cloned();
-            out = existing.unwrap_or_else(|| out.join(comp.as_os_str()));
+            let key = (out.clone(), fold_name(comp.as_os_str()));
+            out = match self.folded.get(&key) {
+                Some(existing) => existing.clone(),
+                None => out.join(comp.as_os_str()),
+            };
         }
         out
     }
+
+    fn folded_key(&self, path: &Path) -> Option<(PathBuf, String)> {
+        if self.case == PathCase::Sensitive {
+            return None;
+        }
+        Some((path.parent()?.to_path_buf(), fold_name(path.file_name()?)))
+    }
+
+    fn insert_dir(&mut self, path: PathBuf) {
+        if let Some(key) = self.folded_key(&path) {
+            self.folded.insert(key, path.clone());
+        }
+        self.dirs.insert(path);
+    }
+
+    fn insert_file(&mut self, path: PathBuf, entry: FileEntry) {
+        if let Some(key) = self.folded_key(&path) {
+            self.folded.insert(key, path.clone());
+        }
+        self.files.insert(path, entry);
+    }
+
+    fn remove_file_entry(&mut self, path: &Path) -> Option<FileEntry> {
+        let entry = self.files.remove(path)?;
+        if let Some(key) = self.folded_key(path) {
+            if self.folded.get(&key).is_some_and(|stored| stored == path)
+                && !self.dirs.contains(path)
+            {
+                self.folded.remove(&key);
+            }
+        }
+        Some(entry)
+    }
+}
+
+fn fold_name(name: &std::ffi::OsStr) -> String {
+    holon_api::caseless_fold(&name.to_string_lossy())
 }
 
 pub struct InMemoryFileSystem {
@@ -139,6 +173,7 @@ impl InMemoryFileSystem {
                 fail_next_write_commit: false,
                 churning: BTreeSet::new(),
                 case,
+                folded: HashMap::new(),
             }),
             tx,
             scans_held: watch::Sender::new(false),
@@ -273,7 +308,7 @@ impl InMemoryFileSystem {
         let mut cur = PathBuf::new();
         for comp in path.components() {
             cur = st.spelled(&cur.join(comp.as_os_str()));
-            st.dirs.insert(cur.clone());
+            st.insert_dir(cur.clone());
         }
     }
 
@@ -284,7 +319,7 @@ impl InMemoryFileSystem {
         let (path, seq) = {
             let mut st = self.lock();
             let path = st.spelled(&normalize(path));
-            if st.files.remove(&path).is_none() {
+            if st.remove_file_entry(&path).is_none() {
                 return Err(not_found(&path));
             }
             st.churning.remove(&path);
@@ -333,7 +368,7 @@ impl InMemoryFileSystem {
                 }
                 None => return Err(not_found(&to)),
             }
-            let Some(entry) = st.files.remove(&from) else {
+            let Some(entry) = st.remove_file_entry(&from) else {
                 return Err(not_found(&from));
             };
             if st.churning.remove(&from) {
@@ -341,7 +376,7 @@ impl InMemoryFileSystem {
             }
             st.clock += 1;
             let tick = st.clock;
-            st.files.insert(
+            st.insert_file(
                 to.clone(),
                 FileEntry {
                     bytes: entry.bytes,
@@ -409,7 +444,7 @@ impl InMemoryFileSystem {
             // The temp side of the real adapter's temp+rename, so a test can
             // fail the replacement at the commit boundary and see the target
             // still hold its complete previous bytes (ADR 0030 D3.1).
-            st.files.insert(
+            st.insert_file(
                 temp.clone(),
                 FileEntry {
                     bytes: contents.to_vec(),
@@ -418,14 +453,16 @@ impl InMemoryFileSystem {
             );
             if st.fail_next_write_commit {
                 st.fail_next_write_commit = false;
-                st.files.remove(&temp);
+                st.remove_file_entry(&temp);
                 return Err(std::io::Error::other(format!(
                     "injected failure between temp write and rename (in-memory): {}",
                     path.display()
                 )));
             }
-            let entry = st.files.remove(&temp).expect("temp entry just inserted");
-            st.files.insert(path.clone(), entry);
+            let entry = st
+                .remove_file_entry(&temp)
+                .expect("temp entry just inserted");
+            st.insert_file(path.clone(), entry);
             // `Create`, not `Modify`, whether or not the target existed: an
             // atomic replacement reaches the real watcher as the `To` half of a
             // rename, which `RenamePairing` classifies as a Create. A double
