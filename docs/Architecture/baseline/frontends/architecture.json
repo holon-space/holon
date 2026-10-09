@@ -717,6 +717,9 @@
                 "name": "arrow_nav_windowed_pbt.rs"
               },
               {
+                "name": "banner_conditions_draw_as_toasts_windowed.rs"
+              },
+              {
                 "name": "block_focus_keeps_outline_windowed.rs"
               },
               {
@@ -727,6 +730,9 @@
               },
               {
                 "name": "cmd_enter_chord_dispatch.rs"
+              },
+              {
+                "name": "collection_gap_windowed.rs"
               },
               {
                 "name": "condition_bus_container.rs"
@@ -837,6 +843,9 @@
                 "name": "main_panel_scroll.rs"
               },
               {
+                "name": "mcp_debug_services_wiring.rs"
+              },
+              {
                 "name": "mcp_scroll_fail_loud.rs"
               },
               {
@@ -874,6 +883,9 @@
               },
               {
                 "name": "panel_scroll_spike.rs"
+              },
+              {
+                "name": "panic_records_seen_after_a_drawn_frame_windowed.rs"
               },
               {
                 "name": "plain_path_scroll.rs"
@@ -1009,6 +1021,9 @@
               },
               {
                 "name": "undo_survives_blur_windowed.rs"
+              },
+              {
+                "name": "vault_loading_placeholder_windowed.rs"
               },
               {
                 "name": "window_chord_reentrant_dispatch.rs"
@@ -1207,6 +1222,9 @@
                 "name": "server.rs"
               },
               {
+                "name": "standalone.rs"
+              },
+              {
                 "name": "telemetry.rs"
               },
               {
@@ -1376,7 +1394,13 @@
                 "name": "screenshot_painter.rs"
               },
               {
+                "name": "stderr_restore_keeps_the_panic_record.rs"
+              },
+              {
                 "name": "stop_signals_quit_through_the_session_shutdown.rs"
+              },
+              {
+                "name": "tui_module_panic_bus.rs"
               },
               {
                 "name": "tui_ui_pbt.rs"

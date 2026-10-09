@@ -78,6 +78,9 @@
             "path": "holon/examples",
             "files": [
               {
+                "name": "cycle_guard_ivm_probe.rs"
+              },
+              {
                 "name": "gql_join_table_resolver_h4.rs"
               },
               {
@@ -213,6 +216,9 @@
                     "name": "dispatch_hold.rs"
                   },
                   {
+                    "name": "entity_search.rs"
+                  },
+                  {
                     "name": "guard_world.rs"
                   },
                   {
@@ -223,6 +229,9 @@
                   },
                   {
                     "name": "holon_service.rs"
+                  },
+                  {
+                    "name": "layout_seed.rs"
                   },
                   {
                     "name": "mod.rs"
@@ -244,6 +253,9 @@
                   },
                   {
                     "name": "rule_status.rs"
+                  },
+                  {
+                    "name": "running_write.rs"
                   },
                   {
                     "name": "task_vocabulary_source.rs"
@@ -470,6 +482,9 @@
                     "name": "IMPLEMENTATION_SUMMARY.md"
                   },
                   {
+                    "name": "database_stuck_guard.rs"
+                  },
+                  {
                     "name": "e2e_test_helpers.rs"
                   },
                   {
@@ -569,6 +584,9 @@
                     "name": "navigation_focus_refuses_unresolvable_target.rs"
                   },
                   {
+                    "name": "recursive_cte_over_block_matview.rs"
+                  },
+                  {
                     "name": "tabs_close_cursor_follow.rs"
                   },
                   {
@@ -648,6 +666,9 @@
                 "name": "cycle_task_state_vocabulary.rs"
               },
               {
+                "name": "decision_shape_claims.rs"
+              },
+              {
                 "name": "dispatcher_arc_schema_gate.rs"
               },
               {
@@ -708,7 +729,13 @@
                 "name": "loro_binary_benchmark.rs"
               },
               {
+                "name": "malformed_reference_engine_route.rs"
+              },
+              {
                 "name": "merge_blocks_in_shared_pages.rs"
+              },
+              {
+                "name": "no_user_value_reaches_a_log_span_or_error.rs"
               },
               {
                 "name": "petri_e2e_pbt.rs"
@@ -729,6 +756,12 @@
                 "name": "schema_catalog_follows_service_ddl.rs"
               },
               {
+                "name": "shape_gate_cost.rs"
+              },
+              {
+                "name": "shape_gate_source_channel.rs"
+              },
+              {
                 "name": "share_mount_tags_e2e.rs"
               },
               {
@@ -738,7 +771,13 @@
                 "name": "shopping_authoring_door_e2e.rs"
               },
               {
+                "name": "sql_write_authority_previous_sibling.rs"
+              },
+              {
                 "name": "stress_tests.rs"
+              },
+              {
+                "name": "stuck_actor_reaches_condition_bus.rs"
               },
               {
                 "name": "sync_import_read_only_adoption.rs"
@@ -751,6 +790,12 @@
               },
               {
                 "name": "turso_block_query_source_round_trip_pbt.rs"
+              },
+              {
+                "name": "typing_channel_claims.rs"
+              },
+              {
+                "name": "undo_at_the_top_level.rs"
               },
               {
                 "name": "undo_compound_interleave.rs"
@@ -1028,6 +1073,12 @@
                 "name": "action_dsl.rs"
               },
               {
+                "name": "admission.rs"
+              },
+              {
+                "name": "admission_nest_tests.rs"
+              },
+              {
                 "name": "auth.rs"
               },
               {
@@ -1097,6 +1148,9 @@
                 "name": "entity_reference.rs"
               },
               {
+                "name": "entity_search.rs"
+              },
+              {
                 "name": "entity_uri.rs"
               },
               {
@@ -1163,6 +1217,9 @@
                 "name": "operation_engine.rs"
               },
               {
+                "name": "periodic.rs"
+              },
+              {
                 "name": "perspective.rs"
               },
               {
@@ -1226,6 +1283,9 @@
                 "name": "theme_token.rs"
               },
               {
+                "name": "type_services.rs"
+              },
+              {
                 "name": "types.rs"
               },
               {
@@ -1257,6 +1317,9 @@
               },
               {
                 "name": "decision_core_pbt.rs"
+              },
+              {
+                "name": "decision_text_totality_pbt.rs"
               },
               {
                 "name": "derived_field_dual_eval_pbt.rs"
@@ -1505,6 +1568,9 @@
                 "name": "database_rebuild_disclosure.rs"
               },
               {
+                "name": "deleted_vault_profile_releases_its_claim.rs"
+              },
+              {
                 "name": "doc_membership_page_boundary_below_root.rs"
               },
               {
@@ -1521,6 +1587,9 @@
               },
               {
                 "name": "in_memory_secret_backend_boot.rs"
+              },
+              {
+                "name": "ingest_refusals_group_by_format.rs"
               },
               {
                 "name": "integration_open_default_view_op.rs"
@@ -1598,7 +1667,13 @@
                 "name": "rehome_entity_op.rs"
               },
               {
+                "name": "root_slot_pending_while_seeding.rs"
+              },
+              {
                 "name": "search_deep_script_query_does_not_overflow.rs"
+              },
+              {
+                "name": "search_union_all_latency.rs"
               },
               {
                 "name": "seed_copy_on_write.rs"
@@ -1647,6 +1722,9 @@
               },
               {
                 "name": "undo_precondition_id_scheme.rs"
+              },
+              {
+                "name": "vault_file_delete_after_ingest.rs"
               },
               {
                 "name": "vault_lock.rs"
@@ -2020,6 +2098,18 @@
                 ]
               },
               {
+                "name": "shape_gate",
+                "path": "holon-core/src/shape_gate",
+                "files": [
+                  {
+                    "name": "decision.rs"
+                  },
+                  {
+                    "name": "sim.rs"
+                  }
+                ]
+              },
+              {
                 "name": "storage",
                 "path": "holon-core/src/storage",
                 "files": [
@@ -2106,6 +2196,9 @@
                 "name": "replica_state.rs"
               },
               {
+                "name": "shape_gate.rs"
+              },
+              {
                 "name": "sink_reader.rs"
               },
               {
@@ -2137,12 +2230,29 @@
           {
             "name": "tests",
             "path": "holon-core/tests",
+            "dirs": [
+              {
+                "name": "shape_gate",
+                "path": "holon-core/tests/shape_gate",
+                "files": [
+                  {
+                    "name": "claims.rs"
+                  }
+                ]
+              }
+            ],
             "files": [
               {
                 "name": "format_registry.rs"
               },
               {
                 "name": "live_data_entries_ordering_probe.rs"
+              },
+              {
+                "name": "private_field_owners.rs"
+              },
+              {
+                "name": "shape_gate.rs"
               }
             ]
           }
@@ -2337,6 +2447,12 @@
               },
               {
                 "name": "fs_port.rs"
+              },
+              {
+                "name": "identity_transfer.rs"
+              },
+              {
+                "name": "identity_transfer_tests.rs"
               },
               {
                 "name": "in_memory.rs"
@@ -2756,6 +2872,9 @@
                 "name": "operations.rs"
               },
               {
+                "name": "panic_record.rs"
+              },
+              {
                 "name": "param_collection.rs"
               },
               {
@@ -2835,9 +2954,29 @@
           {
             "name": "tests",
             "path": "holon-frontend/tests",
+            "dirs": [
+              {
+                "name": "shipped_sources",
+                "path": "holon-frontend/tests/shipped_sources",
+                "c4_level": "unknown",
+                "description": "Every render source Holon ships: the kitchen profiles, every `render:` in a yaml under `assets/default` and `assets/integrations`, every `#+BEGIN_SRC render` block of an org file there, as the org parser reads it, and the render DSL the Rust crates carry as strings.",
+                "pattern_status": "planned",
+                "content": "Every render source Holon ships: the kitchen profiles, every `render:` in a\nyaml under `assets/default` and `assets/integrations`, every\n`#+BEGIN_SRC render` block of an org file there, as the org parser reads it,\nand the render DSL the Rust crates carry as strings.",
+                "source_file": "holon-frontend/tests/shipped_sources/mod.rs",
+                "parent": "holon-frontend",
+                "files": [
+                  {
+                    "name": "mod.rs"
+                  }
+                ]
+              }
+            ],
             "files": [
               {
                 "name": "accordion.rs"
+              },
+              {
+                "name": "authored_builder_input_draws_error.rs"
               },
               {
                 "name": "bottom_dock.rs"
@@ -2852,10 +2991,16 @@
                 "name": "container_query_columns.rs"
               },
               {
+                "name": "default_assets_render_ready.rs"
+              },
+              {
                 "name": "divider.rs"
               },
               {
                 "name": "drawer_open_state.rs"
+              },
+              {
+                "name": "every_builder_survives_authored_args.rs"
               },
               {
                 "name": "inert_integration_disclosure.rs"
@@ -2870,7 +3015,16 @@
                 "name": "numeric_column_text.rs"
               },
               {
+                "name": "panic_record_boot_loop.rs"
+              },
+              {
+                "name": "panic_record_child_process.rs"
+              },
+              {
                 "name": "pending_question_render.rs"
+              },
+              {
+                "name": "render_binary_op_non_finite.rs"
               },
               {
                 "name": "render_spec_context_id.rs"
@@ -2886,6 +3040,9 @@
               },
               {
                 "name": "settings_secret_field_render.rs"
+              },
+              {
+                "name": "shipped_profile_render.rs"
               },
               {
                 "name": "sidebar_creation_slot.rs"
@@ -2904,6 +3061,9 @@
               },
               {
                 "name": "text_style_kwarg.rs"
+              },
+              {
+                "name": "view_mode_switcher_templates.rs"
               }
             ]
           }
@@ -3180,6 +3340,9 @@
                             "name": "birth_contract.rs"
                           },
                           {
+                            "name": "block_render_matches_render_source.rs"
+                          },
+                          {
                             "name": "boundary_respected.rs"
                           },
                           {
@@ -3213,6 +3376,9 @@
                             "name": "embedded_page_collapsed_lazy.rs"
                           },
                           {
+                            "name": "engine_views_match_reference.rs"
+                          },
+                          {
                             "name": "every_page_has_its_own_file.rs"
                           },
                           {
@@ -3241,6 +3407,12 @@
                           },
                           {
                             "name": "inline_row_mount_present.rs"
+                          },
+                          {
+                            "name": "integration_op_routable_or_refused.rs"
+                          },
+                          {
+                            "name": "integration_operations_reach_profiles.rs"
                           },
                           {
                             "name": "journal_feed_viewport_lazy.rs"
@@ -3300,6 +3472,9 @@
                             "name": "observed_errors.rs"
                           },
                           {
+                            "name": "offered_ops_pass_the_write_tier.rs"
+                          },
+                          {
                             "name": "org_render_fixed_point.rs"
                           },
                           {
@@ -3319,6 +3494,12 @@
                           },
                           {
                             "name": "settle_budget.rs"
+                          },
+                          {
+                            "name": "shape_gate_refuses_illegal_writes.rs"
+                          },
+                          {
+                            "name": "shape_sim_matches_authority.rs"
                           },
                           {
                             "name": "share_mount_carries_page_identity.rs"
@@ -3349,6 +3530,9 @@
                           },
                           {
                             "name": "typed_matview_matches_ref.rs"
+                          },
+                          {
+                            "name": "typed_operations_reach_profiles.rs"
                           },
                           {
                             "name": "undo_redo_reference_heal.rs"
@@ -3411,6 +3595,9 @@
                       }
                     ],
                     "files": [
+                      {
+                        "name": "boot_fault.rs"
+                      },
                       {
                         "name": "boundary.rs"
                       },
@@ -3626,6 +3813,9 @@
                             "name": "embedded_page_collapsed_lazy.rs"
                           },
                           {
+                            "name": "engine_views_match_reference.rs"
+                          },
+                          {
                             "name": "every_page_has_its_own_file.rs"
                           },
                           {
@@ -3654,6 +3844,12 @@
                           },
                           {
                             "name": "inline_row_mount_present.rs"
+                          },
+                          {
+                            "name": "integration_op_routable_or_refused.rs"
+                          },
+                          {
+                            "name": "integration_operations_reach_profiles.rs"
                           },
                           {
                             "name": "journal_feed_viewport_lazy.rs"
@@ -3707,6 +3903,12 @@
                             "name": "no_write_outside_vault_root.rs"
                           },
                           {
+                            "name": "offered_ops_pass_the_write_tier.rs"
+                          },
+                          {
+                            "name": "operation_surfaces_agree.rs"
+                          },
+                          {
                             "name": "org_render_fixed_point.rs"
                           },
                           {
@@ -3722,7 +3924,16 @@
                             "name": "remote_list_mirror_matches_ref.rs"
                           },
                           {
+                            "name": "render_only_block_draws_its_render.rs"
+                          },
+                          {
                             "name": "settle_budget.rs"
+                          },
+                          {
+                            "name": "shape_gate_refuses_illegal_writes.rs"
+                          },
+                          {
+                            "name": "shape_sim_matches_authority.rs"
                           },
                           {
                             "name": "share_mount_carries_page_identity.rs"
@@ -3758,7 +3969,13 @@
                             "name": "typed_matview_matches_ref.rs"
                           },
                           {
+                            "name": "typed_operations_reach_profiles.rs"
+                          },
+                          {
                             "name": "undo_redo_reference_heal.rs"
+                          },
+                          {
+                            "name": "unparseable_render_is_error_node.rs"
                           },
                           {
                             "name": "value_fn_provider_arg_variance_13.rs"
@@ -3913,6 +4130,9 @@
                         "name": "focus.rs"
                       },
                       {
+                        "name": "integration_connect.rs"
+                      },
+                      {
                         "name": "layout.rs"
                       },
                       {
@@ -3932,6 +4152,12 @@
                       },
                       {
                         "name": "remote_list.rs"
+                      },
+                      {
+                        "name": "render_sources.rs"
+                      },
+                      {
+                        "name": "shape_edits.rs"
                       },
                       {
                         "name": "shared_view.rs"
@@ -3991,6 +4217,9 @@
                         "name": "apply_mutation.rs"
                       },
                       {
+                        "name": "arm_write_churn.rs"
+                      },
+                      {
                         "name": "arrow_navigate.rs"
                       },
                       {
@@ -4000,7 +4229,16 @@
                         "name": "attempt_read_only_edit.rs"
                       },
                       {
+                        "name": "author_malformed_render.rs"
+                      },
+                      {
+                        "name": "author_render_only_block.rs"
+                      },
+                      {
                         "name": "block_to_page.rs"
+                      },
+                      {
+                        "name": "break_ingested_recipe.rs"
                       },
                       {
                         "name": "bulk_external_add.rs"
@@ -4030,10 +4268,16 @@
                         "name": "declare_typed_schema.rs"
                       },
                       {
+                        "name": "delay_admissions.rs"
+                      },
+                      {
                         "name": "delete_backward.rs"
                       },
                       {
                         "name": "delete_document.rs"
+                      },
+                      {
+                        "name": "delete_headline_while_off.rs"
                       },
                       {
                         "name": "delete_line_from_file.rs"
@@ -4048,10 +4292,16 @@
                         "name": "delete_placement_record.rs"
                       },
                       {
+                        "name": "delete_refused_recipe.rs"
+                      },
+                      {
                         "name": "deliver_block_content.rs"
                       },
                       {
                         "name": "dense_projection_edit.rs"
+                      },
+                      {
+                        "name": "disarm_write_churn.rs"
                       },
                       {
                         "name": "dispatch_unschemed_block_id.rs"
@@ -4063,6 +4313,12 @@
                         "name": "edit_block_copy.rs"
                       },
                       {
+                        "name": "edit_decision_pair_held.rs"
+                      },
+                      {
+                        "name": "edit_decision_subtree.rs"
+                      },
+                      {
                         "name": "emit_mcp_data.rs"
                       },
                       {
@@ -4070,6 +4326,9 @@
                       },
                       {
                         "name": "expand_toggle.rs"
+                      },
+                      {
+                        "name": "external_line_edit.rs"
                       },
                       {
                         "name": "external_write_same_block_focused.rs"
@@ -4168,6 +4427,9 @@
                         "name": "reboot.rs"
                       },
                       {
+                        "name": "reboot_with_backlog_held.rs"
+                      },
+                      {
                         "name": "rebuild_views.rs"
                       },
                       {
@@ -4183,7 +4445,13 @@
                         "name": "rehome_entity.rs"
                       },
                       {
+                        "name": "release_backlog.rs"
+                      },
+                      {
                         "name": "release_held.rs"
+                      },
+                      {
+                        "name": "release_integration_peer.rs"
                       },
                       {
                         "name": "remote_list_sync.rs"
@@ -4196,6 +4464,12 @@
                       },
                       {
                         "name": "rename_page.rs"
+                      },
+                      {
+                        "name": "rename_refused_recipe.rs"
+                      },
+                      {
+                        "name": "save_refused_recipe.rs"
                       },
                       {
                         "name": "search.rs"
@@ -4231,6 +4505,9 @@
                         "name": "start_app.rs"
                       },
                       {
+                        "name": "structural_key_burst.rs"
+                      },
+                      {
                         "name": "switch_view.rs"
                       },
                       {
@@ -4249,6 +4526,9 @@
                         "name": "toggle_state.rs"
                       },
                       {
+                        "name": "touch_file.rs"
+                      },
+                      {
                         "name": "trigger_slash_command.rs"
                       },
                       {
@@ -4265,6 +4545,9 @@
                       },
                       {
                         "name": "write_org_file.rs"
+                      },
+                      {
+                        "name": "write_private_field_generically.rs"
                       }
                     ]
                   },
@@ -4320,6 +4603,9 @@
                   },
                   {
                     "name": "driver_input.rs"
+                  },
+                  {
+                    "name": "engine_views.rs"
                   },
                   {
                     "name": "file_adapter_state.rs"
@@ -4386,6 +4672,9 @@
                   },
                   {
                     "name": "run_result.rs"
+                  },
+                  {
+                    "name": "shape_state.rs"
                   },
                   {
                     "name": "sharing_state.rs"
@@ -4523,6 +4812,9 @@
                   },
                   {
                     "name": "boot_scan_bad_file_survives.rs"
+                  },
+                  {
+                    "name": "boot_seed_outcome.rs"
                   },
                   {
                     "name": "cold_boot_share_disclosure.rs"
@@ -4761,6 +5053,9 @@
                     "name": "integration_configure_button_visibility.rs"
                   },
                   {
+                    "name": "integration_connect_stall_blocks_boot.rs"
+                  },
+                  {
                     "name": "integration_state_boot_population.rs"
                   },
                   {
@@ -4779,6 +5074,9 @@
                     "name": "layout_bridge_smoke.rs"
                   },
                   {
+                    "name": "live_query_serve_failure_is_visible.rs"
+                  },
+                  {
                     "name": "local_ui_state_precedence.rs"
                   },
                   {
@@ -4795,6 +5093,12 @@
                   },
                   {
                     "name": "perspective_slot_resolution.rs"
+                  },
+                  {
+                    "name": "recursive_query_renders_descendants.rs"
+                  },
+                  {
+                    "name": "render_source_panels.rs"
                   },
                   {
                     "name": "sidebar_modifier_click_open_tab_probe.rs"
@@ -4819,6 +5123,15 @@
                   },
                   {
                     "name": "loro_create_persists_prod_session.rs"
+                  },
+                  {
+                    "name": "loro_delete_races_file_edit.rs"
+                  },
+                  {
+                    "name": "loro_engine_versions_equal_the_authority.rs"
+                  },
+                  {
+                    "name": "loro_keystroke_footprint.rs"
                   },
                   {
                     "name": "loro_kind_fidelity_through_projection.rs"
@@ -4867,6 +5180,9 @@
                   },
                   {
                     "name": "loro_unseeded_vault_split.rs"
+                  },
+                  {
+                    "name": "loro_writes_on_unheld_blocks.rs"
                   },
                   {
                     "name": "main.rs"
@@ -4954,6 +5270,9 @@
                   },
                   {
                     "name": "main.rs"
+                  },
+                  {
+                    "name": "periodic_reads_outside_budget.rs"
                   },
                   {
                     "name": "region_writeback_loss.rs"
@@ -5053,6 +5372,9 @@
                 "name": "enabledness_query_production_cost.rs"
               },
               {
+                "name": "focus_on_new_block_under_lag.rs"
+              },
+              {
                 "name": "general_e2e_composed_pbt.rs"
               },
               {
@@ -5092,6 +5414,9 @@
                 "name": "place_all_restates_total_sibling_order.rs"
               },
               {
+                "name": "plan_fence_wait.rs"
+              },
+              {
                 "name": "projector_lag_lock.rs"
               },
               {
@@ -5104,6 +5429,9 @@
                 "name": "shape_profile_shrink.rs"
               },
               {
+                "name": "share_root_structural_ops.rs"
+              },
+              {
                 "name": "sidebar_bind_latency_probe.rs"
               },
               {
@@ -5114,6 +5442,9 @@
               },
               {
                 "name": "stale_rewrite_sibling_order.rs"
+              },
+              {
+                "name": "structural_burst_under_lag.rs"
               },
               {
                 "name": "subtree_of_bfs_cost_turso.rs"
@@ -5527,6 +5858,9 @@
             "path": "holon-loro/examples",
             "files": [
               {
+                "name": "cycle_guard_loro_probe.rs"
+              },
+              {
                 "name": "projection_extract_bench.rs"
               }
             ]
@@ -5557,6 +5891,9 @@
             "files": [
               {
                 "name": "batch_tag_probe.rs"
+              },
+              {
+                "name": "batch_undo.rs"
               },
               {
                 "name": "block_cell_registry.rs"
@@ -5721,6 +6058,9 @@
                 "name": "batch_rollback_guard.rs"
               },
               {
+                "name": "block_source_boundaries.rs"
+              },
+              {
                 "name": "field_write_cost.rs"
               },
               {
@@ -5739,6 +6079,9 @@
                 "name": "projected_blocks_commits_nothing.rs"
               },
               {
+                "name": "shape_gate_cost.rs"
+              },
+              {
                 "name": "snapshot_write_is_durable.rs"
               },
               {
@@ -5746,6 +6089,9 @@
               },
               {
                 "name": "stable_id_index_cost.rs"
+              },
+              {
+                "name": "stable_id_index_create_cost.rs"
               },
               {
                 "name": "stable_id_index_pbt.rs"
@@ -5973,6 +6319,9 @@
             "files": [
               {
                 "name": "event_infra_module.rs"
+              },
+              {
+                "name": "focus_roots_feed.rs"
               },
               {
                 "name": "lib.rs"
@@ -7065,6 +7414,9 @@
             "path": "holon-orgmode/tests",
             "files": [
               {
+                "name": "delete_during_first_ingest.rs"
+              },
+              {
                 "name": "directory_companion_adoption.rs"
               },
               {
@@ -7098,6 +7450,9 @@
                 "name": "org_block_round_trip_pbt.rs"
               },
               {
+                "name": "overruled_edit_compares_in_file_terms.rs"
+              },
+              {
                 "name": "page_id_with_a_scheme_is_refused.rs"
               },
               {
@@ -7114,6 +7469,9 @@
               },
               {
                 "name": "reingest_task_promotion_idempotent.rs"
+              },
+              {
+                "name": "reingest_writes_only_changed_blocks.rs"
               },
               {
                 "name": "render_refusal_is_per_file.rs"
@@ -7135,6 +7493,9 @@
               },
               {
                 "name": "vault_path_escape.rs"
+              },
+              {
+                "name": "writeback_compare_and_rename.rs"
               },
               {
                 "name": "writeback_emits_authored_link_bytes.rs"
@@ -7172,10 +7533,6 @@
           }
         ],
         "trait_impls": [
-          {
-            "type_name": "Value",
-            "trait_name": "From"
-          },
           {
             "type_name": "Value",
             "trait_name": "From"
@@ -7333,6 +7690,9 @@
               },
               {
                 "name": "block_compare.rs"
+              },
+              {
+                "name": "boot_fault.rs"
               },
               {
                 "name": "budget.rs"
@@ -7631,7 +7991,13 @@
                 "name": "lib.rs"
               },
               {
+                "name": "profile_computed_override.rs"
+              },
+              {
                 "name": "profile_scope.rs"
+              },
+              {
+                "name": "profile_write_targets.rs"
               },
               {
                 "name": "trust.rs"
@@ -7656,6 +8022,15 @@
               },
               {
                 "name": "profile_scope_refusal.rs"
+              },
+              {
+                "name": "profile_typed_computed_override_refusal.rs"
+              },
+              {
+                "name": "profile_write_target_refusal.rs"
+              },
+              {
+                "name": "type_services_declaration.rs"
               }
             ]
           }
@@ -8091,7 +8466,13 @@
             "path": "holon-turso/src",
             "files": [
               {
+                "name": "actor_watch.rs"
+              },
+              {
                 "name": "block_table_names.rs"
+              },
+              {
+                "name": "commit_event.rs"
               },
               {
                 "name": "db_open.rs"
@@ -8205,6 +8586,9 @@
                 "name": "edge_agg_retraction_across_reboot.rs"
               },
               {
+                "name": "entity_index_spike.rs"
+              },
+              {
                 "name": "failed_statement_change_events.rs"
               },
               {
@@ -8235,6 +8619,9 @@
                 "name": "missing_deps_error_stays_typed.rs"
               },
               {
+                "name": "non_finite_float_read.rs"
+              },
+              {
                 "name": "property_kinds_migration.rs"
               },
               {
@@ -8254,6 +8641,12 @@
               },
               {
                 "name": "sidecar_views.rs"
+              },
+              {
+                "name": "sql_log_fields_carry_no_literals.rs"
+              },
+              {
+                "name": "stuck_actor_watch.rs"
               },
               {
                 "name": "unregistered_dependency_fast_fail.rs"
@@ -8341,7 +8734,55 @@
             "path": "holon-views/src",
             "files": [
               {
+                "name": "batch.rs"
+              },
+              {
+                "name": "engine.rs"
+              },
+              {
+                "name": "error.rs"
+              },
+              {
+                "name": "eval.rs"
+              },
+              {
+                "name": "intern.rs"
+              },
+              {
                 "name": "lib.rs"
+              },
+              {
+                "name": "lower.rs"
+              },
+              {
+                "name": "payload.rs"
+              },
+              {
+                "name": "plan.rs"
+              },
+              {
+                "name": "row.rs"
+              },
+              {
+                "name": "views.rs"
+              }
+            ]
+          },
+          {
+            "name": "tests",
+            "path": "holon-views/tests",
+            "files": [
+              {
+                "name": "engine_law.rs"
+              },
+              {
+                "name": "entity_index_dd_spike.rs"
+              },
+              {
+                "name": "plan_law.rs"
+              },
+              {
+                "name": "views_law.rs"
               }
             ]
           }

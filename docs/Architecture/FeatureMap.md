@@ -358,7 +358,6 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `loro-owning-page-types-share-removal`
 - `metamorphic-undo-facet-unchanged`
 - `metamorphic-undo-snapshot-missing`
-- `opentab-sql-reads-budget`
 - `orgmode-file-watcher-no-event`
 - `paste-block-copy-sql-read-repeat-budget`
 - `pinblock-lazy-day-page-shell`
