@@ -472,7 +472,19 @@ pub fn unattributed_span_count() -> usize {
 struct ScopeRoutingProcessor;
 
 impl opentelemetry_sdk::trace::SpanProcessor for ScopeRoutingProcessor {
-    fn on_start(&self, _: &mut opentelemetry_sdk::trace::Span, _: &opentelemetry::Context) {}
+    /// Stamps every span a periodic task's pass opened, so a window can leave
+    /// it out of what it charges to its own work.
+    fn on_start(&self, span: &mut opentelemetry_sdk::trace::Span, cx: &opentelemetry::Context) {
+        use opentelemetry::trace::Span as _;
+        if let Some(holon_api::periodic::PeriodicTask(task)) =
+            cx.get::<holon_api::periodic::PeriodicTask>()
+        {
+            span.set_attribute(opentelemetry::KeyValue::new(
+                holon_api::periodic::PERIODIC_TASK_ATTR,
+                *task,
+            ));
+        }
+    }
 
     fn on_end(&self, span: SpanData) {
         route_span(span);
@@ -864,8 +876,14 @@ impl SpanCollector {
     }
 
     /// Structured snapshot of all collected spans for assertion + persistence.
+    ///
+    /// Spans a periodic task's pass emitted are left out of every count: the
+    /// window did not cause them (see [`holon_api::periodic`]).
     pub fn snapshot(&self) -> TransitionMetrics {
-        let spans = self.finished_spans();
+        let (periodic, spans): (Vec<SpanData>, Vec<SpanData>) = self
+            .finished_spans()
+            .into_iter()
+            .partition(|s| span_attr(s, holon_api::periodic::PERIODIC_TASK_ATTR).is_some());
 
         let sql_read_count = spans.iter().filter(|s| s.name.as_ref() == "query").count();
         let is_hash_stamp = |s: &&SpanData| {
@@ -974,6 +992,7 @@ impl SpanCollector {
             max_query_duration,
             total_query_duration,
             total_span_count: spans.len(),
+            periodic_span_count: periodic.len(),
             duplicate_sql,
             duplicate_reads,
             render_count,
@@ -1149,6 +1168,9 @@ pub struct TransitionMetrics {
     pub hash_stamp_write_count: usize,
     /// DDL statements (`"execute_ddl"` + `"execute_ddl_with_deps"`)
     pub sql_ddl_count: usize,
+    /// Spans a periodic background task emitted in this window, excluded
+    /// from every other metric here.
+    pub periodic_span_count: usize,
     /// Slowest individual SQL operation
     pub max_query_duration: Duration,
     /// Sum of all SQL operation durations

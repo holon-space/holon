@@ -275,11 +275,15 @@ impl MetricsSut {
             0 => String::new(),
             n => format!(" idle_hash_stamps={n}"),
         };
+        let periodic_summary = match metrics.periodic_span_count {
+            0 => String::new(),
+            n => format!(" periodic_spans_excluded={n}"),
+        };
         eprintln!(
             "[inv-sql-budget] {key}: reads={} (dedup {})/{} writes={}/{}{stamp_summary} ddl={}/{} tol={} \
              max_q={}ms wall={}ms spans={} rss={delta:+.1}MB \
              (cum={cum:+.1}MB){state_summary}{render_summary}{cdc_summary}{perf_summary}\
-             {unattributed_summary}",
+             {periodic_summary}{unattributed_summary}",
             metrics.sql_read_count,
             metrics.dedup_read_count(),
             expected.reads,

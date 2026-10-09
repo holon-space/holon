@@ -27,6 +27,7 @@ use anyhow::Result;
 use anyhow::anyhow;
 use holon_api::clock::Clock;
 use holon_api::clock::Grain;
+use tracing::Instrument;
 
 use crate::storage::turso::DbHandle;
 
@@ -300,62 +301,71 @@ pub async fn spawn_clock_scheduler(
                     () = &mut cancelled => return,
                     _ = ticker.tick() => {}
                 }
-                // Reconcile only the grains something reads: Day always, a
-                // subscribed grain, and a grain a stored view reads (read again
-                // each tick, so a dropped view stops its grain). A fine grain
-                // nothing reads is never touched — the C6 write-amplification
-                // gate.
-                let mut grains = subs.active();
-                match stored_reader_grains(&db_handle).await {
-                    Ok(stored) => {
-                        for grain in stored {
-                            if grains.contains(&grain) {
-                                continue;
-                            }
-                            // A sidecar view records its grain at connect, before
-                            // anything seeds that grain's row.
-                            if let Err(e) = seed_grain_row(&db_handle, clock.as_ref(), grain).await
-                            {
-                                tracing::error!(
-                                    grain = grain.as_str(),
-                                    error = %format!("{e:#}"),
-                                    "[ClockScheduler] seeding a grain a stored view reads failed"
-                                );
-                            }
-                            grains.push(grain);
-                        }
-                    }
-                    Err(e) => tracing::error!(
-                        error = %format!("{e:#}"),
-                        "[ClockScheduler] reading the grains stored views read failed; only \
-                         subscribed grains tick this round"
-                    ),
-                }
-                for grain in grains {
-                    match reconcile_grain(&db_handle, clock.as_ref(), grain).await {
-                        Ok(ClockTick::Advanced { today, epoch_day }) => {
-                            tracing::info!(
-                                grain = grain.as_str(),
-                                %today,
-                                epoch_day,
-                                "[ClockScheduler] grain advanced"
-                            );
-                        }
-                        Ok(ClockTick::Unchanged) => {}
-                        Err(e) => {
-                            tracing::error!(
-                                grain = grain.as_str(),
-                                error = %format!("{e:#}"),
-                                "[ClockScheduler] reconcile failed"
-                            );
-                        }
-                    }
-                }
+                let pass = tracing::info_span!(parent: None, "clock_scheduler.tick");
+                holon_api::periodic::mark_periodic(&pass, "clock-scheduler");
+                tick(&db_handle, clock.as_ref(), &subs)
+                    .instrument(pass)
+                    .await;
             }
         });
     }
 
     Ok(handle)
+}
+
+/// One scheduler pass: reconcile every grain something reads. Errors are
+/// logged and the next pass retries; a pass never stops the ticker.
+async fn tick(db_handle: &DbHandle, clock: &dyn Clock, subs: &GrainSubscriptions) {
+    // Reconcile only the grains something reads: Day always, a
+    // subscribed grain, and a grain a stored view reads (read again
+    // each tick, so a dropped view stops its grain). A fine grain
+    // nothing reads is never touched — the C6 write-amplification
+    // gate.
+    let mut grains = subs.active();
+    match stored_reader_grains(db_handle).await {
+        Ok(stored) => {
+            for grain in stored {
+                if grains.contains(&grain) {
+                    continue;
+                }
+                // A sidecar view records its grain at connect, before
+                // anything seeds that grain's row.
+                if let Err(e) = seed_grain_row(db_handle, clock, grain).await {
+                    tracing::error!(
+                        grain = grain.as_str(),
+                        error = %format!("{e:#}"),
+                        "[ClockScheduler] seeding a grain a stored view reads failed"
+                    );
+                }
+                grains.push(grain);
+            }
+        }
+        Err(e) => tracing::error!(
+            error = %format!("{e:#}"),
+            "[ClockScheduler] reading the grains stored views read failed; only \
+             subscribed grains tick this round"
+        ),
+    }
+    for grain in grains {
+        match reconcile_grain(db_handle, clock, grain).await {
+            Ok(ClockTick::Advanced { today, epoch_day }) => {
+                tracing::info!(
+                    grain = grain.as_str(),
+                    %today,
+                    epoch_day,
+                    "[ClockScheduler] grain advanced"
+                );
+            }
+            Ok(ClockTick::Unchanged) => {}
+            Err(e) => {
+                tracing::error!(
+                    grain = grain.as_str(),
+                    error = %format!("{e:#}"),
+                    "[ClockScheduler] reconcile failed"
+                );
+            }
+        }
+    }
 }
 
 /// The fine grains that stored views read, as `clock_reader` records them.
