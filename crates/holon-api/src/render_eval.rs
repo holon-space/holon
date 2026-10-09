@@ -705,6 +705,10 @@ fn value_to_f64(v: &Value) -> Option<f64> {
 /// A known function refusing its arguments answers `Some(Err(_))`, which
 /// fails the enclosing evaluation.
 pub trait ValueFnLookup {
+    /// `invoke` answers `Some` for `name`. A call to any other name is a
+    /// widget, whose arguments are evaluated where it is built, not here.
+    fn knows(&self, name: &str) -> bool;
+
     fn invoke(&self, name: &str, args: &ResolvedArgs) -> Option<Result<InterpValue, ComputeError>>;
 }
 
@@ -719,6 +723,10 @@ pub trait ValueFnLookup {
 pub struct CoreValueFnLookup;
 
 impl ValueFnLookup for CoreValueFnLookup {
+    fn knows(&self, name: &str) -> bool {
+        name == "concat"
+    }
+
     fn invoke(&self, name: &str, args: &ResolvedArgs) -> Option<Result<InterpValue, ComputeError>> {
         match name {
             "concat" => Some(Ok(InterpValue::Value(concat_invoke(args)))),
@@ -946,6 +954,7 @@ pub fn eval_to_interp<K: RowKey>(
             let condition = eval_operand(condition, env, fns)?;
             return eval_to_interp(choose_branch(&condition, then, otherwise)?, env, fns);
         }
+        RenderExpr::FunctionCall { name, .. } if !fns.knows(name) => Value(crate::Value::Null),
         RenderExpr::FunctionCall { name, args, .. } => {
             // Evaluate args against the same registry so value-fn calls
             // nested under other value-fn calls resolve correctly.
@@ -1676,6 +1685,10 @@ mod tests {
 
     struct MockValueFnLookup;
     impl ValueFnLookup for MockValueFnLookup {
+        fn knows(&self, name: &str) -> bool {
+            name == "echo"
+        }
+
         fn invoke(
             &self,
             name: &str,

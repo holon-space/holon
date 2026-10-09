@@ -134,6 +134,10 @@ struct ValueFnBinding<'a> {
 }
 
 impl<'a> ValueFnLookup for ValueFnBinding<'a> {
+    fn knows(&self, name: &str) -> bool {
+        self.fns.contains_key(name) || CORE_VALUE_FN_LOOKUP.knows(name)
+    }
+
     fn invoke(&self, name: &str, args: &ResolvedArgs) -> Option<Result<InterpValue, ComputeError>> {
         // User-supplied registry first, then built-in core fns (`concat`,
         // ...). Keeps `concat` working from any DSL context regardless of
@@ -265,6 +269,20 @@ impl<W> RenderInterpreter<W> {
     where
         W: WithEntity,
     {
+        build_catching_panics(widget_of(expr), || {
+            self.interpret_uncaught(expr, ctx, services)
+        })
+    }
+
+    fn interpret_uncaught(
+        &self,
+        expr: &RenderExpr,
+        ctx: &RenderContext,
+        services: &dyn BuilderServices,
+    ) -> W
+    where
+        W: WithEntity,
+    {
         let interpret_fn = |e: &RenderExpr, c: &RenderContext| self.interpret(e, c, services);
 
         match expr {
@@ -372,10 +390,7 @@ impl<W> RenderInterpreter<W> {
         ctx: &RenderContext,
         services: &dyn BuilderServices,
         interpret_fn: &dyn Fn(&RenderExpr, &RenderContext) -> W,
-    ) -> W
-    where
-        W: WithEntity,
-    {
+    ) -> W {
         // One-level scoping of the parent's offer: the builder learns it through
         // `parent_capability`, while the `ctx` it clones for its own children
         // carries `ContainerCapability::None`. Without this strip an `accordion`
@@ -388,7 +403,7 @@ impl<W> RenderInterpreter<W> {
             stripped = ctx.offering(crate::render_context::ContainerCapability::None);
             &stripped
         };
-        let build = || match self.builders.get(name) {
+        let widget = match self.builders.get(name) {
             Some(builder) => builder.build(BuilderArgs {
                 args,
                 ctx,
@@ -413,7 +428,6 @@ impl<W> RenderInterpreter<W> {
                     })
             }
         };
-        let widget = build_catching_panics(name, build);
         match &self.annotator {
             Some(annotate) => annotate(widget, name, ctx),
             None => widget,
@@ -421,15 +435,33 @@ impl<W> RenderInterpreter<W> {
     }
 }
 
-/// The one place a builder's panic is caught: every builder call, nested ones
-/// included, passes through [`RenderInterpreter::dispatch`], so the panicking
-/// widget alone becomes an error node and the window goes on.
+/// The widget a panic while interpreting `expr` is reported against.
+fn widget_of(expr: &RenderExpr) -> &str {
+    match expr {
+        RenderExpr::FunctionCall { name, .. } => name,
+        RenderExpr::ColumnRef { .. }
+        | RenderExpr::Literal { .. }
+        | RenderExpr::BinaryOp { .. }
+        | RenderExpr::Not { .. } => "text",
+        RenderExpr::If { .. } => "if",
+        RenderExpr::Array { .. } | RenderExpr::Object { .. } => "column",
+        RenderExpr::LiveBlock { .. } => "live_block",
+    }
+}
+
+/// The one place a widget's panic is caught: every widget, nested ones
+/// included, is built through [`RenderInterpreter::interpret`], arguments
+/// and builder alike, so the panicking widget alone becomes an error node and
+/// the window goes on.
 #[cfg(not(target_arch = "wasm32"))]
 fn build_catching_panics<W: WithEntity>(name: &str, build: impl FnOnce() -> W) -> W {
     crate::panic_record::catch_disclosed(build).unwrap_or_else(|panic| {
         W::builder_panicked(
             name,
-            format!("panicked at {}: {}", panic.location, panic.message),
+            format!(
+                "panicked at {} on thread {}: {}",
+                panic.location, panic.thread, panic.message
+            ),
         )
     })
 }

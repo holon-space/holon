@@ -12,6 +12,7 @@
 //! bound is reached.
 
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::io::ErrorKind;
 use std::panic::Location;
 use std::path::Path;
@@ -196,7 +197,7 @@ thread_local! {
 /// further. The panic shows on the bus as any panic does, but leaves no record
 /// for the next start once the bus has it: this run survives it.
 ///
-/// The render interpreter's builder dispatch is its one caller; a catch
+/// `RenderInterpreter::interpret` is its one caller; a catch
 /// anywhere else would hide panics the run cannot recover from.
 pub fn catch_disclosed<R>(f: impl FnOnce() -> R) -> Result<R, PanicRecord> {
     hook_once();
@@ -272,9 +273,9 @@ fn hook_once() {
     static HOOK: Once = Once::new();
     HOOK.call_once(|| {
         let previous = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |info| {
-            record(info);
-            previous(info);
+        std::panic::set_hook(Box::new(move |info| match record(info) {
+            Report::Full => previous(info),
+            Report::Repeat(line) => eprintln!("{line}"),
         }));
     });
 }
@@ -756,9 +757,36 @@ fn spawn_forwarder(
         .map(drop)
 }
 
+/// How the hooks chained before Holon's report a panic.
+enum Report {
+    Full,
+    /// One line in their place.
+    Repeat(String),
+}
+
+/// A caught panic shown on the bus is reported in full the first time its
+/// location and message occur in this process, and as one counting line after.
+fn caught_report(record: &PanicRecord) -> Report {
+    static OCCURRENCES: Mutex<BTreeMap<(String, String), u64>> = Mutex::new(BTreeMap::new());
+    let mut occurrences = OCCURRENCES.lock().unwrap_or_else(PoisonError::into_inner);
+    let times = occurrences
+        .entry((record.location.clone(), record.message.clone()))
+        .or_insert(0);
+    *times += 1;
+    match *times {
+        1 => Report::Full,
+        n => Report::Repeat(format!(
+            "caught panic at {} again on thread {}, {n} times in this process; reported in full at its first: {}",
+            record.location,
+            record.thread,
+            record.message.lines().next().unwrap_or_default()
+        )),
+    }
+}
+
 /// Runs inside the panic hook, so it must not panic: a panic here aborts the
 /// process. Every failure goes to stderr.
-fn record(info: &std::panic::PanicHookInfo<'_>) {
+fn record(info: &std::panic::PanicHookInfo<'_>) -> Report {
     let record = PanicRecord::from_hook(info);
     let caught = caught_here(&record);
     let mut target = target();
@@ -767,7 +795,7 @@ fn record(info: &std::panic::PanicHookInfo<'_>) {
             "panic record: no target installed for the panic at {}",
             record.location
         );
-        return;
+        return Report::Full;
     };
     let sent = target.raised.send(record.task_panicked()).is_ok();
     let written = match &mut target.delivery {
@@ -783,7 +811,7 @@ fn record(info: &std::panic::PanicHookInfo<'_>) {
             );
             record.not_shown()
         }
-        Delivery::Forwarded if caught => return,
+        Delivery::Forwarded if caught => return caught_report(&record),
         Delivery::Forwarded => record,
     };
     if let Err(e) = written.write_to(&target.record_dir) {
@@ -800,6 +828,7 @@ fn record(info: &std::panic::PanicHookInfo<'_>) {
             eprintln!("panic record: that the record is missing reaches no bus either");
         }
     }
+    Report::Full
 }
 
 /// Write this run's record for a death that runs no panic hook, such as

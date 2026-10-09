@@ -106,7 +106,9 @@ fn a_panicking_builder_becomes_an_error_node_and_a_condition_shown_once() {
     let [error] = errors.as_slice() else {
         panic!("expected exactly one error node, got {errors:?}");
     };
-    for part in ["panicking", MESSAGE, file!()] {
+    let thread = std::thread::current();
+    let thread = thread.name().expect("a test runs on a named thread");
+    for part in ["panicking", MESSAGE, file!(), thread] {
         assert!(
             error.contains(part),
             "the error node must name {part:?}: {error:?}"
