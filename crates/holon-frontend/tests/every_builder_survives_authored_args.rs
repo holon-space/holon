@@ -429,15 +429,50 @@ fn every_builder_returns_a_view_model_for_any_authored_args() {
 
 // ── One answer per authored layout keyword ─────────────────────────────────
 
-/// Every registered collection builder, with the gap it lays out at when its
-/// call site names none.
-const COLLECTION_BUILDERS: &[(&str, f32)] = &[
-    ("list", 4.0),
-    ("columns", 16.0),
-    ("tree", 4.0),
-    ("outline", 4.0),
-    ("table", 4.0),
-    ("board", 0.0),
+/// A registered collection layout and the call that builds it.
+#[derive(Clone, Copy, Debug)]
+struct CollectionBuilder {
+    builder: &'static str,
+    layout: &'static str,
+    /// Args the call needs to reach `layout`.
+    args: &'static str,
+    /// The gap it lays out at when its call site names none.
+    default_gap: f32,
+    /// Whether it can lay its items side by side (`horizontal:` / `wrap:`).
+    flows: bool,
+}
+
+const fn collection(
+    builder: &'static str,
+    layout: &'static str,
+    args: &'static str,
+    default_gap: f32,
+    flows: bool,
+) -> CollectionBuilder {
+    CollectionBuilder {
+        builder,
+        layout,
+        args,
+        default_gap,
+        flows,
+    }
+}
+
+/// Every registered collection layout.
+const COLLECTION_BUILDERS: &[CollectionBuilder] = &[
+    collection("list", "list", "", 4.0, true),
+    collection("columns", "columns", "", 16.0, false),
+    collection("tree", "tree", "", 2.0, false),
+    collection("outline", "outline", "", 2.0, false),
+    collection("table", "table", "", 2.0, false),
+    collection(
+        "table",
+        "table_columnar",
+        r#"columns: [#{header: "c", cell: text("x")}]"#,
+        4.0,
+        false,
+    ),
+    collection("board", "board", "", 16.0, false),
 ];
 
 /// A layout keyword's authored value: a literal, or a column of the row.
@@ -501,8 +536,7 @@ impl Kw {
 
 #[derive(Clone, Debug)]
 struct LayoutCase {
-    builder: &'static str,
-    default_gap: f32,
+    collection: CollectionBuilder,
     gap: Option<Kw>,
     horizontal: Option<Kw>,
     wrap: Option<Kw>,
@@ -512,6 +546,9 @@ struct LayoutCase {
 impl LayoutCase {
     fn source(&self) -> String {
         let mut args = vec![r#"item_template: text("x")"#.to_string()];
+        if !self.collection.args.is_empty() {
+            args.push(self.collection.args.to_string());
+        }
         for (name, kw) in [
             ("gap", self.gap),
             ("horizontal", self.horizontal),
@@ -521,7 +558,7 @@ impl LayoutCase {
                 args.push(format!("{name}: {}", kw.source()));
             }
         }
-        format!("{}(#{{{}}})", self.builder, args.join(", "))
+        format!("{}(#{{{}}})", self.collection.builder, args.join(", "))
     }
 
     fn expr(&self) -> RenderExpr {
@@ -534,7 +571,7 @@ impl LayoutCase {
     fn model(&self) -> Option<(f32, ItemFlow)> {
         let resolve = |kw: Option<Kw>| kw.map(|kw| kw.resolve(&self.row));
         let gap = match resolve(self.gap) {
-            None => self.default_gap,
+            None => self.collection.default_gap,
             Some(Value::Integer(i)) => i as f32,
             Some(Value::Float(f)) => f as f32,
             Some(_) => return None,
@@ -544,6 +581,9 @@ impl LayoutCase {
             Some(Value::Boolean(b)) => b,
             Some(_) => return None,
         };
+        if !self.collection.flows && (self.horizontal.is_some() || self.wrap.is_some()) {
+            return None;
+        }
         let flow = match (horizontal, resolve(self.wrap)) {
             (false, None) => ItemFlow::Stacked,
             (true, None) => ItemFlow::Row,
@@ -582,9 +622,8 @@ fn layout_case() -> impl Strategy<Value = LayoutCase> {
         row,
     )
         .prop_map(
-            |((builder, default_gap), gap, horizontal, wrap, (n, b, w))| LayoutCase {
-                builder,
-                default_gap,
+            |(collection, gap, horizontal, wrap, (n, b, w))| LayoutCase {
+                collection,
                 gap,
                 horizontal,
                 wrap,
@@ -640,11 +679,11 @@ fn judge(case: &LayoutCase, answer: &Answer) -> Result<(), TestCaseError> {
     match (case.model(), answer) {
         (None, Answer::Refused(message)) => {
             prop_assert!(
-                message.contains(case.builder),
+                message.contains(case.collection.builder),
                 "`{}` over {:?}: the error node does not name `{}`: {message:?}",
                 case.source(),
                 case.row,
-                case.builder
+                case.collection.builder
             );
         }
         (None, Answer::Layout { .. }) => {
@@ -659,7 +698,7 @@ fn judge(case: &LayoutCase, answer: &Answer) -> Result<(), TestCaseError> {
             prop_assert_eq!(
                 answer,
                 &Answer::Layout {
-                    name: case.builder.to_string(),
+                    name: case.collection.layout.to_string(),
                     gap,
                     flow
                 },
@@ -737,7 +776,7 @@ fn click_leg(
     case: &LayoutCase,
 ) -> Result<Answer, TestCaseError> {
     let vm = switcher(services, case, "a");
-    vm.view_mode_switch().switch("b", &case.expr(), services);
+    click(&vm, "b", services);
     slot_answer(&vm, "b")
 }
 
@@ -805,7 +844,7 @@ fn a_malformed_rules_entry_draws_an_error_node_naming_the_builder() {
     let services = StubBuilderServices::new();
     let builders: Vec<&'static str> = COLLECTION_BUILDERS
         .iter()
-        .map(|(b, _)| *b)
+        .map(|c| c.builder)
         .chain(["row", "section"])
         .collect();
     let rules = prop_oneof![
@@ -854,4 +893,391 @@ fn a_malformed_rules_entry_draws_an_error_node_naming_the_builder() {
             Ok(())
         },
     );
+}
+
+// ── A typed param's authored value is honoured or refused ───────────────────
+
+/// Values an author can give a typed param: literals of every shape and
+/// columns of [`typed_param_row`].
+const PARAM_VALUES: &[&str] = &[
+    r#""zz""#,
+    r#""start""#,
+    "0",
+    "7",
+    "1.5",
+    "true",
+    "[]",
+    r#"["a"]"#,
+    "#{}",
+    r#"col("n")"#,
+    r#"col("s")"#,
+    r#"col("b")"#,
+    r#"col("absent")"#,
+];
+
+fn typed_param_row() -> DataRow {
+    DataRow::from([
+        ("id".to_string(), Value::String("block:p".to_string())),
+        ("n".to_string(), Value::Integer(5)),
+        ("s".to_string(), Value::String("x".to_string())),
+        ("b".to_string(), Value::Boolean(true)),
+    ])
+}
+
+/// A builder's typed param, with the positional slot it also reads from.
+#[derive(Clone, Debug)]
+struct TypedParam {
+    builder: &'static str,
+    name: &'static str,
+    type_hint: &'static str,
+    slot: Option<usize>,
+}
+
+/// Every String / Number / Bool param a `widget_builder!` builder declares.
+/// String and Number params consume positional slots in declaration order.
+fn typed_params() -> Vec<TypedParam> {
+    let mut params = Vec::new();
+    for meta in all_widget_metas() {
+        let mut slot = 0;
+        for p in meta.params {
+            let consumes_slot = matches!(p.type_hint, "String" | "Number" | "Value");
+            if matches!(p.type_hint, "String" | "Number" | "Bool") {
+                params.push(TypedParam {
+                    builder: meta.name,
+                    name: p.name,
+                    type_hint: p.type_hint,
+                    slot: consumes_slot.then_some(slot),
+                });
+            }
+            if consumes_slot {
+                slot += 1;
+            }
+        }
+    }
+    assert!(
+        params.len() > 20,
+        "suspiciously few typed params: {params:?}"
+    );
+    params
+}
+
+/// The prop a builder draws for an accepted `value` of a `type_hint` param, or
+/// the refusal it owes; `None` for a value that counts as absent.
+fn typed_param_model(type_hint: &str, value: &Value) -> Option<Result<Value, ()>> {
+    match (type_hint, value) {
+        (_, Value::Null) => None,
+        ("Number", Value::Integer(i)) => Some(Ok(Value::Float(*i as f64))),
+        ("Number", Value::Float(f)) => Some(Ok(Value::Float(*f))),
+        ("Bool", Value::Boolean(b)) => Some(Ok(Value::Boolean(*b))),
+        ("String", Value::String(s)) => Some(Ok(Value::String(s.clone()))),
+        ("String", Value::Integer(i)) => Some(Ok(Value::String(i.to_string()))),
+        ("String", Value::Float(f)) => Some(Ok(Value::String(f.to_string()))),
+        ("String", Value::Boolean(b)) => Some(Ok(Value::String(b.to_string()))),
+        _ => Some(Err(())),
+    }
+}
+
+/// Props a builder derives from its param rather than copying it.
+const DERIVED_PROPS: &[(&str, &str)] =
+    &[("text", "color"), ("icon", "color"), ("badge", "block_id")];
+
+#[derive(Clone, Debug)]
+struct TypedParamCase {
+    param: TypedParam,
+    value: &'static str,
+    positional: bool,
+}
+
+impl TypedParamCase {
+    fn source(&self) -> String {
+        match (self.positional, self.param.slot) {
+            (true, Some(slot)) => {
+                let mut args = vec![r#"col("absent")"#; slot];
+                args.push(self.value);
+                format!("{}({})", self.param.builder, args.join(", "))
+            }
+            _ => format!(
+                "{}(#{{{}: {}}})",
+                self.param.builder, self.param.name, self.value
+            ),
+        }
+    }
+
+    /// The value the call hands this param, as the interpreter resolves it.
+    fn resolved(&self, expr: &RenderExpr) -> Value {
+        let RenderExpr::FunctionCall { args, .. } = expr else {
+            panic!("`{}` parses to a call", self.source());
+        };
+        let arg = match (self.positional, self.param.slot) {
+            (true, Some(slot)) => args.iter().filter(|a| a.name.is_none()).nth(slot),
+            _ => args
+                .iter()
+                .find(|a| a.name.as_deref() == Some(self.param.name)),
+        };
+        arg.map_or(Value::Null, |arg| {
+            holon_api::render_eval::eval_to_value(&arg.value, &typed_param_row())
+                .unwrap_or_else(|e| panic!("`{}` evaluates: {e}", self.source()))
+        })
+    }
+}
+
+fn typed_param_case() -> impl Strategy<Value = TypedParamCase> {
+    (
+        proptest::sample::select(typed_params()),
+        proptest::sample::select(PARAM_VALUES),
+        any::<bool>(),
+    )
+        .prop_map(|(param, value, positional)| TypedParamCase {
+            param,
+            value,
+            positional,
+        })
+}
+
+#[test]
+fn every_typed_param_is_honoured_or_refused() {
+    let services: Arc<dyn BuilderServices> = Arc::new(StubBuilderServices::new());
+    run_property(typed_param_case(), |case| {
+        holon_frontend::shadow_builders::register_render_dsl_widget_names();
+        let source = case.source();
+        let builder = case.param.builder;
+        // The parser refuses some values itself (a colour that names no theme
+        // token): a refusal at the boundary, before any builder runs.
+        let expr = match holon_api::render_dsl::parse_render_dsl(&source) {
+            Ok(expr) => expr,
+            Err(e) => {
+                let message = format!("{e:#}");
+                prop_assert!(
+                    message.contains(builder),
+                    "`{source}`: the parse error does not name `{builder}`: {message}"
+                );
+                return Ok(());
+            }
+        };
+        let row = Arc::new(typed_param_row());
+        let node = services.interpret(&expr, &RenderContext::default().with_row(row.clone()));
+        let key = case.param.name;
+        let message = node.prop_str("message").filter(|_| node.is_error());
+        let fast = holon_frontend::render_interpreter::is_props_only_widget(builder).then(|| {
+            holon_frontend::render_interpreter::resolve_props(
+                builder, &expr, &row, &*services, None,
+            )
+        });
+        match typed_param_model(case.param.type_hint, &case.resolved(&expr)) {
+            None => {}
+            Some(Err(())) => {
+                let message = message.unwrap_or_else(|| {
+                    format!(
+                        "no error node: drew {:?} with props {:?}",
+                        node.widget_name(),
+                        node.props.get_cloned()
+                    )
+                });
+                prop_assert!(
+                    message.contains(builder) && message.contains(key),
+                    "`{source}` must be refused by an error node naming `{builder}` and `{key}`: {message}"
+                );
+                prop_assert!(
+                    !matches!(fast, Some(Ok(_))),
+                    "`{source}`: the props fast path accepts what the build refuses: {fast:?}"
+                );
+            }
+            // The `error` builder draws its accepted message as an error node.
+            Some(Ok(expected)) => match message.filter(|_| builder != "error") {
+                Some(message) => prop_assert!(
+                    message.contains(builder),
+                    "`{source}`: the error node does not name `{builder}`: {message}"
+                ),
+                None => {
+                    let props = node.props.get_cloned();
+                    if let Some(drawn) = props
+                        .get(key)
+                        .filter(|_| !DERIVED_PROPS.contains(&(builder, key)))
+                    {
+                        prop_assert_eq!(drawn, &expected, "`{}` draws `{}`", source, key);
+                    }
+                    if let Some(fast) = fast {
+                        let fast = fast.map_err(|_| {
+                            TestCaseError::fail(format!(
+                                "`{source}`: the props fast path refuses what the build accepts"
+                            ))
+                        })?;
+                        prop_assert_eq!(
+                            fast.get(key),
+                            props.get(key),
+                            "`{}`: fast path vs build",
+                            source
+                        );
+                    }
+                }
+            },
+        }
+        Ok(())
+    });
+}
+
+// ── A view_mode_switcher draws the mode it marks active ────────────────────
+
+/// Each mode a switcher can offer, with the layout its template draws.
+const SWITCHER_MODES: &[(&str, &str, &str)] = &[
+    ("a", "list", r#"list(#{item_template: text("x")})"#),
+    ("b", "tree", r#"tree(#{item_template: text("x")})"#),
+    ("c", "table", r#"table(#{item_template: text("x")})"#),
+];
+
+#[derive(Clone, Debug)]
+struct SwitcherCase {
+    /// The modes `modes:` lists, in order.
+    listed: Vec<&'static str>,
+    /// The modes given a `mode_<name>` template.
+    templated: Vec<&'static str>,
+    default_mode: Option<&'static str>,
+    click: &'static str,
+}
+
+impl SwitcherCase {
+    fn source(&self) -> String {
+        let modes: Vec<String> = self
+            .listed
+            .iter()
+            .map(|m| format!(r#"{{\"name\":\"{m}\",\"icon\":\"list\"}}"#))
+            .collect();
+        let mut args = vec![
+            r#"entity_uri: "block:p""#.to_string(),
+            format!(r#"modes: "[{}]""#, modes.join(",")),
+        ];
+        if let Some(default_mode) = self.default_mode {
+            args.push(format!("default_mode: {default_mode}"));
+        }
+        for (mode, _, template) in SWITCHER_MODES {
+            if self.templated.contains(mode) {
+                args.push(format!("mode_{mode}: {template}"));
+            }
+        }
+        format!("view_mode_switcher(#{{{}}})", args.join(", "))
+    }
+
+    /// The mode the first paint draws, or `None` when the source is refused.
+    fn first_mode(&self) -> Option<&'static str> {
+        let mut listed = self.listed.clone();
+        let mut templated = self.templated.clone();
+        listed.sort();
+        templated.sort();
+        if listed.is_empty() || listed != templated {
+            return None;
+        }
+        match self.default_mode {
+            None => Some(self.listed[0]),
+            Some(lit) => self
+                .listed
+                .iter()
+                .copied()
+                .find(|m| lit == format!("\"{m}\"")),
+        }
+    }
+}
+
+fn layout_of(mode: &str) -> &'static str {
+    SWITCHER_MODES
+        .iter()
+        .find(|(m, _, _)| *m == mode)
+        .map(|(_, layout, _)| *layout)
+        .expect("a switcher mode")
+}
+
+fn switcher_case() -> impl Strategy<Value = SwitcherCase> {
+    let modes = || proptest::sample::subsequence(vec!["a", "b", "c"], 0..=3);
+    (
+        modes(),
+        prop_oneof![3 => Just(None), 1 => modes().prop_map(Some)],
+        proptest::option::of(proptest::sample::select(vec![
+            r#""a""#, r#""b""#, r#""c""#, "5",
+        ])),
+        proptest::sample::select(vec!["a", "b", "c"]),
+    )
+        .prop_map(|(listed, templated, default_mode, click)| SwitcherCase {
+            templated: templated.unwrap_or_else(|| listed.clone()),
+            listed,
+            default_mode,
+            click,
+        })
+}
+
+/// A click on `mode`'s button, as GPUI's bar sends it.
+fn click(vm: &ReactiveViewModel, mode: &str, services: &Arc<dyn BuilderServices>) {
+    vm.view_mode_switch().switch_mode(mode, services);
+}
+
+/// The slot draws the layout of the mode the bar marks active, or an error
+/// node with no mode active.
+fn drawn_mode(vm: &ReactiveViewModel) -> Result<Option<String>, TestCaseError> {
+    let slot = vm
+        .slot
+        .as_ref()
+        .expect("a view_mode_switcher has a slot")
+        .content
+        .get_cloned();
+    let active = vm.prop_str("active_mode");
+    match answer_of(&slot) {
+        Answer::Refused(message) => {
+            prop_assert!(
+                message.contains("view_mode_switcher"),
+                "the slot's error node does not name view_mode_switcher: {message}"
+            );
+            prop_assert_eq!(&active, &None, "a mode is marked active over an error node");
+            Ok(None)
+        }
+        Answer::Layout { name, .. } => {
+            let active = active.expect("a drawn mode is marked active");
+            prop_assert_eq!(
+                name,
+                layout_of(&active),
+                "the slot draws another mode than the active `{}`",
+                active
+            );
+            Ok(Some(active))
+        }
+    }
+}
+
+#[test]
+fn a_view_mode_switcher_draws_the_mode_it_marks_active() {
+    let services = layout_services();
+    run_property(switcher_case(), |case| {
+        holon_frontend::shadow_builders::register_render_dsl_widget_names();
+        let source = case.source();
+        let expr = holon_api::render_dsl::parse_render_dsl(&source)
+            .unwrap_or_else(|e| panic!("`{source}` parses: {e:#}"));
+        let ctx = RenderContext {
+            data_source: Some(Arc::new(SyntheticRows::from_rows(Vec::new()))),
+            ..RenderContext::default()
+        }
+        .with_row(Arc::new(typed_param_row()));
+        let vm = services.interpret(&expr, &ctx);
+        let Some(first) = case.first_mode() else {
+            let message = vm.prop_str("message").filter(|_| vm.is_error());
+            prop_assert!(
+                message
+                    .as_deref()
+                    .is_some_and(|m| m.contains("view_mode_switcher")),
+                "`{source}` must be refused by an error node naming view_mode_switcher, drew {:?} active {:?}",
+                vm.widget_name(),
+                vm.prop_str("active_mode")
+            );
+            return Ok(());
+        };
+        let painted = drawn_mode(&vm)?;
+        prop_assert_eq!(painted.as_deref(), Some(first), "`{}`: first paint", source);
+        click(&vm, case.click, &services);
+        let expected = case.listed.contains(&case.click).then_some(case.click);
+        let clicked = drawn_mode(&vm)?;
+        prop_assert_eq!(
+            clicked.as_deref(),
+            expected,
+            "`{}`: a click on `{}`",
+            source,
+            case.click
+        );
+        Ok(())
+    });
 }

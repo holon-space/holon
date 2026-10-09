@@ -103,7 +103,13 @@ fn vms_outline() -> ReactiveViewModel {
     };
     ReactiveViewModel {
         slot: Some(ReactiveSlot::new(slot_content)),
-        ..ReactiveViewModel::from_widget("view_mode_switcher", HashMap::new())
+        ..ReactiveViewModel::from_widget(
+            "view_mode_switcher",
+            HashMap::from([(
+                "modes".to_string(),
+                holon_api::Value::String("[]".to_string()),
+            )]),
+        )
     }
 }
 

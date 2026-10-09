@@ -74,6 +74,7 @@ holon_macros::widget_builder! {
         };
 
         let mut board_props: HashMap<String, Value> = HashMap::new();
+        board_props.insert("gap".to_string(), Value::Float(layout.gap as f64));
         board_props.insert("lane_field".to_string(), Value::String(lane_field.clone()));
         if let Some(w) = lane_width {
             board_props.insert("lane_width".to_string(), Value::Float(w));

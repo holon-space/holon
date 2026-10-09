@@ -186,7 +186,18 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
         );
     }
 
-    let mut container = div().flex().flex_col().w_full().gap(px(4.0)).child(header);
+    let row_gap = node
+        .collection
+        .as_ref()
+        .and_then(|view| view.layout())
+        .expect("a columnar table is a collection with a layout")
+        .gap;
+    let mut container = div()
+        .flex()
+        .flex_col()
+        .w_full()
+        .gap(px(row_gap))
+        .child(header);
 
     for (index, row) in rows(node).iter().enumerate() {
         let key = row_key(row, index);

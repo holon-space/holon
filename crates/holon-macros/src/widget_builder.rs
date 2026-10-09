@@ -149,6 +149,73 @@ fn parse_param_type(input: ParseStream) -> syn::Result<ParamType> {
 
 // ─── Code Generation ────────────────────────────────────────────────
 
+/// Extraction of a String / Option<String> / bool / f64 / f32 / Value param,
+/// or `None` for a Collection / Expr param. Absent takes the default; a value
+/// of the wrong type runs `on_err` with the message naming the key.
+fn scalar_extraction(
+    param: &WidgetParam,
+    positional_idx: &mut usize,
+    on_err: &proc_macro2::TokenStream,
+) -> Option<proc_macro2::TokenStream> {
+    let name = &param.name;
+    let name_str = name.to_string();
+    let mut slot = || {
+        let idx = *positional_idx;
+        *positional_idx += 1;
+        idx
+    };
+    let default = |unset: proc_macro2::TokenStream| match &param.default {
+        Some(expr) => quote!(#expr),
+        None => unset,
+    };
+    let read = match param.ty {
+        ParamType::String => {
+            let slot = slot();
+            let default = default(quote!(""));
+            quote! {
+                ba.args.param_string(Some(#slot), #name_str)
+                    .map(|v| v.unwrap_or_else(|| #default.to_string()))
+            }
+        }
+        ParamType::OptionalString => {
+            let slot = slot();
+            quote! { ba.args.param_string(Some(#slot), #name_str) }
+        }
+        ParamType::Bool => {
+            let default = default(quote!(false));
+            quote! { ba.args.param_bool(#name_str).map(|v| v.unwrap_or(#default)) }
+        }
+        ParamType::F64 => {
+            let slot = slot();
+            let default = default(quote!(0.0));
+            quote! { ba.args.param_f64(Some(#slot), #name_str).map(|v| v.unwrap_or(#default)) }
+        }
+        ParamType::F32 => {
+            let slot = slot();
+            let default = default(quote!(0.0_f32));
+            quote! {
+                ba.args.param_f64(Some(#slot), #name_str).map(|v| v.map_or(#default, |v| v as f32))
+            }
+        }
+        ParamType::Value => {
+            let idx = slot();
+            return Some(quote! {
+                let #name = ba.args.positional.get(#idx)
+                    .cloned()
+                    .or_else(|| ba.args.named.get(#name_str).cloned())
+                    .unwrap_or(Value::Null);
+            });
+        }
+        ParamType::Collection | ParamType::Expr => return None,
+    };
+    Some(quote! {
+        let #name = match #read {
+            Ok(v) => v,
+            Err(__e) => #on_err,
+        };
+    })
+}
+
 fn generate_extraction(widget_name: &str, params: &[WidgetParam]) -> proc_macro2::TokenStream {
     let mut positional_idx = 0usize;
     let mut extractions = Vec::new();
@@ -157,74 +224,12 @@ fn generate_extraction(widget_name: &str, params: &[WidgetParam]) -> proc_macro2
         let name = &param.name;
         let name_str = name.to_string();
 
+        let on_err = quote!(return ViewModel::error(#widget_name, __e));
+        if let Some(extraction) = scalar_extraction(param, &mut positional_idx, &on_err) {
+            extractions.push(extraction);
+            continue;
+        }
         let extraction = match param.ty {
-            ParamType::String => {
-                let idx = positional_idx;
-                positional_idx += 1;
-                let default = match &param.default {
-                    Some(expr) => quote!(#expr),
-                    None => quote!(""),
-                };
-                quote! {
-                    let #name = ba.args.get_positional_string(#idx)
-                        .or_else(|| ba.args.get_string(#name_str).map(|s| s.to_string()))
-                        .unwrap_or_else(|| #default.to_string());
-                }
-            }
-            ParamType::Bool => {
-                let default = match &param.default {
-                    Some(expr) => quote!(#expr),
-                    None => quote!(false),
-                };
-                quote! {
-                    let #name = ba.args.get_bool(#name_str).unwrap_or(#default);
-                }
-            }
-            ParamType::OptionalString => {
-                let idx = positional_idx;
-                positional_idx += 1;
-                quote! {
-                    let #name: Option<String> = ba.args.get_positional_string(#idx)
-                        .or_else(|| ba.args.get_string(#name_str).map(|s| s.to_string()));
-                }
-            }
-            ParamType::F64 => {
-                let idx = positional_idx;
-                positional_idx += 1;
-                let default = match &param.default {
-                    Some(expr) => quote!(#expr),
-                    None => quote!(0.0),
-                };
-                quote! {
-                    let #name = ba.args.get_positional_f64(#idx)
-                        .or(ba.args.get_f64(#name_str))
-                        .unwrap_or(#default);
-                }
-            }
-            ParamType::F32 => {
-                let idx = positional_idx;
-                positional_idx += 1;
-                let default = match &param.default {
-                    Some(expr) => quote!(#expr),
-                    None => quote!(0.0_f32),
-                };
-                quote! {
-                    let #name = ba.args.get_positional_f64(#idx)
-                        .or(ba.args.get_f64(#name_str))
-                        .map(|v| v as f32)
-                        .unwrap_or(#default);
-                }
-            }
-            ParamType::Value => {
-                let idx = positional_idx;
-                positional_idx += 1;
-                quote! {
-                    let #name = ba.args.positional.get(#idx)
-                        .cloned()
-                        .or_else(|| ba.args.named.get(#name_str).cloned())
-                        .unwrap_or(Value::Null);
-                }
-            }
             ParamType::Collection => {
                 quote! {
                     let #name: crate::reactive_view_model::CollectionData = {
@@ -340,6 +345,7 @@ fn generate_extraction(widget_name: &str, params: &[WidgetParam]) -> proc_macro2
                     let #name = ba.args.get_template(#name_str);
                 }
             }
+            _ => unreachable!("scalar params were extracted above"),
         };
 
         extractions.push(extraction);
@@ -367,77 +373,8 @@ fn generate_resolve_props_body(params: &[WidgetParam]) -> proc_macro2::TokenStre
             _ => {}
         }
 
-        // Extraction
-        let extraction = match param.ty {
-            ParamType::String => {
-                let idx = positional_idx;
-                positional_idx += 1;
-                let default = match &param.default {
-                    Some(expr) => quote!(#expr),
-                    None => quote!(""),
-                };
-                quote! {
-                    let #name = ba.args.get_positional_string(#idx)
-                        .or_else(|| ba.args.get_string(#name_str).map(|s| s.to_string()))
-                        .unwrap_or_else(|| #default.to_string());
-                }
-            }
-            ParamType::Bool => {
-                let default = match &param.default {
-                    Some(expr) => quote!(#expr),
-                    None => quote!(false),
-                };
-                quote! {
-                    let #name = ba.args.get_bool(#name_str).unwrap_or(#default);
-                }
-            }
-            ParamType::OptionalString => {
-                let idx = positional_idx;
-                positional_idx += 1;
-                quote! {
-                    let #name: Option<String> = ba.args.get_positional_string(#idx)
-                        .or_else(|| ba.args.get_string(#name_str).map(|s| s.to_string()));
-                }
-            }
-            ParamType::F64 => {
-                let idx = positional_idx;
-                positional_idx += 1;
-                let default = match &param.default {
-                    Some(expr) => quote!(#expr),
-                    None => quote!(0.0),
-                };
-                quote! {
-                    let #name = ba.args.get_positional_f64(#idx)
-                        .or(ba.args.get_f64(#name_str))
-                        .unwrap_or(#default);
-                }
-            }
-            ParamType::F32 => {
-                let idx = positional_idx;
-                positional_idx += 1;
-                let default = match &param.default {
-                    Some(expr) => quote!(#expr),
-                    None => quote!(0.0_f32),
-                };
-                quote! {
-                    let #name = ba.args.get_positional_f64(#idx)
-                        .or(ba.args.get_f64(#name_str))
-                        .map(|v| v as f32)
-                        .unwrap_or(#default);
-                }
-            }
-            ParamType::Value => {
-                let idx = positional_idx;
-                positional_idx += 1;
-                quote! {
-                    let #name = ba.args.positional.get(#idx)
-                        .cloned()
-                        .or_else(|| ba.args.named.get(#name_str).cloned())
-                        .unwrap_or(Value::Null);
-                }
-            }
-            ParamType::Collection | ParamType::Expr => unreachable!(),
-        };
+        let extraction = scalar_extraction(param, &mut positional_idx, &quote!(return Err(__e)))
+            .expect("Collection and Expr params were skipped above");
         stmts.push(extraction);
 
         // Insertion into __props
@@ -470,7 +407,7 @@ fn generate_resolve_props_body(params: &[WidgetParam]) -> proc_macro2::TokenStre
     quote! {
         let mut __props = std::collections::HashMap::new();
         #(#stmts)*
-        __props
+        Ok(__props)
     }
 }
 
@@ -478,7 +415,9 @@ fn generate_resolve_props_body(params: &[WidgetParam]) -> proc_macro2::TokenStre
 fn generate_resolve_props_fn(params: &[WidgetParam]) -> proc_macro2::TokenStream {
     let body = generate_resolve_props_body(params);
     quote! {
-        pub fn resolve_props_from_args(ba: &BA<'_>) -> std::collections::HashMap<String, holon_api::Value> {
+        pub fn resolve_props_from_args(
+            ba: &BA<'_>,
+        ) -> Result<std::collections::HashMap<String, holon_api::Value>, String> {
             #body
         }
     }
@@ -511,8 +450,10 @@ fn generate_auto_body(widget_name: &str, params: &[WidgetParam]) -> proc_macro2:
     // Auto-body: delegate to resolve_props_from_args
     quote! {
         {
-            let __props = resolve_props_from_args(&ba);
-            ViewModel::from_widget(#widget_name, __props)
+            match resolve_props_from_args(&ba) {
+                Ok(__props) => ViewModel::from_widget(#widget_name, __props),
+                Err(__e) => ViewModel::error(#widget_name, __e),
+            }
         }
     }
 }

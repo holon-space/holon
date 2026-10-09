@@ -111,7 +111,7 @@ pub(crate) fn eager_collection_div(view: &ReactiveView, ctx: &GpuiRenderContext)
     let layout = view.layout();
     let gap = px(layout.as_ref().map(|l| l.gap).unwrap_or(0.0));
     let mut list_div = match layout.as_ref().map(|l| l.flow).unwrap_or_default() {
-        ItemFlow::Stacked => div().flex().flex_col().w_full(),
+        ItemFlow::Stacked => div().flex().flex_col().w_full().gap(gap),
         ItemFlow::Row => div().flex().flex_row().items_center().gap(gap),
         // A wrapping row must also be ALLOWED to be narrower than its content:
         // a flex item's automatic minimum is its min-content width, which for a

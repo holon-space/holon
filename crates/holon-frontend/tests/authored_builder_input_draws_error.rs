@@ -248,3 +248,51 @@ fn view_mode_switcher_without_entity_uri() {
         &["view_mode_switcher", "entity_uri"],
     );
 }
+
+#[test]
+fn row_align_names_no_alignment() {
+    assert_error_names(
+        r#"row(#{align: "middle"}, text("a"))"#,
+        no_row(),
+        &[
+            "row",
+            "align",
+            "middle",
+            "\"start\"",
+            "\"center\"",
+            "\"end\"",
+        ],
+    );
+}
+
+#[test]
+fn state_toggle_states_not_a_list_of_keywords() {
+    for states in [r#"["TODO", 5]"#, "5", r#""TODO""#] {
+        assert_error_names(
+            &format!(r#"state_toggle(col("task_state"), #{{states: {states}}})"#),
+            DataRow::from([
+                ("id".to_string(), Value::String("block:p".to_string())),
+                ("task_state".to_string(), Value::String("TODO".to_string())),
+            ]),
+            &["state_toggle", "states"],
+        );
+    }
+}
+
+#[test]
+fn view_mode_switcher_default_mode_without_its_template() {
+    assert_error_names(
+        r#"view_mode_switcher(#{entity_uri: "block:p", modes: "[{\"name\":\"a\",\"icon\":\"list\"},{\"name\":\"b\",\"icon\":\"list\"}]", default_mode: "b", mode_a: list(#{item_template: text("x")})})"#,
+        no_row(),
+        &["view_mode_switcher", "b"],
+    );
+}
+
+#[test]
+fn view_mode_switcher_mode_without_its_template() {
+    assert_error_names(
+        r#"view_mode_switcher(#{entity_uri: "block:p", modes: "[{\"name\":\"a\",\"icon\":\"list\"},{\"name\":\"table\",\"icon\":\"table\"}]", mode_a: list(#{item_template: text("x")})})"#,
+        no_row(),
+        &["view_mode_switcher", "table"],
+    );
+}

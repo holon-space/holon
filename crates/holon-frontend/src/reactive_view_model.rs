@@ -196,6 +196,15 @@ impl CollectionVariant {
         let spec = crate::collection_layout::lookup_layout(layout)
             .unwrap_or_else(|| panic!("`{layout}` is a registered layout"));
         let gap = parse_gap(widget, named.get("gap"), spec.default_gap)?;
+        let flow_keyword = ["horizontal", "wrap"]
+            .into_iter()
+            .find(|k| named.contains_key(*k));
+        if let Some(keyword) = flow_keyword.filter(|_| !spec.flows) {
+            return Err(format!(
+                "{widget}(#{{{keyword}: …}}): a `{layout}` lays its items out one way only; it \
+                 takes no `horizontal:` or `wrap:`."
+            ));
+        }
         let flow = ItemFlow::parse(widget, named.get("horizontal"), named.get("wrap"))?;
         Ok(Self { spec, gap, flow })
     }
@@ -283,12 +292,58 @@ pub struct ViewModeSwitch {
     ctx: crate::render_context::RenderContext,
 }
 
+/// One entry of a `view_mode_switcher`'s `modes:` list.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ViewMode {
+    pub name: String,
+    pub icon: String,
+}
+
+/// A `view_mode_switcher`'s `modes:` JSON: a list of `{name, icon}` maps.
+pub fn parse_view_modes(json: &str) -> Result<Vec<ViewMode>, String> {
+    serde_json::from_str(json).map_err(|e| {
+        format!("`modes:` must be a JSON list of {{\"name\", \"icon\"}} maps, got {json:?}: {e}")
+    })
+}
+
 impl ViewModeSwitch {
+    /// Switch to mode `mode`, built from the `tmpl_mode_*` prop the builder
+    /// stored for it. A mode with no usable template draws an error node in
+    /// the slot.
+    pub fn switch_mode(&self, mode: &str, services: &Arc<dyn crate::reactive::BuilderServices>) {
+        match self.mode_template(mode) {
+            Ok(template) => self.switch(mode, &template, services),
+            Err(message) => {
+                let refused = ReactiveViewModel::error("view_mode_switcher", message);
+                mark_active_mode(&mut self.props.lock_mut(), mode, &refused);
+                self.slot.set(Arc::new(refused));
+            }
+        }
+    }
+
+    fn mode_template(&self, mode: &str) -> Result<RenderExpr, String> {
+        let key = format!("tmpl_mode_{mode}");
+        let json = match self.props.lock_ref().get(&key) {
+            Some(Value::String(json)) => json.clone(),
+            other => {
+                return Err(format!(
+                    "mode `{mode}` has no template: `{key}` is {other:?}"
+                ));
+            }
+        };
+        let template: RenderExpr = serde_json::from_str(&json)
+            .map_err(|e| format!("mode `{mode}`'s template does not decode: {e}"))?;
+        holon_api::render_dsl::validate_render_expr(&template)
+            .map_err(|e| format!("mode `{mode}`'s template: {e}"))?;
+        Ok(template)
+    }
+
     /// Switch to mode `mode`. Its `template` is built exactly as the first
     /// paint builds it, so the click and the first paint give one answer for
     /// one source; the slot's collection only takes the new item template
     /// when the built layout equals the one it already draws.
-    pub fn switch(
+    fn switch(
         &self,
         mode: &str,
         template: &RenderExpr,
@@ -2053,10 +2108,24 @@ impl ReactiveViewModel {
         }
     }
 
-    /// Create a static collection node. `props` land on the node itself, as
-    /// in [`Self::streaming_collection`].
+    /// Create a static collection node laid out as the registered layout of
+    /// the same name. `props` land on the node itself, as in
+    /// [`Self::streaming_collection`].
     pub fn static_collection(
         widget: &str,
+        items: Vec<ReactiveViewModel>,
+        gap: f32,
+        flow: ItemFlow,
+        props: HashMap<String, Value>,
+    ) -> Self {
+        Self::static_collection_laid_out(widget, widget, items, gap, flow, props)
+    }
+
+    /// A static collection node named `widget`, laid out as the registered
+    /// `layout`.
+    pub fn static_collection_laid_out(
+        widget: &str,
+        layout: &str,
         items: Vec<ReactiveViewModel>,
         gap: f32,
         flow: ItemFlow,
@@ -2068,7 +2137,7 @@ impl ReactiveViewModel {
                 ..Self::from_widget("query_result", props)
             };
         }
-        let layout = Self::widget_layout(widget, gap, flow);
+        let layout = Self::widget_layout(layout, gap, flow);
         let view = crate::reactive_view::ReactiveView::new_static_with_layout(items, layout);
         Self {
             collection: Some(std::sync::Arc::new(view)),
@@ -2076,15 +2145,9 @@ impl ReactiveViewModel {
         }
     }
 
-    fn widget_layout(widget: &str, gap: f32, flow: ItemFlow) -> CollectionVariant {
-        // Single source of truth: the `collection_layout` registry. Falls
-        // back to a `list`-shaped variant for unknown widgets so the
-        // streaming runtime stays well-typed even if a frontend forgets
-        // to register a custom layout.
-        let mut variant = CollectionVariant::from_name(widget, gap).unwrap_or_else(|| {
-            CollectionVariant::from_name("list", gap)
-                .expect("`list` layout is registered as a builtin")
-        });
+    fn widget_layout(layout: &str, gap: f32, flow: ItemFlow) -> CollectionVariant {
+        let mut variant = CollectionVariant::from_name(layout, gap)
+            .unwrap_or_else(|| panic!("`{layout}` is not a registered collection layout"));
         variant.flow = flow;
         variant
     }
@@ -2179,6 +2242,18 @@ mod tests {
     use holon_api::Value;
 
     use super::*;
+
+    #[test]
+    #[should_panic(expected = "not a registered collection layout")]
+    fn a_collection_over_an_unregistered_layout_is_a_programming_error() {
+        ReactiveViewModel::static_collection(
+            "question_options",
+            Vec::new(),
+            8.0,
+            ItemFlow::Stacked,
+            HashMap::new(),
+        );
+    }
 
     fn make_data(task_state: &str) -> Arc<DataRow> {
         Arc::new(

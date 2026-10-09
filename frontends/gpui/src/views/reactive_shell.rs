@@ -747,15 +747,11 @@ impl Render for ReactiveShell {
                         std::sync::Arc::as_ptr(view),
                     );
                 }
-                let gap_px = match view
-                    .layout()
-                    .as_ref()
-                    .filter(|l| l.name() == "list")
-                    .map(|l| l.gap)
-                {
-                    Some(g) => px(g.max(2.0)),
-                    None => px(2.0),
-                };
+                let layout = view.layout();
+                if layout.as_ref().is_some_and(|l| l.flow.is_horizontal()) {
+                    return builders::eager_collection_div(view, &gpui_ctx).into_any_element();
+                }
+                let gap_px = px(layout.map_or(2.0, |l| l.gap));
                 let mut container = div().flex().flex_col().w_full();
                 for item in &items {
                     container = container
@@ -886,16 +882,7 @@ impl Render for ReactiveShell {
             .as_ref()
             .expect("collection-mode render path requires reactive_view")
             .layout();
-        // Same floor as the (rollback-gated) eager branch above so the main
-        // panel renders identically through either path.
-        let row_gap_px: Pixels = match variant
-            .as_ref()
-            .filter(|l| l.name() == "list")
-            .map(|l| l.gap)
-        {
-            Some(g) => px(g.max(2.0)),
-            None => px(2.0),
-        };
+        let row_gap_px: Pixels = px(variant.map_or(2.0, |l| l.gap));
 
         if std::env::var_os("HOLON_GPUI_RENDER_PROBE").is_some()
             && self.render_probe_last.get() != self.items.len()

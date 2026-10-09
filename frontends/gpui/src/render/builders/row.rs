@@ -13,7 +13,8 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
     container = match align.as_str() {
         "start" => container.items_start(),
         "end" => container.items_end(),
-        _ => container.items_center(),
+        "center" => container.items_center(),
+        other => unreachable!("the row builder refuses align {other:?}"),
     };
     for child in render_children(children, ctx) {
         container = container.child(child);

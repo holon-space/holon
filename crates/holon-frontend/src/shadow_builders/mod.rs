@@ -131,12 +131,13 @@ pub fn build_shadow_interpreter() -> RenderInterpreter<ReactiveViewModel> {
 /// Dispatch `resolve_props_from_args` for a named builder.
 ///
 /// Returns `Some(props)` when the builder has a macro-generated
-/// `resolve_props_from_args` (auto-body and custom-body non-raw widgets).
-/// Returns `None` for raw builders that don't have this function.
+/// `resolve_props_from_args` (auto-body and custom-body non-raw widgets), an
+/// `Err` inside when a typed param's value is refused. Returns `None` for raw
+/// builders that don't have this function.
 pub(crate) fn dispatch_resolve_props(
     widget_name: &str,
     ba: &prelude::BA<'_>,
-) -> Option<std::collections::HashMap<String, holon_api::Value>> {
+) -> Option<Result<std::collections::HashMap<String, holon_api::Value>, String>> {
     match widget_name {
         "text" => Some(text::resolve_props_from_args(ba)),
         // `badge` is deliberately absent: the generated function copies the

@@ -438,7 +438,10 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
         .items_start()
         .w_full()
         .overflow_x_scroll()
-        .gap(px(LANE_GAP_PX))
+        .gap(px(node
+            .prop_f64("gap")
+            .expect("the board builder stamps its `gap`")
+            as f32))
         .p(px(LANE_GAP_PX));
 
     for (lane_index, lane) in lanes.iter().enumerate() {

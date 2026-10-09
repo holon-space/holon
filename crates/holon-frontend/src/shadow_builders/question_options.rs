@@ -207,8 +207,9 @@ holon_macros::widget_builder! {
                 answer_button(&question_id, &answer.label, wiring)
             })
             .collect();
-        ViewModel::static_collection(
+        ViewModel::static_collection_laid_out(
             "question_options",
+            "list",
             items,
             8.0,
             ItemFlow::Stacked,

@@ -6,24 +6,6 @@ use holon_frontend::vms_button_id_for;
 use super::prelude::*;
 use crate::geometry::TransparentTracker;
 
-struct ModeDesc {
-    name: String,
-    icon: String,
-}
-
-fn parse_modes(json: &str) -> Vec<ModeDesc> {
-    let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(json) else {
-        return vec![];
-    };
-    arr.into_iter()
-        .filter_map(|v| {
-            let name = v.get("name")?.as_str()?.to_string();
-            let icon = v.get("icon")?.as_str()?.to_string();
-            Some(ModeDesc { name, icon })
-        })
-        .collect()
-}
-
 /// The absolutely-positioned mode-switcher icon bar (top-right overlay), or
 /// `None` when the node declares no modes. Shared by both the definite-height
 /// `render` path and the content-height `render_content_height` path so the
@@ -34,47 +16,15 @@ fn build_switcher_bar(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Opti
         .unwrap_or_else(|| "unknown".to_string());
     // ALLOW(entity_uri_from_raw): render-spec node.prop_str('entity_uri')
     let entity_uri = holon_api::EntityUri::from_raw(&entity_uri_str);
-    let modes = node.prop_str("modes").unwrap_or_else(|| "[]".to_string());
-    let active = node.prop_str("active_mode").unwrap_or_default();
-
-    // Shadow builder stores mode templates as individual `tmpl_mode_*` props,
-    // each a JSON-serialized RenderExpr. Reconstruct the mode -> expr map.
-    let mode_templates: std::collections::HashMap<String, holon_api::render_types::RenderExpr> = {
-        let props = node.props.lock_ref();
-        // ALLOW(filter_map_ok): malformed tmpl_ props are non-fatal reconstruction
-        // skips
-        props
-            .iter()
-            .filter_map(|(k, v)| {
-                let mode_key = k.strip_prefix("tmpl_")?;
-                if let holon_api::Value::String(s) = v {
-                    // ALLOW(ok): see ALLOW(filter_map_ok) above -- same rationale
-                    serde_json::from_str::<holon_api::render_types::RenderExpr>(s)
-                        .ok()
-                        .and_then(|expr| {
-                            // A deserialized template has not been through the
-                            // parser's colour gate. A mode whose template is not
-                            // valid is dropped, and said so, rather than
-                            // rendered with a colour nobody asked for.
-                            match holon_api::render_dsl::validate_render_expr(&expr) {
-                                Ok(()) => Some((mode_key.to_string(), expr)),
-                                Err(e) => {
-                                    tracing::error!(mode = %mode_key, "{e}");
-                                    None
-                                }
-                            }
-                        })
-                } else {
-                    None
-                }
-            })
-            .collect()
-    };
-
-    let mode_list = parse_modes(&modes);
+    let modes = node
+        .prop_str("modes")
+        .expect("a view_mode_switcher node carries its `modes`");
+    let mode_list = holon_frontend::reactive_view_model::parse_view_modes(&modes)
+        .expect("the view_mode_switcher builder refuses `modes:` it cannot parse");
     if mode_list.is_empty() {
         return None;
     }
+    let active = node.prop_str("active_mode").unwrap_or_default();
 
     let icon_size = 14.0;
     let mut icons_row = div().flex().items_center().gap(px(2.0));
@@ -85,7 +35,6 @@ fn build_switcher_bar(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Opti
         let gpui_el_id = format!("vms-{}-{}", entity_uri.id(), mode.name);
 
         let switcher = node.view_mode_switch();
-        let mode_templates_clone = mode_templates.clone();
         let services = ctx.services.clone();
         let mode_for_click = mode.name.clone();
         let icon_el = super::icon::render_icon(&mode.icon, icon_size, ctx);
@@ -100,15 +49,9 @@ fn build_switcher_bar(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Opti
             .child(icon_el)
             .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
                 cx.stop_propagation();
-                tracing::info!(
-                    "[VMS_CLICK] mode={mode_for_click:?} available={:?}",
-                    mode_templates_clone.keys().collect::<Vec<_>>(),
-                );
-                if let Some(template) = mode_templates_clone.get(&format!("mode_{mode_for_click}"))
-                {
-                    let svc: Arc<dyn holon_frontend::reactive::BuilderServices> = services.clone();
-                    switcher.switch(&mode_for_click, template, &svc);
-                }
+                tracing::info!("[VMS_CLICK] mode={mode_for_click:?}");
+                let svc: Arc<dyn holon_frontend::reactive::BuilderServices> = services.clone();
+                switcher.switch_mode(&mode_for_click, &svc);
                 window.refresh();
             });
 

@@ -59,6 +59,9 @@ pub struct LayoutSpec {
     pub shape: LayoutShape,
     /// Gap (px) between items when the call site names no `gap:`.
     pub default_gap: f32,
+    /// Whether the layout can lay its items side by side, i.e. accepts
+    /// `horizontal:` and `wrap:`.
+    pub flows: bool,
 }
 
 impl LayoutSpec {
@@ -67,6 +70,7 @@ impl LayoutSpec {
             name: name.into(),
             shape: LayoutShape::Flat,
             default_gap,
+            flows: false,
         }
     }
 
@@ -75,6 +79,15 @@ impl LayoutSpec {
             name: name.into(),
             shape: LayoutShape::Hierarchical,
             default_gap,
+            flows: false,
+        }
+    }
+
+    /// This layout, accepting `horizontal:` and `wrap:`.
+    pub fn flowing(self) -> Self {
+        Self {
+            flows: true,
+            ..self
         }
     }
 }
@@ -123,15 +136,17 @@ fn registry() -> &'static RwLock<LayoutRegistry> {
 /// Register the layouts shipped with `holon-frontend`. Called automatically
 /// the first time the registry is touched.
 fn register_builtins(r: &mut LayoutRegistry) {
-    r.register(LayoutSpec::flat("list", 4.0));
-    r.register(LayoutSpec::flat("table", 4.0));
+    // Default gaps are the spacing GPUI draws a bare call site at in the
+    // main panel.
+    r.register(LayoutSpec::flat("list", 4.0).flowing());
+    r.register(LayoutSpec::flat("table", 2.0));
     // `table(#{columns: …})`. A layout of its own so a bare `table` keeps the
     // default render path exactly as it was.
     r.register(LayoutSpec::flat("table_columnar", 4.0));
     r.register(LayoutSpec::flat("columns", 16.0));
-    r.register(LayoutSpec::flat("board", 0.0));
-    r.register(LayoutSpec::hierarchical("tree", 4.0));
-    r.register(LayoutSpec::hierarchical("outline", 4.0));
+    r.register(LayoutSpec::flat("board", 16.0));
+    r.register(LayoutSpec::hierarchical("tree", 2.0));
+    r.register(LayoutSpec::hierarchical("outline", 2.0));
 }
 
 /// Register a layout from outside `holon-frontend` (e.g. a frontend-side

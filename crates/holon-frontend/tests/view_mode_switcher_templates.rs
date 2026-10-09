@@ -23,7 +23,10 @@ fn a_mode_template_with_no_json_form_paints_an_error_node_naming_it() {
         name: "view_mode_switcher".to_string(),
         args: vec![
             named("entity_uri", literal(Value::String("block:x".into()))),
-            named("modes", literal(Value::String(r#"[{"name":"a"}]"#.into()))),
+            named(
+                "modes",
+                literal(Value::String(r#"[{"name":"a","icon":"list"}]"#.into())),
+            ),
             named(
                 "mode_a",
                 RenderExpr::FunctionCall {

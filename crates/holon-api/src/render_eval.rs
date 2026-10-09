@@ -124,28 +124,42 @@ pub fn sorted_rows(rows: &[Arc<DataRow>], sort_key: Option<&str>) -> Vec<Arc<Dat
     sorted
 }
 
+/// The state cycle a `states:` arg names. A `Null` (a document without
+/// `#+TODO:`) or an empty list takes the builtin cycle; any other value that is
+/// not a list of keywords is refused.
 pub fn resolve_states<K: RowKey>(
     args: &ResolvedArgs,
     row: &HashMap<K, Value>,
 ) -> Result<Vec<String>, ComputeError> {
-    if let Some(states_expr) = args.get_template("states") {
-        let val = eval_to_value(states_expr, row)?;
-        if let Value::Array(items) = val {
-            let states: Vec<String> = items
-                .iter()
-                .filter_map(|v| v.as_string().map(|s| s.to_string()))
-                .collect();
-            if !states.is_empty() {
-                return Ok(states);
-            }
-        }
+    let builtin = || {
+        vec![
+            String::new(),
+            "TODO".to_string(),
+            "DOING".to_string(),
+            "DONE".to_string(),
+        ]
+    };
+    let Some(states_expr) = args.get_template("states") else {
+        return Ok(builtin());
+    };
+    let not_keywords = |value: Value| ComputeError::WrongType {
+        context: "states".to_string(),
+        expected: "a list of state keywords",
+        value,
+    };
+    match eval_to_value(states_expr, row)? {
+        Value::Null => Ok(builtin()),
+        Value::Array(items) if items.is_empty() => Ok(builtin()),
+        Value::Array(items) => items
+            .iter()
+            .map(|v| {
+                v.as_string()
+                    .map(str::to_string)
+                    .ok_or_else(|| not_keywords(Value::Array(items.clone())))
+            })
+            .collect(),
+        other => Err(not_keywords(other)),
     }
-    Ok(vec![
-        String::new(),
-        "TODO".to_string(),
-        "DOING".to_string(),
-        "DONE".to_string(),
-    ])
 }
 
 pub fn cycle_state(current: &str, states: &[String]) -> String {
@@ -581,6 +595,48 @@ impl ResolvedArgs {
                 None => Err(format!("arg `{name}` must be a number, got {v:?}")),
             },
         }
+    }
+
+    /// The value a typed param was given: positional slot `slot` when it holds
+    /// one, else the named arg. `Null` (a nested widget call, a missing
+    /// column) counts as not given.
+    fn param_value(&self, slot: Option<usize>, name: &str) -> Option<&Value> {
+        slot.and_then(|i| self.positional.get(i))
+            .filter(|v| !v.is_null())
+            .or_else(|| self.named.get(name).filter(|v| !v.is_null()))
+    }
+
+    /// A typed `String` param. A scalar is drawn as its text; a value with no
+    /// text form is refused, never replaced by the default.
+    pub fn param_string(&self, slot: Option<usize>, name: &str) -> Result<Option<String>, String> {
+        self.param_value(slot, name)
+            .map(|v| match v {
+                Value::String(s) | Value::DateTime(s) | Value::Json(s) => Ok(s.clone()),
+                Value::Integer(i) => Ok(i.to_string()),
+                Value::Float(f) => Ok(f.to_string()),
+                Value::Boolean(b) => Ok(b.to_string()),
+                other => Err(format!("arg `{name}` must be text, got {other:?}")),
+            })
+            .transpose()
+    }
+
+    /// A typed number param; anything but a number is refused.
+    pub fn param_f64(&self, slot: Option<usize>, name: &str) -> Result<Option<f64>, String> {
+        self.param_value(slot, name)
+            .map(|v| {
+                value_to_f64(v).ok_or_else(|| format!("arg `{name}` must be a number, got {v:?}"))
+            })
+            .transpose()
+    }
+
+    /// A typed bool param; anything but a boolean is refused.
+    pub fn param_bool(&self, name: &str) -> Result<Option<bool>, String> {
+        self.param_value(None, name)
+            .map(|v| match v {
+                Value::Boolean(b) => Ok(*b),
+                other => Err(format!("arg `{name}` must be a boolean, got {other:?}")),
+            })
+            .transpose()
     }
 
     /// Get positional arg as string, coercing non-string values.

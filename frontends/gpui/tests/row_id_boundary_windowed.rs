@@ -142,8 +142,11 @@ fn painted_board(cx: &mut TestAppContext, id: &str) -> BoundsSnapshot {
     let mut lane_props = std::collections::HashMap::new();
     lane_props.insert("title".to_string(), Value::String("Todo".to_string()));
     let lane = ReactiveViewModel::from_widget("board_lane", lane_props).with_children(vec![card]);
-    let board =
-        ReactiveViewModel::from_widget("board", Default::default()).with_children(vec![lane]);
+    let board = ReactiveViewModel::from_widget(
+        "board",
+        std::collections::HashMap::from([("gap".to_string(), Value::Float(16.0))]),
+    )
+    .with_children(vec![lane]);
 
     let snap =
         render_reactive_fixture_quiescent_sized(cx, Arc::new(board), size(px(900.0), px(600.0)));

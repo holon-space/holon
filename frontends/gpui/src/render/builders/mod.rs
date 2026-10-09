@@ -12,6 +12,7 @@ pub(crate) mod theme;
 // where the main panel is wrapped in a live_block so columns.rs sees no
 // column).
 pub(crate) use bottom_dock::KeyboardHeight;
+pub(crate) use column::eager_collection_div;
 pub(crate) use column::has_pinned_child;
 pub(crate) use column::render_accordion_split;
 pub(crate) use column::slot_pinned_container;
@@ -321,7 +322,10 @@ pub fn render(
         // `size_full` chain resolves to 0 and the list paints nothing. Render
         // eagerly at content height instead, the same firewall
         // `column::eager_collection_div` provides for content-sized columns.
-        if ctx.placement == crate::views::ShellPlacement::Nested {
+        // A virtualized `gpui::list` stacks its rows, so a collection laid
+        // side by side renders eagerly too.
+        let horizontal = view.layout().is_some_and(|l| l.flow.is_horizontal());
+        if ctx.placement == crate::views::ShellPlacement::Nested || horizontal {
             return tag(
                 ctx,
                 "reactive_shell",

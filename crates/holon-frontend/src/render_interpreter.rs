@@ -490,8 +490,10 @@ pub fn resolve_props(
     };
 
     // Try the macro-generated fast path first.
+    // A refused param is not a props update: the full interpret draws its error
+    // node.
     if let Some(props) = crate::shadow_builders::dispatch_resolve_props(widget_name, &ba) {
-        return Ok(props);
+        return props.map_err(|_| crate::reactive_view_model::NotAPropsUpdate);
     }
 
     // ALLOW(fallback): two-level dispatch — fast path then full interpret; both

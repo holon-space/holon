@@ -2,8 +2,6 @@ use super::prelude::*;
 
 holon_macros::widget_builder! {
     raw fn view_mode_switcher(ba: BA<'_>) -> ViewModel {
-        let modes = ba.args.get_string("modes").unwrap_or("[]").to_string();
-
         let Some(entity_id) = ba.args.get_string("entity_uri") else {
             return ViewModel::error(
                 "view_mode_switcher",
@@ -16,46 +14,64 @@ holon_macros::widget_builder! {
                 Err(msg) => return ViewModel::error("view_mode_switcher", msg),
             };
 
-        // Collect all mode_* templates.
+        let modes = match ba.args.named.get("modes") {
+            Some(Value::String(json)) => json.clone(),
+            other => {
+                return ViewModel::error(
+                    "view_mode_switcher",
+                    format!("`modes:` must be a JSON string listing the modes, got {other:?}"),
+                )
+            }
+        };
+        let listed = match crate::reactive_view_model::parse_view_modes(&modes) {
+            Ok(listed) if !listed.is_empty() => listed,
+            Ok(_) => return ViewModel::error("view_mode_switcher", "`modes:` lists no mode"),
+            Err(msg) => return ViewModel::error("view_mode_switcher", msg),
+        };
+
         let mode_templates: std::collections::HashMap<String, holon_api::render_types::RenderExpr> =
             ba.args.templates.iter()
                 .filter(|(k, _)| k.starts_with("mode_"))
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
+        // Every listed mode is drawn by its template, and every template is
+        // reachable from the bar.
+        for mode in &listed {
+            if !mode_templates.contains_key(&format!("mode_{}", mode.name)) {
+                return ViewModel::error(
+                    "view_mode_switcher",
+                    format!("mode `{}` is listed in `modes:` but has no `mode_{}:` template", mode.name, mode.name),
+                );
+            }
+        }
+        for key in mode_templates.keys() {
+            if !listed.iter().any(|mode| format!("mode_{}", mode.name) == *key) {
+                return ViewModel::error(
+                    "view_mode_switcher",
+                    format!("`{key}:` is a template for a mode `modes:` does not list"),
+                );
+            }
+        }
 
-        // Default mode: explicit `default_mode` arg wins (backend marks the
-        // unconditional `Predicate::Always` variant; see
-        // `holon::api::block_domain::view_mode_switcher_from_variants`).
-        // Otherwise, first entry in the `modes` JSON array.
-        let default_mode = ba.args.get_string("default_mode")
-            .map(|s| s.to_string())
-            .or_else(|| {
-                serde_json::from_str::<Vec<serde_json::Value>>(&modes)
-                    .ok()
-                    .and_then(|arr| arr.first()?.get("name")?.as_str().map(|s| s.to_string()))
-            })
-            .unwrap_or_else(|| "tree".to_string());
-
-        let active_mode = futures_signals::signal::Mutable::new(default_mode);
-
-        // Interpret the currently active mode's template into the slot.
-        let mode_key = format!("mode_{}", active_mode.get_cloned());
-        let child_expr = mode_templates.get(&mode_key)
-            .or_else(|| {
-                ba.args.templates.iter()
-                    .find(|(k, _)| k.starts_with("mode_"))
-                    .map(|(_, v)| v)
-            });
-
-        let child = match child_expr {
-            Some(expr) => (ba.interpret)(expr, ba.ctx),
-            None => ViewModel::empty(),
+        // `default_mode` names the unconditional variant when the backend
+        // knows it (`holon::api::block_domain::view_mode_switcher_from_variants`);
+        // otherwise the first listed mode.
+        let default_mode = match ba.args.named.get("default_mode") {
+            None => listed[0].name.clone(),
+            Some(Value::String(mode)) if listed.iter().any(|m| m.name == *mode) => mode.clone(),
+            Some(other) => {
+                return ViewModel::error(
+                    "view_mode_switcher",
+                    format!("`default_mode:` must name a listed mode, got {other:?}"),
+                )
+            }
         };
+        let child = (ba.interpret)(&mode_templates[&format!("mode_{default_mode}")], ba.ctx);
 
         let mut __props = std::collections::HashMap::new();
         __props.insert("entity_uri".to_string(), Value::String(entity_uri.to_string()));
         __props.insert("modes".to_string(), Value::String(modes));
-        crate::reactive_view_model::mark_active_mode(&mut __props, &active_mode.get_cloned(), &child);
+        crate::reactive_view_model::mark_active_mode(&mut __props, &default_mode, &child);
         // Serialize mode_templates into props for snapshot reconstruction.
         for (k, v) in &mode_templates {
             let json = match serde_json::to_string(v) {
