@@ -15,8 +15,6 @@ use holon_core::Result;
 use holon_core::SyncTokenStore;
 use holon_core::SyncableProvider;
 use holon_turso::turso::DbHandle;
-use rmcp::RoleClient;
-use rmcp::service::Peer;
 use tracing::Instrument;
 use tracing::debug;
 use tracing::info;
@@ -25,6 +23,7 @@ use tracing::warn;
 
 use crate::entity_mirror::EntityMirror;
 use crate::mcp_call_surface::McpCallSurface;
+use crate::mcp_request::BudgetedPeer;
 use crate::mcp_sidecar::McpSidecar;
 use crate::mcp_sync_strategy::SyncStrategy;
 use crate::mcp_sync_strategy::expand_uri_template;
@@ -371,7 +370,7 @@ pub struct McpSyncEngine {
     surface: Arc<dyn McpCallSurface>,
     /// The MCP peer, present only for MCP transports. `None` for `rest`, which
     /// serves calls but cannot subscribe to resources or expose typed sources.
-    peer: Option<Peer<RoleClient>>,
+    peer: Option<BudgetedPeer>,
     strategies: HashMap<String, Box<dyn SyncStrategy>>,
     caches: HashMap<String, Arc<dyn EntityCache<DynamicEntity>>>,
     token_store: Arc<dyn SyncTokenStore>,
@@ -406,7 +405,7 @@ impl McpSyncEngine {
     #[allow(clippy::too_many_arguments)] // wires up the full sync pipeline; each arg is a distinct subsystem
     pub fn new(
         surface: Arc<dyn McpCallSurface>,
-        peer: Option<Peer<RoleClient>>,
+        peer: Option<BudgetedPeer>,
         strategies: HashMap<String, Box<dyn SyncStrategy>>,
         caches: HashMap<String, Arc<dyn EntityCache<DynamicEntity>>>,
         token_store: Arc<dyn SyncTokenStore>,
@@ -593,11 +592,9 @@ impl McpSyncEngine {
                 "[McpSyncEngine] Subscribing to '{}' for entity '{}'",
                 uri, entity_name
             );
-            crate::mcp_request::subscribe(peer, uri)
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!("Failed to subscribe to '{uri}' for '{entity_name}': {e}")
-                })?;
+            peer.subscribe(uri).await.map_err(|e| {
+                anyhow::anyhow!("Failed to subscribe to '{uri}' for '{entity_name}': {e}")
+            })?;
         }
 
         // Subscribe to vtable resource templates that have no dynamic params
@@ -609,11 +606,9 @@ impl McpSyncEngine {
                     "[McpSyncEngine] Subscribing to vtable resource '{}'",
                     sub.uri_template
                 );
-                crate::mcp_request::subscribe(peer, &sub.uri_template)
-                    .await
-                    .map_err(|e| {
-                        anyhow::anyhow!("Failed to subscribe to vtable '{}': {e}", sub.uri_template)
-                    })?;
+                peer.subscribe(&sub.uri_template).await.map_err(|e| {
+                    anyhow::anyhow!("Failed to subscribe to vtable '{}': {e}", sub.uri_template)
+                })?;
             } else {
                 info!(
                     "[McpSyncEngine] Vtable '{}' has dynamic params {:?} — relying on broadcast \
@@ -752,7 +747,7 @@ impl McpSyncEngine {
     /// Access the underlying MCP peer (e.g. to build additional typed
     /// sources like `McpClaudeSessionSource` over the same connection).
     /// `None` for the `rest` transport, which has no MCP peer.
-    pub fn peer(&self) -> Option<&Peer<RoleClient>> {
+    pub fn peer(&self) -> Option<&BudgetedPeer> {
         self.peer.as_ref()
     }
 
@@ -770,7 +765,7 @@ impl McpSyncEngine {
             );
             return;
         };
-        match crate::mcp_request::subscribe(peer, uri).await {
+        match peer.subscribe(uri).await {
             Ok(_) => info!("[McpSyncEngine] Subscribed to '{uri}'"),
             Err(e) => warn!("[McpSyncEngine] Failed to subscribe to '{uri}': {e}"),
         }

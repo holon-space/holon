@@ -126,7 +126,7 @@ async fn main() -> Result<()> {
 async fn connect(
     cfg: &IntegrationFileConfig,
 ) -> Result<(
-    rmcp::service::Peer<rmcp::RoleClient>,
+    holon_mcp_client::mcp_request::BudgetedPeer,
     holon_mcp_client::McpRunningService,
 )> {
     // The sidecar names the variable; the value comes from the environment.

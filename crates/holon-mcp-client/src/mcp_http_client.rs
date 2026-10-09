@@ -24,6 +24,9 @@ use rmcp::transport::streamable_http_client::StreamableHttpClient;
 use rmcp::transport::streamable_http_client::StreamableHttpError;
 use rmcp::transport::streamable_http_client::StreamableHttpPostResponse;
 
+use crate::peer_budget::HeldEventBytes;
+use crate::peer_budget::PeerBudget;
+use crate::secure_client::MAX_CONCURRENT_GET_STREAMS;
 use crate::secure_client::MAX_CONCURRENT_POST_STREAMS;
 use crate::secure_client::MAX_RESPONSE_BODY_BYTES;
 use crate::secure_client::MCP_IDLE_TIMEOUT;
@@ -54,26 +57,32 @@ impl std::error::Error for McpHttpError {}
 /// a total one because rmcp sends a connection's messages one POST at a time,
 /// so one reply that never ends stalls every later request.
 ///
-/// A POST reply stream is also bounded in both its lifetime and its number:
-/// rmcp keeps polling the reply stream of a request whose deadline already
-/// passed, so the peer would otherwise decide how many partial events the
-/// process holds.
+/// Both kinds of stream are bounded in number, and the partial events of all
+/// of them share one byte allowance: rmcp keeps polling the reply stream of a
+/// request whose deadline already passed and reopens a notification stream
+/// without a ceiling, so the peer would otherwise decide how many partial
+/// events the process holds. All of that lives in the connection's
+/// [`PeerBudget`], which this client shares with its peer handle.
 #[derive(Clone)]
 pub(crate) struct McpHttpClient {
     client: reqwest::Client,
     idle_timeout: Duration,
     request_timeout: Duration,
-    /// One slot per unfinished POST reply stream, shared by every clone rmcp
-    /// makes of this client, so the budget is per connection.
-    post_streams: Arc<tokio::sync::Semaphore>,
+    /// Shared by every clone rmcp makes of this client AND by the connection's
+    /// [`crate::mcp_request::BudgetedPeer`], so the bounds are per connection.
+    budget: Arc<PeerBudget>,
 }
 
 impl McpHttpClient {
-    pub(crate) fn new() -> Self {
-        Self::with_timeouts(MCP_IDLE_TIMEOUT, REQUEST_TIMEOUT)
+    pub(crate) fn new(budget: Arc<PeerBudget>) -> Self {
+        Self::with_budget(MCP_IDLE_TIMEOUT, REQUEST_TIMEOUT, budget)
     }
 
-    fn with_timeouts(idle_timeout: Duration, request_timeout: Duration) -> Self {
+    fn with_budget(
+        idle_timeout: Duration,
+        request_timeout: Duration,
+        budget: Arc<PeerBudget>,
+    ) -> Self {
         Self {
             client: crate::secure_client::https_only()
                 .read_timeout(idle_timeout)
@@ -81,7 +90,7 @@ impl McpHttpClient {
                 .expect("a reqwest client with a redirect policy and a read timeout must build"),
             idle_timeout,
             request_timeout,
-            post_streams: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_POST_STREAMS)),
+            budget,
         }
     }
 
@@ -104,20 +113,44 @@ impl McpHttpClient {
         move |e| StreamableHttpError::Client(McpHttpError(describe(e)))
     }
 
-    /// One slot of the connection's POST-reply-stream budget, waited for
-    /// rather than refused: Holon's own enumeration fan-out calls a connection
-    /// concurrently, so a full budget is contention and only a peer that holds
-    /// every stream open past the deadline turns it into a failure.
-    async fn budget_slot(&self) -> Result<tokio::sync::OwnedSemaphorePermit, HttpError> {
-        let budget = self.post_streams.clone();
+    /// One slot of a stream budget, waited for rather than refused: Holon's own
+    /// enumeration fan-out calls a connection concurrently and rmcp replaces a
+    /// notification stream while the old one is still closing, so a full budget
+    /// is contention and only a peer that holds every stream open past the
+    /// deadline turns it into a failure.
+    ///
+    /// Waiting is also what rate-limits a peer-driven reconnect storm: rmcp
+    /// retries a notification stream without a ceiling, and each retry then
+    /// waits for a slot rather than opening a socket.
+    async fn stream_slot(
+        &self,
+        which: &str,
+        budget: &Arc<tokio::sync::Semaphore>,
+    ) -> Result<tokio::sync::OwnedSemaphorePermit, HttpError> {
         let timeout = self.request_timeout;
-        match tokio::time::timeout(timeout, budget.acquire_owned()).await {
-            Ok(slot) => Ok(slot.expect("the POST-stream budget is never closed")),
+        match tokio::time::timeout(timeout, budget.clone().acquire_owned()).await {
+            Ok(slot) => Ok(slot.expect("a stream budget is never closed")),
             Err(_) => Err(StreamableHttpError::Client(McpHttpError(format!(
-                "the peer held all MAX_CONCURRENT_POST_STREAMS ({MAX_CONCURRENT_POST_STREAMS}) \
-                 reply streams of this connection open for REQUEST_TIMEOUT ({timeout:?})"
+                "the peer held all {which} streams of this connection open for REQUEST_TIMEOUT \
+                 ({timeout:?})"
             )))),
         }
+    }
+
+    async fn post_slot(&self) -> Result<tokio::sync::OwnedSemaphorePermit, HttpError> {
+        self.stream_slot(
+            &format!("MAX_CONCURRENT_POST_STREAMS ({MAX_CONCURRENT_POST_STREAMS}) reply"),
+            &self.budget.post_streams,
+        )
+        .await
+    }
+
+    async fn get_slot(&self) -> Result<tokio::sync::OwnedSemaphorePermit, HttpError> {
+        self.stream_slot(
+            &format!("MAX_CONCURRENT_GET_STREAMS ({MAX_CONCURRENT_GET_STREAMS}) notification"),
+            &self.budget.get_streams,
+        )
+        .await
     }
 
     async fn post(
@@ -176,7 +209,11 @@ impl McpHttpClient {
             Some(ct) if ct.starts_with(EVENT_STREAM_MIME_TYPE.as_bytes()) => {
                 Ok(StreamableHttpPostResponse::Sse(
                     BoundedPostStream::new(
-                        capped_events(response, self.describe()),
+                        capped_events(
+                            response,
+                            self.describe(),
+                            self.budget.held_event_bytes.clone(),
+                        ),
                         self.request_timeout,
                         slot,
                     )
@@ -210,7 +247,7 @@ impl StreamableHttpClient for McpHttpClient {
         session_id: Option<Arc<str>>,
         auth_token: Option<String>,
     ) -> Result<StreamableHttpPostResponse, HttpError> {
-        let slot = self.budget_slot().await?;
+        let slot = self.post_slot().await?;
         let timeout = self.request_timeout;
         tokio::time::timeout(
             timeout,
@@ -252,6 +289,7 @@ impl StreamableHttpClient for McpHttpClient {
         last_event_id: Option<String>,
         auth_token: Option<String>,
     ) -> Result<BoxedSseResponse, HttpError> {
+        let slot = self.get_slot().await?;
         let mut request = self
             .client
             .get(uri.as_ref())
@@ -273,7 +311,15 @@ impl StreamableHttpClient for McpHttpClient {
                 if ct.starts_with(EVENT_STREAM_MIME_TYPE.as_bytes())
                     || ct.starts_with(JSON_MIME_TYPE.as_bytes()) =>
             {
-                Ok(capped_events(response, self.describe()))
+                Ok(SlotHolding {
+                    inner: capped_events(
+                        response,
+                        self.describe(),
+                        self.budget.held_event_bytes.clone(),
+                    ),
+                    _slot: slot,
+                }
+                .boxed())
             }
             other => Err(StreamableHttpError::UnexpectedContentType(
                 other.map(|ct| String::from_utf8_lossy(ct).into_owned()),
@@ -289,15 +335,17 @@ fn content_type(response: &reqwest::Response) -> Option<&[u8]> {
 fn capped_events(
     response: reqwest::Response,
     describe: impl Fn(reqwest::Error) -> String + Send + 'static,
+    held: Arc<HeldEventBytes>,
 ) -> BoxedSseResponse {
-    capped_sse(response.bytes_stream(), describe)
+    capped_sse(response.bytes_stream(), describe, held)
 }
 
 fn capped_sse(
     bytes: impl futures::Stream<Item = reqwest::Result<Bytes>> + Send + 'static,
     describe: impl Fn(reqwest::Error) -> String + Send + 'static,
+    held: Arc<HeldEventBytes>,
 ) -> BoxedSseResponse {
-    let mut event = EventBytes::default();
+    let mut event = EventBytes::new(held);
     let bytes = bytes.map(move |chunk| {
         let chunk = chunk.map_err(|e| std::io::Error::other(describe(e)))?;
         event.count(&chunk)?;
@@ -368,17 +416,57 @@ impl futures::Stream for BoundedPostStream {
     }
 }
 
-/// The size of the SSE event being received. A blank line ends an event, and
-/// a line ends at `\n`, `\r` or `\r\n`.
-#[derive(Default)]
+/// A stream that holds a slot of its connection's budget for as long as it
+/// lives. The notification stream's lifetime IS the connection's, so unlike a
+/// POST reply it carries no deadline of its own — only a slot.
+struct SlotHolding {
+    inner: BoxedSseResponse,
+    _slot: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl futures::Stream for SlotHolding {
+    type Item = <BoxedSseResponse as futures::Stream>::Item;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        futures::Stream::poll_next(self.inner.as_mut(), cx)
+    }
+}
+
+/// The size of the SSE event being received, charged to the allowance its
+/// connection's streams share. A blank line ends an event, and a line ends at
+/// `\n`, `\r` or `\r\n`.
 struct EventBytes {
     len: usize,
     line_is_empty: bool,
     after_cr: bool,
+    /// Set once the shared allowance refused a chunk. Without it a stream whose
+    /// consumer ignores the error would keep charging.
+    refused: bool,
+    held: Arc<HeldEventBytes>,
 }
 
 impl EventBytes {
+    fn new(held: Arc<HeldEventBytes>) -> Self {
+        Self {
+            len: 0,
+            line_is_empty: false,
+            after_cr: false,
+            refused: false,
+            held,
+        }
+    }
+
     fn count(&mut self, chunk: &[u8]) -> std::io::Result<()> {
+        if self.refused {
+            return Err(std::io::Error::other(format!(
+                "this MCP stream was already stopped at MAX_RESPONSE_BODY_BYTES \
+                 ({MAX_RESPONSE_BODY_BYTES} bytes)"
+            )));
+        }
+        let before = self.len;
         for &b in chunk {
             let lf_of_crlf = self.after_cr && b == b'\n';
             self.after_cr = b == b'\r';
@@ -394,14 +482,21 @@ impl EventBytes {
             }
             self.line_is_empty = false;
             self.len += 1;
-            if self.len > MAX_RESPONSE_BODY_BYTES {
-                return Err(std::io::Error::other(format!(
-                    "an event of the MCP stream is larger than MAX_RESPONSE_BODY_BYTES \
-                     ({MAX_RESPONSE_BODY_BYTES} bytes); reading stopped there"
-                )));
-            }
+        }
+        // One charge per chunk rather than per byte: a chunk is a socket read,
+        // so the overshoot before the check is at most one of those.
+        if let Err(e) = self.held.recharge(before, self.len) {
+            self.len = before;
+            self.refused = true;
+            return Err(e);
         }
         Ok(())
+    }
+}
+
+impl Drop for EventBytes {
+    fn drop(&mut self) {
+        self.held.release(self.len);
     }
 }
 
@@ -410,7 +505,7 @@ mod tests {
     use super::*;
 
     fn fed(chunks: &[&[u8]]) -> EventBytes {
-        let mut event = EventBytes::default();
+        let mut event = EventBytes::new(Arc::new(HeldEventBytes::default()));
         for chunk in chunks {
             event.count(chunk).expect("under the cap");
         }
@@ -463,7 +558,7 @@ mod tests {
             let _ = sock.shutdown().await;
         });
         let started = std::time::Instant::now();
-        let stream = McpHttpClient::with_timeouts(IDLE, REQUEST_TIMEOUT)
+        let stream = McpHttpClient::with_budget(IDLE, REQUEST_TIMEOUT, PeerBudget::new())
             .get_stream(format!("http://{addr}/mcp").into(), "s".into(), None, None)
             .await
             .unwrap_or_else(|e| panic!("the stream did not open: {e}"));
@@ -530,7 +625,7 @@ mod tests {
     async fn a_json_reply_that_trickles_is_cut_at_the_request_timeout() {
         let uri = json_reply_that_never_completes(Some(Duration::from_millis(100))).await;
         let err = post_error(
-            McpHttpClient::with_timeouts(MCP_IDLE_TIMEOUT, Duration::from_secs(1)),
+            McpHttpClient::with_budget(MCP_IDLE_TIMEOUT, Duration::from_secs(1), PeerBudget::new()),
             uri,
         )
         .await;
@@ -541,7 +636,7 @@ mod tests {
     async fn a_json_reply_that_stalls_names_the_idle_timeout() {
         let uri = json_reply_that_never_completes(None).await;
         let err = post_error(
-            McpHttpClient::with_timeouts(Duration::from_secs(1), REQUEST_TIMEOUT),
+            McpHttpClient::with_budget(Duration::from_secs(1), REQUEST_TIMEOUT, PeerBudget::new()),
             uri,
         )
         .await;
@@ -573,7 +668,8 @@ mod tests {
                 let events = futures::executor::block_on(
                     capped_sse(
                         futures::stream::iter(chunks.into_iter().map(Ok)),
-                        McpHttpClient::new().describe(),
+                        McpHttpClient::new(PeerBudget::new()).describe(),
+                        Arc::new(HeldEventBytes::default()),
                     )
                     .collect::<Vec<_>>(),
                 );
@@ -647,7 +743,7 @@ mod tests {
     async fn a_post_reply_stream_that_never_finishes_is_closed_at_the_request_timeout() {
         const REQUEST: Duration = Duration::from_secs(2);
         let (uri, mut closes) = post_streams_that_never_finish(Duration::from_millis(50)).await;
-        let client = McpHttpClient::with_timeouts(MCP_IDLE_TIMEOUT, REQUEST);
+        let client = McpHttpClient::with_budget(MCP_IDLE_TIMEOUT, REQUEST, PeerBudget::new());
         let reply = client
             .post_message(uri.into(), ping(), None, None)
             .await
@@ -681,7 +777,11 @@ mod tests {
     #[tokio::test]
     async fn no_more_post_reply_streams_than_the_budget_are_open_at_once() {
         let (uri, _closes) = post_streams_that_never_finish(Duration::from_millis(50)).await;
-        let client = McpHttpClient::with_timeouts(MCP_IDLE_TIMEOUT, Duration::from_secs(600));
+        let client = McpHttpClient::with_budget(
+            MCP_IDLE_TIMEOUT,
+            Duration::from_secs(600),
+            PeerBudget::new(),
+        );
         let open = |client: McpHttpClient, uri: String| async move {
             client.post_message(uri.into(), ping(), None, None).await
         };
@@ -712,8 +812,12 @@ mod tests {
 
         // A budget the peer never frees is a failure that names it.
         let starved = McpHttpClient {
-            post_streams: client.post_streams.clone(),
-            ..McpHttpClient::with_timeouts(MCP_IDLE_TIMEOUT, Duration::from_millis(200))
+            budget: client.budget.clone(),
+            ..McpHttpClient::with_budget(
+                MCP_IDLE_TIMEOUT,
+                Duration::from_millis(200),
+                PeerBudget::new(),
+            )
         };
         let err = starved
             .post_message(uri.into(), ping(), None, None)
@@ -729,11 +833,101 @@ mod tests {
 
     #[test]
     fn an_event_one_byte_past_the_cap_is_refused() {
-        let mut event = EventBytes::default();
+        let mut event = EventBytes::new(Arc::new(HeldEventBytes::default()));
         event
             .count(&vec![b'a'; MAX_RESPONSE_BODY_BYTES])
             .expect("exactly the cap is accepted");
         let err = event.count(b"a").expect_err("one byte past the cap");
         assert!(err.to_string().contains("MAX_RESPONSE_BODY_BYTES"), "{err}");
+    }
+
+    /// The notification stream carries the same partial event a POST reply
+    /// carries, so the same number of them is what the connection may hold.
+    /// rmcp reopens one whenever the old one ends, and its retry policy has no
+    /// ceiling, so the budget is also what rate-limits a reconnect storm.
+    #[tokio::test]
+    async fn no_more_notification_streams_than_the_budget_are_open_at_once() {
+        let (uri, _closes) = post_streams_that_never_finish(Duration::from_millis(50)).await;
+        let client = McpHttpClient::with_budget(
+            MCP_IDLE_TIMEOUT,
+            Duration::from_secs(600),
+            PeerBudget::new(),
+        );
+        let open = |client: McpHttpClient, uri: String| async move {
+            client
+                .get_stream(uri.into(), "session".into(), None, None)
+                .await
+        };
+        let mut held = Vec::new();
+        for i in 0..MAX_CONCURRENT_GET_STREAMS {
+            match open(client.clone(), uri.clone()).await {
+                Ok(stream) => held.push(stream),
+                Err(e) => panic!("stream #{i} within the budget was not opened: {e}"),
+            }
+        }
+
+        let mut past = Box::pin(open(client.clone(), uri.clone()));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), &mut past)
+                .await
+                .is_err(),
+            "a GET past the budget opened a {}th notification stream",
+            held.len() + 1
+        );
+        held.pop();
+        match tokio::time::timeout(Duration::from_secs(5), past).await {
+            Ok(Ok(stream)) => held.push(stream),
+            Ok(Err(e)) => panic!("the freed slot did not let the waiting GET through: {e}"),
+            Err(_) => panic!("the waiting GET did not take the freed slot within 5s"),
+        }
+        assert_eq!(held.len(), MAX_CONCURRENT_GET_STREAMS);
+
+        let starved = McpHttpClient {
+            budget: client.budget.clone(),
+            ..McpHttpClient::with_budget(
+                MCP_IDLE_TIMEOUT,
+                Duration::from_millis(200),
+                PeerBudget::new(),
+            )
+        };
+        let err = open(starved, uri)
+            .await
+            .err()
+            .expect("a GET with no slot and no time cannot succeed")
+            .to_string();
+        assert!(
+            err.contains("MAX_CONCURRENT_GET_STREAMS") && err.contains("REQUEST_TIMEOUT"),
+            "the failure must name the budget and the deadline; got: {err}"
+        );
+    }
+
+    /// Counting each stream's partial event on its own bounds the memory at
+    /// the stream count times the cap. One allowance for the whole connection
+    /// is what makes the number a bound.
+    #[test]
+    fn the_partial_events_of_a_connection_share_one_byte_allowance() {
+        let held = Arc::new(HeldEventBytes::default());
+        let half = MAX_RESPONSE_BODY_BYTES / 2;
+        let mut first = EventBytes::new(held.clone());
+        let mut second = EventBytes::new(held.clone());
+        first.count(&vec![b'a'; half]).expect("half the allowance");
+        second.count(&vec![b'b'; half]).expect("the other half");
+        let err = second
+            .count(b"x")
+            .expect_err("one byte past the shared allowance");
+        assert!(err.to_string().contains("MAX_RESPONSE_BODY_BYTES"), "{err}");
+
+        // A completed event hands its bytes back; so does a dropped stream.
+        first
+            .count(b"\n\n")
+            .expect("a blank line ends the event under the cap");
+        let mut third = EventBytes::new(held.clone());
+        third
+            .count(&vec![b'c'; half])
+            .expect("a finished event released its half");
+        drop(third);
+        EventBytes::new(held)
+            .count(&vec![b'd'; half])
+            .expect("a dropped stream released its half");
     }
 }

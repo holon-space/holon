@@ -72,7 +72,10 @@ async fn a_peer_that_never_answers_subscribe_is_cut_at_the_request_timeout() {
     let (client_io, server_io) = tokio::io::duplex(1 << 16);
     let methods = silent_peer(server_io);
     let client = ().serve(client_io).await.expect("handshake");
-    let peer = client.peer().clone();
+    let peer = holon_mcp_client::mcp_request::BudgetedPeer::new(
+        client.peer().clone(),
+        holon_mcp_client::peer_budget::PeerBudget::new(),
+    );
     let surface: Arc<dyn McpCallSurface> = Arc::new(peer.clone());
 
     let engine = McpSyncEngine::new(

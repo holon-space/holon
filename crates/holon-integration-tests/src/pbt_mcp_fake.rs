@@ -24,7 +24,6 @@ use holon_mcp_client::mcp_sidecar::McpSidecar;
 use holon_mcp_client::mcp_sidecar::MirrorSchema;
 use holon_mcp_client::mcp_sidecar::SyncConfig;
 use holon_mcp_client::mcp_sync_engine::McpSyncEngine;
-use rmcp::RoleClient;
 use rmcp::RoleServer;
 use rmcp::ServerHandler;
 use rmcp::ServiceExt;
@@ -190,7 +189,10 @@ impl PbtMcpIntegration {
         )?;
 
         let server_peer = server_running.peer().clone();
-        let client_peer: Peer<RoleClient> = client_running.peer().clone();
+        let client_peer = holon_mcp_client::mcp_request::BudgetedPeer::new(
+            client_running.peer().clone(),
+            holon_mcp_client::peer_budget::PeerBudget::new(),
+        );
 
         // Spawn both tasks so they process messages
         tokio::spawn(async move {

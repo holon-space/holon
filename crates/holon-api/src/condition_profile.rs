@@ -445,6 +445,15 @@ const INTEGRATION_CONNECT_SLOW: ConditionProfile = ConditionProfile::new(
     &[],
 );
 
+const INTEGRATION_DISCOVERY_INCOMPLETE: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Warning,
+    "Integration connected without part of what it publishes",
+    icons::WARN,
+    ConditionPlacement::Toast,
+    AllClear::UntilRestart,
+    &[],
+);
+
 const INTEGRATION_WAITING_ON_KEYCHAIN: ConditionProfile = ConditionProfile::new(
     ConditionSeverity::Warning,
     "Integration waiting on the keychain",
@@ -874,6 +883,7 @@ impl ConditionKind {
             Self::WritebackLossy { .. } => WRITEBACK_LOSSY,
             Self::IntegrationConnectFailed { .. } => INTEGRATION_CONNECT_FAILED,
             Self::IntegrationConnectSlow { .. } => INTEGRATION_CONNECT_SLOW,
+            Self::IntegrationDiscoveryIncomplete { .. } => INTEGRATION_DISCOVERY_INCOMPLETE,
             Self::IntegrationWaitingOnKeychain { .. } => INTEGRATION_WAITING_ON_KEYCHAIN,
             Self::IntegrationNeedsAuth { .. } => INTEGRATION_NEEDS_AUTH,
             Self::IntegrationSidecarSuperseded { .. } => INTEGRATION_SIDECAR_SUPERSEDED,

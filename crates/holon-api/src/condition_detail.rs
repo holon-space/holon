@@ -160,6 +160,19 @@ impl ConditionKind {
                  answers"
             )),
 
+            // The body carries the reason verbatim: it names the bound or the
+            // transport failure, which is the only part that says whether to
+            // retry, raise a bound, or fix the peer.
+            Self::IntegrationDiscoveryIncomplete { integration, error } => {
+                ConditionDetail::with_body(
+                    format!(
+                        "{integration} connected, but Holon could not read everything it \
+                         publishes, so some of its pages stay empty. Why:"
+                    ),
+                    vec![error.clone()],
+                )
+            }
+
             Self::IntegrationWaitingOnKeychain { integration } => ConditionDetail::prose(format!(
                 "{integration} is waiting to read its credentials from the keychain; answer the \
                  keychain prompt to let it connect"

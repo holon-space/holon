@@ -25,7 +25,12 @@ pub const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 /// How long an MCP-over-HTTP connection waits for the next byte from its peer.
 pub const MCP_IDLE_TIMEOUT: std::time::Duration = REQUEST_TIMEOUT;
 
-/// The largest response body read, counted as it streams in.
+/// The largest response body read, counted as it streams in — and, for the
+/// streams of one MCP-over-HTTP connection, the partial-event bytes all of them
+/// hold TOGETHER.
+///
+/// Per-stream it would not be a bound: rmcp keeps as many streams as the peer
+/// answers with, so the memory would be this times a number the peer picks.
 pub const MAX_RESPONSE_BODY_BYTES: usize = 64 * 1024 * 1024;
 
 /// The most reply streams one MCP-over-HTTP connection may hold unfinished at
@@ -35,6 +40,45 @@ pub const MAX_RESPONSE_BODY_BYTES: usize = 64 * 1024 * 1024;
 /// 8 is twice Holon's own per-connection enumeration fan-out, so a full budget
 /// is a peer holding streams open rather than Holon's own concurrency.
 pub const MAX_CONCURRENT_POST_STREAMS: usize = 8;
+
+/// The most notification (GET) streams one MCP-over-HTTP connection may hold
+/// open at once.
+///
+/// A connection needs exactly one, plus one overlapping it while rmcp replaces
+/// a stream that ended; 4 leaves room for that handover. rmcp's reconnect
+/// policy retries without a ceiling and, on an error, without a sleep, so this
+/// budget is also what rate-limits a reconnect storm to the rate at which
+/// slots come free.
+pub const MAX_CONCURRENT_GET_STREAMS: usize = 4;
+
+/// The most pages one paginated enumeration (`tools/list`,
+/// `resources/templates/list`) may fetch.
+///
+/// The item count alone does not bound it: a peer answering with an empty page
+/// and one more cursor forever never reaches an item bound. Holon's own MCP
+/// server lists its 50 tools in a single page, so 256 covers even a peer that
+/// paginates one item at a time.
+pub const MAX_LIST_PAGES: usize = 256;
+
+/// The most items one paginated enumeration may collect.
+///
+/// This is the bound on the bytes, since each item carries a name, a
+/// description and a JSON schema. The largest list Holon faces is its own
+/// server's 50 tools; a third-party server at the top of the range (GitHub's
+/// official MCP server) publishes about 100. 4096 is well past any real list
+/// and still a hard ceiling.
+pub const MAX_LIST_ITEMS: usize = 4096;
+
+/// How long a whole connect may take: the `initialize` handshake plus every
+/// page of every enumeration that follows it.
+///
+/// [`REQUEST_TIMEOUT`] bounds one request, which a peer answering every page
+/// promptly never trips — the pages themselves are the growth. The app already
+/// treats a connect still running after 30 s as worth disclosing (a first-run
+/// `npx` sidecar), so this is ten times that. A connect whose three phases each
+/// come near [`REQUEST_TIMEOUT`] is cut here; it is then disclosed as failed
+/// rather than left growing, and the worst real bundled call measures 4.5 s.
+pub const CONNECT_BUDGET: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// A client that refuses any redirect hop leaving https (loopback excepted)
 /// and gives up on a request after [`REQUEST_TIMEOUT`].

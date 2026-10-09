@@ -17,10 +17,8 @@ use holon_core::traits::Delivery;
 use holon_core::traits::OperationResult;
 use holon_core::traits::Result;
 use holon_core::traits::UndoAction;
-use rmcp::RoleClient;
 use rmcp::ServiceExt;
 use rmcp::model::CallToolRequestParam;
-use rmcp::service::Peer;
 use rmcp::transport::StreamableHttpClientTransport;
 use rmcp::transport::TokioChildProcess;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
@@ -29,12 +27,14 @@ use tracing::info;
 use crate::mcp_call_surface::DeclaredCall;
 use crate::mcp_call_surface::McpCallSurface;
 use crate::mcp_http_client::McpHttpClient;
+use crate::mcp_request::BudgetedPeer;
 use crate::mcp_schema_mapping::input_schema_to_params;
 use crate::mcp_sidecar::AckVerdict;
 use crate::mcp_sidecar::McpSidecar;
 use crate::mcp_sidecar::ToolEffect;
 use crate::mcp_sidecar::UndoConfig;
 use crate::mcp_sidecar::WritesPolicy;
+use crate::peer_budget::PeerBudget;
 use crate::rest_transport::RestCallSurface;
 use crate::write_authorization::PendingState;
 use crate::write_authorization::PendingWrite;
@@ -67,7 +67,7 @@ use rmcp::handler::client::ClientHandler;
 pub async fn connect_mcp(
     uri: &str,
     auth_token: Option<&str>,
-) -> anyhow::Result<(Peer<RoleClient>, McpRunningService)> {
+) -> anyhow::Result<(BudgetedPeer, McpRunningService)> {
     connect_mcp_with_handler(uri, auth_token, default_client_info()).await
 }
 
@@ -78,14 +78,16 @@ pub async fn connect_mcp_with_handler<H: ClientHandler>(
     uri: &str,
     auth_token: Option<&str>,
     handler: H,
-) -> anyhow::Result<(Peer<RoleClient>, McpRunningService)> {
+) -> anyhow::Result<(BudgetedPeer, McpRunningService)> {
     let mut config = StreamableHttpClientTransportConfig::with_uri(uri);
     if let Some(token) = auth_token {
         config = config.auth_header(token);
     }
-    let transport = StreamableHttpClientTransport::with_client(McpHttpClient::new(), config);
-    let service = crate::mcp_request::handshake(handler.serve(transport)).await?;
-    let peer = service.peer().clone();
+    let budget = PeerBudget::new();
+    let transport =
+        StreamableHttpClientTransport::with_client(McpHttpClient::new(budget.clone()), config);
+    let service = budget.handshake(handler.serve(transport)).await?;
+    let peer = BudgetedPeer::new(service.peer().clone(), budget);
     Ok((peer, McpRunningService(Box::new(service))))
 }
 
@@ -98,7 +100,7 @@ pub async fn connect_mcp_with_handler<H: ClientHandler>(
 pub async fn connect_mcp_oauth(
     uri: &str,
     auth_manager: rmcp::transport::auth::AuthorizationManager,
-) -> anyhow::Result<(Peer<RoleClient>, McpRunningService)> {
+) -> anyhow::Result<(BudgetedPeer, McpRunningService)> {
     connect_mcp_oauth_with_handler(uri, auth_manager, default_client_info()).await
 }
 
@@ -108,12 +110,14 @@ pub async fn connect_mcp_oauth_with_handler<H: ClientHandler>(
     uri: &str,
     auth_manager: rmcp::transport::auth::AuthorizationManager,
     handler: H,
-) -> anyhow::Result<(Peer<RoleClient>, McpRunningService)> {
-    let auth_client = rmcp::transport::auth::AuthClient::new(McpHttpClient::new(), auth_manager);
+) -> anyhow::Result<(BudgetedPeer, McpRunningService)> {
+    let budget = PeerBudget::new();
+    let auth_client =
+        rmcp::transport::auth::AuthClient::new(McpHttpClient::new(budget.clone()), auth_manager);
     let config = StreamableHttpClientTransportConfig::with_uri(uri);
     let transport = StreamableHttpClientTransport::with_client(auth_client, config);
-    let service = crate::mcp_request::handshake(handler.serve(transport)).await?;
-    let peer = service.peer().clone();
+    let service = budget.handshake(handler.serve(transport)).await?;
+    let peer = BudgetedPeer::new(service.peer().clone(), budget);
     Ok((peer, McpRunningService(Box::new(service))))
 }
 
@@ -127,7 +131,7 @@ pub async fn connect_mcp_child(
     command: &str,
     args: &[String],
     env: &HashMap<String, String>,
-) -> anyhow::Result<(Peer<RoleClient>, McpRunningService)> {
+) -> anyhow::Result<(BudgetedPeer, McpRunningService)> {
     connect_mcp_child_with_handler(command, args, env, default_client_info()).await
 }
 
@@ -138,7 +142,7 @@ pub async fn connect_mcp_child_with_handler<H: ClientHandler>(
     args: &[String],
     env: &HashMap<String, String>,
     handler: H,
-) -> anyhow::Result<(Peer<RoleClient>, McpRunningService)> {
+) -> anyhow::Result<(BudgetedPeer, McpRunningService)> {
     // On unix this resolves BEFORE spawning: `Command::new` searches only the
     // parent's PATH, which for a Finder-launched `.app` is launchd's minimal
     // one, and reports every miss as the same nameless ENOENT.
@@ -147,8 +151,9 @@ pub async fn connect_mcp_child_with_handler<H: ClientHandler>(
         cmd.env(k, v);
     }
     let transport = TokioChildProcess::new(cmd)?;
-    let service = crate::mcp_request::handshake(handler.serve(transport)).await?;
-    let peer = service.peer().clone();
+    let budget = PeerBudget::new();
+    let service = budget.handshake(handler.serve(transport)).await?;
+    let peer = BudgetedPeer::new(service.peer().clone(), budget);
     Ok((peer, McpRunningService(Box::new(service))))
 }
 
@@ -243,7 +248,7 @@ impl McpOperationProvider {
     /// UI annotations. Takes ownership of the connection to keep it alive
     /// for the provider's lifetime.
     pub async fn from_peer(
-        peer: Peer<RoleClient>,
+        peer: BudgetedPeer,
         connection: McpRunningService,
         sidecar: McpSidecar,
         entity_readers: HashMap<String, Arc<dyn EntityFieldReader>>,
@@ -257,11 +262,11 @@ impl McpOperationProvider {
     /// ownership of the connection. The caller must keep the
     /// `McpRunningService` alive separately.
     pub async fn from_peer_shared(
-        peer: Peer<RoleClient>,
+        peer: BudgetedPeer,
         sidecar: McpSidecar,
         entity_readers: HashMap<String, Arc<dyn EntityFieldReader>>,
     ) -> anyhow::Result<Self> {
-        let tools = crate::mcp_request::list_all_tools(&peer).await?;
+        let tools = peer.list_all_tools().await?;
         info!(
             "[McpOperationProvider] Fetched {} tools from MCP server",
             tools.len()

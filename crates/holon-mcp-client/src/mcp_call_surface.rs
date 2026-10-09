@@ -1,4 +1,4 @@
-//! Thin trait abstraction over the rmcp `Peer<RoleClient>` methods used by the
+//! Thin trait abstraction over the peer methods used by the
 //! FDW. Exists so tests can drive the MCP fan-out logic with a scripted peer
 //! instead of standing up a live rmcp transport.
 //!
@@ -7,7 +7,6 @@
 //! FDW and intentionally not part of this surface.
 
 use async_trait::async_trait;
-use rmcp::RoleClient;
 use rmcp::model::CallToolRequest;
 use rmcp::model::CallToolRequestParam;
 use rmcp::model::CallToolResult;
@@ -16,8 +15,9 @@ use rmcp::model::ReadResourceRequest;
 use rmcp::model::ReadResourceRequestParam;
 use rmcp::model::ReadResourceResult;
 use rmcp::model::ServerResult;
-use rmcp::service::Peer;
 use rmcp::service::ServiceError;
+
+use crate::mcp_request::BudgetedPeer;
 
 /// One call a connection DECLARES for itself, as an operation descriptor needs
 /// it. Independent of how the call is reached: a peer answers
@@ -111,7 +111,7 @@ pub fn extract_tool_response(result: &CallToolResult) -> anyhow::Result<serde_js
 }
 
 #[async_trait]
-impl McpCallSurface for Peer<RoleClient> {
+impl McpCallSurface for BudgetedPeer {
     async fn call_tool(
         &self,
         params: CallToolRequestParam,
@@ -122,7 +122,7 @@ impl McpCallSurface for Peer<RoleClient> {
             params,
             extensions: Default::default(),
         });
-        match crate::mcp_request::request(self, &what, request).await? {
+        match self.request(&what, request).await? {
             ServerResult::CallToolResult(result) => Ok(result),
             _ => Err(ServiceError::UnexpectedResponse),
         }
@@ -138,7 +138,7 @@ impl McpCallSurface for Peer<RoleClient> {
             params,
             extensions: Default::default(),
         });
-        match crate::mcp_request::request(self, &what, request).await? {
+        match self.request(&what, request).await? {
             ServerResult::ReadResourceResult(result) => Ok(result),
             _ => Err(ServiceError::UnexpectedResponse),
         }
@@ -200,7 +200,7 @@ mod tests {
         let (client_io, server_io) = tokio::io::duplex(1 << 16);
         let methods = trickling_peer(server_io);
         let client = ().serve(client_io).await.expect("handshake");
-        let peer = client.peer().clone();
+        let peer = BudgetedPeer::new(client.peer().clone(), crate::peer_budget::PeerBudget::new());
 
         let started = tokio::time::Instant::now();
         let call = tokio::time::timeout(

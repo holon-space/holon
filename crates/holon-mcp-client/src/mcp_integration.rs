@@ -141,6 +141,10 @@ pub struct McpIntegration {
     /// The `clock` grains the integration's views read; the session keeps
     /// each one ticking while the integration runs.
     pub clock_grains: Vec<holon_api::clock::Grain>,
+    /// Why this integration came up without the entities its peer's resource
+    /// templates would have declared, when it did. `None` means the template
+    /// list was read in full — NOT that the peer publishes none.
+    pub discovery_incomplete: Option<String>,
     /// Producer handle into the sync event loop.
     sync_event_tx: mpsc::UnboundedSender<SyncEvent>,
 }
@@ -710,7 +714,7 @@ fn absorb_discovered_entity(
 
 #[allow(clippy::too_many_arguments)] // each arg is a distinct subsystem
 async fn finish_integration(
-    peer: rmcp::service::Peer<rmcp::RoleClient>,
+    peer: crate::mcp_request::BudgetedPeer,
     service: McpRunningService,
     mut sidecar: McpSidecar,
     db_handle: DbHandle,
@@ -721,12 +725,22 @@ async fn finish_integration(
     sync_gate: SyncGate,
 ) -> anyhow::Result<McpIntegration> {
     // Auto-discover entities from resource templates
-    let templates = crate::mcp_request::list_all_resource_templates(&peer)
-        .await
-        .unwrap_or_else(|e| {
-            warn!("[finish_integration] Failed to list resource templates: {e}");
-            vec![]
-        });
+    // A template list that cannot be read is NOT an empty one, and it is not a
+    // reason to drop a connection whose tool list came through either. The
+    // connect continues and carries the reason out, so the app discloses a
+    // degraded integration rather than a silently smaller one.
+    let (templates, discovery_incomplete) = match peer.list_all_resource_templates().await {
+        Ok(templates) => (templates, None),
+        Err(e) => {
+            let why = format!("{e}");
+            error!(
+                "[finish_integration] Provider '{provider_name}' could not list its resource \
+                 templates: {why}. The entities they would have declared are NOT registered and \
+                 do not sync; the rest of the integration continues."
+            );
+            (vec![], Some(why))
+        }
+    };
 
     for template in &templates {
         let Some(meta) = parse_resource_template_meta(template) else {
@@ -967,6 +981,7 @@ async fn finish_integration(
         Some(receiver),
         sync_gate,
         sidecar.clock_grains(),
+        discovery_incomplete,
     ))
 }
 
@@ -1193,6 +1208,7 @@ fn spawn_runner(
     notification_receiver: Option<ResourceUpdateReceiver>,
     sync_gate: SyncGate,
     clock_grains: Vec<holon_api::clock::Grain>,
+    discovery_incomplete: Option<String>,
 ) -> McpIntegration {
     // One serialized consumer per integration: initial sync, notification
     // resyncs, and poll ticks all flow through the same channel, so per-entity
@@ -1246,6 +1262,7 @@ fn spawn_runner(
         resource_capabilities,
         fdw_backed_tables,
         clock_grains,
+        discovery_incomplete,
         sync_event_tx,
     }
 }
@@ -1379,6 +1396,8 @@ async fn finish_rest_integration(
         None,
         sync_gate,
         sidecar.clock_grains(),
+        // The `rest` transport has no peer and no template enumeration.
+        None,
     ))
 }
 

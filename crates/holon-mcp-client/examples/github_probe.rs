@@ -16,6 +16,7 @@ use std::env;
 use anyhow::Context;
 use anyhow::Result;
 use holon_mcp_client::connect_mcp;
+use holon_mcp_client::mcp_call_surface::McpCallSurface as _;
 use rmcp::model::CallToolRequestParam;
 use serde_json::Value;
 use serde_json::json;
@@ -70,7 +71,7 @@ async fn main() -> Result<()> {
 }
 
 async fn call_and_summarise(
-    peer: &rmcp::service::Peer<rmcp::RoleClient>,
+    peer: &holon_mcp_client::mcp_request::BudgetedPeer,
     tool: &str,
     args: Value,
 ) -> Result<()> {
@@ -147,7 +148,7 @@ async fn call_and_summarise(
 }
 
 async fn pick_first_repo(
-    peer: &rmcp::service::Peer<rmcp::RoleClient>,
+    peer: &holon_mcp_client::mcp_request::BudgetedPeer,
     query: &str,
 ) -> Option<(String, String)> {
     let result = peer

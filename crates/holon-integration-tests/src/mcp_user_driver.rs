@@ -81,9 +81,8 @@ use holon_frontend::view_model::ViewKind;
 use holon_frontend::view_model::ViewModel;
 use holon_mcp_client::McpRunningService;
 use holon_mcp_client::connect_mcp;
-use rmcp::RoleClient;
+use holon_mcp_client::mcp_call_surface::McpCallSurface as _;
 use rmcp::model::CallToolRequestParam;
-use rmcp::service::Peer;
 
 /// Port the embedded MCP server listens on when `MCP_SERVER_PORT` is unset.
 /// The iOS simulator shares the host loopback, so the same address reaches
@@ -106,7 +105,7 @@ pub fn mcp_base_url_from_env() -> Result<String> {
 /// Drives a live Holon app through its embedded MCP server. See module docs
 /// for the verb→tool mapping and the honesty contract.
 pub struct McpUserDriver {
-    peer: Peer<RoleClient>,
+    peer: holon_mcp_client::mcp_request::BudgetedPeer,
     /// Keeps the streamable-HTTP session alive; dropping it closes the
     /// connection.
     _service: McpRunningService,

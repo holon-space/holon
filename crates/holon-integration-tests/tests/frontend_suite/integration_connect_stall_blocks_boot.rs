@@ -35,6 +35,7 @@ use holon_pbt_core::capabilities::IntegrationConnectTiming;
 use tokio::net::TcpListener;
 
 const STALLED_PROVIDER: &str = "stalled-peer";
+const PAGINATING_PROVIDER: &str = "paginating-peer";
 
 /// A cold boot of the test wiring finishes in a few seconds; a boot that waits
 /// on a connect does not finish at all.
@@ -316,6 +317,15 @@ async fn poll_status(
     accept: impl Fn(&str) -> bool,
     within: Duration,
 ) -> Option<String> {
+    poll_provider_status(env, PROVIDER_NAME, accept, within).await
+}
+
+async fn poll_provider_status(
+    env: &TestEnvironment,
+    provider: &str,
+    accept: impl Fn(&str) -> bool,
+    within: Duration,
+) -> Option<String> {
     let db = env
         .injector()
         .expect("start_app captures the injector")
@@ -328,7 +338,7 @@ async fn poll_status(
                 "SELECT status FROM integration_state WHERE provider_name = :p",
                 HashMap::from([(
                     "p".to_string(),
-                    holon_api::Value::String(PROVIDER_NAME.to_string()),
+                    holon_api::Value::String(provider.to_string()),
                 )]),
             )
             .await
@@ -344,4 +354,148 @@ async fn poll_status(
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+/// Answers `initialize`, then answers every `tools/list` with one tool and
+/// always one more cursor. The connect's tool enumeration is a loop the PEER
+/// drives, and every per-request deadline stays satisfied while it runs.
+async fn start_endless_pagination_peer() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind peer");
+    let addr = listener.local_addr().expect("peer addr");
+    tokio::spawn(async move {
+        while let Ok((sock, _)) = listener.accept().await {
+            tokio::spawn(paginate_forever(sock));
+        }
+    });
+    format!("http://{addr}/mcp")
+}
+
+async fn paginate_forever(sock: tokio::net::TcpStream) {
+    use tokio::io::AsyncBufReadExt as _;
+    use tokio::io::AsyncReadExt as _;
+    use tokio::io::AsyncWriteExt as _;
+    let (read, mut write) = sock.into_split();
+    let mut head = tokio::io::BufReader::new(read);
+    loop {
+        let mut length = 0usize;
+        let mut is_post = false;
+        loop {
+            let mut line = String::new();
+            if head.read_line(&mut line).await.unwrap_or(0) == 0 {
+                return;
+            }
+            if line == "\r\n" {
+                break;
+            }
+            is_post |= line.starts_with("POST ");
+            if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                length = v.trim().parse().expect("a numeric Content-Length");
+            }
+        }
+        if !is_post {
+            // The notification GET stream: refused, to keep this peer to the
+            // enumeration leg under test.
+            let _ = write
+                .write_all(b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\n\r\n")
+                .await;
+            continue;
+        }
+        let mut body = vec![0u8; length];
+        if head.read_exact(&mut body).await.is_err() {
+            return;
+        }
+        let msg: serde_json::Value = serde_json::from_slice(&body).expect("a JSON-RPC body");
+        if msg["id"].is_null() {
+            let _ = write
+                .write_all(b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n")
+                .await;
+            continue;
+        }
+        let result = match msg["method"].as_str().unwrap_or_default() {
+            "initialize" => serde_json::json!({
+                "protocolVersion": "2025-03-26",
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "paginating", "version": "0"},
+            }),
+            "tools/list" => serde_json::json!({
+                "tools": [{"name": "one", "description": "a tool",
+                           "inputSchema": {"type": "object"}}],
+                "nextCursor": "there is always one more page",
+            }),
+            _ => serde_json::json!({}),
+        };
+        let reply = serde_json::json!({"jsonrpc": "2.0", "id": msg["id"], "result": result});
+        let reply = serde_json::to_vec(&reply).expect("serialize the reply");
+        let head_bytes = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nMcp-Session-Id: \
+             paginating\r\nContent-Length: {}\r\n\r\n",
+            reply.len()
+        );
+        if write.write_all(head_bytes.as_bytes()).await.is_err()
+            || write.write_all(&reply).await.is_err()
+        {
+            return;
+        }
+    }
+}
+
+#[test]
+fn a_peer_that_paginates_forever_degrades_only_its_own_integration() {
+    let runtime = runtime();
+    runtime.clone().block_on(paginates_forever(runtime.clone()));
+}
+
+/// Boot must come up AND the hostile integration must reach a terminal state.
+/// A connect that never returns satisfies the first half on its own (the
+/// supervisor spawns it), so the second half is what the peer budget adds: the
+/// enumeration ends, the integration reads `Unavailable`, and the user is told
+/// instead of looking at a blank page for a connection that says `Connecting`
+/// forever.
+async fn paginates_forever(runtime: Arc<tokio::runtime::Runtime>) {
+    let uri = start_endless_pagination_peer().await;
+    let env = TestEnvironment::new(runtime).expect("new TestEnvironment");
+
+    let integrations_dir = env.temp_dir.path().join("integrations");
+    std::fs::create_dir_all(&integrations_dir).expect("create integrations dir");
+    std::fs::write(
+        integrations_dir.join(format!("{PAGINATING_PROVIDER}.yaml")),
+        sidecar_yaml(&uri),
+    )
+    .expect("install the sidecar");
+    IntegrationConfigStore::load(&integrations_dir)
+        .expect("load store")
+        .set(
+            PAGINATING_PROVIDER,
+            IntegrationState {
+                enabled: true,
+                configuration: Configuration::Unconfigured,
+            },
+        )
+        .expect("enable the introduced connection");
+
+    tokio::time::timeout(BOOT_BOUND, env.start_app(false))
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "FrontendSession did not resolve within {BOOT_BOUND:?} while \
+                 '{PAGINATING_PROVIDER}' enumerated a peer's endless tool list"
+            )
+        })
+        .expect("start_app failed after resolving the session");
+
+    let status = poll_provider_status(
+        &env,
+        PAGINATING_PROVIDER,
+        |s| s == "Unavailable",
+        CONNECT_BOUND,
+    )
+    .await;
+    assert_eq!(
+        status.as_deref(),
+        Some("Unavailable"),
+        "{CONNECT_BOUND:?} after boot, '{PAGINATING_PROVIDER}' still does not read Unavailable \
+         (got {status:?}) — a peer that answers every page with one more cursor keeps the connect \
+         enumerating, so the integration never reaches a state the user can act on and the \
+         process grows for as long as the peer wants"
+    );
 }

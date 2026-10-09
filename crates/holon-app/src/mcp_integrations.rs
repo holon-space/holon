@@ -210,6 +210,26 @@ fn disclose_unusable_config(
     });
 }
 
+/// Disclose that `name` connected but came up without part of what its peer
+/// publishes.
+///
+/// Not a connect failure: the tool list is the dispatch surface and it came
+/// through, so the integration serves its operations and taking those away
+/// would be the worse outcome. What is degraded is the auto-discovered
+/// entities, whose absence otherwise reads as "this peer has none".
+fn disclose_discovery_incomplete(name: &str, error: &str, bus: &ConditionBus) {
+    warn!(
+        "[IntegrationSupervisor] Provider '{name}' connected with INCOMPLETE discovery: {error}.          Entities its resource templates would have declared are not registered and do not sync."
+    );
+    bus.emit(Condition {
+        subject: name.to_string(),
+        reason: ConditionKind::IntegrationDiscoveryIncomplete {
+            integration: name.to_string(),
+            error: error.to_string(),
+        },
+    });
+}
+
 /// Disclose that `name` is connectable but waiting on an OAuth grant — same
 /// blank-page consequence as a failed connect, different remedy.
 fn disclose_needs_auth(name: &str, auth_url: &str, bus: &ConditionBus) {
@@ -509,6 +529,9 @@ impl IntegrationSupervisor {
                     "[IntegrationSupervisor] Provider '{name}' connected ({} operations)",
                     integration.operation_provider.operations().len()
                 );
+                if let Some(why) = integration.discovery_incomplete.clone() {
+                    disclose_discovery_incomplete(&name, &why, &self.bus);
+                }
                 integration.set_pending_store(self.pending_writes.clone());
                 if let Err(e) = self
                     .go_live(&engine, &name, origin.as_deref(), Arc::new(integration))
@@ -1041,6 +1064,40 @@ mod tests {
             "binary not found at /nonexistent/holon-test-sidecar",
             "a configured path that does not exist is a MISSING binary — distinct from a bare \
              name this process cannot see, which needs the opposite remedy"
+        );
+    }
+
+    /// A connected integration that came up without part of what the peer
+    /// publishes must say so with the reason — the entities its resource
+    /// templates would have discovered simply do not exist, and a page backed
+    /// by one renders blank exactly like a healthy empty result.
+    #[tokio::test(flavor = "current_thread")]
+    async fn incomplete_discovery_is_disclosed_on_the_degraded_bus() {
+        let bus = ConditionBus::new();
+        let mut current = bus.subscribe().current;
+        assert!(current.is_empty());
+
+        disclose_discovery_incomplete(
+            "todoist",
+            "list_resource_templates offered another page after MAX_LIST_PAGES (256) pages and 0 \
+             items",
+            &bus,
+        );
+
+        let mut current = bus.subscribe().current;
+        assert_eq!(current.len(), 1);
+        let ev = current.remove(0);
+        assert_eq!(ev.subject, "todoist");
+        let ConditionKind::IntegrationDiscoveryIncomplete { integration, error } = ev.reason else {
+            panic!(
+                "expected IntegrationDiscoveryIncomplete, got {:?}",
+                ev.reason
+            );
+        };
+        assert_eq!(integration, "todoist");
+        assert!(
+            error.contains("MAX_LIST_PAGES"),
+            "the disclosure must carry the reason, bound included: {error}"
         );
     }
 

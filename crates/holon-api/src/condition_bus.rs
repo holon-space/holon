@@ -176,6 +176,16 @@ pub enum ConditionKind {
         integration: String,
         elapsed_secs: u64,
     },
+    /// An MCP integration connected, but one of the enumerations the connect
+    /// runs could not be read — a `resources/templates/list` that errored or
+    /// that hit a peer-budget bound. The integration serves its tools; what is
+    /// missing is the entities those templates would have declared, so the
+    /// pages backed by them render blank exactly like a healthy empty result.
+    /// Disclosed with the reason so that blankness is attributable.
+    /// `subject` carries the integration name.
+    ///
+    /// All-clear: a restart, since the connect does not retry the enumeration.
+    IntegrationDiscoveryIncomplete { integration: String, error: String },
     /// An MCP integration's `${VAR}` resolution is blocked on the OS keychain,
     /// which is usually waiting for the user to answer an access prompt.
     /// `subject` carries the integration name.
@@ -626,6 +636,7 @@ impl ConditionKind {
     pub const FOREIGN_ID_COLLISION: &'static str = "foreign-id-collision";
     pub const INTEGRATION_CONNECT_FAILED: &'static str = "integration-connect-failed";
     pub const INTEGRATION_CONNECT_SLOW: &'static str = "integration-connect-slow";
+    pub const INTEGRATION_DISCOVERY_INCOMPLETE: &'static str = "integration-discovery-incomplete";
     pub const INTEGRATION_WAITING_ON_KEYCHAIN: &'static str = "integration-waiting-on-keychain";
     pub const INTEGRATION_NEEDS_AUTH: &'static str = "integration-needs-auth";
     pub const INTEGRATION_NOT_ENABLED: &'static str = "integration-not-enabled";
@@ -696,6 +707,7 @@ impl ConditionKind {
         match self {
             Self::IntegrationConnectFailed { .. } => Self::INTEGRATION_CONNECT_FAILED,
             Self::IntegrationConnectSlow { .. } => Self::INTEGRATION_CONNECT_SLOW,
+            Self::IntegrationDiscoveryIncomplete { .. } => Self::INTEGRATION_DISCOVERY_INCOMPLETE,
             Self::IntegrationWaitingOnKeychain { .. } => Self::INTEGRATION_WAITING_ON_KEYCHAIN,
             Self::IntegrationNeedsAuth { .. } => Self::INTEGRATION_NEEDS_AUTH,
             Self::IntegrationSidecarSuperseded { .. } => Self::INTEGRATION_SIDECAR_SUPERSEDED,
