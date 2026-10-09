@@ -4,9 +4,10 @@
 //! A column the declaration added (nullable, or with a default) is added to the
 //! stored table, the rows survive, and an info condition says so. Any other
 //! difference refuses only that type: the rest of Holon works, a condition
-//! names the type, the table, the difference and the row count, writes to the
-//! type fail naming that condition, and no row is deleted until the user runs
-//! the condition's remedy.
+//! names the type, the table, the difference and the row count, the table is
+//! quarantined so no read path finds it, writes to the type fail naming that
+//! condition, and no row is deleted until the user runs the condition's
+//! remedy.
 //!
 //! @pbt kind harness
 //! @pbt covers stale-type-table-boots — a stored type table that drifted from
@@ -21,10 +22,12 @@ use std::path::Path;
 use std::sync::Arc;
 
 use holon::api::BackendEngine;
+use holon::api::HolonService;
 use holon_api::Condition;
 use holon_api::ConditionBus;
 use holon_api::EntityName;
 use holon_api::OpOrigin;
+use holon_api::QueryEngine;
 use holon_api::QueryLanguage;
 use holon_api::StorageEntity;
 use holon_api::Value;
@@ -239,6 +242,51 @@ fn rebuild_pantry_raw(conn: &Arc<turso_core::Connection>, columns: &str, copied:
     exec(conn, "DROP TABLE pantry_old");
 }
 
+const QUARANTINED: &str = "pantry_item_raw__quarantined";
+
+/// Every stored row of `table`, each rendered with `quote()` and the storage
+/// class of `quantity`, so equal output means byte-equal rows.
+fn snapshot_sql(table: &str) -> String {
+    format!(
+        "SELECT quote(id) || ',' || quote(name) || ',' || quote(quantity) || ',' || \
+         typeof(quantity) || ',' || quote(unit) || ',' || quote(opened_at) || ',' || \
+         quote(best_before) || ',' || quote(properties) || ',' || quote(property_kinds) || \
+         ',' || quote(product_id) AS r FROM {table} ORDER BY id"
+    )
+}
+
+fn snapshot_of(conn: &Arc<turso_core::Connection>, table: &str) -> Vec<String> {
+    let mut stmt = conn.prepare(snapshot_sql(table)).expect("prepare snapshot");
+    stmt.run_collect_rows()
+        .expect("snapshot rows")
+        .into_iter()
+        .map(|row| match row.as_slice() {
+            [turso_core::Value::Text(r)] => r.as_str().to_string(),
+            other => panic!("snapshot row {other:?}"),
+        })
+        .collect()
+}
+
+async fn stored_snapshot(booted: &Booted, table: &str) -> Vec<String> {
+    sql(booted, &snapshot_sql(table))
+        .await
+        .iter()
+        .map(|row| match row.get("r") {
+            Some(Value::String(r)) => r.clone(),
+            other => panic!("snapshot row {other:?}"),
+        })
+        .collect()
+}
+
+async fn tables_named(booted: &Booted, name: &str) -> usize {
+    sql(
+        booted,
+        &format!("SELECT name FROM sqlite_schema WHERE type = 'table' AND name = '{name}'"),
+    )
+    .await
+    .len()
+}
+
 const KEPT: &str = "id, name, quantity, unit, opened_at, best_before, properties, property_kinds";
 
 #[tokio::test(flavor = "multi_thread")]
@@ -318,11 +366,13 @@ async fn a_declared_nullable_column_is_added_and_the_rows_survive() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn a_changed_column_type_refuses_only_that_type_until_the_user_drops_the_table() {
-    let dir = tempfile::tempdir().expect("tempdir");
+/// Seed a database whose `pantry_item_raw.quantity` is stored as TEXT while
+/// the declaration says REAL, with the views over it restored, and return its
+/// rows as [`snapshot_sql`] renders them.
+async fn seed_refused_pantry(dir: &Path) -> Vec<String> {
     let all = format!("{KEPT}, product_id");
-    seed_then_reshape(dir.path(), |conn| {
+    let mut rows = Vec::new();
+    seed_then_reshape(dir, |conn| {
         let views = pantry_views(conn);
         rebuild_pantry_raw(
             conn,
@@ -334,12 +384,15 @@ async fn a_changed_column_type_refuses_only_that_type_until_the_user_drops_the_t
         for (_, view_sql) in views {
             exec(conn, &view_sql);
         }
+        rows = snapshot_of(conn, "pantry_item_raw");
     })
     .await;
+    assert_eq!(rows.len(), 2, "the seed stores two pantry rows: {rows:#?}");
+    rows
+}
 
-    let later = boot(dir.path(), LATER_DB).await;
-
-    let current = conditions(&later.bus);
+fn assert_refusal_disclosed(booted: &Booted) {
+    let current = conditions(&booted.bus);
     let shown = described(&current);
     let refused = current
         .iter()
@@ -353,6 +406,61 @@ async fn a_changed_column_type_refuses_only_that_type_until_the_user_drops_the_t
              {needle:?}): {text}"
         );
     }
+}
+
+/// No read path serves a row of the refused table, whatever SQL names it.
+async fn assert_no_read_serves_the_refused_rows(booted: &Booted) {
+    let mut served = Vec::new();
+
+    let bypass = "SELECT CAST((SELECT quantity FROM pantry_item_raw WHERE id = \
+                  'pantry-item:flour') AS TEXT) AS leaked";
+    if let Ok(rows) = booted
+        .engine
+        .execute_query(bypass.to_string(), HashMap::new(), None)
+        .await
+    {
+        served.push(format!("execute_query, CAST subquery: {rows:?}"));
+    }
+
+    if let Ok(result) = HolonService::new(booted.engine.clone())
+        .execute_raw_sql("SELECT id, quantity FROM pantry_item_raw", HashMap::new())
+        .await
+    {
+        served.push(format!("MCP execute_raw_sql: {:?}", result.rows));
+    }
+
+    if booted
+        .engine
+        .subscribe_sql("SELECT id, quantity FROM pantry_item_raw")
+        .await
+        .is_ok()
+    {
+        served.push("subscribe_sql opened a subscription".to_string());
+    }
+
+    let found = booted
+        .engine
+        .quick_open_search("flour")
+        .await
+        .expect("search keeps working while a type is refused");
+    let hits = format!("{found:?}");
+    if hits.contains("pantry-item:flour") {
+        served.push(format!("quick-open search: {hits}"));
+    }
+
+    assert!(
+        served.is_empty(),
+        "read paths served the refused table: {served:#?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_changed_column_type_refuses_only_that_type_until_the_user_drops_the_table() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let stored = seed_refused_pantry(dir.path()).await;
+
+    let later = boot(dir.path(), LATER_DB).await;
+    assert_refusal_disclosed(&later);
 
     let person_sql = later
         .engine
@@ -391,9 +499,13 @@ async fn a_changed_column_type_refuses_only_that_type_until_the_user_drops_the_t
         .is_empty(),
         "no stored view keeps serving the refused table"
     );
+    assert_no_read_serves_the_refused_rows(&later).await;
 
-    let kept = sql(&later, "SELECT id FROM pantry_item_raw").await;
-    assert_eq!(kept.len(), 2, "a refusal must not delete a row");
+    assert_eq!(
+        stored_snapshot(&later, QUARANTINED).await,
+        stored,
+        "the refused rows are kept byte-equal in the quarantine table"
+    );
 
     op(
         &later,
@@ -410,11 +522,16 @@ async fn a_changed_column_type_refuses_only_that_type_until_the_user_drops_the_t
             .any(|c| c.condition_key().kind == "type-table-refused"),
         "the remedy must clear the condition"
     );
+    assert_eq!(
+        tables_named(&later, QUARANTINED).await,
+        0,
+        "the remedy drops the quarantined rows, as its label says"
+    );
     assert!(
         sql(&later, "SELECT id FROM pantry_item_raw")
             .await
             .is_empty(),
-        "the remedy drops the stored rows, as its label says"
+        "the type is served from a new empty table"
     );
     stock(
         &later,
@@ -448,5 +565,68 @@ async fn a_changed_column_type_refuses_only_that_type_until_the_user_drops_the_t
         consumed.first().and_then(|r| r.get("quantity")),
         Some(&Value::Float(0.75)),
         "consume ran against the recreated table: {consumed:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_type_stays_quarantined_across_boots_until_the_remedy() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let stored = seed_refused_pantry(dir.path()).await;
+
+    let first = boot(dir.path(), LATER_DB).await;
+    assert_refusal_disclosed(&first);
+    holon_app::shutdown_session(&first.injector)
+        .await
+        .expect("shut the first refusing session down");
+    drop(first);
+
+    let second = boot(dir.path(), LATER_DB).await;
+    assert_refusal_disclosed(&second);
+    assert_no_read_serves_the_refused_rows(&second).await;
+    assert_eq!(
+        tables_named(&second, "pantry_item_raw").await,
+        0,
+        "a second boot must not serve the refused type from a new empty table"
+    );
+    assert_eq!(
+        stored_snapshot(&second, QUARANTINED).await,
+        stored,
+        "a second boot keeps the quarantined rows byte-equal, once"
+    );
+
+    op(
+        &second,
+        "type_table",
+        "drop_refused_table",
+        params(&[("type", Value::String("pantry_item".into()))]),
+    )
+    .await
+    .expect("the remedy must run on a quarantined table");
+    assert_eq!(tables_named(&second, QUARANTINED).await, 0);
+    stock(&second, "pantry-item:sugar", &[])
+        .await
+        .expect("after the remedy the type must be writable");
+    holon_app::shutdown_session(&second.injector)
+        .await
+        .expect("shut the remedied session down");
+    drop(second);
+
+    let third = boot(dir.path(), LATER_DB).await;
+    let shown = described(&conditions(&third.bus));
+    assert!(
+        !shown
+            .iter()
+            .any(|c| c.starts_with("[type-table-refused]")
+                || c.starts_with("[schema-module-failed]")),
+        "a boot after the remedy refuses nothing: {shown:#?}"
+    );
+    let rows = engine_read(&third, "from pantry_item")
+        .await
+        .expect("a boot after the remedy reads the type");
+    let ids: Vec<Option<&Value>> = rows.iter().map(|r| r.get("id")).collect();
+    assert_eq!(
+        ids,
+        vec![Some(&Value::String("pantry-item:sugar".into()))],
+        "the row written after the remedy survives the reboot"
     );
 }

@@ -525,11 +525,7 @@ async fn rebuild_table(
         .await
         .map_err(|e| rebuild_error("dropping the views over it", &e))?;
     for emptied in emptied_with(table) {
-        if TableShape::stored(db_handle, emptied)
-            .await?
-            .columns
-            .is_empty()
-        {
+        if !table_exists(db_handle, emptied).await? {
             continue;
         }
         db_handle
@@ -560,19 +556,57 @@ async fn rebuild_table(
 }
 
 /// Drop every view that reads stored `table`, depth first.
-pub async fn drop_views_over(db_handle: &DbHandle, table: &str) -> Result<()> {
+async fn drop_views_over(db_handle: &DbHandle, table: &str) -> Result<()> {
     drop_dependent_views(db_handle, table)
         .await
         .map_err(|e| StorageError::SchemaError(format!("dropping the views over {table}: {e:#}")))
 }
 
-/// Drop stored `table` with every view over it: the remedy for a refused
-/// table whose rows the user gives up. Their owners recreate the views.
-pub async fn drop_table_and_views(db_handle: &DbHandle, table: &str) -> Result<()> {
+/// The name a quarantined `table` keeps its rows under.
+pub fn quarantine_name(table: &str) -> String {
+    format!("{table}__quarantined")
+}
+
+/// Make stored `table` unreadable by every query that names it: drop the
+/// views over it and rename it to [`quarantine_name`]. Its rows stay as they
+/// are.
+pub async fn quarantine(db_handle: &DbHandle, table: &str) -> Result<()> {
     drop_views_over(db_handle, table).await?;
+    let quarantined = quarantine_name(table);
     db_handle
-        .execute_ddl(&format!("DROP TABLE IF EXISTS \"{table}\""))
+        .execute_ddl(&format!(
+            "ALTER TABLE \"{table}\" RENAME TO \"{quarantined}\""
+        ))
         .await
+        .map_err(|e| StorageError::SchemaError(format!("quarantining {table}: {e}")))
+}
+
+/// Move a quarantined `table` back to its name, so its stored shape is judged
+/// against the declaration again. Does nothing when `table` is not
+/// quarantined.
+pub async fn release_quarantine(db_handle: &DbHandle, table: &str) -> Result<()> {
+    let quarantined = quarantine_name(table);
+    if !table_exists(db_handle, &quarantined).await? {
+        return Ok(());
+    }
+    if table_exists(db_handle, table).await? {
+        return Err(StorageError::SchemaError(format!(
+            "both {table} and its quarantined rows {quarantined} are stored; drop one of them"
+        )));
+    }
+    db_handle
+        .execute_ddl(&format!(
+            "ALTER TABLE \"{quarantined}\" RENAME TO \"{table}\""
+        ))
+        .await
+        .map_err(|e| StorageError::SchemaError(format!("releasing {quarantined}: {e}")))
+}
+
+pub async fn table_exists(db_handle: &DbHandle, table: &str) -> Result<bool> {
+    Ok(!TableShape::stored(db_handle, table)
+        .await?
+        .columns
+        .is_empty())
 }
 
 /// [`ensure_statement`] for every statement of a schema file.

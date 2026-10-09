@@ -226,6 +226,7 @@ async fn create_initialized_engine(
                     )
                 },
             }],
+            unserved.clone(),
         )),
     )
     .context("Failed to create BackendEngine")?;

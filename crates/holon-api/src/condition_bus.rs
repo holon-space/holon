@@ -548,13 +548,15 @@ pub enum ConditionKind {
     PanicConditionsUnavailable { reason: String },
     /// The stored table of type `subject` differs from the type's declaration
     /// in a way adding columns does not fix (`diff`), so this session does not
-    /// serve the type: its writes fail naming this condition and its `rows`
-    /// stay untouched.
+    /// serve the type: the table is renamed to `quarantined`, where no read
+    /// finds it and its `rows` stay untouched, and its writes fail naming this
+    /// condition.
     ///
     /// All-clear: [`RemedyApplied`](crate::condition_profile::AllClear) — the
-    /// user drops the table and its rows.
+    /// user drops the quarantined table and its rows.
     TypeTableRefused {
         table: String,
+        quarantined: String,
         diff: String,
         rows: u64,
     },

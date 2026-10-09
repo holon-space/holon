@@ -173,6 +173,7 @@ impl HolonService {
             .db_handle()
             .query(sql, params)
             .await
+            .map_err(|e| self.engine.explain_unserved(e.into()))
             .context("Failed to execute raw SQL")?;
         Ok(QueryResult {
             rows,

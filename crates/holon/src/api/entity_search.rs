@@ -19,6 +19,7 @@ use holon_profiles::TypeRegistry;
 use holon_turso::turso_adapter::TursoAdapter;
 
 use crate::api::backend_engine::query_retrying_schema_change;
+use crate::di::schema_providers::UnservedTypes;
 use crate::storage::turso::DbHandle;
 
 /// The search group quick-open lists as its Pages section.
@@ -34,24 +35,42 @@ pub struct SearchGroup {
     pub member_sql: fn(pk: &str) -> String,
 }
 
+/// Types this session does not serve are left out: their tables are
+/// quarantined, so a branch over one would fail the whole statement.
 pub struct UnionAllSearch {
     db: DbHandle,
     types: Arc<TypeRegistry>,
     groups: Vec<SearchGroup>,
+    unserved: UnservedTypes,
 }
 
 impl UnionAllSearch {
-    pub fn new(db: DbHandle, types: Arc<TypeRegistry>, groups: Vec<SearchGroup>) -> Self {
-        Self { db, types, groups }
+    pub fn new(
+        db: DbHandle,
+        types: Arc<TypeRegistry>,
+        groups: Vec<SearchGroup>,
+        unserved: UnservedTypes,
+    ) -> Self {
+        Self {
+            db,
+            types,
+            groups,
+            unserved,
+        }
     }
 
     fn sql(&self, query: &SearchQuery<'_>, m: &SearchMatch) -> String {
         let mut branches = Vec::new();
+        let mut unsearched = Vec::new();
         for type_def in self.types.all() {
             let Some(services) = &type_def.services else {
                 continue;
             };
             if services.searchable.is_empty() || (query.linkable_only && !services.linkable) {
+                continue;
+            }
+            if self.unserved.condition(&type_def.name).is_some() {
+                unsearched.push(type_def.name.to_string());
                 continue;
             }
             let pk = column(&type_def.primary_key);
@@ -87,6 +106,13 @@ impl UnionAllSearch {
                 .collect::<Vec<_>>()
                 .join(" AND ");
             branches.push(branch(&type_def, services, m, None, &outside, query.limit));
+        }
+        if !unsearched.is_empty() {
+            tracing::warn!(
+                "search leaves out {} unserved type(s): {}",
+                unsearched.len(),
+                unsearched.join(", ")
+            );
         }
         branches.join(" UNION ALL ")
     }
@@ -454,5 +480,64 @@ mod fold_class_tests {
                 .contains(&MAX_GLOB_PATTERN_BYTES.to_string()),
             "the error must name the limit, got {err}"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use holon_api::SearchText;
+
+    use super::*;
+
+    fn note_type(name: &str) -> TypeDefinition {
+        serde_yaml::from_str(&format!(
+            "name: {name}\nprimary_key: id\nsource: pre_configured\nfields:\n  - name: id\n    \
+             sql_type: TEXT\n    primary_key: true\n  - name: title\n    sql_type: TEXT\n\
+             services:\n  title: title\n  searchable: [title]\n"
+        ))
+        .expect("note type yaml")
+    }
+
+    #[tokio::test]
+    async fn a_quarantined_searchable_type_leaves_the_other_types_searchable() {
+        let (_backend, db) = crate::storage::turso::TursoBackend::new_in_memory()
+            .await
+            .expect("in-memory turso");
+        let types = Arc::new(TypeRegistry::new());
+        for name in ["note_kept", "note_refused"] {
+            let type_def = note_type(name);
+            TursoAdapter::register(&type_def, &db)
+                .await
+                .expect("register note type");
+            types.register(type_def).expect("registry");
+        }
+        db.execute(
+            "INSERT INTO note_kept_raw (id, title) VALUES ('k1', 'hello kept')",
+            vec![],
+        )
+        .await
+        .expect("insert kept note");
+        holon_turso::table_shape::quarantine(&db, "note_refused_raw")
+            .await
+            .expect("quarantine");
+        let unserved = UnservedTypes::default();
+        unserved.insert(
+            "note_refused",
+            "note_refused_raw",
+            holon_api::ConditionKind::TYPE_TABLE_REFUSED,
+            "test refusal".to_string(),
+        );
+
+        let hits = UnionAllSearch::new(db, types, vec![], unserved)
+            .search(SearchQuery {
+                text: SearchText::new("hello").expect("search text"),
+                linkable_only: false,
+                limit: 10,
+                group_limits: &[],
+            })
+            .await
+            .expect("a refused type must not break search over the others");
+        let ids: Vec<String> = hits.iter().map(|h| h.id.to_string()).collect();
+        assert_eq!(ids.len(), 1, "the kept note is found: {ids:?}");
     }
 }

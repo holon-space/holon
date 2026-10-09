@@ -495,14 +495,20 @@ impl ConditionKind {
                  shows the last one."
             )),
 
-            Self::TypeTableRefused { table, diff, rows } => ConditionDetail::with_body(
+            Self::TypeTableRefused {
+                table,
+                quarantined,
+                diff,
+                rows,
+            } => ConditionDetail::with_body(
                 format!(
                     "{subject} is not available: its stored table {table} ({rows} rows) does \
                      not match the declaration, and no row was changed."
                 ),
                 vec![
                     diff.clone(),
-                    format!("Remedy: drop this table, {rows} rows lost."),
+                    format!("The rows are kept, unread, in {quarantined}."),
+                    format!("Remedy: drop {quarantined}, {rows} rows lost."),
                 ],
             ),
 

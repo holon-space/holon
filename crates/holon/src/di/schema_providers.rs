@@ -41,6 +41,7 @@ use holon_turso::schema_modules::NavigationSchemaModule;
 use holon_turso::schema_modules::OperationsSchemaModule;
 use holon_turso::schema_modules::SyncStateSchemaModule;
 use holon_turso::schema_modules::TrustProposalsSchemaModule;
+use holon_turso::table_shape;
 use holon_turso::table_shape::TableAdapted;
 use holon_turso::table_shape::TableChange;
 use holon_turso::turso_adapter::TursoAdapter;
@@ -386,54 +387,52 @@ pub fn register_schema_providers(injector: &Injector) {
                 continue;
             }
             let name = type_def.name.to_string();
-            match TursoAdapter::reconcile(&type_def, &db.handle()).await {
+            let raw_table = TursoAdapter::raw_table_name(&type_def);
+            let registered = async {
+                table_shape::release_quarantine(&db.handle(), &raw_table).await?;
+                TursoAdapter::reconcile(&type_def, &db.handle()).await
+            }
+            .await;
+            match registered {
                 Ok(TypeRegistration::Registered { adapted, .. }) => {
                     if let Some(adapted) = adapted {
                         bus.emit(columns_added(name, adapted));
                     }
                 }
                 Ok(TypeRegistration::Refused(refusal)) => {
+                    if let Err(e) = table_shape::quarantine(&db.handle(), &raw_table).await {
+                        refuse_on_error(&bus, &unserved, &name, &raw_table, e.into());
+                        continue;
+                    }
                     unserved.insert(
                         &name,
-                        &refusal.diff.table,
-                        format!("{}: {refusal}", ConditionKind::TYPE_TABLE_REFUSED),
+                        &raw_table,
+                        ConditionKind::TYPE_TABLE_REFUSED,
+                        refusal.to_string(),
                     );
-                    // A view an older binary stored over the refused table
-                    // would keep serving its undeclared shape.
-                    if let Err(e) =
-                        holon_turso::table_shape::drop_views_over(&db.handle(), &refusal.diff.table)
-                            .await
-                    {
-                        tracing::error!("type '{name}': {e:#}");
-                        bus.emit(Condition {
-                            subject: format!("type {name}"),
-                            reason: ConditionKind::SchemaModuleFailed {
-                                error: format!("{e:#}"),
-                            },
-                        });
-                    }
                     bus.emit(Condition {
                         subject: name,
                         reason: ConditionKind::TypeTableRefused {
                             table: refusal.diff.table.clone(),
+                            quarantined: table_shape::quarantine_name(&raw_table),
                             diff: refusal.diff.to_string(),
                             rows: refusal.rows,
                         },
                     });
                 }
                 Err(e) => {
-                    tracing::error!("registering type '{name}' failed: {e:#}");
-                    unserved.insert(
-                        &name,
-                        &TursoAdapter::raw_table_name(&type_def),
-                        format!("{}: {e:#}", ConditionKind::SCHEMA_MODULE_FAILED),
-                    );
-                    bus.emit(Condition {
-                        subject: format!("type {name}"),
-                        reason: ConditionKind::SchemaModuleFailed {
-                            error: format!("{e:#}"),
-                        },
-                    });
+                    let quarantined = async {
+                        if table_shape::table_exists(&db.handle(), &raw_table).await? {
+                            table_shape::quarantine(&db.handle(), &raw_table).await?;
+                        }
+                        anyhow::Ok(())
+                    }
+                    .await;
+                    let error = match quarantined {
+                        Ok(()) => anyhow::Error::from(e),
+                        Err(q) => anyhow::Error::from(e).context(format!("{q:#}")),
+                    };
+                    refuse_on_error(&bus, &unserved, &name, &raw_table, error);
                 }
             }
         }
@@ -441,24 +440,64 @@ pub fn register_schema_providers(injector: &Injector) {
     }));
 }
 
+fn refuse_on_error(
+    bus: &ConditionBus,
+    unserved: &UnservedTypes,
+    name: &str,
+    raw_table: &str,
+    e: anyhow::Error,
+) {
+    tracing::error!("registering type '{name}' failed: {e:#}");
+    unserved.insert(
+        name,
+        raw_table,
+        ConditionKind::SCHEMA_MODULE_FAILED,
+        format!("{e:#}"),
+    );
+    bus.emit(Condition {
+        subject: format!("type {name}"),
+        reason: ConditionKind::SchemaModuleFailed {
+            error: format!("{e:#}"),
+        },
+    });
+}
+
 /// The free-standing types this session does not serve, with why: their
-/// stored table could not be brought to their declaration. Their reads and
-/// writes fail with that reason until it is remedied.
+/// stored table could not be brought to their declaration, so it is
+/// quarantined ([`table_shape::quarantine`]) and every read naming it finds
+/// no such table. Their writes fail with the reason.
 #[derive(Clone, Default)]
 pub struct UnservedTypes(Arc<Mutex<BTreeMap<String, Unserved>>>);
 
 #[derive(Clone)]
 struct Unserved {
     raw_table: String,
+    condition: &'static str,
     reason: String,
 }
 
+impl Unserved {
+    fn explanation(&self, name: &str) -> String {
+        format!(
+            "type '{name}' is not served — {}: {}",
+            self.condition, self.reason
+        )
+    }
+}
+
 impl UnservedTypes {
-    pub fn insert(&self, type_name: &str, raw_table: &str, reason: String) {
+    pub fn insert(
+        &self,
+        type_name: &str,
+        raw_table: &str,
+        condition: &'static str,
+        reason: String,
+    ) {
         self.0.lock().expect("UnservedTypes lock").insert(
             type_name.to_string(),
             Unserved {
                 raw_table: raw_table.to_string(),
+                condition,
                 reason,
             },
         );
@@ -468,39 +507,50 @@ impl UnservedTypes {
         self.0.lock().expect("UnservedTypes lock").remove(type_name);
     }
 
-    /// Each unserved type with its reason.
+    /// The condition `type_name` is unserved under, if it is.
+    pub fn condition(&self, type_name: &str) -> Option<&'static str> {
+        self.0
+            .lock()
+            .expect("UnservedTypes lock")
+            .get(type_name)
+            .map(|unserved| unserved.condition)
+    }
+
+    /// Each unserved type with its explanation.
     pub fn entries(&self) -> BTreeMap<String, String> {
         self.0
             .lock()
             .expect("UnservedTypes lock")
             .iter()
-            .map(|(name, unserved)| (name.clone(), unserved.reason.clone()))
+            .map(|(name, unserved)| (name.clone(), unserved.explanation(name)))
             .collect()
     }
 
-    /// Refuse `sql` when it reads an unserved type, by its name or its raw
-    /// table.
-    pub fn check_read(&self, sql: &str) -> anyhow::Result<()> {
-        let unserved = self.0.lock().expect("UnservedTypes lock").clone();
-        if unserved.is_empty() {
-            return Ok(());
+    /// `error` with why, when it is a query naming an unserved type or its
+    /// stored table and finding no such table.
+    pub fn explain(&self, error: anyhow::Error) -> anyhow::Error {
+        let message = format!("{error:#}");
+        let unserved = self.0.lock().expect("UnservedTypes lock");
+        let explained = unserved.iter().find(|(name, u)| {
+            [name.as_str(), u.raw_table.as_str()]
+                .iter()
+                .any(|table| names_missing_table(&message, table))
+        });
+        match explained {
+            Some((name, u)) => error.context(u.explanation(name)),
+            None => error,
         }
-        let statements = holon_turso::sql_parser::parse_sql(sql).map_err(|e| {
-            anyhow::anyhow!(
-                "cannot tell whether this read touches an unserved type ({}): {e}. SQL: {sql}",
-                unserved.keys().cloned().collect::<Vec<_>>().join(", ")
-            )
-        })?;
-        let read = holon_turso::sql_parser::extract_table_refs(&statements);
-        for (name, Unserved { raw_table, reason }) in &unserved {
-            if read.iter().any(|r| {
-                r.name().eq_ignore_ascii_case(name) || r.name().eq_ignore_ascii_case(raw_table)
-            }) {
-                anyhow::bail!("type '{name}' is not served — {reason}");
-            }
-        }
-        Ok(())
     }
+}
+
+fn names_missing_table(message: &str, table: &str) -> bool {
+    let needle = format!("no such table: {table}");
+    message.match_indices(&needle).any(|(at, _)| {
+        message[at + needle.len()..]
+            .chars()
+            .next()
+            .is_none_or(|c| !(c.is_ascii_alphanumeric() || c == '_'))
+    })
 }
 
 fn columns_added(subject: String, adapted: TableAdapted) -> Condition {
