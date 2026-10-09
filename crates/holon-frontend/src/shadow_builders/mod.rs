@@ -57,7 +57,10 @@ pub fn build_shadow_interpreter() -> RenderInterpreter<ReactiveViewModel> {
     register_all(&mut interp);
     interp.set_widget_metas(all_widget_metas());
     interp.register("column", |ba: prelude::BA<'_>| {
-        let gap = ba.args.get_f64("gap").unwrap_or(0.0) as f32;
+        let gap = match ba.args.get_f64_strict("gap") {
+            Ok(gap) => gap.unwrap_or(0.0) as f32,
+            Err(msg) => return ReactiveViewModel::error("column", msg),
+        };
         // A vertical floor: the column never paints shorter than `min_height`
         // px, so a short/empty section (a LogSeq journal day) still occupies a
         // comfortable block. Parsed at the boundary — present-but-non-numeric or
@@ -101,7 +104,10 @@ pub fn build_shadow_interpreter() -> RenderInterpreter<ReactiveViewModel> {
         // scroll-integrated sections instead of trailing-edge pinning — so a
         // pinned accordion here (or a section-stack accordion elsewhere) errors
         // loudly.
-        let gap = ba.args.get_f64("gap").unwrap_or(0.0) as f32;
+        let gap = match ba.args.get_f64_strict("gap") {
+            Ok(gap) => gap.unwrap_or(0.0) as f32,
+            Err(msg) => return ReactiveViewModel::error("section_stack", msg),
+        };
         let child_ctx = ba.ctx.offering(ContainerCapability::ScrollSections);
         let children: Vec<ReactiveViewModel> = ba
             .args

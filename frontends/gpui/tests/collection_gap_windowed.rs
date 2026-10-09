@@ -109,3 +109,5 @@ fn a_nested_table_draws_its_gap(cx: &mut TestAppContext) {
     let spacings = row_spacings(nested_in_a_list_row(table()), cx);
     assert_gap(&spacings, "eager nested path");
 }
+
+mod test_init;

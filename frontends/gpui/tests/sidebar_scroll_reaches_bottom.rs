@@ -172,6 +172,7 @@ fn sidebar_block_tree(
     props.insert("active_mode".to_string(), Value::String("tree".to_string()));
     ReactiveViewModel {
         slot: Some(ReactiveSlot::new(column)),
+        render_ctx: Some(Default::default()),
         ..ReactiveViewModel::from_widget("view_mode_switcher", props)
     }
 }

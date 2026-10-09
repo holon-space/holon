@@ -296,3 +296,21 @@ fn view_mode_switcher_mode_without_its_template() {
         &["view_mode_switcher", "table"],
     );
 }
+
+#[test]
+fn column_gap_not_a_number() {
+    assert_error_names(
+        r#"column(#{gap: "wide"}, text("a"))"#,
+        no_row(),
+        &["column", "gap", "number"],
+    );
+}
+
+#[test]
+fn section_stack_gap_not_a_number() {
+    assert_error_names(
+        r#"section_stack(#{gap: "wide"}, text("a"))"#,
+        no_row(),
+        &["section_stack", "gap", "number"],
+    );
+}

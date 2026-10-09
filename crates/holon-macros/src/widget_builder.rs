@@ -149,20 +149,31 @@ fn parse_param_type(input: ParseStream) -> syn::Result<ParamType> {
 
 // ─── Code Generation ────────────────────────────────────────────────
 
+/// The next positional slot a scalar param binds to, or none at all when
+/// the widget has a `Collection` param: there every positional arg is a child,
+/// so a scalar is named-only and `row(col("a"), col("b"))` draws two children
+/// rather than reading `col("a")` as the row's `gap`.
+fn positional_slots(params: &[WidgetParam]) -> Option<usize> {
+    (!params.iter().any(|p| matches!(p.ty, ParamType::Collection))).then_some(0)
+}
+
 /// Extraction of a String / Option<String> / bool / f64 / f32 / Value param,
 /// or `None` for a Collection / Expr param. Absent takes the default; a value
 /// of the wrong type runs `on_err` with the message naming the key.
 fn scalar_extraction(
     param: &WidgetParam,
-    positional_idx: &mut usize,
+    positional_idx: &mut Option<usize>,
     on_err: &proc_macro2::TokenStream,
 ) -> Option<proc_macro2::TokenStream> {
     let name = &param.name;
     let name_str = name.to_string();
-    let mut slot = || {
-        let idx = *positional_idx;
-        *positional_idx += 1;
-        idx
+    let mut slot = || match positional_idx {
+        Some(idx) => {
+            let this = *idx;
+            *idx += 1;
+            quote!(Some(#this))
+        }
+        None => quote!(None),
     };
     let default = |unset: proc_macro2::TokenStream| match &param.default {
         Some(expr) => quote!(#expr),
@@ -173,13 +184,13 @@ fn scalar_extraction(
             let slot = slot();
             let default = default(quote!(""));
             quote! {
-                ba.args.param_string(Some(#slot), #name_str)
+                ba.args.param_string(#slot, #name_str)
                     .map(|v| v.unwrap_or_else(|| #default.to_string()))
             }
         }
         ParamType::OptionalString => {
             let slot = slot();
-            quote! { ba.args.param_string(Some(#slot), #name_str) }
+            quote! { ba.args.param_string(#slot, #name_str) }
         }
         ParamType::Bool => {
             let default = default(quote!(false));
@@ -188,19 +199,19 @@ fn scalar_extraction(
         ParamType::F64 => {
             let slot = slot();
             let default = default(quote!(0.0));
-            quote! { ba.args.param_f64(Some(#slot), #name_str).map(|v| v.unwrap_or(#default)) }
+            quote! { ba.args.param_f64(#slot, #name_str).map(|v| v.unwrap_or(#default)) }
         }
         ParamType::F32 => {
             let slot = slot();
             let default = default(quote!(0.0_f32));
             quote! {
-                ba.args.param_f64(Some(#slot), #name_str).map(|v| v.map_or(#default, |v| v as f32))
+                ba.args.param_f64(#slot, #name_str).map(|v| v.map_or(#default, |v| v as f32))
             }
         }
         ParamType::Value => {
-            let idx = slot();
+            let slot = slot();
             return Some(quote! {
-                let #name = ba.args.positional.get(#idx)
+                let #name = #slot.and_then(|__i: usize| ba.args.positional.get(__i))
                     .cloned()
                     .or_else(|| ba.args.named.get(#name_str).cloned())
                     .unwrap_or(Value::Null);
@@ -217,7 +228,7 @@ fn scalar_extraction(
 }
 
 fn generate_extraction(widget_name: &str, params: &[WidgetParam]) -> proc_macro2::TokenStream {
-    let mut positional_idx = 0usize;
+    let mut positional_idx = positional_slots(params);
     let mut extractions = Vec::new();
 
     for param in params {
@@ -358,7 +369,7 @@ fn generate_extraction(widget_name: &str, params: &[WidgetParam]) -> proc_macro2
 /// (String, bool, f64, f32, Option<String>, Value) into a `HashMap<String,
 /// Value>`. Skips Collection and Expr params entirely.
 fn generate_resolve_props_body(params: &[WidgetParam]) -> proc_macro2::TokenStream {
-    let mut positional_idx = 0usize;
+    let mut positional_idx = positional_slots(params);
     let mut stmts = Vec::new();
 
     for param in params {

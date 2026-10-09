@@ -14,6 +14,8 @@ use holon_frontend::RenderContext;
 use holon_frontend::StubBuilderServices;
 use holon_frontend::reactive::BuilderServices;
 
+mod shipped_sources;
+
 const UNKNOWN_BUILDER_MARKER: &str = "[unknown: ";
 
 fn row(pairs: &[(&str, &str)]) -> Arc<DataRow> {
@@ -82,146 +84,11 @@ fn recipe_page_renders_without_an_unknown_builder() {
     );
 }
 
-/// General guard: no shipped variant may name a widget the interpreter lacks.
-#[test]
-fn no_shipped_profile_variant_renders_an_unknown_builder() {
-    let shipped: [(&str, &str); 6] = [
-        ("recipe", holon_kitchen::RECIPE_PROFILE_YAML),
-        ("shopping_item", holon_kitchen::SHOPPING_ITEM_PROFILE_YAML),
-        (
-            "block",
-            include_str!("../../../assets/default/types/block_profile.yaml"),
-        ),
-        (
-            "person",
-            include_str!("../../../assets/default/types/person_profile.yaml"),
-        ),
-        (
-            "collection",
-            include_str!("../../../assets/default/types/collection_profile.yaml"),
-        ),
-        (
-            "integration",
-            include_str!("../../../assets/default/types/integration_profile.yaml"),
-        ),
-    ];
-    let mut offenders = Vec::new();
-    for (profile, yaml) in shipped {
-        for (variant, render) in variants_of(yaml) {
-            if let Err(e) = holon_api::render_dsl::parse_render_dsl(&render) {
-                offenders.push(format!("{profile}/{variant}: refused: {e:#}"));
-                continue;
-            }
-            // The stub row has no `enabled` column, which `state_toggle`'s
-            // builder rejects; that variant's builders are checked by
-            // `state_toggle_bool_binding`.
-            if (profile, variant.as_str()) == ("integration", "default") {
-                continue;
-            }
-            let texts = render_texts(&render, row(&[("id", "block:x"), ("content", "c")]));
-            if texts.iter().any(|t| t.contains(UNKNOWN_BUILDER_MARKER)) {
-                offenders.push(format!("{profile}/{variant}: {texts:?}"));
-            }
-        }
-    }
-    assert!(
-        offenders.is_empty(),
-        "unknown or refused builders: {offenders:#?}"
-    );
-}
-
-fn collect_yaml_renders(node: &serde_yaml::Value, out: &mut Vec<String>) {
-    match node {
-        serde_yaml::Value::Mapping(map) => {
-            for (k, v) in map {
-                match (k.as_str(), v.as_str()) {
-                    (Some("render"), Some(render)) => out.push(render.to_string()),
-                    _ => collect_yaml_renders(v, out),
-                }
-            }
-        }
-        serde_yaml::Value::Sequence(items) => {
-            items.iter().for_each(|v| collect_yaml_renders(v, out))
-        }
-        _ => {}
-    }
-}
-
-fn yaml_renders(label: &str, yaml: &str) -> Vec<(String, String)> {
-    let doc: serde_yaml::Value =
-        serde_yaml::from_str(yaml).unwrap_or_else(|e| panic!("{label} is not yaml: {e}"));
-    let mut renders = Vec::new();
-    collect_yaml_renders(&doc, &mut renders);
-    renders
-        .into_iter()
-        .enumerate()
-        .map(|(i, r)| (format!("{label}#{i}"), r))
-        .collect()
-}
-
-/// The bodies of the `#+BEGIN_SRC render` blocks of an org file.
-fn org_renders(label: &str, org: &str) -> Vec<(String, String)> {
-    let mut out = Vec::new();
-    let mut current: Option<Vec<&str>> = None;
-    for line in org.lines() {
-        let upper = line.trim().to_uppercase();
-        if upper.starts_with("#+BEGIN_SRC RENDER") {
-            current = Some(Vec::new());
-        } else if upper.starts_with("#+END_SRC") {
-            if let Some(body) = current.take() {
-                out.push((format!("{label}#{}", out.len()), body.join("\n")));
-            }
-        } else if let Some(body) = current.as_mut() {
-            body.push(line);
-        }
-    }
-    out
-}
-
-fn shipped_render_strings() -> Vec<(String, String)> {
-    let assets = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets");
-    let mut out = Vec::new();
-    for (label, yaml) in [
-        ("recipe", holon_kitchen::RECIPE_PROFILE_YAML),
-        ("shopping_item", holon_kitchen::SHOPPING_ITEM_PROFILE_YAML),
-    ] {
-        out.extend(yaml_renders(label, yaml));
-    }
-    let mut files: Vec<std::path::PathBuf> = ["default/types", "integrations"]
-        .iter()
-        .flat_map(|dir| std::fs::read_dir(assets.join(dir)).expect("asset dir exists"))
-        .map(|e| e.expect("dir entry").path())
-        .filter(|p| p.extension().is_some_and(|e| e == "yaml"))
-        .collect();
-    files.sort();
-    for path in files {
-        let text = std::fs::read_to_string(&path).expect("asset readable");
-        out.extend(yaml_renders(
-            &path.file_name().unwrap().to_string_lossy(),
-            &text,
-        ));
-    }
-    let mut orgs: Vec<std::path::PathBuf> = std::fs::read_dir(assets.join("default"))
-        .expect("asset dir exists")
-        .map(|e| e.expect("dir entry").path())
-        .filter(|p| p.extension().is_some_and(|e| e == "org"))
-        .collect();
-    orgs.sort();
-    for path in orgs {
-        let text = std::fs::read_to_string(&path).expect("asset readable");
-        out.extend(org_renders(
-            &path.file_name().unwrap().to_string_lossy(),
-            &text,
-        ));
-    }
-    out
-}
-
 /// `to_rhai` prints a form that parses back to the same tree and prints the
 /// same string again, for every shipped render string.
 #[test]
 fn every_shipped_render_string_round_trips_through_to_rhai() {
-    let shipped = shipped_render_strings();
+    let shipped = shipped_sources::shipped_render_strings();
     assert!(
         shipped.len() >= 48,
         "the corpus lost render strings: {}",
@@ -408,5 +275,18 @@ fn a_col_form_that_cannot_run_per_row_is_refused_at_profile_load() {
                 "{render}: error lacks {needle:?}: {msg}"
             );
         }
+    }
+}
+
+/// Every positional arg of a widget with children is a child: a column value
+/// there is drawn, never read as the widget's `gap`, `align` or `title`.
+#[test]
+fn positional_args_of_a_widget_with_children_are_children() {
+    for render in [
+        r#"row(col("a"), col("b"))"#,
+        r#"section(col("a"), col("b"))"#,
+    ] {
+        let texts = render_texts(render, row(&[("a", "first"), ("b", "second")]));
+        assert_eq!(texts, ["first", "second"], "{render}");
     }
 }

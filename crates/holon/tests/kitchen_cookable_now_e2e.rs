@@ -441,3 +441,77 @@ async fn stocked_quantity(ctx: &E2ETestContext, local_id: &str) -> Result<Option
             _ => None,
         }))
 }
+
+/// The `prql:` of the one `live_query` in the shipped recipe page.
+fn recipe_page_query() -> String {
+    fn find(expr: &holon_api::RenderExpr) -> Vec<String> {
+        let own = match expr {
+            holon_api::RenderExpr::FunctionCall { name, args } if name == "live_query" => args
+                .iter()
+                .filter(|a| a.name.as_deref() == Some("prql"))
+                .filter_map(|a| match &a.value {
+                    holon_api::RenderExpr::Literal {
+                        value: Value::String(prql),
+                    } => Some(prql.clone()),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        own.into_iter()
+            .chain(expr.children().into_iter().flat_map(find))
+            .collect()
+    }
+    let profile = holon_profiles::parse_profile_yaml(holon_kitchen::RECIPE_PROFILE_YAML)
+        .expect("the recipe profile parses");
+    let render = &profile
+        .variants
+        .iter()
+        .find(|v| v.name == "default")
+        .expect("the recipe profile has a default variant")
+        .render;
+    let expr = holon_api::render_dsl::parse_render_dsl(render).expect("the recipe page parses");
+    let queries = find(&expr);
+    assert_eq!(
+        queries.len(),
+        1,
+        "the recipe page has one prql live_query: {render}"
+    );
+    queries.into_iter().next().unwrap()
+}
+
+/// The recipe page lists the recipe's own ingredient uses: its query runs in
+/// the context the page's row id gives it.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_recipe_page_lists_its_own_ingredient_uses() -> Result<()> {
+    let ctx = E2ETestContext::new().await?;
+    add_recipe(&ctx, "r-pancakes", "Pancakes").await?;
+    add_recipe(&ctx, "r-toast", "Toast").await?;
+    require(&ctx, "iu-1", "r-pancakes", "flour", Some(200.0), Some("g")).await?;
+    require(&ctx, "iu-2", "r-pancakes", "milk", Some(300.0), Some("ml")).await?;
+    require(&ctx, "iu-3", "r-toast", "bread", Some(1.0), None).await?;
+
+    let recipe = holon_api::EntityUri::parse(&minted("recipe", "r-pancakes"))?;
+    let result = ctx
+        .service()
+        .execute_query(
+            &recipe_page_query(),
+            QueryLanguage::HolonPrql,
+            HashMap::new(),
+            Some(holon_api::QueryContext::for_block(&recipe, None)),
+        )
+        .await?;
+    let mut names: Vec<String> = result
+        .rows
+        .iter()
+        .map(|r| {
+            r.get("raw_name")
+                .and_then(|v| v.as_string())
+                .map(String::from)
+                .ok_or_else(|| anyhow::anyhow!("an ingredient_use row without raw_name: {r:?}"))
+        })
+        .collect::<Result<_>>()?;
+    names.sort();
+    assert_eq!(names, ["flour", "milk"]);
+    Ok(())
+}

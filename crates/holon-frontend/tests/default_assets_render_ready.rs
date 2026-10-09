@@ -1,9 +1,8 @@
-//! The bundled `assets/default` org files are the first value of every layout
-//! stream, and the recovery screen is made of them. They must render from the
-//! parsed text alone, so this test parses each one, builds the root-layout
-//! perspective, parses every render source, and interprets each through the
-//! shadow builders. No asset may draw an `error` node or an unknown widget,
-//! and the root layout draws exactly its perspective's panels.
+//! Every shipped render source (see `shipped_sources`) renders through the
+//! shadow builders without an `error` node or an unknown widget, and the
+//! bundled root layout draws exactly its perspective's panels. The bundled
+//! org files are the first value of every layout stream and the recovery
+//! screen is made of them, so they must render from the parsed text alone.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -11,12 +10,14 @@ use std::sync::Arc;
 use holon_api::EntityUri;
 use holon_api::QueryLanguage;
 use holon_api::RenderExpr;
-use holon_api::SourceLanguage;
+use holon_api::Value;
 use holon_api::widget_spec::DataRow;
 use holon_frontend::ReactiveViewModel;
 use holon_frontend::RenderContext;
 use holon_frontend::reactive::BuilderServices;
 use holon_frontend::render_interpreter::RenderInterpreter;
+
+mod shipped_sources;
 
 /// Services whose live queries start and stay empty, so a `live_query` in an
 /// asset renders as itself and any `error` node comes from the asset.
@@ -116,7 +117,7 @@ impl BuilderServices for AssetServices {
     }
 }
 
-fn render_json(expr: &RenderExpr) -> serde_json::Value {
+fn render_json(expr: &RenderExpr, row: DataRow) -> serde_json::Value {
     static RT: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
     let rt = RT.get_or_init(|| {
         tokio::runtime::Builder::new_multi_thread()
@@ -129,7 +130,7 @@ fn render_json(expr: &RenderExpr) -> serde_json::Value {
         link_classifier: holon_api::link_parser::LinkTargetClassifier::default(),
         rt_handle: rt.handle().clone(),
     };
-    let ctx = RenderContext::default().with_row(Arc::new(DataRow::new()));
+    let ctx = RenderContext::default().with_row(Arc::new(row));
     let vm = services.interpret(expr, &ctx).snapshot();
     serde_json::to_value(&vm).expect("ViewModel serializes")
 }
@@ -180,90 +181,126 @@ fn contains_text(node: &serde_json::Value, needle: &str) -> bool {
     }
 }
 
-#[test]
-fn every_default_asset_org_file_parses_and_renders() {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/default");
-    let mut orgs: Vec<_> = std::fs::read_dir(&dir)
-        .expect("assets/default exists")
-        .map(|e| e.expect("dir entry").path())
-        .filter(|p| p.extension().is_some_and(|e| e == "org"))
-        .collect();
-    orgs.sort();
-    assert!(
-        orgs.iter().any(|p| p.ends_with("index.org")),
-        "assets/default lost index.org: {orgs:?}"
+/// Every column `col("…")` reads in `expr`.
+fn column_names(expr: &RenderExpr) -> Vec<String> {
+    let own = match expr {
+        RenderExpr::ColumnRef { name } => Some(name.clone()),
+        _ => None,
+    };
+    own.into_iter()
+        .chain(expr.children().into_iter().flat_map(column_names))
+        .collect()
+}
+
+/// The row a shipped source is rendered over, shaped like the rows prod
+/// delivers to it: an entity id, and a text value in every column the source
+/// reads, except the columns whose prod type is not text.
+fn source_row(label: &str, expr: &RenderExpr) -> DataRow {
+    let mut row = DataRow::new();
+    for column in column_names(expr) {
+        row.insert(column.clone(), Value::String(format!("{column} value")));
+    }
+    row.insert(
+        "id".to_string(),
+        Value::String("block:shipped-source-row".into()),
     );
-
-    let mut render_sources = 0;
-    for path in &orgs {
-        let name = path.file_name().unwrap().to_string_lossy().to_string();
-        let text = std::fs::read_to_string(path).expect("asset readable");
-        let parsed = holon_org_format::parse_org_file(
-            Path::new(&name),
-            &text,
-            &EntityUri::no_parent(),
-            Path::new(""),
-        )
-        .unwrap_or_else(|e| panic!("{name} does not parse: {e:#}"));
-
-        for block in &parsed.blocks {
-            if !matches!(block.source_language, Some(SourceLanguage::Render)) {
-                continue;
-            }
-            let expr =
-                holon_api::render_dsl::parse_render_dsl(&block.content).unwrap_or_else(|e| {
-                    panic!("{name}: render source {} does not parse: {e:#}", block.id)
-                });
-            let json = render_json(&expr);
-            assert!(
-                !contains_text(&json, "[unknown: "),
-                "{name}: render source {} names a widget the interpreter lacks: {json}",
-                block.id
-            );
-            let errors = error_messages(&json);
-            assert!(
-                errors.is_empty(),
-                "{name}: render source {} draws error nodes: {errors:?}",
-                block.id
-            );
-            render_sources += 1;
+    match label {
+        // The block profile computes `todo_states: '()'`.
+        l if l.starts_with("default/types/block_profile.yaml#") => {
+            row.insert("todo_states".to_string(), Value::Null);
         }
+        // The integration mirror's `enabled` is an INTEGER column.
+        "default/types/integration_profile.yaml#0" => {
+            row.insert("enabled".to_string(), Value::Integer(1));
+        }
+        // `pending_question.options` holds the offered answers as a JSON array.
+        "integrations/claude-history.yaml#2" => {
+            row.insert(
+                "options".to_string(),
+                Value::String(r#"[{"label":"yes"},{"label":"no"}]"#.into()),
+            );
+        }
+        _ => {}
+    }
+    row
+}
 
-        if name == "index.org" {
-            let root = holon_api::root_layout_block_uri();
-            let spec = holon_api::perspective::resolve_active_perspective(&root, &parsed.blocks)
-                .unwrap_or_else(|e| panic!("index.org: root layout does not build: {e:#}"));
-            let layout = spec
-                .layout_expr()
-                .unwrap_or_else(|e| panic!("index.org: layout does not synthesize: {e:#}"));
-            let mut panels: Vec<String> = spec
-                .panels
+#[test]
+fn every_shipped_render_source_draws_no_error_node() {
+    let shipped = shipped_sources::shipped_render_strings();
+    assert!(
+        shipped.iter().any(|(l, _)| l == "default/index.org#0")
+            && shipped
                 .iter()
-                .filter(|p| p.is_displayable())
-                .map(|p| p.id.to_string())
-                .collect();
-            panels.sort();
-            assert!(
-                !panels.is_empty(),
-                "index.org: the root layout has no panel"
-            );
-            let mut drawn = live_block_ids(&layout);
-            drawn.sort();
-            drawn.dedup();
-            assert_eq!(
-                drawn, panels,
-                "index.org: the layout must draw exactly the perspective's displayable panels"
-            );
-            let json = render_json(&layout);
-            let errors = error_messages(&json);
-            assert!(
-                errors.is_empty(),
-                "index.org: the root layout draws error nodes: {errors:?}"
-            );
+                .any(|(l, _)| l.starts_with("default/types/person_profile.yaml"))
+            && shipped.iter().any(|(l, _)| l.starts_with("integrations/"))
+            && shipped.iter().any(|(l, _)| l.starts_with("kitchen/")),
+        "the shipped corpus lost a source family: {:?}",
+        shipped.iter().map(|(l, _)| l).collect::<Vec<_>>()
+    );
+    let mut offenders = Vec::new();
+    for (label, source) in &shipped {
+        let expr = holon_api::render_dsl::parse_render_dsl(source)
+            .unwrap_or_else(|e| panic!("{label} does not parse: {e:#}"));
+        let json = render_json(&expr, source_row(label, &expr));
+        if contains_text(&json, "[unknown: ") {
+            offenders.push(format!("{label}: names a widget the interpreter lacks"));
+        }
+        let errors = error_messages(&json);
+        if !errors.is_empty() {
+            offenders.push(format!("{label}: {errors:?}\n    SRC: {source}"));
         }
     }
     assert!(
-        render_sources > 0,
-        "no render source found in assets/default — the check would be vacuous"
+        offenders.is_empty(),
+        "shipped render sources drawing error nodes ({}):\n{}",
+        offenders.len(),
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn the_root_layout_draws_exactly_its_perspective_panels() {
+    let name = "index.org";
+    let text = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/default/index.org"),
+    )
+    .expect("assets/default/index.org readable");
+    let parsed = holon_org_format::parse_org_file(
+        Path::new(name),
+        &text,
+        &EntityUri::no_parent(),
+        Path::new(""),
+    )
+    .unwrap_or_else(|e| panic!("{name} does not parse: {e:#}"));
+    let root = holon_api::root_layout_block_uri();
+    let spec = holon_api::perspective::resolve_active_perspective(&root, &parsed.blocks)
+        .unwrap_or_else(|e| panic!("index.org: root layout does not build: {e:#}"));
+    let layout = spec
+        .layout_expr()
+        .unwrap_or_else(|e| panic!("index.org: layout does not synthesize: {e:#}"));
+    let mut panels: Vec<String> = spec
+        .panels
+        .iter()
+        .filter(|p| p.is_displayable())
+        .map(|p| p.id.to_string())
+        .collect();
+    panels.sort();
+    assert!(
+        !panels.is_empty(),
+        "index.org: the root layout has no panel"
+    );
+    let mut drawn = live_block_ids(&layout);
+    drawn.sort();
+    drawn.dedup();
+    assert_eq!(
+        drawn, panels,
+        "index.org: the layout must draw exactly the perspective's displayable panels"
+    );
+    let json = render_json(&layout, DataRow::new());
+    let errors = error_messages(&json);
+    assert!(
+        errors.is_empty(),
+        "index.org: the root layout draws error nodes: {errors:?}"
     );
 }

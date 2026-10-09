@@ -496,12 +496,16 @@ pub fn builder_registry(input: TokenStream) -> TokenStream {
 ///
 /// | Type | Extraction |
 /// |---|---|
-/// | `String` | `get_positional_string(N)` / `get_string(name)` |
-/// | `bool` | `get_bool(name)` |
-/// | `f64` | `get_f64(name)` |
-/// | `Value` | `positional[N]` / `named[name]` |
-/// | `Collection` | template expansion over `data_rows` |
+/// | `String`, `Option<String>` | `param_string(slot, name)` |
+/// | `bool` | `param_bool(name)` |
+/// | `f64`, `f32` | `param_f64(slot, name)` |
+/// | `Value` | `positional[slot]` / `named[name]` |
+/// | `Collection` | template expansion over `data_rows`, else the positional children |
 /// | `Expr` | `get_template(name)` |
+///
+/// `slot` is the param's positional index among the non-`bool` scalars. A
+/// widget with a `Collection` param gives its scalars no slot: every
+/// positional arg there is a child.
 #[proc_macro]
 pub fn widget_builder(input: TokenStream) -> TokenStream {
     widget_builder::widget_builder_impl(input)

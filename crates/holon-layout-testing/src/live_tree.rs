@@ -72,7 +72,7 @@ impl HeadlessLiveTree {
 /// Resolve `expr` to the collection call prod *actually renders*, descending
 /// through wrappers. The crucial case is `view_mode_switcher(...)`: it offers
 /// several `mode_*` templates but interprets only the **active** one
-/// (`mode_<default_mode>`, default `"tree"` — see
+/// (`mode_<default_mode>`, else the first mode `modes:` lists — see
 /// `shadow_builders/view_mode_switcher.rs`). A naive "first layout call"
 /// search picks whichever `mode_*` appears first (often `table`), giving the
 /// wrong — and usually non-hierarchical — layout. This mirrors the switcher's
@@ -80,15 +80,10 @@ impl HeadlessLiveTree {
 pub fn resolve_active_collection(expr: &RenderExpr) -> Option<&RenderExpr> {
     match expr {
         RenderExpr::FunctionCall { name, args } if name == "view_mode_switcher" => {
-            let active = active_mode_name(args);
-            let mode_key = format!("mode_{active}");
+            let mode_key = format!("mode_{}", active_mode_name(args)?);
             let tmpl = args
                 .iter()
                 .find(|a| a.name.as_deref() == Some(mode_key.as_str()))
-                .or_else(|| {
-                    args.iter()
-                        .find(|a| a.name.as_deref().is_some_and(|k| k.starts_with("mode_")))
-                })
                 .map(|a| &a.value)?;
             resolve_active_collection(tmpl)
         }
@@ -105,17 +100,24 @@ pub fn resolve_active_collection(expr: &RenderExpr) -> Option<&RenderExpr> {
 }
 
 /// The active mode of a `view_mode_switcher`'s args: explicit `default_mode`
-/// (the backend marks the `Predicate::Always` variant this way), else `"tree"`.
-fn active_mode_name(args: &[holon_api::render_types::Arg]) -> String {
-    args.iter()
-        .find(|a| a.name.as_deref() == Some("default_mode"))
-        .and_then(|a| match &a.value {
-            RenderExpr::Literal {
-                value: holon_api::Value::String(s),
-            } => Some(s.clone()),
-            _ => None,
-        })
-        .unwrap_or_else(|| "tree".to_string())
+/// (the backend marks the `Predicate::Always` variant this way), else the
+/// first mode `modes:` lists; `None` where the builder draws an error node.
+fn active_mode_name(args: &[holon_api::render_types::Arg]) -> Option<String> {
+    let literal = |key: &str| {
+        args.iter()
+            .find(|a| a.name.as_deref() == Some(key))
+            .and_then(|a| match &a.value {
+                RenderExpr::Literal {
+                    value: holon_api::Value::String(s),
+                } => Some(s.clone()),
+                _ => None,
+            })
+    };
+    literal("default_mode").or_else(|| {
+        let modes =
+            holon_frontend::reactive_view_model::parse_view_modes(&literal("modes")?).ok()?;
+        modes.into_iter().next().map(|m| m.name)
+    })
 }
 
 /// The `CollectionVariant` prod draws for `expr`'s *active* collection (see

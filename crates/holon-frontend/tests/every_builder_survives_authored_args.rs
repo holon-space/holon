@@ -934,13 +934,17 @@ struct TypedParam {
 }
 
 /// Every String / Number / Bool param a `widget_builder!` builder declares.
-/// String and Number params consume positional slots in declaration order.
+/// String and Number params consume positional slots in declaration order,
+/// except in a builder with a Collection param, whose positional args are all
+/// children.
 fn typed_params() -> Vec<TypedParam> {
     let mut params = Vec::new();
     for meta in all_widget_metas() {
         let mut slot = 0;
+        let has_children = meta.params.iter().any(|p| p.type_hint == "Collection");
         for p in meta.params {
-            let consumes_slot = matches!(p.type_hint, "String" | "Number" | "Value");
+            let consumes_slot =
+                !has_children && matches!(p.type_hint, "String" | "Number" | "Value");
             if matches!(p.type_hint, "String" | "Number" | "Bool") {
                 params.push(TypedParam {
                     builder: meta.name,

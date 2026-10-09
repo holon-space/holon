@@ -432,6 +432,7 @@ fn view_mode_switcher_node(view: Arc<ReactiveView>) -> Arc<ReactiveViewModel> {
 
     let mut vms = ReactiveViewModel::from_widget("view_mode_switcher", props);
     vms.slot = Some(ReactiveSlot::new(collection_child));
+    vms.render_ctx = Some(Default::default());
     Arc::new(vms)
 }
 
