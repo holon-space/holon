@@ -16,6 +16,8 @@ use holon_core::storage::types::Result;
 use holon_core::storage::types::StorageError;
 use sqlparser::ast::ColumnOption;
 use sqlparser::ast::Expr;
+use sqlparser::ast::Ident;
+use sqlparser::ast::ObjectName;
 use sqlparser::ast::Statement;
 use sqlparser::ast::TableConstraint;
 use sqlparser::dialect::SQLiteDialect;
@@ -421,18 +423,40 @@ async fn row_count(db_handle: &DbHandle, table: &str) -> Result<u64> {
     }
 }
 
-fn is_create_table(statement: &str) -> bool {
-    let code: String = statement
+/// `create_sql` declaring a table named `name` instead.
+fn renamed_create(create_sql: &str, name: &str) -> Result<String> {
+    let mut statements = Parser::parse_sql(&SQLiteDialect {}, create_sql).map_err(|e| {
+        StorageError::SchemaError(format!(
+            "cannot parse table declaration {create_sql:?}: {e}"
+        ))
+    })?;
+    let [Statement::CreateTable(create)] = statements.as_mut_slice() else {
+        return Err(StorageError::SchemaError(format!(
+            "expected exactly one CREATE TABLE statement, got {create_sql:?}"
+        )));
+    };
+    create.name = ObjectName::from(vec![Ident::with_quote('"', name)]);
+    Ok(statements[0].to_string())
+}
+
+fn code_words(statement: &str) -> impl Iterator<Item = &str> {
+    statement
         .lines()
         .filter(|line| !line.trim_start().starts_with("--"))
-        .collect::<Vec<_>>()
-        .join(" ");
-    let words: Vec<String> = code
-        .split_whitespace()
+        .flat_map(str::split_whitespace)
+}
+
+fn is_create_table(statement: &str) -> bool {
+    let words: Vec<String> = code_words(statement)
         .take(2)
         .map(str::to_ascii_uppercase)
         .collect();
     words == ["CREATE", "TABLE"]
+}
+
+/// The first words of `statement`, enough to tell which object it creates.
+fn statement_head(statement: &str) -> String {
+    code_words(statement).take(6).collect::<Vec<_>>().join(" ")
 }
 
 /// Run one schema statement: a `CREATE TABLE` through [`reconcile_table`];
@@ -466,6 +490,9 @@ pub async fn ensure_statement(
 /// Drop `refusal`'s table with the views over it, create it from
 /// `create_sql`, and empty the tables the org ingest refills with it.
 ///
+/// The declaration is first created under a scratch name, so one the engine
+/// cannot create fails before anything is dropped or emptied.
+///
 /// Foreign keys are off for the drop, as SQLite's table-rebuild procedure
 /// prescribes: rows of a kept table that reference it (dismissed advice on a
 /// block) find the same ids again once the ingest refills it.
@@ -478,6 +505,22 @@ async fn rebuild_table(
     let rebuild_error = |step: &str, e: &dyn fmt::Display| {
         StorageError::SchemaError(format!("rebuilding {refusal}: {step}: {e}"))
     };
+    let probe = format!("{table}__declaration_probe");
+    let probe_sql = renamed_create(create_sql, &probe)?;
+    db_handle
+        .execute_ddl(&format!("DROP TABLE IF EXISTS \"{probe}\""))
+        .await
+        .map_err(|e| rebuild_error("dropping a leftover declaration probe", &e))?;
+    db_handle.execute_ddl(&probe_sql).await.map_err(|e| {
+        rebuild_error(
+            "its declaration cannot be created, so the stored table and its rows are kept",
+            &e,
+        )
+    })?;
+    db_handle
+        .execute_ddl(&format!("DROP TABLE \"{probe}\""))
+        .await
+        .map_err(|e| rebuild_error("dropping the declaration probe", &e))?;
     drop_dependent_views(db_handle, table)
         .await
         .map_err(|e| rebuild_error("dropping the views over it", &e))?;
@@ -516,12 +559,17 @@ async fn rebuild_table(
     replaced
 }
 
+/// Drop every view that reads stored `table`, depth first.
+pub async fn drop_views_over(db_handle: &DbHandle, table: &str) -> Result<()> {
+    drop_dependent_views(db_handle, table)
+        .await
+        .map_err(|e| StorageError::SchemaError(format!("dropping the views over {table}: {e:#}")))
+}
+
 /// Drop stored `table` with every view over it: the remedy for a refused
 /// table whose rows the user gives up. Their owners recreate the views.
 pub async fn drop_table_and_views(db_handle: &DbHandle, table: &str) -> Result<()> {
-    drop_dependent_views(db_handle, table).await.map_err(|e| {
-        StorageError::SchemaError(format!("dropping the views over {table}: {e:#}"))
-    })?;
+    drop_views_over(db_handle, table).await?;
     db_handle
         .execute_ddl(&format!("DROP TABLE IF EXISTS \"{table}\""))
         .await
@@ -529,9 +577,23 @@ pub async fn drop_table_and_views(db_handle: &DbHandle, table: &str) -> Result<(
 
 /// [`ensure_statement`] for every statement of a schema file.
 pub async fn ensure_schema_sql(db_handle: &DbHandle, sql: &str) -> Result<Vec<TableChange>> {
+    let statements: Vec<&str> = sql_statements(sql).collect();
     let mut changes = Vec::new();
-    for statement in sql_statements(sql) {
-        changes.extend(ensure_statement(db_handle, statement).await?);
+    for (i, statement) in statements.iter().enumerate() {
+        match ensure_statement(db_handle, statement).await {
+            Ok(change) => changes.extend(change),
+            Err(e) => {
+                let not_run: Vec<String> = statements[i + 1..]
+                    .iter()
+                    .map(|s| statement_head(s))
+                    .filter(|head| !head.is_empty())
+                    .collect();
+                return Err(StorageError::SchemaError(format!(
+                    "{e}; not run after it: [{}]",
+                    not_run.join("; ")
+                )));
+            }
+        }
     }
     Ok(changes)
 }

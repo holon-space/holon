@@ -112,3 +112,56 @@ async fn a_drifted_block_raw_is_rebuilt_and_its_ingest_record_emptied() {
         "dismissed advice is nothing the org files restore, so it is kept"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rebuild_whose_declaration_cannot_be_created_keeps_the_stored_table() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (_b, handle) = open(&dir.path().join("old.db")).await;
+    let drifted = block_raw_schema_sql().replacen(
+        "CREATE TABLE IF NOT EXISTS block_raw (",
+        "CREATE TABLE IF NOT EXISTS block_raw (legacy TEXT NOT NULL,",
+        1,
+    );
+    for sql in [
+        drifted.as_str(),
+        include_str!("../sql/schema/files.sql"),
+        include_str!("../sql/schema/block_tags.sql"),
+    ] {
+        for stmt in sql_statements(sql) {
+            handle.execute_ddl(stmt).await.expect(stmt);
+        }
+    }
+    for stmt in [
+        "INSERT INTO block_raw (id, parent_id, legacy) VALUES ('sentinel:no_parent', \
+         'sentinel:no_parent', 'x')",
+        "INSERT INTO block_raw (id, parent_id, legacy) VALUES ('b1', 'sentinel:no_parent', 'x')",
+        "INSERT INTO block_tags (block_id, tag) VALUES ('b1', 't')",
+        "INSERT INTO file (id, name, parent_id, content_hash) VALUES ('f1', 'a.org', 'root', 'h')",
+    ] {
+        handle.execute(stmt, vec![]).await.expect(stmt);
+    }
+
+    // Passes `IF NOT EXISTS` against the stored table; only a fresh CREATE
+    // finds the unknown key column.
+    let uncreatable =
+        "CREATE TABLE IF NOT EXISTS block_raw (id TEXT, parent_id TEXT, PRIMARY KEY (nope))";
+    let error = holon_turso::table_shape::ensure_statement(&handle, uncreatable)
+        .await
+        .expect_err("a declaration the engine cannot create must fail the rebuild")
+        .to_string();
+    assert!(
+        error.contains("block_raw") && error.contains("nope"),
+        "the error must name the table and why its declaration fails: {error}"
+    );
+    for (sql, rows) in [
+        ("SELECT id FROM block_raw", 2),
+        ("SELECT tag FROM block_tags", 1),
+        ("SELECT id FROM file", 1),
+    ] {
+        assert_eq!(
+            ids(&handle, sql).await.len(),
+            rows,
+            "{sql}: a failed rebuild must leave every row where it was"
+        );
+    }
+}

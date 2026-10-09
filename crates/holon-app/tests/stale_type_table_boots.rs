@@ -109,6 +109,16 @@ async fn sql(booted: &Booted, sql: &str) -> Vec<StorageEntity> {
         .unwrap_or_else(|e| panic!("{sql}: {e}"))
 }
 
+async fn engine_read(booted: &Booted, prql: &str) -> anyhow::Result<Vec<StorageEntity>> {
+    let compiled = booted
+        .engine
+        .compile_to_sql(prql, QueryLanguage::HolonPrql)?;
+    booted
+        .engine
+        .execute_query(compiled, HashMap::new(), None)
+        .await
+}
+
 fn conditions(bus: &ConditionBus) -> Vec<Condition> {
     bus.subscribe().current
 }
@@ -364,6 +374,24 @@ async fn a_changed_column_type_refuses_only_that_type_until_the_user_drops_the_t
         "the write error must name the type and the condition: {error}"
     );
 
+    let read = engine_read(&later, "from pantry_item").await;
+    let error = read
+        .expect_err("a read of the refused type must fail, not serve the undeclared shape")
+        .to_string();
+    assert!(
+        error.contains("pantry_item") && error.contains("type-table-refused"),
+        "the read error must name the type and the condition: {error}"
+    );
+    assert!(
+        sql(
+            &later,
+            "SELECT name FROM sqlite_schema WHERE type = 'view' AND name = 'pantry_item'"
+        )
+        .await
+        .is_empty(),
+        "no stored view keeps serving the refused table"
+    );
+
     let kept = sql(&later, "SELECT id FROM pantry_item_raw").await;
     assert_eq!(kept.len(), 2, "a refusal must not delete a row");
 
@@ -395,7 +423,9 @@ async fn a_changed_column_type_refuses_only_that_type_until_the_user_drops_the_t
     )
     .await
     .expect("after the remedy the type must be writable");
-    let sugar = sql(&later, "SELECT id, quantity FROM pantry_item").await;
+    let sugar = engine_read(&later, "from pantry_item")
+        .await
+        .expect("after the remedy the type reads again");
     assert_eq!(
         sugar.first().and_then(|r| r.get("quantity")),
         Some(&Value::Float(1.0)),

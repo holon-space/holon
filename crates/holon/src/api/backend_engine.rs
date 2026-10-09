@@ -276,6 +276,9 @@ pub struct BackendEngine {
     integration_attribution: holon_core::integration_attribution::IntegrationAttribution,
     /// Written by the boot seed, read by the root slot render.
     layout_seed: crate::api::layout_seed::LayoutSeed,
+    /// Types whose stored table this session refused; every query reading
+    /// one fails with the refusal.
+    unserved: crate::di::schema_providers::UnservedTypes,
     /// Reactive-rule (ADR 0024 WP3) compilation/runtime status. Written by the
     /// action watcher (deprecation / parse / compile / exec outcomes), read by
     /// the render path and MCP so a broken or deprecated rule surfaces its
@@ -364,6 +367,7 @@ impl BackendEngine {
             integration_attribution:
                 holon_core::integration_attribution::IntegrationAttribution::new(),
             layout_seed: crate::api::layout_seed::LayoutSeed::new(),
+            unserved: crate::di::schema_providers::UnservedTypes::default(),
             rule_status: crate::api::rule_status::RuleStatusHandle::new(),
             accepted_rules: crate::api::accepted_rules::AcceptedRuleHandle::new(),
             watch_places: Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -451,11 +455,20 @@ impl BackendEngine {
         Ok(())
     }
 
-    /// Apply all registered SQL-level transformers to a SQL string.
+    pub fn install_unserved_types(&mut self, unserved: crate::di::schema_providers::UnservedTypes) {
+        self.unserved = unserved;
+    }
+
+    /// Refuse a read of an unserved type, then apply all registered SQL-level
+    /// transformers.
     ///
-    /// Returns the original string unchanged if parsing fails.
-    pub fn apply_sql_transforms(&self, sql: &str) -> String {
-        crate::storage::apply_sql_transforms(sql, &self.sql_transformers)
+    /// The transformers leave SQL they cannot parse unchanged.
+    pub fn apply_sql_transforms(&self, sql: &str) -> Result<String> {
+        self.unserved.check_read(sql)?;
+        Ok(crate::storage::apply_sql_transforms(
+            sql,
+            &self.sql_transformers,
+        ))
     }
 
     /// Get the database handle for direct database operations
@@ -758,7 +771,7 @@ impl BackendEngine {
             crate::api::block_domain::leaf_watch_sql(),
         ] {
             self.matview_manager
-                .ensure_view(&self.apply_sql_transforms(&sql))
+                .ensure_view(&self.apply_sql_transforms(&sql)?)
                 .await?;
         }
         Ok(())
@@ -775,7 +788,7 @@ impl BackendEngine {
             QueryLanguage::HolonGql => self.compile_gql(query)?,
             QueryLanguage::HolonSql => query.to_string(),
         };
-        Ok(self.apply_sql_transforms(&raw_sql))
+        self.apply_sql_transforms(&raw_sql)
     }
 
     /// The rendered sort-key spec (`col` / `-col`) implied by the query's
@@ -982,6 +995,7 @@ impl BackendEngine {
         // Always bind context params (using NULL if no context provided).
         // This enables stdlib virtual tables like `from children` to compile even
         // without context.
+        self.unserved.check_read(&sql)?;
         let ctx = context.unwrap_or_else(QueryContext::root);
         self.bind_context_params(&mut params, &ctx);
 
@@ -1022,7 +1036,7 @@ impl BackendEngine {
             .register_watch_context(watch_key, context_id, kind)
             .await?;
 
-        let transformed_sql = self.apply_sql_transforms(&sql);
+        let transformed_sql = self.apply_sql_transforms(&sql)?;
         let (view_name, cdc_stream) = self
             .matview_manager
             .ensure_and_subscribe(&transformed_sql, Some(watch_key))
@@ -1096,7 +1110,7 @@ impl BackendEngine {
         params: HashMap<String, Value>,
         context: Option<QueryContext>,
     ) -> Result<RowChangeStream> {
-        let transformed_sql = self.apply_sql_transforms(&sql);
+        let transformed_sql = self.apply_sql_transforms(&sql)?;
         tracing::debug!(
             "[BackendEngine] SQL:\n{}",
             holon_turso::turso::redact_sql_for_logs(&transformed_sql)

@@ -771,21 +771,9 @@ impl SchemaModule for NavigationSchemaModule {
     }
 
     async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<Vec<TableChange>> {
-        let mut changes = Vec::new();
         tracing::info!("[NavigationSchemaModule] Creating navigation tables");
-
-        for stmt in sql_statements(include_str!("../sql/schema/navigation.sql")) {
-            match ensure_statement(db_handle, stmt).await {
-                Ok(change) => changes.extend(change),
-                Err(e) if e.to_string().contains("already exists") => {
-                    tracing::debug!(
-                        "[NavigationSchemaModule] Skipping (already exists): {}",
-                        &stmt[..stmt.len().min(60)]
-                    );
-                }
-                Err(e) => return Err(e),
-            }
-        }
+        let changes =
+            ensure_schema_sql(db_handle, include_str!("../sql/schema/navigation.sql")).await?;
 
         // Session-scoped: a membership row that outlived its session has no
         // owner, and leaving it would keep a subtree maintained for a watch

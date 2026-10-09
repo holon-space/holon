@@ -395,8 +395,23 @@ pub fn register_schema_providers(injector: &Injector) {
                 Ok(TypeRegistration::Refused(refusal)) => {
                     unserved.insert(
                         &name,
+                        &refusal.diff.table,
                         format!("{}: {refusal}", ConditionKind::TYPE_TABLE_REFUSED),
                     );
+                    // A view an older binary stored over the refused table
+                    // would keep serving its undeclared shape.
+                    if let Err(e) =
+                        holon_turso::table_shape::drop_views_over(&db.handle(), &refusal.diff.table)
+                            .await
+                    {
+                        tracing::error!("type '{name}': {e:#}");
+                        bus.emit(Condition {
+                            subject: format!("type {name}"),
+                            reason: ConditionKind::SchemaModuleFailed {
+                                error: format!("{e:#}"),
+                            },
+                        });
+                    }
                     bus.emit(Condition {
                         subject: name,
                         reason: ConditionKind::TypeTableRefused {
@@ -410,6 +425,7 @@ pub fn register_schema_providers(injector: &Injector) {
                     tracing::error!("registering type '{name}' failed: {e:#}");
                     unserved.insert(
                         &name,
+                        &TursoAdapter::raw_table_name(&type_def),
                         format!("{}: {e:#}", ConditionKind::SCHEMA_MODULE_FAILED),
                     );
                     bus.emit(Condition {
@@ -426,25 +442,64 @@ pub fn register_schema_providers(injector: &Injector) {
 }
 
 /// The free-standing types this session does not serve, with why: their
-/// stored table could not be brought to their declaration. Their writes fail
-/// with that reason until it is remedied.
+/// stored table could not be brought to their declaration. Their reads and
+/// writes fail with that reason until it is remedied.
 #[derive(Clone, Default)]
-pub struct UnservedTypes(Arc<Mutex<BTreeMap<String, String>>>);
+pub struct UnservedTypes(Arc<Mutex<BTreeMap<String, Unserved>>>);
+
+#[derive(Clone)]
+struct Unserved {
+    raw_table: String,
+    reason: String,
+}
 
 impl UnservedTypes {
-    pub fn insert(&self, type_name: &str, reason: String) {
-        self.0
-            .lock()
-            .expect("UnservedTypes lock")
-            .insert(type_name.to_string(), reason);
+    pub fn insert(&self, type_name: &str, raw_table: &str, reason: String) {
+        self.0.lock().expect("UnservedTypes lock").insert(
+            type_name.to_string(),
+            Unserved {
+                raw_table: raw_table.to_string(),
+                reason,
+            },
+        );
     }
 
     pub fn remove(&self, type_name: &str) {
         self.0.lock().expect("UnservedTypes lock").remove(type_name);
     }
 
+    /// Each unserved type with its reason.
     pub fn entries(&self) -> BTreeMap<String, String> {
-        self.0.lock().expect("UnservedTypes lock").clone()
+        self.0
+            .lock()
+            .expect("UnservedTypes lock")
+            .iter()
+            .map(|(name, unserved)| (name.clone(), unserved.reason.clone()))
+            .collect()
+    }
+
+    /// Refuse `sql` when it reads an unserved type, by its name or its raw
+    /// table.
+    pub fn check_read(&self, sql: &str) -> anyhow::Result<()> {
+        let unserved = self.0.lock().expect("UnservedTypes lock").clone();
+        if unserved.is_empty() {
+            return Ok(());
+        }
+        let statements = holon_turso::sql_parser::parse_sql(sql).map_err(|e| {
+            anyhow::anyhow!(
+                "cannot tell whether this read touches an unserved type ({}): {e}. SQL: {sql}",
+                unserved.keys().cloned().collect::<Vec<_>>().join(", ")
+            )
+        })?;
+        let read = holon_turso::sql_parser::extract_table_refs(&statements);
+        for (name, Unserved { raw_table, reason }) in &unserved {
+            if read.iter().any(|r| {
+                r.name().eq_ignore_ascii_case(name) || r.name().eq_ignore_ascii_case(raw_table)
+            }) {
+                anyhow::bail!("type '{name}' is not served — {reason}");
+            }
+        }
+        Ok(())
     }
 }
 

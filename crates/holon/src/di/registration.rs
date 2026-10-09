@@ -175,6 +175,7 @@ async fn create_initialized_engine(
     shutdown: Arc<holon_api::lifecycle::SessionShutdown>,
     block_write_authority: Option<Arc<dyn holon_core::WriteAuthorityReads>>,
     conditions: Arc<holon_api::ConditionBus>,
+    unserved: super::schema_providers::UnservedTypes,
 ) -> Result<BackendEngine> {
     let backend_guard = backend.read().await;
     let db_handle = backend_guard.handle().clone();
@@ -229,6 +230,7 @@ async fn create_initialized_engine(
     )
     .context("Failed to create BackendEngine")?;
     engine.install_integration_attribution(attribution);
+    engine.install_unserved_types(unserved);
 
     // Undo substrate: back the per-session undo stack with the replica DB
     // (`undo_log` snapshot + live-state precondition reader) so history survives
@@ -857,6 +859,7 @@ pub fn register_core_services_with_backend(
                             .await,
                         block_write_authority,
                         (*inj.resolve::<Arc<holon_api::ConditionBus>>()).clone(),
+                        (*inj.resolve::<super::schema_providers::UnservedTypes>()).clone(),
                     )
                     .await
                     // fluxdi async providers return `T`, not `Result<T>`, and

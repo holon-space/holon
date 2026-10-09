@@ -533,7 +533,8 @@ impl ConditionKind {
 
             Self::SchemaModuleFailed { error } => ConditionDetail::with_body(
                 format!(
-                    "the {subject} tables could not be set up; what reads or writes them fails."
+                    "the {subject} tables could not be set up past their first failing \
+                     statement, and none after it ran; what reads or writes them fails."
                 ),
                 vec![error.clone()],
             ),
