@@ -8,10 +8,14 @@
 
 use async_trait::async_trait;
 use rmcp::RoleClient;
+use rmcp::model::CallToolRequest;
 use rmcp::model::CallToolRequestParam;
 use rmcp::model::CallToolResult;
+use rmcp::model::ClientRequest;
+use rmcp::model::ReadResourceRequest;
 use rmcp::model::ReadResourceRequestParam;
 use rmcp::model::ReadResourceResult;
+use rmcp::model::ServerResult;
 use rmcp::service::Peer;
 use rmcp::service::ServiceError;
 
@@ -112,13 +116,145 @@ impl McpCallSurface for Peer<RoleClient> {
         &self,
         params: CallToolRequestParam,
     ) -> Result<CallToolResult, ServiceError> {
-        Peer::<RoleClient>::call_tool(self, params).await
+        let what = format!("call_tool '{}'", params.name);
+        let request = ClientRequest::CallToolRequest(CallToolRequest {
+            method: Default::default(),
+            params,
+            extensions: Default::default(),
+        });
+        match crate::mcp_request::request(self, &what, request).await? {
+            ServerResult::CallToolResult(result) => Ok(result),
+            _ => Err(ServiceError::UnexpectedResponse),
+        }
     }
 
     async fn read_resource(
         &self,
         params: ReadResourceRequestParam,
     ) -> Result<ReadResourceResult, ServiceError> {
-        Peer::<RoleClient>::read_resource(self, params).await
+        let what = format!("read_resource '{}'", params.uri);
+        let request = ClientRequest::ReadResourceRequest(ReadResourceRequest {
+            method: Default::default(),
+            params,
+            extensions: Default::default(),
+        });
+        match crate::mcp_request::request(self, &what, request).await? {
+            ServerResult::ReadResourceResult(result) => Ok(result),
+            _ => Err(ServiceError::UnexpectedResponse),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::Mutex;
+
+    use rmcp::ServiceExt as _;
+    use tokio::io::AsyncBufReadExt as _;
+    use tokio::io::AsyncWriteExt as _;
+
+    use super::*;
+    use crate::secure_client::REQUEST_TIMEOUT;
+
+    /// A peer that answers `initialize`, then answers every request with one
+    /// space a second and never a complete message.
+    fn trickling_peer(server_io: tokio::io::DuplexStream) -> Arc<Mutex<Vec<String>>> {
+        let methods = Arc::new(Mutex::new(Vec::new()));
+        let seen = methods.clone();
+        let (read, write) = tokio::io::split(server_io);
+        let write = Arc::new(tokio::sync::Mutex::new(write));
+        tokio::spawn(async move {
+            let mut lines = tokio::io::BufReader::new(read).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let msg: serde_json::Value = serde_json::from_str(&line).expect("JSON-RPC line");
+                let method = msg["method"].as_str().unwrap_or_default().to_string();
+                seen.lock().expect("lock").push(method.clone());
+                if method == "initialize" {
+                    let reply = serde_json::json!({"jsonrpc": "2.0", "id": msg["id"], "result": {
+                        "protocolVersion": "2025-03-26",
+                        "capabilities": {"tools": {}, "resources": {}},
+                        "serverInfo": {"name": "trickle", "version": "0"}}});
+                    let mut w = write.lock().await;
+                    w.write_all(format!("{reply}\n").as_bytes())
+                        .await
+                        .expect("write");
+                } else if msg.get("id").is_some() {
+                    let write = write.clone();
+                    tokio::spawn(async move {
+                        loop {
+                            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                            if write.lock().await.write_all(b" ").await.is_err() {
+                                return;
+                            }
+                        }
+                    });
+                }
+            }
+        });
+        methods
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_peer_that_trickles_is_cut_at_the_request_timeout_naming_the_call() {
+        let (client_io, server_io) = tokio::io::duplex(1 << 16);
+        let methods = trickling_peer(server_io);
+        let client = ().serve(client_io).await.expect("handshake");
+        let peer = client.peer().clone();
+
+        let started = tokio::time::Instant::now();
+        let call = tokio::time::timeout(
+            REQUEST_TIMEOUT * 2,
+            McpCallSurface::call_tool(
+                &peer,
+                CallToolRequestParam {
+                    name: "slow-tool".into(),
+                    arguments: None,
+                },
+            ),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("call_tool was still open after {:?}", REQUEST_TIMEOUT * 2));
+        let err = call
+            .expect_err("a trickled answer is no answer")
+            .to_string();
+        assert!(
+            err.contains("REQUEST_TIMEOUT") && err.contains("'slow-tool'"),
+            "the error must name the deadline and the tool; got: {err}"
+        );
+        assert!(started.elapsed() <= REQUEST_TIMEOUT + std::time::Duration::from_secs(1));
+
+        let read = tokio::time::timeout(
+            REQUEST_TIMEOUT * 2,
+            McpCallSurface::read_resource(
+                &peer,
+                ReadResourceRequestParam {
+                    uri: "slow://resource".into(),
+                },
+            ),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "read_resource was still open after {:?}",
+                REQUEST_TIMEOUT * 2
+            )
+        });
+        let err = read
+            .expect_err("a trickled answer is no answer")
+            .to_string();
+        assert!(
+            err.contains("REQUEST_TIMEOUT") && err.contains("'slow://resource'"),
+            "the error must name the deadline and the resource; got: {err}"
+        );
+
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        let cancelled = methods
+            .lock()
+            .expect("lock")
+            .iter()
+            .filter(|m| *m == "notifications/cancelled")
+            .count();
+        assert_eq!(cancelled, 2, "the peer is told to stop both requests");
     }
 }

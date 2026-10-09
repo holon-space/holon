@@ -3,9 +3,17 @@
 //! A filter is offered only when its name is listed in [`ALLOWED`]; a filter a
 //! jaq release adds stays unavailable until someone lists it here.
 
+use jaq_core::Cv;
+use jaq_core::Exn;
 use jaq_core::Native;
+use jaq_core::ValXs;
+use jaq_core::box_iter::then;
 use jaq_core::load::parse::Def;
 use jaq_core::native::Filter;
+use jaq_json::Error;
+use jaq_json::Val;
+use jaq_json::bytes_valrs;
+use jaq_json::read;
 
 use crate::mapping::Data;
 
@@ -80,6 +88,11 @@ const ALLOWED: &[&str] = &[
     "totype", "tonumber", "toboolean", "transpose", "in", "inside", "index", "rindex", "@json",
 ];
 
+/// The deepest nesting of arrays and objects `fromjson` parses. jaq's parser
+/// spends native stack on every level, and a mapping parses text the peer
+/// chose.
+pub const MAX_FROMJSON_DEPTH: usize = 128;
+
 pub(crate) fn withheld_reason(name: &str) -> Option<&'static str> {
     WITHHELD
         .iter()
@@ -104,7 +117,79 @@ fn all_defs() -> impl Iterator<Item = Def<&'static str>> {
 fn all_funs() -> impl Iterator<Item = Filter<Native<Data>>> {
     jaq_core::funs::<Data>()
         .chain(jaq_std::funs::<Data>())
-        .chain(jaq_json::funs::<Data>())
+        .chain(jaq_json::funs::<Data>().filter(|(name, _, _)| *name != "fromjson"))
+        .chain([jaq_core::native::run::<Data>((
+            "fromjson",
+            jaq_core::native::v(0),
+            fromjson,
+        ))])
+}
+
+/// jaq-json's `fromjson`, refusing text nested deeper than
+/// [`MAX_FROMJSON_DEPTH`] before its recursive parser sees it.
+fn fromjson(cv: Cv<'_, Data>) -> ValXs<'_, Val> {
+    let input = cv.1;
+    let text = input
+        .try_as_utf8_bytes_owned()
+        .and_then(|text| nesting_within_limit(&text).map(|()| text));
+    let values = then(text, move |text| {
+        bytes_valrs(text, move |text| {
+            let mut failed = false;
+            // After an error jaq's lexer resumes where it stopped, which can be
+            // inside a string the nesting scan read as text.
+            Box::new(read::parse_many(text).map_while(move |value| {
+                if failed {
+                    return None;
+                }
+                failed = value.is_err();
+                Some(
+                    value
+                        .map_err(|e| Error::str(format_args!("cannot parse {input} as JSON: {e}"))),
+                )
+            }))
+        })
+    });
+    Box::new(values.map(|value| value.map_err(Exn::from)))
+}
+
+/// Brackets inside strings and `#` comments do not nest, as in jaq's lexer.
+/// A stray closing bracket never lowers the count below zero, so the count
+/// is never below the parser's depth.
+fn nesting_within_limit(text: &[u8]) -> Result<(), Error> {
+    let mut depth = 0usize;
+    let mut bytes = text.iter().enumerate();
+    while let Some((offset, byte)) = bytes.next() {
+        match byte {
+            b'"' => loop {
+                match bytes.next() {
+                    Some((_, b'\\')) => {
+                        bytes.next();
+                    }
+                    Some((_, b'"')) | None => break,
+                    Some(_) => {}
+                }
+            },
+            b'#' => {
+                for (_, b) in bytes.by_ref() {
+                    if *b == b'\n' {
+                        break;
+                    }
+                }
+            }
+            b'[' | b'{' => {
+                depth += 1;
+                if depth > MAX_FROMJSON_DEPTH {
+                    return Err(Error::str(format_args!(
+                        "cannot parse a string as JSON: it nests arrays and objects deeper than \
+                         MAX_FROMJSON_DEPTH ({MAX_FROMJSON_DEPTH}) at byte {offset}"
+                    )));
+                }
+            }
+            b']' | b'}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

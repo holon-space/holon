@@ -84,7 +84,7 @@ pub async fn connect_mcp_with_handler<H: ClientHandler>(
         config = config.auth_header(token);
     }
     let transport = StreamableHttpClientTransport::with_client(McpHttpClient::new(), config);
-    let service = handler.serve(transport).await?;
+    let service = crate::mcp_request::handshake(handler.serve(transport)).await?;
     let peer = service.peer().clone();
     Ok((peer, McpRunningService(Box::new(service))))
 }
@@ -112,7 +112,7 @@ pub async fn connect_mcp_oauth_with_handler<H: ClientHandler>(
     let auth_client = rmcp::transport::auth::AuthClient::new(McpHttpClient::new(), auth_manager);
     let config = StreamableHttpClientTransportConfig::with_uri(uri);
     let transport = StreamableHttpClientTransport::with_client(auth_client, config);
-    let service = handler.serve(transport).await?;
+    let service = crate::mcp_request::handshake(handler.serve(transport)).await?;
     let peer = service.peer().clone();
     Ok((peer, McpRunningService(Box::new(service))))
 }
@@ -147,7 +147,7 @@ pub async fn connect_mcp_child_with_handler<H: ClientHandler>(
         cmd.env(k, v);
     }
     let transport = TokioChildProcess::new(cmd)?;
-    let service = handler.serve(transport).await?;
+    let service = crate::mcp_request::handshake(handler.serve(transport)).await?;
     let peer = service.peer().clone();
     Ok((peer, McpRunningService(Box::new(service))))
 }
@@ -261,7 +261,7 @@ impl McpOperationProvider {
         sidecar: McpSidecar,
         entity_readers: HashMap<String, Arc<dyn EntityFieldReader>>,
     ) -> anyhow::Result<Self> {
-        let tools = peer.list_all_tools().await?;
+        let tools = crate::mcp_request::list_all_tools(&peer).await?;
         info!(
             "[McpOperationProvider] Fetched {} tools from MCP server",
             tools.len()

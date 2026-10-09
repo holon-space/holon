@@ -8,6 +8,7 @@ use std::panic::AssertUnwindSafe;
 use std::process::Command;
 use std::process::Output;
 
+use holon_rows::MAX_FROMJSON_DEPTH;
 use holon_rows::MAX_MAPPING_OUTPUT_BYTES;
 use holon_rows::MAX_MAPPING_OUTPUTS;
 use holon_rows::RowMapper;
@@ -207,6 +208,102 @@ fn the_pure_library_a_mapping_uses_still_compiles_and_runs() {
             0,
             "A_B"
         ])]
+    );
+}
+
+/// Mappings run on tokio worker threads, whose stack is 2 MiB.
+const WORKER_STACK: usize = 2 * 1024 * 1024;
+const NESTED_SOURCE: &str = "HOLON_ROWS_MAPPER_NESTED_SOURCE";
+
+#[test]
+fn text_the_peer_nests_deeply_is_an_error_naming_the_limit_not_a_stack_overflow() {
+    if let Some(source) = std::env::var_os(NESTED_SOURCE) {
+        let source = source.into_string().expect("the source is UTF-8");
+        let deep = "[".repeat(2000);
+        let outcome = std::thread::Builder::new()
+            .stack_size(WORKER_STACK)
+            .spawn(move || {
+                RowMapper::compile(LABEL, &source).and_then(|m| m.map(&json!({ "p": deep })))
+            })
+            .expect("the mapping thread starts")
+            .join()
+            .expect("the mapping thread did not panic");
+        report(outcome);
+        return;
+    }
+    for (source, expected) in [
+        (".p | fromjson", "err "),
+        (".p | tonumber", "err "),
+        (".p | [fromjson?]", "ok [Array []]"),
+    ] {
+        let outcome = child_outcome(&run_child(
+            "text_the_peer_nests_deeply_is_an_error_naming_the_limit_not_a_stack_overflow",
+            &[(NESTED_SOURCE, source)],
+        ));
+        assert!(
+            outcome.starts_with(expected),
+            "`{source}` over 2000 nested `[` must give `{expected}…`; got: {outcome}"
+        );
+        if expected == "err " {
+            assert!(
+                outcome.contains("MAX_FROMJSON_DEPTH") && outcome.contains(LABEL),
+                "`{source}` must name the nesting limit and the mapping; got: {outcome}"
+            );
+        }
+    }
+}
+
+#[test]
+fn fromjson_keeps_jaqs_semantics_up_to_the_nesting_limit() {
+    let mapper = RowMapper::compile(
+        LABEL,
+        r#"[ (.nested | fromjson), (.many | [fromjson]), (.commented | fromjson),
+             (.bracket_text | fromjson), (.number | tonumber),
+             (.at_limit | fromjson | [paths] | length) ]"#,
+    )
+    .expect("compiles");
+    let at_limit = format!(
+        "{}{}",
+        "[".repeat(MAX_FROMJSON_DEPTH),
+        "]".repeat(MAX_FROMJSON_DEPTH)
+    );
+    let out = mapper
+        .map(&json!({
+            "nested": r#"[[1], {"a": 2}]"#,
+            "many": "1 2",
+            "commented": "# a comment [[[\n3",
+            "bracket_text": r#""[[[{{""#,
+            "number": "12",
+            "at_limit": at_limit,
+        }))
+        .expect("fromjson within the limit runs");
+    assert_eq!(
+        out,
+        vec![json!([[[1], {"a": 2}], [1, 2], 3, "[[[{{", 12, MAX_FROMJSON_DEPTH - 1])]
+    );
+
+    let past_limit = format!(
+        "{}{}",
+        "[".repeat(MAX_FROMJSON_DEPTH + 1),
+        "]".repeat(MAX_FROMJSON_DEPTH + 1)
+    );
+    let err = RowMapper::compile(LABEL, ".p | fromjson")
+        .expect("compiles")
+        .map(&json!({ "p": past_limit }))
+        .expect_err("one level past the limit is refused");
+    assert!(
+        format!("{err:#}").contains("MAX_FROMJSON_DEPTH"),
+        "the refusal must name the limit; got: {err:#}"
+    );
+
+    let malformed = RowMapper::compile(LABEL, ".p | [fromjson?]")
+        .expect("compiles")
+        .map(&json!({ "p": "1 ] 2" }))
+        .expect("an error inside `?` is caught");
+    assert_eq!(
+        malformed,
+        vec![json!([1])],
+        "parsing ends at the first error"
     );
 }
 

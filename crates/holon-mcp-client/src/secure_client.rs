@@ -18,7 +18,8 @@
 /// evidence the hop was blocked. A test asserts on THIS, not on failure.
 pub(crate) const REDIRECT_REFUSED: &str = "refused a redirect";
 
-/// How long one request may take, from connecting until the last body byte.
+/// How long one request may take, from connecting until the last body byte
+/// of a REST call or until the answer to an MCP request.
 pub const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// How long an MCP-over-HTTP connection waits for the next byte from its peer.
@@ -65,12 +66,16 @@ pub(crate) fn https_only() -> reqwest::ClientBuilder {
 /// [`MAX_RESPONSE_BODY_BYTES`] have arrived. Bytes that are not UTF-8 become
 /// U+FFFD, as reqwest's `text()` does without its `charset` feature.
 pub(crate) async fn read_text(resp: reqwest::Response) -> anyhow::Result<String> {
-    Ok(String::from_utf8_lossy(&read_capped(resp).await?).into_owned())
+    Ok(String::from_utf8_lossy(&read_capped(resp, describe).await?).into_owned())
 }
 
 /// The body of `resp`, refused once more than [`MAX_RESPONSE_BODY_BYTES`]
-/// have arrived.
-pub(crate) async fn read_capped(mut resp: reqwest::Response) -> anyhow::Result<Vec<u8>> {
+/// have arrived. `describe` words a failed read for the client that sent it,
+/// which knows which of its timeouts a timeout is.
+pub(crate) async fn read_capped(
+    mut resp: reqwest::Response,
+    describe: impl Fn(reqwest::Error) -> String,
+) -> anyhow::Result<Vec<u8>> {
     let mut body = Vec::new();
     while let Some(chunk) = resp
         .chunk()

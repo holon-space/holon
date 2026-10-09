@@ -721,8 +721,7 @@ async fn finish_integration(
     sync_gate: SyncGate,
 ) -> anyhow::Result<McpIntegration> {
     // Auto-discover entities from resource templates
-    let templates = peer
-        .list_all_resource_templates()
+    let templates = crate::mcp_request::list_all_resource_templates(&peer)
         .await
         .unwrap_or_else(|e| {
             warn!("[finish_integration] Failed to list resource templates: {e}");

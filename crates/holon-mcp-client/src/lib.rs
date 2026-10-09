@@ -25,6 +25,7 @@ mod mcp_http_client;
 pub mod mcp_integration;
 pub mod mcp_notification_handler;
 pub mod mcp_provider;
+mod mcp_request;
 pub mod mcp_resource_discovery;
 pub mod mcp_schema_mapping;
 pub mod mcp_sidecar;

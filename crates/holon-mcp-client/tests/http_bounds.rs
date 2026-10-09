@@ -218,26 +218,29 @@ async fn an_mcp_event_past_the_cap_ends_the_stream() {
 }
 
 /// Paused time, as in `a_peer_that_never_answers_ends_in_a_timeout_error`.
+/// The handshake's deadline is armed before the read's idle timeout, so at
+/// equal durations it is the one that fires.
 #[tokio::test(start_paused = true)]
-async fn an_mcp_peer_that_never_answers_ends_in_an_idle_timeout_error() {
+async fn an_mcp_peer_that_never_answers_ends_in_a_request_timeout_error() {
+    assert!(REQUEST_TIMEOUT <= MCP_IDLE_TIMEOUT);
     let addr = silent_server().await;
     let started = tokio::time::Instant::now();
-    let msg = tokio::time::timeout(MCP_IDLE_TIMEOUT * 2, mcp_connect_error(addr))
+    let msg = tokio::time::timeout(REQUEST_TIMEOUT * 2, mcp_connect_error(addr))
         .await
         .unwrap_or_else(|_| {
             panic!(
-                "the MCP client was still waiting after twice MCP_IDLE_TIMEOUT \
-                 ({MCP_IDLE_TIMEOUT:?})"
+                "the MCP client was still waiting after twice REQUEST_TIMEOUT \
+                 ({REQUEST_TIMEOUT:?})"
             )
         });
     let waited = started.elapsed();
     assert!(
-        msg.contains("MCP_IDLE_TIMEOUT"),
-        "the error must name the idle timeout; got: {msg}"
+        msg.contains("REQUEST_TIMEOUT") && msg.contains("initialize"),
+        "the error must name the request timeout and the handshake; got: {msg}"
     );
     assert!(
-        waited <= MCP_IDLE_TIMEOUT + std::time::Duration::from_secs(1),
-        "the client gave up after {waited:?}, past MCP_IDLE_TIMEOUT ({MCP_IDLE_TIMEOUT:?})"
+        waited <= REQUEST_TIMEOUT + std::time::Duration::from_secs(1),
+        "the client gave up after {waited:?}, past REQUEST_TIMEOUT ({REQUEST_TIMEOUT:?})"
     );
 }
 
