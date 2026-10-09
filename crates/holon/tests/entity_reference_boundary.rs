@@ -52,7 +52,7 @@ async fn engine_with_one_row() -> Arc<BackendEngine> {
     engine
         .db_handle()
         .execute_ddl(&format!(
-            "CREATE TABLE {TABLE} (id TEXT PRIMARY KEY, content TEXT, completed BOOLEAN)"
+            "CREATE TABLE {TABLE} (id TEXT PRIMARY KEY, content TEXT, collapsed BOOLEAN)"
         ))
         .await
         .expect("table created");
@@ -60,7 +60,7 @@ async fn engine_with_one_row() -> Arc<BackendEngine> {
         .db_handle()
         .execute(
             &format!(
-                "INSERT INTO {TABLE} (id, content, completed) VALUES ('{ENTITY}:item-1', 'Test \
+                "INSERT INTO {TABLE} (id, content, collapsed) VALUES ('{ENTITY}:item-1', 'Test \
                  task', 0)"
             ),
             vec![],
@@ -224,7 +224,7 @@ async fn set_field_refuses_a_bare_entity_reference() {
         "set_field",
         &[
             ("id", Value::String("item-1".to_string())),
-            ("field", Value::String("completed".to_string())),
+            ("field", Value::String("collapsed".to_string())),
             ("value", Value::Boolean(true)),
         ],
     )
@@ -291,7 +291,7 @@ async fn set_field_refuses_a_reference_to_another_entity() {
             "set_field",
             &[
                 ("id", Value::String(foreign.to_string())),
-                ("field", Value::String("completed".to_string())),
+                ("field", Value::String("collapsed".to_string())),
                 ("value", Value::Boolean(true)),
             ],
         )
@@ -307,14 +307,14 @@ async fn set_field_refuses_a_reference_to_another_entity() {
 
     let rows = engine
         .execute_query(
-            format!("SELECT completed FROM {TABLE} WHERE id = '{ENTITY}:item-1'"),
+            format!("SELECT collapsed FROM {TABLE} WHERE id = '{ENTITY}:item-1'"),
             std::collections::HashMap::new(),
             None,
         )
         .await
         .expect("read back");
     assert_eq!(
-        rows[0].get("completed").expect("column present"),
+        rows[0].get("collapsed").expect("column present"),
         &Value::Integer(0),
         "a refused write must not have changed the row"
     );
@@ -352,7 +352,7 @@ async fn set_field_refuses_the_root_sentinel_as_its_subject() {
                 "id",
                 Value::String(holon_api::EntityUri::no_parent().to_string()),
             ),
-            ("field", Value::String("completed".to_string())),
+            ("field", Value::String("collapsed".to_string())),
             ("value", Value::Boolean(true)),
         ],
     )
@@ -375,7 +375,7 @@ async fn set_field_accepts_a_scheme_qualified_reference() {
         "set_field",
         &[
             ("id", Value::String(format!("{ENTITY}:item-1"))),
-            ("field", Value::String("completed".to_string())),
+            ("field", Value::String("collapsed".to_string())),
             ("value", Value::Boolean(true)),
         ],
     )
@@ -384,17 +384,17 @@ async fn set_field_accepts_a_scheme_qualified_reference() {
 
     let rows = engine
         .execute_query(
-            format!("SELECT completed FROM {TABLE} WHERE id = '{ENTITY}:item-1'"),
+            format!("SELECT collapsed FROM {TABLE} WHERE id = '{ENTITY}:item-1'"),
             std::collections::HashMap::new(),
             None,
         )
         .await
         .expect("read back");
     assert_eq!(rows.len(), 1, "the write landed on exactly one row");
-    match rows[0].get("completed").expect("column present") {
+    match rows[0].get("collapsed").expect("column present") {
         Value::Integer(i) => assert_eq!(*i, 1),
         Value::Boolean(b) => assert!(b),
-        other => panic!("unexpected value type for completed: {other:?}"),
+        other => panic!("unexpected value type for collapsed: {other:?}"),
     }
 }
 

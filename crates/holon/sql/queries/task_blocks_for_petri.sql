@@ -1,10 +1,10 @@
 -- `Block::try_from` REQUIRES every edge column plus the typed scalar columns
--- (`marks`/`collapsed`/`widget_only`) — a read that omits one fails the whole
+-- (`marks`/`collapsed`/`widget_only`/`block_type`) — a read that omits one fails the whole
 -- row rather than yielding a block with a silently empty edge set. The `block`
 -- matview hydrates all four junction aggregates, so project them verbatim.
 SELECT
     id, parent_id, content, content_type, source_language,
-    source_name, properties, marks, collapsed, widget_only,
+    source_name, properties, marks, collapsed, widget_only, block_type,
     created_at, updated_at,
     tags, requires, advice_suppressed, contributes_to
 FROM block

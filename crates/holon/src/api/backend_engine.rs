@@ -2531,7 +2531,7 @@ mod tests {
         engine
             .db_handle()
             .execute_ddl(
-                "CREATE TABLE test_item (id TEXT PRIMARY KEY, content TEXT, completed BOOLEAN)",
+                "CREATE TABLE test_item (id TEXT PRIMARY KEY, content TEXT, collapsed BOOLEAN)",
             )
             .await
             .unwrap();
@@ -2539,7 +2539,7 @@ mod tests {
         engine
             .db_handle()
             .execute(
-                "INSERT INTO test_item (id, content, completed) VALUES ('test-item:item-1', \
+                "INSERT INTO test_item (id, content, collapsed) VALUES ('test-item:item-1', \
                  'Test task', 0)",
                 vec![],
             )
@@ -2552,7 +2552,7 @@ mod tests {
         // the boundary refuses it (`tests/entity_reference_boundary.rs`).
         let mut bare: StorageEntity = holon_api::StorageEntity::new();
         bare.insert("id".into(), Value::String("item-1".to_string()));
-        bare.insert("field".into(), Value::String("completed".to_string()));
+        bare.insert("field".into(), Value::String("collapsed".to_string()));
         bare.insert("value".into(), Value::Boolean(true));
         let refused = engine
             .execute_operation(
@@ -2568,10 +2568,10 @@ mod tests {
             refused
         );
 
-        // Execute operation to update completed field
+        // Execute operation to update collapsed field
         let mut params: StorageEntity = holon_api::StorageEntity::new();
         params.insert("id".into(), Value::String("test-item:item-1".to_string()));
-        params.insert("field".into(), Value::String("completed".to_string()));
+        params.insert("field".into(), Value::String("collapsed".to_string()));
         params.insert("value".into(), Value::Boolean(true));
 
         let result = engine
@@ -2585,7 +2585,7 @@ mod tests {
         assert!(result.is_ok(), "Operation should succeed: {:?}", result);
 
         // Verify the update
-        let sql = "SELECT id, completed FROM test_item WHERE id = 'test-item:item-1'";
+        let sql = "SELECT id, collapsed FROM test_item WHERE id = 'test-item:item-1'";
         let results = engine
             .execute_query(sql.to_string(), HashMap::new(), None)
             .await
@@ -2598,10 +2598,10 @@ mod tests {
         );
 
         // SQLite stores booleans as integers (0/1), so check for Integer value
-        match results[0].get("completed").unwrap() {
-            Value::Integer(i) => assert_eq!(*i, 1, "Expected completed=1 (true)"),
-            Value::Boolean(b) => assert!(b, "Expected completed=true"),
-            other => panic!("Unexpected value type for completed: {:?}", other),
+        match results[0].get("collapsed").unwrap() {
+            Value::Integer(i) => assert_eq!(*i, 1, "Expected collapsed=1 (true)"),
+            Value::Boolean(b) => assert!(b, "Expected collapsed=true"),
+            other => panic!("Unexpected value type for collapsed: {:?}", other),
         }
     }
 

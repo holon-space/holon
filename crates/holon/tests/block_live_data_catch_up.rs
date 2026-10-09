@@ -63,6 +63,7 @@ fn block_row(id: &str, content: &str) -> holon_api::StorageEntity {
     // The `block` matview always projects these; Block's strict row parser
     // requires them.
     row.insert("content_type".into(), Value::String("text".to_string()));
+    row.insert("block_type".into(), Value::Null);
     row.insert("created_at".into(), Value::Integer(0));
     row.insert("updated_at".into(), Value::Integer(0));
     // Derived from the closed edge-field set, never hand-listed: `Block`'s row

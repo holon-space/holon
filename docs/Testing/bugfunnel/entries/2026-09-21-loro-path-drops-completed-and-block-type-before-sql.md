@@ -3,7 +3,7 @@ id: 2026-09-21-loro-path-drops-completed-and-block-type-before-sql
 date: 2026-09-21
 gap: COVERAGE
 secondary: null
-status: OPEN
+status: FIXED
 summary: >-
   Every write of the `completed` or `block_type` block column is dropped
   between the Loro authority and SQL, so both columns hold their schema
@@ -68,10 +68,8 @@ silently stops matching it.
 `completed` is not what marks a task DONE — the widget path writes the
 `task_state`/`task_state_category` property pair
 (`block_cell_registry.rs:990-1017`), which does travel. The column itself is
-unreachable and reads 0 forever, while remaining live in the read direction
-(`journal_feed_matview.sql:29`, `journal_day_pages_matview.sql:29`,
-`crates/holon-app/src/turso_seams.rs:73`, and the render-DSL checkbox binding
-shape `checked: { column: completed }`, `assets/mock_data.yaml:30`).
+unreachable and read 0 forever, while the journal matviews and the Turso
+seam still selected it.
 
 ## Missing piece
 
@@ -89,15 +87,23 @@ projection, so a column neither side carries agrees vacuously.
 
 ## Remedy
 
-Not fixed in lane `f1a-read-model` (out of scope; the lane added only the
-probe, which is the red). The fix is a ruling, not a patch:
+Fixed in lane `block-l1` (2026-10-10):
 
-- `block_type` — give `Block` a typed slot, drop the key from
-  `RESERVED_PROPERTY_KEYS`, and emit it in `block_to_params`, following the
-  `collapsed`/`widget_only` precedent in the same three files. It has a live
-  SQL reader (advice anchors), so this is the recommended direction.
-- `completed` — decide whether the column is alive at all. Its only clear
-  binding today is a checkbox in mock data; if it is dead, delete the column
-  with its readers rather than wiring it.
+- `block_type` is a typed `Option<EntityName>` slot on `Block`
+  (`crates/holon-api/src/block.rs:379`), lifted out of Loro meta in
+  `read_block_from_tree` (`crates/holon-loro/src/loro_backend.rs:544-549`)
+  and emitted by `block_to_params` / `block_diff_params`. The column is
+  nullable; a stored legacy `'text'` reads as no entity
+  (`parse_stored_block_type`, `block.rs:922`).
+- `completed` is deleted: no column, no reader. The key stays declared as
+  `LEGACY_COMPLETED` (`FieldStorage::Unstored`,
+  `crates/holon-pattern/src/schema.rs:382`), so `set_field(completed)` fails
+  loud and an old Loro doc's key never surfaces as a user property.
+- The projection gate `blocks_differ` also omitted the field; see
+  `2026-10-10-blocks-differ-hand-list-drops-collapsed-and-widget-only`.
 
-The probe stays red until one of those lands.
+The probe is `loro_suite/loro_block_type_reaches_sql.rs` (red
+`lane-logs/inc1-red-KEEP.log`, green
+`lane-logs/inc1-green-loro-suite-KEEP.log` in lane `block-l1`).
+`projection_totality_tests` in `loro_sync_controller.rs` lock that every
+declared stored column is projected.
