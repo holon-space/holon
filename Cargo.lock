@@ -5942,6 +5942,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sha2 0.10.9",
+ "sse-stream",
  "tempfile",
  "tokio",
  "toml 0.8.23",

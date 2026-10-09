@@ -499,6 +499,9 @@ async fn build_oauth_integration(
     let mut auth_manager = AuthorizationManager::new(&uri)
         .await
         .map_err(|e| anyhow::anyhow!("OAuth metadata discovery failed for '{uri}': {e}"))?;
+    auth_manager
+        .with_client(crate::secure_client::secure_http_client())
+        .map_err(|e| anyhow::anyhow!("OAuth client setup failed for '{uri}': {e}"))?;
     auth_manager.set_credential_store((*credential_store).clone());
 
     let has_stored = auth_manager

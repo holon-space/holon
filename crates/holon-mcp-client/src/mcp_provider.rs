@@ -28,6 +28,7 @@ use tracing::info;
 
 use crate::mcp_call_surface::DeclaredCall;
 use crate::mcp_call_surface::McpCallSurface;
+use crate::mcp_http_client::McpHttpClient;
 use crate::mcp_schema_mapping::input_schema_to_params;
 use crate::mcp_sidecar::AckVerdict;
 use crate::mcp_sidecar::McpSidecar;
@@ -82,7 +83,7 @@ pub async fn connect_mcp_with_handler<H: ClientHandler>(
     if let Some(token) = auth_token {
         config = config.auth_header(token);
     }
-    let transport = StreamableHttpClientTransport::from_config(config);
+    let transport = StreamableHttpClientTransport::with_client(McpHttpClient::new(), config);
     let service = handler.serve(transport).await?;
     let peer = service.peer().clone();
     Ok((peer, McpRunningService(Box::new(service))))
@@ -108,8 +109,7 @@ pub async fn connect_mcp_oauth_with_handler<H: ClientHandler>(
     auth_manager: rmcp::transport::auth::AuthorizationManager,
     handler: H,
 ) -> anyhow::Result<(Peer<RoleClient>, McpRunningService)> {
-    let auth_client =
-        rmcp::transport::auth::AuthClient::new(reqwest::Client::default(), auth_manager);
+    let auth_client = rmcp::transport::auth::AuthClient::new(McpHttpClient::new(), auth_manager);
     let config = StreamableHttpClientTransportConfig::with_uri(uri);
     let transport = StreamableHttpClientTransport::with_client(auth_client, config);
     let service = handler.serve(transport).await?;

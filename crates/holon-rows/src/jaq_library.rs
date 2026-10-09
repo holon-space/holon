@@ -27,6 +27,11 @@ pub(crate) const WITHHELD: &[(&str, &str)] = &[
     ("stderr_empty", LOG),
 ];
 
+/// Why `import` and `include` are refused, whether they name a module or a
+/// data file.
+pub(crate) const IMPORT: &str = "a mapping is one self-contained filter and loads no module or \
+                                 data file";
+
 const PROCESS: &str = "it ends the Holon process";
 const CLOCK: &str = "it reads the clock, so one response maps to different rows on every run";
 const ZONE: &str = "it reads this machine's time zone, so one response maps to different rows \

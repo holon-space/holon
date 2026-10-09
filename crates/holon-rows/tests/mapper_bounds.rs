@@ -4,6 +4,7 @@
 //! peer chose. It gets the pure part of jq's standard library and a bounded
 //! output stream; it does not get the process, its environment or its log.
 
+use std::panic::AssertUnwindSafe;
 use std::process::Command;
 use std::process::Output;
 
@@ -138,6 +139,42 @@ fn process_environment_clock_and_log_builtins_are_refused_at_compile() {
         assert!(
             msg.contains(&format!("`{name}`")) && msg.contains(LABEL),
             "the refusal of `{source}` must name `{name}` and the mapping; got: {msg}"
+        );
+    }
+}
+
+const IMPORTS: &[&str] = &[
+    r#"import "x" as $x; $x"#,
+    r#"import "x" as $x; ."#,
+    r#"import "x" as x; ."#,
+    r#"include "x"; ."#,
+];
+
+#[test]
+fn a_mapping_the_load_check_accepts_does_not_panic_when_it_runs() {
+    for source in IMPORTS.iter().chain(&["$__loc__", "$__prog_args", "$ENV"]) {
+        let Ok(mapper) = RowMapper::compile(LABEL, source) else {
+            continue;
+        };
+        let ran = std::panic::catch_unwind(AssertUnwindSafe(|| mapper.map(&json!(null))));
+        assert!(
+            ran.is_ok(),
+            "`{source}` passed the load check and panicked when it ran"
+        );
+    }
+}
+
+#[test]
+fn module_and_data_imports_are_refused_at_load_with_the_reason() {
+    for source in IMPORTS {
+        let err = RowMapper::compile(LABEL, source)
+            .err()
+            .unwrap_or_else(|| panic!("`{source}` compiled, but a mapping may not import"));
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("`x` is not available to a mapping: ") && msg.contains(LABEL),
+            "the refusal of `{source}` must name the import, the reason and the mapping; got: \
+             {msg}"
         );
     }
 }

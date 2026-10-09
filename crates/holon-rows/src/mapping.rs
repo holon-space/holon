@@ -16,8 +16,10 @@ use jaq_core::Ctx;
 use jaq_core::Native;
 use jaq_core::Vars;
 use jaq_core::data::JustLut;
+use jaq_core::load;
 use jaq_core::load::Arena;
 use jaq_core::load::File;
+use jaq_core::load::Import;
 use jaq_core::load::Loader;
 use jaq_json::Val;
 
@@ -58,7 +60,7 @@ impl RowMapper {
     /// library ([`crate::jaq_library`]).
     pub fn compile(label: impl Into<String>, source: &str) -> Result<Self> {
         let label = label.into();
-        let loader = Loader::new(crate::jaq_library::defs());
+        let loader = Loader::new(crate::jaq_library::defs()).with_read(refuse_module);
         let arena = Arena::default();
         let modules = loader
             .load(
@@ -68,6 +70,10 @@ impl RowMapper {
                     path: (),
                 },
             )
+            .map_err(|errs| filter_error(&label, source, errs))?;
+        // The loader leaves `import "…" as $x` to the embedder, and `run` binds
+        // no data for `$x`.
+        jaq_core::load::import(&modules, |_| Err(crate::jaq_library::IMPORT.to_string()))
             .map_err(|errs| filter_error(&label, source, errs))?;
         let filter = Compiler::default()
             .with_funs(crate::jaq_library::funs())
@@ -175,14 +181,22 @@ fn undefined_error(
     anyhow::anyhow!("mapping `{label}` is not a valid jaq filter: {detail}\nfilter: {source}")
 }
 
-fn filter_error<E: std::fmt::Debug>(
-    label: &str,
-    source: &str,
-    errs: Vec<(File<&str, ()>, E)>,
-) -> anyhow::Error {
+fn refuse_module(_: Import<&str, ()>) -> Result<File<String, ()>, String> {
+    Err(crate::jaq_library::IMPORT.to_string())
+}
+
+fn filter_error(label: &str, source: &str, errs: load::Errors<&str, ()>) -> anyhow::Error {
     let detail = errs
         .iter()
-        .map(|(_, e)| format!("{e:?}"))
+        .flat_map(|(_, e)| match e {
+            load::Error::Io(imports) => imports
+                .iter()
+                .map(|(path, why)| {
+                    format!("import of `{path}` is not available to a mapping: {why}")
+                })
+                .collect(),
+            other => vec![format!("{other:?}")],
+        })
         .collect::<Vec<_>>()
         .join("; ");
     anyhow::anyhow!("mapping `{label}` is not a valid jaq filter: {detail}\nfilter: {source}")
