@@ -24,6 +24,7 @@ pub use envelope::Envelope;
 pub use envelope::ScopeHeader;
 pub use ids::parse_local_id;
 pub use jaq_library::MAX_FROMJSON_DEPTH;
+pub use jaq_library::MAX_FROMJSON_NUMBER_DIGITS;
 pub use mapping::MAX_MAPPING_OUTPUT_BYTES;
 pub use mapping::MAX_MAPPING_OUTPUTS;
 pub use mapping::RowMapper;

@@ -9,6 +9,7 @@ use std::process::Command;
 use std::process::Output;
 
 use holon_rows::MAX_FROMJSON_DEPTH;
+use holon_rows::MAX_FROMJSON_NUMBER_DIGITS;
 use holon_rows::MAX_MAPPING_OUTPUT_BYTES;
 use holon_rows::MAX_MAPPING_OUTPUTS;
 use holon_rows::RowMapper;
@@ -304,6 +305,40 @@ fn fromjson_keeps_jaqs_semantics_up_to_the_nesting_limit() {
         malformed,
         vec![json!([1])],
         "parsing ends at the first error"
+    );
+}
+
+#[test]
+fn a_number_of_many_digits_is_an_error_naming_the_limit_not_minutes_of_bigint_work() {
+    // The number never reaches the output, so the output caps cannot stand in
+    // for the digit limit.
+    let mapper = RowMapper::compile(LABEL, ".p | [tonumber] | length").expect("compiles");
+    assert_eq!(
+        mapper
+            .map(&json!({ "p": "9".repeat(MAX_FROMJSON_NUMBER_DIGITS) }))
+            .expect("a number of exactly the limit is parsed"),
+        vec![json!(1)]
+    );
+
+    let err = mapper
+        .map(&json!({ "p": "9".repeat(MAX_FROMJSON_NUMBER_DIGITS + 1) }))
+        .expect_err("one digit past the limit is refused");
+    assert!(
+        format!("{err:#}").contains("MAX_FROMJSON_NUMBER_DIGITS")
+            && format!("{err:#}").contains(LABEL),
+        "the refusal must name the digit limit and the mapping; got: {err:#}"
+    );
+
+    // Parsing these digits as a big integer is superlinear, so a peer buys
+    // minutes of one worker with half a megabyte of text.
+    const CEILING: std::time::Duration = std::time::Duration::from_secs(2);
+    let started = std::time::Instant::now();
+    let refused = mapper.map(&json!({ "p": "9".repeat(500_000) }));
+    assert!(
+        refused.is_err() && started.elapsed() < CEILING,
+        "500 000 digits must be refused in under {CEILING:?}; it took {:?} and gave {:?}",
+        started.elapsed(),
+        refused.map(|v| v.len())
     );
 }
 

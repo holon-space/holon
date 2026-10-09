@@ -16,7 +16,6 @@ use holon_core::SyncTokenStore;
 use holon_core::SyncableProvider;
 use holon_turso::turso::DbHandle;
 use rmcp::RoleClient;
-use rmcp::model::SubscribeRequestParam;
 use rmcp::service::Peer;
 use tracing::Instrument;
 use tracing::debug;
@@ -594,7 +593,7 @@ impl McpSyncEngine {
                 "[McpSyncEngine] Subscribing to '{}' for entity '{}'",
                 uri, entity_name
             );
-            peer.subscribe(SubscribeRequestParam { uri: uri.clone() })
+            crate::mcp_request::subscribe(peer, uri)
                 .await
                 .map_err(|e| {
                     anyhow::anyhow!("Failed to subscribe to '{uri}' for '{entity_name}': {e}")
@@ -610,13 +609,11 @@ impl McpSyncEngine {
                     "[McpSyncEngine] Subscribing to vtable resource '{}'",
                     sub.uri_template
                 );
-                peer.subscribe(SubscribeRequestParam {
-                    uri: sub.uri_template.clone(),
-                })
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!("Failed to subscribe to vtable '{}': {e}", sub.uri_template)
-                })?;
+                crate::mcp_request::subscribe(peer, &sub.uri_template)
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!("Failed to subscribe to vtable '{}': {e}", sub.uri_template)
+                    })?;
             } else {
                 info!(
                     "[McpSyncEngine] Vtable '{}' has dynamic params {:?} — relying on broadcast \
@@ -773,12 +770,7 @@ impl McpSyncEngine {
             );
             return;
         };
-        match peer
-            .subscribe(SubscribeRequestParam {
-                uri: uri.to_string(),
-            })
-            .await
-        {
+        match crate::mcp_request::subscribe(peer, uri).await {
             Ok(_) => info!("[McpSyncEngine] Subscribed to '{uri}'"),
             Err(e) => warn!("[McpSyncEngine] Failed to subscribe to '{uri}': {e}"),
         }

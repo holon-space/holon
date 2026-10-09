@@ -93,6 +93,14 @@ const ALLOWED: &[&str] = &[
 /// chose.
 pub const MAX_FROMJSON_DEPTH: usize = 128;
 
+/// The longest run of digits `fromjson` parses. jaq turns an integer literal
+/// into a big integer, which costs time quadratic in its digits, and a mapping
+/// parses text the peer chose.
+///
+/// 512 is above the ~309 digits an `f64` — and so the JSON the mapper emits —
+/// can hold, so no number a mapping can use is refused.
+pub const MAX_FROMJSON_NUMBER_DIGITS: usize = 512;
+
 pub(crate) fn withheld_reason(name: &str) -> Option<&'static str> {
     WITHHELD
         .iter()
@@ -126,12 +134,13 @@ fn all_funs() -> impl Iterator<Item = Filter<Native<Data>>> {
 }
 
 /// jaq-json's `fromjson`, refusing text nested deeper than
-/// [`MAX_FROMJSON_DEPTH`] before its recursive parser sees it.
+/// [`MAX_FROMJSON_DEPTH`] or padded past [`MAX_FROMJSON_NUMBER_DIGITS`] before
+/// its parser sees it.
 fn fromjson(cv: Cv<'_, Data>) -> ValXs<'_, Val> {
     let input = cv.1;
     let text = input
         .try_as_utf8_bytes_owned()
-        .and_then(|text| nesting_within_limit(&text).map(|()| text));
+        .and_then(|text| within_scan_limits(&text).map(|()| text));
     let values = then(text, move |text| {
         bytes_valrs(text, move |text| {
             let mut failed = false;
@@ -152,13 +161,26 @@ fn fromjson(cv: Cv<'_, Data>) -> ValXs<'_, Val> {
     Box::new(values.map(|value| value.map_err(Exn::from)))
 }
 
-/// Brackets inside strings and `#` comments do not nest, as in jaq's lexer.
-/// A stray closing bracket never lowers the count below zero, so the count
-/// is never below the parser's depth.
-fn nesting_within_limit(text: &[u8]) -> Result<(), Error> {
+/// Brackets and digits inside strings and `#` comments are text, as in jaq's
+/// lexer. A stray closing bracket never lowers the count below zero, so the
+/// count is never below the parser's depth.
+fn within_scan_limits(text: &[u8]) -> Result<(), Error> {
     let mut depth = 0usize;
+    let mut digits = 0usize;
     let mut bytes = text.iter().enumerate();
     while let Some((offset, byte)) = bytes.next() {
+        if byte.is_ascii_digit() {
+            digits += 1;
+            if digits > MAX_FROMJSON_NUMBER_DIGITS {
+                return Err(Error::str(format_args!(
+                    "cannot parse a string as JSON: it holds more than \
+                     MAX_FROMJSON_NUMBER_DIGITS ({MAX_FROMJSON_NUMBER_DIGITS}) digits in one \
+                     number at byte {offset}"
+                )));
+            }
+            continue;
+        }
+        digits = 0;
         match byte {
             b'"' => loop {
                 match bytes.next() {

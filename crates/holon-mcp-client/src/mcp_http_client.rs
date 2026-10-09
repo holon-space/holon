@@ -24,6 +24,7 @@ use rmcp::transport::streamable_http_client::StreamableHttpClient;
 use rmcp::transport::streamable_http_client::StreamableHttpError;
 use rmcp::transport::streamable_http_client::StreamableHttpPostResponse;
 
+use crate::secure_client::MAX_CONCURRENT_POST_STREAMS;
 use crate::secure_client::MAX_RESPONSE_BODY_BYTES;
 use crate::secure_client::MCP_IDLE_TIMEOUT;
 use crate::secure_client::REQUEST_TIMEOUT;
@@ -48,15 +49,23 @@ impl std::error::Error for McpHttpError {}
 /// [`REQUEST_TIMEOUT`] on every POST, and every JSON-RPC message capped at
 /// [`MAX_RESPONSE_BODY_BYTES`].
 ///
-/// A stream gets only the idle timeout because a connection keeps an SSE
-/// stream open for its whole life; rmcp reopens a stream the idle timeout
-/// cut. A POST gets a total one because rmcp sends a connection's messages one
-/// POST at a time, so one reply that never ends stalls every later request.
+/// A GET stream gets only the idle timeout because a connection keeps one open
+/// for its whole life; rmcp reopens a stream the idle timeout cut. A POST gets
+/// a total one because rmcp sends a connection's messages one POST at a time,
+/// so one reply that never ends stalls every later request.
+///
+/// A POST reply stream is also bounded in both its lifetime and its number:
+/// rmcp keeps polling the reply stream of a request whose deadline already
+/// passed, so the peer would otherwise decide how many partial events the
+/// process holds.
 #[derive(Clone)]
 pub(crate) struct McpHttpClient {
     client: reqwest::Client,
     idle_timeout: Duration,
     request_timeout: Duration,
+    /// One slot per unfinished POST reply stream, shared by every clone rmcp
+    /// makes of this client, so the budget is per connection.
+    post_streams: Arc<tokio::sync::Semaphore>,
 }
 
 impl McpHttpClient {
@@ -72,6 +81,7 @@ impl McpHttpClient {
                 .expect("a reqwest client with a redirect policy and a read timeout must build"),
             idle_timeout,
             request_timeout,
+            post_streams: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_POST_STREAMS)),
         }
     }
 
@@ -94,12 +104,29 @@ impl McpHttpClient {
         move |e| StreamableHttpError::Client(McpHttpError(describe(e)))
     }
 
+    /// One slot of the connection's POST-reply-stream budget, waited for
+    /// rather than refused: Holon's own enumeration fan-out calls a connection
+    /// concurrently, so a full budget is contention and only a peer that holds
+    /// every stream open past the deadline turns it into a failure.
+    async fn budget_slot(&self) -> Result<tokio::sync::OwnedSemaphorePermit, HttpError> {
+        let budget = self.post_streams.clone();
+        let timeout = self.request_timeout;
+        match tokio::time::timeout(timeout, budget.acquire_owned()).await {
+            Ok(slot) => Ok(slot.expect("the POST-stream budget is never closed")),
+            Err(_) => Err(StreamableHttpError::Client(McpHttpError(format!(
+                "the peer held all MAX_CONCURRENT_POST_STREAMS ({MAX_CONCURRENT_POST_STREAMS}) \
+                 reply streams of this connection open for REQUEST_TIMEOUT ({timeout:?})"
+            )))),
+        }
+    }
+
     async fn post(
         &self,
         uri: Arc<str>,
         message: ClientJsonRpcMessage,
         session_id: Option<Arc<str>>,
         auth_token: Option<String>,
+        slot: tokio::sync::OwnedSemaphorePermit,
     ) -> Result<StreamableHttpPostResponse, HttpError> {
         let mut request = self
             .client
@@ -148,7 +175,12 @@ impl McpHttpClient {
         match content_type(&response) {
             Some(ct) if ct.starts_with(EVENT_STREAM_MIME_TYPE.as_bytes()) => {
                 Ok(StreamableHttpPostResponse::Sse(
-                    capped_events(response, self.describe()),
+                    BoundedPostStream::new(
+                        capped_events(response, self.describe()),
+                        self.request_timeout,
+                        slot,
+                    )
+                    .boxed(),
                     session_id,
                 ))
             }
@@ -178,14 +210,18 @@ impl StreamableHttpClient for McpHttpClient {
         session_id: Option<Arc<str>>,
         auth_token: Option<String>,
     ) -> Result<StreamableHttpPostResponse, HttpError> {
+        let slot = self.budget_slot().await?;
         let timeout = self.request_timeout;
-        tokio::time::timeout(timeout, self.post(uri, message, session_id, auth_token))
-            .await
-            .unwrap_or_else(|_| {
-                Err(StreamableHttpError::Client(McpHttpError(format!(
-                    "no complete reply to a POST within REQUEST_TIMEOUT ({timeout:?})"
-                ))))
-            })
+        tokio::time::timeout(
+            timeout,
+            self.post(uri, message, session_id, auth_token, slot),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            Err(StreamableHttpError::Client(McpHttpError(format!(
+                "no complete reply to a POST within REQUEST_TIMEOUT ({timeout:?})"
+            ))))
+        })
     }
 
     async fn delete_session(
@@ -268,6 +304,68 @@ fn capped_sse(
         Ok::<_, std::io::Error>(chunk)
     });
     sse_stream::SseStream::from_bytes_stream(bytes).boxed()
+}
+
+/// One unfinished POST reply stream: it holds a slot of its connection's
+/// budget and ends when `timeout` has passed.
+///
+/// It ends instead of raising, because rmcp reconnects a POST reply stream that
+/// errors and the request this stream answers already failed at its own
+/// deadline. The warning is what discloses the close.
+struct BoundedPostStream {
+    /// Dropped the moment the stream finishes, which frees the socket and the
+    /// partial event held in it however long rmcp keeps the stream itself.
+    inner: Option<BoxedSseResponse>,
+    deadline: std::pin::Pin<Box<tokio::time::Sleep>>,
+    timeout: Duration,
+    slot: Option<tokio::sync::OwnedSemaphorePermit>,
+}
+
+impl BoundedPostStream {
+    fn new(
+        inner: BoxedSseResponse,
+        timeout: Duration,
+        slot: tokio::sync::OwnedSemaphorePermit,
+    ) -> Self {
+        Self {
+            inner: Some(inner),
+            deadline: Box::pin(tokio::time::sleep(timeout)),
+            timeout,
+            slot: Some(slot),
+        }
+    }
+}
+
+impl futures::Stream for BoundedPostStream {
+    type Item = <BoxedSseResponse as futures::Stream>::Item;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        use std::task::Poll;
+        let me = &mut *self;
+        if me.inner.is_none() {
+            return Poll::Ready(None);
+        }
+        if std::future::Future::poll(me.deadline.as_mut(), cx).is_ready() {
+            tracing::warn!(
+                "[mcp_http_client] closing a POST reply stream the peer left unfinished for \
+                 REQUEST_TIMEOUT ({:?})",
+                me.timeout
+            );
+            me.inner = None;
+            me.slot = None;
+            return Poll::Ready(None);
+        }
+        let inner = me.inner.as_mut().expect("checked just above");
+        let polled = futures::Stream::poll_next(inner.as_mut(), cx);
+        if matches!(polled, Poll::Ready(None)) {
+            me.inner = None;
+            me.slot = None;
+        }
+        polled
+    }
 }
 
 /// The size of the SSE event being received. A blank line ends an event, and
@@ -497,6 +595,136 @@ mod tests {
             )
         });
         assert_eq!(lens, vec![Ok(Some(data_len))], "parsed in {elapsed:?}");
+    }
+
+    /// The URL of a peer that answers every POST with an SSE stream that sends
+    /// `data: ` and then one byte every `gap` and never a blank line, plus the
+    /// channel on which it reports the connection it first lost.
+    async fn post_streams_that_never_finish(
+        gap: Duration,
+    ) -> (String, tokio::sync::mpsc::UnboundedReceiver<()>) {
+        use tokio::io::AsyncReadExt as _;
+        use tokio::io::AsyncWriteExt as _;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock");
+        let addr = listener.local_addr().expect("addr");
+        let (closed, closes) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let closed = closed.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    let _ = sock.read(&mut buf).await;
+                    let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n\
+                                data: ";
+                    if sock.write_all(head.as_bytes()).await.is_err() {
+                        let _ = closed.send(());
+                        return;
+                    }
+                    loop {
+                        tokio::time::sleep(gap).await;
+                        if sock.write_all(b"x").await.is_err() {
+                            let _ = closed.send(());
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        (format!("http://{addr}/mcp"), closes)
+    }
+
+    fn ping() -> ClientJsonRpcMessage {
+        serde_json::from_value(serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "ping"}))
+            .expect("a ping request")
+    }
+
+    /// rmcp keeps the reply stream of a request that already timed out, so the
+    /// stream has to end on its own; otherwise its partial event and its socket
+    /// stay held.
+    #[tokio::test]
+    async fn a_post_reply_stream_that_never_finishes_is_closed_at_the_request_timeout() {
+        const REQUEST: Duration = Duration::from_secs(2);
+        let (uri, mut closes) = post_streams_that_never_finish(Duration::from_millis(50)).await;
+        let client = McpHttpClient::with_timeouts(MCP_IDLE_TIMEOUT, REQUEST);
+        let reply = client
+            .post_message(uri.into(), ping(), None, None)
+            .await
+            .expect("the peer answered with a stream");
+        let mut stream = match reply {
+            StreamableHttpPostResponse::Sse(stream, _) => stream,
+            other => panic!("expected an SSE reply, got {other:?}"),
+        };
+        let drained = tokio::time::timeout(REQUEST * 3, async {
+            while stream.next().await.is_some() {}
+        })
+        .await;
+        assert!(
+            drained.is_ok(),
+            "the reply stream was still open {:?} after the deadline",
+            REQUEST * 2
+        );
+        // Still held, as rmcp holds it: the close may not wait for the drop.
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), closes.recv())
+                .await
+                .is_ok(),
+            "the socket of the finished stream is still open"
+        );
+        drop(stream);
+    }
+
+    /// Each unfinished stream holds up to [`MAX_RESPONSE_BODY_BYTES`] of a
+    /// partial event, so their number is what bounds the memory a peer can make
+    /// the process hold.
+    #[tokio::test]
+    async fn no_more_post_reply_streams_than_the_budget_are_open_at_once() {
+        let (uri, _closes) = post_streams_that_never_finish(Duration::from_millis(50)).await;
+        let client = McpHttpClient::with_timeouts(MCP_IDLE_TIMEOUT, Duration::from_secs(600));
+        let open = |client: McpHttpClient, uri: String| async move {
+            client.post_message(uri.into(), ping(), None, None).await
+        };
+        let mut held = Vec::new();
+        for i in 0..MAX_CONCURRENT_POST_STREAMS {
+            match open(client.clone(), uri.clone()).await {
+                Ok(StreamableHttpPostResponse::Sse(stream, _)) => held.push(stream),
+                other => panic!("stream #{i} within the budget was not opened: {other:?}"),
+            }
+        }
+
+        // One past the budget waits instead of opening a stream, because
+        // Holon's own fan-out is concurrent and a full budget is contention.
+        let mut past = Box::pin(open(client.clone(), uri.clone()));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), &mut past)
+                .await
+                .is_err(),
+            "a POST past the budget opened a {}th stream",
+            held.len() + 1
+        );
+        held.pop();
+        match tokio::time::timeout(Duration::from_secs(5), past).await {
+            Ok(Ok(StreamableHttpPostResponse::Sse(stream, _))) => held.push(stream),
+            other => panic!("the freed slot did not let the waiting POST through: {other:?}"),
+        }
+        assert_eq!(held.len(), MAX_CONCURRENT_POST_STREAMS);
+
+        // A budget the peer never frees is a failure that names it.
+        let starved = McpHttpClient {
+            post_streams: client.post_streams.clone(),
+            ..McpHttpClient::with_timeouts(MCP_IDLE_TIMEOUT, Duration::from_millis(200))
+        };
+        let err = starved
+            .post_message(uri.into(), ping(), None, None)
+            .await
+            .err()
+            .expect("a POST with no slot and no time cannot succeed")
+            .to_string();
+        assert!(
+            err.contains("MAX_CONCURRENT_POST_STREAMS") && err.contains("REQUEST_TIMEOUT"),
+            "the failure must name the budget and the deadline; got: {err}"
+        );
     }
 
     #[test]

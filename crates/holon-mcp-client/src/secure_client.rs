@@ -28,6 +28,14 @@ pub const MCP_IDLE_TIMEOUT: std::time::Duration = REQUEST_TIMEOUT;
 /// The largest response body read, counted as it streams in.
 pub const MAX_RESPONSE_BODY_BYTES: usize = 64 * 1024 * 1024;
 
+/// The most reply streams one MCP-over-HTTP connection may hold unfinished at
+/// once. rmcp opens one per request and keeps it after the request's deadline,
+/// so without a budget the peer decides how many there are.
+///
+/// 8 is twice Holon's own per-connection enumeration fan-out, so a full budget
+/// is a peer holding streams open rather than Holon's own concurrency.
+pub const MAX_CONCURRENT_POST_STREAMS: usize = 8;
+
 /// A client that refuses any redirect hop leaving https (loopback excepted)
 /// and gives up on a request after [`REQUEST_TIMEOUT`].
 pub(crate) fn secure_http_client() -> reqwest::Client {

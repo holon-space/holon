@@ -13,6 +13,8 @@ use rmcp::model::ListToolsRequest;
 use rmcp::model::PaginatedRequestParam;
 use rmcp::model::ResourceTemplate;
 use rmcp::model::ServerResult;
+use rmcp::model::SubscribeRequest;
+use rmcp::model::SubscribeRequestParam;
 use rmcp::model::Tool;
 use rmcp::service::Peer;
 use rmcp::service::PeerRequestOptions;
@@ -53,6 +55,22 @@ pub(crate) async fn request(
                 reason: Some(reason),
             })
         }
+    }
+}
+
+/// `resources/subscribe`, bounded by [`REQUEST_TIMEOUT`].
+pub(crate) async fn subscribe(peer: &Peer<RoleClient>, uri: &str) -> Result<(), ServiceError> {
+    let what = format!("subscribe '{uri}'");
+    let request = ClientRequest::SubscribeRequest(SubscribeRequest {
+        method: Default::default(),
+        params: SubscribeRequestParam {
+            uri: uri.to_string(),
+        },
+        extensions: Default::default(),
+    });
+    match self::request(peer, &what, request).await? {
+        ServerResult::EmptyResult(_) => Ok(()),
+        _ => Err(ServiceError::UnexpectedResponse),
     }
 }
 
