@@ -1,26 +1,24 @@
 use holon_api::EntityName;
-use holon_api::render_eval::resolve_args;
 use holon_api::render_types::Arg;
 use holon_api::render_types::ClickModifiers;
 use holon_api::render_types::OperationDescriptor;
 use holon_api::render_types::OperationWiring;
 use holon_api::render_types::RenderExpr;
 use holon_api::render_types::Trigger;
-use holon_api::widget_spec::DataRow;
 
 use super::prelude::*;
 
 fn build_wiring(
     name: &str,
     args: &[Arg],
-    row: &DataRow,
+    ba: &BA<'_>,
     trigger: Trigger,
 ) -> Result<OperationWiring, holon_api::computation::ComputeError> {
     let (entity_name, op_name) = match name.split_once('.') {
         Some((e, o)) => (e.to_string(), o.to_string()),
         None => ("block".to_string(), name.to_string()),
     };
-    let resolved = resolve_args(args, row)?;
+    let resolved = ba.services.resolve_args(args, ba.ctx)?;
     let mut bound_params: std::collections::HashMap<String, Value> =
         std::collections::HashMap::new();
     for (k, v) in &resolved.named {
@@ -83,7 +81,7 @@ holon_macros::widget_builder! {
             match build_wiring(
                 name,
                 args,
-                ba.ctx.row(),
+                &ba,
                 Trigger::Click {
                     modifiers: ClickModifiers::none(),
                 },
@@ -117,7 +115,7 @@ holon_macros::widget_builder! {
             (alt_action, ClickModifiers::alt()),
         ] {
             if let Some(RenderExpr::FunctionCall { name, args, .. }) = template {
-                match build_wiring(name, args, ba.ctx.row(), Trigger::Click { modifiers }) {
+                match build_wiring(name, args, &ba, Trigger::Click { modifiers }) {
                     Ok(wiring) => operations.push(wiring),
                     Err(e) => return ViewModel::error("selectable", e.to_string()),
                 }

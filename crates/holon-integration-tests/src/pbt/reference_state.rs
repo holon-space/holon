@@ -3680,6 +3680,13 @@ impl holon_frontend::reactive::BuilderServices for ReferenceState {
         self.harness.interpreter.interpret(expr, ctx, self)
     }
 
+    fn value_fn_lookup<'a>(
+        &'a self,
+        ctx: &'a holon_frontend::RenderContext,
+    ) -> Box<dyn holon_api::render_eval::ValueFnLookup + 'a> {
+        self.harness.interpreter.value_fn_lookup(self, ctx)
+    }
+
     /// The reference model is the proptest state machine's owned, mutating
     /// state — a handle would have to be a COPY, and a lazy slot materialising
     /// against a copy would render a snapshot the model has already moved past,

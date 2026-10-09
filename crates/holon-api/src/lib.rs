@@ -356,13 +356,11 @@ pub use render_eval::ResolvedArgs;
 /// flutter_rust_bridge:ignore
 pub use render_eval::eval_binary_op;
 /// flutter_rust_bridge:ignore
-pub use render_eval::eval_to_value;
+pub use render_eval::eval_plain_value;
 /// flutter_rust_bridge:ignore
 pub use render_eval::is_template_arg;
 /// flutter_rust_bridge:ignore
 pub use render_eval::is_template_arg_for;
-/// flutter_rust_bridge:ignore
-pub use render_eval::resolve_args;
 // Re-export render types
 pub use render_types::{
     Arg, BinaryOperator, BoundaryBehavior, ClickModifiers, MenuExposure, NonMenuSurface, Operation,

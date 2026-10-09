@@ -451,6 +451,12 @@ pub enum ComputeError {
         name: String,
         call: String,
     },
+    /// A call in a value evaluated outside any render, where only the core
+    /// value functions exist.
+    NotAPlainValueFunction {
+        name: String,
+        call: String,
+    },
 }
 
 impl fmt::Display for ComputeError {
@@ -478,6 +484,12 @@ impl fmt::Display for ComputeError {
             ComputeError::UnknownFunction { name, call } => write!(
                 f,
                 "unknown function `{name}` in `{call}`: neither a value function nor a widget"
+            ),
+            ComputeError::NotAPlainValueFunction { name, call } => write!(
+                f,
+                "`{name}` cannot be called in `{call}`: outside a render, only the value \
+                 functions {} can be called",
+                crate::render_eval::CORE_VALUE_FN_NAMES.join(", ")
             ),
         }
     }

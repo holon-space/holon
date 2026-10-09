@@ -76,8 +76,10 @@ fn operation_params_built_from_an_overflowing_expression_are_refused() {
         name: "block.set_ratio".to_string(),
         args: vec![overflowing_arg()],
     };
-    let err = holon_frontend::operations::parse_action_expr(&action, &row_with_huge_x())
-        .expect_err("a non-finite param must refuse the operation");
+    let ctx = RenderContext::default().with_row(Arc::new(row_with_huge_x()));
+    let err =
+        holon_frontend::operations::parse_action_expr(&action, &StubBuilderServices::new(), &ctx)
+            .expect_err("a non-finite param must refuse the operation");
     let message = err.to_string();
     assert!(
         message.contains("non-finite float inf") && message.contains("1e308 * 10.0"),

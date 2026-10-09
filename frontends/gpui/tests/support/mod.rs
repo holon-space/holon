@@ -152,6 +152,12 @@ impl BuilderServices for StubServices {
     fn interpret(&self, _: &RenderExpr, _: &FrontendRenderContext) -> ReactiveViewModel {
         unimplemented!("StubServices::interpret — fixture is not pure-layout")
     }
+    fn value_fn_lookup<'a>(
+        &'a self,
+        _: &'a FrontendRenderContext,
+    ) -> Box<dyn holon_api::render_eval::ValueFnLookup + 'a> {
+        unimplemented!("StubServices::value_fn_lookup — fixture is not pure-layout")
+    }
     fn clone_arc(&self) -> Arc<dyn BuilderServices> {
         unimplemented!("StubServices::clone_arc — fixture reached a lazy widget")
     }
@@ -491,6 +497,13 @@ impl BuilderServices for TestServices {
 
     fn interpret(&self, expr: &RenderExpr, ctx: &FrontendRenderContext) -> ReactiveViewModel {
         self.inner.interpret(expr, ctx)
+    }
+
+    fn value_fn_lookup<'a>(
+        &'a self,
+        ctx: &'a FrontendRenderContext,
+    ) -> Box<dyn holon_api::render_eval::ValueFnLookup + 'a> {
+        self.inner.value_fn_lookup(ctx)
     }
 
     fn query_engine(&self) -> Option<Arc<dyn holon_api::QueryEngine>> {

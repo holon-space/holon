@@ -149,6 +149,12 @@ impl BuilderServices for RecordingServices {
     fn interpret(&self, expr: &RenderExpr, ctx: &RenderContext) -> ReactiveViewModel {
         self.inner.interpret(expr, ctx)
     }
+    fn value_fn_lookup<'a>(
+        &'a self,
+        ctx: &'a RenderContext,
+    ) -> Box<dyn holon_api::render_eval::ValueFnLookup + 'a> {
+        self.inner.value_fn_lookup(ctx)
+    }
     /// Loud rather than delegating: a handle to the inner stub would drop this
     /// fixture's dispatch record, so the assertions would read an empty log.
     fn clone_arc(&self) -> Arc<dyn BuilderServices> {

@@ -1,5 +1,4 @@
 use holon_api::EntityName;
-use holon_api::render_eval::resolve_args;
 use holon_api::render_types::ClickModifiers;
 use holon_api::render_types::OperationDescriptor;
 use holon_api::render_types::OperationWiring;
@@ -147,7 +146,7 @@ holon_macros::widget_builder! {
         };
 
         let row = ba.ctx.row();
-        let resolved = match resolve_args(args, row) {
+        let resolved = match ba.services.resolve_args(args, ba.ctx) {
             Ok(resolved) => resolved,
             Err(e) => return ViewModel::error("question_options", e.to_string()),
         };

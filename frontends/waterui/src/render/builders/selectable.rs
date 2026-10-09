@@ -18,16 +18,17 @@ pub fn build(ba: BA) -> AnyView {
         None => return child,
     };
 
-    let action = match holon_frontend::operations::parse_action_expr(action_expr, ba.ctx.row()) {
-        Ok(action) => action,
-        Err(e) => {
-            return AnyView::new(
-                text(e.to_string())
-                    .size(12.0)
-                    .foreground(Color::srgb_hex("#FF0000")),
-            );
-        }
-    };
+    let action =
+        match holon_frontend::operations::parse_action_expr(action_expr, ba.services, ba.ctx) {
+            Ok(action) => action,
+            Err(e) => {
+                return AnyView::new(
+                    text(e.to_string())
+                        .size(12.0)
+                        .foreground(Color::srgb_hex("#FF0000")),
+                );
+            }
+        };
     if let Some(action) = action {
         let session = ba.ctx.session.clone();
         let spawner: std::sync::Arc<dyn holon_api::spawner::Spawner> = std::sync::Arc::new(

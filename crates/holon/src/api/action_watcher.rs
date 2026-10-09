@@ -24,7 +24,6 @@ use std::sync::Arc;
 use anyhow::Context;
 use anyhow::Result;
 use holon_api::EntityName;
-use holon_api::InterpValue;
 use holon_api::SourceLanguage;
 use holon_api::Value;
 use holon_api::action_dsl::parse_action_dsl;
@@ -33,9 +32,7 @@ use holon_api::effect_id::OutputSlot;
 use holon_api::effect_id::RuleId;
 use holon_api::effect_id::deterministic_block_id;
 use holon_api::lifecycle::SessionShutdown;
-use holon_api::render_eval::CORE_VALUE_FN_LOOKUP;
-use holon_api::render_eval::EvalEnv;
-use holon_api::render_eval::eval_to_interp;
+use holon_api::render_eval::eval_plain_value;
 use holon_api::streaming::Change;
 use holon_core::storage::types::StorageEntity;
 use tokio::task::JoinHandle;
@@ -310,11 +307,10 @@ async fn fire_action(
         let Some(name) = arg.name.as_ref() else {
             continue;
         };
-        match eval_to_interp(&arg.value, &EvalEnv::of_row(data), &CORE_VALUE_FN_LOOKUP) {
-            Ok(InterpValue::Value(v)) => {
+        match eval_plain_value(&arg.value, data) {
+            Ok(v) => {
                 params.insert(name.clone().into(), v);
             }
-            Ok(InterpValue::Rows(_)) => {}
             Err(e) => {
                 status.set(
                     rule.as_str(),

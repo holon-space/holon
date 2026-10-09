@@ -6,7 +6,6 @@ use holon_api::EntityUri;
 use holon_api::InterpValue;
 use holon_api::Value;
 use holon_api::computation::ComputeError;
-use holon_api::render_eval::CORE_VALUE_FN_LOOKUP;
 use holon_api::render_eval::CallKind;
 use holon_api::render_eval::EvalEnv;
 use holon_api::render_eval::OutlineTree;
@@ -14,12 +13,14 @@ use holon_api::render_eval::ResolvedArgs;
 use holon_api::render_eval::ValueFnLookup;
 use holon_api::render_eval::choose_branch;
 use holon_api::render_eval::column_ref_name;
+use holon_api::render_eval::core_value_fn;
 use holon_api::render_eval::eval_to_interp;
-use holon_api::render_eval::resolve_args;
 use holon_api::render_eval::resolve_args_for_widget;
 use holon_api::render_types::OperationWiring;
 use holon_api::render_types::RenderExpr;
 use holon_api::widget_spec::DataRow;
+
+use crate::reactive_view_model::NotAPropsUpdate;
 
 /// Trait for attaching entity data to a widget node.
 /// Both `ViewModel` and `ReactiveViewModel` implement this.
@@ -91,10 +92,11 @@ where
 // the same `RenderInterpreter` under a disjoint name space: a given name
 // is either a widget builder or a value function, never both.
 //
-// Arg evaluation (`resolve_args_for_widget`) dispatches `FunctionCall` nodes
-// into the value-fn registry via a short-lived `ValueFnBinding` that
-// carries `&services` and `&ctx` — the slice of interpreter state a
-// value fn needs.
+// Arg evaluation dispatches `FunctionCall` nodes through a short-lived
+// `ValueFnBinding` that carries `&services` and `&ctx` — the slice of
+// interpreter state a value fn needs. It is the one lookup of render-DSL
+// names: every evaluation in a render obtains it from
+// `BuilderServices::value_fn_lookup`.
 
 /// A registered render-DSL function whose return type is `InterpValue`
 /// (a scalar `Value` or a reactive `Rows` provider). An `Err` renders the
@@ -141,18 +143,22 @@ impl<'a, W> ValueFnLookup for ValueFnBinding<'a, W> {
         } else if self.builders.contains_key(name) {
             Some(CallKind::Widget)
         } else {
-            CORE_VALUE_FN_LOOKUP.call_kind(name)
+            core_value_fn(name).map(|_| CallKind::ValueFn)
         }
     }
 
     fn invoke(&self, name: &str, args: &ResolvedArgs) -> Option<Result<InterpValue, ComputeError>> {
-        // User-supplied registry first, then built-in core fns (`concat`,
-        // ...). Keeps `concat` working from any DSL context regardless of
-        // whether a frontend explicitly registered it.
         self.fns
             .get(name)
             .map(|f| f.invoke(args, self.services, self.ctx))
-            .or_else(|| CORE_VALUE_FN_LOOKUP.invoke(name, args))
+            .or_else(|| core_value_fn(name).map(|f| Ok(InterpValue::Value(f(args)))))
+    }
+
+    fn unknown_function(&self, name: &str, call: String) -> ComputeError {
+        ComputeError::UnknownFunction {
+            name: name.to_string(),
+            call,
+        }
     }
 }
 
@@ -264,6 +270,16 @@ impl<W> RenderInterpreter<W> {
     /// The value functions an authored source can call in an argument.
     pub fn supported_value_fns(&self) -> HashSet<String> {
         self.value_fns.keys().cloned().collect()
+    }
+
+    /// Every name a call evaluated in `ctx` can refer to: this interpreter's
+    /// value functions and widgets, and the core value functions.
+    pub fn value_fn_lookup<'a>(
+        &'a self,
+        services: &'a dyn BuilderServices,
+        ctx: &'a RenderContext,
+    ) -> Box<dyn ValueFnLookup + 'a> {
+        Box::new(self.value_fn_binding(services, ctx))
     }
 
     fn value_fn_binding<'a>(
@@ -509,16 +525,14 @@ pub fn is_props_only_widget(widget_name: &str) -> bool {
 /// Resolves args from the expression, builds a `BuilderArgs`, and dispatches
 /// to the builder's macro-generated `resolve_props_from_args`. For raw
 /// builders that lack a macro-generated function, falls back to
-/// `services.interpret()` and extracts the resulting props. Args that fail to
-/// evaluate are `NotAPropsUpdate`: the full interpret path renders them as an
-/// error node.
+/// `services.interpret()` and extracts the resulting props.
 pub fn resolve_props(
     widget_name: &str,
     expr: &RenderExpr,
     data: &Arc<DataRow>,
     services: &dyn BuilderServices,
     space: Option<crate::render_context::AvailableSpace>,
-) -> Result<HashMap<String, Value>, crate::reactive_view_model::NotAPropsUpdate> {
+) -> Result<HashMap<String, Value>, NotAPropsUpdate> {
     use crate::reactive_view::row_render_context;
     use crate::reactive_view_model::ReactiveViewModel;
 
@@ -526,10 +540,9 @@ pub fn resolve_props(
 
     // Extract args from FunctionCall; other expr variants have no args.
     let args = match expr {
-        RenderExpr::FunctionCall { args, .. } => match resolve_args(args, ctx.row()) {
-            Ok(args) => args,
-            Err(_) => return Err(crate::reactive_view_model::NotAPropsUpdate),
-        },
+        RenderExpr::FunctionCall { args, .. } => services
+            .resolve_args(args, &ctx)
+            .map_err(|e| NotAPropsUpdate::because(format!("{widget_name}: {e}")))?,
         _ => ResolvedArgs::from_positional_exprs(vec![]),
     };
 
@@ -552,7 +565,7 @@ pub fn resolve_props(
     // A refused param is not a props update: the full interpret draws its error
     // node.
     if let Some(props) = crate::shadow_builders::dispatch_resolve_props(widget_name, &ba) {
-        return props.map_err(|_| crate::reactive_view_model::NotAPropsUpdate);
+        return props.map_err(|e| NotAPropsUpdate::because(format!("{widget_name}: {e}")));
     }
 
     // ALLOW(fallback): two-level dispatch — fast path then full interpret; both

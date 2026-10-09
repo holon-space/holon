@@ -2,8 +2,6 @@ use super::prelude::*;
 
 holon_macros::widget_builder! {
     raw fn card(ba: BA<'_>) -> ViewModel {
-        // Named "accent" takes priority — positional[0] is polluted by eval_to_value
-        // flattening the first child expr's text content.
         let accent = match ba
             .args
             .get_string("accent")

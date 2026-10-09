@@ -175,6 +175,12 @@ impl BuilderServices for ExpandStoreServices {
     fn interpret(&self, expr: &RenderExpr, ctx: &FrontendRenderContext) -> ReactiveViewModel {
         self.interpreter.interpret(expr, ctx, self)
     }
+    fn value_fn_lookup<'a>(
+        &'a self,
+        ctx: &'a FrontendRenderContext,
+    ) -> Box<dyn holon_api::render_eval::ValueFnLookup + 'a> {
+        self.interpreter.value_fn_lookup(self, ctx)
+    }
     fn clone_arc(&self) -> Arc<dyn BuilderServices> {
         Arc::new(Self {
             inner: StubBuilderServices::new(),

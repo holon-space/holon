@@ -1042,7 +1042,7 @@ impl TypedParamCase {
                 .find(|a| a.name.as_deref() == Some(self.param.name)),
         };
         arg.map_or(Value::Null, |arg| {
-            holon_api::render_eval::eval_to_value(&arg.value, &typed_param_row())
+            holon_api::render_eval::eval_plain_value(&arg.value, &typed_param_row())
                 .unwrap_or_else(|e| panic!("`{}` evaluates: {e}", self.source()))
         })
     }

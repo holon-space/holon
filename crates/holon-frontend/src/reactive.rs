@@ -91,6 +91,27 @@ pub trait BuilderServices: Send + Sync {
     /// reactive pipeline — no caller ever touches `RenderInterpreter` directly.
     fn interpret(&self, expr: &RenderExpr, ctx: &RenderContext) -> ReactiveViewModel;
 
+    /// Every name a render-DSL call evaluated in `ctx` can refer to, from this
+    /// services' shadow interpreter: what any argument evaluation in a render
+    /// resolves calls through.
+    fn value_fn_lookup<'a>(
+        &'a self,
+        ctx: &'a RenderContext,
+    ) -> Box<dyn holon_api::render_eval::ValueFnLookup + 'a>;
+
+    /// `args` evaluated against `ctx`'s row through [`Self::value_fn_lookup`].
+    fn resolve_args(
+        &self,
+        args: &[holon_api::render_types::Arg],
+        ctx: &RenderContext,
+    ) -> Result<holon_api::render_eval::ResolvedArgs, holon_api::computation::ComputeError> {
+        holon_api::render_eval::resolve_args_with(
+            args,
+            &holon_api::render_eval::EvalEnv::of_row(ctx.row()),
+            &*self.value_fn_lookup(ctx),
+        )
+    }
+
     /// Return an owned handle to this services instance.
     ///
     /// Needed by widgets that capture services for deferred interpretation
@@ -4033,6 +4054,13 @@ impl BuilderServices for ReactiveEngine {
         self.interpreter.interpret(expr, ctx, self)
     }
 
+    fn value_fn_lookup<'a>(
+        &'a self,
+        ctx: &'a RenderContext,
+    ) -> Box<dyn holon_api::render_eval::ValueFnLookup + 'a> {
+        self.interpreter.value_fn_lookup(self, ctx)
+    }
+
     fn clone_arc(&self) -> Arc<dyn BuilderServices> {
         self.services_slot
             .get()
@@ -5061,6 +5089,13 @@ impl Default for StubBuilderServices {
 impl BuilderServices for StubBuilderServices {
     fn interpret(&self, expr: &RenderExpr, ctx: &RenderContext) -> ReactiveViewModel {
         self.interpreter.interpret(expr, ctx, self)
+    }
+
+    fn value_fn_lookup<'a>(
+        &'a self,
+        ctx: &'a RenderContext,
+    ) -> Box<dyn holon_api::render_eval::ValueFnLookup + 'a> {
+        self.interpreter.value_fn_lookup(self, ctx)
     }
 
     /// A stub carries no engine state, so a handle is just a second stub over

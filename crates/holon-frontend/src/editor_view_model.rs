@@ -1876,6 +1876,13 @@ mod tests {
         ) -> crate::ReactiveViewModel {
             self.stub.interpret(expr, ctx)
         }
+
+        fn value_fn_lookup<'a>(
+            &'a self,
+            ctx: &'a crate::RenderContext,
+        ) -> Box<dyn holon_api::render_eval::ValueFnLookup + 'a> {
+            self.stub.value_fn_lookup(ctx)
+        }
         fn clone_arc(&self) -> std::sync::Arc<dyn crate::reactive::BuilderServices> {
             unreachable!("the commit funnel never clones its services")
         }

@@ -122,6 +122,13 @@ impl BuilderServices for HeadlessBuilderServices {
         self.interpreter.interpret(expr, ctx, self)
     }
 
+    fn value_fn_lookup<'a>(
+        &'a self,
+        ctx: &'a RenderContext,
+    ) -> Box<dyn holon_api::render_eval::ValueFnLookup + 'a> {
+        self.interpreter.value_fn_lookup(self, ctx)
+    }
+
     /// A handle over the same engine and interpreter. `describe_ui` is the
     /// caller that needs it: reporting what the UI *should* render means
     /// materialising the lazy slots (`expand_toggle` content, tabs), which

@@ -3,14 +3,15 @@ use std::sync::Arc;
 
 use holon_api::BlockWriteFieldError;
 use holon_api::EntityName;
+use holon_api::InterpValue;
 use holon_api::Value;
 use holon_api::block_write_field::refuse_structural_field;
-use holon_api::render_eval::eval_to_value;
+use holon_api::render_eval::EvalEnv;
+use holon_api::render_eval::eval_to_interp;
 use holon_api::render_types::OperationDescriptor;
 use holon_api::render_types::OperationWiring;
 use holon_api::render_types::RenderExpr;
 use holon_api::spawner::Spawner;
-use holon_api::widget_spec::DataRow;
 
 use crate::FrontendSession;
 use crate::RenderContext;
@@ -319,10 +320,12 @@ impl OperationIntent {
 /// Parse a RenderExpr action into entity name, operation name, and parameters.
 ///
 /// Expects a `FunctionCall` whose name is `"entity.operation"` (dot-separated).
-/// Named arguments are evaluated against the current data row.
+/// Named arguments are evaluated against `ctx`'s row, one by one: a param
+/// named like a render template (`parent_id`, `action`) is still a value.
 pub fn parse_action_expr(
     action_expr: &RenderExpr,
-    row: &DataRow,
+    services: &dyn crate::reactive::BuilderServices,
+    ctx: &RenderContext,
 ) -> Result<Option<OperationIntent>, holon_api::computation::ComputeError> {
     if let RenderExpr::FunctionCall {
         name,
@@ -335,10 +338,21 @@ pub fn parse_action_expr(
             let entity_name = EntityName::Named(parts[0].to_string());
             let op_name = parts[1].to_string();
 
+            let fns = services.value_fn_lookup(ctx);
+            let env = EvalEnv::of_row(ctx.row());
             let mut params = HashMap::new();
             for arg in action_args {
                 if let Some(ref param_name) = arg.name {
-                    let value = eval_to_value(&arg.value, row)?;
+                    let value = match eval_to_interp(&arg.value, &env, &*fns)? {
+                        InterpValue::Value(value) => value,
+                        InterpValue::Rows(_) => {
+                            return Err(holon_api::computation::ComputeError::WrongType {
+                                context: format!("operation param `{param_name}`"),
+                                expected: "a value, not a row set",
+                                value: Value::Null,
+                            });
+                        }
+                    };
                     params.insert(param_name.clone(), value);
                 }
             }

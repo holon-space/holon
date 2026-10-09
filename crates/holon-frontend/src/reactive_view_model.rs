@@ -48,7 +48,18 @@ pub type InterpretFn = Arc<
 /// The expression renders this row as an error node, which props on the
 /// existing node cannot express: the node must be re-interpreted whole.
 #[derive(Debug)]
-pub struct NotAPropsUpdate;
+pub struct NotAPropsUpdate {
+    /// What the error node says.
+    pub reason: String,
+}
+
+impl NotAPropsUpdate {
+    pub fn because(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+        }
+    }
+}
 
 // ── CollectionData (builder-time helper) ───────────────────────────────
 
@@ -1853,7 +1864,11 @@ impl ReactiveViewModel {
     /// node of the same widget.
     pub fn props_update(&self) -> Result<HashMap<String, Value>, NotAPropsUpdate> {
         if self.is_error() {
-            Err(NotAPropsUpdate)
+            let message = self.props.get_cloned().get("message").cloned();
+            Err(NotAPropsUpdate::because(match message {
+                Some(Value::String(message)) => message,
+                other => panic!("an error node carries a text `message`, got {other:?}"),
+            }))
         } else {
             Ok(self.props.get_cloned())
         }

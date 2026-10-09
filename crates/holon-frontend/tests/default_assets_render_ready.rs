@@ -46,6 +46,13 @@ impl BuilderServices for AssetServices {
         self.interpreter.interpret(expr, ctx, self)
     }
 
+    fn value_fn_lookup<'a>(
+        &'a self,
+        ctx: &'a RenderContext,
+    ) -> Box<dyn holon_api::render_eval::ValueFnLookup + 'a> {
+        self.interpreter.value_fn_lookup(self, ctx)
+    }
+
     fn clone_arc(&self) -> Arc<dyn BuilderServices> {
         Arc::new(Self {
             interpreter: self.interpreter.clone(),

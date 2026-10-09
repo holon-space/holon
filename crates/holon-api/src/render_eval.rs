@@ -147,7 +147,7 @@ pub fn resolve_states<K: RowKey>(
         expected: "a list of state keywords",
         value,
     };
-    match eval_to_value(states_expr, row)? {
+    match eval_plain_value(states_expr, row)? {
         Value::Null => Ok(builtin()),
         Value::Array(items) if items.is_empty() => Ok(builtin()),
         Value::Array(items) => items
@@ -700,11 +700,14 @@ fn value_to_f64(v: &Value) -> Option<f64> {
 /// value-function registry). A call to a name of neither kind fails the
 /// enclosing evaluation, as does a value function refusing its arguments.
 pub trait ValueFnLookup {
-    /// `None` for a name that is neither a value function nor a widget.
+    /// `None` for a name this lookup cannot call.
     fn call_kind(&self, name: &str) -> Option<CallKind>;
 
     /// Answers `Some` for every name whose `call_kind` is `ValueFn`.
     fn invoke(&self, name: &str, args: &ResolvedArgs) -> Option<Result<InterpValue, ComputeError>>;
+
+    /// The error for `call`, whose `name` has no `call_kind`.
+    fn unknown_function(&self, name: &str, call: String) -> ComputeError;
 }
 
 /// What a called name in the render DSL refers to.
@@ -716,32 +719,38 @@ pub enum CallKind {
     Widget,
 }
 
-/// Built-in value functions available to every caller — `concat` for
-/// now, more added later. Frontend registries chain through this as the
-/// base layer so user-supplied registrations can still override built-in
-/// names (collision check at `register_value_fn` enforces uniqueness
-/// against widgets, not against the core list).
-///
-/// Replaces the previous `EmptyValueFnLookup` + inline `if name ==
-/// "concat"` shim that lived in `eval_to_interp`.
-pub struct CoreValueFnLookup;
+/// The value functions every evaluation can call, a render's or not.
+pub const CORE_VALUE_FN_NAMES: &[&str] = &["concat"];
 
-impl ValueFnLookup for CoreValueFnLookup {
-    fn call_kind(&self, name: &str) -> Option<CallKind> {
-        (name == "concat").then_some(CallKind::ValueFn)
-    }
-
-    fn invoke(&self, name: &str, args: &ResolvedArgs) -> Option<Result<InterpValue, ComputeError>> {
-        match name {
-            "concat" => Some(Ok(InterpValue::Value(concat_invoke(args)))),
-            _ => None,
-        }
+/// The core value function named `name`. A render's lookup chains through
+/// this beneath its registered value functions.
+pub fn core_value_fn(name: &str) -> Option<fn(&ResolvedArgs) -> Value> {
+    match name {
+        "concat" => Some(concat_invoke),
+        _ => None,
     }
 }
 
-/// Singleton core lookup — built-in value fns, no widget registry.
-/// Used by `eval_to_value` / `resolve_args` (the no-frontend path).
-pub static CORE_VALUE_FN_LOOKUP: CoreValueFnLookup = CoreValueFnLookup;
+/// The names a value evaluated outside any render can call: the core value
+/// functions, and no widget.
+struct PlainValueFns;
+
+impl ValueFnLookup for PlainValueFns {
+    fn call_kind(&self, name: &str) -> Option<CallKind> {
+        core_value_fn(name).map(|_| CallKind::ValueFn)
+    }
+
+    fn invoke(&self, name: &str, args: &ResolvedArgs) -> Option<Result<InterpValue, ComputeError>> {
+        core_value_fn(name).map(|f| Ok(InterpValue::Value(f(args))))
+    }
+
+    fn unknown_function(&self, name: &str, call: String) -> ComputeError {
+        ComputeError::NotAPlainValueFunction {
+            name: name.to_string(),
+            call,
+        }
+    }
+}
 
 /// `concat(a, b, c, ...)` — joins the display-string forms of every
 /// positional arg. Promoted from `legacy_concat` in Task #12 so the
@@ -770,16 +779,6 @@ impl<'a, K: RowKey> EvalEnv<'a, K> {
     pub fn of_row(row: &'a HashMap<K, Value>) -> Self {
         EvalEnv { row }
     }
-}
-
-/// Scalar-only legacy path (preserved behavior for callers that don't
-/// have a value-fn registry). Thin wrapper over `eval_to_interp` that
-/// drops `Rows` to `Value::Null` with a warning.
-pub fn resolve_args<K: RowKey>(
-    args: &[Arg],
-    row: &HashMap<K, Value>,
-) -> Result<ResolvedArgs, ComputeError> {
-    resolve_args_with(args, &EvalEnv::of_row(row), &CORE_VALUE_FN_LOOKUP)
 }
 
 /// Resolve arguments with value-function dispatch.
@@ -886,25 +885,18 @@ pub fn is_template_arg(name: &str) -> bool {
     ) || name.starts_with("mode_")
 }
 
-/// Legacy scalar eval — preserves every call site that was already
-/// `eval_to_value`. Thin wrapper over `eval_to_interp` with the empty
-/// lookup: row-sets become `Value::Null` + a warning, since a scalar
-/// caller cannot meaningfully consume one.
-pub fn eval_to_value<K: RowKey>(
+/// Evaluate a value outside any render — a rule action's param, a filter
+/// predicate, a `states:` list: only the core value functions can be called.
+/// A render's arguments are evaluated with the lookup its `BuilderServices`
+/// hands out instead.
+pub fn eval_plain_value<K: RowKey>(
     expr: &RenderExpr,
     row: &HashMap<K, Value>,
 ) -> Result<Value, ComputeError> {
-    Ok(
-        match eval_to_interp(expr, &EvalEnv::of_row(row), &CORE_VALUE_FN_LOOKUP)? {
-            InterpValue::Value(v) => v,
-            InterpValue::Rows(_) => {
-                tracing::warn!(
-                    "eval_to_value: FunctionCall returned Rows in scalar context; dropping"
-                );
-                Value::Null
-            }
-        },
-    )
+    match eval_to_interp(expr, &EvalEnv::of_row(row), &PlainValueFns)? {
+        InterpValue::Value(v) => Ok(v),
+        InterpValue::Rows(_) => unreachable!("a core value function returned rows"),
+    }
 }
 
 /// Evaluate a `RenderExpr` into an `InterpValue`.
@@ -964,12 +956,7 @@ pub fn eval_to_interp<K: RowKey>(
                     panic!("`{name}` is a value fn by `call_kind`, but `invoke` does not know it")
                 })?
             }
-            None => {
-                return Err(ComputeError::UnknownFunction {
-                    name: name.clone(),
-                    call: expr.to_rhai(),
-                });
-            }
+            None => return Err(fns.unknown_function(name, expr.to_rhai())),
         },
         RenderExpr::Array { items } => Value(crate::Value::Array(
             items
@@ -1058,83 +1045,7 @@ mod tests {
     }
 
     use super::*;
-    use crate::render_dsl::parse_render_dsl;
     use crate::render_types::Arg;
-
-    /// The core value fns, and every other name a widget: the widget names
-    /// live in the frontend's builder registry, out of this crate's reach.
-    struct EveryOtherNameIsAWidget;
-    impl ValueFnLookup for EveryOtherNameIsAWidget {
-        fn call_kind(&self, name: &str) -> Option<CallKind> {
-            Some(
-                CORE_VALUE_FN_LOOKUP
-                    .call_kind(name)
-                    .unwrap_or(CallKind::Widget),
-            )
-        }
-
-        fn invoke(
-            &self,
-            name: &str,
-            args: &ResolvedArgs,
-        ) -> Option<Result<InterpValue, ComputeError>> {
-            CORE_VALUE_FN_LOOKUP.invoke(name, args)
-        }
-    }
-
-    /// First `target`-named call in `expr`, depth-first.
-    fn find_call<'a>(expr: &'a RenderExpr, target: &str) -> Option<&'a [Arg]> {
-        match expr {
-            RenderExpr::FunctionCall { name, args } if name == target => Some(args),
-            RenderExpr::FunctionCall { args, .. } => {
-                args.iter().find_map(|a| find_call(&a.value, target))
-            }
-            RenderExpr::Object { fields } => fields.values().find_map(|v| find_call(v, target)),
-            RenderExpr::Array { items } => items.iter().find_map(|v| find_call(v, target)),
-            _ => None,
-        }
-    }
-
-    /// The shipped left sidebar is the reference user of modifier-click:
-    /// cmd-click (macOS) / ctrl-click (Windows+Linux) open the page in a tab.
-    /// Parsing the real asset rather than a synthetic expression keeps this
-    /// pinned to the affordance users actually get.
-    #[test]
-    fn shipped_left_sidebar_resolves_modifier_click_action_templates() {
-        let org = std::fs::read_to_string(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../assets/default/index.org"
-        ))
-        .expect("read assets/default/index.org");
-        let source = org
-            .lines()
-            .find(|l| l.contains("item_template: selectable("))
-            .expect("left-sidebar render expression in assets/default/index.org");
-
-        let expr = parse_render_dsl(source).expect("parse the shipped left-sidebar expression");
-        let args =
-            find_call(&expr, "selectable").expect("selectable call in the shipped expression");
-        let resolved = resolve_args_with(
-            args,
-            &EvalEnv::of_row(&HashMap::<String, Value>::new()),
-            &EveryOtherNameIsAWidget,
-        )
-        .unwrap();
-
-        // `action` is allowlisted, so its presence proves the fixture parsed and
-        // reached `selectable` — a failure below is then specifically about the
-        // modifier-click names, not a malformed fixture.
-        assert!(
-            resolved.get_template("action").is_some(),
-            "primary `action` template missing — the fixture is malformed"
-        );
-        for key in ["cmd_action", "ctrl_action"] {
-            assert!(
-                resolved.get_template(key).is_some(),
-                "`{key}` did not resolve as a template, so the modifier-click action is dead"
-            );
-        }
-    }
 
     #[test]
     fn test_eval_binary_op_arithmetic() {
@@ -1274,38 +1185,38 @@ mod tests {
     }
 
     #[test]
-    fn test_eval_to_value_literal() {
+    fn test_eval_plain_value_literal() {
         let row = crate::StorageEntity::new();
         let expr = RenderExpr::Literal {
             value: Value::Integer(42),
         };
-        assert_eq!(eval_to_value(&expr, &row).unwrap(), Value::Integer(42));
+        assert_eq!(eval_plain_value(&expr, &row).unwrap(), Value::Integer(42));
     }
 
     #[test]
-    fn test_eval_to_value_column_ref() {
+    fn test_eval_plain_value_column_ref() {
         let mut row = crate::StorageEntity::new();
         row.insert("name".into(), Value::String("Alice".into()));
         let expr = RenderExpr::ColumnRef {
             name: "name".to_string(),
         };
         assert_eq!(
-            eval_to_value(&expr, &row).unwrap(),
+            eval_plain_value(&expr, &row).unwrap(),
             Value::String("Alice".into())
         );
     }
 
     #[test]
-    fn test_eval_to_value_missing_column() {
+    fn test_eval_plain_value_missing_column() {
         let row = crate::StorageEntity::new();
         let expr = RenderExpr::ColumnRef {
             name: "missing".to_string(),
         };
-        assert_eq!(eval_to_value(&expr, &row).unwrap(), Value::Null);
+        assert_eq!(eval_plain_value(&expr, &row).unwrap(), Value::Null);
     }
 
     #[test]
-    fn test_eval_to_value_binary_op() {
+    fn test_eval_plain_value_binary_op() {
         let row = crate::StorageEntity::new();
         let expr = RenderExpr::BinaryOp {
             op: BinaryOperator::Add,
@@ -1316,11 +1227,11 @@ mod tests {
                 value: Value::Integer(2),
             }),
         };
-        assert_eq!(eval_to_value(&expr, &row).unwrap(), Value::Integer(3));
+        assert_eq!(eval_plain_value(&expr, &row).unwrap(), Value::Integer(3));
     }
 
     #[test]
-    fn test_eval_to_value_concat() {
+    fn test_eval_plain_value_concat() {
         let row = crate::StorageEntity::new();
         let expr = RenderExpr::FunctionCall {
             name: "concat".to_string(),
@@ -1340,13 +1251,13 @@ mod tests {
             ],
         };
         assert_eq!(
-            eval_to_value(&expr, &row).unwrap(),
+            eval_plain_value(&expr, &row).unwrap(),
             Value::String("hello world".into())
         );
     }
 
     #[test]
-    fn test_eval_to_value_array() {
+    fn test_eval_plain_value_array() {
         let row = crate::StorageEntity::new();
         let expr = RenderExpr::Array {
             items: vec![
@@ -1359,7 +1270,7 @@ mod tests {
             ],
         };
         assert_eq!(
-            eval_to_value(&expr, &row).unwrap(),
+            eval_plain_value(&expr, &row).unwrap(),
             Value::Array(vec![Value::Integer(1), Value::Integer(2)])
         );
     }
@@ -1388,7 +1299,7 @@ mod tests {
             },
         ];
 
-        let resolved = resolve_args(&args, &row).unwrap();
+        let resolved = resolve_args_with(&args, &EvalEnv::of_row(&row), &PlainValueFns).unwrap();
         assert_eq!(resolved.positional.len(), 1);
         assert_eq!(resolved.positional[0], Value::String("val1".into()));
         assert_eq!(
@@ -1660,7 +1571,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_fn_is_an_error_naming_it() {
+    fn an_unknown_call_in_a_plain_value_is_refused_naming_it() {
         let row = crate::StorageEntity::new();
         let expr = RenderExpr::FunctionCall {
             name: "definitely_not_registered".to_string(),
@@ -1672,8 +1583,8 @@ mod tests {
             }],
         };
         assert_eq!(
-            eval_to_value(&expr, &row),
-            Err(ComputeError::UnknownFunction {
+            eval_plain_value(&expr, &row),
+            Err(ComputeError::NotAPlainValueFunction {
                 name: "definitely_not_registered".to_string(),
                 call: "definitely_not_registered(7)".to_string(),
             })
@@ -1682,10 +1593,6 @@ mod tests {
 
     #[test]
     fn core_concat_still_works() {
-        // concat is reachable through `CORE_VALUE_FN_LOOKUP`. The
-        // pre-Task-#12 inline shim is gone — this test guards the
-        // proper registration path so existing DSL `concat(...)` calls
-        // keep producing identical output.
         let row = crate::StorageEntity::new();
         let expr = RenderExpr::FunctionCall {
             name: "concat".to_string(),
@@ -1705,7 +1612,7 @@ mod tests {
             ],
         };
         assert_eq!(
-            eval_to_value(&expr, &row).unwrap(),
+            eval_plain_value(&expr, &row).unwrap(),
             Value::String("abcd".into())
         );
     }
@@ -1732,6 +1639,13 @@ mod tests {
                 _ => None,
             }
         }
+
+        fn unknown_function(&self, name: &str, call: String) -> ComputeError {
+            ComputeError::UnknownFunction {
+                name: name.to_string(),
+                call,
+            }
+        }
     }
 
     #[test]
@@ -1750,35 +1664,6 @@ mod tests {
             InterpValue::Value(v) => assert_eq!(v, Value::Integer(99)),
             InterpValue::Rows(_) => panic!("expected Value"),
         }
-    }
-
-    #[test]
-    fn resolve_args_with_empty_lookup_matches_legacy() {
-        // Verifies resolve_args() and resolve_args_with(…, &EMPTY) are
-        // observationally identical — the byte-compat promise.
-        let mut row = crate::StorageEntity::new();
-        row.insert("n".into(), Value::Integer(3));
-
-        let args = vec![
-            Arg {
-                name: None,
-                value: RenderExpr::ColumnRef { name: "n".into() },
-            },
-            Arg {
-                name: Some("title".into()),
-                value: RenderExpr::Literal {
-                    value: Value::String("hi".into()),
-                },
-            },
-        ];
-
-        let legacy = resolve_args(&args, &row).unwrap();
-        let with_empty =
-            resolve_args_with(&args, &EvalEnv::of_row(&row), &CORE_VALUE_FN_LOOKUP).unwrap();
-
-        assert_eq!(legacy.positional, with_empty.positional);
-        assert_eq!(legacy.named, with_empty.named);
-        assert!(legacy.rows.is_empty() && with_empty.rows.is_empty());
     }
 }
 
@@ -1913,7 +1798,7 @@ mod mutation_gap_tests {
     }
 
     #[test]
-    fn nested_overflow_reaches_the_caller_of_eval_to_value() {
+    fn nested_overflow_reaches_the_caller_of_eval_plain_value() {
         let expr = RenderExpr::Array {
             items: vec![RenderExpr::BinaryOp {
                 op: BinaryOperator::Mul,
@@ -1925,7 +1810,7 @@ mod mutation_gap_tests {
                 }),
             }],
         };
-        let err = eval_to_value(&expr, &HashMap::<String, Value>::new())
+        let err = eval_plain_value(&expr, &HashMap::<String, Value>::new())
             .expect_err("a nested non-finite result must not become Null");
         assert!(err.to_string().contains("non-finite float inf"), "{err}");
     }
@@ -2278,7 +2163,7 @@ mod mutation_gap_tests {
     #[should_panic(expected = "not a")]
     fn get_template_for_an_unclassified_name_panics() {
         let row: HashMap<String, Value> = HashMap::new();
-        let args = resolve_args(&[], &row).unwrap();
+        let args = resolve_args_with(&[], &EvalEnv::of_row(&row), &PlainValueFns).unwrap();
         let _ = args.get_template("nope");
     }
 

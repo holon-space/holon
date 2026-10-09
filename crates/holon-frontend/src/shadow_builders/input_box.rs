@@ -1,13 +1,11 @@
 use holon_api::EntityName;
 use holon_api::input_types::Key;
 use holon_api::input_types::KeyChord;
-use holon_api::render_eval::resolve_args;
 use holon_api::render_types::Arg;
 use holon_api::render_types::OperationDescriptor;
 use holon_api::render_types::OperationWiring;
 use holon_api::render_types::RenderExpr;
 use holon_api::render_types::Trigger;
-use holon_api::widget_spec::DataRow;
 
 use super::prelude::*;
 
@@ -18,7 +16,7 @@ use super::prelude::*;
 fn submit_wiring(
     name: &str,
     args: &[Arg],
-    row: &DataRow,
+    ba: &BA<'_>,
     modified_param: String,
     id_param: String,
 ) -> Result<OperationWiring, holon_api::computation::ComputeError> {
@@ -26,7 +24,7 @@ fn submit_wiring(
         Some((e, o)) => (e.to_string(), o.to_string()),
         None => ("block".to_string(), name.to_string()),
     };
-    let resolved = resolve_args(args, row)?;
+    let resolved = ba.services.resolve_args(args, ba.ctx)?;
     let mut bound_params: std::collections::HashMap<String, Value> =
         std::collections::HashMap::new();
     // The row's `id` names the entity this box composes for. Cache tables store
@@ -34,7 +32,7 @@ fn submit_wiring(
     // bare id, so the URI is unwrapped here rather than at every declaration
     // site. A row that names no entity binds nothing — the box composes for an
     // entity or for none at all.
-    if let holon_api::RowId::Entity(target) = holon_api::row_id_of(row) {
+    if let holon_api::RowId::Entity(target) = holon_api::row_id_of(ba.ctx.row()) {
         bound_params.insert(id_param, Value::String(target.id().to_string()));
     }
     for (k, v) in &resolved.named {
@@ -90,7 +88,7 @@ holon_macros::widget_builder! {
                 "input_box requires an `action:` operation template".to_string(),
             );
         };
-        let operations = match submit_wiring(name, args, ba.ctx.row(), text_param, id_param) {
+        let operations = match submit_wiring(name, args, &ba, text_param, id_param) {
             Ok(wiring) => vec![wiring],
             Err(e) => return ViewModel::error("input_box", e.to_string()),
         };

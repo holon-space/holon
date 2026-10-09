@@ -82,6 +82,13 @@ impl BuilderServices for SlotCapableServices {
         self.interpreter.interpret(expr, ctx, self)
     }
 
+    fn value_fn_lookup<'a>(
+        &'a self,
+        ctx: &'a RenderContext,
+    ) -> Box<dyn holon_api::render_eval::ValueFnLookup + 'a> {
+        self.interpreter.value_fn_lookup(self, ctx)
+    }
+
     /// All state here is the shared interpreter and a default classifier, so a
     /// handle is a second instance over the same interpreter.
     fn clone_arc(&self) -> Arc<dyn BuilderServices> {
