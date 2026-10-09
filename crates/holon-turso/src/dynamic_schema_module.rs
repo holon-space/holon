@@ -59,12 +59,14 @@ impl SchemaModule for DynamicSchemaModule {
             self.type_def.name,
             crate::turso::redact_sql_for_logs(&create_sql)
         );
-        db_handle.execute_ddl(&create_sql).await.map_err(|e| {
-            holon_core::storage::StorageError::DatabaseError(format!(
-                "Failed to create table '{}': {e}",
-                self.type_def.name
-            ))
-        })?;
+        crate::table_shape::ensure_statement(db_handle, &create_sql)
+            .await
+            .map_err(|e| {
+                holon_core::storage::StorageError::DatabaseError(format!(
+                    "Failed to create table '{}': {e}",
+                    self.type_def.name
+                ))
+            })?;
 
         for index_sql in self.type_def.to_index_sql() {
             db_handle.execute_ddl(&index_sql).await.map_err(|e| {

@@ -494,6 +494,40 @@ impl ConditionKind {
                 "Holon cannot show an internal error while it runs: {reason}. The next start \
                  shows the last one."
             )),
+
+            Self::TypeTableRefused { table, diff, rows } => ConditionDetail::with_body(
+                format!(
+                    "{subject} is not available: its stored table {table} ({rows} rows) does \
+                     not match the declaration, and no row was changed."
+                ),
+                vec![
+                    diff.clone(),
+                    format!("Remedy: drop this table, {rows} rows lost."),
+                ],
+            ),
+
+            Self::TypeTableColumnsAdded {
+                table,
+                added,
+                undeclared,
+                rows,
+            } => ConditionDetail::with_body(
+                format!(
+                    "{table} of {subject} gained the declared columns {}; its {rows} rows are kept.",
+                    added.join(", ")
+                ),
+                undeclared
+                    .iter()
+                    .map(|c| format!("kept undeclared column {c}"))
+                    .collect(),
+            ),
+
+            Self::SchemaModuleFailed { error } => ConditionDetail::with_body(
+                format!(
+                    "the {subject} tables could not be set up; what reads or writes them fails."
+                ),
+                vec![error.clone()],
+            ),
         }
     }
 }

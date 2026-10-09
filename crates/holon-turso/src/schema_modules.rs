@@ -29,6 +29,8 @@ use crate::matview_manager::reconcile_named_view;
 use crate::schema_module::EdgeFieldDescriptor;
 use crate::schema_module::SchemaModule;
 use crate::sql_utils::sql_statements;
+use crate::table_shape::ensure_schema_sql;
+use crate::table_shape::ensure_statement;
 use crate::turso::DbHandle;
 
 /// The canonical `block_raw` DDL (table + index).
@@ -39,85 +41,6 @@ use crate::turso::DbHandle;
 /// time, with a misleading "incompatible DBSP version" parse error.
 pub fn block_raw_schema_sql() -> &'static str {
     include_str!("../sql/schema/blocks.sql")
-}
-
-/// Add `property_kinds` to a `block_raw` created before NV-1.
-///
-/// `CREATE TABLE IF NOT EXISTS` leaves an existing table at its old shape, and
-/// the `block` matview's synthesized SELECT names every declared column — so
-/// without this the first query against a pre-NV-1 database fails on a missing
-/// column. The added column is NULL for every existing row, which is the
-/// truthful reading of those rows: nothing was ever stored at a kind JSON
-/// cannot show.
-async fn add_missing_property_kinds_column(db_handle: &DbHandle) -> Result<()> {
-    let already_declared = db_handle
-        .query_positional(
-            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'block_raw'",
-            vec![],
-        )
-        .await?
-        .first()
-        .and_then(|r| r.get("sql"))
-        .and_then(|v| v.as_string().map(str::to_string))
-        .ok_or_else(|| {
-            StorageError::SchemaError(
-                "block_raw is missing from sqlite_master right after its CREATE TABLE".to_string(),
-            )
-        })?
-        .contains(holon_api::schema::block::PROPERTY_KINDS);
-
-    if already_declared {
-        return Ok(());
-    }
-
-    tracing::warn!(
-        "[CoreSchemaModule] MIGRATING `block_raw`: it predates the `property_kinds` column, so \
-         DateTime and Json property values stored before now read back at their JSON kind. \
-         Adding the column; existing rows keep the kinds JSON shows."
-    );
-    db_handle
-        .execute_ddl("ALTER TABLE block_raw ADD COLUMN property_kinds TEXT")
-        .await?;
-    Ok(())
-}
-
-/// Add `read_only_blocks` to a `file` table created before read-only formats
-/// carried their block membership.
-///
-/// `CREATE TABLE IF NOT EXISTS` leaves an existing table at its old shape, so
-/// without this the controller's persist UPDATE fails on a missing column and
-/// every read-only file's membership is lost at the next boot. NULL for every
-/// existing row is truthful: the next ingest of each file writes the set it
-/// declares.
-async fn add_missing_read_only_blocks_column(db_handle: &DbHandle) -> Result<()> {
-    let already_declared = db_handle
-        .query_positional(
-            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'file'",
-            vec![],
-        )
-        .await?
-        .first()
-        .and_then(|r| r.get("sql"))
-        .and_then(|v| v.as_string().map(str::to_string))
-        .ok_or_else(|| {
-            StorageError::SchemaError(
-                "file is missing from sqlite_master right after its CREATE TABLE".to_string(),
-            )
-        })?
-        .contains("read_only_blocks");
-
-    if already_declared {
-        return Ok(());
-    }
-
-    tracing::warn!(
-        "[CoreSchemaModule] MIGRATING `file`: it predates the `read_only_blocks` column. Adding \
-         it; each file's read-only membership is written by its next ingest."
-    );
-    db_handle
-        .execute_ddl("ALTER TABLE file ADD COLUMN read_only_blocks TEXT")
-        .await?;
-    Ok(())
 }
 
 /// Core schema module providing the fundamental tables: block_raw, files, and
@@ -149,12 +72,8 @@ impl SchemaModule for CoreSchemaModule {
     async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<()> {
         tracing::info!("[CoreSchemaModule] Creating core tables");
 
-        for stmt in sql_statements(block_raw_schema_sql()) {
-            db_handle.execute_ddl(stmt).await?;
-        }
+        ensure_schema_sql(db_handle, block_raw_schema_sql()).await?;
         tracing::debug!("[CoreSchemaModule] block_raw table + index created");
-
-        add_missing_property_kinds_column(db_handle).await?;
 
         // Seed the self-parented `sentinel:no_parent` row so root blocks
         // (parent_id = 'sentinel:no_parent') satisfy the block_raw parent FK.
@@ -173,19 +92,14 @@ impl SchemaModule for CoreSchemaModule {
             .await?;
         tracing::debug!("[CoreSchemaModule] sentinel:no_parent row seeded");
 
-        for stmt in sql_statements(include_str!("../sql/schema/files.sql")) {
-            db_handle.execute_ddl(stmt).await?;
-        }
-        add_missing_read_only_blocks_column(db_handle).await?;
+        ensure_schema_sql(db_handle, include_str!("../sql/schema/files.sql")).await?;
         tracing::debug!("[CoreSchemaModule] files table + indexes created");
 
         // `clock` relation (ADR 0024 P5, time-as-data). Seed a deterministic
         // placeholder row so the boot guard always finds a `day` grain; the
         // `ClockScheduler`'s first tick replaces it with the real local date via
         // a CDC-emitting UPDATE before any temporal-guard matview is created.
-        for stmt in sql_statements(include_str!("../sql/schema/clock.sql")) {
-            db_handle.execute_ddl(stmt).await?;
-        }
+        ensure_schema_sql(db_handle, include_str!("../sql/schema/clock.sql")).await?;
         db_handle
             .execute(
                 "INSERT OR IGNORE INTO clock (grain, today, epoch_day, updated_at) VALUES ('day', \
@@ -195,9 +109,11 @@ impl SchemaModule for CoreSchemaModule {
             .await?;
         tracing::debug!("[CoreSchemaModule] clock table created + day row seeded");
 
-        for stmt in sql_statements(include_str!("../sql/schema/integration_cache.sql")) {
-            db_handle.execute_ddl(stmt).await?;
-        }
+        ensure_schema_sql(
+            db_handle,
+            include_str!("../sql/schema/integration_cache.sql"),
+        )
+        .await?;
 
         tracing::info!("[CoreSchemaModule] Core tables created successfully");
         Ok(())
@@ -438,24 +354,24 @@ impl SchemaModule for BlockSchemaModule {
         )
         .await?;
 
-        for stmt in sql_statements(include_str!("../sql/schema/block_requires.sql")) {
-            db_handle.execute_ddl(stmt).await?;
-        }
+        ensure_schema_sql(db_handle, include_str!("../sql/schema/block_requires.sql")).await?;
         tracing::debug!("[BlockSchemaModule] block_requires table created");
 
-        for stmt in sql_statements(include_str!("../sql/schema/block_tags.sql")) {
-            db_handle.execute_ddl(stmt).await?;
-        }
+        ensure_schema_sql(db_handle, include_str!("../sql/schema/block_tags.sql")).await?;
         tracing::debug!("[BlockSchemaModule] block_tags table created");
 
-        for stmt in sql_statements(include_str!("../sql/schema/advice_suppressed.sql")) {
-            db_handle.execute_ddl(stmt).await?;
-        }
+        ensure_schema_sql(
+            db_handle,
+            include_str!("../sql/schema/advice_suppressed.sql"),
+        )
+        .await?;
         tracing::debug!("[BlockSchemaModule] advice_suppressed table created");
 
-        for stmt in sql_statements(include_str!("../sql/schema/block_contributes_to.sql")) {
-            db_handle.execute_ddl(stmt).await?;
-        }
+        ensure_schema_sql(
+            db_handle,
+            include_str!("../sql/schema/block_contributes_to.sql"),
+        )
+        .await?;
         tracing::debug!("[BlockSchemaModule] block_contributes_to table created");
 
         tracing::info!("[BlockSchemaModule] Junction tables ready");
@@ -843,7 +759,7 @@ impl SchemaModule for NavigationSchemaModule {
         tracing::info!("[NavigationSchemaModule] Creating navigation tables");
 
         for stmt in sql_statements(include_str!("../sql/schema/navigation.sql")) {
-            match db_handle.execute_ddl(stmt).await {
+            match ensure_statement(db_handle, stmt).await {
                 Ok(()) => {}
                 Err(e) if e.to_string().contains("already exists") => {
                     tracing::debug!(
@@ -974,9 +890,7 @@ impl SchemaModule for SyncStateSchemaModule {
 
     async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<()> {
         tracing::info!("[SyncStateSchemaModule] Creating sync_states table");
-        for stmt in sql_statements(include_str!("../sql/schema/sync_states.sql")) {
-            db_handle.execute_ddl(stmt).await?;
-        }
+        ensure_schema_sql(db_handle, include_str!("../sql/schema/sync_states.sql")).await?;
         tracing::info!("[SyncStateSchemaModule] sync_states table created");
         Ok(())
     }
@@ -1003,73 +917,14 @@ impl SchemaModule for IntegrationStateSchemaModule {
 
     async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<()> {
         tracing::info!("[IntegrationStateSchemaModule] Creating integration_state table");
-        for stmt in sql_statements(include_str!("../sql/schema/integration_state.sql")) {
-            db_handle.execute_ddl(stmt).await?;
-        }
-        add_missing_integration_state_columns(db_handle).await?;
+        ensure_schema_sql(
+            db_handle,
+            include_str!("../sql/schema/integration_state.sql"),
+        )
+        .await?;
         tracing::info!("[IntegrationStateSchemaModule] integration_state table created");
         Ok(())
     }
-}
-
-/// Bring a database created before the presentation and disclosure axes
-/// existed up to the current shape.
-///
-/// `CREATE TABLE IF NOT EXISTS` leaves an existing table alone, so a vault that
-/// booted an earlier build keeps a six-column `integration_state` and every
-/// projector write fails on the unknown column. The columns are purely
-/// additive and the projector rewrites every row from the sidecars on the next
-/// boot, so appending them is the whole migration — the `DEFAULT ''` holds only
-/// until that write lands.
-///
-/// A no-op on a current-shape database (one `PRAGMA table_info` read).
-async fn add_missing_integration_state_columns(db_handle: &DbHandle) -> Result<()> {
-    // `PRAGMA table_info` rather than the stored DDL: `ALTER TABLE` rewrites
-    // `sqlite_master.sql` in its own formatting, so a DDL-text probe would stop
-    // recognising the column it had just added and try again on the next boot.
-    let rows = db_handle
-        .query_positional("PRAGMA table_info(integration_state)", vec![])
-        .await?;
-    if rows.is_empty() {
-        return Err(StorageError::SchemaError(
-            "PRAGMA table_info(integration_state) reports no columns immediately after the \
-             table's CREATE — the DDL above did not take effect"
-                .to_string(),
-        ));
-    }
-    let present: Vec<String> = rows
-        .iter()
-        .map(|row| match row.get("name") {
-            Some(holon_api::Value::String(s)) => Ok(s.clone()),
-            other => Err(StorageError::SchemaError(format!(
-                "PRAGMA table_info(integration_state) returned a row whose `name` is {other:?}, \
-                 not TEXT"
-            ))),
-        })
-        .collect::<Result<_>>()?;
-
-    for (column, decl) in [
-        ("display_name", "TEXT NOT NULL DEFAULT ''"),
-        ("icon", "TEXT NOT NULL DEFAULT ''"),
-        ("default_view", "TEXT"),
-        ("origin", "TEXT NOT NULL DEFAULT ''"),
-        ("hosts", "TEXT NOT NULL DEFAULT ''"),
-    ] {
-        if present.iter().any(|c| c == column) {
-            continue;
-        }
-        tracing::info!(
-            column,
-            "[IntegrationStateSchemaModule] adding a missing presentation column to \
-             integration_state"
-        );
-        db_handle
-            .execute_ddl(&format!(
-                "ALTER TABLE integration_state ADD COLUMN {column} {decl}"
-            ))
-            .await?;
-    }
-    Ok(())
 }
 
 /// Operations schema module for undo/redo persistence.
@@ -1093,9 +948,7 @@ impl SchemaModule for OperationsSchemaModule {
 
     async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<()> {
         tracing::info!("[OperationsSchemaModule] Creating operation table");
-        for stmt in sql_statements(include_str!("../sql/schema/operations.sql")) {
-            db_handle.execute_ddl(stmt).await?;
-        }
+        ensure_schema_sql(db_handle, include_str!("../sql/schema/operations.sql")).await?;
         tracing::info!("[OperationsSchemaModule] operation table created");
         Ok(())
     }
@@ -1155,9 +1008,7 @@ impl SchemaModule for HistorySchemaModule {
                 db_handle.execute_ddl("DROP TABLE block_history").await?;
             }
         }
-        for stmt in sql_statements(include_str!("../sql/schema/history.sql")) {
-            db_handle.execute_ddl(stmt).await?;
-        }
+        ensure_schema_sql(db_handle, include_str!("../sql/schema/history.sql")).await?;
         tracing::info!("[HistorySchemaModule] block_history table ready");
         Ok(())
     }
@@ -1197,16 +1048,16 @@ impl SchemaModule for BlockDerivedSchemaModule {
     }
 
     async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<()> {
-        db_handle
-            .execute_ddl(
-                "CREATE TABLE IF NOT EXISTS block_derived (\
-                 block_id TEXT NOT NULL, \
-                 field_name TEXT NOT NULL, \
-                 value_json TEXT NOT NULL, \
-                 provenance TEXT NOT NULL, \
-                 PRIMARY KEY (block_id, field_name))",
-            )
-            .await?;
+        ensure_statement(
+            db_handle,
+            "CREATE TABLE IF NOT EXISTS block_derived (\
+             block_id TEXT NOT NULL, \
+             field_name TEXT NOT NULL, \
+             value_json TEXT NOT NULL, \
+             provenance TEXT NOT NULL, \
+             PRIMARY KEY (block_id, field_name))",
+        )
+        .await?;
         tracing::info!("[BlockDerivedSchemaModule] block_derived sidecar table ready");
         Ok(())
     }
@@ -1371,18 +1222,14 @@ impl SchemaModule for LinkSchemaModule {
         db_handle
             .execute_ddl("DROP TABLE IF EXISTS block_link")
             .await?;
-        for stmt in sql_statements(include_str!("../sql/schema/block_links.sql")) {
-            db_handle.execute_ddl(stmt).await?;
-        }
+        ensure_schema_sql(db_handle, include_str!("../sql/schema/block_links.sql")).await?;
         // Merge redirects live here rather than in their own module: they are
         // the other half of id resolution and are re-derived at the same SQL
         // write boundary (from the survivor's `merged_from` property, as
         // `block_links` is from `marks`). They are read on the block-lookup MISS
         // path, NOT by the `resolved_id` rewrite — `merge_blocks` re-points
         // inbound links eagerly, so a resolved link never needs the redirect.
-        for stmt in sql_statements(include_str!("../sql/schema/block_redirects.sql")) {
-            db_handle.execute_ddl(stmt).await?;
-        }
+        ensure_schema_sql(db_handle, include_str!("../sql/schema/block_redirects.sql")).await?;
         reconcile_named_view(db_handle, "backlinks", &backlinks_view_select())
             .await
             .map_err(|e| StorageError::DatabaseError(e.to_string()))?;
@@ -1442,9 +1289,7 @@ impl SchemaModule for IdentitySchemaModule {
 
     async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<()> {
         tracing::info!("[IdentitySchemaModule] Creating identity tables");
-        for stmt in sql_statements(include_str!("../sql/schema/identity.sql")) {
-            db_handle.execute_ddl(stmt).await?;
-        }
+        ensure_schema_sql(db_handle, include_str!("../sql/schema/identity.sql")).await?;
         tracing::info!("[IdentitySchemaModule] identity tables created");
         Ok(())
     }

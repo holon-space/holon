@@ -546,6 +546,34 @@ pub enum ConditionKind {
     ///
     /// All-clear: none in this process.
     PanicConditionsUnavailable { reason: String },
+    /// The stored table of type `subject` differs from the type's declaration
+    /// in a way adding columns does not fix (`diff`), so this session does not
+    /// serve the type: its writes fail naming this condition and its `rows`
+    /// stay untouched.
+    ///
+    /// All-clear: [`RemedyApplied`](crate::condition_profile::AllClear) — the
+    /// user drops the table and its rows.
+    TypeTableRefused {
+        table: String,
+        diff: String,
+        rows: u64,
+    },
+    /// The stored table of type `subject` gained the `added` columns its
+    /// declaration names; its `rows` read them as NULL or their default.
+    /// `undeclared` stored columns are kept as they are.
+    ///
+    /// All-clear: none in this process.
+    TypeTableColumnsAdded {
+        table: String,
+        added: Vec<String>,
+        undeclared: Vec<String>,
+        rows: u64,
+    },
+    /// Schema module `subject` could not set up its tables or views
+    /// (`error`); whatever reads or writes them fails.
+    ///
+    /// All-clear: none in this process.
+    SchemaModuleFailed { error: String },
 }
 
 /// Subject of the device-wide conditions on this bus, which have no share to
@@ -627,6 +655,9 @@ impl ConditionKind {
     pub const PANIC_RECORD_UNWRITABLE: &'static str = "panic-record-unwritable";
     pub const PANIC_RECORD_UNREADABLE: &'static str = "panic-record-unreadable";
     pub const PANIC_CONDITIONS_UNAVAILABLE: &'static str = "panic-conditions-unavailable";
+    pub const TYPE_TABLE_REFUSED: &'static str = "type-table-refused";
+    pub const TYPE_TABLE_COLUMNS_ADDED: &'static str = "type-table-columns-added";
+    pub const SCHEMA_MODULE_FAILED: &'static str = "schema-module-failed";
 
     /// The condition's stable identity, paired with the subject to form a
     /// [`ConditionKey`]. Total: every degradation is a sticky
@@ -693,6 +724,9 @@ impl ConditionKind {
             Self::PanicRecordUnwritable { .. } => Self::PANIC_RECORD_UNWRITABLE,
             Self::PanicRecordUnreadable { .. } => Self::PANIC_RECORD_UNREADABLE,
             Self::PanicConditionsUnavailable { .. } => Self::PANIC_CONDITIONS_UNAVAILABLE,
+            Self::TypeTableRefused { .. } => Self::TYPE_TABLE_REFUSED,
+            Self::TypeTableColumnsAdded { .. } => Self::TYPE_TABLE_COLUMNS_ADDED,
+            Self::SchemaModuleFailed { .. } => Self::SCHEMA_MODULE_FAILED,
         }
     }
 }

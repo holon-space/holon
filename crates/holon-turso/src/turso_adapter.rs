@@ -26,6 +26,10 @@ use holon_core::storage::StorageError;
 use super::dynamic_schema_module::DynamicSchemaModule;
 use super::matview_manager::reconcile_named_view;
 use super::schema_module::SchemaModule;
+use super::table_shape::ShapeRefusal;
+use super::table_shape::TableAdapted;
+use super::table_shape::TableReconcile;
+use super::table_shape::reconcile_table;
 use super::turso::DbHandle;
 
 /// Suffix separating a type's raw write table from its read matview. Writes
@@ -202,6 +206,17 @@ const SQL_KEYWORDS: &[&str] = &[
     "without",
 ];
 
+/// What [`TursoAdapter::reconcile`] made of a type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TypeRegistration {
+    Registered {
+        artifacts: TursoArtifacts,
+        /// The stored table gained declared columns it lacked.
+        adapted: Option<TableAdapted>,
+    },
+    Refused(ShapeRefusal),
+}
+
 /// Whether an identifier collides with a SQL keyword (case-insensitively).
 ///
 /// Public so generators can AVOID emitting one: [`TursoAdapter::register`]
@@ -316,17 +331,45 @@ impl TursoAdapter {
         ]
     }
 
-    /// Create a type's whole Turso footprint and report what was created.
-    ///
-    /// Each module's resources are marked available before the next runs, so
-    /// the matview's `requires(<name>_raw)` DDL gate is satisfied in-order.
+    /// Create a type's whole Turso footprint and report what was created; a
+    /// stored table the declaration refuses is an error.
     pub async fn register(
         type_def: &TypeDefinition,
         db_handle: &DbHandle,
     ) -> Result<TursoArtifacts> {
+        match Self::reconcile(type_def, db_handle).await? {
+            TypeRegistration::Registered { artifacts, .. } => Ok(artifacts),
+            TypeRegistration::Refused(refusal) => Err(StorageError::SchemaError(format!(
+                "type '{}': {refusal}",
+                type_def.name
+            ))),
+        }
+    }
+
+    /// Create a type's whole Turso footprint over whatever an earlier boot
+    /// stored, or refuse the type when its stored table cannot take the
+    /// declared shape without losing rows. A refused type gets no read
+    /// matview and no index from this call; its stored rows stay.
+    ///
+    /// Each module's resources are marked available before the next runs, so
+    /// the matview's `requires(<name>_raw)` DDL gate is satisfied in-order.
+    pub async fn reconcile(
+        type_def: &TypeDefinition,
+        db_handle: &DbHandle,
+    ) -> Result<TypeRegistration> {
         Self::reject_keyword_identifiers(type_def)?;
         Self::reject_non_lowercase_name(type_def)?;
         Self::reject_non_identifier_name(type_def)?;
+        let adapted = match reconcile_table(
+            db_handle,
+            &Self::raw_type_def(type_def).to_create_table_sql(),
+        )
+        .await?
+        {
+            TableReconcile::Refused(refusal) => return Ok(TypeRegistration::Refused(refusal)),
+            TableReconcile::Adapted(adapted) => Some(adapted),
+            TableReconcile::Unchanged => None,
+        };
         for module in Self::schema_modules(type_def) {
             module.ensure_schema(db_handle).await.map_err(|e| {
                 StorageError::DatabaseError(format!(
@@ -355,14 +398,17 @@ impl TursoAdapter {
         }
 
         let fragment = Self::prql_stdlib_fragment(type_def);
-        Ok(TursoArtifacts {
-            raw_table: Self::raw_table_name(type_def),
-            matview: Self::matview_name(type_def),
-            prql_stdlib_entries: if fragment.is_empty() {
-                Vec::new()
-            } else {
-                vec![fragment]
+        Ok(TypeRegistration::Registered {
+            artifacts: TursoArtifacts {
+                raw_table: Self::raw_table_name(type_def),
+                matview: Self::matview_name(type_def),
+                prql_stdlib_entries: if fragment.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![fragment]
+                },
             },
+            adapted,
         })
     }
 

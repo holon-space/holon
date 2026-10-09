@@ -33,6 +33,7 @@ pub mod schema_modules;
 pub mod sql_parser;
 pub mod sql_utils;
 pub mod table_classes;
+pub mod table_shape;
 pub mod turso;
 pub mod turso_actor_stats;
 pub mod turso_adapter;

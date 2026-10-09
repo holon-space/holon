@@ -67,18 +67,22 @@ pub enum ConditionPlacement {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OpId {
     PairRetryReimport,
+    /// Takes the refused type's name as `type`.
+    DropRefusedTypeTable,
 }
 
 impl OpId {
     pub const fn entity(self) -> &'static str {
         match self {
             Self::PairRetryReimport => "device",
+            Self::DropRefusedTypeTable => "type_table",
         }
     }
 
     pub const fn op(self) -> &'static str {
         match self {
             Self::PairRetryReimport => "pair_retry_reimport",
+            Self::DropRefusedTypeTable => "drop_refused_table",
         }
     }
 }
@@ -795,6 +799,33 @@ const PANIC_CONDITIONS_UNAVAILABLE: ConditionProfile = ConditionProfile::new(
     &[],
 );
 
+const TYPE_TABLE_REFUSED: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Warning,
+    "A type's stored table does not match its declaration",
+    icons::BLOCKED,
+    ConditionPlacement::Banner,
+    AllClear::RemedyApplied,
+    &[RemedySlot::Retry(OpId::DropRefusedTypeTable)],
+);
+
+const TYPE_TABLE_COLUMNS_ADDED: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Info,
+    "A type's stored table gained new columns",
+    icons::INFO,
+    ConditionPlacement::Toast,
+    AllClear::UntilRestart,
+    &[],
+);
+
+const SCHEMA_MODULE_FAILED: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Error,
+    "Part of the database could not be set up",
+    icons::BLOCKED,
+    ConditionPlacement::Banner,
+    AllClear::UntilRestart,
+    &[],
+);
+
 impl ConditionKind {
     /// This kind's profile. Total, like
     /// [`condition_kind`](ConditionKind::condition_kind): a new variant cannot
@@ -857,6 +888,9 @@ impl ConditionKind {
             Self::PanicRecordUnwritable { .. } => PANIC_RECORD_UNWRITABLE,
             Self::PanicRecordUnreadable { .. } => PANIC_RECORD_UNREADABLE,
             Self::PanicConditionsUnavailable { .. } => PANIC_CONDITIONS_UNAVAILABLE,
+            Self::TypeTableRefused { .. } => TYPE_TABLE_REFUSED,
+            Self::TypeTableColumnsAdded { .. } => TYPE_TABLE_COLUMNS_ADDED,
+            Self::SchemaModuleFailed { .. } => SCHEMA_MODULE_FAILED,
         }
     }
 }
