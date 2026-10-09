@@ -209,6 +209,8 @@ const MERGE_BLOCKS_OP: &str = "merge_blocks";
 /// creates go to whichever provider owns `block` creation in this wiring.
 const CREATE_PAGE_FROM_LINK_OP: &str = "create_page_from_link";
 
+const PAGE_RENAME_PLAN_OP: &str = "page_rename_plan";
+
 /// Advance a block one step around its owning document's task-state ring
 /// (Cmd+Enter). Intercepted at the engine because the ring is a function of the
 /// DOCUMENT's declared `#+TODO:` vocabulary, and only the engine holds the
@@ -1730,6 +1732,131 @@ impl DispatchingOperationEngine {
         }
 
         Ok(Some(Value::String(plan.leaf_id)))
+    }
+
+    /// The links a `set_field(content)` must rewrite, or `None` when the write
+    /// retitles no page that a name link resolves to. A wiring without the
+    /// `block_links` junction has no links to rewrite.
+    async fn page_rename_plan(
+        &self,
+        params: &StorageEntity,
+    ) -> Result<Option<crate::core::page_rename_plan::PageRenamePlan>> {
+        use crate::core::page_rename_plan::PageRenamePlan;
+
+        let Some(content) = params.get("value").and_then(|v| v.as_string()) else {
+            return Ok(None);
+        };
+        if !self
+            .dispatcher
+            .catalog()
+            .iter()
+            .any(|d| d.entity_name.as_str() == "block" && d.name == PAGE_RENAME_PLAN_OP)
+        {
+            return Ok(None);
+        }
+        let id = params
+            .get("id")
+            .and_then(|v| v.as_string())
+            .ok_or_else(|| anyhow::anyhow!("block set_field(content): missing 'id' parameter"))?;
+        let mut query = StorageEntity::new();
+        query.insert("id".into(), Value::String(id.to_string()));
+        query.insert("content".into(), Value::String(content.to_string()));
+        let result = self
+            .dispatcher
+            .execute_operation(&EntityName::new("block"), PAGE_RENAME_PLAN_OP, query)
+            .await
+            .map_err(|e| anyhow::anyhow!("renaming page {id}: planning the link rewrite: {e}"))?;
+        match result.response {
+            None | Some(Value::Null) => Ok(None),
+            Some(plan) => {
+                let plan = PageRenamePlan::from_value(&plan)
+                    .map_err(|e| anyhow::anyhow!("renaming page {id}: {e}"))?;
+                Ok((!plan.backlinks.is_empty()).then_some(plan))
+            }
+        }
+    }
+
+    /// Retitle a page and rewrite every name link to it
+    /// (D-link-follows-rename): the title write and one rich `content`
+    /// write per linking block, as ONE undo step.
+    async fn run_page_rename(
+        &self,
+        params: &StorageEntity,
+        plan: crate::core::page_rename_plan::PageRenamePlan,
+        origin: &OpOrigin,
+    ) -> Result<Option<Value>> {
+        use crate::core::page_rename_plan::rewrite_name_links;
+
+        let op = "page rename";
+        let content = params
+            .get("value")
+            .and_then(|v| v.as_string())
+            .expect("page_rename_plan only plans String content writes")
+            .to_string();
+        let new_title = holon_api::block::title_of(&content).trim().to_string();
+        let reader = self.reader.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "{op} needs a live-state reader to read the linking blocks; this engine was \
+                 built without one"
+            )
+        })?;
+        let mut rewrites: Vec<StorageEntity> = Vec::new();
+        for backlink in &plan.backlinks {
+            // ALLOW(entity_uri_from_raw): ids come from the `block_links` junction.
+            let uri = holon_api::EntityUri::from_raw(&backlink.source);
+            let text = match reader.field_value(&uri, "content").await? {
+                Some(Value::String(s)) => s,
+                other => bail!("{op}: linking block {uri} has content {other:?}"),
+            };
+            let marks = match reader.field_value(&uri, "marks").await? {
+                Some(Value::String(s) | Value::Json(s)) => holon_api::marks_from_json(&s)
+                    .map_err(|e| anyhow::anyhow!("{op}: marks of {uri} are corrupt: {e}"))?,
+                other => bail!("{op}: linking block {uri} has marks {other:?}"),
+            };
+            let (text, marks) = rewrite_name_links(&text, &marks, &backlink.targets, &new_title);
+            let mut value = std::collections::HashMap::new();
+            value.insert("text".to_string(), Value::String(text));
+            value.insert(
+                "marks".to_string(),
+                Value::String(holon_api::marks_to_json(&marks)),
+            );
+            let mut p = StorageEntity::new();
+            p.insert("id".into(), Value::String(backlink.source.clone()));
+            p.insert("field".into(), Value::String("content".into()));
+            p.insert("value".into(), Value::Object(value));
+            rewrites.push(p);
+        }
+
+        let mut forwards = Vec::new();
+        let mut inverses = Vec::new();
+        let mut changes = Vec::new();
+        for p in std::iter::once(params.clone()).chain(rewrites) {
+            let (forward, inverse, deltas) = self
+                .dispatch_task_keyword_constituent(op, p, origin)
+                .await?;
+            forwards.push(forward);
+            inverses.push(inverse);
+            changes.extend(deltas);
+        }
+        if origin.is_user() {
+            inverses.reverse();
+            let entry = UndoEntry {
+                kind: holon_core::EntryKind::Ops {
+                    ops: forwards,
+                    inverse_ops: inverses,
+                },
+                origin: OpOrigin::User,
+                group_id: 0,
+                precondition: Precondition::forward(&changes),
+                redo_precondition: Precondition::inverse(&changes),
+            };
+            self.journal_step(entry).await?;
+        }
+        if let Some(history) = &self.history {
+            self.record_history(history.as_ref(), "block", "set_field", origin, &changes)
+                .await?;
+        }
+        Ok(None)
     }
 
     /// Execute the block → page transform (Option B). See
@@ -4581,6 +4708,20 @@ impl DispatchingOperationEngine {
         if op_name == INSTANTIATE_TEMPLATE_OP && entity_name.as_str() == "block" {
             return self
                 .run_instantiate_template(&params, &origin)
+                .await
+                .map(OpOutcome::proven);
+        }
+
+        // A retitled page carries the rewrite of every link to it in the same
+        // undo step. String values only: an undo/redo replay restores rich
+        // `{text, marks}` Objects and replays the rewrite as its own constituents.
+        if op_name == "set_field"
+            && entity_name.as_str() == "block"
+            && params.get("field").and_then(|v| v.as_string()) == Some("content")
+            && let Some(plan) = self.page_rename_plan(&params).await?
+        {
+            return self
+                .run_page_rename(&params, plan, &origin)
                 .await
                 .map(OpOutcome::proven);
         }

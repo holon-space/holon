@@ -201,6 +201,7 @@ impl SimStore {
             "block_to_page_plan"
             | "merge_blocks_plan"
             | "page_chain_plan"
+            | "page_rename_plan"
             | "rewrite_link_resolution"
             | "restore_link_resolution"
             | "heal_page_links" => return Ok(()),

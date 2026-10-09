@@ -2,6 +2,7 @@ pub mod block_to_page_plan;
 pub mod merge_blocks_plan;
 pub mod operation_log;
 pub mod page_chain_plan;
+pub mod page_rename_plan;
 pub mod pantry_operations;
 pub(crate) mod properties_bag_write;
 pub mod queryable_cache;

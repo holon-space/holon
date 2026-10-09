@@ -2907,6 +2907,7 @@ impl ReferenceState {
         let old_path = self.page_path_of_ref(page_id).unwrap_or_else(|| {
             panic!("apply_page_rename: {page_id} must be a page with a well-formed path")
         });
+        self.rewrite_name_links_to(page_id, new_title);
         let block = self
             .domain
             .block_state
@@ -2931,6 +2932,86 @@ impl ReferenceState {
         }
         self.renamed_away_page_paths.push(old_path);
         self.recanon_and_rebuild();
+    }
+
+    /// D-link-follows-rename: every name link that resolves to `page_id` now
+    /// names `new_title` (the leaf of a `parent/leaf` chain), and a bare link
+    /// (label == target) shows it. An explicit label stays as authored.
+    /// Resolution is read BEFORE the title changes.
+    fn rewrite_name_links_to(&mut self, page_id: &EntityUri, new_title: &str) {
+        use holon_api::inline_mark::EntityRef;
+        use holon_api::inline_mark::InlineMark;
+
+        let linking: Vec<(EntityUri, Vec<usize>)> = self
+            .domain
+            .block_state
+            .blocks
+            .values()
+            .filter_map(|b| {
+                let hits: Vec<usize> = b
+                    .marks
+                    .iter()
+                    .flatten()
+                    .enumerate()
+                    .filter(|(_, m)| match &m.mark {
+                        InlineMark::Link {
+                            target: EntityRef::Name { name },
+                            ..
+                        } => self.ref_resolve_page_name(name).as_ref() == Some(page_id),
+                        _ => false,
+                    })
+                    .map(|(i, _)| i)
+                    .collect();
+                (!hits.is_empty()).then(|| (b.id.clone(), hits))
+            })
+            .collect();
+        for (id, hits) in linking {
+            let block = self
+                .domain
+                .block_state
+                .blocks
+                .get_mut(&id)
+                .expect("a linking block collected above exists");
+            let marks = block.marks.as_mut().expect("a linking block has marks");
+            let mut hits = hits;
+            hits.sort_by_key(|&i| std::cmp::Reverse(marks[i].start));
+            for i in hits {
+                let (start, end) = (marks[i].start, marks[i].end);
+                let InlineMark::Link {
+                    target: EntityRef::Name { name },
+                    label,
+                } = &mut marks[i].mark
+                else {
+                    unreachable!("hit {i} was selected as a name link");
+                };
+                let new_name = match name.rsplit_once('/') {
+                    Some((prefix, _)) => format!("{prefix}/{new_title}"),
+                    None => new_title.to_string(),
+                };
+                let bare = *label == *name;
+                *name = new_name.clone();
+                if !bare {
+                    continue;
+                }
+                *label = new_name.clone();
+                let chars: Vec<char> = block.content.chars().collect();
+                block.content = chars[..start]
+                    .iter()
+                    .chain(new_name.chars().collect::<Vec<_>>().iter())
+                    .chain(chars[end..].iter())
+                    .collect();
+                let new_end = start + new_name.chars().count();
+                for (j, m) in marks.iter_mut().enumerate() {
+                    if j == i {
+                        m.end = new_end;
+                        continue;
+                    }
+                    let shift = |p: usize| if p >= end { p - end + new_end } else { p };
+                    m.start = shift(m.start);
+                    m.end = shift(m.end);
+                }
+            }
+        }
     }
 
     /// `CreatePageAtFreedPath` reference effect -- the ref-side mirror of the

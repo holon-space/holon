@@ -2414,6 +2414,72 @@ impl SqlOperationProvider {
         }))
     }
 
+    /// `None` unless `id` is a page whose title `content` changes; otherwise
+    /// the blocks whose name links resolve to it.
+    async fn page_rename_plan(
+        &self,
+        id: &str,
+        content: &str,
+    ) -> Result<Option<crate::core::page_rename_plan::PageRenamePlan>> {
+        use crate::core::page_rename_plan::Backlink;
+        use crate::core::page_rename_plan::PageRenamePlan;
+
+        let idq = id.replace('\'', "''");
+        let rows = self
+            .db_handle
+            .query(
+                &format!(
+                    "SELECT b.content FROM {} b JOIN block_tags t ON t.block_id = b.id AND t.tag \
+                     = '{PAGE_TAG}' WHERE b.id = '{idq}'",
+                    self.table_name
+                ),
+                HashMap::new(),
+            )
+            .await
+            .map_err(|e| format!("page_rename_plan: reading page {id}: {e}"))?;
+        let Some(row) = rows.into_iter().next() else {
+            return Ok(None);
+        };
+        let prior = row
+            .get("content")
+            .and_then(|v| v.as_string())
+            .ok_or_else(|| format!("page_rename_plan: page {id} has no content"))?;
+        if holon_api::block::title_of(prior) == holon_api::block::title_of(content) {
+            return Ok(None);
+        }
+        let rows = self
+            .db_handle
+            .query(
+                &format!(
+                    "SELECT source_block_id, target FROM block_links WHERE resolved_id = '{idq}' \
+                     AND kind = 'page' ORDER BY source_block_id, target"
+                ),
+                HashMap::new(),
+            )
+            .await
+            .map_err(|e| format!("page_rename_plan: reading the links to {id}: {e}"))?;
+        let mut backlinks: Vec<Backlink> = Vec::new();
+        for row in rows {
+            let field = |name: &str| {
+                row.get(name)
+                    .and_then(|v| v.as_string())
+                    .map(str::to_string)
+                    .ok_or_else(|| {
+                        format!("page_rename_plan: block_links row without {name}: {row:?}")
+                    })
+            };
+            let (source, target) = (field("source_block_id")?, field("target")?);
+            match backlinks.last_mut() {
+                Some(last) if last.source == source => last.targets.push(target),
+                _ => backlinks.push(Backlink {
+                    source,
+                    targets: vec![target],
+                }),
+            }
+        }
+        Ok(Some(PageRenamePlan { backlinks }))
+    }
+
     /// The dangling→resolved trigger: when a Page-tagged block is written,
     /// dangling name links it satisfies resolve to it (leaf-suffix match —
     /// target equal to the page name or a chain ending in `/<name>`). This is
@@ -3477,6 +3543,42 @@ impl OperationProvider for SqlOperationProvider {
                 OperationDescriptor {
                     entity_name: self.entity_name.clone().into(),
                     entity_short_name: self.entity_short_name.clone(),
+                    name: "page_rename_plan".to_string(),
+                    display_name: "Page Rename Plan".to_string(),
+                    description: "Read-only planner for the link rewrite a page rename carries"
+                        .to_string(),
+                    required_params: vec![
+                        OperationParam {
+                            name: "id".to_string(),
+                            type_hint: TypeHint::EntityId {
+                                entity_name: EntityName::new("block"),
+                            },
+                            description: "The block whose content changes".to_string(),
+                        },
+                        OperationParam {
+                            name: "content".to_string(),
+                            type_hint: TypeHint::String,
+                            description: "Its new content".to_string(),
+                        },
+                    ],
+                    optional_params: vec![],
+                    id_column: "id".to_string(),
+                    affected_fields: vec![],
+                    param_mappings: vec![],
+                    target_scope: self.target_scope(),
+                    boundary_behavior: holon_api::BoundaryBehavior::PrivateOnly,
+                    menu_exposure: holon_api::MenuExposure::NotListed {
+                        surface: holon_api::NonMenuSurface::Internal,
+                    },
+                    trigger: None,
+                    bound_params: Default::default(),
+                    marking_delta: holon_api::marking::MarkingDelta::Undeclared,
+                    guard: holon_api::pattern::OpGuard::None,
+                    arcs: holon_api::arcs::TransitionArcs::Undeclared,
+                },
+                OperationDescriptor {
+                    entity_name: self.entity_name.clone().into(),
+                    entity_short_name: self.entity_short_name.clone(),
                     name: "heal_page_links".to_string(),
                     display_name: "Heal Page Links".to_string(),
                     description: "Resolve the dangling wiki-links a target names to its page"
@@ -4295,6 +4397,24 @@ impl OriginTaggedWrites for SqlOperationProvider {
                     "page_chain_plan is read-only",
                 )
                 .with_response(PageChainPlan { leaf_id, missing }.to_value()))
+            }
+            "page_rename_plan" => {
+                let id = params
+                    .get("id")
+                    .and_then(|v| v.as_string())
+                    .ok_or_else(|| "page_rename_plan: missing 'id' parameter".to_string())?
+                    .to_string();
+                let content = params
+                    .get("content")
+                    .and_then(|v| v.as_string())
+                    .ok_or_else(|| "page_rename_plan: missing 'content' parameter".to_string())?
+                    .to_string();
+                let plan = self.page_rename_plan(&id, &content).await?;
+                Ok(OperationResult::declared_irreversible(
+                    Vec::new(),
+                    "page_rename_plan is read-only",
+                )
+                .with_response(plan.map_or(Value::Null, |p| p.to_value())))
             }
             "heal_page_links" => {
                 // Resolve the dangling name links a wiki-link `target` names to

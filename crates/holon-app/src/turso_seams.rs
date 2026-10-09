@@ -1163,6 +1163,7 @@ impl Module for OrgModeModule {
                 let allowlist: &[&str] = if loro_authority {
                     &[
                         "page_chain_plan",
+                        "page_rename_plan",
                         "heal_page_links",
                         "rewrite_link_resolution",
                         "restore_link_resolution",
