@@ -29,7 +29,7 @@ Two things the proposal cites are absent from this line: `crates/holon-app/src/s
 - Parse, don't validate. Fail loud. Never swallow an error.
 - Every behaviour change enters through a red-first PBT (`.claude/skills/holon-feature/SKILL.md`), then the dogfood-explorer gate.
 - Standing rule (D118 note): a behaviour pinned only OUTSIDE the keystone is a reportable coverage gap.
-- Google's scope tiers decide what is reachable: Calendar is not restricted, Gmail is (`gmail.readonly` restricted, `gmail.send` sensitive).
+- Google's scope tiers decide what is reachable: Calendar is not restricted, Gmail is. `gmail.readonly` and `gmail.modify` are restricted; only `gmail.send` alone is sensitive, and any client that also reads is restricted (https://developers.google.com/workspace/gmail/api/auth/scopes). Restricted scopes need OAuth verification and a yearly CASA assessment for a shared client, so every tier uses the user's own OAuth client (D-gmail-scope.a).
 
 **Optimised for.** The smallest total change that removes the most user friction, in risk-elimination order.
 
@@ -163,7 +163,10 @@ Split into three landable rungs, riskiest first (amendment 9).
 - `writes: enabled` on the sidecar, or every non-read effect is denied loud.
 
 **2w-c: Gmail send.**
-- Scopes: `gmail.send` (sensitive) plus `gmail.readonly`. `gmail.modify` is RESTRICTED and stays out; label and archive are a separate decision for Martin. Send is `effect: once_only`, so it lands in the existing approval queue and never fires unattended.
+- The user picks the scope tier at setup, always on their own OAuth client (Increment 2). Tiers: read (`gmail.readonly`), read+send (adds `gmail.send`), read+modify (adds `gmail.modify`: label, archive, mark read; `gmail.compose` only if drafts are wanted). The sidecar declares the chosen tier's scopes.
+- The user sets the consent screen to "In production", not "Testing", so refresh tokens do not expire after 7 days. To be tested on Martin's account first.
+- A tier change invalidates the existing consent (same path as amendment 6).
+- Send is `effect: once_only`, so it lands in the existing approval queue and never fires unattended.
 - **Body encoding (amendment 8).** `messages.send` needs `raw` as base64url of an RFC 2822 message. Check whether `jaq-std` 3 exposes `@base64` and note that base64url is NOT standard jq. Plan an `encoding: base64url` directive on the `holon.tools` entry that applies to one mapped field, rather than a hand-written filter, with its own red test.
 
 **Gates for each rung.** The `holon-mcp-client` write and mock suites, the new tests, `just lint`, `just gate-compile`, `just keystone-smoke`, then dogfood-explorer (2w-c's pass must include approve-a-pending-write).
@@ -172,11 +175,10 @@ Split into three landable rungs, riskiest first (amendment 9).
 
 ## 4. Stays out of scope
 
-- Increment 3: a Holon-owned OAuth client, and the ownership decision behind it.
+- Increment 3: a Holon-owned OAuth client (it would need OAuth verification and CASA for any Gmail tier), and the ownership decision behind it.
 - The YAML `client_secret_keychain` arm as the primary route (B2).
 - A keychain arm for the refresh token.
 - Multi-feed fan-out and app-authored sidecars (D2).
-- Gmail label and archive (`gmail.modify`, restricted). Put to Martin.
 - CalDAV read and write.
 - Any change to the enablement model. The `.state.toml` stays the switch.
 - The multi-calendar fan-out TODO already noted in `gcal.yaml:93-102`.
