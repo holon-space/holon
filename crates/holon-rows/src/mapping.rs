@@ -9,6 +9,7 @@
 use anyhow::Context as _;
 use anyhow::Result;
 use anyhow::bail;
+use anyhow::ensure;
 use holon_core::file_format::TypedRowSet;
 use jaq_core::Compiler;
 use jaq_core::Ctx;
@@ -18,13 +19,18 @@ use jaq_core::data::JustLut;
 use jaq_core::load::Arena;
 use jaq_core::load::File;
 use jaq_core::load::Loader;
-use jaq_core::unwrap_valr;
 use jaq_json::Val;
 
 /// The one value type and one function set every mapping compiles against, so
 /// a filter that runs in one call site runs in all of them.
-type Data = JustLut<Val>;
+pub(crate) type Data = JustLut<Val>;
 type Compiled = jaq_core::compile::Filter<Native<Data>>;
+
+/// The most values one run may emit. A row stream emits one value per row.
+pub const MAX_MAPPING_OUTPUTS: usize = 100_000;
+
+/// The most JSON text, summed over every value, one run may emit.
+pub const MAX_MAPPING_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
 
 /// A compiled mapping.
 ///
@@ -48,14 +54,11 @@ impl std::fmt::Debug for RowMapper {
 }
 
 impl RowMapper {
-    /// Compile `source` as a jaq filter over `jq`'s standard library.
+    /// Compile `source` as a jaq filter over the pure part of jq's standard
+    /// library ([`crate::jaq_library`]).
     pub fn compile(label: impl Into<String>, source: &str) -> Result<Self> {
         let label = label.into();
-        let loader = Loader::new(
-            jaq_core::defs()
-                .chain(jaq_std::defs())
-                .chain(jaq_json::defs()),
-        );
+        let loader = Loader::new(crate::jaq_library::defs());
         let arena = Arena::default();
         let modules = loader
             .load(
@@ -67,13 +70,9 @@ impl RowMapper {
             )
             .map_err(|errs| filter_error(&label, source, errs))?;
         let filter = Compiler::default()
-            .with_funs(
-                jaq_core::funs()
-                    .chain(jaq_std::funs())
-                    .chain(jaq_json::funs()),
-            )
+            .with_funs(crate::jaq_library::funs())
             .compile(modules)
-            .map_err(|errs| filter_error(&label, source, errs))?;
+            .map_err(|errs| undefined_error(&label, source, errs))?;
         Ok(Self { label, filter })
     }
 
@@ -102,17 +101,32 @@ impl RowMapper {
             .map_err(|e| anyhow::anyhow!("mapping `{}` cannot read its input: {e}", self.label))?;
         let ctx = Ctx::<Data>::new(&self.filter.lut, Vars::new([]));
         let mut out = Vec::new();
-        for (index, result) in self
-            .filter
-            .id
-            .run((ctx, input))
-            .map(unwrap_valr)
-            .enumerate()
-        {
-            let value = result.map_err(|e| {
-                anyhow::anyhow!("mapping `{}` failed at output #{index}: {e}", self.label)
+        let mut bytes = 0;
+        for (index, result) in self.filter.id.run((ctx, input)).enumerate() {
+            ensure!(
+                index < MAX_MAPPING_OUTPUTS,
+                "mapping `{}` emitted more than MAX_MAPPING_OUTPUTS ({MAX_MAPPING_OUTPUTS}) values",
+                self.label
+            );
+            let value = result.map_err(|exn| match exn.get_err() {
+                Ok(e) => {
+                    anyhow::anyhow!("mapping `{}` failed at output #{index}: {e}", self.label)
+                }
+                Err(exn) => anyhow::anyhow!(
+                    "mapping `{}` raised an exception that is not an error at output #{index}: \
+                     {exn:?}",
+                    self.label
+                ),
             })?;
-            out.push(value.to_string());
+            let text = value.to_string();
+            bytes += text.len();
+            ensure!(
+                bytes <= MAX_MAPPING_OUTPUT_BYTES,
+                "mapping `{}` emitted more than MAX_MAPPING_OUTPUT_BYTES \
+                 ({MAX_MAPPING_OUTPUT_BYTES}) bytes of JSON by output #{index}",
+                self.label
+            );
+            out.push(text);
         }
         Ok(out)
     }
@@ -140,6 +154,25 @@ impl RowMapper {
         crate::parse_row_sets(&lines)
             .with_context(|| format!("the stream mapping `{}` produced", self.label))
     }
+}
+
+fn undefined_error(
+    label: &str,
+    source: &str,
+    errs: jaq_core::compile::Errors<&str, ()>,
+) -> anyhow::Error {
+    let detail = errs
+        .iter()
+        .flat_map(|(_, undefined)| undefined)
+        .map(
+            |(name, kind)| match crate::jaq_library::withheld_reason(name) {
+                Some(why) => format!("`{name}` is not available to a mapping: {why}"),
+                None => format!("undefined {} `{name}`", kind.as_str()),
+            },
+        )
+        .collect::<Vec<_>>()
+        .join("; ");
+    anyhow::anyhow!("mapping `{label}` is not a valid jaq filter: {detail}\nfilter: {source}")
 }
 
 fn filter_error<E: std::fmt::Debug>(

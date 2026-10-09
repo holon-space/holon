@@ -316,6 +316,7 @@ pub struct IntegrationFileConfig {
 /// call template Holon cannot drive, a body on a GET. After this function a
 /// [`crate::rest_transport::RestCall`] is a call that can be made.
 fn build_rest_transport(
+    provider: &str,
     manual: crate::utcp_manual::UtcpManual,
     holon: HolonSection,
     lookup: &VarLookup<'_>,
@@ -371,7 +372,11 @@ fn build_rest_transport(
         );
         let compile = |what: &str, src: Option<String>| -> anyhow::Result<Option<Arc<RowMapper>>> {
             src.map(|src| {
-                RowMapper::compile(format!("holon.tools.{}.{what}", tool.name), &src).map(Arc::new)
+                RowMapper::compile(
+                    format!("{provider}: holon.tools.{}.{what}", tool.name),
+                    &src,
+                )
+                .map(Arc::new)
             })
             .transpose()
         };
@@ -632,7 +637,7 @@ impl IntegrationFileConfig {
             }
         } else if let Some(manual) = self.utcp {
             let holon = self.holon.unwrap_or_default();
-            build_rest_transport(manual, holon, lookup, redactor, root)?
+            build_rest_transport(&provider_name, manual, holon, lookup, redactor, root)?
         } else {
             anyhow::bail!(
                 "a sidecar must declare either an MCP `transport` (child_process | http) or a \

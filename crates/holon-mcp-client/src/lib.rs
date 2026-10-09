@@ -122,6 +122,8 @@ pub use roster::ConnectionRoster;
 pub use roster::ConnectionSource;
 pub use secret_ref::SecretRef;
 pub use secret_ref::TokenRef;
+pub use secure_client::MAX_RESPONSE_BODY_BYTES;
+pub use secure_client::REQUEST_TIMEOUT;
 pub use sync_freshness::FreshnessPlan;
 pub use sync_freshness::ProbedResourceCapabilities;
 pub use sync_freshness::freshness_plan;

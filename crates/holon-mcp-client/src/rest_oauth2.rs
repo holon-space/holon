@@ -351,17 +351,14 @@ impl OAuth2TokenProvider {
                 anyhow::anyhow!(
                     "oauth2 token refresh POST to {} failed: {}",
                     redact_url(&self.token_url),
-                    // `without_url` strips the URL (and thus any query) from the
-                    // reqwest error before it reaches a log.
-                    e.without_url()
+                    crate::secure_client::describe(e)
                 )
             })?;
         let status = resp.status();
-        let body = resp.text().await.map_err(|e| {
+        let body = crate::secure_client::read_text(resp).await.map_err(|e| {
             anyhow::anyhow!(
-                "oauth2 token refresh: reading response from {} failed: {}",
+                "oauth2 token refresh: reading response from {} failed: {e:#}",
                 redact_url(&self.token_url),
-                e.without_url()
             )
         })?;
 

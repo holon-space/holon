@@ -14,6 +14,7 @@
 mod emit;
 mod envelope;
 mod ids;
+mod jaq_library;
 mod mapping;
 mod parse;
 
@@ -22,5 +23,7 @@ pub use envelope::CONTRACT_VERSION;
 pub use envelope::Envelope;
 pub use envelope::ScopeHeader;
 pub use ids::parse_local_id;
+pub use mapping::MAX_MAPPING_OUTPUT_BYTES;
+pub use mapping::MAX_MAPPING_OUTPUTS;
 pub use mapping::RowMapper;
 pub use parse::parse_row_sets;

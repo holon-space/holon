@@ -590,15 +590,12 @@ pub async fn exchange_code(
     let resp = http.post(token_url).form(&form).send().await.map_err(|e| {
         anyhow::anyhow!(
             "oauth2 code exchange POST to {safe_url} failed: {}",
-            e.without_url()
+            crate::secure_client::describe(e)
         )
     })?;
     let status = resp.status();
-    let body = resp.text().await.map_err(|e| {
-        anyhow::anyhow!(
-            "oauth2 code exchange: reading the response from {safe_url} failed: {}",
-            e.without_url()
-        )
+    let body = crate::secure_client::read_text(resp).await.map_err(|e| {
+        anyhow::anyhow!("oauth2 code exchange: reading the response from {safe_url} failed: {e:#}")
     })?;
 
     anyhow::ensure!(
