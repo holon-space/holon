@@ -3715,6 +3715,10 @@ pub trait RefSqlCardinality {
     /// [`RefEditorMirrorMut::note_backspace_joins`] for why it is recorded
     /// rather than derived.
     fn last_backspace_joins(&self) -> usize;
+
+    /// How many blocks other than `page` hold a name link that resolves to
+    /// it; renaming `page` rewrites each of them.
+    fn name_linking_blocks(&self, page: &EntityUri) -> usize;
 }
 
 /// Reference-side typed block surface for `inv-backend-blocks-match-ref`.

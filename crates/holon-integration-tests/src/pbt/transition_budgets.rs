@@ -160,6 +160,9 @@ impl holon_pbt_core::capabilities::RefSqlCardinality for CardinalityProbe {
     fn last_draw_promoted(&self) -> bool {
         self.draw_promoted
     }
+    fn name_linking_blocks(&self, _: &holon_api::EntityUri) -> usize {
+        self.scale
+    }
 }
 
 /// The complexity class a transition's OWN budget formula claims, derived by

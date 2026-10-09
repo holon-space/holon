@@ -1735,7 +1735,9 @@ impl DispatchingOperationEngine {
     }
 
     /// The links a `set_field(content)` must rewrite, or `None` when the write
-    /// retitles no page that a name link resolves to. A wiring without the
+    /// retitles no page that a name link resolves to. Whether the write
+    /// retitles a page is read from the write authority, so an edit of a
+    /// non-page block costs one authority read. A wiring without the
     /// `block_links` junction has no links to rewrite.
     async fn page_rename_plan(
         &self,
@@ -1743,37 +1745,51 @@ impl DispatchingOperationEngine {
     ) -> Result<Option<crate::core::page_rename_plan::PageRenamePlan>> {
         use crate::core::page_rename_plan::PageRenamePlan;
 
+        let op = "page rename";
         let Some(content) = params.get("value").and_then(|v| v.as_string()) else {
             return Ok(None);
         };
-        if !self
-            .dispatcher
-            .catalog()
-            .iter()
-            .any(|d| d.entity_name.as_str() == "block" && d.name == PAGE_RENAME_PLAN_OP)
-        {
-            return Ok(None);
-        }
         let id = params
             .get("id")
             .and_then(|v| v.as_string())
             .ok_or_else(|| anyhow::anyhow!("block set_field(content): missing 'id' parameter"))?;
+        let authority = self.block_authority(op)?;
+        // ALLOW(entity_uri_from_raw): `id` is the operation's own block id.
+        let uri = EntityUri::from_raw(id);
+        if !authority
+            .block_is_page(&uri)
+            .await
+            .map_err(|e| anyhow::anyhow!("{op}: reading whether {uri} is a page: {e}"))?
+        {
+            return Ok(None);
+        }
+        let prior = authority
+            .block(&uri)
+            .await
+            .map_err(|e| anyhow::anyhow!("{op}: reading page {uri}: {e}"))?
+            .ok_or_else(|| anyhow::anyhow!("{op}: page {uri} is not in the store"))?;
+        if holon_api::block::title_of(&prior.block.content) == holon_api::block::title_of(content)
+            || !self
+                .dispatcher
+                .catalog()
+                .iter()
+                .any(|d| d.entity_name.as_str() == "block" && d.name == PAGE_RENAME_PLAN_OP)
+        {
+            return Ok(None);
+        }
         let mut query = StorageEntity::new();
         query.insert("id".into(), Value::String(id.to_string()));
-        query.insert("content".into(), Value::String(content.to_string()));
         let result = self
             .dispatcher
             .execute_operation(&EntityName::new("block"), PAGE_RENAME_PLAN_OP, query)
             .await
-            .map_err(|e| anyhow::anyhow!("renaming page {id}: planning the link rewrite: {e}"))?;
-        match result.response {
-            None | Some(Value::Null) => Ok(None),
-            Some(plan) => {
-                let plan = PageRenamePlan::from_value(&plan)
-                    .map_err(|e| anyhow::anyhow!("renaming page {id}: {e}"))?;
-                Ok((!plan.backlinks.is_empty()).then_some(plan))
-            }
-        }
+            .map_err(|e| anyhow::anyhow!("{op} {id}: planning the link rewrite: {e}"))?;
+        let plan = result
+            .response
+            .ok_or_else(|| anyhow::anyhow!("{op} {id}: {PAGE_RENAME_PLAN_OP} returned no plan"))?;
+        let plan =
+            PageRenamePlan::from_value(&plan).map_err(|e| anyhow::anyhow!("{op} {id}: {e}"))?;
+        Ok((!plan.backlinks.is_empty()).then_some(plan))
     }
 
     /// Retitle a page and rewrite every name link to it
@@ -1794,26 +1810,29 @@ impl DispatchingOperationEngine {
             .expect("page_rename_plan only plans String content writes")
             .to_string();
         let new_title = holon_api::block::title_of(&content).trim().to_string();
-        let reader = self.reader.as_ref().ok_or_else(|| {
-            anyhow::anyhow!(
-                "{op} needs a live-state reader to read the linking blocks; this engine was \
-                 built without one"
-            )
-        })?;
+        let authority = self.block_authority(op)?;
         let mut rewrites: Vec<StorageEntity> = Vec::new();
         for backlink in &plan.backlinks {
             // ALLOW(entity_uri_from_raw): ids come from the `block_links` junction.
             let uri = holon_api::EntityUri::from_raw(&backlink.source);
-            let text = match reader.field_value(&uri, "content").await? {
-                Some(Value::String(s)) => s,
-                other => bail!("{op}: linking block {uri} has content {other:?}"),
-            };
-            let marks = match reader.field_value(&uri, "marks").await? {
-                Some(Value::String(s) | Value::Json(s)) => holon_api::marks_from_json(&s)
-                    .map_err(|e| anyhow::anyhow!("{op}: marks of {uri} are corrupt: {e}"))?,
-                other => bail!("{op}: linking block {uri} has marks {other:?}"),
-            };
-            let (text, marks) = rewrite_name_links(&text, &marks, &backlink.targets, &new_title);
+            let linking = authority
+                .block(&uri)
+                .await
+                .map_err(|e| anyhow::anyhow!("{op}: reading linking block {uri}: {e}"))?
+                .ok_or_else(|| anyhow::anyhow!("{op}: linking block {uri} is not in the store"))?
+                .block;
+            let prior_marks = linking.marks.unwrap_or_default();
+            let (text, marks) = rewrite_name_links(
+                &linking.content,
+                &prior_marks,
+                &backlink.targets,
+                &new_title,
+            );
+            // The `block_links` projection can still list a link the authority
+            // no longer holds.
+            if text == linking.content && marks == prior_marks {
+                continue;
+            }
             let mut value = std::collections::HashMap::new();
             value.insert("text".to_string(), Value::String(text));
             value.insert(

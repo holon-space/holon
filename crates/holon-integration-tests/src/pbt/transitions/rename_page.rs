@@ -199,11 +199,14 @@ crate::cap_transition! {
     |me, _state, sut| {
         sut.rename_page(&me.page_id, &me.new_title).await;
     }
-    sql_budget: |_me, state| {
+    sql_budget: |me, state| {
         let blocks = state.block_count();
+        // Each block whose link text the rename rewrites adds at most one org
+        // write-back, plus its `block_raw` write where SQL holds block CRUD.
+        let per_rewrite = if state.content_writes_reach_sql() { 2 } else { 1 };
         ExpectedSql {
             reads: blocks + 8,
-            writes: 2,
+            writes: 2 + per_rewrite * state.name_linking_blocks(&me.page_id),
             ddl: 0,
             tolerance: 3,
         }

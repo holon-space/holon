@@ -934,10 +934,11 @@ async fn a_name_link_resolves_to_the_page_with_that_name_after_its_old_holder_wa
     }
 }
 
-/// A `[[A]]` link resolved while page A still had that name.
+/// A rename is a rename refactoring (D-link-follows-rename.b): a `[[A]]` link
+/// resolved while page A had that name reads `[[B]]` after the page is renamed
+/// to B and keeps resolving to it, also once a new page takes the name A.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "a rename does not re-resolve block_links rows; docs/Testing/bugfunnel/entries/2026-10-08-new-file-at-a-renamed-pages-old-path-takes-over-its-id.md"]
-async fn a_link_resolved_before_a_rename_resolves_to_the_page_with_that_name() {
+async fn a_link_follows_its_page_through_a_rename() {
     let engine = block_engine().await;
     let handle = engine.db_handle();
 
@@ -949,15 +950,25 @@ async fn a_link_resolved_before_a_rename_resolves_to_the_page_with_that_name() {
         link_resolved(handle, "early").await.as_deref(),
         Some(id_a.as_str())
     );
-    rename_page(&engine, &id_a, "B").await;
+    let mut p: holon_api::StorageEntity = HashMap::new();
+    p.insert("id".into(), Value::String(id_a.clone()));
+    p.insert("field".into(), Value::String("content".into()));
+    p.insert("value".into(), Value::String("B".into()));
+    fixture_op(&engine, "set_field", p).await;
+    assert_eq!(
+        block_content(handle, "block:early").await.as_deref(),
+        Some("see B"),
+        "the bare link must show the page's new name"
+    );
+
     let id_a2 = create_page_from_link(&engine, "A")
         .await
         .expect("create the new page A");
-
+    assert_ne!(id_a2, id_a);
     assert_eq!(
         link_resolved(handle, "early").await.as_deref(),
-        Some(id_a2.as_str()),
-        "link [[A]] must resolve to the page named A ({id_a2}), not to the renamed page B ({id_a})"
+        Some(id_a.as_str()),
+        "link [[B]] must resolve to the renamed page B ({id_a}), not to the new page A ({id_a2})"
     );
 }
 

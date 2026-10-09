@@ -653,6 +653,9 @@ mod cap_transition_generic_arm_selftest {
             fn last_backspace_joins(&self) -> usize {
                 0
             }
+            fn name_linking_blocks(&self, _: &holon_api::EntityUri) -> usize {
+                0
+            }
         }
 
         let sql = DummyGenericTransition.expected_sql(&DummyRef);

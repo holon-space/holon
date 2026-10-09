@@ -2907,7 +2907,7 @@ impl ReferenceState {
         let old_path = self.page_path_of_ref(page_id).unwrap_or_else(|| {
             panic!("apply_page_rename: {page_id} must be a page with a well-formed path")
         });
-        self.rewrite_name_links_to(page_id, new_title);
+        self.rewrite_name_links_to(page_id, holon_api::block::title_of(new_title).trim());
         let block = self
             .domain
             .block_state
@@ -2934,19 +2934,17 @@ impl ReferenceState {
         self.recanon_and_rebuild();
     }
 
-    /// D-link-follows-rename: every name link that resolves to `page_id` now
-    /// names `new_title` (the leaf of a `parent/leaf` chain), and a bare link
-    /// (label == target) shows it. An explicit label stays as authored.
-    /// Resolution is read BEFORE the title changes.
-    fn rewrite_name_links_to(&mut self, page_id: &EntityUri, new_title: &str) {
+    /// The blocks other than `page_id` itself whose name links resolve to
+    /// `page_id`, each with the indices of those links in its marks.
+    fn name_links_to(&self, page_id: &EntityUri) -> Vec<(EntityUri, Vec<usize>)> {
         use holon_api::inline_mark::EntityRef;
         use holon_api::inline_mark::InlineMark;
 
-        let linking: Vec<(EntityUri, Vec<usize>)> = self
-            .domain
+        self.domain
             .block_state
             .blocks
             .values()
+            .filter(|b| b.id != *page_id)
             .filter_map(|b| {
                 let hits: Vec<usize> = b
                     .marks
@@ -2964,8 +2962,23 @@ impl ReferenceState {
                     .collect();
                 (!hits.is_empty()).then(|| (b.id.clone(), hits))
             })
-            .collect();
-        for (id, hits) in linking {
+            .collect()
+    }
+
+    /// How many blocks a rename of `page_id` rewrites.
+    pub fn name_linking_block_count(&self, page_id: &EntityUri) -> usize {
+        self.name_links_to(page_id).len()
+    }
+
+    /// D-link-follows-rename: every name link that resolves to `page_id` now
+    /// names `new_title` (the leaf of a `parent/leaf` chain), and a bare link
+    /// (label == target) shows it. An explicit label stays as authored.
+    /// Resolution is read BEFORE the title changes.
+    fn rewrite_name_links_to(&mut self, page_id: &EntityUri, new_title: &str) {
+        use holon_api::inline_mark::EntityRef;
+        use holon_api::inline_mark::InlineMark;
+
+        for (id, hits) in self.name_links_to(page_id) {
             let block = self
                 .domain
                 .block_state

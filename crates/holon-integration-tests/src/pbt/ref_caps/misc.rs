@@ -119,4 +119,7 @@ impl RefSqlCardinality for ReferenceState {
     fn last_backspace_joins(&self) -> usize {
         self.ui.tab.last_backspace_joins
     }
+    fn name_linking_blocks(&self, page: &holon_api::EntityUri) -> usize {
+        self.name_linking_block_count(page)
+    }
 }

@@ -199,7 +199,7 @@ impl Fixture {
                 vec![("target", s("Linked page"))]
             }
             ("block", "page_chain_plan") => vec![("target", s("Linked page"))],
-            ("block", "page_rename_plan") => vec![("id", id("a")), ("content", s("alpha2"))],
+            ("block", "page_rename_plan") => vec![("id", id("a"))],
             ("block", "heal_page_links") => vec![("page_id", id("a")), ("target", s("alpha"))],
             ("block", "rewrite_link_resolution") => vec![("from", id("a")), ("to", id("b"))],
             ("block", "restore_link_resolution") => vec![("rows", s("[]"))],

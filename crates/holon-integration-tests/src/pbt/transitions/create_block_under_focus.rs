@@ -101,6 +101,44 @@ fn create_under_focus_parent<R: RefLayout + RefFocusRoots + RefLayoutInteract>(
     Some(root)
 }
 
+/// Titles of the pages under a page that no other page's title shares: a
+/// `[[title]]` link to one resolves to exactly that page, the population
+/// `RenamePage` renames.
+fn linkable_page_titles<R: RefBlockTreeMut>(state: &R) -> Vec<String> {
+    let pages: Vec<EntityUri> = state
+        .all_non_seed_block_ids()
+        .into_iter()
+        .filter(|id| state.is_page_block(id))
+        .collect();
+    let title = |id: &EntityUri| {
+        state
+            .block_content(id)
+            .map(|c| holon_api::block::title_of(c).trim().to_string())
+    };
+    let keys: Vec<holon_api::PageTitleKey> = pages
+        .iter()
+        .filter_map(title)
+        .map(|t| holon_api::PageTitleKey::of(&t))
+        .collect();
+    pages
+        .iter()
+        .filter(|id| {
+            state
+                .parent_of(id)
+                .is_some_and(|parent| state.is_page_block(&parent))
+        })
+        .filter_map(title)
+        .filter(|t| {
+            !t.is_empty()
+                && keys
+                    .iter()
+                    .filter(|k| **k == holon_api::PageTitleKey::of(t))
+                    .count()
+                    == 1
+        })
+        .collect()
+}
+
 impl<
     R: RefLifecycle
         + RefLayout
@@ -136,7 +174,18 @@ impl<
             // Short org-safe ASCII words: no trailing whitespace, no org markup,
             // so the created content round-trips through the block store / any
             // org sync unchanged — the ref content matches the SUT verbatim.
-            let content = proptest::string::string_regex("[a-z]{1,8}").expect("valid regex");
+            let word = || proptest::string::string_regex("[a-z]{1,8}").expect("valid regex");
+            let titles = linkable_page_titles(state);
+            let content = if titles.is_empty() {
+                word().boxed()
+            } else {
+                prop_oneof![
+                    3 => word(),
+                    1 => (word(), prop::sample::select(titles))
+                        .prop_map(|(w, title)| format!("{w} [[{title}]]")),
+                ]
+                .boxed()
+            };
             // Mix both create paths: `Some` exercises the explicit-id (born-equal)
             // op dispatch; `None` exercises the provider's mint-when-absent fix.
             let strat = (content, proptest::bool::ANY)
