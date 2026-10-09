@@ -1806,21 +1806,6 @@ impl Render for HolonApp {
                 f32::from(window.viewport_size().width),
                 f32::from(window.viewport_size().height),
             );
-            if share_ui::previous_runs_painted(
-                self.share_ui.read(cx),
-                f32::from(window.viewport_size().width),
-                f32::from(window.viewport_size().height),
-            ) {
-                let share_ui = self.share_ui.clone();
-                // Runs when the next frame is requested, so after this frame was drawn.
-                window.on_next_frame(move |_, cx| {
-                    // `None` when an earlier frame's callback already took it.
-                    let drawn = share_ui.update(cx, |s, _| s.previous_runs_shown_on.take());
-                    if let Some(bus) = drawn {
-                        holon_frontend::panic_record::seen_on(&bus);
-                    }
-                });
-            }
             for ov in overlays {
                 page = page.child(ov);
             }

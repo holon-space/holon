@@ -307,8 +307,9 @@ pub struct ShareUiState {
     pub accept_error: Option<String>,
     /// Modal and banner kinds already logged as drawn in the toast stack.
     surfaceless_as_toasts: HashSet<&'static str>,
-    /// The bus that raised a previous-run panic this window has not yet drawn;
-    /// the frame after the one that paints it calls `panic_record::seen_on`.
+    /// The bus that raised a previous-run panic this window has not yet drawn
+    /// inside its viewport; the frame after one that did calls
+    /// `panic_record::seen_on`.
     pub previous_runs_shown_on: Option<Arc<holon_api::ConditionBus>>,
 }
 
@@ -491,7 +492,12 @@ impl ShareUiState {
                 *existing = toast;
                 return;
             }
-            self.toasts.push(toast);
+            // First, so no other toast can push the crash doorbell out of the window.
+            if is_previous_run(&toast) {
+                self.toasts.insert(0, toast);
+            } else {
+                self.toasts.push(toast);
+            }
             return;
         }
 
@@ -1241,6 +1247,7 @@ pub fn render_overlays(
         overlays.push(render_toast_stack(
             &state.toasts,
             share_state,
+            state.previous_runs_shown_on.is_some(),
             bounds.clone(),
             theme,
             viewport_width,
@@ -2006,6 +2013,9 @@ fn toast_message(toast: &DegradedToast) -> String {
 /// elements and the cap never sees them.
 fn toast_lines(toast: &DegradedToast) -> Vec<String> {
     let mut lines = vec![toast_message(toast)];
+    if is_previous_run(toast) {
+        return lines;
+    }
     lines.extend(toast.detail.body.iter().cloned());
     let reimported = toast
         .condition
@@ -2019,6 +2029,18 @@ fn toast_lines(toast: &DegradedToast) -> Vec<String> {
     }
     lines
 }
+
+/// The crash doorbell: its headline alone, clamped to [`PREVIOUS_RUN_LINES`],
+/// so it fits every window; the full records stay on disk.
+fn is_previous_run(toast: &DegradedToast) -> bool {
+    toast
+        .condition
+        .as_ref()
+        .is_some_and(|c| c.kind == ConditionKind::PREVIOUS_RUN_PANICKED)
+}
+
+/// How many wrapped lines the previous-run toast's headline may paint.
+const PREVIOUS_RUN_LINES: usize = 3;
 
 /// The colour a severity is painted in. The ONE place severity becomes a
 /// pixel value, so a new condition inherits it rather than choosing.
@@ -2053,6 +2075,11 @@ pub const DEGRADED_TOAST_STACK: &str = "degraded-toast-stack";
 /// query that finds the conflict copies), so its rect is what a windowed test
 /// judges, not the string it was built from.
 pub const TOAST_LINE: &str = "toast-line";
+
+/// Element id of the previous-run toast's box, recorded with its unclipped
+/// rect: the window acknowledges the records only when that rect lies inside
+/// the viewport of a drawn frame.
+pub const PREVIOUS_RUN_TOAST: &str = "previous-run-toast";
 
 /// The widths a toast box wants when the window lets it have them.
 const TOAST_MIN_W: f32 = 280.0;
@@ -2106,6 +2133,15 @@ fn estimated_toast_height(lines: &[String], text_width: f32) -> f32 {
     wrapped * TOAST_LINE_H + TOAST_BOX_CHROME_H
 }
 
+fn toast_height(toast: &DegradedToast, text_width: f32) -> f32 {
+    let height = estimated_toast_height(&toast_lines(toast), text_width);
+    if is_previous_run(toast) {
+        height.min(PREVIOUS_RUN_LINES as f32 * TOAST_LINE_H + TOAST_BOX_CHROME_H)
+    } else {
+        height
+    }
+}
+
 /// How many of `toasts`, from the first, the stack paints in this viewport.
 fn painted_toasts(toasts: &[DegradedToast], viewport_width: f32, viewport_height: f32) -> usize {
     let text_w = toast_text_width(toast_box_width(viewport_width));
@@ -2122,7 +2158,7 @@ fn painted_toasts(toasts: &[DegradedToast], viewport_width: f32, viewport_height
     let mut used = 0.0f32;
     let mut visible = 0usize;
     for toast in toasts {
-        let h = estimated_toast_height(&toast_lines(toast), text_w) + TOAST_GAP_H;
+        let h = toast_height(toast, text_w) + TOAST_GAP_H;
         if used + h > budget {
             break;
         }
@@ -2132,29 +2168,10 @@ fn painted_toasts(toasts: &[DegradedToast], viewport_width: f32, viewport_height
     visible
 }
 
-/// The stack paints, in this viewport, every previous-run panic of
-/// [`ShareUiState::previous_runs_shown_on`].
-pub fn previous_runs_painted(
-    state: &ShareUiState,
-    viewport_width: f32,
-    viewport_height: f32,
-) -> bool {
-    if state.previous_runs_shown_on.is_none() {
-        return false;
-    }
-    let painted = painted_toasts(&state.toasts, viewport_width, viewport_height);
-    let is_previous_run = |t: &DegradedToast| {
-        t.condition
-            .as_ref()
-            .is_some_and(|c| c.kind == ConditionKind::PREVIOUS_RUN_PANICKED)
-    };
-    let (shown, hidden) = state.toasts.split_at(painted);
-    shown.iter().any(is_previous_run) && !hidden.iter().any(is_previous_run)
-}
-
 fn render_toast_stack(
     toasts: &[DegradedToast],
     share_state: Entity<ShareUiState>,
+    acknowledge: bool,
     bounds: crate::geometry::BoundsRegistry,
     theme: OverlayTheme,
     viewport_width: f32,
@@ -2222,9 +2239,19 @@ fn render_toast_stack(
         let (bg_color, _, _) = toast_style(toast.kind);
         let lines = toast_lines(toast);
         let close_state = share_state.clone();
+        let previous_run = is_previous_run(toast);
+        let probe = previous_run.then(|| {
+            previous_run_probe(
+                bounds.clone(),
+                lines.join(" "),
+                acknowledge.then(|| share_state.clone()),
+            )
+        });
         stack = stack.child(
             div()
                 .id(SharedString::from(format!("toast-{idx}")))
+                .relative()
+                .children(probe)
                 .px_3()
                 .py_2()
                 .rounded(px(6.0))
@@ -2250,9 +2277,15 @@ fn render_toast_stack(
                         // `max_w` — and the window — on the right.
                         .min_w(px(0.0))
                         .children(lines.into_iter().enumerate().map(|(line_idx, l)| {
+                            let line = div().min_w(px(0.0)).child(l.clone());
+                            let line = if previous_run {
+                                line.line_clamp(PREVIOUS_RUN_LINES).text_ellipsis()
+                            } else {
+                                line
+                            };
                             crate::geometry::tracked(
                                 format!("{TOAST_LINE}-{idx}-{line_idx}"),
-                                div().min_w(px(0.0)).child(l.clone()).into_any_element(),
+                                line.into_any_element(),
                                 &bounds,
                                 "toast_line",
                                 None,
@@ -2286,6 +2319,63 @@ fn render_toast_stack(
     )
     .with_displayed_text(messages.join(" · "))
     .into_any_element()
+}
+
+/// Fills the previous-run toast's box: records the box's unclipped rect as
+/// [`PREVIOUS_RUN_TOAST`] and, when `acknowledge` is set and the rect lies
+/// inside the viewport, marks the records seen on the frame after this one.
+fn previous_run_probe(
+    bounds: crate::geometry::BoundsRegistry,
+    headline: String,
+    acknowledge: Option<Entity<ShareUiState>>,
+) -> impl IntoElement {
+    gpui::canvas(
+        move |rect, window, _| {
+            let viewport = window.viewport_size();
+            let inside = rect.size.width > px(0.0)
+                && rect.size.height > px(0.0)
+                && rect.origin.x >= px(0.0)
+                && rect.origin.y >= px(0.0)
+                && rect.right() <= viewport.width
+                && rect.bottom() <= viewport.height
+                && rect.intersect(&window.content_mask().bounds) == rect;
+            bounds.record(
+                PREVIOUS_RUN_TOAST.to_string(),
+                holon_frontend::geometry::ElementInfo {
+                    x: f32::from(rect.origin.x),
+                    y: f32::from(rect.origin.y),
+                    width: f32::from(rect.size.width),
+                    height: f32::from(rect.size.height),
+                    widget_type: Arc::from("previous_run_toast"),
+                    entity_id: None,
+                    has_content: true,
+                    parent_id: None,
+                    displayed_text: Some(Arc::from(headline)),
+                    focused: None,
+                    styled_runs: None,
+                    opacity: None,
+                    expected_size: Default::default(),
+                    vm_node: None,
+                    painted_fg: None,
+                    painted_bg: None,
+                },
+            );
+            if let Some(state) = acknowledge.filter(|_| inside) {
+                window.on_next_frame(move |_, cx| {
+                    // `None` when an earlier frame's callback already took it.
+                    let drawn = state.update(cx, |s, _| s.previous_runs_shown_on.take());
+                    if let Some(bus) = drawn {
+                        holon_frontend::panic_record::seen_on(&bus);
+                    }
+                });
+            }
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
 }
 
 fn render_error_modal(

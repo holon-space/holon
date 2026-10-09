@@ -752,35 +752,79 @@ impl std::fmt::Display for HolonChange {
 /// frontend has shown.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct EarlierPanics {
-    /// Each `file:line:column` they panicked at (a record that cannot be read
-    /// names its own path), with how many runs did, newest first.
-    pub sites: Vec<(String, usize)>,
+    /// Newest first.
+    pub panics: Vec<EarlierPanic>,
     pub dropped: Option<DroppedPanics>,
+}
+
+/// Where one earlier run panicked, and with what message.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EarlierPanic {
+    /// `file:line:column`.
+    pub location: String,
+    pub message: String,
 }
 
 impl EarlierPanics {
     pub fn runs(&self) -> usize {
-        self.sites.iter().map(|(_, runs)| runs).sum::<usize>()
-            + self.dropped.as_ref().map_or(0, |d| d.count)
+        self.panics.len() + self.dropped.as_ref().map_or(0, DroppedPanics::count)
     }
 }
 
-/// Panicked runs whose records were dropped unshown, to bound how many are
-/// kept: how many, and when the first and the last of them ended.
+/// Panicked runs whose records were dropped to bound how many are kept: how
+/// many, and when the first and the last of those whose end time could be
+/// read ended.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DroppedPanics {
-    pub count: usize,
-    pub first_ended: chrono::DateTime<chrono::Utc>,
-    pub last_ended: chrono::DateTime<chrono::Utc>,
+    count: usize,
+    first_ended: Option<chrono::DateTime<chrono::Utc>>,
+    last_ended: Option<chrono::DateTime<chrono::Utc>>,
+    /// Of `count`, the runs whose end time could not be read.
+    #[serde(default)]
+    undated: usize,
 }
 
 impl DroppedPanics {
-    pub fn and(self, ended: chrono::DateTime<chrono::Utc>) -> Self {
+    /// One run, which ended at `ended` when that could be read.
+    pub fn one(ended: Option<chrono::DateTime<chrono::Utc>>) -> Self {
         Self {
-            count: self.count + 1,
-            first_ended: self.first_ended.min(ended),
-            last_ended: self.last_ended.max(ended),
+            count: 1,
+            first_ended: ended,
+            last_ended: ended,
+            undated: usize::from(ended.is_none()),
         }
+    }
+
+    pub fn and(self, other: Self) -> Self {
+        let earliest = |a: Option<_>, b: Option<_>| match (a, b) {
+            (Some(a), Some(b)) => Some(std::cmp::min(a, b)),
+            (a, b) => a.or(b),
+        };
+        let latest = |a: Option<_>, b: Option<_>| match (a, b) {
+            (Some(a), Some(b)) => Some(std::cmp::max(a, b)),
+            (a, b) => a.or(b),
+        };
+        Self {
+            count: self.count + other.count,
+            first_ended: earliest(self.first_ended, other.first_ended),
+            last_ended: latest(self.last_ended, other.last_ended),
+            undated: self.undated + other.undated,
+        }
+    }
+
+    pub fn count(&self) -> usize {
+        self.count
+    }
+
+    /// When the first and the last of the dated runs ended.
+    pub fn ended_between(
+        &self,
+    ) -> Option<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)> {
+        self.first_ended.zip(self.last_ended)
+    }
+
+    pub fn undated(&self) -> usize {
+        self.undated
     }
 }
 

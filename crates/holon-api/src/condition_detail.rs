@@ -462,32 +462,22 @@ impl ConditionKind {
                 thread,
                 earlier,
             } => {
-                let at = |t: &chrono::DateTime<chrono::Utc>| t.format("%Y-%m-%d %H:%M:%S UTC");
-                let mut body = vec![subject.to_string(), message.clone()];
+                let runs = match 1 + earlier.runs() {
+                    1 => "1 earlier run".to_string(),
+                    runs => format!("{runs} earlier runs"),
+                };
+                let headline = format!(
+                    "Holon crashed in {runs} — newest: {} at {subject}",
+                    one_line(message)
+                );
+                let mut body = vec![format!("{subject} on {thread}: {}", one_line(message))];
                 body.extend(
                     earlier
-                        .sites
+                        .panics
                         .iter()
-                        .map(|(site, runs)| format!("{runs}\u{d7} earlier at {site}")),
+                        .map(|p| format!("{}: {}", p.location, one_line(&p.message))),
                 );
-                body.extend(earlier.dropped.iter().map(|d| {
-                    format!(
-                        "{}\u{d7} earlier, records dropped unshown, between {} and {}",
-                        d.count,
-                        at(&d.first_ended),
-                        at(&d.last_ended)
-                    )
-                }));
-                let headline = match earlier.runs() {
-                    0 => format!(
-                        "Holon stopped last time because of an internal error on {thread}. The \
-                         log export has the details."
-                    ),
-                    runs => format!(
-                        "Holon stopped last time because of an internal error on {thread}, and \
-                         in the {runs} runs before it too. The log export has the details."
-                    ),
-                };
+                body.extend(earlier.dropped.iter().map(dropped_line));
                 ConditionDetail::with_body(headline, body)
             }
 
@@ -501,7 +491,7 @@ impl ConditionKind {
 
             Self::PanicRecordUnreadable { reason } => ConditionDetail::prose(format!(
                 "Holon cannot read {subject} among its records of internal errors: {reason}. \
-                 The records beside it are still shown."
+                 It stays where it is, and the records beside it are still shown."
             )),
 
             Self::PanicRecordUnwritable { reason } => ConditionDetail::prose(format!(
@@ -513,6 +503,41 @@ impl ConditionKind {
                 "Holon cannot show an internal error while it runs: {reason}. The next start \
                  shows the last one."
             )),
+        }
+    }
+}
+
+/// How many characters of a panic message one line shows.
+const ONE_LINE_CHARS: usize = 120;
+
+/// The first line of `message`, cut to [`ONE_LINE_CHARS`]; `…` marks a cut.
+fn one_line(message: &str) -> String {
+    let first = message.lines().next().unwrap_or("");
+    let cut: String = first.chars().take(ONE_LINE_CHARS).collect();
+    if cut.len() < message.len() {
+        format!("{cut}…")
+    } else {
+        cut
+    }
+}
+
+fn dropped_line(dropped: &crate::DroppedPanics) -> String {
+    let at = |t: chrono::DateTime<chrono::Utc>| t.format("%Y-%m-%d %H:%M:%S UTC");
+    let count = dropped.count();
+    match (dropped.ended_between(), dropped.undated()) {
+        (Some((first, last)), 0) => format!(
+            "{count}\u{d7} earlier, records dropped unshown, between {} and {}",
+            at(first),
+            at(last)
+        ),
+        (Some((first, last)), undated) => format!(
+            "{count}\u{d7} earlier, records dropped unshown, between {} and {} ({undated} of \
+             them at an unknown time)",
+            at(first),
+            at(last)
+        ),
+        (None, _) => {
+            format!("{count}\u{d7} earlier, records dropped unshown, at an unknown time")
         }
     }
 }
