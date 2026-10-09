@@ -116,8 +116,10 @@ fn active_mode_name(args: &[holon_api::render_types::Arg]) -> Option<String> {
         _ => None,
     };
     arg("entity_uri")?;
-    let listed =
-        holon_frontend::reactive_view_model::parse_view_modes(&string_literal("modes")?).ok()?;
+    let modes = string_literal("modes")?;
+    // The builder draws an error node for an unparsable `modes:`; this fn reports
+    // that as None.
+    let listed = holon_frontend::reactive_view_model::parse_view_modes(&modes).ok()?; // ALLOW(ok): builder error = None
     match arg("default_mode") {
         None => listed.into_iter().next().map(|m| m.name),
         Some(_) => {

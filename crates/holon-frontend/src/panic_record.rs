@@ -59,8 +59,8 @@ pub const SEEN_DIR: &str = "seen-panics";
 /// How many records [`SEEN_DIR`] keeps; [`SEEN_DROPPED_FILE`] counts the rest.
 pub const KEPT_SEEN: usize = 20;
 
-/// The one summary of the records dropped from [`SEEN_DIR`], with the fallback
-/// names [`DROPPED_FILE`] has.
+/// The one summary of the records dropped from [`SEEN_DIR`], with the same
+/// overflow names [`DROPPED_FILE`] has.
 pub const SEEN_DROPPED_FILE: &str = "seen-dropped-panics.json";
 
 /// Appended to the message of a record whose panic reached no bus.
