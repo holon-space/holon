@@ -392,6 +392,13 @@ fn render_unsupported(name: &str, _: &GpuiRenderContext) -> Div {
     div().child(format!("[unsupported: {name}]"))
 }
 
+fn render_panicked(name: &str, message: &str, ctx: &GpuiRenderContext) -> AnyElement {
+    error::render(
+        &holon_frontend::reactive_view_model::ReactiveViewModel::error(name, message),
+        ctx,
+    )
+}
+
 /// Stable key for a collection over a named row source. Its own prefix, so a
 /// query whose text happens to read like a source name cannot land on the same
 /// cache entry.

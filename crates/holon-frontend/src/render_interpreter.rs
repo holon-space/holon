@@ -463,15 +463,8 @@ fn widget_of(expr: &RenderExpr) -> &str {
 /// the window goes on.
 #[cfg(not(target_arch = "wasm32"))]
 fn build_catching_panics<W: WithEntity>(name: &str, build: impl FnOnce() -> W) -> W {
-    crate::panic_record::catch_disclosed(build).unwrap_or_else(|panic| {
-        W::builder_panicked(
-            name,
-            format!(
-                "panicked at {} on thread {}: {}",
-                panic.location, panic.thread, panic.message
-            ),
-        )
-    })
+    crate::panic_record::catch_disclosed(build)
+        .unwrap_or_else(|panic| W::builder_panicked(name, panic.to_string()))
 }
 
 /// A wasm32 build aborts on a panic, so nothing unwinds to a catch.

@@ -144,7 +144,8 @@ enum RegistrationMode {
     /// Option<Type>` with a match
     Dispatch(syn::Type),
     /// `node_dispatch: Type` — generate `render_node(node, ctx) -> Type`
-    /// dispatching on ViewKind
+    /// dispatching on ViewKind. A builder's panic becomes the element of the
+    /// caller's `render_panicked(name, message, ctx)` (not on wasm32).
     NodeDispatch(syn::Type),
 }
 
@@ -456,6 +457,8 @@ pub fn builder_registry_impl(input: TokenStream) -> TokenStream {
 
             let unsupported_inner = quote! { render_unsupported(name, ctx) };
             let unsupported_applied = apply(unsupported_inner, "__unknown");
+            let panicked_inner = quote! { render_panicked(name, &panic.to_string(), ctx) };
+            let panicked_applied = apply(panicked_inner, "builder_panicked");
 
             // Empty/None arm. Defaults to the GPUI expression so existing
             // GPUI consumers keep working; other frontends pass `empty: ...`.
@@ -469,7 +472,7 @@ pub fn builder_registry_impl(input: TokenStream) -> TokenStream {
                     ctx: &#ctx_ty,
                 ) -> #ret_ty {
                     let name = node.widget_name();
-                    match name.as_deref() {
+                    let build = || match name.as_deref() {
                         #(#arms)*
                         Some("empty") | None => #empty_arm,
                         _ => {
@@ -477,7 +480,17 @@ pub fn builder_registry_impl(input: TokenStream) -> TokenStream {
                             tracing::warn!("Unsupported widget: {name}");
                             #unsupported_applied
                         }
-                    }
+                    };
+                    // A wasm32 build aborts on a panic, so nothing unwinds to a catch.
+                    #[cfg(target_arch = "wasm32")]
+                    let built = build();
+                    #[cfg(not(target_arch = "wasm32"))]
+                    let built = holon_frontend::panic_record::catch_disclosed(build)
+                        .unwrap_or_else(|panic| {
+                            let name = name.as_deref().unwrap_or("unknown");
+                            #panicked_applied
+                        });
+                    built
                 }
             }
         }

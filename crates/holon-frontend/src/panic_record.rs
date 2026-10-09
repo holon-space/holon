@@ -77,6 +77,17 @@ pub struct PanicRecord {
     pub thread: String,
 }
 
+/// What an error element a caught panic leaves in the UI says.
+impl std::fmt::Display for PanicRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "panicked at {} on thread {}: {}",
+            self.location, self.thread, self.message
+        )
+    }
+}
+
 impl PanicRecord {
     pub fn from_hook(info: &std::panic::PanicHookInfo<'_>) -> Self {
         let message = payload_message(info.payload());
@@ -197,8 +208,10 @@ thread_local! {
 /// further. The panic shows on the bus as any panic does, but leaves no record
 /// for the next start once the bus has it: this run survives it.
 ///
-/// `RenderInterpreter::interpret` is its one caller; a catch
-/// anywhere else would hide panics the run cannot recover from.
+/// Its two callers are `RenderInterpreter::interpret`, which builds the view
+/// model, and the `render_node` that `holon_macros::builder_registry!`
+/// generates, which builds a frontend's elements from it; a catch anywhere
+/// else would hide panics the run cannot recover from.
 pub fn catch_disclosed<R>(f: impl FnOnce() -> R) -> Result<R, PanicRecord> {
     hook_once();
     let outer = CATCHING.with(|slot| slot.replace(Some(None)));
