@@ -175,6 +175,9 @@ fn drive_undo_then_blur(
     let env = futures::executor::block_on(async { TestEnvironment::new(runtime.clone()).unwrap() });
     // Mode BEFORE boot: the wiring is read once at `start_app`.
     env.set_enable_loro(loro);
+    if loro {
+        env.enable_block_cell_registry();
+    }
     futures::executor::block_on(async { env.start_app(true).await.expect("start_app") });
     assert_eq!(
         env.loro_enabled(),

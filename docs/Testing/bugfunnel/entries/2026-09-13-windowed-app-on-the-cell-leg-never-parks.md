@@ -2,8 +2,8 @@
 id: 2026-09-13-windowed-app-on-the-cell-leg-never-parks
 date: 2026-09-13
 gap: ENVIRONMENT
-secondary: null
-status: OPEN
+secondary: COVERAGE
+status: FIXED
 summary: >-
   A windowed GPUI app booted on the editor-cell leg never reaches a parked
   state, so `settle`'s repeated 30 s budgets exhaust the test timeout.
@@ -38,40 +38,48 @@ driving the fixtures.
 
 ## Root cause
 
-**Not established. This entry records the SYMPTOM.** What the measurements rule
-out is recorded here so the next probe does not repeat them.
+**A self-deadlock on the GPUI thread, not a busy run loop.** The editor's
+remote-delta task (`frontends/gpui/src/views/editor_view.rs`, the
+`cell.remote_deltas()` loop in `EditorView::new`) built its directive in one
+statement:
 
-Ruled out, each by direct measurement rather than reasoning:
+```rust
+let directive = this.controller.lock().unwrap()
+    .remote_converge_directive()
+    .map(|d| ConvergeDirective { target: this.project_authority(&d.target), ..d });
+```
 
-| Candidate | Evidence against |
-|---|---|
-| The undo itself blocks | Instrumenting the four stages of `TextUndo::undo` shows all of them complete on a run that then times out (`lane-logs/probe-win-1789283026.log`) |
-| A lock deadlock | A `sample` of the hung process shows every thread parked and the main loop in `run_until_parked` (`lane-logs/sample-1789266513.txt`) |
-| Re-entrancy on the undo manager's mutex | Making every read path `try_lock` and panic on re-entry produced 2 timeouts and 0 panics over 8 runs (`lane-logs/h1-1789282712.log`) |
-| The document write guard | Removing it from the undo path does not change the hang |
-| Cell-leg delta delivery to the editor | Three headless pins pass, including the undo shape (`crates/holon-app/tests/cell_leg_delta_delivery.rs`) |
-| The GPUI delta subscription | Instrumenting `frontends/gpui/src/views/editor_view.rs:685-694` shows the undo's delta waking the task and running through to the window update, on a run that then times out |
+The `MutexGuard` temporary lives until the end of the `let`, and
+`project_authority` locks the same `std::sync::Mutex<EditorViewModel>` again
+inside the `.map` closure. The second lock never returns. The path runs only
+when a cell is attached (`cell_for_remote` is `Some`, so only the editor-cell
+leg) and a remote delta leaves the view-model buffer behind the cell
+(`remote_converge_directive` returns `Some`). Depending on when the first such
+delta arrives, the stall shows at the boot barrier or after the undo.
 
-So the delta arrives and is applied, and nothing is blocked. What remains is
-that the run loop never goes idle: `settle` (which waits for
-`run_until_parked`) keeps finding work, and its repeated 30 s budgets add up
-past the test cap.
+Measured, `lane-logs/park/` in the `cell-undo-park` lane:
 
-**Candidate next probe:** find what keeps the run loop busy on the cell leg — a
-re-render loop, a stream that never terminates, or a timer that re-arms.
-Instrument `run_until_parked`'s pending-task set, or count renders per settle,
-rather than instrumenting the CRDT side again (the table above shows that side
-is clean).
+- `repro1.log`: `task_keyword_blur_windowed …_loro` with
+  `enable_block_cell_registry()` exits 124 at 300 s with 5 log lines. The first
+  30 s `settle` never returns, so one `run_until_parked` call blocks.
+- `sample3.txt`: the process is at 0.3 % CPU. The only `__psynch_mutexwait` in
+  the process is on the test (GPUI) thread:
+  `pump_cycle → HeadlessAppContext::run_until_parked → TestScheduler::tick →
+  EditorView::new remote-delta task → EditorView::project_authority →
+  Mutex<EditorViewModel>::lock`.
+
+An earlier sample showed the main loop "in `run_until_parked`" and was read as
+"nothing is blocked". The frame under it was a mutex wait.
 
 ## Missing piece
 
-No gate runs the windowed fixtures on the editor-cell leg, and no assertion
-anywhere bounds "the app reaches a parked state". The cell leg is exercised
-headlessly (where there is no run loop to park) and the windowed fixtures are
-exercised on the on-blur leg, so the combination that fails is the one
-combination nothing runs. The keystone PBT cannot reproduce it: it is headless
-and has no GPUI run loop, which is what makes this ENVIRONMENT rather than
-COVERAGE or ORACLE.
+The defect is in GPUI view code (`EditorView`), and the keystone PBT is
+headless: its editor mirror never runs `EditorView`, so it cannot reach the
+lock. That makes the primary gap ENVIRONMENT. The windowed fixtures can reach
+it, but none of them booted the editor-cell leg, so the only combination that
+fails was one that nothing ran (secondary COVERAGE). No assertion bounds "the
+app reaches a parked state", so a deadlock of this kind shows up only as a
+test timeout.
 
 ## Exposure
 
@@ -82,10 +90,11 @@ lane (D115.A) and is that increment's stated entry condition.
 
 ## Remedy
 
-Open. Increment 2 of the cell-undo lane is complete headless and its headline
-windowed rung stays on the on-blur leg until this is fixed; the fixture is
-untouched in the landed tree. Related: risk row 1 of
-`~/.claude/plans/cell-undo-design.md`, which predicted the
-`task_keyword_blur_windowed` hang, and
-`2026-09-11-cmd-z-restores-nothing-after-typing-through-the-editor-cell`, whose
-symptom this blocks the windowed proof of.
+FIXED. Bind the directive in its own statement so that the guard drops before
+`project_authority` locks again (`editor_view.rs`, the `remote_delta`
+directive). The windowed `_loro` arms of `task_keyword_blur_windowed` and
+`undo_survives_blur_windowed` now boot the editor-cell leg
+(`env.enable_block_cell_registry()`). They pass in about 20 s with the fix and
+hang (exit 124 at 240 s) without it (`teeth-*.log`, `green-*.log`).
+
+The general park bound is still open (see Missing piece).

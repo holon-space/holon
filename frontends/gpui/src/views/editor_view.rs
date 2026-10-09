@@ -711,15 +711,14 @@ impl EditorView {
                                     // behind the adapter-side IME guard
                                     // (Amendment 3). The structural payload of
                                     // the delta stays discarded above.
-                                    let directive = this
-                                        .controller
-                                        .lock()
-                                        .unwrap()
-                                        .remote_converge_directive()
-                                        .map(|d| ConvergeDirective {
-                                            target: this.project_authority(&d.target),
-                                            ..d
-                                        });
+                                    // Its own statement: the guard must drop before
+                                    // `project_authority` locks the controller again.
+                                    let directive =
+                                        this.controller.lock().unwrap().remote_converge_directive();
+                                    let directive = directive.map(|d| ConvergeDirective {
+                                        target: this.project_authority(&d.target),
+                                        ..d
+                                    });
                                     if let Some(directive) = directive {
                                         this.converge_or_defer(
                                             "remote_delta",
