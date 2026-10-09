@@ -83,13 +83,19 @@ crate::cap_transition! {
     |me, _state, sut| {
         sut.delete_vault_file(&me.file).await;
     }
-    sql_budget: |_me, _state| {
-        // Bounded by the cascade: a broken recipe that once ingested takes its
-        // page and steps out (up to 15 reads), where a file that never
-        // ingested owns no rows (3). Neither writes SQL.
+    sql_budget: |_me, state| {
+        // A broken recipe that once ingested takes its page and steps out; a
+        // file that never ingested owns no rows. With Loro in the write path
+        // the deletion only reads. Without it, `org.on_file_deleted`
+        // cascades through `DELETE FROM block_raw` and friends (34 reads, 9 writes).
+        let (reads, writes) = if state.content_writes_reach_sql() {
+            (34, 9)
+        } else {
+            (15, 0)
+        };
         ExpectedSql {
-            reads: 15,
-            writes: 0,
+            reads,
+            writes,
             ddl: 0,
             tolerance: 6,
         }
