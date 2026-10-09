@@ -5012,6 +5012,12 @@ impl StubBuilderServices {
         }
     }
 
+    /// Interpret with `interpreter` instead of the shipped builders.
+    pub fn with_interpreter(mut self, interpreter: RenderInterpreter<ReactiveViewModel>) -> Self {
+        self.interpreter = Arc::new(interpreter);
+        self
+    }
+
     /// Answer `resolve_profile` with `profile`, so the profile/variant path
     /// (`render_entity` → `pick_active_variant`) is reachable from a test.
     pub fn with_profile(mut self, profile: holon_api::RenderProfile) -> Self {

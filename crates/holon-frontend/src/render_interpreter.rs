@@ -33,6 +33,9 @@ pub trait WithEntity {
 
     /// The node an expression that failed to evaluate renders as.
     fn eval_error(message: String) -> Self;
+
+    /// The node the `widget` builder renders as when it panicked.
+    fn builder_panicked(widget: &str, message: String) -> Self;
 }
 
 use crate::RenderContext;
@@ -369,7 +372,10 @@ impl<W> RenderInterpreter<W> {
         ctx: &RenderContext,
         services: &dyn BuilderServices,
         interpret_fn: &dyn Fn(&RenderExpr, &RenderContext) -> W,
-    ) -> W {
+    ) -> W
+    where
+        W: WithEntity,
+    {
         // One-level scoping of the parent's offer: the builder learns it through
         // `parent_capability`, while the `ctx` it clones for its own children
         // carries `ContainerCapability::None`. Without this strip an `accordion`
@@ -382,7 +388,7 @@ impl<W> RenderInterpreter<W> {
             stripped = ctx.offering(crate::render_context::ContainerCapability::None);
             &stripped
         };
-        let widget = match self.builders.get(name) {
+        let build = || match self.builders.get(name) {
             Some(builder) => builder.build(BuilderArgs {
                 args,
                 ctx,
@@ -407,11 +413,31 @@ impl<W> RenderInterpreter<W> {
                     })
             }
         };
+        let widget = build_catching_panics(name, build);
         match &self.annotator {
             Some(annotate) => annotate(widget, name, ctx),
             None => widget,
         }
     }
+}
+
+/// The one place a builder's panic is caught: every builder call, nested ones
+/// included, passes through [`RenderInterpreter::dispatch`], so the panicking
+/// widget alone becomes an error node and the window goes on.
+#[cfg(not(target_arch = "wasm32"))]
+fn build_catching_panics<W: WithEntity>(name: &str, build: impl FnOnce() -> W) -> W {
+    crate::panic_record::catch_disclosed(build).unwrap_or_else(|panic| {
+        W::builder_panicked(
+            name,
+            format!("panicked at {}: {}", panic.location, panic.message),
+        )
+    })
+}
+
+/// A wasm32 build aborts on a panic, so nothing unwinds to a catch.
+#[cfg(target_arch = "wasm32")]
+fn build_catching_panics<W: WithEntity>(_: &str, build: impl FnOnce() -> W) -> W {
+    build()
 }
 
 // =========================================================================

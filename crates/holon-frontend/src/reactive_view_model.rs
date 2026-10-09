@@ -2236,6 +2236,10 @@ impl crate::render_interpreter::WithEntity for ReactiveViewModel {
     fn eval_error(message: String) -> Self {
         Self::error("eval_error", message)
     }
+
+    fn builder_panicked(widget: &str, message: String) -> Self {
+        Self::error(widget, message)
+    }
 }
 
 #[cfg(test)]

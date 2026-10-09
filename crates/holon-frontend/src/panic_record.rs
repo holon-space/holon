@@ -2,7 +2,8 @@
 //! core bus now, and a record in the config dir that a later start discloses
 //! as [`ConditionKind::PreviousRunPanicked`]. The record is written on the
 //! panicking thread before anything else, so a panic that still aborts (one
-//! that crosses `extern "C"`) leaves it too.
+//! that crosses `extern "C"`) leaves it too. A panic [`catch_disclosed`]
+//! catches leaves no record once the bus has it.
 //!
 //! A record leaves [`UNSHOWN_DIR`] only once a frontend has drawn the bus that
 //! shows it ([`seen_on`]), so a run that dies before that keeps the records of
@@ -10,6 +11,7 @@
 //! message: no file Holon reads a crash from is deleted, only counted once a
 //! bound is reached.
 
+use std::cell::RefCell;
 use std::io::ErrorKind;
 use std::panic::Location;
 use std::path::Path;
@@ -76,12 +78,7 @@ pub struct PanicRecord {
 
 impl PanicRecord {
     pub fn from_hook(info: &std::panic::PanicHookInfo<'_>) -> Self {
-        let payload = info.payload();
-        let message = payload
-            .downcast_ref::<&str>()
-            .map(|s| (*s).to_string())
-            .or_else(|| payload.downcast_ref::<String>().cloned())
-            .unwrap_or_else(|| "a panic with a non-text payload".to_string());
+        let message = payload_message(info.payload());
         let location = info.location().map_or_else(
             || "an unknown location".to_string(),
             |l| format!("{}:{}:{}", l.file(), l.line(), l.column()),
@@ -127,6 +124,14 @@ impl PanicRecord {
             },
         }
     }
+}
+
+fn payload_message(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|s| (*s).to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "a panic with a non-text payload".to_string())
 }
 
 fn current_thread_name() -> String {
@@ -180,6 +185,46 @@ impl Target {
 }
 
 static TARGET: Mutex<Option<Target>> = Mutex::new(None);
+
+thread_local! {
+    /// `Some` while [`catch_disclosed`] runs on this thread; the hook puts the
+    /// panic's record in it.
+    static CATCHING: RefCell<Option<Option<PanicRecord>>> = const { RefCell::new(None) };
+}
+
+/// Run `f`, and return the record of a panic in it instead of unwinding
+/// further. The panic shows on the bus as any panic does, but leaves no record
+/// for the next start once the bus has it: this run survives it.
+///
+/// The render interpreter's builder dispatch is its one caller; a catch
+/// anywhere else would hide panics the run cannot recover from.
+pub fn catch_disclosed<R>(f: impl FnOnce() -> R) -> Result<R, PanicRecord> {
+    hook_once();
+    let outer = CATCHING.with(|slot| slot.replace(Some(None)));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+    let caught = CATCHING.with(|slot| slot.replace(outer)).flatten();
+    result.map_err(|payload| {
+        caught.unwrap_or_else(|| PanicRecord {
+            message: payload_message(payload.as_ref()),
+            location: "an unknown location: a panic hook installed after Holon's replaced it"
+                .to_string(),
+            thread: current_thread_name(),
+        })
+    })
+}
+
+/// Hand `record` to the [`catch_disclosed`] running on this thread, if one is.
+fn caught_here(record: &PanicRecord) -> bool {
+    CATCHING
+        .try_with(|slot| match slot.try_borrow_mut().as_deref_mut() {
+            Ok(Some(caught)) => {
+                *caught = Some(record.clone());
+                true
+            }
+            Ok(None) | Err(_) => false,
+        })
+        .unwrap_or(false)
+}
 
 fn target() -> MutexGuard<'static, Option<Target>> {
     TARGET.lock().unwrap_or_else(PoisonError::into_inner)
@@ -715,6 +760,7 @@ fn spawn_forwarder(
 /// process. Every failure goes to stderr.
 fn record(info: &std::panic::PanicHookInfo<'_>) {
     let record = PanicRecord::from_hook(info);
+    let caught = caught_here(&record);
     let mut target = target();
     let Some(target) = target.as_mut() else {
         eprintln!(
@@ -737,6 +783,7 @@ fn record(info: &std::panic::PanicHookInfo<'_>) {
             );
             record.not_shown()
         }
+        Delivery::Forwarded if caught => return,
         Delivery::Forwarded => record,
     };
     if let Err(e) = written.write_to(&target.record_dir) {
