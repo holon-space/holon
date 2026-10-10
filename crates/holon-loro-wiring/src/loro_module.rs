@@ -635,9 +635,11 @@ fn register_subtree_share(injector: &Injector) {
         // `OpOrigin::Sync` branch, so they consult the same authority
         // themselves. Optional for the same reason the cell registry's is:
         // a composition without a format registry installs none.
-        let write_tier = resolver
-            .optional_resolve_async::<dyn holon_core::WriteTierAuthority>()
-            .await;
+        let write_tier = holon::di::resolve_if_bound::<dyn holon_core::WriteTierAuthority>(
+            &resolver,
+            "[LoroModule] share backend write-tier gate",
+        )
+        .await;
 
         Shared::new(LoroShareBackend::new_with_sql(
             store_arc,
@@ -700,9 +702,11 @@ fn register_subtree_share(injector: &Injector) {
                 Arc::new(move || {
                     let injector = write_tier_injector.clone();
                     Box::pin(async move {
-                        injector
-                            .optional_resolve_async::<dyn holon_core::WriteTierAuthority>()
-                            .await
+                        holon::di::resolve_if_bound::<dyn holon_core::WriteTierAuthority>(
+                            &injector,
+                            "[LoroModule] device-pairing write-tier gate",
+                        )
+                        .await
                     })
                 });
             Shared::new(Arc::new(holon_loro::device_pairing_op::DevicePairing::new(

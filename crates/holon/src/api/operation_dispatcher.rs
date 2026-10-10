@@ -2716,34 +2716,43 @@ impl Module for OperationModule {
             // enforcer, which is exactly what prod installed before this seam
             // existed (`PolicyOverlayEnforcer::inert()`: an empty PolicySet
             // whose `check` returns `Ok(())` on the first line).
-            let enforcer = r
-                .optional_resolve_async::<dyn BoundaryEnforcer>()
-                .await
-                .unwrap_or_else(|| {
-                    Arc::new(holon_core::InertBoundaryEnforcer) as Arc<dyn BoundaryEnforcer>
-                });
+            //
+            // SEC-bound (open, #165): whether the APP container must assert
+            // all four guard types are bound belongs here, next to each
+            // `None` arm.
+            let enforcer = crate::di::resolve_if_bound::<dyn BoundaryEnforcer>(
+                &r,
+                "[OperationModule] boundary seam",
+            )
+            .await
+            .unwrap_or_else(|| {
+                Arc::new(holon_core::InertBoundaryEnforcer) as Arc<dyn BoundaryEnforcer>
+            });
             dispatcher.set_boundary_enforcer(enforcer);
 
             // ADR 0032 §3 — install the net gate. The placement policy needs
             // capability profiles and a document-home authority, neither of
             // which this crate links, so a composition root that has them
             // registers one and a container without them gets the inert guard.
-            let net_guard = r
-                .optional_resolve_async::<dyn crate::api::net_guard::NetGuard>()
-                .await
-                .unwrap_or_else(|| {
-                    Arc::new(crate::api::net_guard::InertNetGuard)
-                        as Arc<dyn crate::api::net_guard::NetGuard>
-                });
+            let net_guard = crate::di::resolve_if_bound::<dyn crate::api::net_guard::NetGuard>(
+                &r,
+                "[OperationModule] net gate",
+            )
+            .await
+            .unwrap_or_else(|| {
+                Arc::new(crate::api::net_guard::InertNetGuard)
+                    as Arc<dyn crate::api::net_guard::NetGuard>
+            });
             dispatcher.set_net_guard(net_guard);
 
             // The write-tier gate. Answering needs a block reader and the
             // vault's format registry, so a composition root with a vault
             // registers one; a container without files registers none and
             // every block it holds is writable.
-            if let Some(authority) = r
-                .optional_resolve_async::<dyn holon_core::WriteTierAuthority>()
-                .await
+            if let Some(authority) = crate::di::resolve_if_bound::<
+                dyn holon_core::WriteTierAuthority,
+            >(&r, "[OperationModule] write-tier gate")
+            .await
             {
                 dispatcher.set_write_tier_authority(authority);
             }
@@ -2753,9 +2762,10 @@ impl Module for OperationModule {
             // authority, which is the SQL tables when no separate one exists.
             {
                 let validators = r.resolve_async::<holon_core::ShapeValidators>().await;
-                let authority = match r
-                    .optional_resolve_async::<dyn holon_core::WriteAuthorityReads>()
-                    .await
+                let authority = match crate::di::resolve_if_bound::<
+                    dyn holon_core::WriteAuthorityReads,
+                >(&r, "[OperationModule] shape gate")
+                .await
                 {
                     Some(authority) => authority,
                     None => Arc::new(crate::core::sql_write_authority::SqlWriteAuthority::new(

@@ -1,0 +1,117 @@
+Red log — #165 "Never install an inert guard when a guard resolve fails"
+Date: 2026-10-10
+Test: crates/holon/tests/guard_resolve_fails_loud.rs
+Command: cargo nextest run -p holon --features holon/test-helpers \
+           --test guard_resolve_fails_loud --no-fail-fast
+Tree: .claude/worktrees/guard-fail-loud, base main 7f3a7f77, fluxdi lock e6c64618
+Build profile: test (unoptimized + debuginfo)
+
+Code state for this run: the four OperationModule guard sites still call
+`Injector::optional_resolve_async` (= `try_resolve_async().ok()`), i.e. the
+state of main at 7f3a7f77. Nothing else differs from the landed change.
+
+Red for the right reason:
+  - BoundaryEnforcer, NetGuard, WriteTierAuthority: the boot SURVIVED a
+    `FactoryFailed` resolve, so it installed InertBoundaryEnforcer /
+    InertNetGuard / no write-tier authority.
+  - WriteAuthorityReads: the dispatcher's shape gate silently took the racy SQL
+    reads; the boot only died later, at the engine's own fail-loud resolve
+    (crates/holon/src/di/registration.rs:878), with a message that names
+    neither the shape gate nor the type. That later panic is why the test
+    asserts the composition SITE and not merely "the boot panicked".
+  - `an_unbound_guard_still_boots` passes in both states: "not bound" stays a
+    legal container shape.
+
+warning: Cargo.toml: unused manifest key: profile.coverage.package.*.pathfinder_simd
+warning: Cargo.toml: unused manifest key: profile.coverage.package.*.psm
+warning: workspace (manifest) generated 2 warnings
+   Compiling holon v0.1.0 (/Users/martin/Workspaces/pkm/holon/.claude/worktrees/guard-fail-loud/crates/holon)
+   Compiling holon-loro-wiring v0.1.0 (/Users/martin/Workspaces/pkm/holon/.claude/worktrees/guard-fail-loud/crates/holon-loro-wiring)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.51s
+────────────
+ Nextest run ID 220f06ec-0aad-4bdb-b1c3-f11ffb273f7d with nextest profile: default
+    Starting 5 tests across 1 binary
+        FAIL [   1.370s] (1/5) holon::guard_resolve_fails_loud a_failing_write_authority_reads_factory_stops_the_boot
+  stdout ───
+
+    running 1 test
+    test a_failing_write_authority_reads_factory_stops_the_boot ... FAILED
+
+    failures:
+
+    failures:
+        a_failing_write_authority_reads_factory_stops_the_boot
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 1.34s
+
+  stderr ───
+
+    thread 'a_failing_write_authority_reads_factory_stops_the_boot' (353686871) panicked at crates/holon/tests/guard_resolve_fails_loud.rs:75:5:
+    the panic should name the composition site [OperationModule] shape gate, got: boot [component=turso stage=engine-resolve]: resolving the block write authority failed: (FactoryFailed) - Factory for type dyn holon_core::traits::WriteAuthorityReads failed: the guard factory failed on purpose
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   1.891s] (2/5) holon::guard_resolve_fails_loud a_failing_write_tier_authority_factory_stops_the_boot
+  stdout ───
+
+    running 1 test
+    test a_failing_write_tier_authority_factory_stops_the_boot ... FAILED
+
+    failures:
+
+    failures:
+        a_failing_write_tier_authority_factory_stops_the_boot
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 1.86s
+
+  stderr ───
+
+    thread 'a_failing_write_tier_authority_factory_stops_the_boot' (353686872) panicked at crates/holon/tests/guard_resolve_fails_loud.rs:61:18:
+    the boot survived a failed resolve of dyn holon_core::write_tier_gate::WriteTierAuthority, so it installed the permissive default instead of failing loudly
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        PASS [   1.918s] (3/5) holon::guard_resolve_fails_loud an_unbound_guard_still_boots
+        FAIL [   1.946s] (4/5) holon::guard_resolve_fails_loud a_failing_boundary_enforcer_factory_stops_the_boot
+  stdout ───
+
+    running 1 test
+    test a_failing_boundary_enforcer_factory_stops_the_boot ... FAILED
+
+    failures:
+
+    failures:
+        a_failing_boundary_enforcer_factory_stops_the_boot
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 1.92s
+
+  stderr ───
+
+    thread 'a_failing_boundary_enforcer_factory_stops_the_boot' (353686822) panicked at crates/holon/tests/guard_resolve_fails_loud.rs:61:18:
+    the boot survived a failed resolve of dyn holon_core::boundary_enforcer::BoundaryEnforcer, so it installed the permissive default instead of failing loudly
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   1.975s] (5/5) holon::guard_resolve_fails_loud a_failing_net_guard_factory_stops_the_boot
+  stdout ───
+
+    running 1 test
+    test a_failing_net_guard_factory_stops_the_boot ... FAILED
+
+    failures:
+
+    failures:
+        a_failing_net_guard_factory_stops_the_boot
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 1.96s
+
+  stderr ───
+
+    thread 'a_failing_net_guard_factory_stops_the_boot' (353686820) panicked at crates/holon/tests/guard_resolve_fails_loud.rs:61:18:
+    the boot survived a failed resolve of dyn holon::api::net_guard::NetGuard, so it installed the permissive default instead of failing loudly
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [   1.977s] 5 tests run: 1 passed, 4 failed, 0 skipped
+        FAIL [   1.370s] (1/5) holon::guard_resolve_fails_loud a_failing_write_authority_reads_factory_stops_the_boot
+        FAIL [   1.891s] (2/5) holon::guard_resolve_fails_loud a_failing_write_tier_authority_factory_stops_the_boot
+        FAIL [   1.946s] (4/5) holon::guard_resolve_fails_loud a_failing_boundary_enforcer_factory_stops_the_boot
+        FAIL [   1.975s] (5/5) holon::guard_resolve_fails_loud a_failing_net_guard_factory_stops_the_boot
+error: test run failed

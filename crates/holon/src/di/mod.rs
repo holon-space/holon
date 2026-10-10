@@ -11,6 +11,7 @@
 
 pub mod lifecycle;
 pub mod registration;
+pub mod resolve_if_bound;
 pub mod runtime;
 pub mod schema_providers;
 #[cfg(any(test, feature = "test-helpers"))]
@@ -26,6 +27,7 @@ pub use lifecycle::{
 };
 pub use registration::register_core_services_no_turso;
 pub use registration::register_core_services_with_backend;
+pub use resolve_if_bound::resolve_if_bound;
 pub use runtime::DbHandleCacheFactory;
 pub use runtime::create_queryable_cache_async;
 pub use schema_providers::DbReady;
