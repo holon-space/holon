@@ -43,12 +43,16 @@ Instead:
 1. Incorporate the PR branch's changes into the linear integration chain
    (stacked-workstreams weave onto `integration`, gates green), then land so
    `main` advances along the straight line.
-2. Re-point the PR's bookmark to the corresponding rev IN the landed linear
+2. Re-point the PR's bookmark to the lane tip IN the woven `integration`
    chain (`jj bookmark set <name> -r <rev-in-chain> --allow-backwards` if
-   needed) and push BOTH `main` and the updated bookmark.
-3. GitHub then sees the PR's head as reachable from `main` and marks the PR
-   merged on its own — we keep a clean linear history AND GitHub's PR
-   bookkeeping.
+   needed).
+3. Push in TWO steps, in this order:
+   a. `jj git push --bookmark <lane>` ALONE.
+   b. Wait until `gh pr view <n> --json headRefOid` equals that tip.
+   c. `jj git push --bookmark integration`.
+   GitHub then marks the PR MERGED into `integration`. Pushing both bookmarks
+   in one push CLOSES the PR instead. After the lane lands, `main` advances
+   along the same line.
 
 # `holon` MCP
 
@@ -71,9 +75,10 @@ repo:
 topic; `README.org` indexes them; `Now.org` is the G1 critical path).
 This repo's `docs/` holds the **ground-level detail** (ADRs, architecture,
 plans); the vault holds the altitude view and points back to those docs.
-When you defer a decision or surface a cross-session open topic, record it in
-the vault as a topic-doc headline with a slug `:ID:` (see
-`Display Placement & Resurfacing.org` for the pattern) — not only in-repo.
+When you defer a strategy-level topic, record it in the vault as a topic-doc
+headline with a slug `:ID:` (see `Display Placement & Resurfacing.org` for the
+pattern) — not only in-repo. Lane state and follow-up tasks go to
+`holon-space/holon-work` issues (see "Task tracking").
 Note (measured 2026-08-11, ratified by Martin): underscored identifiers
 round-trip byte-stable — the old "mangles underscored identifiers" claim is
 refuted. The REAL round-trip hazards: `_`-prefixed property KEYS are silently
@@ -87,21 +92,18 @@ stored properties bag and the renderer replays it. Pinned by
 crates/holon-app/tests/org_store_org_round_trip.rs. See
 docs/Reference/CompassConventions.md.
 
-# Task tracking (lane state records)
-Every lane keeps its running state record (done / in progress with file:line / next / evidence) in the vault, so a fresh agent can continue it at any moment.
-- **Where:** `/Users/martin/Workspaces/pkm/holon-pkm/Projects/Holon/<topic>.org`. Each lane is ONE task under the backlog item it belongs to. Current lanes:
-
-  | Lane | Page › backlog item |
-  |---|---|
-  | org-drawer-faithful (group B) | `Plain-Text Layer.org` › Keep OrgRenderer + parser bidirectional sync stable |
-  | d229-move | `Plain-Text Layer.org` › Org-mode adapter |
-  | decision Inc 6 / Inc 7 / Inc 10 | `Dogfooding & Agents.org` › Idea 3 › Ask Martin through `?`-question blocks in the vault (D209.a) |
-  | dogfooding phase 1 | `Cross-Cutting Concerns.org` › macOS desktop (GPUI) — the dogfood platform |
-
-  A new lane finds its backlog item with `grep -n '^\*' <page>`; if none fits, the orchestrator picks one.
-- **How:** load and follow the `holon-handoff` skill: imperative titles, details as child blocks, parent state derived from children, each link (commit, report, design note; `file:///` for local files) on its own child line.
-- **Writes:** an agent edits ONLY the task subtree of its own lane, by point edits with the Edit tool (never read the whole file and write it back). When a running Holon instance holds the vault (it holds the `flock` on `{vault}/.holon/writer.lock`; the file stays after exit, so check that the `pid` in it is alive), use the MCP instead (`dense_patch`, `claim_task`, `complete_task`).
-- Never touch other lanes' subtrees or other vault content.
+# Task tracking (lane state in GitHub issues)
+Work-in-progress and lane context live in GitHub issues of the PRIVATE repo `holon-space/holon-work`. Vision and strategy stay in the vault. A fresh agent can continue any lane from its issue.
+- **One issue per lane.** The orchestrator state is the state comment of issue #26.
+- **State comment.** Each issue has ONE state comment, edited in place. It starts with the marker `<!-- lane-state -->`. Content: done / in progress (file:line) / next / evidence. Agents update it at each milestone.
+  - Write: `~/.claude/skills/orchestrator/scripts/lane-state.sh write <issue> <markdown-file>`
+  - Read: `~/.claude/skills/orchestrator/scripts/lane-state.sh read <issue>`
+- **Decisions.** Ask in the decision inbox. When Martin rules, post a comment on the issue with the ruling, the direction, and possibly a (partial) plan.
+- **Draft PR per lane.** Open a PUBLIC draft PR on `holon-space/holon` with base `integration` when the lane bookmark is first pushed. The PR body links the private issue by number only. No private details in the PR: no real-DB measurements, no vault content, no unfixed security defects. These stay in the private issue.
+- **Landing.** Merge the PR as in the VCS section above. On landing, close the issue with a comment that names the main commit.
+- **Writing style.** Load the `holon-handoff` skill before writing an issue, PR body or state comment and follow its "GitHub issues and PRs" section: actionable imperative tasks as `- [ ]` / `- [x]`, parent state derived from children, one fact per line with details in nested lists, never long lines that cram several facts.
+- **Speaking names.** Every issue and PR is understandable from GitHub alone. Use speaking names and `#N` links, never aliases such as `M5`, `Inc 0` or `G1`. A milestone is an epic: a parent issue with sub-issues. Local paths, vault pages and lane logs may support a statement but never carry its meaning.
+- **Secrets.** Never put secrets, tokens, passwords or env dumps into an issue or PR.
 
 # Development
 See [DEVELOPMENT.md](DEVELOPMENT.md) — testing (nextest, coverage) and log analysis scripts.
