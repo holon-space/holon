@@ -12,13 +12,11 @@
 //! - the block-CRUD authority, which picks the Loro or the SqlOnly write leg
 //!   (`holon-app/src/turso_seams.rs:955`)
 //!
-//! The other two pin only that the app boot refuses to proceed, because an
-//! earlier REQUIRED resolve of the same type fails loud first:
-//! `loro_module.rs:181` for `WriteTierAuthority` and `wiring.rs:448` for
-//! `ReadOnlyDocuments`. Their optional arms (`loro_module.rs:638`, `:705`,
-//! `holon-orgmode/src/di.rs:808`) are therefore unreachable in an app boot —
-//! the contradiction `holon-frontend/src/render_services.rs:74` already states
-//! and the open SEC-bound question has to settle.
+//! The other two pin that the app boot refuses to proceed, without naming one
+//! site: several sites resolve the same type and the first one to run is the
+//! one that panics. For `WriteTierAuthority` every site is now REQUIRED
+//! (SEC-bound.a), and `wiring.rs:448` requires `ReadOnlyDocuments`, so there
+//! is no permissive arm left behind either of them.
 //!
 //! @pbt kind harness
 //! @pbt covers guard-resolve-fails-loud-outside-the-dispatcher — a failed
@@ -130,12 +128,10 @@ fn boot_and_assert(bind: impl FnOnce(&Injector) + Send + 'static, site: &str, ty
     );
 }
 
-/// No container that loads `LoroModule` can reach the share backend's own
-/// write-tier arm: the `BlockCellRegistry` provider REQUIRES the same type
-/// (`loro_module.rs:181`, `resolve_async`) and the registry is resolved first.
-/// So this pins the reachable guarantee — an app never boots with a
-/// `WriteTierAuthority` that failed to resolve — and the first loud site is
-/// that required resolve, not `loro_module.rs:638`.
+/// Every site that wants the write-tier authority now requires it, so which
+/// one panics depends on resolve order and the test does not pin a site. What
+/// it pins is the guarantee: an app never boots with a `WriteTierAuthority`
+/// that failed to resolve.
 #[test]
 fn a_failing_write_tier_authority_stops_the_app_boot() {
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -173,12 +169,12 @@ fn a_failing_block_cell_registry_stops_the_event_infra_wiring() {
 }
 
 /// `ReadOnlyDocuments` IS the vault's write-tier authority: absence makes every
-/// block in a read-only-format document editable again. In the app container
-/// `wiring.rs:448` already REQUIRES it (a sync `resolve`), so the loud failure
-/// comes from there; the org-mode arm the lane made loud
-/// (`holon-orgmode/src/di.rs:808`) bites only in a container that requires
-/// none, which this harness cannot build. Pinned here: the app boot never
-/// proceeds with an authority that failed to resolve.
+/// block in a read-only-format document editable again. `wiring.rs:448`
+/// requires it, so the loud failure comes from there; the org-mode arm this
+/// lane made loud (`holon-orgmode/src/di.rs:808`) bites in a container that
+/// requires none, which this harness cannot build — the org-standalone one.
+/// Pinned here: the app boot never proceeds with an authority that failed to
+/// resolve.
 #[test]
 fn a_failing_read_only_document_authority_stops_the_app_boot() {
     let rt = tokio::runtime::Builder::new_multi_thread()

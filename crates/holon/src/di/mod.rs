@@ -9,6 +9,7 @@
 //! - `lifecycle`: App lifecycle functions (creating/initializing BackendEngine)
 //! - `registration`: DI service registration functions
 
+pub mod guard_bindings;
 pub mod lifecycle;
 pub mod registration;
 pub mod runtime;
@@ -19,6 +20,8 @@ pub mod test_helpers;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+pub use guard_bindings::RootOwnsGuardComposition;
+pub use guard_bindings::complete_guard_composition;
 // Re-export public API
 pub use lifecycle::{
     CoreInfraModule, StorageSelector, build_no_turso_container, create_backend_engine,

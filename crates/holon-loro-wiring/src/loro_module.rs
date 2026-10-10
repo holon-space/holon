@@ -633,13 +633,16 @@ fn register_subtree_share(injector: &Injector) {
         // The write-tier authority for imported blocks. The share projection
         // legs write straight to `sql_ops`, bypassing the dispatcher's
         // `OpOrigin::Sync` branch, so they consult the same authority
-        // themselves. Optional for the same reason the cell registry's is:
-        // a composition without a format registry installs none.
-        let write_tier = holon_core::resolve_if_bound_async::<dyn holon_core::WriteTierAuthority>(
-            &resolver,
-            "[LoroModule] share backend write-tier gate",
-        )
-        .await;
+        // themselves. Required (SEC-bound.a): a composition without a format
+        // registry binds `NoReadOnlyDocuments`, so there is no absence to
+        // import blocks past.
+        let write_tier = Some(
+            holon_core::resolve_bound_async::<dyn holon_core::WriteTierAuthority>(
+                &resolver,
+                "[LoroModule] share backend write-tier gate",
+            )
+            .await,
+        );
 
         Shared::new(LoroShareBackend::new_with_sql(
             store_arc,
@@ -695,18 +698,21 @@ fn register_subtree_share(injector: &Injector) {
             // The third import seam's write-tier authority. The re-import
             // writes through `BlockOrdering`, bypassing the dispatcher's gate,
             // so it asks the same authority itself. Lazy for the same reason
-            // as `ordering`, and optional for the same reason as the share
-            // backend's: a composition with no vault root registers none.
+            // as `ordering`, and required for the same reason as the share
+            // backend's: every container binds one, the explicit no-op
+            // included (SEC-bound.a).
             let write_tier_injector = write_tier_injector.clone();
             let write_tier: holon_loro::device_pairing_op::WriteTierResolver =
                 Arc::new(move || {
                     let injector = write_tier_injector.clone();
                     Box::pin(async move {
-                        holon_core::resolve_if_bound_async::<dyn holon_core::WriteTierAuthority>(
-                            &injector,
-                            "[LoroModule] device-pairing write-tier gate",
+                        Some(
+                            holon_core::resolve_bound_async::<dyn holon_core::WriteTierAuthority>(
+                                &injector,
+                                "[LoroModule] device-pairing write-tier gate",
+                            )
+                            .await,
                         )
-                        .await
                     })
                 });
             Shared::new(Arc::new(holon_loro::device_pairing_op::DevicePairing::new(

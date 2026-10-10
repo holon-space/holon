@@ -46,6 +46,23 @@ where
     }
 }
 
+/// For a service the container GUARANTEES: panics on every resolve error,
+/// "not bound" included.
+///
+/// Use it where a composition root has committed to a binding — a guard, where
+/// a configuration without one binds the explicit no-op (SEC-bound.a). There
+/// "not bound" is a wiring fault like any other, and a permissive default
+/// installed here would be the fail-open this module exists to prevent.
+pub async fn resolve_bound_async<T>(injector: &Injector, site: &str) -> Shared<T>
+where
+    T: ?Sized + Send + Sync + 'static,
+{
+    match injector.try_resolve_async::<T>().await {
+        Ok(service) => service,
+        Err(e) => wiring_fault::<T>(site, &e),
+    }
+}
+
 /// The set form: empty only when nothing is bound into the set. Panics on any
 /// other resolve error, including a failure of ONE member — a partial set is a
 /// different set, and silently dropping a member drops whatever it enforced.

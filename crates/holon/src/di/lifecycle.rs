@@ -190,6 +190,7 @@ where
     open_and_register_core(&injector, db_path, StorageSelector::Turso, conditions)?;
 
     setup_fn(&injector)?;
+    super::guard_bindings::complete_guard_composition(&injector);
 
     tracing::debug!("[DI] Injector built successfully");
 
@@ -215,6 +216,7 @@ where
     let injector = Injector::root();
     open_and_register_core(&injector, db_path, StorageSelector::LoroMemory, conditions)?;
     setup_fn(&injector)?;
+    super::guard_bindings::complete_guard_composition(&injector);
     tracing::debug!("[DI] Turso-free injector built successfully");
     Ok(Arc::new(injector))
 }

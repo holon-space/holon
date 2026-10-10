@@ -2713,69 +2713,51 @@ impl Module for OperationModule {
                     .link_target_classifier(),
             );
 
-            // ADR 0028 C3 — install the boundary/authz seam. The concrete
-            // policy overlay lives in `holon-sharing`, so a composition root
-            // that has policies registers it and this crate never learns the
-            // sharing domain. With none registered we fall back to the inert
-            // enforcer, which is exactly what prod installed before this seam
-            // existed (`PolicyOverlayEnforcer::inert()`: an empty PolicySet
-            // whose `check` returns `Ok(())` on the first line).
+            // Every guard is REQUIRED (SEC-bound.a): `crate::di::guard_bindings`
+            // settles each container's bindings before anything resolves this
+            // dispatcher, so a container with no real guard holds the EXPLICIT
+            // no-op. An absence here is therefore a wiring fault, and an inert
+            // guard installed on the way past it would run the gate open.
             //
-            // SEC-bound (open, #165): whether the APP container must assert
-            // all four guard types are bound belongs here, next to each
-            // `None` arm.
-            let enforcer = holon_core::resolve_if_bound_async::<dyn BoundaryEnforcer>(
+            // ADR 0028 C3 — the boundary/authz seam. The concrete policy
+            // overlay lives in `holon-sharing`, so a root that has policies
+            // binds it and this crate never learns the sharing domain.
+            let enforcer = holon_core::resolve_bound_async::<dyn BoundaryEnforcer>(
                 &r,
                 "[OperationModule] boundary seam",
             )
-            .await
-            .unwrap_or_else(|| {
-                Arc::new(holon_core::InertBoundaryEnforcer) as Arc<dyn BoundaryEnforcer>
-            });
+            .await;
             dispatcher.set_boundary_enforcer(enforcer);
 
-            // ADR 0032 §3 — install the net gate. The placement policy needs
+            // ADR 0032 §3 — the net gate. The placement policy needs
             // capability profiles and a document-home authority, neither of
-            // which this crate links, so a composition root that has them
-            // registers one and a container without them gets the inert guard.
-            let net_guard = holon_core::resolve_if_bound_async::<dyn crate::api::net_guard::NetGuard>(
+            // which this crate links, so a root that has them binds it.
+            let net_guard = holon_core::resolve_bound_async::<dyn crate::api::net_guard::NetGuard>(
                 &r,
                 "[OperationModule] net gate",
             )
-            .await
-            .unwrap_or_else(|| {
-                Arc::new(crate::api::net_guard::InertNetGuard)
-                    as Arc<dyn crate::api::net_guard::NetGuard>
-            });
+            .await;
             dispatcher.set_net_guard(net_guard);
 
             // The write-tier gate. Answering needs a block reader and the
-            // vault's format registry, so a composition root with a vault
-            // registers one; a container without files registers none and
-            // every block it holds is writable.
-            if let Some(authority) = holon_core::resolve_if_bound_async::<
-                dyn holon_core::WriteTierAuthority,
-            >(&r, "[OperationModule] write-tier gate")
-            .await
-            {
-                dispatcher.set_write_tier_authority(authority);
-            }
+            // vault's format registry, so a root with a vault binds the real
+            // gate and one without files binds `NoReadOnlyDocuments`.
+            let write_tier = holon_core::resolve_bound_async::<dyn holon_core::WriteTierAuthority>(
+                &r,
+                "[OperationModule] write-tier gate",
+            )
+            .await;
+            dispatcher.set_write_tier_authority(write_tier);
 
-            // The shape gate. A composition root that registers tagged shapes
-            // gets it; it reads the pre-write state from the block write
-            // authority, which is the SQL tables when no separate one exists.
+            // The shape gate reads the pre-write state from the block write
+            // authority — Loro where a CRDT store is the writer, the SQL tables
+            // otherwise. Which one is the container's choice, not this site's.
             {
                 let validators = r.resolve_async::<holon_core::ShapeValidators>().await;
-                let authority = match holon_core::resolve_if_bound_async::<
+                let authority = holon_core::resolve_bound_async::<
                     dyn holon_core::WriteAuthorityReads,
                 >(&r, "[OperationModule] shape gate")
-                .await
-                {
-                    Some(authority) => authority,
-                    None => Arc::new(crate::core::sql_write_authority::SqlWriteAuthority::new(
-                        db_handle_provider.handle(),
-                    )) as Arc<dyn holon_core::WriteAuthorityReads>,
-                };
+                .await;
                 dispatcher.set_shape_gate(validators, authority, (*bus).clone());
             }
 

@@ -3,7 +3,7 @@ id: 2026-10-10-guard-resolve-failure-installs-inert-guard
 date: 2026-10-10
 gap: COVERAGE
 secondary: ENVIRONMENT
-status: PARTIAL
+status: FIXED
 summary: >-
   A failed DI resolve of a security or write guard was read as "no guard is
   bound", so the composition root installed the permissive default and the
@@ -77,14 +77,24 @@ event-infra and org-mode seam sites through the real app wiring).
 wiring fault is not attributed to a store that is fine
 (`crates/holon-app/src/boot_error.rs`).
 
-Status PARTIAL, for two reasons recorded in holon-work #165:
+SEC-bound.a (ruled 2026-10-10) closes the other half: the binding is no longer
+optional. `crates/holon/src/di/guard_bindings.rs` settles every container's
+guard bindings before anything resolves the dispatcher — a composition root
+that declares `RootOwnsGuardComposition` (the app) must bind every guard
+itself and a missing one stops the boot naming it, while every other container
+gets the EXPLICIT no-op guards. The dispatcher then resolves all four as
+REQUIRED, so it has no permissive branch left at all, and the arms that used to
+install an inert guard are gone.
 
-- "Not bound" still installs the permissive default in every container, the app
-  included. That is the unruled SEC-bound question; the marker sits at
-  `crates/holon/src/api/operation_dispatcher.rs:2719`.
-- The tree contradicts itself on whether an absent `WriteTierAuthority` is
-  legal at all: `crates/holon-frontend/src/render_services.rs:74` and
-  `crates/holon-loro-wiring/src/loro_module.rs:181` both REQUIRE it, which
-  makes the optional arms at `loro_module.rs:638`, `:705` and
-  `crates/holon-orgmode/src/di.rs:808` unreachable in an app boot — so no test
-  can distinguish them until that contradiction is settled.
+That also closes the residual the verifier noted: a guard bound in the wrong
+scope reads as absent in the scope the consumer resolves from, and in the app
+container absent is now fatal rather than inert.
+
+Red log for this half:
+`docs/Testing/red-logs/2026-10-10-guard-unbound-in-app-container-RED.txt` — one
+removed binding in `crates/holon-app/src/wiring.rs` stops every app boot,
+naming the guard.
+
+Still later, not open: SEC-boot.a ratified the panic as the stopgap, with a
+typed error that boot discloses as the eventual shape
+(`crates/holon/src/di/registration.rs:905-915` names that step).

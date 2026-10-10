@@ -1,0 +1,148 @@
+Red log — #165 SEC-bound.a: an app container with one guard unbound stops the boot
+Date: 2026-10-10
+Ruling: https://github.com/holon-space/holon-work/issues/165#issuecomment-6102271026
+Tests: crates/holon/src/di/guard_bindings.rs (unit tests)
+       crates/holon-app/tests/guard_resolve_fails_loud_in_the_app.rs
+       crates/holon-app/tests/sharing_requires_crdt.rs (any app boot)
+Command: cargo nextest run -p holon -p holon-app --features holon/test-helpers \
+           --no-fail-fast -E "binary(guard_resolve_fails_loud_in_the_app) or \
+           binary(sharing_requires_crdt) or test(guard_composition)"
+Tree: .claude/worktrees/guard-fail-loud, base main 7f3a7f77, rounds 1-2 on top
+Build profile: test (unoptimized + debuginfo)
+
+Code state for this run: one line removed from the app composition root — the
+`dyn BoundaryEnforcer` binding in `crates/holon-app/src/wiring.rs`. Everything
+else is the landed change. This is the shape SEC-bound.a is about: a root that
+declares it owns guard composition and then leaves one guard out.
+
+Red for the right reason: EVERY app boot stops, naming the guard and the type,
+instead of installing the inert enforcer. The permanent unit test
+`a_root_that_owns_guard_composition_must_bind_every_guard` passes in this state
+too, because it asserts the same rule on a hand-built container.
+
+ Nextest run ID b1736347-713b-4aed-a1d2-75edbfbd3653 with nextest profile: default
+    Starting 7 tests across 143 binaries (1035 tests skipped)
+        PASS [   0.050s] (1/7) holon di::guard_bindings::tests::a_root_that_owns_guard_composition_must_bind_every_guard
+        FAIL [   0.260s] (2/7) holon-app::sharing_requires_crdt sharing_with_crdt_off_names_the_setting
+  stdout ───
+
+    running 1 test
+    test sharing_with_crdt_off_names_the_setting ... FAILED
+
+    failures:
+
+    failures:
+        sharing_with_crdt_off_names_the_setting
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.23s
+
+  stderr ───
+
+    thread 'sharing_with_crdt_off_names_the_setting' (355210564) panicked at crates/holon/src/di/guard_bindings.rs:105:5:
+    guard composition: nothing binds the boundary/authz seam (dyn holon_core::boundary_enforcer::BoundaryEnforcer) in this container. A composition root that owns its guard composition binds every guard — the real one, or the explicit no-op. Leaving it out would run the gate open.
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.265s] (3/7) holon-app::sharing_requires_crdt sharing_reaches_the_backend_on_the_shipped_default
+  stdout ───
+
+    running 1 test
+    test sharing_reaches_the_backend_on_the_shipped_default ... FAILED
+
+    failures:
+
+    failures:
+        sharing_reaches_the_backend_on_the_shipped_default
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.24s
+
+  stderr ───
+
+    thread 'sharing_reaches_the_backend_on_the_shipped_default' (355210563) panicked at crates/holon/src/di/guard_bindings.rs:105:5:
+    guard composition: nothing binds the boundary/authz seam (dyn holon_core::boundary_enforcer::BoundaryEnforcer) in this container. A composition root that owns its guard composition binds every guard — the real one, or the explicit no-op. Leaving it out would run the gate open.
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.266s] (4/7) holon-app::guard_resolve_fails_loud_in_the_app a_wrongly_registered_crud_authority_stops_the_org_seam
+  stdout ───
+
+    running 1 test
+    test a_wrongly_registered_crud_authority_stops_the_org_seam ... FAILED
+
+    failures:
+
+    failures:
+        a_wrongly_registered_crud_authority_stops_the_org_seam
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.23s
+
+  stderr ───
+
+    thread 'a_wrongly_registered_crud_authority_stops_the_org_seam' (355210597) panicked at crates/holon-app/tests/guard_resolve_fails_loud_in_the_app.rs:214:5:
+    the panic should name the org-mode seam, got: guard composition: nothing binds the boundary/authz seam (dyn holon_core::boundary_enforcer::BoundaryEnforcer) in this container. A composition root that owns its guard composition binds every guard — the real one, or the explicit no-op. Leaving it out would run the gate open.
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.268s] (5/7) holon-app::guard_resolve_fails_loud_in_the_app a_failing_block_cell_registry_stops_the_event_infra_wiring
+  stdout ───
+
+    running 1 test
+    test a_failing_block_cell_registry_stops_the_event_infra_wiring ... FAILED
+
+    failures:
+
+    failures:
+        a_failing_block_cell_registry_stops_the_event_infra_wiring
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.24s
+
+  stderr ───
+
+    thread 'a_failing_block_cell_registry_stops_the_event_infra_wiring' (355210608) panicked at crates/holon-app/tests/guard_resolve_fails_loud_in_the_app.rs:119:5:
+    the panic should name the composition site [EventInfraModule] block cell registry for the operation provider, got: guard composition: nothing binds the boundary/authz seam (dyn holon_core::boundary_enforcer::BoundaryEnforcer) in this container. A composition root that owns its guard composition binds every guard — the real one, or the explicit no-op. Leaving it out would run the gate open.
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.268s] (6/7) holon-app::guard_resolve_fails_loud_in_the_app a_failing_read_only_document_authority_stops_the_app_boot
+  stdout ───
+
+    running 1 test
+    test a_failing_read_only_document_authority_stops_the_app_boot ... FAILED
+
+    failures:
+
+    failures:
+        a_failing_read_only_document_authority_stops_the_app_boot
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.24s
+
+  stderr ───
+
+    thread 'a_failing_read_only_document_authority_stops_the_app_boot' (355210598) panicked at crates/holon-app/tests/guard_resolve_fails_loud_in_the_app.rs:192:5:
+    the panic should name the authority type, got: guard composition: nothing binds the boundary/authz seam (dyn holon_core::boundary_enforcer::BoundaryEnforcer) in this container. A composition root that owns its guard composition binds every guard — the real one, or the explicit no-op. Leaving it out would run the gate open.
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.268s] (7/7) holon-app::guard_resolve_fails_loud_in_the_app a_failing_write_tier_authority_stops_the_app_boot
+  stdout ───
+
+    running 1 test
+    test a_failing_write_tier_authority_stops_the_app_boot ... FAILED
+
+    failures:
+
+    failures:
+        a_failing_write_tier_authority_stops_the_app_boot
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.24s
+
+  stderr ───
+
+    thread 'a_failing_write_tier_authority_stops_the_app_boot' (355210635) panicked at crates/holon-app/tests/guard_resolve_fails_loud_in_the_app.rs:149:5:
+    the panic should name the guard type, got: guard composition: nothing binds the boundary/authz seam (dyn holon_core::boundary_enforcer::BoundaryEnforcer) in this container. A composition root that owns its guard composition binds every guard — the real one, or the explicit no-op. Leaving it out would run the gate open.
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [   0.275s] 7 tests run: 1 passed, 6 failed, 1035 skipped
+        FAIL [   0.260s] (2/7) holon-app::sharing_requires_crdt sharing_with_crdt_off_names_the_setting
+        FAIL [   0.265s] (3/7) holon-app::sharing_requires_crdt sharing_reaches_the_backend_on_the_shipped_default
+        FAIL [   0.266s] (4/7) holon-app::guard_resolve_fails_loud_in_the_app a_wrongly_registered_crud_authority_stops_the_org_seam
+        FAIL [   0.268s] (5/7) holon-app::guard_resolve_fails_loud_in_the_app a_failing_block_cell_registry_stops_the_event_infra_wiring
+        FAIL [   0.268s] (6/7) holon-app::guard_resolve_fails_loud_in_the_app a_failing_read_only_document_authority_stops_the_app_boot
+        FAIL [   0.268s] (7/7) holon-app::guard_resolve_fails_loud_in_the_app a_failing_write_tier_authority_stops_the_app_boot
+error: test run failed

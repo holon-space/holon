@@ -86,6 +86,7 @@ pub use file_format::WriteTier;
 pub use file_format::apply_document_metadata;
 pub use publish_errors::PublishErrorTracker;
 pub use resolve_if_bound::resolve_all_if_bound_async;
+pub use resolve_if_bound::resolve_bound_async;
 pub use resolve_if_bound::resolve_if_bound;
 pub use resolve_if_bound::resolve_if_bound_async;
 pub use shape_gate::ShapeRefused;

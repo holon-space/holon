@@ -151,11 +151,15 @@ async fn a_failing_operation_observer_stops_the_boot() {
     );
 }
 
-/// The other half of the rule: an unbound guard stays a legal container shape.
-/// This container binds none of the four, and the engine still assembles.
+/// The other half of the rule (SEC-bound.a): a container that names no guard
+/// still boots, because `crate::di::guard_bindings` binds the EXPLICIT no-op
+/// guards for it before anything resolves the dispatcher. The dispatcher itself
+/// has no permissive branch left to take.
 #[tokio::test(flavor = "multi_thread")]
-async fn an_unbound_guard_still_boots() {
-    create_test_engine_with_setup(":memory:".into(), |_| Ok(()))
+async fn a_container_that_names_no_guard_gets_the_explicit_no_ops() {
+    let engine = create_test_engine_with_setup(":memory:".into(), |_| Ok(()))
         .await
-        .expect("a container that binds no guard boots on the permissive defaults");
+        .expect("a container that names no guard boots on the explicit no-op guards");
+    // A boot is the whole claim: the dispatcher resolved all four as required.
+    drop(engine);
 }

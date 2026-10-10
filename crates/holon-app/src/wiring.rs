@@ -220,6 +220,10 @@ impl FrontendInjectorExt for Injector {
 
         // Conditional modules
         let orgmode_root = holon_config.vault.root.clone();
+        // Read before the vault branch consumes `orgmode_root`: the guard
+        // bindings at the end of this function need to know which guards the
+        // vault branch bound (SEC-bound.a).
+        let vault_wired = orgmode_root.is_some();
         let loro_enabled = holon_config.crdt_enabled();
         let loro_storage_dir = holon_config.crdt.storage_dir.clone();
         // Derived ONCE and reused for both LoroConfig and the epoch guard's
@@ -867,6 +871,42 @@ impl FrontendInjectorExt for Injector {
         // Render stack (slot + shared shadow interpreter + ReactiveEngine
         // factory) — backend-agnostic, lives in holon-frontend.
         register_render_services(self);
+
+        // SEC-bound.a — the app binds every guard itself, so nothing fills one
+        // in for it and a guard left out stops the boot naming the type. The
+        // write-tier gate is bound by the vault branches above (the real gate,
+        // or `NoReadOnlyDocuments` where there is no vault), and the block
+        // write authority by `LoroModule` when the CRDT layer is on; these are
+        // the rest.
+        self.provide::<holon::di::RootOwnsGuardComposition>(Provider::root(|_| {
+            Shared::new(holon::di::RootOwnsGuardComposition)
+        }));
+        // Nothing in the tree mints or persists a share policy yet, so the
+        // explicit no-op IS the policy. `holon-sharing` registering a
+        // `PolicyOverlayEnforcer` replaces this line, it does not slip past it.
+        self.provide::<dyn holon_core::BoundaryEnforcer>(Provider::root(|_| {
+            Arc::new(holon_core::InertBoundaryEnforcer) as Arc<dyn holon_core::BoundaryEnforcer>
+        }));
+        // The net gate's real placement policy is `MoveGuard`, which
+        // `OrgModeModule` contributes because deciding a destination's
+        // capability needs both homes' profiles. With no vault there is no
+        // such module, so the gate is explicitly inert rather than absent.
+        if !vault_wired || cfg!(target_arch = "wasm32") {
+            self.provide::<dyn holon::api::net_guard::NetGuard>(Provider::root(|_| {
+                Arc::new(holon::api::net_guard::InertNetGuard)
+                    as Arc<dyn holon::api::net_guard::NetGuard>
+            }));
+        }
+        if !loro_enabled {
+            // No CRDT store, so the SQL tables ARE the pre-write state the
+            // shape gate reads. Saying it here keeps the choice in the wiring.
+            self.provide::<dyn holon_core::WriteAuthorityReads>(Provider::root(|resolver| {
+                let db = resolver.resolve::<dyn holon::di::DbHandleProvider>();
+                Arc::new(holon::core::sql_write_authority::SqlWriteAuthority::new(
+                    db.handle(),
+                )) as Arc<dyn holon_core::WriteAuthorityReads>
+            }));
+        }
 
         Ok(())
     }
