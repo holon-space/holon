@@ -4119,6 +4119,9 @@ pub trait SutAppLifecycle {
     /// [`Self::reboot`], with every read of a read-only (`.cook`) file held
     /// from the shutdown on, so the boot's read-only backlog cannot move.
     async fn reboot_with_backlog_held(&self);
+    /// [`Self::reboot`] into a binary whose scalar-function set differs from
+    /// the one that built the database: an ordinary upgrade.
+    async fn reboot_after_upgrade(&self);
     /// Release the held read-only reads and wait until the backlog drained.
     async fn release_backlog(&self);
     /// A second session on the live vault is refused by the writer lock,

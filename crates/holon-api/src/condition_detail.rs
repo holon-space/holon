@@ -278,25 +278,15 @@ impl ConditionKind {
                 ConditionDetail::with_body(why.clone(), seed_path.iter().cloned().collect())
             }
 
-            Self::DatabaseRebuiltAtBoot {
-                reason,
-                lost,
-                caches,
-            } => ConditionDetail::with_body(
+            // The backup path is a PAYLOAD the user needs whole, and a long
+            // path would be cut by the headline cap.
+            Self::DatabaseMovedAside { reason, backup } => ConditionDetail::with_body(
                 format!(
-                    "The database was rebuilt because {reason}. Blocks and views came back from \
-                     the vault; the integration caches re-sync from their sources, without the \
-                     rows a source no longer holds; this local state did not come back"
+                    "The database could not be opened ({reason}), so Holon moved it aside and \
+                     started a fresh one. The blocks came back from the vault. Anything that was \
+                     only in the database is in the moved file"
                 ),
-                lost.iter()
-                    .map(|l| format!("{}: {} ({} rows)", l.table, l.what, l.rows))
-                    .chain(caches.iter().map(|c| {
-                        format!(
-                            "{}: {} cache, re-syncing ({} rows)",
-                            c.table, c.provider, c.rows
-                        )
-                    }))
-                    .collect(),
+                vec![backup.clone()],
             ),
 
             Self::UndoHistoryClearedAtBoot { entries } => ConditionDetail::prose(format!(

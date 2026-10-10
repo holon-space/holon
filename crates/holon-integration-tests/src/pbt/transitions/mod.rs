@@ -163,6 +163,7 @@ mod pin_block;
 mod place_under_own_descendant;
 mod press_key;
 mod reboot;
+mod reboot_after_upgrade;
 mod reboot_with_backlog_held;
 mod rebuild_views;
 pub mod receiver_create_block;
@@ -290,6 +291,7 @@ pub use pin_block::PinBlock;
 pub use place_under_own_descendant::PlaceUnderOwnDescendant;
 pub use press_key::PressKey;
 pub use reboot::Reboot;
+pub use reboot_after_upgrade::RebootAfterUpgrade;
 pub use reboot_with_backlog_held::RebootWithBacklogHeld;
 pub use rebuild_views::RebuildViews;
 pub use receiver_create_block::ReceiverCreateBlock;
@@ -381,6 +383,7 @@ crate::declare_e2e_transitions! {
         RebuildViews(RebuildViews),
         EpochFlipRejected(EpochFlipRejected),
         RebootWithBacklogHeld(RebootWithBacklogHeld),
+        RebootAfterUpgrade(RebootAfterUpgrade),
         ReleaseBacklog(ReleaseBacklog),
         DeleteHeadlineWhileOff(DeleteHeadlineWhileOff),
         SecondWriterRefused(SecondWriterRefused),
@@ -755,6 +758,7 @@ mod required_caps_guard {
         one!(RenameDocument, lc::SutAppLifecycle);
         one!(EpochFlipRejected, lc::SutAppLifecycle);
         one!(RebootWithBacklogHeld, lc::SutAppLifecycle);
+        one!(RebootAfterUpgrade, lc::SutAppLifecycle);
         one!(ReleaseBacklog, lc::SutAppLifecycle);
         one!(DeleteHeadlineWhileOff, lc::SutAppLifecycle);
         one!(SecondWriterRefused, lc::SutAppLifecycle);

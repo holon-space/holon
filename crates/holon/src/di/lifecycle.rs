@@ -94,17 +94,17 @@ pub fn open_and_register_core(
     match storage {
         StorageSelector::Turso => {
             tracing::debug!("[DI] Opening database at {:?}...", db_path);
-            let (db, rebuild) =
-                TursoBackend::open_database_reporting_rebuild(&db_path).map_err(|e| {
+            let (db, outcome) =
+                TursoBackend::open_database_reporting_outcome(&db_path).map_err(|e| {
                     anyhow::anyhow!(
                         "Failed to open Turso database at {}: {e}",
                         db_path.display()
                     )
                 })?;
             tracing::debug!("[DI] Database opened successfully");
-            injector.provide::<holon_turso::table_classes::BootRebuild>(fluxdi::Provider::root(
+            injector.provide::<holon_turso::db_open::BootOpenOutcome>(fluxdi::Provider::root(
                 move |_| {
-                    fluxdi::Shared::new(holon_turso::table_classes::BootRebuild(rebuild.clone()))
+                    fluxdi::Shared::new(holon_turso::db_open::BootOpenOutcome(outcome.clone()))
                 },
             ));
 
@@ -127,8 +127,12 @@ pub fn open_and_register_core(
             tracing::debug!(
                 "[DI] LoroMemory storage — skipping Turso, registering Turso-free core"
             );
-            injector.provide::<holon_turso::table_classes::BootRebuild>(fluxdi::Provider::root(
-                |_| fluxdi::Shared::new(holon_turso::table_classes::BootRebuild(None)),
+            injector.provide::<holon_turso::db_open::BootOpenOutcome>(fluxdi::Provider::root(
+                |_| {
+                    fluxdi::Shared::new(holon_turso::db_open::BootOpenOutcome(
+                        holon_turso::db_open::OpenOutcome::Kept,
+                    ))
+                },
             ));
             register_core_services_no_turso(injector, db_path, conditions)?;
         }

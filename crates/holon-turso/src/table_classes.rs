@@ -1,10 +1,9 @@
-//! What each table of a Holon database is, for a rebuild. A database this
-//! binary cannot use is deleted and opened fresh (`db_open`); the org files and
-//! the Loro store rebuild every [`Class::Rebuilt`] table, each connection
-//! re-syncs its [`Class::IntegrationCache`] tables, and every [`Class::Lost`]
-//! table starts empty and is disclosed with the rows it held.
-//! `holon-app/tests/database_rebuild_disclosure.rs` fails for a table in no
-//! class.
+//! What each table of a Holon database is, for a stored table that drifted
+//! from its declaration (`table_shape`): the org files and the Loro store
+//! refill every [`Class::Rebuilt`] table, each connection re-syncs its
+//! [`Class::IntegrationCache`] tables, and a [`Class::Lost`] table holds state
+//! nothing else restores. `holon-app/tests/database_open_disclosure.rs` fails
+//! for a table in no class.
 
 use std::collections::HashMap;
 
@@ -19,9 +18,6 @@ pub enum Class {
     /// What the user loses, in words a disclosure can show.
     Lost(&'static str),
 }
-
-/// What a disclosure says a table in no class holds.
-pub const UNCLASSIFIED: &str = "a table no classification names";
 
 const REBUILT: &[&str] = &[
     // The block tree and its edges: the org files and the Loro store.
@@ -162,41 +158,6 @@ pub fn carries_rows(table: &str) -> bool {
     ]
     .contains(&table)
 }
-
-/// Every lost table, with what its loss means.
-pub fn lost_tables() -> &'static [(&'static str, &'static str)] {
-    LOST
-}
-
-/// A table the rebuild deleted that no replica restores, and the rows it
-/// held: a [`Class::Lost`] table, or one in no class ([`UNCLASSIFIED`]).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LostRows {
-    pub table: String,
-    pub what: &'static str,
-    pub rows: u64,
-}
-
-/// An integration cache the rebuild cleared, and the rows it held.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CacheRows {
-    pub table: String,
-    pub provider: String,
-    pub rows: u64,
-}
-
-/// Why a database was deleted at open, and what it held that the org files do
-/// not rebuild.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Rebuild {
-    pub reason: String,
-    pub lost: Vec<LostRows>,
-    pub caches: Vec<CacheRows>,
-}
-
-/// The rebuild this process's boot did, if any. Provided once per session.
-#[derive(Debug, Clone)]
-pub struct BootRebuild(pub Option<Rebuild>);
 
 #[cfg(test)]
 mod tests {

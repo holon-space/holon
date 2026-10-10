@@ -2194,17 +2194,17 @@ impl std::fmt::Debug for TursoBackend {
 impl TursoBackend {
     /// Open a Turso database file (or `:memory:`) and return the Database
     /// handle. Every Holon open goes through here, so every database gets the
-    /// same [`crate::scalar_fns::ALL`]. A file this binary cannot use is
-    /// deleted and opened fresh; the org files rebuild it.
+    /// same [`crate::scalar_fns::ALL`]. See [`crate::db_open`] for what an open
+    /// does to a file this binary cannot use as it is.
     pub fn open_database<P: AsRef<Path>>(db_path: P) -> Result<Arc<Database>> {
-        Ok(Self::open_database_reporting_rebuild(db_path)?.0)
+        Ok(Self::open_database_reporting_outcome(db_path)?.0)
     }
 
-    /// [`Self::open_database`], plus the rebuild the open did, for a boot that
-    /// discloses the lost state to the user.
-    pub fn open_database_reporting_rebuild<P: AsRef<Path>>(
+    /// [`Self::open_database`], plus what the open did to the file, for a boot
+    /// that discloses it to the user.
+    pub fn open_database_reporting_outcome<P: AsRef<Path>>(
         db_path: P,
-    ) -> Result<(Arc<Database>, Option<crate::table_classes::Rebuild>)> {
+    ) -> Result<(Arc<Database>, crate::db_open::OpenOutcome)> {
         let opened = crate::db_open::open(db_path.as_ref(), crate::scalar_fns::ALL)?;
         tracing::info!("Turso database opened at: {}", db_path.as_ref().display());
         Ok(opened)

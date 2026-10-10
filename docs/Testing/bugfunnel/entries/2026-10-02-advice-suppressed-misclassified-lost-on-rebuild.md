@@ -36,14 +36,14 @@ files. The disclosure is false, and it trains the user to ignore real loss banne
 
 ## Missing piece
 
-`crates/holon-app/tests/database_rebuild_disclosure.rs::every_table_is_classified_as_rebuilt_or_lost`
-(`:296`) checks only that each table has a class. No test checks that the class is true: a
+`crates/holon-app/tests/database_open_disclosure.rs::every_table_is_classified_as_rebuilt_or_lost`
+(`:275`) checks only that each table has a class. No test checks that the class is true: a
 `Lost` table must actually come back empty after a rebuild, and a `Rebuilt` table must come back
 full.
 
 ## Remedy
 
-OPEN. Rung that closes the gap: extend `database_rebuild_disclosure.rs` so that the probe vault
+OPEN. Rung that closes the gap: extend `database_open_disclosure.rs` so that the probe vault
 holds one block with a dismissed advice lesson. After the rebuild, assert that each `LOST`
 table is empty and that each `REBUILT` junction holds its rows again. It goes red today because
 `advice_suppressed` is classed `Lost` but is refilled. Fix: move `advice_suppressed` from

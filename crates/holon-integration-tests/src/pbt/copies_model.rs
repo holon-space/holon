@@ -149,6 +149,7 @@ impl ReferenceState {
                 | "EpochFlipRejected"
                 | "DeleteHeadlineWhileOff"
                 | "RebootWithBacklogHeld"
+                | "RebootAfterUpgrade"
         );
         let base_forgotten = self.files.copies.values().any(|copy| !copy.base_known);
         check(

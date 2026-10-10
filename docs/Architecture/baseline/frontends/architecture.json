@@ -726,6 +726,9 @@
                 "name": "breadcrumb_resolves_from_view_root_windowed.rs"
               },
               {
+                "name": "builder_panic_paints_error_node_windowed.rs"
+              },
+              {
                 "name": "chrome_one_row_windowed.rs"
               },
               {
@@ -751,6 +754,9 @@
               },
               {
                 "name": "editor_trailing_space_echo.rs"
+              },
+              {
+                "name": "element_builder_panic_paints_error_windowed.rs"
               },
               {
                 "name": "empty_block_hint_windowed.rs"

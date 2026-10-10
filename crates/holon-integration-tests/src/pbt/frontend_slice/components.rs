@@ -236,6 +236,26 @@ pub enum RebootGap {
     },
     /// Every `.cook` read is held from the shutdown on (D108.a).
     BacklogHeld,
+    /// The database records another scalar-function set, as one an older
+    /// binary built does.
+    FunctionSetChanged,
+}
+
+/// Make `db_path` record a scalar-function set no binary registers.
+fn record_foreign_function_set(db_path: &std::path::Path) {
+    let db = holon::storage::turso::TursoBackend::open_database(db_path)
+        .unwrap_or_else(|e| panic!("[reboot] open {} between boots: {e}", db_path.display()));
+    let conn = db
+        .connect()
+        .unwrap_or_else(|e| panic!("[reboot] connect: {e}"));
+    for sql in [
+        "CREATE TABLE IF NOT EXISTS holon_db_fn_set (signature TEXT NOT NULL)",
+        "DELETE FROM holon_db_fn_set",
+        "INSERT INTO holon_db_fn_set (signature) VALUES ('older_binary_fn/1/v1')",
+    ] {
+        conn.execute(sql)
+            .unwrap_or_else(|e| panic!("[reboot] {sql}: {e}"));
+    }
 }
 
 /// A composition component wrapping a real headless frontend stack. Owns the
@@ -1171,7 +1191,10 @@ impl HeadlessFrontendComponent {
             RebootGap::DeleteHeadline { block_id, doc } => {
                 Some(self.cut_headline_from_file(block_id, doc).await)
             }
-            RebootGap::Nothing | RebootGap::EpochFlipRejected | RebootGap::BacklogHeld => None,
+            RebootGap::Nothing
+            | RebootGap::EpochFlipRejected
+            | RebootGap::BacklogHeld
+            | RebootGap::FunctionSetChanged => None,
         };
 
         // Drop CDC consumers before the actor goes away (mirrors
@@ -1210,6 +1233,7 @@ impl HeadlessFrontendComponent {
         match between {
             RebootGap::Nothing => {}
             RebootGap::BacklogHeld => self.store.org_fs.hold_reads_with_extension("cook"),
+            RebootGap::FunctionSetChanged => record_foreign_function_set(&self.store.db_path()),
             RebootGap::EpochFlipRejected => {
                 crate::test_environment::run_epoch_flip_rejection_check(
                     self.store.temp.path(),
@@ -5829,6 +5853,10 @@ impl SutAppLifecycle for HeadlessFrontendComponent {
 
     async fn reboot_with_backlog_held(&self) {
         self.reboot_through(RebootGap::BacklogHeld).await;
+    }
+
+    async fn reboot_after_upgrade(&self) {
+        self.reboot_through(RebootGap::FunctionSetChanged).await;
     }
 
     async fn release_backlog(&self) {

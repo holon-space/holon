@@ -18,7 +18,8 @@
 mod actor_watch;
 pub mod block_table_names;
 pub mod commit_event;
-mod db_open;
+pub mod db_open;
+pub mod dbsp_state;
 pub mod derived_reconciler;
 pub mod durable_state;
 pub mod dynamic_schema_module;
