@@ -40,9 +40,18 @@ transport. A finished line releases what it held, so a well-behaved sidecar stre
 in messages. Past the allowance the read fails naming the bound, rmcp logs it at `error!` and
 the leg ends; the integration degrades, Holon keeps running.
 
+The ended leg is disclosed rather than only logged: the refusal is published on
+`PeerBudget.transport` (`BoundTrips`), carried out as `McpIntegration.transport_ended`, and
+`holon-app`'s `spawn_disclose_transport_end` records `IntegrationStatus::Unavailable` on the
+integration's row and raises `ConditionKind::IntegrationConnectionEnded` with the bound named in
+the body, so the row never keeps claiming a transportless integration is connected.
+
 Pinned by `crates/holon-mcp-client/src/child_transport.rs::tests` (the refusal names the
-bound; 100 MiB in finished 1 MiB lines still streams) and
-`crates/holon-mcp-client/tests/inbound_bounds.rs::one_stdio_message_past_the_byte_allowance_ends_the_connection`.
+bound; 100 MiB in finished 1 MiB lines still streams),
+`crates/holon-mcp-client/tests/inbound_bounds.rs::one_stdio_message_past_the_byte_allowance_ends_the_connection`
+and `crates/holon-app/src/mcp_integrations.rs::tests::a_bound_that_ends_a_sidecars_leg_marks_the_integration_unavailable`
+(a real sidecar floods one unterminated line past the allowance; the condition names the bound
+and the mirror reads `Unavailable`).
 Teeth: removing the charge turns both the unit test and the end-to-end test red
 (`lane-logs/jaq-r7-teeth-stdio.log`), with the file restored byte-for-byte
 (`lane-logs/jaq-r7-sha-before.log` / `-sha-after.log`).

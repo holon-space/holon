@@ -151,6 +151,12 @@ pub struct McpIntegration {
     /// disclose that its peer pushed more change signals than it may park.
     /// `None` for the `rest` transport, which has no peer to push any.
     pub signal_loss: Option<tokio::sync::watch::Receiver<Option<String>>>,
+    /// Fires with the reason whenever a bound ended one of this connection's
+    /// transport legs. The integration serves nothing after that and nothing
+    /// reconnects it, so a consumer that ignores this leaves the pages blank
+    /// with no reason given. `None` for the `rest` transport, whose polls carry
+    /// their own failures.
+    pub transport_ended: Option<tokio::sync::watch::Receiver<Option<String>>>,
     /// Producer handle into the sync event loop.
     sync_event_tx: mpsc::UnboundedSender<SyncEvent>,
 }
@@ -475,10 +481,11 @@ pub async fn build_mcp_integration(
             poll_interval,
         } => {
             // The `rest` transport shares the whole connector read path
-            // (`SyncStrategy`/`McpCallSurface`) with MCP, but has no peer and no
-            // resource subscriptions — it is driven by a poll-only background
-            // runner. Leases / read-write / vtable-write-through are out of
-            // scope and fail loud inside `finish_rest_integration`.
+            // (`SyncStrategy`/`McpCallSurface`) with MCP, but has no peer and
+            // no resource subscriptions — it is driven by a
+            // poll-only background runner. Leases / read-write /
+            // vtable-write-through are out of scope and fail loud
+            // inside `finish_rest_integration`.
             let integration = finish_rest_integration(
                 manual.clone(),
                 *poll_interval,
@@ -737,6 +744,10 @@ async fn finish_integration(
     receiver: ResourceUpdateReceiver,
     sync_gate: SyncGate,
 ) -> anyhow::Result<McpIntegration> {
+    // Taken before the peer is handed to the operation provider, which moves
+    // it; the watch keeps a trip published during the connect readable.
+    let transport_ended = Some(peer.budget().transport.trips());
+
     // Auto-discover entities from resource templates
     // A template list that cannot be read is NOT an empty one, and it is not a
     // reason to drop a connection whose tool list came through either. The
@@ -768,11 +779,11 @@ async fn finish_integration(
     }
 
     // Fail loud on a sync-vs-write_through clash: the engine's in-memory mirror
-    // assumes it is the SOLE writer to a sync entity's cache table (it keeps the
-    // mirror consistent by write-through after each committed batch). A
-    // `vtable.write_through` entity has the FDW cursor writing the same table for
-    // IVM — a second, unobserved writer that would silently desync the mirror.
-    // These two mechanisms must never target the same cache table.
+    // assumes it is the SOLE writer to a sync entity's cache table (it keeps
+    // the mirror consistent by write-through after each committed batch). A
+    // `vtable.write_through` entity has the FDW cursor writing the same table
+    // for IVM — a second, unobserved writer that would silently desync the
+    // mirror. These two mechanisms must never target the same cache table.
     for (entity_name, entity_config) in &sidecar.entities {
         let has_sync = entity_config.sync.is_some();
         let has_write_through = entity_config
@@ -842,15 +853,17 @@ async fn finish_integration(
                 contractless_fdw_tables.push(format!("{table_name}_fdw"));
             }
 
-            // ID scheme: prefix ID column values with "{scheme}:" to match McpSyncEngine.
-            // Uses EntityName::as_str() (hyphens) not table_name() (underscores).
+            // ID scheme: prefix ID column values with "{scheme}:" to match
+            // McpSyncEngine. Uses EntityName::as_str() (hyphens)
+            // not table_name() (underscores).
             let id_col = entity_config.id_column_or_default();
             let entity_type = sidecar.prefixed_name(entity_name);
             let id_scheme = Some((id_col, entity_type.as_str().to_string()));
 
-            // If write_through is enabled, pass the cache table name so the cursor
-            // writes fetched rows back for IVM. The cache table is created by
-            // the CacheFactory for any entity with a schema — sync is not required.
+            // If write_through is enabled, pass the cache table name so the
+            // cursor writes fetched rows back for IVM. The cache
+            // table is created by the CacheFactory for any entity
+            // with a schema — sync is not required.
             let cache_table = if vtable_config.write_through {
                 Some(table_name.clone())
             } else {
@@ -995,6 +1008,7 @@ async fn finish_integration(
         sync_gate,
         sidecar.clock_grains(),
         discovery_incomplete,
+        transport_ended,
     ))
 }
 
@@ -1222,6 +1236,7 @@ fn spawn_runner(
     sync_gate: SyncGate,
     clock_grains: Vec<holon_api::clock::Grain>,
     discovery_incomplete: Option<String>,
+    transport_ended: Option<tokio::sync::watch::Receiver<Option<String>>>,
 ) -> McpIntegration {
     // One serialized consumer per integration: initial sync, notification
     // resyncs, and poll ticks all flow through the same loop, so per-entity
@@ -1271,6 +1286,7 @@ fn spawn_runner(
         clock_grains,
         discovery_incomplete,
         signal_loss,
+        transport_ended,
         sync_event_tx,
     }
 }
@@ -1355,8 +1371,8 @@ async fn finish_rest_integration(
     let resource_capabilities = ProbedResourceCapabilities::from_server(None);
 
     // Poll cadence per REST sync entity: per-entity `sync.interval` wins, then
-    // the transport-wide `poll_interval`, then the built-in default. REST has no
-    // subscription freshness, so every sync entity MUST poll — unbounded
+    // the transport-wide `poll_interval`, then the built-in default. REST has
+    // no subscription freshness, so every sync entity MUST poll — unbounded
     // staleness must never be silent.
     let default_interval = poll_interval
         .map(|i| i.duration())
@@ -1405,6 +1421,7 @@ async fn finish_rest_integration(
         sync_gate,
         sidecar.clock_grains(),
         // The `rest` transport has no peer and no template enumeration.
+        None,
         None,
     ))
 }
@@ -1707,7 +1724,8 @@ pub fn spawn_sync_event_loop<S: ResyncSink + 'static>(
         // once it is full.
         await_gate(&gate, &tuning).await;
 
-        // Lever 2: trailing-edge + max-wait debounce over the serialized stream.
+        // Lever 2: trailing-edge + max-wait debounce over the serialized
+        // stream.
         let mut pending = PendingSyncWork::default();
         let mut trailing: Option<tokio::time::Instant> = None;
         let mut hard: Option<tokio::time::Instant> = None;

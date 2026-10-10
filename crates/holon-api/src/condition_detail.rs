@@ -188,6 +188,20 @@ impl ConditionKind {
                 vec![reason.clone()],
             ),
 
+            // The body carries the reason verbatim: it names the bound that
+            // ended the leg, which is what says whether the peer sends
+            // oversized messages or the bound is too low.
+            Self::IntegrationConnectionEnded {
+                integration,
+                reason,
+            } => ConditionDetail::with_body(
+                format!(
+                    "{integration} stopped answering and its pages stay empty until Holon \
+                     restarts. Why:"
+                ),
+                vec![reason.clone()],
+            ),
+
             Self::IntegrationWaitingOnKeychain { integration } => ConditionDetail::prose(format!(
                 "{integration} is waiting to read its credentials from the keychain; answer the \
                  keychain prompt to let it connect"

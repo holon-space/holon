@@ -168,6 +168,51 @@ fn spawn_disclose_signal_loss(
     });
 }
 
+/// Follow one connected integration's transport for the life of the SESSION,
+/// recording and disclosing the bound that ends a leg.
+///
+/// The status is written before the condition: a reader who sees the toast and
+/// looks at the Integrations row must not find it still claiming the
+/// integration is connected.
+fn spawn_disclose_transport_end(
+    db: holon::storage::DbHandle,
+    attribution: holon_core::integration_attribution::IntegrationAttribution,
+    bus: Arc<ConditionBus>,
+    name: String,
+    mut ended: tokio::sync::watch::Receiver<Option<String>>,
+    shutdown: &holon_api::lifecycle::SessionShutdown,
+) {
+    let cancelled = shutdown.cancelled();
+    let pump = async move {
+        // The current value first: a bound can end the leg DURING the connect,
+        // which is before this task exists.
+        loop {
+            let trip = ended.borrow_and_update().clone();
+            if let Some(reason) = trip {
+                record_status(
+                    &db,
+                    &attribution,
+                    &name,
+                    crate::integration_projection::IntegrationStatus::Unavailable,
+                    &reason,
+                )
+                .await;
+                disclose_connection_ended(&name, &reason, &bus);
+            }
+            if ended.changed().await.is_err() {
+                break;
+            }
+        }
+    };
+    shutdown.spawn("integration-transport-end", async move {
+        tokio::select! {
+            biased;
+            () = cancelled => {}
+            () = pump => {}
+        }
+    });
+}
+
 /// Declare the tables `provider` owns BEFORE the connect attempt.
 ///
 /// A sidecar names its entities whether or not the remote ever answers, so
@@ -284,6 +329,26 @@ fn disclose_signals_collapsed(name: &str, reason: &str, bus: &ConditionBus) {
     bus.emit(Condition {
         subject: name.to_string(),
         reason: ConditionKind::IntegrationChangeSignalsCollapsed {
+            integration: name.to_string(),
+            reason: holon_mcp_client::bounded_peer_text(reason),
+        },
+    });
+}
+
+/// Disclose that a bound ended `name`'s transport, so it serves nothing for
+/// the rest of the session.
+///
+/// Not a connect failure: it connected and worked. What the user is told is
+/// that the pages backed by it are blank from now on and that a restart is the
+/// only way back, because nothing in the process reconnects a dead leg.
+fn disclose_connection_ended(name: &str, reason: &str, bus: &ConditionBus) {
+    error!(
+        "[IntegrationSupervisor] Provider '{name}' lost its transport to a bound: {reason}. It \
+         serves no operations and syncs nothing until Holon restarts."
+    );
+    bus.emit(Condition {
+        subject: name.to_string(),
+        reason: ConditionKind::IntegrationConnectionEnded {
             integration: name.to_string(),
             reason: holon_mcp_client::bounded_peer_text(reason),
         },
@@ -778,6 +843,16 @@ impl IntegrationSupervisor {
         if let Some(signals) = integration.signal_loss.clone() {
             spawn_disclose_signal_loss(self.bus.clone(), name.to_string(), signals, &self.shutdown);
         }
+        if let Some(ended) = integration.transport_ended.clone() {
+            spawn_disclose_transport_end(
+                self.db.clone(),
+                self.attribution.clone(),
+                self.bus.clone(),
+                name.to_string(),
+                ended,
+                &self.shutdown,
+            );
+        }
         if syncs {
             spawn_status_from_sync_health(
                 self.db.clone(),
@@ -891,7 +966,8 @@ impl McpIntegrationsModule {
         if let Ok((_, loaded)) = &loaded {
             // Logged here, not at disclosure time: the registry singleton is
             // resolved lazily, so the bus signal may never fire in a container
-            // that never touches an integration — the log must not depend on it.
+            // that never touches an integration — the log must not depend on
+            // it.
             for s in &loaded.superseded {
                 warn!(
                     "[McpIntegrationsModule] Installed sidecar '{}' for provider '{}' was NOT \
@@ -982,11 +1058,12 @@ impl Module for McpIntegrationsModule {
         let superseded = Arc::new(loaded.superseded.clone());
         let ignored = Arc::new(loaded.ignored.clone());
         let inert = Arc::new(loaded.inert.clone());
-        // Nothing to run AND nothing to say: leave the container untouched, so a
-        // build with no integrations directory keeps resolving no MCP services
-        // at all. Files that enabled nothing are the opposite case — the
-        // registry factory is where the disclosure reaches the bus, so it must
-        // be registered even when no integration runs.
+        // Nothing to run AND nothing to say: leave the container untouched, so
+        // a build with no integrations directory keeps resolving no MCP
+        // services at all. Files that enabled nothing are the opposite
+        // case — the registry factory is where the disclosure reaches
+        // the bus, so it must be registered even when no integration
+        // runs.
         if configs.is_empty() && ignored.is_empty() && inert.is_empty() {
             return Ok(());
         }
@@ -1023,13 +1100,15 @@ impl Module for McpIntegrationsModule {
         // write ruling, increment 4c). Installed on every integration below so
         // all once_only chokepoints and the frontend approve panel coordinate
         // through the same at-most-once state machine. Registered as a DI
-        // singleton so the GPUI layer resolves the same handle to render/approve.
+        // singleton so the GPUI layer resolves the same handle to
+        // render/approve.
         let pending_writes = Arc::new(PendingWriteStore::new());
         let pending_writes_di = pending_writes.clone();
         // fluxdi treats an `Arc<T>`-returning root closure as the shared
-        // instance of `T`, so `provide::<PendingWriteStore>` + a closure cloning
-        // this Arc registers ONE shared store; `resolve::<PendingWriteStore>`
-        // returns that same `Arc<PendingWriteStore>` (mirrors PendingOAuthFlows).
+        // instance of `T`, so `provide::<PendingWriteStore>` + a closure
+        // cloning this Arc registers ONE shared store;
+        // `resolve::<PendingWriteStore>` returns that same
+        // `Arc<PendingWriteStore>` (mirrors PendingOAuthFlows).
         injector.provide::<PendingWriteStore>(Provider::root(move |_| pending_writes_di.clone()));
 
         let settings_vm = settings_vm.clone();
@@ -1270,5 +1349,214 @@ mod tests {
         };
         assert_eq!(integration, "linear");
         assert_eq!(auth_url, "https://linear.app/oauth/authorize");
+    }
+
+    struct NoopTokenStore;
+
+    #[async_trait::async_trait]
+    impl SyncTokenStore for NoopTokenStore {
+        async fn load_token(
+            &self,
+            _: &str,
+        ) -> holon_core::Result<Option<holon_api::StreamPosition>> {
+            Ok(None)
+        }
+        async fn save_token(
+            &self,
+            _: &str,
+            _: holon_api::StreamPosition,
+        ) -> holon_core::Result<()> {
+            Ok(())
+        }
+        async fn clear_all_tokens(&self) -> holon_core::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A sidecar that answers the connect and then, once `trigger` exists,
+    /// writes one line it never terminates — a message past the connection's
+    /// shared allowance. The trigger keeps the flood out of the connect, so
+    /// what is under test is a CONNECTED integration losing its transport.
+    fn flooding_sidecar(trigger: &Path) -> (String, Vec<String>) {
+        let script = r#"
+import sys, json, os, time, threading
+
+trigger = sys.argv[1]
+
+def flood():
+    while not os.path.exists(trigger):
+        time.sleep(0.02)
+    sys.stdout.write("x" * (68 * 1024 * 1024))
+    sys.stdout.flush()
+
+threading.Thread(target=flood, daemon=True).start()
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    msg = json.loads(line)
+    if msg.get("id") is None:
+        continue
+    result = {
+        "initialize": {"protocolVersion": "2025-03-26",
+                       "capabilities": {"tools": {}, "resources": {}},
+                       "serverInfo": {"name": "flooder", "version": "0"}},
+        "tools/list": {"tools": []},
+        "resources/templates/list": {"resourceTemplates": []},
+    }.get(msg.get("method"), {})
+    sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": result}) + "\n")
+    sys.stdout.flush()
+"#;
+        (
+            "/usr/bin/python3".to_string(),
+            vec![
+                "-c".to_string(),
+                script.to_string(),
+                trigger.display().to_string(),
+            ],
+        )
+    }
+
+    /// The mirror with `provider` enabled and already carrying the verdict a
+    /// finished connect writes, which is what a dead leg has to overwrite.
+    async fn mirror_with_connected(provider: &str) -> holon::storage::DbHandle {
+        let (backend, db) = holon_turso::turso::TursoBackend::new_in_memory()
+            .await
+            .expect("an in-memory database");
+        std::mem::forget(backend);
+        holon_turso::schema_module::SchemaModule::ensure_schema(
+            &holon_turso::schema_modules::CoreSchemaModule,
+            &db,
+        )
+        .await
+        .expect("the core schema");
+        holon_turso::schema_module::SchemaModule::ensure_schema(
+            &holon_turso::schema_modules::IntegrationStateSchemaModule,
+            &db,
+        )
+        .await
+        .expect("the integration mirror");
+        db.execute_values(
+            "INSERT INTO integration_state (id, provider_name, enabled, status, config_status, \
+             configurable, configure_progress, updated_at) VALUES (?, ?, 1, ?, '', 0, '', ?)",
+            vec![
+                holon_api::Value::String(crate::integration_projection::integration_row_id(
+                    provider,
+                )),
+                holon_api::Value::String(provider.to_string()),
+                holon_api::Value::String(IntegrationStatus::Connected.label().to_string()),
+                holon_api::Value::String(holon::storage::now_utc()),
+            ],
+        )
+        .await
+        .expect("the enabled row the registry records a status on");
+        db
+    }
+
+    async fn recorded_status(db: &holon::storage::DbHandle, provider: &str) -> String {
+        let rows = db
+            .query(
+                &format!(
+                    "SELECT status FROM integration_state WHERE id = '{}'",
+                    crate::integration_projection::integration_row_id(provider)
+                ),
+                HashMap::new(),
+            )
+            .await
+            .expect("read the mirror");
+        rows.first()
+            .and_then(|r| r.get("status"))
+            .and_then(|v| v.as_string())
+            .expect("the enabled row carries a status")
+            .to_string()
+    }
+
+    /// A bound that ENDS a sidecar's stdio leg takes every operation of the
+    /// integration with it, and nothing reconnects in process. The row must
+    /// read `Unavailable` and the disclosure must name the bound — otherwise
+    /// the integration's pages render blank while the sidebar still claims it
+    /// is connected.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_bound_that_ends_a_sidecars_leg_marks_the_integration_unavailable() {
+        const PROVIDER: &str = "flooder";
+        let db = mirror_with_connected(PROVIDER).await;
+        let home = tempfile::tempdir().expect("a temp dir");
+        let trigger = home.path().join("flood-now");
+        let (command, args) = flooding_sidecar(&trigger);
+
+        let built = build_mcp_integration(
+            holon_mcp_client::McpIntegrationConfig {
+                provider_name: PROVIDER.to_string(),
+                transport: holon_mcp_client::McpTransport::ChildProcess {
+                    command,
+                    args,
+                    env: HashMap::new(),
+                },
+                sidecar_yaml: format!(
+                    "schema_version: {}\ndisplay_name: \"Flooder\"\nentities: {{}}\ntools: {{}}\n",
+                    holon_mcp_client::SIDECAR_SCHEMA_VERSION
+                ),
+                auth_mode: holon_mcp_client::AuthMode::None,
+            },
+            db.clone(),
+            Arc::new(holon::di::DbHandleCacheFactory::new(db.clone())),
+            Arc::new(NoopTokenStore) as Arc<dyn SyncTokenStore>,
+            &PendingOAuthFlows::new(),
+            SyncGate::opened(),
+        )
+        .await
+        .expect("a sidecar that answers the connect connects");
+        let holon_mcp_client::McpConnectionResult::Connected(integration) = built else {
+            panic!("a sidecar that answers initialize and both enumerations must connect");
+        };
+
+        let bus = Arc::new(ConditionBus::new());
+        let attribution = IntegrationAttribution::new();
+        let shutdown = holon_api::lifecycle::SessionShutdown::new();
+        spawn_disclose_transport_end(
+            db.clone(),
+            attribution.clone(),
+            bus.clone(),
+            PROVIDER.to_string(),
+            integration
+                .transport_ended
+                .clone()
+                .expect("a sidecar connection follows the bounds that can end its leg"),
+            &shutdown,
+        );
+
+        std::fs::write(&trigger, b"flood").expect("the trigger is writable");
+
+        for _ in 0..200 {
+            if let Some(ended) = bus.current().into_iter().find(|c| c.subject == PROVIDER) {
+                assert_eq!(
+                    ended.reason.condition_kind(),
+                    ConditionKind::INTEGRATION_CONNECTION_ENDED,
+                    "a leg ended by a bound is not a connect failure and not a sync failure: {:?}",
+                    ended.reason
+                );
+                let detail = ended.reason.detail(PROVIDER);
+                assert!(
+                    detail
+                        .body
+                        .iter()
+                        .any(|line| line.contains("MAX_RESPONSE_BODY_BYTES")),
+                    "the disclosure must name the bound that ended the leg: {detail:?}"
+                );
+                assert_eq!(
+                    recorded_status(&db, PROVIDER).await,
+                    IntegrationStatus::Unavailable.label(),
+                    "an integration whose transport is gone serves nothing, so its row may not \
+                     keep claiming it is connected"
+                );
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        panic!(
+            "the sidecar's stdio leg was ended by the response-body allowance and nothing said \
+             so: no condition for '{PROVIDER}', status still {}",
+            recorded_status(&db, PROVIDER).await
+        );
     }
 }

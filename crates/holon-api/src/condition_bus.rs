@@ -196,6 +196,15 @@ pub enum ConditionKind {
     ///
     /// All-clear: a restart. There is no event that says a peer stopped.
     IntegrationChangeSignalsCollapsed { integration: String, reason: String },
+    /// A bound ENDED one of a connected MCP integration's transport legs — a
+    /// sidecar message past the connection's response-body allowance, which
+    /// the stdio reader refuses rather than hold. Every operation that
+    /// integration serves goes with the leg and nothing reconnects in process,
+    /// so its pages render blank for the rest of the session. `subject`
+    /// carries the integration name.
+    ///
+    /// All-clear: a restart. The connection is not re-established in process.
+    IntegrationConnectionEnded { integration: String, reason: String },
     /// An MCP integration's `${VAR}` resolution is blocked on the OS keychain,
     /// which is usually waiting for the user to answer an access prompt.
     /// `subject` carries the integration name.
@@ -649,6 +658,7 @@ impl ConditionKind {
     pub const INTEGRATION_DISCOVERY_INCOMPLETE: &'static str = "integration-discovery-incomplete";
     pub const INTEGRATION_CHANGE_SIGNALS_COLLAPSED: &'static str =
         "integration-change-signals-collapsed";
+    pub const INTEGRATION_CONNECTION_ENDED: &'static str = "integration-connection-ended";
     pub const INTEGRATION_WAITING_ON_KEYCHAIN: &'static str = "integration-waiting-on-keychain";
     pub const INTEGRATION_NEEDS_AUTH: &'static str = "integration-needs-auth";
     pub const INTEGRATION_NOT_ENABLED: &'static str = "integration-not-enabled";
@@ -723,6 +733,7 @@ impl ConditionKind {
             Self::IntegrationChangeSignalsCollapsed { .. } => {
                 Self::INTEGRATION_CHANGE_SIGNALS_COLLAPSED
             }
+            Self::IntegrationConnectionEnded { .. } => Self::INTEGRATION_CONNECTION_ENDED,
             Self::IntegrationWaitingOnKeychain { .. } => Self::INTEGRATION_WAITING_ON_KEYCHAIN,
             Self::IntegrationNeedsAuth { .. } => Self::INTEGRATION_NEEDS_AUTH,
             Self::IntegrationSidecarSuperseded { .. } => Self::INTEGRATION_SIDECAR_SUPERSEDED,

@@ -54,6 +54,12 @@ impl BudgetedPeer {
         Self { peer, budget }
     }
 
+    /// The budget this peer's calls are charged to, so the integration built
+    /// around it can follow the bounds that trip.
+    pub(crate) fn budget(&self) -> &Arc<PeerBudget> {
+        &self.budget
+    }
+
     /// What the peer declared about itself at `initialize`. Local state, so no
     /// bound applies.
     pub fn peer_info(&self) -> Option<&rmcp::model::InitializeResult> {
@@ -77,8 +83,8 @@ impl BudgetedPeer {
             Err(_) => {
                 let reason =
                     format!("{what} got no response within REQUEST_TIMEOUT ({REQUEST_TIMEOUT:?})");
-                // Spawned: telling the peer goes through the same transport that
-                // is not answering.
+                // Spawned: telling the peer goes through the same transport
+                // that is not answering.
                 let peer = self.peer.clone();
                 let notice = CancelledNotificationParam {
                     request_id,
