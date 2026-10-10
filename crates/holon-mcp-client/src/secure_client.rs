@@ -69,6 +69,16 @@ pub const MAX_LIST_PAGES: usize = 256;
 /// and still a hard ceiling.
 pub const MAX_LIST_ITEMS: usize = 4096;
 
+/// The bytes of list items the enumerations of ONE connection may collect
+/// together.
+///
+/// [`MAX_LIST_ITEMS`] and [`MAX_LIST_PAGES`] bound counts, not sizes, and a
+/// peer picks the size of an item: 16 items of a megabyte per page stays inside
+/// both counts and still hands over gigabytes. 16 MiB is 4 KiB of name,
+/// description and schema for every one of [`MAX_LIST_ITEMS`]; the largest real
+/// catalog (about 100 tools) stays two orders below it.
+pub const MAX_LIST_BYTES: usize = 16 * 1024 * 1024;
+
 /// The longest resource URI a `notifications/resources/updated` may carry.
 ///
 /// The URI is peer-chosen text that is parked until the boot scan's sync gate
@@ -87,6 +97,15 @@ pub const MAX_NOTIFICATION_URI_BYTES: usize = 2048;
 /// [`MAX_NOTIFICATION_URI_BYTES`] it is what bounds the bytes a notification
 /// flood parks.
 pub const MAX_PENDING_SYNC_URIS: usize = 256;
+
+/// The bytes of its sidecar's stderr one connection may put in the log.
+///
+/// stderr is where a sidecar's own diagnostics go, and with a file log sink it
+/// is a peer appending to an unrotated file. A first-run `npx` sidecar writes
+/// tens of KiB of install chatter, so 1 MiB covers every real sidecar's whole
+/// session; past it the lines are dropped and the count is disclosed
+/// ([`crate::peer_budget::StderrAllowance`]).
+pub const MAX_STDERR_BYTES: usize = 1024 * 1024;
 
 /// The most peer-chosen text one disclosure may carry.
 ///

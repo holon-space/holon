@@ -154,6 +154,7 @@ pub struct PbtMcpIntegration {
     server_items: Arc<RwLock<Vec<serde_json::Value>>>,
     server_peer: Peer<RoleServer>,
     sync_engine: Arc<McpSyncEngine>,
+    probe_cache: Arc<dyn holon_core::EntityCache<DynamicEntity>>,
 }
 
 impl PbtMcpIntegration {
@@ -267,9 +268,10 @@ impl PbtMcpIntegration {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to create pbt_probe cache: {e}"))?;
 
+        let probe_cache: Arc<dyn holon_core::EntityCache<DynamicEntity>> = Arc::new(cache);
         let mut caches: HashMap<String, Arc<dyn holon_core::EntityCache<DynamicEntity>>> =
             HashMap::new();
-        caches.insert(ENTITY_NAME.to_string(), Arc::new(cache));
+        caches.insert(ENTITY_NAME.to_string(), probe_cache.clone());
 
         // Build sync strategies from sidecar config
         let mut strategies: HashMap<String, Box<dyn holon_mcp_client::SyncStrategy>> =
@@ -298,7 +300,10 @@ impl PbtMcpIntegration {
         sync_engine.subscribe_all().await?;
 
         // Spawn the serialized sync-event consumer, reading the peer's notices
-        // from the bounded inbound queue exactly as production does.
+        // from the bounded inbound queue exactly as production does. This fake
+        // has no Holon-side event source — no poll ticker, no initial
+        // `SyncAll` — so the `SyncEvent` sender is dropped here and the peer's
+        // queue is the only thing the loop reads.
         let engine_for_listener = sync_engine.clone();
         let (_sync_event_tx, sync_event_rx) = tokio::sync::mpsc::unbounded_channel();
         holon_mcp_client::spawn_sync_event_loop(
@@ -314,7 +319,36 @@ impl PbtMcpIntegration {
             server_items,
             server_peer,
             sync_engine,
+            probe_cache,
         })
+    }
+
+    /// Add an item and announce it ONLY through the peer's
+    /// `notifications/resources/updated`, the way a real peer does: the row
+    /// lands only if the sync loop still reads the inbound queue.
+    pub async fn emit_update_through_the_peers_notice(&self) -> anyhow::Result<()> {
+        let n = self.counter.fetch_add(1, Ordering::SeqCst);
+        self.server_items.write().await.push(serde_json::json!({
+            "id": format!("pbt-probe-{n}"),
+            "data": format!("update-{n}"),
+        }));
+        self.server_peer
+            .notify_resource_updated(ResourceUpdatedNotificationParam {
+                uri: RESOURCE_URI.to_string(),
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("the test server could not announce its update: {e}"))?;
+        Ok(())
+    }
+
+    /// How many probe rows the mirror table holds.
+    pub async fn mirrored_rows(&self) -> anyhow::Result<usize> {
+        let ids = self
+            .probe_cache
+            .get_all_ids()
+            .await
+            .map_err(|e| anyhow::anyhow!("reading the pbt_probe mirror failed: {e}"))?;
+        Ok(ids.len())
     }
 
     /// Emit a data update through the real MCP pipeline.
@@ -352,5 +386,46 @@ impl PbtMcpIntegration {
         self.sync_engine.resync_by_uri(RESOURCE_URI).await?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A peer's notice is synced for as long as its inbound queue is open.
+    ///
+    /// Holon's own `SyncEvent` sender is not what keeps the sync loop alive: a
+    /// connection whose peer still pushes notices outlives any one sender, and
+    /// this fake has no Holon-side sender at all.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_notice_sent_after_the_integration_was_built_is_synced() {
+        let (backend, db) = holon::storage::turso::TursoBackend::new_in_memory()
+            .await
+            .expect("an in-memory database");
+        // The actor owns the connection for the whole test; dropping the
+        // backend would close it out from under the sync engine.
+        std::mem::forget(backend);
+
+        let mcp = PbtMcpIntegration::new(db)
+            .await
+            .expect("the fake MCP integration connects");
+        mcp.emit_update_through_the_peers_notice()
+            .await
+            .expect("the test server announces its update");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let rows = mcp.mirrored_rows().await.expect("read the probe mirror");
+            if rows == 1 {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the peer announced one updated resource and nothing synced it: the mirror holds \
+                 {rows} rows. The sync loop stopped reading the peer's inbound queue."
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
     }
 }

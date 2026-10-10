@@ -1715,6 +1715,7 @@ pub fn spawn_sync_event_loop<S: ResyncSink + 'static>(
             None => (None, None),
         };
         let mut collapses = notices.as_ref().map(|n| n.collapses());
+        let mut events_open = true;
         let mut inbound_open = uris.is_some();
         let mut collapses_open = collapses.is_some();
 
@@ -1731,6 +1732,18 @@ pub fn spawn_sync_event_loop<S: ResyncSink + 'static>(
         let mut hard: Option<tokio::time::Instant> = None;
 
         loop {
+            // Each source closes on its own; the loop ends when no signal can
+            // reach it any more. A peer still pushing notices into its bounded
+            // queue is such a source, so Holon's own sender being dropped
+            // leaves the inbound leg running.
+            if !events_open && !inbound_open && !collapses_open {
+                if !pending.is_empty() {
+                    std::mem::take(&mut pending)
+                        .execute(sync_engine.as_ref())
+                        .await;
+                }
+                break;
+            }
             let fire_at = match (trailing, hard) {
                 (Some(t), Some(h)) => Some(t.min(h)),
                 (Some(t), None) => Some(t),
@@ -1738,7 +1751,7 @@ pub fn spawn_sync_event_loop<S: ResyncSink + 'static>(
                 (None, None) => None,
             };
             tokio::select! {
-                maybe_event = receiver.recv() => {
+                maybe_event = receiver.recv(), if events_open => {
                     match maybe_event {
                         Some(event) => {
                             if pending.is_empty() {
@@ -1749,12 +1762,7 @@ pub fn spawn_sync_event_loop<S: ResyncSink + 'static>(
                             }
                             trailing = Some(tokio::time::Instant::now() + tuning.debounce);
                         }
-                        None => {
-                            if !pending.is_empty() {
-                                std::mem::take(&mut pending).execute(sync_engine.as_ref()).await;
-                            }
-                            break;
-                        }
+                        None => events_open = false,
                     }
                 }
                 maybe_uri = async {
@@ -1808,7 +1816,7 @@ pub fn spawn_sync_event_loop<S: ResyncSink + 'static>(
                 }
             }
         }
-        info!("[sync_event_loop] Channel closed, stopping");
+        info!("[sync_event_loop] every signal source of this integration closed, stopping");
     })
 }
 

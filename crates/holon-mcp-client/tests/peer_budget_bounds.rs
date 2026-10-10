@@ -23,28 +23,42 @@ const BOUND: std::time::Duration = std::time::Duration::from_secs(20);
 /// Speaks Streamable HTTP over a raw socket rather than through `rmcp`'s server
 /// so that it can answer what no cooperative implementation would.
 fn endless_pagination_peer(tools_per_page: usize) -> String {
-    peer(tools_per_page, true)
+    peer(tools_per_page, true, SMALL_TOOL)
+}
+
+/// A peer whose pages stay well inside the page and item bounds and carry a
+/// megabyte of description per tool.
+fn fat_pagination_peer() -> String {
+    peer(16, true, 1 << 20)
 }
 
 /// A peer that answers `initialize` and hands out its whole tool list in one
 /// page, so a connect against it succeeds.
 fn finite_peer() -> String {
-    peer(1, false)
+    peer(1, false, SMALL_TOOL)
 }
 
-fn peer(tools_per_page: usize, endless: bool) -> String {
+/// The description length of a tool no bound is meant to catch.
+const SMALL_TOOL: usize = 6;
+
+fn peer(tools_per_page: usize, endless: bool, description_bytes: usize) -> String {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind the hostile peer");
     let uri = format!("http://{}/mcp", listener.local_addr().expect("peer addr"));
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(stream) = stream else { continue };
-            std::thread::spawn(move || serve(stream, tools_per_page, endless));
+            std::thread::spawn(move || serve(stream, tools_per_page, endless, description_bytes));
         }
     });
     uri
 }
 
-fn serve(mut stream: std::net::TcpStream, tools_per_page: usize, endless: bool) {
+fn serve(
+    mut stream: std::net::TcpStream,
+    tools_per_page: usize,
+    endless: bool,
+    description_bytes: usize,
+) {
     use std::io::BufRead as _;
     let peer = stream.try_clone().expect("clone the socket");
     let mut head = std::io::BufReader::new(peer);
@@ -96,7 +110,7 @@ fn serve(mut stream: std::net::TcpStream, tools_per_page: usize, endless: bool) 
                     "tools": (0..tools_per_page)
                         .map(|i| serde_json::json!({
                             "name": format!("tool_{i}"),
-                            "description": "a tool",
+                            "description": "d".repeat(description_bytes),
                             "inputSchema": {"type": "object"},
                         }))
                         .collect::<Vec<_>>(),
@@ -201,6 +215,18 @@ async fn an_enumeration_starting_past_the_budget_is_refused_naming_the_bound() {
     );
     assert!(
         err.contains("CONNECT_BUDGET"),
+        "the refusal must name the bound it hit; got: {err}"
+    );
+}
+
+/// Small pages of huge items: 16 tools of a megabyte each stays under the item
+/// count AND under the page count, so the counts alone let a peer hand over
+/// gigabytes — 4096 items and 256 pages of this shape are ~16 GiB.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_peer_whose_pages_are_huge_is_cut_at_the_list_byte_bound() {
+    let err = connect_failure(&fat_pagination_peer()).await;
+    assert!(
+        err.contains("MAX_LIST_BYTES"),
         "the refusal must name the bound it hit; got: {err}"
     );
 }

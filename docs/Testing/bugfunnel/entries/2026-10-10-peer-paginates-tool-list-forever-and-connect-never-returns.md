@@ -53,7 +53,15 @@ handshake and every page); each refusal names the bound it hit. A trip degrades 
 integration — it is disclosed as `IntegrationConnectFailed` and Holon keeps booting (D-jaq-bound.a,
 plus the 10-08 boot-always directive).
 
-Pinned by `crates/holon-mcp-client/tests/peer_budget_bounds.rs` (page bound, item bound) and
+The counts alone still let a peer hand over gigabytes, because it picks the SIZE of an item:
+16 tools of a megabyte per page stays inside both counts and inside `CONNECT_BUDGET`, and 256
+such pages are ~4 GiB. `MAX_LIST_BYTES` (16 MiB per connection, `ListedBytes` in
+`peer_budget.rs`) is therefore charged per page from `serialized_bytes()`, which counts the
+JSON through a `ByteCount` writer rather than copying the page; the refusal names the bound and
+how many pages and items it had collected.
+
+Pinned by `crates/holon-mcp-client/tests/peer_budget_bounds.rs` (page bound, item bound,
+`a_peer_whose_pages_are_huge_is_cut_at_the_list_byte_bound`) and
 `crates/holon-integration-tests/tests/frontend_suite/integration_connect_stall_blocks_boot.rs::a_peer_that_paginates_forever_degrades_only_its_own_integration`
 (boot resolves, the integration reaches `Unavailable`). Teeth proven by inverting each bound:
 `lane-logs/jaq-r5-teeth-pagination.log`, `lane-logs/jaq-r5-teeth-boot.log`.

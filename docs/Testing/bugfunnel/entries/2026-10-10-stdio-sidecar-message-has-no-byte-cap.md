@@ -32,7 +32,7 @@ was the one nothing exercised — the bundled sidecars are all stdio.
 
 ## Remedy
 `crates/holon-mcp-client/src/child_transport.rs`: Holon spawns the sidecar itself
-(`kill_on_drop`, stderr inherited as rmcp left it) and reads its stdout through
+(`kill_on_drop`) and reads its stdout through
 `BoundedChildStdout`, which charges the bytes of the line it has not finished to the
 connection's `HeldEventBytes` — the same per-connection `MAX_RESPONSE_BODY_BYTES` allowance the
 HTTP legs' partial SSE events charge, so there is one allowance per connection and not one per
@@ -46,8 +46,26 @@ The ended leg is disclosed rather than only logged: the refusal is published on
 integration's row and raises `ConditionKind::IntegrationConnectionEnded` with the bound named in
 the body, so the row never keeps claiming a transportless integration is connected.
 
+The sidecar's stderr was the other half of the same hole: inherited, it goes wherever Holon's
+own stderr goes, and with `HOLON_LOG=file://…` that is an append-only, unrotated file a peer
+grows line by line. It is now piped and read to its end by `forward_stderr` (so the pipe
+cannot fill and stall the sidecar) under `MAX_STDERR_BYTES` (1 MiB per connection,
+`StderrAllowance` in `peer_budget.rs`): each line is cut at `MAX_DISCLOSED_PEER_TEXT_BYTES`
+with the skipped tail counted, escaped through `bounded_peer_text`, and charged to the
+allowance. Past it the first dropped line names the bound, the running count is repeated at
+every power of ten, and the total is disclosed when stderr ends — dropped, never silently.
+
+`bounded_peer_text` itself now escapes every control character, newline included: a sidecar's
+stderr line and a peer's error text both reach a line-oriented log and a one-line Integrations
+row, where a raw newline is a log line the peer wrote itself and a CSI sequence rewrites the
+terminal. The escaped bytes are what the 4096-byte bound is charged, so escaping cannot widen
+it.
+
 Pinned by `crates/holon-mcp-client/src/child_transport.rs::tests` (the refusal names the
-bound; 100 MiB in finished 1 MiB lines still streams),
+bound; 100 MiB in finished 1 MiB lines still streams;
+`a_flooding_sidecars_stderr_is_bounded_and_what_it_cost_is_disclosed` drives a real sidecar
+that writes escape sequences, one 8 MiB line and 4 MiB of flood),
+`crates/holon-mcp-client/src/peer_budget.rs::tests` (control characters escaped and named),
 `crates/holon-mcp-client/tests/inbound_bounds.rs::one_stdio_message_past_the_byte_allowance_ends_the_connection`
 and `crates/holon-app/src/mcp_integrations.rs::tests::a_bound_that_ends_a_sidecars_leg_marks_the_integration_unavailable`
 (a real sidecar floods one unterminated line past the allowance; the condition names the bound

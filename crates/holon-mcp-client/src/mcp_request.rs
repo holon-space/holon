@@ -159,14 +159,16 @@ impl BudgetedPeer {
     }
 
     /// Walk `page` until the peer stops handing out cursors, bounded by
-    /// [`MAX_LIST_PAGES`], [`MAX_LIST_ITEMS`] and the connect deadline.
+    /// [`MAX_LIST_PAGES`], [`MAX_LIST_ITEMS`],
+    /// [`crate::secure_client::MAX_LIST_BYTES`] and the connect deadline.
     ///
-    /// All three are needed, because each catches a shape the others do not: a
+    /// All four are needed, because each catches a shape the others do not: a
     /// peer sending full pages forever hits the item bound, one sending empty
-    /// pages forever hits the page bound, and one sending slow pages forever
-    /// hits the deadline.
+    /// pages forever hits the page bound, one sending few but huge items hits
+    /// the byte bound, and one sending slow pages forever hits the deadline.
     async fn all_pages<T, F, Fut>(&self, what: &str, mut page: F) -> Result<Vec<T>, ServiceError>
     where
+        T: serde::Serialize,
         F: FnMut(Option<String>) -> Fut,
         Fut: Future<Output = Result<(Vec<T>, Option<String>), ServiceError>>,
     {
@@ -198,6 +200,26 @@ impl BudgetedPeer {
                     });
                 }
             };
+            match serialized_bytes(&items) {
+                Ok(bytes) => {
+                    if let Err(refused) = self.budget.listed_bytes.charge(bytes) {
+                        return Err(ServiceError::Cancelled {
+                            reason: Some(format!(
+                                "{what} {refused}, after {fetched} pages and {} items",
+                                all.len() + items.len()
+                            )),
+                        });
+                    }
+                }
+                Err(e) => {
+                    return Err(ServiceError::Cancelled {
+                        reason: Some(format!(
+                            "{what} answered page {fetched} with items whose size could not be \
+                             charged to MAX_LIST_BYTES: {e}"
+                        )),
+                    });
+                }
+            }
             all.extend(items);
             if all.len() > MAX_LIST_ITEMS {
                 return Err(ServiceError::Cancelled {
@@ -220,6 +242,30 @@ impl BudgetedPeer {
                 all.len()
             )),
         })
+    }
+}
+
+/// What holding `items` costs, measured as the JSON they came in as.
+///
+/// Counted rather than re-serialized into a buffer: the page can be as large as
+/// a whole response body, and a copy of it to learn its size would be the
+/// growth the bound exists to stop.
+fn serialized_bytes<T: serde::Serialize>(items: &[T]) -> serde_json::Result<usize> {
+    let mut counted = ByteCount(0);
+    serde_json::to_writer(&mut counted, items)?;
+    Ok(counted.0)
+}
+
+struct ByteCount(usize);
+
+impl std::io::Write for ByteCount {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0 += buf.len();
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
 

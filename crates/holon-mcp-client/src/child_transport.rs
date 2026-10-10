@@ -9,6 +9,11 @@
 //! events charge — and publishes the bound that ends the leg, so a dead leg is
 //! disclosed rather than only logged.
 //!
+//! Its stderr is piped and read here too, under
+//! [`crate::peer_budget::StderrAllowance`]: inherited it goes wherever Holon's
+//! own stderr goes, which with a file log sink is an unrotated file a peer can
+//! grow.
+//!
 //! Spawning the child means owning its shutdown too: [`BoundedChildProcess`]
 //! closes the sidecar's stdin and waits for it to leave on its own before
 //! killing it, as `TokioChildProcess` does, because a sidecar killed mid-write
@@ -25,15 +30,20 @@ use rmcp::service::RxJsonRpcMessage;
 use rmcp::service::TxJsonRpcMessage;
 use rmcp::transport::Transport;
 use rmcp::transport::async_rw::AsyncRwTransport;
+use tokio::io::AsyncBufReadExt as _;
 use tokio::io::AsyncRead;
 use tokio::io::ReadBuf;
 use tokio::process::Child;
+use tokio::process::ChildStderr;
 use tokio::process::ChildStdin;
 use tokio::process::ChildStdout;
+use tracing::debug;
 use tracing::info;
 use tracing::warn;
 
 use crate::peer_budget::PeerBudget;
+use crate::peer_budget::StderrVerdict;
+use crate::secure_client::MAX_DISCLOSED_PEER_TEXT_BYTES;
 
 /// How long a sidecar is given to leave on its own after its stdin closes,
 /// before it is killed. rmcp's own child transport waits the same 3 s.
@@ -49,29 +59,38 @@ pub(crate) struct BoundedChildStdout {
 }
 
 /// Spawn `cmd` as an MCP sidecar and return the transport that talks to it.
-///
-/// stderr stays inherited, as rmcp's own child transport leaves it: piping it
-/// without a reader would stop a chatty sidecar at the first full pipe.
 pub(crate) fn spawn_bounded_child(
     cmd: &mut tokio::process::Command,
     budget: Arc<PeerBudget>,
 ) -> std::io::Result<BoundedChildProcess> {
-    let (child, stdout, stdin) = spawn_parts(cmd, budget)?;
+    let who = cmd.as_std().get_program().to_string_lossy().into_owned();
+    let (child, stdout, stdin, stderr) = spawn_parts(cmd, budget.clone())?;
+    tokio::spawn(forward_stderr(
+        stderr,
+        who.clone(),
+        budget,
+        move |verdict| match verdict {
+            StderrVerdict::Forward(line) => info!("[sidecar {who}] {line}"),
+            StderrVerdict::Say(bound) => warn!("[sidecar {who}] {bound}"),
+            StderrVerdict::Nothing => {}
+        },
+    ));
     Ok(BoundedChildProcess {
         child: Some(child),
         transport: AsyncRwTransport::new_client(stdout, stdin),
     })
 }
 
-/// The sidecar's process and the two ends of its stdio, split out so tests can
-/// drive the reader on its own.
+/// The sidecar's process and the three ends of its stdio, split out so tests
+/// can drive the readers on their own.
 fn spawn_parts(
     cmd: &mut tokio::process::Command,
     budget: Arc<PeerBudget>,
-) -> std::io::Result<(Child, BoundedChildStdout, ChildStdin)> {
+) -> std::io::Result<(Child, BoundedChildStdout, ChildStdin, ChildStderr)> {
     let mut child = cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()?;
     let stdout = child
@@ -82,6 +101,10 @@ fn spawn_parts(
         .stdin
         .take()
         .expect("a child spawned with a piped stdin has one");
+    let stderr = child
+        .stderr
+        .take()
+        .expect("a child spawned with a piped stderr has one");
     Ok((
         child,
         BoundedChildStdout {
@@ -90,7 +113,78 @@ fn spawn_parts(
             held: 0,
         },
         stdin,
+        stderr,
     ))
+}
+
+/// Read `stderr` to its end, handing every line to `say` under the
+/// connection's stderr allowance.
+///
+/// Reading never stops, so the pipe cannot fill and stall the sidecar: a line
+/// the bound refuses is read and dropped, not left unread.
+async fn forward_stderr<R: AsyncRead + Unpin>(
+    stderr: R,
+    who: String,
+    budget: Arc<PeerBudget>,
+    mut say: impl FnMut(StderrVerdict),
+) {
+    let mut reader = tokio::io::BufReader::new(stderr);
+    loop {
+        match next_line(&mut reader).await {
+            Ok(Some(line)) => say(budget.stderr.admit(&line)),
+            Ok(None) => break,
+            Err(e) => {
+                say(StderrVerdict::Say(format!(
+                    "reading this sidecar's stderr failed, so nothing it writes there is logged \
+                     any more: {e}"
+                )));
+                break;
+            }
+        }
+    }
+    if let Some(report) = budget.stderr.dropped_report() {
+        say(StderrVerdict::Say(format!("{report}; stderr ended")));
+    }
+    debug!("[child_transport] the stderr of sidecar {who} ended");
+}
+
+/// The next stderr line, at most [`MAX_DISCLOSED_PEER_TEXT_BYTES`] of it with
+/// the rest of an over-long line counted instead of buffered.
+///
+/// `read_line` would buffer a line a sidecar never terminates whole, which is
+/// the same hole the stdout reader closes.
+async fn next_line<R: AsyncRead + Unpin>(
+    reader: &mut tokio::io::BufReader<R>,
+) -> std::io::Result<Option<String>> {
+    let mut line = Vec::new();
+    let mut cut = 0usize;
+    loop {
+        let chunk = reader.fill_buf().await?;
+        if chunk.is_empty() {
+            if line.is_empty() && cut == 0 {
+                return Ok(None);
+            }
+            break;
+        }
+        let (text, consumed, complete) = match chunk.iter().position(|b| *b == b'\n') {
+            Some(newline) => (&chunk[..newline], newline + 1, true),
+            None => (chunk, chunk.len(), false),
+        };
+        let fits = text
+            .len()
+            .min(MAX_DISCLOSED_PEER_TEXT_BYTES.saturating_sub(line.len()));
+        line.extend_from_slice(&text[..fits]);
+        cut += text.len() - fits;
+        reader.consume(consumed);
+        if complete {
+            break;
+        }
+    }
+    let mut text = String::from_utf8_lossy(&line).into_owned();
+    if cut > 0 {
+        text.push_str(&format!("… ({cut} bytes cut)"));
+    }
+    Ok(Some(text))
 }
 
 /// A sidecar connection: the budgeted stdio transport plus the process it
@@ -193,6 +287,7 @@ mod tests {
     use tokio::io::AsyncReadExt as _;
 
     use super::*;
+    use crate::secure_client::MAX_STDERR_BYTES;
 
     fn sidecar(script: &str) -> tokio::process::Command {
         let mut cmd = tokio::process::Command::new("/usr/bin/python3");
@@ -204,7 +299,7 @@ mod tests {
     #[tokio::test]
     async fn an_unfinished_line_past_the_allowance_names_the_bound() {
         let cmd = &mut sidecar("import sys\nsys.stdout.write('x' * (68 * 1024 * 1024))");
-        let (_child, mut stdout, _stdin) =
+        let (_child, mut stdout, _stdin, _stderr) =
             spawn_parts(cmd, PeerBudget::new()).expect("the sidecar spawns");
         let mut chunk = vec![0u8; 1 << 16];
         let err = loop {
@@ -228,7 +323,7 @@ mod tests {
         let cmd = &mut sidecar(
             "import sys\nfor _ in range(100): sys.stdout.write('x' * (1024 * 1024) + '\\n')",
         );
-        let (_child, mut stdout, _stdin) =
+        let (_child, mut stdout, _stdin, _stderr) =
             spawn_parts(cmd, PeerBudget::new()).expect("the sidecar spawns");
         let mut all = Vec::new();
         stdout
@@ -236,6 +331,67 @@ mod tests {
             .await
             .expect("100 finished lines are 100 messages, not one 100 MiB message");
         assert_eq!(all.len(), 100 * (1024 * 1024 + 1));
+    }
+
+    /// A sidecar whose stderr carries escape sequences, one line far past the
+    /// per-line cap, and then 4 MiB of flood — four times what the log may
+    /// take from it.
+    #[tokio::test]
+    async fn a_flooding_sidecars_stderr_is_bounded_and_what_it_cost_is_disclosed() {
+        let cmd = &mut sidecar(
+            "import sys\nsys.stderr.write('\\x1b[2Jbanner\\x07\\n')\nsys.stderr.write('L' * (8 \
+             * 1024 * 1024) + '\\n')\nfor _ in range(4096): sys.stderr.write('e' * 1024 + '\\n')",
+        );
+        let budget = PeerBudget::new();
+        let (_child, _stdout, _stdin, stderr) =
+            spawn_parts(cmd, budget.clone()).expect("the sidecar spawns");
+
+        let mut forwarded: Vec<String> = Vec::new();
+        let mut said: Vec<String> = Vec::new();
+        forward_stderr(
+            stderr,
+            "flooder".to_string(),
+            budget.clone(),
+            |verdict| match verdict {
+                StderrVerdict::Forward(line) => forwarded.push(line),
+                StderrVerdict::Say(bound) => said.push(bound),
+                StderrVerdict::Nothing => {}
+            },
+        )
+        .await;
+
+        let logged: usize = forwarded.iter().map(String::len).sum();
+        assert!(
+            logged <= MAX_STDERR_BYTES,
+            "the log may take at most MAX_STDERR_BYTES ({MAX_STDERR_BYTES}) from one sidecar's \
+             stderr; it took {logged}"
+        );
+        assert!(
+            !forwarded[0].chars().any(char::is_control)
+                && forwarded[0].contains("\\u{1b}")
+                && forwarded[0].contains("\\u{7}"),
+            "a stderr line is peer text in a terminal: {:?}",
+            forwarded[0]
+        );
+        assert!(
+            forwarded[1].len() <= MAX_DISCLOSED_PEER_TEXT_BYTES + 64
+                && forwarded[1].contains("bytes cut"),
+            "an 8 MiB line must be cut to MAX_DISCLOSED_PEER_TEXT_BYTES and say so; got {} bytes \
+             ending {:?}",
+            forwarded[1].len(),
+            &forwarded[1][forwarded[1].len().saturating_sub(40)..]
+        );
+        assert!(
+            said.first()
+                .is_some_and(|first| first.contains("MAX_STDERR_BYTES")),
+            "the first dropped line must name the bound that dropped it; said: {said:?}"
+        );
+        assert!(
+            said.last()
+                .is_some_and(|last| last.contains("stderr ended")
+                    && last.contains("stderr lines were dropped")),
+            "how many lines the bound dropped must be disclosed: {said:?}"
+        );
     }
 }
 

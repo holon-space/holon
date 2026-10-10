@@ -12,6 +12,7 @@
 //! built without a budget, so the clock starts before the handshake it bounds.
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 
@@ -21,7 +22,9 @@ use crate::secure_client::CONNECT_BUDGET;
 use crate::secure_client::MAX_CONCURRENT_GET_STREAMS;
 use crate::secure_client::MAX_CONCURRENT_POST_STREAMS;
 use crate::secure_client::MAX_DISCLOSED_PEER_TEXT_BYTES;
+use crate::secure_client::MAX_LIST_BYTES;
 use crate::secure_client::MAX_RESPONSE_BODY_BYTES;
+use crate::secure_client::MAX_STDERR_BYTES;
 
 /// One connection's share of every resource its peer can grow.
 #[derive(Debug)]
@@ -43,6 +46,10 @@ pub struct PeerBudget {
     /// so. A leg that ends takes every operation of the integration with it,
     /// so this cannot be a log line only.
     pub transport: Arc<BoundTrips>,
+    /// The bytes of list items this connection's enumerations have collected.
+    pub(crate) listed_bytes: ListedBytes,
+    /// What this connection's sidecar may still write into the log.
+    pub(crate) stderr: StderrAllowance,
 }
 
 impl PeerBudget {
@@ -54,7 +61,105 @@ impl PeerBudget {
             connect_deadline: tokio::time::Instant::now() + CONNECT_BUDGET,
             inbound: Arc::new(InboundNotices::default()),
             transport: Arc::new(BoundTrips::default()),
+            listed_bytes: ListedBytes::default(),
+            stderr: StderrAllowance::default(),
         })
+    }
+}
+
+/// What a sidecar's stderr may add to the log, and what is said once it has
+/// added that much.
+///
+/// stderr is peer-written text going to a sink that may be an append-only
+/// file, so its volume is a resource the peer grows. Past the bound the lines
+/// are dropped — but never quietly: the first drop names the bound and the
+/// running count is repeated at every power of ten, so a flood of N lines
+/// costs log(N) log lines.
+#[derive(Default, Debug)]
+pub(crate) struct StderrAllowance {
+    spent: AtomicUsize,
+    dropped: AtomicU64,
+}
+
+/// What to do with one stderr line of a sidecar.
+pub(crate) enum StderrVerdict {
+    /// Write this to the log; bounded and escaped.
+    Forward(String),
+    /// Write this to the log: the bound has something to say.
+    Say(String),
+    /// Dropped, and there is nothing new to say about it.
+    Nothing,
+}
+
+impl StderrAllowance {
+    /// Charge `line` to this connection's stderr allowance, refused once it
+    /// has spent [`MAX_STDERR_BYTES`].
+    pub(crate) fn admit(&self, line: &str) -> StderrVerdict {
+        let text = bounded_peer_text(line);
+        let spent = self.spent.fetch_add(text.len(), Ordering::Relaxed) + text.len();
+        if spent <= MAX_STDERR_BYTES {
+            return StderrVerdict::Forward(text);
+        }
+        self.spent.fetch_sub(text.len(), Ordering::Relaxed);
+        let dropped = self.dropped.fetch_add(1, Ordering::Relaxed) + 1;
+        if dropped == 1 {
+            return StderrVerdict::Say(format!(
+                "MAX_STDERR_BYTES ({MAX_STDERR_BYTES} bytes) of this sidecar's stderr are in the \
+                 log; further lines are dropped and counted"
+            ));
+        }
+        if is_power_of_ten(dropped) {
+            return StderrVerdict::Say(format!(
+                "{dropped} stderr lines dropped since MAX_STDERR_BYTES ({MAX_STDERR_BYTES} bytes) \
+                 was spent"
+            ));
+        }
+        StderrVerdict::Nothing
+    }
+
+    /// What this bound has to disclose about the lines it dropped.
+    pub(crate) fn dropped_report(&self) -> Option<String> {
+        let dropped = self.dropped.load(Ordering::Relaxed);
+        (dropped > 0).then(|| {
+            format!(
+                "{dropped} stderr lines were dropped by MAX_STDERR_BYTES ({MAX_STDERR_BYTES} \
+                 bytes)"
+            )
+        })
+    }
+}
+
+fn is_power_of_ten(n: u64) -> bool {
+    let mut power = 10u64;
+    while power < n {
+        match power.checked_mul(10) {
+            Some(next) => power = next,
+            None => return false,
+        }
+    }
+    power == n
+}
+
+/// The bytes of list items a connection holds: a page of an enumeration is
+/// kept for as long as the connection serves the catalog built from it, so
+/// nothing is ever released here.
+#[derive(Default, Debug)]
+pub(crate) struct ListedBytes(AtomicUsize);
+
+impl ListedBytes {
+    /// Charge `more` bytes of items, refused once this connection's
+    /// enumerations hold more than [`MAX_LIST_BYTES`] between them. The
+    /// refusal names the bound and what was held when it tripped.
+    pub(crate) fn charge(&self, more: usize) -> Result<(), String> {
+        let held = self.0.fetch_add(more, Ordering::Relaxed) + more;
+        if held > MAX_LIST_BYTES {
+            self.0.fetch_sub(more, Ordering::Relaxed);
+            return Err(format!(
+                "collected {held} bytes of list items, past MAX_LIST_BYTES ({MAX_LIST_BYTES} \
+                 bytes) for this connection"
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -114,22 +219,37 @@ impl BoundTrips {
 }
 
 /// `text` as a disclosure may carry it: at most
-/// [`MAX_DISCLOSED_PEER_TEXT_BYTES`], with what was cut NAMED rather than
-/// dropped.
+/// [`MAX_DISCLOSED_PEER_TEXT_BYTES`] of it, every control character escaped,
+/// and what was cut NAMED rather than dropped.
 ///
-/// Peer text reaches a toast, the integration's row and the log, and a peer
-/// picks its length. Cutting it silently would leave a reader unable to tell a
-/// complete error from a truncated one.
+/// Peer text reaches a toast, the integration's row and the log, and the peer
+/// picks both its length and its bytes. Cutting it silently would leave a
+/// reader unable to tell a complete error from a truncated one, and a raw
+/// control character would let the peer write a log line of its own (a
+/// newline), move the terminal's cursor (a CSI sequence) or ring it (BEL).
 pub fn bounded_peer_text(text: &str) -> String {
-    if text.len() <= MAX_DISCLOSED_PEER_TEXT_BYTES {
-        return text.to_string();
+    let mut out = String::with_capacity(text.len().min(MAX_DISCLOSED_PEER_TEXT_BYTES));
+    let mut kept = 0;
+    for c in text.chars() {
+        let mut utf8 = [0u8; 4];
+        let escaped = c
+            .is_control()
+            .then(|| c.escape_default().collect::<String>());
+        let piece = match &escaped {
+            Some(e) => e.as_str(),
+            None => c.encode_utf8(&mut utf8),
+        };
+        if out.len() + piece.len() > MAX_DISCLOSED_PEER_TEXT_BYTES {
+            break;
+        }
+        out.push_str(piece);
+        kept += c.len_utf8();
     }
-    let mut end = MAX_DISCLOSED_PEER_TEXT_BYTES;
-    while !text.is_char_boundary(end) {
-        end -= 1;
+    let cut = text.len() - kept;
+    if cut == 0 {
+        return out;
     }
-    let cut = text.len() - end;
-    format!("{}… ({cut} bytes cut)", &text[..end])
+    format!("{out}… ({cut} bytes cut)")
 }
 
 /// The bytes of unfinished messages a connection holds together: a partial
@@ -164,5 +284,53 @@ impl HeldEventBytes {
 
     pub(crate) fn release(&self, held: usize) {
         self.0.fetch_sub(held, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A peer that answers with escape sequences writes into a line-oriented
+    /// log and a terminal: a newline forges a log line of its own, a CSI
+    /// sequence rewrites what is already on screen, BEL rings it.
+    #[test]
+    fn control_characters_of_peer_text_are_escaped_and_named() {
+        let disclosed = bounded_peer_text("harmless\u{1b}[2J\u{7}\nsecond line\r\n");
+
+        assert!(
+            !disclosed.chars().any(char::is_control),
+            "no control character may reach the sink verbatim; got {disclosed:?}"
+        );
+        for escape in ["\\u{1b}", "\\u{7}", "\\n", "\\r"] {
+            assert!(
+                disclosed.contains(escape),
+                "a control character must be VISIBLE, not dropped: {escape} missing from \
+                 {disclosed:?}"
+            );
+        }
+        assert!(
+            disclosed.starts_with("harmless") && disclosed.contains("second line"),
+            "the peer's readable text must survive: {disclosed:?}"
+        );
+    }
+
+    /// Escaping grows the text, so the bound is charged on what reaches the
+    /// sink — not on the bytes the peer sent.
+    #[test]
+    fn escaping_does_not_widen_the_bound() {
+        let disclosed = bounded_peer_text(&"\u{1b}".repeat(1 << 16));
+
+        assert!(
+            disclosed.len() <= MAX_DISCLOSED_PEER_TEXT_BYTES + 64,
+            "escaped control characters must be charged to MAX_DISCLOSED_PEER_TEXT_BYTES \
+             ({MAX_DISCLOSED_PEER_TEXT_BYTES}); got {} bytes",
+            disclosed.len()
+        );
+        assert!(
+            disclosed.contains("bytes cut"),
+            "what was cut must be named: {}",
+            &disclosed[..disclosed.len().min(120)]
+        );
     }
 }
