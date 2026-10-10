@@ -43,6 +43,23 @@ const DAY_PAGE: &str = "\
 :END:
 ";
 
+const DAY_PAGE_TEXT_AFTER_SOURCE: &str = "\
+#+TITLE: DayPage
+#+ID: area-daypage
+* Q1W  q9
+:PROPERTIES:
+:ID: bulk-0-0
+:END:
+#+BEGIN_SRC sh
+echo hi
+#+END_SRC
+text after the source block
+* Day keeps this
+:PROPERTIES:
+:ID: day-keeps
+:END:
+";
+
 const DAY_PAGE_RELEASED: &str = "\
 #+TITLE: DayPage
 #+ID: area-daypage
@@ -181,9 +198,13 @@ async fn set_task_state(env: &TestEnvironment, state: &str) {
 /// DayPage.org owns the block, Overview.org holds a copy; the copy is set
 /// TODO in the file and the block DONE in Holon.
 async fn edited_apart(rt: Arc<tokio::runtime::Runtime>) -> TestEnvironment {
+    edited_apart_owning(rt, DAY_PAGE).await
+}
+
+async fn edited_apart_owning(rt: Arc<tokio::runtime::Runtime>, day_page: &str) -> TestEnvironment {
     let env = TestEnvironment::new(rt).expect("TestEnvironment::new");
     env.set_enable_loro(false);
-    env.write_org_file("DayPage.org", DAY_PAGE)
+    env.write_org_file("DayPage.org", day_page)
         .await
         .expect("write DayPage.org");
     env.start_app(true).await.expect("start_app");
@@ -312,6 +333,38 @@ fn moving_the_block_into_the_copys_page_saves_the_file() {
         );
         eventually_on_disk(&env, "Overview.org", "DONE Q1W").await;
         assert_one_copy_holding(&env, "TODO Q1W", "FileEditOverruled").await;
+        env.stop_app().await.expect("stop_app");
+    });
+}
+
+/// The dropped Holon block holds a value the org form cannot write (text
+/// that stood after a source block): the rescue is degraded, so the
+/// overruled-edit condition names the loss.
+#[test]
+fn a_lossy_conflict_copy_is_disclosed() {
+    let rt = runtime();
+    rt.clone().block_on(async move {
+        let mut env = edited_apart_owning(rt, DAY_PAGE_TEXT_AFTER_SOURCE).await;
+        holon_filesystem::FileSystem::remove(
+            env.org_fs.as_ref(),
+            &env.org_root().join("DayPage.org"),
+        )
+        .await
+        .expect("delete DayPage.org");
+        settle(&env).await;
+        assert_eq!(
+            rows(&env, COPIED, "parent_id").await,
+            vec!["block:overview".to_string()],
+            "premise: Overview.org adopts the block"
+        );
+        assert_eq!(conflict_copies(&env).await.len(), 1, "premise: one copy");
+        let named = conditions(&env);
+        assert!(
+            named.iter().any(
+                |c| c.contains("HolonEditOverruled") && c.contains("leaves out a stored value")
+            ),
+            "the lossy conflict copy must name the loss in the overruled-edit condition: {named:?}"
+        );
         env.stop_app().await.expect("stop_app");
     });
 }

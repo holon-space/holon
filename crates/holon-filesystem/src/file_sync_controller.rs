@@ -4630,7 +4630,7 @@ impl FileSyncController {
                 OnConflict::Refuse => unreachable!("a refused adoption returns its conflicts"),
             };
             side[0].parent_id = document_uri.clone();
-            let text = self
+            let Rendered { text, losses } = self
                 .adapter(path)?
                 .render_blocks(&side, path, document_uri)
                 .with_context(|| {
@@ -4638,12 +4638,14 @@ impl FileSyncController {
                         "render the version of {root} that {} overrules",
                         path.display()
                     )
-                })?
-                .text;
-            Some(Overruled {
-                conflicts: plan.conflicts,
-                text,
-            })
+                })?;
+            let mut conflicts = plan.conflicts;
+            conflicts.extend(
+                losses
+                    .iter()
+                    .map(|loss| format!("the saved copy leaves out a stored value: {loss}")),
+            );
+            Some(Overruled { conflicts, text })
         };
         Ok(Ok(AdoptionPlan {
             tree,
