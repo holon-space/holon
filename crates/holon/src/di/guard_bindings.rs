@@ -179,6 +179,71 @@ mod tests {
         ));
     }
 
+    /// A guard bound where the consumer does not look is MISSING, not bound.
+    ///
+    /// A module registered through `imports()` gets its own child injector, and
+    /// a `Provider::singleton` there lands in that child's table — invisible to
+    /// the dispatcher, which resolves from the root scope. The claim therefore
+    /// has to fail. This pins `try_provide`: were it to answer from the local
+    /// scope (or walk scopes), this guard would read as bound and the gate
+    /// would run open with nothing in the root scope to enforce it.
+    #[test]
+    #[should_panic(expected = "nothing binds the net gate")]
+    fn a_guard_bound_only_in_a_child_scope_is_still_missing() {
+        let root = Injector::root();
+        root.provide::<RootOwnsGuardComposition>(Provider::root(|_| {
+            fluxdi::Shared::new(RootOwnsGuardComposition)
+        }));
+        root.provide::<dyn holon_core::BoundaryEnforcer>(Provider::root(|_| {
+            Arc::new(holon_core::InertBoundaryEnforcer) as Arc<dyn holon_core::BoundaryEnforcer>
+        }));
+        let child = Injector::child(fluxdi::Shared::new(root));
+        child.provide::<dyn crate::api::net_guard::NetGuard>(Provider::singleton(|_| {
+            Arc::new(crate::api::net_guard::InertNetGuard)
+                as Arc<dyn crate::api::net_guard::NetGuard>
+        }));
+        complete_guard_composition(&child);
+    }
+
+    /// The same for a NAME: a named binding answers `resolve_named`, never the
+    /// unnamed resolve the dispatcher does, so it does not satisfy the claim.
+    /// This pins `try_provide` against treating a named binding as the unnamed
+    /// one.
+    #[test]
+    #[should_panic(expected = "nothing binds the net gate")]
+    fn a_guard_bound_only_under_a_name_is_still_missing() {
+        let injector = Injector::root();
+        injector.provide::<RootOwnsGuardComposition>(Provider::root(|_| {
+            fluxdi::Shared::new(RootOwnsGuardComposition)
+        }));
+        injector.provide::<dyn holon_core::BoundaryEnforcer>(Provider::root(|_| {
+            Arc::new(holon_core::InertBoundaryEnforcer) as Arc<dyn holon_core::BoundaryEnforcer>
+        }));
+        injector.provide_named::<dyn crate::api::net_guard::NetGuard>(
+            "the net gate under a name",
+            Provider::root(|_| {
+                Arc::new(crate::api::net_guard::InertNetGuard)
+                    as Arc<dyn crate::api::net_guard::NetGuard>
+            }),
+        );
+        complete_guard_composition(&injector);
+    }
+
+    /// The converse, so the two tests above cannot pass by calling EVERY guard
+    /// missing: the one shape a consumer resolves — unnamed, root scope — reads
+    /// as present.
+    #[test]
+    fn a_root_scope_unnamed_binding_reads_as_present() {
+        let injector = Injector::root();
+        injector.provide::<dyn crate::api::net_guard::NetGuard>(Provider::root(|_| {
+            Arc::new(crate::api::net_guard::InertNetGuard)
+                as Arc<dyn crate::api::net_guard::NetGuard>
+        }));
+        assert!(already_bound::<dyn crate::api::net_guard::NetGuard>(
+            &injector
+        ));
+    }
+
     /// A real binding is never replaced by the no-op.
     #[tokio::test]
     async fn an_existing_binding_wins_over_the_no_op() {

@@ -1,0 +1,110 @@
+Red log — #165 SEC-bound.a: guard presence is answered from the root scope, unnamed
+Date: 2026-10-11
+Issue: https://github.com/holon-space/holon-work/issues/165
+Tests: crates/holon/src/di/guard_bindings.rs
+         tests::a_guard_bound_only_in_a_child_scope_is_still_missing
+         tests::a_guard_bound_only_under_a_name_is_still_missing
+         tests::a_root_scope_unnamed_binding_reads_as_present (converse, stays green)
+Command: cargo nextest run -p holon --features holon/test-helpers --no-fail-fast \
+           -E "test(guard)"
+Tree: .claude/worktrees/guard-fail-loud, series fea424be..2385fbe5, pin on top
+Build profile: test (unoptimized + debuginfo)
+
+What the pin is for: `already_bound` asks whether a guard is bound by ATTEMPTING
+the registration (`Injector::try_provide` with a root-scope provider). That
+closes the wrong-scope gap ONLY because fluxdi's `try_provide` consults the same
+root-scope unnamed table the consumer's resolve reads. If fluxdi ever answered
+from the local scope, walked scopes, or took a named binding for the unnamed
+one, a guard the dispatcher can never see would read as bound and the gate would
+run open — silently, with no test failing.
+
+What was simulated: `already_bound` (crates/holon/src/di/guard_bindings.rs) got a
+presence check that walks scopes AND ignores names, ahead of the real probe —
+`injector.dependency_graph()` collects every ancestor's local providers and lists
+named bindings under the same `type_name`:
+
+    if injector
+        .dependency_graph()
+        .nodes
+        .iter()
+        .any(|node| node.type_name == std::any::type_name::<T>())
+    {
+        return true;
+    }
+
+Nothing else changed. The simulation was reverted after this run.
+
+Red for the right reason: in both tests the container binds the net gate ONLY
+where the consumer cannot see it (a child injector at module scope; the root
+scope under a name), and guard composition is expected to stop the boot naming
+the net gate. Under the simulation it accepts that binding and walks PAST the net
+gate — the panic that arrives names the NEXT guard the test container leaves out,
+`WriteTierAuthority`. So the failure is exactly the reopened gap: a guard the
+dispatcher would never resolve counted as bound.
+
+The converse test `a_root_scope_unnamed_binding_reads_as_present` stays green, so
+the two reds cannot be a presence check that simply calls every guard missing.
+Of the 33 tests the filter selects, exactly these 2 fail.
+
+ Nextest run ID 85b1b1bb-8b84-4b2a-a2e3-39393eea2bcd with nextest profile: default
+    Starting 33 tests across 73 binaries (702 tests skipped)
+        FAIL [   0.017s] ( 1/33) holon di::guard_bindings::tests::a_guard_bound_only_in_a_child_scope_is_still_missing
+  stdout ───
+
+    running 1 test
+    test di::guard_bindings::tests::a_guard_bound_only_in_a_child_scope_is_still_missing - should panic ... FAILED
+
+    failures:
+
+    ---- di::guard_bindings::tests::a_guard_bound_only_in_a_child_scope_is_still_missing stdout ----
+    note: panic did not contain expected string
+          panic message: "guard composition: nothing binds the write-tier gate (dyn holon_core::write_tier_gate::WriteTierAuthority) in this container. A composition root that owns its guard composition binds every guard — the real one, or the explicit no-op. Leaving it out would run the gate open."
+     expected substring: "nothing binds the net gate"
+
+    failures:
+        di::guard_bindings::tests::a_guard_bound_only_in_a_child_scope_is_still_missing
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 303 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'di::guard_bindings::tests::a_guard_bound_only_in_a_child_scope_is_still_missing' panicked at crates/holon/src/di/guard_bindings.rs:105:5:
+    guard composition: nothing binds the write-tier gate (dyn holon_core::write_tier_gate::WriteTierAuthority) in this container. A composition root that owns its guard composition binds every guard — the real one, or the explicit no-op. Leaving it out would run the gate open.
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.022s] (15/33) holon di::guard_bindings::tests::a_guard_bound_only_under_a_name_is_still_missing
+  stdout ───
+
+    running 1 test
+    test di::guard_bindings::tests::a_guard_bound_only_under_a_name_is_still_missing - should panic ... FAILED
+
+    failures:
+
+    ---- di::guard_bindings::tests::a_guard_bound_only_under_a_name_is_still_missing stdout ----
+    note: panic did not contain expected string
+          panic message: "guard composition: nothing binds the write-tier gate (dyn holon_core::write_tier_gate::WriteTierAuthority) in this container. A composition root that owns its guard composition binds every guard — the real one, or the explicit no-op. Leaving it out would run the gate open."
+     expected substring: "nothing binds the net gate"
+
+    failures:
+        di::guard_bindings::tests::a_guard_bound_only_under_a_name_is_still_missing
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 303 filtered out; finished in 0.01s
+
+  stderr ───
+
+    thread 'di::guard_bindings::tests::a_guard_bound_only_under_a_name_is_still_missing' panicked at crates/holon/src/di/guard_bindings.rs:105:5:
+    guard composition: nothing binds the write-tier gate (dyn holon_core::write_tier_gate::WriteTierAuthority) in this container. A composition root that owns its guard composition binds every guard — the real one, or the explicit no-op. Leaving it out would run the gate open.
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        PASS [   0.035s] holon di::guard_bindings::tests::a_root_scope_unnamed_binding_reads_as_present
+        PASS [   0.035s] holon di::guard_bindings::tests::a_root_that_owns_guard_composition_must_bind_every_guard
+        PASS [   0.035s] holon di::guard_bindings::tests::a_plain_container_gets_the_explicit_no_op_guards
+        PASS [   0.023s] holon di::guard_bindings::tests::an_existing_binding_wins_over_the_no_op
+        PASS [   0.828s] holon::guard_resolve_fails_loud a_failing_net_guard_factory_stops_the_boot
+        PASS [   1.208s] holon::guard_resolve_fails_loud a_container_that_names_no_guard_gets_the_explicit_no_ops
+        (25 further selected tests PASS — full run in target/lane-logs/guard-presence-pin-RED-nofailfast.txt)
+────────────
+     Summary [   3.689s] 33 tests run: 31 passed, 2 failed, 702 skipped
+        FAIL [   0.017s] ( 1/33) holon di::guard_bindings::tests::a_guard_bound_only_in_a_child_scope_is_still_missing
+        FAIL [   0.022s] (15/33) holon di::guard_bindings::tests::a_guard_bound_only_under_a_name_is_still_missing
+error: test run failed
