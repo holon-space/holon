@@ -15,7 +15,7 @@ use holon_api::render_eval::choose_branch;
 use holon_api::render_eval::column_ref_name;
 use holon_api::render_eval::core_value_fn;
 use holon_api::render_eval::eval_to_interp;
-use holon_api::render_eval::resolve_args_for_widget;
+use holon_api::render_eval::resolve_widget_args;
 use holon_api::render_types::OperationWiring;
 use holon_api::render_types::RenderExpr;
 use holon_api::widget_spec::DataRow;
@@ -132,6 +132,7 @@ where
 struct ValueFnBinding<'a, W: 'static> {
     fns: &'a HashMap<String, Arc<dyn ValueFn>>,
     builders: &'a HashMap<String, Box<dyn Builder<W>>>,
+    widget_metas: &'a HashMap<String, &'static holon_api::WidgetMeta>,
     services: &'a dyn BuilderServices,
     ctx: &'a RenderContext,
 }
@@ -141,7 +142,7 @@ impl<'a, W> ValueFnLookup for ValueFnBinding<'a, W> {
         if self.fns.contains_key(name) {
             Some(CallKind::ValueFn)
         } else if self.builders.contains_key(name) {
-            Some(CallKind::Widget)
+            Some(CallKind::Widget(self.widget_metas.get(name).copied()))
         } else {
             core_value_fn(name).map(|_| CallKind::ValueFn)
         }
@@ -229,6 +230,7 @@ impl<W> RenderInterpreter<W> {
 
     pub fn register(&mut self, name: impl Into<String>, builder: impl Builder<W> + 'static) {
         let n = name.into();
+        assert_not_core_value_fn(&n, "widget builder");
         if self.value_fns.contains_key(&n) {
             panic!(
                 "cannot register widget builder '{n}': a value function is already registered \
@@ -243,6 +245,7 @@ impl<W> RenderInterpreter<W> {
     /// Panics on name collision with an existing widget builder.
     pub fn register_value_fn(&mut self, name: impl Into<String>, f: impl ValueFn + 'static) {
         let n = name.into();
+        assert_not_core_value_fn(&n, "value function");
         if self.builders.contains_key(&n) {
             panic!(
                 "cannot register value function '{n}': a widget builder is already registered \
@@ -290,6 +293,7 @@ impl<W> RenderInterpreter<W> {
         ValueFnBinding {
             fns: &self.value_fns,
             builders: &self.builders,
+            widget_metas: &self.widget_metas,
             services,
             ctx,
         }
@@ -323,11 +327,8 @@ impl<W> RenderInterpreter<W> {
 
         match expr {
             RenderExpr::FunctionCall { name, args } => {
-                // Bind the value-fn registry so `resolve_args_for_widget` can
-                // dispatch `FunctionCall` arg expressions (e.g.
-                // `collection: focus_chain()`) through it.
                 let binding = self.value_fn_binding(services, ctx);
-                let resolved = match resolve_args_for_widget(
+                let resolved = match resolve_widget_args(
                     args,
                     &EvalEnv::of_row(ctx.row()),
                     &binding,
@@ -459,6 +460,13 @@ impl<W> RenderInterpreter<W> {
     }
 }
 
+fn assert_not_core_value_fn(name: &str, kind: &str) {
+    assert!(
+        core_value_fn(name).is_none(),
+        "cannot register {kind} '{name}': it is a core value function"
+    );
+}
+
 /// The widget a panic while interpreting `expr` is reported against.
 fn widget_of(expr: &RenderExpr) -> &str {
     match expr {
@@ -540,9 +548,16 @@ pub fn resolve_props(
 
     // Extract args from FunctionCall; other expr variants have no args.
     let args = match expr {
-        RenderExpr::FunctionCall { args, .. } => services
-            .resolve_args(args, &ctx)
-            .map_err(|e| NotAPropsUpdate::because(format!("{widget_name}: {e}")))?,
+        RenderExpr::FunctionCall { args, .. } => {
+            let fns = services.value_fn_lookup(&ctx);
+            let Some(CallKind::Widget(meta)) = fns.call_kind(widget_name) else {
+                return Err(NotAPropsUpdate::because(format!(
+                    "`{widget_name}` is no widget of this interpreter"
+                )));
+            };
+            resolve_widget_args(args, &EvalEnv::of_row(ctx.row()), &*fns, meta)
+                .map_err(|e| NotAPropsUpdate::because(format!("{widget_name}: {e}")))?
+        }
         _ => ResolvedArgs::from_positional_exprs(vec![]),
     };
 

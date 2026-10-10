@@ -65,4 +65,18 @@ impl WidgetMeta {
             .find(|p| p.name == name)
             .map(|p| p.type_hint == "Expr" || p.type_hint == "Collection")
     }
+
+    /// How many leading positional args bind to scalar params; every later
+    /// one is a child slot. The binding is `positional_slots` /
+    /// `scalar_extraction` in holon-macros' `widget_builder`: a `Collection`
+    /// param makes every positional arg a child, a `Bool` binds by name only.
+    pub fn value_slots(&self) -> usize {
+        if self.params.iter().any(|p| p.type_hint == "Collection") {
+            return 0;
+        }
+        self.params
+            .iter()
+            .filter(|p| matches!(p.type_hint, "String" | "Number" | "Value"))
+            .count()
+    }
 }

@@ -83,7 +83,7 @@ fn validate_dotted_names(expr: &RenderExpr) -> Result<()> {
 pub fn parse_predicate(source: &str) -> Result<crate::predicate::Predicate> {
     let expr = parse_render_dsl(source)
         .with_context(|| format!("filter predicate is not valid DSL: {source:?}"))?;
-    let val = crate::eval_plain_value(&expr, &HashMap::<String, crate::Value>::new())
+    let val = crate::render_eval::eval_plain_value(&expr, &HashMap::<String, crate::Value>::new())
         .with_context(|| format!("filter predicate does not evaluate: {source:?}"))?;
     let json = serde_json::to_value(&val)
         .with_context(|| format!("filter predicate Value → JSON failed: {source:?}"))?;
@@ -1014,9 +1014,11 @@ mod tests {
             .iter()
             .find(|a| a.name.as_deref() == Some("rules"))
             .expect("rules: arg present");
-        let rules_value =
-            crate::eval_plain_value(&rules_arg.value, &HashMap::<String, crate::Value>::new())
-                .unwrap();
+        let rules_value = crate::render_eval::eval_plain_value(
+            &rules_arg.value,
+            &HashMap::<String, crate::Value>::new(),
+        )
+        .unwrap();
         let crate::Value::Array(items) = rules_value else {
             panic!("rules: must evaluate to Array");
         };

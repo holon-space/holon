@@ -356,7 +356,6 @@ pub use render_eval::ResolvedArgs;
 /// flutter_rust_bridge:ignore
 pub use render_eval::eval_binary_op;
 /// flutter_rust_bridge:ignore
-pub use render_eval::eval_plain_value;
 /// flutter_rust_bridge:ignore
 pub use render_eval::is_template_arg;
 /// flutter_rust_bridge:ignore

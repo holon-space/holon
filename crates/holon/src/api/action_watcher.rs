@@ -32,7 +32,6 @@ use holon_api::effect_id::OutputSlot;
 use holon_api::effect_id::RuleId;
 use holon_api::effect_id::deterministic_block_id;
 use holon_api::lifecycle::SessionShutdown;
-use holon_api::render_eval::eval_plain_value;
 use holon_api::streaming::Change;
 use holon_core::storage::types::StorageEntity;
 use tokio::task::JoinHandle;
@@ -295,35 +294,24 @@ async fn fire_action(
     rule: &RuleId,
     data: &StorageEntity,
 ) {
-    // Action params are all named, plain values (never render templates or
-    // row-producing collections), so evaluate each directly. Routing through the
-    // render-oriented `resolve_args_with` would divert any param whose name
-    // collides with a render-template key (`parent_id`, `sortkey`, `action`, …
-    // see `is_template_arg`) into an unevaluated `templates` bucket the op never
-    // sees — which silently dropped `block.create`'s `parent_id` and broke
-    // journal auto-create ("parent_id is required for block creation").
-    let mut params = StorageEntity::new();
-    for arg in &parsed_action.params {
-        let Some(name) = arg.name.as_ref() else {
-            continue;
-        };
-        match eval_plain_value(&arg.value, data) {
-            Ok(v) => {
-                params.insert(name.clone().into(), v);
-            }
-            Err(e) => {
-                status.set(
-                    rule.as_str(),
-                    RuleStatus::ExecError(format!("param {name}: {e}")),
-                );
-                tracing::error!(
-                    "[action_watcher] action {} refused: param {name}: {e}",
-                    rule.as_str()
-                );
-                return;
-            }
+    // Action params are all plain values, evaluated one by one: the
+    // render-oriented `resolve_args_with` would divert a param named like a
+    // render template (`parent_id`, `action`, … see `is_template_arg`) into
+    // `templates`, which the op never sees.
+    let mut params = match parsed_action.eval_params(data) {
+        Ok(params) => params,
+        Err((name, e)) => {
+            status.set(
+                rule.as_str(),
+                RuleStatus::ExecError(format!("param {name}: {e}")),
+            );
+            tracing::error!(
+                "[action_watcher] action {} refused: param {name}: {e}",
+                rule.as_str()
+            );
+            return;
         }
-    }
+    };
 
     // Deterministic effect id (ADR 0024 P4): a rule-fired create mints a
     // name-based UUIDv5 of (rule-id, firing-key, slot) so every replica firing

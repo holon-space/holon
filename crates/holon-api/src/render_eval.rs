@@ -130,6 +130,7 @@ pub fn sorted_rows(rows: &[Arc<DataRow>], sort_key: Option<&str>) -> Vec<Arc<Dat
 pub fn resolve_states<K: RowKey>(
     args: &ResolvedArgs,
     row: &HashMap<K, Value>,
+    fns: &dyn ValueFnLookup,
 ) -> Result<Vec<String>, ComputeError> {
     let builtin = || {
         vec![
@@ -147,7 +148,19 @@ pub fn resolve_states<K: RowKey>(
         expected: "a list of state keywords",
         value,
     };
-    match eval_plain_value(states_expr, row)? {
+    let states = match eval_to_interp(states_expr, &EvalEnv::of_row(row), fns)
+        .map_err(|e| e.placed_in(|| "arg `states`".to_string()))?
+    {
+        InterpValue::Value(v) => v,
+        InterpValue::Rows(_) => {
+            return Err(ComputeError::WrongType {
+                context: "states".to_string(),
+                expected: "a list of state keywords, not a row set",
+                value: Value::Null,
+            });
+        }
+    };
+    match states {
         Value::Null => Ok(builtin()),
         Value::Array(items) if items.is_empty() => Ok(builtin()),
         Value::Array(items) => items
@@ -711,12 +724,13 @@ pub trait ValueFnLookup {
 }
 
 /// What a called name in the render DSL refers to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy)]
 pub enum CallKind {
     ValueFn,
     /// Its arguments are evaluated where the widget is built, not where the
-    /// call is passed as an argument.
-    Widget,
+    /// call is passed as an argument. The meta is `None` for a widget that
+    /// declares no params.
+    Widget(Option<&'static crate::WidgetMeta>),
 }
 
 /// The value functions every evaluation can call, a render's or not.
@@ -781,7 +795,8 @@ impl<'a, K: RowKey> EvalEnv<'a, K> {
     }
 }
 
-/// Resolve arguments with value-function dispatch.
+/// Resolve the arguments of a call that is no widget — a value function's,
+/// an operation's: every arg needs a value.
 ///
 /// Scalar-valued results are placed in `positional` / `named`; row-set
 /// results end up in `rows` under their named-arg key. Positional
@@ -793,17 +808,29 @@ pub fn resolve_args_with<K: RowKey>(
     env: &EvalEnv<'_, K>,
     fns: &dyn ValueFnLookup,
 ) -> Result<ResolvedArgs, ComputeError> {
-    resolve_args_for_widget(args, env, fns, None)
+    resolve_args(args, env, fns, None, usize::MAX)
 }
 
-/// `resolve_args_with` for a call site that knows which widget it is
-/// resolving args for: the widget's declared params decide templateness,
-/// so a migrated widget needs no entry in `is_template_arg`.
-pub fn resolve_args_for_widget<K: RowKey>(
+/// Resolve the arguments of a call to `widget`. Its declared params decide
+/// templateness, so a migrated widget needs no entry in `is_template_arg`;
+/// a positional arg past its scalar params is a child slot, where a widget
+/// call stays `Null` for the builder to interpret from `positional_exprs`.
+pub fn resolve_widget_args<K: RowKey>(
     args: &[Arg],
     env: &EvalEnv<'_, K>,
     fns: &dyn ValueFnLookup,
     widget: Option<&'static crate::WidgetMeta>,
+) -> Result<ResolvedArgs, ComputeError> {
+    let value_slots = widget.map_or(0, crate::WidgetMeta::value_slots);
+    resolve_args(args, env, fns, widget, value_slots)
+}
+
+fn resolve_args<K: RowKey>(
+    args: &[Arg],
+    env: &EvalEnv<'_, K>,
+    fns: &dyn ValueFnLookup,
+    widget: Option<&'static crate::WidgetMeta>,
+    value_slots: usize,
 ) -> Result<ResolvedArgs, ComputeError> {
     let mut positional = Vec::new();
     let mut positional_exprs = Vec::new();
@@ -816,7 +843,9 @@ pub fn resolve_args_for_widget<K: RowKey>(
             Some(name) if is_template_arg_for(widget, name) => {
                 templates.insert(name.clone(), arg.value.clone());
             }
-            Some(name) => match eval_to_interp(&arg.value, env, fns)? {
+            Some(name) => match eval_at(&arg.value, env, fns, Slot::Value)
+                .map_err(|e| e.placed_in(|| format!("arg `{name}`")))?
+            {
                 InterpValue::Value(v) => {
                     named.insert(name.clone(), v);
                 }
@@ -825,8 +854,16 @@ pub fn resolve_args_for_widget<K: RowKey>(
                 }
             },
             None => {
+                let index = positional_exprs.len();
+                let slot = if index < value_slots {
+                    Slot::Value
+                } else {
+                    Slot::Child
+                };
                 positional_exprs.push(arg.value.clone());
-                match eval_to_interp(&arg.value, env, fns)? {
+                match eval_at(&arg.value, env, fns, slot)
+                    .map_err(|e| e.placed_in(|| format!("positional arg {index}")))?
+                {
                     InterpValue::Value(v) => positional.push(v),
                     InterpValue::Rows(_) => panic!(
                         "value-function returned Rows in positional position; use a named arg \
@@ -886,10 +923,9 @@ pub fn is_template_arg(name: &str) -> bool {
 }
 
 /// Evaluate a value outside any render — a rule action's param, a filter
-/// predicate, a `states:` list: only the core value functions can be called.
-/// A render's arguments are evaluated with the lookup its `BuilderServices`
-/// hands out instead.
-pub fn eval_plain_value<K: RowKey>(
+/// predicate: only the core value functions can be called. Crate-private, so
+/// a render evaluates through the lookup its `BuilderServices` hands out.
+pub(crate) fn eval_plain_value<K: RowKey>(
     expr: &RenderExpr,
     row: &HashMap<K, Value>,
 ) -> Result<Value, ComputeError> {
@@ -899,15 +935,31 @@ pub fn eval_plain_value<K: RowKey>(
     }
 }
 
-/// Evaluate a `RenderExpr` into an `InterpValue`.
+/// Evaluate a `RenderExpr` that needs a value into an `InterpValue`.
 ///
-/// Drives argument evaluation for `resolve_args_with`. Dispatches
-/// `FunctionCall`s through the provided registry; a widget call stays `Null`
-/// here, and a call to a name `fns` does not know is an error.
+/// Dispatches `FunctionCall`s through `fns`; a call to a widget or to a name
+/// `fns` does not know is an error.
 pub fn eval_to_interp<K: RowKey>(
     expr: &RenderExpr,
     env: &EvalEnv<'_, K>,
     fns: &dyn ValueFnLookup,
+) -> Result<InterpValue, ComputeError> {
+    eval_at(expr, env, fns, Slot::Value)
+}
+
+/// Where an expression is evaluated. A widget call in a child slot is the
+/// child, which the builder interprets itself; anywhere else it is refused.
+#[derive(Debug, Clone, Copy)]
+enum Slot {
+    Child,
+    Value,
+}
+
+fn eval_at<K: RowKey>(
+    expr: &RenderExpr,
+    env: &EvalEnv<'_, K>,
+    fns: &dyn ValueFnLookup,
+    slot: Slot,
 ) -> Result<InterpValue, ComputeError> {
     use InterpValue::*;
     Ok(match expr {
@@ -946,10 +998,19 @@ pub fn eval_to_interp<K: RowKey>(
             otherwise,
         } => {
             let condition = eval_operand(condition, env, fns)?;
-            return eval_to_interp(choose_branch(&condition, then, otherwise)?, env, fns);
+            return eval_at(choose_branch(&condition, then, otherwise)?, env, fns, slot);
         }
         RenderExpr::FunctionCall { name, args } => match fns.call_kind(name) {
-            Some(CallKind::Widget) => Value(crate::Value::Null),
+            Some(CallKind::Widget(_)) => match slot {
+                Slot::Child => Value(crate::Value::Null),
+                Slot::Value => {
+                    return Err(ComputeError::WidgetInValuePosition {
+                        widget: name.clone(),
+                        call: expr.to_rhai(),
+                        place: None,
+                    });
+                }
+            },
             Some(CallKind::ValueFn) => {
                 let resolved = resolve_args_with(args, env, fns)?;
                 fns.invoke(name, &resolved).unwrap_or_else(|| {
@@ -961,13 +1022,13 @@ pub fn eval_to_interp<K: RowKey>(
         RenderExpr::Array { items } => Value(crate::Value::Array(
             items
                 .iter()
-                .map(|i| eval_operand(i, env, fns))
+                .map(|i| eval_scalar(i, env, fns, slot))
                 .collect::<Result<_, _>>()?,
         )),
         RenderExpr::Object { fields } => Value(crate::Value::Object(
             fields
                 .iter()
-                .map(|(k, v)| Ok((k.clone(), eval_operand(v, env, fns)?)))
+                .map(|(k, v)| Ok((k.clone(), eval_scalar(v, env, fns, slot)?)))
                 .collect::<Result<_, ComputeError>>()?,
         )),
         RenderExpr::LiveBlock { block_id } => {
@@ -1028,7 +1089,16 @@ fn eval_operand<K: RowKey>(
     env: &EvalEnv<'_, K>,
     fns: &dyn ValueFnLookup,
 ) -> Result<Value, ComputeError> {
-    match eval_to_interp(expr, env, fns)? {
+    eval_scalar(expr, env, fns, Slot::Value)
+}
+
+fn eval_scalar<K: RowKey>(
+    expr: &RenderExpr,
+    env: &EvalEnv<'_, K>,
+    fns: &dyn ValueFnLookup,
+    slot: Slot,
+) -> Result<Value, ComputeError> {
+    match eval_at(expr, env, fns, slot)? {
         InterpValue::Value(v) => Ok(v),
         InterpValue::Rows(_) => Err(ComputeError::WrongType {
             context: format!("the operand `{}`", expr.to_rhai()),
@@ -1983,11 +2053,11 @@ mod mutation_gap_tests {
             },
         );
         assert_eq!(
-            resolve_states(&args, &row).unwrap(),
+            resolve_states(&args, &row, &PlainValueFns).unwrap(),
             vec!["A".to_string(), "B".to_string()]
         );
 
-        let default = resolve_states(&empty_args(), &row).unwrap();
+        let default = resolve_states(&empty_args(), &row, &PlainValueFns).unwrap();
         assert_eq!(
             default,
             vec![
@@ -2015,7 +2085,7 @@ mod mutation_gap_tests {
             },
         );
         assert_eq!(
-            resolve_states(&args, &row).unwrap(),
+            resolve_states(&args, &row, &PlainValueFns).unwrap(),
             vec![
                 String::new(),
                 "TODO".to_string(),
@@ -2042,7 +2112,7 @@ mod mutation_gap_tests {
             },
         );
         assert_eq!(
-            resolve_states(&args, &row).unwrap(),
+            resolve_states(&args, &row, &PlainValueFns).unwrap(),
             vec![
                 String::new(),
                 "TODO".to_string(),

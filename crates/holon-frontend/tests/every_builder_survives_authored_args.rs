@@ -1042,8 +1042,20 @@ impl TypedParamCase {
                 .find(|a| a.name.as_deref() == Some(self.param.name)),
         };
         arg.map_or(Value::Null, |arg| {
-            holon_api::render_eval::eval_plain_value(&arg.value, &typed_param_row())
-                .unwrap_or_else(|e| panic!("`{}` evaluates: {e}", self.source()))
+            let services = StubBuilderServices::new();
+            let row = typed_param_row();
+            let ctx = RenderContext::default().with_row(Arc::new(row.clone()));
+            let fns = services.value_fn_lookup(&ctx);
+            let value = holon_api::render_eval::eval_to_interp(
+                &arg.value,
+                &holon_api::render_eval::EvalEnv::of_row(&row),
+                &*fns,
+            );
+            match value {
+                Ok(holon_api::InterpValue::Value(v)) => v,
+                Ok(holon_api::InterpValue::Rows(_)) => panic!("`{}` is a row set", self.source()),
+                Err(e) => panic!("`{}` evaluates: {e}", self.source()),
+            }
         })
     }
 }

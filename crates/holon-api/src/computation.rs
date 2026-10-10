@@ -457,6 +457,32 @@ pub enum ComputeError {
         name: String,
         call: String,
     },
+    /// A call to `widget` where a value is needed: a widget is only a
+    /// widget's child or a template arg. `place` names the arg, once known.
+    WidgetInValuePosition {
+        widget: String,
+        call: String,
+        place: Option<String>,
+    },
+}
+
+impl ComputeError {
+    /// `self`, placed in `place` when it is a widget call no enclosing arg
+    /// has named yet.
+    pub fn placed_in(self, place: impl FnOnce() -> String) -> Self {
+        match self {
+            ComputeError::WidgetInValuePosition {
+                widget,
+                call,
+                place: None,
+            } => ComputeError::WidgetInValuePosition {
+                widget,
+                call,
+                place: Some(place()),
+            },
+            other => other,
+        }
+    }
 }
 
 impl fmt::Display for ComputeError {
@@ -490,6 +516,16 @@ impl fmt::Display for ComputeError {
                 "`{name}` cannot be called in `{call}`: outside a render, only the value \
                  functions {} can be called",
                 crate::render_eval::CORE_VALUE_FN_NAMES.join(", ")
+            ),
+            ComputeError::WidgetInValuePosition {
+                widget,
+                call,
+                place,
+            } => write!(
+                f,
+                "widget `{widget}` cannot stand in {}, which needs a value: a widget is only \
+                 a widget's child or a template arg (in `{call}`)",
+                place.as_deref().unwrap_or("an operand or condition")
             ),
         }
     }

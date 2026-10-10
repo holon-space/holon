@@ -23,6 +23,28 @@ pub struct ParsedAction {
     pub params: Vec<Arg>,
 }
 
+impl ParsedAction {
+    /// Every param evaluated against the row that fires, outside any render:
+    /// only the core value functions can be called. `Err` names the param.
+    pub fn eval_params(
+        &self,
+        row: &crate::StorageEntity,
+    ) -> std::result::Result<crate::StorageEntity, (String, crate::computation::ComputeError)> {
+        self.params
+            .iter()
+            .map(|arg| {
+                let name = arg
+                    .name
+                    .as_ref()
+                    .expect("parse_action_dsl names every param");
+                crate::render_eval::eval_plain_value(&arg.value, row)
+                    .map(|v| (name.as_str().into(), v))
+                    .map_err(|e| (name.clone(), e))
+            })
+            .collect()
+    }
+}
+
 const ENTITIES: &[&str] = &["block"];
 
 const OPERATIONS: &[&str] = &[

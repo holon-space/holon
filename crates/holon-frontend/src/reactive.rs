@@ -99,7 +99,9 @@ pub trait BuilderServices: Send + Sync {
         ctx: &'a RenderContext,
     ) -> Box<dyn holon_api::render_eval::ValueFnLookup + 'a>;
 
-    /// `args` evaluated against `ctx`'s row through [`Self::value_fn_lookup`].
+    /// The `args` of a call that is no widget (an operation's params),
+    /// evaluated against `ctx`'s row through [`Self::value_fn_lookup`]: every
+    /// arg needs a value.
     fn resolve_args(
         &self,
         args: &[holon_api::render_types::Arg],

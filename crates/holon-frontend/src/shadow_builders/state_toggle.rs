@@ -58,7 +58,11 @@ holon_macros::widget_builder! {
             Err(e) => return ViewModel::error("state_toggle", e),
         };
 
-        let states = match resolve_states(ba.args, ba.ctx.row()) {
+        let states = match resolve_states(
+            ba.args,
+            ba.ctx.row(),
+            &*ba.services.value_fn_lookup(ba.ctx),
+        ) {
             Ok(states) => states.join(","),
             Err(e) => return ViewModel::error("state_toggle", e.to_string()),
         };

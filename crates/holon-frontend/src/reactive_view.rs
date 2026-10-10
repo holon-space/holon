@@ -2235,9 +2235,9 @@ impl ReactiveView {
                     for index in 0..items.len() {
                         let item = items[index].clone();
                         let row = item.data.get_cloned();
-                        match interpret_fn(&new_tmpl, &row) {
-                            Ok(props) if !item.is_error() => item.props.set(props),
-                            _ => items.set_cloned(
+                        match props_under_template(&interpret_fn, &new_tmpl, &row, &item) {
+                            Some(props) => item.props.set(props),
+                            None => items.set_cloned(
                                 index,
                                 interpret(
                                     &new_tmpl,
@@ -2634,6 +2634,29 @@ fn walk_children(node: &ReactiveViewModel, f: &dyn Fn(&ReactiveViewModel)) {
     if let Some(ref slot) = node.slot {
         let guard = slot.content.lock_ref();
         f(&guard);
+    }
+}
+
+/// `item`'s props under `template`, or `None` when `item` must be
+/// re-interpreted whole.
+fn props_under_template(
+    interpret_fn: &InterpretFn,
+    template: &RenderExpr,
+    row: &Arc<holon_api::widget_spec::DataRow>,
+    item: &ReactiveViewModel,
+) -> Option<HashMap<String, holon_api::Value>> {
+    match interpret_fn(template, row) {
+        Ok(props) if !item.is_error() => Some(props),
+        Ok(_) => None,
+        Err(not_props) => {
+            tracing::warn!(
+                // ALLOW(raw_row_id_column): label — names the row in the log line
+                row = ?row.get("id"),
+                reason = %not_props.reason,
+                "template change re-interprets the row whole"
+            );
+            None
+        }
     }
 }
 
@@ -4347,5 +4370,57 @@ mod tests {
         );
 
         view.stop();
+    }
+
+    #[test]
+    fn a_template_change_that_is_no_props_update_discloses_why() {
+        use tracing_subscriber::layer::Context;
+        use tracing_subscriber::layer::Layer;
+        use tracing_subscriber::prelude::*;
+
+        #[derive(Clone, Default)]
+        struct Warnings(Arc<Mutex<Vec<String>>>);
+
+        impl<S: tracing::Subscriber> Layer<S> for Warnings {
+            fn on_event(&self, event: &tracing::Event<'_>, _: Context<'_, S>) {
+                struct Fields(String);
+                impl tracing::field::Visit for Fields {
+                    fn record_debug(
+                        &mut self,
+                        field: &tracing::field::Field,
+                        value: &dyn std::fmt::Debug,
+                    ) {
+                        self.0.push_str(&format!(" {}={value:?}", field.name()));
+                    }
+                }
+                if *event.metadata().level() <= tracing::Level::WARN {
+                    let mut fields = Fields(String::new());
+                    event.record(&mut fields);
+                    self.0.lock().unwrap().push(fields.0);
+                }
+            }
+        }
+
+        let interpret_fn: InterpretFn = Arc::new(|_, _| {
+            Err(crate::reactive_view_model::NotAPropsUpdate::because(
+                "text: `row` stands where a value is needed",
+            ))
+        });
+        let template = holon_api::render_dsl::parse_render_dsl(r#"text(row(text("a")))"#).unwrap();
+        let row = Arc::new(make_row("block:b1", "x"));
+        let item = ReactiveViewModel::from_widget("text", HashMap::new());
+        let warnings = Warnings::default();
+        let props = tracing::subscriber::with_default(
+            tracing_subscriber::registry().with(warnings.clone()),
+            || props_under_template(&interpret_fn, &template, &row, &item),
+        );
+        assert!(props.is_none(), "an error is no props update");
+        let warnings = warnings.0.lock().unwrap();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("`row` stands where a value is needed")),
+            "the reason the item is re-interpreted whole must be logged, got {warnings:?}"
+        );
     }
 }

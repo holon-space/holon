@@ -343,7 +343,9 @@ pub fn parse_action_expr(
             let mut params = HashMap::new();
             for arg in action_args {
                 if let Some(ref param_name) = arg.name {
-                    let value = match eval_to_interp(&arg.value, &env, &*fns)? {
+                    let value = match eval_to_interp(&arg.value, &env, &*fns)
+                        .map_err(|e| e.placed_in(|| format!("arg `{param_name}`")))?
+                    {
                         InterpValue::Value(value) => value,
                         InterpValue::Rows(_) => {
                             return Err(holon_api::computation::ComputeError::WrongType {

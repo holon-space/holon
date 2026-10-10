@@ -2,34 +2,46 @@
 //! known as a widget on every path that evaluates render-DSL arguments — never
 //! refused as "neither a value function nor a widget".
 
-use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 
 use holon_api::RenderExpr;
+use holon_api::StorageEntity;
 use holon_api::Value;
+use holon_api::action_dsl::parse_action_dsl;
 use holon_api::computation::ComputeError;
 use holon_api::render_dsl::parse_render_dsl;
+use holon_api::render_eval::CallKind;
+use holon_api::render_eval::EvalEnv;
 use holon_api::render_eval::ResolvedArgs;
+use holon_api::render_eval::resolve_widget_args;
 use holon_api::render_types::Arg;
 use holon_api::widget_spec::DataRow;
 use holon_frontend::RenderContext;
 use holon_frontend::StubBuilderServices;
 use holon_frontend::reactive::BuilderServices;
+use holon_frontend::render_interpreter::BuilderArgs;
+use holon_frontend::render_interpreter::RenderInterpreter;
 use holon_frontend::render_interpreter::resolve_props;
 use holon_frontend::view_model::ViewKind;
 use holon_frontend::view_model::ViewModel;
 
 mod shipped_sources;
 
-/// The argument resolution `selectable`, `input_box`, `question_options` and
-/// `resolve_props` share.
+/// `call`'s arguments, resolved as the interpreter and `resolve_props`
+/// resolve a widget's, and as an operation's params are resolved otherwise.
 fn resolve_shared(
-    args: &[Arg],
+    call: &RenderExpr,
     ctx: &RenderContext,
     services: &StubBuilderServices,
 ) -> Result<ResolvedArgs, ComputeError> {
-    services.resolve_args(args, ctx)
+    let fns = services.value_fn_lookup(ctx);
+    match fns.call_kind(call_name(call)) {
+        Some(CallKind::Widget(meta)) => {
+            resolve_widget_args(call_args(call), &EvalEnv::of_row(ctx.row()), &*fns, meta)
+        }
+        _ => services.resolve_args(call_args(call), ctx),
+    }
 }
 
 fn operation_params(
@@ -41,8 +53,12 @@ fn operation_params(
 }
 
 /// The evaluation a value outside any render gets (rule action params).
-fn plain_value(expr: &RenderExpr) -> Result<Value, ComputeError> {
-    holon_api::render_eval::eval_plain_value(expr, &HashMap::<String, Value>::new())
+fn plain_value(source: &str) -> Result<Value, ComputeError> {
+    parse_action_dsl(&format!("block.create(#{{ content: {source} }})"))
+        .unwrap()
+        .eval_params(&StorageEntity::new())
+        .map(|mut params| params.remove("content").unwrap())
+        .map_err(|(_, e)| e)
 }
 
 fn calls(expr: &RenderExpr) -> Vec<&RenderExpr> {
@@ -105,12 +121,31 @@ fn refused_widget<'a>(err: &'a ComputeError, widgets: &HashSet<String>) -> Optio
     match err {
         ComputeError::UnknownFunction { name, .. }
         | ComputeError::NotAPlainValueFunction { name, .. }
+        | ComputeError::WidgetInValuePosition { widget: name, .. }
             if widgets.contains(name) =>
         {
             Some(name)
         }
         _ => None,
     }
+}
+
+/// `message` refuses a call to `widget` where `arg` needs a value.
+fn refuses_widget_as_value(message: &str, widget: &str, arg: &str) -> bool {
+    message.contains(&format!("widget `{widget}` cannot stand in arg `{arg}`"))
+}
+
+/// Every operation param in `vm` bound to `Null`.
+fn null_bindings(vm: &ViewModel) -> Vec<String> {
+    let own = vm.operations.iter().flat_map(|op| {
+        op.descriptor
+            .bound_params
+            .iter()
+            .filter(|(_, v)| v.is_null())
+            .map(|(k, _)| format!("{}.{k}", op.descriptor.name))
+    });
+    own.chain(vm.children().into_iter().flat_map(null_bindings))
+        .collect()
 }
 
 fn error_messages(vm: &ViewModel, out: &mut Vec<String>) {
@@ -142,8 +177,8 @@ fn literal(value: &str) -> RenderExpr {
     }
 }
 
-/// Every shipped call's own arguments, resolved the way a widget resolves its
-/// action template's arguments.
+/// Every shipped call's own arguments, resolved as its kind of call resolves
+/// them.
 #[test]
 fn shipped_call_arguments_resolve_through_the_shared_resolver() {
     let Shipped {
@@ -155,7 +190,7 @@ fn shipped_call_arguments_resolve_through_the_shared_resolver() {
     let refused: Vec<String> = calls
         .iter()
         .filter_map(|(label, c)| {
-            let err = resolve_shared(call_args(c), &ctx, &services).err()?;
+            let err = resolve_shared(c, &ctx, &services).err()?;
             let widget = refused_widget(&err, &widgets)?;
             Some(format!(
                 "{label}: {}(..) refused widget `{widget}`: {err}",
@@ -166,39 +201,42 @@ fn shipped_call_arguments_resolve_through_the_shared_resolver() {
     assert!(refused.is_empty(), "{}", refused.join("\n"));
 }
 
-/// Every shipped widget call as an operation parameter.
+/// Every shipped widget call as an operation parameter: a widget has no value
+/// to bind, so the parameter is refused, naming the widget and the param.
 #[test]
-fn shipped_widget_calls_as_operation_params_are_known() {
+fn shipped_widget_calls_as_operation_params_are_refused() {
     let Shipped {
         services,
         widgets,
         calls,
     } = shipped();
     let ctx = row_ctx();
-    let refused: Vec<String> = calls
+    let accepted: Vec<String> = calls
         .iter()
         .filter(|(_, c)| widgets.contains(call_name(c)))
         .filter_map(|(label, c)| {
             let action = call("block.noop", vec![arg("p", c.clone())]);
-            let err = operation_params(&action, &ctx, &services).err()?;
-            let widget = refused_widget(&err, &widgets)?;
-            Some(format!("{label}: refused widget `{widget}`: {err}"))
+            match operation_params(&action, &ctx, &services) {
+                Err(e) if refuses_widget_as_value(&e.to_string(), call_name(c), "p") => None,
+                other => Some(format!("{label}: {}: {other:?}", c.to_rhai())),
+            }
         })
         .collect();
-    assert!(refused.is_empty(), "{}", refused.join("\n"));
+    assert!(accepted.is_empty(), "{}", accepted.join("\n"));
 }
 
 /// Every shipped widget call inside the `action:` template of each widget
-/// that wires an operation from one.
+/// that wires an operation from one: the host draws the refusal, and wires no
+/// operation with a missing param.
 #[test]
-fn shipped_widget_calls_in_action_templates_build_without_refusing_the_widget() {
+fn shipped_widget_calls_in_action_templates_are_refused_by_every_host() {
     let Shipped {
         services,
         widgets,
         calls,
     } = shipped();
     let ctx = row_ctx();
-    let mut refused = Vec::new();
+    let mut accepted = Vec::new();
     for (label, c) in calls.iter().filter(|(_, c)| widgets.contains(call_name(c))) {
         let action = call("block.noop", vec![arg("p", c.clone())]);
         let hosts = [
@@ -228,17 +266,159 @@ fn shipped_widget_calls_in_action_templates_build_without_refusing_the_widget() 
             ),
         ];
         for host in &hosts {
+            let vm = services.interpret(host, &ctx).snapshot();
             let mut errors = Vec::new();
-            error_messages(&services.interpret(host, &ctx).snapshot(), &mut errors);
-            refused.extend(
-                errors
-                    .into_iter()
-                    .filter(|m| m.contains("unknown function") || m.contains("cannot be called in"))
-                    .map(|m| format!("{label}: {}: {m}", call_name(host))),
-            );
+            error_messages(&vm, &mut errors);
+            if !errors
+                .iter()
+                .any(|m| refuses_widget_as_value(m, call_name(c), "p"))
+            {
+                accepted.push(format!(
+                    "{label}: {}: no refusal in {errors:?}",
+                    call_name(host)
+                ));
+            }
+            let nulls = null_bindings(&vm);
+            if !nulls.is_empty() {
+                accepted.push(format!(
+                    "{label}: {}: binds Null {nulls:?}",
+                    call_name(host)
+                ));
+            }
         }
     }
-    assert!(refused.is_empty(), "{}", refused.join("\n"));
+    assert!(accepted.is_empty(), "{}", accepted.join("\n"));
+}
+
+/// The two hosts an Enter or a click dispatches from, with a widget call where
+/// the operation needs a value.
+#[test]
+fn a_widget_call_as_an_operation_param_is_refused_not_bound_to_null() {
+    let services = StubBuilderServices::new();
+    let ctx = row_ctx();
+    for (source, param) in [
+        (
+            r#"selectable(text("x"), #{action: navigation_focus(#{region: "main", block_id: row(text("b"))})})"#,
+            "block_id",
+        ),
+        (
+            r#"input_box(#{action: set_content(#{text: row(text("b"))})})"#,
+            "text",
+        ),
+    ] {
+        let vm = services
+            .interpret(&parse_render_dsl(source).unwrap(), &ctx)
+            .snapshot();
+        let mut errors = Vec::new();
+        error_messages(&vm, &mut errors);
+        assert!(
+            errors
+                .iter()
+                .any(|m| refuses_widget_as_value(m, "row", param)),
+            "{source}: the `{param}` param must be refused naming `row`, got errors {errors:?}"
+        );
+        assert_eq!(null_bindings(&vm), Vec::<String>::new(), "{source}");
+    }
+}
+
+/// A widget call where a widget's own scalar arg needs a value.
+#[test]
+fn a_widget_call_in_a_value_slot_of_a_widget_is_refused() {
+    let services = StubBuilderServices::new();
+    let ctx = row_ctx();
+    let vm = services
+        .interpret(&parse_render_dsl(r#"text(row(text("a")))"#).unwrap(), &ctx)
+        .snapshot();
+    let mut errors = Vec::new();
+    error_messages(&vm, &mut errors);
+    assert!(
+        errors
+            .iter()
+            .any(|m| m.contains("widget `row` cannot stand in positional arg 0")),
+        "text's content needs a value, got errors {errors:?}"
+    );
+}
+
+/// Children and the branches of a child `if` stay widgets.
+#[test]
+fn widget_calls_as_children_build() {
+    let services = StubBuilderServices::new();
+    let ctx = row_ctx();
+    for source in [
+        r#"row(text("a"), text("b"))"#,
+        r#"row(if true { text("a") } else { text("b") })"#,
+        r#"column([text("a"), text("b")])"#,
+    ] {
+        let vm = services
+            .interpret(&parse_render_dsl(source).unwrap(), &ctx)
+            .snapshot();
+        let mut errors = Vec::new();
+        error_messages(&vm, &mut errors);
+        assert_eq!(errors, Vec::<String>::new(), "{source}");
+    }
+}
+
+/// `states:` is evaluated with the render's value functions.
+#[test]
+fn a_value_function_in_states_is_called() {
+    let services = StubBuilderServices::new();
+    let ctx = row_ctx();
+    let vm = services
+        .interpret(
+            &parse_render_dsl(
+                r#"state_toggle(col("task_state"), #{states: state_accent("TODO")})"#,
+            )
+            .unwrap(),
+            &ctx,
+        )
+        .snapshot();
+    let mut errors = Vec::new();
+    error_messages(&vm, &mut errors);
+    assert!(
+        errors.len() == 1 && errors[0].contains(r#"found String("muted")"#),
+        "`state_accent` must be called and its theme token refused as no list of states, \
+         got errors {errors:?}"
+    );
+}
+
+#[test]
+fn a_widget_call_in_states_is_refused_naming_it() {
+    let services = StubBuilderServices::new();
+    let ctx = row_ctx();
+    let vm = services
+        .interpret(
+            &parse_render_dsl(r#"state_toggle(col("task_state"), #{states: row(text("a"))})"#)
+                .unwrap(),
+            &ctx,
+        )
+        .snapshot();
+    let mut errors = Vec::new();
+    error_messages(&vm, &mut errors);
+    assert!(
+        errors
+            .iter()
+            .any(|m| refuses_widget_as_value(m, "row", "states")),
+        "got errors {errors:?}"
+    );
+}
+
+#[test]
+#[should_panic(expected = "concat")]
+fn a_widget_cannot_take_a_core_value_function_name() {
+    let mut interpreter = RenderInterpreter::<ViewModel>::new();
+    interpreter.register("concat", |_: BuilderArgs<'_, ViewModel>| ViewModel::empty());
+}
+
+#[test]
+#[should_panic(expected = "concat")]
+fn a_value_function_cannot_take_a_core_value_function_name() {
+    let mut interpreter = RenderInterpreter::<ViewModel>::new();
+    interpreter.register_value_fn(
+        "concat",
+        |_: &ResolvedArgs, _: &dyn BuilderServices, _: &RenderContext| {
+            Ok(holon_api::InterpValue::Value(Value::Null))
+        },
+    );
 }
 
 /// The props fast path accepts what the full interpret builds.
@@ -286,8 +466,7 @@ fn a_props_fast_path_refusal_names_its_cause() {
 /// claiming the name is no widget.
 #[test]
 fn a_widget_call_in_a_plain_value_is_refused_for_what_it_is() {
-    let expr = parse_render_dsl(r#"row(text("a"))"#).unwrap();
-    let message = plain_value(&expr)
+    let message = plain_value(r#"row(text("a"))"#)
         .expect_err("a widget has no value outside a render")
         .to_string();
     assert!(message.contains("`row`"), "{message}");
@@ -315,7 +494,7 @@ fn shipped_left_sidebar_resolves_modifier_click_action_templates() {
                     .any(|a| a.name.as_deref() == Some("cmd_action"))
         })
         .expect("the left sidebar's modifier-click selectable in assets/default/index.org");
-    let resolved = resolve_shared(call_args(sidebar), &row_ctx(), &services).unwrap();
+    let resolved = resolve_shared(sidebar, &row_ctx(), &services).unwrap();
 
     // `action` is allowlisted, so its presence proves the fixture reached
     // `selectable` — a failure below is then about the modifier-click names.
