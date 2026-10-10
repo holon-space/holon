@@ -208,6 +208,32 @@ mod tests {
         assert_eq!(boot_err.stage, BootStage::EngineResolve);
     }
 
+    /// The boot report carries the open's cause and fix, not only the
+    /// outermost "failed to open" context.
+    #[cfg(unix)]
+    #[test]
+    fn a_refused_turso_open_reports_its_fix() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("holon.db");
+        drop(holon::storage::turso::TursoBackend::open_database(&path).expect("create"));
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+
+        let flux_err = CoreInfraModule {
+            db_path: path.clone(),
+            conditions: std::sync::Arc::new(holon_api::ConditionBus::new()),
+        }
+        .configure(&Injector::root())
+        .expect_err("a read-only database file must fail the open");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let report = BootError::from_bootstrap_error(flux_err).structured_report();
+        assert!(
+            report.contains("give this user write access to the file and its directory"),
+            "the boot report must name the fix, got:\n{report}"
+        );
+    }
+
     /// A second named storage module (Loro) classifies to its own component.
     #[test]
     fn loro_module_failure_attributes_loro_engine_resolve() {

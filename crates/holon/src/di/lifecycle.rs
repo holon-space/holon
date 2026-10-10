@@ -164,7 +164,11 @@ impl Module for CoreInfraModule {
             self.conditions.clone(),
         )
         .map_err(|e| {
-            fluxdi::Error::module_lifecycle_failed("CoreInfraModule", "configure", &e.to_string())
+            fluxdi::Error::module_lifecycle_failed(
+                "CoreInfraModule",
+                "configure",
+                &format!("{e:#}"),
+            )
         })
     }
 }

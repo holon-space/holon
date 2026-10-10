@@ -1,0 +1,105 @@
+# Red log: holon-work #155 fix round (truncated DB, damaged WAL, boot hint)
+# Base: 843dc400 (first classification), tests added on top
+# Commands: cargo nextest run -p holon-turso --test db_open_keeps_a_usable_file; cargo nextest run -p holon-app --lib -E 'test(boot_error)'
+# Date: 2026-10-10
+
+────────────
+ Nextest run ID e57f5687-b3f7-47a5-b460-3f4a3fe6a76e with nextest profile: default
+        PASS [   0.026s] (1/7) holon-turso::db_open_keeps_a_usable_file a_database_in_a_missing_directory_is_an_io_error
+        PASS [   0.046s] (2/7) holon-turso::db_open_keeps_a_usable_file a_file_that_is_not_a_database_is_moved_aside
+        PASS [   0.046s] (3/7) holon-turso::db_open_keeps_a_usable_file a_read_only_database_file_is_not_moved_aside
+        FAIL [   0.048s] (4/7) holon-turso::db_open_keeps_a_usable_file a_damaged_write_ahead_log_is_moved_aside_with_its_database
+  stdout ───
+
+    running 1 test
+    test a_damaged_write_ahead_log_is_moved_aside_with_its_database ... FAILED
+
+    failures:
+
+    failures:
+        a_damaged_write_ahead_log_is_moved_aside_with_its_database
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.02s
+
+  stderr ───
+
+    thread 'a_damaged_write_ahead_log_is_moved_aside_with_its_database' (354119804) panicked at crates/holon-turso/tests/db_open_keeps_a_usable_file.rs:189:51:
+    damaged WAL: the open must recover: DatabaseError("connect: Corrupt database: invalid page size in WAL: 2002873447")
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        PASS [   0.050s] (5/7) holon-turso::db_open_keeps_a_usable_file a_database_in_a_read_only_directory_opens_where_it_is
+        FAIL [   0.050s] (6/7) holon-turso::db_open_keeps_a_usable_file a_truncated_database_is_moved_aside
+  stdout ───
+
+    running 1 test
+    test a_truncated_database_is_moved_aside ... FAILED
+
+    failures:
+
+    failures:
+        a_truncated_database_is_moved_aside
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.03s
+
+  stderr ───
+
+    thread 'a_truncated_database_is_moved_aside' (354119795) panicked at crates/holon-turso/tests/db_open_keeps_a_usable_file.rs:189:51:
+    truncated to 200 bytes: the open must recover: DatabaseUnopenable { path: "/var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/.tmpUHDVzF/holon.db", failure: Unclassified, cause: "I/O error: short read on page 1: expected 512 bytes, got 200" }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        PASS [   0.056s] (7/7) holon-turso::db_open_keeps_a_usable_file a_second_process_does_not_move_a_live_database_aside
+────────────
+     Summary [   0.057s] 7 tests run: 5 passed, 2 failed, 0 skipped
+        FAIL [   0.048s] (4/7) holon-turso::db_open_keeps_a_usable_file a_damaged_write_ahead_log_is_moved_aside_with_its_database
+        FAIL [   0.050s] (6/7) holon-turso::db_open_keeps_a_usable_file a_truncated_database_is_moved_aside
+error: test run failed
+
+#### holon-app
+    --> crates/holon-app/src/mcp_integrations.rs:1277:13
+     |
+1277 |         let mut current = bus.subscribe().current;
+     |             ----^^^^^^^
+     |             |
+     |             help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+    --> crates/holon-app/src/mcp_integrations.rs:1219:13
+     |
+1219 |         let mut current = bus.subscribe().current;
+     |             ----^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+────────────
+ Nextest run ID f20f2c27-513d-4b8a-8710-42b56ea4a8c9 with nextest profile: default
+        PASS [   0.023s] (1/5) holon-app boot_error::tests::unattributed_failure_falls_back_to_session_resolve
+        PASS [   0.028s] (2/5) holon-app boot_error::tests::loro_module_failure_attributes_loro_engine_resolve
+        PASS [   0.029s] (3/5) holon-app consolidator_epoch::tests::mismatched_boot_errors_naming_invariant
+        PASS [   0.033s] (4/5) holon-app boot_error::tests::failing_turso_open_attributes_turso_engine_resolve
+        FAIL [   0.051s] (5/5) holon-app boot_error::tests::a_refused_turso_open_reports_its_fix
+  stdout ───
+
+    running 1 test
+    test boot_error::tests::a_refused_turso_open_reports_its_fix ... FAILED
+
+    failures:
+
+    failures:
+        boot_error::tests::a_refused_turso_open_reports_its_fix
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 44 filtered out; finished in 0.03s
+
+  stderr ───
+
+    thread 'boot_error::tests::a_refused_turso_open_reports_its_fix' (354124480) panicked at crates/holon-app/src/boot_error.rs:231:9:
+    the boot report must name the fix, got:
+    boot failed: component=turso stage=engine-resolve
+      cause: Module lifecycle failed: module=CoreInfraModule, phase=configure, details=Failed to open Turso database at /var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/.tmpXu95m1/holon.db
+
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [   0.053s] 5 tests run: 4 passed, 1 failed, 40 skipped
+        FAIL [   0.051s] (5/5) holon-app boot_error::tests::a_refused_turso_open_reports_its_fix
+error: test run failed

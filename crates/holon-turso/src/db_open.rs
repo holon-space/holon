@@ -65,7 +65,13 @@ pub(crate) fn open(db_path: &Path, fns: &[ScalarFn]) -> Result<(Arc<Database>, O
         let db = open_with_io(Arc::new(MemoryIO::new()), path, OpenFlags::default(), fns)?;
         return Ok((db, OpenOutcome::Kept));
     }
-    let db = match open_file(path, fns) {
+    // The engine reads the write-ahead log at the first connect, so a damaged
+    // log surfaces there.
+    let opened = open_file(path, fns).and_then(|db| {
+        db.connect().map_err(|e| unopenable(path, e))?;
+        Ok(db)
+    });
+    let db = match opened {
         Ok(db) => db,
         Err(StorageError::DatabaseUnopenable {
             failure: DatabaseOpenFailure::Corrupt,
@@ -332,12 +338,18 @@ fn unopenable(path: &str, e: LimboError) -> StorageError {
 
 fn open_failure(e: &LimboError) -> DatabaseOpenFailure {
     match e {
-        LimboError::Corrupt(_) | LimboError::NotADB => DatabaseOpenFailure::Corrupt,
-        // The engine's only signal for a held lock is this text, at
-        // `core/io/unix.rs` of the fork; other lock failures stay unclassified.
-        LimboError::LockingError(message) if message.ends_with("locked by another process") => {
-            DatabaseOpenFailure::Locked
+        // Holon writes only UTF-8 files, so another encoding is a damaged header.
+        LimboError::Corrupt(_) | LimboError::NotADB | LimboError::UnsupportedEncoding(_) => {
+            DatabaseOpenFailure::Corrupt
         }
+        LimboError::CompletionError(
+            CompletionError::ShortRead { .. }
+            | CompletionError::ShortReadWalFrame { .. }
+            | CompletionError::WalFramePageMismatch { .. }
+            | CompletionError::ChecksumMismatch { .. },
+        ) => DatabaseOpenFailure::Corrupt,
+        // The engine raises it only where it takes a file or WAL lock.
+        LimboError::LockingError(_) => DatabaseOpenFailure::Locked,
         LimboError::CompletionError(CompletionError::IOError(kind, _)) => {
             DatabaseOpenFailure::Io(*kind)
         }
@@ -790,6 +802,66 @@ mod tests {
             "the committed drop must survive a reopen"
         );
         assert_eq!(count(&db, "SELECT count(*) FROM t"), 3);
+    }
+
+    #[test]
+    fn engine_open_errors_map_to_their_class() {
+        use std::io::ErrorKind;
+        let short_read = CompletionError::ShortRead {
+            page_idx: 1,
+            expected: 4096,
+            actual: 200,
+        };
+        for (error, class) in [
+            (LimboError::NotADB, DatabaseOpenFailure::Corrupt),
+            (
+                LimboError::Corrupt("invalid page size in WAL".into()),
+                DatabaseOpenFailure::Corrupt,
+            ),
+            (
+                LimboError::CompletionError(short_read),
+                DatabaseOpenFailure::Corrupt,
+            ),
+            (
+                LimboError::LockingError(
+                    "Failed opening database 'x'. Database is already open without \
+                     experimental multiprocess WAL in another process"
+                        .into(),
+                ),
+                DatabaseOpenFailure::Locked,
+            ),
+            (
+                LimboError::LockingError("Failed locking file 'x', permission denied".into()),
+                DatabaseOpenFailure::Locked,
+            ),
+            (
+                LimboError::DatabaseFull,
+                DatabaseOpenFailure::Io(ErrorKind::StorageFull),
+            ),
+            (
+                LimboError::CompletionError(CompletionError::IOError(
+                    ErrorKind::PermissionDenied,
+                    "open",
+                )),
+                DatabaseOpenFailure::Io(ErrorKind::PermissionDenied),
+            ),
+            (
+                LimboError::InternalError("x".into()),
+                DatabaseOpenFailure::Unclassified,
+            ),
+        ] {
+            assert_eq!(open_failure(&error), class, "{error}");
+        }
+    }
+
+    #[test]
+    fn an_unclassified_open_error_names_its_cause() {
+        let message =
+            unopenable("/db", LimboError::InternalError("page 7 vanished".into())).to_string();
+        assert!(
+            message.contains("does not classify") && message.contains("page 7 vanished"),
+            "{message}"
+        );
     }
 
     /// Bytes the engine cannot open as a database are kept under a new name,

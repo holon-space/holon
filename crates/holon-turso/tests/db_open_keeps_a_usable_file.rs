@@ -181,3 +181,65 @@ fn a_database_in_a_missing_directory_is_an_io_error() {
         "the open must name a missing directory, got: {opened:?}"
     );
 }
+
+/// The open reports `MovedAside`, and the backup beside the database holds
+/// `files` byte for byte, keyed by suffix (`""`, `"-wal"`).
+fn assert_moved_aside(path: &Path, files: &[(&str, Vec<u8>)], case: &str) {
+    let opened = TursoBackend::open_database_reporting_outcome(path);
+    let (db, outcome) = opened.unwrap_or_else(|e| panic!("{case}: the open must recover: {e:?}"));
+    let holon_turso::db_open::OpenOutcome::MovedAside { backup, .. } = outcome else {
+        panic!("{case}: a damaged file must be moved aside, got {outcome:?}");
+    };
+    for (suffix, bytes) in files {
+        let moved = PathBuf::from(format!("{}{suffix}", backup.display()));
+        assert!(
+            std::fs::read(&moved).ok().as_ref() == Some(bytes),
+            "{case}: {} must hold the original bytes",
+            moved.display()
+        );
+    }
+    exec(&db, "CREATE TABLE fresh (id INTEGER PRIMARY KEY)");
+}
+
+#[test]
+fn a_file_that_is_not_a_database_is_moved_aside() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("holon.db");
+    let garbage = b"not a database".repeat(400);
+    std::fs::write(&path, &garbage).unwrap();
+    assert_moved_aside(&path, &[("", garbage)], "garbage");
+}
+
+#[test]
+fn a_truncated_database_is_moved_aside() {
+    for keep in [200, 1024] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("holon.db");
+        build(&path);
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(
+            bytes.len() > keep,
+            "the built file has {} bytes",
+            bytes.len()
+        );
+        std::fs::write(&path, &bytes[..keep]).unwrap();
+        assert_moved_aside(
+            &path,
+            &[("", bytes[..keep].to_vec())],
+            &format!("truncated to {keep} bytes"),
+        );
+    }
+}
+
+/// The write-ahead log holds committed pages of its database, so the two move
+/// aside as one pair.
+#[test]
+fn a_damaged_write_ahead_log_is_moved_aside_with_its_database() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("holon.db");
+    build(&path);
+    let db_bytes = std::fs::read(&path).unwrap();
+    let wal_bytes = b"garbage wal".repeat(50);
+    std::fs::write(dir.path().join("holon.db-wal"), &wal_bytes).unwrap();
+    assert_moved_aside(&path, &[("", db_bytes), ("-wal", wal_bytes)], "damaged WAL");
+}
