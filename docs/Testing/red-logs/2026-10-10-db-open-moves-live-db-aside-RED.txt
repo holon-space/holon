@@ -1,0 +1,79 @@
+# Red log: db_open moves a live database aside (holon-work #155, task 1)
+# Base: main 7f3a7f77, unmodified crates/holon-turso/src/db_open.rs
+# Command: CARGO_TARGET_DIR=<ws>/target cargo nextest run -p holon-turso --test db_open_keeps_a_usable_file --no-fail-fast
+# Date: 2026-10-10
+
+warning: Cargo.toml: unused manifest key: profile.coverage.package.*.pathfinder_simd
+warning: Cargo.toml: unused manifest key: profile.coverage.package.*.psm
+warning: workspace (manifest) generated 2 warnings
+────────────
+ Nextest run ID c41b1777-29d7-4fae-8b9e-0444cb1cbed6 with nextest profile: default
+        FAIL [   0.032s] (1/4) holon-turso::db_open_keeps_a_usable_file a_database_in_a_missing_directory_is_an_io_error
+  stdout ───
+
+    running 1 test
+    test a_database_in_a_missing_directory_is_an_io_error ... FAILED
+
+    failures:
+
+    failures:
+        a_database_in_a_missing_directory_is_an_io_error
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.01s
+
+  stderr ───
+
+    thread 'a_database_in_a_missing_directory_is_an_io_error' (353586253) panicked at crates/holon-turso/tests/db_open_keeps_a_usable_file.rs:168:5:
+    the open must name a missing file or directory, got: DatabaseError("open /var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/.tmpVjcvrl/gone/holon.db: I/O error (statfs shared WAL coordination path): entity not found")
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        PASS [   0.045s] (2/4) holon-turso::db_open_keeps_a_usable_file a_database_in_a_read_only_directory_opens_where_it_is
+        FAIL [   0.049s] (3/4) holon-turso::db_open_keeps_a_usable_file a_read_only_database_file_is_not_moved_aside
+  stdout ───
+
+    running 1 test
+    test a_read_only_database_file_is_not_moved_aside ... FAILED
+
+    failures:
+
+    failures:
+        a_read_only_database_file_is_not_moved_aside
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.03s
+
+  stderr ───
+
+    thread 'a_read_only_database_file_is_not_moved_aside' (353586251) panicked at crates/holon-turso/tests/db_open_keeps_a_usable_file.rs:110:5:
+    assertion `left == right` failed: a file without write permission must stay at its path, unchanged; open gave Ok(MovedAside { reason: "the engine cannot open it: Database error: open /var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/.tmpSr0IsC/holon.db: I/O error (open): permission denied", backup: "/var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/.tmpSr0IsC/holon.db.unusable-20261010T202013.954Z" })
+      left: (true, ["/var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/.tmpSr0IsC/holon.db.unusable-20261010T202013.954Z", "/var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/.tmpSr0IsC/holon.db.unusable-20261010T202013.954Z-wal"])
+     right: (true, [])
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.061s] (4/4) holon-turso::db_open_keeps_a_usable_file a_second_process_does_not_move_a_live_database_aside
+  stdout ───
+
+    running 1 test
+    process B: CHILD-OPENED MovedAside { reason: "the engine cannot open it: Database error: open /var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/.tmpRvf6dJ/holon.db: Locking error: Failed locking file '/var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/.tmpRvf6dJ/holon.db'. File is locked by another process", backup: "/var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/.tmpRvf6dJ/holon.db.unusable-20261010T202013.962Z" }
+    test a_second_process_does_not_move_a_live_database_aside ... FAILED
+
+    failures:
+
+    failures:
+        a_second_process_does_not_move_a_live_database_aside
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.04s
+
+  stderr ───
+
+    thread 'a_second_process_does_not_move_a_live_database_aside' (353586250) panicked at crates/holon-turso/tests/db_open_keeps_a_usable_file.rs:88:5:
+    assertion `left == right` failed: process A's live file must stay at its path, with no backup beside it; B: CHILD-OPENED MovedAside { reason: "the engine cannot open it: Database error: open /var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/.tmpRvf6dJ/holon.db: Locking error: Failed locking file '/var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/.tmpRvf6dJ/holon.db'. File is locked by another process", backup: "/var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/.tmpRvf6dJ/holon.db.unusable-20261010T202013.962Z" }
+      left: (1885816501, ["/var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/.tmpRvf6dJ/holon.db.unusable-20261010T202013.962Z-wal", "/var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/.tmpRvf6dJ/holon.db.unusable-20261010T202013.962Z"])
+     right: (1885816361, [])
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [   0.061s] 4 tests run: 1 passed, 3 failed, 0 skipped
+        FAIL [   0.032s] (1/4) holon-turso::db_open_keeps_a_usable_file a_database_in_a_missing_directory_is_an_io_error
+        FAIL [   0.049s] (3/4) holon-turso::db_open_keeps_a_usable_file a_read_only_database_file_is_not_moved_aside
+        FAIL [   0.061s] (4/4) holon-turso::db_open_keeps_a_usable_file a_second_process_does_not_move_a_live_database_aside
+error: test run failed

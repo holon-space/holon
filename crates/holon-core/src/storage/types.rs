@@ -53,6 +53,15 @@ pub enum StorageError {
     #[error("Database error: {0}")]
     DatabaseError(String),
 
+    /// The engine refused to open a database file. Only `Corrupt` lets the
+    /// open move the file aside; this error means the file is where it was.
+    #[error("cannot open the database {path}: {failure}. Engine error: {cause}")]
+    DatabaseUnopenable {
+        path: String,
+        failure: DatabaseOpenFailure,
+        cause: String,
+    },
+
     /// The database actor is gone, so no statement can reach the database any
     /// more. Only process teardown produces this, and it is its own variant
     /// because a caller running during teardown must tell it apart from a
@@ -75,3 +84,46 @@ pub enum StorageError {
 }
 
 pub type Result<T> = std::result::Result<T, StorageError>;
+
+/// Why the engine could not open a database file, as far as it lets us tell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DatabaseOpenFailure {
+    /// Another process holds the file's lock.
+    Locked,
+    /// The file system refused an operation on the file.
+    Io(std::io::ErrorKind),
+    /// The file is not a database, or its header or pages are damaged.
+    Corrupt,
+    /// An engine error none of the above names.
+    Unclassified,
+}
+
+impl std::fmt::Display for DatabaseOpenFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use std::io::ErrorKind;
+        match self {
+            Self::Locked => write!(
+                f,
+                "another process holds it open; quit the other Holon process that uses this \
+                 database, then start Holon again"
+            ),
+            Self::Io(ErrorKind::PermissionDenied | ErrorKind::ReadOnlyFilesystem) => write!(
+                f,
+                "no permission to write it; give this user write access to the file and its \
+                 directory"
+            ),
+            Self::Io(ErrorKind::StorageFull | ErrorKind::QuotaExceeded) => {
+                write!(f, "the disk is full; free disk space")
+            }
+            Self::Io(ErrorKind::NotFound) => {
+                write!(f, "its directory does not exist; create the directory")
+            }
+            Self::Io(kind) => write!(f, "the file system refused it ({kind})"),
+            Self::Corrupt => write!(f, "the file is damaged"),
+            Self::Unclassified => write!(
+                f,
+                "the engine gave an error Holon does not classify, so the file is left as it is"
+            ),
+        }
+    }
+}

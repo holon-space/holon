@@ -96,10 +96,10 @@ pub fn open_and_register_core(
             tracing::debug!("[DI] Opening database at {:?}...", db_path);
             let (db, outcome) =
                 TursoBackend::open_database_reporting_outcome(&db_path).map_err(|e| {
-                    anyhow::anyhow!(
-                        "Failed to open Turso database at {}: {e}",
+                    anyhow::Error::new(e).context(format!(
+                        "Failed to open Turso database at {}",
                         db_path.display()
-                    )
+                    ))
                 })?;
             tracing::debug!("[DI] Database opened successfully");
             injector.provide::<holon_turso::db_open::BootOpenOutcome>(fluxdi::Provider::root(

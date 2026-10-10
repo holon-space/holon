@@ -4,18 +4,22 @@
 //! what it computed: its materialized views, rebuilt from the tables they read,
 //! and the `block_derived` cache. That happens when the file was built with a
 //! different [`scalar_fns`] set, or when the engine could not load one of its
-//! views. A file the engine cannot open at all is moved aside, never deleted.
+//! views. A file the engine reports as damaged is moved aside, never deleted;
+//! any other open failure leaves the file where it is.
 
 use std::path::Path;
 use std::sync::Arc;
 
 use holon_core::replica_state::DurableReplicaState;
+use holon_core::storage::types::DatabaseOpenFailure;
 use holon_core::storage::types::Result;
 use holon_core::storage::types::StorageError;
+use turso_core::CompletionError;
 use turso_core::Connection;
 use turso_core::Database;
 use turso_core::DatabaseOpts;
 use turso_core::IO;
+use turso_core::LimboError;
 use turso_core::MemoryIO;
 use turso_core::OpenFlags;
 use turso_core::OpenOptions;
@@ -63,15 +67,20 @@ pub(crate) fn open(db_path: &Path, fns: &[ScalarFn]) -> Result<(Arc<Database>, O
     }
     let db = match open_file(path, fns) {
         Ok(db) => db,
-        Err(e) => {
+        Err(StorageError::DatabaseUnopenable {
+            failure: DatabaseOpenFailure::Corrupt,
+            cause,
+            ..
+        }) => {
             return set_aside(
                 None,
                 db_path,
                 path,
                 fns,
-                &format!("the engine cannot open it: {e}"),
+                &format!("the engine cannot open it: {cause}"),
             );
         }
+        Err(e) => return Err(e),
     };
     let Some(reason) = unusable_reason(&db, fns)? else {
         record_signature(&db, fns)?;
@@ -99,7 +108,7 @@ pub(crate) fn open(db_path: &Path, fns: &[ScalarFn]) -> Result<(Arc<Database>, O
 
 #[cfg(target_family = "unix")]
 fn open_file(path: &str, fns: &[ScalarFn]) -> Result<Arc<Database>> {
-    let io = turso_core::UnixIO::new().map_err(|e| StorageError::DatabaseError(e.to_string()))?;
+    let io = turso_core::UnixIO::new().map_err(|e| unopenable(path, e))?;
     open_with_io(Arc::new(io), path, OpenFlags::default(), fns)
 }
 
@@ -310,7 +319,35 @@ fn open_with_io(
         .flags(flags)
         .db_opts(opts);
     Database::open(io, path, scalar_fns::register_on_options(options, fns))
-        .map_err(|e| StorageError::DatabaseError(format!("open {path}: {e}")))
+        .map_err(|e| unopenable(path, e))
+}
+
+fn unopenable(path: &str, e: LimboError) -> StorageError {
+    StorageError::DatabaseUnopenable {
+        path: path.to_string(),
+        failure: open_failure(&e),
+        cause: e.to_string(),
+    }
+}
+
+fn open_failure(e: &LimboError) -> DatabaseOpenFailure {
+    match e {
+        LimboError::Corrupt(_) | LimboError::NotADB => DatabaseOpenFailure::Corrupt,
+        // The engine's only signal for a held lock is this text, at
+        // `core/io/unix.rs` of the fork; other lock failures stay unclassified.
+        LimboError::LockingError(message) if message.ends_with("locked by another process") => {
+            DatabaseOpenFailure::Locked
+        }
+        LimboError::CompletionError(CompletionError::IOError(kind, _)) => {
+            DatabaseOpenFailure::Io(*kind)
+        }
+        #[cfg(target_family = "unix")]
+        LimboError::CompletionError(CompletionError::RustixIOError(errno)) => {
+            DatabaseOpenFailure::Io(std::io::Error::from(*errno).kind())
+        }
+        LimboError::DatabaseFull => DatabaseOpenFailure::Io(std::io::ErrorKind::StorageFull),
+        _ => DatabaseOpenFailure::Unclassified,
+    }
 }
 
 fn unusable_reason(db: &Arc<Database>, fns: &[ScalarFn]) -> Result<Option<String>> {
