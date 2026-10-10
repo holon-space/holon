@@ -155,6 +155,11 @@ pub struct PbtMcpIntegration {
     server_peer: Peer<RoleServer>,
     sync_engine: Arc<McpSyncEngine>,
     probe_cache: Arc<dyn holon_core::EntityCache<DynamicEntity>>,
+    /// The serialized sync consumer, owned so [`Self::shut_down`] can see it
+    /// end rather than leaving it parked with the sync engine in it.
+    sync_event_task: tokio::task::JoinHandle<()>,
+    /// Ends the client service, which closes the inbound notice queue.
+    client_cancel: rmcp::service::RunningServiceCancellationToken,
 }
 
 impl PbtMcpIntegration {
@@ -200,6 +205,7 @@ impl PbtMcpIntegration {
                 tracing::warn!("[PbtMcpIntegration] Server task ended: {e}");
             }
         });
+        let client_cancel = client_running.cancellation_token();
         tokio::spawn(async move {
             if let Err(e) = client_running.waiting().await {
                 tracing::warn!("[PbtMcpIntegration] Client task ended: {e}");
@@ -306,7 +312,7 @@ impl PbtMcpIntegration {
         // queue is the only thing the loop reads.
         let engine_for_listener = sync_engine.clone();
         let (_sync_event_tx, sync_event_rx) = tokio::sync::mpsc::unbounded_channel();
-        holon_mcp_client::spawn_sync_event_loop(
+        let sync_event_task = holon_mcp_client::spawn_sync_event_loop(
             sync_event_rx,
             Some(update_rx),
             engine_for_listener,
@@ -320,7 +326,23 @@ impl PbtMcpIntegration {
             server_peer,
             sync_engine,
             probe_cache,
+            sync_event_task,
+            client_cancel,
         })
+    }
+
+    /// End the peer's inbound leg and wait for the sync loop to stop with it.
+    pub async fn shut_down(self) -> anyhow::Result<()> {
+        self.client_cancel.cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(10), self.sync_event_task)
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "the sync loop is still running with no source left to wake it, holding this \
+                     integration's sync engine"
+                )
+            })?
+            .map_err(|e| anyhow::anyhow!("the sync loop panicked: {e}"))
     }
 
     /// Add an item and announce it ONLY through the peer's
@@ -400,12 +422,11 @@ mod tests {
     /// this fake has no Holon-side sender at all.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_notice_sent_after_the_integration_was_built_is_synced() {
-        let (backend, db) = holon::storage::turso::TursoBackend::new_in_memory()
-            .await
-            .expect("an in-memory database");
         // The actor owns the connection for the whole test; dropping the
         // backend would close it out from under the sync engine.
-        std::mem::forget(backend);
+        let (_backend, db) = holon::storage::turso::TursoBackend::new_in_memory()
+            .await
+            .expect("an in-memory database");
 
         let mcp = PbtMcpIntegration::new(db)
             .await
@@ -418,7 +439,7 @@ mod tests {
         loop {
             let rows = mcp.mirrored_rows().await.expect("read the probe mirror");
             if rows == 1 {
-                return;
+                break;
             }
             assert!(
                 std::time::Instant::now() < deadline,
@@ -427,5 +448,9 @@ mod tests {
             );
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
+
+        mcp.shut_down()
+            .await
+            .expect("the sync loop ends with its connection");
     }
 }

@@ -185,6 +185,9 @@ impl BudgetedPeer {
                 )),
             });
         }
+        // While this is held, a reply body of this connection may not be
+        // larger than what MAX_LIST_BYTES leaves the pages below.
+        let _enumerating = self.budget.listed_bytes.enumeration();
         let mut all = Vec::new();
         let mut cursor = None;
         for fetched in 1..=MAX_LIST_PAGES {

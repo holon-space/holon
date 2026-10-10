@@ -9,6 +9,9 @@
 
 use std::collections::HashMap;
 use std::io::Write as _;
+use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 
 use holon_mcp_client::McpSidecar;
 use holon_mcp_client::mcp_provider::McpOperationProvider;
@@ -23,34 +26,62 @@ const BOUND: std::time::Duration = std::time::Duration::from_secs(20);
 /// Speaks Streamable HTTP over a raw socket rather than through `rmcp`'s server
 /// so that it can answer what no cooperative implementation would.
 fn endless_pagination_peer(tools_per_page: usize) -> String {
-    peer(tools_per_page, true, SMALL_TOOL)
+    peer(tools_per_page, true, SMALL_TOOL).0
 }
 
 /// A peer whose pages stay well inside the page and item bounds and carry a
 /// megabyte of description per tool.
 fn fat_pagination_peer() -> String {
-    peer(16, true, 1 << 20)
+    peer(16, true, 1 << 20).0
 }
 
 /// A peer that answers `initialize` and hands out its whole tool list in one
 /// page, so a connect against it succeeds.
 fn finite_peer() -> String {
-    peer(1, false, SMALL_TOOL)
+    peer(1, false, SMALL_TOOL).0
 }
+
+/// A peer that hands out [`HUGE_PAGE_BYTES`] of tools in its FIRST page, so
+/// nothing but the read itself can stop it.
+fn one_huge_page_peer() -> (String, Arc<AtomicUsize>) {
+    peer(HUGE_PAGE_TOOLS, false, 1 << 20)
+}
+
+/// Tools of a megabyte each, well past `MAX_LIST_BYTES` and well inside
+/// `MAX_RESPONSE_BODY_BYTES`.
+const HUGE_PAGE_TOOLS: usize = 40;
+const HUGE_PAGE_BYTES: usize = HUGE_PAGE_TOOLS * (1 << 20);
 
 /// The description length of a tool no bound is meant to catch.
 const SMALL_TOOL: usize = 6;
 
-fn peer(tools_per_page: usize, endless: bool, description_bytes: usize) -> String {
+/// The peer's URI and the reply bytes it has managed to hand over, which is
+/// what tells a body cut off mid-read from one read whole and refused after.
+fn peer(
+    tools_per_page: usize,
+    endless: bool,
+    description_bytes: usize,
+) -> (String, Arc<AtomicUsize>) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind the hostile peer");
     let uri = format!("http://{}/mcp", listener.local_addr().expect("peer addr"));
+    let handed_over = Arc::new(AtomicUsize::new(0));
+    let counting = handed_over.clone();
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(stream) = stream else { continue };
-            std::thread::spawn(move || serve(stream, tools_per_page, endless, description_bytes));
+            let counting = counting.clone();
+            std::thread::spawn(move || {
+                serve(
+                    stream,
+                    tools_per_page,
+                    endless,
+                    description_bytes,
+                    &counting,
+                )
+            });
         }
     });
-    uri
+    (uri, handed_over)
 }
 
 fn serve(
@@ -58,6 +89,7 @@ fn serve(
     tools_per_page: usize,
     endless: bool,
     description_bytes: usize,
+    handed_over: &AtomicUsize,
 ) {
     use std::io::BufRead as _;
     let peer = stream.try_clone().expect("clone the socket");
@@ -134,7 +166,14 @@ fn serve(
                 .as_bytes(),
             )
             .expect("write the reply head");
-        stream.write_all(&body).expect("write the reply body");
+        for chunk in body.chunks(64 * 1024) {
+            if stream.write_all(chunk).is_err() {
+                // The client stopped reading: nothing more of this reply gets
+                // out, and how much did is the measurement.
+                return;
+            }
+            handed_over.fetch_add(chunk.len(), Ordering::Relaxed);
+        }
     }
 }
 
@@ -228,5 +267,26 @@ async fn a_peer_whose_pages_are_huge_is_cut_at_the_list_byte_bound() {
     assert!(
         err.contains("MAX_LIST_BYTES"),
         "the refusal must name the bound it hit; got: {err}"
+    );
+}
+
+/// `MAX_RESPONSE_BODY_BYTES` is four times `MAX_LIST_BYTES`, so a single page
+/// the enumeration can never hold still fits one reply body: charging the
+/// items only once they are decoded means receiving and deserializing all of
+/// it first, and the transient peak — the body plus the decoded items — is the
+/// peer's choice, not the bound's.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_single_page_past_the_list_allowance_is_cut_off_during_the_read() {
+    let (uri, handed_over) = one_huge_page_peer();
+    let err = connect_failure(&uri).await;
+    assert!(
+        err.contains("MAX_LIST_BYTES"),
+        "the refusal must name the bound it hit; got: {err}"
+    );
+    let got_out = handed_over.load(Ordering::Relaxed);
+    assert!(
+        got_out < HUGE_PAGE_BYTES,
+        "a {HUGE_PAGE_BYTES}-byte page cannot fit MAX_LIST_BYTES, so the read must stop inside \
+         it; the peer handed over {got_out} bytes"
     );
 }

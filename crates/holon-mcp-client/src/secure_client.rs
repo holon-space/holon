@@ -11,6 +11,8 @@
 //! ([`crate::integration_config::is_secure_url`]): once when the sidecar loads,
 //! and once per hop at request time.
 
+use crate::peer_budget::BodyCap;
+
 /// The phrase every redirect refusal carries.
 ///
 /// Named as a constant because the distinction it marks is easy to lose: a
@@ -165,15 +167,19 @@ pub(crate) fn https_only() -> reqwest::ClientBuilder {
 /// [`MAX_RESPONSE_BODY_BYTES`] have arrived. Bytes that are not UTF-8 become
 /// U+FFFD, as reqwest's `text()` does without its `charset` feature.
 pub(crate) async fn read_text(resp: reqwest::Response) -> anyhow::Result<String> {
-    Ok(String::from_utf8_lossy(&read_capped(resp, describe).await?).into_owned())
+    Ok(
+        String::from_utf8_lossy(&read_capped(resp, describe, BodyCap::ResponseBody).await?)
+            .into_owned(),
+    )
 }
 
-/// The body of `resp`, refused once more than [`MAX_RESPONSE_BODY_BYTES`]
-/// have arrived. `describe` words a failed read for the client that sent it,
-/// which knows which of its timeouts a timeout is.
+/// The body of `resp`, refused once more than `cap` has arrived. `describe`
+/// words a failed read for the client that sent it, which knows which of its
+/// timeouts a timeout is.
 pub(crate) async fn read_capped(
     mut resp: reqwest::Response,
     describe: impl Fn(reqwest::Error) -> String,
+    cap: BodyCap,
 ) -> anyhow::Result<Vec<u8>> {
     let mut body = Vec::new();
     while let Some(chunk) = resp
@@ -182,9 +188,8 @@ pub(crate) async fn read_capped(
         .map_err(|e| anyhow::anyhow!(describe(e)))?
     {
         anyhow::ensure!(
-            body.len() + chunk.len() <= MAX_RESPONSE_BODY_BYTES,
-            "the response body is larger than MAX_RESPONSE_BODY_BYTES \
-             ({MAX_RESPONSE_BODY_BYTES} bytes); reading stopped there"
+            body.len() + chunk.len() <= cap.bytes(),
+            "the response body is larger than {cap}; reading stopped there"
         );
         body.extend_from_slice(&chunk);
     }

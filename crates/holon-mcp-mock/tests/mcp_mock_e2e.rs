@@ -189,6 +189,31 @@ async fn happy_tool_sync_populates_cache() {
     assert_eq!(titles(&db).await, vec!["Item 1", "Item 2", "Item 3"]);
 }
 
+/// The sync loop and the poll tickers of an integration are its own: nothing
+/// reconnects one in-process, so a task that outlives it holds that
+/// integration's sync engine — caches and DB handles — until the process ends.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_dropped_integration_reaps_its_sync_loop() {
+    let db = setup_db().await;
+    let integration = connected(
+        connect("tool.yaml", MOCK_BIN, Some("happy"), &db)
+            .await
+            .expect("connect happy"),
+    );
+    let sync_loop = integration.sync_event_task.abort_handle();
+
+    drop(integration);
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !sync_loop.is_finished() {
+        assert!(
+            Instant::now() < deadline,
+            "the sync loop outlived the integration it belongs to"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
 // ── Slow / high-latency response (#2) ─────────────────────────────
 #[tokio::test(flavor = "multi_thread")]
 async fn slow_response_is_tolerated() {

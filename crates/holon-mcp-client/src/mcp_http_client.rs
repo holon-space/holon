@@ -222,9 +222,12 @@ impl McpHttpClient {
                 ))
             }
             Some(ct) if ct.starts_with(JSON_MIME_TYPE.as_bytes()) => {
-                let body = read_capped(response, self.describe()).await.map_err(|e| {
-                    StreamableHttpError::UnexpectedServerResponse(Cow::Owned(format!("{e:#}")))
-                })?;
+                let cap = self.budget.listed_bytes.body_cap();
+                let body = read_capped(response, self.describe(), cap)
+                    .await
+                    .map_err(|e| {
+                        StreamableHttpError::UnexpectedServerResponse(Cow::Owned(format!("{e:#}")))
+                    })?;
                 Ok(StreamableHttpPostResponse::Json(
                     serde_json::from_slice(&body)?,
                     session_id,
@@ -503,9 +506,16 @@ impl Drop for EventBytes {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::peer_budget::ListedBytes;
+
+    /// The streams of a connection with no enumeration running, where
+    /// `MAX_RESPONSE_BODY_BYTES` is the only cap on what they hold.
+    fn held_bytes() -> Arc<HeldEventBytes> {
+        Arc::new(HeldEventBytes::new(Arc::new(ListedBytes::default())))
+    }
 
     fn fed(chunks: &[&[u8]]) -> EventBytes {
-        let mut event = EventBytes::new(Arc::new(HeldEventBytes::default()));
+        let mut event = EventBytes::new(held_bytes());
         for chunk in chunks {
             event.count(chunk).expect("under the cap");
         }
@@ -669,7 +679,7 @@ mod tests {
                     capped_sse(
                         futures::stream::iter(chunks.into_iter().map(Ok)),
                         McpHttpClient::new(PeerBudget::new()).describe(),
-                        Arc::new(HeldEventBytes::default()),
+                        held_bytes(),
                     )
                     .collect::<Vec<_>>(),
                 );
@@ -833,7 +843,7 @@ mod tests {
 
     #[test]
     fn an_event_one_byte_past_the_cap_is_refused() {
-        let mut event = EventBytes::new(Arc::new(HeldEventBytes::default()));
+        let mut event = EventBytes::new(held_bytes());
         event
             .count(&vec![b'a'; MAX_RESPONSE_BODY_BYTES])
             .expect("exactly the cap is accepted");
@@ -906,7 +916,7 @@ mod tests {
     /// is what makes the number a bound.
     #[test]
     fn the_partial_events_of_a_connection_share_one_byte_allowance() {
-        let held = Arc::new(HeldEventBytes::default());
+        let held = held_bytes();
         let half = MAX_RESPONSE_BODY_BYTES / 2;
         let mut first = EventBytes::new(held.clone());
         let mut second = EventBytes::new(held.clone());

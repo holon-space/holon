@@ -65,19 +65,22 @@ pub(crate) fn spawn_bounded_child(
 ) -> std::io::Result<BoundedChildProcess> {
     let who = cmd.as_std().get_program().to_string_lossy().into_owned();
     let (child, stdout, stdin, stderr) = spawn_parts(cmd, budget.clone())?;
+    let reader_who = who.clone();
     tokio::spawn(forward_stderr(
         stderr,
         who.clone(),
-        budget,
+        budget.clone(),
         move |verdict| match verdict {
-            StderrVerdict::Forward(line) => info!("[sidecar {who}] {line}"),
-            StderrVerdict::Say(bound) => warn!("[sidecar {who}] {bound}"),
+            StderrVerdict::Forward(line) => info!("[sidecar {reader_who}] {line}"),
+            StderrVerdict::Say(bound) => warn!("[sidecar {reader_who}] {bound}"),
             StderrVerdict::Nothing => {}
         },
     ));
     Ok(BoundedChildProcess {
         child: Some(child),
         transport: AsyncRwTransport::new_client(stdout, stdin),
+        budget,
+        who,
     })
 }
 
@@ -194,12 +197,21 @@ pub(crate) struct BoundedChildProcess {
     /// that never reached [`Self::shut_down`] still ends the sidecar.
     child: Option<Child>,
     transport: AsyncRwTransport<RoleClient, BoundedChildStdout, ChildStdin>,
+    budget: Arc<PeerBudget>,
+    /// The sidecar's program name, which is how its lines are keyed in the log.
+    who: String,
 }
 
 impl BoundedChildProcess {
     /// Close the sidecar's stdin, give it [`GRACEFUL_EXIT`] to leave on its
     /// own, then kill it.
     async fn shut_down(&mut self) -> std::io::Result<()> {
+        // The stderr reader says this at its own EOF, which a process on its
+        // way down does not reach: the reader is a task and is dropped
+        // wherever it was parked.
+        if let Some(report) = self.budget.stderr.dropped_report() {
+            warn!("[sidecar {}] {report}; the connection closed", self.who);
+        }
         // Dropping the writer is what the sidecar sees as EOF on its stdin,
         // which is the only signal it gets to stop.
         self.transport.close().await?;
@@ -391,6 +403,68 @@ mod tests {
                 .is_some_and(|last| last.contains("stderr ended")
                     && last.contains("stderr lines were dropped")),
             "how many lines the bound dropped must be disclosed: {said:?}"
+        );
+    }
+
+    #[derive(Clone)]
+    struct Captured(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Captured {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("the capture buffer")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl tracing_subscriber::fmt::MakeWriter<'_> for Captured {
+        type Writer = Self;
+        fn make_writer(&self) -> Self {
+            self.clone()
+        }
+    }
+
+    /// The stderr reader is a task of its own, and a process shutting down
+    /// drops it wherever it was parked. The close path therefore says the
+    /// total too — what a bound dropped is only disclosed if the disclosure
+    /// outlives the flood.
+    #[tokio::test]
+    async fn closing_a_connection_says_what_its_stderr_bound_dropped() {
+        let budget = PeerBudget::new();
+        let line = "x".repeat(4096);
+        for _ in 0..(MAX_STDERR_BYTES / line.len() + 2) {
+            budget.stderr.admit(&line);
+        }
+        let mut transport =
+            spawn_bounded_child(&mut sidecar("import time\ntime.sleep(10)"), budget.clone())
+                .expect("the sidecar spawns");
+        // Held here, so the sidecar's stderr stays open across the close and
+        // its reader cannot reach the EOF where it would say the total itself.
+        let _sidecar_alive = transport.child.take();
+
+        let log = Captured(Arc::new(std::sync::Mutex::new(Vec::new())));
+        let captured = log.clone();
+        let guard = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_writer(log)
+                .with_ansi(false)
+                .with_max_level(tracing::Level::TRACE)
+                .finish(),
+        );
+        transport.shut_down().await.expect("the connection closes");
+        drop(guard);
+
+        let said =
+            String::from_utf8_lossy(&captured.0.lock().expect("the capture buffer")).into_owned();
+        assert!(
+            said.contains("stderr lines were dropped by MAX_STDERR_BYTES"),
+            "closing the connection must disclose the total its stderr bound dropped; the log \
+             said: {said}"
         );
     }
 }

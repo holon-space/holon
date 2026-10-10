@@ -161,6 +161,18 @@ pub struct McpIntegration {
     sync_event_tx: mpsc::UnboundedSender<SyncEvent>,
 }
 
+/// Nothing reconnects an integration in-process, so a task that outlives the
+/// one it belongs to holds that integration's sync engine — its caches and DB
+/// handles — until the process ends.
+impl Drop for McpIntegration {
+    fn drop(&mut self) {
+        self.sync_event_task.abort();
+        for producer in &self.background_tasks {
+            producer.abort();
+        }
+    }
+}
+
 /// A unit of sync work, serialized through one consumer per integration so
 /// notification resyncs, poll ticks, and the initial sync never overlap.
 #[derive(Debug)]
@@ -1736,7 +1748,12 @@ pub fn spawn_sync_event_loop<S: ResyncSink + 'static>(
             // reach it any more. A peer still pushing notices into its bounded
             // queue is such a source, so Holon's own sender being dropped
             // leaves the inbound leg running.
-            if !events_open && !inbound_open && !collapses_open {
+            //
+            // The collapse signal is NOT such a source: it is published by the
+            // inbound handler and by this loop, and its sender hangs off the
+            // budget the sync engine holds — the loop would be waiting on
+            // itself. Both publishers are gone once these two are closed.
+            if !events_open && !inbound_open {
                 if !pending.is_empty() {
                     std::mem::take(&mut pending)
                         .execute(sync_engine.as_ref())
@@ -2158,6 +2175,9 @@ mod sync_loop_gate_debounce_tests {
         /// that answers but whose rows the schema rejects.
         fail: AtomicBool,
         health: SyncHealthSignal,
+        /// The connection this sink syncs through, which `McpSyncEngine` holds
+        /// as its `BudgetedPeer`.
+        _budget: Option<Arc<crate::peer_budget::PeerBudget>>,
     }
 
     impl CountingSink {
@@ -2388,6 +2408,41 @@ mod sync_loop_gate_debounce_tests {
 
         drop(tx);
         let _ = handle.await;
+    }
+
+    /// Both publishers of a collapse are gone once Holon's own sender and the
+    /// peer's notice queue are closed, so the loop must end — it holds the
+    /// sync engine, hence this integration's caches and DB handles, for as
+    /// long as it runs. The sink here holds the connection's budget the way
+    /// `McpSyncEngine` holds its `BudgetedPeer`, so the collapse signal's
+    /// sender is alive the whole time.
+    #[tokio::test]
+    async fn a_peer_backed_loop_ends_once_its_two_signal_sources_closed() {
+        let budget = crate::peer_budget::PeerBudget::new();
+        let (handler, receiver) = budget.notifying_handler();
+        let sink = Arc::new(CountingSink {
+            _budget: Some(budget),
+            ..Default::default()
+        });
+        let (tx, rx) = mpsc::unbounded_channel();
+        let handle = spawn_sync_event_loop(
+            rx,
+            Some(receiver),
+            sink,
+            SyncGate::opened(),
+            SyncLoopTuning::test(),
+        );
+
+        drop(tx);
+        drop(handler);
+
+        tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect(
+                "no signal can reach this loop any more, so it must end instead of parking with \
+                 the sync engine in it",
+            )
+            .expect("the loop must not panic");
     }
 }
 
