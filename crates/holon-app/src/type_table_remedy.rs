@@ -1,6 +1,6 @@
 //! The remedy for a refused type table (`ConditionKind::TypeTableRefused`):
-//! drop the quarantined table and its rows, then serve the type from a table
-//! created from its declaration, in this session.
+//! serve the type from a table created from its declaration, then drop the
+//! quarantined tables and their rows, in this session.
 
 use std::sync::Arc;
 
@@ -30,9 +30,9 @@ pub fn drop_refused_table_descriptor() -> OperationDescriptor {
         id_column: String::new(),
         name: OP.op().to_string(),
         display_name: "Drop the refused table".to_string(),
-        description: "Drop the stored table of a type this session does not serve because the \
-                      table does not match the type's declaration, with all its rows, and serve \
-                      the type from a new empty table. NOT UNDOABLE: the rows are deleted."
+        description: "Drop the quarantined tables of a type this session does not serve, with \
+                      all their rows, and serve the type from a new empty table. NOT UNDOABLE: \
+                      the rows are deleted."
             .to_string(),
         required_params: vec![OperationParam {
             name: "type".to_string(),
@@ -98,13 +98,26 @@ impl OperationProvider for TypeTableRemedyProvider {
             .to_string();
 
         let unserved = self.injector.resolve_async::<UnservedTypes>().await;
-        if unserved.condition(&type_name) != Some(ConditionKind::TYPE_TABLE_REFUSED) {
-            return Err(format!(
-                "{}: type '{type_name}' has no refused table: {:?}",
-                OP.op(),
-                unserved.entries().get(&type_name)
-            )
-            .into());
+        match unserved.condition(&type_name) {
+            Some(ConditionKind::TYPE_TABLE_REFUSED) => {}
+            Some(_) => {
+                return Err(format!(
+                    "{}: {}; no quarantined table holds its rows",
+                    OP.op(),
+                    unserved
+                        .explanation(&type_name)
+                        .expect("an unserved type has an explanation")
+                )
+                .into());
+            }
+            None => {
+                return Err(format!(
+                    "{}: type '{type_name}' is served or not declared; no quarantined table \
+                     holds its rows",
+                    OP.op()
+                )
+                .into());
+            }
         }
         let type_def = self
             .injector
@@ -122,11 +135,16 @@ impl OperationProvider for TypeTableRemedyProvider {
             .resolve_async::<holon::api::operation_dispatcher::OperationDispatcher>()
             .await;
 
-        let quarantined =
-            holon_turso::table_shape::quarantine_name(&TursoAdapter::raw_table_name(&type_def));
-        db.execute_ddl(&format!("DROP TABLE \"{quarantined}\""))
-            .await?;
+        let quarantined = holon_turso::table_shape::quarantined_tables(
+            &db,
+            &TursoAdapter::raw_table_name(&type_def),
+        )
+        .await?;
         TursoAdapter::register(&type_def, &db).await?;
+        for table in quarantined {
+            db.execute_ddl(&format!("DROP TABLE \"{}\"", table.name))
+                .await?;
+        }
         holon::core::type_declaration::derive_write_authority(&type_def, &db, &dispatcher)?;
         holon::core::type_declaration::register_companion_operations(&type_name, &db, &dispatcher)?;
         unserved.remove(&type_name);

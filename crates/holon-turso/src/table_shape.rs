@@ -11,6 +11,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
+use holon_api::QuarantinedTable;
 use holon_api::Value;
 use holon_core::storage::types::Result;
 use holon_core::storage::types::StorageError;
@@ -562,44 +563,107 @@ async fn drop_views_over(db_handle: &DbHandle, table: &str) -> Result<()> {
         .map_err(|e| StorageError::SchemaError(format!("dropping the views over {table}: {e:#}")))
 }
 
-/// The name a quarantined `table` keeps its rows under.
-pub fn quarantine_name(table: &str) -> String {
+/// The first name a quarantined `table` keeps its rows under; when a stored
+/// object holds it, `_2`, `_3`, ... are appended.
+fn quarantine_name(table: &str) -> String {
     format!("{table}__quarantined")
 }
 
+fn is_quarantine_of(table: &str, name: &str) -> bool {
+    let base = quarantine_name(table).to_ascii_lowercase();
+    match name.to_ascii_lowercase().strip_prefix(&base) {
+        Some("") => true,
+        Some(rest) => rest
+            .strip_prefix('_')
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())),
+        None => false,
+    }
+}
+
+async fn schema_names(db_handle: &DbHandle, kind: Option<&str>) -> Result<Vec<String>> {
+    let sql = match kind {
+        Some(kind) => format!("SELECT name FROM sqlite_schema WHERE type = '{kind}'"),
+        None => "SELECT name FROM sqlite_schema".to_string(),
+    };
+    db_handle
+        .query(&sql, HashMap::new())
+        .await?
+        .into_iter()
+        .map(|row| match row.get("name") {
+            Some(Value::String(name)) => Ok(name.clone()),
+            other => Err(StorageError::SchemaError(format!(
+                "sqlite_schema name: expected TEXT, got {other:?}"
+            ))),
+        })
+        .collect()
+}
+
+/// The stored tables holding quarantined rows of `table`, by name.
+pub async fn quarantined_tables(
+    db_handle: &DbHandle,
+    table: &str,
+) -> Result<Vec<QuarantinedTable>> {
+    let mut names: Vec<String> = schema_names(db_handle, Some("table"))
+        .await?
+        .into_iter()
+        .filter(|name| is_quarantine_of(table, name))
+        .collect();
+    names.sort();
+    let mut quarantined = Vec::with_capacity(names.len());
+    for name in names {
+        let rows = row_count(db_handle, &name).await?;
+        quarantined.push(QuarantinedTable { name, rows });
+    }
+    Ok(quarantined)
+}
+
 /// Make stored `table` unreadable by every query that names it: drop the
-/// views over it and rename it to [`quarantine_name`]. Its rows stay as they
-/// are.
-pub async fn quarantine(db_handle: &DbHandle, table: &str) -> Result<()> {
+/// views over it and rename it to the first free quarantine name, which it
+/// returns. Its rows stay as they are.
+pub async fn quarantine(db_handle: &DbHandle, table: &str) -> Result<String> {
     drop_views_over(db_handle, table).await?;
-    let quarantined = quarantine_name(table);
+    let taken: Vec<String> = schema_names(db_handle, None)
+        .await?
+        .into_iter()
+        .map(|name| name.to_ascii_lowercase())
+        .collect();
+    let base = quarantine_name(table);
+    let quarantined = std::iter::once(base.clone())
+        .chain((2..).map(|n| format!("{base}_{n}")))
+        .find(|name| !taken.contains(&name.to_ascii_lowercase()))
+        .expect("an unbounded sequence of names has a free one");
     db_handle
         .execute_ddl(&format!(
             "ALTER TABLE \"{table}\" RENAME TO \"{quarantined}\""
         ))
         .await
-        .map_err(|e| StorageError::SchemaError(format!("quarantining {table}: {e}")))
+        .map_err(|e| StorageError::SchemaError(format!("quarantining {table}: {e}")))?;
+    Ok(quarantined)
 }
 
-/// Move a quarantined `table` back to its name, so its stored shape is judged
-/// against the declaration again. Does nothing when `table` is not
-/// quarantined.
-pub async fn release_quarantine(db_handle: &DbHandle, table: &str) -> Result<()> {
-    let quarantined = quarantine_name(table);
-    if !table_exists(db_handle, &quarantined).await? {
-        return Ok(());
-    }
+/// Move the one quarantined table of `table` back to its name, so its stored
+/// shape is judged against the declaration again. Returns the quarantined
+/// tables it leaves in place: all of them when `table` is stored too or more
+/// than one is quarantined, since then none is the one to serve.
+pub async fn release_quarantine(
+    db_handle: &DbHandle,
+    table: &str,
+) -> Result<Vec<QuarantinedTable>> {
+    let quarantined = quarantined_tables(db_handle, table).await?;
+    let [only] = quarantined.as_slice() else {
+        return Ok(quarantined);
+    };
     if table_exists(db_handle, table).await? {
-        return Err(StorageError::SchemaError(format!(
-            "both {table} and its quarantined rows {quarantined} are stored; drop one of them"
-        )));
+        return Ok(quarantined);
     }
     db_handle
         .execute_ddl(&format!(
-            "ALTER TABLE \"{quarantined}\" RENAME TO \"{table}\""
+            "ALTER TABLE \"{}\" RENAME TO \"{table}\"",
+            only.name
         ))
         .await
-        .map_err(|e| StorageError::SchemaError(format!("releasing {quarantined}: {e}")))
+        .map_err(|e| StorageError::SchemaError(format!("releasing {}: {e}", only.name)))?;
+    Ok(Vec::new())
 }
 
 pub async fn table_exists(db_handle: &DbHandle, table: &str) -> Result<bool> {

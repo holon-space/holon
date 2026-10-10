@@ -111,6 +111,7 @@ pub use condition_bus::EarlierPanics;
 pub use condition_bus::HolonChange;
 pub use condition_bus::IngestRefusals;
 pub use condition_bus::LostTableRows;
+pub use condition_bus::QuarantinedTable;
 pub use condition_bus::RefusedFile;
 pub use condition_profile::AllClear;
 pub use condition_profile::ClearingEvent;

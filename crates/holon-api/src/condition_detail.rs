@@ -497,20 +497,37 @@ impl ConditionKind {
 
             Self::TypeTableRefused {
                 table,
+                why,
                 quarantined,
-                diff,
-                rows,
-            } => ConditionDetail::with_body(
-                format!(
-                    "{subject} is not available: its stored table {table} ({rows} rows) does \
-                     not match the declaration, and no row was changed."
-                ),
-                vec![
-                    diff.clone(),
-                    format!("The rows are kept, unread, in {quarantined}."),
-                    format!("Remedy: drop {quarantined}, {rows} rows lost."),
-                ],
-            ),
+            } => {
+                let mut body = vec![why.clone()];
+                body.extend(
+                    quarantined.iter().map(|q| {
+                        format!("Rows are kept, unread, in {} ({} rows).", q.name, q.rows)
+                    }),
+                );
+                let names: Vec<&str> = quarantined.iter().map(|q| q.name.as_str()).collect();
+                let rows: u64 = quarantined.iter().map(|q| q.rows).sum();
+                body.push(format!(
+                    "Remedy: drop {}, {rows} rows lost, and serve {subject} from a new empty \
+                     {table}.",
+                    names.join(", ")
+                ));
+                if quarantined.len() > 1 {
+                    body.push(
+                        "Or drop or rename all but one of them and restart: the next start \
+                         judges that one against the declaration."
+                            .to_string(),
+                    );
+                }
+                ConditionDetail::with_body(
+                    format!(
+                        "{subject} is not available: Holon does not serve its stored table \
+                         {table}, and no row was changed."
+                    ),
+                    body,
+                )
+            }
 
             Self::TableColumnsAdded {
                 table,
@@ -540,7 +557,7 @@ impl ConditionKind {
             Self::SchemaModuleFailed { error } => ConditionDetail::with_body(
                 format!(
                     "the {subject} tables could not be set up past their first failing \
-                     statement, and none after it ran; what reads or writes them fails."
+                     statement, and none after it ran."
                 ),
                 vec![error.clone()],
             ),

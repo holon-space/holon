@@ -388,56 +388,81 @@ pub fn register_schema_providers(injector: &Injector) {
             }
             let name = type_def.name.to_string();
             let raw_table = TursoAdapter::raw_table_name(&type_def);
-            let registered = async {
-                table_shape::release_quarantine(&db.handle(), &raw_table).await?;
-                TursoAdapter::reconcile(&type_def, &db.handle()).await
+            let judged = async {
+                let held = table_shape::release_quarantine(&db.handle(), &raw_table).await?;
+                if !held.is_empty() {
+                    return Ok(None);
+                }
+                TursoAdapter::reconcile(&type_def, &db.handle())
+                    .await
+                    .map(Some)
             }
             .await;
-            match registered {
-                Ok(TypeRegistration::Registered { adapted, .. }) => {
+            let why = match judged {
+                Ok(Some(TypeRegistration::Registered { adapted, .. })) => {
                     if let Some(adapted) = adapted {
                         bus.emit(columns_added(name, adapted));
                     }
+                    continue;
                 }
-                Ok(TypeRegistration::Refused(refusal)) => {
-                    if let Err(e) = table_shape::quarantine(&db.handle(), &raw_table).await {
-                        refuse_on_error(&bus, &unserved, &name, &raw_table, e.into());
-                        continue;
-                    }
-                    unserved.insert(
-                        &name,
-                        &raw_table,
-                        ConditionKind::TYPE_TABLE_REFUSED,
-                        refusal.to_string(),
-                    );
-                    bus.emit(Condition {
-                        subject: name,
-                        reason: ConditionKind::TypeTableRefused {
-                            table: refusal.diff.table.clone(),
-                            quarantined: table_shape::quarantine_name(&raw_table),
-                            diff: refusal.diff.to_string(),
-                            rows: refusal.rows,
-                        },
-                    });
-                }
-                Err(e) => {
-                    let quarantined = async {
-                        if table_shape::table_exists(&db.handle(), &raw_table).await? {
-                            table_shape::quarantine(&db.handle(), &raw_table).await?;
-                        }
-                        anyhow::Ok(())
-                    }
-                    .await;
-                    let error = match quarantined {
-                        Ok(()) => anyhow::Error::from(e),
-                        Err(q) => anyhow::Error::from(e).context(format!("{q:#}")),
-                    };
-                    refuse_on_error(&bus, &unserved, &name, &raw_table, error);
-                }
-            }
+                Ok(Some(TypeRegistration::Refused(refusal))) => refusal.to_string(),
+                Ok(None) => format!(
+                    "more than one stored table holds rows of {raw_table}, so Holon serves none \
+                     of them"
+                ),
+                Err(e) => format!("setting up {raw_table} failed: {e:#}"),
+            };
+            hold(&db.handle(), &bus, &unserved, &name, &raw_table, why).await;
         }
         Shared::new(DbReady::<FreeStandingTypeViews>::new())
     }));
+}
+
+/// Leave type `name` unserved: quarantine its stored `raw_table`, if any, and
+/// disclose `why` with every table that keeps its rows.
+async fn hold(
+    db: &DbHandle,
+    bus: &ConditionBus,
+    unserved: &UnservedTypes,
+    name: &str,
+    raw_table: &str,
+    why: String,
+) {
+    let held = async {
+        if table_shape::table_exists(db, raw_table).await? {
+            table_shape::quarantine(db, raw_table).await?;
+        }
+        table_shape::quarantined_tables(db, raw_table).await
+    }
+    .await;
+    match held {
+        Ok(quarantined) if !quarantined.is_empty() => {
+            unserved.insert(
+                name,
+                raw_table,
+                ConditionKind::TYPE_TABLE_REFUSED,
+                why.clone(),
+            );
+            bus.emit(Condition {
+                subject: name.to_string(),
+                reason: ConditionKind::TypeTableRefused {
+                    table: raw_table.to_string(),
+                    why,
+                    quarantined,
+                },
+            });
+        }
+        Ok(_) => refuse_on_error(bus, unserved, name, raw_table, anyhow::anyhow!(why)),
+        Err(e) => refuse_on_error(
+            bus,
+            unserved,
+            name,
+            raw_table,
+            anyhow::anyhow!(why).context(format!(
+                "{raw_table} could not be quarantined, so SQL naming it still reads it: {e:#}"
+            )),
+        ),
+    }
 }
 
 fn refuse_on_error(
@@ -514,6 +539,15 @@ impl UnservedTypes {
             .expect("UnservedTypes lock")
             .get(type_name)
             .map(|unserved| unserved.condition)
+    }
+
+    /// Why `type_name` is not served, if it is not.
+    pub fn explanation(&self, type_name: &str) -> Option<String> {
+        self.0
+            .lock()
+            .expect("UnservedTypes lock")
+            .get(type_name)
+            .map(|unserved| unserved.explanation(type_name))
     }
 
     /// Each unserved type with its explanation.

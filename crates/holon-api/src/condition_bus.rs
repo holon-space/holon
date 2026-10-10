@@ -546,19 +546,17 @@ pub enum ConditionKind {
     ///
     /// All-clear: none in this process.
     PanicConditionsUnavailable { reason: String },
-    /// The stored table of type `subject` differs from the type's declaration
-    /// in a way adding columns does not fix (`diff`), so this session does not
-    /// serve the type: the table is renamed to `quarantined`, where no read
-    /// finds it and its `rows` stay untouched, and its writes fail naming this
-    /// condition.
+    /// This session does not serve type `subject` from its stored `table`
+    /// (`why`): its stored rows are kept untouched in the `quarantined`
+    /// tables, which no read of the type or of `table` finds, and its writes
+    /// fail naming this condition.
     ///
     /// All-clear: [`RemedyApplied`](crate::condition_profile::AllClear) — the
-    /// user drops the quarantined table and its rows.
+    /// user drops the quarantined tables and their rows.
     TypeTableRefused {
         table: String,
-        quarantined: String,
-        diff: String,
-        rows: u64,
+        why: String,
+        quarantined: Vec<QuarantinedTable>,
     },
     /// Stored `table` (of the type or table `subject`) gained the `added`
     /// columns its declaration names; its `rows` read them as NULL or their
@@ -578,7 +576,7 @@ pub enum ConditionKind {
     /// All-clear: none in this process.
     TableRebuilt { diff: String, rows: u64 },
     /// Schema module `subject` could not set up its tables or views
-    /// (`error`); whatever reads or writes them fails.
+    /// (`error`).
     ///
     /// All-clear: none in this process.
     SchemaModuleFailed { error: String },
@@ -870,6 +868,13 @@ impl DroppedPanics {
     pub fn undated(&self) -> usize {
         self.undated
     }
+}
+
+/// A stored table holding rows of a type Holon does not serve, with how many.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QuarantinedTable {
+    pub name: String,
+    pub rows: u64,
 }
 
 /// A table a database rebuild deleted and no replica restores, with the rows

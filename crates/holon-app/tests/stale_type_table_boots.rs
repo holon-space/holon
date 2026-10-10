@@ -630,3 +630,165 @@ async fn a_refused_type_stays_quarantined_across_boots_until_the_remedy() {
         "the row written after the remedy survives the reboot"
     );
 }
+
+/// Run `statements` on the database between two sessions.
+fn between_sessions(dir: &Path, statements: &[&str]) {
+    let db = holon::storage::turso::TursoBackend::open_database(dir.join(LATER_DB))
+        .expect("open between the sessions");
+    let conn = db.connect().expect("connect");
+    for statement in statements {
+        exec(&conn, statement);
+    }
+}
+
+/// The stored tables whose name starts with [`QUARANTINED`].
+async fn quarantine_tables(booted: &Booted) -> Vec<String> {
+    sql(
+        booted,
+        &format!(
+            "SELECT name FROM sqlite_schema WHERE type = 'table' AND substr(name, 1, {}) = \
+             '{QUARANTINED}' ORDER BY name",
+            QUARANTINED.len()
+        ),
+    )
+    .await
+    .iter()
+    .map(|row| match row.get("name") {
+        Some(Value::String(name)) => name.clone(),
+        other => panic!("table name {other:?}"),
+    })
+    .collect()
+}
+
+/// The pantry_item refusal names every table holding rows it keeps unread,
+/// and nothing claims it failed in some other way.
+async fn assert_held_disclosed(booted: &Booted) {
+    let current = conditions(&booted.bus);
+    let shown = described(&current);
+    assert!(
+        !shown
+            .iter()
+            .any(|c| c.starts_with("[schema-module-failed]") && c.contains("pantry_item")),
+        "a held type is disclosed as refused, not as a failed setup: {shown:#?}"
+    );
+    let refused = current
+        .iter()
+        .find(|c| c.condition_key().kind == "type-table-refused" && c.subject == "pantry_item")
+        .unwrap_or_else(|| panic!("the held type is not disclosed: {shown:#?}"));
+    let text = described(std::slice::from_ref(refused)).join("");
+    for table in quarantine_tables(booted).await {
+        assert!(
+            text.contains(&format!("{table} (")),
+            "the refusal must name {table}, which holds rows it keeps unread: {text}"
+        );
+    }
+}
+
+async fn run_remedy_then_write(booted: &Booted) {
+    op(
+        booted,
+        "type_table",
+        "drop_refused_table",
+        params(&[("type", Value::String("pantry_item".into()))]),
+    )
+    .await
+    .expect("the remedy must run");
+    assert!(
+        !conditions(&booted.bus)
+            .iter()
+            .any(|c| c.condition_key().kind == "type-table-refused"),
+        "the remedy must clear the condition"
+    );
+    assert_eq!(
+        quarantine_tables(booted).await,
+        Vec::<String>::new(),
+        "the remedy drops every table its condition named"
+    );
+    stock(booted, "pantry-item:sugar", &[])
+        .await
+        .expect("after the remedy the type must be writable");
+    let rows = engine_read(booted, "from pantry_item")
+        .await
+        .expect("after the remedy the type reads again");
+    assert_eq!(
+        rows.len(),
+        1,
+        "only the row written after the remedy: {rows:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_table_already_named_like_the_quarantine_does_not_let_the_refused_rows_be_read() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let stored = seed_refused_pantry(dir.path()).await;
+    between_sessions(
+        dir.path(),
+        &[
+            &format!("CREATE TABLE {QUARANTINED} (mine TEXT)"),
+            &format!("INSERT INTO {QUARANTINED} (mine) VALUES ('users own table')"),
+        ],
+    );
+
+    let later = boot(dir.path(), LATER_DB).await;
+    assert_no_read_serves_the_refused_rows(&later).await;
+    assert_eq!(
+        tables_named(&later, "pantry_item_raw").await,
+        0,
+        "the refused table is moved out of its name"
+    );
+    let held = quarantine_tables(&later).await;
+    assert_eq!(held.len(), 2, "both tables are kept: {held:?}");
+    let refused_copy = held
+        .iter()
+        .find(|t| t.as_str() != QUARANTINED)
+        .expect("the refused rows are kept under a free name");
+    assert_eq!(
+        stored_snapshot(&later, refused_copy).await,
+        stored,
+        "the refused rows are kept byte-equal"
+    );
+    assert_eq!(
+        sql(&later, &format!("SELECT mine FROM {QUARANTINED}"))
+            .await
+            .len(),
+        1,
+        "the table that held the name is untouched"
+    );
+    assert_held_disclosed(&later).await;
+    run_remedy_then_write(&later).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_raw_table_recreated_beside_the_quarantine_is_not_served() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let stored = seed_refused_pantry(dir.path()).await;
+    let first = boot(dir.path(), LATER_DB).await;
+    assert_refusal_disclosed(&first);
+    holon_app::shutdown_session(&first.injector)
+        .await
+        .expect("shut the refusing session down");
+    drop(first);
+    between_sessions(
+        dir.path(),
+        &[
+            "CREATE TABLE pantry_item_raw (id TEXT PRIMARY KEY, quantity REAL)",
+            "INSERT INTO pantry_item_raw (id, quantity) VALUES ('pantry-item:flour', 2.0)",
+        ],
+    );
+
+    let second = boot(dir.path(), LATER_DB).await;
+    assert_no_read_serves_the_refused_rows(&second).await;
+    assert_eq!(
+        tables_named(&second, "pantry_item_raw").await,
+        0,
+        "neither table holding pantry rows is served"
+    );
+    assert_eq!(
+        stored_snapshot(&second, QUARANTINED).await,
+        stored,
+        "the first quarantine keeps its rows byte-equal"
+    );
+    assert_eq!(quarantine_tables(&second).await.len(), 2);
+    assert_held_disclosed(&second).await;
+    run_remedy_then_write(&second).await;
+}
