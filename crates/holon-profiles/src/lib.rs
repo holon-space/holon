@@ -398,7 +398,7 @@ fn strip_rhai_prefix(s: &str) -> String {
 ///
 /// Returns `(data_condition, ui_condition)`.
 fn split_condition(source: &str) -> Result<(Option<String>, Predicate)> {
-    let conjuncts: Vec<&str> = source.split("&&").map(|s| s.trim()).collect();
+    let conjuncts = top_level_conjuncts(source)?;
 
     let mut data_parts = Vec::new();
     let mut ui_predicates = Vec::new();
@@ -430,6 +430,61 @@ fn split_condition(source: &str) -> Result<(Option<String>, Predicate)> {
     };
 
     Ok((data_condition, ui_condition))
+}
+
+/// Split a Rhai condition on its TOP-LEVEL `&&` only: a `&&` inside a string
+/// literal or inside parentheses belongs to its conjunct, it is not a
+/// boundary.
+///
+/// An unbalanced parenthesis or an unterminated quote means the condition
+/// cannot be split faithfully, so it is refused naming the source — splitting
+/// it anyway would hand a silently-wrong predicate to the frontend.
+fn top_level_conjuncts(source: &str) -> Result<Vec<&str>> {
+    let bytes = source.as_bytes();
+    let mut conjuncts = Vec::new();
+    let mut start = 0;
+    let mut depth = 0usize;
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            quote @ (b'"' | b'\'') => {
+                i += 1;
+                loop {
+                    anyhow::ensure!(
+                        i < bytes.len(),
+                        "malformed condition `{source}`: unterminated {} quote",
+                        if quote == b'"' { "double" } else { "single" }
+                    );
+                    if bytes[i] == b'\\' {
+                        i += 1;
+                    } else if bytes[i] == quote {
+                        break;
+                    }
+                    i += 1;
+                }
+                i += 1;
+            }
+            b'(' => {
+                depth += 1;
+                i += 1;
+            }
+            b')' => {
+                depth = depth.checked_sub(1).ok_or_else(|| {
+                    anyhow::anyhow!("malformed condition `{source}`: unbalanced `)`")
+                })?;
+                i += 1;
+            }
+            b'&' if depth == 0 && bytes.get(i + 1) == Some(&b'&') => {
+                conjuncts.push(source[start..i].trim());
+                i += 2;
+                start = i;
+            }
+            _ => i += 1,
+        }
+    }
+    anyhow::ensure!(depth == 0, "malformed condition `{source}`: unbalanced `(`");
+    conjuncts.push(source[start..].trim());
+    Ok(conjuncts)
 }
 
 /// Check if a conjunct references any variables that are NOT UI state
@@ -1701,6 +1756,108 @@ mod tests {
         let (data, ui) = split_condition("is_expanded").unwrap();
         assert!(data.is_none());
         assert_eq!(ui, Predicate::Var("is_expanded".into()));
+    }
+
+    // -----------------------------------------------------------------------
+    // Top-level-only `&&` splitting — bugfunnel
+    // 2026-10-11-split-condition-splits-inside-quotes-and-parens.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_double_quoted_ampersand_pair_is_not_a_conjunct_boundary() {
+        let (data, ui) = split_condition(r#"view_mode == "list && table""#).unwrap();
+        assert!(data.is_none(), "whole condition is UI-only, got {data:?}");
+        assert_eq!(
+            ui,
+            Predicate::Eq {
+                field: "view_mode".into(),
+                value: Value::String("list && table".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn a_single_quoted_ampersand_pair_is_not_a_conjunct_boundary() {
+        let (data, ui) = split_condition("view_mode == 'list && table'").unwrap();
+        assert!(data.is_none(), "whole condition is UI-only, got {data:?}");
+        assert_eq!(
+            ui,
+            Predicate::Eq {
+                field: "view_mode".into(),
+                value: Value::String("list && table".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn an_escaped_quote_does_not_end_the_string_literal() {
+        let (data, ui) = split_condition(r#"view_mode == "a\" && b""#).unwrap();
+        assert!(data.is_none(), "whole condition is UI-only, got {data:?}");
+        assert_eq!(
+            ui,
+            Predicate::Eq {
+                field: "view_mode".into(),
+                value: Value::String(r#"a\" && b"#.into()),
+            }
+        );
+    }
+
+    #[test]
+    fn a_quoted_ampersand_pair_survives_beside_a_real_conjunct() {
+        let (data, ui) = split_condition(r#"name == "a && b" && is_focused"#).unwrap();
+        assert_eq!(data.as_deref(), Some(r#"name == "a && b""#));
+        assert_eq!(ui, Predicate::Var("is_focused".into()));
+    }
+
+    #[test]
+    fn a_parenthesised_ampersand_pair_is_not_a_conjunct_boundary() {
+        // No TOP-LEVEL `&&` at all: the whole expression is one conjunct, and
+        // it references the non-UI `is_task`, so it stays data-side intact.
+        let source = "(is_focused && is_expanded) || is_task";
+        let (data, ui) = split_condition(source).unwrap();
+        assert_eq!(data.as_deref(), Some(source));
+        assert_eq!(ui, Predicate::Always);
+    }
+
+    #[test]
+    fn nested_parentheses_keep_their_inner_ampersand_pairs() {
+        let (data, ui) =
+            split_condition("((is_focused && is_expanded) || is_task) && available_width_px < 600")
+                .unwrap();
+        assert_eq!(
+            data.as_deref(),
+            Some("((is_focused && is_expanded) || is_task)")
+        );
+        assert_eq!(
+            ui,
+            Predicate::Lt {
+                field: "available_width_px".into(),
+                value: Value::Integer(600),
+            }
+        );
+    }
+
+    #[test]
+    fn an_unbalanced_parenthesis_is_refused_naming_the_condition() {
+        let outcome = split_condition("is_focused && (is_task");
+        assert!(
+            matches!(&outcome, Err(e) if format!("{e:#}").contains("is_focused && (is_task")),
+            "unbalanced `(` must be refused by its text, got {outcome:?}"
+        );
+        let outcome = split_condition("is_task) && is_focused");
+        assert!(
+            matches!(&outcome, Err(e) if format!("{e:#}").contains("is_task) && is_focused")),
+            "unbalanced `)` must be refused by its text, got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn an_unterminated_quote_is_refused_naming_the_condition() {
+        let outcome = split_condition(r#"view_mode == "list"#);
+        assert!(
+            matches!(&outcome, Err(e) if format!("{e:#}").contains(r#"view_mode == "list"#)),
+            "unterminated quote must be refused by its text, got {outcome:?}"
+        );
     }
 
     #[test]
