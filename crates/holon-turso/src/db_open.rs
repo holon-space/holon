@@ -4,8 +4,10 @@
 //! what it computed: its materialized views, rebuilt from the tables they read,
 //! and the `block_derived` cache. That happens when the file was built with a
 //! different [`scalar_fns`] set, or when the engine could not load one of its
-//! views. A file the engine reports as damaged is moved aside, never deleted;
-//! any other open failure leaves the file where it is.
+//! views. A damaged file is moved aside, never deleted: the shared-WAL
+//! coordination file or the write-ahead log alone when the error points there,
+//! else every file of the database. Any other open failure leaves the files
+//! where they are.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -39,6 +41,13 @@ pub enum OpenOutcome {
         reason: String,
         views: Vec<String>,
     },
+    /// The write-ahead log was damaged and the main file intact. The log was
+    /// renamed to `backup`; the commits it held and the main file did not are
+    /// in that file only.
+    LogMovedAside {
+        reason: String,
+        backup: std::path::PathBuf,
+    },
     /// The engine could not use the file at all. It was renamed to `backup`,
     /// and a fresh database was opened in its place.
     MovedAside {
@@ -65,29 +74,16 @@ pub(crate) fn open(db_path: &Path, fns: &[ScalarFn]) -> Result<(Arc<Database>, O
         let db = open_with_io(Arc::new(MemoryIO::new()), path, OpenFlags::default(), fns)?;
         return Ok((db, OpenOutcome::Kept));
     }
+    let db = match open_file(path, fns) {
+        Ok(db) => db,
+        Err(e) => return recover_damaged(e, Leg::Open, db_path, path, fns),
+    };
     // The engine reads the write-ahead log at the first connect, so a damaged
     // log surfaces there.
-    let opened = open_file(path, fns).and_then(|db| {
-        db.connect().map_err(|e| unopenable(path, e))?;
-        Ok(db)
-    });
-    let db = match opened {
-        Ok(db) => db,
-        Err(StorageError::DatabaseUnopenable {
-            failure: DatabaseOpenFailure::Corrupt,
-            cause,
-            ..
-        }) => {
-            return set_aside(
-                None,
-                db_path,
-                path,
-                fns,
-                &format!("the engine cannot open it: {cause}"),
-            );
-        }
-        Err(e) => return Err(e),
-    };
+    if let Err(e) = db.connect() {
+        drop(db);
+        return recover_damaged(unopenable(path, e), Leg::Connect, db_path, path, fns);
+    }
     let Some(reason) = unusable_reason(&db, fns)? else {
         record_signature(&db, fns)?;
         return Ok((db, OpenOutcome::Kept));
@@ -139,9 +135,116 @@ fn open_file(_: &str, _: &[ScalarFn]) -> Result<Arc<Database>> {
     ))
 }
 
+/// Where an engine open error arose.
+#[derive(Clone, Copy)]
+enum Leg {
+    Open,
+    /// The first connect, which reads the write-ahead log.
+    Connect,
+}
+
+/// Moves aside the one file a `Corrupt` error points at and opens again; any
+/// other error is returned as it is. The engine does not say which file is
+/// damaged, so the smallest move that can explain the error goes first: the
+/// coordination file, which holds no rows; then the log, if the first connect
+/// raised the error; then every file of the database.
+fn recover_damaged(
+    error: StorageError,
+    leg: Leg,
+    db_path: &Path,
+    path: &str,
+    fns: &[ScalarFn],
+) -> Result<(Arc<Database>, OpenOutcome)> {
+    let StorageError::DatabaseUnopenable {
+        failure: DatabaseOpenFailure::Corrupt,
+        cause,
+        ..
+    } = error
+    else {
+        return Err(error);
+    };
+    let reason = format!("the engine cannot open it: {cause}");
+    let coordination = sidecar(path, COORDINATION_SUFFIX);
+    if coordination.exists() {
+        let backup = move_aside(&[coordination], path)?;
+        tracing::warn!(
+            "[open_database] {path}: {reason}. Moved its shared-WAL coordination file aside to \
+             {}{COORDINATION_SUFFIX}; it holds no rows",
+            backup.display()
+        );
+        return open(db_path, fns);
+    }
+    let log = sidecar(path, LOG_SUFFIX);
+    if matches!(leg, Leg::Connect) && log.exists() {
+        let backup = move_aside(&[log], path)?;
+        let backup = std::path::PathBuf::from(format!("{}{LOG_SUFFIX}", backup.display()));
+        tracing::error!(
+            "[open_database] {path}: {reason}. Moved its write-ahead log aside to {}; commits \
+             that were only in the log are in that file",
+            backup.display()
+        );
+        let (db, outcome) = open(db_path, fns)?;
+        return Ok(match outcome {
+            OpenOutcome::Kept | OpenOutcome::ViewsDropped { .. } => {
+                (db, OpenOutcome::LogMovedAside { reason, backup })
+            }
+            moved @ (OpenOutcome::LogMovedAside { .. } | OpenOutcome::MovedAside { .. }) => {
+                (db, moved)
+            }
+        });
+    }
+    set_aside(None, db_path, path, fns, &reason)
+}
+
+const LOG_SUFFIX: &str = "-wal";
+const COORDINATION_SUFFIX: &str = "-tshm";
+
+fn sidecar(path: &str, suffix: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(format!("{path}{suffix}"))
+}
+
+/// Rename each of `files` (files of the database at `path`) to a timestamped
+/// backup beside it, keeping its suffix. Returns the backup's base path.
+#[cfg(target_family = "unix")]
+fn move_aside(files: &[std::path::PathBuf], path: &str) -> Result<std::path::PathBuf> {
+    let backup = std::path::PathBuf::from(format!(
+        "{path}.unusable-{}",
+        chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ")
+    ));
+    for file in files.iter().filter(|f| f.exists()) {
+        let suffix = file
+            .to_str()
+            .and_then(|f| f.strip_prefix(path))
+            .unwrap_or_else(|| panic!("{} is not a file of {path}", file.display()));
+        let to = std::path::PathBuf::from(format!("{}{suffix}", backup.display()));
+        assert!(!to.exists(), "the backup {} exists already", to.display());
+        std::fs::rename(file, &to).map_err(|e| {
+            StorageError::DatabaseError(format!(
+                "move the unusable database file {} aside to {}: {e}",
+                file.display(),
+                to.display()
+            ))
+        })?;
+    }
+    Ok(backup)
+}
+
+/// OPFS files cannot be renamed through the engine's IO.
+#[cfg(not(target_family = "unix"))]
+fn move_aside(files: &[std::path::PathBuf], path: &str) -> Result<std::path::PathBuf> {
+    Err(StorageError::DatabaseError(format!(
+        "the database at {path} is unusable ({}). Copy it out of the browser storage and \
+         delete it there; the org files rebuild the blocks",
+        files
+            .iter()
+            .map(|f| f.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    )))
+}
+
 /// Rename every file of the database to a timestamped backup beside it and
 /// open a fresh one.
-#[cfg(target_family = "unix")]
 fn set_aside(
     db: Option<Arc<Database>>,
     db_path: &Path,
@@ -156,28 +259,7 @@ fn set_aside(
             "{path} is unusable ({reason}), but another holder in this process still has it open"
         );
     }
-    let backup = std::path::PathBuf::from(format!(
-        "{path}.unusable-{}",
-        chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ")
-    ));
-    for file in TursoDurableState::new(db_path).durable_paths() {
-        if !file.exists() {
-            continue;
-        }
-        let suffix = file
-            .to_str()
-            .and_then(|f| f.strip_prefix(path))
-            .unwrap_or_else(|| panic!("{} is not a file of {path}", file.display()));
-        let to = std::path::PathBuf::from(format!("{}{suffix}", backup.display()));
-        assert!(!to.exists(), "the backup {} exists already", to.display());
-        std::fs::rename(&file, &to).map_err(|e| {
-            StorageError::DatabaseError(format!(
-                "move the unusable database file {} aside to {}: {e}",
-                file.display(),
-                to.display()
-            ))
-        })?;
-    }
+    let backup = move_aside(&TursoDurableState::new(db_path).durable_paths(), path)?;
     tracing::error!(
         "[open_database] {path} is unusable: {reason}. Moved it aside to {} and opened a fresh \
          database; anything that was only in the database is in that file",
@@ -197,21 +279,6 @@ fn set_aside(
             backup,
         },
     ))
-}
-
-/// OPFS files cannot be renamed through the engine's IO.
-#[cfg(not(target_family = "unix"))]
-fn set_aside(
-    _: Option<Arc<Database>>,
-    _: &Path,
-    path: &str,
-    _: &[ScalarFn],
-    reason: &str,
-) -> Result<(Arc<Database>, OpenOutcome)> {
-    Err(StorageError::DatabaseError(format!(
-        "the database at {path} is unusable: {reason}. Copy it out of the browser storage and \
-         delete it there; the org files rebuild the blocks"
-    )))
 }
 
 /// In one transaction: drop every materialized view and every view the engine
@@ -338,18 +405,22 @@ fn unopenable(path: &str, e: LimboError) -> StorageError {
 
 fn open_failure(e: &LimboError) -> DatabaseOpenFailure {
     match e {
-        // Holon writes only UTF-8 files, so another encoding is a damaged header.
-        LimboError::Corrupt(_) | LimboError::NotADB | LimboError::UnsupportedEncoding(_) => {
-            DatabaseOpenFailure::Corrupt
-        }
+        LimboError::Corrupt(_) | LimboError::NotADB => DatabaseOpenFailure::Corrupt,
         LimboError::CompletionError(
             CompletionError::ShortRead { .. }
             | CompletionError::ShortReadWalFrame { .. }
             | CompletionError::WalFramePageMismatch { .. }
             | CompletionError::ChecksumMismatch { .. },
         ) => DatabaseOpenFailure::Corrupt,
-        // The engine raises it only where it takes a file or WAL lock.
-        LimboError::LockingError(_) => DatabaseOpenFailure::Locked,
+        // The engine names contention only in its text: a lock another process
+        // holds (`core/io/unix.rs`), or a database another process has open
+        // in the other WAL mode (`core/database.rs`).
+        LimboError::LockingError(message)
+            if message.ends_with("locked by another process")
+                || message.ends_with("in another process") =>
+        {
+            DatabaseOpenFailure::Locked
+        }
         LimboError::CompletionError(CompletionError::IOError(kind, _)) => {
             DatabaseOpenFailure::Io(*kind)
         }
@@ -831,8 +902,24 @@ mod tests {
                 DatabaseOpenFailure::Locked,
             ),
             (
-                LimboError::LockingError("Failed locking file 'x', permission denied".into()),
+                LimboError::LockingError(
+                    "Failed locking file 'x'. File is locked by another process".into(),
+                ),
                 DatabaseOpenFailure::Locked,
+            ),
+            (
+                LimboError::LockingError("Failed locking file 'x', permission denied".into()),
+                DatabaseOpenFailure::Unclassified,
+            ),
+            (
+                LimboError::LockingError(
+                    "mmap shared WAL coordination file failed: no memory".into(),
+                ),
+                DatabaseOpenFailure::Unclassified,
+            ),
+            (
+                LimboError::UnsupportedEncoding("UTF-16le".into()),
+                DatabaseOpenFailure::Unclassified,
             ),
             (
                 LimboError::DatabaseFull,

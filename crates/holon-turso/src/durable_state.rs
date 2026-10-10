@@ -1,8 +1,8 @@
 //! Turso's durable-state descriptor (`DurableReplicaState` impl).
 //!
 //! Owns the Turso-specific disk knowledge — `:memory:` detection and the
-//! `-wal`/`-shm` sidecar files — so consumers (the consolidator-epoch guard,
-//! the future handover migration) never hard-code it.
+//! `-wal`/`-shm`/`-tshm` sidecar files — so consumers (the consolidator-epoch
+//! guard, the future handover migration) never hard-code it.
 
 use std::path::Path;
 use std::path::PathBuf;
@@ -31,7 +31,7 @@ impl DurableReplicaState for TursoDurableState {
         if self.is_ephemeral() {
             return vec![];
         }
-        ["", "-wal", "-shm"]
+        ["", "-wal", "-shm", "-tshm"]
             .iter()
             .map(|suffix| {
                 if suffix.is_empty() {
@@ -70,13 +70,14 @@ mod tests {
     #[test]
     fn file_backed_db_is_durable_with_all_sidecars() {
         let state = TursoDurableState::new("/var/data/holon.db");
-        // file-backed => is_ephemeral() == false => the three sidecar paths.
+        // file-backed => is_ephemeral() == false => the file and its sidecars.
         assert_eq!(
             state.durable_paths(),
             vec![
                 PathBuf::from("/var/data/holon.db"),
                 PathBuf::from("/var/data/holon.db-wal"),
                 PathBuf::from("/var/data/holon.db-shm"),
+                PathBuf::from("/var/data/holon.db-tshm"),
             ]
         );
     }

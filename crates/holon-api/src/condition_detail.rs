@@ -289,6 +289,15 @@ impl ConditionKind {
                 vec![backup.clone()],
             ),
 
+            Self::DatabaseLogMovedAside { reason, backup } => ConditionDetail::with_body(
+                format!(
+                    "The database's write-ahead log could not be read ({reason}), so Holon moved \
+                     it aside and opened the database without it. The blocks came back from the \
+                     vault. Changes that were only in the log are in the moved file"
+                ),
+                vec![backup.clone()],
+            ),
+
             Self::UndoHistoryClearedAtBoot { entries } => ConditionDetail::prose(format!(
                 "{entries} step{} from the previous session were discarded",
                 if *entries == 1 { "" } else { "s" }

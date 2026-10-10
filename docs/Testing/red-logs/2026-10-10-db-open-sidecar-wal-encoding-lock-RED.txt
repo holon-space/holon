@@ -1,0 +1,94 @@
+# Red log: holon-work #155 round 3 (coordination file, WAL alone, UTF-16, lock classes, truncated WAL)
+# Tree: 0c9f3f16 plus the new tests and the OpenOutcome::LogMovedAside variant (no behavior change)
+# Commands: cargo nextest run -p holon-turso --test db_open_keeps_a_usable_file --run-ignored all; cargo nextest run -p holon-turso --lib -E 'test(engine_open_errors_map_to_their_class)'
+# a_truncated_write_ahead_log_does_not_lose_rows_silently is #[ignore]d: tracked as its own task
+# Date: 2026-10-10
+
+────────────
+ Nextest run ID c9e12b94-2255-4598-9474-c4bd39d75ea9 with nextest profile: default
+        PASS [   0.015s] ( 1/10) holon-turso::db_open_keeps_a_usable_file a_database_in_a_missing_directory_is_an_io_error
+        PASS [   0.032s] ( 2/10) holon-turso::db_open_keeps_a_usable_file a_read_only_database_file_is_not_moved_aside
+        PASS [   0.032s] ( 3/10) holon-turso::db_open_keeps_a_usable_file a_file_that_is_not_a_database_is_moved_aside
+        PASS [   0.033s] ( 4/10) holon-turso::db_open_keeps_a_usable_file a_database_in_a_read_only_directory_opens_where_it_is
+        FAIL [   0.034s] ( 5/10) holon-turso::db_open_keeps_a_usable_file a_damaged_coordination_file_is_moved_aside_alone
+  stdout ───
+    running 1 test
+    test a_damaged_coordination_file_is_moved_aside_alone ... FAILED
+    failures:
+    failures:
+        a_damaged_coordination_file_is_moved_aside_alone
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.02s
+  stderr ───
+    thread 'a_damaged_coordination_file_is_moved_aside_alone' (354504806) panicked at crates/holon-turso/tests/db_open_keeps_a_usable_file.rs:298:29:
+    a damaged coordination file must not stop the open: DatabaseUnopenable { path: "/var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/.tmpdllKWC/holon.db", failure: Corrupt, cause: "Corrupt database: shared WAL coordination file is smaller than the coordination header: got 396, minimum 4096" }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+        FAIL [   0.035s] ( 6/10) holon-turso::db_open_keeps_a_usable_file a_truncated_write_ahead_log_does_not_lose_rows_silently
+  stdout ───
+    running 1 test
+    test a_truncated_write_ahead_log_does_not_lose_rows_silently ... FAILED
+    failures:
+    failures:
+        a_truncated_write_ahead_log_does_not_lose_rows_silently
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.02s
+  stderr ───
+    thread 'a_truncated_write_ahead_log_does_not_lose_rows_silently' (354504812) panicked at crates/holon-turso/tests/db_open_keeps_a_usable_file.rs:365:9:
+    log cut to 0 bytes: the open reported Kept, but the committed row is gone (Err(ParseError("no such table: t")))
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+        PASS [   0.037s] ( 7/10) holon-turso::db_open_keeps_a_usable_file a_second_process_does_not_move_a_live_database_aside
+        FAIL [   0.038s] ( 8/10) holon-turso::db_open_keeps_a_usable_file a_database_in_another_text_encoding_is_kept_and_refused
+  stdout ───
+    running 1 test
+    test a_database_in_another_text_encoding_is_kept_and_refused ... FAILED
+    failures:
+    failures:
+        a_database_in_another_text_encoding_is_kept_and_refused
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.03s
+  stderr ───
+    thread 'a_database_in_another_text_encoding_is_kept_and_refused' (354504814) panicked at crates/holon-turso/tests/db_open_keeps_a_usable_file.rs:329:5:
+    assertion `left == right` failed: a UTF-16 database must stay at its path, unchanged; open gave Ok(MovedAside { reason: "the engine cannot open it: Unsupported text encoding: UTF-16le. Only UTF-8 is supported.", backup: "/var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/.tmpQ6Nc85/holon.db.unusable-20261010T211436.831Z" })
+      left: (false, ["/var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/.tmpQ6Nc85/holon.db.unusable-20261010T211436.831Z", "/var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/.tmpQ6Nc85/holon.db.unusable-20261010T211436.831Z-wal"])
+     right: (true, [])
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+        FAIL [   0.038s] ( 9/10) holon-turso::db_open_keeps_a_usable_file a_damaged_write_ahead_log_is_moved_aside_alone
+  stdout ───
+    running 1 test
+    test a_damaged_write_ahead_log_is_moved_aside_alone ... FAILED
+    failures:
+    failures:
+        a_damaged_write_ahead_log_is_moved_aside_alone
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.03s
+  stderr ───
+    thread 'a_damaged_write_ahead_log_is_moved_aside_alone' (354504810) panicked at crates/holon-turso/tests/db_open_keeps_a_usable_file.rs:269:9:
+    the open must report the moved log, got MovedAside { reason: "the engine cannot open it: Corrupt database: invalid page size in WAL: 2002873447", backup: "/var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/.tmpCXFI7V/holon.db.unusable-20261010T211436.831Z" }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+        PASS [   0.044s] (10/10) holon-turso::db_open_keeps_a_usable_file a_truncated_database_is_moved_aside
+────────────
+     Summary [   0.045s] 10 tests run: 6 passed, 4 failed, 0 skipped
+        FAIL [   0.034s] ( 5/10) holon-turso::db_open_keeps_a_usable_file a_damaged_coordination_file_is_moved_aside_alone
+        FAIL [   0.035s] ( 6/10) holon-turso::db_open_keeps_a_usable_file a_truncated_write_ahead_log_does_not_lose_rows_silently
+        FAIL [   0.038s] ( 8/10) holon-turso::db_open_keeps_a_usable_file a_database_in_another_text_encoding_is_kept_and_refused
+        FAIL [   0.038s] ( 9/10) holon-turso::db_open_keeps_a_usable_file a_damaged_write_ahead_log_is_moved_aside_alone
+error: test run failed
+
+#### unit
+────────────
+ Nextest run ID 933041a7-1c77-4269-87cd-edca907bcd3c with nextest profile: default
+        FAIL [   0.009s] (1/1) holon-turso db_open::tests::engine_open_errors_map_to_their_class
+  stdout ───
+    running 1 test
+    test db_open::tests::engine_open_errors_map_to_their_class ... FAILED
+    failures:
+    failures:
+        db_open::tests::engine_open_errors_map_to_their_class
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 251 filtered out; finished in 0.00s
+  stderr ───
+    thread 'db_open::tests::engine_open_errors_map_to_their_class' (354507282) panicked at crates/holon-turso/src/db_open.rs:876:13:
+    assertion `left == right` failed: Locking error: Failed locking file 'x', permission denied
+      left: Locked
+     right: Unclassified
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+  Cancelling due to test failure: 
+────────────
+     Summary [   0.010s] 1 test run: 0 passed, 1 failed, 251 skipped
+        FAIL [   0.009s] (1/1) holon-turso db_open::tests::engine_open_errors_map_to_their_class
+error: test run failed

@@ -514,19 +514,29 @@ impl FrontendInjectorExt for Injector {
                     .await;
                 tracing::info!("[FrontendSession] factory: BackendEngine resolved");
 
-                // A database the engine could not open was moved aside at open;
-                // say where it is.
+                // A damaged database file was moved aside at open; say where it is.
                 let opened = resolver.resolve::<holon::storage::db_open::BootOpenOutcome>();
-                if let holon::storage::db_open::OpenOutcome::MovedAside { reason, backup } =
-                    &opened.0
-                {
+                let moved = match &opened.0 {
+                    holon::storage::db_open::OpenOutcome::MovedAside { reason, backup } => {
+                        Some(holon_api::ConditionKind::DatabaseMovedAside {
+                            reason: reason.clone(),
+                            backup: backup.display().to_string(),
+                        })
+                    }
+                    holon::storage::db_open::OpenOutcome::LogMovedAside { reason, backup } => {
+                        Some(holon_api::ConditionKind::DatabaseLogMovedAside {
+                            reason: reason.clone(),
+                            backup: backup.display().to_string(),
+                        })
+                    }
+                    holon::storage::db_open::OpenOutcome::Kept
+                    | holon::storage::db_open::OpenOutcome::ViewsDropped { .. } => None,
+                };
+                if let Some(reason) = moved {
                     let bus = resolver.resolve::<Arc<holon_api::ConditionBus>>();
                     bus.emit(holon_api::Condition {
                         subject: "database".to_string(),
-                        reason: holon_api::ConditionKind::DatabaseMovedAside {
-                            reason: reason.clone(),
-                            backup: backup.display().to_string(),
-                        },
+                        reason,
                     });
                 }
 

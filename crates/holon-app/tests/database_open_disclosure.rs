@@ -312,3 +312,48 @@ async fn every_table_is_classified_as_rebuilt_or_lost() {
         "classify these tables in crates/holon-turso/src/table_classes.rs: {unclassified:?}"
     );
 }
+
+/// A damaged write-ahead log beside an intact database: only the log moves
+/// aside, and the boot says so.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_damaged_write_ahead_log_is_moved_aside_and_disclosed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("probe.org"), VAULT_ORG).expect("write the probe vault");
+    let db_path = dir.path().join(DB_FILE);
+    drop(holon::storage::turso::TursoBackend::open_database(&db_path).expect("create"));
+    let garbage = b"a write-ahead log nobody can read".repeat(50);
+    std::fs::write(dir.path().join(format!("{DB_FILE}-wal")), &garbage).expect("damage the log");
+
+    let booted = boot(dir.path(), DB_FILE).await;
+
+    let current = booted
+        .injector
+        .resolve::<Arc<holon_api::ConditionBus>>()
+        .subscribe()
+        .current;
+    let moved = current
+        .iter()
+        .find(|c| c.condition_key().kind == "database-log-moved-aside")
+        .unwrap_or_else(|| {
+            panic!(
+                "a log moved aside at boot was not disclosed: {:?}",
+                raised_kinds(&booted)
+            )
+        });
+    let detail = moved.reason.detail(&moved.subject);
+    let [backup] = detail.body.as_slice() else {
+        panic!(
+            "the detail must carry the moved log's path, got {:?}",
+            detail.body
+        );
+    };
+    assert_eq!(
+        std::fs::read(backup).expect("read the moved log"),
+        garbage,
+        "the disclosed path must hold the damaged log"
+    );
+    assert!(
+        !raised_kinds(&booted).contains(&"database-moved-aside".to_string()),
+        "the intact database must not be moved aside"
+    );
+}

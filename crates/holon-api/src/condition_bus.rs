@@ -297,6 +297,12 @@ pub enum ConditionKind {
     ///
     /// All-clear: none — the backup stays where it is for the whole session.
     DatabaseMovedAside { reason: String, backup: String },
+    /// The database's write-ahead log was damaged at boot, so it was renamed
+    /// to `backup` and the intact main file opened. Commits that were only in
+    /// the log are in `backup`; the vault refills the blocks.
+    ///
+    /// All-clear: none — the backup stays where it is for the whole session.
+    DatabaseLogMovedAside { reason: String, backup: String },
     /// A file NAMES a connection but cannot be used, so the connection does
     /// not exist: a stale `schema_version`, a file that will not parse, a
     /// reference to another connection's secret, or two files claiming one
@@ -682,6 +688,7 @@ impl ConditionKind {
     pub const SECRETS_HELD_IN_MEMORY: &'static str = "secrets-held-in-memory";
     pub const UNDO_HISTORY_CLEARED_AT_BOOT: &'static str = "undo-history-cleared-at-boot";
     pub const DATABASE_MOVED_ASIDE: &'static str = "database-moved-aside";
+    pub const DATABASE_LOG_MOVED_ASIDE: &'static str = "database-log-moved-aside";
     pub const SHARED_SUBTREE_NOT_MATERIALIZED: &'static str = "shared-subtree-not-materialized";
     pub const SNAPSHOT_LOAD_FAILED: &'static str = "snapshot-load-failed";
     pub const SNAPSHOT_SAVE_FAILED: &'static str = "snapshot-save-failed";
@@ -753,6 +760,7 @@ impl ConditionKind {
             Self::SecretsHeldInMemory { .. } => Self::SECRETS_HELD_IN_MEMORY,
             Self::UndoHistoryClearedAtBoot { .. } => Self::UNDO_HISTORY_CLEARED_AT_BOOT,
             Self::DatabaseMovedAside { .. } => Self::DATABASE_MOVED_ASIDE,
+            Self::DatabaseLogMovedAside { .. } => Self::DATABASE_LOG_MOVED_ASIDE,
             Self::SnapshotSaveFailed(_) => Self::SNAPSHOT_SAVE_FAILED,
             Self::SnapshotLoadFailed(_) => Self::SNAPSHOT_LOAD_FAILED,
             Self::RehydrationFailed(_) => Self::REHYDRATION_FAILED,

@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use holon_core::storage::types::DatabaseOpenFailure;
 use holon_core::storage::types::StorageError;
+use holon_turso::db_open::OpenOutcome;
 use holon_turso::turso::TursoBackend;
 use turso_core::Database;
 
@@ -159,7 +160,7 @@ fn a_database_in_a_read_only_directory_opens_where_it_is() {
         "no file may be renamed; open gave {opened:?}"
     );
     assert!(
-        matches!(opened, Ok(holon_turso::db_open::OpenOutcome::Kept)),
+        matches!(opened, Ok(OpenOutcome::Kept)),
         "a database whose files are writable opens in a read-only directory, got {opened:?}"
     );
 }
@@ -187,7 +188,7 @@ fn a_database_in_a_missing_directory_is_an_io_error() {
 fn assert_moved_aside(path: &Path, files: &[(&str, Vec<u8>)], case: &str) {
     let opened = TursoBackend::open_database_reporting_outcome(path);
     let (db, outcome) = opened.unwrap_or_else(|e| panic!("{case}: the open must recover: {e:?}"));
-    let holon_turso::db_open::OpenOutcome::MovedAside { backup, .. } = outcome else {
+    let OpenOutcome::MovedAside { backup, .. } = outcome else {
         panic!("{case}: a damaged file must be moved aside, got {outcome:?}");
     };
     for (suffix, bytes) in files {
@@ -231,15 +232,151 @@ fn a_truncated_database_is_moved_aside() {
     }
 }
 
-/// The write-ahead log holds committed pages of its database, so the two move
-/// aside as one pair.
+/// `build`, then fold the log into the main file, so the main file alone
+/// holds the row.
+fn build_checkpointed(path: &Path) {
+    build(path);
+    let (db, _) = TursoBackend::open_database_reporting_outcome(path).expect("reopen");
+    exec(&db, "PRAGMA wal_checkpoint(TRUNCATE)");
+}
+
+fn rows_in_t(db: &Arc<Database>) -> Vec<Vec<turso_core::Value>> {
+    db.connect()
+        .unwrap()
+        .prepare("SELECT id FROM t")
+        .and_then(|mut stmt| stmt.run_collect_rows())
+        .unwrap_or_else(|e| panic!("SELECT id FROM t: {e}"))
+}
+
+fn single_row() -> Vec<Vec<turso_core::Value>> {
+    vec![vec![turso_core::Value::Numeric(
+        turso_core::Numeric::Integer(1),
+    )]]
+}
+
+/// A damaged log costs only the commits it held: the intact main file stays
+/// where it is, and the open says the log was moved aside.
 #[test]
-fn a_damaged_write_ahead_log_is_moved_aside_with_its_database() {
+fn a_damaged_write_ahead_log_is_moved_aside_alone() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("holon.db");
-    build(&path);
-    let db_bytes = std::fs::read(&path).unwrap();
+    build_checkpointed(&path);
+    let inode = std::fs::metadata(&path).unwrap().ino();
     let wal_bytes = b"garbage wal".repeat(50);
     std::fs::write(dir.path().join("holon.db-wal"), &wal_bytes).unwrap();
-    assert_moved_aside(&path, &[("", db_bytes), ("-wal", wal_bytes)], "damaged WAL");
+
+    let (db, outcome) = TursoBackend::open_database_reporting_outcome(&path)
+        .unwrap_or_else(|e| panic!("a damaged log must not stop the open: {e:?}"));
+    let OpenOutcome::LogMovedAside { backup, .. } = outcome else {
+        panic!("the open must report the moved log, got {outcome:?}");
+    };
+    assert!(
+        std::fs::read(&backup).ok() == Some(wal_bytes),
+        "{} must hold the damaged log",
+        backup.display()
+    );
+    assert_eq!(
+        (std::fs::metadata(&path).unwrap().ino(), rows_in_t(&db)),
+        (inode, single_row()),
+        "the intact main file must stay at its path with its checkpointed row"
+    );
+}
+
+/// The shared-WAL coordination file holds no rows. A damaged one is moved
+/// aside alone; the engine does not need it to open a database that no
+/// multi-process writer holds, and does not create it again.
+#[test]
+fn a_damaged_coordination_file_is_moved_aside_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("holon.db");
+    build_checkpointed(&path);
+    let inode = std::fs::metadata(&path).unwrap().ino();
+    let tshm = dir.path().join("holon.db-tshm");
+    assert!(!tshm.exists(), "a Holon open creates no coordination file");
+    let garbage = b"garbage tshm".repeat(33);
+    std::fs::write(&tshm, &garbage).unwrap();
+
+    let (db, outcome) = TursoBackend::open_database_reporting_outcome(&path)
+        .unwrap_or_else(|e| panic!("a damaged coordination file must not stop the open: {e:?}"));
+    assert_eq!(outcome, OpenOutcome::Kept);
+    assert_eq!(
+        (std::fs::metadata(&path).unwrap().ino(), rows_in_t(&db)),
+        (inode, single_row()),
+        "the database must stay at its path with its row"
+    );
+    let moved: Vec<_> = backups(dir.path());
+    match moved.as_slice() {
+        [only] if only.to_string_lossy().ends_with("-tshm") => assert!(
+            std::fs::read(only).ok() == Some(garbage),
+            "{} must hold the damaged coordination file",
+            only.display()
+        ),
+        other => panic!("only the coordination file may be moved aside, found {other:?}"),
+    }
+    assert!(
+        !tshm.exists(),
+        "the engine must not create the coordination file again"
+    );
+}
+
+/// A valid SQLite file in an encoding the engine does not support is not
+/// damaged: it stays, and the open names the cause.
+#[test]
+fn a_database_in_another_text_encoding_is_kept_and_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("holon.db");
+    build_checkpointed(&path);
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes[56..60].copy_from_slice(&2u32.to_be_bytes());
+    std::fs::write(&path, &bytes).unwrap();
+
+    let opened = TursoBackend::open_database_reporting_outcome(&path).map(|(_, o)| o);
+    assert_eq!(
+        (
+            std::fs::read(&path).ok() == Some(bytes),
+            backups(dir.path())
+        ),
+        (true, vec![]),
+        "a UTF-16 database must stay at its path, unchanged; open gave {opened:?}"
+    );
+    match opened {
+        Err(StorageError::DatabaseUnopenable {
+            failure: DatabaseOpenFailure::Unclassified,
+            cause,
+            ..
+        }) => assert!(
+            cause.contains("UTF-16"),
+            "the cause must name the encoding: {cause}"
+        ),
+        other => panic!("the open must refuse with an unclassified error, got {other:?}"),
+    }
+}
+
+/// A log cut short by a crash drops the commits it held, and the open says
+/// nothing about it.
+#[test]
+#[ignore = "holon-work #155 truncated WAL: a truncated or empty WAL silently loses committed rows and the open reports Kept; tracked as its own task"]
+fn a_truncated_write_ahead_log_does_not_lose_rows_silently() {
+    for keep in [0usize, 40] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("holon.db");
+        build(&path);
+        let wal = dir.path().join("holon.db-wal");
+        let bytes = std::fs::read(&wal).unwrap();
+        assert!(bytes.len() > keep, "the log holds {} bytes", bytes.len());
+        std::fs::write(&wal, &bytes[..keep]).unwrap();
+
+        let (db, outcome) = TursoBackend::open_database_reporting_outcome(&path)
+            .unwrap_or_else(|e| panic!("log cut to {keep} bytes: {e:?}"));
+        let rows = db
+            .connect()
+            .unwrap()
+            .prepare("SELECT id FROM t")
+            .and_then(|mut stmt| stmt.run_collect_rows());
+        assert!(
+            outcome != OpenOutcome::Kept || rows.as_ref().is_ok_and(|r| r.len() == 1),
+            "log cut to {keep} bytes: the open reported Kept, but the committed row is gone \
+             ({rows:?})"
+        );
+    }
 }

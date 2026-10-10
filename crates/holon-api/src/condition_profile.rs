@@ -553,6 +553,15 @@ const DATABASE_MOVED_ASIDE: ConditionProfile = ConditionProfile::new(
     &[],
 );
 
+const DATABASE_LOG_MOVED_ASIDE: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Warning,
+    "The database's write-ahead log was damaged and was moved aside",
+    icons::WARN,
+    ConditionPlacement::Banner,
+    AllClear::UntilRestart,
+    &[],
+);
+
 const LEFT_SHARED_PAGE: ConditionProfile = ConditionProfile::new(
     ConditionSeverity::Info,
     "You left a shared page",
@@ -922,6 +931,7 @@ impl ConditionKind {
             Self::SecretsHeldInMemory { .. } => SECRETS_HELD_IN_MEMORY,
             Self::UndoHistoryClearedAtBoot { .. } => UNDO_HISTORY_CLEARED_AT_BOOT,
             Self::DatabaseMovedAside { .. } => DATABASE_MOVED_ASIDE,
+            Self::DatabaseLogMovedAside { .. } => DATABASE_LOG_MOVED_ASIDE,
             Self::PairingReimportedLocalContent { .. } => PAIRING_REIMPORTED_LOCAL_CONTENT,
             Self::LeftSharedPage { .. } => LEFT_SHARED_PAGE,
             Self::DeletedSharedPage { .. } => DELETED_SHARED_PAGE,
