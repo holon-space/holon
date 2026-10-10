@@ -23,18 +23,28 @@ const BOUND: std::time::Duration = std::time::Duration::from_secs(20);
 /// Speaks Streamable HTTP over a raw socket rather than through `rmcp`'s server
 /// so that it can answer what no cooperative implementation would.
 fn endless_pagination_peer(tools_per_page: usize) -> String {
+    peer(tools_per_page, true)
+}
+
+/// A peer that answers `initialize` and hands out its whole tool list in one
+/// page, so a connect against it succeeds.
+fn finite_peer() -> String {
+    peer(1, false)
+}
+
+fn peer(tools_per_page: usize, endless: bool) -> String {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind the hostile peer");
     let uri = format!("http://{}/mcp", listener.local_addr().expect("peer addr"));
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(stream) = stream else { continue };
-            std::thread::spawn(move || serve(stream, tools_per_page));
+            std::thread::spawn(move || serve(stream, tools_per_page, endless));
         }
     });
     uri
 }
 
-fn serve(mut stream: std::net::TcpStream, tools_per_page: usize) {
+fn serve(mut stream: std::net::TcpStream, tools_per_page: usize, endless: bool) {
     use std::io::BufRead as _;
     let peer = stream.try_clone().expect("clone the socket");
     let mut head = std::io::BufReader::new(peer);
@@ -81,16 +91,21 @@ fn serve(mut stream: std::net::TcpStream, tools_per_page: usize) {
                 "capabilities": {"tools": {}},
                 "serverInfo": {"name": "endless", "version": "0"},
             }),
-            "tools/list" => serde_json::json!({
-                "tools": (0..tools_per_page)
-                    .map(|i| serde_json::json!({
-                        "name": format!("tool_{i}"),
-                        "description": "a tool",
-                        "inputSchema": {"type": "object"},
-                    }))
-                    .collect::<Vec<_>>(),
-                "nextCursor": "there is always one more page",
-            }),
+            "tools/list" => {
+                let mut page = serde_json::json!({
+                    "tools": (0..tools_per_page)
+                        .map(|i| serde_json::json!({
+                            "name": format!("tool_{i}"),
+                            "description": "a tool",
+                            "inputSchema": {"type": "object"},
+                        }))
+                        .collect::<Vec<_>>(),
+                });
+                if endless {
+                    page["nextCursor"] = serde_json::json!("there is always one more page");
+                }
+                page
+            }
             _ => serde_json::json!({}),
         };
         let reply = serde_json::json!({"jsonrpc": "2.0", "id": msg["id"], "result": result});
@@ -155,6 +170,37 @@ async fn a_peer_that_paginates_in_full_pages_is_cut_at_the_item_bound() {
     let err = connect_failure(&endless_pagination_peer(1024)).await;
     assert!(
         err.contains("MAX_LIST_ITEMS"),
+        "the refusal must name the bound it hit; got: {err}"
+    );
+}
+
+/// `finish_integration` runs TWO enumerations against ONE budget
+/// (`list_all_resource_templates`, then `from_peer_shared` ->
+/// `list_all_tools`), and the PEER owns the time the first one takes: it
+/// decides how many pages and how many templates — each of which becomes a
+/// cache table and a DDL — there are. A spent budget is therefore a state a
+/// peer can drive the connect into, so it has to read like every other bound
+/// here: refused, naming CONNECT_BUDGET.
+#[tokio::test]
+async fn an_enumeration_starting_past_the_budget_is_refused_naming_the_bound() {
+    let (peer, _service) = holon_mcp_client::connect_mcp(&finite_peer(), None)
+        .await
+        .expect("a peer that lists its tools in one page connects");
+    // The peer spent the connect budget on its first enumeration. Paused only
+    // now, so the connect above ran on the real clock.
+    tokio::time::pause();
+    tokio::time::advance(holon_mcp_client::CONNECT_BUDGET + std::time::Duration::from_secs(1))
+        .await;
+    let outcome =
+        McpOperationProvider::from_peer_shared(peer, empty_sidecar(), HashMap::new()).await;
+    let err = format!(
+        "{:#}",
+        outcome
+            .err()
+            .expect("no provider from an enumeration that cannot run")
+    );
+    assert!(
+        err.contains("CONNECT_BUDGET"),
         "the refusal must name the bound it hit; got: {err}"
     );
 }

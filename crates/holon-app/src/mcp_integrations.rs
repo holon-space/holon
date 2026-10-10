@@ -64,6 +64,9 @@ async fn record_status(
     status: crate::integration_projection::IntegrationStatus,
     cause: &str,
 ) {
+    // A cause can be a peer's or a sidecar's own text, and it lands in the
+    // Integrations row.
+    let cause = &holon_mcp_client::bounded_peer_text(cause);
     attribution.set_status(name, status, cause);
     if let Err(e) = crate::integration_projection::set_integration_status(db, name, status).await {
         warn!(
@@ -130,6 +133,41 @@ fn spawn_status_from_sync_health(
     });
 }
 
+/// Follow one connected integration's inbound signal bound for the life of the
+/// SESSION, disclosing each collapse.
+///
+/// A task rather than a one-shot read at connect: when a peer floods is the
+/// peer's choice, and it is always after the connect.
+fn spawn_disclose_signal_loss(
+    bus: Arc<ConditionBus>,
+    name: String,
+    mut signals: tokio::sync::watch::Receiver<Option<String>>,
+    shutdown: &holon_api::lifecycle::SessionShutdown,
+) {
+    let cancelled = shutdown.cancelled();
+    let pump = async move {
+        // The current value first: a peer can flood during the connect, which
+        // is before this task exists, and waiting for the next change would
+        // leave that one disclosed in the log only.
+        loop {
+            let collapsed = signals.borrow_and_update().clone();
+            if let Some(reason) = collapsed {
+                disclose_signals_collapsed(&name, &reason, &bus);
+            }
+            if signals.changed().await.is_err() {
+                break;
+            }
+        }
+    };
+    shutdown.spawn("integration-signal-loss", async move {
+        tokio::select! {
+            biased;
+            () = cancelled => {}
+            () = pump => {}
+        }
+    });
+}
+
 /// Declare the tables `provider` owns BEFORE the connect attempt.
 ///
 /// A sidecar names its entities whether or not the remote ever answers, so
@@ -179,7 +217,7 @@ fn disclose_connect_failure(name: &str, error: &anyhow::Error, bus: &ConditionBu
         subject: name.to_string(),
         reason: ConditionKind::IntegrationConnectFailed {
             integration: name.to_string(),
-            error: format!("{error:#}"),
+            error: holon_mcp_client::bounded_peer_text(&format!("{error:#}")),
         },
     });
 }
@@ -205,7 +243,7 @@ fn disclose_unusable_config(
         reason: ConditionKind::IntegrationSidecarUnusable {
             provider: name.to_string(),
             installed_path: origin.unwrap_or("(bundled with this build)").to_string(),
-            why: format!("{error:#}"),
+            why: holon_mcp_client::bounded_peer_text(&format!("{error:#}")),
         },
     });
 }
@@ -225,7 +263,29 @@ fn disclose_discovery_incomplete(name: &str, error: &str, bus: &ConditionBus) {
         subject: name.to_string(),
         reason: ConditionKind::IntegrationDiscoveryIncomplete {
             integration: name.to_string(),
-            error: error.to_string(),
+            error: holon_mcp_client::bounded_peer_text(error),
+        },
+    });
+}
+
+/// Disclose that `name`'s peer pushed more resource-change signals than one
+/// connection may hold.
+///
+/// Not a sync failure and not a lost update: every signal that did not fit was
+/// widened into a full re-sync, so the rows are current. What the user is told
+/// is that this peer's freshness is coarse, because a peer doing this
+/// repeatedly turns every notice into a full re-sync of everything it syncs.
+fn disclose_signals_collapsed(name: &str, reason: &str, bus: &ConditionBus) {
+    warn!(
+        "[IntegrationSupervisor] Provider '{name}' pushed more resource-change signals than one \
+         connection may hold: {reason}. Every entity it syncs is re-synced once instead of the \
+         resources it named."
+    );
+    bus.emit(Condition {
+        subject: name.to_string(),
+        reason: ConditionKind::IntegrationChangeSignalsCollapsed {
+            integration: name.to_string(),
+            reason: holon_mcp_client::bounded_peer_text(reason),
         },
     });
 }
@@ -715,6 +775,9 @@ impl IntegrationSupervisor {
             "",
         )
         .await;
+        if let Some(signals) = integration.signal_loss.clone() {
+            spawn_disclose_signal_loss(self.bus.clone(), name.to_string(), signals, &self.shutdown);
+        }
         if syncs {
             spawn_status_from_sync_health(
                 self.db.clone(),
@@ -1098,6 +1161,68 @@ mod tests {
         assert!(
             error.contains("MAX_LIST_PAGES"),
             "the disclosure must carry the reason, bound included: {error}"
+        );
+    }
+
+    /// A peer picks its own error text, and it lands in a toast and in the
+    /// integration's row. A megabyte of it is not a disclosure — and cutting it
+    /// silently would hide that there was more.
+    #[tokio::test(flavor = "current_thread")]
+    async fn peer_error_text_is_bounded_in_what_is_disclosed() {
+        let bus = ConditionBus::new();
+        disclose_connect_failure("todoist", &anyhow::anyhow!("{}", "A".repeat(1 << 20)), &bus);
+
+        let mut current = bus.subscribe().current;
+        let ev = current.remove(0);
+        let ConditionKind::IntegrationConnectFailed { error, .. } = ev.reason else {
+            panic!("expected IntegrationConnectFailed, got {:?}", ev.reason)
+        };
+        assert!(
+            error.len() <= 8192,
+            "a peer's error text must be bounded; got {} bytes",
+            error.len()
+        );
+        assert!(
+            error.contains("bytes cut"),
+            "what was cut must be visible, not silent: {}",
+            &error[..error.len().min(200)]
+        );
+    }
+
+    /// A peer that floods its change signals must say so with the reason: the
+    /// rows are current, but every notice it sends now costs a full re-sync of
+    /// everything that integration syncs.
+    #[tokio::test(flavor = "current_thread")]
+    async fn collapsed_change_signals_are_disclosed_on_the_degraded_bus() {
+        let bus = ConditionBus::new();
+        let mut current = bus.subscribe().current;
+        assert!(current.is_empty());
+
+        disclose_signals_collapsed(
+            "todoist",
+            "MAX_PENDING_SYNC_URIS (256) resource URIs of this connection are already waiting \
+             for a re-sync",
+            &bus,
+        );
+
+        let mut current = bus.subscribe().current;
+        assert_eq!(current.len(), 1);
+        let ev = current.remove(0);
+        assert_eq!(ev.subject, "todoist");
+        let ConditionKind::IntegrationChangeSignalsCollapsed {
+            integration,
+            reason,
+        } = ev.reason
+        else {
+            panic!(
+                "expected IntegrationChangeSignalsCollapsed, got {:?}",
+                ev.reason
+            );
+        };
+        assert_eq!(integration, "todoist");
+        assert!(
+            reason.contains("MAX_PENDING_SYNC_URIS"),
+            "the disclosure must carry the reason, bound included: {reason}"
         );
     }
 

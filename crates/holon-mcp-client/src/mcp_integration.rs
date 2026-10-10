@@ -20,7 +20,6 @@ use tracing::info;
 use tracing::warn;
 
 use crate::credential_store::TursoCredentialStore;
-use crate::mcp_notification_handler::NotifyingClientHandler;
 use crate::mcp_notification_handler::ResourceUpdateReceiver;
 use crate::mcp_provider::EntityFieldReader;
 use crate::mcp_provider::McpOperationProvider;
@@ -38,8 +37,10 @@ use crate::mcp_sidecar::SyncConfig;
 use crate::mcp_sidecar::SyncInterval;
 use crate::mcp_sync_engine::McpSyncEngine;
 use crate::mcp_sync_strategy::SyncStrategy;
+use crate::peer_budget::InboundNotices;
 use crate::rest_transport::RestCallSurface;
 use crate::rest_transport::RestManual;
+use crate::secure_client::MAX_PENDING_SYNC_URIS;
 use crate::sync_freshness::ProbedResourceCapabilities;
 
 /// Default poll cadence for a `rest` integration whose sync entities declare
@@ -145,6 +146,11 @@ pub struct McpIntegration {
     /// templates would have declared, when it did. `None` means the template
     /// list was read in full — NOT that the peer publishes none.
     pub discovery_incomplete: Option<String>,
+    /// Fires with the reason whenever an inbound bound replaced this
+    /// connection's per-resource re-syncs with one full re-sync, so the app can
+    /// disclose that its peer pushed more change signals than it may park.
+    /// `None` for the `rest` transport, which has no peer to push any.
+    pub signal_loss: Option<tokio::sync::watch::Receiver<Option<String>>>,
     /// Producer handle into the sync event loop.
     sync_event_tx: mpsc::UnboundedSender<SyncEvent>,
 }
@@ -354,9 +360,11 @@ impl PendingOAuthFlows {
             .map_err(|e| anyhow::anyhow!("OAuth token exchange failed: {e}"))?;
 
         info!("[OAuth] Token exchange successful, connecting...");
-        let (handler, receiver) = NotifyingClientHandler::new();
+        let budget = crate::peer_budget::PeerBudget::new();
+        let (handler, receiver) = budget.notifying_handler();
         let (peer, service) =
-            connect_mcp_oauth_with_handler(&pending.uri, pending.auth_manager, handler).await?;
+            connect_mcp_oauth_with_handler(&pending.uri, pending.auth_manager, handler, budget)
+                .await?;
         finish_integration(
             peer,
             service,
@@ -392,8 +400,9 @@ pub async fn build_mcp_integration(
     match &config.transport {
         McpTransport::Http { uri } => match &config.auth_mode {
             AuthMode::None => {
-                let (handler, receiver) = NotifyingClientHandler::new();
-                let (peer, service) = connect_mcp_with_handler(uri, None, handler).await?;
+                let budget = crate::peer_budget::PeerBudget::new();
+                let (handler, receiver) = budget.notifying_handler();
+                let (peer, service) = connect_mcp_with_handler(uri, None, handler, budget).await?;
                 let integration = finish_integration(
                     peer,
                     service,
@@ -409,9 +418,10 @@ pub async fn build_mcp_integration(
                 Ok(McpConnectionResult::Connected(integration))
             }
             AuthMode::StaticToken(token) => {
-                let (handler, receiver) = NotifyingClientHandler::new();
+                let budget = crate::peer_budget::PeerBudget::new();
+                let (handler, receiver) = budget.notifying_handler();
                 let (peer, service) =
-                    connect_mcp_with_handler(uri, Some(token.as_str()), handler).await?;
+                    connect_mcp_with_handler(uri, Some(token.as_str()), handler, budget).await?;
                 let integration = finish_integration(
                     peer,
                     service,
@@ -442,9 +452,10 @@ pub async fn build_mcp_integration(
             }
         },
         McpTransport::ChildProcess { command, args, env } => {
-            let (handler, receiver) = NotifyingClientHandler::new();
+            let budget = crate::peer_budget::PeerBudget::new();
+            let (handler, receiver) = budget.notifying_handler();
             let (peer, service) =
-                connect_mcp_child_with_handler(command, args, env, handler).await?;
+                connect_mcp_child_with_handler(command, args, env, handler, budget).await?;
             let integration = finish_integration(
                 peer,
                 service,
@@ -515,8 +526,10 @@ async fn build_oauth_integration(
 
     if has_stored {
         info!("[OAuth] Found stored credentials for '{uri}', attempting connection");
-        let (handler, receiver) = NotifyingClientHandler::new();
-        let (peer, service) = connect_mcp_oauth_with_handler(&uri, auth_manager, handler).await?;
+        let budget = crate::peer_budget::PeerBudget::new();
+        let (handler, receiver) = budget.notifying_handler();
+        let (peer, service) =
+            connect_mcp_oauth_with_handler(&uri, auth_manager, handler, budget).await?;
         let integration = finish_integration(
             peer,
             service,
@@ -1211,30 +1224,24 @@ fn spawn_runner(
     discovery_incomplete: Option<String>,
 ) -> McpIntegration {
     // One serialized consumer per integration: initial sync, notification
-    // resyncs, and poll ticks all flow through the same channel, so per-entity
-    // sync work never overlaps.
+    // resyncs, and poll ticks all flow through the same loop, so per-entity
+    // sync work never overlaps. Holon's own events (the initial sync, poll
+    // ticks) come through this channel; the peer's notices stay on their own
+    // bounded one, which the loop reads directly — relaying them here would
+    // park a peer-chosen number of URIs in an unbounded queue.
     let (sync_event_tx, sync_event_rx) = mpsc::unbounded_channel::<SyncEvent>();
+    let signal_loss = notification_receiver
+        .as_ref()
+        .map(|receiver| receiver.notices.collapses());
     let sync_event_task = spawn_sync_event_loop(
         sync_event_rx,
+        notification_receiver,
         sync_engine.clone(),
         sync_gate,
         SyncLoopTuning::default(),
     );
 
     let mut background_tasks = Vec::new();
-
-    // Notification forwarder: resource-updated URIs -> serialized consumer.
-    // Only for transports that push notifications (MCP); `rest` polls instead.
-    if let Some(mut receiver) = notification_receiver {
-        let tx = sync_event_tx.clone();
-        background_tasks.push(tokio::spawn(async move {
-            while let Some(uri) = receiver.0.recv().await {
-                if tx.send(SyncEvent::NotificationUri(uri)).is_err() {
-                    break;
-                }
-            }
-        }));
-    }
 
     // Poll tickers: one per entity with a configured interval.
     for (entity_name, every) in poll_entities {
@@ -1263,6 +1270,7 @@ fn spawn_runner(
         fdw_backed_tables,
         clock_grains,
         discovery_incomplete,
+        signal_loss,
         sync_event_tx,
     }
 }
@@ -1538,16 +1546,32 @@ struct PendingSyncWork {
 }
 
 impl PendingSyncWork {
-    fn absorb(&mut self, event: SyncEvent) {
+    /// Take `event` into this batch, or say which bound widened the batch into
+    /// a full re-sync instead.
+    ///
+    /// The URI set is the second place a peer's change signals wait (the first
+    /// is its bounded inbound queue), so it carries the same bound. Reaching it
+    /// loses no signal: a full re-sync covers every URI in the batch and every
+    /// one that could not join it.
+    fn absorb(&mut self, event: SyncEvent) -> Option<String> {
         match event {
             SyncEvent::SyncAll => self.sync_all = true,
             SyncEvent::NotificationUri(uri) => {
+                if self.uris.len() >= MAX_PENDING_SYNC_URIS && !self.uris.contains(&uri) {
+                    self.uris.clear();
+                    self.sync_all = true;
+                    return Some(format!(
+                        "one batch of resource-updated notices reached MAX_PENDING_SYNC_URIS \
+                         ({MAX_PENDING_SYNC_URIS}) distinct URIs"
+                    ));
+                }
                 self.uris.insert(uri);
             }
             SyncEvent::PollTick(entity) => {
                 self.poll_entities.insert(entity);
             }
         }
+        None
     }
 
     fn is_empty(&self) -> bool {
@@ -1637,6 +1661,21 @@ async fn await_gate(gate: &SyncGate, tuning: &SyncLoopTuning) {
     }
 }
 
+/// Announce on the connection's inbound signal that `reason` widened its
+/// per-resource re-syncs into one full re-sync.
+///
+/// A loop driven through [`SyncEvent`] directly (a transport with no peer, or a
+/// test) has no such signal, and a collapse must not become quiet there.
+fn collapse(notices: Option<&InboundNotices>, reason: String) {
+    match notices {
+        Some(notices) => notices.collapse(reason),
+        None => error!(
+            "[sync_event_loop] {reason} — which resource changed is no longer known, so every \
+             entity is re-synced once instead"
+        ),
+    }
+}
+
 /// Spawn the single consumer that serializes all sync work for an integration:
 /// the initial full sync, notification-driven resyncs, and poll ticks.
 ///
@@ -1648,13 +1687,24 @@ async fn await_gate(gate: &SyncGate, tuning: &SyncLoopTuning) {
 ///    updated" notifications collapses into one re-sync per URI.
 pub fn spawn_sync_event_loop<S: ResyncSink + 'static>(
     mut receiver: mpsc::UnboundedReceiver<SyncEvent>,
+    inbound: Option<ResourceUpdateReceiver>,
     sync_engine: Arc<S>,
     gate: SyncGate,
     tuning: SyncLoopTuning,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        // Lever 1: hold everything until the boot scan is done. Signals queue
-        // in the unbounded channel meanwhile and are drained + coalesced below.
+        let (mut uris, notices) = match inbound {
+            Some(receiver) => (Some(receiver.uris), Some(receiver.notices)),
+            None => (None, None),
+        };
+        let mut collapses = notices.as_ref().map(|n| n.collapses());
+        let mut inbound_open = uris.is_some();
+        let mut collapses_open = collapses.is_some();
+
+        // Lever 1: hold everything until the boot scan is done. Holon's own
+        // events queue in the unbounded channel meanwhile; the peer's notices
+        // wait in their bounded queue, which collapses into one full re-sync
+        // once it is full.
         await_gate(&gate, &tuning).await;
 
         // Lever 2: trailing-edge + max-wait debounce over the serialized stream.
@@ -1676,7 +1726,9 @@ pub fn spawn_sync_event_loop<S: ResyncSink + 'static>(
                             if pending.is_empty() {
                                 hard = Some(tokio::time::Instant::now() + tuning.max_coalesce);
                             }
-                            pending.absorb(event);
+                            if let Some(reason) = pending.absorb(event) {
+                                collapse(notices.as_deref(), reason);
+                            }
                             trailing = Some(tokio::time::Instant::now() + tuning.debounce);
                         }
                         None => {
@@ -1685,6 +1737,45 @@ pub fn spawn_sync_event_loop<S: ResyncSink + 'static>(
                             }
                             break;
                         }
+                    }
+                }
+                maybe_uri = async {
+                    match uris.as_mut() {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                }, if inbound_open => {
+                    match maybe_uri {
+                        Some(uri) => {
+                            if pending.is_empty() {
+                                hard = Some(tokio::time::Instant::now() + tuning.max_coalesce);
+                            }
+                            if let Some(reason) =
+                                pending.absorb(SyncEvent::NotificationUri(uri))
+                            {
+                                collapse(notices.as_deref(), reason);
+                            }
+                            trailing = Some(tokio::time::Instant::now() + tuning.debounce);
+                        }
+                        // The peer's inbound leg ended; poll ticks and the
+                        // initial sync still flow through this loop.
+                        None => inbound_open = false,
+                    }
+                }
+                still_watched = async {
+                    match collapses.as_mut() {
+                        Some(watch) => watch.changed().await.is_ok(),
+                        None => std::future::pending().await,
+                    }
+                }, if collapses_open => {
+                    if still_watched {
+                        if pending.is_empty() {
+                            hard = Some(tokio::time::Instant::now() + tuning.max_coalesce);
+                        }
+                        pending.sync_all = true;
+                        trailing = Some(tokio::time::Instant::now() + tuning.debounce);
+                    } else {
+                        collapses_open = false;
                     }
                 }
                 _ = async {
@@ -2090,8 +2181,13 @@ mod sync_loop_gate_debounce_tests {
     async fn a_connection_whose_every_sync_fails_never_reads_healthy() {
         let sink = Arc::new(CountingSink::failing());
         let (tx, rx) = mpsc::unbounded_channel();
-        let handle =
-            spawn_sync_event_loop(rx, sink.clone(), SyncGate::opened(), SyncLoopTuning::test());
+        let handle = spawn_sync_event_loop(
+            rx,
+            None,
+            sink.clone(),
+            SyncGate::opened(),
+            SyncLoopTuning::test(),
+        );
 
         tx.send(SyncEvent::SyncAll).unwrap();
         for _ in 0..5 {
@@ -2118,8 +2214,13 @@ mod sync_loop_gate_debounce_tests {
     async fn one_success_earns_healthy_and_a_later_failure_does_not_flap_it() {
         let sink = Arc::new(CountingSink::default());
         let (tx, rx) = mpsc::unbounded_channel();
-        let handle =
-            spawn_sync_event_loop(rx, sink.clone(), SyncGate::opened(), SyncLoopTuning::test());
+        let handle = spawn_sync_event_loop(
+            rx,
+            None,
+            sink.clone(),
+            SyncGate::opened(),
+            SyncLoopTuning::test(),
+        );
 
         tx.send(SyncEvent::SyncAll).unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -2150,7 +2251,8 @@ mod sync_loop_gate_debounce_tests {
         let sink = Arc::new(CountingSink::default());
         let gate = SyncGate::new(); // DeferredUntilScan
         let (tx, rx) = mpsc::unbounded_channel();
-        let handle = spawn_sync_event_loop(rx, sink.clone(), gate.clone(), SyncLoopTuning::test());
+        let handle =
+            spawn_sync_event_loop(rx, None, sink.clone(), gate.clone(), SyncLoopTuning::test());
 
         // Boot enqueues the initial sync, then a resource-update storm arrives
         // during the (still-running) scan.
@@ -2195,8 +2297,13 @@ mod sync_loop_gate_debounce_tests {
     async fn debounce_collapses_per_resource() {
         let sink = Arc::new(CountingSink::default());
         let (tx, rx) = mpsc::unbounded_channel();
-        let handle =
-            spawn_sync_event_loop(rx, sink.clone(), SyncGate::opened(), SyncLoopTuning::test());
+        let handle = spawn_sync_event_loop(
+            rx,
+            None,
+            sink.clone(),
+            SyncGate::opened(),
+            SyncLoopTuning::test(),
+        );
 
         for _ in 0..47 {
             tx.send(SyncEvent::NotificationUri(PROJECTS.to_string()))
@@ -2235,8 +2342,13 @@ mod sync_loop_gate_debounce_tests {
         let sink = Arc::new(CountingSink::default());
         let (tx, rx) = mpsc::unbounded_channel();
         // Gate stays DeferredUntilScan forever (no open() call).
-        let handle =
-            spawn_sync_event_loop(rx, sink.clone(), SyncGate::new(), SyncLoopTuning::test());
+        let handle = spawn_sync_event_loop(
+            rx,
+            None,
+            sink.clone(),
+            SyncGate::new(),
+            SyncLoopTuning::test(),
+        );
         tx.send(SyncEvent::NotificationUri(PROJECTS.to_string()))
             .unwrap();
 

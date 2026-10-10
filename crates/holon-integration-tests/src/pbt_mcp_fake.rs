@@ -171,7 +171,8 @@ impl PbtMcpIntegration {
         let server = TestMcpServer {
             items: server_items.clone(),
         };
-        let (client_handler, update_rx) = holon_mcp_client::NotifyingClientHandler::new();
+        let budget = holon_mcp_client::peer_budget::PeerBudget::new();
+        let (client_handler, update_rx) = budget.notifying_handler();
 
         let (server_running, client_running) = tokio::try_join!(
             async {
@@ -189,10 +190,8 @@ impl PbtMcpIntegration {
         )?;
 
         let server_peer = server_running.peer().clone();
-        let client_peer = holon_mcp_client::mcp_request::BudgetedPeer::new(
-            client_running.peer().clone(),
-            holon_mcp_client::peer_budget::PeerBudget::new(),
-        );
+        let client_peer =
+            holon_mcp_client::mcp_request::BudgetedPeer::new(client_running.peer().clone(), budget);
 
         // Spawn both tasks so they process messages
         tokio::spawn(async move {
@@ -298,26 +297,17 @@ impl PbtMcpIntegration {
         // Subscribe to resource notifications
         sync_engine.subscribe_all().await?;
 
-        // Spawn serialized sync-event consumer + notification forwarder
+        // Spawn the serialized sync-event consumer, reading the peer's notices
+        // from the bounded inbound queue exactly as production does.
         let engine_for_listener = sync_engine.clone();
-        let (sync_event_tx, sync_event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_sync_event_tx, sync_event_rx) = tokio::sync::mpsc::unbounded_channel();
         holon_mcp_client::spawn_sync_event_loop(
             sync_event_rx,
+            Some(update_rx),
             engine_for_listener,
             holon_mcp_client::SyncGate::opened(),
             holon_mcp_client::SyncLoopTuning::test(),
         );
-        tokio::spawn(async move {
-            let mut update_rx = update_rx;
-            while let Some(uri) = update_rx.0.recv().await {
-                if sync_event_tx
-                    .send(holon_mcp_client::SyncEvent::NotificationUri(uri))
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        });
 
         Ok(Self {
             counter: AtomicU64::new(0),

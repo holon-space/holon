@@ -1202,6 +1202,8 @@ async fn rest_poll_runner_syncs_reuses_mirror_and_survives_failure() {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<SyncEvent>();
     let _loop = spawn_sync_event_loop(
         rx,
+        // The `rest` transport has no peer, so no inbound notices.
+        None,
         engine.clone(),
         SyncGate::opened(),
         SyncLoopTuning::test(),

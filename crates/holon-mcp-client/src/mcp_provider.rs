@@ -20,7 +20,6 @@ use holon_core::traits::UndoAction;
 use rmcp::ServiceExt;
 use rmcp::model::CallToolRequestParam;
 use rmcp::transport::StreamableHttpClientTransport;
-use rmcp::transport::TokioChildProcess;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use tracing::info;
 
@@ -68,22 +67,24 @@ pub async fn connect_mcp(
     uri: &str,
     auth_token: Option<&str>,
 ) -> anyhow::Result<(BudgetedPeer, McpRunningService)> {
-    connect_mcp_with_handler(uri, auth_token, default_client_info()).await
+    connect_mcp_with_handler(uri, auth_token, default_client_info(), PeerBudget::new()).await
 }
 
 /// Connect to an MCP server over Streamable HTTP with a custom `ClientHandler`.
 ///
-/// Use `NotifyingClientHandler` to receive resource update notifications.
+/// `budget` is the connection's whole allowance and it covers the handler too
+/// (see [`PeerBudget::notifying_handler`]), so the caller builds both from the
+/// same one.
 pub async fn connect_mcp_with_handler<H: ClientHandler>(
     uri: &str,
     auth_token: Option<&str>,
     handler: H,
+    budget: Arc<PeerBudget>,
 ) -> anyhow::Result<(BudgetedPeer, McpRunningService)> {
     let mut config = StreamableHttpClientTransportConfig::with_uri(uri);
     if let Some(token) = auth_token {
         config = config.auth_header(token);
     }
-    let budget = PeerBudget::new();
     let transport =
         StreamableHttpClientTransport::with_client(McpHttpClient::new(budget.clone()), config);
     let service = budget.handshake(handler.serve(transport)).await?;
@@ -101,7 +102,8 @@ pub async fn connect_mcp_oauth(
     uri: &str,
     auth_manager: rmcp::transport::auth::AuthorizationManager,
 ) -> anyhow::Result<(BudgetedPeer, McpRunningService)> {
-    connect_mcp_oauth_with_handler(uri, auth_manager, default_client_info()).await
+    connect_mcp_oauth_with_handler(uri, auth_manager, default_client_info(), PeerBudget::new())
+        .await
 }
 
 /// Connect to an MCP server over Streamable HTTP with OAuth and a custom
@@ -110,8 +112,8 @@ pub async fn connect_mcp_oauth_with_handler<H: ClientHandler>(
     uri: &str,
     auth_manager: rmcp::transport::auth::AuthorizationManager,
     handler: H,
+    budget: Arc<PeerBudget>,
 ) -> anyhow::Result<(BudgetedPeer, McpRunningService)> {
-    let budget = PeerBudget::new();
     let auth_client =
         rmcp::transport::auth::AuthClient::new(McpHttpClient::new(budget.clone()), auth_manager);
     let config = StreamableHttpClientTransportConfig::with_uri(uri);
@@ -132,7 +134,8 @@ pub async fn connect_mcp_child(
     args: &[String],
     env: &HashMap<String, String>,
 ) -> anyhow::Result<(BudgetedPeer, McpRunningService)> {
-    connect_mcp_child_with_handler(command, args, env, default_client_info()).await
+    connect_mcp_child_with_handler(command, args, env, default_client_info(), PeerBudget::new())
+        .await
 }
 
 /// Connect to an MCP server via stdio child process with a custom
@@ -142,6 +145,7 @@ pub async fn connect_mcp_child_with_handler<H: ClientHandler>(
     args: &[String],
     env: &HashMap<String, String>,
     handler: H,
+    budget: Arc<PeerBudget>,
 ) -> anyhow::Result<(BudgetedPeer, McpRunningService)> {
     // On unix this resolves BEFORE spawning: `Command::new` searches only the
     // parent's PATH, which for a Finder-launched `.app` is launchd's minimal
@@ -150,8 +154,7 @@ pub async fn connect_mcp_child_with_handler<H: ClientHandler>(
     for (k, v) in env {
         cmd.env(k, v);
     }
-    let transport = TokioChildProcess::new(cmd)?;
-    let budget = PeerBudget::new();
+    let transport = crate::child_transport::spawn_bounded_child(&mut cmd, budget.clone())?;
     let service = budget.handshake(handler.serve(transport)).await?;
     let peer = BudgetedPeer::new(service.peer().clone(), budget);
     Ok((peer, McpRunningService(Box::new(service))))

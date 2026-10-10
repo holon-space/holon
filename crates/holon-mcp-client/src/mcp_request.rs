@@ -165,15 +165,18 @@ impl BudgetedPeer {
         Fut: Future<Output = Result<(Vec<T>, Option<String>), ServiceError>>,
     {
         let deadline = self.budget.connect_deadline;
-        // Enumeration runs inside a connect; a budget already spent means this
-        // is being called from somewhere else, where the bound below would read
-        // as the peer's fault.
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "[mcp_request] {what} started after this connection's CONNECT_BUDGET \
-             ({CONNECT_BUDGET:?}) was already spent — enumeration belongs to the connect, and a \
-             later caller would be refused for the previous connect's elapsed time"
-        );
+        // A connect runs several enumerations against this one budget and the
+        // PEER owns how long each takes, so arriving here with it already spent
+        // is a state a peer can drive — a refusal naming the bound, never an
+        // invariant.
+        if tokio::time::Instant::now() >= deadline {
+            return Err(ServiceError::Cancelled {
+                reason: Some(format!(
+                    "{what} could not start: this connection's CONNECT_BUDGET ({CONNECT_BUDGET:?}) \
+                     was already spent by the handshake and the enumerations before it"
+                )),
+            });
+        }
         let mut all = Vec::new();
         let mut cursor = None;
         for fetched in 1..=MAX_LIST_PAGES {

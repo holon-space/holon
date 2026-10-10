@@ -552,6 +552,8 @@ async fn a_refused_initial_sync_marks_the_integration_unhealthy() {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let loop_handle = holon_mcp_client::spawn_sync_event_loop(
         rx,
+        // This test drives the loop through `SyncEvent` directly, with no peer.
+        None,
         fx.engine.clone(),
         holon_mcp_client::SyncGate::opened(),
         holon_mcp_client::SyncLoopTuning::test(),

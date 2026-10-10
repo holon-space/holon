@@ -13,6 +13,7 @@
 //! `OperationProvider`s.
 
 pub mod bundled_sidecars;
+mod child_transport;
 pub mod command_resolution;
 pub mod credential_path;
 pub mod credential_store;
@@ -109,6 +110,7 @@ pub use mcp_sync_strategy::SyncStrategy;
 pub use mcp_sync_strategy::ToolSync;
 pub use mcp_vtable::McpForeignDataWrapper;
 pub use mcp_vtable::VtableConfig;
+pub use peer_budget::bounded_peer_text;
 pub use provider_name::ProviderName;
 pub use redaction::MIN_SECRET_LEN;
 pub use redaction::Redactor;
@@ -125,6 +127,10 @@ pub use roster::ConnectionRoster;
 pub use roster::ConnectionSource;
 pub use secret_ref::SecretRef;
 pub use secret_ref::TokenRef;
+pub use secure_client::CONNECT_BUDGET;
+pub use secure_client::MAX_DISCLOSED_PEER_TEXT_BYTES;
+pub use secure_client::MAX_NOTIFICATION_URI_BYTES;
+pub use secure_client::MAX_PENDING_SYNC_URIS;
 pub use secure_client::MAX_RESPONSE_BODY_BYTES;
 pub use secure_client::MCP_IDLE_TIMEOUT;
 pub use secure_client::REQUEST_TIMEOUT;

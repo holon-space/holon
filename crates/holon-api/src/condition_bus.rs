@@ -186,6 +186,16 @@ pub enum ConditionKind {
     ///
     /// All-clear: a restart, since the connect does not retry the enumeration.
     IntegrationDiscoveryIncomplete { integration: String, error: String },
+    /// An MCP integration's peer pushed more resource-change signals than one
+    /// connection may hold — more URIs waiting for a re-sync than
+    /// `MAX_PENDING_SYNC_URIS`, or a URI past `MAX_NOTIFICATION_URI_BYTES`.
+    /// No signal was dropped: the per-resource re-syncs it named were replaced
+    /// by one full re-sync, so the rows are current but their freshness is
+    /// coarse, and a peer that keeps doing it is worth knowing about.
+    /// `subject` carries the integration name.
+    ///
+    /// All-clear: a restart. There is no event that says a peer stopped.
+    IntegrationChangeSignalsCollapsed { integration: String, reason: String },
     /// An MCP integration's `${VAR}` resolution is blocked on the OS keychain,
     /// which is usually waiting for the user to answer an access prompt.
     /// `subject` carries the integration name.
@@ -637,6 +647,8 @@ impl ConditionKind {
     pub const INTEGRATION_CONNECT_FAILED: &'static str = "integration-connect-failed";
     pub const INTEGRATION_CONNECT_SLOW: &'static str = "integration-connect-slow";
     pub const INTEGRATION_DISCOVERY_INCOMPLETE: &'static str = "integration-discovery-incomplete";
+    pub const INTEGRATION_CHANGE_SIGNALS_COLLAPSED: &'static str =
+        "integration-change-signals-collapsed";
     pub const INTEGRATION_WAITING_ON_KEYCHAIN: &'static str = "integration-waiting-on-keychain";
     pub const INTEGRATION_NEEDS_AUTH: &'static str = "integration-needs-auth";
     pub const INTEGRATION_NOT_ENABLED: &'static str = "integration-not-enabled";
@@ -708,6 +720,9 @@ impl ConditionKind {
             Self::IntegrationConnectFailed { .. } => Self::INTEGRATION_CONNECT_FAILED,
             Self::IntegrationConnectSlow { .. } => Self::INTEGRATION_CONNECT_SLOW,
             Self::IntegrationDiscoveryIncomplete { .. } => Self::INTEGRATION_DISCOVERY_INCOMPLETE,
+            Self::IntegrationChangeSignalsCollapsed { .. } => {
+                Self::INTEGRATION_CHANGE_SIGNALS_COLLAPSED
+            }
             Self::IntegrationWaitingOnKeychain { .. } => Self::INTEGRATION_WAITING_ON_KEYCHAIN,
             Self::IntegrationNeedsAuth { .. } => Self::INTEGRATION_NEEDS_AUTH,
             Self::IntegrationSidecarSuperseded { .. } => Self::INTEGRATION_SIDECAR_SUPERSEDED,

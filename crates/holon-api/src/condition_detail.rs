@@ -173,6 +173,21 @@ impl ConditionKind {
                 )
             }
 
+            // The body carries the reason verbatim: it names which bound
+            // collapsed the signals, which is what says whether the peer is
+            // chatty by design or the bound is too low.
+            Self::IntegrationChangeSignalsCollapsed {
+                integration,
+                reason,
+            } => ConditionDetail::with_body(
+                format!(
+                    "{integration} reported more changes at once than Holon keeps track of, \
+                         so everything it syncs was refreshed instead of the parts it named. \
+                         Nothing is missing. Why:"
+                ),
+                vec![reason.clone()],
+            ),
+
             Self::IntegrationWaitingOnKeychain { integration } => ConditionDetail::prose(format!(
                 "{integration} is waiting to read its credentials from the keychain; answer the \
                  keychain prompt to let it connect"

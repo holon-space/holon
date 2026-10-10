@@ -69,6 +69,34 @@ pub const MAX_LIST_PAGES: usize = 256;
 /// and still a hard ceiling.
 pub const MAX_LIST_ITEMS: usize = 4096;
 
+/// The longest resource URI a `notifications/resources/updated` may carry.
+///
+/// The URI is peer-chosen text that is parked until the boot scan's sync gate
+/// opens, and it is only useful if it matches a resource this connection syncs.
+/// 2048 bytes is the practical URL ceiling of the web, so a URI past it can
+/// match nothing Holon declared and parking it buys a resync that cannot
+/// happen.
+pub const MAX_NOTIFICATION_URI_BYTES: usize = 2048;
+
+/// The most distinct resource URIs one connection may have waiting for a
+/// re-sync.
+///
+/// Each one costs a serialized `resources/read` of up to [`REQUEST_TIMEOUT`],
+/// so 256 of them is already more serial work than any integration has rows;
+/// past this a single full re-sync is both cheaper and complete. Together with
+/// [`MAX_NOTIFICATION_URI_BYTES`] it is what bounds the bytes a notification
+/// flood parks.
+pub const MAX_PENDING_SYNC_URIS: usize = 256;
+
+/// The most peer-chosen text one disclosure may carry.
+///
+/// A peer picks its own error strings and they ride into a toast and into the
+/// integration's row, where a megabyte is not a disclosure. 4 KiB holds every
+/// real provider error plus the bound names this lane's own refusals carry, and
+/// what is cut is named rather than dropped
+/// ([`crate::peer_budget::bounded_peer_text`]).
+pub const MAX_DISCLOSED_PEER_TEXT_BYTES: usize = 4096;
+
 /// How long a whole connect may take: the `initialize` handshake plus every
 /// page of every enumeration that follows it.
 ///

@@ -454,6 +454,15 @@ const INTEGRATION_DISCOVERY_INCOMPLETE: ConditionProfile = ConditionProfile::new
     &[],
 );
 
+const INTEGRATION_CHANGE_SIGNALS_COLLAPSED: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Warning,
+    "Integration sends more change signals than Holon holds",
+    icons::WARN,
+    ConditionPlacement::Toast,
+    AllClear::UntilRestart,
+    &[],
+);
+
 const INTEGRATION_WAITING_ON_KEYCHAIN: ConditionProfile = ConditionProfile::new(
     ConditionSeverity::Warning,
     "Integration waiting on the keychain",
@@ -884,6 +893,7 @@ impl ConditionKind {
             Self::IntegrationConnectFailed { .. } => INTEGRATION_CONNECT_FAILED,
             Self::IntegrationConnectSlow { .. } => INTEGRATION_CONNECT_SLOW,
             Self::IntegrationDiscoveryIncomplete { .. } => INTEGRATION_DISCOVERY_INCOMPLETE,
+            Self::IntegrationChangeSignalsCollapsed { .. } => INTEGRATION_CHANGE_SIGNALS_COLLAPSED,
             Self::IntegrationWaitingOnKeychain { .. } => INTEGRATION_WAITING_ON_KEYCHAIN,
             Self::IntegrationNeedsAuth { .. } => INTEGRATION_NEEDS_AUTH,
             Self::IntegrationSidecarSuperseded { .. } => INTEGRATION_SIDECAR_SUPERSEDED,
