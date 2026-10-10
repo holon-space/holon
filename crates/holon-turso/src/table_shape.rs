@@ -565,9 +565,10 @@ async fn rebuild_table(
 
 /// Copy every row of `refusal`'s table into the shape `create_sql` declares:
 /// the declaration is created under a scratch name and, in one transaction,
-/// filled with the values of the columns both name and renamed over the stored
-/// table. A row the declaration cannot hold fails the transaction, which keeps
-/// the stored table and its rows.
+/// filled with the values of the columns both name, and renamed over the stored
+/// table in one transaction. The fill is tried first, before any view is
+/// dropped: a row the declaration cannot hold keeps the stored table, its rows
+/// and the views over it.
 async fn reshape_table(
     db_handle: &DbHandle,
     create_sql: &str,
@@ -604,34 +605,37 @@ async fn reshape_table(
                 &e,
             )
         })?;
-    drop_dependent_views(db_handle, table)
-        .await
-        .map_err(|e| reshape_error("dropping the views over it", &e))?;
     db_handle
         .execute_ddl("PRAGMA foreign_keys = OFF")
         .await
         .map_err(|e| reshape_error("turning foreign keys off", &e))?;
     let columns = carried.join(", ");
-    let copied = db_handle
-        .transaction(vec![
-            (
-                format!("INSERT INTO {scratch} ({columns}) SELECT {columns} FROM {table}"),
-                vec![],
-            ),
-            (format!("DROP TABLE \"{table}\""), vec![]),
-            (
-                format!("ALTER TABLE \"{scratch}\" RENAME TO \"{table}\""),
-                vec![],
-            ),
-        ])
-        .await
-        .map_err(|e| {
+    let copy = format!("INSERT INTO {scratch} ({columns}) SELECT {columns} FROM {table}");
+    let copied = async {
+        db_handle.execute_ddl(&copy).await.map_err(|e| {
             reshape_error(
-                "a stored row does not fit its declaration, so the stored table and its rows \
-                 are kept",
+                "a stored row does not fit its declaration, so the stored table, its rows \
+                     and the views over it are kept",
                 &e,
             )
-        });
+        })?;
+        drop_dependent_views(db_handle, table)
+            .await
+            .map_err(|e| reshape_error("dropping the views over it", &e))?;
+        db_handle
+            .transaction(vec![
+                (format!("DELETE FROM {scratch}"), vec![]),
+                (copy.clone(), vec![]),
+                (format!("DROP TABLE \"{table}\""), vec![]),
+                (
+                    format!("ALTER TABLE \"{scratch}\" RENAME TO \"{table}\""),
+                    vec![],
+                ),
+            ])
+            .await
+            .map_err(|e| reshape_error("swapping in the reshaped table", &e))
+    }
+    .await;
     db_handle
         .execute_ddl("PRAGMA foreign_keys = ON")
         .await

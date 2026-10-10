@@ -227,6 +227,38 @@ async fn a_row_the_declaration_cannot_hold_keeps_the_stored_block_raw() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_refused_reshape_keeps_the_views_over_the_stored_table() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("old.db");
+    let declared = "sort_key TEXT NOT NULL DEFAULT 'A0',";
+    let drifted = block_raw_schema_sql().replacen(declared, "sort_key TEXT,", 1);
+    drifted_database(
+        &path,
+        &drifted,
+        &[
+            "INSERT INTO block_raw (id, parent_id, sort_key) VALUES ('sentinel:no_parent', \
+             'sentinel:no_parent', 'A0')",
+            "INSERT INTO block_raw (id, parent_id, sort_key) VALUES ('b1', 'sentinel:no_parent', \
+             NULL)",
+        ],
+    )
+    .await;
+
+    let (_b, handle) = open(&path).await;
+    for boot in 1..=2 {
+        CoreSchemaModule
+            .ensure_schema(&handle)
+            .await
+            .expect_err("a row block_raw's declaration cannot hold must fail the core tables");
+        assert_eq!(
+            ids(&handle, "SELECT id FROM block ORDER BY id").await.len(),
+            2,
+            "boot {boot}: the block matview still serves the stored rows"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_rebuild_whose_declaration_cannot_be_created_keeps_the_stored_table() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (_b, handle) = open(&dir.path().join("old.db")).await;
