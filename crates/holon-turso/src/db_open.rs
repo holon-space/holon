@@ -1,10 +1,10 @@
 //! The one place that opens a Holon Turso database.
 //!
-//! The database is derived data: the org files rebuild it. So a file that this
-//! binary cannot use is deleted and opened fresh, never migrated. A file is
-//! unusable when it was built with a different [`scalar_fns`] set, or when the
-//! engine could not load one of its materialized views (such a view refuses
-//! every write to the tables that feed it).
+//! No open deletes a row. A file this binary cannot use as it is loses only
+//! what it computed: its materialized views, rebuilt from the tables they read,
+//! and the `block_derived` cache. That happens when the file was built with a
+//! different [`scalar_fns`] set, or when the engine could not load one of its
+//! views. A file the engine cannot open at all is moved aside, never deleted.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -24,36 +24,77 @@ use turso_core::Value;
 use crate::durable_state::TursoDurableState;
 use crate::scalar_fns;
 use crate::scalar_fns::ScalarFn;
-use crate::table_classes;
-use crate::table_classes::CacheRows;
-use crate::table_classes::Class;
-use crate::table_classes::LostRows;
-use crate::table_classes::Rebuild;
+
+/// What an open did to the database file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OpenOutcome {
+    Kept,
+    /// The file could not be used as it was: its materialized views and the
+    /// `block_derived` cache were dropped. Every table row is kept.
+    ViewsDropped {
+        reason: String,
+        views: Vec<String>,
+    },
+    /// The engine could not use the file at all. It was renamed to `backup`,
+    /// and a fresh database was opened in its place.
+    MovedAside {
+        reason: String,
+        backup: std::path::PathBuf,
+    },
+}
+
+/// What this process's boot did to its database file. Provided once per
+/// session; a boot that opens no database (`LoroMemory`) records `Kept`.
+#[derive(Debug, Clone)]
+pub struct BootOpenOutcome(pub OpenOutcome);
 
 const FN_SET_TABLE: &str = "holon_db_fn_set";
+/// Values computed with the functions; the derived-field reconciler refills it.
+const DERIVED_CACHE_TABLE: &str = "block_derived";
 
-/// The opened database, and the rebuild this open did, if any.
-pub(crate) fn open(db_path: &Path, fns: &[ScalarFn]) -> Result<(Arc<Database>, Option<Rebuild>)> {
+/// The opened database, and what this open did to the file.
+pub(crate) fn open(db_path: &Path, fns: &[ScalarFn]) -> Result<(Arc<Database>, OpenOutcome)> {
     let path = db_path
         .to_str()
         .ok_or_else(|| StorageError::DatabaseError(format!("path {db_path:?} is not UTF-8")))?;
     if path.starts_with(":memory:") {
         let db = open_with_io(Arc::new(MemoryIO::new()), path, OpenFlags::default(), fns)?;
-        return Ok((db, None));
+        return Ok((db, OpenOutcome::Kept));
     }
-    let db = open_file(path, fns)?;
+    let db = match open_file(path, fns) {
+        Ok(db) => db,
+        Err(e) => {
+            return set_aside(
+                None,
+                db_path,
+                path,
+                fns,
+                &format!("the engine cannot open it: {e}"),
+            );
+        }
+    };
     let Some(reason) = unusable_reason(&db, fns)? else {
         record_signature(&db, fns)?;
-        return Ok((db, None));
+        return Ok((db, OpenOutcome::Kept));
     };
-    #[cfg(target_family = "unix")]
-    return rebuild(db, db_path, path, fns, &reason);
-    // OPFS files cannot be deleted through the engine's IO.
-    #[cfg(not(target_family = "unix"))]
-    return Err(StorageError::DatabaseError(format!(
-        "the database at {path} is unusable: {reason}. Delete it from the browser storage; \
-         the org files rebuild it"
-    )));
+    match drop_computed(&db, fns) {
+        Ok(views) => {
+            tracing::info!(
+                "[open_database] {path}: {reason}. Dropped its materialized views [{}] and the \
+                 {DERIVED_CACHE_TABLE} cache; every table row is kept, and the views are \
+                 rebuilt from the tables",
+                views.join(", ")
+            );
+            Ok((db, OpenOutcome::ViewsDropped { reason, views }))
+        }
+        Err(e) => set_aside(
+            Some(db),
+            db_path,
+            path,
+            fns,
+            &format!("{reason}, and dropping its views failed: {e}"),
+        ),
+    }
 }
 
 #[cfg(target_family = "unix")]
@@ -83,117 +124,167 @@ fn open_file(_: &str, _: &[ScalarFn]) -> Result<Arc<Database>> {
     ))
 }
 
+/// Rename every file of the database to a timestamped backup beside it and
+/// open a fresh one.
 #[cfg(target_family = "unix")]
-fn rebuild(
-    db: Arc<Database>,
+fn set_aside(
+    db: Option<Arc<Database>>,
     db_path: &Path,
     path: &str,
     fns: &[ScalarFn],
     reason: &str,
-) -> Result<(Arc<Database>, Option<Rebuild>)> {
-    let (lost, caches) = rows_not_rebuilt(&db)?;
-    tracing::info!(
-        "[open_database] deleting {path}: {reason}. The org files and the Loro store rebuild \
-         the blocks and every view. Integration caches cleared, each re-synced from its source \
-         (a row the source no longer holds is gone): {}. Lost for good: {}",
-        describe_caches(&caches),
-        describe(&lost)
-    );
-    assert_eq!(
-        Arc::strong_count(&db),
-        1,
-        "{path} is unusable ({reason}), but another holder in this process still has it open"
-    );
-    drop(db);
-    for file in TursoDurableState::new(db_path).durable_paths() {
-        match std::fs::remove_file(&file) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => {
-                return Err(StorageError::DatabaseError(format!(
-                    "delete unusable database file {}: {e}",
-                    file.display()
-                )));
-            }
-        }
+) -> Result<(Arc<Database>, OpenOutcome)> {
+    if let Some(db) = db {
+        assert_eq!(
+            Arc::strong_count(&db),
+            1,
+            "{path} is unusable ({reason}), but another holder in this process still has it open"
+        );
     }
+    let backup = std::path::PathBuf::from(format!(
+        "{path}.unusable-{}",
+        chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ")
+    ));
+    for file in TursoDurableState::new(db_path).durable_paths() {
+        if !file.exists() {
+            continue;
+        }
+        let suffix = file
+            .to_str()
+            .and_then(|f| f.strip_prefix(path))
+            .unwrap_or_else(|| panic!("{} is not a file of {path}", file.display()));
+        let to = std::path::PathBuf::from(format!("{}{suffix}", backup.display()));
+        assert!(!to.exists(), "the backup {} exists already", to.display());
+        std::fs::rename(&file, &to).map_err(|e| {
+            StorageError::DatabaseError(format!(
+                "move the unusable database file {} aside to {}: {e}",
+                file.display(),
+                to.display()
+            ))
+        })?;
+    }
+    tracing::error!(
+        "[open_database] {path} is unusable: {reason}. Moved it aside to {} and opened a fresh \
+         database; anything that was only in the database is in that file",
+        backup.display()
+    );
     let db = open_file(path, fns)?;
-    if let Some(reason) = unusable_reason(&db, fns)? {
+    if let Some(fresh) = unusable_reason(&db, fns)? {
         return Err(StorageError::DatabaseError(format!(
-            "the fresh database at {path} is unusable right after it was created: {reason}"
+            "the fresh database at {path} is unusable right after it was created: {fresh}"
         )));
     }
     record_signature(&db, fns)?;
     Ok((
         db,
-        Some(Rebuild {
+        OpenOutcome::MovedAside {
             reason: reason.to_string(),
-            lost,
-            caches,
-        }),
+            backup,
+        },
     ))
 }
 
-/// Every table the file holds that the org files and the Loro store do not
-/// rebuild, with its row count: the lost ones, and the integration caches.
-fn rows_not_rebuilt(db: &Arc<Database>) -> Result<(Vec<LostRows>, Vec<CacheRows>)> {
+/// OPFS files cannot be renamed through the engine's IO.
+#[cfg(not(target_family = "unix"))]
+fn set_aside(
+    _: Option<Arc<Database>>,
+    _: &Path,
+    path: &str,
+    _: &[ScalarFn],
+    reason: &str,
+) -> Result<(Arc<Database>, OpenOutcome)> {
+    Err(StorageError::DatabaseError(format!(
+        "the database at {path} is unusable: {reason}. Copy it out of the browser storage and \
+         delete it there; the org files rebuild the blocks"
+    )))
+}
+
+/// In one transaction: drop every materialized view and every view the engine
+/// could not load, dependents first; empty the derived cache; record `fns`.
+/// Returns the dropped view names.
+fn drop_computed(db: &Arc<Database>, fns: &[ScalarFn]) -> Result<Vec<String>> {
     let conn = connect(db)?;
-    let caches: std::collections::HashMap<String, String> =
-        if has_table(&conn, "integration_cache")? {
-            rows(&conn, "SELECT table_name, provider FROM integration_cache")?
-                .into_iter()
-                .map(|row| match row.as_slice() {
-                    [Value::Text(table), Value::Text(provider)] => {
-                        Ok((table.as_str().to_string(), provider.as_str().to_string()))
-                    }
-                    other => Err(StorageError::DatabaseError(format!(
-                        "integration_cache row is {other:?}"
-                    ))),
-                })
-                .collect::<Result<_>>()?
-        } else {
-            Default::default()
-        };
-    let mut lost = Vec::new();
-    let mut cleared = Vec::new();
-    for row in rows(
+    let unloadable = unloadable_views(&conn)?;
+    let mut views: Vec<(String, String)> = rows(
         &conn,
-        "SELECT name FROM sqlite_schema WHERE type = 'table' AND substr(name, 1, 7) NOT IN \
-         ('sqlite_', '__turso') ORDER BY name",
-    )? {
-        let table = match row.as_slice() {
-            [Value::Text(name)] => name.as_str().to_string(),
-            other => {
-                return Err(StorageError::DatabaseError(format!(
-                    "sqlite_schema name is {other:?}"
-                )));
-            }
-        };
-        match table_classes::class_of(&table, &caches) {
-            Some(Class::Rebuilt) => {}
-            Some(Class::IntegrationCache(provider)) => {
-                let rows = count(&conn, &table)?;
-                cleared.push(CacheRows {
-                    table,
-                    provider,
-                    rows,
-                });
-            }
-            Some(Class::Lost(what)) => {
-                let rows = count(&conn, &table)?;
-                lost.push(LostRows { table, what, rows });
-            }
-            None => {
-                let rows = count(&conn, &table)?;
-                lost.push(LostRows {
-                    table,
-                    what: table_classes::UNCLASSIFIED,
-                    rows,
-                });
-            }
+        "SELECT name, sql FROM sqlite_schema WHERE type = 'view' ORDER BY name",
+    )?
+    .into_iter()
+    .map(|row| match row.as_slice() {
+        [Value::Text(name), Value::Text(sql)] => {
+            Ok((name.as_str().to_string(), sql.as_str().to_string()))
         }
+        other => Err(StorageError::DatabaseError(format!(
+            "sqlite_schema view row is {other:?}"
+        ))),
+    })
+    .collect::<Result<Vec<_>>>()?
+    .into_iter()
+    .filter(|(name, sql)| is_materialized(sql) || unloadable.contains(name))
+    .collect();
+    let run = |sql: &str| {
+        conn.execute(sql)
+            .map_err(|e| StorageError::DatabaseError(format!("{sql}: {e}")))
+    };
+    run("BEGIN IMMEDIATE")?;
+    let mut dropped = Vec::new();
+    while !views.is_empty() {
+        let (free, held): (Vec<_>, Vec<_>) = views.iter().cloned().partition(|(name, _)| {
+            !views
+                .iter()
+                .any(|(other, sql)| other != name && names_word(sql, name))
+        });
+        if free.is_empty() {
+            run("ROLLBACK")?;
+            return Err(StorageError::DatabaseError(format!(
+                "the views [{}] read each other, so none can be dropped first",
+                held.iter()
+                    .map(|(n, _)| n.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        }
+        for (name, _) in free {
+            run(&format!("DROP VIEW \"{name}\""))?;
+            dropped.push(name);
+        }
+        views = held;
     }
-    Ok((lost, cleared))
+    if has_table(&conn, DERIVED_CACHE_TABLE)? {
+        run(&format!("DELETE FROM {DERIVED_CACHE_TABLE}"))?;
+    }
+    write_signature(&conn, fns)?;
+    run("COMMIT")?;
+    Ok(dropped)
+}
+
+fn is_materialized(sql: &str) -> bool {
+    sql.split_whitespace()
+        .take(3)
+        .map(str::to_ascii_uppercase)
+        .eq(["CREATE", "MATERIALIZED", "VIEW"])
+}
+
+/// Whether `sql` names `name` as a whole identifier.
+fn names_word(sql: &str, name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    sql.to_ascii_lowercase()
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .any(|word| word == name)
+}
+
+fn unloadable_views(conn: &Arc<Connection>) -> Result<Vec<String>> {
+    conn.with_schema_mut(|schema| {
+        let mut views: Vec<String> = schema
+            .incompatible_views
+            .keys()
+            .chain(schema.broken_views.iter())
+            .cloned()
+            .collect();
+        views.sort();
+        views
+    })
+    .map_err(|e| StorageError::DatabaseError(format!("read the schema: {e}")))
 }
 
 fn has_table(conn: &Arc<Connection>, table: &str) -> Result<bool> {
@@ -202,44 +293,6 @@ fn has_table(conn: &Arc<Connection>, table: &str) -> Result<bool> {
         &format!("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = '{table}'"),
     )?
     .is_empty())
-}
-
-fn count(conn: &Arc<Connection>, table: &str) -> Result<u64> {
-    let count = rows(conn, &format!("SELECT count(*) FROM \"{table}\""))?;
-    match count.as_slice() {
-        [row] => match row.as_slice() {
-            [Value::Numeric(turso_core::Numeric::Integer(n))] => u64::try_from(*n)
-                .map_err(|e| StorageError::DatabaseError(format!("count of {table}: {e}"))),
-            other => Err(StorageError::DatabaseError(format!(
-                "count of {table} is {other:?}"
-            ))),
-        },
-        other => Err(StorageError::DatabaseError(format!(
-            "count of {table} returned {} rows",
-            other.len()
-        ))),
-    }
-}
-
-fn describe(lost: &[LostRows]) -> String {
-    if lost.is_empty() {
-        return "nothing".to_string();
-    }
-    lost.iter()
-        .map(|l| format!("{} ({} rows: {})", l.table, l.rows, l.what))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-fn describe_caches(caches: &[CacheRows]) -> String {
-    if caches.is_empty() {
-        return "none".to_string();
-    }
-    caches
-        .iter()
-        .map(|c| format!("{} ({} rows, {})", c.table, c.rows, c.provider))
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 fn open_with_io(
@@ -308,16 +361,13 @@ fn unusable_reason(db: &Arc<Database>, fns: &[ScalarFn]) -> Result<Option<String
 enum StoredSignature {
     Absent,
     Recorded(String),
-    /// A torn or foreign record: the file is rebuilt, never refused.
+    /// A torn or foreign record: the views are dropped and the record written
+    /// again, never refused.
     Unreadable(String),
 }
 
 fn stored_signature(conn: &Arc<Connection>) -> Result<StoredSignature> {
-    let has_table = rows(
-        conn,
-        &format!("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = '{FN_SET_TABLE}'"),
-    )?;
-    if has_table.is_empty() {
+    if !has_table(conn, FN_SET_TABLE)? {
         return Ok(StoredSignature::Absent);
     }
     let stored = rows(conn, &format!("SELECT signature FROM {FN_SET_TABLE}"))?;
@@ -349,15 +399,23 @@ fn record_signature(db: &Arc<Database>, fns: &[ScalarFn]) -> Result<()> {
             .map_err(|e| StorageError::DatabaseError(format!("{sql}: {e}")))
     };
     run("BEGIN IMMEDIATE")?;
+    write_signature(&conn, fns)?;
+    run("COMMIT")
+}
+
+/// Inside the caller's transaction.
+fn write_signature(conn: &Arc<Connection>, fns: &[ScalarFn]) -> Result<()> {
+    let run = |sql: &str| {
+        conn.execute(sql)
+            .map_err(|e| StorageError::DatabaseError(format!("{sql}: {e}")))
+    };
     run(&format!(
         "CREATE TABLE IF NOT EXISTS {FN_SET_TABLE} (signature TEXT NOT NULL)"
     ))?;
     run(&format!("DELETE FROM {FN_SET_TABLE}"))?;
     #[cfg(test)]
     if CRASH_AFTER_DELETE.load(std::sync::atomic::Ordering::SeqCst) {
-        return Err(StorageError::DatabaseError(
-            "injected crash between DELETE and INSERT".to_string(),
-        ));
+        panic!("injected crash between DELETE and INSERT");
     }
     let insert = format!("INSERT INTO {FN_SET_TABLE} (signature) VALUES (?1)");
     let mut stmt = conn
@@ -365,12 +423,11 @@ fn record_signature(db: &Arc<Database>, fns: &[ScalarFn]) -> Result<()> {
         .map_err(|e| StorageError::DatabaseError(format!("{insert}: {e}")))?;
     stmt.bind_at(
         1.try_into().expect("1 is non-zero"),
-        Value::build_text(wanted),
+        Value::build_text(scalar_fns::signature(fns)),
     )
     .map_err(|e| StorageError::DatabaseError(format!("{insert}: bind: {e}")))?;
     stmt.run_ignore_rows()
-        .map_err(|e| StorageError::DatabaseError(format!("{insert}: {e}")))?;
-    run("COMMIT")
+        .map_err(|e| StorageError::DatabaseError(format!("{insert}: {e}")))
 }
 
 fn is_empty(conn: &Arc<Connection>) -> Result<bool> {
@@ -441,27 +498,32 @@ mod tests {
         assert_eq!(count(&db, "SELECT sum(d) FROM v"), 6);
     }
 
+    fn has(db: &Arc<Database>, kind: &str, name: &str) -> bool {
+        count(
+            db,
+            &format!(
+                "SELECT count(*) FROM sqlite_schema WHERE type = '{kind}' AND name = '{name}'"
+            ),
+        ) == 1
+    }
+
     #[test]
-    fn a_database_built_with_another_function_set_is_rebuilt_at_open() {
+    fn a_database_built_with_another_function_set_keeps_its_rows_and_drops_its_views() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("holon.db");
         build_with_double(&path);
 
         let db = TursoBackend::open_database(&path).expect("open with this binary's set");
-        let write = exec(
-            &db,
-            "CREATE TABLE IF NOT EXISTS t (id INTEGER PRIMARY KEY, n INTEGER)",
-        )
-        .and_then(|()| exec(&db, "INSERT INTO t (n) VALUES (3)"));
         assert!(
-            write.is_ok(),
-            "a database this binary cannot use must be rebuilt at open, but its writes are \
-             refused: {write:?}"
+            !has(&db, "view", "v"),
+            "a view built over a function this binary does not register must be dropped"
         );
+        exec(&db, "INSERT INTO t (n) VALUES (3)")
+            .expect("with the view gone, writes to its source table must be accepted");
         assert_eq!(
             count(&db, "SELECT count(*) FROM t"),
-            1,
-            "the rebuilt database must start empty"
+            3,
+            "a function-set change must keep every table row"
         );
     }
 
@@ -488,29 +550,26 @@ mod tests {
         }
         let db = open(&path, &[]).unwrap().0;
         assert_eq!(count(&db, "SELECT count(*) FROM t"), 1);
-        assert_eq!(
-            count(
-                &db,
-                &format!("SELECT count(*) FROM sqlite_schema WHERE name = '{FN_SET_TABLE}'")
-            ),
-            0,
+        assert!(
+            !has(&db, "table", FN_SET_TABLE),
             "the empty set needs no record"
         );
     }
 
     #[test]
-    fn a_database_opened_by_a_larger_set_is_rebuilt_and_records_it() {
+    fn a_database_opened_by_a_larger_set_keeps_its_tables_and_records_it() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("holon.db");
         {
             let db = open(&path, &[]).unwrap().0;
             exec(&db, "CREATE TABLE t (id INTEGER PRIMARY KEY)").unwrap();
+            exec(&db, "INSERT INTO t (id) VALUES (1)").unwrap();
         }
         let db = open(&path, &[DOUBLE]).unwrap().0;
         assert_eq!(
-            count(&db, "SELECT count(*) FROM sqlite_schema WHERE name = 't'"),
-            0,
-            "a database built without the function must be rebuilt"
+            count(&db, "SELECT count(*) FROM t"),
+            1,
+            "a larger function set must keep every table row"
         );
         let conn = connect(&db).unwrap();
         assert!(matches!(
@@ -518,10 +577,11 @@ mod tests {
             StoredSignature::Recorded(s) if s == "holon_test_double/1/v1"
         ));
     }
-    /// A crash inside the record write leaves the database openable: the
-    /// transaction rolls back, and the next open records the set again.
+
+    /// A crash after the views are dropped but before the record is written
+    /// rolls the whole transaction back; the next open drops them again.
     #[test]
-    fn a_crash_while_recording_the_set_leaves_the_database_openable() {
+    fn a_crash_while_dropping_the_views_leaves_them_for_the_next_open() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("holon.db");
         build_with_double(&path);
@@ -531,10 +591,18 @@ mod tests {
         };
 
         CRASH_AFTER_DELETE.store(true, std::sync::atomic::Ordering::SeqCst);
-        let crashed = open(&path, &[double_v2]);
+        let crashed = std::panic::catch_unwind(|| open(&path, &[double_v2]));
         CRASH_AFTER_DELETE.store(false, std::sync::atomic::Ordering::SeqCst);
-        assert!(crashed.is_err(), "the injected crash must fail that open");
+        assert!(crashed.is_err(), "the injected crash must end that open");
         drop(crashed);
+        {
+            let (db, _) = open(&path, &[DOUBLE]).expect("open under the old set");
+            assert_eq!(
+                count(&db, "SELECT sum(d) FROM v"),
+                6,
+                "the crashed transaction must leave the view in place"
+            );
+        }
 
         let (db, _) = open(&path, &[double_v2])
             .unwrap_or_else(|e| panic!("the open after a crash must succeed: {e}"));
@@ -543,13 +611,14 @@ mod tests {
             stored_signature(&conn).unwrap(),
             StoredSignature::Recorded(s) if s == "holon_test_double/1/v2"
         ));
+        assert!(!has(&db, "view", "v"), "the next open must drop the view");
+        assert_eq!(count(&db, "SELECT count(*) FROM t"), 2);
     }
 
-    /// A file an older binary built under the empty set cannot load a view that
-    /// calls this binary's functions, so the first open of this binary rebuilds
-    /// it.
+    /// A file an older binary built under the empty set keeps its rows when
+    /// this binary, which registers functions, first opens it.
     #[test]
-    fn a_database_built_without_this_binarys_functions_is_rebuilt_at_open() {
+    fn a_database_built_without_this_binarys_functions_keeps_its_rows_at_open() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("holon.db");
         {
@@ -558,12 +627,7 @@ mod tests {
             exec(&db, "INSERT INTO t (id) VALUES (1)").unwrap();
         }
         let db = TursoBackend::open_database(&path).expect("open with this binary's set");
-        assert_eq!(
-            count(&db, "SELECT count(*) FROM sqlite_schema WHERE name = 't'"),
-            0,
-            "a database built without [{}] must be rebuilt",
-            scalar_fns::signature(scalar_fns::ALL)
-        );
+        assert_eq!(count(&db, "SELECT count(*) FROM t"), 1);
         let conn = connect(&db).unwrap();
         assert!(matches!(
             stored_signature(&conn).unwrap(),
@@ -574,9 +638,10 @@ mod tests {
 
     /// A crash between the DELETE and the INSERT of a non-atomic record leaves
     /// the table with no row; a table holding anything but one text row is as
-    /// unreadable. Either way the file is derived data, so it is rebuilt.
+    /// unreadable. Either way the record says nothing about the tables, so they
+    /// keep their rows and the record is written again.
     #[test]
-    fn an_unreadable_signature_record_is_rebuilt_not_an_open_error() {
+    fn an_unreadable_signature_record_keeps_the_rows_and_is_written_again() {
         for (case, torn) in [
             ("no row", vec![]),
             ("two rows", vec!["'a'", "'b'"]),
@@ -587,6 +652,7 @@ mod tests {
             {
                 let db = open(&path, &[]).unwrap().0;
                 exec(&db, "CREATE TABLE t (id INTEGER PRIMARY KEY)").unwrap();
+                exec(&db, "INSERT INTO t (id) VALUES (1)").unwrap();
                 exec(
                     &db,
                     &format!("CREATE TABLE {FN_SET_TABLE} (signature TEXT NOT NULL)"),
@@ -600,19 +666,157 @@ mod tests {
                     .unwrap();
                 }
             }
-            for fns in [&[][..], &[DOUBLE][..]] {
-                let (db, _) = open(&path, fns).unwrap_or_else(|e| {
-                    panic!(
-                        "{case}: an unreadable signature record must lead to a rebuild, not to \
-                         an open error: {e}"
-                    )
-                });
-                assert_eq!(
-                    count(&db, "SELECT count(*) FROM sqlite_schema WHERE name = 't'"),
-                    0,
-                    "{case}: the database must be rebuilt"
-                );
-            }
+            let (db, _) = open(&path, &[DOUBLE]).unwrap_or_else(|e| {
+                panic!("{case}: an unreadable signature record must not be an open error: {e}")
+            });
+            assert_eq!(
+                count(&db, "SELECT count(*) FROM t"),
+                1,
+                "{case}: the rows must be kept"
+            );
+            let conn = connect(&db).unwrap();
+            assert!(
+                matches!(
+                    stored_signature(&conn).unwrap(),
+                    StoredSignature::Recorded(s) if s == "holon_test_double/1/v1"
+                ),
+                "{case}: the record must be written again"
+            );
+        }
+    }
+
+    /// `w` reads `v`, which calls `DOUBLE`: both go, the source rows stay.
+    #[test]
+    fn a_function_set_change_drops_a_chained_view_and_keeps_the_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("holon.db");
+        build_with_double(&path);
+        {
+            let (db, _) = open(&path, &[DOUBLE]).unwrap();
+            exec(
+                &db,
+                "CREATE MATERIALIZED VIEW w AS SELECT id, d FROM v WHERE d > 2",
+            )
+            .unwrap();
+            assert_eq!(count(&db, "SELECT count(*) FROM w"), 1);
+        }
+        let (db, _) = open(&path, &[]).expect("open without DOUBLE");
+        assert!(!has(&db, "view", "v") && !has(&db, "view", "w"));
+        assert_eq!(count(&db, "SELECT count(*) FROM t"), 2);
+        exec(&db, "INSERT INTO t (n) VALUES (3)").expect("t accepts writes");
+    }
+
+    /// The engine treats DROP of a materialized view, a DELETE and the record
+    /// write as one transaction: a ROLLBACK keeps all three, a COMMIT applies
+    /// all three.
+    #[test]
+    fn a_view_drop_rolls_back_and_commits_with_the_writes_beside_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("holon.db");
+        build_with_double(&path);
+        let (db, _) = open(&path, &[DOUBLE]).unwrap();
+        exec(&db, "CREATE TABLE d (x INTEGER)").unwrap();
+        exec(&db, "INSERT INTO d (x) VALUES (1)").unwrap();
+        let conn = connect(&db).unwrap();
+        let run = |sql: &str| conn.execute(sql).unwrap_or_else(|e| panic!("{sql}: {e}"));
+        let in_tx = |end: &str| {
+            run("BEGIN IMMEDIATE");
+            run("DROP VIEW v");
+            run("DELETE FROM d");
+            run(&format!("UPDATE {FN_SET_TABLE} SET signature = 'changed'"));
+            run(end);
+        };
+
+        in_tx("ROLLBACK");
+        assert!(has(&db, "view", "v"), "ROLLBACK must keep the view");
+        assert_eq!(count(&db, "SELECT sum(d) FROM v"), 6);
+        assert_eq!(count(&db, "SELECT count(*) FROM d"), 1);
+        assert!(matches!(
+            stored_signature(&conn).unwrap(),
+            StoredSignature::Recorded(s) if s == "holon_test_double/1/v1"
+        ));
+        exec(&db, "INSERT INTO t (n) VALUES (3)").expect("the kept view still maintains");
+        assert_eq!(count(&db, "SELECT sum(d) FROM v"), 12);
+
+        in_tx("COMMIT");
+        assert!(!has(&db, "view", "v"));
+        assert_eq!(count(&db, "SELECT count(*) FROM d"), 0);
+        assert!(matches!(
+            stored_signature(&conn).unwrap(),
+            StoredSignature::Recorded(s) if s == "changed"
+        ));
+        drop(conn);
+        drop(db);
+        let (db, _) = open(&path, &[DOUBLE]).unwrap();
+        assert!(
+            !has(&db, "view", "v"),
+            "the committed drop must survive a reopen"
+        );
+        assert_eq!(count(&db, "SELECT count(*) FROM t"), 3);
+    }
+
+    /// Bytes the engine cannot open as a database are kept under a new name,
+    /// and the open goes on with a fresh file.
+    #[test]
+    fn a_file_the_engine_cannot_open_is_moved_aside_not_deleted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("holon.db");
+        let garbage = b"not a database, but somebody's only copy".repeat(200);
+        std::fs::write(&path, &garbage).unwrap();
+
+        let (db, outcome) = open(&path, &[DOUBLE])
+            .unwrap_or_else(|e| panic!("an unopenable file must not stop the open: {e}"));
+        let OpenOutcome::MovedAside { backup, .. } = outcome else {
+            panic!("the open must report the move, got {outcome:?}");
+        };
+        exec(&db, "CREATE TABLE t (id INTEGER PRIMARY KEY)").expect("the fresh file is usable");
+        let backups: Vec<std::path::PathBuf> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("holon.db.unusable-") && !n.ends_with("-wal"))
+            })
+            .collect();
+        match backups.as_slice() {
+            [found] => assert_eq!(
+                (found, std::fs::read(found).unwrap()),
+                (&backup, garbage),
+                "the backup must be the reported path and hold the file byte for byte"
+            ),
+            other => panic!("expected one backup next to the database, found {other:?}"),
+        }
+    }
+
+    /// The write-ahead log and the shared-memory file belong to the database
+    /// file; they move with it, under the same timestamp.
+    #[test]
+    fn the_sidecars_of_an_unopenable_file_are_moved_aside_with_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("holon.db");
+        let contents = [
+            ("", b"main file, not a database".repeat(200)),
+            ("-wal", b"write-ahead log bytes".repeat(150)),
+            ("-shm", b"shared memory bytes".repeat(100)),
+        ];
+        for (suffix, bytes) in &contents {
+            std::fs::write(format!("{}{suffix}", path.display()), bytes).unwrap();
+        }
+
+        let (db, outcome) =
+            open(&path, &[DOUBLE]).expect("an unopenable file must not stop the open");
+        let OpenOutcome::MovedAside { backup, .. } = outcome else {
+            panic!("the open must report the move, got {outcome:?}");
+        };
+        exec(&db, "CREATE TABLE t (id INTEGER PRIMARY KEY)").expect("the fresh file is usable");
+        for (suffix, bytes) in &contents {
+            let moved = format!("{}{suffix}", backup.display());
+            assert_eq!(
+                std::fs::read(&moved).unwrap_or_else(|e| panic!("{moved}: {e}")),
+                *bytes,
+                "{moved} must hold the original bytes"
+            );
         }
     }
 }

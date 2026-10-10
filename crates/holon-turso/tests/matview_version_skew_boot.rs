@@ -1,6 +1,6 @@
 //! Contract: a database whose PERSISTED matview definitions this binary cannot
-//! load is deleted and rebuilt at open (Martin: no migration; the org files
-//! rebuild the derived database).
+//! load keeps every table row at open; the views it cannot load, and every
+//! view over them, are dropped, so the schema modules build them again.
 //!
 //! A stored matview whose SELECT no longer type-checks against the current
 //! base-table schema (a column the newer schema dropped) lands in the engine's
@@ -32,6 +32,10 @@ async fn write_old_shape_db(path: &std::path::Path) {
         .execute_ddl("CREATE TABLE block_raw (id TEXT PRIMARY KEY, parent_id TEXT, depth INTEGER)")
         .await
         .expect("create block_raw");
+    handle
+        .execute_ddl("INSERT INTO block_raw (id, parent_id, depth) VALUES ('kept', NULL, 0)")
+        .await
+        .expect("insert a block");
     handle
         .execute_ddl(
             "CREATE MATERIALIZED VIEW block AS SELECT b.id, b.parent_id, b.depth FROM block_raw b",
@@ -119,7 +123,7 @@ fn fold_wal_into_db(path: &std::path::Path) -> Vec<u8> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_database_with_a_view_this_binary_cannot_load_is_rebuilt_at_open() {
+async fn a_database_with_a_view_this_binary_cannot_load_keeps_its_rows_and_drops_its_views() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("skew.db");
 
@@ -131,9 +135,8 @@ async fn a_database_with_a_view_this_binary_cannot_load_is_rebuilt_at_open() {
         "the stale `block` definition must be in the file before the open"
     );
 
-    let db = TursoBackend::open_database(&path).unwrap_or_else(|e| {
-        panic!("opening a database with an unusable view must rebuild it, not fail: {e}")
-    });
+    let db = TursoBackend::open_database(&path)
+        .unwrap_or_else(|e| panic!("opening a database with an unusable view must not fail: {e}"));
     let (backend, handle) = TursoBackend::new(db, broadcast::channel(64).0).expect("backend");
     let rows = handle
         .query(
@@ -148,15 +151,28 @@ async fn a_database_with_a_view_this_binary_cannot_load_is_rebuilt_at_open() {
         .filter_map(|r| r.get("name"))
         .map(|v| format!("{v:?}"))
         .collect();
-    assert!(
-        names.is_empty(),
-        "the database must be rebuilt from scratch, but it still holds {names:?}"
+    assert_eq!(
+        names,
+        vec![format!(
+            "{:?}",
+            holon_api::Value::String("block_raw".into())
+        )],
+        "the open must keep the table and drop every view over the unusable one"
     );
+    let kept = handle
+        .query("SELECT id FROM block_raw", std::collections::HashMap::new())
+        .await
+        .expect("read block_raw");
+    assert_eq!(kept.len(), 1, "the block row must survive the open");
+    handle
+        .execute_ddl("INSERT INTO block_raw (id, parent_id) VALUES ('new', NULL)")
+        .await
+        .expect("with its views gone, block_raw must accept writes");
     handle.shutdown().await.expect("shutdown");
     drop(backend);
 }
 
-/// The rebuild above must be caused by the stale `block` definition alone:
+/// The drop above must be caused by the stale `block` definition alone:
 /// with `block` still satisfiable, the identical fan-out of dependents opens
 /// and keeps every object.
 #[tokio::test(flavor = "multi_thread")]

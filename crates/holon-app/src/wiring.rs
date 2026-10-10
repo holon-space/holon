@@ -514,33 +514,18 @@ impl FrontendInjectorExt for Injector {
                     .await;
                 tracing::info!("[FrontendSession] factory: BackendEngine resolved");
 
-                // A database this binary could not use was deleted at open;
-                // say which local state went with it.
-                let rebuild = resolver.resolve::<holon::storage::table_classes::BootRebuild>();
-                if let Some(rebuild) = &rebuild.0 {
+                // A database the engine could not open was moved aside at open;
+                // say where it is.
+                let opened = resolver.resolve::<holon::storage::db_open::BootOpenOutcome>();
+                if let holon::storage::db_open::OpenOutcome::MovedAside { reason, backup } =
+                    &opened.0
+                {
                     let bus = resolver.resolve::<Arc<holon_api::ConditionBus>>();
                     bus.emit(holon_api::Condition {
                         subject: "database".to_string(),
-                        reason: holon_api::ConditionKind::DatabaseRebuiltAtBoot {
-                            reason: rebuild.reason.clone(),
-                            lost: rebuild
-                                .lost
-                                .iter()
-                                .map(|l| holon_api::LostTableRows {
-                                    table: l.table.clone(),
-                                    what: l.what.to_string(),
-                                    rows: l.rows,
-                                })
-                                .collect(),
-                            caches: rebuild
-                                .caches
-                                .iter()
-                                .map(|c| holon_api::ClearedCacheRows {
-                                    table: c.table.clone(),
-                                    provider: c.provider.clone(),
-                                    rows: c.rows,
-                                })
-                                .collect(),
+                        reason: holon_api::ConditionKind::DatabaseMovedAside {
+                            reason: reason.clone(),
+                            backup: backup.display().to_string(),
                         },
                     });
                 }

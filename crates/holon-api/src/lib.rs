@@ -97,7 +97,6 @@ pub mod widget_spec;
 pub mod write_seq;
 
 pub use caseless::caseless_fold;
-pub use condition_bus::ClearedCacheRows;
 pub use condition_bus::Condition;
 pub use condition_bus::ConditionBus;
 pub use condition_bus::ConditionChange;
@@ -110,7 +109,6 @@ pub use condition_bus::EarlierPanic;
 pub use condition_bus::EarlierPanics;
 pub use condition_bus::HolonChange;
 pub use condition_bus::IngestRefusals;
-pub use condition_bus::LostTableRows;
 pub use condition_bus::QuarantinedTable;
 pub use condition_bus::RefusedFile;
 pub use condition_profile::AllClear;

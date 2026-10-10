@@ -6,6 +6,7 @@ pub mod resource;
 // keep the historical `crate::storage::*` paths resolving while making the
 // dependency on `holon-turso` explicit (ADR 0004 Phase 9).
 pub use holon_turso::block_table_names;
+pub use holon_turso::db_open;
 pub use holon_turso::dynamic_schema_module;
 pub use holon_turso::graph_schema;
 pub use holon_turso::scalar_fns;

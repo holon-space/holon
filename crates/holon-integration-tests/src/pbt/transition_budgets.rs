@@ -814,7 +814,7 @@ pub fn max_rss_delta_bytes(transition: &crate::pbt::transitions::E2ETransition) 
         "WriteOrgFile" | "CreateDirectory" | "GitInit" | "JjGitInit" | "CreateStaleLoro" => 5 * MB,
         // A reboot, plus a flipped boot's DI container and Turso connection
         // until the wiring guard rejects it; budget alongside StartApp.
-        "EpochFlipRejected" | "RebootWithBacklogHeld" => 1500 * MB,
+        "EpochFlipRejected" | "RebootWithBacklogHeld" | "RebootAfterUpgrade" => 1500 * MB,
         "BulkExternalAdd" | "CreateDocument" | "DeleteDocument" => 200 * MB,
         "SimulateRestart" => 80 * MB,
         "ApplyMutation" => 50 * MB,

@@ -291,6 +291,9 @@
                     "name": "operation_log.rs"
                   },
                   {
+                    "name": "page_chain_plan.rs"
+                  },
+                  {
                     "name": "pantry_operations.rs"
                   },
                   {
@@ -1027,6 +1030,10 @@
           {
             "type_name": "EntityName",
             "trait_name": "From"
+          },
+          {
+            "type_name": "EntityName",
+            "trait_name": "TryFrom"
           }
         ],
         "dirs": [
@@ -1095,6 +1102,9 @@
               },
               {
                 "name": "capability.rs"
+              },
+              {
+                "name": "caseless.rs"
               },
               {
                 "name": "change_set.rs"
@@ -1266,6 +1276,9 @@
               },
               {
                 "name": "spawner.rs"
+              },
+              {
+                "name": "spelling.rs"
               },
               {
                 "name": "storage_error.rs"
@@ -1512,6 +1525,9 @@
                 "name": "type_admission.rs"
               },
               {
+                "name": "type_table_remedy.rs"
+              },
+              {
                 "name": "vault_lock.rs"
               },
               {
@@ -1565,7 +1581,7 @@
                 "name": "computed_persisted_boot_column.rs"
               },
               {
-                "name": "database_rebuild_disclosure.rs"
+                "name": "database_open_disclosure.rs"
               },
               {
                 "name": "deleted_vault_profile_releases_its_claim.rs"
@@ -1628,6 +1644,9 @@
                 "name": "is_program_net_agrees_with_the_profile.rs"
               },
               {
+                "name": "loro_document_manager_page_position.rs"
+              },
+              {
                 "name": "loro_seam_edge_fields.rs"
               },
               {
@@ -1652,10 +1671,16 @@
                 "name": "org_store_org_round_trip.rs"
               },
               {
+                "name": "page_slot_completes_a_placeholder.rs"
+              },
+              {
                 "name": "platform_capabilities_disclosure.rs"
               },
               {
                 "name": "quick_open_search_at_vault_scale.rs"
+              },
+              {
+                "name": "real_db_shape_dryrun.rs"
               },
               {
                 "name": "rebuild_views_discloses_while_it_runs.rs"
@@ -1704,6 +1729,12 @@
               },
               {
                 "name": "sort_key_has_no_default.rs"
+              },
+              {
+                "name": "sqlonly_database_survives_function_set_change.rs"
+              },
+              {
+                "name": "stale_type_table_boots.rs"
               },
               {
                 "name": "text_undo_manager.rs"
@@ -2126,6 +2157,10 @@
                     "name": "types.rs"
                   }
                 ]
+              },
+              {
+                "name": "testdata",
+                "path": "holon-core/src/testdata"
               }
             ],
             "files": [
@@ -2437,6 +2472,9 @@
                 "name": "crash_injection.rs"
               },
               {
+                "name": "doc_homes.rs"
+              },
+              {
                 "name": "error.rs"
               },
               {
@@ -2506,6 +2544,9 @@
               },
               {
                 "name": "nearest_page_ancestor_walk.rs"
+              },
+              {
+                "name": "path_collision_key_matches_the_host.rs"
               }
             ]
           }
@@ -2797,6 +2838,9 @@
                 "name": "config.rs"
               },
               {
+                "name": "crash_history.rs"
+              },
+              {
                 "name": "creation_slot.rs"
               },
               {
@@ -2982,6 +3026,9 @@
                 "name": "bottom_dock.rs"
               },
               {
+                "name": "builder_panic_is_caught_and_disclosed.rs"
+              },
+              {
                 "name": "chat_view_render.rs"
               },
               {
@@ -3030,6 +3077,9 @@
                 "name": "render_spec_context_id.rs"
               },
               {
+                "name": "repeated_builder_panic_is_reported_once.rs"
+              },
+              {
                 "name": "row_id_boundary.rs"
               },
               {
@@ -3043,6 +3093,9 @@
               },
               {
                 "name": "shipped_profile_render.rs"
+              },
+              {
+                "name": "shipped_widget_calls_resolve_on_every_path.rs"
               },
               {
                 "name": "sidebar_creation_slot.rs"
@@ -3061,6 +3114,12 @@
               },
               {
                 "name": "text_style_kwarg.rs"
+              },
+              {
+                "name": "unknown_function_call_is_an_error_node.rs"
+              },
+              {
+                "name": "value_fn_panic_degrades_only_its_widget.rs"
               },
               {
                 "name": "view_mode_switcher_templates.rs"
@@ -3356,6 +3415,9 @@
                           },
                           {
                             "name": "copies_stay_on_disk.rs"
+                          },
+                          {
+                            "name": "crash_history_matches_ref.rs"
                           },
                           {
                             "name": "declared_column_gaps.rs"
@@ -3796,6 +3858,9 @@
                           },
                           {
                             "name": "copies_stay_on_disk.rs"
+                          },
+                          {
+                            "name": "crash_history_matches_ref.rs"
                           },
                           {
                             "name": "display_placement_canonical_inert.rs"
@@ -4425,6 +4490,9 @@
                       },
                       {
                         "name": "reboot.rs"
+                      },
+                      {
+                        "name": "reboot_after_upgrade.rs"
                       },
                       {
                         "name": "reboot_with_backlog_held.rs"
@@ -5119,7 +5187,13 @@
                 "path": "holon-integration-tests/tests/loro_suite",
                 "files": [
                   {
-                    "name": "loro_completed_and_block_type_reach_sql.rs"
+                    "name": "loro_block_type_invalid_values.rs"
+                  },
+                  {
+                    "name": "loro_block_type_on_a_legacy_schema.rs"
+                  },
+                  {
+                    "name": "loro_block_type_reaches_sql.rs"
                   },
                   {
                     "name": "loro_create_persists_prod_session.rs"
@@ -6689,6 +6763,9 @@
                 "name": "bundled_sidecars.rs"
               },
               {
+                "name": "child_transport.rs"
+              },
+              {
                 "name": "command_resolution.rs"
               },
               {
@@ -6716,6 +6793,9 @@
                 "name": "mcp_call_surface.rs"
               },
               {
+                "name": "mcp_http_client.rs"
+              },
+              {
                 "name": "mcp_integration.rs"
               },
               {
@@ -6723,6 +6803,9 @@
               },
               {
                 "name": "mcp_provider.rs"
+              },
+              {
+                "name": "mcp_request.rs"
               },
               {
                 "name": "mcp_resource_discovery.rs"
@@ -6744,6 +6827,9 @@
               },
               {
                 "name": "oauth_bootstrap.rs"
+              },
+              {
+                "name": "peer_budget.rs"
               },
               {
                 "name": "provider_name.rs"
@@ -6793,6 +6879,9 @@
             ],
             "files": [
               {
+                "name": "bundled_mappings_compile.rs"
+              },
+              {
                 "name": "cache_tables_are_not_rowid_alias_tables.rs"
               },
               {
@@ -6806,6 +6895,12 @@
               },
               {
                 "name": "entity_link_scheme_join.rs"
+              },
+              {
+                "name": "http_bounds.rs"
+              },
+              {
+                "name": "inbound_bounds.rs"
               },
               {
                 "name": "inline_secret_refused.rs"
@@ -6827,6 +6922,9 @@
               },
               {
                 "name": "oauth_bootstrap_flow.rs"
+              },
+              {
+                "name": "peer_budget_bounds.rs"
               },
               {
                 "name": "provider_name.rs"
@@ -6863,6 +6961,9 @@
               },
               {
                 "name": "sidecar_id_column_is_text.rs"
+              },
+              {
+                "name": "subscribe_bounds.rs"
               },
               {
                 "name": "unconfigured_is_a_gate.rs"
@@ -6981,6 +7082,9 @@
               },
               {
                 "name": "claude_history_send_message.rs"
+              },
+              {
+                "name": "discovery_incomplete.rs"
               },
               {
                 "name": "mcp_mock_e2e.rs"
@@ -8078,6 +8182,9 @@
                 "name": "ids.rs"
               },
               {
+                "name": "jaq_library.rs"
+              },
+              {
                 "name": "lib.rs"
               },
               {
@@ -8094,6 +8201,9 @@
             "files": [
               {
                 "name": "contract_pbt.rs"
+              },
+              {
+                "name": "mapper_bounds.rs"
               }
             ]
           }
@@ -8478,6 +8588,9 @@
                 "name": "db_open.rs"
               },
               {
+                "name": "dbsp_state.rs"
+              },
+              {
                 "name": "derived_reconciler.rs"
               },
               {
@@ -8523,6 +8636,9 @@
                 "name": "table_classes.rs"
               },
               {
+                "name": "table_shape.rs"
+              },
+              {
                 "name": "turso.rs"
               },
               {
@@ -8565,6 +8681,9 @@
                 "name": "clock_reader_prune.rs"
               },
               {
+                "name": "column_added_under_dependent_matview.rs"
+              },
+              {
                 "name": "concat_isnull_matview_probe.rs"
               },
               {
@@ -8572,6 +8691,9 @@
               },
               {
                 "name": "ddl_hang_guard.rs"
+              },
+              {
+                "name": "declared_table_shape_self_consistent.rs"
               },
               {
                 "name": "derived_field_eval_vs_sql.rs"
@@ -8619,10 +8741,19 @@
                 "name": "missing_deps_error_stays_typed.rs"
               },
               {
+                "name": "navigation_schema_errors.rs"
+              },
+              {
                 "name": "non_finite_float_read.rs"
               },
               {
                 "name": "property_kinds_migration.rs"
+              },
+              {
+                "name": "quarantine_record.rs"
+              },
+              {
+                "name": "rebuilt_table_drift.rs"
               },
               {
                 "name": "recursive_cte_page_boundary.rs"
@@ -8649,7 +8780,16 @@
                 "name": "stuck_actor_watch.rs"
               },
               {
+                "name": "type_table_add_column_under_matview.rs"
+              },
+              {
                 "name": "unregistered_dependency_fast_fail.rs"
+              },
+              {
+                "name": "upgrade_rebuilds_views_and_derived.rs"
+              },
+              {
+                "name": "warm_reboot_keeps_matviews.rs"
               },
               {
                 "name": "watch_context_dedup_maintenance.rs"

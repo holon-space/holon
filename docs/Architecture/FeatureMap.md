@@ -36,7 +36,7 @@ The one-page answer to *"which features could this change impact?"*. Rows are us
 | **Ruled by** | An ADR under [`docs/adr/`](../adr/), or an invariant number from [Model.md](Model.md). |
 | **Mode axes** | Which of [Model.md](Model.md)'s four orthogonal axes the feature's behaviour varies on: **Storage** (Loro store on/off), **File adapter** (org/none), **Merge fidelity** (op-CRDT / base-3-way / LWW), **Transport** (iroh P2P on/off). `—` means the feature behaves the same everywhere. *Headless vs windowed* is a test-slice axis, not a product mode; it is called out in prose where it matters. |
 
-The composed keystone is [`general_e2e_composed_pbt.rs`](../../crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs). Its alphabet is 117 transitions; the repo declares 97 invariant ids plus 17 correspondence-family ids. Open reds are registered in [KeystoneKnownReds.md](../Testing/KeystoneKnownReds.md) — a red listed there is a pass-with-note, anything else is a regression.
+The composed keystone is [`general_e2e_composed_pbt.rs`](../../crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs). Its alphabet is 118 transitions; the repo declares 97 invariant ids plus 17 correspondence-family ids. Open reds are registered in [KeystoneKnownReds.md](../Testing/KeystoneKnownReds.md) — a red listed there is a pass-with-note, anything else is a regression.
 
 ---
 
@@ -277,6 +277,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `PlaceUnderOwnDescendant` — a cyclic move is refused on the SQL placement path as on the Loro one, so no store holds a parent cycle
 - `PressKey` — raw key chord -> bubble_input resolution
 - `Reboot` — what survives a real restart
+- `RebootAfterUpgrade` — an upgrade changes nothing a user can see: every row the database held survives, in both storage modes
 - `RebootWithBacklogHeld` — the org files are ingested and the watch loop runs while the read-only backlog has not moved (D108.a)
 - `RebuildViews` — a watch opened before a `rebuild_views` keeps receiving changes after it and holds what its rebuilt view holds
 - `ReceiverCreateBlock` — a peer-authored block under an owner-authored parent, and its arrival on the owner after a reverse round.
