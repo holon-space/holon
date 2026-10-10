@@ -317,51 +317,87 @@ fn a_loro_doc_holding_invalid_typed_fields_boots_reads_defaults_and_discloses() 
     });
 }
 
-#[test]
-fn an_org_drawer_naming_block_type_boots_and_reads_untyped() {
+/// An org drawer key naming the `block_type` column is refused for every
+/// value, valid or not, as `build_block_params` refuses it: the block boots
+/// untyped, nothing is unreadable, and the write-back no longer carries the
+/// key.
+fn a_block_type_drawer_is_refused(value: &str) {
     let rt = runtime();
     rt.clone().block_on(async move {
         let env = TestEnvironment::new(rt.clone()).unwrap();
         env.write_org_file(
             "drawer.org",
-            "* drawer probe\n:PROPERTIES:\n:ID: bt-drawer-probe\n:block_type: not a name!\n:END:\n",
+            &format!(
+                "* drawer probe\n:PROPERTIES:\n:ID: bt-drawer-probe\n:block_type: {value}\n:END:\n"
+            ),
         )
         .await
         .expect("write drawer.org");
         env.start_app(true)
             .await
             .expect("start_app with the drawer");
-        let deadline = std::time::Instant::now() + Duration::from_secs(20);
-        while env
-            .query_sql("SELECT id FROM block_raw WHERE id = 'block:bt-drawer-probe'")
-            .await
-            .expect("query block_raw")
-            .is_empty()
-        {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the drawer probe never reached SQL"
-            );
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
+        assert!(
+            env.wait_for_block("bt-drawer-probe", Duration::from_secs(20))
+                .await,
+            "the drawer probe never arrived"
+        );
         env.wait_for_loro_quiescence(Duration::from_secs(10)).await;
-        let projected = view_block(&env, "block:bt-drawer-probe").await;
-        assert_eq!(
-            projected.block_type, None,
-            "the drawer key must not type it"
-        );
-        let held = authority_block(&env, "block:bt-drawer-probe").await;
-        assert_eq!(held.block_type, None, "the drawer key must not type it");
+
         let mut failures: Vec<String> = Vec::new();
-        note_condition(
-            &env,
-            "block:bt-drawer-probe/block_type",
-            INVALID,
-            "boot",
-            &mut failures,
-        );
+        let projected = view_block(&env, "block:bt-drawer-probe").await.block_type;
+        if projected.is_some() {
+            failures.push(format!("the block view reads block_type {projected:?}"));
+        }
+        let held = authority_block(&env, "block:bt-drawer-probe")
+            .await
+            .block_type;
+        if held.is_some() {
+            failures.push(format!("the authority reads block_type {held:?}"));
+        }
+        let raised = unreadable_conditions(&env);
+        if !raised.is_empty() {
+            failures.push(format!("block_field_unreadable raised: {raised:?}"));
+        }
+
+        service(&env)
+            .execute_operation(
+                &EntityName::new("block"),
+                "set_field",
+                set_field_params(
+                    "block:bt-drawer-probe",
+                    "content",
+                    Value::String("drawer edited".into()),
+                ),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("editing the content must land: {e:#}"));
+        env.wait_for_loro_quiescence(Duration::from_secs(10)).await;
+        env.wait_for_org_files_stable(300, Duration::from_secs(10))
+            .await;
+        let file = holon_filesystem::FileSystem::read_to_string(
+            env.org_fs.as_ref(),
+            &env.org_file_path("drawer.org"),
+        )
+        .await
+        .expect("read drawer.org");
+        if !file.contains("drawer edited") {
+            failures.push(format!("the edit never reached the file:\n{file}"));
+        }
+        if file.contains(":block_type:") {
+            failures.push(format!("the write-back carries the refused key:\n{file}"));
+        }
         assert!(failures.is_empty(), "{}", failures.join("\n"));
     });
+}
+
+#[test]
+fn an_org_drawer_naming_an_invalid_block_type_is_refused() {
+    a_block_type_drawer_is_refused(INVALID);
+}
+
+#[test]
+fn an_org_drawer_naming_a_valid_block_type_is_refused() {
+    a_block_type_drawer_is_refused("page");
 }
 
 const LEGACY_BLOCK_RAW: &str = "CREATE TABLE block_raw (

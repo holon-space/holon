@@ -160,7 +160,7 @@ impl SqlProjectionComponent {
 
     async fn blocks_from_block_raw(&self) -> Vec<Block> {
         let rows = self
-            .query(crate::pbt::sut_row_parsing::BLOCK_RAW_SNAPSHOT_SQL)
+            .query(crate::pbt::sut_row_parsing::BLOCK_RAW_SNAPSHOT_SQL.as_str())
             .await;
         parse_block_rows(&rows)
     }

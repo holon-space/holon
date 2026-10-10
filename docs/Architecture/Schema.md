@@ -86,7 +86,7 @@ when a block has no tags/requires:
 
 | Table/view | Columns | Role |
 |---|---|---|
-| `block_raw` | `id`, `parent_id`, `depth`, `sort_key`, `content`, `content_type`, `source_language`, `source_name`, `properties`, `marks`, `collapsed`, `completed`, `block_type`, `created_at`, `updated_at`, `_change_origin` | Base table. Owned by `CoreSchemaModule`. All structural writes land here. |
+| `block_raw` | `id`, `parent_id`, `sort_key`, `content`, `content_type`, `source_language`, `source_name`, `properties`, `property_kinds`, `marks`, `collapsed`, `widget_only`, `block_type` (nullable; NULL = untyped), `created_at`, `updated_at`, `_change_origin`, `write_seq` | Base table. Owned by `CoreSchemaModule`; its columns derive from `holon_api::schema::BLOCK`. All structural writes land here. |
 | `block_tags` | `block_id`, `tag` (PK on both, FK `block_id → block_raw(id)` cascade) | Junction table for the `tags` edge field. Owned by `BlockSchemaModule`. |
 | `block_requires` | `block_id`, `required_id` (PK on both, FKs to `block_raw(id)` cascade) | Junction table for the `requires` edge field. Owned by `BlockSchemaModule`. |
 | `block` (matview) | all `block_raw` columns + `tags` (JSON array), `requires` (JSON array) | Hydrated read surface. Owned by `BlockMatviewSchemaModule`. Every downstream reader (GQL/PRQL, `block_with_path`, `block_requirement_edges`) reads from here, not `block_raw`. |

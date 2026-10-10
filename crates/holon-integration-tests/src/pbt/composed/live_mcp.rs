@@ -297,7 +297,7 @@ impl SutBackend for LiveMcp {
     }
 
     async fn block_raw_snapshot(&self) -> Vec<Block> {
-        let rows = self.rows(BLOCK_RAW_SNAPSHOT_SQL).await;
+        let rows = self.rows(BLOCK_RAW_SNAPSHOT_SQL.as_str()).await;
         let entities: Vec<holon_core::storage::types::StorageEntity> =
             rows.iter().map(json_row_to_storage_entity).collect();
         parse_block_rows(&entities)

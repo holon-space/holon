@@ -14,6 +14,7 @@
 //! Extracted from `sut.rs` (Phase D2).
 
 use std::collections::HashMap;
+use std::sync::LazyLock;
 
 use holon_api::ContentType;
 use holon_api::SourceLanguage;
@@ -22,34 +23,40 @@ use holon_api::block::Block;
 use holon_api::entity_uri::EntityUri;
 use holon_orgmode::OrgBlockExt;
 
+/// The `block_raw` columns a block value carries, from the one schema source
+/// of truth, so a new block column reaches the snapshot without editing it.
+fn block_value_columns() -> Vec<&'static str> {
+    holon_api::schema::BLOCK
+        .columns_with_source()
+        .into_iter()
+        .filter(|(_, source)| *source == holon_api::schema::ColumnSource::Value)
+        .map(|(name, _)| name)
+        .collect()
+}
+
 /// Snapshot SQL for the `block` MATVIEW — the canonical projection that carries
 /// the junction edge fields as `json_group_array` columns — one per
-/// [`holon_api::EdgeField`].
-/// Backs the `inv-blocks-match-ref/matview` reader
-/// (`SutBackend::live_block_snapshot`). Centralised here, next to
-/// [`parse_block_row`], so the column list and its parser stay in lockstep and
-/// the SQL isn't duplicated across SUT impls.
-pub(super) const BLOCK_MATVIEW_SNAPSHOT_SQL: &str = "SELECT id, parent_id, content, content_type, \
-                                                     source_language, source_name, \
-                                                     properties, marks, collapsed, \
-                                                     widget_only, tags, requires, \
-                                                     advice_suppressed, contributes_to FROM \
-                                                     block";
+/// [`holon_api::EdgeField`]. Backs the `inv-blocks-match-ref/matview` reader
+/// (`SutBackend::live_block_snapshot`).
+pub(super) static BLOCK_MATVIEW_SNAPSHOT_SQL: LazyLock<String> = LazyLock::new(|| {
+    let mut columns = block_value_columns();
+    columns.extend(holon_api::schema::BLOCK.edge_sets());
+    format!("SELECT {} FROM block", columns.join(", "))
+});
 
 /// Snapshot SQL for the write-side `block_raw` BASE TABLE. Native columns only
 /// — `block_raw` has no junction `tags`/`requires`, so [`parse_block_row`]
 /// leaves those empty and the `/block_raw` invariant compares a field subset.
 /// Backs `SutBackend::block_raw_snapshot`.
 ///
-/// Excludes the self-parented `sentinel:no_parent` FK-anchor row that
-/// `CoreSchemaModule` seeds to satisfy the `block_raw.parent_id` FK — it is not
-/// a real block and never appears in the reference model. Production's `block`
-/// matview drops it the same way (`schema_modules.rs`: `WHERE b.id !=
-/// 'sentinel:no_parent'`).
-pub(super) const BLOCK_RAW_SNAPSHOT_SQL: &str = "SELECT id, parent_id, content, content_type, \
-                                                 source_language, source_name, properties, \
-                                                 marks, collapsed, widget_only FROM block_raw \
-                                                 WHERE id != 'sentinel:no_parent'";
+/// Excludes the self-parented `sentinel:no_parent` FK-anchor row, as the
+/// production `block` matview does: it is not a real block.
+pub(super) static BLOCK_RAW_SNAPSHOT_SQL: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "SELECT {} FROM block_raw WHERE id != 'sentinel:no_parent'",
+        block_value_columns().join(", ")
+    )
+});
 
 /// Read a `NOT NULL DEFAULT 0` SQLite boolean column that the snapshot SQL is
 /// REQUIRED to select. Absent = the SQL lost the column, which would silently
@@ -61,8 +68,8 @@ fn required_sql_bool(row: &holon_core::storage::types::StorageEntity, col: &str)
         Some(Value::Boolean(b)) => *b,
         Some(other) => panic!("block row {col:?} must be an INTEGER 0/1, got {other:?}"),
         None => panic!(
-            "block row is missing the {col:?} column — add it to BLOCK_MATVIEW_SNAPSHOT_SQL / \
-             BLOCK_RAW_SNAPSHOT_SQL; without it every parsed Block reports {col}=false and \
+            "block row is missing the {col:?} column — make the snapshot SQL select it \
+             (sut_row_parsing.rs); without it every parsed Block reports {col}=false and \
              inv-blocks-match-ref is vacuous on that field"
         ),
     }
@@ -89,8 +96,8 @@ fn required_sql_opt_string(
                 .to_string(),
         ),
         None => panic!(
-            "block row is missing the {col:?} column — add it to BLOCK_MATVIEW_SNAPSHOT_SQL / \
-             BLOCK_RAW_SNAPSHOT_SQL; without it every parsed Block reports {col}=None and \
+            "block row is missing the {col:?} column — make the snapshot SQL select it \
+             (sut_row_parsing.rs); without it every parsed Block reports {col}=None and \
              inv-blocks-match-ref is vacuous on that field"
         ),
     }
@@ -197,6 +204,10 @@ pub(super) fn parse_block_row(row: &holon_core::storage::types::StorageEntity) -
     // NULL here is a real value (no source name), but an ABSENT column is the
     // SELECT having lost it, which is the failure this guard exists to catch.
     block.source_name = required_sql_opt_string(row, "source_name");
+    block.block_type = required_sql_opt_string(row, "block_type").and_then(|stored| {
+        holon_api::block::parse_stored_block_type(&stored)
+            .unwrap_or_else(|e| panic!("block row 'block_type' {stored:?} is unreadable: {e}"))
+    });
 
     if let Some(props_val) = row.get("properties") {
         match props_val {

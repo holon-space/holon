@@ -325,9 +325,10 @@ of `blocks_differ`") — that rationale went stale the day H12's fix made
 `blocks_differ` iterate `EdgeField::ALL`; both SELECTs now hydrate the
 junction, and the stale comment is deleted. `task_blocks_for_petri.sql` widened
 its projection to include the matview's COALESCE'd `tags`/`requires`.
-Still open as H1-residue hardening (not H8): `depth`, `sort_key`, `collapsed`,
-`completed`, `block_type` remain intentionally not round-tripped into `Block`
-with no type-level marker. Anchors:
+`collapsed`, `widget_only` and `block_type` round-trip into `Block`; a stored
+`block_type` that is not an entity name reads as `None` and raises a
+`block-field-unreadable` condition. `sort_key` stays outside `Block` (order is
+carried beside the value). Anchors:
 `impl TryFrom<crate::StorageEntity> for Block`, `require_string_array`
 (`holon-api/src/block.rs`); `TursoSinkReader::read_blocks`;
 `load_all_blocks_with_hydration`.

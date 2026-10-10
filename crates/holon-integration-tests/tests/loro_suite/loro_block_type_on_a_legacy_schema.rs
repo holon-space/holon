@@ -1,7 +1,8 @@
-//! A database whose `block_raw` was created before `block_type` became
-//! nullable and `completed` was dropped keeps that shape across boots
-//! (`CREATE TABLE IF NOT EXISTS`). Reads, creates and `block_type` writes must
-//! still work on it.
+//! A database created before `block_type` became nullable and `completed` was
+//! dropped: its `block_raw` keeps that shape across boots (`CREATE TABLE IF
+//! NOT EXISTS`), while its `block` and journal matviews still select
+//! `completed` and must be rebuilt at boot. Reads, creates and `block_type`
+//! writes must still work on it.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -68,13 +69,122 @@ fn set_block_type(id: &str, value: Value) -> HashMap<Arc<str>, Value> {
     params
 }
 
-fn create_legacy_database(env: &TestEnvironment) {
+/// The junction tables and per-junction aggregation matviews the `block`
+/// matview joins, then the matviews that selected `completed`, in creation
+/// order.
+const LEGACY_CHAIN: &[&str] = &[
+    "block_requires",
+    "block_tags",
+    "advice_suppressed",
+    "block_contributes_to",
+    "block_requires_agg",
+    "block_tags_agg",
+    "advice_suppressed_agg",
+    "block_contributes_to_agg",
+    "block",
+    "journal_day_pages",
+    "journal_feed",
+];
+
+const VIEWS_THAT_SELECTED_COMPLETED: &[&str] = &["block", "journal_day_pages", "journal_feed"];
+
+/// The current schema's DDL for every `LEGACY_CHAIN` object, read from a
+/// freshly booted database.
+async fn current_chain_ddl(runtime: Arc<tokio::runtime::Runtime>) -> HashMap<String, String> {
+    let fresh = TestEnvironment::new(runtime).unwrap();
+    fresh
+        .start_app(true)
+        .await
+        .expect("start_app on a fresh database");
+    let rows = fresh
+        .engine()
+        .db_handle()
+        .query(
+            "SELECT name, sql FROM sqlite_master WHERE sql IS NOT NULL",
+            HashMap::new(),
+        )
+        .await
+        .expect("reading sqlite_master must succeed");
+    let ddl: HashMap<String, String> = rows
+        .into_iter()
+        .map(|row| {
+            let field = |col: &str| match row.get(col) {
+                Some(Value::String(s)) => s.clone(),
+                other => panic!("sqlite_master {col} must be TEXT, got {other:?}"),
+            };
+            (field("name"), field("sql"))
+        })
+        .collect();
+    for name in LEGACY_CHAIN {
+        assert!(
+            ddl.contains_key(*name),
+            "the current schema has no {name:?}"
+        );
+    }
+    ddl
+}
+
+/// `sql` with `completed` selected between `widget_only` and `block_type`, as
+/// the matviews selected it before the column was dropped.
+fn selecting_completed(sql: &str) -> String {
+    let anchor = "widget_only,";
+    let at = sql.find(anchor).expect("the view selects widget_only") + anchor.len();
+    let rest = &sql[at..];
+    let gap = &rest[..rest.len() - rest.trim_start().len()];
+    let qualifier = if rest.trim_start().starts_with("b.") {
+        "b."
+    } else {
+        ""
+    };
+    assert!(
+        rest.trim_start()[qualifier.len()..].starts_with("block_type"),
+        "the view must select block_type right after widget_only: {sql}"
+    );
+    format!("{}{gap}{qualifier}completed,{rest}", &sql[..at])
+}
+
+async fn create_legacy_database(env: &TestEnvironment, runtime: Arc<tokio::runtime::Runtime>) {
+    let ddl = current_chain_ddl(runtime).await;
     let db = holon_turso::turso::TursoBackend::open_database(env.temp_path().join("test.db"))
         .expect("opening the legacy database must succeed");
-    db.connect()
-        .expect("connecting to the legacy database must succeed")
-        .execute(LEGACY_BLOCK_RAW)
+    let conn = db
+        .connect()
+        .expect("connecting to the legacy database must succeed");
+    conn.execute(LEGACY_BLOCK_RAW)
         .expect("creating the legacy block_raw must succeed");
+    for name in LEGACY_CHAIN {
+        let sql = if VIEWS_THAT_SELECTED_COMPLETED.contains(name) {
+            selecting_completed(&ddl[*name])
+        } else {
+            ddl[*name].clone()
+        };
+        conn.execute(&sql)
+            .unwrap_or_else(|e| panic!("creating the legacy {name:?} must succeed: {e}"));
+    }
+}
+
+/// Every matview that selected `completed` was rebuilt without it at boot.
+async fn assert_legacy_views_rebuilt(env: &TestEnvironment) {
+    let rows = env
+        .engine()
+        .db_handle()
+        .query(
+            "SELECT name, sql FROM sqlite_master WHERE type = 'view'",
+            HashMap::new(),
+        )
+        .await
+        .expect("reading sqlite_master must succeed");
+    for name in VIEWS_THAT_SELECTED_COMPLETED {
+        let row = rows
+            .iter()
+            .find(|r| r.get("name") == Some(&Value::String(name.to_string())))
+            .unwrap_or_else(|| panic!("boot left no {name:?} view"));
+        let sql = format!("{:?}", row.get("sql"));
+        assert!(
+            !sql.contains("completed"),
+            "boot kept the legacy {name:?} view: {sql}"
+        );
+    }
 }
 
 /// The stored `block_type` cell, and the typed slot the SQL row parses into.
@@ -113,11 +223,12 @@ fn run_on_a_legacy_database(body: impl AsyncFnOnce(&TestEnvironment, &HolonServi
     let runtime = Arc::new(tokio::runtime::Runtime::new().expect("tokio runtime"));
     runtime.clone().block_on(async move {
         let env = TestEnvironment::new(runtime.clone()).unwrap();
-        create_legacy_database(&env);
+        create_legacy_database(&env, runtime.clone()).await;
         env.start_app(true)
             .await
-            .expect("start_app on a legacy block_raw");
+            .expect("start_app on a legacy database");
         env.wait_for_loro_quiescence(Duration::from_secs(10)).await;
+        assert_legacy_views_rebuilt(&env).await;
         let service = service(&env);
         body(&env, &service).await;
     });

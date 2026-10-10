@@ -1924,7 +1924,10 @@ impl HeadlessFrontendComponent {
         let rows = self
             .engine()
             .db_handle()
-            .query(BLOCK_RAW_SNAPSHOT_SQL, std::collections::HashMap::new())
+            .query(
+                BLOCK_RAW_SNAPSHOT_SQL.as_str(),
+                std::collections::HashMap::new(),
+            )
             .await
             .expect("block_raw query");
         parse_block_rows(&rows)
@@ -2769,7 +2772,10 @@ impl SutBackend for HeadlessFrontendComponent {
         let rows = self
             .engine()
             .db_handle()
-            .query(BLOCK_MATVIEW_SNAPSHOT_SQL, std::collections::HashMap::new())
+            .query(
+                BLOCK_MATVIEW_SNAPSHOT_SQL.as_str(),
+                std::collections::HashMap::new(),
+            )
             .await
             .expect("block matview query");
         parse_block_rows(&rows)

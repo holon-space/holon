@@ -42,22 +42,33 @@ impl BlockCreateRequest {
     ///
     /// Every ingest (org files, LogSeq-DB import) goes through here, so the
     /// typed scalars the authority stores in its property map are carried in
-    /// ONE place. `collapsed` and `widget_only` are exactly those: they are
-    /// typed `Block` fields, but the Loro authority keeps them in the node's
-    /// property map (that is where `set_field("collapsed")` writes them, and
-    /// `read_block_from_tree` lifts them into the typed slots on the way out).
-    /// Reconstructing this struct field-by-field at a call site is what dropped
-    /// a vault's fold state on import.
+    /// ONE place. `collapsed`, `widget_only` and `block_type` are exactly
+    /// those: they are typed `Block` fields, but the Loro authority keeps them
+    /// in the node's property map (that is where `set_field("collapsed")`
+    /// writes them, and `read_block_from_tree` lifts them into the typed slots
+    /// on the way out).
+    ///
+    /// A `properties` key naming a storage column (an org drawer
+    /// `:block_type:`) is not carried: only the typed slot speaks for its
+    /// column. The ingest's param builder discloses the refused key.
     ///
     /// Written only when set, matching `drawer_properties()`'s convention — a
     /// create has no prior value to clear.
     pub fn of(block: &holon_api::block::Block, parent_id: &EntityUri) -> Self {
-        let mut properties = block.properties.clone();
+        let mut properties: std::collections::HashMap<String, holon_api::Value> = block
+            .properties
+            .iter()
+            .filter(|(key, _)| !holon_api::schema::is_block_column(key))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
         if block.collapsed {
             properties.insert("collapsed".to_string(), holon_api::Value::Boolean(true));
         }
         if block.widget_only {
             properties.insert("widget_only".to_string(), holon_api::Value::Boolean(true));
+        }
+        if let Some(block_type) = &block.block_type {
+            properties.insert("block_type".to_string(), block_type.clone().into());
         }
         Self {
             parent_id: parent_id.clone(),
@@ -520,5 +531,35 @@ mod default_contract_tests {
             ordering.consolidator(),
             holon_api::capability::Consolidator::Store
         ));
+    }
+}
+
+#[cfg(test)]
+mod create_request_tests {
+    use super::*;
+
+    #[test]
+    fn a_create_request_carries_the_typed_block_type_and_no_column_named_property() {
+        let mut block = holon_api::block::Block::new_text(
+            EntityUri::parse("block:typed").unwrap(),
+            EntityUri::no_parent(),
+            "typed",
+        );
+        block.block_type = Some(holon_api::EntityName::new("page"));
+        block.set_property("keep", "v");
+        let typed = BlockCreateRequest::of(&block, &EntityUri::no_parent());
+        assert_eq!(
+            typed.properties.get("block_type"),
+            Some(&holon_api::Value::from(holon_api::EntityName::new("page")))
+        );
+        assert_eq!(
+            typed.properties.get("keep"),
+            Some(&holon_api::Value::from("v"))
+        );
+
+        block.block_type = None;
+        block.set_property("block_type", "page");
+        let drawer = BlockCreateRequest::of(&block, &EntityUri::no_parent());
+        assert_eq!(drawer.properties.get("block_type"), None);
     }
 }
