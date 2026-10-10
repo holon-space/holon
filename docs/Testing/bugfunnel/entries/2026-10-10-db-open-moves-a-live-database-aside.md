@@ -31,14 +31,17 @@ lock and the engine shares one `Database` per file in a process, so no in-proces
 keystone reboot can reach the lock error.
 
 ## Remedy
-`open_with_io` and the first connect parse the engine error at the boundary into
+Every engine call of the open (the file open, the first connect and every read or write after
+it) parses the engine error at the boundary into
 `StorageError::DatabaseUnopenable { failure: DatabaseOpenFailure, .. }` (`Locked`, `Io(kind)`,
 `Corrupt`, `Unclassified`). `Locked` is only real contention: a lock another process holds, or a
 database another process has open. `Corrupt` is `Corrupt`, `NotADB` and the short-read,
 WAL-frame and checksum completion errors; it moves aside the smallest set of files that can
-explain it: a damaged shared-WAL coordination file (`-tshm`) alone, then the write-ahead log
-alone when the first connect raised the error (disclosed as `database-log-moved-aside`), else
-every file of the database (`database-moved-aside`). Every other class keeps the files and
+explain it: a damaged shared-WAL coordination file (`-tshm`) alone (disclosed as
+`database-coordination-file-moved-aside`), then the write-ahead log alone when the first connect
+raised the error (`database-log-moved-aside`), else every file of the database
+(`database-moved-aside`). The files of one recovery share one backup name, and a taken name is
+never overwritten. Every other class keeps the files and
 returns the typed error; boot discloses it as `BootError { Turso, EngineResolve }` with the
 whole cause chain, so the report names the fix. The integration test runs a real second process.
 Open: boot still stops on a `Locked` or `Io` open (degraded boot, #155).

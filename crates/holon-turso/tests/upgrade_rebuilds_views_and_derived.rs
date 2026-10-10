@@ -14,7 +14,7 @@ use holon_api::computation::ArithOp;
 use holon_api::computation::Computation;
 use holon_api::computation::DerivedField;
 use holon_api::computation::FieldIdent;
-use holon_turso::db_open::OpenOutcome;
+use holon_turso::db_open::OpenChange;
 use holon_turso::derived_reconciler::DerivedFieldReconcilerHandle;
 use holon_turso::derived_reconciler::spawn_derived_field_reconciler;
 use holon_turso::matview_manager::MatviewManager;
@@ -179,8 +179,8 @@ async fn an_upgrade_rebuilds_the_views_and_refills_block_derived() {
 
     let (db, outcome) =
         TursoBackend::open_database_reporting_outcome(&path).expect("open after the upgrade");
-    match &outcome {
-        OpenOutcome::ViewsDropped { views, .. } => assert_eq!(
+    match outcome.0.as_slice() {
+        [OpenChange::ViewsDropped { views, .. }] => assert_eq!(
             views.iter().cloned().collect::<BTreeSet<_>>(),
             first_views,
             "the upgrade must drop exactly the views boot 1 built"

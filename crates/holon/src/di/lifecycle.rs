@@ -130,7 +130,7 @@ pub fn open_and_register_core(
             injector.provide::<holon_turso::db_open::BootOpenOutcome>(fluxdi::Provider::root(
                 |_| {
                     fluxdi::Shared::new(holon_turso::db_open::BootOpenOutcome(
-                        holon_turso::db_open::OpenOutcome::Kept,
+                        holon_turso::db_open::OpenOutcome::KEPT,
                     ))
                 },
             ));

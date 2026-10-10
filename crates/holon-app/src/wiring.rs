@@ -514,25 +514,31 @@ impl FrontendInjectorExt for Injector {
                     .await;
                 tracing::info!("[FrontendSession] factory: BackendEngine resolved");
 
-                // A damaged database file was moved aside at open; say where it is.
+                // Say where each damaged database file moved at open.
                 let opened = resolver.resolve::<holon::storage::db_open::BootOpenOutcome>();
-                let moved = match &opened.0 {
-                    holon::storage::db_open::OpenOutcome::MovedAside { reason, backup } => {
-                        Some(holon_api::ConditionKind::DatabaseMovedAside {
-                            reason: reason.clone(),
-                            backup: backup.display().to_string(),
-                        })
-                    }
-                    holon::storage::db_open::OpenOutcome::LogMovedAside { reason, backup } => {
-                        Some(holon_api::ConditionKind::DatabaseLogMovedAside {
-                            reason: reason.clone(),
-                            backup: backup.display().to_string(),
-                        })
-                    }
-                    holon::storage::db_open::OpenOutcome::Kept
-                    | holon::storage::db_open::OpenOutcome::ViewsDropped { .. } => None,
-                };
-                if let Some(reason) = moved {
+                for change in &opened.0.0 {
+                    use holon::storage::db_open::OpenChange;
+                    let reason = match change {
+                        OpenChange::MovedAside { reason, backup } => {
+                            holon_api::ConditionKind::DatabaseMovedAside {
+                                reason: reason.clone(),
+                                backup: backup.display().to_string(),
+                            }
+                        }
+                        OpenChange::LogMovedAside { reason, backup } => {
+                            holon_api::ConditionKind::DatabaseLogMovedAside {
+                                reason: reason.clone(),
+                                backup: backup.display().to_string(),
+                            }
+                        }
+                        OpenChange::CoordinationFileMovedAside { reason, backup } => {
+                            holon_api::ConditionKind::DatabaseCoordinationFileMovedAside {
+                                reason: reason.clone(),
+                                backup: backup.display().to_string(),
+                            }
+                        }
+                        OpenChange::ViewsDropped { .. } => continue,
+                    };
                     let bus = resolver.resolve::<Arc<holon_api::ConditionBus>>();
                     bus.emit(holon_api::Condition {
                         subject: "database".to_string(),

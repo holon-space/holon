@@ -6,8 +6,9 @@
 //! different [`scalar_fns`] set, or when the engine could not load one of its
 //! views. A damaged file is moved aside, never deleted: the shared-WAL
 //! coordination file or the write-ahead log alone when the error points there,
-//! else every file of the database. Any other open failure leaves the files
-//! where they are.
+//! else every file of the database. Every engine error of the open, from the
+//! file open to the last read, is classified the same way; any failure other
+//! than damage leaves the files where they are.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -31,15 +32,25 @@ use crate::durable_state::TursoDurableState;
 use crate::scalar_fns;
 use crate::scalar_fns::ScalarFn;
 
-/// What an open did to the database file.
+/// What an open did to the database files, in the order it did it. Empty when
+/// it kept them as they were.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum OpenOutcome {
-    Kept,
+pub struct OpenOutcome(pub Vec<OpenChange>);
+
+impl OpenOutcome {
+    pub const KEPT: Self = Self(Vec::new());
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OpenChange {
     /// The file could not be used as it was: its materialized views and the
     /// `block_derived` cache were dropped. Every table row is kept.
-    ViewsDropped {
+    ViewsDropped { reason: String, views: Vec<String> },
+    /// The shared-WAL coordination file was damaged. It holds no rows; it was
+    /// renamed to `backup`.
+    CoordinationFileMovedAside {
         reason: String,
-        views: Vec<String>,
+        backup: std::path::PathBuf,
     },
     /// The write-ahead log was damaged and the main file intact. The log was
     /// renamed to `backup`; the commits it held and the main file did not are
@@ -57,7 +68,8 @@ pub enum OpenOutcome {
 }
 
 /// What this process's boot did to its database file. Provided once per
-/// session; a boot that opens no database (`LoroMemory`) records `Kept`.
+/// session; a boot that opens no database (`LoroMemory`) records
+/// [`OpenOutcome::KEPT`].
 #[derive(Debug, Clone)]
 pub struct BootOpenOutcome(pub OpenOutcome);
 
@@ -71,55 +83,162 @@ pub(crate) fn open(db_path: &Path, fns: &[ScalarFn]) -> Result<(Arc<Database>, O
         .to_str()
         .ok_or_else(|| StorageError::DatabaseError(format!("path {db_path:?} is not UTF-8")))?;
     if path.starts_with(":memory:") {
-        let db = open_with_io(Arc::new(MemoryIO::new()), path, OpenFlags::default(), fns)?;
-        return Ok((db, OpenOutcome::Kept));
+        let db = open_with_io(Arc::new(MemoryIO::new()), path, OpenFlags::default(), fns)
+            .map_err(|e| e.classify(path))?;
+        return Ok((db, OpenOutcome::KEPT));
     }
-    let db = match open_file(path, fns) {
-        Ok(db) => db,
-        Err(e) => return recover_damaged(e, Leg::Open, db_path, path, fns),
-    };
-    // The engine reads the write-ahead log at the first connect, so a damaged
-    // log surfaces there.
-    if let Err(e) = db.connect() {
-        drop(db);
-        return recover_damaged(unopenable(path, e), Leg::Connect, db_path, path, fns);
-    }
-    let Some(reason) = unusable_reason(&db, fns)? else {
-        record_signature(&db, fns)?;
-        return Ok((db, OpenOutcome::Kept));
-    };
-    match drop_computed(&db, fns) {
-        Ok(views) => {
-            tracing::info!(
-                "[open_database] {path}: {reason}. Dropped its materialized views [{}] and the \
-                 {DERIVED_CACHE_TABLE} cache; every table row is kept, and the views are \
-                 rebuilt from the tables",
-                views.join(", ")
-            );
-            Ok((db, OpenOutcome::ViewsDropped { reason, views }))
+    let mut changes = Vec::new();
+    let mut stem = None;
+    // Each failed pass moves one more existing file aside, so the loop ends.
+    loop {
+        let Failed { leg, error, db } = match attempt(path, fns) {
+            Ok((db, change)) => {
+                changes.extend(change);
+                return Ok((db, OpenOutcome(changes)));
+            }
+            Err(failed) => failed,
+        };
+        if !error.is_corrupt() {
+            return Err(error.classify(path));
         }
-        Err(e) => set_aside(
-            Some(db),
-            db_path,
-            path,
-            fns,
-            &format!("{reason}, and dropping its views failed: {e}"),
-        ),
+        if let Some(db) = db {
+            assert_eq!(
+                Arc::strong_count(&db),
+                1,
+                "{path} is damaged ({error}), but another holder in this process still has it open"
+            );
+        }
+        let reason = format!("the engine cannot use it: {error}");
+        let stem: &std::path::Path = stem.get_or_insert_with(|| free_backup_stem(db_path, path));
+        changes.push(recover_damaged(leg, reason, db_path, path, stem)?);
+        if let Some(OpenChange::MovedAside { .. }) = changes.last() {
+            let db = open_fresh(path, fns).map_err(|e| e.classify(path))?;
+            return Ok((db, OpenOutcome(changes)));
+        }
     }
 }
 
+/// Where an engine error arose during an open.
+#[derive(Clone, Copy)]
+enum Leg {
+    Open,
+    /// The first connect, which reads the write-ahead log.
+    Connect,
+    /// A read or write of the opened database.
+    Use,
+}
+
+struct Failed {
+    leg: Leg,
+    error: OpenError,
+    db: Option<Arc<Database>>,
+}
+
+/// An error inside an open. An engine error keeps its `LimboError`, so `open`
+/// classifies the errors of every leg in one place.
+#[derive(Debug)]
+enum OpenError {
+    Engine { doing: String, error: LimboError },
+    Other(StorageError),
+}
+
+impl std::fmt::Display for OpenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Engine { doing, error } => write!(f, "{doing}: {error}"),
+            Self::Other(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl OpenError {
+    fn is_corrupt(&self) -> bool {
+        matches!(self, Self::Engine { error, .. } if open_failure(error) == DatabaseOpenFailure::Corrupt)
+    }
+
+    fn classify(self, path: &str) -> StorageError {
+        match self {
+            Self::Engine { ref error, .. } => StorageError::DatabaseUnopenable {
+                path: path.to_string(),
+                failure: open_failure(error),
+                cause: self.to_string(),
+            },
+            Self::Other(e) => e,
+        }
+    }
+}
+
+type Step<T> = std::result::Result<T, OpenError>;
+
+fn engine(doing: impl std::fmt::Display) -> impl FnOnce(LimboError) -> OpenError {
+    move |error| OpenError::Engine {
+        doing: doing.to_string(),
+        error,
+    }
+}
+
+fn invalid(message: String) -> OpenError {
+    OpenError::Other(StorageError::DatabaseError(message))
+}
+
+/// One try to open `path` and make it usable by this binary.
+fn attempt(
+    path: &str,
+    fns: &[ScalarFn],
+) -> std::result::Result<(Arc<Database>, Option<OpenChange>), Failed> {
+    let db = open_file(path, fns).map_err(|error| Failed {
+        leg: Leg::Open,
+        error,
+        db: None,
+    })?;
+    // The engine reads the write-ahead log at the first connect, so a damaged
+    // log surfaces there.
+    if let Err(error) = db.connect() {
+        return Err(Failed {
+            leg: Leg::Connect,
+            error: engine("connect")(error),
+            db: Some(db),
+        });
+    }
+    match admit(&db, path, fns) {
+        Ok(change) => Ok((db, change)),
+        Err(error) => Err(Failed {
+            leg: Leg::Use,
+            error,
+            db: Some(db),
+        }),
+    }
+}
+
+/// Records this binary's function set in `db`, or drops what `db` computed
+/// with another one.
+fn admit(db: &Arc<Database>, path: &str, fns: &[ScalarFn]) -> Step<Option<OpenChange>> {
+    let Some(reason) = unusable_reason(db, fns)? else {
+        record_signature(db, fns)?;
+        return Ok(None);
+    };
+    let views = drop_computed(db, fns)?;
+    tracing::info!(
+        "[open_database] {path}: {reason}. Dropped its materialized views [{}] and the \
+         {DERIVED_CACHE_TABLE} cache; every table row is kept, and the views are rebuilt from \
+         the tables",
+        views.join(", ")
+    );
+    Ok(Some(OpenChange::ViewsDropped { reason, views }))
+}
+
 #[cfg(target_family = "unix")]
-fn open_file(path: &str, fns: &[ScalarFn]) -> Result<Arc<Database>> {
-    let io = turso_core::UnixIO::new().map_err(|e| unopenable(path, e))?;
+fn open_file(path: &str, fns: &[ScalarFn]) -> Step<Arc<Database>> {
+    let io = turso_core::UnixIO::new().map_err(engine("create the file IO"))?;
     open_with_io(Arc::new(io), path, OpenFlags::default(), fns)
 }
 
 /// wasm32: a file path needs the host IO that the browser worker registers
 /// (the OPFS shim) before the engine opens a database.
 #[cfg(all(not(target_family = "unix"), target_family = "wasm"))]
-fn open_file(path: &str, fns: &[ScalarFn]) -> Result<Arc<Database>> {
+fn open_file(path: &str, fns: &[ScalarFn]) -> Step<Arc<Database>> {
     let io = crate::turso::wasm_io::registered().ok_or_else(|| {
-        StorageError::DatabaseError(format!(
+        invalid(format!(
             "open_database('{path}'): no wasm IO registered — call \
              holon_turso::register_wasm_io (e.g. with the OPFS shim) before opening a \
              file-backed database on wasm32"
@@ -129,71 +248,57 @@ fn open_file(path: &str, fns: &[ScalarFn]) -> Result<Arc<Database>> {
 }
 
 #[cfg(all(not(target_family = "unix"), not(target_family = "wasm")))]
-fn open_file(_: &str, _: &[ScalarFn]) -> Result<Arc<Database>> {
-    Err(StorageError::DatabaseError(
+fn open_file(_: &str, _: &[ScalarFn]) -> Step<Arc<Database>> {
+    Err(invalid(
         "File-based storage not yet supported on this platform".to_string(),
     ))
 }
 
-/// Where an engine open error arose.
-#[derive(Clone, Copy)]
-enum Leg {
-    Open,
-    /// The first connect, which reads the write-ahead log.
-    Connect,
-}
-
-/// Moves aside the one file a `Corrupt` error points at and opens again; any
-/// other error is returned as it is. The engine does not say which file is
-/// damaged, so the smallest move that can explain the error goes first: the
-/// coordination file, which holds no rows; then the log, if the first connect
-/// raised the error; then every file of the database.
+/// Moves aside the files a `Corrupt` error can point at. The engine does not
+/// say which file is damaged, so the smallest move that can explain the error
+/// goes first: the coordination file, which holds no rows; then the log, if
+/// the first connect raised the error; then every file of the database.
 fn recover_damaged(
-    error: StorageError,
     leg: Leg,
+    reason: String,
     db_path: &Path,
     path: &str,
-    fns: &[ScalarFn],
-) -> Result<(Arc<Database>, OpenOutcome)> {
-    let StorageError::DatabaseUnopenable {
-        failure: DatabaseOpenFailure::Corrupt,
-        cause,
-        ..
-    } = error
-    else {
-        return Err(error);
-    };
-    let reason = format!("the engine cannot open it: {cause}");
+    stem: &Path,
+) -> Result<OpenChange> {
     let coordination = sidecar(path, COORDINATION_SUFFIX);
     if coordination.exists() {
-        let backup = move_aside(&[coordination], path)?;
+        let backup = move_aside(&coordination, path, stem)?;
         tracing::warn!(
             "[open_database] {path}: {reason}. Moved its shared-WAL coordination file aside to \
-             {}{COORDINATION_SUFFIX}; it holds no rows",
+             {}; it holds no rows",
             backup.display()
         );
-        return open(db_path, fns);
+        return Ok(OpenChange::CoordinationFileMovedAside { reason, backup });
     }
     let log = sidecar(path, LOG_SUFFIX);
     if matches!(leg, Leg::Connect) && log.exists() {
-        let backup = move_aside(&[log], path)?;
-        let backup = std::path::PathBuf::from(format!("{}{LOG_SUFFIX}", backup.display()));
+        let backup = move_aside(&log, path, stem)?;
         tracing::error!(
             "[open_database] {path}: {reason}. Moved its write-ahead log aside to {}; commits \
              that were only in the log are in that file",
             backup.display()
         );
-        let (db, outcome) = open(db_path, fns)?;
-        return Ok(match outcome {
-            OpenOutcome::Kept | OpenOutcome::ViewsDropped { .. } => {
-                (db, OpenOutcome::LogMovedAside { reason, backup })
-            }
-            moved @ (OpenOutcome::LogMovedAside { .. } | OpenOutcome::MovedAside { .. }) => {
-                (db, moved)
-            }
-        });
+        return Ok(OpenChange::LogMovedAside { reason, backup });
     }
-    set_aside(None, db_path, path, fns, &reason)
+    for file in TursoDurableState::new(db_path).durable_paths() {
+        if file.exists() {
+            move_aside(&file, path, stem)?;
+        }
+    }
+    tracing::error!(
+        "[open_database] {path} is unusable: {reason}. Moved it aside to {} and opened a fresh \
+         database; anything that was only in the database is in that file",
+        stem.display()
+    );
+    Ok(OpenChange::MovedAside {
+        reason,
+        backup: stem.to_path_buf(),
+    })
 }
 
 const LOG_SUFFIX: &str = "-wal";
@@ -203,88 +308,85 @@ fn sidecar(path: &str, suffix: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(format!("{path}{suffix}"))
 }
 
-/// Rename each of `files` (files of the database at `path`) to a timestamped
-/// backup beside it, keeping its suffix. Returns the backup's base path.
-#[cfg(target_family = "unix")]
-fn move_aside(files: &[std::path::PathBuf], path: &str) -> Result<std::path::PathBuf> {
-    let backup = std::path::PathBuf::from(format!(
+/// The suffix `file`, a file of the database at `path`, adds to `path`.
+fn suffix_of<'a>(file: &'a Path, path: &str) -> &'a str {
+    file.to_str()
+        .and_then(|f| f.strip_prefix(path))
+        .unwrap_or_else(|| panic!("{} is not a file of {path}", file.display()))
+}
+
+/// The base name the files of one recovery move to: `{path}.unusable-{now}`,
+/// with `.2`, `.3`, … appended while a file of the database under that name
+/// exists already.
+fn free_backup_stem(db_path: &Path, path: &str) -> std::path::PathBuf {
+    let base = format!(
         "{path}.unusable-{}",
         chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ")
-    ));
-    for file in files.iter().filter(|f| f.exists()) {
-        let suffix = file
-            .to_str()
-            .and_then(|f| f.strip_prefix(path))
-            .unwrap_or_else(|| panic!("{} is not a file of {path}", file.display()));
-        let to = std::path::PathBuf::from(format!("{}{suffix}", backup.display()));
-        assert!(!to.exists(), "the backup {} exists already", to.display());
-        std::fs::rename(file, &to).map_err(|e| {
-            StorageError::DatabaseError(format!(
-                "move the unusable database file {} aside to {}: {e}",
-                file.display(),
-                to.display()
-            ))
-        })?;
+    );
+    let files = TursoDurableState::new(db_path).durable_paths();
+    (1..)
+        .map(|n| match n {
+            1 => base.clone(),
+            n => format!("{base}.{n}"),
+        })
+        .find(|stem| {
+            files
+                .iter()
+                .all(|file| !Path::new(&format!("{stem}{}", suffix_of(file, path))).exists())
+        })
+        .map(std::path::PathBuf::from)
+        .expect("the range of names is unbounded")
+}
+
+/// Renames `file`, a file of the database at `path`, to `stem` plus its
+/// suffix. Returns the new path.
+#[cfg(target_family = "unix")]
+fn move_aside(file: &Path, path: &str, stem: &Path) -> Result<std::path::PathBuf> {
+    let to = std::path::PathBuf::from(format!("{}{}", stem.display(), suffix_of(file, path)));
+    if to.exists() {
+        return Err(StorageError::DatabaseError(format!(
+            "move the damaged database file {} aside: {} appeared after the name was chosen; \
+             nothing was overwritten",
+            file.display(),
+            to.display()
+        )));
     }
-    Ok(backup)
+    std::fs::rename(file, &to).map_err(|e| {
+        StorageError::DatabaseError(format!(
+            "move the damaged database file {} aside to {}: {e}",
+            file.display(),
+            to.display()
+        ))
+    })?;
+    Ok(to)
 }
 
 /// OPFS files cannot be renamed through the engine's IO.
 #[cfg(not(target_family = "unix"))]
-fn move_aside(files: &[std::path::PathBuf], path: &str) -> Result<std::path::PathBuf> {
+fn move_aside(file: &Path, path: &str, _: &Path) -> Result<std::path::PathBuf> {
     Err(StorageError::DatabaseError(format!(
-        "the database at {path} is unusable ({}). Copy it out of the browser storage and \
-         delete it there; the org files rebuild the blocks",
-        files
-            .iter()
-            .map(|f| f.display().to_string())
-            .collect::<Vec<_>>()
-            .join(", ")
+        "the database at {path} is damaged ({}). Copy it out of the browser storage and delete \
+         it there; the org files rebuild the blocks",
+        file.display()
     )))
 }
 
-/// Rename every file of the database to a timestamped backup beside it and
-/// open a fresh one.
-fn set_aside(
-    db: Option<Arc<Database>>,
-    db_path: &Path,
-    path: &str,
-    fns: &[ScalarFn],
-    reason: &str,
-) -> Result<(Arc<Database>, OpenOutcome)> {
-    if let Some(db) = db {
-        assert_eq!(
-            Arc::strong_count(&db),
-            1,
-            "{path} is unusable ({reason}), but another holder in this process still has it open"
-        );
-    }
-    let backup = move_aside(&TursoDurableState::new(db_path).durable_paths(), path)?;
-    tracing::error!(
-        "[open_database] {path} is unusable: {reason}. Moved it aside to {} and opened a fresh \
-         database; anything that was only in the database is in that file",
-        backup.display()
-    );
+/// A database created where a damaged one was moved aside.
+fn open_fresh(path: &str, fns: &[ScalarFn]) -> Step<Arc<Database>> {
     let db = open_file(path, fns)?;
     if let Some(fresh) = unusable_reason(&db, fns)? {
-        return Err(StorageError::DatabaseError(format!(
+        return Err(invalid(format!(
             "the fresh database at {path} is unusable right after it was created: {fresh}"
         )));
     }
     record_signature(&db, fns)?;
-    Ok((
-        db,
-        OpenOutcome::MovedAside {
-            reason: reason.to_string(),
-            backup,
-        },
-    ))
+    Ok(db)
 }
 
 /// In one transaction: drop every materialized view and every view the engine
 /// could not load, dependents first; empty the derived cache; record `fns`.
 /// Returns the dropped view names.
-fn drop_computed(db: &Arc<Database>, fns: &[ScalarFn]) -> Result<Vec<String>> {
+fn drop_computed(db: &Arc<Database>, fns: &[ScalarFn]) -> Step<Vec<String>> {
     let conn = connect(db)?;
     let unloadable = unloadable_views(&conn)?;
     let mut views: Vec<(String, String)> = rows(
@@ -296,18 +398,13 @@ fn drop_computed(db: &Arc<Database>, fns: &[ScalarFn]) -> Result<Vec<String>> {
         [Value::Text(name), Value::Text(sql)] => {
             Ok((name.as_str().to_string(), sql.as_str().to_string()))
         }
-        other => Err(StorageError::DatabaseError(format!(
-            "sqlite_schema view row is {other:?}"
-        ))),
+        other => Err(invalid(format!("sqlite_schema view row is {other:?}"))),
     })
-    .collect::<Result<Vec<_>>>()?
+    .collect::<Step<Vec<_>>>()?
     .into_iter()
     .filter(|(name, sql)| is_materialized(sql) || unloadable.contains(name))
     .collect();
-    let run = |sql: &str| {
-        conn.execute(sql)
-            .map_err(|e| StorageError::DatabaseError(format!("{sql}: {e}")))
-    };
+    let run = |sql: &str| conn.execute(sql).map_err(engine(sql));
     run("BEGIN IMMEDIATE")?;
     let mut dropped = Vec::new();
     while !views.is_empty() {
@@ -318,7 +415,7 @@ fn drop_computed(db: &Arc<Database>, fns: &[ScalarFn]) -> Result<Vec<String>> {
         });
         if free.is_empty() {
             run("ROLLBACK")?;
-            return Err(StorageError::DatabaseError(format!(
+            return Err(invalid(format!(
                 "the views [{}] read each other, so none can be dropped first",
                 held.iter()
                     .map(|(n, _)| n.as_str())
@@ -355,7 +452,7 @@ fn names_word(sql: &str, name: &str) -> bool {
         .any(|word| word == name)
 }
 
-fn unloadable_views(conn: &Arc<Connection>) -> Result<Vec<String>> {
+fn unloadable_views(conn: &Arc<Connection>) -> Step<Vec<String>> {
     conn.with_schema_mut(|schema| {
         let mut views: Vec<String> = schema
             .incompatible_views
@@ -366,10 +463,10 @@ fn unloadable_views(conn: &Arc<Connection>) -> Result<Vec<String>> {
         views.sort();
         views
     })
-    .map_err(|e| StorageError::DatabaseError(format!("read the schema: {e}")))
+    .map_err(engine("read the schema"))
 }
 
-fn has_table(conn: &Arc<Connection>, table: &str) -> Result<bool> {
+fn has_table(conn: &Arc<Connection>, table: &str) -> Step<bool> {
     Ok(!rows(
         conn,
         &format!("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = '{table}'"),
@@ -382,7 +479,7 @@ fn open_with_io(
     path: &str,
     flags: OpenFlags,
     fns: &[ScalarFn],
-) -> Result<Arc<Database>> {
+) -> Step<Arc<Database>> {
     let opts = DatabaseOpts::default().with_views(true);
     // The Tantivy `fts` and sparse-vector `CREATE INDEX .. USING` methods exist
     // only in the native turso_core build.
@@ -391,16 +488,7 @@ fn open_with_io(
     let options = OpenOptions::new(Arc::new(turso_core::SqliteDialect))
         .flags(flags)
         .db_opts(opts);
-    Database::open(io, path, scalar_fns::register_on_options(options, fns))
-        .map_err(|e| unopenable(path, e))
-}
-
-fn unopenable(path: &str, e: LimboError) -> StorageError {
-    StorageError::DatabaseUnopenable {
-        path: path.to_string(),
-        failure: open_failure(&e),
-        cause: e.to_string(),
-    }
+    Database::open(io, path, scalar_fns::register_on_options(options, fns)).map_err(engine("open"))
 }
 
 fn open_failure(e: &LimboError) -> DatabaseOpenFailure {
@@ -433,7 +521,7 @@ fn open_failure(e: &LimboError) -> DatabaseOpenFailure {
     }
 }
 
-fn unusable_reason(db: &Arc<Database>, fns: &[ScalarFn]) -> Result<Option<String>> {
+fn unusable_reason(db: &Arc<Database>, fns: &[ScalarFn]) -> Step<Option<String>> {
     let conn = connect(db)?;
     let wanted = scalar_fns::signature(fns);
     let stored = match stored_signature(&conn)? {
@@ -468,7 +556,7 @@ fn unusable_reason(db: &Arc<Database>, fns: &[ScalarFn]) -> Result<Option<String
             views.sort();
             views
         })
-        .map_err(|e| StorageError::DatabaseError(format!("read the schema: {e}")))?;
+        .map_err(engine("read the schema"))?;
     if unusable.is_empty() {
         return Ok(None);
     }
@@ -486,7 +574,7 @@ enum StoredSignature {
     Unreadable(String),
 }
 
-fn stored_signature(conn: &Arc<Connection>) -> Result<StoredSignature> {
+fn stored_signature(conn: &Arc<Connection>) -> Step<StoredSignature> {
     if !has_table(conn, FN_SET_TABLE)? {
         return Ok(StoredSignature::Absent);
     }
@@ -505,7 +593,7 @@ static CRASH_AFTER_DELETE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
 /// One transaction: a crash inside it leaves the previous record.
-fn record_signature(db: &Arc<Database>, fns: &[ScalarFn]) -> Result<()> {
+fn record_signature(db: &Arc<Database>, fns: &[ScalarFn]) -> Step<()> {
     let conn = connect(db)?;
     let wanted = scalar_fns::signature(fns);
     match stored_signature(&conn)? {
@@ -514,21 +602,15 @@ fn record_signature(db: &Arc<Database>, fns: &[ScalarFn]) -> Result<()> {
         StoredSignature::Absent if wanted.is_empty() => return Ok(()),
         _ => {}
     }
-    let run = |sql: &str| {
-        conn.execute(sql)
-            .map_err(|e| StorageError::DatabaseError(format!("{sql}: {e}")))
-    };
+    let run = |sql: &str| conn.execute(sql).map_err(engine(sql));
     run("BEGIN IMMEDIATE")?;
     write_signature(&conn, fns)?;
     run("COMMIT")
 }
 
 /// Inside the caller's transaction.
-fn write_signature(conn: &Arc<Connection>, fns: &[ScalarFn]) -> Result<()> {
-    let run = |sql: &str| {
-        conn.execute(sql)
-            .map_err(|e| StorageError::DatabaseError(format!("{sql}: {e}")))
-    };
+fn write_signature(conn: &Arc<Connection>, fns: &[ScalarFn]) -> Step<()> {
+    let run = |sql: &str| conn.execute(sql).map_err(engine(sql));
     run(&format!(
         "CREATE TABLE IF NOT EXISTS {FN_SET_TABLE} (signature TEXT NOT NULL)"
     ))?;
@@ -538,31 +620,27 @@ fn write_signature(conn: &Arc<Connection>, fns: &[ScalarFn]) -> Result<()> {
         panic!("injected crash between DELETE and INSERT");
     }
     let insert = format!("INSERT INTO {FN_SET_TABLE} (signature) VALUES (?1)");
-    let mut stmt = conn
-        .prepare(&insert)
-        .map_err(|e| StorageError::DatabaseError(format!("{insert}: {e}")))?;
+    let mut stmt = conn.prepare(&insert).map_err(engine(&insert))?;
     stmt.bind_at(
         1.try_into().expect("1 is non-zero"),
         Value::build_text(scalar_fns::signature(fns)),
     )
-    .map_err(|e| StorageError::DatabaseError(format!("{insert}: bind: {e}")))?;
-    stmt.run_ignore_rows()
-        .map_err(|e| StorageError::DatabaseError(format!("{insert}: {e}")))
+    .map_err(engine(format!("{insert}: bind")))?;
+    stmt.run_ignore_rows().map_err(engine(&insert))
 }
 
-fn is_empty(conn: &Arc<Connection>) -> Result<bool> {
+fn is_empty(conn: &Arc<Connection>) -> Step<bool> {
     Ok(rows(conn, "SELECT 1 FROM sqlite_schema LIMIT 1")?.is_empty())
 }
 
-fn connect(db: &Arc<Database>) -> Result<Arc<Connection>> {
-    db.connect()
-        .map_err(|e| StorageError::DatabaseError(format!("connect: {e}")))
+fn connect(db: &Arc<Database>) -> Step<Arc<Connection>> {
+    db.connect().map_err(engine("connect"))
 }
 
-fn rows(conn: &Arc<Connection>, sql: &str) -> Result<Vec<Vec<Value>>> {
+fn rows(conn: &Arc<Connection>, sql: &str) -> Step<Vec<Vec<Value>>> {
     conn.prepare(sql)
         .and_then(|mut stmt| stmt.run_collect_rows())
-        .map_err(|e| StorageError::DatabaseError(format!("{sql}: {e}")))
+        .map_err(engine(sql))
 }
 
 #[cfg(test)]
@@ -588,10 +666,8 @@ mod tests {
         func: double,
     };
 
-    fn exec(db: &Arc<Database>, sql: &str) -> Result<()> {
-        connect(db)?
-            .execute(sql)
-            .map_err(|e| StorageError::DatabaseError(format!("{sql}: {e}")))
+    fn exec(db: &Arc<Database>, sql: &str) -> Step<()> {
+        connect(db)?.execute(sql).map_err(engine(sql))
     }
 
     fn count(db: &Arc<Database>, sql: &str) -> i64 {
@@ -943,8 +1019,9 @@ mod tests {
 
     #[test]
     fn an_unclassified_open_error_names_its_cause() {
-        let message =
-            unopenable("/db", LimboError::InternalError("page 7 vanished".into())).to_string();
+        let message = engine("open")(LimboError::InternalError("page 7 vanished".into()))
+            .classify("/db")
+            .to_string();
         assert!(
             message.contains("does not classify") && message.contains("page 7 vanished"),
             "{message}"
@@ -962,7 +1039,7 @@ mod tests {
 
         let (db, outcome) = open(&path, &[DOUBLE])
             .unwrap_or_else(|e| panic!("an unopenable file must not stop the open: {e}"));
-        let OpenOutcome::MovedAside { backup, .. } = outcome else {
+        let [OpenChange::MovedAside { backup, .. }] = outcome.0.as_slice() else {
             panic!("the open must report the move, got {outcome:?}");
         };
         exec(&db, "CREATE TABLE t (id INTEGER PRIMARY KEY)").expect("the fresh file is usable");
@@ -978,7 +1055,7 @@ mod tests {
         match backups.as_slice() {
             [found] => assert_eq!(
                 (found, std::fs::read(found).unwrap()),
-                (&backup, garbage),
+                (backup, garbage),
                 "the backup must be the reported path and hold the file byte for byte"
             ),
             other => panic!("expected one backup next to the database, found {other:?}"),
@@ -1002,7 +1079,7 @@ mod tests {
 
         let (db, outcome) =
             open(&path, &[DOUBLE]).expect("an unopenable file must not stop the open");
-        let OpenOutcome::MovedAside { backup, .. } = outcome else {
+        let [OpenChange::MovedAside { backup, .. }] = outcome.0.as_slice() else {
             panic!("the open must report the move, got {outcome:?}");
         };
         exec(&db, "CREATE TABLE t (id INTEGER PRIMARY KEY)").expect("the fresh file is usable");

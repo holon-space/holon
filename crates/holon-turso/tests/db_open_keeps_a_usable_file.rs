@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use holon_core::storage::types::DatabaseOpenFailure;
 use holon_core::storage::types::StorageError;
+use holon_turso::db_open::OpenChange;
 use holon_turso::db_open::OpenOutcome;
 use holon_turso::turso::TursoBackend;
 use turso_core::Database;
@@ -160,7 +161,7 @@ fn a_database_in_a_read_only_directory_opens_where_it_is() {
         "no file may be renamed; open gave {opened:?}"
     );
     assert!(
-        matches!(opened, Ok(OpenOutcome::Kept)),
+        opened.as_ref().is_ok_and(|o| *o == OpenOutcome::KEPT),
         "a database whose files are writable opens in a read-only directory, got {opened:?}"
     );
 }
@@ -188,7 +189,7 @@ fn a_database_in_a_missing_directory_is_an_io_error() {
 fn assert_moved_aside(path: &Path, files: &[(&str, Vec<u8>)], case: &str) {
     let opened = TursoBackend::open_database_reporting_outcome(path);
     let (db, outcome) = opened.unwrap_or_else(|e| panic!("{case}: the open must recover: {e:?}"));
-    let OpenOutcome::MovedAside { backup, .. } = outcome else {
+    let [OpenChange::MovedAside { backup, .. }] = outcome.0.as_slice() else {
         panic!("{case}: a damaged file must be moved aside, got {outcome:?}");
     };
     for (suffix, bytes) in files {
@@ -267,7 +268,7 @@ fn a_damaged_write_ahead_log_is_moved_aside_alone() {
 
     let (db, outcome) = TursoBackend::open_database_reporting_outcome(&path)
         .unwrap_or_else(|e| panic!("a damaged log must not stop the open: {e:?}"));
-    let OpenOutcome::LogMovedAside { backup, .. } = outcome else {
+    let [OpenChange::LogMovedAside { backup, .. }] = outcome.0.as_slice() else {
         panic!("the open must report the moved log, got {outcome:?}");
     };
     assert!(
@@ -283,8 +284,8 @@ fn a_damaged_write_ahead_log_is_moved_aside_alone() {
 }
 
 /// The shared-WAL coordination file holds no rows. A damaged one is moved
-/// aside alone; the engine does not need it to open a database that no
-/// multi-process writer holds, and does not create it again.
+/// aside alone, and the open says so; the engine does not need it to open a
+/// database that no multi-process writer holds, and does not create it again.
 #[test]
 fn a_damaged_coordination_file_is_moved_aside_alone() {
     let dir = tempfile::tempdir().unwrap();
@@ -298,7 +299,9 @@ fn a_damaged_coordination_file_is_moved_aside_alone() {
 
     let (db, outcome) = TursoBackend::open_database_reporting_outcome(&path)
         .unwrap_or_else(|e| panic!("a damaged coordination file must not stop the open: {e:?}"));
-    assert_eq!(outcome, OpenOutcome::Kept);
+    let [OpenChange::CoordinationFileMovedAside { backup, .. }] = outcome.0.as_slice() else {
+        panic!("the open must report the moved coordination file, got {outcome:?}");
+    };
     assert_eq!(
         (std::fs::metadata(&path).unwrap().ino(), rows_in_t(&db)),
         (inode, single_row()),
@@ -306,7 +309,7 @@ fn a_damaged_coordination_file_is_moved_aside_alone() {
     );
     let moved: Vec<_> = backups(dir.path());
     match moved.as_slice() {
-        [only] if only.to_string_lossy().ends_with("-tshm") => assert!(
+        [only] if only == backup => assert!(
             std::fs::read(only).ok() == Some(garbage),
             "{} must hold the damaged coordination file",
             only.display()
@@ -352,6 +355,144 @@ fn a_database_in_another_text_encoding_is_kept_and_refused() {
     }
 }
 
+/// A damaged schema page surfaces only when the open reads its first table,
+/// after the engine opened the file and the log. That read classifies its
+/// error like the others, so the file is moved aside.
+#[test]
+fn a_damaged_page_the_open_reads_is_moved_aside() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("holon.db");
+    {
+        let (db, _) = TursoBackend::open_database_reporting_outcome(&path).expect("create");
+        for i in 0..80 {
+            exec(
+                &db,
+                &format!("CREATE TABLE t{i} (id INTEGER PRIMARY KEY, body TEXT NOT NULL)"),
+            );
+        }
+        exec(&db, "PRAGMA wal_checkpoint(TRUNCATE)");
+    }
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes[4096..8192].fill(0xAB);
+    std::fs::write(&path, &bytes).unwrap();
+
+    assert_moved_aside(&path, &[("", bytes)], "page 2 overwritten");
+}
+
+/// A backup never replaces another file: when the timestamped name is taken,
+/// the move picks the next free one.
+#[test]
+fn a_backup_name_that_is_taken_is_not_overwritten() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("holon.db");
+    let garbage = b"not a database".repeat(400);
+    std::fs::write(&path, &garbage).unwrap();
+    let start = chrono::Utc::now();
+    let taken: Vec<PathBuf> = (0..3000)
+        .map(|ms| {
+            let at = start + chrono::Duration::milliseconds(ms);
+            PathBuf::from(format!(
+                "{}.unusable-{}",
+                path.display(),
+                at.format("%Y%m%dT%H%M%S%.3fZ")
+            ))
+        })
+        .collect();
+    for file in &taken {
+        std::fs::write(file, b"an earlier backup").unwrap();
+    }
+
+    let (_, outcome) = TursoBackend::open_database_reporting_outcome(&path)
+        .unwrap_or_else(|e| panic!("a taken backup name must not stop the open: {e:?}"));
+    let [OpenChange::MovedAside { backup, .. }] = outcome.0.as_slice() else {
+        panic!("a damaged file must be moved aside, got {outcome:?}");
+    };
+    assert!(
+        std::fs::read(backup).ok() == Some(garbage),
+        "{} must hold the damaged file",
+        backup.display()
+    );
+    let overwritten: Vec<_> = taken
+        .iter()
+        .filter(|f| std::fs::read(f).ok().as_deref() != Some(b"an earlier backup".as_slice()))
+        .collect();
+    assert!(
+        overwritten.is_empty(),
+        "earlier backups were replaced: {overwritten:?}"
+    );
+}
+
+/// The base name of a backup file: its path without the suffix it kept.
+fn backup_stem(backup: &Path, suffix: &str) -> String {
+    let name = backup.display().to_string();
+    name.strip_suffix(suffix)
+        .unwrap_or_else(|| panic!("{name} must end in {suffix}"))
+        .to_string()
+}
+
+/// A damaged coordination file and a damaged log: the open moves both, says
+/// so for each, and names both backups with one stem.
+#[test]
+fn one_recovery_names_its_backups_with_one_stem() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("holon.db");
+    build_checkpointed(&path);
+    std::fs::write(dir.path().join("holon.db-tshm"), b"garbage tshm".repeat(33)).unwrap();
+    std::fs::write(dir.path().join("holon.db-wal"), b"garbage wal".repeat(50)).unwrap();
+
+    let (db, outcome) = TursoBackend::open_database_reporting_outcome(&path)
+        .unwrap_or_else(|e| panic!("damaged sidecars must not stop the open: {e:?}"));
+    let [
+        OpenChange::CoordinationFileMovedAside {
+            backup: coordination,
+            ..
+        },
+        OpenChange::LogMovedAside { backup: log, .. },
+    ] = outcome.0.as_slice()
+    else {
+        panic!("the open must report both moves, in order, got {outcome:?}");
+    };
+    assert_eq!(
+        backup_stem(coordination, "-tshm"),
+        backup_stem(log, "-wal"),
+        "the files of one recovery must share one backup name"
+    );
+    assert_eq!(rows_in_t(&db), single_row());
+}
+
+/// A damaged log beside a file built with another function set: the open moves
+/// the log and drops the views, and reports both.
+#[test]
+fn a_damaged_log_and_dropped_views_are_both_reported() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("holon.db");
+    build_checkpointed(&path);
+    {
+        let (db, _) = TursoBackend::open_database_reporting_outcome(&path).expect("reopen");
+        exec(&db, "DELETE FROM holon_db_fn_set");
+        exec(
+            &db,
+            "INSERT INTO holon_db_fn_set (signature) VALUES ('older_fn/1/v1')",
+        );
+        exec(&db, "PRAGMA wal_checkpoint(TRUNCATE)");
+    }
+    std::fs::write(dir.path().join("holon.db-wal"), b"garbage wal".repeat(50)).unwrap();
+
+    let (db, outcome) = TursoBackend::open_database_reporting_outcome(&path)
+        .unwrap_or_else(|e| panic!("a damaged log must not stop the open: {e:?}"));
+    assert!(
+        matches!(
+            outcome.0.as_slice(),
+            [
+                OpenChange::LogMovedAside { .. },
+                OpenChange::ViewsDropped { .. }
+            ]
+        ),
+        "the open must report the moved log and the dropped views, got {outcome:?}"
+    );
+    assert_eq!(rows_in_t(&db), single_row());
+}
+
 /// A log cut short by a crash drops the commits it held, and the open says
 /// nothing about it.
 #[test]
@@ -374,7 +515,7 @@ fn a_truncated_write_ahead_log_does_not_lose_rows_silently() {
             .prepare("SELECT id FROM t")
             .and_then(|mut stmt| stmt.run_collect_rows());
         assert!(
-            outcome != OpenOutcome::Kept || rows.as_ref().is_ok_and(|r| r.len() == 1),
+            outcome != OpenOutcome::KEPT || rows.as_ref().is_ok_and(|r| r.len() == 1),
             "log cut to {keep} bytes: the open reported Kept, but the committed row is gone \
              ({rows:?})"
         );

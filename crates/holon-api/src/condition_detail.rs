@@ -292,11 +292,22 @@ impl ConditionKind {
             Self::DatabaseLogMovedAside { reason, backup } => ConditionDetail::with_body(
                 format!(
                     "The database's write-ahead log could not be read ({reason}), so Holon moved \
-                     it aside and opened the database without it. The blocks came back from the \
-                     vault. Changes that were only in the log are in the moved file"
+                     it aside and opened the database without it. The database file itself was \
+                     kept. Changes that were only in the log are in the moved file"
                 ),
                 vec![backup.clone()],
             ),
+
+            Self::DatabaseCoordinationFileMovedAside { reason, backup } => {
+                ConditionDetail::with_body(
+                    format!(
+                        "The database's shared-WAL coordination file could not be read \
+                         ({reason}), so Holon moved it aside. It holds no rows; the database and \
+                         its log were kept"
+                    ),
+                    vec![backup.clone()],
+                )
+            }
 
             Self::UndoHistoryClearedAtBoot { entries } => ConditionDetail::prose(format!(
                 "{entries} step{} from the previous session were discarded",

@@ -352,8 +352,62 @@ async fn a_damaged_write_ahead_log_is_moved_aside_and_disclosed() {
         garbage,
         "the disclosed path must hold the damaged log"
     );
+    let rendered = format!("{} {}", detail.headline, detail.body.join(" | "));
+    assert!(
+        rendered.contains("The database file itself was kept")
+            && !rendered.contains("came back from the vault"),
+        "the main file was kept, not rebuilt from the vault: {rendered}"
+    );
     assert!(
         !raised_kinds(&booted).contains(&"database-moved-aside".to_string()),
         "the intact database must not be moved aside"
+    );
+}
+
+/// A damaged shared-WAL coordination file beside an intact database: only it
+/// moves aside, and the boot says so.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_damaged_coordination_file_is_moved_aside_and_disclosed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("probe.org"), VAULT_ORG).expect("write the probe vault");
+    let db_path = dir.path().join(DB_FILE);
+    drop(holon::storage::turso::TursoBackend::open_database(&db_path).expect("create"));
+    let garbage = b"a coordination file nobody can read".repeat(50);
+    std::fs::write(dir.path().join(format!("{DB_FILE}-tshm")), &garbage)
+        .expect("damage the coordination file");
+
+    let booted = boot(dir.path(), DB_FILE).await;
+
+    let current = booted
+        .injector
+        .resolve::<Arc<holon_api::ConditionBus>>()
+        .subscribe()
+        .current;
+    let moved = current
+        .iter()
+        .find(|c| c.condition_key().kind == "database-coordination-file-moved-aside")
+        .unwrap_or_else(|| {
+            panic!(
+                "a coordination file moved aside at boot was not disclosed: {:?}",
+                raised_kinds(&booted)
+            )
+        });
+    let detail = moved.reason.detail(&moved.subject);
+    let [backup] = detail.body.as_slice() else {
+        panic!(
+            "the detail must carry the moved file's path, got {:?}",
+            detail.body
+        );
+    };
+    assert_eq!(
+        std::fs::read(backup).expect("read the moved coordination file"),
+        garbage,
+        "the disclosed path must hold the damaged coordination file"
+    );
+    let kinds = raised_kinds(&booted);
+    assert!(
+        !kinds.contains(&"database-moved-aside".to_string())
+            && !kinds.contains(&"database-log-moved-aside".to_string()),
+        "the intact database and its log must stay: {kinds:?}"
     );
 }

@@ -1,0 +1,162 @@
+# Red log: holon-work #155 round 4 (signature-read leg, taken backup name, one stem per recovery, log + views both reported, coordination-file disclosure, log disclosure text)
+# Tree: 5016f43b plus the new tests and OpenOutcome as a list of OpenChange (no behavior change)
+# Commands: cargo nextest run -p holon-turso --test db_open_keeps_a_usable_file --no-fail-fast; cargo nextest run -p holon-app --test database_open_disclosure --no-fail-fast
+# Date: 2026-10-10
+
+warning: Cargo.toml: unused manifest key: profile.coverage.package.*.pathfinder_simd
+warning: Cargo.toml: unused manifest key: profile.coverage.package.*.psm
+warning: workspace (manifest) generated 2 warnings
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 34.85s
+────────────
+ Nextest run ID 303f9614-36d1-463d-a679-02c845942205 with nextest profile: default
+    Starting 13 tests across 1 binary (1 test skipped)
+        PASS [   0.025s] ( 1/13) holon-turso::db_open_keeps_a_usable_file a_database_in_a_missing_directory_is_an_io_error
+        PASS [   0.071s] ( 2/13) holon-turso::db_open_keeps_a_usable_file a_database_in_a_read_only_directory_opens_where_it_is
+        PASS [   0.073s] ( 3/13) holon-turso::db_open_keeps_a_usable_file a_read_only_database_file_is_not_moved_aside
+        PASS [   0.086s] ( 4/13) holon-turso::db_open_keeps_a_usable_file a_damaged_coordination_file_is_moved_aside_alone
+        PASS [   0.100s] ( 5/13) holon-turso::db_open_keeps_a_usable_file a_database_in_another_text_encoding_is_kept_and_refused
+        PASS [   0.103s] ( 6/13) holon-turso::db_open_keeps_a_usable_file a_damaged_write_ahead_log_is_moved_aside_alone
+        PASS [   0.108s] ( 7/13) holon-turso::db_open_keeps_a_usable_file a_second_process_does_not_move_a_live_database_aside
+        FAIL [   0.109s] ( 8/13) holon-turso::db_open_keeps_a_usable_file one_recovery_names_its_backups_with_one_stem
+  stdout ───
+
+    running 1 test
+    test one_recovery_names_its_backups_with_one_stem ... FAILED
+
+    failures:
+
+    failures:
+        one_recovery_names_its_backups_with_one_stem
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.06s
+
+  stderr ───
+
+    thread 'one_recovery_names_its_backups_with_one_stem' (355122523) panicked at crates/holon-turso/tests/db_open_keeps_a_usable_file.rs:455:9:
+    the open must report both moves, in order, got OpenOutcome([LogMovedAside { reason: "the engine cannot open it: Corrupt database: invalid page size in WAL: 2002873447", backup: "/var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/.tmpes0iNv/holon.db.unusable-20261010T215109.497Z-wal" }])
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        PASS [   0.115s] ( 9/13) holon-turso::db_open_keeps_a_usable_file a_file_that_is_not_a_database_is_moved_aside
+        FAIL [   0.164s] (10/13) holon-turso::db_open_keeps_a_usable_file a_damaged_log_and_dropped_views_are_both_reported
+  stdout ───
+
+    running 1 test
+    test a_damaged_log_and_dropped_views_are_both_reported ... FAILED
+
+    failures:
+
+    failures:
+        a_damaged_log_and_dropped_views_are_both_reported
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.14s
+
+  stderr ───
+
+    thread 'a_damaged_log_and_dropped_views_are_both_reported' (355122511) panicked at crates/holon-turso/tests/db_open_keeps_a_usable_file.rs:485:5:
+    the open must report the moved log and the dropped views, got OpenOutcome([LogMovedAside { reason: "the engine cannot open it: Corrupt database: invalid page size in WAL: 2002873447", backup: "/var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/.tmpCG7I5E/holon.db.unusable-20261010T215109.501Z-wal" }])
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        PASS [   0.173s] (11/13) holon-turso::db_open_keeps_a_usable_file a_truncated_database_is_moved_aside
+        FAIL [   0.358s] (12/13) holon-turso::db_open_keeps_a_usable_file a_damaged_page_the_open_reads_is_moved_aside
+  stdout ───
+
+    running 1 test
+    test a_damaged_page_the_open_reads_is_moved_aside ... FAILED
+
+    failures:
+
+    failures:
+        a_damaged_page_the_open_reads_is_moved_aside
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.34s
+
+  stderr ───
+
+    thread 'a_damaged_page_the_open_reads_is_moved_aside' (355122499) panicked at crates/holon-turso/tests/db_open_keeps_a_usable_file.rs:191:51:
+    page 2 overwritten: the open must recover: DatabaseError("SELECT signature FROM holon_db_fn_set: Corrupt database: Invalid page type: 171")
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   1.321s] (13/13) holon-turso::db_open_keeps_a_usable_file a_backup_name_that_is_taken_is_not_overwritten
+  stdout ───
+
+    running 1 test
+    test a_backup_name_that_is_taken_is_not_overwritten ... FAILED
+
+    failures:
+
+    failures:
+        a_backup_name_that_is_taken_is_not_overwritten
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 13 filtered out; finished in 1.29s
+
+  stderr ───
+
+    thread 'a_backup_name_that_is_taken_is_not_overwritten' (355122513) panicked at crates/holon-turso/src/db_open.rs:233:9:
+    the backup /var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/.tmp2kcgK0/holon.db.unusable-20261010T215110.201Z exists already
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [   1.322s] 13 tests run: 9 passed, 4 failed, 1 skipped
+        FAIL [   0.109s] ( 8/13) holon-turso::db_open_keeps_a_usable_file one_recovery_names_its_backups_with_one_stem
+        FAIL [   0.164s] (10/13) holon-turso::db_open_keeps_a_usable_file a_damaged_log_and_dropped_views_are_both_reported
+        FAIL [   0.358s] (12/13) holon-turso::db_open_keeps_a_usable_file a_damaged_page_the_open_reads_is_moved_aside
+        FAIL [   1.321s] (13/13) holon-turso::db_open_keeps_a_usable_file a_backup_name_that_is_taken_is_not_overwritten
+error: test run failed
+warning: Cargo.toml: unused manifest key: profile.coverage.package.*.pathfinder_simd
+warning: Cargo.toml: unused manifest key: profile.coverage.package.*.psm
+warning: workspace (manifest) generated 2 warnings
+warning: linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `holon-app` (test "database_open_disclosure") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2m 11s
+────────────
+ Nextest run ID 0335176d-f123-41f5-aee7-dca9e4d6f695 with nextest profile: default
+    Starting 5 tests across 1 binary
+        FAIL [   4.229s] (1/5) holon-app::database_open_disclosure a_damaged_write_ahead_log_is_moved_aside_and_disclosed
+  stdout ───
+
+    running 1 test
+    test a_damaged_write_ahead_log_is_moved_aside_and_disclosed ... FAILED
+
+    failures:
+
+    failures:
+        a_damaged_write_ahead_log_is_moved_aside_and_disclosed
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 4.20s
+
+  stderr ───
+
+    thread 'a_damaged_write_ahead_log_is_moved_aside_and_disclosed' (355166360) panicked at crates/holon-app/tests/database_open_disclosure.rs:356:5:
+    the main file was kept, not rebuilt from the vault: The database's write-ahead log could not be read (the engine cannot open it: Corrupt database: invalid page size in WAL: 1634231649), so Holon moved it aside and opened the database without it. The blocks came back from the vault. Changes that were only in the log are in the moved file /var/folders/hc/2q6czxpx6j9_87bq787752jw0000gn/T/.tmpvRyuL4/rebuild.db.unusable-20261010T215329.411Z-wal
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   4.737s] (2/5) holon-app::database_open_disclosure a_damaged_coordination_file_is_moved_aside_and_disclosed
+  stdout ───
+
+    running 1 test
+    test a_damaged_coordination_file_is_moved_aside_and_disclosed ... FAILED
+
+    failures:
+
+    failures:
+        a_damaged_coordination_file_is_moved_aside_and_disclosed
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 4.71s
+
+  stderr ───
+
+    thread 'a_damaged_coordination_file_is_moved_aside_and_disclosed' (355166366) panicked at crates/holon-app/tests/database_open_disclosure.rs:390:13:
+    a coordination file moved aside at boot was not disclosed: []
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        PASS [   4.744s] (3/5) holon-app::database_open_disclosure every_table_is_classified_as_rebuilt_or_lost
+        PASS [   4.842s] (4/5) holon-app::database_open_disclosure a_database_the_engine_cannot_open_is_moved_aside_and_disclosed
+        PASS [   8.465s] (5/5) holon-app::database_open_disclosure an_upgrade_builds_the_same_views_as_a_fresh_boot
+────────────
+     Summary [   8.466s] 5 tests run: 3 passed, 2 failed, 0 skipped
+        FAIL [   4.229s] (1/5) holon-app::database_open_disclosure a_damaged_write_ahead_log_is_moved_aside_and_disclosed
+        FAIL [   4.737s] (2/5) holon-app::database_open_disclosure a_damaged_coordination_file_is_moved_aside_and_disclosed
+error: test run failed
