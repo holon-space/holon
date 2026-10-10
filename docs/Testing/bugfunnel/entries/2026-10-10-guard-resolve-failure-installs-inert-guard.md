@@ -3,7 +3,7 @@ id: 2026-10-10-guard-resolve-failure-installs-inert-guard
 date: 2026-10-10
 gap: COVERAGE
 secondary: ENVIRONMENT
-status: FIXED
+status: PARTIAL
 summary: >-
   A failed DI resolve of a security or write guard was read as "no guard is
   bound", so the composition root installed the permissive default and the
@@ -12,20 +12,28 @@ summary: >-
 
 ## Bug
 
-Six composition sites resolved a guard through
-`Injector::optional_resolve_async`, which is `try_resolve_async().ok()`: it
-reports "nothing bound it" and "it is bound but the resolve failed" as the same
-`None`. Each `None` branch installs a permissive default, so ANY resolve error
-turned a wired guard off without a word:
+Eleven composition sites resolved a guard through
+`Injector::optional_resolve_async` (or its sync twin `try_resolve().ok()`, or
+`try_resolve_all_async().unwrap_or_else(|_| vec![])`), all of which report
+"nothing bound it" and "it is bound but the resolve failed" as the same
+absence. Each absence branch installs a permissive default, so ANY resolve
+error turned a wired guard off without a word:
 
 - `InertBoundaryEnforcer` instead of the policy overlay
 - `InertNetGuard` instead of the placement gate
 - no `WriteTierAuthority` at all, so every block is writable (three sites)
 - SQL write-authority reads instead of the Loro authority, which is the
-  `convert_block_to_page` parent race
+  `convert_block_to_page` parent race (three sites)
+- zero `OperationObserver`s, and the only one prod binds IS the operation log,
+  so undo and the audit trail both went away
+- the read-only document authority absent, so every block homed in a
+  read-only-format document became editable again
+- reduced `SessionCapabilities` pinned for the whole session, and the SqlOnly
+  write leg chosen, off a failed `BlockCellRegistry` / `CrudAuthority` resolve
 
-Found by the senior review of holon-work #158 (code audit, not a test), filed
-as holon-work #165.
+Found by code audit, not by a test: the senior review of holon-work #158 found
+the first six, and the security verifier of the fix found the rest. Filed as
+holon-work #165.
 
 ## Root cause
 
@@ -35,14 +43,12 @@ the discarded kinds are wiring faults — `CircularDependency`, `TypeMismatch`,
 `AsyncFactoryRequiresAsyncResolve` — and after the fluxdi head move (#158) a
 panicking guard factory joins them as `FactoryFailed`.
 
-The red run
-(`docs/Testing/red-logs/2026-10-10-guard-resolve-fails-open-RED.txt`) shows the
-boot surviving a `FactoryFailed` resolve of `BoundaryEnforcer`, `NetGuard` and
-`WriteTierAuthority`. For `WriteAuthorityReads` it shows the sharper shape: the
-dispatcher's shape gate silently took the racy SQL reads and the boot only died
-later, at the engine's own fail-loud resolve
-(`crates/holon/src/di/registration.rs:878`), with a message naming neither the
-shape gate nor the type.
+The red runs are `docs/Testing/red-logs/2026-10-10-guard-resolve-fails-open-RED.txt`
+and `...-round2-RED.txt`. They show the boot surviving a `FactoryFailed`
+resolve of `BoundaryEnforcer`, `NetGuard`, `WriteTierAuthority` and the
+observer set, and the shape gate silently taking the racy SQL reads while the
+boot died later at `crates/holon/src/di/registration.rs:878` with a message
+naming neither the gate nor the type.
 
 ## Missing piece
 
@@ -55,17 +61,30 @@ build, so the fail-open branch is not even on its path (ENVIRONMENT).
 
 ## Remedy
 
-`holon::di::resolve_if_bound` (`crates/holon/src/di/resolve_if_bound.rs`) keeps
-the two facts apart: only `ServiceNotProvided` yields `None`; every other error
-panics naming the composition site, the type and the cause. All six sites use
-it.
+`holon_core::resolve_if_bound_async`, `resolve_if_bound` and
+`resolve_all_if_bound_async` (`crates/holon-core/src/resolve_if_bound.rs`) keep
+the two facts apart: only `ServiceNotProvided` yields the absence; every other
+error panics naming the composition site, the type and the cause. The helper
+lives in `holon-core`, next to the guard traits, so the org-mode and Loro
+composition roots reach the same rule as the engine's. All eleven sites use it.
 
-Pinned by `crates/holon/tests/guard_resolve_fails_loud.rs`: one test per guard
-type binds that type to a failing factory and asserts the boot dies naming the
-site AND the type, plus `an_unbound_guard_still_boots`, which keeps "not bound"
-a legal container shape.
+Pinned by `crates/holon/tests/guard_resolve_fails_loud.rs` (the five
+`OperationModule` sites plus `an_unbound_guard_still_boots`, which keeps "not
+bound" a legal container shape) and
+`crates/holon-app/tests/guard_resolve_fails_loud_in_the_app.rs` (the
+event-infra and org-mode seam sites through the real app wiring).
+`BootError::from_bootstrap_error` gained an `Operations` component so a guard
+wiring fault is not attributed to a store that is fine
+(`crates/holon-app/src/boot_error.rs`).
 
-Still open: whether the APP container must additionally assert that all four
-guard types ARE bound (holon-work #165, "SEC-bound"). Not ruled, so not
-implemented; the comment at
-`crates/holon/src/api/operation_dispatcher.rs:2720` marks where it would go.
+Status PARTIAL, for two reasons recorded in holon-work #165:
+
+- "Not bound" still installs the permissive default in every container, the app
+  included. That is the unruled SEC-bound question; the marker sits at
+  `crates/holon/src/api/operation_dispatcher.rs:2719`.
+- The tree contradicts itself on whether an absent `WriteTierAuthority` is
+  legal at all: `crates/holon-frontend/src/render_services.rs:74` and
+  `crates/holon-loro-wiring/src/loro_module.rs:181` both REQUIRE it, which
+  makes the optional arms at `loro_module.rs:638`, `:705` and
+  `crates/holon-orgmode/src/di.rs:808` unreachable in an app boot — so no test
+  can distinguish them until that contradiction is settled.

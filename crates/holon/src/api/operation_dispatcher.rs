@@ -2674,10 +2674,14 @@ impl Module for OperationModule {
                 "[OperationModule] Found {} operation providers",
                 providers.len()
             );
-            let observers = r
-                .try_resolve_all_async::<dyn OperationObserver>()
-                .await
-                .unwrap_or_else(|_| vec![]);
+            // The only observer prod binds is `OperationLogObserver`, which IS
+            // the operation log undo and the audit trail read, so an empty set
+            // from a failed resolve would drop both without a word.
+            let observers = holon_core::resolve_all_if_bound_async::<dyn OperationObserver>(
+                &r,
+                "[OperationModule] operation observers",
+            )
+            .await;
             info!(
                 "[OperationModule] Found {} operation observers",
                 observers.len()
@@ -2720,7 +2724,7 @@ impl Module for OperationModule {
             // SEC-bound (open, #165): whether the APP container must assert
             // all four guard types are bound belongs here, next to each
             // `None` arm.
-            let enforcer = crate::di::resolve_if_bound::<dyn BoundaryEnforcer>(
+            let enforcer = holon_core::resolve_if_bound_async::<dyn BoundaryEnforcer>(
                 &r,
                 "[OperationModule] boundary seam",
             )
@@ -2734,7 +2738,7 @@ impl Module for OperationModule {
             // capability profiles and a document-home authority, neither of
             // which this crate links, so a composition root that has them
             // registers one and a container without them gets the inert guard.
-            let net_guard = crate::di::resolve_if_bound::<dyn crate::api::net_guard::NetGuard>(
+            let net_guard = holon_core::resolve_if_bound_async::<dyn crate::api::net_guard::NetGuard>(
                 &r,
                 "[OperationModule] net gate",
             )
@@ -2749,7 +2753,7 @@ impl Module for OperationModule {
             // vault's format registry, so a composition root with a vault
             // registers one; a container without files registers none and
             // every block it holds is writable.
-            if let Some(authority) = crate::di::resolve_if_bound::<
+            if let Some(authority) = holon_core::resolve_if_bound_async::<
                 dyn holon_core::WriteTierAuthority,
             >(&r, "[OperationModule] write-tier gate")
             .await
@@ -2762,7 +2766,7 @@ impl Module for OperationModule {
             // authority, which is the SQL tables when no separate one exists.
             {
                 let validators = r.resolve_async::<holon_core::ShapeValidators>().await;
-                let authority = match crate::di::resolve_if_bound::<
+                let authority = match holon_core::resolve_if_bound_async::<
                     dyn holon_core::WriteAuthorityReads,
                 >(&r, "[OperationModule] shape gate")
                 .await

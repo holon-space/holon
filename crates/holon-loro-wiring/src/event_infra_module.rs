@@ -153,23 +153,31 @@ impl Module for EventInfraModule {
                 // Synthetic `MemStore` test impls bypass this entirely
                 // because they inherit the `BlockOperations::cells()`
                 // default of `None`.
-                let cell_registry: Arc<dyn EntityCellRegistry> = match resolver
-                    .optional_resolve_async::<holon_loro::block_cell_registry::BlockCellRegistry>()
+                // The registry decides `SessionCapabilities` below, so a failed
+                // resolve read as absence pins reduced capabilities for the
+                // whole session.
+                let cell_registry: Arc<dyn EntityCellRegistry> =
+                    match holon_core::resolve_if_bound_async::<
+                        holon_loro::block_cell_registry::BlockCellRegistry,
+                    >(
+                        &resolver,
+                        "[EventInfraModule] block cell registry for the operation provider",
+                    )
                     .await
-                {
-                    Some(arc) => arc.clone() as Arc<dyn EntityCellRegistry>,
-                    None => {
-                        // SqlOnly mode: wire cells to the convergent block
-                        // feed (read + CDC signal) + the SQL set_field write
-                        // path so `live_field` presents the same cell surface
-                        // as Full (Loro) mode instead of erroring.
-                        let live = resolver.resolve_async::<BlockFeed>().await;
-                        Arc::new(holon_core::SqlOnlyCellRegistry::wired(
-                            live.0.clone(),
-                            sql_cell_set_field_writer(sql_ops.clone()),
-                        )) as Arc<dyn EntityCellRegistry>
-                    }
-                };
+                    {
+                        Some(arc) => arc.clone() as Arc<dyn EntityCellRegistry>,
+                        None => {
+                            // SqlOnly mode: wire cells to the convergent block
+                            // feed (read + CDC signal) + the SQL set_field write
+                            // path so `live_field` presents the same cell surface
+                            // as Full (Loro) mode instead of erroring.
+                            let live = resolver.resolve_async::<BlockFeed>().await;
+                            Arc::new(holon_core::SqlOnlyCellRegistry::wired(
+                                live.0.clone(),
+                                sql_cell_set_field_writer(sql_ops.clone()),
+                            )) as Arc<dyn EntityCellRegistry>
+                        }
+                    };
                 // The composition root knows what's present, so it resolves the
                 // capability role here and injects it — `SqlBlockOperations`
                 // never probes a Loro-aware component itself.
@@ -181,25 +189,18 @@ impl Module for EventInfraModule {
                 // from it, so the guard reads that must not race a write get
                 // answered by Loro. Resolve the SHARED instance — building a
                 // second one here would be a second writer onto the same doc.
-                //
-                // `optional_resolve_async` is `try_resolve_async().ok()`, which
-                // would turn a genuine resolve failure into the racy SQL path
-                // silently. Only `ServiceNotProvided` legitimately means "no
-                // Loro in this session" (SqlOnly); anything else — including
-                // `CircularDependency` — is a wiring fault and must be loud, as
-                // the BlockFeed `expect` above is.
-                let block_ops = match resolver
-                    .try_resolve_async::<holon_loro::LoroBlockOperations>()
-                    .await
+                // Absence means SqlOnly; a failed resolve read as absence would
+                // reinstate the `convert_block_to_page` parent race silently.
+                let block_ops = match holon_core::resolve_if_bound_async::<
+                    holon_loro::LoroBlockOperations,
+                >(
+                    &resolver, "[EventInfraModule] block write authority"
+                )
+                .await
                 {
-                    Ok(authority) => block_ops
+                    Some(authority) => block_ops
                         .with_write_authority(authority.clone() as Arc<dyn WriteAuthorityReads>),
-                    Err(e) if e.kind == fluxdi::ErrorKind::ServiceNotProvided => block_ops,
-                    Err(e) => panic!(
-                        "[EventInfraModule] resolving the block write authority \
-                         (LoroBlockOperations) failed: {e}. Falling back to SQL reads here would \
-                         reinstate the convert_block_to_page parent race silently."
-                    ),
+                    None => block_ops,
                 };
                 Arc::new(block_ops) as Arc<dyn OperationProvider>
             },
@@ -221,38 +222,42 @@ impl Module for EventInfraModule {
                 BlockSchemaModule.edge_fields(),
             ));
 
-            let cell_registry: Arc<dyn EntityCellRegistry> = match resolver
-                .optional_resolve_async::<holon_loro::block_cell_registry::BlockCellRegistry>()
+            let cell_registry: Arc<dyn EntityCellRegistry> =
+                match holon_core::resolve_if_bound_async::<
+                    holon_loro::block_cell_registry::BlockCellRegistry,
+                >(
+                    &resolver,
+                    "[EventInfraModule] block cell registry for BlockOrdering",
+                )
                 .await
-            {
-                Some(arc) => arc.clone() as Arc<dyn EntityCellRegistry>,
-                None => {
-                    let live = resolver.resolve_async::<BlockFeed>().await;
-                    Arc::new(holon_core::SqlOnlyCellRegistry::wired(
-                        live.0.clone(),
-                        sql_cell_set_field_writer(sql_ops.clone()),
-                    )) as Arc<dyn EntityCellRegistry>
-                }
-            };
+                {
+                    Some(arc) => arc.clone() as Arc<dyn EntityCellRegistry>,
+                    None => {
+                        let live = resolver.resolve_async::<BlockFeed>().await;
+                        Arc::new(holon_core::SqlOnlyCellRegistry::wired(
+                            live.0.clone(),
+                            sql_cell_set_field_writer(sql_ops.clone()),
+                        )) as Arc<dyn EntityCellRegistry>
+                    }
+                };
             let caps = SessionCapabilities::detect_and_pin(cell_registry.has_loro_backing());
             let block_ops = SqlBlockOperations::new(sql_ops, block_cache)
                 .with_cell_registry(cell_registry)
                 .with_capabilities(caps);
             // A create under a parent only the projection holds is refused
             // against the same authority the OperationProvider above decides on.
-            let block_ops = match resolver
-                .try_resolve_async::<holon_loro::LoroBlockOperations>()
+            let block_ops =
+                match holon_core::resolve_if_bound_async::<holon_loro::LoroBlockOperations>(
+                    &resolver,
+                    "[EventInfraModule] block write authority for BlockOrdering",
+                )
                 .await
-            {
-                Ok(authority) => {
-                    block_ops.with_write_authority(authority as Arc<dyn WriteAuthorityReads>)
-                }
-                Err(e) if e.kind == fluxdi::ErrorKind::ServiceNotProvided => block_ops,
-                Err(e) => panic!(
-                    "[EventInfraModule] resolving the block write authority \
-                     (LoroBlockOperations) for BlockOrdering failed: {e}"
-                ),
-            };
+                {
+                    Some(authority) => {
+                        block_ops.with_write_authority(authority as Arc<dyn WriteAuthorityReads>)
+                    }
+                    None => block_ops,
+                };
             Arc::new(block_ops) as Arc<dyn BlockOrdering>
         }));
 

@@ -23,6 +23,7 @@ use futures::FutureExt;
 use holon::api::net_guard::NetGuard;
 use holon::di::test_helpers::create_test_engine_with_setup;
 use holon_core::BoundaryEnforcer;
+use holon_core::OperationObserver;
 use holon_core::WriteAuthorityReads;
 use holon_core::WriteTierAuthority;
 
@@ -40,28 +41,28 @@ where
     })
 }
 
-/// Boots a container in which `T` is bound to a failing factory and returns the
-/// panic message.
-async fn boot_failure_message<T>() -> String
-where
-    T: ?Sized + Send + Sync + 'static,
-{
+/// Boots a container with `bind` applied to it and returns the panic message.
+async fn boot_failure_message(bind: impl FnOnce(&fluxdi::Injector) + Send) -> String {
+    // The boot is EXPECTED to panic, so its backtrace is noise. Restore the
+    // hook this process had, not the default: under `cargo test` all tests
+    // share one process, and swapping in the default would strip a sibling's
+    // panic output.
+    let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
     let outcome = AssertUnwindSafe(create_test_engine_with_setup(
         ":memory:".into(),
         |injector| {
-            injector.provide::<T>(failing_provider::<T>());
+            bind(injector);
             Ok(())
         },
     ))
     .catch_unwind()
     .await;
-    let _ = std::panic::take_hook();
+    std::panic::set_hook(previous);
     match outcome {
         Ok(_) => panic!(
-            "the boot survived a failed resolve of {}, so it installed the permissive default \
-             instead of failing loudly",
-            std::any::type_name::<T>()
+            "the boot survived the failed resolve, so it installed the permissive default \
+             instead of failing loudly"
         ),
         Err(payload) => payload
             .downcast_ref::<String>()
@@ -69,6 +70,17 @@ where
             .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
             .unwrap_or_else(|| "a panic with a non-string payload".to_string()),
     }
+}
+
+/// Boots a container in which `T` is bound to a failing factory.
+async fn guard_boot_failure_message<T>() -> String
+where
+    T: ?Sized + Send + Sync + 'static,
+{
+    boot_failure_message(|injector| {
+        injector.provide::<T>(failing_provider::<T>());
+    })
+    .await
 }
 
 fn assert_names_site_and_type(message: &str, site: &str, type_name: &str) {
@@ -88,7 +100,7 @@ fn assert_names_site_and_type(message: &str, site: &str, type_name: &str) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_failing_boundary_enforcer_factory_stops_the_boot() {
-    let message = boot_failure_message::<dyn BoundaryEnforcer>().await;
+    let message = guard_boot_failure_message::<dyn BoundaryEnforcer>().await;
     assert_names_site_and_type(
         &message,
         "[OperationModule] boundary seam",
@@ -98,13 +110,13 @@ async fn a_failing_boundary_enforcer_factory_stops_the_boot() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_failing_net_guard_factory_stops_the_boot() {
-    let message = boot_failure_message::<dyn NetGuard>().await;
+    let message = guard_boot_failure_message::<dyn NetGuard>().await;
     assert_names_site_and_type(&message, "[OperationModule] net gate", "NetGuard");
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_failing_write_tier_authority_factory_stops_the_boot() {
-    let message = boot_failure_message::<dyn WriteTierAuthority>().await;
+    let message = guard_boot_failure_message::<dyn WriteTierAuthority>().await;
     assert_names_site_and_type(
         &message,
         "[OperationModule] write-tier gate",
@@ -114,11 +126,28 @@ async fn a_failing_write_tier_authority_factory_stops_the_boot() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_failing_write_authority_reads_factory_stops_the_boot() {
-    let message = boot_failure_message::<dyn WriteAuthorityReads>().await;
+    let message = guard_boot_failure_message::<dyn WriteAuthorityReads>().await;
     assert_names_site_and_type(
         &message,
         "[OperationModule] shape gate",
         "WriteAuthorityReads",
+    );
+}
+
+/// The operation log is an observer, and the observer SET took the same
+/// shortcut: any resolve error gave zero observers. The only observer prod
+/// binds is `OperationLogObserver`, so that silently dropped undo and the audit
+/// trail.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failing_operation_observer_stops_the_boot() {
+    let message = boot_failure_message(|injector| {
+        injector.provide_into_set::<dyn OperationObserver>(failing_provider());
+    })
+    .await;
+    assert_names_site_and_type(
+        &message,
+        "[OperationModule] operation observers",
+        "OperationObserver",
     );
 }
 

@@ -1,0 +1,157 @@
+Red log — #165 round 2, the fail-open sites the verifier found
+Date: 2026-10-10
+Tests: crates/holon/tests/guard_resolve_fails_loud.rs
+       crates/holon-app/tests/guard_resolve_fails_loud_in_the_app.rs
+       crates/holon-app/src/boot_error.rs (unit tests)
+Command: cargo nextest run -p holon -p holon-app --features holon/test-helpers \
+           --no-fail-fast -E "binary(guard_resolve_fails_loud) or \
+           binary(guard_resolve_fails_loud_in_the_app) or \
+           test(operation_pipeline_failures)"
+Tree: .claude/worktrees/guard-fail-loud, base main 7f3a7f77, round 1 at fea424be
+Build profile: test (unoptimized + debuginfo)
+
+Code state for this run: the round-2 production edits reverted to their state
+at fea424be — the observer set back to `unwrap_or_else(|_| vec![])`, the
+org-mode read-only authority, the block-CRUD authority, the block cell registry
+and the Loro share backend's write-tier gate back to
+`optional_resolve_async` / `try_resolve().ok()`, and the `Operations` arm
+removed from `BootError::from_bootstrap_error`. The test files are the landed
+ones.
+
+Red for the right reason:
+  - `a_failing_operation_observer_stops_the_boot`: the boot SURVIVED a failed
+    observer-set resolve, so it ran with zero observers — no operation log,
+    hence no undo and no audit trail.
+  - `a_wrongly_registered_crud_authority_stops_the_org_seam`: the boot SURVIVED
+    a `CrudAuthority` registered with the wrong factory kind, silently taking
+    the SqlOnly write leg.
+  - `operation_pipeline_failures_attribute_operations_engine_resolve`: a guard
+    wiring fault in the operation pipeline attributed to `Session`, which tells
+    the user to repair the wrong thing.
+
+Red for a DIFFERENT reason, which is itself the finding:
+  - `a_failing_write_tier_authority_stops_the_app_boot` and
+    `a_failing_read_only_document_authority_stops_the_app_boot` went red on the
+    assertion text, not on a survived boot: an earlier REQUIRED resolve of the
+    same type (`loro_module.rs:181`, `wiring.rs:448`) already fails loud. The
+    optional arms at `loro_module.rs:638`, `:705` and
+    `holon-orgmode/src/di.rs:808` are therefore unreachable in an app boot.
+    Both tests were retargeted to the guarantee they can actually pin.
+  - `a_failing_block_cell_registry_stops_the_event_infra_wiring` PASSED in the
+    reverted state, because the site string of the sibling `BlockOrdering`
+    resolve contained the asserted substring. The two site strings were made
+    disjoint and the assertion tightened to the operation-provider one.
+
+ Nextest run ID 498199d1-f2ff-4392-8e43-2b9f7f196a3c with nextest profile: default
+    Starting 11 tests across 143 binaries (1028 tests skipped)
+        FAIL [   0.038s] ( 1/11) holon-app boot_error::tests::operation_pipeline_failures_attribute_operations_engine_resolve
+  stdout ───
+
+    running 1 test
+    test boot_error::tests::operation_pipeline_failures_attribute_operations_engine_resolve ... FAILED
+
+    failures:
+
+    failures:
+        boot_error::tests::operation_pipeline_failures_attribute_operations_engine_resolve
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 44 filtered out; finished in 0.01s
+
+  stderr ───
+
+    thread 'boot_error::tests::operation_pipeline_failures_attribute_operations_engine_resolve' (354681425) panicked at crates/holon-app/src/boot_error.rs:243:13:
+    assertion `left == right` failed: OperationModule must attribute to the operation pipeline
+      left: Session
+     right: Operations
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   2.630s] ( 2/11) holon-app::guard_resolve_fails_loud_in_the_app a_failing_write_tier_authority_stops_the_loro_share_backend
+  stdout ───
+
+    running 1 test
+    test a_failing_write_tier_authority_stops_the_loro_share_backend ... FAILED
+
+    failures:
+
+    failures:
+        a_failing_write_tier_authority_stops_the_loro_share_backend
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 2.59s
+
+  stderr ───
+
+    thread 'a_failing_write_tier_authority_stops_the_loro_share_backend' (354681565) panicked at crates/holon-app/tests/guard_resolve_fails_loud_in_the_app.rs:115:5:
+    the panic should name the composition site [LoroModule] share backend write-tier gate, got: called `Result::unwrap()` on an `Err` value: Error { kind: FactoryFailed, message: "Factory for type dyn holon_core::write_tier_gate::WriteTierAuthority failed: the guard factory failed on purpose", source: Some("the guard factory failed on purpose") }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   2.745s] ( 3/11) holon-app::guard_resolve_fails_loud_in_the_app a_failing_read_only_document_authority_stops_the_org_wiring
+  stdout ───
+
+    running 1 test
+    test a_failing_read_only_document_authority_stops_the_org_wiring ... FAILED
+
+    failures:
+
+    failures:
+        a_failing_read_only_document_authority_stops_the_org_wiring
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 2.72s
+
+  stderr ───
+
+    thread 'a_failing_read_only_document_authority_stops_the_org_wiring' (354681431) panicked at crates/holon-app/tests/guard_resolve_fails_loud_in_the_app.rs:115:5:
+    the panic should name the composition site [OrgModeModule] read-only document authority, got: called `Result::unwrap()` on an `Err` value: Error { kind: AsyncFactoryRequiresAsyncResolve, message: "Type alloc::sync::Arc<holon_core::write_tier_gate::ReadOnlyDocuments> is registered with an async provider; use try_resolve_async/resolve_async", source: None }
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        PASS [   2.747s] ( 4/11) holon::guard_resolve_fails_loud a_failing_write_authority_reads_factory_stops_the_boot
+        PASS [   2.882s] ( 5/11) holon::guard_resolve_fails_loud a_failing_boundary_enforcer_factory_stops_the_boot
+        PASS [   2.894s] ( 6/11) holon-app::guard_resolve_fails_loud_in_the_app a_failing_block_cell_registry_stops_the_event_infra_wiring
+        PASS [   2.908s] ( 7/11) holon::guard_resolve_fails_loud a_failing_net_guard_factory_stops_the_boot
+        PASS [   2.919s] ( 8/11) holon::guard_resolve_fails_loud a_failing_write_tier_authority_factory_stops_the_boot
+        FAIL [   3.455s] ( 9/11) holon::guard_resolve_fails_loud a_failing_operation_observer_stops_the_boot
+  stdout ───
+
+    running 1 test
+    test a_failing_operation_observer_stops_the_boot ... FAILED
+
+    failures:
+
+    failures:
+        a_failing_operation_observer_stops_the_boot
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out; finished in 3.43s
+
+  stderr ───
+
+    thread 'a_failing_operation_observer_stops_the_boot' (354681423) panicked at crates/holon/tests/guard_resolve_fails_loud.rs:63:18:
+    the boot survived the failed resolve, so it installed the permissive default instead of failing loudly
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        PASS [   3.470s] (10/11) holon::guard_resolve_fails_loud an_unbound_guard_still_boots
+        FAIL [   3.954s] (11/11) holon-app::guard_resolve_fails_loud_in_the_app a_wrongly_registered_crud_authority_stops_the_org_seam
+  stdout ───
+
+    running 1 test
+    test a_wrongly_registered_crud_authority_stops_the_org_seam ... FAILED
+
+    failures:
+
+    failures:
+        a_wrongly_registered_crud_authority_stops_the_org_seam
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 3.92s
+
+  stderr ───
+
+    thread 'a_wrongly_registered_crud_authority_stops_the_org_seam' (354681460) panicked at crates/holon-app/tests/guard_resolve_fails_loud_in_the_app.rs:91:18:
+    the app boot survived the failed resolve, so a composition root took the failure for an absence and installed its permissive default
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [   3.959s] 11 tests run: 6 passed, 5 failed, 1028 skipped
+        FAIL [   0.038s] ( 1/11) holon-app boot_error::tests::operation_pipeline_failures_attribute_operations_engine_resolve
+        FAIL [   2.630s] ( 2/11) holon-app::guard_resolve_fails_loud_in_the_app a_failing_write_tier_authority_stops_the_loro_share_backend
+        FAIL [   2.745s] ( 3/11) holon-app::guard_resolve_fails_loud_in_the_app a_failing_read_only_document_authority_stops_the_org_wiring
+        FAIL [   3.455s] ( 9/11) holon::guard_resolve_fails_loud a_failing_operation_observer_stops_the_boot
+        FAIL [   3.954s] (11/11) holon-app::guard_resolve_fails_loud_in_the_app a_wrongly_registered_crud_authority_stops_the_org_seam
+error: test run failed

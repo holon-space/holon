@@ -13,6 +13,7 @@ ignored = ["workspace-hack"]
 [dependencies]
 async-trait.workspace = true
 chrono.workspace = true
+fluxdi.workspace = true
 futures.workspace = true
 futures-signals.workspace = true
 holon-api.workspace = true

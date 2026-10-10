@@ -5469,6 +5469,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "fluxdi",
  "futures",
  "futures-signals",
  "holon-api",

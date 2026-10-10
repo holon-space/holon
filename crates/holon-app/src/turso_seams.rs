@@ -952,9 +952,11 @@ impl Module for OrgModeModule {
                 // composition root as the Loro provider when a CRDT backend is
                 // enabled, absent in SqlOnly. orgmode picks the authority without
                 // naming a concrete backend type.
-                // ALLOW(ok): optional DI service
                 let crud_authority: Option<Arc<CrudAuthority>> =
-                    resolver.try_resolve::<CrudAuthority>().ok();
+                    holon_core::resolve_if_bound::<CrudAuthority>(
+                        &resolver,
+                        "[OrgModeSeam] block-CRUD authority",
+                    );
 
                 let loro_available = crud_authority.is_some();
                 info!(

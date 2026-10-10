@@ -30,6 +30,10 @@ pub enum BootComponent {
     Loro,
     /// OrgMode file sync.
     OrgSync,
+    /// The operation pipeline: dispatcher assembly, its guards and the
+    /// block-operation seams. A failure here is a wiring fault, not a damaged
+    /// store, so it must not be attributed to Turso or Loro.
+    Operations,
     /// External MCP integrations (`integrations/*.yaml`).
     McpIntegrations,
     /// `FrontendSession` assembly (the DI factory that wires the ViewModel).
@@ -46,6 +50,7 @@ impl fmt::Display for BootComponent {
             BootComponent::Turso => "turso",
             BootComponent::Loro => "loro",
             BootComponent::OrgSync => "org-sync",
+            BootComponent::Operations => "operations",
             BootComponent::McpIntegrations => "mcp-integrations",
             BootComponent::Session => "session",
             BootComponent::Platform => "platform",
@@ -120,8 +125,13 @@ impl BootError {
             (BootComponent::Turso, BootStage::EngineResolve)
         } else if msg.contains("LoroModule") {
             (BootComponent::Loro, BootStage::EngineResolve)
-        } else if msg.contains("OrgModeModule") {
+        } else if msg.contains("OrgModeModule") || msg.contains("OrgModeSeam") {
             (BootComponent::OrgSync, BootStage::ContainerConfigure)
+        } else if msg.contains("OperationModule") || msg.contains("EventInfraModule") {
+            // The dispatcher's guards and the block-operation seams. Once
+            // fluxdi catches factory panics, a guard wiring fault arrives here
+            // as a `FactoryFailed` carrying one of those site strings.
+            (BootComponent::Operations, BootStage::EngineResolve)
         } else if msg.contains("McpIntegrationsModule") {
             (
                 BootComponent::McpIntegrations,
@@ -242,6 +252,32 @@ mod tests {
         let boot_err = BootError::from_bootstrap_error(flux_err);
         assert_eq!(boot_err.component, BootComponent::Loro);
         assert_eq!(boot_err.stage, BootStage::EngineResolve);
+    }
+
+    /// A guard wiring fault in the operation pipeline is NOT a damaged store.
+    ///
+    /// Once fluxdi catches factory panics (#158), the panic a failed guard
+    /// resolve raises inside `OperationModule` arrives here as a resolve
+    /// failure carrying the site string. Attributing that to Turso or Loro
+    /// would tell the user to repair a store that is fine, and the
+    /// Session/SessionResolve default names the wrong stage.
+    #[test]
+    fn operation_pipeline_failures_attribute_operations_engine_resolve() {
+        for module in ["OperationModule", "EventInfraModule"] {
+            let flux_err = fluxdi::Error::module_lifecycle_failed(
+                module,
+                "configure",
+                "[OperationModule] boundary seam: resolving dyn holon_core::BoundaryEnforcer \
+                 failed",
+            );
+            let boot_err = BootError::from_bootstrap_error(flux_err);
+            assert_eq!(
+                boot_err.component,
+                BootComponent::Operations,
+                "{module} must attribute to the operation pipeline"
+            );
+            assert_eq!(boot_err.stage, BootStage::EngineResolve);
+        }
     }
 
     /// Anything not attributable to a named storage module falls back to

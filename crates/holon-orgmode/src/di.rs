@@ -805,8 +805,10 @@ pub fn register_org_file_sync_core(injector: &Injector) -> std::result::Result<(
                 // The read-only slice of the doc→home map, published to the
                 // operation dispatcher. Absent in the org-standalone container,
                 // which registers no dispatcher to read it.
-                let read_only_docs = resolver
-                    .optional_resolve_async::<std::sync::Arc<holon_core::ReadOnlyDocuments>>()
+                let read_only_docs =
+                    holon_core::resolve_if_bound_async::<
+                        std::sync::Arc<holon_core::ReadOnlyDocuments>,
+                    >(&resolver, "[OrgModeModule] read-only document authority")
                     .await;
 
                 // 3-way text merger for the no-store conflict path (spec 0008
