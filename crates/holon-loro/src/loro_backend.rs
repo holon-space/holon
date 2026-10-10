@@ -510,45 +510,88 @@ fn read_block_from_tree_with_parent(
     block
 }
 
+/// A typed block field whose stored value its type cannot hold. The block
+/// reads with that field's default; the projection discloses each one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnreadableField {
+    pub block_id: String,
+    pub field: &'static str,
+    pub stored: String,
+    pub reason: String,
+}
+
 fn read_block_from_tree(
     tree: &loro::LoroTree,
     node: loro::TreeID,
     parent_tree_id: Option<loro::TreeID>,
 ) -> Block {
+    read_block_noting(tree, node, parent_tree_id, &mut Vec::new())
+}
+
+fn shown(value: &Value) -> String {
+    match value {
+        Value::String(s) => s.clone(),
+        other => format!("{other:?}"),
+    }
+}
+
+/// [`read_block_from_tree`] that appends every typed field it had to read as
+/// its default to `unreadable`.
+fn read_block_noting(
+    tree: &loro::LoroTree,
+    node: loro::TreeID,
+    parent_tree_id: Option<loro::TreeID>,
+    unreadable: &mut Vec<UnreadableField>,
+) -> Block {
     let meta = tree
         .get_meta(node)
         .unwrap_or_else(|_| panic!("get_meta failed for node {:?}", node));
+    let id = block_uri_from_meta(&meta, node);
     let content = read_content_from_meta(&meta);
     // `read_properties_from_meta` already strips edge-typed keys (`tags`,
     // `requires`) that legacy pollution may have flattened into the PROPERTIES
     // blob — they live in dedicated meta keys + typed `Block` slots instead.
     let mut properties = read_properties_from_meta(&meta);
-    // `collapsed` is a typed Block field (document state, 2026-07-11 ruling)
-    // but `set_field(collapsed)` lands in the Loro properties map like every
-    // other scalar (apply_field_changes_to_meta). Lift it into the typed slot
-    // at this read boundary — parse-don't-validate — so a Loro-derived Block
-    // agrees field-for-field with a SQL-derived one (whose TryFrom reads the
-    // `collapsed` column) and org writeback emits one `:COLLAPSED:` drawer.
-    let collapsed = match properties.remove("collapsed") {
+    let mut note = |field: &'static str, stored: &Value, reason: String| {
+        unreadable.push(UnreadableField {
+            block_id: id.to_string(),
+            field,
+            stored: shown(stored),
+            reason,
+        });
+    };
+    // `collapsed`, `widget_only` and `block_type` are typed Block fields, but
+    // `set_field` lands them in the Loro properties map like every other
+    // scalar (apply_field_changes_to_meta). Lift them into the typed slots at
+    // this read boundary — parse-don't-validate — so a Loro-derived Block
+    // agrees field-for-field with a SQL-derived one and org writeback emits
+    // one drawer each.
+    let mut flag = |field: &'static str| match properties.remove(field) {
         None => false,
         Some(Value::Boolean(b)) => b,
         Some(Value::Integer(i)) => i != 0,
-        Some(other) => panic!("corrupt `collapsed` property in Loro tree: {other:?}"),
+        Some(other) => {
+            note(field, &other, "not a boolean".to_string());
+            false
+        }
     };
-    let widget_only = match properties.remove("widget_only") {
-        None => false,
-        Some(Value::Boolean(b)) => b,
-        Some(Value::Integer(i)) => i != 0,
-        Some(other) => panic!("corrupt `widget_only` property in Loro tree: {other:?}"),
-    };
+    let collapsed = flag("collapsed");
+    let widget_only = flag("widget_only");
     let block_type = match properties.remove("block_type") {
         None | Some(Value::Null) => None,
-        Some(Value::String(s)) => holon_api::block::parse_stored_block_type(&s)
-            .unwrap_or_else(|e| panic!("corrupt `block_type` property in Loro tree: {e}")),
-        Some(other) => panic!("corrupt `block_type` property in Loro tree: {other:?}"),
+        Some(Value::String(s)) => match holon_api::block::parse_stored_block_type(&s) {
+            Ok(block_type) => block_type,
+            Err(reason) => {
+                note("block_type", &Value::String(s), reason);
+                None
+            }
+        },
+        Some(other) => {
+            note("block_type", &other, "not a string".to_string());
+            None
+        }
     };
 
-    let id = block_uri_from_meta(&meta, node);
     let parent_id = match parent_tree_id {
         Some(pid) => {
             let parent_meta = tree
@@ -1488,6 +1531,15 @@ pub fn snapshot_blocks_from_doc(doc: &loro::LoroDoc) -> HashMap<String, Snapshot
 pub fn snapshot_blocks_from_doc_settled(
     doc: &loro::LoroDoc,
 ) -> (HashMap<String, SnapshotBlock>, bool) {
+    snapshot_blocks_from_doc_noting(doc, &mut Vec::new())
+}
+
+/// [`snapshot_blocks_from_doc_settled`] that appends every typed field it read
+/// as its default to `unreadable`.
+pub fn snapshot_blocks_from_doc_noting(
+    doc: &loro::LoroDoc,
+    unreadable: &mut Vec<UnreadableField>,
+) -> (HashMap<String, SnapshotBlock>, bool) {
     let tree = doc.get_tree(TREE_NAME);
     let mut blocks: HashMap<String, SnapshotBlock> = HashMap::new();
     // The node each projected block was read from: a duplicated id projects
@@ -1523,7 +1575,7 @@ pub fn snapshot_blocks_from_doc_settled(
             continue;
         }
         let parent_tid = get_node_parent(&tree, node.id);
-        let block = read_block_from_tree(&tree, node.id, parent_tid);
+        let block = read_block_noting(&tree, node.id, parent_tid, unreadable);
         // The fractional index is the Loro adapter's internal ordering encoding
         // (ADR 0005): captured here for the SQL projection, never on the block.
         // Computed per sibling group so concurrently-created siblings whose
@@ -1702,6 +1754,7 @@ fn read_one_node_snapshot(
     tree: &loro::LoroTree,
     node: loro::TreeID,
     group_keys: &mut HashMap<loro::TreeParentId, HashMap<loro::TreeID, Option<String>>>,
+    unreadable: &mut Vec<UnreadableField>,
 ) -> Option<(String, SnapshotBlock)> {
     let stable_id = match classify(tree, node) {
         LiveNode::Settled(sid) => sid,
@@ -1754,7 +1807,7 @@ fn read_one_node_snapshot(
         );
         return None;
     };
-    let block = read_block_from_tree(tree, node, parent_tid);
+    let block = read_block_noting(tree, node, parent_tid, unreadable);
     // Key by the SCHEMED id (`block:<stable>`), exactly as the full-snapshot
     // reader keys `blocks` — the `live`/SQL rows use the schemed id. Keying by
     // the bare `stable_id` here would make every update look like a create
@@ -1874,6 +1927,17 @@ pub fn incremental_block_changes(
     pending: &[PendingChange],
     tid_index: &mut HashMap<loro::TreeID, String>,
 ) -> anyhow::Result<(HashMap<String, Option<SnapshotBlock>>, bool)> {
+    incremental_block_changes_noting(doc, pending, tid_index, &mut Vec::new())
+}
+
+/// [`incremental_block_changes`] that appends every typed field it read as
+/// its default to `unreadable`.
+pub fn incremental_block_changes_noting(
+    doc: &loro::LoroDoc,
+    pending: &[PendingChange],
+    tid_index: &mut HashMap<loro::TreeID, String>,
+    unreadable: &mut Vec<UnreadableField>,
+) -> anyhow::Result<(HashMap<String, Option<SnapshotBlock>>, bool)> {
     let tree = doc.get_tree(TREE_NAME);
 
     let mut reread: HashSet<loro::TreeID> = HashSet::new();
@@ -1974,7 +2038,7 @@ pub fn incremental_block_changes(
         if is_mount_node(&tree, node) {
             continue;
         }
-        match read_one_node_snapshot(&tree, node, &mut group_keys) {
+        match read_one_node_snapshot(&tree, node, &mut group_keys, unreadable) {
             Some((sid, snap)) => {
                 tid_index.insert(node, sid.clone());
                 changed.insert(sid, Some(snap));

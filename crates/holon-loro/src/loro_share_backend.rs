@@ -586,6 +586,8 @@ impl ShareRoot {
 struct ProjectionMark {
     frontiers: loro::Frontiers,
     placement: RootPlacement,
+    /// The `(block id, field)` pairs a `BlockFieldUnreadable` is raised for.
+    unreadable: HashSet<(String, &'static str)>,
 }
 
 /// One share's Loro→SQL projection. Two workers drive it (shared-doc commits
@@ -636,7 +638,15 @@ impl ShareProjection {
             snap
         };
 
-        let (ops, after_settled) = share_diff_ops(&self.doc, &before, &placement, stid);
+        let mut unreadable = Vec::new();
+        let (ops, after_settled) =
+            share_diff_ops(&self.doc, &before, &placement, stid, &mut unreadable);
+        crate::loro_sync_controller::disclose_unreadable_fields(
+            &self.bus,
+            &mut mark.unreadable,
+            |_| true,
+            unreadable,
+        );
         if !ops.is_empty() {
             // Integrity guard (see `first_local_collision`): a synced-in
             // remote edit must never project a block whose id shadows a
@@ -740,6 +750,7 @@ fn spawn_projection_worker(
         mark: tokio::sync::Mutex::new(ProjectionMark {
             frontiers: doc.oplog_frontiers(),
             placement,
+            unreadable: HashSet::new(),
         }),
         doc: doc.clone(),
         sql_ops,
@@ -789,10 +800,11 @@ fn share_diff_ops(
     before: &HashMap<String, crate::loro_backend::SnapshotBlock>,
     placement: &RootPlacement,
     stid: &str,
+    unreadable: &mut Vec<crate::loro_backend::UnreadableField>,
 ) -> (Vec<(String, StorageEntity)>, bool) {
-    use crate::loro_backend::snapshot_blocks_from_doc_settled;
+    use crate::loro_backend::snapshot_blocks_from_doc_noting;
     use crate::loro_sync_controller::diff_snapshots_to_ops;
-    let (mut after, after_settled) = snapshot_blocks_from_doc_settled(doc);
+    let (mut after, after_settled) = snapshot_blocks_from_doc_noting(doc, unreadable);
     placement.apply(&mut after, stid);
     let mut ops = diff_snapshots_to_ops(before, &after);
     if !after_settled {
@@ -3603,6 +3615,7 @@ mod tests {
                 mount: EntityUri::block("mount"),
             },
             "test-tree",
+            &mut Vec::new(),
         );
         assert!(
             !settled,
@@ -3645,6 +3658,7 @@ mod tests {
                 mount: EntityUri::block("mount"),
             },
             "test-tree",
+            &mut Vec::new(),
         );
         assert!(settled, "a genuine delete must not unsettle the snapshot");
         assert!(

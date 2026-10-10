@@ -181,6 +181,7 @@ pub use loro_backend::SOURCE_LANGUAGE;
 pub use loro_backend::STABLE_ID;
 pub use loro_backend::SnapshotBlock;
 pub use loro_backend::TREE_NAME;
+pub use loro_backend::UnreadableField;
 pub use loro_backend::build_tid_index;
 pub use loro_backend::configure_text_styles;
 pub use loro_backend::extract_pending_changes;

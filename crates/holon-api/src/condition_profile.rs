@@ -754,6 +754,15 @@ const DERIVED_FIELD_NOT_COMPUTED: ConditionProfile = ConditionProfile::new(
     &[],
 );
 
+const BLOCK_FIELD_UNREADABLE: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Warning,
+    "A block field holds a value Holon cannot read",
+    icons::WARN,
+    ConditionPlacement::Toast,
+    AllClear::RemedyApplied,
+    &[],
+);
+
 const PREVIOUS_RUN_PANICKED: ConditionProfile = ConditionProfile::new(
     ConditionSeverity::Error,
     "Holon stopped last time because of an internal error",
@@ -892,6 +901,7 @@ impl ConditionKind {
             Self::DatabaseStuck { .. } => DATABASE_STUCK,
             Self::DatabaseWatchFailed { .. } => DATABASE_WATCH_FAILED,
             Self::DerivedFieldNotComputed { .. } => DERIVED_FIELD_NOT_COMPUTED,
+            Self::BlockFieldUnreadable { .. } => BLOCK_FIELD_UNREADABLE,
             Self::PreviousRunPanicked { .. } => PREVIOUS_RUN_PANICKED,
             Self::TaskPanicked { .. } => TASK_PANICKED,
             Self::PanicRecordUnwritable { .. } => PANIC_RECORD_UNWRITABLE,

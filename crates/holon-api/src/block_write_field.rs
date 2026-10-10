@@ -222,6 +222,41 @@ impl BlockWriteField {
     }
 }
 
+impl BlockWriteField {
+    /// The fields whose value this vocabulary parses ([`Self::parse_value`]);
+    /// every other field's value passes through as written.
+    pub const TYPED: [Self; 3] = [Self::BlockType, Self::Collapsed, Self::WidgetOnly];
+
+    /// Parse the value an intent writes into this field into its canonical
+    /// stored form, refusing one the field's type cannot hold.
+    pub fn parse_value(&self, value: crate::Value) -> Result<crate::Value, String> {
+        use crate::Value;
+        let refuse = |why: String| {
+            let shown = match &value {
+                Value::String(s) => format!("{s:?}"),
+                other => format!("{other:?}"),
+            };
+            Err(format!("{self} value {shown}: {why}"))
+        };
+        match self {
+            Self::BlockType => match &value {
+                Value::Null => Ok(Value::Null),
+                _ => match crate::EntityName::try_from(value.clone()) {
+                    Ok(name) => Ok(Value::from(name)),
+                    Err(e) => refuse(e.to_string()),
+                },
+            },
+            Self::Collapsed | Self::WidgetOnly => match &value {
+                Value::Boolean(b) => Ok(Value::Boolean(*b)),
+                Value::Integer(0) => Ok(Value::Boolean(false)),
+                Value::Integer(1) => Ok(Value::Boolean(true)),
+                _ => refuse("must be a boolean (or the integer 0 or 1)".to_string()),
+            },
+            _ => Ok(value),
+        }
+    }
+}
+
 impl fmt::Display for BlockWriteField {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())

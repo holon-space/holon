@@ -994,8 +994,9 @@ impl TryFrom<crate::StorageEntity> for Block {
         let block_type = match row.get("block_type") {
             None => anyhow::bail!("block {id}: required column 'block_type' absent from row"),
             Some(Value::Null) => None,
-            Some(Value::String(s)) => parse_stored_block_type(s)
-                .map_err(|e| anyhow::anyhow!("block {id}: invalid 'block_type': {e}"))?,
+            // An unparseable name reads as untyped; the boot audit
+            // (`unreadable_stored_block_types`) discloses it.
+            Some(Value::String(s)) => parse_stored_block_type(s).unwrap_or(None),
             Some(other) => {
                 anyhow::bail!("block {id}: column 'block_type' must be a string, got {other:?}")
             }

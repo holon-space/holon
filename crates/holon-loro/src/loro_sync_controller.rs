@@ -34,6 +34,7 @@
 //! next pass reseeds and retries rather than silently dropping the change.
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
@@ -63,7 +64,6 @@ use tracing::warn;
 use crate::LoroDocument;
 use crate::LoroDocumentStore;
 use crate::loro_backend::SnapshotBlock;
-use crate::loro_backend::snapshot_blocks_from_doc_settled;
 use crate::loro_document_store::DocScope;
 
 /// Filename of the sidecar file that persists the sync watermark next to the
@@ -336,6 +336,48 @@ fn unguarded_delivery(source: CommitSource, event: &loro::event::DiffEvent<'_>) 
     panic!("{message}");
     #[cfg(not(any(test, feature = "test-helpers")))]
     error!("{message}");
+}
+
+/// Raise a `BlockFieldUnreadable` condition for each of `unreadable`, and
+/// clear each one in `raised` whose block this read covered (`read`) and found
+/// readable or gone. `raised` is the set the caller holds raised.
+pub(crate) fn disclose_unreadable_fields(
+    bus: &holon_api::condition_bus::ConditionBus,
+    raised: &mut HashSet<(String, &'static str)>,
+    read: impl Fn(&str) -> bool,
+    unreadable: Vec<crate::loro_backend::UnreadableField>,
+) {
+    let found: HashSet<(String, &'static str)> = unreadable
+        .iter()
+        .map(|u| (u.block_id.clone(), u.field))
+        .collect();
+    raised.retain(|(block_id, field)| {
+        let fixed = read(block_id) && !found.contains(&(block_id.clone(), *field));
+        if fixed {
+            bus.clear(
+                &holon_api::condition_bus::ConditionKey::block_field_unreadable(block_id, field),
+            );
+        }
+        !fixed
+    });
+    for u in unreadable {
+        if !raised.contains(&(u.block_id.clone(), u.field)) {
+            tracing::warn!(
+                block_id = %u.block_id,
+                field = u.field,
+                stored = %u.stored,
+                reason = %u.reason,
+                "loro projection: typed block field unreadable; it reads as its default"
+            );
+        }
+        bus.emit(holon_api::condition_bus::Condition::block_field_unreadable(
+            &u.block_id,
+            u.field,
+            u.stored,
+            u.reason,
+        ));
+        raised.insert((u.block_id, u.field));
+    }
 }
 
 /// The sticky condition key the projection raises and clears.
@@ -792,6 +834,9 @@ pub struct LoroProjection {
     commit_clock: Arc<CommitClock>,
     /// Gets each doc's rows read under the same guard as their cover.
     views_engine: Arc<ViewEngine>,
+    /// The `(block id, field)` pairs this projection holds a
+    /// `BlockFieldUnreadable` condition raised for.
+    unreadable_raised: StdMutex<HashSet<(String, &'static str)>>,
     #[cfg(any(test, feature = "test-helpers"))]
     read_seam: StdMutex<Option<Arc<dyn Fn(CommitSource) + Send + Sync>>>,
 }
@@ -838,6 +883,7 @@ impl LoroProjection {
             shared_trees: None,
             commit_clock,
             views_engine,
+            unreadable_raised: StdMutex::new(HashSet::new()),
             #[cfg(any(test, feature = "test-helpers"))]
             read_seam: StdMutex::new(None),
         }
@@ -1576,6 +1622,7 @@ impl LoroProjection {
         bool,
         Frontiers,
     )> {
+        let mut unreadable = Vec::new();
         let (facts, frontier, cover, (changed, settled)) = doc.with_read(|doc| {
             let facts = std::mem::take(&mut *queue.lock().unwrap());
             let frontier = doc.oplog_frontiers();
@@ -1585,9 +1632,15 @@ impl LoroProjection {
                 seam(source);
             }
             let mut tid_index = self.tid_index.lock().unwrap();
-            let read = crate::loro_backend::incremental_block_changes(doc, &facts, &mut tid_index)?;
+            let read = crate::loro_backend::incremental_block_changes_noting(
+                doc,
+                &facts,
+                &mut tid_index,
+                &mut unreadable,
+            )?;
             Ok((facts.len(), frontier, cover, read))
         })?;
+        self.disclose_unreadable(changed.keys(), unreadable);
         if settled {
             let delta = changed
                 .iter()
@@ -1611,19 +1664,35 @@ impl LoroProjection {
         queue: &StdMutex<Vec<crate::loro_backend::PendingChange>>,
         source: CommitSource,
     ) -> Result<(HashMap<String, SnapshotBlock>, bool, Frontiers)> {
+        let mut unreadable = Vec::new();
         let (frontier, cover, (blocks, settled)) = doc.with_read(|doc| {
             queue.lock().unwrap().clear();
             Ok((
                 doc.oplog_frontiers(),
                 self.commit_clock.high_water(),
-                snapshot_blocks_from_doc_settled(doc),
+                crate::loro_backend::snapshot_blocks_from_doc_noting(doc, &mut unreadable),
             ))
         })?;
+        self.disclose_unreadable(blocks.keys(), unreadable);
         if settled {
             self.views_engine
                 .replace(source, cover, blocks.values().cloned().collect());
         }
         Ok((blocks, settled, frontier))
+    }
+
+    fn disclose_unreadable<'a>(
+        &self,
+        read: impl Iterator<Item = &'a String>,
+        unreadable: Vec<crate::loro_backend::UnreadableField>,
+    ) {
+        let read: HashSet<&String> = read.collect();
+        disclose_unreadable_fields(
+            &self.degraded,
+            &mut self.unreadable_raised.lock().unwrap(),
+            |block_id| read.contains(&block_id.to_string()),
+            unreadable,
+        );
     }
 
     /// A failed sink write leaves the SQL index behind the Loro authority.

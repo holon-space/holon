@@ -1668,10 +1668,12 @@ impl OperationDispatcher {
 
                 // Intent boundary (Model.md invariants 3 and 16): parse the
                 // field of a block `set_field` intent into the closed
-                // `BlockWriteField` vocabulary, and refuse a block `update`
-                // that names a private field. Private fields, order keys and
-                // storage-internal fields are a loud Err here, in EVERY mode —
-                // their owners write them, never a generic intent. The
+                // `BlockWriteField` vocabulary, parse each typed field's value
+                // (`BlockWriteField::TYPED`) into its stored form, and refuse
+                // a block `update` that names a private field. Private fields,
+                // order keys and storage-internal fields are a loud Err here,
+                // in EVERY mode — their owners write them, never a generic
+                // intent — and so is a value a typed field cannot hold. The
                 // ordering authority's own writes don't pass through the
                 // dispatcher (they call the SQL provider / CRUD seam directly),
                 // so this rejects exactly the smuggling path.
@@ -1681,8 +1683,24 @@ impl OperationDispatcher {
                         .get("field")
                         .and_then(|v| v.as_string())
                         .ok_or("block set_field: missing 'field' parameter")?;
-                    holon_api::BlockWriteField::parse(field)
+                    let field = holon_api::BlockWriteField::parse(field)
                         .map_err(|e| format!("intent boundary: {e}"))?;
+                    if let Some(value) = params.remove("value") {
+                        let value = field
+                            .parse_value(value)
+                            .map_err(|e| format!("intent boundary: {e}"))?;
+                        params.insert("value".into(), value);
+                    }
+                }
+                if resolved_entity_name == "block" && matches!(op_name, "create" | "update") {
+                    for field in holon_api::BlockWriteField::TYPED {
+                        if let Some(value) = params.remove(field.as_str()) {
+                            let value = field
+                                .parse_value(value)
+                                .map_err(|e| format!("intent boundary: {e}"))?;
+                            params.insert(field.as_str().into(), value);
+                        }
+                    }
                 }
                 if resolved_entity_name == "block" && op_name == "update" {
                     if let Some((field, private)) = holon_api::schema::BLOCK

@@ -154,6 +154,41 @@ fn build_graph_schema_registry(type_registry: &TypeRegistry) -> GraphSchemaRegis
     registry
 }
 
+/// Raise a `BlockFieldUnreadable` for every stored `block_type` that is no
+/// entity name: such a block reads as untyped.
+async fn disclose_unreadable_stored_block_types(
+    db_handle: &DbHandle,
+    conditions: &holon_api::ConditionBus,
+) -> Result<()> {
+    let rows = db_handle
+        .query(
+            "SELECT id, block_type FROM block_raw WHERE block_type IS NOT NULL",
+            std::collections::HashMap::new(),
+        )
+        .await
+        .context("boot audit: reading the stored block_type values")?;
+    for row in rows {
+        let id = row
+            .get("id")
+            .and_then(|v| v.as_string())
+            .with_context(|| format!("boot audit: block_raw row without a string id: {row:?}"))?;
+        let stored = match row.get("block_type") {
+            Some(holon_api::Value::String(s)) => s.clone(),
+            other => format!("{other:?}"),
+        };
+        if let Err(reason) = holon_api::block::parse_stored_block_type(&stored) {
+            tracing::warn!(block_id = %id, %stored, %reason, "stored block_type unreadable; it reads as untyped");
+            conditions.emit(holon_api::Condition::block_field_unreadable(
+                id,
+                "block_type",
+                stored,
+                reason,
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Create and initialize a BackendEngine from a backend, dispatcher, and
 /// config.
 ///
@@ -181,11 +216,18 @@ async fn create_initialized_engine(
     let db_handle = backend_guard.handle().clone();
     drop(backend_guard);
     // No separate authority registered means SQL accepts block writes itself.
-    let block_write_authority = block_write_authority.unwrap_or_else(|| {
-        Arc::new(crate::core::sql_write_authority::SqlWriteAuthority::new(
-            db_handle.clone(),
-        ))
-    });
+    // Then SQL is also what a stored `block_type` is read from, so its
+    // unreadable values are disclosed here; a Loro authority's projection
+    // discloses its own.
+    let block_write_authority = match block_write_authority {
+        Some(authority) => authority,
+        None => {
+            disclose_unreadable_stored_block_types(&db_handle, &conditions).await?;
+            Arc::new(crate::core::sql_write_authority::SqlWriteAuthority::new(
+                db_handle.clone(),
+            ))
+        }
+    };
 
     let type_profiles = holon_profiles::type_profiles_from_registry(type_registry);
 

@@ -513,6 +513,19 @@ pub enum ConditionKind {
         field: String,
         reason: String,
     },
+    /// Typed field `field` of block `block_id` (the two make `subject`) is
+    /// stored as `stored`, which that field's type cannot hold (`reason`), so
+    /// it reads as the field's default.
+    ///
+    /// All-clear: the Loro projection's next read of the block finds a valid
+    /// value (or no block); where SQL is the write authority, the next boot's
+    /// audit does.
+    BlockFieldUnreadable {
+        block_id: String,
+        field: String,
+        stored: String,
+        reason: String,
+    },
     /// The previous run of Holon panicked at `subject` (a `file:line:column`)
     /// on `thread` with `message`, as its panic record says, after the
     /// `earlier` runs that no frontend has shown either. One condition stands
@@ -656,6 +669,7 @@ impl ConditionKind {
     pub const DATABASE_STUCK: &'static str = "database-stuck";
     pub const DATABASE_WATCH_FAILED: &'static str = "database-watch-failed";
     pub const DERIVED_FIELD_NOT_COMPUTED: &'static str = "derived-field-not-computed";
+    pub const BLOCK_FIELD_UNREADABLE: &'static str = "block-field-unreadable";
     pub const PREVIOUS_RUN_PANICKED: &'static str = "previous-run-panicked";
     pub const TASK_PANICKED: &'static str = "task-panicked";
     pub const PANIC_RECORD_UNWRITABLE: &'static str = "panic-record-unwritable";
@@ -726,6 +740,7 @@ impl ConditionKind {
             Self::DatabaseStuck { .. } => Self::DATABASE_STUCK,
             Self::DatabaseWatchFailed { .. } => Self::DATABASE_WATCH_FAILED,
             Self::DerivedFieldNotComputed { .. } => Self::DERIVED_FIELD_NOT_COMPUTED,
+            Self::BlockFieldUnreadable { .. } => Self::BLOCK_FIELD_UNREADABLE,
             Self::PreviousRunPanicked { .. } => Self::PREVIOUS_RUN_PANICKED,
             Self::TaskPanicked { .. } => Self::TASK_PANICKED,
             Self::PanicRecordUnwritable { .. } => Self::PANIC_RECORD_UNWRITABLE,
@@ -939,6 +954,25 @@ impl Condition {
         }
     }
 
+    /// Typed field `field` of block `block_id` is stored as `stored`, which
+    /// it cannot hold because of `reason`.
+    pub fn block_field_unreadable(
+        block_id: &str,
+        field: &str,
+        stored: String,
+        reason: String,
+    ) -> Self {
+        Self {
+            subject: ConditionKey::block_field_unreadable(block_id, field).subject,
+            reason: ConditionKind::BlockFieldUnreadable {
+                block_id: block_id.to_string(),
+                field: field.to_string(),
+                stored,
+                reason,
+            },
+        }
+    }
+
     /// The sticky identity of this degradation.
     pub fn condition_key(&self) -> ConditionKey {
         ConditionKey {
@@ -963,6 +997,15 @@ impl ConditionKey {
         Self {
             subject: format!("{block_id}/{field}@{}", seat.name()),
             kind: ConditionKind::DERIVED_FIELD_NOT_COMPUTED,
+        }
+    }
+
+    /// The key of [`ConditionKind::BlockFieldUnreadable`] for `field` of
+    /// `block_id`.
+    pub fn block_field_unreadable(block_id: &str, field: &str) -> Self {
+        Self {
+            subject: format!("{block_id}/{field}"),
+            kind: ConditionKind::BLOCK_FIELD_UNREADABLE,
         }
     }
 

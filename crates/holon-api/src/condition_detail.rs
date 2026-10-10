@@ -457,6 +457,16 @@ impl ConditionKind {
                  until the next computation succeeds."
             )),
 
+            Self::BlockFieldUnreadable {
+                block_id,
+                field,
+                stored,
+                reason,
+            } => ConditionDetail::prose(format!(
+                "{block_id} stores {field} as {stored}, which Holon cannot read ({reason}), so it \
+                 shows the default {field}. Write a valid {field} with set_field to fix it."
+            )),
+
             // A doorbell: every record is read in full in the crash history,
             // which the profile's remedy opens.
             Self::PreviousRunPanicked {

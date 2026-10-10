@@ -1,6 +1,7 @@
 //! Loro CRDT store: projection, persistence, restart, and sync-controller
 //! tests.
 
+mod loro_block_type_invalid_values;
 mod loro_block_type_on_a_legacy_schema;
 mod loro_block_type_reaches_sql;
 mod loro_create_persists_prod_session;
