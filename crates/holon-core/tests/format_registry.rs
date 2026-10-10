@@ -155,6 +155,15 @@ fn an_extensionless_path_is_not_a_vault_document() {
 }
 
 #[test]
+fn a_conflict_copy_is_not_a_vault_document() {
+    let registry = org_and_cook();
+    let source = Path::new("/vault/Notes.org");
+    let copy = holon_core::conflict_copy::path_for(source, 1_760_000_000_000, 0);
+    assert!(registry.handles(source));
+    assert!(!registry.handles(&copy), "{}", copy.display());
+}
+
+#[test]
 fn extension_matching_is_case_insensitive() {
     let registry = org_and_cook();
     assert!(registry.handles(Path::new("/vault/Shouty.ORG")));

@@ -4889,6 +4889,49 @@ impl FileSyncController {
             .with_context(|| format!("keep the copies {held:?} in {}", path.display()))
     }
 
+    /// Save `disk_content`, the whole of `path` as this ingest read it, as a
+    /// conflict copy beside it, once per ingest: `saved` holds the copy this
+    /// ingest made. An overruling write-back may run only once this returns.
+    async fn save_conflict_copy(
+        &self,
+        path: &Path,
+        disk_content: &str,
+        saved: &mut Option<PathBuf>,
+    ) -> Result<PathBuf> {
+        if let Some(copy) = saved {
+            return Ok(copy.clone());
+        }
+        let millis = self.clock.now_millis();
+        let copy = (0..holon_core::conflict_copy::SEQ_COUNT)
+            .map(|seq| holon_core::conflict_copy::path_for(path, millis, seq))
+            .find(|candidate| !self.fs.exists(candidate))
+            .with_context(|| {
+                format!(
+                    "every conflict copy name of {} for this second is taken, so the file's text \
+                     is not saved and the write-back that overrules it does not run",
+                    path.display()
+                )
+            })?;
+        self.fs
+            .write(&copy, disk_content.as_bytes())
+            .await
+            .with_context(|| {
+                format!(
+                    "save {} as the conflict copy {}; without it the write-back that overrules \
+                     the file's edit does not run",
+                    path.display(),
+                    copy.display()
+                )
+            })?;
+        tracing::warn!(
+            file = %path.display(),
+            conflict_copy = %copy.display(),
+            "[FileSyncController] saved the file as a conflict copy before a write-back \
+             overrules its edit"
+        );
+        Ok(saved.insert(copy).clone())
+    }
+
     /// `block` alone, as the format writes it into `path`.
     fn block_file_text(&self, path: &Path, doc: &EntityUri, block: &Block) -> Result<String> {
         let mut alone = block.clone();
@@ -6059,6 +6102,7 @@ impl FileSyncController {
         // this file resolves it. Foreign PAGE inlines (`foreign_subtree_ids`)
         // are excluded: their owning page-file is authoritative.
         let inlines_foreign_pages = !foreign_subtree_ids.is_empty();
+        let mut conflict_copy: Option<PathBuf> = None;
         let mut copies_here: HashSet<EntityUri> = HashSet::new();
         let mut copy_subtrees: HashSet<EntityUri> = HashSet::new();
         let mut adopted_subtrees: HashSet<EntityUri> = HashSet::new();
@@ -6314,16 +6358,20 @@ impl FileSyncController {
                 };
                 if edited {
                     let file_text = self.block_file_text(path, &document_uri, block)?;
+                    let copy = self
+                        .save_conflict_copy(path, &disk_content, &mut conflict_copy)
+                        .await?;
                     tracing::warn!(
                         block_id = %block.id,
                         file = %path.display(),
                         %change,
                         %file_text,
+                        conflict_copy = %copy.display(),
                         "[FileSyncController] the file edited a block Holon {change} since the \
                          last sync; Holon's change stands and the file's text is not ingested"
                     );
                     if let Some(disclosure) = &self.writeback_disclosure {
-                        disclosure.file_edit_overruled(&block.id, path, &file_text, change);
+                        disclosure.file_edit_overruled(&block.id, path, &file_text, change, &copy);
                     }
                 } else {
                     tracing::warn!(
@@ -6717,10 +6765,14 @@ impl FileSyncController {
                             Some(TextMergeOutcome::TooLarge) => {
                                 let file_text =
                                     self.block_file_text(path, &document_uri, new_block)?;
+                                let copy = self
+                                    .save_conflict_copy(path, &disk_content, &mut conflict_copy)
+                                    .await?;
                                 tracing::warn!(
                                     block_id = %id,
                                     file = %path.display(),
                                     %file_text,
+                                    conflict_copy = %copy.display(),
                                     "[FileSyncController] the file and Holon both edited a \
                                      block's text, too much to merge; Holon's text stands and \
                                      the file's is not ingested"
@@ -6731,6 +6783,7 @@ impl FileSyncController {
                                         path,
                                         &file_text,
                                         HolonChange::Edited,
+                                        &copy,
                                     );
                                 }
                                 Some(mine.clone())

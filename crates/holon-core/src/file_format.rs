@@ -400,13 +400,16 @@ impl FormatRegistry {
     }
 
     /// The adapter claiming `path`'s extension, or `None` when no adapter
-    /// does — that path is simply not a vault document (an attachment, a
-    /// `.gitignore`, an editor lock file), which is a typed absence and not a
-    /// failure.
+    /// does or `path` is a [conflict copy](crate::conflict_copy) — that path
+    /// is simply not a vault document (an attachment, a `.gitignore`, an
+    /// editor lock file), which is a typed absence and not a failure.
     /// Returns an owned handle rather than a borrow: the sync controller
     /// resolves the adapter inside `&mut self` methods that go on to mutate
     /// their own state, and a borrow of `self` would outlive that.
     pub fn adapter_for(&self, path: &Path) -> Option<Arc<dyn FileFormatAdapter>> {
+        if crate::conflict_copy::is_conflict_copy(path) {
+            return None;
+        }
         let ext = path.extension()?.to_str()?.to_ascii_lowercase();
         self.by_ext.get(&ext).map(|&i| self.adapters[i].clone())
     }

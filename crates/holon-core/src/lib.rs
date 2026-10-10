@@ -20,6 +20,7 @@ pub mod boundary_enforcer;
 pub mod canonical_path;
 pub mod cell;
 pub mod cell_registry;
+pub mod conflict_copy;
 pub mod consolidator;
 pub mod core;
 pub mod downstream_projection;

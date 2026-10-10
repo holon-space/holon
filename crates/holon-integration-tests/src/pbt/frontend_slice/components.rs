@@ -477,7 +477,8 @@ impl HeadlessFrontendComponent {
             .collect()
     }
 
-    /// Fork B — every `.org` file on disk in the watched root paired with its
+    /// Fork B — every `.org` file on disk in the watched root, except a
+    /// conflict copy, paired with its
     /// bare `#+ID:` header value (absolute path, `None` id if the file has
     /// no `#+ID:`). The path is where B2 actually materialized a page —
     /// which for a fileless child of a companion is NESTED
@@ -491,7 +492,9 @@ impl HeadlessFrontendComponent {
             .expect("Fork B disk_org_files: scan_directory failed");
         let mut out = Vec::new();
         for path in scanned.files {
-            if path.extension().and_then(|e| e.to_str()) != Some("org") {
+            if path.extension().and_then(|e| e.to_str()) != Some("org")
+                || holon_core::conflict_copy::is_conflict_copy(&path)
+            {
                 continue;
             }
             let content = FileSystem::read_to_string(self.org_fs().as_ref(), &path)

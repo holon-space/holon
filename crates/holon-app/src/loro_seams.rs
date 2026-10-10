@@ -839,6 +839,7 @@ impl holon_filesystem::WritebackDisclosure for WritebackDegradedDisclosure {
         file: &Path,
         file_text: &str,
         change: holon_api::HolonChange,
+        conflict_copy: &Path,
     ) {
         self.bus.emit(holon_api::Condition {
             subject: block_id.as_str().to_string(),
@@ -846,6 +847,7 @@ impl holon_filesystem::WritebackDisclosure for WritebackDegradedDisclosure {
                 file: file.display().to_string(),
                 file_text: file_text.to_string(),
                 change,
+                conflict_copy: conflict_copy.display().to_string(),
             },
         });
     }

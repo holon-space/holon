@@ -703,13 +703,15 @@ pub trait WritebackDisclosure: Send + Sync {
 
     /// Signal that `block_id` in `file` was edited after Holon `change`d the
     /// block: Holon's change stands and `file_text`, the block as the file
-    /// holds it, is not ingested. Sticky for the rest of the process.
+    /// holds it, is not ingested. `conflict_copy` holds the whole file as it
+    /// was before the write-back. Sticky for the rest of the process.
     fn file_edit_overruled(
         &self,
         block_id: &EntityUri,
         file: &Path,
         file_text: &str,
         change: HolonChange,
+        conflict_copy: &Path,
     );
 
     /// Signal that the file-sync controller of `vault` failed before it

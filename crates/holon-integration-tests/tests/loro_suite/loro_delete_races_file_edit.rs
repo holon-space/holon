@@ -97,6 +97,33 @@ fn overruled_text(env: &TestEnvironment, id: &str) -> Option<String> {
         })
 }
 
+/// Every conflict copy in the vault, with its text.
+async fn conflict_copies(env: &TestEnvironment) -> Vec<(std::path::PathBuf, String)> {
+    let scanned = holon_filesystem::FileSystem::scan_directory(env.org_fs.as_ref(), env.org_root())
+        .await
+        .expect("scan the vault");
+    let mut copies = Vec::new();
+    for path in scanned.files {
+        if holon_core::conflict_copy::is_conflict_copy(&path) {
+            let text = disk(env, &path).await;
+            copies.push((path, text));
+        }
+    }
+    copies.sort();
+    copies
+}
+
+/// The `Debug` text of every current condition.
+fn conditions(env: &TestEnvironment) -> Vec<String> {
+    env.injector()
+        .expect("injector")
+        .resolve::<Arc<holon_api::ConditionBus>>()
+        .current()
+        .into_iter()
+        .map(|c| format!("{c:?}"))
+        .collect()
+}
+
 async fn disk(env: &TestEnvironment, path: &std::path::Path) -> String {
     holon_filesystem::FileSystem::read_to_string(env.org_fs.as_ref(), path)
         .await
@@ -169,7 +196,7 @@ async fn holon_change_races_edit(
     beta_edit: BetaEdit,
 ) {
     holon_integration_tests::test_tracing::SpanCollector::global();
-    let env = TestEnvironment::new(runtime).expect("TestEnvironment::new");
+    let mut env = TestEnvironment::new(runtime).expect("TestEnvironment::new");
     assert!(env.loro_enabled(), "this race needs the Loro wiring");
     let path = env
         .write_org_file("vault.org", VAULT)
@@ -274,6 +301,65 @@ async fn holon_change_races_edit(
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+
+    let copies = conflict_copies(&env).await;
+    if lost_marker.is_none() {
+        assert!(
+            copies.is_empty(),
+            "an editor change Holon did not overrule left conflict copies: {copies:?}"
+        );
+        return;
+    }
+    let [(copy, copy_text)] = copies.as_slice() else {
+        panic!(
+            "the overruling write-back must leave exactly one conflict copy of the editor's \
+             save, found {copies:?}"
+        );
+    };
+    assert_eq!(
+        copy_text, &edited,
+        "the conflict copy must hold the editor's save byte-equal"
+    );
+    let named = conditions(&env);
+    assert!(
+        named
+            .iter()
+            .any(|c| c.contains("FileEditOverruled") && c.contains(&copy.display().to_string())),
+        "the overruled-edit condition must name the conflict copy {}: {named:?}",
+        copy.display()
+    );
+
+    env.wait_for_loro_quiescence(Duration::from_secs(10)).await;
+    env.wait_for_org_files_stable(100, Duration::from_secs(10))
+        .await;
+    env.stop_app().await.expect("stop_app");
+    env.start_app(true).await.expect("restart");
+    env.wait_for_loro_quiescence(Duration::from_secs(10)).await;
+    env.wait_for_org_files_stable(100, Duration::from_secs(10))
+        .await;
+    let after_restart = conflict_copies(&env).await;
+    assert_eq!(
+        after_restart, copies,
+        "the conflict copy must survive a restart unchanged"
+    );
+    let beta = row(&env, "block:d91-beta").await;
+    let stands = match change {
+        HolonChange::DeleteBeta => beta.is_none(),
+        HolonChange::IndentBetaUnderAlpha => {
+            beta.as_ref().map(|(c, p)| (c.as_str(), p.as_str()))
+                == Some(("Beta", "block:d91-alpha"))
+        }
+    };
+    assert!(
+        stands,
+        "after a restart Holon's {change:?} must still stand and the conflict copy must not be \
+         ingested: Beta in the store {beta:?}"
+    );
+    let named = conditions(&env);
+    assert!(
+        !named.iter().any(|c| c.contains(".conflict-")),
+        "after a restart no condition may come from ingesting the conflict copy: {named:?}"
+    );
 }
 
 const PARENT_VAULT: &str = "* Alpha

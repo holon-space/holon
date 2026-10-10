@@ -207,6 +207,7 @@ impl holon_filesystem::WritebackDisclosure for Disclosures {
         _: &std::path::Path,
         _: &str,
         _: holon_api::HolonChange,
+        _: &std::path::Path,
     ) {
     }
     fn vault_sync_not_started(&self, _: &std::path::Path, _: &str) {}

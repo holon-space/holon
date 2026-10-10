@@ -420,11 +420,13 @@ impl ConditionKind {
                 file,
                 file_text,
                 change,
+                conflict_copy,
             } => ConditionDetail::with_body(
                 format!(
                     "{subject} was {change} in Holon, and {file} was edited before Holon wrote \
                      that back.{too_large} Holon's change stands; the file's text was not \
-                     applied and is replaced on the next write. The text was:",
+                     applied and is replaced on the next write. The whole file as you saved it \
+                     is kept in {conflict_copy}. The text was:",
                     too_large = match change {
                         HolonChange::Edited => " The two edits are too large to merge.",
                         HolonChange::Deleted | HolonChange::Moved => "",

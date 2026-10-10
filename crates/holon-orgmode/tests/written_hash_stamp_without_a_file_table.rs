@@ -163,7 +163,15 @@ impl holon_filesystem::WritebackDisclosure for Disclosures {
     fn deletion_undone(&self, _: &EntityUri, _: &Path, _: &[&Path]) {}
     fn undone_deletion_resolved(&self, _: &EntityUri) {}
     fn deletion_ended_by_edit(&self, _: &EntityUri, _: &Path) {}
-    fn file_edit_overruled(&self, _: &EntityUri, _: &Path, _: &str, _: holon_api::HolonChange) {}
+    fn file_edit_overruled(
+        &self,
+        _: &EntityUri,
+        _: &Path,
+        _: &str,
+        _: holon_api::HolonChange,
+        _: &Path,
+    ) {
+    }
     fn vault_sync_not_started(&self, _: &Path, _: &str) {}
     fn vault_state_unreadable(&self, _: &Path, _: &Path, _: &str) {}
     fn vault_start_incomplete(&self, _: &Path, _: &str, _: &str) {}

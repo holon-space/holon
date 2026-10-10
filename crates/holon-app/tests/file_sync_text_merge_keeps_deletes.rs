@@ -9,6 +9,8 @@
 //! edit of one block merge without resurrecting deleted text
 
 use std::collections::HashMap;
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -20,8 +22,14 @@ use holon_core::consolidator::Seen;
 use holon_core::traits::Result as OrderingResult;
 use holon_filesystem::BlockReader;
 use holon_filesystem::DocumentManager;
+use holon_filesystem::FileSystem;
 use holon_filesystem::IngestOutcome;
 use holon_filesystem::RealFileSystem;
+use holon_filesystem::fs_port::FileMeta;
+use holon_filesystem::fs_port::FileStamp;
+use holon_filesystem::fs_port::ScannedEntries;
+use holon_filesystem::fs_port::StampedRead;
+use holon_filesystem::fs_port::WriteBack;
 use holon_loro::TransientLoroTextMerge;
 use holon_orgmode::file_sync_controller::new_org_sync_controller;
 
@@ -244,10 +252,24 @@ fn overruled_text(bus: &holon_api::ConditionBus) -> Option<(String, holon_api::H
     })
 }
 
-#[tokio::test]
-async fn edits_too_large_to_merge_keep_both_texts_and_disclose_the_files() {
-    let doc = EntityUri::block(DOC_ID);
-    let alpha = EntityUri::block(ALPHA);
+/// Every conflict copy in `dir`, with its bytes.
+fn conflict_copies(dir: &Path) -> Vec<(PathBuf, String)> {
+    let mut copies: Vec<(PathBuf, String)> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| holon_core::conflict_copy::is_conflict_copy(path))
+        .map(|path| {
+            let text = std::fs::read_to_string(&path).unwrap();
+            (path, text)
+        })
+        .collect();
+    copies.sort();
+    copies
+}
+
+/// A base text and two edits of it too large for the 3-way merge: the app
+/// deletes one char, the editor reverses the whole line.
+fn too_large_edits() -> (String, String, String) {
     let mut seed = 0x9e37_79b9_7f4a_7c15u64;
     let base: String = (0..20_000)
         .map(|_| {
@@ -255,6 +277,181 @@ async fn edits_too_large_to_merge_keep_both_texts_and_disclose_the_files() {
             b"abcd"[(seed >> 62) as usize] as char
         })
         .collect();
+    let mine = format!("{}{}", &base[..100], &base[101..]);
+    let theirs: String = base.chars().rev().collect();
+    (base, mine, theirs)
+}
+
+#[tokio::test]
+async fn edits_too_large_to_merge_keep_both_texts_and_disclose_the_files() {
+    let doc = EntityUri::block(DOC_ID);
+    let alpha = EntityUri::block(ALPHA);
+    let (base, mine, theirs) = too_large_edits();
+    let mut page = Block::new_text(doc.clone(), EntityUri::no_parent(), "Notes");
+    page.set_page(true);
+    let docs = PageStore::default();
+    docs.by_id.lock().unwrap().insert(doc.clone(), page);
+    let store: Store = Arc::default();
+    store.lock().unwrap().insert(
+        alpha.clone(),
+        Block::new_text(alpha.clone(), doc.clone(), base.clone()),
+    );
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let path = root.join("Notes.org");
+    std::fs::write(&path, org_file(&base)).unwrap();
+
+    let bus = Arc::new(holon_api::ConditionBus::new());
+    let mut controller = new_org_sync_controller(
+        Arc::new(StoreReader(store.clone())),
+        Arc::new(docs.clone()),
+        root.clone(),
+        Arc::new(StoreTree {
+            store: store.clone(),
+        }),
+        Arc::new(RealFileSystem),
+    )
+    .with_text_merge(Arc::new(TransientLoroTextMerge::default()))
+    .with_writeback_disclosure(Arc::new(
+        holon_app::loro_seams::WritebackDegradedDisclosure { bus: bus.clone() },
+    ));
+    let first = controller
+        .on_file_changed(&path)
+        .await
+        .expect("first ingest of the file");
+    assert_eq!(first, IngestOutcome::Ingested);
+
+    store.lock().unwrap().get_mut(&alpha).unwrap().content = mine.clone();
+    std::fs::write(&path, org_file(&theirs)).unwrap();
+    let outcome = controller.on_file_changed(&path).await;
+
+    assert!(
+        store.lock().unwrap()[&alpha].content == mine,
+        "the app's text must stand (ingest outcome {outcome:?})"
+    );
+    let (disclosed, change) =
+        overruled_text(&bus).expect("the file's edit is disclosed as overruled");
+    assert_eq!(change, holon_api::HolonChange::Edited);
+    assert!(
+        disclosed.contains(&theirs),
+        "the disclosure must hold the file's text whole"
+    );
+
+    let copies = conflict_copies(&root);
+    let [(copy, copy_text)] = copies.as_slice() else {
+        panic!("the overruling write-back must leave exactly one conflict copy, found {copies:?}");
+    };
+    assert_eq!(
+        copy_text,
+        &org_file(&theirs),
+        "the conflict copy must hold the editor's file byte-equal"
+    );
+    let named: Vec<String> = bus.current().iter().map(|c| format!("{c:?}")).collect();
+    assert!(
+        named
+            .iter()
+            .any(|c| c.contains("FileEditOverruled") && c.contains(&copy.display().to_string())),
+        "the overruled-edit condition must name the conflict copy {}: {named:?}",
+        copy.display()
+    );
+
+    drop(controller);
+    let mut restarted = new_org_sync_controller(
+        Arc::new(StoreReader(store.clone())),
+        Arc::new(docs.clone()),
+        root.clone(),
+        Arc::new(StoreTree {
+            store: store.clone(),
+        }),
+        Arc::new(RealFileSystem),
+    )
+    .with_text_merge(Arc::new(TransientLoroTextMerge::default()));
+    let ingested = restarted
+        .poll_new_files()
+        .await
+        .expect("the restart's scan of the vault");
+    assert_eq!(
+        ingested, 1,
+        "the restart ingests Notes.org and never its conflict copy"
+    );
+    assert_eq!(
+        conflict_copies(&root),
+        copies,
+        "the conflict copy must survive a restart unchanged"
+    );
+    assert!(
+        store.lock().unwrap()[&alpha].content == mine,
+        "after a restart the app's text must still stand"
+    );
+    assert_eq!(
+        docs.by_id.lock().unwrap().len(),
+        1,
+        "the conflict copy must not become a document"
+    );
+}
+
+/// The real file system, except that writing a conflict copy fails.
+struct ConflictCopiesUnwritable;
+
+#[async_trait]
+impl FileSystem for ConflictCopiesUnwritable {
+    async fn read_to_string(&self, path: &Path) -> std::io::Result<String> {
+        RealFileSystem.read_to_string(path).await
+    }
+    async fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
+        RealFileSystem.read(path).await
+    }
+    async fn read_stamped(&self, path: &Path) -> std::io::Result<StampedRead> {
+        RealFileSystem.read_stamped(path).await
+    }
+    async fn write_if_unchanged(
+        &self,
+        path: &Path,
+        expected: &FileStamp,
+        contents: &[u8],
+    ) -> std::io::Result<WriteBack> {
+        RealFileSystem
+            .write_if_unchanged(path, expected, contents)
+            .await
+    }
+    async fn write(&self, path: &Path, contents: &[u8]) -> std::io::Result<()> {
+        if holon_core::conflict_copy::is_conflict_copy(path) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "conflict copies are unwritable here",
+            ));
+        }
+        RealFileSystem.write(path, contents).await
+    }
+    async fn remove(&self, path: &Path) -> std::io::Result<()> {
+        RealFileSystem.remove(path).await
+    }
+    async fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()> {
+        RealFileSystem.rename(from, to).await
+    }
+    async fn create_dir_all(&self, path: &Path) -> std::io::Result<()> {
+        RealFileSystem.create_dir_all(path).await
+    }
+    async fn scan_directory(&self, root: &Path) -> std::io::Result<ScannedEntries> {
+        RealFileSystem.scan_directory(root).await
+    }
+    async fn metadata(&self, path: &Path) -> std::io::Result<FileMeta> {
+        RealFileSystem.metadata(path).await
+    }
+    fn exists(&self, path: &Path) -> bool {
+        RealFileSystem.exists(path)
+    }
+    fn canonicalize(&self, path: &Path) -> std::io::Result<PathBuf> {
+        RealFileSystem.canonicalize(path)
+    }
+}
+
+#[tokio::test]
+async fn an_unwritable_conflict_copy_blocks_the_overruling_write_back_and_is_disclosed() {
+    let doc = EntityUri::block(DOC_ID);
+    let alpha = EntityUri::block(ALPHA);
+    let (base, mine, theirs) = too_large_edits();
     let mut page = Block::new_text(doc.clone(), EntityUri::no_parent(), "Notes");
     page.set_page(true);
     let docs = PageStore::default();
@@ -274,11 +471,11 @@ async fn edits_too_large_to_merge_keep_both_texts_and_disclose_the_files() {
     let mut controller = new_org_sync_controller(
         Arc::new(StoreReader(store.clone())),
         Arc::new(docs),
-        root,
+        root.clone(),
         Arc::new(StoreTree {
             store: store.clone(),
         }),
-        Arc::new(RealFileSystem),
+        Arc::new(ConflictCopiesUnwritable),
     )
     .with_text_merge(Arc::new(TransientLoroTextMerge::default()))
     .with_writeback_disclosure(Arc::new(
@@ -290,23 +487,26 @@ async fn edits_too_large_to_merge_keep_both_texts_and_disclose_the_files() {
         .expect("first ingest of the file");
     assert_eq!(first, IngestOutcome::Ingested);
 
-    // The app deletes one char; before the write-back, an editor reverses the
-    // whole line.
-    let mine = format!("{}{}", &base[..100], &base[101..]);
-    let theirs: String = base.chars().rev().collect();
-    store.lock().unwrap().get_mut(&alpha).unwrap().content = mine.clone();
+    store.lock().unwrap().get_mut(&alpha).unwrap().content = mine;
     std::fs::write(&path, org_file(&theirs)).unwrap();
     let outcome = controller.on_file_changed(&path).await;
 
-    assert!(
-        store.lock().unwrap()[&alpha].content == mine,
-        "the app's text must stand (ingest outcome {outcome:?})"
+    let error = format!(
+        "{:#}",
+        outcome.expect_err("an unsaved conflict copy fails the ingest")
     );
-    let (disclosed, change) =
-        overruled_text(&bus).expect("the file's edit is disclosed as overruled");
-    assert_eq!(change, holon_api::HolonChange::Edited);
     assert!(
-        disclosed.contains(&theirs),
-        "the disclosure must hold the file's text whole"
+        error.contains(".conflict-"),
+        "the error must name the conflict copy it could not write: {error}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        org_file(&theirs),
+        "without its conflict copy the editor's file must not be overwritten"
+    );
+    let named: Vec<String> = bus.current().iter().map(|c| format!("{c:?}")).collect();
+    assert!(
+        named.iter().any(|c| c.contains(".conflict-")),
+        "the unwritable conflict copy must be disclosed: {named:?}"
     );
 }

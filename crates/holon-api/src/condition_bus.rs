@@ -462,13 +462,15 @@ pub enum ConditionKind {
     /// `subject`, a block id, was edited in `file` after Holon `change`d it.
     /// Holon's change stands; the block as the file holds it, `file_text`
     /// (text, properties, tags, state), is not ingested, and the next
-    /// write-back replaces it.
+    /// write-back replaces it. `conflict_copy` is a file beside `file` that
+    /// holds `file` as it was before that write-back.
     ///
     /// All-clear: none in this process.
     FileEditOverruled {
         file: String,
         file_text: String,
         change: HolonChange,
+        conflict_copy: String,
     },
     /// `subject`, a vault root, is not synced: the file sync failed before it
     /// watched the vault. `cause` names the failure and what no longer syncs.

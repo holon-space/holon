@@ -3979,6 +3979,7 @@ mod intermediate_ancestor_writeback_hole {
                 _: &std::path::Path,
                 _: &str,
                 _: holon_api::HolonChange,
+                _: &std::path::Path,
             ) {
             }
             fn vault_sync_not_started(&self, _: &std::path::Path, _: &str) {}
@@ -4096,6 +4097,7 @@ mod intermediate_ancestor_writeback_hole {
                 _: &std::path::Path,
                 _: &str,
                 _: holon_api::HolonChange,
+                _: &std::path::Path,
             ) {
             }
             fn vault_sync_not_started(&self, _: &std::path::Path, _: &str) {}
@@ -4236,6 +4238,7 @@ mod intermediate_ancestor_writeback_hole {
                 _: &std::path::Path,
                 _: &str,
                 _: holon_api::HolonChange,
+                _: &std::path::Path,
             ) {
             }
             fn vault_sync_not_started(&self, _: &std::path::Path, _: &str) {}
@@ -4504,6 +4507,7 @@ impl holon_filesystem::WritebackDisclosure for RefusalLog {
         _: &std::path::Path,
         _: &str,
         _: holon_api::HolonChange,
+        _: &std::path::Path,
     ) {
     }
     fn vault_sync_not_started(&self, _: &std::path::Path, _: &str) {}
