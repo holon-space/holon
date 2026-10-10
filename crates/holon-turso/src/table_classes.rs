@@ -90,6 +90,10 @@ const LOST: &[(&str, &str)] = &[
         "the position in the back and forward history",
     ),
     ("advice_suppressed", "dismissed advice"),
+    (
+        "_holon_quarantine",
+        "the record of which tables keep the rows of types Holon did not serve",
+    ),
     ("block_redirects", "redirects from merged or renamed blocks"),
     ("local_ui_state", "local view settings"),
     (

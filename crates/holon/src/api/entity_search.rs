@@ -517,7 +517,7 @@ mod tests {
         )
         .await
         .expect("insert kept note");
-        holon_turso::table_shape::quarantine(&db, "note_refused_raw")
+        holon_turso::table_shape::quarantine(&db, "note_refused_raw", "refused in a test")
             .await
             .expect("quarantine");
         let unserved = UnservedTypes::default();

@@ -660,9 +660,9 @@ async fn quarantine_tables(booted: &Booted) -> Vec<String> {
     .collect()
 }
 
-/// The pantry_item refusal names every table holding rows it keeps unread,
+/// The pantry_item refusal names every table in `held` and none in `foreign`,
 /// and nothing claims it failed in some other way.
-async fn assert_held_disclosed(booted: &Booted) {
+async fn assert_held_disclosed(booted: &Booted, held: &[&str], foreign: &[&str]) {
     let current = conditions(&booted.bus);
     let shown = described(&current);
     assert!(
@@ -676,15 +676,27 @@ async fn assert_held_disclosed(booted: &Booted) {
         .find(|c| c.condition_key().kind == "type-table-refused" && c.subject == "pantry_item")
         .unwrap_or_else(|| panic!("the held type is not disclosed: {shown:#?}"));
     let text = described(std::slice::from_ref(refused)).join("");
-    for table in quarantine_tables(booted).await {
+    for table in held {
         assert!(
             text.contains(&format!("{table} (")),
             "the refusal must name {table}, which holds rows it keeps unread: {text}"
         );
     }
+    for table in foreign {
+        assert!(
+            !text.contains(&format!("{table} (")) && !text.contains(&format!("{table},")),
+            "the refusal must not claim {table}, which Holon never quarantined: {text}"
+        );
+    }
 }
 
-async fn run_remedy_then_write(booted: &Booted) {
+/// Run the pantry_item remedy and write to the type; every table in
+/// `foreign` must keep its rows.
+async fn run_remedy_then_write(booted: &Booted, foreign: &[&str]) {
+    let mut kept = Vec::new();
+    for table in foreign {
+        kept.push(sql(booted, &format!("SELECT * FROM {table}")).await);
+    }
     op(
         booted,
         "type_table",
@@ -701,9 +713,16 @@ async fn run_remedy_then_write(booted: &Booted) {
     );
     assert_eq!(
         quarantine_tables(booted).await,
-        Vec::<String>::new(),
-        "the remedy drops every table its condition named"
+        foreign.iter().map(|t| t.to_string()).collect::<Vec<_>>(),
+        "the remedy drops every table its condition named, and no other"
     );
+    for (table, rows) in foreign.iter().zip(kept) {
+        assert_eq!(
+            sql(booted, &format!("SELECT * FROM {table}")).await,
+            rows,
+            "the remedy must leave {table}, which Holon never quarantined, untouched"
+        );
+    }
     stock(booted, "pantry-item:sugar", &[])
         .await
         .expect("after the remedy the type must be writable");
@@ -754,8 +773,8 @@ async fn a_table_already_named_like_the_quarantine_does_not_let_the_refused_rows
         1,
         "the table that held the name is untouched"
     );
-    assert_held_disclosed(&later).await;
-    run_remedy_then_write(&later).await;
+    assert_held_disclosed(&later, &[refused_copy], &[QUARANTINED]).await;
+    run_remedy_then_write(&later, &[QUARANTINED]).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -789,6 +808,149 @@ async fn a_raw_table_recreated_beside_the_quarantine_is_not_served() {
         "the first quarantine keeps its rows byte-equal"
     );
     assert_eq!(quarantine_tables(&second).await.len(), 2);
-    assert_held_disclosed(&second).await;
-    run_remedy_then_write(&second).await;
+    let held = quarantine_tables(&second).await;
+    let held: Vec<&str> = held.iter().map(String::as_str).collect();
+    assert_held_disclosed(&second, &held, &[]).await;
+    run_remedy_then_write(&second, &[]).await;
+}
+
+/// A healthy pantry_item is served, writable and has no remedy to run, and
+/// `foreign`, a table Holon never quarantined, keeps its `foreign_rows` rows.
+async fn assert_healthy_type_served_beside(booted: &Booted, foreign: &str, foreign_rows: usize) {
+    let shown = described(&conditions(&booted.bus));
+    assert!(
+        !shown.iter().any(|c| c.contains("pantry_item")
+            && (c.starts_with("[type-table-refused]") || c.starts_with("[schema-module-failed]"))),
+        "a table Holon never quarantined must not take a healthy type offline: {shown:#?}"
+    );
+    let rows = engine_read(booted, "from pantry_item")
+        .await
+        .expect("the healthy type is served");
+    assert_eq!(rows.len(), 2, "both stored rows are served: {rows:?}");
+    assert_eq!(tables_named(booted, "pantry_item_raw").await, 1);
+    assert_eq!(
+        sql(booted, &format!("SELECT * FROM {foreign}")).await.len(),
+        foreign_rows,
+        "{foreign} is user data and stays as it is"
+    );
+    stock(booted, "pantry-item:sugar", &[])
+        .await
+        .expect("the healthy type stays writable");
+    let remedy = op(
+        booted,
+        "type_table",
+        "drop_refused_table",
+        params(&[("type", Value::String("pantry_item".into()))]),
+    )
+    .await;
+    assert!(
+        remedy.is_err(),
+        "a served type has nothing to drop: {remedy:?}"
+    );
+    assert_eq!(
+        sql(booted, &format!("SELECT * FROM {foreign}")).await.len(),
+        foreign_rows,
+        "a refused remedy drops nothing"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_empty_table_created_through_mcp_with_a_quarantine_like_name_leaves_a_healthy_type_served()
+ {
+    let dir = tempfile::tempdir().expect("tempdir");
+    seed_then_reshape(dir.path(), |_| {}).await;
+    let first = boot(dir.path(), LATER_DB).await;
+    assert_eq!(
+        engine_read(&first, "from pantry_item")
+            .await
+            .expect("served")
+            .len(),
+        2
+    );
+    HolonService::new(first.engine.clone())
+        .execute_raw_sql(
+            "CREATE TABLE pantry_item_raw__quarantined_7 (totally TEXT)",
+            HashMap::new(),
+        )
+        .await
+        .expect("MCP raw SQL creates the table");
+    holon_app::shutdown_session(&first.injector)
+        .await
+        .expect("shut the first session down");
+    drop(first);
+
+    let second = boot(dir.path(), LATER_DB).await;
+    assert_healthy_type_served_beside(&second, "pantry_item_raw__quarantined_7", 0).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_user_table_named_like_the_quarantine_leaves_a_healthy_type_served() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    seed_then_reshape(dir.path(), |_| {}).await;
+    between_sessions(
+        dir.path(),
+        &[
+            &format!("CREATE TABLE {QUARANTINED} (mine TEXT)"),
+            &format!("INSERT INTO {QUARANTINED} (mine) VALUES ('users own table')"),
+        ],
+    );
+
+    let later = boot(dir.path(), LATER_DB).await;
+    assert_healthy_type_served_beside(&later, QUARANTINED, 1).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_remedy_never_drops_a_table_holon_did_not_quarantine() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let stored = seed_refused_pantry(dir.path()).await;
+    let foreign = "pantry_item_raw__quarantined_7";
+    between_sessions(
+        dir.path(),
+        &[
+            &format!("CREATE TABLE {foreign} (mine TEXT)"),
+            &format!("INSERT INTO {foreign} (mine) VALUES ('users own table')"),
+        ],
+    );
+
+    let later = boot(dir.path(), LATER_DB).await;
+    assert_refusal_disclosed(&later);
+    assert_no_read_serves_the_refused_rows(&later).await;
+    assert_eq!(
+        stored_snapshot(&later, QUARANTINED).await,
+        stored,
+        "the refused rows are kept byte-equal"
+    );
+    assert_held_disclosed(&later, &[QUARANTINED], &[foreign]).await;
+    run_remedy_then_write(&later, &[foreign]).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_recorded_quarantine_that_is_no_longer_stored_refuses_the_type_until_the_remedy() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    seed_refused_pantry(dir.path()).await;
+    let first = boot(dir.path(), LATER_DB).await;
+    assert_refusal_disclosed(&first);
+    holon_app::shutdown_session(&first.injector)
+        .await
+        .expect("shut the refusing session down");
+    drop(first);
+    between_sessions(dir.path(), &[&format!("DROP TABLE {QUARANTINED}")]);
+
+    let second = boot(dir.path(), LATER_DB).await;
+    let current = conditions(&second.bus);
+    let shown = described(&current);
+    let refused = current
+        .iter()
+        .find(|c| c.condition_key().kind == "type-table-refused" && c.subject == "pantry_item")
+        .unwrap_or_else(|| panic!("the record without its table is not disclosed: {shown:#?}"));
+    let text = described(std::slice::from_ref(refused)).join("");
+    assert!(
+        text.contains(QUARANTINED) && text.contains("2 rows"),
+        "the refusal must name the recorded table that is gone and the rows it held: {text}"
+    );
+    assert!(
+        engine_read(&second, "from pantry_item").await.is_err(),
+        "a type whose record and schema disagree is not served"
+    );
+    run_remedy_then_write(&second, &[]).await;
 }

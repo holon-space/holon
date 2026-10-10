@@ -563,21 +563,59 @@ async fn drop_views_over(db_handle: &DbHandle, table: &str) -> Result<()> {
         .map_err(|e| StorageError::SchemaError(format!("dropping the views over {table}: {e:#}")))
 }
 
-/// The first name a quarantined `table` keeps its rows under; when a stored
-/// object holds it, `_2`, `_3`, ... are appended.
-fn quarantine_name(table: &str) -> String {
-    format!("{table}__quarantined")
+/// Holon's record of every table it quarantined. Only a recorded table is a
+/// quarantine: a table merely named like one is the user's.
+const QUARANTINE_RECORD: &str = "_holon_quarantine";
+
+const QUARANTINE_RECORD_SQL: &str = "CREATE TABLE IF NOT EXISTS _holon_quarantine (
+    quarantined TEXT PRIMARY KEY NOT NULL,
+    type_table TEXT NOT NULL,
+    rows INTEGER NOT NULL,
+    reason TEXT NOT NULL,
+    at TEXT NOT NULL
+)";
+
+struct Recorded {
+    quarantined: String,
+    type_table: String,
+    rows: u64,
 }
 
-fn is_quarantine_of(table: &str, name: &str) -> bool {
-    let base = quarantine_name(table).to_ascii_lowercase();
-    match name.to_ascii_lowercase().strip_prefix(&base) {
-        Some("") => true,
-        Some(rest) => rest
-            .strip_prefix('_')
-            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())),
-        None => false,
-    }
+async fn recorded(db_handle: &DbHandle) -> Result<Vec<Recorded>> {
+    db_handle.execute_ddl(QUARANTINE_RECORD_SQL).await?;
+    db_handle
+        .query(
+            &format!(
+                "SELECT quarantined, type_table, rows FROM {QUARANTINE_RECORD} ORDER BY \
+                 quarantined"
+            ),
+            HashMap::new(),
+        )
+        .await?
+        .into_iter()
+        .map(|row| {
+            match (
+                row.get("quarantined"),
+                row.get("type_table"),
+                row.get("rows"),
+            ) {
+                (
+                    Some(Value::String(quarantined)),
+                    Some(Value::String(type_table)),
+                    Some(Value::Integer(rows)),
+                ) => Ok(Recorded {
+                    quarantined: quarantined.clone(),
+                    type_table: type_table.clone(),
+                    rows: u64::try_from(*rows).map_err(|e| {
+                        StorageError::SchemaError(format!("{QUARANTINE_RECORD}.rows: {e}"))
+                    })?,
+                }),
+                _ => Err(StorageError::SchemaError(format!(
+                    "{QUARANTINE_RECORD} row is {row:?}"
+                ))),
+            }
+        })
+        .collect()
 }
 
 async fn schema_names(db_handle: &DbHandle, kind: Option<&str>) -> Result<Vec<String>> {
@@ -598,72 +636,163 @@ async fn schema_names(db_handle: &DbHandle, kind: Option<&str>) -> Result<Vec<St
         .collect()
 }
 
-/// The stored tables holding quarantined rows of `table`, by name.
-pub async fn quarantined_tables(
-    db_handle: &DbHandle,
-    table: &str,
-) -> Result<Vec<QuarantinedTable>> {
-    let mut names: Vec<String> = schema_names(db_handle, Some("table"))
-        .await?
-        .into_iter()
-        .filter(|name| is_quarantine_of(table, name))
-        .collect();
-    names.sort();
-    let mut quarantined = Vec::with_capacity(names.len());
-    for name in names {
-        let rows = row_count(db_handle, &name).await?;
-        quarantined.push(QuarantinedTable { name, rows });
+/// The quarantines Holon recorded for `table`.
+pub struct Quarantines {
+    /// Recorded tables that are stored, with the rows they hold now.
+    pub stored: Vec<QuarantinedTable>,
+    /// Recorded tables that are not stored, with the rows they held when
+    /// quarantined.
+    pub missing: Vec<QuarantinedTable>,
+}
+
+pub async fn quarantines(db_handle: &DbHandle, table: &str) -> Result<Quarantines> {
+    let tables: Vec<String> = schema_names(db_handle, Some("table")).await?;
+    let mut quarantines = Quarantines {
+        stored: Vec::new(),
+        missing: Vec::new(),
+    };
+    for record in recorded(db_handle).await? {
+        if record.type_table != table {
+            continue;
+        }
+        if tables.contains(&record.quarantined) {
+            let rows = row_count(db_handle, &record.quarantined).await?;
+            quarantines.stored.push(QuarantinedTable {
+                name: record.quarantined,
+                rows,
+            });
+        } else {
+            quarantines.missing.push(QuarantinedTable {
+                name: record.quarantined,
+                rows: record.rows,
+            });
+        }
     }
-    Ok(quarantined)
+    Ok(quarantines)
 }
 
 /// Make stored `table` unreadable by every query that names it: drop the
-/// views over it and rename it to the first free quarantine name, which it
-/// returns. Its rows stay as they are.
-pub async fn quarantine(db_handle: &DbHandle, table: &str) -> Result<String> {
+/// views over it, then, in one transaction, rename it to the first name no
+/// schema object or record holds and record it as quarantined for `reason`.
+/// Returns that name. Its rows stay as they are.
+pub async fn quarantine(db_handle: &DbHandle, table: &str, reason: &str) -> Result<String> {
     drop_views_over(db_handle, table).await?;
     let taken: Vec<String> = schema_names(db_handle, None)
         .await?
         .into_iter()
+        .chain(
+            recorded(db_handle)
+                .await?
+                .into_iter()
+                .map(|r| r.quarantined),
+        )
         .map(|name| name.to_ascii_lowercase())
         .collect();
-    let base = quarantine_name(table);
+    let base = format!("{table}__quarantined");
     let quarantined = std::iter::once(base.clone())
         .chain((2..).map(|n| format!("{base}_{n}")))
         .find(|name| !taken.contains(&name.to_ascii_lowercase()))
         .expect("an unbounded sequence of names has a free one");
+    let rows = row_count(db_handle, table).await?;
     db_handle
-        .execute_ddl(&format!(
-            "ALTER TABLE \"{table}\" RENAME TO \"{quarantined}\""
-        ))
+        .transaction(vec![
+            (
+                format!("ALTER TABLE \"{table}\" RENAME TO \"{quarantined}\""),
+                vec![],
+            ),
+            (
+                format!(
+                    "INSERT INTO {QUARANTINE_RECORD} (quarantined, type_table, rows, reason, at) \
+                     VALUES (?, ?, ?, ?, ?)"
+                ),
+                vec![
+                    turso::Value::Text(quarantined.clone()),
+                    turso::Value::Text(table.to_string()),
+                    turso::Value::Integer(i64::try_from(rows).map_err(|e| {
+                        StorageError::SchemaError(format!("row count of {table}: {e}"))
+                    })?),
+                    turso::Value::Text(reason.to_string()),
+                    turso::Value::Text(chrono::Utc::now().to_rfc3339()),
+                ],
+            ),
+        ])
         .await
         .map_err(|e| StorageError::SchemaError(format!("quarantining {table}: {e}")))?;
     Ok(quarantined)
 }
 
-/// Move the one quarantined table of `table` back to its name, so its stored
-/// shape is judged against the declaration again. Returns the quarantined
-/// tables it leaves in place: all of them when `table` is stored too or more
-/// than one is quarantined, since then none is the one to serve.
-pub async fn release_quarantine(
-    db_handle: &DbHandle,
-    table: &str,
-) -> Result<Vec<QuarantinedTable>> {
-    let quarantined = quarantined_tables(db_handle, table).await?;
-    let [only] = quarantined.as_slice() else {
-        return Ok(quarantined);
+/// What [`release_quarantine`] leaves for the caller.
+pub enum Release {
+    /// Judge stored `table`, if any, against its declaration.
+    Judge,
+    /// Serve nothing of `table`, for the reason given.
+    Hold(String),
+}
+
+/// Move the one recorded quarantine of `table` back to its name and forget
+/// it, so its stored shape is judged against the declaration again. Holds
+/// `table` when the record and the schema leave no single table to judge.
+pub async fn release_quarantine(db_handle: &DbHandle, table: &str) -> Result<Release> {
+    let Quarantines { stored, missing } = quarantines(db_handle, table).await?;
+    if !missing.is_empty() {
+        let gone: Vec<String> = missing
+            .iter()
+            .map(|q| format!("{} ({} rows)", q.name, q.rows))
+            .collect();
+        return Ok(Release::Hold(format!(
+            "Holon recorded {} as holding rows of {table}, but no such table is stored",
+            gone.join(", ")
+        )));
+    }
+    let only = match stored.as_slice() {
+        [] => return Ok(Release::Judge),
+        [only] => only,
+        _ => {
+            return Ok(Release::Hold(format!(
+                "Holon quarantined {table} more than once, so it serves none of those tables"
+            )));
+        }
     };
     if table_exists(db_handle, table).await? {
-        return Ok(quarantined);
+        return Ok(Release::Hold(format!(
+            "{table} is stored beside {}, which holds its quarantined rows, so Holon serves \
+             neither",
+            only.name
+        )));
     }
     db_handle
-        .execute_ddl(&format!(
-            "ALTER TABLE \"{}\" RENAME TO \"{table}\"",
-            only.name
-        ))
+        .transaction(vec![
+            (
+                format!("ALTER TABLE \"{}\" RENAME TO \"{table}\"", only.name),
+                vec![],
+            ),
+            (
+                format!("DELETE FROM {QUARANTINE_RECORD} WHERE quarantined = ?"),
+                vec![turso::Value::Text(only.name.clone())],
+            ),
+        ])
         .await
         .map_err(|e| StorageError::SchemaError(format!("releasing {}: {e}", only.name)))?;
-    Ok(Vec::new())
+    Ok(Release::Judge)
+}
+
+/// Drop every stored table recorded as a quarantine of `table` and forget
+/// every record of it, in one transaction. A table no record names is never
+/// dropped.
+pub async fn drop_quarantined(db_handle: &DbHandle, table: &str) -> Result<()> {
+    let Quarantines { stored, .. } = quarantines(db_handle, table).await?;
+    let mut statements: Vec<(String, Vec<turso::Value>)> = stored
+        .iter()
+        .map(|q| (format!("DROP TABLE \"{}\"", q.name), vec![]))
+        .collect();
+    statements.push((
+        format!("DELETE FROM {QUARANTINE_RECORD} WHERE type_table = ?"),
+        vec![turso::Value::Text(table.to_string())],
+    ));
+    db_handle
+        .transaction(statements)
+        .await
+        .map_err(|e| StorageError::SchemaError(format!("dropping the quarantines of {table}: {e}")))
 }
 
 pub async fn table_exists(db_handle: &DbHandle, table: &str) -> Result<bool> {

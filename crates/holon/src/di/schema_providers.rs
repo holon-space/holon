@@ -42,6 +42,8 @@ use holon_turso::schema_modules::OperationsSchemaModule;
 use holon_turso::schema_modules::SyncStateSchemaModule;
 use holon_turso::schema_modules::TrustProposalsSchemaModule;
 use holon_turso::table_shape;
+use holon_turso::table_shape::Quarantines;
+use holon_turso::table_shape::Release;
 use holon_turso::table_shape::TableAdapted;
 use holon_turso::table_shape::TableChange;
 use holon_turso::turso_adapter::TursoAdapter;
@@ -389,27 +391,23 @@ pub fn register_schema_providers(injector: &Injector) {
             let name = type_def.name.to_string();
             let raw_table = TursoAdapter::raw_table_name(&type_def);
             let judged = async {
-                let held = table_shape::release_quarantine(&db.handle(), &raw_table).await?;
-                if !held.is_empty() {
-                    return Ok(None);
+                match table_shape::release_quarantine(&db.handle(), &raw_table).await? {
+                    Release::Hold(why) => Ok(Err(why)),
+                    Release::Judge => TursoAdapter::reconcile(&type_def, &db.handle())
+                        .await
+                        .map(Ok),
                 }
-                TursoAdapter::reconcile(&type_def, &db.handle())
-                    .await
-                    .map(Some)
             }
             .await;
             let why = match judged {
-                Ok(Some(TypeRegistration::Registered { adapted, .. })) => {
+                Ok(Ok(TypeRegistration::Registered { adapted, .. })) => {
                     if let Some(adapted) = adapted {
                         bus.emit(columns_added(name, adapted));
                     }
                     continue;
                 }
-                Ok(Some(TypeRegistration::Refused(refusal))) => refusal.to_string(),
-                Ok(None) => format!(
-                    "more than one stored table holds rows of {raw_table}, so Holon serves none \
-                     of them"
-                ),
+                Ok(Ok(TypeRegistration::Refused(refusal))) => refusal.to_string(),
+                Ok(Err(why)) => why,
                 Err(e) => format!("setting up {raw_table} failed: {e:#}"),
             };
             hold(&db.handle(), &bus, &unserved, &name, &raw_table, why).await;
@@ -419,7 +417,7 @@ pub fn register_schema_providers(injector: &Injector) {
 }
 
 /// Leave type `name` unserved: quarantine its stored `raw_table`, if any, and
-/// disclose `why` with every table that keeps its rows.
+/// disclose `why` with every table recorded as keeping its rows.
 async fn hold(
     db: &DbHandle,
     bus: &ConditionBus,
@@ -430,13 +428,13 @@ async fn hold(
 ) {
     let held = async {
         if table_shape::table_exists(db, raw_table).await? {
-            table_shape::quarantine(db, raw_table).await?;
+            table_shape::quarantine(db, raw_table, &why).await?;
         }
-        table_shape::quarantined_tables(db, raw_table).await
+        table_shape::quarantines(db, raw_table).await
     }
     .await;
     match held {
-        Ok(quarantined) if !quarantined.is_empty() => {
+        Ok(Quarantines { stored, missing }) if !stored.is_empty() || !missing.is_empty() => {
             unserved.insert(
                 name,
                 raw_table,
@@ -448,7 +446,7 @@ async fn hold(
                 reason: ConditionKind::TypeTableRefused {
                     table: raw_table.to_string(),
                     why,
-                    quarantined,
+                    quarantined: stored,
                 },
             });
         }
@@ -458,9 +456,7 @@ async fn hold(
             unserved,
             name,
             raw_table,
-            anyhow::anyhow!(why).context(format!(
-                "{raw_table} could not be quarantined, so SQL naming it still reads it: {e:#}"
-            )),
+            anyhow::anyhow!(why).context(format!("holding {raw_table}: {e:#}")),
         ),
     }
 }

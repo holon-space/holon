@@ -506,19 +506,19 @@ impl ConditionKind {
                         format!("Rows are kept, unread, in {} ({} rows).", q.name, q.rows)
                     }),
                 );
-                let names: Vec<&str> = quarantined.iter().map(|q| q.name.as_str()).collect();
-                let rows: u64 = quarantined.iter().map(|q| q.rows).sum();
-                body.push(format!(
-                    "Remedy: drop {}, {rows} rows lost, and serve {subject} from a new empty \
-                     {table}.",
-                    names.join(", ")
-                ));
-                if quarantined.len() > 1 {
-                    body.push(
-                        "Or drop or rename all but one of them and restart: the next start \
-                         judges that one against the declaration."
-                            .to_string(),
-                    );
+                if quarantined.is_empty() {
+                    body.push(format!(
+                        "Remedy: forget Holon's record and serve {subject} from a new empty \
+                         {table}."
+                    ));
+                } else {
+                    let names: Vec<&str> = quarantined.iter().map(|q| q.name.as_str()).collect();
+                    let rows: u64 = quarantined.iter().map(|q| q.rows).sum();
+                    body.push(format!(
+                        "Remedy: drop {}, {rows} rows lost, and serve {subject} from a new empty \
+                         {table}. To keep rows, copy them out with SQL first.",
+                        names.join(", ")
+                    ));
                 }
                 ConditionDetail::with_body(
                     format!(

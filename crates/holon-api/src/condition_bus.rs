@@ -548,8 +548,8 @@ pub enum ConditionKind {
     PanicConditionsUnavailable { reason: String },
     /// This session does not serve type `subject` from its stored `table`
     /// (`why`): its stored rows are kept untouched in the `quarantined`
-    /// tables, which no read of the type or of `table` finds, and its writes
-    /// fail naming this condition.
+    /// tables Holon recorded, which no read of the type or of `table` finds,
+    /// and its writes fail naming this condition.
     ///
     /// All-clear: [`RemedyApplied`](crate::condition_profile::AllClear) — the
     /// user drops the quarantined tables and their rows.

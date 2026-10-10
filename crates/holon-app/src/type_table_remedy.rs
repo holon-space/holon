@@ -1,6 +1,6 @@
 //! The remedy for a refused type table (`ConditionKind::TypeTableRefused`):
 //! serve the type from a table created from its declaration, then drop the
-//! quarantined tables and their rows, in this session.
+//! tables Holon recorded as its quarantines, with their rows, in this session.
 
 use std::sync::Arc;
 
@@ -135,16 +135,9 @@ impl OperationProvider for TypeTableRemedyProvider {
             .resolve_async::<holon::api::operation_dispatcher::OperationDispatcher>()
             .await;
 
-        let quarantined = holon_turso::table_shape::quarantined_tables(
-            &db,
-            &TursoAdapter::raw_table_name(&type_def),
-        )
-        .await?;
         TursoAdapter::register(&type_def, &db).await?;
-        for table in quarantined {
-            db.execute_ddl(&format!("DROP TABLE \"{}\"", table.name))
-                .await?;
-        }
+        holon_turso::table_shape::drop_quarantined(&db, &TursoAdapter::raw_table_name(&type_def))
+            .await?;
         holon::core::type_declaration::derive_write_authority(&type_def, &db, &dispatcher)?;
         holon::core::type_declaration::register_companion_operations(&type_name, &db, &dispatcher)?;
         unserved.remove(&type_name);
