@@ -1,7 +1,9 @@
 //! Conflict copies: a vault file's text saved beside it before a write-back
 //! overrules part of it, so the user's text survives on disk.
 //!
-//! A copy is named `<stem>.conflict-<UTC YYYYMMDDTHHMMSSZ>-<NNN>.<ext>`.
+//! A copy is named `<stem>.conflict-<UTC YYYYMMDDTHHMMSSZ>-<NNN>.<ext>`;
+//! a stem too long for [`MAX_NAME_BYTES`] keeps its start and gains
+//! `~<hash of the whole stem>`.
 //! It is never a vault document: [`crate::file_format::FormatRegistry`]
 //! claims no conflict copy, so no scan or watcher ingests one, and nothing
 //! deletes one.
@@ -18,6 +20,12 @@ const STAMP_LEN: usize = 16;
 const SEQ_LEN: usize = 3;
 /// The number of distinct copy names per file and second.
 pub const SEQ_COUNT: u16 = 1000;
+/// The longest copy name, in bytes. File systems cap a name at 255 bytes,
+/// and an atomic write names its temp file after the copy with up to 43
+/// bytes more.
+pub const MAX_NAME_BYTES: usize = 200;
+/// `~` and 8 hex digits.
+const HASH_LEN: usize = 9;
 
 /// Whether `path` is named as a conflict copy.
 pub fn is_conflict_copy(path: &Path) -> bool {
@@ -62,10 +70,33 @@ pub fn path_for(path: &Path, millis: i64, seq: u16) -> PathBuf {
         });
     let at = DateTime::from_timestamp_millis(millis)
         .unwrap_or_else(|| panic!("clock millis {millis} out of range"));
-    path.with_file_name(format!(
-        "{stem}{MARKER}{}-{seq:03}.{ext}",
-        at.format(STAMP_FORMAT)
-    ))
+    let suffix = format!("{MARKER}{}-{seq:03}.{ext}", at.format(STAMP_FORMAT));
+    let name = if stem.len() + suffix.len() <= MAX_NAME_BYTES {
+        format!("{stem}{suffix}")
+    } else {
+        let budget = MAX_NAME_BYTES
+            .checked_sub(suffix.len() + HASH_LEN)
+            .filter(|budget| *budget > 0)
+            .unwrap_or_else(|| {
+                panic!(
+                    "the extension of {} leaves no room for a conflict copy name",
+                    path.display()
+                )
+            });
+        let mut end = budget;
+        while !stem.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}~{:08x}{suffix}", &stem[..end], fnv1a(stem) as u32)
+    };
+    path.with_file_name(name)
+}
+
+/// FNV-1a: stable across builds and platforms, unlike `std`'s hasher.
+fn fnv1a(text: &str) -> u64 {
+    text.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+    })
 }
 
 #[cfg(test)]
@@ -82,6 +113,26 @@ mod tests {
         );
         assert!(is_conflict_copy(&copy));
         assert!(!is_conflict_copy(source));
+    }
+
+    #[test]
+    fn a_long_name_is_shortened_to_a_distinct_copy_name() {
+        let long = |fill: &str| format!("/vault/{}{fill}.org", "ä".repeat(122));
+        let (a, b) = (long("xa"), long("xb"));
+        assert_eq!(Path::new(&a).file_name().unwrap().len(), 250);
+        let copy_a = path_for(Path::new(&a), 1_760_000_000_123, 0);
+        let copy_b = path_for(Path::new(&b), 1_760_000_000_123, 0);
+        for copy in [&copy_a, &copy_b] {
+            let name = copy.file_name().unwrap().to_str().unwrap();
+            assert!(
+                name.len() <= MAX_NAME_BYTES,
+                "{name} is {} bytes",
+                name.len()
+            );
+            assert!(name.starts_with("ää"), "{name} keeps the start of the name");
+            assert!(is_conflict_copy(copy), "{name}");
+        }
+        assert_ne!(copy_a, copy_b);
     }
 
     #[test]

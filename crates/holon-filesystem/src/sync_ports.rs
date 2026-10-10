@@ -714,6 +714,20 @@ pub trait WritebackDisclosure: Send + Sync {
         conflict_copy: &Path,
     );
 
+    /// Signal that `file` adopted its copy of `block_id`, edited apart from
+    /// Holon's version, because the user deleted that version: Holon's
+    /// version, `holon_text` in file terms, is replaced where they differ
+    /// (`conflicts`). `conflict_copy` holds `holon_text`. Sticky for the rest
+    /// of the process.
+    fn holon_edit_overruled(
+        &self,
+        block_id: &EntityUri,
+        file: &Path,
+        holon_text: &str,
+        conflicts: &[String],
+        conflict_copy: &Path,
+    );
+
     /// Signal that the file-sync controller of `vault` failed before it
     /// watched the vault, so nothing syncs; `cause` names the failure. Sticky
     /// for the rest of the process.

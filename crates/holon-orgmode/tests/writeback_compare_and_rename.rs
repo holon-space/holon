@@ -430,6 +430,15 @@ impl WritebackDisclosure for Disclosures {
         _: &Path,
     ) {
     }
+    fn holon_edit_overruled(
+        &self,
+        _: &holon_api::EntityUri,
+        _: &Path,
+        _: &str,
+        _: &[String],
+        _: &Path,
+    ) {
+    }
     fn vault_sync_not_started(&self, _: &Path, _: &str) {}
     fn vault_state_unreadable(&self, _: &Path, _: &Path, _: &str) {}
     fn vault_start_incomplete(&self, _: &Path, _: &str, _: &str) {}

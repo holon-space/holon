@@ -1156,6 +1156,8 @@ pub struct FileSyncController {
     ending_undone: HashMap<EntityUri, EndingUndone>,
     /// The undone deletions as last written beside the Loro snapshot.
     persisted_undone: Vec<crate::undone_deletions_file::UndoneDeletionRecord>,
+    /// The conflict copies this controller saved, by the file they copy.
+    conflict_copies: HashMap<CanonicalPath, Vec<PathBuf>>,
 
     /// During the initial scan: the vault files by each block id their text
     /// carries, read once when an ingest first releases blocks.
@@ -1280,6 +1282,7 @@ impl FileSyncController {
             undone_deletions: HashMap::new(),
             ending_undone: HashMap::new(),
             persisted_undone: Vec::new(),
+            conflict_copies: HashMap::new(),
             scan_id_index: None,
         }
     }
@@ -4601,11 +4604,53 @@ impl FileSyncController {
                 .filter(|id| undone.contains(*id))
                 .cloned(),
         );
+        let overruled = if plan.conflicts.is_empty() {
+            None
+        } else {
+            let mut side: Vec<Block> = match on_conflict {
+                OnConflict::TakeDisk => {
+                    let mut side = Vec::new();
+                    let mut stack = vec![root.clone()];
+                    while let Some(id) = stack.pop() {
+                        side.push(stored[&id].clone());
+                        let children =
+                            self.ordering.children(&id).await.map_err(|e| {
+                                anyhow::anyhow!("children of {id} in the store: {e}")
+                            })?;
+                        stack.extend(
+                            children
+                                .into_iter()
+                                .rev()
+                                .filter(|child| stored.contains_key(child)),
+                        );
+                    }
+                    side
+                }
+                OnConflict::TakeStore => subtree.iter().map(|b| (*b).clone()).collect(),
+                OnConflict::Refuse => unreachable!("a refused adoption returns its conflicts"),
+            };
+            side[0].parent_id = document_uri.clone();
+            let text = self
+                .adapter(path)?
+                .render_blocks(&side, path, document_uri)
+                .with_context(|| {
+                    format!(
+                        "render the version of {root} that {} overrules",
+                        path.display()
+                    )
+                })?
+                .text;
+            Some(Overruled {
+                conflicts: plan.conflicts,
+                text,
+            })
+        };
         Ok(Ok(AdoptionPlan {
             tree,
             merged,
             dropped,
             deleted_in_holon,
+            overruled,
         }))
     }
 
@@ -4889,17 +4934,32 @@ impl FileSyncController {
             .with_context(|| format!("keep the copies {held:?} in {}", path.display()))
     }
 
-    /// Save `disk_content`, the whole of `path` as this ingest read it, as a
+    /// Save `text`, which an overruling change replaces in `path`, as a
     /// conflict copy beside it, once per ingest: `saved` holds the copy this
-    /// ingest made. An overruling write-back may run only once this returns.
+    /// ingest made. A copy already holding `text` is reused. The overruling
+    /// change may run only once this returns.
     async fn save_conflict_copy(
-        &self,
+        &mut self,
         path: &Path,
-        disk_content: &str,
+        text: &str,
         saved: &mut Option<PathBuf>,
     ) -> Result<PathBuf> {
         if let Some(copy) = saved {
             return Ok(copy.clone());
+        }
+        let canonical = CanonicalPath::new(path);
+        for copy in self.conflict_copies.get(&canonical).into_iter().flatten() {
+            if self.fs.exists(copy)
+                && self.fs.read(copy).await.with_context(|| {
+                    format!(
+                        "read the conflict copy {} of {}",
+                        copy.display(),
+                        path.display()
+                    )
+                })? == text.as_bytes()
+            {
+                return Ok(saved.insert(copy.clone()).clone());
+            }
         }
         let millis = self.clock.now_millis();
         let copy = (0..holon_core::conflict_copy::SEQ_COUNT)
@@ -4907,18 +4967,18 @@ impl FileSyncController {
             .find(|candidate| !self.fs.exists(candidate))
             .with_context(|| {
                 format!(
-                    "every conflict copy name of {} for this second is taken, so the file's text \
-                     is not saved and the write-back that overrules it does not run",
+                    "every conflict copy name of {} for this second is taken, so the text a \
+                     change overrules is not saved and that change does not run",
                     path.display()
                 )
             })?;
         self.fs
-            .write(&copy, disk_content.as_bytes())
+            .write(&copy, text.as_bytes())
             .await
             .with_context(|| {
                 format!(
-                    "save {} as the conflict copy {}; without it the write-back that overrules \
-                     the file's edit does not run",
+                    "save the text a change overrules in {} as the conflict copy {}; without it \
+                     that change does not run",
                     path.display(),
                     copy.display()
                 )
@@ -4926,10 +4986,74 @@ impl FileSyncController {
         tracing::warn!(
             file = %path.display(),
             conflict_copy = %copy.display(),
-            "[FileSyncController] saved the file as a conflict copy before a write-back \
-             overrules its edit"
+            "[FileSyncController] saved the text a change overrules as a conflict copy"
         );
+        self.conflict_copies
+            .entry(canonical)
+            .or_default()
+            .push(copy.clone());
         Ok(saved.insert(copy).clone())
+    }
+
+    /// Save the side an adoption of `block_id` into `path` overrules as a
+    /// conflict copy, and disclose it. `disk_content` is `path` as this
+    /// ingest read it, and `saved` the copy of it this ingest made.
+    async fn disclose_overruled_adoption(
+        &mut self,
+        block_id: &EntityUri,
+        path: &Path,
+        on_conflict: OnConflict,
+        overruled: &Overruled,
+        disk_content: &str,
+        saved: &mut Option<PathBuf>,
+    ) -> Result<()> {
+        let conflicts = &overruled.conflicts;
+        match on_conflict {
+            OnConflict::TakeStore => {
+                let copy = self.save_conflict_copy(path, disk_content, saved).await?;
+                tracing::warn!(
+                    %block_id,
+                    file = %path.display(),
+                    ?conflicts,
+                    conflict_copy = %copy.display(),
+                    "[FileSyncController] Holon moved a block into the page of a file that holds \
+                     a copy edited apart from it; Holon's version stands"
+                );
+                if let Some(disclosure) = &self.writeback_disclosure {
+                    disclosure.file_edit_overruled(
+                        block_id,
+                        path,
+                        &overruled.text,
+                        HolonChange::Moved,
+                        &copy,
+                    );
+                }
+            }
+            OnConflict::TakeDisk => {
+                let copy = self
+                    .save_conflict_copy(path, &overruled.text, &mut None)
+                    .await?;
+                tracing::warn!(
+                    %block_id,
+                    file = %path.display(),
+                    ?conflicts,
+                    conflict_copy = %copy.display(),
+                    "[FileSyncController] a file adopts its copy of a block edited apart from \
+                     Holon's version, which the user deleted; the copy stands"
+                );
+                if let Some(disclosure) = &self.writeback_disclosure {
+                    disclosure.holon_edit_overruled(
+                        block_id,
+                        path,
+                        &overruled.text,
+                        conflicts,
+                        &copy,
+                    );
+                }
+            }
+            OnConflict::Refuse => unreachable!("a refused adoption overrules nothing"),
+        }
+        Ok(())
     }
 
     /// `block` alone, as the format writes it into `path`.
@@ -6182,6 +6306,17 @@ impl FileSyncController {
                             path.display(),
                             block.id,
                         );
+                        if let Some(overruled) = &plan.overruled {
+                            self.disclose_overruled_adoption(
+                                &block.id,
+                                path,
+                                on_conflict,
+                                overruled,
+                                &disk_content,
+                                &mut conflict_copy,
+                            )
+                            .await?;
+                        }
                         moved_in.extend(plan.merged);
                         dropped_by_copies.extend(plan.dropped);
                         deleted_in_holon.extend(
@@ -11078,6 +11213,16 @@ struct AdoptionPlan {
     /// Members Holon deleted and the copy did not change: they stay deleted,
     /// and the copy's file loses them.
     deleted_in_holon: Vec<EntityUri>,
+    /// What the adoption replaced where the copy and the store changed apart.
+    overruled: Option<Overruled>,
+}
+
+/// The side an adoption overrules.
+struct Overruled {
+    /// What both sides changed apart.
+    conflicts: Vec<String>,
+    /// The overruled side's subtree as the file writes it.
+    text: String,
 }
 
 /// The decisions of one adoption, and what both sides changed apart.

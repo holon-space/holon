@@ -435,6 +435,22 @@ impl ConditionKind {
                 vec![file_text.clone()],
             ),
 
+            Self::HolonEditOverruled {
+                file,
+                holon_text,
+                conflicts,
+                conflict_copy,
+            } => ConditionDetail::with_body(
+                format!(
+                    "{subject} was edited apart in {file}, which held a copy of it, and in \
+                     Holon; then its other version was deleted, so {file} keeps its copy. \
+                     Holon's version was replaced where the two differed ({}). It is kept in \
+                     {conflict_copy}. Holon's version was:",
+                    conflicts.join("; "),
+                ),
+                vec![holon_text.clone()],
+            ),
+
             Self::VaultSyncNotStarted { cause } => ConditionDetail::with_body(
                 format!(
                     "Holon is not syncing the files in {subject}: {cause}. Restart Holon after \

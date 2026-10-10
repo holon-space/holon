@@ -212,6 +212,15 @@ impl holon_filesystem::WritebackDisclosure for Overruled {
             .unwrap()
             .push(format!("{block_id} {change}: {file_text:?}"));
     }
+    fn holon_edit_overruled(
+        &self,
+        _: &holon_api::EntityUri,
+        _: &std::path::Path,
+        _: &str,
+        _: &[String],
+        _: &std::path::Path,
+    ) {
+    }
     fn vault_sync_not_started(&self, _: &std::path::Path, _: &str) {}
     fn vault_state_unreadable(&self, _: &std::path::Path, _: &std::path::Path, _: &str) {}
     fn vault_start_incomplete(&self, _: &std::path::Path, _: &str, _: &str) {}

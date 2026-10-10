@@ -691,6 +691,15 @@ const FILE_EDIT_OVERRULED: ConditionProfile = ConditionProfile::new(
     &[],
 );
 
+const HOLON_EDIT_OVERRULED: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Warning,
+    "A Holon edit was not kept",
+    icons::WARN,
+    ConditionPlacement::Toast,
+    AllClear::UntilRestart,
+    &[],
+);
+
 const VAULT_SYNC_NOT_STARTED: ConditionProfile = ConditionProfile::new(
     ConditionSeverity::Error,
     "Files are not synced",
@@ -930,6 +939,7 @@ impl ConditionKind {
             Self::DeletionUndoneBlockInOtherFile { .. } => DELETION_UNDONE_BLOCK_IN_OTHER_FILE,
             Self::DeletionEndedByEdit { .. } => DELETION_ENDED_BY_EDIT,
             Self::FileEditOverruled { .. } => FILE_EDIT_OVERRULED,
+            Self::HolonEditOverruled { .. } => HOLON_EDIT_OVERRULED,
             Self::VaultSyncNotStarted { .. } => VAULT_SYNC_NOT_STARTED,
             Self::VaultStateUnreadable { .. } => VAULT_STATE_UNREADABLE,
             Self::VaultStartIncomplete { .. } => VAULT_START_INCOMPLETE,

@@ -1,6 +1,7 @@
 //! Org parse / render / write-back and vault-ingest tests.
 
 mod bidirectional_sync;
+mod conflict_copy_on_adoption;
 mod convert_block_to_page_inherits_the_source_ring;
 mod convert_block_to_page_materializes_child_file;
 mod doc_id_writeback_stability;

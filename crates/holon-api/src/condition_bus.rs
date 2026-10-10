@@ -472,6 +472,19 @@ pub enum ConditionKind {
         change: HolonChange,
         conflict_copy: String,
     },
+    /// `subject`, a block id that `file` held a copy of, was edited apart in
+    /// that copy and in Holon, and the user's deletion of the other version
+    /// chose the copy: `file` adopts it, and Holon's version, `holon_text` (as
+    /// the file would hold it), is replaced where they differ (`conflicts`).
+    /// `conflict_copy` is a file beside `file` that holds `holon_text`.
+    ///
+    /// All-clear: none in this process.
+    HolonEditOverruled {
+        file: String,
+        holon_text: String,
+        conflicts: Vec<String>,
+        conflict_copy: String,
+    },
     /// `subject`, a vault root, is not synced: the file sync failed before it
     /// watched the vault. `cause` names the failure and what no longer syncs.
     ///
@@ -700,6 +713,7 @@ impl ConditionKind {
         "deletion-undone-block-in-other-file";
     pub const DELETION_ENDED_BY_EDIT: &'static str = "deletion-ended-by-edit";
     pub const FILE_EDIT_OVERRULED: &'static str = "file-edit-overruled";
+    pub const HOLON_EDIT_OVERRULED: &'static str = "holon-edit-overruled";
     pub const VAULT_SYNC_NOT_STARTED: &'static str = "vault-sync-not-started";
     pub const VAULT_STATE_UNREADABLE: &'static str = "vault-state-unreadable";
     pub const VAULT_START_INCOMPLETE: &'static str = "vault-start-incomplete";
@@ -777,6 +791,7 @@ impl ConditionKind {
             }
             Self::DeletionEndedByEdit { .. } => Self::DELETION_ENDED_BY_EDIT,
             Self::FileEditOverruled { .. } => Self::FILE_EDIT_OVERRULED,
+            Self::HolonEditOverruled { .. } => Self::HOLON_EDIT_OVERRULED,
             Self::VaultSyncNotStarted { .. } => Self::VAULT_SYNC_NOT_STARTED,
             Self::VaultStateUnreadable { .. } => Self::VAULT_STATE_UNREADABLE,
             Self::VaultStartIncomplete { .. } => Self::VAULT_START_INCOMPLETE,
