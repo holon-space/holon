@@ -28,7 +28,7 @@ env:
   # auto-overrides to that pin, so a looser value here (e.g. bare `nightly`)
   # installs components onto a toolchain cargo never runs — `cargo fmt` then
   # dies with "cargo-fmt is not installed for nightly-<date>".
-  RUST_VERSION: nightly-2026-07-17
+  RUST_VERSION: nightly-2026-08-16
 
 jobs:
   # Detect which parts of the codebase changed
@@ -85,6 +85,14 @@ jobs:
                       /usr/local/.ghcup /opt/hostedtoolcache/CodeQL \
                       /usr/share/swift
           df -h /
+
+      - name: Check RUST_VERSION matches rust-toolchain.toml
+        run: |
+          channel=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)
+          if [ "$channel" != "$RUST_VERSION" ]; then
+            echo "::error::RUST_VERSION ($RUST_VERSION) != rust-toolchain.toml channel ($channel); update the pins in .github/workflows/{ci,devex-gates,web}.yml"
+            exit 1
+          fi
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable

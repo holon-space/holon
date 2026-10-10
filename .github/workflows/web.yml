@@ -21,7 +21,7 @@ on:
     tags: ["v*.*.*"]
 
 env:
-  RUST_VERSION: nightly-2026-07-17
+  RUST_VERSION: nightly-2026-08-16
 
 permissions:
   contents: read
