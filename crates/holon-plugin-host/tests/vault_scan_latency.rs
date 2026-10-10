@@ -48,6 +48,42 @@ fn fuel_and_memory_headroom() {
     );
 }
 
+/// What a vault scan pays per file once the host is warm. Measured with the
+/// unit table built once and the talc allocator: 1.9 M for a real recipe and
+/// 104.6 M for the 200-step one; rebuilding the unit table on every call cost
+/// 5.25 M per file on top.
+#[test]
+fn a_warm_host_spends_fuel_on_the_recipe_rather_than_on_setup() {
+    let wasm = std::fs::read(support::plugins_dir().join("cooklang.wasm")).unwrap();
+    let limits = PluginLimits::default();
+    let mut host = PluginHost::from_bytes(&wasm, limits).unwrap();
+    let ctx = br#"{"source_path":"Rezepte/Pancakes.cook","file_stem":"Pancakes"}"#;
+    let mut spend = |recipe: &str| {
+        host.parse(recipe.as_bytes(), ctx)
+            .expect("an ordinary recipe parses");
+        limits.fuel_per_call - host.fuel_remaining()
+    };
+
+    let real = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/pancakes.cook"),
+    )
+    .unwrap();
+    spend(&real);
+    let real_spent = spend(&real);
+    let big_spent = spend(&support::big_recipe(200));
+    println!("WARM: pancakes.cook {real_spent} fuel, 200-step recipe {big_spent} fuel");
+
+    assert!(
+        real_spent < 4_000_000,
+        "a {}-byte recipe spent {real_spent} fuel on a warm host; per-call setup is back",
+        real.len()
+    );
+    assert!(
+        big_spent < 125_000_000,
+        "the 200-step recipe spent {big_spent} fuel on a warm host"
+    );
+}
+
 /// 200 generated recipes through ONE host — the vault scan. Reports against
 /// the 200 ms SLO rather than asserting it, because the SLO covers the whole
 /// interaction and this measures only the parse leg of it.
@@ -99,7 +135,7 @@ fn two_hundred_recipes_on_one_host() {
 /// load does not move it.
 const PARSE_BUDGET_PER_RECIPE: Duration = Duration::from_millis(20);
 
-/// Measured cost is 8-12 ms. A reading far below that, while the guest ran
+/// Measured cost is 4-5 ms. A reading far below that, while the guest ran
 /// once per file, means it ran on another thread and the budget bounds nothing.
 const PARSE_FLOOR_PER_RECIPE: Duration = Duration::from_millis(2);
 

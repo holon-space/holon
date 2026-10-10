@@ -36,6 +36,11 @@ use serde_json::json;
 
 holon_abi_guest::holon_plugin!(parse_cook);
 
+/// The default dlmalloc coalesces and splits on nearly every free, which costs
+/// about twice the fuel per small allocation; the parse allocates per token.
+#[global_allocator]
+static ALLOC: talc::TalckWasm = unsafe { talc::TalckWasm::new_global() };
+
 /// The property carrying a step's 1-based number, which distinguishes a step
 /// block from a prose block.
 const STEP_NUMBER_KEY: &str = "step_number";
@@ -209,10 +214,21 @@ fn parser() -> Result<CooklangParser, String> {
     Ok(CooklangParser::new(Extensions::all(), converter))
 }
 
+thread_local! {
+    /// Building the unit tables costs more fuel than parsing a typical recipe,
+    /// and the host reuses one instance for every file of a scan.
+    static PARSER: Result<CooklangParser, String> = parser();
+}
+
 fn parse_recipe(source: &str) -> Result<Recipe, String> {
     reject_unclosed_component_brace(source)?;
-    let recipe = parser()?
-        .parse(source)
+    let parsed = PARSER.with(|parser| {
+        parser
+            .as_ref()
+            .map(|p| p.parse(source))
+            .map_err(Clone::clone)
+    })?;
+    let recipe = parsed
         .into_result()
         .map(|(recipe, _warnings)| recipe)
         .map_err(|report| {
