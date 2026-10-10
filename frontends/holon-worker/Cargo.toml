@@ -18,12 +18,18 @@ license = "FSL-1.1-ALv2"
 publish = false
 description = "Holon backend running as a Web Worker on wasm32-wasip1-threads"
 
+[package.metadata.cargo-machete]
+ignored = ["digest"]
+
 [lib]
 crate-type = ["cdylib", "lib"]
 
 [dependencies]
-napi = { version = "3.8.3", default-features = false, features = ["napi6", "tokio_rt"] }
-napi-derive = "3.5.2"
+# Pinned with napi-build below: napi-build >= 2.6 (required by napi >= 3.14) panics without an emnapi archive, which `check-worker-wasm` does not provide.
+napi = { version = "=3.9.2", default-features = false, features = ["napi6", "tokio_rt"] }
+napi-derive = "=3.5.6"
+# Version pin only: curve25519-dalek 5.0.0-pre.1 imports `digest::crypto_common`, removed in digest 0.11.3 (the root gets this pin through iroh-base).
+digest = "=0.11.0-rc.10"
 # NOTE: tokio refuses to compile `rt-multi-thread` on any wasm target with a
 # compile_error!(): "Only features sync,macros,io-util,rt,time are supported on
 # wasm." This was discovered during the Phase 1 spike (2026-04-14) and means
@@ -89,7 +95,7 @@ loro = { git = "https://github.com/nightscape/loro.git", rev = "d302b153" }
 loro_fractional_index = { git = "https://github.com/nightscape/loro.git", rev = "d302b153" }
 
 [build-dependencies]
-napi-build = "2.3.1"
+napi-build = "=2.3.2"
 
 [features]
 # `browser` toggles the vendored Turso OPFS shim. Phase 2 enables it by
