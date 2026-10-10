@@ -112,12 +112,9 @@ fn forced_labels(bound: &Value) -> Vec<String> {
     }
 }
 
-fn dotted(name: &str) -> (&str, &str) {
-    name.split_once('.').unwrap_or_else(|| {
-        panic!(
-            "question_options: `action:` must name an entity operation in dot form \
-             (`entity.op`), got `{name}` — an undotted name would target the wrong entity"
-        )
+fn dotted(name: &str) -> Result<(&str, &str), String> {
+    name.split_once('.').ok_or_else(|| {
+        format!("`action:` must name an entity operation in dot form (`entity.op`), got `{name}`")
     })
 }
 
@@ -150,11 +147,15 @@ holon_macros::widget_builder! {
             Ok(resolved) => resolved,
             Err(e) => return ViewModel::error("question_options", e.to_string()),
         };
-        assert!(
-            resolved.positional.is_empty(),
-            "question_options: `action:` takes named params only, got {} positional",
-            resolved.positional.len()
-        );
+        if let Some(first) = resolved.positional_exprs.first() {
+            return ViewModel::error(
+                "question_options",
+                format!(
+                    "`action:` takes named params only, got positional arg 0: `{}`",
+                    first.to_rhai()
+                ),
+            );
+        }
 
         // An explicitly bound answer overrides what the widget would fill in —
         // the one route by which a label the question never offered could reach
@@ -175,7 +176,10 @@ holon_macros::widget_builder! {
             }
         }
 
-        let (entity_name, op_name) = dotted(name);
+        let (entity_name, op_name) = match dotted(name) {
+            Ok(parts) => parts,
+            Err(e) => return ViewModel::error("question_options", e),
+        };
         // The mirror stores the primary key scheme-qualified
         // (`cc-pending-question:<question_id>`); the tool wants the provider's
         // opaque id, which is the URI's path. Read fresh from the row on every

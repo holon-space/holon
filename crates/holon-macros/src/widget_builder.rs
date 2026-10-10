@@ -149,12 +149,30 @@ fn parse_param_type(input: ParseStream) -> syn::Result<ParamType> {
 
 // ─── Code Generation ────────────────────────────────────────────────
 
-/// The next positional slot a scalar param binds to, or none at all when
-/// the widget has a `Collection` param: there every positional arg is a child,
-/// so a scalar is named-only and `row(col("a"), col("b"))` draws two children
-/// rather than reading `col("a")` as the row's `gap`.
-fn positional_slots(params: &[WidgetParam]) -> Option<usize> {
-    (!params.iter().any(|p| matches!(p.ty, ParamType::Collection))).then_some(0)
+/// The positional slot each param binds to, in declaration order. String,
+/// Option<String>, f64, f32 and Value params take the next slot; a bool binds
+/// by name only. With a `Collection` param every positional arg is a child, so
+/// no param has a slot and `row(col("a"), col("b"))` draws two children rather
+/// than reading `col("a")` as the row's `gap`.
+fn positional_slots(params: &[WidgetParam]) -> Vec<Option<usize>> {
+    let has_collection = params.iter().any(|p| p.ty == ParamType::Collection);
+    let mut next = 0;
+    params
+        .iter()
+        .map(|p| match p.ty {
+            ParamType::String
+            | ParamType::OptionalString
+            | ParamType::F64
+            | ParamType::F32
+            | ParamType::Value
+                if !has_collection =>
+            {
+                next += 1;
+                Some(next - 1)
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 /// Extraction of a String / Option<String> / bool / f64 / f32 / Value param,
@@ -162,17 +180,13 @@ fn positional_slots(params: &[WidgetParam]) -> Option<usize> {
 /// of the wrong type runs `on_err` with the message naming the key.
 fn scalar_extraction(
     param: &WidgetParam,
-    positional_idx: &mut Option<usize>,
+    slot: Option<usize>,
     on_err: &proc_macro2::TokenStream,
 ) -> Option<proc_macro2::TokenStream> {
     let name = &param.name;
     let name_str = name.to_string();
-    let mut slot = || match positional_idx {
-        Some(idx) => {
-            let this = *idx;
-            *idx += 1;
-            quote!(Some(#this))
-        }
+    let slot = || match slot {
+        Some(idx) => quote!(Some(#idx)),
         None => quote!(None),
     };
     let default = |unset: proc_macro2::TokenStream| match &param.default {
@@ -228,15 +242,14 @@ fn scalar_extraction(
 }
 
 fn generate_extraction(widget_name: &str, params: &[WidgetParam]) -> proc_macro2::TokenStream {
-    let mut positional_idx = positional_slots(params);
     let mut extractions = Vec::new();
 
-    for param in params {
+    for (param, slot) in params.iter().zip(positional_slots(params)) {
         let name = &param.name;
         let name_str = name.to_string();
 
         let on_err = quote!(return ViewModel::error(#widget_name, __e));
-        if let Some(extraction) = scalar_extraction(param, &mut positional_idx, &on_err) {
+        if let Some(extraction) = scalar_extraction(param, slot, &on_err) {
             extractions.push(extraction);
             continue;
         }
@@ -369,23 +382,15 @@ fn generate_extraction(widget_name: &str, params: &[WidgetParam]) -> proc_macro2
 /// (String, bool, f64, f32, Option<String>, Value) into a `HashMap<String,
 /// Value>`. Skips Collection and Expr params entirely.
 fn generate_resolve_props_body(params: &[WidgetParam]) -> proc_macro2::TokenStream {
-    let mut positional_idx = positional_slots(params);
     let mut stmts = Vec::new();
 
-    for param in params {
+    for (param, slot) in params.iter().zip(positional_slots(params)) {
         let name = &param.name;
         let name_str = name.to_string();
 
-        match param.ty {
-            ParamType::Collection | ParamType::Expr => {
-                // Collection/Expr don't consume positional slots — skip entirely.
-                continue;
-            }
-            _ => {}
-        }
-
-        let extraction = scalar_extraction(param, &mut positional_idx, &quote!(return Err(__e)))
-            .expect("Collection and Expr params were skipped above");
+        let Some(extraction) = scalar_extraction(param, slot, &quote!(return Err(__e))) else {
+            continue;
+        };
         stmts.push(extraction);
 
         // Insertion into __props
@@ -489,7 +494,8 @@ fn generate_meta(widget_name: &str, params: &[WidgetParam]) -> proc_macro2::Toke
 
     let static_params: Vec<_> = params
         .iter()
-        .map(|p| {
+        .zip(positional_slots(params))
+        .map(|(p, slot)| {
             let name = p.name.to_string();
             let type_hint = match p.ty {
                 ParamType::String => "String",
@@ -508,11 +514,16 @@ fn generate_meta(widget_name: &str, params: &[WidgetParam]) -> proc_macro2::Toke
                 }
                 None => quote! { None },
             };
+            let slot = match slot {
+                Some(idx) => quote! { Some(#idx) },
+                None => quote! { None },
+            };
             quote! {
                 holon_api::StaticParam {
                     name: #name,
                     type_hint: #type_hint,
                     default: #default_expr,
+                    slot: #slot,
                 }
             }
         })

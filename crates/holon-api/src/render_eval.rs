@@ -799,30 +799,29 @@ impl<'a, K: RowKey> EvalEnv<'a, K> {
 /// an operation's: every arg needs a value.
 ///
 /// Scalar-valued results are placed in `positional` / `named`; row-set
-/// results end up in `rows` under their named-arg key. Positional
-/// row-sets panic — positional args are scalar by convention, so a row
-/// set there is a user error in the DSL worth surfacing at the first
-/// evaluation.
+/// results end up in `rows` under their named-arg key; a positional row set
+/// is a `WrongType` error.
 pub fn resolve_args_with<K: RowKey>(
     args: &[Arg],
     env: &EvalEnv<'_, K>,
     fns: &dyn ValueFnLookup,
 ) -> Result<ResolvedArgs, ComputeError> {
-    resolve_args(args, env, fns, None, usize::MAX)
+    resolve_args(args, env, fns, None, &|_| true)
 }
 
 /// Resolve the arguments of a call to `widget`. Its declared params decide
 /// templateness, so a migrated widget needs no entry in `is_template_arg`;
-/// a positional arg past its scalar params is a child slot, where a widget
-/// call stays `Null` for the builder to interpret from `positional_exprs`.
+/// a positional arg no param binds to is a child slot, where a widget call
+/// stays `Null` for the builder to interpret from `positional_exprs`.
 pub fn resolve_widget_args<K: RowKey>(
     args: &[Arg],
     env: &EvalEnv<'_, K>,
     fns: &dyn ValueFnLookup,
     widget: Option<&'static crate::WidgetMeta>,
 ) -> Result<ResolvedArgs, ComputeError> {
-    let value_slots = widget.map_or(0, crate::WidgetMeta::value_slots);
-    resolve_args(args, env, fns, widget, value_slots)
+    resolve_args(args, env, fns, widget, &|index| {
+        widget.is_some_and(|meta| meta.is_value_slot(index))
+    })
 }
 
 fn resolve_args<K: RowKey>(
@@ -830,7 +829,7 @@ fn resolve_args<K: RowKey>(
     env: &EvalEnv<'_, K>,
     fns: &dyn ValueFnLookup,
     widget: Option<&'static crate::WidgetMeta>,
-    value_slots: usize,
+    is_value_slot: &dyn Fn(usize) -> bool,
 ) -> Result<ResolvedArgs, ComputeError> {
     let mut positional = Vec::new();
     let mut positional_exprs = Vec::new();
@@ -855,7 +854,7 @@ fn resolve_args<K: RowKey>(
             },
             None => {
                 let index = positional_exprs.len();
-                let slot = if index < value_slots {
+                let slot = if is_value_slot(index) {
                     Slot::Value
                 } else {
                     Slot::Child
@@ -865,10 +864,14 @@ fn resolve_args<K: RowKey>(
                     .map_err(|e| e.placed_in(|| format!("positional arg {index}")))?
                 {
                     InterpValue::Value(v) => positional.push(v),
-                    InterpValue::Rows(_) => panic!(
-                        "value-function returned Rows in positional position; use a named arg \
-                         (e.g. `collection:`) instead"
-                    ),
+                    InterpValue::Rows(_) => {
+                        return Err(ComputeError::WrongType {
+                            context: format!("positional arg {index} `{}`", arg.value.to_rhai()),
+                            expected: "a scalar value or a widget, not a row set; pass a row set \
+                                       as a named arg such as `collection:`",
+                            value: Value::Null,
+                        });
+                    }
                 }
             }
         }
@@ -2249,11 +2252,13 @@ mod mutation_gap_tests {
                     name: "content",
                     type_hint: "Expr",
                     default: None,
+                    slot: None,
                 },
                 crate::StaticParam {
                     name: "header",
                     type_hint: "String",
                     default: None,
+                    slot: Some(0),
                 },
             ],
             doc: "",

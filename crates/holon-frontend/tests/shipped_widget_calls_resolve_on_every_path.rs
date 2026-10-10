@@ -339,6 +339,73 @@ fn a_widget_call_in_a_value_slot_of_a_widget_is_refused() {
     );
 }
 
+/// An `action:` the user wrote wrong draws an error naming the widget and the
+/// fault.
+#[test]
+fn question_options_refuses_a_malformed_action_naming_it() {
+    let services = StubBuilderServices::new();
+    let ctx = row_ctx();
+    let mut wrong = Vec::new();
+    for (action, fault) in [
+        (
+            call(
+                "block.set_field",
+                vec![Arg {
+                    name: None,
+                    value: literal("x"),
+                }],
+            ),
+            "positional arg 0: `\"x\"`",
+        ),
+        (call("set_field", vec![]), "`set_field`"),
+    ] {
+        let host = call(
+            "question_options",
+            vec![
+                arg("options", literal(r#"[{"label": "yes"}]"#)),
+                arg("action", action),
+            ],
+        );
+        let vm = services.interpret(&host, &ctx).snapshot();
+        let mut errors = Vec::new();
+        error_messages(&vm, &mut errors);
+        if !errors.iter().any(|m| {
+            m.starts_with("question_options") && m.contains(fault) && !m.contains("panicked")
+        }) {
+            wrong.push(format!(
+                "want an error naming question_options and {fault}, got {errors:?}"
+            ));
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// A row set where a positional arg needs a value or a child.
+#[test]
+fn a_row_set_in_a_positional_arg_is_refused_naming_the_call() {
+    let services = StubBuilderServices::new();
+    let ctx = row_ctx();
+    let mut wrong = Vec::new();
+    for source in [
+        r#"text(ops_of("navigation:main"))"#,
+        r#"row(ops_of("navigation:main"))"#,
+    ] {
+        let vm = services
+            .interpret(&parse_render_dsl(source).unwrap(), &ctx)
+            .snapshot();
+        let mut errors = Vec::new();
+        error_messages(&vm, &mut errors);
+        if !errors.iter().any(|m| {
+            m.contains("positional arg 0 `ops_of(")
+                && m.contains("row set")
+                && !m.contains("panicked")
+        }) {
+            wrong.push(format!("{source}: got {errors:?}"));
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
 /// Children and the branches of a child `if` stay widgets.
 #[test]
 fn widget_calls_as_children_build() {

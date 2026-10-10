@@ -48,6 +48,8 @@ pub struct StaticParam {
     pub name: &'static str,
     pub type_hint: &'static str,
     pub default: Option<&'static str>,
+    /// The positional arg this param binds to; `None` binds it by name only.
+    pub slot: Option<usize>,
 }
 
 impl WidgetMeta {
@@ -66,17 +68,9 @@ impl WidgetMeta {
             .map(|p| p.type_hint == "Expr" || p.type_hint == "Collection")
     }
 
-    /// How many leading positional args bind to scalar params; every later
-    /// one is a child slot. The binding is `positional_slots` /
-    /// `scalar_extraction` in holon-macros' `widget_builder`: a `Collection`
-    /// param makes every positional arg a child, a `Bool` binds by name only.
-    pub fn value_slots(&self) -> usize {
-        if self.params.iter().any(|p| p.type_hint == "Collection") {
-            return 0;
-        }
-        self.params
-            .iter()
-            .filter(|p| matches!(p.type_hint, "String" | "Number" | "Value"))
-            .count()
+    /// Whether positional arg `index` binds to a param; every other
+    /// positional arg is a child.
+    pub fn is_value_slot(&self, index: usize) -> bool {
+        self.params.iter().any(|p| p.slot == Some(index))
     }
 }
