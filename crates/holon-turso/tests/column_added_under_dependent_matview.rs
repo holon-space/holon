@@ -73,9 +73,8 @@ async fn block_raw_gains_property_kinds_under_the_block_matview() {
              DEFAULT 'A0', content TEXT NOT NULL DEFAULT '', content_type TEXT NOT NULL DEFAULT \
              'text', source_language TEXT, source_name TEXT, properties TEXT, marks TEXT, \
              collapsed INTEGER NOT NULL DEFAULT 0, widget_only INTEGER NOT NULL DEFAULT 0, \
-             completed INTEGER NOT NULL DEFAULT 0, block_type TEXT NOT NULL DEFAULT 'text', \
-             created_at INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL DEFAULT 0, \
-             _change_origin TEXT, write_seq INTEGER NOT NULL DEFAULT 0)",
+             block_type TEXT, created_at INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT \
+             NULL DEFAULT 0, _change_origin TEXT, write_seq INTEGER NOT NULL DEFAULT 0)",
             "INSERT INTO block_raw (id, parent_id) VALUES ('b1', 'b1')",
             "CREATE MATERIALIZED VIEW block AS SELECT id, parent_id, content FROM block_raw",
         ],

@@ -15,6 +15,12 @@ use holon_api::Value;
 use holon_core::WriteAuthorityReads;
 use holon_integration_tests::TestEnvironment;
 use holon_integration_tests::TestEnvironmentBuilder;
+use holon_loro::DocScope;
+use holon_loro::LoroBackend;
+
+/// The `block_type` an untyped block was stored with while the column was NOT
+/// NULL. No intent may write it, so it is stored past the intent boundary.
+const LEGACY_UNTYPED: &str = "text";
 
 /// (shape name, stored `block_type` or none, expected slot).
 fn shapes() -> Vec<(&'static str, Option<Value>, Option<EntityName>)> {
@@ -25,7 +31,11 @@ fn shapes() -> Vec<(&'static str, Option<Value>, Option<EntityName>)> {
             Some(EntityName::new("note")),
         ),
         ("absent", None, None),
-        ("legacy-text", Some(Value::String("text".to_string())), None),
+        (
+            "legacy-text",
+            Some(Value::String(LEGACY_UNTYPED.to_string())),
+            None,
+        ),
     ]
 }
 
@@ -55,7 +65,46 @@ async fn boot(rt: Arc<tokio::runtime::Runtime>, loro: bool) -> TestEnvironment {
     env
 }
 
-async fn observe(env: &TestEnvironment, authority: &dyn WriteAuthorityReads) -> Vec<String> {
+/// Store [`LEGACY_UNTYPED`] as `id`'s `block_type` straight in the write
+/// authority.
+async fn store_legacy_untyped(env: &TestEnvironment, loro: bool, id: &str) {
+    if loro {
+        let store = env
+            .loro_doc_store()
+            .expect("loro_doc_store present in Loro wiring")
+            .clone();
+        let store = store.read().await;
+        let global = store.get_doc(DocScope::Global).await.expect("global doc");
+        let layout = store.get_doc(DocScope::Layout).await.expect("layout doc");
+        LoroBackend::from_document(global)
+            .with_layout_doc(layout)
+            .update_block_properties(
+                id,
+                &HashMap::from([(
+                    "block_type".to_string(),
+                    Value::String(LEGACY_UNTYPED.to_string()),
+                )]),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{id}: the raw Loro write must land: {e}"));
+        env.wait_for_loro_quiescence(Duration::from_secs(60)).await;
+    } else {
+        env.engine()
+            .db_handle()
+            .execute(
+                &format!("UPDATE block_raw SET block_type = '{LEGACY_UNTYPED}' WHERE id = '{id}'"),
+                vec![],
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{id}: the raw SQL write must land: {e}"));
+    }
+}
+
+async fn observe(
+    env: &TestEnvironment,
+    authority: &dyn WriteAuthorityReads,
+    loro: bool,
+) -> Vec<String> {
     let mut mismatches = Vec::new();
     for (name, block_type, expected) in shapes() {
         let id = format!("block:shape-{name}");
@@ -70,12 +119,16 @@ async fn observe(env: &TestEnvironment, authority: &dyn WriteAuthorityReads) -> 
         .into_iter()
         .map(|(k, v)| (k.to_string(), v))
         .collect();
-        if let Some(block_type) = block_type {
+        let legacy = block_type == Some(Value::String(LEGACY_UNTYPED.to_string()));
+        if let Some(block_type) = block_type.filter(|_| !legacy) {
             params.insert("block_type".to_string(), block_type);
         }
         env.execute_operation("block", "create", params)
             .await
             .unwrap_or_else(|e| panic!("store shape {name}: {e:#}"));
+        if legacy {
+            store_legacy_untyped(env, loro, &id).await;
+        }
 
         let got = authority
             .subtree(&EntityUri::parse(&id).expect("shape id"))
@@ -98,7 +151,7 @@ fn the_loro_authority_parses_each_stored_shape_like_the_shared_rule() {
             .injector()
             .expect("booted injector")
             .resolve::<dyn WriteAuthorityReads>();
-        let mismatches = observe(&env, authority.as_ref()).await;
+        let mismatches = observe(&env, authority.as_ref(), true).await;
         assert!(
             mismatches.is_empty(),
             "Loro leg:\n{}",
@@ -115,7 +168,7 @@ fn the_sql_authority_parses_each_stored_shape_like_the_shared_rule() {
         let authority = holon::core::sql_write_authority::SqlWriteAuthority::new(
             env.engine().db_handle().clone(),
         );
-        let mismatches = observe(&env, &authority).await;
+        let mismatches = observe(&env, &authority, false).await;
         assert!(mismatches.is_empty(), "SQL leg:\n{}", mismatches.join("\n"));
     });
 }

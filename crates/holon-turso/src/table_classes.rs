@@ -43,16 +43,16 @@ const REBUILT: &[&str] = &[
 ];
 
 /// `<name>_raw` tables (a type's write table, `turso_adapter`) that a source
-/// outside this database restores in full after a rebuild: the org files and
-/// the Loro store are `block_raw`'s only write path, so both its rows and its
-/// columns come back whole. `recipe_raw`/`ingredient_use_raw` are NOT here:
-/// the generic op surface can write a `source_path`/`recipe_id` the cooklang
-/// plugin's `.cook` files never back, and columns outside its restored list
-/// (`ingredient_use.product_id`, either type's `properties` overflow) — same
-/// shape as `shopping_item_raw`, below. Any other `_raw` table — a bundled
-/// type with no such source (`pantry_item_raw`, `person_raw`) or a
-/// user-added type minted at runtime and written only through
-/// `SqlOperationProvider` — is `Lost` too.
+/// outside this database restores in full after a rebuild: with the Loro store
+/// on, the org files and the Loro store are `block_raw`'s only write path, so
+/// both its rows and its columns come back whole.
+/// `recipe_raw`/`ingredient_use_raw` are NOT here: the generic op surface can
+/// write a `source_path`/`recipe_id` the cooklang plugin's `.cook` files never
+/// back, and columns outside its restored list (`ingredient_use.product_id`,
+/// either type's `properties` overflow) — same shape as `shopping_item_raw`,
+/// below. Any other `_raw` table — a bundled type with no such source
+/// (`pantry_item_raw`, `person_raw`) or a user-added type minted at runtime and
+/// written only through `SqlOperationProvider` — is `Lost` too.
 const REBUILT_RAW: &[&str] = &["block_raw"];
 
 /// What a `_raw` table not literally named above holds: nothing outside this
@@ -149,23 +149,18 @@ pub fn class_of(table: &str, caches: &HashMap<String, String>) -> Option<Class> 
     None
 }
 
-/// The tables emptied when `table` is rebuilt: the record of what was
-/// already ingested (else the org ingest skips the unchanged files that refill
-/// it) and the tables the same ingest refills with it.
-pub fn emptied_with(table: &str) -> Vec<&'static str> {
-    const BLOCK_TREE: &[&str] = &[
+/// Without the Loro store (`crdt.enabled = false`) the block tree's tables
+/// hold the only durable copy of the blocks, so a drifted one has its rows
+/// carried into the declared shape, never dropped.
+pub fn carries_rows(table: &str) -> bool {
+    [
         "block_raw",
         "block_tags",
         "block_requires",
         "block_contributes_to",
         "block_links",
-    ];
-    if !BLOCK_TREE.contains(&table) {
-        return Vec::new();
-    }
-    std::iter::once("file")
-        .chain(BLOCK_TREE.iter().copied().filter(|t| *t != table))
-        .collect()
+    ]
+    .contains(&table)
 }
 
 /// Every lost table, with what its loss means.

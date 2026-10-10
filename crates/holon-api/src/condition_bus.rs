@@ -588,6 +588,12 @@ pub enum ConditionKind {
     ///
     /// All-clear: none in this process.
     TableRebuilt { diff: String, rows: u64 },
+    /// Stored table `subject` differed from its declaration (`diff`), so its
+    /// `rows` were copied into the declared shape; values of the stored
+    /// columns the declaration does not name are gone.
+    ///
+    /// All-clear: none in this process.
+    TableReshaped { diff: String, rows: u64 },
     /// Schema module `subject` could not set up its tables or views
     /// (`error`).
     ///
@@ -678,6 +684,7 @@ impl ConditionKind {
     pub const TYPE_TABLE_REFUSED: &'static str = "type-table-refused";
     pub const TABLE_COLUMNS_ADDED: &'static str = "table-columns-added";
     pub const TABLE_REBUILT: &'static str = "table-rebuilt";
+    pub const TABLE_RESHAPED: &'static str = "table-reshaped";
     pub const SCHEMA_MODULE_FAILED: &'static str = "schema-module-failed";
 
     /// The condition's stable identity, paired with the subject to form a
@@ -749,6 +756,7 @@ impl ConditionKind {
             Self::TypeTableRefused { .. } => Self::TYPE_TABLE_REFUSED,
             Self::TableColumnsAdded { .. } => Self::TABLE_COLUMNS_ADDED,
             Self::TableRebuilt { .. } => Self::TABLE_REBUILT,
+            Self::TableReshaped { .. } => Self::TABLE_RESHAPED,
             Self::SchemaModuleFailed { .. } => Self::SCHEMA_MODULE_FAILED,
         }
     }

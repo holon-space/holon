@@ -264,20 +264,36 @@ fn render_block_diff(label: &str, actual: &[Block], expected: &[Block]) -> Strin
 }
 
 /// The per-field difference between two normalized blocks with the same id.
-///
-/// The named-field sweep is exhaustive over `Block` today. If a field is added
-/// and not listed here, two unequal blocks would report "no named field
-/// differs" — so that case falls back to dumping both sides rather than
-/// silently reporting an empty delta.
+/// `Block` is destructured without `..`, so a new field fails to compile here
+/// until it is compared.
 fn field_deltas(a: &Block, e: &Block) -> String {
+    let Block {
+        id: _,
+        parent_id,
+        tags,
+        requires,
+        advice_suppressed,
+        contributes_to,
+        content,
+        content_type,
+        source_language,
+        source_name,
+        properties,
+        marks,
+        collapsed,
+        widget_only,
+        block_type,
+        created_at,
+        updated_at,
+    } = a;
     let mut parts = Vec::new();
     macro_rules! delta {
         ($field:ident) => {
-            if a.$field != e.$field {
+            if *$field != e.$field {
                 parts.push(format!(
                     "{}: sut={:?} ref={:?}",
                     stringify!($field),
-                    a.$field,
+                    $field,
                     e.$field
                 ));
             }
@@ -296,15 +312,14 @@ fn field_deltas(a: &Block, e: &Block) -> String {
     delta!(marks);
     delta!(collapsed);
     delta!(widget_only);
+    delta!(block_type);
     delta!(created_at);
     delta!(updated_at);
 
-    if parts.is_empty() {
-        return format!(
-            "blocks differ but no named field does — `field_deltas` is missing a \
-             `Block` field. sut={a:#?} ref={e:#?}"
-        );
-    }
+    assert!(
+        !parts.is_empty(),
+        "field_deltas called on equal blocks: sut={a:#?} ref={e:#?}"
+    );
     parts.join("; ")
 }
 
@@ -510,6 +525,19 @@ mod tests {
         assert!(msg.contains("field deltas (1)"), "{msg}");
         assert!(
             msg.contains("content: sut=\"hello\" ref=\"CHANGED\""),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn diff_names_a_block_type_delta() {
+        let mut actual = blk("1", "root", "same");
+        actual.block_type = Some(holon_api::EntityName::new("page"));
+        let expected = blk("1", "root", "same");
+        let msg = compare_block_fields("t", &[actual], &[expected]).unwrap_err();
+
+        assert!(
+            msg.contains("block_type: sut=Some(") && msg.contains("ref=None"),
             "{msg}"
         );
     }

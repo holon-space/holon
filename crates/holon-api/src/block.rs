@@ -914,9 +914,10 @@ impl Block {
     }
 }
 
-/// The `block_type` every untyped block stored while the column was NOT NULL;
-/// it reads as no entity.
-const LEGACY_UNTYPED_BLOCK_TYPE: &str = "text";
+/// The `block_type` every untyped block stored while the column was NOT NULL.
+/// It reads as no entity, so a write may not store it
+/// ([`crate::BlockWriteField::parse_value`]).
+pub(crate) const LEGACY_UNTYPED_BLOCK_TYPE: &str = "text";
 
 /// Parse a stored `block_type` value.
 pub fn parse_stored_block_type(raw: &str) -> Result<Option<EntityName>, String> {

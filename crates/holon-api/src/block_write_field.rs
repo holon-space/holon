@@ -242,6 +242,11 @@ impl BlockWriteField {
             Self::BlockType => match &value {
                 Value::Null => Ok(Value::Null),
                 _ => match crate::EntityName::try_from(value.clone()) {
+                    Ok(name) if name.as_str() == crate::block::LEGACY_UNTYPED_BLOCK_TYPE => refuse(
+                        "an untyped block was stored that way, so it reads as no entity; \
+                             write null to clear block_type"
+                            .to_string(),
+                    ),
                     Ok(name) => Ok(Value::from(name)),
                     Err(e) => refuse(e.to_string()),
                 },
@@ -278,6 +283,17 @@ mod tests {
                 })
             );
         }
+    }
+
+    #[test]
+    fn the_legacy_untyped_block_type_is_refused() {
+        let refused = BlockWriteField::BlockType
+            .parse_value(crate::Value::String("text".to_string()))
+            .expect_err("\"text\" reads as untyped, so writing it must be refused");
+        assert!(
+            refused.contains("block_type") && refused.contains("\"text\""),
+            "{refused}"
+        );
     }
 
     #[test]

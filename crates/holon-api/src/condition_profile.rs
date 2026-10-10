@@ -835,6 +835,15 @@ const TABLE_REBUILT: ConditionProfile = ConditionProfile::new(
     &[],
 );
 
+const TABLE_RESHAPED: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Info,
+    "A stored table was brought to its new shape",
+    icons::INFO,
+    ConditionPlacement::Toast,
+    AllClear::UntilRestart,
+    &[],
+);
+
 const SCHEMA_MODULE_FAILED: ConditionProfile = ConditionProfile::new(
     ConditionSeverity::Error,
     "Part of the database could not be set up",
@@ -910,6 +919,7 @@ impl ConditionKind {
             Self::TypeTableRefused { .. } => TYPE_TABLE_REFUSED,
             Self::TableColumnsAdded { .. } => TABLE_COLUMNS_ADDED,
             Self::TableRebuilt { .. } => TABLE_REBUILT,
+            Self::TableReshaped { .. } => TABLE_RESHAPED,
             Self::SchemaModuleFailed { .. } => SCHEMA_MODULE_FAILED,
         }
     }

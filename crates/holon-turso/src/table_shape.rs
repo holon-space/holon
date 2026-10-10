@@ -27,8 +27,8 @@ use sqlparser::parser::Parser;
 use crate::matview_manager::drop_dependent_views;
 use crate::sql_utils::sql_statements;
 use crate::table_classes::Class;
+use crate::table_classes::carries_rows;
 use crate::table_classes::class_of;
-use crate::table_classes::emptied_with;
 use crate::turso::DbHandle;
 
 /// The structure of one column: what decides whether a row written for one
@@ -338,11 +338,21 @@ pub struct TableRebuilt {
     pub rows: u64,
 }
 
+/// A stored block-tree table ([`carries_rows`]) that differed from its
+/// declaration, so its `rows` were copied into the declared shape. Values of
+/// the stored columns the declaration does not name are gone.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TableReshaped {
+    pub diff: ShapeDiff,
+    pub rows: u64,
+}
+
 /// What [`ensure_statement`] did to a stored table beyond creating it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TableChange {
     ColumnsAdded(TableAdapted),
     Rebuilt(TableRebuilt),
+    Reshaped(TableReshaped),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -461,9 +471,9 @@ fn statement_head(statement: &str) -> String {
 }
 
 /// Run one schema statement: a `CREATE TABLE` through [`reconcile_table`];
-/// anything else as DDL. A refused shape is rebuilt when the table is one the
-/// org files and the Loro store refill, and an error naming the difference
-/// otherwise.
+/// anything else as DDL. A refused shape is reshaped when the table carries
+/// its rows, rebuilt when it is one the org files and the Loro store refill,
+/// and an error naming the difference otherwise.
 pub async fn ensure_statement(
     db_handle: &DbHandle,
     statement: &str,
@@ -476,6 +486,13 @@ pub async fn ensure_statement(
         TableReconcile::Unchanged => Ok(None),
         TableReconcile::Adapted(adapted) => Ok(Some(TableChange::ColumnsAdded(adapted))),
         TableReconcile::Refused(refusal) => {
+            if carries_rows(&refusal.diff.table) {
+                reshape_table(db_handle, statement, &refusal).await?;
+                return Ok(Some(TableChange::Reshaped(TableReshaped {
+                    diff: refusal.diff,
+                    rows: refusal.rows,
+                })));
+            }
             if class_of(&refusal.diff.table, &HashMap::new()) != Some(Class::Rebuilt) {
                 return Err(StorageError::SchemaError(refusal.to_string()));
             }
@@ -488,15 +505,14 @@ pub async fn ensure_statement(
     }
 }
 
-/// Drop `refusal`'s table with the views over it, create it from
-/// `create_sql`, and empty the tables the org ingest refills with it.
+/// Drop `refusal`'s table with the views over it and create it from
+/// `create_sql`.
 ///
 /// The declaration is first created under a scratch name, so one the engine
 /// cannot create fails before anything is dropped or emptied.
 ///
 /// Foreign keys are off for the drop, as SQLite's table-rebuild procedure
-/// prescribes: rows of a kept table that reference it (dismissed advice on a
-/// block) find the same ids again once the ingest refills it.
+/// prescribes.
 async fn rebuild_table(
     db_handle: &DbHandle,
     create_sql: &str,
@@ -525,15 +541,6 @@ async fn rebuild_table(
     drop_dependent_views(db_handle, table)
         .await
         .map_err(|e| rebuild_error("dropping the views over it", &e))?;
-    for emptied in emptied_with(table) {
-        if !table_exists(db_handle, emptied).await? {
-            continue;
-        }
-        db_handle
-            .execute(&format!("DELETE FROM \"{emptied}\""), vec![])
-            .await
-            .map_err(|e| rebuild_error(&format!("emptying {emptied}"), &e))?;
-    }
     db_handle
         .execute_ddl("PRAGMA foreign_keys = OFF")
         .await
@@ -554,6 +561,88 @@ async fn rebuild_table(
         .await
         .map_err(|e| rebuild_error("turning foreign keys back on", &e))?;
     replaced
+}
+
+/// Copy every row of `refusal`'s table into the shape `create_sql` declares:
+/// the declaration is created under a scratch name and, in one transaction,
+/// filled with the values of the columns both name and renamed over the stored
+/// table. A row the declaration cannot hold fails the transaction, which keeps
+/// the stored table and its rows.
+async fn reshape_table(
+    db_handle: &DbHandle,
+    create_sql: &str,
+    refusal: &ShapeRefusal,
+) -> Result<()> {
+    let table = refusal.diff.table.as_str();
+    let reshape_error = |step: &str, e: &dyn fmt::Display| {
+        StorageError::SchemaError(format!("reshaping {refusal}: {step}: {e}"))
+    };
+    let declared = DeclaredTable::parse(create_sql)?;
+    let stored = TableShape::stored(db_handle, table).await?;
+    let carried: Vec<&str> = declared
+        .columns
+        .iter()
+        .map(|c| c.shape.name.as_str())
+        .filter(|name| {
+            stored
+                .columns
+                .iter()
+                .any(|s| s.name.eq_ignore_ascii_case(name))
+        })
+        .collect();
+    let scratch = format!("{table}__reshaped");
+    db_handle
+        .execute_ddl(&format!("DROP TABLE IF EXISTS \"{scratch}\""))
+        .await
+        .map_err(|e| reshape_error("dropping a leftover scratch table", &e))?;
+    db_handle
+        .execute_ddl(&renamed_create(create_sql, &scratch)?)
+        .await
+        .map_err(|e| {
+            reshape_error(
+                "its declaration cannot be created, so the stored table and its rows are kept",
+                &e,
+            )
+        })?;
+    drop_dependent_views(db_handle, table)
+        .await
+        .map_err(|e| reshape_error("dropping the views over it", &e))?;
+    db_handle
+        .execute_ddl("PRAGMA foreign_keys = OFF")
+        .await
+        .map_err(|e| reshape_error("turning foreign keys off", &e))?;
+    let columns = carried.join(", ");
+    let copied = db_handle
+        .transaction(vec![
+            (
+                format!("INSERT INTO {scratch} ({columns}) SELECT {columns} FROM {table}"),
+                vec![],
+            ),
+            (format!("DROP TABLE \"{table}\""), vec![]),
+            (
+                format!("ALTER TABLE \"{scratch}\" RENAME TO \"{table}\""),
+                vec![],
+            ),
+        ])
+        .await
+        .map_err(|e| {
+            reshape_error(
+                "a stored row does not fit its declaration, so the stored table and its rows \
+                 are kept",
+                &e,
+            )
+        });
+    db_handle
+        .execute_ddl("PRAGMA foreign_keys = ON")
+        .await
+        .map_err(|e| reshape_error("turning foreign keys back on", &e))?;
+    if copied.is_err() {
+        db_handle
+            .execute_ddl(&format!("DROP TABLE IF EXISTS \"{scratch}\""))
+            .await
+            .map_err(|e| reshape_error("dropping the scratch table", &e))?;
+    }
+    copied
 }
 
 /// Drop every view that reads stored `table`, depth first.

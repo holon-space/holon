@@ -155,6 +155,7 @@ async fn seed_then_reshape(dir: &Path, reshape: impl FnOnce(&Arc<turso_core::Con
                     "[type-table-refused]",
                     "[table-columns-added]",
                     "[table-rebuilt]",
+                    "[table-reshaped]",
                     "[schema-module-failed]",
                 ]
                 .iter()

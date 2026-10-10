@@ -115,6 +115,7 @@ fn intents_writing_an_invalid_block_type_are_refused() {
     refuses_invalid_intents(&[
         ("block_type", Value::String(INVALID.to_string())),
         ("block_type", Value::Integer(7)),
+        ("block_type", Value::String("text".to_string())),
     ]);
 }
 
@@ -400,28 +401,6 @@ fn an_org_drawer_naming_a_valid_block_type_is_refused() {
     a_block_type_drawer_is_refused("page");
 }
 
-const LEGACY_BLOCK_RAW: &str = "CREATE TABLE block_raw (
-    id TEXT PRIMARY KEY,
-    parent_id TEXT,
-    sort_key TEXT NOT NULL DEFAULT 'A0',
-    content TEXT NOT NULL DEFAULT '',
-    content_type TEXT NOT NULL DEFAULT 'text',
-    source_language TEXT,
-    source_name TEXT,
-    properties TEXT,
-    property_kinds TEXT,
-    marks TEXT,
-    collapsed INTEGER NOT NULL DEFAULT 0,
-    widget_only INTEGER NOT NULL DEFAULT 0,
-    completed INTEGER NOT NULL DEFAULT 0,
-    block_type TEXT NOT NULL DEFAULT 'text',
-    created_at INTEGER NOT NULL DEFAULT 0,
-    updated_at INTEGER NOT NULL DEFAULT 0,
-    _change_origin TEXT,
-    write_seq INTEGER NOT NULL DEFAULT 0,
-    FOREIGN KEY (parent_id) REFERENCES block_raw(id) DEFERRABLE INITIALLY DEFERRED
-)";
-
 #[test]
 fn a_sql_row_holding_an_invalid_block_type_boots_reads_untyped_and_discloses() {
     let rt = runtime();
@@ -432,8 +411,12 @@ fn a_sql_row_holding_an_invalid_block_type_boots_reads_untyped_and_discloses() {
         let db = holon_turso::turso::TursoBackend::open_database(env.temp_path().join("test.db"))
             .expect("opening the database must succeed");
         let conn = db.connect().expect("connecting must succeed");
-        conn.execute(LEGACY_BLOCK_RAW)
-            .expect("creating the legacy block_raw must succeed");
+        for statement in holon_turso::sql_utils::sql_statements(
+            holon_turso::schema_modules::block_raw_schema_sql(),
+        ) {
+            conn.execute(statement)
+                .unwrap_or_else(|e| panic!("creating block_raw: {statement}: {e}"));
+        }
         conn.execute(&format!(
             "INSERT INTO block_raw (id, parent_id, content, block_type) VALUES ('{id}', NULL, \
              'sql invalid', '{INVALID}')"

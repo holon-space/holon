@@ -564,6 +564,14 @@ impl ConditionKind {
                 vec![diff.clone()],
             ),
 
+            Self::TableReshaped { diff, rows } => ConditionDetail::with_body(
+                format!(
+                    "{subject} did not match its declaration, so its {rows} rows were copied \
+                     into the declared shape; values of columns it no longer declares are gone."
+                ),
+                vec![diff.clone()],
+            ),
+
             Self::SchemaModuleFailed { error } => ConditionDetail::with_body(
                 format!(
                     "the {subject} tables could not be set up past their first failing \

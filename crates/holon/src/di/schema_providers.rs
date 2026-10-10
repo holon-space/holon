@@ -615,6 +615,13 @@ async fn run_or_disclose(inj: &Injector, module: &dyn SchemaModule) {
                             rows: rebuilt.rows,
                         },
                     },
+                    TableChange::Reshaped(reshaped) => Condition {
+                        subject: reshaped.diff.table.clone(),
+                        reason: ConditionKind::TableReshaped {
+                            diff: reshaped.diff.to_string(),
+                            rows: reshaped.rows,
+                        },
+                    },
                 });
             }
         }

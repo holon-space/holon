@@ -1537,6 +1537,34 @@ mod tests {
     }
 
     #[test]
+    fn a_re_import_carries_block_type_on_both_legs() {
+        let typed = |id: &str, content: &str| {
+            let mut snap = snap(id, "sentinel:no_parent", content);
+            snap.1.block.block_type = Some(holon_api::EntityName::new("page"));
+            snap
+        };
+        let own = [
+            typed("block:mine", "Phone page"),
+            typed("block:both", "Phone"),
+        ];
+        let owner = store_of(&[snap("block:both", "sentinel:no_parent", "Owner")]);
+        let plan = plan_reimport(&own, &owner);
+
+        for id in ["block:mine", "block:both-before-pairing"] {
+            let request = plan
+                .requests
+                .iter()
+                .find(|r| r.id.as_str() == id)
+                .unwrap_or_else(|| panic!("{id} is re-imported: {:?}", plan.requests));
+            assert_eq!(
+                request.properties.get("block_type"),
+                Some(&holon_api::Value::String("page".to_string())),
+                "{id} keeps its block_type"
+            );
+        }
+    }
+
+    #[test]
     fn capability_parses_only_the_two_words() {
         assert_eq!(PairCapability::parse("read").unwrap(), PairCapability::Read);
         assert_eq!(

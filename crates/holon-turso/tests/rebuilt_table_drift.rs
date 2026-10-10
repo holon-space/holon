@@ -1,8 +1,8 @@
-//! Contract: a stored table the org files and the Loro store refill, whose
-//! shape no column addition fixes, is dropped and recreated empty at boot
-//! instead of failing its schema module, and the record of what was already
-//! ingested into it is emptied so the next ingest refills it. Rows of tables
-//! nothing refills stay where they are.
+//! Contract: a stored block-tree table whose shape no column addition fixes
+//! keeps every row at boot: its rows are copied into the declared shape,
+//! because without the Loro store it holds the only durable copy of the block
+//! tree. A row the declaration cannot hold fails the schema module and leaves
+//! every stored table as it was.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -31,85 +31,198 @@ async fn ids(handle: &DbHandle, sql: &str) -> Vec<String> {
         .collect()
 }
 
+async fn columns(handle: &DbHandle, table: &str) -> Vec<String> {
+    handle
+        .query(&format!("PRAGMA table_info({table})"), HashMap::new())
+        .await
+        .unwrap_or_else(|e| panic!("PRAGMA table_info({table}): {e}"))
+        .into_iter()
+        .map(|r| format!("{:?}", r.get("name").expect("a column name")))
+        .collect()
+}
+
+/// A database whose `block_raw` is declared by `drifted` and holds the
+/// `rows`, plus a tag and a dismissal of `b1`, an ingested file, and a matview
+/// over `block_raw`.
+async fn drifted_database(path: &Path, drifted: &str, rows: &[&str]) {
+    let (_b, handle) = open(path).await;
+    handle
+        .execute_ddl("PRAGMA foreign_keys = ON")
+        .await
+        .expect("fk on");
+    for sql in [
+        drifted,
+        include_str!("../sql/schema/files.sql"),
+        include_str!("../sql/schema/block_tags.sql"),
+        include_str!("../sql/schema/advice_suppressed.sql"),
+    ] {
+        for stmt in sql_statements(sql) {
+            handle.execute_ddl(stmt).await.expect(stmt);
+        }
+    }
+    for stmt in rows.iter().copied().chain([
+        "INSERT INTO block_tags (block_id, tag) VALUES ('b1', 't')",
+        "INSERT INTO advice_suppressed (anchor_id, lesson_id) VALUES ('b1', 'l1')",
+        "INSERT INTO file (id, name, parent_id, content_hash) VALUES ('f1', 'a.org', 'root', 'h')",
+    ]) {
+        handle.execute(stmt, vec![]).await.expect(stmt);
+    }
+    handle
+        .execute_ddl("CREATE MATERIALIZED VIEW block AS SELECT id, content FROM block_raw")
+        .await
+        .expect("matview over block_raw");
+    handle.shutdown().await.expect("shutdown");
+}
+
+/// The rows of every block-tree table the drifted databases seed.
+async fn block_tree_rows(handle: &DbHandle) -> Vec<(&'static str, usize)> {
+    let mut counts = Vec::new();
+    for (table, sql) in [
+        ("block_raw", "SELECT id FROM block_raw"),
+        ("block_tags", "SELECT tag FROM block_tags"),
+        ("file", "SELECT id FROM file"),
+        (
+            "advice_suppressed",
+            "SELECT lesson_id FROM advice_suppressed",
+        ),
+    ] {
+        counts.push((table, ids(handle, sql).await.len()));
+    }
+    counts
+}
+
 #[tokio::test(flavor = "multi_thread")]
-async fn a_drifted_block_raw_is_rebuilt_and_its_ingest_record_emptied() {
+async fn a_drifted_block_raw_keeps_every_row_in_its_declared_shape() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("old.db");
-    {
-        let (_b, handle) = open(&path).await;
-        handle
-            .execute_ddl("PRAGMA foreign_keys = ON")
-            .await
-            .expect("fk on");
-        let drifted = block_raw_schema_sql().replacen(
-            "CREATE TABLE IF NOT EXISTS block_raw (",
-            "CREATE TABLE IF NOT EXISTS block_raw (legacy TEXT NOT NULL,",
-            1,
-        );
-        for sql in [
-            drifted.as_str(),
-            include_str!("../sql/schema/files.sql"),
-            include_str!("../sql/schema/block_tags.sql"),
-            include_str!("../sql/schema/advice_suppressed.sql"),
-        ] {
-            for stmt in sql_statements(sql) {
-                handle.execute_ddl(stmt).await.expect(stmt);
-            }
-        }
-        for stmt in [
+    let drifted = block_raw_schema_sql().replacen(
+        "CREATE TABLE IF NOT EXISTS block_raw (",
+        "CREATE TABLE IF NOT EXISTS block_raw (legacy TEXT NOT NULL,",
+        1,
+    );
+    drifted_database(
+        &path,
+        &drifted,
+        &[
             "INSERT INTO block_raw (id, parent_id, legacy) VALUES ('sentinel:no_parent', \
              'sentinel:no_parent', 'x')",
-            "INSERT INTO block_raw (id, parent_id, legacy) VALUES ('b1', 'sentinel:no_parent', \
-             'x')",
-            "INSERT INTO block_tags (block_id, tag) VALUES ('b1', 't')",
-            "INSERT INTO advice_suppressed (anchor_id, lesson_id) VALUES ('b1', 'l1')",
-            "INSERT INTO file (id, name, parent_id, content_hash) VALUES ('f1', 'a.org', 'root', \
-             'h')",
-        ] {
-            handle.execute(stmt, vec![]).await.expect(stmt);
-        }
-        handle
-            .execute_ddl("CREATE MATERIALIZED VIEW block AS SELECT id, content FROM block_raw")
-            .await
-            .expect("matview over block_raw");
-        handle.shutdown().await.expect("shutdown");
-    }
+            "INSERT INTO block_raw (id, parent_id, content, block_type, legacy) VALUES ('b1', \
+             'sentinel:no_parent', 'kept', 'page', 'x')",
+        ],
+    )
+    .await;
 
     let (_b, handle) = open(&path).await;
     let changes = CoreSchemaModule
         .ensure_schema(&handle)
         .await
         .expect("a drifted block_raw does not fail the core tables");
-    let rebuilt: Vec<_> = changes
+    let reshaped: Vec<_> = changes
         .iter()
         .filter_map(|c| match c {
-            TableChange::Rebuilt(r) => Some((r.diff.table.as_str(), r.rows)),
-            TableChange::ColumnsAdded(_) => None,
+            TableChange::Reshaped(r) => Some((r.diff.table.as_str(), r.rows)),
+            TableChange::Rebuilt(_) | TableChange::ColumnsAdded(_) => None,
         })
         .collect();
-    assert_eq!(rebuilt, vec![("block_raw", 2)], "changes: {changes:?}");
+    assert_eq!(reshaped, vec![("block_raw", 2)], "changes: {changes:?}");
+    assert!(
+        !changes.iter().any(|c| matches!(c, TableChange::Rebuilt(_))),
+        "no block-tree table is dropped: {changes:?}"
+    );
+    assert!(
+        !columns(&handle, "block_raw")
+            .await
+            .iter()
+            .any(|c| c.contains("legacy")),
+        "block_raw has its declared shape"
+    );
     assert_eq!(
-        ids(&handle, "SELECT id FROM block_raw").await,
+        ids(
+            &handle,
+            "SELECT content || '/' || block_type FROM block_raw WHERE id = 'b1'"
+        )
+        .await,
         vec![format!(
             "{:?}",
-            holon_api::Value::String("sentinel:no_parent".into())
+            holon_api::Value::String("kept/page".into())
         )],
-        "only the re-seeded sentinel remains"
-    );
-    assert!(
-        ids(&handle, "SELECT id FROM file").await.is_empty(),
-        "the ingest record is emptied so every org file is ingested again"
-    );
-    assert!(
-        ids(&handle, "SELECT tag FROM block_tags").await.is_empty(),
-        "the junctions the same ingest refills are emptied with block_raw"
+        "b1 keeps its values"
     );
     assert_eq!(
-        ids(&handle, "SELECT lesson_id FROM advice_suppressed")
+        block_tree_rows(&handle).await,
+        vec![
+            ("block_raw", 2),
+            ("block_tags", 1),
+            ("file", 1),
+            ("advice_suppressed", 1)
+        ],
+        "reshaping block_raw keeps every row of the block tree"
+    );
+
+    let again = CoreSchemaModule
+        .ensure_schema(&handle)
+        .await
+        .expect("the reshaped block_raw boots again");
+    assert!(again.is_empty(), "the reshape is stable: {again:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_row_the_declaration_cannot_hold_keeps_the_stored_block_raw() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("old.db");
+    let declared = "sort_key TEXT NOT NULL DEFAULT 'A0',";
+    assert!(block_raw_schema_sql().contains(declared));
+    let drifted = block_raw_schema_sql().replacen(declared, "sort_key TEXT,", 1);
+    drifted_database(
+        &path,
+        &drifted,
+        &[
+            "INSERT INTO block_raw (id, parent_id, sort_key) VALUES ('sentinel:no_parent', \
+             'sentinel:no_parent', 'A0')",
+            "INSERT INTO block_raw (id, parent_id, sort_key) VALUES ('b1', 'sentinel:no_parent', \
+             NULL)",
+        ],
+    )
+    .await;
+
+    let (_b, handle) = open(&path).await;
+    let error = CoreSchemaModule
+        .ensure_schema(&handle)
+        .await
+        .expect_err("a row block_raw's declaration cannot hold must fail the core tables")
+        .to_string();
+    assert!(
+        error.contains("block_raw") && error.contains("sort_key"),
+        "the error must name the table and the difference: {error}"
+    );
+    assert_eq!(
+        block_tree_rows(&handle).await,
+        vec![
+            ("block_raw", 2),
+            ("block_tags", 1),
+            ("file", 1),
+            ("advice_suppressed", 1)
+        ],
+        "a refused reshape leaves every row where it was"
+    );
+    assert!(
+        columns(&handle, "block_raw")
             .await
-            .len(),
-        1,
-        "dismissed advice is nothing the org files restore, so it is kept"
+            .iter()
+            .any(|c| c.contains("sort_key")),
+        "the stored block_raw is still there"
+    );
+    assert!(
+        ids(
+            &handle,
+            "SELECT name FROM sqlite_master WHERE name LIKE 'block_raw%' AND type = 'table'"
+        )
+        .await
+            == vec![format!(
+                "{:?}",
+                holon_api::Value::String("block_raw".into())
+            )],
+        "no scratch table is left behind"
     );
 }
 

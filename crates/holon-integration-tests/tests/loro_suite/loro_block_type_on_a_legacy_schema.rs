@@ -1,8 +1,8 @@
 //! A database created before `block_type` became nullable and `completed` was
-//! dropped: its `block_raw` keeps that shape across boots (`CREATE TABLE IF
-//! NOT EXISTS`), while its `block` and journal matviews still select
-//! `completed` and must be rebuilt at boot. Reads, creates and `block_type`
-//! writes must still work on it.
+//! dropped: boot copies the rows of its `block_raw` into the declared shape and
+//! rebuilds the `block` and journal matviews that still select `completed`.
+//! Every stored row survives, in every wiring, and reads, creates and
+//! `block_type` writes work on it.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -288,8 +288,6 @@ fn block_type_reads_and_writes_on_a_legacy_block_raw() {
 }
 
 #[test]
-#[ignore = "red: the projection's `UPDATE block_type = NULL` fails `NOT NULL constraint failed: \
-            block_raw.block_type` on a legacy block_raw; lane stale-type rebuilds that table"]
 fn clearing_block_type_on_a_legacy_block_raw() {
     run_on_a_legacy_database(async |env, service| {
         create_then_type(env, service).await;
@@ -323,6 +321,82 @@ fn clearing_block_type_on_a_legacy_block_raw() {
         if projection_errors != 0 {
             failures.push(format!(
                 "the Loro projection recorded {projection_errors} sink error(s)"
+            ));
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    });
+}
+
+/// Without the Loro store `block_raw` is the only durable copy of the block
+/// tree, so every legacy row must survive the boot that reshapes it.
+#[test]
+fn every_legacy_row_survives_the_reshape_without_the_loro_store() {
+    let runtime = Arc::new(tokio::runtime::Runtime::new().expect("tokio runtime"));
+    runtime.clone().block_on(async move {
+        let env = TestEnvironment::new(runtime.clone()).unwrap();
+        env.set_enable_loro(false);
+        create_legacy_database(&env, runtime.clone()).await;
+        let db = holon_turso::turso::TursoBackend::open_database(env.temp_path().join("test.db"))
+            .expect("opening the legacy database must succeed");
+        let conn = db.connect().expect("connecting must succeed");
+        for row in [
+            format!(
+                "INSERT INTO block_raw (id, parent_id, content, block_type) VALUES \
+                 ('{UNTYPED_ID}', NULL, 'legacy untyped', 'text')"
+            ),
+            format!(
+                "INSERT INTO block_raw (id, parent_id, content, block_type, completed) VALUES \
+                 ('{TYPED_ID}', NULL, 'legacy typed', 'page', 1)"
+            ),
+        ] {
+            conn.execute(&row)
+                .unwrap_or_else(|e| panic!("seeding {row}: {e}"));
+        }
+        drop(conn);
+        drop(db);
+
+        env.start_app(true)
+            .await
+            .expect("start_app on a legacy database without the Loro store");
+        let authority = holon::core::sql_write_authority::SqlWriteAuthority::new(
+            env.engine().db_handle().clone(),
+        );
+        let mut failures: Vec<String> = Vec::new();
+        for (id, content, expected) in [
+            (UNTYPED_ID, "legacy untyped", None),
+            (TYPED_ID, "legacy typed", Some(EntityName::new("page"))),
+        ] {
+            let held = holon_core::WriteAuthorityReads::block(
+                &authority,
+                &holon_api::EntityUri::parse(id).expect("probe id"),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{id}: the SQL authority read must succeed: {e:#}"));
+            match held {
+                None => failures.push(format!("{id}: the reshape lost the row")),
+                Some(block) => {
+                    if block.content != content || block.block_type != expected {
+                        failures.push(format!(
+                            "{id}: reads content {:?}, block_type {:?}; expected {content:?}, \
+                             {expected:?}",
+                            block.content, block.block_type
+                        ));
+                    }
+                }
+            }
+        }
+        let reshaped: Vec<String> = env
+            .injector()
+            .expect("booted injector")
+            .resolve::<Arc<holon_api::ConditionBus>>()
+            .current()
+            .into_iter()
+            .filter(|c| c.subject == "block_raw")
+            .map(|c| c.condition_key().kind.to_string())
+            .collect();
+        if reshaped != ["table-reshaped"] {
+            failures.push(format!(
+                "block_raw must raise exactly one table-reshaped condition, raised {reshaped:?}"
             ));
         }
         assert!(failures.is_empty(), "{}", failures.join("\n"));
