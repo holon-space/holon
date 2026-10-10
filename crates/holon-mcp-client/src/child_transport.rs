@@ -134,7 +134,7 @@ async fn forward_stderr<R: AsyncRead + Unpin>(
     let mut reader = tokio::io::BufReader::new(stderr);
     loop {
         match next_line(&mut reader).await {
-            Ok(Some(line)) => say(budget.stderr.admit(&line)),
+            Ok(Some(line)) => say(budget.stderr.charge_line(&line)),
             Ok(None) => break,
             Err(e) => {
                 say(StderrVerdict::Say(format!(
@@ -438,7 +438,7 @@ mod tests {
         let budget = PeerBudget::new();
         let line = "x".repeat(4096);
         for _ in 0..(MAX_STDERR_BYTES / line.len() + 2) {
-            budget.stderr.admit(&line);
+            budget.stderr.charge_line(&line);
         }
         let mut transport =
             spawn_bounded_child(&mut sidecar("import time\ntime.sleep(10)"), budget.clone())

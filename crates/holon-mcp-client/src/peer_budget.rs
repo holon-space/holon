@@ -100,7 +100,7 @@ pub(crate) enum StderrVerdict {
 impl StderrAllowance {
     /// Charge `line` to this connection's stderr allowance, refused once it
     /// has spent [`MAX_STDERR_BYTES`].
-    pub(crate) fn admit(&self, line: &str) -> StderrVerdict {
+    pub(crate) fn charge_line(&self, line: &str) -> StderrVerdict {
         let text = bounded_peer_text(line);
         let spent = self.spent.fetch_add(text.len(), Ordering::Relaxed) + text.len();
         if spent <= MAX_STDERR_BYTES {
@@ -462,7 +462,7 @@ mod tests {
         let allowance = StderrAllowance::default();
         let line = "x".repeat(4096);
         for _ in 0..(MAX_STDERR_BYTES / line.len() + 2) {
-            allowance.admit(&line);
+            allowance.charge_line(&line);
         }
 
         let said = allowance
