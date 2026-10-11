@@ -38,6 +38,7 @@ pub mod paint_text_styling;
 pub mod share_mount_carries_page_identity;
 pub mod two_instance_convergence;
 pub mod two_writer_peer_writes_land;
+pub mod typed_loro_matches_ref;
 pub mod typed_matview_matches_ref;
 pub mod typed_operations_reach_profiles;
 pub mod view_model_matches_store;

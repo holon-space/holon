@@ -3,15 +3,16 @@
 //!
 //! @pbt rung datatype
 //! @pbt covers typed-matview-matches-ref — a free-standing typed entity is
-//!   created through its Turso serialization (raw table + read matview), lives
-//!   in NO block table, and its matview matches the oracle.
+//!   created through the mode's write authority, lives in NO block table, and
+//!   its matview matches the oracle.
+//! @pbt covers typed-loro-matches-ref — in every Loro mode the entity lands in
+//!   the Loro typed-entity store, with or without Turso.
 //!
 //! A free-standing entity is NOT block-shaped: no parent, no tree, no org
-//! projection. It serializes to its own `<type>_raw` write table + `<type>`
-//! read matview (the `TursoAdapter` derivation). This transition creates one
-//! through `SutTypedEntity` and records it in the per-type oracle fragment;
-//! `inv-typed-matview-matches-ref` then asserts every type's matview equals the
-//! oracle AND that no typed-entity id reaches a block table.
+//! projection. This transition creates one through `SutTypedEntityWrite` — a
+//! dispatch by entity name, so SqlOnly reaches the SQL provider and every Loro
+//! mode reaches the Loro store — and records it in the per-type oracle
+//! fragment.
 //!
 //! The TYPE IS DRAWN, never named here: the generator picks from the registry's
 //! free-standing schemas, and the field values come from that schema's
@@ -23,7 +24,7 @@ use holon_pbt_core::StorageAdapter;
 use holon_pbt_core::TransitionFactory;
 use holon_pbt_core::TransitionRef;
 use holon_pbt_core::capabilities::RefLifecycle;
-use holon_pbt_core::capabilities::SutTypedEntity;
+use holon_pbt_core::capabilities::SutTypedEntityWrite;
 use holon_pbt_core::validation::Reason;
 use holon_pbt_core::validation::check;
 use proptest::prelude::*;
@@ -93,13 +94,10 @@ impl TransitionFactory<ReferenceState> for CreateTypedEntity {
     type Reason = Reason;
 
     fn required_wiring() -> RequiredWiring {
-        // The serialization (raw table + matview) is pure Turso: the write goes
-        // straight to `<type>_raw`, with no gesture and no window. Requiring
-        // `Actor::UI` here would make the transition UNREACHABLE — the composed
-        // keystone is headless by construction and strips that actor
-        // (`wide_e2e::set_for_wiring`). The frontend arm is already selected for
-        // by the `SutTypedEntity` cap.
-        RequiredWiring::HasStorage(StorageAdapter::Turso)
+        // Every storage mode has a typed-entity write authority: Turso in
+        // SqlOnly, the Loro store in every Loro mode. No `Actor::UI`: the
+        // composed keystone is headless and strips that actor.
+        RequiredWiring::any_storage_of([StorageAdapter::Turso, StorageAdapter::Loro])
     }
 
     fn weighted_generator(state: &ReferenceState) -> Validated<(u32, BoxedStrategy<Self>), Reason> {
@@ -179,15 +177,15 @@ impl TransitionRef<ReferenceState> for CreateTypedEntity {
 }
 
 crate::cap_transition! {
-    CreateTypedEntity: SutTypedEntity,
+    CreateTypedEntity: SutTypedEntityWrite,
     where R: [ RefLifecycle ],
     |me, _state, sut| {
         sut.create_typed_entity(&me.type_name, &me.id, me.field_pairs()).await;
     }
     sql_budget: |_me, _state| {
-        // One raw INSERT into `<type>_raw` (no op-pipeline). Turso IVM maintains
-        // the matview internally; a generous tolerance absorbs that maintenance
-        // + any CDC-driven reads without under-stating the write.
+        // One INSERT into `<type>_raw`, by the SQL provider or by the Loro
+        // projector. Turso IVM maintains the matview internally; a generous
+        // tolerance absorbs that maintenance + any CDC-driven reads.
         ExpectedSql {
             reads: 0,
             writes: 1,

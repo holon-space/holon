@@ -8188,11 +8188,9 @@ mod tests {
 
 // ─── Datatype axis (BG-1): free-standing typed entities ───────────────
 //
-// `SutTypedEntity` over this frontend's real `BackendEngine`. Writes target the
-// TursoAdapter raw table (`<type>_raw`); reads target the generated read
-// matview (`<type>`). Before the adapter is wired those objects don't exist, so
-// `create_typed_entity` fails loud ("no such table: <type>_raw") — the
-// red-for-the-right-reason the keystone datatype axis captures.
+// `SutTypedEntity` over this frontend's real `BackendEngine`: declarations and
+// reads of the generated read matview (`<type>`). Writes are
+// `typed_entity_sut::TypedEntityWriter`'s, over the same engine.
 #[async_trait::async_trait(?Send)]
 impl holon_pbt_core::capabilities::SutTypedEntity for HeadlessFrontendComponent {
     async fn declare_typed_schema(
@@ -8281,27 +8279,6 @@ impl holon_pbt_core::capabilities::SutTypedEntity for HeadlessFrontendComponent 
         .unwrap_or_else(|e| {
             panic!("SutTypedEntity::declare_typed_schema('{type_name}') failed: {e}")
         });
-    }
-
-    async fn create_typed_entity(&self, type_name: &str, id: &str, fields: Vec<(String, String)>) {
-        // The write goes through the SAME authority a block write goes through
-        // — the `OperationDispatcher`, routed by entity name. A type declared at
-        // runtime must own a write authority derived from ITS `TypeDefinition`;
-        // dispatching here is what proves the routing exists instead of the
-        // test reaching around it with raw SQL.
-        use holon_core::OperationProvider;
-        let mut params = holon_core::storage::types::StorageEntity::new();
-        params.insert("id".into(), holon_api::Value::String(id.to_string()));
-        for (col, val) in fields {
-            params.insert(col.into(), holon_api::Value::String(val));
-        }
-        self.engine()
-            .get_dispatcher()
-            .execute_operation(&holon_api::EntityName::new(type_name), "create", params)
-            .await
-            .unwrap_or_else(|e| {
-                panic!("SutTypedEntity::create_typed_entity('{type_name}', '{id}') failed: {e}")
-            });
     }
 
     async fn typed_entity_rows(&self, type_name: &str, columns: Vec<String>) -> Vec<Vec<String>> {

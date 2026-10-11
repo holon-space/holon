@@ -523,6 +523,11 @@ async fn compose_sut_seeded_impl(
         // storage); a Loro-only / storage-only slice never reaches here, so
         // the typed-matview invariant deselects honestly there.
         caps.insert(comp.clone() as Arc<dyn holon_pbt_core::capabilities::SutTypedEntity>);
+        caps.insert(
+            Arc::new(crate::pbt::typed_entity_sut::TypedEntityWriter::new(
+                comp.engine() as Arc<dyn holon::api::OperationEngine>,
+            )) as Arc<dyn holon_pbt_core::capabilities::SutTypedEntityWrite>,
+        );
         // The component's fake MCP peer and the production integration module
         // that connects it.
         caps.insert(comp.clone() as Arc<dyn holon_pbt_core::capabilities::SutIntegrationConnect>);
@@ -857,7 +862,7 @@ async fn compose_sut_seeded_impl(
         // The slice's Loro cap reads the DEVICE's whole store, not the
         // replicated half: layout blocks are as real to a block invariant as
         // any other, and a cap blind to them would report them missing.
-        let backend = LoroBackend::from_document(global_doc).with_layout_doc(layout_doc);
+        let backend = LoroBackend::from_document(global_doc.clone()).with_layout_doc(layout_doc);
         // ...and every shared subtree the device has loaded, which the
         // authority follows through its mount.
         let backend = Arc::new(match frontend_shared_trees.clone() {
@@ -892,13 +897,27 @@ async fn compose_sut_seeded_impl(
         if !has_turso {
             let block_ops =
                 holon_loro::loro_block_operations::LoroBlockOperations::new(doc_store.clone());
+            let engine = holon_loro_wiring::loro_block_query_source::loro_operation_engine(
+                block_ops,
+                Arc::new(holon_api::ConditionBus::new()),
+            );
             loro_caps.insert(Arc::new(crate::pbt::op_write_cap::EdgeFieldWriter::new(
-                holon_loro_wiring::loro_block_query_source::loro_operation_engine(
-                    block_ops,
-                    Arc::new(holon_api::ConditionBus::new()),
-                ),
+                engine.clone(),
                 resolver.clone(),
             )) as Arc<dyn SutEdgeFieldWrite>);
+            loro_caps.insert(
+                Arc::new(crate::pbt::typed_entity_sut::TypedEntityWriter::new(engine))
+                    as Arc<dyn holon_pbt_core::capabilities::SutTypedEntityWrite>,
+            );
+        }
+        // The Loro typed-entity store is read off the authority doc: the
+        // frontend's in full mode, the canonical doc without Turso.
+        if !has_turso || frontend_loro_store.is_some() {
+            loro_caps.insert(
+                Arc::new(crate::pbt::typed_entity_sut::LoroTypedEntityReader::new(
+                    global_doc.clone(),
+                )) as Arc<dyn holon_pbt_core::capabilities::SutTypedEntityLoro>,
+            );
         }
         // The peer-mesh surface (`SutLoro`) is contributed whenever the `doc_store` it
         // drives over is the SAME doc whose mutations reach the canonical `SutBackend`

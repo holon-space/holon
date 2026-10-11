@@ -4705,12 +4705,6 @@ pub trait SutTypedEntity {
         searchable: bool,
     );
 
-    /// Insert one row into the type's raw write table (`<type_name>_raw`),
-    /// carrying `id` plus each `(column, value)` in `fields`. Fails loud if the
-    /// serialization is absent (no such table) — that absence IS the
-    /// red-for-the-right-reason before the adapter is wired.
-    async fn create_typed_entity(&self, type_name: &str, id: &str, fields: Vec<(String, String)>);
-
     /// Read `columns` (in order) from the type's read matview (`<type_name>`),
     /// one inner Vec per row, canonically sorted for order-insensitive diffing.
     async fn typed_entity_rows(&self, type_name: &str, columns: Vec<String>) -> Vec<Vec<String>>;
@@ -4722,6 +4716,39 @@ pub trait SutTypedEntity {
     /// The operation names offered for `type_name` by each surface that lists
     /// operations.
     async fn typed_entity_operation_surfaces(&self, type_name: &str) -> OperationSurfaces;
+}
+
+/// SUT-side writes of a free-standing typed entity, dispatched through the
+/// session's operation engine by entity name — so the same transition reaches
+/// whichever write authority the mode registered: the SQL provider (SqlOnly)
+/// or the Loro typed-entity store (every Loro mode, with or without Turso).
+/// Each write fails loud when the dispatch is refused.
+#[allow(async_fn_in_trait)]
+#[holon_macros::capmap_adapter]
+pub trait SutTypedEntityWrite {
+    /// `create` with `id` plus each `(column, value)` in `fields`.
+    async fn create_typed_entity(&self, type_name: &str, id: &str, fields: Vec<(String, String)>);
+
+    /// `set_field` of one persisted column.
+    async fn set_typed_entity_field(&self, type_name: &str, id: &str, field: &str, value: &str);
+
+    /// `delete` of one entity.
+    async fn delete_typed_entity(&self, type_name: &str, id: &str);
+}
+
+/// SUT-side read of the Loro typed-entity store: the live entities of one
+/// type straight off the Loro map (root `entity:<type>`, one child map per
+/// entity, one key per field), with no Turso in between.
+#[allow(async_fn_in_trait)]
+#[holon_macros::capmap_adapter]
+pub trait SutTypedEntityLoro {
+    /// `columns` (the id first) of every live entity of `type_name`, one inner
+    /// Vec per entity, canonically sorted. An absent field reads as `""`.
+    async fn loro_typed_entity_rows(
+        &self,
+        type_name: &str,
+        columns: Vec<String>,
+    ) -> Vec<Vec<String>>;
 }
 
 /// One entity's operation names as the surfaces see them: the dispatcher's
@@ -4755,6 +4782,14 @@ pub trait RefTypedEntities {
     /// Every typed-entity id the oracle created, across all types. The
     /// datatype-axis identity asserts none of them reaches a block table.
     fn typed_entity_ids(&self) -> std::collections::BTreeSet<String>;
+
+    /// Each tracked type with its STORED columns only (the id first): what a
+    /// write authority holds, without the matview's computed columns.
+    fn stored_typed_entity_schemas(&self) -> Vec<(String, Vec<String>)>;
+
+    /// Expected rows over [`Self::stored_typed_entity_schemas`]' columns,
+    /// canonically sorted.
+    fn expected_stored_typed_entity_rows(&self, type_name: &str) -> Vec<Vec<String>>;
 
     /// Every entity whose type declares the search service.
     fn searchable_typed_entities(&self) -> Vec<SearchableEntity>;

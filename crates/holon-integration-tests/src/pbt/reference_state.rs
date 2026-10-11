@@ -594,6 +594,9 @@ pub struct TypedEntitiesRefState {
     /// Types declaring the search service: title = first value column,
     /// searchable = every value column.
     searchable: BTreeSet<String>,
+    /// type name -> how many entities were ever created. The id counter: a
+    /// deleted id stays taken, because the Loro store keeps its tombstone.
+    created: BTreeMap<String, usize>,
 }
 
 impl TypedEntitiesRefState {
@@ -672,10 +675,59 @@ impl TypedEntitiesRefState {
     /// columns in order (the id is the key, not a value).
     pub fn add(&mut self, type_name: String, id: String, values: Vec<String>) {
         let stored = Self::stored_id(&type_name, &id);
+        *self.created.entry(type_name.clone()).or_default() += 1;
         self.by_type
             .entry(type_name)
             .or_default()
             .insert(stored, values);
+    }
+
+    /// The live ids of one type, in a stable order.
+    pub fn ids(&self, type_name: &str) -> Vec<String> {
+        self.by_type
+            .get(type_name)
+            .map(|entities| entities.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Overwrite one value column of a live entity.
+    pub fn set_field(&mut self, type_name: &str, id: &str, column: &str, value: String) {
+        let index = self.schemas[type_name]
+            .iter()
+            .position(|c| c == column)
+            .unwrap_or_else(|| panic!("'{type_name}' declares no column {column:?}"));
+        let values = self
+            .by_type
+            .get_mut(type_name)
+            .and_then(|entities| entities.get_mut(id))
+            .unwrap_or_else(|| panic!("'{type_name}' has no live entity {id:?}"));
+        values[index] = value;
+    }
+
+    /// Delete a live entity.
+    pub fn remove(&mut self, type_name: &str, id: &str) {
+        self.by_type
+            .get_mut(type_name)
+            .and_then(|entities| entities.remove(id))
+            .unwrap_or_else(|| panic!("'{type_name}' has no live entity {id:?}"));
+    }
+
+    /// Expected rows over the stored columns only (`[id, ..values]`),
+    /// canonically sorted.
+    pub fn stored_rows(&self, type_name: &str) -> Vec<Vec<String>> {
+        let mut rows: Vec<Vec<String>> = self
+            .by_type
+            .get(type_name)
+            .into_iter()
+            .flatten()
+            .map(|(id, values)| {
+                let mut row = vec![id.clone()];
+                row.extend(values.iter().cloned());
+                row
+            })
+            .collect();
+        rows.sort();
+        rows
     }
 
     /// The id the write authority STORES for a create. An id arriving without
@@ -696,9 +748,10 @@ impl TypedEntitiesRefState {
         }
     }
 
-    /// How many entities of this type exist (the generator's id counter).
+    /// How many entities of this type were ever created (the generator's id
+    /// counter).
     pub fn count(&self, type_name: &str) -> usize {
-        self.by_type.get(type_name).map_or(0, BTreeMap::len)
+        self.created.get(type_name).copied().unwrap_or(0)
     }
 
     /// Expected rows for one type as `[id, ..values, ..computed]`, canonically

@@ -39,6 +39,21 @@ impl RefTypedEntities for ReferenceState {
         self.typed_entities.all_ids().cloned().collect()
     }
 
+    fn stored_typed_entity_schemas(&self) -> Vec<(String, Vec<String>)> {
+        self.typed_entities
+            .declared()
+            .map(|(type_name, value_columns)| {
+                let mut columns = vec!["id".to_string()];
+                columns.extend(value_columns.iter().cloned());
+                (type_name.clone(), columns)
+            })
+            .collect()
+    }
+
+    fn expected_stored_typed_entity_rows(&self, type_name: &str) -> Vec<Vec<String>> {
+        self.typed_entities.stored_rows(type_name)
+    }
+
     fn searchable_typed_entities(&self) -> Vec<SearchableEntity> {
         self.typed_entities.searchable_entities()
     }

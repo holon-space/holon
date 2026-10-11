@@ -77,6 +77,7 @@ pub mod transition_budgets;
 pub mod transition_dispatch;
 pub mod transitions;
 pub mod typed_entity_schemas;
+pub mod typed_entity_sut;
 pub mod types;
 pub mod ui_actor_state;
 pub mod ui_harness;

@@ -398,6 +398,12 @@ impl RefTypedEntities for NullRef {
     fn typed_entity_ids(&self) -> BTreeSet<String> {
         panic!("class-2: invariant read RefTypedEntities::typed_entity_ids")
     }
+    fn stored_typed_entity_schemas(&self) -> Vec<(String, Vec<String>)> {
+        panic!("class-2: invariant read RefTypedEntities::stored_typed_entity_schemas")
+    }
+    fn expected_stored_typed_entity_rows(&self, type_name: &str) -> Vec<Vec<String>> {
+        panic!("class-2: invariant read RefTypedEntities::expected_stored_typed_entity_rows")
+    }
     fn searchable_typed_entities(&self) -> Vec<crate::capabilities::SearchableEntity> {
         panic!("class-2: invariant read RefTypedEntities::searchable_typed_entities")
     }

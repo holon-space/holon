@@ -121,6 +121,7 @@ pub mod delete_placed_root;
 pub mod delete_placement_parent;
 pub mod delete_placement_record;
 mod delete_refused_recipe;
+pub mod delete_typed_entity;
 mod dense_projection_edit;
 mod disarm_write_churn;
 mod dispatch_unschemed_block_id;
@@ -183,6 +184,7 @@ mod search;
 mod second_writer_refused;
 mod select_bias;
 pub mod set_edge_field;
+pub mod set_typed_entity_field;
 mod setup_watch;
 pub mod share_container;
 pub mod share_page;
@@ -238,6 +240,7 @@ pub use delete_placed_root::DeletePlacedRoot;
 pub use delete_placement_parent::DeletePlacementParent;
 pub use delete_placement_record::DeletePlacementRecord;
 pub use delete_refused_recipe::DeleteRefusedRecipe;
+pub use delete_typed_entity::DeleteTypedEntity;
 pub use deliver_block_content::DeliverBlockContent;
 pub use dense_projection_edit::DenseProjectionEdit;
 pub use disarm_write_churn::DisarmWriteChurn;
@@ -310,6 +313,7 @@ pub use save_refused_recipe::SaveRefusedRecipe;
 pub use search::Search;
 pub use second_writer_refused::SecondWriterRefused;
 pub use set_edge_field::SetEdgeField;
+pub use set_typed_entity_field::SetTypedEntityField;
 pub use setup_watch::SetupWatch;
 pub use share_container::ShareContainer;
 pub use share_page::SharePage;
@@ -366,6 +370,8 @@ crate::declare_e2e_transitions! {
         ClickBlock(ClickBlock),
         CreateBlockUnderFocus(CreateBlockUnderFocus),
         CreateTypedEntity(CreateTypedEntity),
+        SetTypedEntityField(SetTypedEntityField),
+        DeleteTypedEntity(DeleteTypedEntity),
         DeclareTypedSchema(DeclareTypedSchema),
         CreateDocument(CreateDocument),
         RenameDocument(RenameDocument),
