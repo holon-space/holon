@@ -281,17 +281,16 @@ impl RenderContext {
             w.descriptor.entity_name.as_str() == holon_core::WRITE_TIER_ENTITY
         };
         // The subject the dispatcher judges is the id a click sends, which is
-        // this context's bound row. Resolved only when there is a judged
-        // operation to withhold, so an ordinary row pays one vec scan.
-        let subject = self
-            .offered_operations
-            .iter()
-            .any(judged)
-            .then(|| holon_api::row_id_of(self.row()).entity())
-            .flatten();
+        // this context's bound row. A row that names no entity has no subject,
+        // so it is offered nothing the tier judges, like a refused one.
         let mut operations = self.offered_operations.clone();
-        if subject.is_some_and(|s| !services.write_tier_admits(&s)) {
-            operations.retain(|w| !judged(w));
+        if operations.iter().any(judged) {
+            let admitted = holon_api::row_id_of(self.row())
+                .entity()
+                .is_some_and(|s| services.write_tier_admits(&s));
+            if !admitted {
+                operations.retain(|w| !judged(w));
+            }
         }
         self.triggers = crate::input_trigger::default_triggers_for_operations(&operations);
         self.operations = operations;
@@ -654,11 +653,11 @@ mod tests {
         ];
         let offered_per_item = |services: &crate::reactive::StubBuilderServices,
                                 tmpl: &str|
-         -> Vec<(String, Vec<String>)> {
+         -> Vec<(Option<String>, Vec<String>)> {
             let ctx = RenderContext::for_row(Arc::clone(&parent_row))
                 .with_operations(ops.clone(), services);
             let src = format!(
-                r#"board(#{{lane_field: "task_state", item_template: {tmpl}, rows: [#{{id: "{read_only}", task_state: "TODO"}}, #{{id: "{writable}", task_state: "TODO"}}]}})"#
+                r#"board(#{{lane_field: "task_state", item_template: {tmpl}, rows: [#{{id: "{read_only}", task_state: "TODO"}}, #{{id: "{writable}", task_state: "TODO"}}, #{{task_state: "TODO", content: "no subject"}}]}})"#
             );
             let expr = holon_api::render_dsl::parse_render_dsl(&src).expect("parses");
             let board = services.interpret(&expr, &ctx);
@@ -667,8 +666,7 @@ mod tests {
                 .iter()
                 .map(|item| {
                     (
-                        item.prop_str("row_id")
-                            .expect("a static card names its row"),
+                        item.prop_str("row_id"),
                         item.operations
                             .iter()
                             .map(|w| w.descriptor.name.clone())
@@ -685,8 +683,9 @@ mod tests {
         ] {
             let expected: Vec<String> = expected.into_iter().map(String::from).collect();
             let want = vec![
-                (read_only.to_string(), Vec::<String>::new()),
-                (writable.to_string(), expected),
+                (Some(read_only.to_string()), Vec::<String>::new()),
+                (Some(writable.to_string()), expected),
+                (None, Vec::<String>::new()),
             ];
             let under_writable_parent =
                 crate::reactive::StubBuilderServices::new().with_write_refused(read_only.clone());
