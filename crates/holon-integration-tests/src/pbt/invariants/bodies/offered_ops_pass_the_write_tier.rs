@@ -2,14 +2,18 @@
 //! the dispatcher's write tier then refuses (D46).
 //!
 //! @pbt oracle internal-consistency — the production offer paths (`ops_of`,
-//!   the Main panel's `state_toggle`) against the production dispatcher's
-//!   write-tier verdict for the same operation on the same block
+//!   and every operation a rendered widget binds, in every region) against the
+//!   production dispatcher's write-tier verdict for the same operation on the
+//!   same block
 //! @pbt covers offer-matches-write-tier — the operations offered on a block
 //!   whose document is homed in a `WriteTier::ReadOnly` file
 //! @pbt slips-if-removed `ops_of` offers `set_field` and every other block
 //!   operation on a `.cook` block, and each click is refused after the offer
 //! @pbt slips-if-removed a `.cook` step's `state_toggle` binds the task-state
 //!   cycle, and its click is refused after the offer
+//! @pbt slips-if-removed a `.cook` step's widgets bind the block chords
+//!   (`indent`, `move_up`, `set_field`, …), and each keystroke is refused
+//!   after the offer
 
 use holon_pbt_core::capabilities::RefReadOnlyHomes;
 use holon_pbt_core::capabilities::SutReadOnlyHomes;

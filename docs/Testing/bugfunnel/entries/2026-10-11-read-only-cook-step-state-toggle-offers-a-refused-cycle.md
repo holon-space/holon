@@ -35,14 +35,24 @@ toggle's bound op. The ToggleState generator also did not exclude read-only
 homes, so the only signal was a harness panic in a rarely drawn case.
 
 ## Remedy
-- The `state_toggle` builder drops the tier-judged operations when the write
-  tier refuses the row, so the toggle shows the state and binds no cycle.
-- `SutReadOnlyHomes::offered_ops_refused_by_write_tier` also judges the Main
-  panel's `state_toggle` cycle intent.
+- `RenderContext::with_operations` drops the tier-judged operations when the
+  write tier refuses the bound row. That is the ONE point every widget reads
+  `ctx.operations` from, so the toggle, `editable_text`, `expand_toggle`,
+  `rendered_text` and the block chords `render_entity` unions on are all
+  offered only what the dispatcher admits. `ops_of` keeps its own filter
+  because it offers a subject no bound row names.
+- `SutReadOnlyHomes::offered_ops_refused_by_write_tier` judges every operation
+  a rendered widget binds on the block, in every region
+  (`focus_path::bound_operations_on`), not the Main panel's `state_toggle`
+  alone.
 - `ToggleState` excludes read-only-homed blocks.
+- The GPUI `state_toggle`'s display-only branch names which of the two causes
+  it is: a tier-refused row logs at `debug` (the refusal is by design and the
+  tier discloses the file), an unwired row still warns.
 - Lock: hand-authored case
-  `a-read-only-cook-step-offers-no-state-toggle-cycle`. It is red before the fix
-  on `inv-offered-ops-pass-the-write-tier` (`state_toggle set_field` on both
-  recipe steps) and green after (`target/toggle-ro-green.log`).
-- Still open: the other widgets of a read-only row still carry every block
-  operation in their `operations`.
+  `a-read-only-cook-step-offers-no-state-toggle-cycle`, plus the unit lock
+  `render_context::tests::a_refused_row_is_offered_none_of_the_operations_the_write_tier_judges`.
+  The widened invariant is red before the fix on 156 offers
+  (`column` / `editable_text` × 39 block operations × both recipe steps,
+  `target/gate-logs/offer-write-tier-red.log`) and green after
+  (`inv-offered-ops-pass-the-write-tier=6/6`).

@@ -239,11 +239,33 @@ impl RenderContext {
     /// Automatically derives default input triggers from the operations.
     /// Joins keybindings from the services registry into each
     /// OperationDescriptor.
+    ///
+    /// This is the ONE point every widget's offers pass through — each reads
+    /// them back as `ctx.operations` — so the write tier is applied here: a row
+    /// the dispatcher refuses is offered none of the operations the tier judges
+    /// (D46). `ops_of` withholds the same operations on its own path
+    /// ([`crate::value_fns::ops_of`]), because it offers a subject no row bound
+    /// here names.
     pub fn with_operations(
         &self,
         mut operations: Vec<OperationWiring>,
         services: &dyn BuilderServices,
     ) -> Self {
+        let judged = |w: &OperationWiring| {
+            w.descriptor.entity_name.as_str() == holon_core::WRITE_TIER_ENTITY
+        };
+        // The subject the dispatcher judges is the id a click sends, which is
+        // this context's bound row. Resolved only when there is a judged
+        // operation to withhold, so an ordinary row pays one vec scan.
+        let subject = operations
+            .iter()
+            .any(judged)
+            .then(|| holon_api::row_id_of(self.row()).entity())
+            .flatten();
+        if subject.is_some_and(|s| !services.write_tier_admits(&s)) {
+            operations.retain(|w| !judged(w));
+        }
+
         let bindings = services.key_bindings_snapshot();
         if !bindings.is_empty() {
             for op in &mut operations {
@@ -420,5 +442,67 @@ mod tests {
     #[test]
     fn default_context_has_no_available_space() {
         assert!(RenderContext::default().available_space.is_none());
+    }
+
+    /// D46 at the one point every widget reads its offers from: the write tier
+    /// refuses the bound row, so the operations it judges are not offered —
+    /// while an operation of another entity still is.
+    #[test]
+    fn a_refused_row_is_offered_none_of_the_operations_the_write_tier_judges() {
+        let subject = holon_api::EntityUri::parse("block:recipe-step").expect("parses");
+        let row: Arc<DataRow> = Arc::new(HashMap::from([(
+            "id".to_string(),
+            holon_api::Value::String(subject.to_string()),
+        )]));
+        let ops = vec![
+            wiring(holon_core::WRITE_TIER_ENTITY, "set_field"),
+            wiring("navigation", "focus"),
+        ];
+
+        let admitting = crate::reactive::StubBuilderServices::new();
+        let refusing = crate::reactive::StubBuilderServices::new().with_write_refused(subject);
+        let offered = |services: &dyn BuilderServices| -> Vec<String> {
+            RenderContext::default()
+                .with_row(Arc::clone(&row))
+                .with_operations(ops.clone(), services)
+                .operations
+                .iter()
+                .map(|w| w.descriptor.name.clone())
+                .collect()
+        };
+
+        assert_eq!(offered(&admitting), vec!["set_field", "focus"]);
+        assert_eq!(offered(&refusing), vec!["focus"]);
+    }
+
+    fn wiring(entity_name: &str, name: &str) -> OperationWiring {
+        OperationWiring {
+            modified_param: String::new(),
+            descriptor: holon_api::OperationDescriptor {
+                entity_name: entity_name.into(),
+                entity_short_name: entity_name.to_string(),
+                id_column: "id".to_string(),
+                name: name.to_string(),
+                display_name: name.to_string(),
+                description: String::new(),
+                required_params: vec![],
+                optional_params: vec![],
+                affected_fields: vec![],
+                param_mappings: vec![],
+                target_scope: holon_api::TargetScope::Global,
+                boundary_behavior: holon_api::BoundaryBehavior::Unclassified,
+                menu_exposure: holon_api::MenuExposure::NotListed {
+                    surface: holon_api::NonMenuSurface::PointerGesture,
+                },
+                trigger: None,
+                bound_params: Default::default(),
+                guard: holon_api::pattern::OpGuard::None,
+                marking_delta: holon_api::marking::MarkingDelta::Undeclared,
+                arcs: holon_api::arcs::TransitionArcs::Declared {
+                    reads: vec![],
+                    emits: vec![],
+                },
+            },
+        }
     }
 }

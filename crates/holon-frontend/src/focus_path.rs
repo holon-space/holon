@@ -372,6 +372,42 @@ pub fn click_intent_miss_reason(
     )
 }
 
+/// Every operation the rendered tree BINDS on `entity_id`, anywhere in it, as
+/// `(widget operation, operation's entity name)` pairs.
+///
+/// A bound operation is an offer: a click or the widget's chord dispatches it.
+/// So judging offers against the dispatcher (D46) needs all of them — every
+/// region, every widget kind — not the Main panel's `state_toggle` alone.
+pub fn bound_operations_on(
+    root: &crate::view_model::ViewModel,
+    entity_id: &EntityUri,
+) -> Vec<(String, String)> {
+    fn walk(
+        node: &crate::view_model::ViewModel,
+        entity_id: &EntityUri,
+        out: &mut Vec<(String, String)>,
+    ) {
+        if node.entity_id().as_ref() == Some(entity_id) {
+            let widget = node.widget_name().unwrap_or("<unnamed>");
+            for op in &node.operations {
+                out.push((
+                    format!("{widget} {}", op.descriptor.name),
+                    op.descriptor.entity_name.as_str().to_string(),
+                ));
+            }
+        }
+        for child in node.children() {
+            walk(child, entity_id, out);
+        }
+    }
+
+    let mut out = Vec::new();
+    walk(root, entity_id, &mut out);
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// Resolve the intent a click on `entity_id`'s `state_toggle` glyph dispatches,
 /// within `region`'s panel. `state_toggle` cycling is NOT a bound click-INTENT:
 /// `cycle_task_state` is key-chord-bound (Cmd+Enter), so `find_click_intent_*`

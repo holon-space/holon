@@ -8712,19 +8712,17 @@ impl holon_pbt_core::capabilities::SutReadOnlyHomes for HeadlessFrontendComponen
                 })
                 .map(|refusal| refusal.to_string())
         };
-        // The Main panel's `state_toggle` binds its cycle op from the row, not
-        // from `ops_of`, so a click on it is an offer of its own.
+        // A widget binds its own operations from the row rather than from
+        // `ops_of` (`state_toggle`'s cycle, `editable_text`'s `set_field`, the
+        // block chords `render_entity` unions on), so each bound op is an offer
+        // of its own — in EVERY region, not only Main.
         let resolved = reactive.snapshot_resolved(&holon_api::root_layout_block_uri());
-        let toggle = holon_frontend::focus_path::state_toggle_cycle_intent(&resolved, &uri, "main")
-            .map(|intent| {
-                intent.unwrap_or_else(|e| {
-                    panic!("[read-only homes] state_toggle intent of {block_id}: {e}")
-                })
+        let bound = holon_frontend::focus_path::bound_operations_on(&resolved, &uri)
+            .into_iter()
+            .filter_map(|(label, entity_name)| {
+                refusal_of(&entity_name).map(|refusal| (label, refusal))
             })
-            .and_then(|intent| {
-                refusal_of(intent.entity_name.as_str())
-                    .map(|refusal| (format!("state_toggle {}", intent.op_name), refusal))
-            });
+            .collect::<Vec<_>>();
         offered
             .iter()
             .filter_map(|row| {
@@ -8737,7 +8735,7 @@ impl holon_pbt_core::capabilities::SutReadOnlyHomes for HeadlessFrontendComponen
                 let name = field("name");
                 refusal_of(&field("entity_name")).map(|refusal| (name, refusal))
             })
-            .chain(toggle)
+            .chain(bound)
             .collect()
     }
 

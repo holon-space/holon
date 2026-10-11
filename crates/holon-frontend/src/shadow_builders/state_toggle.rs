@@ -92,22 +92,9 @@ holon_macros::widget_builder! {
         // own `props` Mutable. No tree walk, no `set_data`, no manual
         // propagation — that's the architectural fix for the
         // task-state-toggle bug.
-        // D46: a row the write tier refuses is offered no state change, so the
-        // toggle shows its state without binding the ops the tier judges.
-        let operations = match holon_api::row_id_of(&*row_arc).entity() {
-            Some(subject) if !ba.services.write_tier_admits(&subject) => ba
-                .ctx
-                .operations
-                .iter()
-                .filter(|w| w.descriptor.entity_name.as_str() != holon_core::WRITE_TIER_ENTITY)
-                .cloned()
-                .collect(),
-            _ => ba.ctx.operations.clone(),
-        };
-
         let data = ba.ctx.data_mutable();
         let mut vm = ViewModel {
-            operations,
+            operations: ba.ctx.operations.clone(),
             data: data.clone(),
             ..ViewModel::from_widget("state_toggle", __props)
         };

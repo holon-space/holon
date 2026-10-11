@@ -63,15 +63,33 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
     let icon = state_icon(&current);
 
     let Some(intent) = intent else {
-        // Disclose the degraded (display-only) control: without op wiring or a
-        // row id a click cannot dispatch. A switch degrades to a switch —
-        // falling back to the task glyph here would make an unwired
-        // integration row unreadable as well as inert.
-        tracing::warn!(
-            block_id = row_id.as_deref().unwrap_or("<none>"),
-            "state_toggle: no set_field op wiring or row id for field '{field}' — rendering \
-             display-only"
-        );
+        // Disclose the degraded (display-only) control, and name WHICH of the
+        // two causes it is. A row the write tier refuses is offered no
+        // tier-judged operation BY DESIGN (D46, applied in
+        // `RenderContext::with_operations`) and the tier discloses the file
+        // itself, so warning there reported a wiring defect that does not
+        // exist. An unwired row is the defect, and still warns.
+        match node.row_id() {
+            Some(row)
+                if !holon_frontend::reactive::BuilderServices::write_tier_admits(
+                    &*ctx.services,
+                    &row,
+                ) =>
+            {
+                tracing::debug!(
+                    block_id = %row,
+                    "state_toggle: the write tier refuses this row, so no set_field is offered \
+                     for field '{field}' — rendering display-only"
+                )
+            }
+            row => tracing::warn!(
+                block_id = row.as_ref().map(|r| r.as_str()).unwrap_or("<none>"),
+                "state_toggle: no set_field op wiring or row id for field '{field}' — rendering \
+                 display-only"
+            ),
+        }
+        // A switch degrades to a switch — falling back to the task glyph here
+        // would make an unwired integration row unreadable as well as inert.
         return match appearance {
             StateToggleAppearance::Switch => div()
                 .flex_shrink_0()
