@@ -544,3 +544,141 @@ warning: workspace (manifest) generated 2 warnings
         FAIL [   0.013s] (7/8) holon-profiles tests::an_unterminated_quote_is_refused_naming_the_condition
         FAIL [   0.013s] (8/8) holon-profiles tests::an_escaped_quote_does_not_end_the_string_literal
 error: test run failed
+
+==============================================================
+ROUND 2 RED — backtick literal strings (verifier refutation of 30a97e84)
+Baseline: 30a97e84, whose top_level_conjuncts tracked only " and '.
+==============================================================
+warning: Cargo.toml: unused manifest key: profile.coverage.package.*.pathfinder_simd
+warning: Cargo.toml: unused manifest key: profile.coverage.package.*.psm
+warning: workspace (manifest) generated 2 warnings
+   Compiling holon-profiles v0.1.0 (/Users/martin/Workspaces/pkm/holon/.claude/worktrees/split-cond/crates/holon-profiles)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.49s
+────────────
+ Nextest run ID 6bddf044-bba9-446d-a3a7-ec1af8eabea5 with nextest profile: default
+    Starting 6 tests across 8 binaries (125 tests skipped)
+        FAIL [   0.011s] (1/6) holon-profiles tests::a_backtick_literal_may_hold_an_unmatched_single_quote
+  stdout ───
+
+    running 1 test
+    test tests::a_backtick_literal_may_hold_an_unmatched_single_quote ... FAILED
+
+    failures:
+
+    failures:
+        tests::a_backtick_literal_may_hold_an_unmatched_single_quote
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 76 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'tests::a_backtick_literal_may_hold_an_unmatched_single_quote' (356927507) panicked at crates/holon-profiles/src/lib.rs:1825:71:
+    called `Result::unwrap()` on an `Err` value: malformed condition `x == `it's` && is_focused`: unterminated single quote
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        PASS [   0.011s] (2/6) holon-profiles tests::a_quoted_ampersand_pair_survives_beside_a_real_conjunct
+        FAIL [   0.012s] (3/6) holon-profiles tests::a_backtick_literal_keeps_an_ampersand_pair_across_a_line_break
+  stdout ───
+
+    running 1 test
+    test tests::a_backtick_literal_keeps_an_ampersand_pair_across_a_line_break ... FAILED
+
+    failures:
+
+    failures:
+        tests::a_backtick_literal_keeps_an_ampersand_pair_across_a_line_break
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 76 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'tests::a_backtick_literal_keeps_an_ampersand_pair_across_a_line_break' (356927506) panicked at crates/holon-profiles/src/lib.rs:1835:9:
+    assertion `left == right` failed
+      left: Some("x == `a && b`")
+     right: Some("x == `a\n&& b`")
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        PASS [   0.012s] (4/6) holon-profiles tests::a_backslash_inside_a_backtick_literal_is_not_an_escape
+        FAIL [   0.012s] (5/6) holon-profiles tests::a_backtick_literal_may_hold_an_unmatched_double_quote
+  stdout ───
+
+    running 1 test
+    test tests::a_backtick_literal_may_hold_an_unmatched_double_quote ... FAILED
+
+    failures:
+
+    failures:
+        tests::a_backtick_literal_may_hold_an_unmatched_double_quote
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 76 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'tests::a_backtick_literal_may_hold_an_unmatched_double_quote' (356927510) panicked at crates/holon-profiles/src/lib.rs:1818:71:
+    called `Result::unwrap()` on an `Err` value: malformed condition `x == `a"b` && is_focused`: unterminated double quote
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.012s] (6/6) holon-profiles tests::an_unterminated_backtick_literal_is_refused_naming_the_condition
+  stdout ───
+
+    running 1 test
+    test tests::an_unterminated_backtick_literal_is_refused_naming_the_condition ... FAILED
+
+    failures:
+
+    failures:
+        tests::an_unterminated_backtick_literal_is_refused_naming_the_condition
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 76 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'tests::an_unterminated_backtick_literal_is_refused_naming_the_condition' (356927511) panicked at crates/holon-profiles/src/lib.rs:1850:9:
+    unterminated backtick must be refused by its text, got Ok((Some("x == `a"), Var("is_focused")))
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [   0.013s] 6 tests run: 2 passed, 4 failed, 125 skipped
+        FAIL [   0.011s] (1/6) holon-profiles tests::a_backtick_literal_may_hold_an_unmatched_single_quote
+        FAIL [   0.012s] (3/6) holon-profiles tests::a_backtick_literal_keeps_an_ampersand_pair_across_a_line_break
+        FAIL [   0.012s] (5/6) holon-profiles tests::a_backtick_literal_may_hold_an_unmatched_double_quote
+        FAIL [   0.012s] (6/6) holon-profiles tests::an_unterminated_backtick_literal_is_refused_naming_the_condition
+error: test run failed
+
+==============================================================
+ROUND 2 RED — a_quoted_ampersand_pair_survives_beside_a_real_conjunct
+reworked to discriminate; run against the ORIGINAL source.split("&&").
+==============================================================
+warning: Cargo.toml: unused manifest key: profile.coverage.package.*.pathfinder_simd
+warning: Cargo.toml: unused manifest key: profile.coverage.package.*.psm
+warning: workspace (manifest) generated 2 warnings
+   Compiling holon-profiles v0.1.0 (/Users/martin/Workspaces/pkm/holon/.claude/worktrees/split-cond/crates/holon-profiles)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.54s
+────────────
+ Nextest run ID 9b7c3083-2087-4bb5-a166-e55b885bc419 with nextest profile: default
+    Starting 1 test across 8 binaries (130 tests skipped)
+        FAIL [   0.012s] (1/1) holon-profiles tests::a_quoted_ampersand_pair_survives_beside_a_real_conjunct
+  stdout ───
+
+    running 1 test
+    test tests::a_quoted_ampersand_pair_survives_beside_a_real_conjunct ... FAILED
+
+    failures:
+
+    failures:
+        tests::a_quoted_ampersand_pair_survives_beside_a_real_conjunct
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 76 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'tests::a_quoted_ampersand_pair_survives_beside_a_real_conjunct' (356930013) panicked at crates/holon-profiles/src/lib.rs:1811:9:
+    assertion `left == right` failed
+      left: Some("name == \"a && b\"")
+     right: Some("name == \"a&&b\"")
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [   0.013s] 1 test run: 0 passed, 1 failed, 130 skipped
+        FAIL [   0.012s] (1/1) holon-profiles tests::a_quoted_ampersand_pair_survives_beside_a_real_conjunct
+error: test run failed

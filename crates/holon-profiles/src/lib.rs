@@ -436,7 +436,13 @@ fn split_condition(source: &str) -> Result<(Option<String>, Predicate)> {
 /// literal or inside parentheses belongs to its conjunct, it is not a
 /// boundary.
 ///
-/// An unbalanced parenthesis or an unterminated quote means the condition
+/// All three Rhai literal delimiters are tracked. `"` (string) and `'` (char)
+/// process `\` escapes; a backtick literal string is VERBATIM — `\` is
+/// content and the literal may span lines (rhai tokenizer:
+/// `parse_string_literal` with `verbatim: true`), so a `"` or `'` inside one
+/// opens nothing.
+///
+/// An unbalanced parenthesis or an unterminated literal means the condition
 /// cannot be split faithfully, so it is refused naming the source — splitting
 /// it anyway would hand a silently-wrong predicate to the frontend.
 fn top_level_conjuncts(source: &str) -> Result<Vec<&str>> {
@@ -447,15 +453,20 @@ fn top_level_conjuncts(source: &str) -> Result<Vec<&str>> {
     let mut i = 0;
     while i < bytes.len() {
         match bytes[i] {
-            quote @ (b'"' | b'\'') => {
+            quote @ (b'"' | b'\'' | b'`') => {
+                let verbatim = quote == b'`';
                 i += 1;
                 loop {
                     anyhow::ensure!(
                         i < bytes.len(),
-                        "malformed condition `{source}`: unterminated {} quote",
-                        if quote == b'"' { "double" } else { "single" }
+                        "malformed condition `{source}`: unterminated {} literal",
+                        match quote {
+                            b'"' => "double-quoted",
+                            b'\'' => "single-quoted",
+                            _ => "backtick",
+                        }
                     );
-                    if bytes[i] == b'\\' {
+                    if !verbatim && bytes[i] == b'\\' {
                         i += 1;
                     } else if bytes[i] == quote {
                         break;
@@ -1804,9 +1815,53 @@ mod tests {
 
     #[test]
     fn a_quoted_ampersand_pair_survives_beside_a_real_conjunct() {
-        let (data, ui) = split_condition(r#"name == "a && b" && is_focused"#).unwrap();
-        assert_eq!(data.as_deref(), Some(r#"name == "a && b""#));
+        // The quoted `&&` carries NO surrounding spaces, so a splitter that cut
+        // it and rejoined with `" && "` would alter the literal.
+        let (data, ui) = split_condition(r#"name == "a&&b" && is_focused"#).unwrap();
+        assert_eq!(data.as_deref(), Some(r#"name == "a&&b""#));
         assert_eq!(ui, Predicate::Var("is_focused".into()));
+    }
+
+    #[test]
+    fn a_backtick_literal_may_hold_an_unmatched_double_quote() {
+        // Rhai backtick literal strings are verbatim: a `"` inside one does not
+        // open a string, so this condition compiles and must still split.
+        let (data, ui) = split_condition("x == `a\"b` && is_focused").unwrap();
+        assert_eq!(data.as_deref(), Some("x == `a\"b`"));
+        assert_eq!(ui, Predicate::Var("is_focused".into()));
+    }
+
+    #[test]
+    fn a_backtick_literal_may_hold_an_unmatched_single_quote() {
+        let (data, ui) = split_condition("x == `it's` && is_focused").unwrap();
+        assert_eq!(data.as_deref(), Some("x == `it's`"));
+        assert_eq!(ui, Predicate::Var("is_focused".into()));
+    }
+
+    #[test]
+    fn a_backtick_literal_keeps_an_ampersand_pair_across_a_line_break() {
+        // A backtick literal may span lines; the `&&` inside it is content, so
+        // the literal must come out byte-identical, newline included.
+        let (data, ui) = split_condition("x == `a\n&& b` && is_focused").unwrap();
+        assert_eq!(data.as_deref(), Some("x == `a\n&& b`"));
+        assert_eq!(ui, Predicate::Var("is_focused".into()));
+    }
+
+    #[test]
+    fn a_backslash_inside_a_backtick_literal_is_not_an_escape() {
+        // Verbatim: the `\` is content, so the NEXT backtick closes the literal.
+        let (data, ui) = split_condition("x == `a\\` && is_focused").unwrap();
+        assert_eq!(data.as_deref(), Some("x == `a\\`"));
+        assert_eq!(ui, Predicate::Var("is_focused".into()));
+    }
+
+    #[test]
+    fn an_unterminated_backtick_literal_is_refused_naming_the_condition() {
+        let outcome = split_condition("x == `a && is_focused");
+        assert!(
+            matches!(&outcome, Err(e) if format!("{e:#}").contains("x == `a && is_focused")),
+            "unterminated backtick must be refused by its text, got {outcome:?}"
+        );
     }
 
     #[test]

@@ -45,11 +45,20 @@ keystone PBT authors no profile conditions at all, so no generated interaction
 can reach this state.
 
 ## Remedy
-`top_level_conjuncts` (crates/holon-profiles/src/lib.rs:442) scans bytes,
-tracking quote state (both quote kinds, `\` escapes) and parenthesis depth,
-and splits only on a depth-0 `&&` outside a literal. An unbalanced
-parenthesis or an unterminated quote is refused naming the source condition
-instead of being split wrongly. Pinned by eight unit tests in
-`crates/holon-profiles/src/lib.rs` (`a_double_quoted_ampersand_pair_...`
-through `an_unterminated_quote_is_refused_naming_the_condition`); red log at
-`docs/Testing/red-logs/2026-10-11-split-condition-quotes-parens-RED.txt`.
+`top_level_conjuncts` (crates/holon-profiles/src/lib.rs:448) scans bytes,
+tracking literal state and parenthesis depth, and splits only on a depth-0
+`&&` outside a literal. All three Rhai delimiters are tracked: `"` and `'`
+process `\` escapes, a backtick literal is verbatim (`\` is content, the
+literal may span lines). An unbalanced parenthesis or an unterminated literal
+is refused naming the source condition instead of being split wrongly.
+
+Pinned by thirteen unit tests in `crates/holon-profiles/src/lib.rs`
+(`a_double_quoted_ampersand_pair_...` through
+`an_unterminated_backtick_literal_is_refused_naming_the_condition`); red log
+at `docs/Testing/red-logs/2026-10-11-split-condition-quotes-parens-RED.txt`.
+
+The first fix attempt tracked only `"` and `'`, so `x == \`a"b\` && is_focused`
+— valid Rhai — became a hard refusal. A fresh verifier caught that before the
+lane landed (`target/split-cond-verify.md`); the backtick tests and the
+verbatim rule close it, and the one test that did not discriminate against the
+old splitter was reworked to do so.
