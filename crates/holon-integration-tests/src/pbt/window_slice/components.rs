@@ -496,7 +496,7 @@ impl SutFrontendEmissions for GpuiFrontendEngineComponent {
                 .iter()
                 .filter_map(|row| {
                     let id = row.get("id").and_then(|v| v.as_string())?.to_string();
-                    let ctx = holon_frontend::RenderContext::default().with_row(row.clone());
+                    let ctx = holon_frontend::RenderContext::for_row(row.clone());
                     Some((id, Arc::new(reactive.interpret(&item_template, &ctx))))
                 })
                 .collect();

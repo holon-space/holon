@@ -189,7 +189,7 @@ fn render(services: &QuestionViewServices, dsl: &str, options: &str) -> Reactive
     holon_frontend::shadow_builders::register_render_dsl_widget_names();
     let parsed: RenderExpr = holon_api::render_dsl::parse_render_dsl(dsl)
         .unwrap_or_else(|e| panic!("pending-question profile must parse: {e}\n{dsl}"));
-    let ctx = RenderContext::default().with_row(question_row(options));
+    let ctx = RenderContext::for_row(question_row(options));
     services.interpret(&parsed, &ctx)
 }
 

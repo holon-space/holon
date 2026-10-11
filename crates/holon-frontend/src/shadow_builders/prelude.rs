@@ -145,7 +145,7 @@ pub(crate) fn interpret_virtual_child(
     } else {
         &affordance
     };
-    let row_ctx = ba.ctx.with_row(row);
+    let row_ctx = ba.ctx.with_row(row, ba.services);
     Ok(Some((ba.interpret)(template, &row_ctx)))
 }
 
@@ -179,7 +179,7 @@ fn weave_advice_into_item(ba: &BA<'_>, mut item: ViewModel) -> ViewModel {
     let template = crate::reactive_view::advice_readonly_template();
     for row in advice_rows {
         let occurrence = crate::advice_weaver::advice_row_occurrence(&row);
-        let row_ctx = ba.ctx.with_row(row);
+        let row_ctx = ba.ctx.with_row(row, ba.services);
         let mut vm = (ba.interpret)(&template, &row_ctx);
         vm.occurrence = occurrence;
         item.children.push(Arc::new(vm));

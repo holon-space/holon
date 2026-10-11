@@ -152,7 +152,13 @@ pub struct RenderContext {
     /// which case `data_mutable()` synthesises a one-shot
     /// `Mutable::new(snapshot).read_only()`.
     pub current_row_mutable: Option<ReadOnlyMutable<Arc<DataRow>>>,
+    /// The operations offered to the bound row: [`Self::offered_operations`]
+    /// as the write tier judges that row. Every widget reads its offers here.
     pub operations: Vec<OperationWiring>,
+    /// The operations this context offers before the write tier judges a row.
+    /// Each rebinding of the row judges them again, so an item is offered what
+    /// ITS row is offered, not what the enclosing row was.
+    pub offered_operations: Vec<OperationWiring>,
     /// Input triggers derived from operations. Propagated to ViewModel nodes
     /// so frontends can check them locally on each keystroke.
     pub triggers: Vec<crate::input_trigger::InputTrigger>,
@@ -221,7 +227,7 @@ impl RenderContext {
     /// Shared `ReadOnlyMutable<Arc<DataRow>>` for the bound row.
     ///
     /// Returns the CDC-owned read-only handle when the collection driver
-    /// supplied one (`with_row_mutable`), so all leaves rendered for the
+    /// supplied one (`for_row_mutable`), so all leaves rendered for the
     /// same row share the same `Arc<MutableState>`. The `ReadOnlyMutable`
     /// type makes leaf-side mutation a compile error — only
     /// `ReactiveRowSet::apply_change`, which holds the writable `Mutable`,
@@ -251,21 +257,6 @@ impl RenderContext {
         mut operations: Vec<OperationWiring>,
         services: &dyn BuilderServices,
     ) -> Self {
-        let judged = |w: &OperationWiring| {
-            w.descriptor.entity_name.as_str() == holon_core::WRITE_TIER_ENTITY
-        };
-        // The subject the dispatcher judges is the id a click sends, which is
-        // this context's bound row. Resolved only when there is a judged
-        // operation to withhold, so an ordinary row pays one vec scan.
-        let subject = operations
-            .iter()
-            .any(judged)
-            .then(|| holon_api::row_id_of(self.row()).entity())
-            .flatten();
-        if subject.is_some_and(|s| !services.write_tier_admits(&s)) {
-            operations.retain(|w| !judged(w));
-        }
-
         let bindings = services.key_bindings_snapshot();
         if !bindings.is_empty() {
             for op in &mut operations {
@@ -276,12 +267,35 @@ impl RenderContext {
                 }
             }
         }
-        let triggers = crate::input_trigger::default_triggers_for_operations(&operations);
         Self {
-            operations,
-            triggers,
+            offered_operations: operations,
             ..self.clone()
         }
+        .judged_for_row(services)
+    }
+
+    /// `operations` and `triggers` from `offered_operations`, as the write
+    /// tier judges the bound row.
+    fn judged_for_row(mut self, services: &dyn BuilderServices) -> Self {
+        let judged = |w: &OperationWiring| {
+            w.descriptor.entity_name.as_str() == holon_core::WRITE_TIER_ENTITY
+        };
+        // The subject the dispatcher judges is the id a click sends, which is
+        // this context's bound row. Resolved only when there is a judged
+        // operation to withhold, so an ordinary row pays one vec scan.
+        let subject = self
+            .offered_operations
+            .iter()
+            .any(judged)
+            .then(|| holon_api::row_id_of(self.row()).entity())
+            .flatten();
+        let mut operations = self.offered_operations.clone();
+        if subject.is_some_and(|s| !services.write_tier_admits(&s)) {
+            operations.retain(|w| !judged(w));
+        }
+        self.triggers = crate::input_trigger::default_triggers_for_operations(&operations);
+        self.operations = operations;
+        self
     }
 
     /// Bind a single row for leaf widget resolution.
@@ -291,16 +305,28 @@ impl RenderContext {
     /// builders like `pref_field` that search the full set).
     ///
     /// Clears `current_row_mutable` because the snapshot path has no shared
-    /// CDC handle. Live drivers must use `with_row_mutable` instead.
-    pub fn with_row(&self, row: Arc<DataRow>) -> Self {
+    /// CDC handle. Live drivers must use `for_row_mutable` instead.
+    ///
+    /// Judges the offered operations again for the new row.
+    pub fn with_row(&self, row: Arc<DataRow>, services: &dyn BuilderServices) -> Self {
         Self {
             current_row: Some(row),
             current_row_mutable: None,
             ..self.clone()
         }
+        .judged_for_row(services)
     }
 
-    /// Bind a row via a CDC-owned `ReadOnlyMutable` handle.
+    /// A context with `row` bound and nothing offered yet.
+    pub fn for_row(row: Arc<DataRow>) -> Self {
+        Self {
+            current_row: Some(row),
+            ..Self::default()
+        }
+    }
+
+    /// A context with a row bound via a CDC-owned `ReadOnlyMutable` handle,
+    /// and nothing offered yet.
     ///
     /// All leaves rendered under this context share the same
     /// `Arc<MutableState>` — when `ReactiveRowSet::apply_change` writes the
@@ -311,12 +337,11 @@ impl RenderContext {
     /// `ReactiveRowSet`". The `current_row` snapshot is also set so
     /// synchronous reads (`row()`, `row_arc()`) resolve immediately during
     /// interpretation.
-    pub fn with_row_mutable(&self, handle: ReadOnlyMutable<Arc<DataRow>>) -> Self {
-        let snapshot = handle.get_cloned();
+    pub fn for_row_mutable(handle: ReadOnlyMutable<Arc<DataRow>>) -> Self {
         Self {
-            current_row: Some(snapshot),
+            current_row: Some(handle.get_cloned()),
             current_row_mutable: Some(handle),
-            ..self.clone()
+            ..Self::default()
         }
     }
 
@@ -423,7 +448,7 @@ mod tests {
         let row: Arc<DataRow> = Arc::new(HashMap::new());
         let ctx = RenderContext::default()
             .with_available_space(space)
-            .with_row(row.clone());
+            .with_row(row.clone(), &crate::reactive::StubBuilderServices::new());
         assert_eq!(ctx.available_space, Some(space));
         assert!(ctx.current_row.is_some());
     }
@@ -432,9 +457,7 @@ mod tests {
     fn with_row_then_with_available_space_preserves_both() {
         let space = sample_space();
         let row: Arc<DataRow> = Arc::new(HashMap::new());
-        let ctx = RenderContext::default()
-            .with_row(row)
-            .with_available_space(space);
+        let ctx = RenderContext::for_row(row).with_available_space(space);
         assert_eq!(ctx.available_space, Some(space));
         assert!(ctx.current_row.is_some());
     }
@@ -462,8 +485,7 @@ mod tests {
         let admitting = crate::reactive::StubBuilderServices::new();
         let refusing = crate::reactive::StubBuilderServices::new().with_write_refused(subject);
         let offered = |services: &dyn BuilderServices| -> Vec<String> {
-            RenderContext::default()
-                .with_row(Arc::clone(&row))
+            RenderContext::for_row(Arc::clone(&row))
                 .with_operations(ops.clone(), services)
                 .operations
                 .iter()
@@ -494,9 +516,8 @@ mod tests {
                 .expect("parses");
         let bound =
             |services: &crate::reactive::StubBuilderServices| -> Vec<(String, Vec<String>)> {
-                let ctx = RenderContext::default()
-                    .with_row(Arc::clone(&row))
-                    .with_operations(ops.clone(), services);
+                let ctx =
+                    RenderContext::for_row(Arc::clone(&row)).with_operations(ops.clone(), services);
                 let column = services.interpret(&expr, &ctx);
                 column
                     .children
@@ -554,10 +575,7 @@ mod tests {
             let entity =
                 holon_api::render_dsl::parse_render_dsl("render_entity()").expect("parses");
             let root = |services: crate::reactive::StubBuilderServices| {
-                services.interpret(
-                    &entity,
-                    &RenderContext::default().with_row(Arc::clone(&row)),
-                )
+                services.interpret(&entity, &RenderContext::for_row(Arc::clone(&row)))
             };
 
             let writable =
@@ -598,9 +616,8 @@ mod tests {
         ];
         let expr = holon_api::render_dsl::parse_render_dsl(r#"card(text("x"))"#).expect("parses");
         let carried = |services: &crate::reactive::StubBuilderServices| -> Vec<String> {
-            let ctx = RenderContext::default()
-                .with_row(Arc::clone(&row))
-                .with_operations(ops.clone(), services);
+            let ctx =
+                RenderContext::for_row(Arc::clone(&row)).with_operations(ops.clone(), services);
             services
                 .interpret(&expr, &ctx)
                 .operations
@@ -616,6 +633,77 @@ mod tests {
             vec!["move_block", "set_field", "focus"]
         );
         assert_eq!(carried(&refusing), vec!["focus"]);
+    }
+
+    /// A collection item judged against the write tier is judged as ITSELF,
+    /// not as the row whose context it renders in: binding the item's row
+    /// re-judges the operations the enclosing context carries.
+    #[test]
+    fn a_static_board_item_is_offered_what_its_own_row_is_offered() {
+        crate::shadow_builders::register_render_dsl_widget_names();
+        let parent = holon_api::EntityUri::parse("block:board-parent").expect("parses");
+        let read_only = holon_api::EntityUri::parse("block:read-only-item").expect("parses");
+        let writable = holon_api::EntityUri::parse("block:writable-item").expect("parses");
+        let parent_row: Arc<DataRow> = Arc::new(HashMap::from([(
+            "id".to_string(),
+            holon_api::Value::String(parent.to_string()),
+        )]));
+        let ops = vec![
+            wiring(holon_core::WRITE_TIER_ENTITY, "move_block"),
+            wiring(holon_core::WRITE_TIER_ENTITY, "set_field"),
+        ];
+        let offered_per_item = |services: &crate::reactive::StubBuilderServices,
+                                tmpl: &str|
+         -> Vec<(String, Vec<String>)> {
+            let ctx = RenderContext::for_row(Arc::clone(&parent_row))
+                .with_operations(ops.clone(), services);
+            let src = format!(
+                r#"board(#{{lane_field: "task_state", item_template: {tmpl}, rows: [#{{id: "{read_only}", task_state: "TODO"}}, #{{id: "{writable}", task_state: "TODO"}}]}})"#
+            );
+            let expr = holon_api::render_dsl::parse_render_dsl(&src).expect("parses");
+            let board = services.interpret(&expr, &ctx);
+            let lane = board.children.first().expect("one lane");
+            lane.children
+                .iter()
+                .map(|item| {
+                    (
+                        item.prop_str("row_id")
+                            .expect("a static card names its row"),
+                        item.operations
+                            .iter()
+                            .map(|w| w.descriptor.name.clone())
+                            .collect(),
+                    )
+                })
+                .collect()
+        };
+
+        for (tmpl, expected) in [
+            (r#"card(text("x"))"#, vec!["move_block", "set_field"]),
+            (r#"draggable(text("x"))"#, vec!["move_block"]),
+            ("drop_zone()", vec!["move_block"]),
+        ] {
+            let expected: Vec<String> = expected.into_iter().map(String::from).collect();
+            let want = vec![
+                (read_only.to_string(), Vec::<String>::new()),
+                (writable.to_string(), expected),
+            ];
+            let under_writable_parent =
+                crate::reactive::StubBuilderServices::new().with_write_refused(read_only.clone());
+            assert_eq!(
+                offered_per_item(&under_writable_parent, tmpl),
+                want,
+                "{tmpl} under a writable parent"
+            );
+            let under_read_only_parent = crate::reactive::StubBuilderServices::new()
+                .with_write_refused(read_only.clone())
+                .with_write_refused(parent.clone());
+            assert_eq!(
+                offered_per_item(&under_read_only_parent, tmpl),
+                want,
+                "{tmpl} under a read-only parent"
+            );
+        }
     }
 
     fn wiring(entity_name: &str, name: &str) -> OperationWiring {

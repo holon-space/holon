@@ -18,7 +18,7 @@ pub fn build(ba: BA) -> AnyView {
             .ctx
             .data_rows
             .iter()
-            .map(|row| (ba.interpret)(tmpl, &ba.ctx.with_row(row.clone())))
+            .map(|row| (ba.interpret)(tmpl, &ba.ctx.with_row(row.clone(), ba.services)))
             .collect();
         return AnyView::new(vstack(views).spacing(2.0));
     }

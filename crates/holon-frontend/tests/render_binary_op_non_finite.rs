@@ -41,7 +41,7 @@ fn overflowing_binary_op_over_a_column_renders_an_error_node() {
             left: column("x"),
             right: literal(b),
         };
-        let ctx = RenderContext::default().with_row(Arc::new(row));
+        let ctx = RenderContext::for_row(Arc::new(row));
         let vm = StubBuilderServices::new().interpret(&expr, &ctx).snapshot();
         match vm.kind {
             ViewKind::Error { message } => assert!(
@@ -76,7 +76,7 @@ fn operation_params_built_from_an_overflowing_expression_are_refused() {
         name: "block.set_ratio".to_string(),
         args: vec![overflowing_arg()],
     };
-    let ctx = RenderContext::default().with_row(Arc::new(row_with_huge_x()));
+    let ctx = RenderContext::for_row(Arc::new(row_with_huge_x()));
     let err =
         holon_frontend::operations::parse_action_expr(&action, &StubBuilderServices::new(), &ctx)
             .expect_err("a non-finite param must refuse the operation");
@@ -93,7 +93,7 @@ fn widget_args_built_from_an_overflowing_expression_render_an_error_node() {
         name: "text".to_string(),
         args: vec![overflowing_arg()],
     };
-    let ctx = RenderContext::default().with_row(Arc::new(row_with_huge_x()));
+    let ctx = RenderContext::for_row(Arc::new(row_with_huge_x()));
     let vm = StubBuilderServices::new().interpret(&expr, &ctx).snapshot();
     match vm.kind {
         ViewKind::Error { message } => assert!(

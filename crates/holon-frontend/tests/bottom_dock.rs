@@ -43,7 +43,7 @@ fn interpret(expr: &RenderExpr, row: Option<Arc<DataRow>>) -> ReactiveViewModel 
     let services = StubBuilderServices::new();
     let mut ctx = RenderContext::default();
     if let Some(r) = row {
-        ctx = ctx.with_row(r);
+        ctx = ctx.with_row(r, &services);
     }
     services.interpret(expr, &ctx)
 }

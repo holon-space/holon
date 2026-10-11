@@ -26,12 +26,12 @@ pub fn build(ba: BA) -> AnyView {
     }
 
     if rows.is_empty() {
-        return (ba.interpret)(tmpl, &ba.ctx.with_row(Default::default()));
+        return (ba.interpret)(tmpl, &ba.ctx.with_row(Default::default(), ba.services));
     }
 
     let views: Vec<AnyView> = rows
         .iter()
-        .map(|row| (ba.interpret)(tmpl, &ba.ctx.with_row(row.clone())))
+        .map(|row| (ba.interpret)(tmpl, &ba.ctx.with_row(row.clone(), ba.services)))
         .collect();
 
     AnyView::new(hstack(views).spacing(16.0))
@@ -43,12 +43,16 @@ fn build_screen_layout(
     rows: &[std::sync::Arc<holon_api::widget_spec::DataRow>],
 ) -> AnyView {
     if rows.is_empty() {
-        return (ba.interpret)(tmpl, &ba.ctx.with_row(Default::default()));
+        return (ba.interpret)(tmpl, &ba.ctx.with_row(Default::default(), ba.services));
     }
 
     let partition: ScreenLayoutPartition<AnyView> =
         render_eval::partition_screen_columns(rows, |row| {
-            (ba.interpret)(tmpl, &ba.ctx.with_row(std::sync::Arc::new(row.clone())))
+            (ba.interpret)(
+                tmpl,
+                &ba.ctx
+                    .with_row(std::sync::Arc::new(row.clone()), ba.services),
+            )
         });
 
     let main_content = if partition.main.len() == 1 {

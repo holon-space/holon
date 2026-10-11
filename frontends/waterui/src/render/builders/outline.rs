@@ -37,7 +37,7 @@ pub fn build(ba: BA) -> AnyView {
     let tree = OutlineTree::from_rows(rows, parent_id_col, sort_col);
     let views = tree.walk_depth_first(|row, depth| {
         let indent = (depth as f32) * 16.0;
-        let row_ctx = ba.ctx.with_row(row.clone());
+        let row_ctx = ba.ctx.with_row(row.clone(), ba.services);
         let content = (ba.interpret)(tmpl, &row_ctx);
         if indent > 0.0 {
             AnyView::new(hstack(vec![AnyView::new(spacer().width(indent)), content]))

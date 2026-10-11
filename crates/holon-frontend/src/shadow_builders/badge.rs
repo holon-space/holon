@@ -49,7 +49,7 @@ mod tests {
         let mut row = DataRow::new();
         row.insert("id".to_string(), Value::String(id.to_string()));
         row.insert("content".to_string(), Value::String("hello".to_string()));
-        let ctx = crate::RenderContext::default().with_row(Arc::new(row));
+        let ctx = crate::RenderContext::for_row(Arc::new(row));
         let expr = holon_api::render_dsl::parse_render_dsl(src).expect("render DSL parses");
         StubBuilderServices::new().interpret(&expr, &ctx)
     }

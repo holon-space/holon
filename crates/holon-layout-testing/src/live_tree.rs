@@ -180,7 +180,7 @@ mod tests {
         )
         .expect("the source parses");
         let services = holon_frontend::StubBuilderServices::new();
-        let ctx = holon_frontend::RenderContext::default().with_row(std::sync::Arc::new(
+        let ctx = holon_frontend::RenderContext::for_row(std::sync::Arc::new(
             holon_api::widget_spec::DataRow::from([(
                 "n".to_string(),
                 holon_api::Value::Integer(9),

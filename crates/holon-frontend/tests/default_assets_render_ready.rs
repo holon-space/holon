@@ -302,11 +302,8 @@ fn every_shipped_render_source_draws_no_error_node() {
         let expr = holon_api::render_dsl::parse_render_dsl(source)
             .unwrap_or_else(|e| panic!("{label} does not parse: {e:#}"));
         let row = Arc::new(source_row(label, &expr));
-        let over = |row: Arc<DataRow>| {
-            RenderContext::default()
-                .with_row(row.clone())
-                .with_data_rows(vec![row])
-        };
+        let over =
+            |row: Arc<DataRow>| RenderContext::for_row(row.clone()).with_data_rows(vec![row]);
         let renders = std::iter::once(("source".to_string(), &expr, over(row.clone()))).chain(
             item_templates(&expr)
                 .into_iter()
@@ -381,10 +378,7 @@ fn the_root_layout_draws_exactly_its_perspective_panels() {
         drawn, panels,
         "index.org: the layout must draw exactly the perspective's displayable panels"
     );
-    let json = render_json(
-        &layout,
-        &RenderContext::default().with_row(Arc::new(DataRow::new())),
-    );
+    let json = render_json(&layout, &RenderContext::for_row(Arc::new(DataRow::new())));
     let errors = error_messages(&json);
     assert!(
         errors.is_empty(),

@@ -2236,7 +2236,7 @@ impl crate::render_interpreter::WithEntity for ReactiveViewModel {
         // `attach_entity` is called by `shared_tree_build` for nested
         // children where no shared CDC handle is available — so the new
         // node carries a snapshot, not a shared signal source. Live data
-        // sources should construct via `with_row_mutable` on the
+        // sources should construct via `for_row_mutable` on the
         // `RenderContext` instead.
         self.data = Mutable::new(entity).read_only();
         self.bound_id = entity_id;

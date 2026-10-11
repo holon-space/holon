@@ -113,7 +113,7 @@ fn shipped() -> Shipped {
 fn row_ctx() -> RenderContext {
     let mut row = DataRow::new();
     row.insert("id".to_string(), Value::String("block:b1".to_string()));
-    RenderContext::default().with_row(Arc::new(row))
+    RenderContext::for_row(Arc::new(row))
 }
 
 /// `Some(widget)` when `err` refuses a call to the registered `widget`.

@@ -333,7 +333,7 @@ fn build(services: &Arc<ExpandStoreServices>) -> Arc<ReactiveViewModel> {
     let mut row = DataRow::new();
     row.insert("id".into(), Value::String(format!("block:{TARGET}")));
     row.insert("content".into(), Value::String("A Nested Page".into()));
-    let ctx = FrontendRenderContext::default().with_row(Arc::new(row));
+    let ctx = FrontendRenderContext::for_row(Arc::new(row));
     Arc::new(services.interpret(&expr, &ctx))
 }
 
@@ -490,7 +490,7 @@ fn build_over(
     holon_frontend::shadow_builders::register_render_dsl_widget_names();
     let expr =
         holon_api::render_dsl::parse_render_dsl(EMBEDDED_PAGE).expect("embedded_page DSL parses");
-    let ctx = FrontendRenderContext::default().with_row_mutable(row.read_only());
+    let ctx = FrontendRenderContext::for_row_mutable(row.read_only());
     Arc::new(services.interpret(&expr, &ctx))
 }
 
@@ -711,7 +711,7 @@ fn an_opened_nested_page_paints_its_children(cx: &mut TestAppContext) {
     holon_frontend::shadow_builders::register_render_dsl_widget_names();
     let expr = holon_api::render_dsl::parse_render_dsl(EMBEDDED_PAGE_LIVE)
         .expect("embedded_page live DSL parses");
-    let ctx = FrontendRenderContext::default().with_row(row_with(false));
+    let ctx = FrontendRenderContext::for_row(row_with(false));
     let vm = Arc::new(services.interpret(&expr, &ctx));
 
     let bounds = BoundsRegistry::new();
@@ -854,7 +854,7 @@ fn probe_variant(cx: &mut TestAppContext, label: &str, dsl: &str) {
     holon_frontend::shadow_builders::register_render_dsl_widget_names();
     let expr = holon_api::render_dsl::parse_render_dsl(dsl)
         .unwrap_or_else(|e| panic!("shipped embedded_page DSL parses ({label}): {e}"));
-    let ctx = FrontendRenderContext::default().with_row(row_with(false));
+    let ctx = FrontendRenderContext::for_row(row_with(false));
     let vm = Arc::new(services.interpret(&expr, &ctx));
 
     let bounds = BoundsRegistry::new();

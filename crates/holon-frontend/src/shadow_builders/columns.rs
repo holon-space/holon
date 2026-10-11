@@ -196,7 +196,7 @@ holon_macros::widget_builder! {
                         if let holon_api::RowId::Unusable(refusal) = row_id {
                             return ViewModel::refused_row(&refusal);
                         }
-                        let row_ctx = ba.ctx.with_row(row);
+                        let row_ctx = ba.ctx.with_row(row, ba.services);
                         let row_ctx = match row_ctx.available_space {
                             Some(p) => row_ctx.with_available_space(partition(p, count, gap)),
                             None => row_ctx,

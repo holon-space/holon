@@ -335,7 +335,7 @@ fn record_case_panic(info: &std::panic::PanicHookInfo<'_>) -> bool {
 /// reactive views started, and walks the row through `call.changes`.
 fn build(services: &Arc<dyn BuilderServices>, call: &Call) -> Result<(), TestCaseError> {
     let row = Mutable::new(Arc::new(call.row.clone()));
-    let ctx = RenderContext::default().with_row_mutable(row.read_only());
+    let ctx = RenderContext::for_row_mutable(row.read_only());
     let rt = services.runtime_handle();
     CASE_PANICS.with(|log| *log.borrow_mut() = Some(Vec::new()));
     let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -718,7 +718,10 @@ fn layout_ctx(case: &LayoutCase) -> RenderContext {
         data_source: Some(Arc::new(SyntheticRows::from_rows(Vec::new()))),
         ..RenderContext::default()
     }
-    .with_row(Arc::new(case.row.clone()))
+    .with_row(
+        Arc::new(case.row.clone()),
+        &holon_frontend::reactive::StubBuilderServices::new(),
+    )
 }
 
 fn build_leg(services: &Arc<dyn BuilderServices>, case: &LayoutCase) -> Answer {
@@ -1044,7 +1047,7 @@ impl TypedParamCase {
         arg.map_or(Value::Null, |arg| {
             let services = StubBuilderServices::new();
             let row = typed_param_row();
-            let ctx = RenderContext::default().with_row(Arc::new(row.clone()));
+            let ctx = RenderContext::for_row(Arc::new(row.clone()));
             let fns = services.value_fn_lookup(&ctx);
             let value = holon_api::render_eval::eval_to_interp(
                 &arg.value,
@@ -1103,7 +1106,7 @@ fn every_typed_param_is_honoured_or_refused() {
             }
         };
         let row = Arc::new(typed_param_row());
-        let ctx = RenderContext::default().with_row(row.clone());
+        let ctx = RenderContext::for_row(row.clone());
         let node = services.interpret(&expr, &ctx);
         let key = case.param.name;
         if case.positional && matches!(case.param.positional, Positional::Child) {
@@ -1331,7 +1334,7 @@ fn a_view_mode_switcher_draws_the_mode_it_marks_active() {
             data_source: Some(Arc::new(SyntheticRows::from_rows(Vec::new()))),
             ..RenderContext::default()
         }
-        .with_row(Arc::new(typed_param_row()));
+        .with_row(Arc::new(typed_param_row()), &*services);
         let vm = services.interpret(&expr, &ctx);
         let Some(first) = case.first_mode() else {
             let message = vm.prop_str("message").filter(|_| vm.is_error());

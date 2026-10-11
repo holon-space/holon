@@ -51,7 +51,7 @@ fn row(pairs: &[(&str, Value)]) -> Arc<DataRow> {
 async fn rendered_content(column: &str, r: Arc<DataRow>) -> ReactiveViewModel {
     let services = StubBuilderServices::new();
     let cell = Mutable::new(r).read_only();
-    let ctx = RenderContext::default().with_row_mutable(cell.clone());
+    let ctx = RenderContext::for_row_mutable(cell.clone());
     let vm = services.interpret(&text_of(col(column)), &ctx);
     // The derivation runs on a spawned task; give it a chance to land.
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -108,7 +108,7 @@ async fn absent_column_keeps_the_build_time_snapshot() {
     let services = StubBuilderServices::new();
     let full = row(&[("session_count", Value::Integer(7))]);
     let cell = Mutable::new(full);
-    let ctx = RenderContext::default().with_row_mutable(cell.read_only());
+    let ctx = RenderContext::for_row_mutable(cell.read_only());
     let vm = services.interpret(&text_of(col("session_count")), &ctx);
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     assert_eq!(vm.prop_str("content").as_deref(), Some("7"));

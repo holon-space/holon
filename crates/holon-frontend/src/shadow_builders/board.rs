@@ -242,7 +242,7 @@ fn build_static_card(
     if let holon_api::RowId::Unusable(refusal) = row_id {
         return ViewModel::refused_row(&refusal);
     }
-    let row_ctx = ba.ctx.with_row(row.clone());
+    let row_ctx = ba.ctx.with_row(row.clone(), ba.services);
     let card_vm = (ba.interpret)(tmpl, &row_ctx);
     let row_id_val = row_id.entity().map(|uri| uri.to_string());
     let parent_id_val = row

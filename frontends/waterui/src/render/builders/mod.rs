@@ -79,7 +79,7 @@ pub fn create_interpreter() -> RenderInterpreter<AnyView> {
                     ba.ctx
                         .data_rows
                         .iter()
-                        .map(|row| (ba.interpret)(tmpl, &ba.ctx.with_row(row.clone())))
+                        .map(|row| (ba.interpret)(tmpl, &ba.ctx.with_row(row.clone(), ba.services)))
                         .collect()
                 };
                 AnyView::new(vstack(views))

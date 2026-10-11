@@ -165,7 +165,7 @@ mod tests {
         let mut row = DataRow::new();
         row.insert("id".into(), Value::String("block:page-a".into()));
         row.insert("content".into(), Value::String("A Page".into()));
-        let ctx = crate::RenderContext::default().with_row(Arc::new(row));
+        let ctx = crate::RenderContext::for_row(Arc::new(row));
         let services = StubBuilderServices::new();
         let vm = services.interpret(&expr, &ctx);
         assert_eq!(vm.widget_name().as_deref(), Some("expand_toggle"));

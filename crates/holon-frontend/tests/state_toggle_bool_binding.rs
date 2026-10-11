@@ -50,7 +50,7 @@ fn bool_toggle_expr() -> RenderExpr {
 fn build(r: Arc<DataRow>) -> (ReactiveViewModel, Mutable<Arc<DataRow>>) {
     let services = StubBuilderServices::new();
     let cell = Mutable::new(r);
-    let ctx = RenderContext::default().with_row_mutable(cell.clone().read_only());
+    let ctx = RenderContext::for_row_mutable(cell.clone().read_only());
     let vm = services.interpret(&bool_toggle_expr(), &ctx);
     (vm, cell)
 }

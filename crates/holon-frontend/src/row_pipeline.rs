@@ -197,7 +197,7 @@ where
     F: Fn(&RenderExpr, &RenderContext) -> W,
     W: WithEntity,
 {
-    let row_ctx = base_ctx.with_row(Arc::clone(row));
+    let row_ctx = base_ctx.with_row(Arc::clone(row), services);
     let ops: Vec<OperationWiring> = services
         .resolve_profile(row_ctx.row())
         .map(|p| {

@@ -715,7 +715,7 @@ pub fn shared_tree_build<W: WithEntity>(
         // which resolve their own profile downstream.
         let row_ctx = RenderContext {
             depth: ba.ctx.depth + depth,
-            ..ba.ctx.with_row(Arc::clone(resolved_row))
+            ..ba.ctx.with_row(Arc::clone(resolved_row), ba.services)
         };
         let is_context_root = context_root_id.as_deref().is_some_and(|cid| {
             resolved_row

@@ -68,8 +68,8 @@ pub(crate) fn row_render_context(
     parent_space: Option<AvailableSpace>,
 ) -> crate::RenderContext {
     let mut base = match handle {
-        Some(h) => crate::RenderContext::default().with_row_mutable(h),
-        None => crate::RenderContext::default().with_row(row),
+        Some(h) => crate::RenderContext::for_row_mutable(h),
+        None => crate::RenderContext::for_row(row),
     };
     if let Some(space) = parent_space {
         base = base.with_available_space(space);
@@ -3157,7 +3157,7 @@ mod tests {
     /// The node the full interpret path renders for `expr` over `row`.
     fn fully_interpreted(expr: &RenderExpr, row: DataRow) -> ReactiveViewModel {
         use crate::reactive::BuilderServices;
-        let ctx = crate::RenderContext::default().with_row(Arc::new(row));
+        let ctx = crate::RenderContext::for_row(Arc::new(row));
         StubBuilderServices::new().interpret(expr, &ctx)
     }
 
@@ -3803,7 +3803,7 @@ mod tests {
 
         let node = services.interpret(
             &creation_affordance_template(),
-            &crate::RenderContext::default().with_row(row),
+            &crate::RenderContext::for_row(row),
         );
 
         fn names(n: &ReactiveViewModel, out: &mut Vec<String>) {
@@ -3849,7 +3849,7 @@ mod tests {
         let row = Arc::new(row);
 
         let expr = advice_readonly_template();
-        let ctx = crate::RenderContext::default().with_row(row);
+        let ctx = crate::RenderContext::for_row(row);
         let node = services.interpret(&expr, &ctx);
 
         // Collect every widget name + find the op_button / selectable nodes.

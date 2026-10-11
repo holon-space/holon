@@ -152,7 +152,7 @@ fn a_tree_row_whose_id_forms_no_uri_renders_an_error_node_naming_it() {
 fn a_bare_node_over_a_refused_row_renders_an_error_node() {
     holon_frontend::shadow_builders::register_render_dsl_widget_names();
     let expr = holon_api::render_dsl::parse_render_dsl("live_block()").expect("dsl should parse");
-    let ctx = RenderContext::default().with_row_mutable(Mutable::new(bad_row()).read_only());
+    let ctx = RenderContext::for_row_mutable(Mutable::new(bad_row()).read_only());
 
     let vm = StubBuilderServices::new().interpret(&expr, &ctx);
 
@@ -223,7 +223,7 @@ fn the_origin_of_a_row_whose_id_contains_the_marker_does_not_unwind() {
 fn a_transclude_target_that_forms_no_uri_renders_an_error_node() {
     holon_frontend::shadow_builders::register_render_dsl_widget_names();
     let expr = holon_api::render_dsl::parse_render_dsl("transclude()").expect("dsl should parse");
-    let ctx = RenderContext::default().with_row_mutable(
+    let ctx = RenderContext::for_row_mutable(
         Mutable::new(row_with(&[
             ("id", "block:ok"),
             ("target_uri", "block:my task"),
@@ -243,7 +243,7 @@ fn a_transclude_target_that_forms_no_uri_renders_an_error_node() {
 fn a_drawer_over_a_refused_row_renders_an_error_node() {
     holon_frontend::shadow_builders::register_render_dsl_widget_names();
     let expr = holon_api::render_dsl::parse_render_dsl("drawer()").expect("dsl should parse");
-    let ctx = RenderContext::default().with_row_mutable(Mutable::new(bad_row()).read_only());
+    let ctx = RenderContext::for_row_mutable(Mutable::new(bad_row()).read_only());
 
     let vm = StubBuilderServices::new().interpret(&expr, &ctx);
 
@@ -271,7 +271,7 @@ fn a_drawer_over_a_row_without_an_id_column_names_no_entity() {
     holon_frontend::shadow_builders::register_render_dsl_widget_names();
     let expr = holon_api::render_dsl::parse_render_dsl("drawer()").expect("dsl should parse");
     let row = row_with(&[("content", "hello")]);
-    let ctx = RenderContext::default().with_row_mutable(Mutable::new(row).read_only());
+    let ctx = RenderContext::for_row_mutable(Mutable::new(row).read_only());
 
     let vm = StubBuilderServices::new().interpret(&expr, &ctx);
 
@@ -305,7 +305,7 @@ fn question_row(id: Option<&str>) -> Arc<DataRow> {
 fn interpret_over(dsl: &str, row: Arc<DataRow>) -> ReactiveViewModel {
     holon_frontend::shadow_builders::register_render_dsl_widget_names();
     let expr = holon_api::render_dsl::parse_render_dsl(dsl).expect("dsl should parse");
-    let ctx = RenderContext::default().with_row_mutable(Mutable::new(row).read_only());
+    let ctx = RenderContext::for_row_mutable(Mutable::new(row).read_only());
     StubBuilderServices::new().interpret(&expr, &ctx)
 }
 
@@ -398,7 +398,7 @@ fn a_variant_profile_over_a_row_that_names_no_entity_does_not_unwind() {
     };
     let services = StubBuilderServices::new().with_profile(profile);
     let expr = holon_api::render_dsl::parse_render_dsl("render_entity()").expect("dsl");
-    let ctx = RenderContext::default().with_row_mutable(Mutable::new(bad_row()).read_only());
+    let ctx = RenderContext::for_row_mutable(Mutable::new(bad_row()).read_only());
 
     let vm = services.interpret(&expr, &ctx);
 

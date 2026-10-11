@@ -227,7 +227,7 @@ fn expanded_chat_view(services: &ChatViewServices, entity: &str) -> Arc<Reactive
     } else {
         session_row()
     };
-    let ctx = RenderContext::default().with_row(row);
+    let ctx = RenderContext::for_row(row);
     let vm = interpret_with(services, &dsl, &ctx);
     assert_eq!(vm.widget_name().as_deref(), Some("expand_toggle"));
     vm.lazy_slot

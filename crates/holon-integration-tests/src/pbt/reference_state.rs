@@ -1740,7 +1740,7 @@ impl ReferenceState {
             return false;
         };
         let row = std::sync::Arc::new(block_to_data_row(block));
-        let ctx = holon_frontend::RenderContext::default().with_row(row);
+        let ctx = holon_frontend::RenderContext::for_row(row);
         let vm = self.interpret(&item_template, &ctx);
         view_model_has_widget(&vm, widgets)
     }

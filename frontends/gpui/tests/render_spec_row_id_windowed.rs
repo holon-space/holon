@@ -32,7 +32,7 @@ fn node_for_row(dsl: &str, id: &str) -> Arc<ReactiveViewModel> {
     let mut row = DataRow::new();
     row.insert("id".to_string(), Value::String(id.to_string()));
     row.insert("content".to_string(), Value::String("hello".to_string()));
-    let ctx = RenderContext::default().with_row_mutable(Mutable::new(Arc::new(row)).read_only());
+    let ctx = RenderContext::for_row_mutable(Mutable::new(Arc::new(row)).read_only());
     let expr = holon_api::render_dsl::parse_render_dsl(dsl).expect("dsl should parse");
     Arc::new(StubBuilderServices::new().interpret(&expr, &ctx))
 }

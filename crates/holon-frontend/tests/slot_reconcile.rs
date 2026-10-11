@@ -35,7 +35,7 @@ fn live_text(services: &StubBuilderServices, cell: &Mutable<Arc<DataRow>>) -> Re
     holon_frontend::shadow_builders::register_render_dsl_widget_names();
     let expr = holon_api::render_dsl::parse_render_dsl("text(col(\"content\"))")
         .expect("dsl should parse");
-    let ctx = RenderContext::default().with_row_mutable(cell.read_only());
+    let ctx = RenderContext::for_row_mutable(cell.read_only());
     services.interpret(&expr, &ctx)
 }
 

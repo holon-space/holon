@@ -19,7 +19,10 @@ pub fn build(ba: BA) -> AnyView {
             views.push((ba.interpret)(tmpl, ba.ctx));
         } else {
             for row in &ba.ctx.data_rows {
-                views.push((ba.interpret)(tmpl, &ba.ctx.with_row(row.clone())));
+                views.push((ba.interpret)(
+                    tmpl,
+                    &ba.ctx.with_row(row.clone(), ba.services),
+                ));
             }
         }
     }

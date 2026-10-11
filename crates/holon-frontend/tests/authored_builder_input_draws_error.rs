@@ -15,7 +15,7 @@ fn render_json_over(dsl: &str, row: DataRow) -> serde_json::Value {
     let expr = holon_api::render_dsl::parse_render_dsl(dsl)
         .unwrap_or_else(|e| panic!("{dsl} does not parse: {e:#}"));
     let services = StubBuilderServices::new();
-    let ctx = RenderContext::default().with_row(Arc::new(row));
+    let ctx = RenderContext::for_row(Arc::new(row));
     let vm = services.interpret(&expr, &ctx).snapshot();
     serde_json::to_value(&vm).expect("ViewModel serializes")
 }
@@ -192,7 +192,7 @@ fn state_toggle_bool_binding_live_row_turns_non_bool() {
     .expect("parses");
     let row = |v: Value| Arc::new(DataRow::from([("picked".to_string(), v)]));
     let cell = Mutable::new(row(Value::Boolean(true)));
-    let ctx = RenderContext::default().with_row_mutable(cell.read_only());
+    let ctx = RenderContext::for_row_mutable(cell.read_only());
     let vm = services.interpret(&expr, &ctx);
     let widget = |vm: &holon_frontend::ReactiveViewModel| {
         serde_json::to_value(vm.snapshot()).expect("serializes")

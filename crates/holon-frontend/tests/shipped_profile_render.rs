@@ -46,7 +46,7 @@ fn render_texts(render: &str, row: Arc<DataRow>) -> Vec<String> {
     let services = StubBuilderServices::new();
     let expr = holon_api::render_dsl::parse_render_dsl(render)
         .unwrap_or_else(|e| panic!("render does not parse: {render}: {e:#}"));
-    let ctx = RenderContext::default().with_row(row);
+    let ctx = RenderContext::for_row(row);
     let vm = services.interpret(&expr, &ctx).snapshot();
     let json = serde_json::to_value(&vm).expect("ViewModel serializes");
     let mut out = Vec::new();

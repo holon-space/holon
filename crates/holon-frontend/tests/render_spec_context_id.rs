@@ -25,7 +25,7 @@ fn interpret(dsl: &str, ctx: &RenderContext) -> ReactiveViewModel {
 fn row_context(id: &str) -> RenderContext {
     let mut row = DataRow::new();
     row.insert("id".to_string(), Value::String(id.to_string()));
-    RenderContext::default().with_row_mutable(Mutable::new(Arc::new(row)).read_only())
+    RenderContext::for_row_mutable(Mutable::new(Arc::new(row)).read_only())
 }
 
 fn message(vm: &ReactiveViewModel) -> String {
