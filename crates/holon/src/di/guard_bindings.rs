@@ -78,6 +78,25 @@ pub fn complete_guard_composition(injector: &Injector) {
         "the block write authority the shape gate reads",
         sql_block_write_authority,
     );
+    claim::<dyn holon_core::TypeWriteAuthority>(
+        injector,
+        root_owns_them,
+        "the write authority of free-standing types",
+        sql_type_write_authority,
+    );
+}
+
+/// The SQL tables as the write authority of every free-standing type, for a
+/// container with no Loro store.
+pub fn sql_type_write_authority() -> Provider<dyn holon_core::TypeWriteAuthority> {
+    Provider::root_async(|resolver| async move {
+        let db = resolver
+            .resolve_async::<dyn super::DbHandleProvider>()
+            .await;
+        Arc::new(crate::core::type_declaration::SqlTypeWriteAuthority(
+            db.handle(),
+        )) as Arc<dyn holon_core::TypeWriteAuthority>
+    })
 }
 
 /// The SQL tables as the block write authority, for a container with no CRDT
@@ -194,6 +213,9 @@ mod tests {
             &injector
         ));
         assert!(already_bound::<dyn holon_core::WriteAuthorityReads>(
+            &injector
+        ));
+        assert!(already_bound::<dyn holon_core::TypeWriteAuthority>(
             &injector
         ));
     }

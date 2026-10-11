@@ -123,8 +123,8 @@ pub fn broken_shape(
 pub struct WriteSnapshot {
     domain: crate::pbt::reference_domain_state::ReferenceDomainState,
     files: crate::pbt::file_adapter_state::FileAdapterState,
-    undo_stack: Vec<crate::pbt::block_state::BlockState>,
-    redo_stack: Vec<crate::pbt::block_state::BlockState>,
+    undo_stack: Vec<crate::pbt::action_actor_state::HistoryEntry>,
+    redo_stack: Vec<crate::pbt::action_actor_state::HistoryEntry>,
     user_write: bool,
 }
 

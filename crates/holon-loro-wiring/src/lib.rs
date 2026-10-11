@@ -22,6 +22,7 @@ pub mod loro_block_query_source;
 pub mod loro_module;
 pub mod loro_ui_watcher;
 pub mod memory_backend;
+pub mod typed_entity_sink;
 // Pulls in proptest, which is native-only. Gated behind `testing` (or
 // `#[cfg(test)]`): zero production consumers.
 #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "testing")))]

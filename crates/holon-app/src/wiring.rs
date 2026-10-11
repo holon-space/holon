@@ -905,6 +905,9 @@ impl FrontendInjectorExt for Injector {
             self.provide::<dyn holon_core::WriteAuthorityReads>(
                 holon::di::sql_block_write_authority(),
             );
+            self.provide::<dyn holon_core::TypeWriteAuthority>(
+                holon::di::sql_type_write_authority(),
+            );
         }
 
         Ok(())

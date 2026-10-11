@@ -883,7 +883,7 @@ impl IntegrationSupervisor {
             if type_def.owning_integration() == Some(name) {
                 holon::core::type_declaration::derive_write_authority(
                     &type_def,
-                    &self.db,
+                    &holon::core::type_declaration::SqlTypeWriteAuthority(self.db.clone()),
                     &dispatcher,
                 )
                 .map_err(|e| {

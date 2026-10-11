@@ -130,6 +130,7 @@ pub async fn register_loro_read_stack(
 pub fn register_loro_operation_engine(
     injector: &Injector,
     doc_store: Arc<RwLock<LoroDocumentStore>>,
+    collab: Arc<holon_loro::LoroDocument>,
 ) {
     let block_ops = LoroBlockOperations::new(doc_store);
     // Thread the shared-tree registry into the write path if the container
@@ -153,14 +154,15 @@ pub fn register_loro_operation_engine(
         }
     };
     let bus = injector.resolve::<Arc<holon_api::ConditionBus>>();
-    let engine = loro_operation_engine(block_ops, (*bus).clone());
+    let engine = loro_operation_engine(block_ops, collab, (*bus).clone());
     injector.provide::<dyn OperationEngine>(Provider::root(move |_| engine.clone()));
 }
 
 /// The operation engine a no-Turso session dispatches through, over
-/// `block_ops`.
+/// `block_ops`, with every free-standing type stored in `collab`.
 pub fn loro_operation_engine(
     block_ops: LoroBlockOperations,
+    collab: Arc<holon_loro::LoroDocument>,
     bus: Arc<holon_api::ConditionBus>,
 ) -> Arc<dyn OperationEngine> {
     let block_ops = Arc::new(block_ops);
@@ -184,6 +186,18 @@ pub fn loro_operation_engine(
     // this is the ONE dispatcher construction outside DI, so a future edit that
     // drops block CRUD here must crash at composition time, not silently drop
     // content writes (the EventInfraModule-alone class of bug).
+    let typed = holon_loro::loro_entity_operations::LoroTypeWriteAuthority::new(collab, None);
+    // Integration mirrors need their connector, which a no-Turso session has none
+    // of.
+    for type_def in holon_profiles::create_default_registry()
+        .expect("[loro_block_query_source] default TypeRegistry")
+        .all()
+        .iter()
+        .filter(|t| t.owning_integration().is_none())
+    {
+        holon::core::type_declaration::derive_write_authority(type_def, &typed, &dispatcher)
+            .unwrap_or_else(|e| panic!("[loro_block_query_source] type '{}': {e}", type_def.name));
+    }
     dispatcher
         .assert_content_write_capability()
         .expect("[loro_block_query_source] operation-registry assembly check failed");
@@ -568,8 +582,10 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         let store = Arc::new(RwLock::new(LoroDocumentStore::new(tmp.keep())));
+        let collab = store.read().await.get_doc(DocScope::Global).await.unwrap();
         let engine = loro_operation_engine(
             LoroBlockOperations::new(store.clone()),
+            collab,
             Arc::new(holon_api::ConditionBus::new()),
         );
         let run = |op: &'static str, params: Vec<(&'static str, String)>| {

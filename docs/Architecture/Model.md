@@ -67,6 +67,11 @@ Turso-LWW authority (`SqlOperationProvider` block CRUD, `SqlBlockOperations`).
 2. **Store** — durable replica with op history and frontiers.
 3. **Transport substrate** — delta export/import for P2P.
 
+In a Loro mode the store also holds every free-standing typed entity: a root
+map `entity:<type>` in `holon_tree`, one child map per entity. The projector
+writes each changed entity to its type's Turso table; integration mirrors keep
+their connector as write authority.
+
 The value of using the CRDT *without* the store equals the quality of your
 state→ops inference, because without history you must reconstruct ops from
 states:

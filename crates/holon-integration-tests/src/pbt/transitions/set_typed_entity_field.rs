@@ -105,6 +105,7 @@ impl TransitionRef<ReferenceState> for SetTypedEntityField {
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
+        state.push_undo_snapshot();
         state
             .typed_entities
             .set_field(&self.type_name, &self.id, &self.field, self.value.clone());

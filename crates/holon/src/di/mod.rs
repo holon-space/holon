@@ -23,6 +23,7 @@ use std::sync::Arc;
 pub use guard_bindings::RootOwnsGuardComposition;
 pub use guard_bindings::complete_guard_composition;
 pub use guard_bindings::sql_block_write_authority;
+pub use guard_bindings::sql_type_write_authority;
 // Re-export public API
 pub use lifecycle::{
     CoreInfraModule, StorageSelector, build_no_turso_container, create_backend_engine,

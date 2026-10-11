@@ -8268,9 +8268,14 @@ impl holon_pbt_core::capabilities::SutTypedEntity for HeadlessFrontendComponent 
         // would be a documented bypass of the CV-E check.
         let profiles = holon_capability::registry::shipped_profiles()
             .expect("the shipped capability profiles must parse");
+        let authority = self
+            .injector()
+            .resolve_async::<dyn holon_core::TypeWriteAuthority>()
+            .await;
         holon_app::type_admission::declare_type_admitted(
             &profiles,
             &type_def,
+            authority.as_ref(),
             self.engine().db_handle(),
             &registry,
             &self.engine().get_dispatcher(),

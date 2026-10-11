@@ -580,6 +580,10 @@ impl Default for IntegrationRefState {
 /// at construction, and `DeclareTypedSchema` adds runtime-declared ones with
 /// proptest-drawn shapes — so the axis exercises arbitrary schemas, not one
 /// hand-authored type. Nothing here names a type.
+/// Type name -> entity id -> value cells: the part of the typed state undo
+/// restores.
+pub type TypedEntityRows = BTreeMap<String, BTreeMap<String, Vec<String>>>;
+
 #[derive(Debug, Clone, Default)]
 pub struct TypedEntitiesRefState {
     /// type name -> value columns, in the schema's order (the primary key is
@@ -590,13 +594,15 @@ pub struct TypedEntitiesRefState {
     /// where the SUT reads a planted matview column.
     computed: BTreeMap<String, Vec<(String, holon_api::computation::Computation)>>,
     /// type name -> entity id -> value cells, aligned with `schemas`.
-    by_type: BTreeMap<String, BTreeMap<String, Vec<String>>>,
+    by_type: TypedEntityRows,
     /// Types declaring the search service: title = first value column,
     /// searchable = every value column.
     searchable: BTreeSet<String>,
     /// type name -> how many entities were ever created. The id counter: a
     /// deleted id stays taken, because the Loro store keeps its tombstone.
     created: BTreeMap<String, usize>,
+    /// Every stored id ever created, deleted ones included: history keeps them.
+    ever: BTreeSet<String>,
 }
 
 impl TypedEntitiesRefState {
@@ -676,10 +682,26 @@ impl TypedEntitiesRefState {
     pub fn add(&mut self, type_name: String, id: String, values: Vec<String>) {
         let stored = Self::stored_id(&type_name, &id);
         *self.created.entry(type_name.clone()).or_default() += 1;
+        self.ever.insert(stored.clone());
         self.by_type
             .entry(type_name)
             .or_default()
             .insert(stored, values);
+    }
+
+    pub fn rows_snapshot(&self) -> TypedEntityRows {
+        self.by_type.clone()
+    }
+
+    /// Put back an undo snapshot. Declared types and the id counters stay:
+    /// declarations are not undoable and ids are never reused.
+    pub fn restore_rows(&mut self, rows: TypedEntityRows) {
+        self.by_type = rows;
+    }
+
+    /// Every id the oracle ever created, of every type.
+    pub fn ever_ids(&self) -> impl Iterator<Item = &String> {
+        self.ever.iter()
     }
 
     /// The live ids of one type, in a stable order.
@@ -3445,8 +3467,23 @@ impl ReferenceState {
     /// record snapshots, and `UndoLastMutation`
     /// (gated on `has_undo_history`) can pop them back.
     pub fn push_undo_snapshot(&mut self) {
-        self.action.undo_stack.push(self.domain.block_state.clone());
+        let entry = self.history_entry();
+        self.action.undo_stack.push(entry);
         self.action.redo_stack.clear();
+    }
+
+    fn history_entry(&self) -> super::action_actor_state::HistoryEntry {
+        super::action_actor_state::HistoryEntry {
+            blocks: self.domain.block_state.clone(),
+            typed: self.typed_entities.rows_snapshot(),
+        }
+    }
+
+    fn restore_history_entry(&mut self, entry: super::action_actor_state::HistoryEntry) {
+        let mut restored = entry.blocks;
+        restored.next_id = restored.next_id.max(self.domain.block_state.next_id);
+        self.domain.block_state = restored;
+        self.typed_entities.restore_rows(entry.typed);
     }
 
     /// `id`'s text and task state as they are now, in every undo and redo
@@ -3461,6 +3498,7 @@ impl ReferenceState {
             .undo_stack
             .iter_mut()
             .chain(self.action.redo_stack.iter_mut())
+            .map(|entry| &mut entry.blocks)
         {
             let Some(block) = snapshot.blocks.get_mut(id) else {
                 continue;
@@ -3493,6 +3531,7 @@ impl ReferenceState {
             .undo_stack
             .iter_mut()
             .chain(self.action.redo_stack.iter_mut())
+            .map(|entry| &mut entry.blocks)
         {
             if !snapshot.blocks.contains_key(&now.parent_id) {
                 continue;
@@ -3543,11 +3582,10 @@ impl ReferenceState {
     /// `block_state` for the same reason.
     pub fn pop_undo_to_redo(&mut self) {
         let pre_restore = self.domain.block_state.clone();
-        self.action.redo_stack.push(pre_restore.clone());
-        let id_hwm = self.domain.block_state.next_id;
-        let mut restored = self.action.undo_stack.pop().expect("undo stack is empty");
-        restored.next_id = restored.next_id.max(id_hwm);
-        self.domain.block_state = restored;
+        let entry = self.history_entry();
+        self.action.redo_stack.push(entry);
+        let restored = self.action.undo_stack.pop().expect("undo stack is empty");
+        self.restore_history_entry(restored);
         self.rematerialize_file_ingested(&pre_restore);
         self.recompute_derived();
         self.clear_focus_for_blocks_dropped_by_restore(&pre_restore);
@@ -3558,11 +3596,10 @@ impl ReferenceState {
     /// [`Self::pop_undo_to_redo`].
     pub fn pop_redo_to_undo(&mut self) {
         let pre_restore = self.domain.block_state.clone();
-        self.action.undo_stack.push(pre_restore.clone());
-        let id_hwm = self.domain.block_state.next_id;
-        let mut restored = self.action.redo_stack.pop().expect("redo stack is empty");
-        restored.next_id = restored.next_id.max(id_hwm);
-        self.domain.block_state = restored;
+        let entry = self.history_entry();
+        self.action.undo_stack.push(entry);
+        let restored = self.action.redo_stack.pop().expect("redo stack is empty");
+        self.restore_history_entry(restored);
         // REDO-direction hazard: `pre_restore` still holds a block this redo is
         // supposed to re-delete, so re-materialising blindly from it would
         // RESURRECT a user-deleted block (spurious `only_in_ref`). What keeps it

@@ -877,6 +877,15 @@ where
     }
 }
 
+/// The store that accepts the writes of a free-standing type: the composition
+/// root binds the one its mode uses (Loro store on, or SQL).
+pub trait TypeWriteAuthority: MaybeSendSync {
+    fn for_type(
+        &self,
+        type_def: &holon_api::TypeDefinition,
+    ) -> Result<std::sync::Arc<dyn OperationProvider>>;
+}
+
 /// The facts a guard may only learn from whatever ACCEPTED a write.
 ///
 /// A store whose reads come from a projection of someone else's writes (the SQL

@@ -837,6 +837,10 @@ pub struct LoroProjection {
     /// The `(block id, field)` pairs this projection holds a
     /// `BlockFieldUnreadable` condition raised for.
     unreadable_raised: StdMutex<HashSet<(String, &'static str)>>,
+    /// The typed entities the Global doc's commits changed and the sink has not
+    /// received yet, as `(type root, store key)`.
+    entity_pending: Arc<StdMutex<std::collections::BTreeSet<(String, String)>>>,
+    entity_sink: Option<Arc<dyn crate::loro_entity_operations::TypedEntitySink>>,
     #[cfg(any(test, feature = "test-helpers"))]
     read_seam: StdMutex<Option<Arc<dyn Fn(CommitSource) + Send + Sync>>>,
 }
@@ -884,9 +888,20 @@ impl LoroProjection {
             commit_clock,
             views_engine,
             unreadable_raised: StdMutex::new(HashSet::new()),
+            entity_pending: Arc::new(StdMutex::new(Default::default())),
+            entity_sink: None,
             #[cfg(any(test, feature = "test-helpers"))]
             read_seam: StdMutex::new(None),
         }
+    }
+
+    /// Project the typed entities of the Global doc into `sink`.
+    pub fn with_entity_sink(
+        mut self,
+        sink: Arc<dyn crate::loro_entity_operations::TypedEntitySink>,
+    ) -> Self {
+        self.entity_sink = Some(sink);
+        self
     }
 
     /// Leave the rows of every share loaded in `store` to that share's own
@@ -945,11 +960,17 @@ impl LoroProjection {
         // never read doc state.
         let (collab_doc, layout_doc) = (collab.doc(), layout.doc());
 
-        for (doc, queue, source) in [
-            (&collab_doc, self.pending.clone(), CommitSource::LoroGlobal),
+        for (doc, queue, entity_queue, source) in [
+            (
+                &collab_doc,
+                self.pending.clone(),
+                Some(self.entity_pending.clone()),
+                CommitSource::LoroGlobal,
+            ),
             (
                 &layout_doc,
                 self.layout_pending.clone(),
+                None,
                 CommitSource::LoroLayout,
             ),
         ] {
@@ -964,6 +985,12 @@ impl LoroProjection {
                 let mut facts = crate::loro_backend::extract_pending_changes(&event);
                 if !facts.is_empty() {
                     queue.lock().unwrap().append(&mut facts);
+                }
+                if let Some(entity_queue) = &entity_queue {
+                    let mut changed = crate::loro_entity_operations::changed_entities(&event);
+                    if !changed.is_empty() {
+                        entity_queue.lock().unwrap().append(&mut changed);
+                    }
                 }
                 wake.notify_one();
             })));
@@ -993,7 +1020,9 @@ impl LoroProjection {
     /// advanced `last_synced` to the commit's frontiers, so a settle detector
     /// must require this as well as `last_synced == oplog_frontiers`.
     pub fn pending_is_empty(&self) -> bool {
-        self.pending.lock().unwrap().is_empty() && self.layout_pending.lock().unwrap().is_empty()
+        self.pending.lock().unwrap().is_empty()
+            && self.layout_pending.lock().unwrap().is_empty()
+            && self.entity_pending.lock().unwrap().is_empty()
     }
 
     /// Whether every change up to `global` and `layout` (the two projected
@@ -1130,6 +1159,7 @@ impl LoroProjection {
         let t0 = std::time::Instant::now();
 
         let (collab, layout) = self.docs().await?;
+        self.project_entities(&collab).await?;
         let last = self.last_synced.lock().unwrap().clone();
         let layout_last = self.layout_last_synced.lock().unwrap().clone();
         let seeded = self.seeded.load(Ordering::SeqCst);
@@ -1611,6 +1641,44 @@ impl LoroProjection {
     /// engine at that cover; an unsettled one leaves its stamps to the full
     /// walk. Returns the number of facts taken, the changed rows, whether the
     /// read is settled, and the frontier the rows are at.
+    /// The entity leg: lands every pending typed entity's current row in the
+    /// sink. A failed pass keeps the entities pending for the next one.
+    async fn project_entities(&self, collab: &LoroDocument) -> Result<()> {
+        let changed = std::mem::take(&mut *self.entity_pending.lock().unwrap());
+        if changed.is_empty() {
+            return Ok(());
+        }
+        let projected = self.project_entity_rows(collab, &changed).await;
+        if projected.is_err() {
+            self.entity_pending.lock().unwrap().extend(changed);
+        }
+        projected
+    }
+
+    async fn project_entity_rows(
+        &self,
+        collab: &LoroDocument,
+        changed: &std::collections::BTreeSet<(String, String)>,
+    ) -> Result<()> {
+        let sink = self.entity_sink.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "[LoroProjection] the Global doc holds typed entities {changed:?}, but this \
+                 projection has no typed-entity sink"
+            )
+        })?;
+        let rows = collab.with_read(|doc| {
+            Ok(crate::loro_entity_operations::read_changed_rows(
+                doc, changed,
+            ))
+        })?;
+        for (entity, rows) in rows {
+            sink.project(&entity, rows)
+                .await
+                .with_context(|| format!("[LoroProjection] projecting typed entity '{entity}'"))?;
+        }
+        Ok(())
+    }
+
     fn read_incremental(
         &self,
         doc: &LoroDocument,

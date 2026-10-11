@@ -1712,7 +1712,10 @@ impl BackendEngine {
             .admission_footprint(entity_name, op_name, params)
     }
 
-    pub async fn enable_undo_persistence(&mut self) -> Result<()> {
+    pub async fn enable_undo_persistence(
+        &mut self,
+        types: Arc<holon_profiles::TypeRegistry>,
+    ) -> Result<()> {
         use crate::api::undo_persistence::SqlUndoStateReader;
         use crate::api::undo_persistence::SqlUndoStore;
         use crate::api::undo_persistence::ensure_undo_log;
@@ -1720,6 +1723,7 @@ impl BackendEngine {
         let reader = Arc::new(SqlUndoStateReader::new(
             self.db_handle.clone(),
             crate::storage::BLOCK_WRITE_TABLE,
+            types,
         ));
         let store = Arc::new(SqlUndoStore::new(self.db_handle.clone()));
         let history = Arc::new(crate::api::history_store::TursoHistoryStore::new(

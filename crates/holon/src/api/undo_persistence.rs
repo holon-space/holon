@@ -6,15 +6,12 @@
 //!   equivalent, heavier encoding; the snapshot is bounded by the stack's
 //!   `max_size` and re-verified at replay, which is what makes it safe.
 //! - [`SqlUndoStateReader`] reads the current projected value of an (entity,
-//!   field) from the block write table so a stored
-//!   [`Precondition`](holon_core::Precondition) can be checked against live
-//!   state before an inverse replays (staleness policy).
-//!
-//! Only the `block` entity carries real inverses today, so the reader targets
-//! the block write table; other entities are `DeclaredIrreversible` and never
-//! produce a precondition to verify.
+//!   field) from the write table of the entity's type, chosen by its URI
+//!   scheme, so a stored [`Precondition`](holon_core::Precondition) can be
+//!   checked against live state before an inverse replays (staleness policy).
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use anyhow::Context;
 use anyhow::Result;
@@ -23,6 +20,8 @@ use holon_api::EntityUri;
 use holon_api::Value;
 use holon_core::UndoStateReader;
 use holon_core::UndoStore;
+use holon_profiles::TypeRegistry;
+use holon_turso::turso_adapter::TursoAdapter;
 
 use crate::storage::DbHandle;
 
@@ -86,19 +85,31 @@ impl UndoStore for SqlUndoStore {
     }
 }
 
-/// Read current (entity, field) values from the block write table for staleness
-/// verification.
+/// Read current (entity, field) values from the write table of the entity's
+/// type for staleness verification.
 pub struct SqlUndoStateReader {
     db: DbHandle,
-    table: String,
+    block_table: String,
+    types: Arc<TypeRegistry>,
 }
 
 impl SqlUndoStateReader {
-    pub fn new(db: DbHandle, table: impl Into<String>) -> Self {
+    pub fn new(db: DbHandle, block_table: impl Into<String>, types: Arc<TypeRegistry>) -> Self {
         Self {
             db,
-            table: table.into(),
+            block_table: block_table.into(),
+            types,
         }
+    }
+
+    fn table_of(&self, entity: &EntityUri) -> Result<String> {
+        if entity.is_block() {
+            return Ok(self.block_table.clone());
+        }
+        let type_def = self.types.get(entity.scheme()).with_context(|| {
+            format!("undo reader: no declared type owns the scheme of {entity}")
+        })?;
+        Ok(TursoAdapter::raw_table_name(&type_def))
     }
 }
 
@@ -115,13 +126,14 @@ fn assert_identifier(name: &str, kind: &str) -> Result<()> {
 #[async_trait]
 impl UndoStateReader for SqlUndoStateReader {
     async fn field_value(&self, entity: &EntityUri, field: &str) -> Result<Option<Value>> {
+        let table = self.table_of(entity)?;
         assert_identifier(field, "field")?;
-        assert_identifier(&self.table, "table")?;
+        assert_identifier(&table, "table")?;
         // The write table keys its rows by the SCHEME-QUALIFIED id, which is
         // what `EntityUri::as_str` renders. This is the one place the id
         // becomes SQL text.
         let escaped = entity.as_str().replace('\'', "''");
-        let sql = format!("SELECT {field} FROM {} WHERE id = '{escaped}'", self.table);
+        let sql = format!("SELECT {field} FROM {table} WHERE id = '{escaped}'");
         let rows = self
             .db
             .query(&sql, HashMap::new())

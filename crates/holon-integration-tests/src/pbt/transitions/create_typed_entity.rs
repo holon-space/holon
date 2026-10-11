@@ -170,6 +170,7 @@ impl TransitionRef<ReferenceState> for CreateTypedEntity {
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
+        state.push_undo_snapshot();
         state
             .typed_entities
             .add(self.type_name.clone(), self.id.clone(), self.values());

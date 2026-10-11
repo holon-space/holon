@@ -154,6 +154,26 @@ impl Module for LoroModule {
         injector.provide::<dyn holon_core::WriteAuthorityReads>(Provider::root(|resolver| {
             resolver.resolve::<LoroBlockOperations>() as Arc<dyn holon_core::WriteAuthorityReads>
         }));
+        injector.provide::<dyn holon_core::TypeWriteAuthority>(Provider::root_async(
+            |resolver| async move {
+                let doc_store = resolver.resolve::<LoroDocumentStore>();
+                let collab = doc_store
+                    .get_doc(DocScope::Global)
+                    .await
+                    .expect("LoroDocumentStore::get_doc(Global) failed for TypeWriteAuthority");
+                let db = resolver
+                    .resolve::<dyn holon::di::DbHandleProvider>()
+                    .handle();
+                Arc::new(
+                    holon_loro::loro_entity_operations::LoroTypeWriteAuthority::new(
+                        collab,
+                        Some(Arc::new(
+                            holon::core::type_declaration::SqlTypeWriteAuthority(db),
+                        )),
+                    ),
+                ) as Arc<dyn holon_core::TypeWriteAuthority>
+            },
+        ));
 
         // Register a Loro-aware `BlockCellRegistry`. `SqlBlockOperations`
         // consumes this so chord-time `split_block` / `join_block` reads
@@ -250,11 +270,17 @@ impl Module for LoroModule {
                 let db_handle = db_handle_provider.handle();
                 let command_bus = block_sql_write_provider(db_handle.clone());
                 let sink_reader: Arc<dyn holon_loro::SinkReader> =
-                    Arc::new(holon::storage::TursoSinkReader::new(db_handle));
+                    Arc::new(holon::storage::TursoSinkReader::new(db_handle.clone()));
                 let doc_store_arc = Arc::new(RwLock::new((*doc_store).clone()));
                 let read_model =
                     resolver.resolve::<Arc<holon_api::block_read_model::BlockReadModel>>();
                 let degraded = resolver.resolve::<Arc<holon_api::condition_bus::ConditionBus>>();
+                let entity_sink = Arc::new(crate::typed_entity_sink::SqlTypedEntitySink::new(
+                    db_handle.clone(),
+                    resolver
+                        .resolve_async::<holon_profiles::TypeRegistry>()
+                        .await,
+                ));
                 let projection = holon_loro::loro_sync_controller::LoroProjection::from_storage(
                     doc_store_arc,
                     command_bus,
@@ -265,7 +291,8 @@ impl Module for LoroModule {
                     resolver.resolve::<CommitClock>(),
                     resolver.resolve::<ViewEngine>(),
                 )
-                .unwrap_or_else(|e| panic!("[LoroModule] build the Loro projection: {e:#}"));
+                .unwrap_or_else(|e| panic!("[LoroModule] build the Loro projection: {e:#}"))
+                .with_entity_sink(entity_sink);
                 #[cfg(all(
                     feature = "iroh-sync",
                     not(all(target_arch = "wasm32", target_os = "unknown"))

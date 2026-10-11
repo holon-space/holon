@@ -1040,7 +1040,7 @@ pub(crate) fn read_scalar_field_from_meta(meta: &loro::LoroMap, key: &str) -> Op
 /// Properties are arbitrary `serde_json::Value`; the per-key granularity (not
 /// per-field) is what H3 needs — concurrent edits to *different* properties are
 /// different keys.
-fn encode_property_value(key: &str, value: &Value) -> anyhow::Result<loro::LoroValue> {
+pub(crate) fn encode_property_value(key: &str, value: &Value) -> anyhow::Result<loro::LoroValue> {
     // The stored JSON is read back through `Value`'s untagged deserializer
     // (`decode_properties_map`), which mints a `Value::Removed` from the
     // marker's shape at ANY depth. A marker that reached storage would put a
@@ -1076,7 +1076,7 @@ fn encode_property_value(key: &str, value: &Value) -> anyhow::Result<loro::LoroV
 /// corruption, never a plain object. The write leg refuses to store an
 /// authored look-alike, so nothing legitimate can produce one — falling back
 /// would silently serve the wrong value for a key whose kind was declared.
-fn decode_property_json(key: &str, json: &str) -> Value {
+pub(crate) fn decode_property_json(key: &str, json: &str) -> Value {
     let parsed: serde_json::Value = serde_json::from_str(json)
         .unwrap_or_else(|e| panic!("Corrupt property JSON for {key:?}: {json:?}: {e}"));
     if holon_api::kind_envelope::claims_envelope(&parsed) {

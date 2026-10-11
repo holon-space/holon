@@ -1272,7 +1272,7 @@ impl TestEnvironment {
             .get_doc(DocScope::Global)
             .await
             .map_err(|e| anyhow::anyhow!("get_doc(Global): {e}"))?;
-        let backend = Arc::new(LoroBackend::from_document(doc));
+        let backend = Arc::new(LoroBackend::from_document(doc.clone()));
         let shared_store = Arc::new(RwLock::new(doc_store));
 
         let injector = build_no_turso_container(
@@ -1281,6 +1281,7 @@ impl TestEnvironment {
             {
                 let backend = backend.clone();
                 let shared_store = shared_store.clone();
+                let doc = doc.clone();
                 let org_fs = self.org_fs.clone();
                 let org_root = self.org_root.clone();
                 move |injector| {
@@ -1290,7 +1291,7 @@ impl TestEnvironment {
                     use holon_app::loro_seams::LoroDocumentManager;
                     vault.register(injector);
                     register_loro_block_query_source(injector, backend.clone());
-                    register_loro_operation_engine(injector, shared_store.clone());
+                    register_loro_operation_engine(injector, shared_store.clone(), doc.clone());
                     register_block_query_frontend(injector);
 
                     // Org file-sync over the Loro seams — the SAME backend-blind

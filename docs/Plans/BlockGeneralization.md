@@ -62,6 +62,7 @@ Follow-on rulings that bind open work:
 | **BG-5** | `graph_eav` module, DDL, DI registration and Schema.md section deleted; GQL `validate_typed_shape` refuses unknown labels, untyped edges and unlabelled nodes at compile time, default resolvers pointing at a sentinel table so residual paths fail loud and identically on fresh and legacy files | `0a10b5a5` | 2026-08-31 | fresh-boot inventory over all 14 table names in `crates/holon-app/tests/fresh_db_boot_seed_smoke.rs` |
 | **I3-1** | `ComputedSpec::parse` is the single door: typed parse over `FieldIdent`, tier enforcement in the constructor, registry cross-check that declared types match the owning `TypeDefinition`'s columns; `computed_persisted` lowers through the ONE formatter (`PlantedColumn::select_expr`, duplicate unvalidated sink deleted), `computed_live` evals without Turso behind a boot-once disclosed WARN for out-of-subset fields | `8d07c182` | 2026-09-01 | `crates/holon/tests/computed_tier_dual_path.rs` (dual-path agreement, proptest); `crates/holon-profiles/tests/computed_tier_declaration.rs`; `crates/holon-api/tests/typed_computed_field_declaration.rs` |
 | **NV-1** | Per-block `property_kinds` column records the kind for keys whose JSON spelling is ambiguous; ONE writer (`bag_and_kinds_set_clause`) owns bag and kinds in a single UPDATE across create, update and `set_field` — `set_field` was a third bag writer that bricked rows — with a workspace-wide tripwire keeping it the only `json_set`/`json_remove` site; reads parse at one boundary and a kind/value disagreement is a loud query error; additive sniffed ALTER migration, idempotent, downgrade inert. SQL leg only — the profile claims `date_time`/`json` with the Loro leg disclosed pending S2 | `e19a726f` | 2026-09-01 | `crates/holon/src/core/set_field_property_kinds_test.rs`; `crates/holon-turso/tests/property_kinds_migration.rs`; `crates/holon/tests/capability_certification.rs` (certifier drives the types clause on every live route and PINS the two `set_field` routes as expected-undriven) |
+| **Inc 4a** | Loro format adapter, flat part (holon-space/holon-work#168): in a Loro mode the Loro store is the write authority of every free-standing type — root map `entity:<type>` in `holon_tree`, one mergeable child map per entity, overflow bag as a `properties` child, `_deleted` tombstone for a type without `soft_delete`; the projector lands changed entities in the type's Turso table (`EventOrigin::Loro`); the mode switch is the injected `TypeWriteAuthority` factory; integration mirrors keep the SQL authority; every entity op is undoable | lane `loro-tes-2` | 2026-10-12 | keystone `inv-typed-loro-matches-ref` (red-first on the checkpoint) and the oracle's typed undo/redo history |
 
 ---
 
@@ -224,7 +225,7 @@ Follow-on rulings that bind open work:
 
 ### 2b.6 — see **I3-2** (same item).
 
-### Inc 4 — Loro format adapter
+### Inc 4 — Loro format adapter (hierarchical part; flat landed as Inc 4a)
 - **Scope.** Layout inferred from `crdt_backing` metadata (hierarchical →
   tree, flat → map-per-entity; text-fidelity fields → `LoroText`, scalars →
   LWW); a generated per-type projector; adapter capability declarations;

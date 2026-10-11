@@ -707,7 +707,14 @@ impl RefBackend for ReferenceState {
 /// surfaces them to the `history_*` correspondences.
 impl RefHistoryExpectation for ReferenceState {
     fn ever_created_ids(&self) -> BTreeSet<EntityUri> {
-        self.history_ever_created.clone()
+        let typed = self.typed_entities.ever_ids().map(|id| {
+            EntityUri::parse(id).unwrap_or_else(|e| panic!("stored typed id {id:?}: {e}"))
+        });
+        self.history_ever_created
+            .iter()
+            .cloned()
+            .chain(typed)
+            .collect()
     }
 
     fn removed_block_ids(&self) -> BTreeSet<EntityUri> {

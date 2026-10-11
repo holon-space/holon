@@ -249,7 +249,7 @@ async fn create_initialized_engine(
     // (`undo_log` snapshot + live-state precondition reader) so history survives
     // a restart and stale entries are dropped loudly at replay.
     engine
-        .enable_undo_persistence()
+        .enable_undo_persistence(type_registry.clone())
         .await
         .context("Failed to enable undo persistence")?;
 

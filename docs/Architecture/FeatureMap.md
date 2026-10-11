@@ -36,7 +36,7 @@ The one-page answer to *"which features could this change impact?"*. Rows are us
 | **Ruled by** | An ADR under [`docs/adr/`](../adr/), or an invariant number from [Model.md](Model.md). |
 | **Mode axes** | Which of [Model.md](Model.md)'s four orthogonal axes the feature's behaviour varies on: **Storage** (Loro store on/off), **File adapter** (org/none), **Merge fidelity** (op-CRDT / base-3-way / LWW), **Transport** (iroh P2P on/off). `—` means the feature behaves the same everywhere. *Headless vs windowed* is a test-slice axis, not a product mode; it is called out in prose where it matters. |
 
-The composed keystone is [`general_e2e_composed_pbt.rs`](../../crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs). Its alphabet is 118 transitions; the repo declares 98 invariant ids plus 17 correspondence-family ids. Open reds are registered in [KeystoneKnownReds.md](../Testing/KeystoneKnownReds.md) — a red listed there is a pass-with-note, anything else is a regression.
+The composed keystone is [`general_e2e_composed_pbt.rs`](../../crates/holon-integration-tests/tests/general_e2e_composed_pbt.rs). Its alphabet is 120 transitions; the repo declares 99 invariant ids plus 17 correspondence-family ids. Open reds are registered in [KeystoneKnownReds.md](../Testing/KeystoneKnownReds.md) — a red listed there is a pass-with-note, anything else is a regression.
 
 ---
 
@@ -259,6 +259,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `DeletePlacementParent` — a recipient delete of a block the placed page hangs under, which leaves the page's share exactly as a delete of the page does and never deletes the owner's page.
 - `DeletePlacementRecord` — a recipient delete naming a page's mount rather than the page, which leaves the page's share exactly as a delete of the page does and never deletes the owner's page.
 - `DeleteRefusedRecipe` — a file that is gone leaves its format's group; the last one out clears the condition (D71.b)
+- `DeleteTypedEntity` — a deleted entity leaves the matview.
 - `DisarmWriteChurn` — once no file churns, every owed write-back has landed and no stall is disclosed any more
 - `DispatchUnschemedBlockId` — the id form that let the write leg and the read legs key on different strings
 - `EditBlockCopy` — a copy edited on disk while Holon edits the same block: the later release merges both, or refuses and discloses when both changed the keyword apart (D229.b)
@@ -288,6 +289,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `SaveRefusedRecipe` — every refused file of one format is ONE `vault-ingest-failed` condition that counts them and names the first few (D71.b)
 - `Search` — the hit set equals the reference model's literal substring match over block content and the searchable fields of every type declaring search, folded by Unicode simple case folding, with pattern metacharacters matching themselves and an empty query returning nothing. Each hit shows its title's first line, and under it the other lines of the matched field that contain the query.
 - `SecondWriterRefused` — a second session on a held vault is refused by the writer lock, names the holder and writes nothing
+- `SetTypedEntityField` — a `set_field` lands in the matview.
 - `StartApp` — application startup + seeded sidebar watch
 - `StructuralKeyBurst` — a structural op decides on the block and parent that earlier admitted keys produced, not on a projection that has not caught up with them
 - `TouchFile` — a new stamp without new bytes changes nothing in the store
@@ -322,6 +324,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 - `inv-shows-source-when-no-query`
 - `inv-state-toggle-toy`
 - `inv-two-writer-peer-writes-land` — generic ComposedSut StateMachineTest: per-tick reconcile + catalog check + non-vacuity floor
+- `inv-typed-loro-matches-ref` — each type's live entities read straight off the Loro map vs `RefTypedEntities::expected_stored_typed_entity_rows`.
 - `inv-unparseable-render-is-error-node` — a render source that does not parse draws an error naming the block and the parse error, never a silent `table()`
 - `inv-value-fn-provider-arg-variance-13` — the ReactiveEngine / interpret_pure / ProviderCache coupling drops rows, churns Arc identity, or flickers
 - `inv-value-fn-provider-identity` — a transient wrong StateToggle in an intermediate emission that a later structural re-render masks

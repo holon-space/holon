@@ -210,7 +210,9 @@ pub fn move_in_ref(
         .iter_mut()
         .chain(state.action.redo_stack.iter_mut())
     {
-        snapshot.move_subtree_to_document(block_id, target_doc, placement);
+        snapshot
+            .blocks
+            .move_subtree_to_document(block_id, target_doc, placement);
     }
     state.rebuild_profile_tracking();
 }

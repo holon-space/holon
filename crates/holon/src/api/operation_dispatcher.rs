@@ -2793,13 +2793,18 @@ impl Module for OperationModule {
             // `FreeStandingTypeViews` created. An unserved type gets none, so
             // its writes fail with the reason recorded above.
             let type_registry = r.resolve_async::<holon_profiles::TypeRegistry>().await;
+            let authority = holon_core::resolve_bound_async::<dyn holon_core::TypeWriteAuthority>(
+                &r,
+                "[OperationModule] typed-entity write authority",
+            )
+            .await;
             for type_def in type_registry.all() {
                 if unserved.contains_key(type_def.name.as_str()) {
                     continue;
                 }
                 crate::core::type_declaration::derive_write_authority(
                     &type_def,
-                    &db_handle_provider.handle(),
+                    authority.as_ref(),
                     &dispatcher,
                 )
                 .and_then(|()| {

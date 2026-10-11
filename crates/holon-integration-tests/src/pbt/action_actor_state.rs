@@ -8,7 +8,7 @@
 //!
 //! @pbt kind ref
 //! @pbt covers action-actor-state — lifecycle flag, `next_doc_id` allocator,
-//!   last-transition tag (Markov weighting), and the undo/redo `BlockState`
+//!   last-transition tag (Markov weighting), and the undo/redo `HistoryEntry`
 //!   snapshot stacks. FIDELITY: `next_doc_id`/`next_id` are monotonic across
 //!   undo/redo by design (prod never reuses a burned id, see
 //! `pop_undo_to_redo`).
@@ -31,11 +31,18 @@ pub struct ActionActorState {
     /// style adaptive weighting in `transitions()`.
     pub last_transition_kind: Option<&'static str>,
 
-    /// Undo stack: snapshots of `BlockState` before each UI mutation.
-    pub undo_stack: Vec<BlockState>,
+    /// Undo stack: the state before each UI mutation.
+    pub undo_stack: Vec<HistoryEntry>,
 
-    /// Redo stack: snapshots of `BlockState` before each undo.
-    pub redo_stack: Vec<BlockState>,
+    /// Redo stack: the state before each undo.
+    pub redo_stack: Vec<HistoryEntry>,
+}
+
+/// One undo/redo step: what a restore puts back.
+#[derive(Debug, Clone)]
+pub struct HistoryEntry {
+    pub blocks: BlockState,
+    pub typed: super::reference_state::TypedEntityRows,
 }
 
 impl ActionActorState {

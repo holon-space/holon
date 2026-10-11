@@ -138,7 +138,15 @@ impl OperationProvider for TypeTableRemedyProvider {
         TursoAdapter::register(&type_def, &db).await?;
         holon_turso::table_shape::drop_quarantined(&db, &TursoAdapter::raw_table_name(&type_def))
             .await?;
-        holon::core::type_declaration::derive_write_authority(&type_def, &db, &dispatcher)?;
+        let authority = self
+            .injector
+            .resolve_async::<dyn holon_core::TypeWriteAuthority>()
+            .await;
+        holon::core::type_declaration::derive_write_authority(
+            &type_def,
+            authority.as_ref(),
+            &dispatcher,
+        )?;
         holon::core::type_declaration::register_companion_operations(&type_name, &db, &dispatcher)?;
         unserved.remove(&type_name);
         self.injector

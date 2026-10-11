@@ -77,6 +77,7 @@ impl TransitionRef<ReferenceState> for DeleteTypedEntity {
     }
 
     fn apply_to_ref(&self, state: &mut ReferenceState) {
+        state.push_undo_snapshot();
         state.typed_entities.remove(&self.type_name, &self.id);
     }
 }

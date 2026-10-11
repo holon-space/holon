@@ -151,13 +151,17 @@ pub fn sidecar_refusals(
 pub async fn declare_type_admitted(
     profiles: &ProfileRegistry,
     type_def: &TypeDefinition,
+    authority: &dyn holon_core::TypeWriteAuthority,
     db_handle: &holon::storage::turso::DbHandle,
     registry: &TypeRegistry,
     dispatcher: &holon::api::operation_dispatcher::OperationDispatcher,
 ) -> Result<TursoArtifacts> {
     admits(profiles, type_def)
         .map_err(|e| format!("declaring '{}' is refused: {e}", type_def.name))?;
-    holon::core::type_declaration::declare_type(type_def, db_handle, registry, dispatcher).await
+    holon::core::type_declaration::declare_type(
+        type_def, authority, db_handle, registry, dispatcher,
+    )
+    .await
 }
 
 /// The entity a type declaration acts on. Not a stored row anywhere — the
@@ -273,8 +277,20 @@ impl OperationProvider for TypeAdmissionProvider {
             .injector
             .resolve_async::<holon::api::operation_dispatcher::OperationDispatcher>()
             .await;
+        let authority = self
+            .injector
+            .resolve_async::<dyn holon_core::TypeWriteAuthority>()
+            .await;
 
-        declare_type_admitted(&self.profiles, &type_def, &db, &registry, &dispatcher).await?;
+        declare_type_admitted(
+            &self.profiles,
+            &type_def,
+            authority.as_ref(),
+            &db,
+            &registry,
+            &dispatcher,
+        )
+        .await?;
 
         Ok(OperationResult::declared_irreversible(
             Vec::new(),
