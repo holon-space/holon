@@ -50,7 +50,7 @@ pub mod rehome_entity;
 pub mod remote_list;
 pub mod seed;
 pub mod session;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub mod stop_signal;
 pub mod turso_seams;
 pub mod type_admission;
