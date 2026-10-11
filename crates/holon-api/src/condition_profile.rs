@@ -817,6 +817,15 @@ const BLOCK_FIELD_UNREADABLE: ConditionProfile = ConditionProfile::new(
     &[],
 );
 
+const STORED_BLOCK_TYPES_UNAUDITED: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Warning,
+    "Holon could not check the stored block types",
+    icons::WARN,
+    ConditionPlacement::Banner,
+    AllClear::UntilRestart,
+    &[],
+);
+
 const PREVIOUS_RUN_PANICKED: ConditionProfile = ConditionProfile::new(
     ConditionSeverity::Error,
     "Holon stopped last time because of an internal error",
@@ -973,6 +982,7 @@ impl ConditionKind {
             Self::DatabaseWatchFailed { .. } => DATABASE_WATCH_FAILED,
             Self::DerivedFieldNotComputed { .. } => DERIVED_FIELD_NOT_COMPUTED,
             Self::BlockFieldUnreadable { .. } => BLOCK_FIELD_UNREADABLE,
+            Self::StoredBlockTypesUnaudited { .. } => STORED_BLOCK_TYPES_UNAUDITED,
             Self::PreviousRunPanicked { .. } => PREVIOUS_RUN_PANICKED,
             Self::TaskPanicked { .. } => TASK_PANICKED,
             Self::PanicRecordUnwritable { .. } => PANIC_RECORD_UNWRITABLE,

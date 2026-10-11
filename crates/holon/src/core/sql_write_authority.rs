@@ -31,24 +31,36 @@ impl SqlWriteAuthority {
     /// Raise a `block_field_unreadable` for every stored `block_type` that is
     /// no entity name: such a block reads as untyped.
     ///
+    /// What the audit itself cannot read (the query, or a row without a string
+    /// id) is a data fault: it raises one `stored_block_types_unaudited` on
+    /// [`BLOCK_WRITE_TABLE`], and the boot goes on.
+    ///
     /// The duty sits on this authority because the rows it reads ARE the
     /// stored state wherever it is the container's authority; a CRDT authority
     /// discloses its own store's unreadable values instead.
     pub async fn disclose_unreadable_stored_block_types(
         &self,
         conditions: &holon_api::ConditionBus,
-    ) -> Result<()> {
+    ) {
+        let unaudited = |error: String| {
+            tracing::error!(%error, "boot audit of the stored block_type values failed");
+            conditions.emit(holon_api::Condition {
+                subject: BLOCK_WRITE_TABLE.to_string(),
+                reason: holon_api::ConditionKind::StoredBlockTypesUnaudited { error },
+            });
+        };
         let sql =
             format!("SELECT id, block_type FROM {BLOCK_WRITE_TABLE} WHERE block_type IS NOT NULL");
-        let rows = self
-            .db_handle
-            .query(&sql, HashMap::new())
-            .await
-            .map_err(|e| format!("boot audit: reading the stored block_type values: {e}"))?;
+        let rows = match self.db_handle.query(&sql, HashMap::new()).await {
+            Ok(rows) => rows,
+            Err(e) => return unaudited(format!("reading the stored block_type values: {e}")),
+        };
+        let mut idless = Vec::new();
         for row in rows {
-            let id = row.get("id").and_then(|v| v.as_string()).ok_or_else(|| {
-                format!("boot audit: {BLOCK_WRITE_TABLE} row without a string id: {row:?}")
-            })?;
+            let Some(id) = row.get("id").and_then(|v| v.as_string()) else {
+                idless.push(format!("{row:?}"));
+                continue;
+            };
             let stored = match row.get("block_type") {
                 Some(Value::String(s)) => s.clone(),
                 other => format!("{other:?}"),
@@ -63,7 +75,13 @@ impl SqlWriteAuthority {
                 ));
             }
         }
-        Ok(())
+        if !idless.is_empty() {
+            unaudited(format!(
+                "{} rows without a string id, unchecked: {}",
+                idless.len(),
+                idless.join("; ")
+            ));
+        }
     }
 
     async fn blocks_where(&self, predicate: &str, bound: &str) -> Result<Vec<Block>> {

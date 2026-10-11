@@ -458,3 +458,68 @@ fn a_sql_row_holding_an_invalid_block_type_boots_reads_untyped_and_discloses() {
         assert!(failures.is_empty(), "{}", failures.join("\n"));
     });
 }
+
+/// AUDIT-boot.a: a stored row the boot audit cannot read (no string `id`) is
+/// a data fault, so the boot discloses it and goes on, and the audit still
+/// discloses the readable rows after it.
+#[test]
+fn a_sql_row_the_block_type_audit_cannot_read_boots_and_discloses() {
+    let rt = runtime();
+    rt.clone().block_on(async move {
+        let env = TestEnvironment::new(rt.clone()).unwrap();
+        env.set_enable_loro(false);
+        let id = "block:bt-sql-after-unaudited";
+        let db = holon_turso::turso::TursoBackend::open_database(env.temp_path().join("test.db"))
+            .expect("opening the database must succeed");
+        let conn = db.connect().expect("connecting must succeed");
+        for statement in holon_turso::sql_utils::sql_statements(
+            holon_turso::schema_modules::block_raw_schema_sql(),
+        ) {
+            conn.execute(statement)
+                .unwrap_or_else(|e| panic!("creating block_raw: {statement}: {e}"));
+        }
+        conn.execute(
+            "INSERT INTO block_raw (id, parent_id, content, block_type) VALUES (NULL, NULL, \
+             'no id', 'page')",
+        )
+        .expect("inserting the id-less row must succeed");
+        conn.execute(&format!(
+            "INSERT INTO block_raw (id, parent_id, content, block_type) VALUES ('{id}', NULL, \
+             'sql invalid', '{INVALID}')"
+        ))
+        .expect("inserting the invalid row must succeed");
+        drop(conn);
+        drop(db);
+
+        env.start_app(true)
+            .await
+            .expect("start_app on a block_raw row without an id");
+        let unaudited: Vec<String> = env
+            .injector()
+            .expect("booted injector")
+            .resolve::<Arc<holon_api::ConditionBus>>()
+            .current()
+            .into_iter()
+            .filter(|c| c.condition_key().kind == "stored-block-types-unaudited")
+            .map(|c| format!("{} {:?}", c.subject, c.reason))
+            .collect();
+        let mut failures: Vec<String> = Vec::new();
+        if !unaudited
+            .iter()
+            .any(|c| c.starts_with("block_raw ") && c.contains("1 rows without a string id"))
+        {
+            failures.push(format!(
+                "no stored-block-types-unaudited condition on block_raw naming the id-less row; \
+                 raised: {unaudited:?}"
+            ));
+        }
+        note_condition(
+            &env,
+            &format!("{id}/block_type"),
+            INVALID,
+            "boot",
+            &mut failures,
+        );
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    });
+}

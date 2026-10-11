@@ -88,7 +88,7 @@ pub fn complete_guard_composition(injector: &Injector) {
 /// and a container that built the authority itself would silently skip that
 /// disclosure.
 pub fn sql_block_write_authority() -> Provider<dyn holon_core::WriteAuthorityReads> {
-    Provider::root_try_async(|resolver| async move {
+    Provider::root_async(|resolver| async move {
         // The audit reads `block_raw`, so the core schema has to be up. Every
         // boot resolves this marker eagerly long before the shape gate asks
         // for an authority; resolving it here is a cache hit that also makes
@@ -101,9 +101,8 @@ pub fn sql_block_write_authority() -> Provider<dyn holon_core::WriteAuthorityRea
         let authority = crate::core::sql_write_authority::SqlWriteAuthority::new(db.handle());
         authority
             .disclose_unreadable_stored_block_types(&conditions)
-            .await
-            .map_err(|e| format!("the SQL block write authority's boot audit failed: {e}"))?;
-        Ok::<_, String>(Arc::new(authority) as Arc<dyn holon_core::WriteAuthorityReads>)
+            .await;
+        Arc::new(authority) as Arc<dyn holon_core::WriteAuthorityReads>
     })
 }
 

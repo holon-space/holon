@@ -542,6 +542,14 @@ impl ConditionKind {
                  shows the default {field}. Write a valid {field} with set_field to fix it."
             )),
 
+            Self::StoredBlockTypesUnaudited { error } => ConditionDetail::with_body(
+                format!(
+                    "Holon could not check the stored block types in {subject}, so a block whose \
+                     type it cannot read shows untyped without a warning."
+                ),
+                vec![error.clone()],
+            ),
+
             // A doorbell: every record is read in full in the crash history,
             // which the profile's remedy opens.
             Self::PreviousRunPanicked {

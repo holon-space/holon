@@ -575,6 +575,12 @@ pub enum ConditionKind {
         stored: String,
         reason: String,
     },
+    /// The boot audit of the stored `block_type` values of table `subject`
+    /// could not read them (`error`), so a block whose type Holon cannot read
+    /// may show untyped without its `BlockFieldUnreadable`.
+    ///
+    /// All-clear: none in this process; the next boot audits again.
+    StoredBlockTypesUnaudited { error: String },
     /// The previous run of Holon panicked at `subject` (a `file:line:column`)
     /// on `thread` with `message`, as its panic record says, after the
     /// `earlier` runs that no frontend has shown either. One condition stands
@@ -733,6 +739,7 @@ impl ConditionKind {
     pub const DATABASE_WATCH_FAILED: &'static str = "database-watch-failed";
     pub const DERIVED_FIELD_NOT_COMPUTED: &'static str = "derived-field-not-computed";
     pub const BLOCK_FIELD_UNREADABLE: &'static str = "block-field-unreadable";
+    pub const STORED_BLOCK_TYPES_UNAUDITED: &'static str = "stored-block-types-unaudited";
     pub const PREVIOUS_RUN_PANICKED: &'static str = "previous-run-panicked";
     pub const TASK_PANICKED: &'static str = "task-panicked";
     pub const PANIC_RECORD_UNWRITABLE: &'static str = "panic-record-unwritable";
@@ -815,6 +822,7 @@ impl ConditionKind {
             Self::DatabaseWatchFailed { .. } => Self::DATABASE_WATCH_FAILED,
             Self::DerivedFieldNotComputed { .. } => Self::DERIVED_FIELD_NOT_COMPUTED,
             Self::BlockFieldUnreadable { .. } => Self::BLOCK_FIELD_UNREADABLE,
+            Self::StoredBlockTypesUnaudited { .. } => Self::STORED_BLOCK_TYPES_UNAUDITED,
             Self::PreviousRunPanicked { .. } => Self::PREVIOUS_RUN_PANICKED,
             Self::TaskPanicked { .. } => Self::TASK_PANICKED,
             Self::PanicRecordUnwritable { .. } => Self::PANIC_RECORD_UNWRITABLE,
