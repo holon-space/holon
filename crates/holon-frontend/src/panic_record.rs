@@ -204,6 +204,82 @@ thread_local! {
     static CATCHING: RefCell<Option<Option<PanicRecord>>> = const { RefCell::new(None) };
 }
 
+/// What a test may know of the process-wide hook. One process is one run in
+/// production, but a test binary runs every test of this crate in it, so a
+/// test's threads are the only ones whose panics are its own.
+#[cfg(test)]
+pub(crate) mod in_test {
+    use std::cell::Cell;
+    use std::cell::RefCell;
+    use std::sync::Arc;
+    use std::sync::Mutex;
+    use std::sync::PoisonError;
+
+    thread_local! {
+        /// This thread belongs to the test that armed the recorder.
+        static RECORDING: Cell<bool> = const { Cell::new(false) };
+        /// Where the panics raised on this thread are collected.
+        static OBSERVED: RefCell<Option<Arc<Mutex<Vec<String>>>>> =
+            const { RefCell::new(None) };
+    }
+
+    /// Let the panics of this thread reach the armed record dir. Without it
+    /// the panic of any other test running in parallel overwrites the record
+    /// the arming test asserts on.
+    pub(crate) fn record_panics_here() {
+        RECORDING.set(true);
+    }
+
+    pub(crate) fn stop_recording_here() {
+        RECORDING.set(false);
+    }
+
+    pub(super) fn records_panics_here() -> bool {
+        RECORDING.get()
+    }
+
+    /// Collects the panics raised on this thread while it lives. It chains the
+    /// process hook instead of replacing it, so it neither hides a panic from
+    /// another observer nor destroys one.
+    pub(crate) struct PanicsHere(Arc<Mutex<Vec<String>>>);
+
+    impl PanicsHere {
+        pub(crate) fn observing() -> Self {
+            super::hook_once();
+            let sink = Arc::new(Mutex::new(Vec::new()));
+            let previous = OBSERVED.with(|slot| slot.replace(Some(sink.clone())));
+            assert!(
+                previous.is_none(),
+                "one observer per thread: a nested one would hide the outer one's panics"
+            );
+            Self(sink)
+        }
+
+        pub(crate) fn observed(&self) -> Vec<String> {
+            self.0
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone()
+        }
+    }
+
+    impl Drop for PanicsHere {
+        fn drop(&mut self) {
+            OBSERVED.with(|slot| slot.replace(None));
+        }
+    }
+
+    pub(super) fn observe(info: &std::panic::PanicHookInfo<'_>) {
+        OBSERVED.with(|slot| {
+            if let Ok(Some(sink)) = slot.try_borrow().as_deref() {
+                sink.lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push(info.to_string());
+            }
+        });
+    }
+}
+
 /// Run `f`, and return the record of a panic in it instead of unwinding
 /// further. The panic shows on the bus as any panic does, but leaves no record
 /// for the next start once the bus has it: this run survives it.
@@ -286,9 +362,13 @@ fn hook_once() {
     static HOOK: Once = Once::new();
     HOOK.call_once(|| {
         let previous = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |info| match record(info) {
-            Report::Full => previous(info),
-            Report::Repeat(line) => eprintln!("{line}"),
+        std::panic::set_hook(Box::new(move |info| {
+            #[cfg(test)]
+            in_test::observe(info);
+            match record(info) {
+                Report::Full => previous(info),
+                Report::Repeat(line) => eprintln!("{line}"),
+            }
         }));
     });
 }
@@ -802,6 +882,12 @@ fn caught_report(record: &PanicRecord) -> Report {
 fn record(info: &std::panic::PanicHookInfo<'_>) -> Report {
     let record = PanicRecord::from_hook(info);
     let caught = caught_here(&record);
+    // A panic of another test in this binary is not this run's: it must
+    // neither overwrite the armed record nor reach the armed bus.
+    #[cfg(test)]
+    if !in_test::records_panics_here() {
+        return Report::Full;
+    }
     let mut target = target();
     let Some(target) = target.as_mut() else {
         eprintln!(
@@ -875,13 +961,25 @@ mod tests {
     use super::*;
 
     /// The hook and its target are process-wide: each test starts a process
-    /// that has not armed yet.
-    fn fresh_process() -> std::sync::MutexGuard<'static, ()> {
+    /// that has not armed yet, and claims its own threads' panics as that
+    /// process's.
+    fn fresh_process() -> FreshProcess {
         static SERIAL: Mutex<()> = Mutex::new(());
         let serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
         *target() = None;
         *shown() = None;
-        serial
+        in_test::record_panics_here();
+        FreshProcess(serial)
+    }
+
+    struct FreshProcess(
+        #[expect(dead_code, reason = "held to serialize the tests")] MutexGuard<'static, ()>,
+    );
+
+    impl Drop for FreshProcess {
+        fn drop(&mut self) {
+            in_test::stop_recording_here();
+        }
     }
 
     fn seed_previous_run(dir: &Path) {
@@ -1552,7 +1650,11 @@ mod tests {
     }
 
     fn panic_on_a_thread(message: &'static str) {
-        let joined = std::thread::spawn(move || panic!("{message}")).join();
+        let joined = std::thread::spawn(move || {
+            in_test::record_panics_here();
+            panic!("{message}")
+        })
+        .join();
         assert!(joined.is_err(), "the thread must die of its panic");
     }
 

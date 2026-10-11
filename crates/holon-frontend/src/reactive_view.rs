@@ -4275,14 +4275,13 @@ mod tests {
         );
 
         // The driver runs in a spawned task; a panic there aborts only that
-        // task, so capture it through the panic hook to assert on it here.
-        // (nextest gives each test its own process, so the global hook is safe.)
-        let panics: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        let sink = panics.clone();
-        let previous_hook = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |info| {
-            sink.lock().unwrap().push(info.to_string());
-        }));
+        // task, so observe it through the panic hook to assert on it here.
+        // `#[tokio::test]` drives that task on this very thread, so observing
+        // only this thread's panics keeps the other tests sharing this
+        // process out of the assertion below — and keeps their observation
+        // intact, since `PanicsHere` chains the process hook instead of
+        // replacing it.
+        let panics = crate::panic_record::in_test::PanicsHere::observing();
 
         let services: Arc<dyn crate::reactive::BuilderServices> =
             Arc::new(StubBuilderServices::new());
@@ -4299,7 +4298,7 @@ mod tests {
             ($ready:expr, $desc:expr) => {{
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
                 loop {
-                    if !panics.lock().unwrap().is_empty() {
+                    if !panics.observed().is_empty() {
                         break; // driver panicked — let the assertions report it
                     }
                     if $ready {
@@ -4353,9 +4352,7 @@ mod tests {
             "child content update applied (item replaced)"
         );
 
-        std::panic::set_hook(previous_hook);
-
-        let observed = panics.lock().unwrap().clone();
+        let observed = panics.observed();
         assert!(
             observed.is_empty(),
             "tree driver panicked reconciling an update to a child whose parent was removed — \
