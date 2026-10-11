@@ -168,11 +168,13 @@ type Sink = Arc<Mutex<BTreeSet<(String, String)>>>;
 fn arm(doc: &LoroDocument, shape: Shape) -> anyhow::Result<(Sink, loro::Subscription)> {
     let collected: Sink = Arc::default();
     let sink = collected.clone();
-    let sub = doc.doc().subscribe_root(Arc::new(move |event| {
-        sink.lock()
-            .expect("the fact sink is not poisoned")
-            .extend(changed_entities(&event));
-    }));
+    let sub = doc.with_read(|d| {
+        Ok(d.subscribe_root(Arc::new(move |event| {
+            sink.lock()
+                .expect("the fact sink is not poisoned")
+                .extend(changed_entities(&event));
+        })))
+    })?;
     // The commit that opened before the subscription records nothing, so the
     // warm-up spends two.
     for warm in ["warm-1", "warm-2"] {

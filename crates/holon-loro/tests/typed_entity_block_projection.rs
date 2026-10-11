@@ -14,7 +14,6 @@ use std::sync::Mutex;
 
 use holon_loro::CONTENT_RAW;
 use holon_loro::CONTENT_TYPE;
-use holon_loro::STABLE_ID;
 use holon_loro::TREE_NAME;
 use holon_loro::WriteOrigin;
 use holon_loro::loro_backend::PendingChange;
@@ -22,6 +21,7 @@ use holon_loro::loro_backend::build_tid_index;
 use holon_loro::loro_backend::extract_pending_changes;
 use holon_loro::loro_backend::incremental_block_changes;
 use holon_loro::loro_document::LoroDocument;
+use holon_loro::write_stable_id;
 use loro::LoroValue;
 use loro::TreeID;
 use typed_entity_shape::CANDIDATES;
@@ -44,14 +44,14 @@ fn seeded() -> anyhow::Result<(Arc<LoroDocument>, Vec<TreeID>)> {
         let tree = txn.get_tree(TREE_NAME);
         let page = tree.create(None)?;
         let meta = tree.get_meta(page)?;
-        meta.insert(STABLE_ID, "page-1")?;
+        write_stable_id(txn, page, "page-1")?;
         meta.insert(CONTENT_TYPE, "text")?;
         meta.ensure_mergeable_text(CONTENT_RAW)?.insert(0, "Page")?;
         let mut nodes = vec![page];
         for i in 0..4 {
             let node = tree.create(page)?;
             let meta = tree.get_meta(node)?;
-            meta.insert(STABLE_ID, format!("b{i}").as_str())?;
+            write_stable_id(txn, node, format!("b{i}").as_str())?;
             meta.insert(CONTENT_TYPE, "text")?;
             meta.ensure_mergeable_text(CONTENT_RAW)?
                 .insert(0, &format!("block {i}"))?;
@@ -69,16 +69,20 @@ fn subscribe(doc: &LoroDocument) -> (Facts, loro::Subscription) {
     };
     let blocks = facts.blocks.clone();
     let entities = facts.entities.clone();
-    let sub = doc.doc().subscribe_root(Arc::new(move |event| {
-        blocks
-            .lock()
-            .expect("the block sink is not poisoned")
-            .extend(extract_pending_changes(&event));
-        entities
-            .lock()
-            .expect("the entity sink is not poisoned")
-            .extend(changed_entities(&event));
-    }));
+    let sub = doc
+        .with_read(|d| {
+            Ok(d.subscribe_root(Arc::new(move |event| {
+                blocks
+                    .lock()
+                    .expect("the block sink is not poisoned")
+                    .extend(extract_pending_changes(&event));
+                entities
+                    .lock()
+                    .expect("the entity sink is not poisoned")
+                    .extend(changed_entities(&event));
+            })))
+        })
+        .expect("subscribing under the read guard succeeds");
     (facts, sub)
 }
 
