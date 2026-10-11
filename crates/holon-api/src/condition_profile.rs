@@ -655,6 +655,15 @@ const PROFILE_REFUSED: ConditionProfile = ConditionProfile::new(
     &[],
 );
 
+const TYPE_PROFILE_REFUSED: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Error,
+    "Type profile refused",
+    icons::BLOCKED,
+    ConditionPlacement::Toast,
+    AllClear::UntilRestart,
+    &[],
+);
+
 const BLOCK_IN_TWO_FILES: ConditionProfile = ConditionProfile::new(
     ConditionSeverity::Warning,
     "Block is in more than one file",
@@ -964,6 +973,7 @@ impl ConditionKind {
             Self::WatchViewsRebuilding => WATCH_VIEWS_REBUILDING,
             Self::VaultBacklogIngesting { .. } => VAULT_BACKLOG_INGESTING,
             Self::ProfileRefused { .. } => PROFILE_REFUSED,
+            Self::TypeProfileRefused(_) => TYPE_PROFILE_REFUSED,
             Self::BlockInTwoFiles { .. } => BLOCK_IN_TWO_FILES,
             Self::BlockEditedInTwoFiles { .. } => BLOCK_EDITED_IN_TWO_FILES,
             Self::DeletedBlockKeptInFile { .. } => DELETED_BLOCK_KEPT_IN_FILE,

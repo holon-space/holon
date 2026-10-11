@@ -608,6 +608,58 @@ pub struct ProfileVariant {
     pub render: String,
 }
 
+/// A type's profile refused because one of its variants does not parse. The
+/// type keeps its schema and renders with the default profile.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MalformedTypeProfile {
+    pub entity: String,
+    pub origin: TypeSource,
+    pub variant: String,
+    pub part: VariantPart,
+    /// The condition or render text as written.
+    pub text: String,
+    pub reason: String,
+}
+
+/// The part of a [`ProfileVariant`] that does not parse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VariantPart {
+    Condition,
+    Render,
+}
+
+impl std::fmt::Display for VariantPart {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Condition => "condition",
+            Self::Render => "render",
+        })
+    }
+}
+
+impl std::fmt::Display for TypeSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BuiltIn => f.write_str("built in"),
+            Self::PreConfigured => f.write_str("shipped with Holon"),
+            Self::UserDefined => f.write_str("user-defined"),
+            Self::McpProvider(provider) => write!(f, "declared by integration '{provider}'"),
+        }
+    }
+}
+
+impl std::fmt::Display for MalformedTypeProfile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the {} of variant '{}' of type '{}' ({}) does not parse: `{}`: {}",
+            self.part, self.variant, self.entity, self.origin, self.text, self.reason
+        )
+    }
+}
+
+impl std::error::Error for MalformedTypeProfile {}
+
 /// The canonical entity schema. Every entity in Holon — whether hard-coded
 /// (Block), pre-configured (Person), user-defined, or MCP-sourced — is
 /// represented by a `TypeDefinition`.

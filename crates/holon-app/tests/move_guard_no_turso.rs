@@ -118,7 +118,10 @@ impl BlockReader for ForestReader {
 fn resolver_from(blocks: &[Block]) -> Arc<dyn ProfileResolving> {
     let type_registry =
         holon_profiles::create_default_registry().expect("default TypeRegistry builds");
-    let type_profiles = holon_profiles::type_profiles_from_registry(&type_registry);
+    let type_profiles = holon_profiles::type_profiles_from_registry(
+        &type_registry,
+        &holon_api::ConditionBus::new(),
+    );
     let mut live_entities = holon_profiles::LiveEntities::new();
     for spec in LiveEntitySpec::ALL.iter().copied() {
         live_entities.insert(

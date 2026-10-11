@@ -21,6 +21,7 @@ fn registered_block_profile() -> holon_api::entity_profile::EntityProfile {
         .find(|td| td.name == "block")
         .expect("the default registry defines the block type");
     holon_profiles::profile_from_type_def(&block)
+        .expect("the bundled block profile parses")
         .expect("the block type definition yields a profile")
 }
 

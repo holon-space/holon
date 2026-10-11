@@ -764,67 +764,107 @@ fn parse_literal_value(s: &str) -> Result<Value> {
 pub fn profile_variants_to_stored(
     profile_variants: &[holon_api::ProfileVariant],
 ) -> Result<Vec<StoredVariant>> {
-    let mut variants = Vec::new();
-    for pv in profile_variants {
-        let (condition_src, condition_required, data_condition, ui_condition) =
-            if let Some(ref compiled) = pv.condition {
-                let src = compiled.source.clone();
-                let (dc, uc) = split_condition(&src)
-                    .with_context(|| format!("in condition of variant '{}'", pv.name))?;
-                // The full condition's required columns come straight off its
-                // already-compiled AST. The data-only subset is a different
-                // string (UI conjuncts stripped), so derive its required set by
-                // compiling it once here (compile-only; it is a subset of the
-                // parent that already compiled).
-                (src, compiled.required_columns.clone(), dc, uc)
-            } else {
-                (String::new(), BTreeSet::new(), None, Predicate::Always)
-            };
+    parse_variants(profile_variants).map_err(|refusal| {
+        anyhow::anyhow!(
+            "in {} of variant '{}': {}",
+            refusal.part,
+            refusal.variant,
+            refusal.reason
+        )
+    })
+}
 
-        let data_condition_required = match &data_condition {
-            Some(dc) => {
-                CompiledExpr::compile(&RhaiEngine::new(), dc.as_str())
-                    .map_err(|e| {
-                        anyhow::anyhow!("compiling data condition of variant '{}': {e}", pv.name)
-                    })?
-                    .required_columns
-            }
-            None => BTreeSet::new(),
-        };
+/// A variant that does not parse, before it is attributed to a type.
+struct VariantRefusal {
+    variant: String,
+    part: holon_api::VariantPart,
+    text: String,
+    reason: String,
+}
 
-        let profile = Arc::new(StoredProfile {
-            name: pv.name.clone(),
-            render: parse_render_text(&pv.render)
-                .with_context(|| format!("in render of variant '{}'", pv.name))?,
-        });
-
-        variants.push(StoredVariant {
-            name: pv.name.clone(),
-            priority: pv.priority,
-            condition_source: condition_src,
-            condition_required,
-            data_condition,
-            data_condition_required,
-            ui_condition,
-            profile,
-        });
-    }
+fn parse_variants(
+    profile_variants: &[holon_api::ProfileVariant],
+) -> std::result::Result<Vec<StoredVariant>, VariantRefusal> {
+    let mut variants = profile_variants
+        .iter()
+        .map(parse_variant)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
     variants.sort_by_key(|v| std::cmp::Reverse(v.priority));
     Ok(variants)
 }
 
-/// Build an EntityProfile from a TypeDefinition's profile_variants.
-/// Returns None if the TypeDefinition has no profile_variants.
-pub fn profile_from_type_def(type_def: &holon_api::TypeDefinition) -> Option<EntityProfile> {
-    if type_def.profile_variants.is_empty() {
-        return None;
-    }
-    let variants = profile_variants_to_stored(&type_def.profile_variants).unwrap_or_else(|e| {
-        panic!(
-            "Failed to parse profile variants for entity '{}': {e:#}",
-            type_def.name
-        )
+fn parse_variant(
+    pv: &holon_api::ProfileVariant,
+) -> std::result::Result<StoredVariant, VariantRefusal> {
+    let refusal = |part, text: &str, reason: String| VariantRefusal {
+        variant: pv.name.clone(),
+        part,
+        text: text.to_string(),
+        reason,
+    };
+    let (condition_src, condition_required, data_condition, ui_condition) =
+        if let Some(ref compiled) = pv.condition {
+            let src = compiled.source.clone();
+            let (dc, uc) = split_condition(&src)
+                .map_err(|e| refusal(holon_api::VariantPart::Condition, &src, format!("{e:#}")))?;
+            (src, compiled.required_columns.clone(), dc, uc)
+        } else {
+            (String::new(), BTreeSet::new(), None, Predicate::Always)
+        };
+
+    // The data-only subset is a different string (UI conjuncts stripped), so
+    // its required set comes from compiling it here.
+    let data_condition_required = match &data_condition {
+        Some(dc) => {
+            CompiledExpr::compile(&RhaiEngine::new(), dc.as_str())
+                .map_err(|e| {
+                    refusal(
+                        holon_api::VariantPart::Condition,
+                        &condition_src,
+                        format!("its data part `{dc}` does not compile: {e}"),
+                    )
+                })?
+                .required_columns
+        }
+        None => BTreeSet::new(),
+    };
+
+    let profile = Arc::new(StoredProfile {
+        name: pv.name.clone(),
+        render: parse_render_text(&pv.render)
+            .map_err(|e| refusal(holon_api::VariantPart::Render, &pv.render, format!("{e:#}")))?,
     });
+
+    Ok(StoredVariant {
+        name: pv.name.clone(),
+        priority: pv.priority,
+        condition_source: condition_src,
+        condition_required,
+        data_condition,
+        data_condition_required,
+        ui_condition,
+        profile,
+    })
+}
+
+/// Build an EntityProfile from a TypeDefinition's profile_variants: `None` when
+/// it has none, a refusal when one of them does not parse.
+pub fn profile_from_type_def(
+    type_def: &holon_api::TypeDefinition,
+) -> std::result::Result<Option<EntityProfile>, holon_api::MalformedTypeProfile> {
+    if type_def.profile_variants.is_empty() {
+        return Ok(None);
+    }
+    let variants = parse_variants(&type_def.profile_variants).map_err(|refusal| {
+        holon_api::MalformedTypeProfile {
+            entity: type_def.name.clone(),
+            origin: type_def.source.clone(),
+            variant: refusal.variant,
+            part: refusal.part,
+            text: refusal.text,
+            reason: refusal.reason,
+        }
+    })?;
 
     let computed_fields: Vec<CompiledComputedField> = type_def
         .computed_specs()
@@ -856,7 +896,7 @@ pub fn profile_from_type_def(type_def: &holon_api::TypeDefinition) -> Option<Ent
         .map(|f| f.name.clone())
         .collect();
 
-    Some(
+    Ok(Some(
         EntityProfile {
             entity_name: holon_api::EntityName::new(&type_def.name),
             variants,
@@ -866,7 +906,7 @@ pub fn profile_from_type_def(type_def: &holon_api::TypeDefinition) -> Option<Ent
             render_requirements: Default::default(),
         }
         .derive_render_requirements(),
-    )
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -2129,8 +2169,8 @@ mod tests {
         assert_refused_naming(r##"is_focused && x == #"a"##, "unterminated raw string");
     }
 
-    /// `profile_from_type_def` panics on a refused condition, so every shipped
-    /// profile's conditions must split.
+    /// A condition that does not split refuses its type's whole profile, so
+    /// every shipped profile's conditions must split.
     #[test]
     fn every_shipped_profile_condition_splits() {
         let dir =
@@ -2841,10 +2881,13 @@ variants:
     /// shape, not the YAML-only `parse_entity_profile` fixture).
     fn block_profile_with_schema() -> EntityProfile {
         let registry = crate::type_registry::create_default_registry().unwrap();
-        crate::type_registry::type_profiles_from_registry(&registry)
-            .into_iter()
-            .find(|p| p.entity_name.as_str() == "block")
-            .expect("block profile must exist in the default registry")
+        crate::type_registry::type_profiles_from_registry(
+            &registry,
+            &holon_api::ConditionBus::new(),
+        )
+        .into_iter()
+        .find(|p| p.entity_name.as_str() == "block")
+        .expect("block profile must exist in the default registry")
     }
 
     #[test]

@@ -372,6 +372,15 @@ impl ConditionKind {
                 vec![error.clone()],
             ),
 
+            Self::TypeProfileRefused(refusal) => ConditionDetail::with_body(
+                format!(
+                    "the profile of type {subject} ({}) is not applied — fix the {} of variant \
+                     '{}':",
+                    refusal.origin, refusal.part, refusal.variant
+                ),
+                vec![refusal.text.clone(), refusal.reason.clone()],
+            ),
+
             // The paths are BODY lines: the user opens one of them to delete a
             // copy, so they must survive the headline cap.
             Self::BlockInTwoFiles {

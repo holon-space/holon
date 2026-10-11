@@ -678,17 +678,31 @@ pub fn create_default_registry() -> Result<Arc<TypeRegistry>> {
 /// Bridge function — `profile_from_type_def` can't see the registry's
 /// `virtual_children` map, so it's attached here. Single source of truth
 /// shared by the Turso DI path and the no-Turso bundled-only resolver.
-pub fn type_profiles_from_registry(type_registry: &TypeRegistry) -> Vec<EntityProfile> {
-    type_registry
-        .all()
-        .iter()
-        .filter_map(|td| {
-            crate::profile_from_type_def(td).map(|mut p| {
-                p.virtual_child = type_registry.virtual_child_config(&td.name);
-                p.with_widened_virtual_child()
-            })
-        })
-        .collect()
+///
+/// A type whose profile does not parse is left out and raised on `conditions`
+/// as [`holon_api::ConditionKind::TypeProfileRefused`].
+pub fn type_profiles_from_registry(
+    type_registry: &TypeRegistry,
+    conditions: &holon_api::ConditionBus,
+) -> Vec<EntityProfile> {
+    let mut profiles = Vec::new();
+    for td in type_registry.all() {
+        match crate::profile_from_type_def(&td) {
+            Ok(Some(mut profile)) => {
+                profile.virtual_child = type_registry.virtual_child_config(&td.name);
+                profiles.push(profile.with_widened_virtual_child());
+            }
+            Ok(None) => {}
+            Err(refusal) => {
+                tracing::error!("type profile refused: {refusal}");
+                conditions.emit(holon_api::Condition {
+                    subject: refusal.entity.clone(),
+                    reason: holon_api::ConditionKind::TypeProfileRefused(refusal),
+                });
+            }
+        }
+    }
+    profiles
 }
 
 #[cfg(test)]

@@ -422,6 +422,12 @@ pub enum ConditionKind {
     /// All-clear: the next successful load of the same block. A deleted block's
     /// condition stands until restart.
     ProfileRefused { error: String },
+    /// A type's profile does not parse, so the type renders with the default
+    /// profile; its schema and rows are unaffected. `subject` is the type.
+    ///
+    /// All-clear: none — type profiles are built once at boot, so the
+    /// condition holds until a restart with a fixed profile.
+    TypeProfileRefused(crate::entity::MalformedTypeProfile),
     /// One block id is on disk in two or more org files. `subject` is the
     /// block id; `owner_file` belongs to the page that owns the block and stays
     /// authoritative, `copy_files` hold the other copies. Holon deletes none:
@@ -720,6 +726,7 @@ impl ConditionKind {
     pub const WATCH_VIEWS_REBUILDING: &'static str = "watch-views-rebuilding";
     pub const VAULT_BACKLOG_INGESTING: &'static str = "vault-backlog-ingesting";
     pub const PROFILE_REFUSED: &'static str = "profile-refused";
+    pub const TYPE_PROFILE_REFUSED: &'static str = "type-profile-refused";
     pub const BLOCK_IN_TWO_FILES: &'static str = "block-in-two-files";
     pub const BLOCK_EDITED_IN_TWO_FILES: &'static str = "block-edited-in-two-files";
     pub const DELETED_BLOCK_KEPT_IN_FILE: &'static str = "deleted-block-kept-in-file";
@@ -802,6 +809,7 @@ impl ConditionKind {
             Self::WatchViewsRebuilding => Self::WATCH_VIEWS_REBUILDING,
             Self::VaultBacklogIngesting { .. } => Self::VAULT_BACKLOG_INGESTING,
             Self::ProfileRefused { .. } => Self::PROFILE_REFUSED,
+            Self::TypeProfileRefused(_) => Self::TYPE_PROFILE_REFUSED,
             Self::BlockInTwoFiles { .. } => Self::BLOCK_IN_TWO_FILES,
             Self::BlockEditedInTwoFiles { .. } => Self::BLOCK_EDITED_IN_TWO_FILES,
             Self::DeletedBlockKeptInFile { .. } => Self::DELETED_BLOCK_KEPT_IN_FILE,

@@ -90,10 +90,13 @@ fn entity_dispatch() -> holon_api::render_requirements::RenderRequirements {
 fn block_profile() -> EntityProfile {
     let registry = holon_profiles::type_registry::create_default_registry()
         .expect("default registry must build");
-    holon_profiles::type_registry::type_profiles_from_registry(&registry)
-        .into_iter()
-        .find(|p| p.entity_name.as_str() == "block")
-        .expect("block profile must exist in the default registry")
+    holon_profiles::type_registry::type_profiles_from_registry(
+        &registry,
+        &holon_api::ConditionBus::new(),
+    )
+    .into_iter()
+    .find(|p| p.entity_name.as_str() == "block")
+    .expect("block profile must exist in the default registry")
 }
 
 /// A plain block as the projection carries it: no `tags` column, so

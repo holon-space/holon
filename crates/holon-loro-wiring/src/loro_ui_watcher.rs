@@ -68,7 +68,7 @@ pub fn build_turso_free_profile_resolver(
     conditions: Arc<holon_api::ConditionBus>,
 ) -> Arc<dyn ProfileResolving> {
     let type_registry = holon_profiles::create_default_registry().expect("default TypeRegistry");
-    let type_profiles = holon_profiles::type_profiles_from_registry(&type_registry);
+    let type_profiles = holon_profiles::type_profiles_from_registry(&type_registry, &conditions);
 
     let empty_profiles = holon_api::live_data::LiveData::new(
         Vec::new(),

@@ -144,7 +144,8 @@ pub(crate) fn load_seed_profile_into_ref(state: &mut ReferenceState) {
     let block_type_def = registry
         .get("block")
         .expect("Block type must be registered");
-    state.domain.seed_profile = holon::entity_profile::profile_from_type_def(&block_type_def);
+    state.domain.seed_profile = holon::entity_profile::profile_from_type_def(&block_type_def)
+        .expect("the bundled block profile parses");
 }
 
 /// Model the bundled default-asset layout the production boot's
