@@ -28,6 +28,11 @@ struct AssetServices {
 }
 
 impl BuilderServices for AssetServices {
+    /// No vault backs these services, so no document is read-only.
+    fn write_tier_admits(&self, _: &holon_api::EntityUri) -> bool {
+        true
+    }
+
     fn dispatch_intent_awaitable(
         &self,
         intent: holon_frontend::operations::OperationIntent,

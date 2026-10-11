@@ -2704,7 +2704,7 @@ layer (ADR 0010, "ViewModels carry the intent, drivers dispatch it").
 | Interaction | Headless? | Call chain |
 |---|---|---|
 | (a) **select / focus** (was `click_block`) | **YES** | `engine.snapshot_resolved(root)` → `find_click_intent_in_region(vm, id, region)` → if `Some(intent)`: `session.execute_operation(intent)`; if `None` (e.g. editable_text in Main): `session.execute_operation("navigation","focus",{block_id})` (the existing component path). This is exactly what `ReactiveEngineDriver::click_entity` does (user_driver.rs:475-510), minus the driver wrapper. |
-| (b) **move / reparent** (was `drag_drop_block`) | **YES** | Resolve the drop op from the target's `ViewKind::DropZone { op_name }` (view_model.rs; `drop_zone` prop `op`/`op_name`, default `DEFAULT_DROP_OP_NAME`) → `build_drop_intent(source_id, target_id, target_entity, op_name)` (user_driver.rs:51, builds `{parent_id, ...}` params by id) → `session.execute_operation(intent)`. No coordinates — the `op_name` is a declarative widget prop, resolved by walking the snapshot tree by id (mirrors `drop_entity`'s `walk_tree` lookup, user_driver.rs:704-725, minus the bounds wait). |
+| (b) **move / reparent** (was `drag_drop_block`) | **YES** | Resolve the drop op from the target `drop_zone`'s one bound operation (`drag_drop_operation`, user_driver.rs; a zone whose row is not offered the op binds none and offers no drop) → `build_drop_intent(source_id, target_id, op)` (builds `{parent_id, ...}` params by id) → `session.execute_operation(intent)`. No coordinates — the op is the zone's bound operation, resolved by walking the snapshot tree by id (mirrors `drop_entity`'s `walk_tree` lookup, user_driver.rs:704-725, minus the bounds wait). |
 | (c) **expand + collapse** (was `expand_toggle`/`collapse_toggle`) | **YES** (already geometry-free) | The current `E2ESut` impl does NOT click — it walks the reactive tree and flips the `expand_toggle` node's `expanded` signal gate directly (`set_expand_toggle_gate`, `pbt/sut_render.rs:114-179`; `ViewKind::ExpandToggle{expanded}` is in-memory tab UI state, ref side is `state.ui.tab.expanded_toggles`, expand_toggle.rs:93). Pure `ReactiveEngine` snapshot + signal `set` — no geometry already. Re-levels cleanly to an `expand(id)`/`collapse(id)` intent over the component's `reactive` engine. |
 | (d) **trigger_command** (was `trigger_slash_command`) | **YES for the resolved op; NO for the popup-UI path** — see nuance below | `slash_command_on_enter(engine, block_uri, current_text, cursor_byte)` (`headless_editor_mirror.rs:332-396`) resolves the `/cmd` to an `OperationIntent` BY block_id (sources ops from `services.entity_operations(scheme)`, NOT a rendered node — geometry-free), using the same pure `CommandProvider`/`check_triggers`/`build_command_items`/`on_select` logic GPUI drives. Dispatched at headless_editor_mirror.rs:272 via `engine.dispatch_intent_sync`. The net op (e.g. `block::delete{id}`) is reachable headlessly by id. |
 
@@ -2736,7 +2736,7 @@ driver-realized concern.
 - The slash popup-filter UI path (above).
 
 **Net:** select / move / expand / collapse / trigger_command(resolved-op) all re-level to
-intent caps realized headlessly via `find_click_intent_in_region` (or `DropZone.op_name` /
+intent caps realized headlessly via `find_click_intent_in_region` (or the `drop_zone`'s bound op /
 `slash_command_on_enter` / the expand-gate) + `session.execute_operation`. `press_key`,
 geometry hit-test, and the slash popup-UI path remain the E4 driver/windowed residue.
 

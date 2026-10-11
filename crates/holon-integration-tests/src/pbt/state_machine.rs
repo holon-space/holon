@@ -39,7 +39,8 @@ pub(crate) const LAYOUT_MUTATIONS_ENABLED: bool = true;
 /// Wiring:
 /// - `assets/default/types/block_profile.yaml` `editing` and `default` variants
 ///   wrap each block in `column(row(draggable(icon), …), drop_zone())`.
-/// - `ViewKind::DropZone { op_name }` carries the dispatched op declaratively.
+/// - `draggable` / `drop_zone` bind the op a drop dispatches from the row's
+///   offered operations; an unoffered row binds none and offers no drag/drop.
 /// - `UserDriver::drop_entity` overrides drive headless (shadow tree walk via
 ///   `HeadlessInputRouter::block_contents`) and GPUI (real `MouseDown` →
 ///   `MouseMove(pressed=Left)` → `MouseUp` events).

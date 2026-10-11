@@ -374,14 +374,10 @@ pub enum ViewKind {
         fields: String,
         child: Box<ViewModel>,
     },
-    /// A drop target. `op_name` is the operation dispatched when a drag is
-    /// released on this zone — defaults to `move_block`. Production GPUI
-    /// `drop_zone.rs` and the headless `UserDriver::drop_entity` both read
-    /// this to build the dispatched intent (see `build_drop_intent`).
-    DropZone {
-        #[serde(default = "default_drop_op_name")]
-        op_name: String,
-    },
+    /// A drop target. The operation a drop dispatches is the node's one bound
+    /// operation ([`crate::user_driver::drag_drop_operation`]); a zone that
+    /// binds none offers no drop.
+    DropZone {},
     /// View mode switcher: ghost icons for switching collection layout.
     /// `entity_uri` identifies which collection this switcher controls.
     ViewModeSwitcher {
@@ -566,9 +562,6 @@ impl ViewKind {
     }
 }
 
-fn default_drop_op_name() -> String {
-    "move_block".to_string()
-}
 fn default_icon_name() -> String {
     "circle".to_string()
 }

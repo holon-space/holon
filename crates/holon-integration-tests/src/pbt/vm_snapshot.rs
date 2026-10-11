@@ -207,9 +207,6 @@ pub(crate) fn view_model_to_snapshot(
         ViewKind::PieMenu { fields, .. } => {
             props.insert("fields".into(), fields.clone());
         }
-        ViewKind::DropZone { op_name } => {
-            props.insert("op_name".into(), op_name.clone());
-        }
         ViewKind::ViewModeSwitcher {
             entity_uri, modes, ..
         } => {
@@ -269,6 +266,7 @@ pub(crate) fn view_model_to_snapshot(
         | ViewKind::Focusable { .. }
         | ViewKind::Selectable { .. }
         | ViewKind::Draggable { .. }
+        | ViewKind::DropZone {}
         | ViewKind::OnHover { .. }
         | ViewKind::BottomDock { .. }
         | ViewKind::LiveBlock { .. }

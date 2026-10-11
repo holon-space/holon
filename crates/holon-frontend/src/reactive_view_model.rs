@@ -1573,12 +1573,7 @@ impl ReactiveViewModel {
                 fields: self.prop_str("fields").unwrap_or_default(),
                 child: Box::new(self.children.first().map(|c| snap(c)).unwrap_or_default()),
             },
-            "drop_zone" => ViewKind::DropZone {
-                op_name: self
-                    .prop_str("op")
-                    .or_else(|| self.prop_str("op_name"))
-                    .unwrap_or_else(|| "move_block".to_string()),
-            },
+            "drop_zone" => ViewKind::DropZone {},
             "view_mode_switcher" => {
                 let entity_uri = self
                     .prop_str("entity_uri")

@@ -155,6 +155,11 @@ fn bare(target_id: &str) -> &str {
 }
 
 impl BuilderServices for ExpandStoreServices {
+    /// No vault backs these services, so no document is read-only.
+    fn write_tier_admits(&self, _: &holon_api::EntityUri) -> bool {
+        true
+    }
+
     /// ExpandStoreServices is a test double with no backend to await: it
     /// dispatches and reports that nothing was proven, rather than
     /// inheriting a claim it cannot make.

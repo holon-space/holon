@@ -501,9 +501,8 @@ pub trait BuilderServices: Send + Sync {
     /// Whether the write tier admits a block write naming `subject`, as its
     /// `id` or `parent_id`. Offer paths ask it so they never offer what the
     /// dispatcher refuses; it discloses nothing, because the write asks again.
-    fn write_tier_admits(&self, _: &EntityUri) -> bool {
-        true
-    }
+    /// Required: services that answer for a tree answer for its offers.
+    fn write_tier_admits(&self, subject: &EntityUri) -> bool;
 
     /// Cloned handle to the focused-block `Mutable`, when this services
     /// instance is backed by a `UiState`. Used by reactive row providers

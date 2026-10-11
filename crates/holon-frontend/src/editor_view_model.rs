@@ -1869,6 +1869,10 @@ mod tests {
     }
 
     impl crate::reactive::BuilderServices for RefusingSlotServices {
+        fn write_tier_admits(&self, subject: &holon_api::EntityUri) -> bool {
+            self.stub.write_tier_admits(subject)
+        }
+
         fn interpret(
             &self,
             expr: &holon_api::render_types::RenderExpr,

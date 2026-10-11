@@ -45,10 +45,22 @@ use crate::reactive::ReactiveEngine;
 use crate::reactive_view_model::ReactiveViewModel;
 use crate::row_origin::RowOrigin;
 
-/// Default operation dispatched when a drop completes on a block drop zone.
-/// ALLOW(fallback): doc comment describing pre-existing default-op semantics
-/// Used as fallback when `ViewKind::DropZone { op_name }` isn't readable.
-pub const DEFAULT_DROP_OP_NAME: &str = "move_block";
+/// The operation a `draggable` or `drop_zone` node offers: the one operation it
+/// binds. `None` means the widget offers no drag or drop — its row is not
+/// offered the operation, so the write tier would refuse it.
+pub fn drag_drop_operation(
+    operations: &[holon_api::render_types::OperationWiring],
+) -> Option<&holon_api::render_types::OperationWiring> {
+    assert!(
+        operations.len() <= 1,
+        "a drag/drop widget binds at most one operation, got {:?}",
+        operations
+            .iter()
+            .map(|w| w.descriptor.name.as_str())
+            .collect::<Vec<_>>()
+    );
+    operations.first()
+}
 
 /// Param key for the source block id on a drop dispatch.
 pub const DROP_SOURCE_PARAM: &str = "id";
@@ -58,9 +70,8 @@ pub const DROP_TARGET_PARAM: &str = "parent_id";
 
 /// Build the `OperationIntent` that a drop zone widget dispatches when a
 /// drag is released on it. Production GPUI `drop_zone` and the headless
-/// `UserDriver::drop_entity` default impl both call this. `op_name` comes
-/// from the dropzone widget's declarative spec (see
-/// `ViewKind::DropZone { op_name }`).
+/// `UserDriver::drop_entity` default impl both call this. `operation` is the
+/// zone's bound operation ([`drag_drop_operation`]).
 ///
 /// `None` when the drop lands on its own source: `move_block{id: S,
 /// parent_id: S}` would make a block its own parent, and whether the engine
@@ -69,8 +80,7 @@ pub const DROP_TARGET_PARAM: &str = "parent_id";
 pub fn build_drop_intent(
     source_id: &EntityUri,
     target_id: &EntityUri,
-    target_entity: EntityName,
-    op_name: &str,
+    operation: &holon_api::render_types::OperationDescriptor,
 ) -> Option<OperationIntent> {
     if source_id == target_id {
         tracing::info!(
@@ -88,7 +98,11 @@ pub fn build_drop_intent(
         DROP_TARGET_PARAM.into(),
         Value::String(target_id.to_string()),
     );
-    Some(OperationIntent::new(target_entity, op_name.into(), params))
+    Some(OperationIntent::new(
+        operation.entity_name.clone(),
+        operation.name.clone(),
+        params,
+    ))
 }
 
 use crate::focus_path::walk_tree;
@@ -1437,10 +1451,9 @@ impl UserDriver for ReactiveEngineDriver {
             .context("router not ready before drop_entity")?;
 
         let deadline = Instant::now() + drop_widget_timeout();
-        let (entity, op) = loop {
+        let operation = loop {
             let mut found_source = false;
-            let mut target_entity: Option<EntityName> = None;
-            let mut target_op: Option<String> = None;
+            let mut target_op: Option<holon_api::render_types::OperationDescriptor> = None;
             {
                 let contents = self.router.block_contents.lock().unwrap();
                 for tree in contents.values() {
@@ -1449,50 +1462,45 @@ impl UserDriver for ReactiveEngineDriver {
                             && n.widget_name().as_deref() == Some("draggable")
                             && n.row_id().map(|uri| uri.to_string()).as_deref()
                                 == Some(source_id.as_str())
+                            && drag_drop_operation(&n.operations).is_some()
                         {
                             found_source = true;
                         }
-                        if target_entity.is_none()
+                        if target_op.is_none()
                             && n.widget_name().as_deref() == Some("drop_zone")
                             && n.row_id().map(|uri| uri.to_string()).as_deref()
                                 == Some(target_id.as_str())
                         {
-                            target_entity =
-                                Some(n.entity_name().unwrap_or_else(|| EntityName::new("block")));
-                            target_op = Some(
-                                n.prop_str("op")
-                                    .or_else(|| n.prop_str("op_name"))
-                                    .unwrap_or_else(|| DEFAULT_DROP_OP_NAME.to_string()),
-                            );
+                            target_op =
+                                drag_drop_operation(&n.operations).map(|w| w.descriptor.clone());
                         }
                     });
-                    if found_source && target_entity.is_some() {
+                    if found_source && target_op.is_some() {
                         break;
                     }
                 }
             }
-            if let (true, Some(entity)) = (found_source, target_entity) {
-                break (
-                    entity,
-                    target_op.unwrap_or_else(|| DEFAULT_DROP_OP_NAME.to_string()),
-                );
+            if let (true, Some(operation)) = (found_source, target_op) {
+                break operation;
             }
             if Instant::now() >= deadline {
                 let diag = self.router.diagnostic_snapshot();
                 if !found_source {
                     anyhow::bail!(
-                        "drop_entity: no Draggable widget covers source block {source_id} after \
-                         {:?} — the source's block tree never populated in the router (live_block \
-                         slot didn't resolve, or the block's render template doesn't include \
-                         `draggable(...)`).\nRouter diagnostic:\n{diag}",
+                        "drop_entity: no Draggable widget offering a drag covers source block \
+                         {source_id} after {:?} — the source's block tree never populated in the \
+                         router (live_block slot didn't resolve), the block's render template \
+                         doesn't include `draggable(...)`, or the row is not offered the drag's \
+                         operation (the write tier refuses it).\nRouter diagnostic:\n{diag}",
                         drop_widget_timeout()
                     );
                 }
                 anyhow::bail!(
-                    "drop_entity: no DropZone widget renders for target block {target_id} after \
-                     {:?} — the target's block tree never populated in the router (live_block \
-                     slot didn't resolve, or the block's render template doesn't include \
-                     `drop_zone(...)`).\nRouter diagnostic:\n{diag}",
+                    "drop_entity: no DropZone widget offering a drop renders for target block \
+                     {target_id} after {:?} — the target's block tree never populated in the \
+                     router (live_block slot didn't resolve), the block's render template \
+                     doesn't include `drop_zone(...)`, or the row is not offered the drop's \
+                     operation (the write tier refuses it).\nRouter diagnostic:\n{diag}",
                     drop_widget_timeout()
                 );
             }
@@ -1500,7 +1508,7 @@ impl UserDriver for ReactiveEngineDriver {
         };
 
         let tick_snapshot = self.router.current_tick();
-        let Some(intent) = build_drop_intent(source_id, target_id, entity, &op) else {
+        let Some(intent) = build_drop_intent(source_id, target_id, &operation) else {
             anyhow::bail!(
                 "drop_entity: {source_id} dropped on itself — a block cannot become its own \
                  parent, and the production drop zones refuse this dispatch too"

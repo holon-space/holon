@@ -475,6 +475,62 @@ mod tests {
         assert_eq!(offered(&refusing), vec!["focus"]);
     }
 
+    /// Drag and drop are offers too: `draggable` and `drop_zone` bind the
+    /// `move_block` their row is offered, so a writable row keeps both and a
+    /// refused row binds neither.
+    #[test]
+    fn drag_and_drop_bind_the_move_their_row_is_offered() {
+        let subject = holon_api::EntityUri::parse("block:recipe-step").expect("parses");
+        let row: Arc<DataRow> = Arc::new(HashMap::from([(
+            "id".to_string(),
+            holon_api::Value::String(subject.to_string()),
+        )]));
+        let ops = vec![
+            wiring(holon_core::WRITE_TIER_ENTITY, "move_block"),
+            wiring(holon_core::WRITE_TIER_ENTITY, "set_field"),
+        ];
+        let expr =
+            holon_api::render_dsl::parse_render_dsl(r#"column(draggable(text("x")), drop_zone())"#)
+                .expect("parses");
+        let bound =
+            |services: &crate::reactive::StubBuilderServices| -> Vec<(String, Vec<String>)> {
+                let ctx = RenderContext::default()
+                    .with_row(Arc::clone(&row))
+                    .with_operations(ops.clone(), services);
+                let column = services.interpret(&expr, &ctx);
+                column
+                    .children
+                    .iter()
+                    .map(|node| {
+                        (
+                            node.widget_name().expect("a widget"),
+                            node.operations
+                                .iter()
+                                .map(|w| w.descriptor.name.clone())
+                                .collect(),
+                        )
+                    })
+                    .collect()
+            };
+
+        let admitting = crate::reactive::StubBuilderServices::new();
+        let refusing = crate::reactive::StubBuilderServices::new().with_write_refused(subject);
+        assert_eq!(
+            bound(&admitting),
+            vec![
+                ("draggable".to_string(), vec!["move_block".to_string()]),
+                ("drop_zone".to_string(), vec!["move_block".to_string()]),
+            ]
+        );
+        assert_eq!(
+            bound(&refusing),
+            vec![
+                ("draggable".to_string(), vec![]),
+                ("drop_zone".to_string(), vec![]),
+            ]
+        );
+    }
+
     fn wiring(entity_name: &str, name: &str) -> OperationWiring {
         OperationWiring {
             modified_param: String::new(),

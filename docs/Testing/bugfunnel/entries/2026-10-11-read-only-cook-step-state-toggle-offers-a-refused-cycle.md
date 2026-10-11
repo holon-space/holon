@@ -41,6 +41,15 @@ homes, so the only signal was a harness panic in a rarely drawn case.
   `rendered_text` and the block chords `render_entity` unions on are all
   offered only what the dispatcher admits. `ops_of` keeps its own filter
   because it offers a subject no bound row names.
+- Drag and drop are bound operations too. `draggable` and `drop_zone` bind the
+  `move_block` their row is offered, and the GPUI, dioxus-web and headless
+  drag/drop paths dispatch only that bound operation; a widget that binds none
+  offers no drag or drop. The GPUI board dispatches the `move_block` and
+  `set_field` each card binds, and holds still a lane that holds a card it may
+  not move (`Sortable` enables drag per lane).
+- `BuilderServices::write_tier_admits` is required. `HeadlessBuilderServices`
+  (MCP `describe_ui`, the frontend slice) asks the dispatcher's write tier, the
+  reference model asks its read-only homes.
 - `SutReadOnlyHomes::offered_ops_refused_by_write_tier` judges every operation
   a rendered widget binds on the block, in every region
   (`focus_path::bound_operations_on`), not the Main panel's `state_toggle`
@@ -55,4 +64,7 @@ homes, so the only signal was a harness panic in a rarely drawn case.
   The widened invariant is red before the fix on 156 offers
   (`column` / `editable_text` × 39 block operations × both recipe steps,
   `target/gate-logs/offer-write-tier-red.log`) and green after
-  (`inv-offered-ops-pass-the-write-tier=6/6`).
+  (`inv-offered-ops-pass-the-write-tier=6/6`). It is red again on the
+  `drop_zone`'s `move_block` on both recipe steps while drops were unbound
+  (`target/gate-logs/offer-write-tier-r2-red.log`), and green once they bind;
+  unit lock `render_context::tests::drag_and_drop_bind_the_move_their_row_is_offered`.

@@ -1,4 +1,5 @@
 use holon_frontend::ReactiveViewModel;
+use holon_frontend::user_driver::drag_drop_operation;
 
 use super::prelude::*;
 use crate::render::drag::DraggedBlock;
@@ -8,9 +9,12 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
     let child = node.children.first().expect("draggable requires a child");
     let child_el = super::render(child, ctx);
 
-    let Some(block_id) = node.row_id().map(|uri| uri.to_string()) else {
+    if drag_drop_operation(&node.operations).is_none() {
         return child_el;
-    };
+    }
+    let block_id = node
+        .row_id()
+        .expect("draggable binds its operation from a bound row, so it names one");
 
     let label = node
         .entity()
@@ -24,11 +28,7 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
     let text_color = tc(ctx, |t| t.foreground);
 
     let el_id = format!("drag-{block_id}");
-    let payload = DraggedBlock {
-        block_id,
-        entity: node.entity(),
-        operations: node.operations.clone(),
-    };
+    let payload = DraggedBlock { block_id };
 
     div()
         .child(

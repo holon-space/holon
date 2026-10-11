@@ -75,6 +75,22 @@ impl HeadlessBuilderServices {
 }
 
 impl BuilderServices for HeadlessBuilderServices {
+    /// Asks the dispatcher's own write tier, so a tree built here offers what
+    /// the dispatcher admits and nothing it refuses.
+    fn write_tier_admits(&self, subject: &EntityUri) -> bool {
+        let mut params: holon_api::StorageEntity = HashMap::new();
+        params.insert("id".into(), holon_api::Value::String(subject.to_string()));
+        self.engine
+            .get_dispatcher()
+            .write_tier_refusal(
+                holon_core::WRITE_TIER_ENTITY,
+                &params,
+                &holon_api::OpOrigin::User,
+            )
+            .unwrap_or_else(|e| panic!("write-tier lookup of {subject}: {e}"))
+            .is_none()
+    }
+
     fn row_sources(&self) -> Arc<holon_api::row_source::RowSourceRegistry> {
         Arc::clone(&self.row_sources)
     }

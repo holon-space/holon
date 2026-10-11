@@ -1,3 +1,6 @@
+// A drag source. `op` names the row operation the drag dispatches when it is
+// dropped. The source binds it from the row's offered operations, so a row that
+// is not offered it binds none and cannot be dragged.
 use super::prelude::*;
 
 holon_macros::widget_builder! {
@@ -7,13 +10,13 @@ holon_macros::widget_builder! {
         } else {
             ViewModel::empty()
         };
-        // Bind data to the current row so `row_id()` returns the block's id.
-        // GPUI's draggable builder reads `node.row_id()` to set up `on_drag`
-        // and the headless drop walker (and inv-editable-text-has-draggable) match by row_id; both
-        // silently no-op without this binding.
+        let op = ba.args.get_string("op").unwrap_or("move_block");
+        // `row_id()` must name the dragged row: the GPUI draggable builder and
+        // the headless drop walker both match by it.
         ViewModel {
             children: vec![Arc::new(child)],
             data: futures_signals::signal::Mutable::new(ba.ctx.row_arc()).read_only(),
+            operations: super::prelude::offered_operation(ba.ctx, op),
             ..ViewModel::from_widget("draggable", std::collections::HashMap::new())
         }
     }

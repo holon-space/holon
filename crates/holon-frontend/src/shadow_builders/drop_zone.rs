@@ -1,20 +1,17 @@
-// A drop target. `op` is the operation dispatched when a drag is
-// released on this zone (defaults to `move_block`). The headless
-// `UserDriver::drop_entity` and the GPUI `drop_zone` builder both
-// read this so the wiring stays in one declarative place.
+// A drop target. `op` names the row operation a drag released on this zone
+// dispatches. The zone binds that operation from the row's offered operations,
+// so a row that is not offered it (the write tier refuses the row) binds none
+// and offers no drop.
 use super::prelude::*;
 
 holon_macros::widget_builder! {
     fn drop_zone(#[default = "move_block"] op: String) {
-        let mut __props = std::collections::HashMap::new();
-        __props.insert("op".to_string(), Value::String(op));
-        // Bind data to the current row so `row_id()` returns the target
-        // block's id. The headless drop walker (drop_entity, inv-editable-text-has-draggable) and
-        // the GPUI drop_zone builder match by row_id; both fall through
-        // silently without this.
+        // `row_id()` must name the target row: the GPUI drop_zone builder and
+        // the headless drop walker both match by it.
         ViewModel {
             data: futures_signals::signal::Mutable::new(ba.ctx.row_arc()).read_only(),
-            ..ViewModel::from_widget("drop_zone", __props)
+            operations: super::prelude::offered_operation(ba.ctx, &op),
+            ..ViewModel::from_widget("drop_zone", std::collections::HashMap::new())
         }
     }
 }

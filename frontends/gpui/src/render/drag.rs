@@ -1,6 +1,3 @@
-use std::collections::HashMap;
-use std::sync::Arc;
-
 use gpui::Context;
 use gpui::Hsla;
 use gpui::Pixels;
@@ -9,17 +6,13 @@ use gpui::Window;
 use gpui::div;
 use gpui::prelude::*;
 use gpui::px;
-use holon_api::Value;
-use holon_api::render_types::OperationWiring;
 
-/// Payload carried during a block drag operation.
-/// Contains all data needed by drop_zone to dispatch a move_block operation.
+/// Payload carried during a block drag: the dragged row, which a drop zone
+/// moves with its own bound operation. Only a `draggable` that binds its drag
+/// operation starts one.
 #[derive(Clone)]
-#[allow(dead_code)]
 pub struct DraggedBlock {
-    pub block_id: String,
-    pub entity: Arc<HashMap<String, Value>>,
-    pub operations: Vec<OperationWiring>,
+    pub block_id: holon_api::EntityUri,
 }
 
 /// Visual preview shown while dragging a block.

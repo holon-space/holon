@@ -3750,6 +3750,11 @@ pub fn block_to_data_row(block: &Block) -> holon_api::widget_spec::DataRow {
 }
 
 impl holon_frontend::reactive::BuilderServices for ReferenceState {
+    /// The model's read-only homes: every block a read-only file refuses.
+    fn write_tier_admits(&self, subject: &EntityUri) -> bool {
+        self.read_only.refusing_file(subject).is_none()
+    }
+
     /// ReferenceState is a test double with no backend to await: it dispatches
     /// and reports that nothing was proven, rather than inheriting a claim
     /// it cannot make.

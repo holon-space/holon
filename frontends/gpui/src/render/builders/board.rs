@@ -59,6 +59,14 @@ struct BoardCard {
     /// when the row carries no `parent_id` column (non-block entities) —
     /// reorders anchored on such a card are in-memory only.
     parent_id: Option<String>,
+    /// The `move_block` and `set_field` the card's row is offered — the
+    /// operations a drag persists with. A persisted card that lacks either
+    /// is offered no drag ([`BoardCard::offers_drag`]).
+    move_block: Option<holon_api::render_types::OperationDescriptor>,
+    set_field: Option<holon_api::render_types::OperationDescriptor>,
+    /// Whether the card's lane lets it be dragged. `Sortable` enables drag per
+    /// lane, so one card refused a drag holds its whole lane still.
+    draggable: bool,
     accent: Option<gpui::Hsla>,
     accent_hex: u32,
     lines: Vec<CardLine>,
@@ -156,10 +164,20 @@ fn extract_card(
             .get("parent_id")
             .and_then(|v| v.as_string().map(|s| s.to_string()))
     });
+    let bound = |name: &str| {
+        card_vm
+            .operations
+            .iter()
+            .find(|w| w.descriptor.name == name)
+            .map(|w| w.descriptor.clone())
+    };
     Ok(BoardCard {
         id: ((lane_index as u64) << 32) | (card_index as u64),
         row_id: row_id.entity(),
         parent_id,
+        move_block: bound("move_block"),
+        set_field: bound("set_field"),
+        draggable: true,
         accent,
         accent_hex,
         lines: extract_lines(card_vm),
@@ -177,52 +195,39 @@ fn extract_lane_cards(lane: &ReactiveViewModel) -> Vec<std::sync::Arc<ReactiveVi
     lane.children.to_vec()
 }
 
-/// Resolve the row's profile and its `op_name` op. Returns the
-/// entity-name owning that op so callers can build a typed intent. Logs
-/// and returns `None` on missing profile / op (callers skip silently —
-/// drag/drop must not crash mid-drag).
-fn resolve_row_op_entity(
-    services: &std::sync::Arc<dyn BuilderServices>,
-    row_id: &EntityUri,
-    op_name: &str,
-    context: &str,
-) -> Option<holon_api::EntityName> {
-    let mut probe: HashMap<String, Value> = HashMap::new();
-    probe.insert("id".into(), Value::String(row_id.to_string()));
-    let Some(profile) = services.resolve_profile(&probe) else {
-        tracing::warn!("board {context}: resolve_profile None for row_id={row_id}");
-        return None;
-    };
-    let Some(op) = profile.operations.iter().find(|o| o.name == op_name) else {
-        tracing::warn!("board {context}: {op_name} op not found on profile for row_id={row_id}");
-        return None;
-    };
-    Some(op.entity_name.clone())
+impl BoardCard {
+    /// A card with no persisted row drags in memory only and dispatches
+    /// nothing; a persisted card drags only when its row is offered both
+    /// operations a drag dispatches.
+    fn offers_drag(&self) -> bool {
+        self.row_id.is_none() || (self.move_block.is_some() && self.set_field.is_some())
+    }
 }
 
-/// Dispatch `set_field(id=row_id, field=field, value=value)` after
-/// resolving the row's entity.
+/// Dispatch the card's bound `set_field(id=row_id, field=field, value=value)`.
 fn dispatch_set_field(
     services: &std::sync::Arc<dyn BuilderServices>,
+    card: &BoardCard,
     row_id: &EntityUri,
     field: &str,
     value: String,
     context: &str,
 ) {
-    let Some(entity_name) = resolve_row_op_entity(services, row_id, "set_field", context) else {
-        return;
-    };
+    let operation = card
+        .set_field
+        .as_ref()
+        .expect("a dragged persisted card is offered set_field");
     match OperationIntent::set_field(
-        &entity_name,
-        "set_field",
+        &operation.entity_name,
+        &operation.name,
         &row_id.to_string(),
         field,
         Value::String(value),
     ) {
         Ok(intent) => services.dispatch_intent(intent),
         Err(e) => services.surface_op_failure(
-            entity_name.as_str(),
-            "set_field",
+            operation.entity_name.as_str(),
+            &operation.name,
             &anyhow::anyhow!("board {context}: not dispatched for row_id={row_id}: {e}"),
         ),
     }
@@ -233,12 +238,14 @@ fn dispatch_set_field(
 /// `dispatch_move_for_position` after the optimistic state update.
 fn dispatch_lane_change(
     services: &std::sync::Arc<dyn BuilderServices>,
+    card: &BoardCard,
     row_id: &EntityUri,
     lane_field: &str,
     new_value: &str,
 ) {
     dispatch_set_field(
         services,
+        card,
         row_id,
         lane_field,
         new_value.to_string(),
@@ -302,9 +309,10 @@ fn dispatch_move_for_position(
         }
         (None, None) => return,
     };
-    let Some(entity_name) = resolve_row_op_entity(services, row_id, "move_block", context) else {
-        return;
-    };
+    let operation = card
+        .move_block
+        .as_ref()
+        .expect("a dragged persisted card is offered move_block");
     let mut params: HashMap<String, Value> = HashMap::new();
     params.insert("id".into(), Value::String(row_id.to_string()));
     params.insert("parent_id".into(), Value::String(parent_id));
@@ -312,8 +320,8 @@ fn dispatch_move_for_position(
         params.insert("after_block_id".into(), Value::String(after));
     }
     services.dispatch_intent(OperationIntent::new(
-        entity_name,
-        "move_block".to_string(),
+        operation.entity_name.clone(),
+        operation.name.clone(),
         params,
     ));
 }
@@ -346,7 +354,7 @@ fn render_card(item: &BoardCard, _: usize, _: &gpui::Window, cx: &gpui::App) -> 
         .flex()
         .flex_col()
         .gap(px(CARD_GAP_INNER_PX))
-        .cursor_grab()
+        .when(item.draggable, |card| card.cursor_grab())
         .hover(|s| s.shadow_md());
 
     for line in &item.lines {
@@ -457,6 +465,17 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
             }
         }
 
+        let lane_drags = cards.iter().all(BoardCard::offers_drag);
+        if !lane_drags {
+            tracing::debug!(
+                target: "holon.board",
+                "lane {title:?} holds a card whose row is not offered a drag; the lane is held still"
+            );
+        }
+        for card in &mut cards {
+            card.draggable = lane_drags;
+        }
+
         let state_key = crate::entity_view_registry::CacheKey::Ephemeral(format!(
             "{board_key_seed}:lane-state:{lane_index}"
         ));
@@ -484,6 +503,7 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
             )
             .axis(Axis::Vertical)
             .gap(px(CARD_GAP_PX))
+            .disabled(!lane_drags)
             .on_reorder(move |_from, to, _w, cx| {
                 // Within-lane reorder: state already reflects the new order.
                 // Persist by dispatching a positional move anchored on the
@@ -499,6 +519,7 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
                 };
                 dispatch_lane_change(
                     &services_for_insert,
+                    &item,
                     row_id,
                     &lane_field_owned,
                     &target_lane_value,

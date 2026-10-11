@@ -61,6 +61,11 @@ static RUNTIME: std::sync::LazyLock<tokio::runtime::Runtime> = std::sync::LazyLo
 });
 
 impl BuilderServices for SlotCapableServices {
+    /// No vault backs these services, so no document is read-only.
+    fn write_tier_admits(&self, _: &holon_api::EntityUri) -> bool {
+        true
+    }
+
     /// SlotCapableServices is a test double with no backend to await: it
     /// dispatches and reports that nothing was proven, rather than
     /// inheriting a claim it cannot make.

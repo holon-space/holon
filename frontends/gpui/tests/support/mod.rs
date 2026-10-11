@@ -132,6 +132,11 @@ pub struct StubServices {
 }
 
 impl BuilderServices for StubServices {
+    /// No vault backs these services, so no document is read-only.
+    fn write_tier_admits(&self, _: &holon_api::EntityUri) -> bool {
+        true
+    }
+
     /// StubServices is a test double with no backend to await: it dispatches
     /// and reports that nothing was proven, rather than inheriting a claim
     /// it cannot make.
@@ -430,6 +435,11 @@ impl TestServices {
 }
 
 impl BuilderServices for TestServices {
+    /// No vault backs these services, so no document is read-only.
+    fn write_tier_admits(&self, _: &holon_api::EntityUri) -> bool {
+        true
+    }
+
     fn row_sources(&self) -> Arc<holon_api::row_source::RowSourceRegistry> {
         Arc::clone(&self.row_sources)
     }

@@ -1,5 +1,7 @@
 use holon_api::EntityUri;
+use holon_api::render_types::OperationDescriptor;
 use holon_frontend::user_driver::build_drop_intent;
+use holon_frontend::user_driver::drag_drop_operation;
 use holon_frontend::view_model::ViewKind;
 
 use super::prelude::*;
@@ -10,34 +12,32 @@ use crate::editor::intent_to_wire;
 /// `default`/`editing` variants emit `column(row(…), drop_zone())`).
 ///
 /// GPUI parity (`gpui/render/builders/drop_zone.rs`): dropping block S on
-/// the zone of block T dispatches `build_drop_intent(S, T, entity, op)` —
-/// params `{id: S, parent_id: T}`, op `move_block` — i.e. S becomes a child
-/// of T. Same engine path as the headless `UserDriver::drop_entity`.
+/// the zone of block T dispatches the zone's bound operation through
+/// `build_drop_intent(S, T, op)` — params `{id: S, parent_id: T}` — i.e. S
+/// becomes a child of T. A zone that binds no operation offers no drop.
 pub fn render(node: &ViewModel, _: &DioxusRenderContext) -> Element {
-    let ViewKind::DropZone { op_name } = &node.kind else {
+    let ViewKind::DropZone {} = &node.kind else {
         return rsx! {};
     };
-    let target_id = node.row_id();
-    let entity_name = node
-        .entity_name()
-        .unwrap_or_else(|| holon_api::EntityName::new("block"));
+    let Some(operation) = drag_drop_operation(&node.operations) else {
+        return rsx! { div { style: "height: 4px; margin: 1px 0;" } };
+    };
+    let target_id = node
+        .row_id()
+        .expect("drop_zone binds its operation from a bound row, so it names one");
     rsx! {
         DropZoneNode {
             target_id,
-            entity_name: entity_name.to_string(),
-            op_name: op_name.clone(),
+            operation: operation.descriptor.clone(),
         }
     }
 }
 
 #[component]
-fn DropZoneNode(target_id: Option<EntityUri>, entity_name: String, op_name: String) -> Element {
+fn DropZoneNode(target_id: EntityUri, operation: OperationDescriptor) -> Element {
     let mut hovered = use_signal(|| false);
     // DOM attributes are text; the typed id is what the drop dispatches on.
-    let dom_target_id = target_id
-        .as_ref()
-        .map(EntityUri::to_string)
-        .unwrap_or_default();
+    let dom_target_id = target_id.to_string();
     let style = if hovered() {
         "height: 8px; margin: 1px 0; border-radius: 2px; background: #4a9eda;"
     } else {
@@ -66,21 +66,10 @@ fn DropZoneNode(target_id: Option<EntityUri>, entity_name: String, op_name: Stri
                     return;
                 };
                 crate::dnd::clear_drag();
-                let Some(target) = target_id.clone() else {
-                    tracing::error!(
-                        "[dnd] drop_zone without row_id — cannot dispatch {op_name} for {source_id}"
-                    );
+                let Some(intent) = build_drop_intent(&source_id, &target_id, &operation) else {
                     return;
                 };
-                let Some(intent) = build_drop_intent(
-                    &source_id,
-                    &target,
-                    holon_api::EntityName::new(&entity_name),
-                    &op_name,
-                ) else {
-                    return;
-                };
-                tracing::info!("[dnd] drop: {source_id} -> {target} via {op_name}");
+                tracing::info!("[dnd] drop: {source_id} -> {target_id} via {}", operation.name);
                 dispatch_chain(vec![intent_to_wire(&intent)]);
             },
         }

@@ -1,3 +1,4 @@
+use holon_frontend::user_driver::drag_drop_operation;
 use holon_frontend::view_model::ViewKind;
 
 use super::prelude::*;
@@ -5,19 +6,20 @@ use super::prelude::*;
 /// Drag source for a block row. GPUI parity (`gpui/render/builders/
 /// draggable.rs`): the wrapped child (the bullet icon in the default block
 /// template) becomes the drag handle for the whole block. The dragged block
-/// id is parked in `crate::dnd`; `drop_zone` builds the intent.
+/// id is parked in `crate::dnd`; `drop_zone` builds the intent. A draggable
+/// that binds no operation renders its child undraggable.
 pub fn render(node: &ViewModel, _: &DioxusRenderContext) -> Element {
     let ViewKind::Draggable { child, .. } = &node.kind else {
         return rsx! {};
     };
     let child_vm = (**child).clone();
 
-    let Some(block_id) = node.row_id() else {
-        // No row id — nothing to move. Render the child undraggable rather
-        // than a drag that could never dispatch.
-        tracing::warn!("[dnd] draggable without row_id — rendering child only");
+    if drag_drop_operation(&node.operations).is_none() {
         return rsx! { RenderNode { node: child_vm } };
-    };
+    }
+    let block_id = node
+        .row_id()
+        .expect("draggable binds its operation from a bound row, so it names one");
 
     // The typed id travels to `dnd`; the DOM attribute is text, so it is
     // spelled out here and nowhere upstream.

@@ -146,6 +146,10 @@ impl RecordingServices {
 }
 
 impl BuilderServices for RecordingServices {
+    fn write_tier_admits(&self, subject: &holon_api::EntityUri) -> bool {
+        self.inner.write_tier_admits(subject)
+    }
+
     fn interpret(&self, expr: &RenderExpr, ctx: &RenderContext) -> ReactiveViewModel {
         self.inner.interpret(expr, ctx)
     }

@@ -220,3 +220,19 @@ pub(crate) fn theme_token_prop(builder: &str, prop: &str, raw: &str) -> Result<S
         .map(|token| token.as_str().to_string())
         .map_err(|e| format!("{builder}(#{{{prop}: {raw:?}}}): {e}"))
 }
+
+/// The row operation named `op`, bound as the widget's one operation, when the
+/// row is offered it; no operation otherwise. Reads `ctx.operations`, which the
+/// write tier has already filtered, so a widget that offers what it binds never
+/// offers a write the dispatcher refuses.
+pub(crate) fn offered_operation(
+    ctx: &crate::RenderContext,
+    op: &str,
+) -> Vec<holon_api::render_types::OperationWiring> {
+    ctx.operations
+        .iter()
+        .filter(|w| w.descriptor.name == op)
+        .take(1)
+        .cloned()
+        .collect()
+}
