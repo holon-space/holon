@@ -131,7 +131,8 @@ exceptions = [
     { crate = "holon-tui", allow = ["FSL-1.1-ALv2"] },
     { crate = "holon-turso", allow = ["FSL-1.1-ALv2"] },
     { crate = "holon-turso-testing", allow = ["FSL-1.1-ALv2"] },
-    { crate = "holon-waterui", allow = ["FSL-1.1-ALv2"] },
+    { crate = "holon-views", allow = ["FSL-1.1-ALv2"] },
+    { crate = "holon-waterui",allow = ["FSL-1.1-ALv2"] },
     { crate = "holon-worker", allow = ["FSL-1.1-ALv2"] },
     { crate = "symlink", allow = ["FSL-1.1-ALv2"] },
 ]
