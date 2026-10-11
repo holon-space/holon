@@ -432,70 +432,174 @@ fn split_condition(source: &str) -> Result<(Option<String>, Predicate)> {
     Ok((data_condition, ui_condition))
 }
 
-/// Split a Rhai condition on its TOP-LEVEL `&&` only: a `&&` inside a string
-/// literal or inside parentheses belongs to its conjunct, it is not a
-/// boundary.
+/// Split a Rhai condition on its TOP-LEVEL `&&` only, following the Rhai
+/// 1.26 tokenizer: a `&&` inside a literal or inside `()`, `[]` or `{}` belongs
+/// to its conjunct, it is not a boundary. Backtick literals may hold `${…}`
+/// interpolations, which are expressions with their own nested literals.
 ///
-/// All three Rhai literal delimiters are tracked. `"` (string) and `'` (char)
-/// process `\` escapes; a backtick literal string is VERBATIM — `\` is
-/// content and the literal may span lines (rhai tokenizer:
-/// `parse_string_literal` with `verbatim: true`), so a `"` or `'` inside one
-/// opens nothing.
-///
-/// An unbalanced parenthesis or an unterminated literal means the condition
-/// cannot be split faithfully, so it is refused naming the source — splitting
-/// it anyway would hand a silently-wrong predicate to the frontend.
+/// A condition that cannot be split faithfully is refused naming its source:
+/// an unterminated literal, an unbalanced bracket, a comment, or a split beside
+/// a top-level `||`, `|`, `^`, `&` or `;` (their precedence would make the
+/// split change the meaning).
 fn top_level_conjuncts(source: &str) -> Result<Vec<&str>> {
     let bytes = source.as_bytes();
     let mut conjuncts = Vec::new();
     let mut start = 0;
-    let mut depth = 0usize;
+    let mut open = Vec::new();
+    let mut loose_operator = None;
     let mut i = 0;
     while i < bytes.len() {
-        match bytes[i] {
-            quote @ (b'"' | b'\'' | b'`') => {
-                let verbatim = quote == b'`';
+        let top_level = open.is_empty();
+        match (bytes[i], bytes.get(i + 1).copied()) {
+            (b'/', Some(b'/' | b'*')) => anyhow::bail!(
+                "malformed condition `{source}`: a comment cannot be split faithfully, remove it"
+            ),
+            (quote @ (b'"' | b'\''), _) => i = skip_escaped_literal(source, i, quote)?,
+            (b'#', Some(b'#' | b'"')) => i = skip_raw_literal(source, i)?,
+            (b'`', _) => i = scan_backtick_text(source, i + 1, &mut open)?,
+            (b'(', _) => {
+                open.push(Open::Bracket(b')'));
                 i += 1;
-                loop {
-                    anyhow::ensure!(
-                        i < bytes.len(),
-                        "malformed condition `{source}`: unterminated {} literal",
-                        match quote {
-                            b'"' => "double-quoted",
-                            b'\'' => "single-quoted",
-                            _ => "backtick",
-                        }
-                    );
-                    if !verbatim && bytes[i] == b'\\' {
-                        i += 1;
-                    } else if bytes[i] == quote {
-                        break;
-                    }
-                    i += 1;
+            }
+            (b'[', _) => {
+                open.push(Open::Bracket(b']'));
+                i += 1;
+            }
+            (b'{', _) => {
+                open.push(Open::Bracket(b'}'));
+                i += 1;
+            }
+            (closer @ (b')' | b']' | b'}'), _) => match open.pop() {
+                Some(Open::Bracket(expected)) if expected == closer => i += 1,
+                Some(Open::Interpolation) if closer == b'}' => {
+                    i = scan_backtick_text(source, i + 1, &mut open)?
                 }
-                i += 1;
-            }
-            b'(' => {
-                depth += 1;
-                i += 1;
-            }
-            b')' => {
-                depth = depth.checked_sub(1).ok_or_else(|| {
-                    anyhow::anyhow!("malformed condition `{source}`: unbalanced `)`")
-                })?;
-                i += 1;
-            }
-            b'&' if depth == 0 && bytes.get(i + 1) == Some(&b'&') => {
+                _ => anyhow::bail!(
+                    "malformed condition `{source}`: unbalanced `{}`",
+                    closer as char
+                ),
+            },
+            (b'&', Some(b'&')) if top_level => {
                 conjuncts.push(source[start..i].trim());
                 i += 2;
                 start = i;
             }
+            (b'|', Some(b'|')) if top_level => {
+                loose_operator = Some("||");
+                i += 2;
+            }
+            (b'|', _) if top_level => {
+                loose_operator = Some("|");
+                i += 1;
+            }
+            (b'^', _) if top_level => {
+                loose_operator = Some("^");
+                i += 1;
+            }
+            (b'&', _) if top_level => {
+                loose_operator = Some("&");
+                i += 1;
+            }
+            (b';', _) if top_level => {
+                loose_operator = Some(";");
+                i += 1;
+            }
             _ => i += 1,
         }
     }
-    anyhow::ensure!(depth == 0, "malformed condition `{source}`: unbalanced `(`");
+    match open.last() {
+        None => {}
+        Some(Open::Interpolation) => {
+            anyhow::bail!("malformed condition `{source}`: unterminated backtick literal")
+        }
+        Some(Open::Bracket(closer)) => {
+            anyhow::bail!(
+                "malformed condition `{source}`: unbalanced, `{}` missing",
+                *closer as char
+            )
+        }
+    }
     conjuncts.push(source[start..].trim());
+    if let Some(operator) = loose_operator {
+        anyhow::ensure!(
+            conjuncts.len() == 1,
+            "condition `{source}` has a top-level `{operator}` beside a top-level `&&`: \
+             splitting on the `&&` would change the operator precedence; parenthesise one side"
+        );
+    }
     Ok(conjuncts)
+}
+
+/// An open nesting level of [`top_level_conjuncts`].
+enum Open {
+    /// `(`, `[` or `{`, holding the byte that closes it.
+    Bracket(u8),
+    /// A `${` inside a backtick literal; its `}` resumes the literal's text.
+    Interpolation,
+}
+
+/// Skip a `"` string or `'` char literal starting at `i`; `\` escapes the next
+/// byte. Returns the index after the closing quote.
+fn skip_escaped_literal(source: &str, i: usize, quote: u8) -> Result<usize> {
+    let bytes = source.as_bytes();
+    let mut j = i + 1;
+    loop {
+        anyhow::ensure!(
+            j < bytes.len(),
+            "malformed condition `{source}`: unterminated {} literal",
+            if quote == b'"' {
+                "double-quoted"
+            } else {
+                "single-quoted"
+            }
+        );
+        match bytes[j] {
+            b'\\' => j += 2,
+            b if b == quote => return Ok(j + 1),
+            _ => j += 1,
+        }
+    }
+}
+
+/// Skip a raw string `#"…"#` (any number of `#`) starting at `i`. Returns the
+/// index after the closing `#`s.
+fn skip_raw_literal(source: &str, i: usize) -> Result<usize> {
+    let hashes = source[i..].bytes().take_while(|&b| b == b'#').count();
+    let body = i + hashes;
+    anyhow::ensure!(
+        source.as_bytes().get(body) == Some(&b'"'),
+        "malformed condition `{source}`: `{}` opens no raw string",
+        &source[i..body]
+    );
+    let closing = format!("\"{}", "#".repeat(hashes));
+    let end = source[body + 1..].find(&closing).ok_or_else(|| {
+        anyhow::anyhow!("malformed condition `{source}`: unterminated raw string literal")
+    })?;
+    Ok(body + 1 + end + closing.len())
+}
+
+/// Scan the text of a backtick literal from `i` (inside it). The text is
+/// verbatim except that a doubled backtick is an escaped backtick and `${`
+/// opens an interpolation (`\${` does not). Returns the index after the
+/// closing backtick, or after the `${` with an [`Open::Interpolation`] pushed.
+fn scan_backtick_text(source: &str, i: usize, open: &mut Vec<Open>) -> Result<usize> {
+    let bytes = source.as_bytes();
+    let mut j = i;
+    loop {
+        anyhow::ensure!(
+            j < bytes.len(),
+            "malformed condition `{source}`: unterminated backtick literal"
+        );
+        match (bytes[j], bytes.get(j + 1).copied()) {
+            (b'`', Some(b'`')) | (b'\\', Some(b'$')) => j += 2,
+            (b'`', _) => return Ok(j + 1),
+            (b'$', Some(b'{')) => {
+                open.push(Open::Interpolation);
+                return Ok(j + 2);
+            }
+            _ => j += 1,
+        }
+    }
 }
 
 /// Check if a conjunct references any variables that are NOT UI state
@@ -1912,6 +2016,152 @@ mod tests {
         assert!(
             matches!(&outcome, Err(e) if format!("{e:#}").contains(r#"view_mode == "list"#)),
             "unterminated quote must be refused by its text, got {outcome:?}"
+        );
+    }
+
+    fn assert_rhai_compiles(source: &str) {
+        CompiledExpr::compile(&RhaiEngine::new(), source)
+            .unwrap_or_else(|e| panic!("sanity: Rhai must compile `{source}`: {e}"));
+    }
+
+    fn assert_refused_naming(source: &str, reason: &str) {
+        let outcome = split_condition(source);
+        assert!(
+            matches!(&outcome, Err(e) if format!("{e:#}").contains(source)
+                && format!("{e:#}").contains(reason)),
+            "`{source}` must be refused by its text with `{reason}`, got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn a_backtick_literal_inside_an_interpolation_keeps_its_ampersand_pair() {
+        for (source, data) in [
+            ("x == `${ `&&` }` && is_focused", "x == `${ `&&` }`"),
+            ("x == `${`a&&b`}` && is_focused", "x == `${`a&&b`}`"),
+            ("x == `p${ \"`\" }q` && is_focused", "x == `p${ \"`\" }q`"),
+            (
+                "x == `a${ #{k: `}`}.k }b` && is_focused",
+                "x == `a${ #{k: `}`}.k }b`",
+            ),
+            ("x == `\\${ ` && is_focused", "x == `\\${ `"),
+        ] {
+            assert_rhai_compiles(source);
+            let (got_data, ui) = split_condition(source).unwrap();
+            assert_eq!(got_data.as_deref(), Some(data), "for `{source}`");
+            assert_eq!(ui, Predicate::Var("is_focused".into()), "for `{source}`");
+        }
+    }
+
+    #[test]
+    fn a_top_level_or_beside_a_split_ampersand_pair_is_refused() {
+        // `a && b || c` is `(a && b) || c`; splitting on the `&&` would give
+        // `a && (b || c)`.
+        for source in [
+            "is_focused && is_task || x",
+            "x || is_task && is_focused",
+            "is_focused && is_task | x",
+            "is_focused && is_task ^ x",
+            "is_focused && is_task & x",
+        ] {
+            assert_rhai_compiles(source);
+            assert_refused_naming(source, "precedence");
+        }
+    }
+
+    #[test]
+    fn a_top_level_statement_separator_beside_a_split_is_refused() {
+        // `a && b; c` evaluates to `c`; the split `a`, `b; c` would mean `a && c`.
+        assert_refused_naming("is_focused && is_task; x", "precedence");
+    }
+
+    #[test]
+    fn a_top_level_or_without_a_split_stays_whole() {
+        let source = "is_task || is_focused";
+        let (data, ui) = split_condition(source).unwrap();
+        assert_eq!(data.as_deref(), Some(source));
+        assert_eq!(ui, Predicate::Always);
+    }
+
+    #[test]
+    fn a_comment_in_a_condition_is_refused() {
+        for source in [
+            "is_task /* && */ && is_focused",
+            "is_task // it's\n && is_focused",
+        ] {
+            assert_rhai_compiles(source);
+            assert_refused_naming(source, "comment");
+        }
+    }
+
+    #[test]
+    fn brackets_and_braces_keep_their_inner_ampersand_pairs() {
+        for (source, data) in [
+            ("[is_focused && x][0] && is_focused", "[is_focused && x][0]"),
+            ("#{a: x && y}.a && is_focused", "#{a: x && y}.a"),
+        ] {
+            assert_rhai_compiles(source);
+            let (got_data, ui) = split_condition(source).unwrap();
+            assert_eq!(got_data.as_deref(), Some(data), "for `{source}`");
+            assert_eq!(ui, Predicate::Var("is_focused".into()), "for `{source}`");
+        }
+        assert_refused_naming("[is_task) && is_focused", "unbalanced");
+    }
+
+    #[test]
+    fn a_raw_string_literal_keeps_its_ampersand_pair() {
+        let source = r##"x == #"a"&&"# && is_focused"##;
+        assert_rhai_compiles(source);
+        let (data, ui) = split_condition(source).unwrap();
+        assert_eq!(data.as_deref(), Some(r##"x == #"a"&&"#"##));
+        assert_eq!(ui, Predicate::Var("is_focused".into()));
+
+        let source = r###"x == ##"x"#&&"## && is_focused"###;
+        assert_rhai_compiles(source);
+        let (data, ui) = split_condition(source).unwrap();
+        assert_eq!(data.as_deref(), Some(r###"x == ##"x"#&&"##"###));
+        assert_eq!(ui, Predicate::Var("is_focused".into()));
+    }
+
+    #[test]
+    fn an_unterminated_raw_string_is_refused_naming_the_condition() {
+        // Rhai accepts it, reading to the end of the source; refusing keeps a
+        // likely typo from reaching the frontend as a predicate.
+        assert_refused_naming(r##"is_focused && x == #"a"##, "unterminated raw string");
+    }
+
+    /// `profile_from_type_def` panics on a refused condition, so every shipped
+    /// profile's conditions must split.
+    #[test]
+    fn every_shipped_profile_condition_splits() {
+        let dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/default/types");
+        let mut conditions = 0;
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            let yaml = std::fs::read_to_string(&path).unwrap();
+            if !yaml.lines().any(|l| l.starts_with("entity_name:")) {
+                continue;
+            }
+            let parsed = parse_profile_yaml(&yaml).unwrap();
+            for variant in &parsed.variants {
+                let Some(condition) = &variant.condition else {
+                    continue;
+                };
+                let split = split_condition(&condition.source).unwrap_or_else(|e| {
+                    panic!("{} variant '{}': {e:#}", path.display(), variant.name)
+                });
+                println!(
+                    "{} | {} | {} -> {split:?}",
+                    path.file_name().unwrap().to_string_lossy(),
+                    variant.name,
+                    condition.source
+                );
+                conditions += 1;
+            }
+        }
+        assert!(
+            conditions > 0,
+            "sanity: found no shipped condition under {dir:?}"
         );
     }
 

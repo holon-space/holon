@@ -1,0 +1,24 @@
+# 2026-10-11 split_condition round 3 RED (base 508aa943 + new tests only)
+# cmd: cargo nextest run -p holon-profiles --no-fail-fast
+        FAIL [   0.020s] (  9/137) holon-profiles tests::a_backtick_literal_inside_an_interpolation_keeps_its_ampersand_pair
+    thread 'tests::a_backtick_literal_inside_an_interpolation_keeps_its_ampersand_pair' (358101803) panicked at crates/holon-profiles/src/lib.rs:1946:13:
+      left: Some("x == `${ ` && ` }`")
+     right: Some("x == `${ `&&` }`")
+        FAIL [   0.020s] ( 12/137) holon-profiles tests::a_raw_string_literal_keeps_its_ampersand_pair
+    thread 'tests::a_raw_string_literal_keeps_its_ampersand_pair' (358101812) panicked at crates/holon-profiles/src/lib.rs:2003:50:
+    called `Result::unwrap()` on an `Err` value: malformed condition `x == #"a"&&"# && is_focused`: unterminated double-quoted literal
+        FAIL [   0.021s] ( 13/137) holon-profiles tests::a_comment_in_a_condition_is_refused
+    thread 'tests::a_comment_in_a_condition_is_refused' (358101815) panicked at crates/holon-profiles/src/lib.rs:1925:9:
+    `is_task /* && */ && is_focused` must be refused by its text with `comment`, got Ok((Some("is_task /* && */"), Var("is_focused")))
+        FAIL [   0.021s] ( 14/137) holon-profiles tests::a_top_level_or_beside_a_split_ampersand_pair_is_refused
+    thread 'tests::a_top_level_or_beside_a_split_ampersand_pair_is_refused' (358101813) panicked at crates/holon-profiles/src/lib.rs:1925:9:
+    `is_focused && is_task || x` must be refused by its text with `precedence`, got Ok((Some("is_task || x"), Var("is_focused")))
+        FAIL [   0.020s] ( 24/137) holon-profiles tests::brackets_and_braces_keep_their_inner_ampersand_pairs
+    thread 'tests::brackets_and_braces_keep_their_inner_ampersand_pairs' (358101855) panicked at crates/holon-profiles/src/lib.rs:1992:58:
+    called `Result::unwrap()` on an `Err` value: unsupported UI condition `[is_focused`: expected `var`, `!var`, or `var <op> literal` (rewrite `a || b` as separate variants)
+     Summary [   1.898s] 137 tests run: 132 passed, 5 failed, 0 skipped
+        FAIL [   0.020s] (  9/137) holon-profiles tests::a_backtick_literal_inside_an_interpolation_keeps_its_ampersand_pair
+        FAIL [   0.020s] ( 12/137) holon-profiles tests::a_raw_string_literal_keeps_its_ampersand_pair
+        FAIL [   0.021s] ( 13/137) holon-profiles tests::a_comment_in_a_condition_is_refused
+        FAIL [   0.021s] ( 14/137) holon-profiles tests::a_top_level_or_beside_a_split_ampersand_pair_is_refused
+        FAIL [   0.020s] ( 24/137) holon-profiles tests::brackets_and_braces_keep_their_inner_ampersand_pairs
