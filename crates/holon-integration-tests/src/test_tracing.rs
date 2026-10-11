@@ -472,8 +472,8 @@ pub fn unattributed_span_count() -> usize {
 struct ScopeRoutingProcessor;
 
 impl opentelemetry_sdk::trace::SpanProcessor for ScopeRoutingProcessor {
-    /// Stamps every span a periodic task's pass opened, so a window can leave
-    /// it out of what it charges to its own work.
+    /// Stamps every span a periodic task's pass — or a [`HarnessProbe`] —
+    /// opened, so a window can leave it out of what it charges to its own work.
     fn on_start(&self, span: &mut opentelemetry_sdk::trace::Span, cx: &opentelemetry::Context) {
         use opentelemetry::trace::Span as _;
         if let Some(holon_api::periodic::PeriodicTask(task)) =
@@ -483,6 +483,9 @@ impl opentelemetry_sdk::trace::SpanProcessor for ScopeRoutingProcessor {
                 holon_api::periodic::PERIODIC_TASK_ATTR,
                 *task,
             ));
+        }
+        if let Some(HarnessProbe(probe)) = cx.get::<HarnessProbe>() {
+            span.set_attribute(opentelemetry::KeyValue::new(HARNESS_PROBE_ATTR, *probe));
         }
     }
 
@@ -878,12 +881,17 @@ impl SpanCollector {
     /// Structured snapshot of all collected spans for assertion + persistence.
     ///
     /// Spans a periodic task's pass emitted are left out of every count: the
-    /// window did not cause them (see [`holon_api::periodic`]).
+    /// window did not cause them (see [`holon_api::periodic`]). So are the
+    /// spans of a [`harness_probe`]: the window did not cause those either —
+    /// the harness opened them to watch it.
     pub fn snapshot(&self) -> TransitionMetrics {
-        let (periodic, spans): (Vec<SpanData>, Vec<SpanData>) = self
+        let (periodic, driven): (Vec<SpanData>, Vec<SpanData>) = self
             .finished_spans()
             .into_iter()
             .partition(|s| span_attr(s, holon_api::periodic::PERIODIC_TASK_ATTR).is_some());
+        let (harness_probes, spans): (Vec<SpanData>, Vec<SpanData>) = driven
+            .into_iter()
+            .partition(|s| span_attr(s, HARNESS_PROBE_ATTR).is_some());
 
         let sql_read_count = spans.iter().filter(|s| s.name.as_ref() == "query").count();
         let is_hash_stamp = |s: &&SpanData| {
@@ -998,6 +1006,7 @@ impl SpanCollector {
             total_query_duration,
             total_span_count: spans.len(),
             periodic_span_count: periodic.len(),
+            harness_probe_span_count: harness_probes.len(),
             duplicate_sql,
             duplicate_reads,
             render_count,
@@ -1038,6 +1047,43 @@ fn span_attr(span: &SpanData, key: &str) -> Option<String> {
 /// Extract the `sql` attribute from a span's attributes.
 fn sql_attr(span: &SpanData) -> Option<String> {
     span_attr(span, "sql")
+}
+
+/// Work the HARNESS does to OBSERVE the system — never work the system did.
+///
+/// The keystone's landing polls re-ask one `block_raw` question every 10 ms
+/// until a click shows up in the projection, so charging them to the
+/// transition's SQL budgets measures the harness and not production. The
+/// marker travels in the OpenTelemetry context exactly as
+/// [`holon_api::periodic::PeriodicTask`] does, so every span under a probe is
+/// recognizable however deep the read sits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HarnessProbe(pub &'static str);
+
+/// The span attribute [`ScopeRoutingProcessor`] stamps on each span that
+/// inherits a [`HarnessProbe`], carrying the probe's name.
+pub const HARNESS_PROBE_ATTR: &str = "harness_probe";
+
+/// Run `probe` as the harness observation `name`: every span it opens is
+/// stamped with [`HARNESS_PROBE_ATTR`] and left out of every
+/// [`TransitionMetrics`] count, [`TransitionMetrics::harness_probe_span_count`]
+/// apart.
+pub async fn harness_probe<T>(
+    name: &'static str,
+    probe: impl std::future::Future<Output = T>,
+) -> T {
+    use tracing::Instrument;
+    use tracing_opentelemetry::OpenTelemetrySpanExt;
+    use tracing_opentelemetry::SetParentError;
+
+    let span = tracing::info_span!(parent: None, "pbt.harness_probe", probe = name);
+    match span.set_parent(opentelemetry::Context::new().with_value(HarnessProbe(name))) {
+        Ok(()) | Err(SetParentError::LayerNotFound | SetParentError::SpanDisabled) => {}
+        Err(SetParentError::AlreadyStarted) => {
+            panic!("harness probe '{name}': its span was entered before it was marked")
+        }
+    }
+    probe.instrument(span).await
 }
 
 /// Span lookup by id, for walking `parent_span_id` chains.
@@ -1184,6 +1230,9 @@ pub struct TransitionMetrics {
     /// Spans a periodic background task emitted in this window, excluded
     /// from every other metric here.
     pub periodic_span_count: usize,
+    /// Spans a [`harness_probe`] emitted in this window — the harness's own
+    /// observation reads — excluded from every other metric here.
+    pub harness_probe_span_count: usize,
     /// Slowest individual SQL operation
     pub max_query_duration: Duration,
     /// Sum of all SQL operation durations

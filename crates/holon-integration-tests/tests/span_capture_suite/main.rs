@@ -9,6 +9,7 @@
 //! in parallel in one process.
 
 mod declared_column_parity;
+mod harness_probe_reads_outside_budget;
 mod host_page_with_inline_subpages_ingest;
 mod interaction_trace_connectivity;
 mod periodic_reads_outside_budget;

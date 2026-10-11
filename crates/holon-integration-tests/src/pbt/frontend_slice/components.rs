@@ -98,6 +98,7 @@ use crate::pbt::sut_row_parsing::parse_block_rows;
 use crate::pbt::transitions::toggle_state::cycle_click_count;
 use crate::pbt::types::MutationApply;
 use crate::pbt::vm_snapshot::view_model_to_snapshot;
+use crate::test_tracing::harness_probe;
 
 /// How long the headless component's FIRST layout render may take.
 ///
@@ -2003,12 +2004,23 @@ impl HeadlessFrontendComponent {
     /// Run a read-only SQL statement against the headless engine and return the
     /// raw rows (the `SutSqlProjection` read surface — mirrors the sql_slice's
     /// `query`). Fail-loud on error.
+    ///
+    /// Every read here is the HARNESS asking what the system holds, so it runs
+    /// under a [`harness_probe`] and is left out of the per-transition SQL
+    /// budgets: a landing poll that re-asks one question every 10 ms would
+    /// otherwise trip the redundancy ratchet that exists to catch PRODUCTION
+    /// re-execution growth.
     pub(crate) async fn sql_query(&self, sql: &str) -> Vec<holon_api::StorageEntity> {
-        self.engine()
-            .db_handle()
-            .query(sql, std::collections::HashMap::new())
-            .await
-            .unwrap_or_else(|e| panic!("HeadlessFrontendComponent sql_query failed ({sql}): {e}"))
+        harness_probe("HeadlessFrontendComponent::sql_query", async {
+            self.engine()
+                .db_handle()
+                .query(sql, std::collections::HashMap::new())
+                .await
+                .unwrap_or_else(|e| {
+                    panic!("HeadlessFrontendComponent sql_query failed ({sql}): {e}")
+                })
+        })
+        .await
     }
 
     fn cell(row: &holon_api::StorageEntity, col: &str) -> Option<String> {

@@ -45,6 +45,7 @@ use holon_pbt_core::composition::CapMap;
 use holon_pbt_core::composition::CapProvider;
 
 use crate::pbt::sut_row_parsing::parse_block_rows;
+use crate::test_tracing::harness_probe;
 
 /// A composition component wrapping a real Turso `BackendEngine`. Mutations go
 /// through the production block operation dispatcher; reads go through raw SQL
@@ -60,12 +61,19 @@ impl SqlProjectionComponent {
     }
 
     /// Run a read-only SQL statement and return the raw rows.
+    ///
+    /// Harness observation, never work the system did, so it runs under a
+    /// [`harness_probe`] and stays out of the per-transition SQL budgets —
+    /// same reason as `HeadlessFrontendComponent::sql_query`.
     async fn query(&self, sql: &str) -> Vec<StorageEntity> {
-        self.engine
-            .db_handle()
-            .query(sql, HashMap::new())
-            .await
-            .unwrap_or_else(|e| panic!("SqlProjectionComponent query failed ({sql}): {e}"))
+        harness_probe("SqlProjectionComponent::query", async {
+            self.engine
+                .db_handle()
+                .query(sql, HashMap::new())
+                .await
+                .unwrap_or_else(|e| panic!("SqlProjectionComponent query failed ({sql}): {e}"))
+        })
+        .await
     }
 
     /// Create a block with an explicit id through the production

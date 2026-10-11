@@ -3,7 +3,7 @@ id: 2026-10-11-toggle-state-repeat-ratchet-counts-the-harness-landing-poll
 date: 2026-10-11
 gap: FALSE-ALARM
 secondary: null
-status: OPEN
+status: FIXED
 summary: >-
   `inv-sql-budget` failed a `ToggleState` with `sql_read_repeat` 75 > 64 for
   `SELECT json_extract(properties, '$.task_state') … FROM block_raw WHERE id = …`,
@@ -40,8 +40,22 @@ traced read in the transition window, including the harness's own polls. Its
 purpose is to catch production re-execution growth.
 
 ## Remedy
-Open, queued. Either keep harness reads out of the ratchet (drop
-`origin=<no-parent>` reads that the harness issued), or make
-`await_toggle_landed` wait on the projection's change signal instead of a 10 ms
-SQL poll. The slow landing itself (1.3 s for five clicks) is the lane's repair
-path and is judged by `inv-settle-budget`, not by this ratchet.
+Fixed: harness observation reads are kept out of the measurement, structurally
+and not by raising a number. `test_tracing::harness_probe` marks a future with
+a `HarnessProbe` OpenTelemetry context value — the same mechanism
+`holon_api::periodic::mark_periodic` already uses for background timers — so
+`ScopeRoutingProcessor::on_start` stamps `harness_probe` on every span under it
+and `SpanCollector::snapshot` partitions those out of every metric. The two
+harness SQL read surfaces run under it:
+`HeadlessFrontendComponent::sql_query` and `SqlProjectionComponent::query`.
+The exclusion is disclosed on the `[inv-sql-budget]` line as
+`harness_probe_spans_excluded=N`, never silent.
+
+A production read that repeats is unaffected: it carries no marker, so the
+ratchet still sees it. Both halves are pinned by
+`tests/span_capture_suite/harness_probe_reads_outside_budget.rs` — 75 probed
+polls charge the window 0 reads, the same statement unprobed 75x still reports
+`worst_read_repeat` 75.
+
+The slow landing itself (1.3 s for five clicks) is the lane's repair path and is
+judged by `inv-settle-budget`, not by this ratchet.

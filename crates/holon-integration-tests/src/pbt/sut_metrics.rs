@@ -279,11 +279,15 @@ impl MetricsSut {
             0 => String::new(),
             n => format!(" periodic_spans_excluded={n}"),
         };
+        let probe_summary = match metrics.harness_probe_span_count {
+            0 => String::new(),
+            n => format!(" harness_probe_spans_excluded={n}"),
+        };
         eprintln!(
             "[inv-sql-budget] {key}: reads={} (dedup {})/{} writes={}/{}{stamp_summary} ddl={}/{} tol={} \
              max_q={}ms wall={}ms spans={} rss={delta:+.1}MB \
              (cum={cum:+.1}MB){state_summary}{render_summary}{cdc_summary}{perf_summary}\
-             {periodic_summary}{unattributed_summary}",
+             {periodic_summary}{probe_summary}{unattributed_summary}",
             metrics.sql_read_count,
             metrics.dedup_read_count(),
             expected.reads,
