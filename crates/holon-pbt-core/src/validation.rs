@@ -74,6 +74,9 @@ pub enum Reason {
 
     // ---------- chord-ops ----------
     NoGrandparent,
+    /// Outdenting a direct page child is refused by the op engine (ADR 0028
+    /// D1).
+    ParentIsPage,
     DragDropDisabled,
     SourceNotRendered,
     BlocksNotInteractiveUnderLayout,

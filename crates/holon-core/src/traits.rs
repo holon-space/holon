@@ -498,6 +498,18 @@ impl From<UndoAction> for OperationResult {
 
 pub type CreateResult = (String, OperationResult);
 
+/// An outdent of a direct page child refused because the block would escape
+/// its page container (ADR 0028 D1). An expected refusal the user is told
+/// about, not an application error.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "Cannot outdent a direct child of a page: block {block} would escape its page container \
+     (ADR 0028 D1). Move it elsewhere instead."
+)]
+pub struct PageBoundaryRefused {
+    pub block: EntityUri,
+}
+
 /// Error raised when a trait's dispatch helper does not recognize an operation
 /// name.
 #[derive(Debug)]
@@ -1573,7 +1585,6 @@ where
     #[holon_macros::menu_exposure(action_bar)]
     #[holon_macros::boundary_behavior(forbidden_at_page_boundary)]
     async fn outdent(&self, id: &EntityUri) -> Result<OperationResult> {
-        let id_str = id.as_str();
         let maybe_block: Option<T> = self.block_authoritative(id).await?;
         let block: T = maybe_block.ok_or_else(|| anyhow::anyhow!("Block not found"))?;
         let parent_id = block
@@ -1595,11 +1606,7 @@ where
         // `journals` (the journals-phantom family — block_raw corruption that
         // every downstream projection faithfully mirrors).
         if self.is_page_authoritative(parent_id).await? {
-            return Err(anyhow::anyhow!(
-                "Cannot outdent a direct child of a page: block {id_str} would escape its page \
-                 container (ADR 0028 D1). Move it elsewhere instead."
-            )
-            .into());
+            return Err(PageBoundaryRefused { block: id.clone() }.into());
         }
 
         let grandparent_id = parent

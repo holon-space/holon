@@ -298,7 +298,7 @@ pub async fn judge_plan(
     let sim = SimStore::new(authority);
     for op in ops {
         sim.apply(op.op_name, op.params).await.map_err(|e| {
-            if e.is::<crate::BlockNotInWriteAuthority>() {
+            if e.is::<crate::BlockNotInWriteAuthority>() || e.is::<crate::PageBoundaryRefused>() {
                 return e;
             }
             format!(

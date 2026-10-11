@@ -453,6 +453,10 @@
 # Pinning storage={Turso} reproduces the abort in ONE transition.
 {"name": "outdent-page-child-refusal-sqlonly", "description": "task #30: the ADR 0028 D1 page-boundary refusal must be a MODELLED NO-OP at the SqlOnly dispatch floor, not a run-aborting panic. Red before the fix: 'block/outdent operation failed: ... would escape its page container' at op_write_cap.rs OpDispatchWriter::execute.", "initial_state": {"wiring": {"storage_adapters": ["Turso"], "sync_adapters": [], "actors": []}}, "transitions": [{"Outdent": {"block_id": "block:c1"}}]}
 #
+# The Cell-leg twin of the case above: the keystroke path logged the same modelled refusal at
+# ERROR, so inv-no-errors / inv-no-observed-errors went red on a journal day page's child.
+{"name": "outdent-journal-page-child-refusal-cell-leg", "description": "bugfunnel 2026-10-11-outdent-of-journal-page-child-is-modelled-refusal-but-logs-error-keystone-red: the ADR 0028 D1 page-boundary refusal of an outdent on a journal day page's direct child, through the Cell-leg keystroke path, must be a modelled NO-OP that logs no ERROR and records no app error. Red before the fix: inv-no-errors + inv-no-observed-errors on 'dispatch_intent_awaitable: block.outdent: ... would escape its page container' (reactive.rs). Shrunk keystone case, wiring pinned to the failing draw.", "initial_state": {"wiring": {"storage_adapters": ["Loro", "Turso"], "sync_adapters": [], "actors": ["MCPServer"]}}, "transitions": [{"JumpToSearchHit": {"query": "2026-01-16", "hit": "block:368857d2-b6f5-4a8d-5c03-a6daedd2100f"}}, {"CreateBlockUnderFocus": {"content": "a", "id": "block:gen-1"}}, {"Outdent": {"block_id": "block:gen-1"}}]}
+#
 # ── known-reds entry 14: PinBlock read elevation = target beyond depth-20 cap ──
 # Measurement lane (task #7, 2026-08-04) + verifier round. GREEN control runs;
 # RED twin stays commented until the candidate set honours the depth-20 cap.

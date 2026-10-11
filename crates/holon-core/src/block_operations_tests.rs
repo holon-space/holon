@@ -662,10 +662,16 @@ mod tests {
         };
         store.insert(b);
 
-        let result = store.outdent(&EntityUri::block("B")).await;
-        assert!(
-            result.is_err(),
-            "outdent of a direct page child must be rejected (ADR 0028 D1)"
+        let err = store
+            .outdent(&EntityUri::block("B"))
+            .await
+            .expect_err("outdent of a direct page child must be rejected (ADR 0028 D1)");
+        assert_eq!(
+            err.downcast_ref::<PageBoundaryRefused>(),
+            Some(&PageBoundaryRefused {
+                block: EntityUri::block("B")
+            }),
+            "the refusal must stay typed so callers can tell it from a failure: {err}"
         );
 
         // Rejection is inert: B stays under the page, unchanged.

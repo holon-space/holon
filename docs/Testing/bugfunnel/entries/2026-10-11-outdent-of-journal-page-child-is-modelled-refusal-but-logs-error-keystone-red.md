@@ -3,7 +3,7 @@ id: 2026-10-11-outdent-of-journal-page-child-is-modelled-refusal-but-logs-error-
 date: 2026-10-11
 gap: FALSE-ALARM
 secondary: null
-status: OPEN
+status: FIXED
 summary: >-
   Under a Loro+Turso (Cell leg) draw the keystone generates Outdent on a direct child of a
   journal day page; the op engine refuses it (ADR 0028 D1), the model treats it as a no-op, but
@@ -48,8 +48,20 @@ The model and the invariants disagree about one documented refusal: the transiti
 "refused, no-op", the error-log invariants say "any ERROR is a bug". No known-reds row exists.
 
 ## Remedy
-OPEN. Two options for the owner: (a) add `parent is not a page` to `outdent_preconditions`
-(prod hides the op at the page boundary via `boundary_behavior`, so the generator should not
-offer it; keep the refusal case as a separate hand-authored no-op lock); or (b) make the
-disclosed page-boundary refusal an expected problem in the observed-errors window. (a) is
-simpler. Pin with a hand-authored case: the shrunk sequence above (Loro+Turso+MCPServer, Cell leg).
+FIXED with option (a) plus a WARN-level disclosure of the expected refusal.
+- The op engine returns the refusal as a typed `PageBoundaryRefused`
+  (crates/holon-core/src/traits.rs). The shape gate passes it through unwrapped
+  (crates/holon-core/src/shape_gate.rs), and the operation engine keeps it typed
+  (crates/holon/src/api/operation_engine.rs, `execute_admitted`).
+- The frontend op-failure seams (`dispatch_intent_awaitable`,
+  `dispatch_intent_awaiting_result`, `surface_op_failure`) go through
+  `disclose_op_failure` (crates/holon-frontend/src/reactive.rs): the typed
+  refusal is a WARN and is not counted as an app error; every other failure is
+  still an ERROR plus `record_error()`. The caller still gets the `Err` (toast).
+- `outdent_preconditions` refuses a block whose parent is a page
+  (`Reason::ParentIsPage`), so the generator no longer offers it as a normal outdent.
+- Lock: hand-authored case `outdent-journal-page-child-refusal-cell-leg`
+  (the shrunk sequence, Loro+Turso+MCPServer, Cell leg) next to the SqlOnly twin
+  `outdent-page-child-refusal-sqlonly`. Red before the fix on inv-no-errors +
+  inv-no-observed-errors (`target/outdent-red.log` in the lane workspace); green
+  after (`target/outdent-green.log`).

@@ -78,6 +78,15 @@ pub fn outdent_preconditions<R: RefBlockTree + RefLifecycle>(
         state.grandparent(block_id).is_some(),
         Reason::NoGrandparent,
     ));
+    // The refusal itself is pinned by the hand-authored cases
+    // `outdent-page-child-refusal-sqlonly` and
+    // `outdent-journal-page-child-refusal-cell-leg`.
+    checks.push(check(
+        !state
+            .parent_of(block_id)
+            .is_some_and(|parent| state.is_page_block(&parent)),
+        Reason::ParentIsPage,
+    ));
     checks
         .into_iter()
         .collect::<Validated<Vec<()>, _>>()

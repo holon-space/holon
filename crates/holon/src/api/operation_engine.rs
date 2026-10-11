@@ -4694,8 +4694,11 @@ impl DispatchingOperationEngine {
             .dispatcher
             .execute_operation_with_provenance(entity_name, op_name, params, input, origin.clone())
             .await
-            .map_err(|e| {
-                anyhow::anyhow!("Operation '{op_name}' on entity '{entity_name}' failed: {e}")
+            .map_err(|e| match e.downcast::<holon_core::PageBoundaryRefused>() {
+                Ok(refusal) => anyhow::Error::new(*refusal),
+                Err(e) => {
+                    anyhow::anyhow!("Operation '{op_name}' on entity '{entity_name}' failed: {e}")
+                }
             })?;
         if let Some(root) = &rehomed {
             self.recategorize(root).await?;

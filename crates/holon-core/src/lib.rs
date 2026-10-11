@@ -139,6 +139,7 @@ pub use traits::OperationRegistry;
 pub use traits::OperationResult;
 pub use traits::OriginTaggedWrites;
 pub use traits::OwningPage;
+pub use traits::PageBoundaryRefused;
 pub use traits::RenameOperations;
 pub use traits::Result;
 pub use traits::StreamProvider;

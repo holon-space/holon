@@ -4576,9 +4576,10 @@ impl BuilderServices for ReactiveEngine {
                         }
                         // Disclose the failed write (same seam as `dispatch_intent`);
                         // the caller ALSO surfaces it as a visible toast.
-                        session.error_tracker().record_error();
-                        tracing::error!(
-                            "dispatch_intent_awaitable: {entity_name}.{op_name}: {e:#}"
+                        disclose_op_failure(
+                            session.error_tracker(),
+                            &format!("dispatch_intent_awaitable: {entity_name}.{op_name}"),
+                            &e,
                         );
                         Err(e)
                     }
@@ -4646,9 +4647,10 @@ impl BuilderServices for ReactiveEngine {
                                 holon_api::latency_e2e::ClockOrigin::Ui,
                             );
                         }
-                        session.error_tracker().record_error();
-                        tracing::error!(
-                            "dispatch_intent_awaiting_result: {entity_name}.{op_name}: {e:#}"
+                        disclose_op_failure(
+                            session.error_tracker(),
+                            &format!("dispatch_intent_awaiting_result: {entity_name}.{op_name}"),
+                            &e,
                         );
                         Err(e)
                     }
@@ -5487,6 +5489,20 @@ fn interaction_span(entity_name: &str, op_name: &str) -> tracing::Span {
     )
 }
 
+/// Log an op failure under `what`. An expected refusal the user is told about
+/// is a WARN; any other failure is an app error on `tracker`.
+fn disclose_op_failure(tracker: &holon_core::PublishErrorTracker, what: &str, err: &anyhow::Error) {
+    if err
+        .downcast_ref::<holon_core::PageBoundaryRefused>()
+        .is_some()
+    {
+        tracing::warn!("{what}: {err:#}");
+    } else {
+        tracker.record_error();
+        tracing::error!("{what}: {err:#}");
+    }
+}
+
 /// Surface a fire-and-forget op-execution failure. Records it on the monitoring
 /// tracker and logs it (the PBT/monitoring seam), then — if the shell installed
 /// a sink — routes the op error's VERBATIM message to a user-visible
@@ -5501,8 +5517,11 @@ fn surface_op_failure(
     op_name: &str,
     err: &anyhow::Error,
 ) {
-    tracker.record_error();
-    tracing::error!("Operation {entity_name}.{op_name} failed: {err:#}");
+    disclose_op_failure(
+        tracker,
+        &format!("Operation {entity_name}.{op_name} failed"),
+        err,
+    );
     if let Some(sink) = sink {
         sink(format!("{err:#}"));
     }
