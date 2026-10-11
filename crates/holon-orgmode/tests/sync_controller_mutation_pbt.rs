@@ -574,6 +574,14 @@ fn simulate_sql_round_trip(
         }
     }
 
+    // The build params never carry `block_type` (a metadata write does not
+    // retype), but a stored row always has the column: NULL when untyped.
+    row.entry("block_type".into()).or_insert_with(|| {
+        doc.block_type
+            .as_ref()
+            .map_or(Value::Null, |t| Value::String(t.to_string()))
+    });
+
     // Emit the merged properties JSON as a string Value — Block::try_from
     // accepts both Value::String and Value::Json for the properties column.
     let props_json = serde_json::to_string(&extras).expect("properties must serialize");
