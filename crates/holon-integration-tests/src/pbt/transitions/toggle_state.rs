@@ -22,6 +22,7 @@ use holon_pbt_core::capabilities::RefFocus;
 use holon_pbt_core::capabilities::RefFocusRoots;
 use holon_pbt_core::capabilities::RefLayout;
 use holon_pbt_core::capabilities::RefLifecycle;
+use holon_pbt_core::capabilities::RefReadOnlyHomes;
 use holon_pbt_core::capabilities::RefTaskState;
 use holon_pbt_core::capabilities::RefTaskStateToggle;
 use holon_pbt_core::capabilities::SutDriver;
@@ -109,7 +110,8 @@ impl<
         + RefBlockTree
         + RefLayout
         + RefTaskState
-        + RefTaskStateToggle,
+        + RefTaskStateToggle
+        + RefReadOnlyHomes,
 > TransitionFactory<R> for ToggleState
 {
     fn required_caps() -> Vec<::holon_pbt_core::composition::CapId> {
@@ -172,7 +174,8 @@ impl<
         + RefBlockTree
         + RefLayout
         + RefTaskState
-        + RefTaskStateToggle,
+        + RefTaskStateToggle
+        + RefReadOnlyHomes,
 > TransitionRef<R> for ToggleState
 {
     type Reason = Reason;
@@ -225,6 +228,12 @@ impl<
             // ToggleState whenever a custom block profile is loaded.
             check(
                 !state.has_blocks_profile(),
+                Reason::StateToggleNotApplicable,
+            ),
+            // A block homed in a read-only file renders its toggle without the
+            // cycle (D46), so there is nothing to click.
+            check(
+                !state.read_only_homed_blocks().contains(&self.block_id),
                 Reason::StateToggleNotApplicable,
             ),
             // A shrink can drop the transition that set the current state.

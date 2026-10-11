@@ -8683,14 +8683,36 @@ impl holon_pbt_core::capabilities::SutReadOnlyHomes for HeadlessFrontendComponen
 
     async fn offered_ops_refused_by_write_tier(&self, block_id: &str) -> Vec<(String, String)> {
         let reactive = self.reactive();
+        let uri = holon_api::EntityUri::parse(block_id).expect("a block id is an entity uri");
         let offered = holon_frontend::value_fns::ops_of::ops_rows_for_uri(
-            &holon_api::EntityUri::parse(block_id).expect("a block id is an entity uri"),
+            &uri,
             &*reactive,
             &holon_api::widget_spec::DataRow::new(),
         );
         let dispatcher = self.engine().get_dispatcher();
         let mut subject: holon_api::StorageEntity = std::collections::HashMap::new();
         subject.insert("id".into(), holon_api::Value::String(block_id.to_string()));
+        let refusal_of = |entity_name: &str| {
+            dispatcher
+                .write_tier_refusal(entity_name, &subject, &holon_api::OpOrigin::User)
+                .unwrap_or_else(|e| {
+                    panic!("[read-only homes] write tier failed on {block_id}: {e}")
+                })
+                .map(|refusal| refusal.to_string())
+        };
+        // The Main panel's `state_toggle` binds its cycle op from the row, not
+        // from `ops_of`, so a click on it is an offer of its own.
+        let resolved = reactive.snapshot_resolved(&holon_api::root_layout_block_uri());
+        let toggle = holon_frontend::focus_path::state_toggle_cycle_intent(&resolved, &uri, "main")
+            .map(|intent| {
+                intent.unwrap_or_else(|e| {
+                    panic!("[read-only homes] state_toggle intent of {block_id}: {e}")
+                })
+            })
+            .and_then(|intent| {
+                refusal_of(intent.entity_name.as_str())
+                    .map(|refusal| (format!("state_toggle {}", intent.op_name), refusal))
+            });
         offered
             .iter()
             .filter_map(|row| {
@@ -8701,13 +8723,9 @@ impl holon_pbt_core::capabilities::SutReadOnlyHomes for HeadlessFrontendComponen
                         .to_string()
                 };
                 let name = field("name");
-                dispatcher
-                    .write_tier_refusal(&field("entity_name"), &subject, &holon_api::OpOrigin::User)
-                    .unwrap_or_else(|e| {
-                        panic!("[read-only homes] write tier failed on {block_id}: {e}")
-                    })
-                    .map(|refusal| (name, refusal.to_string()))
+                refusal_of(&field("entity_name")).map(|refusal| (name, refusal))
             })
+            .chain(toggle)
             .collect()
     }
 
