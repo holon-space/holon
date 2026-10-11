@@ -10,6 +10,7 @@ on:
       - 'Cargo.lock'
       - 'deny.toml'
       - '.jscpd.json'
+      - 'rust-toolchain.toml'
       - '.github/workflows/ci.yml'
   pull_request:
     branches: [main, master]
@@ -20,6 +21,7 @@ on:
       - 'Cargo.lock'
       - 'deny.toml'
       - '.jscpd.json'
+      - 'rust-toolchain.toml'
       - '.github/workflows/ci.yml'
   workflow_dispatch:
 
@@ -58,6 +60,7 @@ jobs:
               - 'Cargo.lock'
               - 'deny.toml'
               - '.jscpd.json'
+              - 'rust-toolchain.toml'
             workflow:
               - '.github/workflows/ci.yml'
 
@@ -88,7 +91,7 @@ jobs:
 
       - name: Check RUST_VERSION matches rust-toolchain.toml
         run: |
-          channel=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)
+          channel=$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml","rb"))["toolchain"]["channel"])')
           if [ "$channel" != "$RUST_VERSION" ]; then
             echo "::error::RUST_VERSION ($RUST_VERSION) != rust-toolchain.toml channel ($channel); update the pins in .github/workflows/{ci,devex-gates,web}.yml"
             exit 1
