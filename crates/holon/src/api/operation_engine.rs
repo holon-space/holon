@@ -60,6 +60,7 @@ use holon_core::UndoStack;
 use holon_core::UndoStateReader;
 use holon_core::UndoStore;
 use holon_core::storage::types::StorageEntity;
+use holon_core::type_write_rule::WriteSchema;
 use holon_core::verify_precondition;
 use holon_org_format::OrgDocumentExt;
 use holon_org_format::ParsedCarrier;
@@ -71,7 +72,6 @@ use crate::api::BackendEngine;
 use crate::api::operation_dispatcher::AuthoredInput;
 use crate::api::operation_dispatcher::OperationDispatcher;
 use crate::api::running_write::RunningWrite;
-use crate::core::sql_operation_provider::WriteSchema;
 
 #[async_trait]
 impl OperationEngine for BackendEngine {

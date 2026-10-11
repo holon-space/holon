@@ -8,10 +8,10 @@
 //! 1. the type enters the [`TypeRegistry`], so lookups by name resolve;
 //! 2. its Turso serialization is derived by [`TursoAdapter`] (raw table + read
 //!    matview);
-//! 3. it gets a WRITE AUTHORITY — a [`SqlOperationProvider`] whose table and
-//!    column vocabulary come from the type's own definition — registered on the
-//!    dispatcher, so writes route by ITS type instead of finding no provider
-//!    (or, worse, block's).
+//! 3. it gets a WRITE AUTHORITY — an operation provider the mode's
+//!    [`TypeWriteAuthority`] derives from the type's own definition —
+//!    registered on the dispatcher, so writes route by ITS type instead of
+//!    finding no provider (or, worse, block's).
 //!
 //! Nothing here branches per TYPE. Every per-type artifact is an output of
 //! `adapter(TypeDefinition)`, which is what makes declaring a new type a
@@ -30,6 +30,7 @@ use holon_api::ColumnValueKind;
 use holon_api::TypeDefinition;
 use holon_core::OperationProvider;
 use holon_core::Result;
+use holon_core::TypeWriteAuthority;
 use holon_profiles::TypeRegistry;
 use holon_turso::turso_adapter::TursoAdapter;
 use holon_turso::turso_adapter::TursoArtifacts;
@@ -45,6 +46,7 @@ use crate::storage::turso::DbHandle;
 /// Declaring the same name twice fails and stays failed.
 pub async fn declare_type(
     type_def: &TypeDefinition,
+    authority: &dyn TypeWriteAuthority,
     db_handle: &DbHandle,
     registry: &TypeRegistry,
     dispatcher: &OperationDispatcher,
@@ -63,7 +65,7 @@ pub async fn declare_type(
             type_def.name
         )
     })?;
-    let provider = write_authority(type_def, db_handle).map_err(|e| {
+    let provider = authority.for_type(type_def).map_err(|e| {
         format!(
             "declare_type('{}'): deriving the write authority failed: {e}",
             type_def.name
@@ -121,7 +123,7 @@ pub async fn declare_type(
 /// derived SQL authority no connector serves.
 pub fn derive_write_authority(
     type_def: &TypeDefinition,
-    db_handle: &DbHandle,
+    authority: &dyn TypeWriteAuthority,
     dispatcher: &OperationDispatcher,
 ) -> Result<()> {
     if !crate::di::schema_providers::is_free_standing(type_def) {
@@ -137,7 +139,7 @@ pub fn derive_write_authority(
         );
         return Ok(());
     }
-    register_write_authority(type_def, db_handle, dispatcher)
+    register_write_authority(type_def, authority, dispatcher)
 }
 
 /// Give an already-serialized type its write authority.
@@ -146,14 +148,14 @@ pub fn derive_write_authority(
 /// seeded in the registry at boot already has its Turso artifacts (derived by
 /// `FreeStandingTypeViews`) and needs only the authority, while
 /// [`declare_type`] does the whole sequence. One derivation either way —
-/// `SqlOperationProvider::for_type` reads the definition and nothing else.
+/// `authority` reads the definition and nothing else.
 pub fn register_write_authority(
     type_def: &TypeDefinition,
-    db_handle: &DbHandle,
+    authority: &dyn TypeWriteAuthority,
     dispatcher: &OperationDispatcher,
 ) -> Result<()> {
     require_declarable(type_def)?;
-    install_write_authority(type_def, write_authority(type_def, db_handle)?, dispatcher)
+    install_write_authority(type_def, authority.for_type(type_def)?, dispatcher)
 }
 
 /// Register the operations a bundled type adds beside its write authority,
@@ -178,14 +180,17 @@ fn require_declarable(type_def: &TypeDefinition) -> Result<()> {
     require_declarable_soft_delete(type_def)
 }
 
-fn write_authority(
-    type_def: &TypeDefinition,
-    db_handle: &DbHandle,
-) -> Result<Arc<dyn OperationProvider>> {
-    Ok(Arc::new(SqlOperationProvider::for_type(
-        db_handle.clone(),
-        type_def,
-    )?))
+/// The SQL tables as the write authority of every free-standing type, for a
+/// container with no Loro store.
+pub struct SqlTypeWriteAuthority(pub DbHandle);
+
+impl TypeWriteAuthority for SqlTypeWriteAuthority {
+    fn for_type(&self, type_def: &TypeDefinition) -> Result<Arc<dyn OperationProvider>> {
+        Ok(Arc::new(SqlOperationProvider::for_type(
+            self.0.clone(),
+            type_def,
+        )?))
+    }
 }
 
 fn install_write_authority(
@@ -204,7 +209,7 @@ fn install_write_authority(
 /// Every type must declare the overflow column the engine's `_provenance`
 /// stamp lands in; the write boundary routes no field it has no column for.
 fn require_engine_stamp_has_a_home(type_def: &TypeDefinition) -> Result<()> {
-    let overflow = crate::core::sql_operation_provider::WriteSchema::OVERFLOW_COLUMN;
+    let overflow = holon_core::type_write_rule::WriteSchema::OVERFLOW_COLUMN;
     let declared = type_def
         .persistent_fields()
         .into_iter()
@@ -419,10 +424,16 @@ mod tests {
             (&no_overflow, "declares no `properties` overflow column"),
             (&unhonourable, "declare it nullable TEXT"),
         ] {
-            let err = declare_type(type_def, &db_handle, &registry, &dispatcher)
-                .await
-                .expect_err("an undeclarable type must be refused by the public path")
-                .to_string();
+            let err = declare_type(
+                type_def,
+                &SqlTypeWriteAuthority(db_handle.clone()),
+                &db_handle,
+                &registry,
+                &dispatcher,
+            )
+            .await
+            .expect_err("an undeclarable type must be refused by the public path")
+            .to_string();
             assert!(
                 err.contains(expected),
                 "expected a refusal mentioning {expected:?}, got: {err}"
@@ -465,10 +476,16 @@ mod tests {
             rich_text: vec![],
         });
 
-        let err = declare_type(&type_def, &db_handle, &registry, &dispatcher)
-            .await
-            .expect_err("a services block naming a missing field must be refused")
-            .to_string();
+        let err = declare_type(
+            &type_def,
+            &SqlTypeWriteAuthority(db_handle.clone()),
+            &db_handle,
+            &registry,
+            &dispatcher,
+        )
+        .await
+        .expect_err("a services block naming a missing field must be refused")
+        .to_string();
         assert!(err.contains("no_such_field"), "got: {err}");
 
         let created = db_handle
@@ -500,17 +517,29 @@ mod tests {
         let dispatcher = OperationDispatcher::new(vec![]);
         let type_def = declared("gen_1");
 
-        let artifacts = declare_type(&type_def, &db_handle, &registry, &dispatcher)
-            .await
-            .expect("first declaration");
+        let artifacts = declare_type(
+            &type_def,
+            &SqlTypeWriteAuthority(db_handle.clone()),
+            &db_handle,
+            &registry,
+            &dispatcher,
+        )
+        .await
+        .expect("first declaration");
         assert!(registry.contains("gen_1"), "the type entered the registry");
         assert!(dispatcher.has_provider("gen_1"), "the type became writable");
 
         // Re-declaring is refused by the write-authority check.
-        let err = declare_type(&type_def, &db_handle, &registry, &dispatcher)
-            .await
-            .expect_err("re-declaring a live type must be refused")
-            .to_string();
+        let err = declare_type(
+            &type_def,
+            &SqlTypeWriteAuthority(db_handle.clone()),
+            &db_handle,
+            &registry,
+            &dispatcher,
+        )
+        .await
+        .expect_err("re-declaring a live type must be refused")
+        .to_string();
         assert!(
             err.contains("registering the write authority failed"),
             "the refusal must come from the write-authority check; got: {err}"
@@ -535,10 +564,16 @@ mod tests {
             "teardown leaves the write authority in place, which is why the name stays taken"
         );
 
-        let after_teardown = declare_type(&type_def, &db_handle, &registry, &dispatcher)
-            .await
-            .expect_err("teardown must not make the name re-declarable")
-            .to_string();
+        let after_teardown = declare_type(
+            &type_def,
+            &SqlTypeWriteAuthority(db_handle.clone()),
+            &db_handle,
+            &registry,
+            &dispatcher,
+        )
+        .await
+        .expect_err("teardown must not make the name re-declarable")
+        .to_string();
         assert!(
             after_teardown.contains("registering the write authority failed"),
             "the post-teardown retry must fail the same way; got: {after_teardown}"

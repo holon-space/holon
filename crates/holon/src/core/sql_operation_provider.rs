@@ -30,6 +30,7 @@ use holon_core::Result;
 use holon_core::block_ordering::MintedPosition;
 use holon_core::block_ordering::ORDER_REKEYS_PARAM;
 use holon_core::storage::types::StorageEntity;
+use holon_core::type_write_rule::WriteSchema;
 
 use crate::core::merge_blocks_plan;
 use crate::core::properties_bag_write::BagEntry;
@@ -202,30 +203,6 @@ fn blocks_known_columns() -> Vec<&'static str> {
     holon_api::schema::BLOCK.columns()
 }
 
-/// The column vocabulary one entity's write table exposes, derived from that
-/// entity's schema.
-///
-/// Everything the write path used to ASSUME about `block` — that a param
-/// outside the column set can be packed into a `properties` JSON column, that
-/// a create stamps `created_at`/`updated_at` — is a question asked of this
-/// schema instead. A runtime-declared type that declares none of those columns
-/// therefore gets none of that behaviour, rather than inheriting block's shape
-/// and writing SQL against columns its table does not have.
-#[derive(Clone, Debug)]
-pub(crate) struct WriteSchema {
-    columns: HashSet<String>,
-    /// The tombstone column of a type that declared soft-delete semantics
-    /// ([`holon_api::entity::SoftDelete`]). `Some` turns `delete` into a
-    /// tombstone write and adds `purge` as the op that removes the row.
-    soft_delete: Option<String>,
-    /// The entity references a `create` may carry.
-    create_references: Vec<OperationParam>,
-    /// The entity references an `update` may carry besides its `id`.
-    update_references: Vec<OperationParam>,
-    /// What `set_field`'s `value` is, by the field it writes.
-    set_field_value: TypeHint,
-}
-
 /// What a `delete` or `purge` does to the target row.
 #[derive(Clone, Debug)]
 enum DeletePlan {
@@ -236,104 +213,23 @@ enum DeletePlan {
     Purge,
 }
 
-impl WriteSchema {
-    /// The JSON column that absorbs params outside [`Self::columns`]. An entity
-    /// whose table lacks it has NO overflow, so an unknown param is an error.
-    ///
-    /// `pub(crate)` because the engine's reserved-key refusal must know which
-    /// param carries a whole property BAG, and deriving that from the schema is
-    /// what keeps the refusal from being a hand-list of operation names.
-    pub(crate) const OVERFLOW_COLUMN: &'static str = holon_api::FieldSchema::OVERFLOW_PROPERTIES;
-
-    fn new(
-        columns: impl IntoIterator<Item = String>,
-        create_references: Vec<OperationParam>,
-        update_references: Vec<OperationParam>,
-        set_field_value: TypeHint,
-    ) -> Self {
-        Self {
-            columns: columns.into_iter().collect(),
-            soft_delete: None,
-            create_references,
-            update_references,
-            set_field_value,
-        }
-    }
-
-    /// The block write vocabulary, single-sourced from
-    /// `holon_api::schema::BLOCK`, for `entity_name`'s table. A block-shaped
-    /// table of another entity declares only its own key as a reference: the
-    /// block schema's reference fields name blocks, not its rows.
-    fn block(entity_name: &str) -> Self {
-        let columns = blocks_known_columns().into_iter().map(str::to_string);
-        if entity_name == holon_api::schema::block::RELATION {
-            return Self::new(
-                columns,
-                holon_core::block_op_catalog::block_create_references(),
-                holon_core::block_op_catalog::block_update_references(),
-                holon_core::block_op_catalog::block_set_field_value_hint(),
-            );
-        }
-        let keyed_only = TypeDefinition::new(entity_name, Vec::new());
-        Self::from_references(columns, &keyed_only)
-            .expect("a type with no fields references nothing")
-    }
-
-    fn from_references(
-        columns: impl IntoIterator<Item = String>,
-        type_def: &TypeDefinition,
-    ) -> Result<Self> {
-        Ok(Self::new(
+/// The block write vocabulary, single-sourced from `holon_api::schema::BLOCK`,
+/// for `entity_name`'s table. A block-shaped table of another entity declares
+/// only its own key as a reference: the block schema's reference fields name
+/// blocks, not its rows.
+fn block_write_schema(entity_name: &str) -> WriteSchema {
+    let columns = blocks_known_columns().into_iter().map(str::to_string);
+    if entity_name == holon_api::schema::block::RELATION {
+        return WriteSchema::new(
             columns,
-            holon_api::create_references(type_def)?,
-            holon_api::row_field_references(type_def)?,
-            holon_api::set_field_value_hint(type_def)?,
-        ))
+            holon_core::block_op_catalog::block_create_references(),
+            holon_core::block_op_catalog::block_update_references(),
+            holon_core::block_op_catalog::block_set_field_value_hint(),
+        );
     }
-
-    /// The vocabulary a runtime-declared type's raw table exposes: its
-    /// PERSISTED fields. Computed and transient fields are not written.
-    fn from_type_def(type_def: &TypeDefinition) -> Result<Self> {
-        Ok(Self {
-            soft_delete: type_def
-                .soft_delete
-                .as_ref()
-                .map(|s| s.tombstone_field.to_string()),
-            ..Self::from_references(
-                type_def
-                    .persistent_fields()
-                    .into_iter()
-                    .map(|f| f.name.clone()),
-                type_def,
-            )?
-        })
-    }
-
-    fn is_column(&self, name: &str) -> bool {
-        self.columns.contains(name)
-    }
-
-    fn has_overflow(&self) -> bool {
-        self.columns.contains(Self::OVERFLOW_COLUMN)
-    }
-
-    /// The tombstone column `delete` stamps instead of removing the row, for a
-    /// type that declared soft-delete semantics.
-    fn tombstone_column(&self) -> Option<&str> {
-        self.soft_delete.as_deref()
-    }
-
-    /// Whether a create stamps write-time timestamps: only when the table
-    /// declares the columns to hold them.
-    fn stamps_timestamps(&self) -> bool {
-        self.is_column("created_at") && self.is_column("updated_at")
-    }
-
-    fn column_list(&self) -> Vec<&str> {
-        let mut cols: Vec<&str> = self.columns.iter().map(String::as_str).collect();
-        cols.sort_unstable();
-        cols
-    }
+    let keyed_only = TypeDefinition::new(entity_name, Vec::new());
+    WriteSchema::from_references(columns, &keyed_only)
+        .expect("a type with no fields references nothing")
 }
 
 /// A prepared operation, split into two FK-ordered phases so a batch can apply
@@ -454,7 +350,7 @@ impl SqlOperationProvider {
         entity_short_name: String,
         edge_fields: Vec<EdgeFieldDescriptor>,
     ) -> Self {
-        let write_schema = WriteSchema::block(&entity_name);
+        let write_schema = block_write_schema(&entity_name);
         Self::with_write_schema(
             db_handle,
             table_name,
@@ -544,24 +440,9 @@ impl SqlOperationProvider {
         self.write_schema.is_column("content") && self.write_schema.is_column("parent_id")
     }
 
-    /// Where a param or `set_field` field is written: a real column, or the
-    /// `properties` overflow. A type declaring neither has nowhere to put it —
-    /// an error at the write boundary, never SQL against a column the table
-    /// does not have (nor a value quietly dropped into JSON nobody reads).
     fn require_write_route(&self, field: &str) -> Result<()> {
-        if self.write_schema.is_column(field) || self.write_schema.has_overflow() {
-            return Ok(());
-        }
-        Err(format!(
-            "{entity}: field '{field}' is not a column of `{table}` and `{entity}` declares no \
-             `{overflow}` overflow column, so this write has nowhere to land. Declared columns: \
-             {cols:?}. Add the field to the type definition, or write it to a type that has it.",
-            entity = self.entity_name,
-            table = self.table_name,
-            overflow = WriteSchema::OVERFLOW_COLUMN,
-            cols = self.write_schema.column_list(),
-        )
-        .into())
+        self.write_schema
+            .require_write_route(&self.entity_name, &self.table_name, field)
     }
 
     /// Override the clock (tests). Defaults to SystemClock.
@@ -636,10 +517,7 @@ impl SqlOperationProvider {
             )
             .into());
         }
-        let mut sql_fields = Vec::new();
-        let mut extra_props = std::collections::HashMap::new();
         let mut edge_field_params: Vec<(EdgeFieldDescriptor, Vec<String>)> = Vec::new();
-        let mut existing_properties_json: Option<String> = None;
 
         // First-line headline trimming only applies to text blocks; source
         // blocks preserve content verbatim. Look up `content_type` from the
@@ -647,28 +525,14 @@ impl SqlOperationProvider {
         // text when absent — the common case.
         let is_source = params.get("content_type").and_then(|v| v.as_string()) == Some("source");
 
-        for (key, value) in params.iter() {
-            if &**key == "properties" {
-                // Captured here to merge with the extras bucket below. Live
-                // callers pass the column as a JSON string, but `capture_row`
-                // hands it back DECODED, as an Object — reading only the string
-                // shape dropped every property from a delete-inverse, so undo
-                // resurrected the row stripped of them.
-                existing_properties_json = match value {
-                    Value::Object(_) => Some(value.to_json_string()?),
-                    _ => value.as_string().map(str::to_string),
+        let partitioned = self.write_schema.partition(
+            &self.entity_name,
+            &self.table_name,
+            params,
+            |key, value| {
+                let Some(descriptor) = self.edge_fields.get(key) else {
+                    return Ok(false);
                 };
-            } else if holon_core::block_ordering::is_operation_control_param(key) {
-                // Operation-control metadata (positional intent, routing hints,
-                // diff guards) — never persist. The positional intent is lifted
-                // onto the typed `Event` field in `prepare_create`. Sibling
-                // re-keys no longer ride this map at all — they travel TYPED on
-                // the op's `MintedPosition` (`apply_position`), so a
-                // `_order_rekeys` key here is inert; the predicate keeps
-                // stripping it as defense-in-depth (Ruling B; ADR 0030 D4).
-                // Shared with the intent boundaries that REFUSE these keys, so
-                // the "interpreted, not stored" set has exactly one definition.
-            } else if let Some(descriptor) = self.edge_fields.get(key.as_ref()) {
                 // Edge-typed field: must carry a Value::Array. Fail loud if
                 // a caller mis-types this — silently flowing to JSON would
                 // be the *exact* H5 bug we're closing.
@@ -693,50 +557,27 @@ impl SqlOperationProvider {
                     .collect();
                 descriptor.field.refuse_malformed_targets(&ids)?;
                 edge_field_params.push((descriptor.clone(), ids));
-            } else if self.write_schema.is_column(key.as_ref()) {
+                Ok(true)
+            },
+        )?;
+
+        let sql_fields = partitioned
+            .columns
+            .into_iter()
+            .map(|(key, value)| {
                 // Trim trailing whitespace from content — org files don't
                 // preserve it, so storing untrimmed content would cause
                 // permanent divergence between DB and org round-trips.
-                let value = if &**key == "content" {
-                    &Self::trimmed_content(value, is_source)
+                let value = if key == "content" {
+                    Self::trimmed_content(&value, is_source)
                 } else {
                     value
                 };
-                sql_fields.push((
-                    key.to_string(),
-                    Self::value_to_sql(value).map_err(|e| e.under(key))?,
-                ));
-            } else {
-                self.require_write_route(key)?;
-                extra_props.insert(key.to_string(), value.clone());
-            }
-        }
-
-        // Merge existing properties JSON into extra_props
-        if let Some(json_str) = existing_properties_json
-            && let Ok(map) = serde_json::from_str::<
-                std::collections::HashMap<String, serde_json::Value>,
-            >(&json_str)
-        {
-            for (k, v) in map {
-                extra_props
-                    .entry(k.clone())
-                    .or_insert_with(|| Value::from_json_value(v));
-            }
-        }
-
-        // ONE choke-point for both authored routes into the property bag (loose
-        // params and the submitted `properties` blob): the reserved removal
-        // marker must never reach storage. `Block::try_from` reads the stored
-        // blob back through `Value`'s untagged deserializer, which mints a
-        // `Value::Removed` from the marker's shape at any depth — putting a
-        // removal INSTRUCTION into stored state and breaking the invariant the
-        // unfiltered DB-read callers rely on. Refused here, named, while the
-        // author is present.
-        for (key, value) in &extra_props {
-            value.reject_reserved_marker(key)?;
-            value.reject_non_finite_float(key)?;
-        }
+                let literal = Self::value_to_sql(&value).map_err(|e| e.under(&key))?;
+                Ok((key, literal))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let extra_props = partitioned.overflow;
 
         Ok((sql_fields, extra_props, edge_field_params))
     }
@@ -3268,145 +3109,17 @@ impl OperationProvider for SqlOperationProvider {
             );
             (descriptor.marking_delta, descriptor.arcs)
         };
-        let (set_field_delta, set_field_arcs) =
-            crud_declaration(holon_core::__operations_crud_operations::SET_FIELD_OP);
-        let (create_delta, create_arcs) =
-            crud_declaration(holon_core::__operations_crud_operations::CREATE_OP);
-        let (delete_delta, delete_arcs) =
-            crud_declaration(holon_core::__operations_crud_operations::DELETE_OP);
-
-        let mut ops = vec![
-            OperationDescriptor {
-                entity_name: self.entity_name.clone().into(),
-                entity_short_name: self.entity_short_name.clone(),
-                name: "set_field".to_string(),
-                display_name: "Set Field".to_string(),
-                description: format!("Set a field on {}", self.entity_short_name),
-                required_params: vec![
-                    OperationParam {
-                        name: "id".to_string(),
-                        type_hint: TypeHint::EntityId {
-                            entity_name: EntityName::new(&self.entity_name),
-                        },
-                        description: "Entity ID".to_string(),
-                    },
-                    OperationParam {
-                        name: "field".to_string(),
-                        type_hint: TypeHint::String,
-                        description: "Field name".to_string(),
-                    },
-                    OperationParam {
-                        name: "value".to_string(),
-                        type_hint: self.write_schema.set_field_value.clone(),
-                        description: "Field value".to_string(),
-                    },
-                ],
-                optional_params: vec![],
-                id_column: "id".to_string(),
-                affected_fields: vec![],
-                param_mappings: vec![],
-                target_scope: self.target_scope(),
-                boundary_behavior: holon_api::BoundaryBehavior::PrivateOnly,
-                menu_exposure: holon_api::MenuExposure::NotListed {
-                    surface: holon_api::NonMenuSurface::Internal,
-                },
-                trigger: None,
-                bound_params: Default::default(),
-                marking_delta: set_field_delta,
-                guard: holon_api::pattern::OpGuard::None,
-                arcs: set_field_arcs,
+        let mut ops = holon_core::type_write_rule::crud_descriptors(
+            &EntityName::new(&self.entity_name),
+            &self.entity_short_name,
+            self.target_scope(),
+            &self.write_schema,
+            holon_core::type_write_rule::CrudDeclarations {
+                set_field: crud_declaration(holon_core::__operations_crud_operations::SET_FIELD_OP),
+                create: crud_declaration(holon_core::__operations_crud_operations::CREATE_OP),
+                delete: crud_declaration(holon_core::__operations_crud_operations::DELETE_OP),
             },
-            OperationDescriptor {
-                entity_name: self.entity_name.clone().into(),
-                entity_short_name: self.entity_short_name.clone(),
-                name: "create".to_string(),
-                display_name: "Create".to_string(),
-                description: format!("Create a new {}", self.entity_short_name),
-                id_column: "id".to_string(),
-                required_params: vec![],
-                optional_params: self.write_schema.create_references.clone(),
-                affected_fields: vec![],
-                param_mappings: vec![],
-                target_scope: self.target_scope(),
-                boundary_behavior: holon_api::BoundaryBehavior::PrivateOnly,
-                menu_exposure: holon_api::MenuExposure::NotListed {
-                    surface: holon_api::NonMenuSurface::Internal,
-                },
-                trigger: None,
-                bound_params: Default::default(),
-                marking_delta: create_delta,
-                guard: holon_api::pattern::OpGuard::None,
-                arcs: create_arcs,
-            },
-            holon_core::block_op_catalog::update_descriptor(
-                &EntityName::new(&self.entity_name),
-                &self.entity_short_name,
-                self.target_scope(),
-                self.write_schema.update_references.clone(),
-            ),
-            OperationDescriptor {
-                entity_name: self.entity_name.clone().into(),
-                entity_short_name: self.entity_short_name.clone(),
-                name: "delete".to_string(),
-                display_name: "Delete".to_string(),
-                description: format!("Delete {}", self.entity_short_name),
-                required_params: vec![OperationParam {
-                    name: "id".to_string(),
-                    type_hint: TypeHint::EntityId {
-                        entity_name: EntityName::new(&self.entity_name),
-                    },
-                    description: "Entity ID".to_string(),
-                }],
-                optional_params: vec![],
-                id_column: "id".to_string(),
-                affected_fields: vec![],
-                param_mappings: vec![],
-                target_scope: self.target_scope(),
-                boundary_behavior: holon_api::BoundaryBehavior::PrivateOnly,
-                menu_exposure: holon_api::MenuExposure::Listed {
-                    surfaces: holon_api::SurfaceSet {
-                        slash_menu: true,
-                        action_bar: false,
-                    },
-                },
-                trigger: None,
-                bound_params: Default::default(),
-                marking_delta: delete_delta,
-                guard: holon_api::pattern::OpGuard::None,
-                arcs: delete_arcs,
-            },
-        ];
-
-        if self.write_schema.tombstone_column().is_some() {
-            ops.push(OperationDescriptor {
-                entity_name: self.entity_name.clone().into(),
-                entity_short_name: self.entity_short_name.clone(),
-                name: "purge".to_string(),
-                display_name: "Purge".to_string(),
-                description: format!("Remove a tombstoned {} for good", self.entity_short_name),
-                required_params: vec![OperationParam {
-                    name: "id".to_string(),
-                    type_hint: TypeHint::EntityId {
-                        entity_name: EntityName::new(&self.entity_name),
-                    },
-                    description: "Entity ID".to_string(),
-                }],
-                optional_params: vec![],
-                id_column: "id".to_string(),
-                affected_fields: vec![],
-                param_mappings: vec![],
-                target_scope: self.target_scope(),
-                boundary_behavior: holon_api::BoundaryBehavior::PrivateOnly,
-                menu_exposure: holon_api::MenuExposure::NotListed {
-                    surface: holon_api::NonMenuSurface::Internal,
-                },
-                trigger: None,
-                bound_params: Default::default(),
-                marking_delta: holon_api::marking::MarkingDelta::Undeclared,
-                guard: holon_api::pattern::OpGuard::None,
-                arcs: holon_api::arcs::TransitionArcs::Undeclared,
-            });
-        }
+        );
 
         // The compounds below READ block's content/hierarchy vocabulary
         // (`content`, `parent_id`, marks, task properties), so an entity whose
@@ -5178,6 +4891,7 @@ mod write_schema_tests {
 
     use super::TypeDefinition;
     use super::WriteSchema;
+    use super::block_write_schema;
 
     fn declared(name: &str, columns: &[&str]) -> TypeDefinition {
         let mut fields = vec![FieldSchema::new("id", "TEXT").primary_key()];
@@ -5195,7 +4909,7 @@ mod write_schema_tests {
     /// that declares neither must get neither.
     #[test]
     fn overflow_and_timestamps_come_from_the_schema_not_from_block() {
-        let block = WriteSchema::block(holon_api::schema::block::RELATION);
+        let block = block_write_schema(holon_api::schema::block::RELATION);
         assert!(block.has_overflow());
         assert!(block.stamps_timestamps());
         assert!(block.is_column("parent_id"));
@@ -5212,15 +4926,6 @@ mod write_schema_tests {
             "stamping a column the table does not have would fail the INSERT"
         );
         assert!(!free_standing.is_column("content"));
-    }
-
-    /// The derivation reads the type's PERSISTED fields — nothing else. A
-    /// column named here can never come from block's vocabulary.
-    #[test]
-    fn a_declared_types_vocabulary_is_exactly_its_persisted_fields() {
-        let schema =
-            WriteSchema::from_type_def(&declared("gen_1", &["aaa", "bbb"])).expect("schema");
-        assert_eq!(schema.column_list(), vec!["aaa", "bbb", "id"]);
     }
 }
 
