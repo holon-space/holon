@@ -21,6 +21,7 @@ async fn from_block_query_source_has_no_engine_but_a_source() {
     let session = from_block_query_source(
         empty_source(),
         None,
+        holon_profiles::create_default_registry().expect("default TypeRegistry"),
         &holon_api::lifecycle::SessionShutdown::new(),
         Arc::new(holon_api::ConditionBus::new()),
     );

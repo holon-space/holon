@@ -70,7 +70,7 @@ impl Booted {
     }
 }
 
-async fn boot_with_late_profile() -> Booted {
+async fn boot() -> Booted {
     let dir = tempfile::tempdir().expect("tempdir");
     let holon_config = HolonConfig {
         db_path: Some(dir.path().join("late-profile.db")),
@@ -95,13 +95,17 @@ async fn boot_with_late_profile() -> Booted {
     )
     .await
     .expect("session boots");
-    let booted = Booted {
+    Booted {
         _dir: dir,
         _session: session,
         engine,
         registry,
         bus,
-    };
+    }
+}
+
+async fn boot_with_late_profile() -> Booted {
+    let booted = boot().await;
     std::fs::write(booted.profile_file(), PROFILE_ORG).expect("write the vault");
     let start = Instant::now();
     while !(booted.registry.has_vault_profile_for("personlate") && booted.profile_in_effect()) {
@@ -187,7 +191,7 @@ fn a_deleted_vault_profile_stops_refusing_the_type_it_overrode() {
 }
 
 #[test]
-fn a_refused_edit_leaves_the_live_profiles_claim_in_force() {
+fn a_refused_edit_releases_the_profiles_claim() {
     runtime().block_on(async {
         let booted = boot_with_late_profile().await;
         let (id, content) = profile_block(&booted).await;
@@ -213,13 +217,23 @@ fn a_refused_edit_leaves_the_live_profiles_claim_in_force() {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
 
-        let err = booted
-            .registry
-            .register(late_person(&booted.registry))
-            .expect_err("the older profile version is still applied, so it still overrides");
+        let start = Instant::now();
+        loop {
+            match booted.registry.register(late_person(&booted.registry)) {
+                Ok(()) => break,
+                Err(e) if e.downcast_ref::<TypedComputedFieldOverride>().is_some() => {
+                    assert!(
+                        start.elapsed() < DEADLINE,
+                        "the refused profile still claims the type: {e:#}"
+                    );
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                Err(e) => panic!("register failed for another reason: {e:#}"),
+            }
+        }
         assert!(
-            err.downcast_ref::<TypedComputedFieldOverride>().is_some(),
-            "{err:#}"
+            !booted.profile_in_effect(),
+            "the type was accepted while a version of the refused profile still computed it"
         );
     });
 }
@@ -259,5 +273,83 @@ fn deleting_a_refused_profile_block_clears_its_refusal() {
             );
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
+    });
+}
+
+const DUPLICATE_INVARIANT_ORG: &str = "\
+* Profile a
+:PROPERTIES:
+:ID: pa
+:END:
+#+begin_src holon_entity_profile_yaml
+entity_name: block
+invariants:
+  inv_y:
+    holds: 'block.task_state == \"DONE\" => not child(block.task_state == \"TODO\")'
+    on_violation: { repair: reopen_parent, set: { task_state: DOING } }
+#+end_src
+* Profile b
+:PROPERTIES:
+:ID: pb
+:END:
+#+begin_src holon_entity_profile_yaml
+entity_name: block
+invariants:
+  inv_y:
+    holds: 'block.task_state == \"DONE\" => not child(block.task_state == \"TODO\")'
+    on_violation: { repair: reopen_parent, set: { task_state: DOING } }
+#+end_src
+";
+
+/// Over the Turso CDC leg: of two vault profiles declaring one invariant name
+/// the smaller block id wins, and the loser loads once the winner is deleted
+/// — the state a fresh boot of the remaining vault reaches.
+#[test]
+fn the_loser_of_a_duplicate_invariant_loads_once_the_winner_is_deleted() {
+    runtime().block_on(async {
+        let booted = boot().await;
+        let state = || {
+            let declared: Vec<String> = booted
+                .registry
+                .declared_invariants("block")
+                .iter()
+                .map(|i| i.name.to_string())
+                .collect();
+            let mut refused: Vec<String> = booted
+                .bus
+                .current()
+                .into_iter()
+                .filter(|c| matches!(c.reason, ConditionKind::ProfileRefused { .. }))
+                .map(|c| c.subject)
+                .collect();
+            refused.sort();
+            (declared, refused)
+        };
+        let wait_for = |want: (Vec<String>, Vec<String>), label: &'static str| {
+            let state = &state;
+            async move {
+                let start = Instant::now();
+                while state() != want {
+                    assert!(
+                        start.elapsed() < DEADLINE,
+                        "[{label}] (declared, refused) = {:?}, expected {want:?}",
+                        state()
+                    );
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            }
+        };
+        std::fs::write(booted.profile_file(), DUPLICATE_INVARIANT_ORG).expect("write the vault");
+        wait_for(
+            (vec!["inv_y".into()], vec!["block:pb::src::0".into()]),
+            "pa wins the duplicate",
+        )
+        .await;
+        user_op(&booted, "delete", &[("id", "block:pa::src::0")]).await;
+        wait_for(
+            (vec!["inv_y".into()], vec![]),
+            "pb loads once pa is deleted",
+        )
+        .await;
     });
 }

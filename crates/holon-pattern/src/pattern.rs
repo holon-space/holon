@@ -1098,7 +1098,7 @@ impl Guard {
     /// inferring the [`Subject`]: any [`BuiltinRef`] ⇒ clock-driven, else
     /// block-driven. Rejects mixing a builtin with a block predicate.
     ///
-    /// Grammar: `not`, `and`, `or`, parentheses, and the guard functions
+    /// Grammar: `=>`, `not`, `and`, `or`, parentheses, and the guard functions
     /// `block_exists("path")`, `has_tag("tag")` and `parent(<expr>)`.
     pub fn parse(input: &str) -> Result<Guard, GuardParseError> {
         Guard::from_body(parse_guard_body(input)?)
@@ -1294,7 +1294,7 @@ pub fn parse_guard_body(input: &str) -> Result<Pattern, GuardParseError> {
         return Err(GuardParseError::Empty);
     }
     let mut parser = TokenParser { tokens, pos: 0 };
-    let pat = parser.parse_or()?;
+    let pat = parser.parse_implies()?;
     if parser.pos != parser.tokens.len() {
         return Err(GuardParseError::UnexpectedToken {
             token: parser.tokens[parser.pos].clone(),
@@ -1317,7 +1317,10 @@ fn tokenize(input: &str) -> Result<Vec<String>, GuardParseError> {
             }
             '=' | '!' => {
                 chars.next();
-                if chars.peek() == Some(&'=') {
+                if c == '=' && chars.peek() == Some(&'>') {
+                    chars.next();
+                    tokens.push("=>".to_string());
+                } else if chars.peek() == Some(&'=') {
                     chars.next();
                     tokens.push(format!("{c}="));
                 } else {
@@ -1388,6 +1391,21 @@ impl TokenParser {
         t
     }
 
+    /// `a => b` desugars to `not a or b`; it binds looser than `or` and does
+    /// not chain, so `a => b => c` is refused rather than read one way.
+    fn parse_implies(&mut self) -> Result<Pattern, GuardParseError> {
+        let antecedent = self.parse_or()?;
+        if self.peek() != Some("=>") {
+            return Ok(antecedent);
+        }
+        self.bump();
+        let consequent = self.parse_or()?;
+        Ok(Pattern::Or(vec![
+            Pattern::Not(Box::new(antecedent)),
+            consequent,
+        ]))
+    }
+
     fn parse_or(&mut self) -> Result<Pattern, GuardParseError> {
         let mut terms = vec![self.parse_and()?];
         while self.peek() == Some("or") {
@@ -1428,7 +1446,7 @@ impl TokenParser {
         match self.peek() {
             Some("(") => {
                 self.bump();
-                let inner = self.parse_or()?;
+                let inner = self.parse_implies()?;
                 if self.bump().as_deref() != Some(")") {
                     return Err(GuardParseError::UnexpectedEnd {
                         expected: "closing `)`".to_string(),
@@ -1900,6 +1918,42 @@ mod tests {
     /// `holon_core::block_op_catalog::page_under_non_page_prohibited`
     /// computes from two booleans, expressed relationally.
     const PAGE_UNDER_NON_PAGE: &str = "has_tag(\"Page\") and parent(not has_tag(\"Page\"))";
+
+    /// `a => b` is `not a or b`, binding looser than `or`, so an invariant
+    /// reads as written.
+    #[test]
+    fn an_implication_desugars_to_a_disjunction() {
+        let g =
+            Guard::parse("block.task_state == \"DONE\" => not child(block.task_state != \"DONE\")")
+                .expect("an implication must parse");
+        let column = |op| Pattern::Field {
+            field: FieldRef::Column {
+                relation: "block".to_string(),
+                name: "task_state".to_string(),
+            },
+            op,
+            rhs: Operand::Lit(Value::String("DONE".to_string())),
+        };
+        assert_eq!(g.subject, Subject::Block);
+        assert_eq!(
+            g.body,
+            Pattern::Or(vec![
+                Pattern::Not(Box::new(column(CmpOp::Eq))),
+                Pattern::Not(Box::new(Pattern::Child(Box::new(column(CmpOp::Ne))))),
+            ])
+        );
+        let loose = parse_guard_body("has_tag(\"a\") or has_tag(\"b\") => has_tag(\"c\")").unwrap();
+        assert_eq!(
+            loose,
+            Pattern::Or(vec![
+                Pattern::Not(Box::new(Pattern::Or(vec![
+                    Pattern::HasTag("a".to_string()),
+                    Pattern::HasTag("b".to_string()),
+                ]))),
+                Pattern::HasTag("c".to_string()),
+            ])
+        );
+    }
 
     #[test]
     fn parent_guard_parses_and_is_block_driven() {

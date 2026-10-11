@@ -19,11 +19,13 @@
 //! and compiles on-demand during resolution. Compilation is fast for small
 //! expressions (<1µs each).
 
+mod invariants;
 mod profile_computed_override;
 mod profile_scope;
 mod profile_write_targets;
 pub mod trust;
 pub mod type_registry;
+pub mod vault_profiles;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
@@ -43,6 +45,10 @@ use holon_api::render_types::OperationDescriptor;
 use holon_api::render_types::RenderExpr;
 use holon_api::render_types::RenderVariant;
 use holon_api::row_id;
+pub use invariants::ConstantRepair;
+pub use invariants::DeclaredInvariant;
+pub use invariants::InvariantName;
+pub use invariants::OnViolation;
 pub use profile_computed_override::TypedComputedFieldOverride;
 pub use profile_computed_override::check_profile_computed_overrides;
 pub use profile_scope::check_profile_scope;
@@ -55,6 +61,7 @@ pub use trust::TrustPolicyParseError;
 pub use trust::TrustRule;
 pub use type_registry::TableName;
 pub use type_registry::TypeRegistry;
+pub use type_registry::VaultProfileAdmission;
 pub use type_registry::VaultProfileClaims;
 pub use type_registry::create_default_registry;
 pub use type_registry::type_profiles_from_registry;
@@ -234,6 +241,12 @@ pub struct ParsedProfile {
     pub variants: Vec<holon_api::ProfileVariant>,
     #[serde(default)]
     pub virtual_child: Option<VirtualChildConfig>,
+    /// Parsed from `invariants:` by [`parse_profile_yaml`]; never read from
+    /// YAML directly.
+    #[serde(skip)]
+    pub invariants: Vec<DeclaredInvariant>,
+    #[serde(default, rename = "invariants")]
+    invariants_declared: BTreeMap<String, invariants::InvariantRepr>,
 }
 
 /// A computed field as declared in profile YAML. Written either as the bare
@@ -284,6 +297,11 @@ impl From<ComputedFieldDeclRepr> for ComputedFieldDecl {
 pub fn parse_profile_yaml(yaml_content: &str) -> Result<ParsedProfile> {
     let mut profile: ParsedProfile =
         serde_yaml::from_str(yaml_content).context("Invalid YAML in entity profile")?;
+
+    profile.invariants = invariants::parse_invariants(
+        &profile.entity_name,
+        std::mem::take(&mut profile.invariants_declared),
+    )?;
 
     let engine = RhaiEngine::new();
     for (name, decl) in profile.computed.iter_mut() {

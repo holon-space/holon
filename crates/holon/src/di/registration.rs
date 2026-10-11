@@ -11,7 +11,6 @@ use fluxdi::Shared;
 use holon_core::OperationObserver;
 use holon_core::OperationProvider;
 use holon_core::SyncTokenStore;
-use holon_core::storage::types::StorageEntity;
 use holon_profiles::TypeRegistry;
 use holon_profiles::create_default_registry;
 use holon_turso::schema_modules::BlockSchemaModule;
@@ -42,7 +41,6 @@ use crate::core::operation_log::OperationLogObserver;
 use crate::core::operation_log::OperationLogStore;
 use crate::entity_profile::LiveEntities;
 use crate::entity_profile::ProfileResolver;
-use crate::entity_profile::parse_profile_yaml;
 use crate::identity::IdentityProvider;
 use crate::navigation::NavigationProvider;
 use crate::storage::ChangeOriginInjector;
@@ -193,7 +191,7 @@ async fn create_initialized_engine(
         ui_info,
         LiveEntities::new(),
         type_profiles,
-        type_registry.profile_load_check(),
+        type_registry.vault_profile_admitter(),
         type_registry.vault_profile_claims(),
         conditions,
         &shutdown,
@@ -480,8 +478,12 @@ async fn create_profile_resolver(
     ui_info: holon_api::UiInfo,
     live_entities: LiveEntities,
     type_profiles: Vec<crate::entity_profile::EntityProfile>,
-    profile_load_check: impl Fn(&str, &crate::entity_profile::ParsedProfile) -> Result<()>
-    + Send
+    vault_profile_admitter: impl Fn(
+        &std::collections::BTreeMap<String, String>,
+    ) -> std::collections::BTreeMap<
+        String,
+        holon_profiles::VaultProfileAdmission,
+    > + Send
     + Sync
     + 'static,
     vault_profile_claims: holon_profiles::VaultProfileClaims,
@@ -499,39 +501,16 @@ async fn create_profile_resolver(
     let entity_operations = entity_operations(&catalog, &block_synthetic);
     let computed_conditions = Arc::clone(&conditions);
     let stopped_conditions = Arc::clone(&conditions);
-    let refusal_conditions = Arc::clone(&conditions);
     let resolver = match matview_manager.watch(PROFILE_SQL).await {
         Ok(result) => {
-            let load =
-                move |row: &StorageEntity| load_profile_row(row, &profile_load_check, &conditions);
-            // A refused row stays out of the mirror at boot exactly as a
-            // refused CDC row does after it.
-            let initial_rows = result
-                .initial_rows
-                .into_iter()
-                .filter(|row| load(row).is_ok())
-                .collect();
-            let live_profiles = LiveData::new(
-                initial_rows,
-                |row| {
-                    let id = row
-                        .get("id")
-                        .and_then(|v| v.as_string())
-                        .map(|s| s.to_string())
-                        .ok_or_else(|| anyhow::anyhow!("profile row missing 'id'"))?;
-                    Ok(id)
-                },
-                move |row| load(row),
+            let mirror = holon_profiles::vault_profiles::vault_profile_mirror(
+                result.initial_rows,
+                vault_profile_admitter,
+                conditions,
             );
-            live_profiles.on_delete(move |id| {
-                refusal_conditions.clear(&holon_api::ConditionKey {
-                    subject: id.to_string(),
-                    kind: holon_api::ConditionKind::PROFILE_REFUSED,
-                });
-            });
-            live_profiles.subscribe("entity_profile", result.stream);
+            mirror.rows.subscribe("entity_profile", result.stream);
             Arc::new(ProfileResolver::with_type_profiles(
-                live_profiles,
+                mirror.profiles,
                 ui_info,
                 live_entities,
                 entity_operations,
@@ -641,42 +620,6 @@ fn follow_operation_catalog(
             })
         },
     );
-}
-
-/// Parse and check one org-embedded profile row. A refusal is raised as a
-/// [`holon_api::ConditionKind::ProfileRefused`] on the row's block and a
-/// successful load clears it.
-fn load_profile_row(
-    row: &StorageEntity,
-    profile_load_check: &impl Fn(&str, &crate::entity_profile::ParsedProfile) -> Result<()>,
-    conditions: &holon_api::ConditionBus,
-) -> Result<crate::entity_profile::EntityProfile> {
-    let id = row
-        .get("id")
-        .and_then(|v| v.as_string())
-        .expect("PROFILE_SQL selects the block id");
-    let loaded = (|| {
-        let content = row
-            .get("content")
-            .and_then(|v| v.as_string())
-            .ok_or_else(|| anyhow::anyhow!("profile row missing 'content'"))?;
-        let profile = parse_profile_yaml(content)?;
-        profile_load_check(id, &profile)?;
-        profile.to_entity_profile()
-    })();
-    match &loaded {
-        Ok(_) => conditions.clear(&holon_api::ConditionKey {
-            subject: id.to_string(),
-            kind: holon_api::ConditionKind::PROFILE_REFUSED,
-        }),
-        Err(e) => conditions.emit(holon_api::Condition {
-            subject: id.to_string(),
-            reason: holon_api::ConditionKind::ProfileRefused {
-                error: format!("{e:#}"),
-            },
-        }),
-    }
-    loaded
 }
 
 /// Register core services with a pre-created TursoBackend and DbHandle.

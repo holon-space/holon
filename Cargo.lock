@@ -6176,6 +6176,7 @@ dependencies = [
  "futures-signals",
  "holon-api",
  "holon-core",
+ "proptest 1.11.0",
  "rhai",
  "serde",
  "serde_json",

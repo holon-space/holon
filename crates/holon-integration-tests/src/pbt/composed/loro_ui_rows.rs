@@ -37,6 +37,7 @@ impl LoroUiRowsComponent {
         let shutdown = SessionShutdown::new();
         let resolver = build_turso_free_profile_resolver(
             source.clone(),
+            holon_profiles::create_default_registry().expect("default TypeRegistry"),
             &shutdown,
             Arc::new(holon_api::ConditionBus::new()),
         );

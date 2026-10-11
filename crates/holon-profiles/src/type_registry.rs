@@ -8,6 +8,7 @@
 //! boundary). If an expression doesn't compile, `register()` returns an error
 //! immediately — no invalid expressions can exist in the registry.
 
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt;
@@ -52,6 +53,8 @@ pub struct TypeRegistry {
     /// profile-side types like `VirtualChildConfig`. `apply_parsed_profile`
     /// inserts here; `profile_from_type_def` callers read here.
     virtual_children: RwLock<HashMap<String, VirtualChildConfig>>,
+    /// Invariants declared in bundled profile YAML, by entity key.
+    invariants: Arc<RwLock<HashMap<TableName, Vec<crate::DeclaredInvariant>>>>,
 }
 
 /// The types and the vault profiles' claims live under ONE lock: admitting a
@@ -60,10 +63,43 @@ pub struct TypeRegistry {
 #[derive(Default)]
 struct Admitted {
     types: HashMap<String, TypeDefinition>,
-    /// The `(entity, computed field)` pairs each vault profile computes or is
-    /// about to compute, by profile id, so a type registered later is checked
-    /// against them ([`TypeRegistry::register`]).
+    /// The `(entity, computed field)` pairs of the vault profiles the resolver
+    /// put in effect, by profile id. Only [`VaultProfileClaims::apply`]
+    /// writes it.
     vault_profile_claims: HashMap<String, HashSet<(TableName, String)>>,
+    /// The same pairs for the profiles the latest admission accepted. Only
+    /// [`TypeRegistry::vault_profile_admitter`] writes it, so a resolver
+    /// applying an older set cannot drop them.
+    admission_claims: HashMap<String, HashSet<(TableName, String)>>,
+    /// The invariants of the profiles the latest admission accepted, by
+    /// profile id. Only [`TypeRegistry::vault_profile_admitter`] writes it.
+    vault_invariants:
+        std::collections::BTreeMap<String, (TableName, Vec<crate::DeclaredInvariant>)>,
+}
+
+impl Admitted {
+    /// Every claim a type registered now is checked against: the profiles in
+    /// effect and the ones about to be.
+    fn claims(&self) -> impl Iterator<Item = (&String, &HashSet<(TableName, String)>)> {
+        self.vault_profile_claims
+            .iter()
+            .chain(self.admission_claims.iter())
+    }
+}
+
+/// One block's outcome of [`TypeRegistry::vault_profile_admitter`]: the
+/// block's profile is in effect, or it is refused and absent.
+#[derive(Debug, Clone)]
+pub enum VaultProfileAdmission {
+    InEffect(EntityProfile),
+    Refused(String),
+}
+
+struct LoadedVaultProfile {
+    key: TableName,
+    invariants: Vec<crate::DeclaredInvariant>,
+    claim: HashSet<(TableName, String)>,
+    profile: EntityProfile,
 }
 
 fn claim_of_parsed(profile: &ParsedProfile) -> impl Iterator<Item = (TableName, String)> + '_ {
@@ -173,6 +209,7 @@ impl TypeRegistry {
         Self {
             admitted: Arc::default(),
             virtual_children: RwLock::new(HashMap::new()),
+            invariants: Arc::default(),
         }
     }
 
@@ -334,7 +371,127 @@ impl TypeRegistry {
                 .expect("TypeRegistry poisoned")
                 .insert(entity_name.clone(), vc);
         }
+        if !profile.invariants.is_empty() {
+            let mut invariants = self.invariants.write().expect("TypeRegistry poisoned");
+            let declared = invariants
+                .entry(TableName::from_scheme(&entity_name))
+                .or_default();
+            for invariant in profile.invariants {
+                if declared.iter().any(|d| d.name == invariant.name) {
+                    anyhow::bail!(
+                        "invariant '{}' of '{entity_name}' is declared twice",
+                        invariant.name
+                    );
+                }
+                declared.push(invariant);
+            }
+        }
         Ok(())
+    }
+
+    /// The invariants profiles declared for `entity`: the bundled ones in
+    /// load order, then the loaded vault profiles' by profile id.
+    pub fn declared_invariants(&self, entity: &str) -> Vec<crate::DeclaredInvariant> {
+        let key = TableName::from_scheme(entity);
+        let mut declared = self
+            .invariants
+            .read()
+            .expect("TypeRegistry poisoned")
+            .get(&key)
+            .cloned()
+            .unwrap_or_default();
+        let admitted = self.admitted.read().expect("TypeRegistry poisoned");
+        declared.extend(
+            admitted
+                .vault_invariants
+                .values()
+                .filter(|(entity_key, _)| *entity_key == key)
+                .flat_map(|(_, invariants)| invariants.iter().cloned()),
+        );
+        declared
+    }
+
+    /// The admission of the whole current set of org-embedded vault profiles,
+    /// by block id, as one pure function of that set: equal sets admit
+    /// equally, whatever order their rows arrived in.
+    ///
+    /// Each block is first loaded on its own: its content is parsed and run
+    /// through the load-time checks [`Self::apply_parsed_profile`] runs, plus
+    /// the refusal to redeclare a typed computed field
+    /// ([`crate::check_profile_computed_overrides`]), against the types
+    /// registered now; a block that fails is refused and absent, whatever
+    /// version of it loaded before. Then each invariant name of an entity goes
+    /// to ONE declarer: a bundled profile over any vault profile,
+    /// else the vault profile with the smallest block id. A vault profile that
+    /// loses any of its names is refused whole.
+    ///
+    /// The admitted profiles' invariants and computed-field claims replace the
+    /// previous admission's, in the same critical section as the type checks.
+    pub fn vault_profile_admitter(
+        &self,
+    ) -> impl Fn(&BTreeMap<String, String>) -> BTreeMap<String, VaultProfileAdmission>
+    + Send
+    + Sync
+    + 'static {
+        let admitted = Arc::clone(&self.admitted);
+        let bundled = Arc::clone(&self.invariants);
+        move |candidates| {
+            let bundled = bundled.read().expect("TypeRegistry poisoned");
+            let mut admitted = admitted.write().expect("TypeRegistry poisoned");
+            let load = |id: &str, content: &str| -> Result<LoadedVaultProfile> {
+                let mut parsed = parse_profile_yaml(content)?;
+                check_vault_profile(&admitted, id, &parsed)?;
+                let claim: HashSet<_> = claim_of_parsed(&parsed).collect();
+                let key = TableName::from_scheme(&parsed.entity_name);
+                let invariants = std::mem::take(&mut parsed.invariants);
+                Ok(LoadedVaultProfile {
+                    key,
+                    invariants,
+                    claim,
+                    profile: parsed.to_entity_profile()?,
+                })
+            };
+            let mut declarers: HashMap<(TableName, String), String> = HashMap::new();
+            let mut admissions = BTreeMap::new();
+            let mut in_effect = Vec::new();
+            for (id, content) in candidates {
+                let loaded = load(id, content)
+                    .map_err(|e| format!("{e:#}"))
+                    .and_then(|loaded| {
+                        match first_taken_invariant(&loaded, &bundled, &declarers) {
+                            None => Ok(loaded),
+                            Some(lost) => Err(lost),
+                        }
+                    });
+                match loaded {
+                    Ok(loaded) => {
+                        for invariant in &loaded.invariants {
+                            declarers.insert(
+                                (loaded.key.clone(), invariant.name.to_string()),
+                                id.clone(),
+                            );
+                        }
+                        admissions.insert(
+                            id.clone(),
+                            VaultProfileAdmission::InEffect(loaded.profile.clone()),
+                        );
+                        in_effect.push((id.clone(), loaded));
+                    }
+                    Err(refusal) => {
+                        admissions.insert(id.clone(), VaultProfileAdmission::Refused(refusal));
+                    }
+                }
+            }
+            admitted.vault_invariants.clear();
+            admitted.admission_claims.clear();
+            for (id, loaded) in in_effect {
+                admitted.admission_claims.insert(id.clone(), loaded.claim);
+                admitted
+                    .vault_invariants
+                    .insert(id, (loaded.key, loaded.invariants));
+            }
+            admissions
+        }
     }
 
     /// Get a type definition by name.
@@ -357,41 +514,6 @@ impl TypeRegistry {
         LinkTargetClassifier::with_registry(self.clone() as Arc<dyn LinkSchemeRegistry>)
     }
 
-    /// The load-time checks [`Self::apply_parsed_profile`] runs, plus the
-    /// refusal to redeclare a typed computed field
-    /// ([`crate::check_profile_computed_overrides`]), against the types
-    /// registered at the time of each call, for profiles that load after the
-    /// registry is built (org-embedded profile blocks). The closure takes the
-    /// id of the block the profile was loaded from. An accepted profile's
-    /// fields join that block's claim before the profile can take effect, so
-    /// [`Self::register`] refuses a type the profile would override;
-    /// [`VaultProfileClaims::apply`] narrows the claim to what is in effect.
-    pub fn profile_load_check(
-        &self,
-    ) -> impl Fn(&str, &ParsedProfile) -> Result<()> + Send + Sync + 'static {
-        let admitted = Arc::clone(&self.admitted);
-        move |profile_id, profile| {
-            let mut admitted = admitted.write().expect("TypeRegistry poisoned");
-            let type_def = admitted
-                .types
-                .get(TableName::from_scheme(&profile.entity_name).as_str());
-            crate::check_profile_scope(profile, type_def)
-                .and_then(|()| crate::check_profile_write_targets(profile))
-                .and_then(|()| {
-                    crate::check_profile_computed_overrides(profile_id, profile, type_def)
-                        .map_err(Into::into)
-                })?;
-            // The version this one replaces computes until the resolver
-            // applies the new one, so its claim stays too.
-            admitted
-                .vault_profile_claims
-                .entry(profile_id.to_string())
-                .or_default()
-                .extend(claim_of_parsed(profile));
-            Ok(())
-        }
-    }
-
     /// The handle the profile resolver applies vault profiles through.
     pub fn vault_profile_claims(&self) -> VaultProfileClaims {
         VaultProfileClaims {
@@ -405,9 +527,8 @@ impl TypeRegistry {
         self.admitted
             .read()
             .expect("TypeRegistry poisoned")
-            .vault_profile_claims
-            .values()
-            .flatten()
+            .claims()
+            .flat_map(|(_, claim)| claim)
             .any(|(entity_key, _)| *entity_key == key)
     }
 
@@ -454,20 +575,64 @@ impl TypeRegistry {
     }
 }
 
+fn check_vault_profile(
+    admitted: &Admitted,
+    profile_id: &str,
+    profile: &ParsedProfile,
+) -> Result<()> {
+    let type_def = admitted
+        .types
+        .get(TableName::from_scheme(&profile.entity_name).as_str());
+    crate::check_profile_scope(profile, type_def)?;
+    crate::check_profile_write_targets(profile)?;
+    crate::check_profile_computed_overrides(profile_id, profile, type_def)?;
+    Ok(())
+}
+
+/// The refusal for the first invariant name of `loaded` that a bundled
+/// profile or an earlier vault profile in `declarers` already declares.
+fn first_taken_invariant(
+    loaded: &LoadedVaultProfile,
+    bundled: &HashMap<TableName, Vec<crate::DeclaredInvariant>>,
+    declarers: &HashMap<(TableName, String), String>,
+) -> Option<String> {
+    loaded.invariants.iter().find_map(|invariant| {
+        let name = invariant.name.to_string();
+        let in_bundled = bundled
+            .get(&loaded.key)
+            .is_some_and(|declared| declared.iter().any(|d| d.name == invariant.name));
+        if in_bundled {
+            return Some(format!(
+                "invariant '{name}' of '{}' is already declared by a bundled profile",
+                loaded.key
+            ));
+        }
+        declarers
+            .get(&(loaded.key.clone(), name.clone()))
+            .map(|winner| {
+                format!(
+                    "invariant '{name}' of '{}' is already declared by vault profile '{winner}', \
+                     whose block id sorts first",
+                    loaded.key
+                )
+            })
+    })
+}
+
 fn check_declaration(admitted: &Admitted, type_def: &TypeDefinition) -> Result<()> {
     if let Some(services) = &type_def.services {
         services.check_fields(type_def)?;
     }
     check_computed_types_match_columns(type_def)?;
     check_against_vault_profiles(
-        &admitted.vault_profile_claims,
+        admitted.claims(),
         &TableName::from_scheme(&type_def.name),
         type_def,
     )
 }
 
-fn check_against_vault_profiles(
-    claims: &HashMap<String, HashSet<(TableName, String)>>,
+fn check_against_vault_profiles<'a>(
+    claims: impl Iterator<Item = (&'a String, &'a HashSet<(TableName, String)>)>,
     key: &TableName,
     type_def: &TypeDefinition,
 ) -> Result<()> {
@@ -477,7 +642,7 @@ fn check_against_vault_profiles(
                 && !matches!(spec.computation(), Computation::Script(_))
             {
                 return Err(crate::TypedComputedFieldOverride {
-                    profile: profile_id.clone(),
+                    profile: profile_id.to_string(),
                     entity: type_def.name.clone(),
                     field: name.to_string(),
                 }

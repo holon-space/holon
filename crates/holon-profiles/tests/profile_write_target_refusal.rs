@@ -2,6 +2,9 @@
 //! `set_field` is refused when the profile loads, naming the widget argument,
 //! the field and the structural op that owns it.
 
+mod common;
+
+use common::admit_one;
 use holon_profiles::create_default_registry;
 use holon_profiles::parse_profile_yaml;
 
@@ -79,16 +82,13 @@ fn writable_targets_load() {
 
 #[test]
 fn an_org_embedded_profile_is_checked_for_write_targets() {
-    let check = create_default_registry()
-        .expect("default registry loads")
-        .profile_load_check();
-    let refused = parse_profile_yaml(&block_profile_rendering(
-        r#"board(#{item_template: render_entity(), lane_field: "parent_id"})"#,
-    ))
-    .expect("profile parses");
-    let msg = format!(
-        "{:#}",
-        check("block-profile-id", &refused).expect_err("lane_field parent_id refused")
-    );
+    let msg = admit_one(
+        &create_default_registry().expect("default registry loads"),
+        "block-profile-id",
+        &block_profile_rendering(
+            r#"board(#{item_template: render_entity(), lane_field: "parent_id"})"#,
+        ),
+    )
+    .expect_err("lane_field parent_id refused");
     assert!(msg.contains("lane_field"), "{msg}");
 }

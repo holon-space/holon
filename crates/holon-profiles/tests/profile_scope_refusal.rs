@@ -2,6 +2,9 @@
 //! refused when the profile loads (ruling D171.a), naming the expression, the
 //! name and the key the author most likely meant.
 
+mod common;
+
+use common::admit_one;
 use holon_profiles::create_default_registry;
 use holon_profiles::parse_profile_yaml;
 
@@ -82,15 +85,13 @@ fn guarded_and_declared_reads_load() {
 
 #[test]
 fn an_org_embedded_profile_is_checked_against_the_registered_types() {
-    let check = create_default_registry()
-        .expect("default registry loads")
-        .profile_load_check();
-    let refused = parse_profile_yaml(&block_profile_with_condition("asked-by != ()"))
-        .expect("profile parses");
-    let msg = format!(
-        "{:#}",
-        check("block-profile-id", &refused).expect_err("hyphenated key refused")
-    );
+    let registry = create_default_registry().expect("default registry loads");
+    let msg = admit_one(
+        &registry,
+        "block-profile-id",
+        &block_profile_with_condition("asked-by != ()"),
+    )
+    .expect_err("hyphenated key refused");
     assert!(msg.contains("properties[\"asked-by\"]"), "{msg}");
 
     // A bundled computed field (`is_task`), a lone guard and a profile named
@@ -101,10 +102,7 @@ fn an_org_embedded_profile_is_checked_against_the_registered_types() {
         "entity_name: kanban_collection\nvariants:\n  - name: board\n    render: 'text(\"b\")'\n"
             .to_string(),
     ] {
-        check(
-            "block-profile-id",
-            &parse_profile_yaml(&yaml).expect("profile parses"),
-        )
-        .unwrap_or_else(|e| panic!("must load: {e:#}"));
+        admit_one(&registry, "block-profile-id", &yaml)
+            .unwrap_or_else(|e| panic!("must load: {e}"));
     }
 }

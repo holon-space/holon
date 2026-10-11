@@ -46,13 +46,12 @@ use tokio::sync::mpsc;
 /// Build the Turso-free [`ProfileResolving`] the Loro render path uses to
 /// derive collection render expressions.
 ///
-/// The production resolver is fed by a Turso matview watching `PROFILE_SQL`
-/// (user-authored profile blocks); a no-Turso session has no such matview. We
-/// seed a resolver from the **built-in** type profiles only (the same
-/// `create_default_registry` → `profile_from_type_def` path the Turso engine
-/// uses), backed by an empty profile source. The result carries the built-in
-/// `collection` variants (tree/table/board) so `collection_render_from_profile`
-/// resolves a real `view_mode_switcher`, minus user-defined profile overrides.
+/// The Turso resolver's vault profiles come from a matview watching
+/// `PROFILE_SQL`; a no-Turso session has no such matview, so the same vault
+/// profile mirror is fed from snapshots of `source`. The type profiles come
+/// from `type_registry` as in the Turso engine, so the result carries the
+/// built-in `collection` variants (tree/table/board) and
+/// `collection_render_from_profile` resolves a real `view_mode_switcher`.
 ///
 /// Its entity lookups (`query_source`, `rule_sibling`) come from `source`
 /// instead of the Turso CDC matviews — without them every lookup-dependent
@@ -60,24 +59,24 @@ use tokio::sync::mpsc;
 /// Loro-only session.
 ///
 /// Must be called from within a Tokio runtime:
-/// `ProfileResolver::with_type_profiles` spawns a background actor that watches
-/// the (empty) profile source, and the entity refresh below spawns its own.
+/// the vault profile mirror and `ProfileResolver::with_type_profiles` spawn
+/// background actors, and the entity refresh below spawns its own.
 pub fn build_turso_free_profile_resolver(
     source: Arc<dyn BlockQuerySource>,
+    type_registry: Arc<holon_profiles::TypeRegistry>,
     shutdown: &holon_api::lifecycle::SessionShutdown,
     conditions: Arc<holon_api::ConditionBus>,
 ) -> Arc<dyn ProfileResolving> {
-    let type_registry = holon_profiles::create_default_registry().expect("default TypeRegistry");
     let type_profiles = holon_profiles::type_profiles_from_registry(&type_registry, &conditions);
 
-    let empty_profiles = holon_api::live_data::LiveData::new(
+    let vault_profiles = holon_profiles::vault_profiles::vault_profile_mirror(
         Vec::new(),
-        |_| Ok(String::new()),
-        |_| anyhow::bail!("no-Turso session has no user profile source"),
+        type_registry.vault_profile_admitter(),
+        Arc::clone(&conditions),
     );
 
     let resolver = Arc::new(ProfileResolver::with_type_profiles(
-        empty_profiles,
+        vault_profiles.profiles,
         holon_api::UiInfo::default(),
         LiveEntities::new(),
         HashMap::new(),
@@ -85,7 +84,12 @@ pub fn build_turso_free_profile_resolver(
         type_registry.vault_profile_claims(),
         conditions,
     ));
-    spawn_live_entity_refresh(source, Arc::downgrade(&resolver), shutdown);
+    spawn_live_entity_refresh(
+        source,
+        Arc::downgrade(&resolver),
+        vault_profiles.rows,
+        shutdown,
+    );
     resolver
 }
 
@@ -99,6 +103,7 @@ pub fn build_turso_free_profile_resolver(
 fn spawn_live_entity_refresh(
     source: Arc<dyn BlockQuerySource>,
     resolver: std::sync::Weak<ProfileResolver>,
+    vault_profiles: Arc<holon_api::live_data::LiveData<String>>,
     shutdown: &holon_api::lifecycle::SessionShutdown,
 ) {
     let cancelled = shutdown.cancelled();
@@ -106,6 +111,7 @@ fn spawn_live_entity_refresh(
         tokio::pin!(cancelled);
         let mut previous: Option<SourceBlockKey> = None;
         let mut polled_version: Option<u64> = None;
+        let mut profile_rows = std::collections::BTreeMap::new();
         loop {
             let Some(resolver) = resolver.upgrade() else {
                 return;
@@ -117,6 +123,7 @@ fn spawn_live_entity_refresh(
             if version.is_none() || version != polled_version {
                 match source.snapshot().await {
                     Ok(snapshot) => {
+                        follow_vault_profiles(&snapshot, &mut profile_rows, &vault_profiles);
                         let current = source_block_key(&snapshot);
                         if previous.as_ref() != Some(&current) {
                             let entities = holon_profiles::LiveEntitySpec::ALL
@@ -148,6 +155,61 @@ fn spawn_live_entity_refresh(
             }
         }
     });
+}
+
+/// Apply to `mirror` the difference between `seen` and the profile blocks of
+/// `snapshot`, then remember them in `seen`.
+fn follow_vault_profiles(
+    snapshot: &holon_core::storage::BlockSnapshot,
+    seen: &mut std::collections::BTreeMap<String, String>,
+    mirror: &holon_api::live_data::LiveData<String>,
+) {
+    let current: std::collections::BTreeMap<String, String> = snapshot
+        .iter_blocks()
+        .filter(|b| {
+            b.content_type == holon_api::ContentType::Source
+                && holon_profiles::is_profile_block_by_source_language(
+                    b.source_language.as_ref().map(|l| l.to_string()).as_deref(),
+                )
+        })
+        .map(|b| (b.id.as_str().to_string(), b.content.clone()))
+        .collect();
+    let row =
+        |id: &str, content: &str| holon_profiles::vault_profiles::vault_profile_row(id, content);
+    let mut changes = Vec::new();
+    for (id, content) in &current {
+        match seen.get(id) {
+            None => changes.push(Change::Created {
+                data: row(id, content),
+                origin: ChangeOrigin::Remote {
+                    operation_id: None,
+                    trace_id: None,
+                },
+            }),
+            Some(old) if old != content => changes.push(Change::Updated {
+                id: id.clone(),
+                data: row(id, content),
+                origin: ChangeOrigin::Remote {
+                    operation_id: None,
+                    trace_id: None,
+                },
+            }),
+            Some(_) => {}
+        }
+    }
+    for id in seen.keys().filter(|id| !current.contains_key(*id)) {
+        changes.push(Change::Deleted {
+            id: id.clone(),
+            origin: ChangeOrigin::Remote {
+                operation_id: None,
+                trace_id: None,
+            },
+        });
+    }
+    if !changes.is_empty() {
+        mirror.apply_changes(changes);
+    }
+    *seen = current;
 }
 
 /// Every source block's id, parent, content type and language — sorted.
@@ -827,6 +889,7 @@ mod tests {
         })) as Arc<dyn BlockQuerySource>;
         let resolver = build_turso_free_profile_resolver(
             source,
+            holon_profiles::create_default_registry().expect("default TypeRegistry"),
             &holon_api::lifecycle::SessionShutdown::new(),
             Arc::new(holon_api::ConditionBus::new()),
         );
@@ -836,6 +899,134 @@ mod tests {
             "Turso-free resolver must seed the built-in collection variants (tree/table/board); \
              got none — render would degrade to table()"
         );
+    }
+
+    /// A vault profile block in the Loro tree loads without Turso: its declared
+    /// invariants reach the shared registry, and leave it with the block.
+    #[tokio::test]
+    async fn turso_free_session_loads_vault_profile_invariants() {
+        const YAML: &str = "entity_name: block\ninvariants:\n  done_parent_has_done_children:\n    holds: 'block.task_state == \"DONE\" => not child(block.task_state == \"TODO\" or block.task_state == \"DOING\")'\n    on_violation: { repair: reopen_parent, set: { task_state: DOING } }\n";
+        let profile = holon_api::Block::new_source(
+            EntityUri::block("vault-profile"),
+            EntityUri::block("profiles-page"),
+            "holon_entity_profile_yaml",
+            YAML,
+        );
+        let blocks = Arc::new(std::sync::Mutex::new(vec![profile]));
+        let snapshot_of = Arc::clone(&blocks);
+        let source = Arc::new(holon_core::storage::from_sync(move || {
+            Ok(holon_core::storage::BlockSnapshot::from_ordered(
+                snapshot_of.lock().unwrap().clone(),
+                Vec::new(),
+            ))
+        })) as Arc<dyn BlockQuerySource>;
+        let registry = holon_profiles::create_default_registry().expect("default TypeRegistry");
+        let shutdown = holon_api::lifecycle::SessionShutdown::new();
+        let _resolver = build_turso_free_profile_resolver(
+            source,
+            registry.clone(),
+            &shutdown,
+            Arc::new(holon_api::ConditionBus::new()),
+        );
+        let declared = |registry: &holon_profiles::TypeRegistry| -> Vec<String> {
+            registry
+                .declared_invariants("block")
+                .iter()
+                .map(|i| i.name.to_string())
+                .collect()
+        };
+        let wait_for = |want: Vec<String>, label: &'static str| {
+            let registry = registry.clone();
+            async move {
+                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+                while declared(&registry) != want {
+                    assert!(
+                        tokio::time::Instant::now() < deadline,
+                        "[{label}] the no-Turso session's registry declares {:?} for block, \
+                         expected {want:?}: the vault profile in the Loro tree did not load",
+                        declared(&registry)
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+            }
+        };
+        wait_for(vec!["done_parent_has_done_children".into()], "loaded").await;
+        blocks.lock().unwrap().clear();
+        wait_for(Vec::new(), "deleted").await;
+    }
+
+    /// Two vault profiles that declare the same invariant name: the one with
+    /// the smaller block id wins, whatever the order they arrived in, and the
+    /// loser loads as soon as the winner leaves — the state a fresh boot of
+    /// the same vault reaches.
+    #[tokio::test]
+    async fn a_duplicate_invariant_goes_to_the_smallest_block_id_in_any_history() {
+        const YAML: &str = "entity_name: block\ninvariants:\n  inv_y:\n    holds: 'block.task_state == \"DONE\" => not child(block.task_state == \"TODO\")'\n    on_violation: { repair: reopen_parent, set: { task_state: DOING } }\n";
+        let profile = |id: &str| {
+            holon_api::Block::new_source(
+                EntityUri::block(id),
+                EntityUri::block("profiles-page"),
+                "holon_entity_profile_yaml",
+                YAML,
+            )
+        };
+        let blocks = Arc::new(std::sync::Mutex::new(vec![profile("pa")]));
+        let snapshot_of = Arc::clone(&blocks);
+        let source = Arc::new(holon_core::storage::from_sync(move || {
+            Ok(holon_core::storage::BlockSnapshot::from_ordered(
+                snapshot_of.lock().unwrap().clone(),
+                Vec::new(),
+            ))
+        })) as Arc<dyn BlockQuerySource>;
+        let registry = holon_profiles::create_default_registry().expect("default TypeRegistry");
+        let conditions = Arc::new(holon_api::ConditionBus::new());
+        let shutdown = holon_api::lifecycle::SessionShutdown::new();
+        let _resolver = build_turso_free_profile_resolver(
+            source,
+            registry.clone(),
+            &shutdown,
+            Arc::clone(&conditions),
+        );
+        let state = || {
+            let declared: Vec<String> = registry
+                .declared_invariants("block")
+                .iter()
+                .map(|i| i.name.to_string())
+                .collect();
+            let mut refused: Vec<String> = conditions
+                .current()
+                .into_iter()
+                .filter(|c| matches!(c.reason, holon_api::ConditionKind::ProfileRefused { .. }))
+                .map(|c| c.subject)
+                .collect();
+            refused.sort();
+            (declared, refused)
+        };
+        let wait_for = |want: (Vec<String>, Vec<String>), label: &'static str| {
+            let state = &state;
+            async move {
+                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+                while state() != want {
+                    assert!(
+                        tokio::time::Instant::now() < deadline,
+                        "[{label}] (declared, refused) = {:?}, expected {want:?}",
+                        state()
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+            }
+        };
+        let inv_y = || vec!["inv_y".to_string()];
+        wait_for((inv_y(), vec![]), "pa alone").await;
+        blocks.lock().unwrap().push(profile("pb"));
+        wait_for((inv_y(), vec!["block:pb".into()]), "pb joins and loses").await;
+        blocks
+            .lock()
+            .unwrap()
+            .retain(|b| b.id.as_str() != "block:pa");
+        wait_for((inv_y(), vec![]), "pb loads once pa is gone").await;
+        blocks.lock().unwrap().push(profile("pa"));
+        wait_for((inv_y(), vec!["block:pb".into()]), "pa rejoins and wins").await;
     }
 
     // ── Root display slot resolution (no-Turso arm) ────────────────────────
