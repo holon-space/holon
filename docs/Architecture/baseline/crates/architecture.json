@@ -348,6 +348,9 @@
                 "parent": "holon",
                 "files": [
                   {
+                    "name": "guard_bindings.rs"
+                  },
+                  {
                     "name": "lifecycle.rs"
                   },
                   {
@@ -691,6 +694,9 @@
               },
               {
                 "name": "fts_e2e.rs"
+              },
+              {
+                "name": "guard_resolve_fails_loud.rs"
               },
               {
                 "name": "guard_world_projection_schema.rs"
@@ -1596,7 +1602,13 @@
                 "name": "file_row_document_id.rs"
               },
               {
+                "name": "file_sync_text_merge_keeps_deletes.rs"
+              },
+              {
                 "name": "fresh_db_boot_seed_smoke.rs"
+              },
+              {
+                "name": "guard_resolve_fails_loud_in_the_app.rs"
               },
               {
                 "name": "home_profile_lookup_latency.rs"
@@ -1654,6 +1666,9 @@
               },
               {
                 "name": "loro_write_origins.rs"
+              },
+              {
+                "name": "malformed_type_profile_boots_degraded.rs"
               },
               {
                 "name": "marks_span_precondition.rs"
@@ -2189,6 +2204,9 @@
                 "name": "cell_registry.rs"
               },
               {
+                "name": "conflict_copy.rs"
+              },
+              {
                 "name": "consolidator.rs"
               },
               {
@@ -2229,6 +2247,9 @@
               },
               {
                 "name": "replica_state.rs"
+              },
+              {
+                "name": "resolve_if_bound.rs"
               },
               {
                 "name": "shape_gate.rs"
@@ -3552,6 +3573,9 @@
                             "name": "remote_list_mirror_matches_ref.rs"
                           },
                           {
+                            "name": "remote_list_peer_matches_ref.rs"
+                          },
+                          {
                             "name": "reseed_leak.rs"
                           },
                           {
@@ -3987,6 +4011,9 @@
                           },
                           {
                             "name": "remote_list_mirror_matches_ref.rs"
+                          },
+                          {
+                            "name": "remote_list_peer_matches_ref.rs"
                           },
                           {
                             "name": "render_only_block_draws_its_render.rs"
@@ -5283,6 +5310,9 @@
                     "name": "bidirectional_sync.rs"
                   },
                   {
+                    "name": "conflict_copy_on_adoption.rs"
+                  },
+                  {
                     "name": "convert_block_to_page_inherits_the_source_ring.rs"
                   },
                   {
@@ -5335,6 +5365,9 @@
                 "files": [
                   {
                     "name": "declared_column_parity.rs"
+                  },
+                  {
+                    "name": "harness_probe_reads_outside_budget.rs"
                   },
                   {
                     "name": "host_page_with_inline_subpages_ingest.rs"
@@ -6127,6 +6160,23 @@
           {
             "name": "tests",
             "path": "holon-loro/tests",
+            "dirs": [
+              {
+                "name": "typed_entity_shape",
+                "path": "holon-loro/tests/typed_entity_shape",
+                "c4_level": "unknown",
+                "description": "The candidate on-disk shapes of the Loro typed-entity store (the plan `LoroTypedEntityStore.md` section 4), shared by the convergence PBT, the scale bench and the read-side bench. No production wiring: these tests decide the shape before any of it exists.",
+                "pattern_status": "planned",
+                "content": "The candidate on-disk shapes of the Loro typed-entity store (the plan\n`LoroTypedEntityStore.md` section 4), shared by the convergence PBT, the\nscale bench and the read-side bench. No production wiring: these tests\ndecide the shape before any of it exists.\n\nThree shapes:\n- A  `MergeableChild`: one mergeable child map per entity, at key = the id\n- B  `FlatKeys`: flat keys `<id>/<field>` in the type root map\n- A' `PlainContainerChild`: A built with `insert_container` instead — the\n  negative control the convergence oracle must refute\n\nEvery write is padded to a Lamport height no peer has used yet, so no two\nwrites to one key ever tie. That makes the last-writer-wins oracle exact\nwithout re-simulating Loro's peer-id tie-break; the padding follows the\nclock-parity precedent in `crates/holon-loro/src/multi_peer.rs`.",
+                "source_file": "holon-loro/tests/typed_entity_shape/mod.rs",
+                "parent": "holon-loro",
+                "files": [
+                  {
+                    "name": "mod.rs"
+                  }
+                ]
+              }
+            ],
             "files": [
               {
                 "name": "batch_rollback_guard.rs"
@@ -6172,6 +6222,18 @@
               },
               {
                 "name": "text_undo_contract.rs"
+              },
+              {
+                "name": "transient_text_merge_pbt.rs"
+              },
+              {
+                "name": "typed_entity_block_projection.rs"
+              },
+              {
+                "name": "typed_entity_convergence_pbt.rs"
+              },
+              {
+                "name": "typed_entity_scale.rs"
               },
               {
                 "name": "undo_history_trim_probe.rs"
@@ -7956,7 +8018,7 @@
         "description": "The generic wasm plugin host: a vault file format served by a `.wasm` guest and a yaml sidecar instead of by a Rust crate.",
         "pattern": "Plugin Host",
         "pattern_status": "planned",
-        "content": "@c4 component\n@c4 layer Adapters\nPattern: Plugin Host\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-core \"core datasource traits\" \"Rust\"\n@c4 uses holon-rows \"typed row JSON Lines\" \"Rust\"\n\nThe generic wasm plugin host: a vault file format served by a `.wasm`\nguest and a yaml sidecar instead of by a Rust crate.\n\nThree pieces. [`abi`] is the five core-wasm functions everything speaks.\n[`PluginHost`] runs one guest under a fuel and a memory limit, keeping the\ninstance alive across files. [`PluginFormatAdapter`] turns the JSON Lines\nthe guest emits into a [`holon_core::file_format::FileFormatParseResult`],\nrefusing anything the sidecar did not declare.\n\nGuests are PURE FUNCTIONS: the host supplies an empty linker, so a guest\nthat reached for WASI, a clock or the network would fail to instantiate\nrather than degrade.",
+        "content": "@c4 component\n@c4 layer Adapters\nPattern: Plugin Host\n@c4 uses holon-api \"shared value & operation types\" \"Rust\"\n@c4 uses holon-core \"core datasource traits\" \"Rust\"\n\nThe generic wasm plugin host: a vault file format served by a `.wasm`\nguest and a yaml sidecar instead of by a Rust crate.\n\nThree pieces. [`abi`] is the five core-wasm functions everything speaks.\n[`PluginHost`] runs one guest under a fuel and a memory limit, keeping the\ninstance alive across files. [`PluginFormatAdapter`] turns the typed stream\nthe guest emits into a [`holon_core::file_format::FileFormatParseResult`],\nrefusing anything the sidecar did not declare.\n\nGuests are PURE FUNCTIONS: the host supplies an empty linker, so a guest\nthat reached for WASI, a clock or the network would fail to instantiate\nrather than degrade.",
         "source_file": "holon-plugin-host/src/lib.rs",
         "layer": "Adapters",
         "relationships": [
@@ -7968,11 +8030,6 @@
           {
             "target": "holon-core",
             "label": "core datasource traits",
-            "protocol": "Rust"
-          },
-          {
-            "target": "holon-rows",
-            "label": "typed row JSON Lines",
             "protocol": "Rust"
           }
         ],
@@ -8044,10 +8101,16 @@
                 "name": "block_params.rs"
               },
               {
+                "name": "cook_file_names_pbt.rs"
+              },
+              {
                 "name": "cook_ingest.rs"
               },
               {
                 "name": "plugin_failure_modes.rs"
+              },
+              {
+                "name": "plugin_rows_contract.rs"
               },
               {
                 "name": "rows_contract_differential_pbt.rs"
@@ -8125,6 +8188,9 @@
                 "name": "decision_profile_conditions.rs"
               },
               {
+                "name": "malformed_type_profile_refusal.rs"
+              },
+              {
                 "name": "profile_scope_refusal.rs"
               },
               {
@@ -8177,9 +8243,6 @@
               },
               {
                 "name": "envelope.rs"
-              },
-              {
-                "name": "ids.rs"
               },
               {
                 "name": "jaq_library.rs"
@@ -8688,6 +8751,9 @@
               },
               {
                 "name": "create_table_keyword_columns.rs"
+              },
+              {
+                "name": "db_open_keeps_a_usable_file.rs"
               },
               {
                 "name": "ddl_hang_guard.rs"
