@@ -925,6 +925,15 @@ const SCHEMA_MODULE_FAILED: ConditionProfile = ConditionProfile::new(
     &[],
 );
 
+const CLOCK_NOT_RUNNING: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Error,
+    "Holon's clock is not running",
+    icons::BLOCKED,
+    ConditionPlacement::Banner,
+    AllClear::UntilRestart,
+    &[],
+);
+
 impl ConditionKind {
     /// This kind's profile. Total, like
     /// [`condition_kind`](ConditionKind::condition_kind): a new variant cannot
@@ -1003,6 +1012,7 @@ impl ConditionKind {
             Self::TableRebuilt { .. } => TABLE_REBUILT,
             Self::TableReshaped { .. } => TABLE_RESHAPED,
             Self::SchemaModuleFailed { .. } => SCHEMA_MODULE_FAILED,
+            Self::ClockNotRunning { .. } => CLOCK_NOT_RUNNING,
         }
     }
 }

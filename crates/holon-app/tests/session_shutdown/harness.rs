@@ -132,6 +132,7 @@ pub async fn boot_a_working_session() -> Booted {
     let dir = tempfile::tempdir().expect("create tempdir for the vault");
     std::fs::write(dir.path().join("probe.org"), VAULT_ORG).expect("write the probe vault file");
 
+    let conditions = std::sync::Arc::new(holon_api::ConditionBus::new());
     let holon_config = HolonConfig {
         db_path: Some(dir.path().join("shutdown.db")),
         vault: VaultConfig {
@@ -145,7 +146,7 @@ pub async fn boot_a_working_session() -> Booted {
         SessionConfig::new(holon_api::UiInfo::permissive()),
         dir.path().to_path_buf(),
         HashSet::new(),
-        std::sync::Arc::new(holon_api::ConditionBus::new()),
+        conditions.clone(),
         |injector| {
             holon::testing::database_stuck_guard::report_database_stuck_in(injector);
             // The render stack the gpui frontend installs. Without it the
@@ -174,6 +175,7 @@ pub async fn boot_a_working_session() -> Booted {
     )
     .await
     .expect("the shared wiring must boot a session");
+    holon::testing::clock_guard::assert_clock_running(&conditions);
 
     // Put the render path to work: a live UI watch is what subscribes the
     // session to CDC and produces the `[UiWatcher] render_entity(...)` reads

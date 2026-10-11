@@ -665,10 +665,14 @@ impl ConditionKind {
             ),
 
             Self::SchemaModuleFailed { error } => ConditionDetail::with_body(
-                format!(
-                    "the {subject} tables could not be set up past their first failing \
-                     statement, and none after it ran."
-                ),
+                format!("not all {subject} tables could be set up; what failed is below."),
+                vec![error.clone()],
+            ),
+
+            Self::ClockNotRunning { error } => ConditionDetail::with_body(
+                "Holon's clock did not start, so what depends on today's date does not \
+                 change with it. It starts with the next Holon start that can set up the \
+                 clock table.",
                 vec![error.clone()],
             ),
         }

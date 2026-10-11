@@ -549,6 +549,7 @@ impl TestEnvironmentBuilder {
 
         let _startup_errors = session.error_tracker().errors();
         holon::testing::database_stuck_guard::assert_guarded_in(&injector);
+        holon::testing::clock_guard::assert_clock_running_in(&injector);
 
         Ok(TestEnvironment {
             org_fs,
@@ -1163,6 +1164,7 @@ impl TestEnvironment {
         let ctx = E2ETestContext::from_engine(backend_engine);
 
         holon::testing::database_stuck_guard::assert_guarded_in(&injector);
+        holon::testing::clock_guard::assert_clock_running_in(&injector);
         self.latch_session(session);
         self.latch_injector(injector);
         if let Some(doc_store) = doc_store {

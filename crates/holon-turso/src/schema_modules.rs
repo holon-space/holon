@@ -70,60 +70,80 @@ impl SchemaModule for CoreSchemaModule {
         vec![] // No dependencies - this is the root
     }
 
+    /// Each core relation is set up on its own, since none depends on
+    /// another: one the stored database refuses leaves the others standing.
     async fn ensure_schema(&self, db_handle: &DbHandle) -> Result<Vec<TableChange>> {
-        let mut changes = Vec::new();
         tracing::info!("[CoreSchemaModule] Creating core tables");
-
-        changes.extend(ensure_schema_sql(db_handle, block_raw_schema_sql()).await?);
-        tracing::debug!("[CoreSchemaModule] block_raw table + index created");
-
-        // Seed the self-parented `sentinel:no_parent` row so root blocks
-        // (parent_id = 'sentinel:no_parent') satisfy the block_raw parent FK.
-        // Self-reference is legal because the FK is DEFERRABLE INITIALLY
-        // DEFERRED (checked at COMMIT, when the row itself is present).
-        // Idempotent: re-running bootstrap must not duplicate or error.
-        db_handle
-            .execute(
-                // Schema bootstrap seeding the FK anchor row, not a block
-                // mutation — writes only the sentinel, never a real block.
-                // ALLOW(sole_block_writer): sentinel-only FK anchor seed.
-                "INSERT OR IGNORE INTO block_raw (id, parent_id) VALUES ('sentinel:no_parent', \
-                 'sentinel:no_parent')",
-                vec![],
-            )
-            .await?;
-        tracing::debug!("[CoreSchemaModule] sentinel:no_parent row seeded");
-
-        changes
-            .extend(ensure_schema_sql(db_handle, include_str!("../sql/schema/files.sql")).await?);
-        tracing::debug!("[CoreSchemaModule] files table + indexes created");
-
-        // `clock` relation (ADR 0024 P5, time-as-data). Seed a deterministic
-        // placeholder row so the boot guard always finds a `day` grain; the
-        // `ClockScheduler`'s first tick replaces it with the real local date via
-        // a CDC-emitting UPDATE before any temporal-guard matview is created.
-        changes
-            .extend(ensure_schema_sql(db_handle, include_str!("../sql/schema/clock.sql")).await?);
-        db_handle
-            .execute(
-                "INSERT OR IGNORE INTO clock (grain, today, epoch_day, updated_at) VALUES ('day', \
-                 '1970-01-01', 0, '1970-01-01T00:00:00Z')",
-                vec![],
-            )
-            .await?;
-        tracing::debug!("[CoreSchemaModule] clock table created + day row seeded");
-
-        changes.extend(
-            ensure_schema_sql(
-                db_handle,
-                include_str!("../sql/schema/integration_cache.sql"),
-            )
-            .await?,
-        );
-
+        let units = [
+            ("file", ensure_files(db_handle).await),
+            ("clock", ensure_clock(db_handle).await),
+            (
+                "integration_cache",
+                ensure_integration_cache(db_handle).await,
+            ),
+            ("block_raw", ensure_block_raw(db_handle).await),
+        ];
+        let mut changes = Vec::new();
+        let mut failed = Vec::new();
+        for (relation, result) in units {
+            match result {
+                Ok(unit) => changes.extend(unit),
+                Err(e) => failed.push(format!("{relation}: {e}")),
+            }
+        }
+        if !failed.is_empty() {
+            return Err(StorageError::SchemaError(failed.join("; ")));
+        }
         tracing::info!("[CoreSchemaModule] Core tables created successfully");
         Ok(changes)
     }
+}
+
+async fn ensure_files(db_handle: &DbHandle) -> Result<Vec<TableChange>> {
+    ensure_schema_sql(db_handle, include_str!("../sql/schema/files.sql")).await
+}
+
+/// `clock` relation (ADR 0024 P5, time-as-data). Seed a deterministic
+/// placeholder row so the boot guard always finds a `day` grain; the
+/// `ClockScheduler`'s first tick replaces it with the real local date via a
+/// CDC-emitting UPDATE before any temporal-guard matview is created.
+async fn ensure_clock(db_handle: &DbHandle) -> Result<Vec<TableChange>> {
+    let changes = ensure_schema_sql(db_handle, include_str!("../sql/schema/clock.sql")).await?;
+    db_handle
+        .execute(
+            "INSERT OR IGNORE INTO clock (grain, today, epoch_day, updated_at) VALUES ('day', \
+             '1970-01-01', 0, '1970-01-01T00:00:00Z')",
+            vec![],
+        )
+        .await?;
+    Ok(changes)
+}
+
+async fn ensure_integration_cache(db_handle: &DbHandle) -> Result<Vec<TableChange>> {
+    ensure_schema_sql(
+        db_handle,
+        include_str!("../sql/schema/integration_cache.sql"),
+    )
+    .await
+}
+
+/// `block_raw` and the self-parented `sentinel:no_parent` row root blocks
+/// (parent_id = 'sentinel:no_parent') reference to satisfy its parent FK.
+/// Self-reference is legal because the FK is DEFERRABLE INITIALLY DEFERRED
+/// (checked at COMMIT, when the row itself is present).
+async fn ensure_block_raw(db_handle: &DbHandle) -> Result<Vec<TableChange>> {
+    let changes = ensure_schema_sql(db_handle, block_raw_schema_sql()).await?;
+    db_handle
+        .execute(
+            // Schema bootstrap seeding the FK anchor row, not a block
+            // mutation — writes only the sentinel, never a real block.
+            // ALLOW(sole_block_writer): sentinel-only FK anchor seed.
+            "INSERT OR IGNORE INTO block_raw (id, parent_id) VALUES ('sentinel:no_parent', \
+             'sentinel:no_parent')",
+            vec![],
+        )
+        .await?;
+    Ok(changes)
 }
 
 /// Migrate one junction table off the pre-2026-07-22 shape that carried a

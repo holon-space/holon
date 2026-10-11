@@ -42,6 +42,7 @@ pub async fn boot_a_working_session() -> Booted {
     let dir = tempfile::tempdir().expect("create tempdir for the vault");
     std::fs::write(dir.path().join("probe.org"), VAULT_ORG).expect("write the probe vault file");
 
+    let conditions = std::sync::Arc::new(holon_api::ConditionBus::new());
     let holon_config = HolonConfig {
         db_path: Some(dir.path().join("undo-scheme.db")),
         vault: VaultConfig {
@@ -55,7 +56,7 @@ pub async fn boot_a_working_session() -> Booted {
         SessionConfig::new(holon_api::UiInfo::permissive()),
         dir.path().to_path_buf(),
         HashSet::new(),
-        std::sync::Arc::new(holon_api::ConditionBus::new()),
+        conditions.clone(),
         |injector| {
             holon::testing::database_stuck_guard::report_database_stuck_in(injector);
             use holon_frontend::reactive::RenderInterpreterInjectorExt;
@@ -75,6 +76,7 @@ pub async fn boot_a_working_session() -> Booted {
     )
     .await
     .expect("the shared wiring must boot a session");
+    holon::testing::clock_guard::assert_clock_running(&conditions);
 
     let services = reactive.clone() as Arc<dyn holon_frontend::reactive::BuilderServices>;
     let live = reactive.watch_live(&holon_api::EntityUri::block(PROBE_PAGE), services);

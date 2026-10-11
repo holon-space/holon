@@ -57,7 +57,7 @@ use crate::sync::LiveData;
 /// only happens on an actual day change (ADR 0024 P5).
 const CLOCK_TICK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// Boot guard: fail loud unless the `clock` day row is seeded with a real,
+/// Boot guard: an error unless the `clock` day row is seeded with a real,
 /// post-1970 date. Proves the clock scheduler ran on this embedder's boot path
 /// (ENVIRONMENT is the top BugFunnel escape category — every embedder must
 /// seed).
@@ -85,6 +85,26 @@ async fn assert_clock_seeded(db_handle: &DbHandle) -> Result<()> {
          — the clock scheduler did not seed the real date"
     );
     Ok(())
+}
+
+/// Spawn the clock scheduler, install it on `engine`, and prove its seed
+/// landed.
+async fn start_clock(
+    engine: &mut BackendEngine,
+    db_handle: &DbHandle,
+    clock: Arc<dyn holon_api::Clock>,
+    shutdown: &Arc<holon_api::lifecycle::SessionShutdown>,
+) -> Result<()> {
+    let clock_scheduler = crate::sync::clock_scheduler::spawn_clock_scheduler(
+        db_handle.clone(),
+        clock,
+        CLOCK_TICK_INTERVAL,
+        shutdown,
+    )
+    .await
+    .context("[DI] clock scheduler failed to seed the clock relation at boot")?;
+    engine.install_clock_scheduler(clock_scheduler);
+    assert_clock_seeded(db_handle).await
 }
 
 /// Build the default set of SQL-level transformers (applied after compilation).
@@ -193,7 +213,7 @@ async fn create_initialized_engine(
         type_profiles,
         type_registry.vault_profile_admitter(),
         type_registry.vault_profile_claims(),
-        conditions,
+        conditions.clone(),
         &shutdown,
     )
     .await?;
@@ -266,23 +286,18 @@ async fn create_initialized_engine(
     // the injected wall clock and re-fire temporal-guard matviews on
     // day-rollover. Every embedder resolves through this shared path, so
     // spawning it here covers GPUI, iOS, dioxus-web worker, and headless tests.
-    // Boot guard below fails loud if the seed did not land. The production
-    // wiring uses the real `SystemClock`; the keystone `AdvanceDay` transition
-    // injects a fake clock (via `InjectedClock`, resolved in the factory below)
-    // instead (§6).
-    let clock_scheduler = crate::sync::clock_scheduler::spawn_clock_scheduler(
-        db_handle.clone(),
-        clock,
-        CLOCK_TICK_INTERVAL,
-        &shutdown,
-    )
-    .await
-    .context("[DI] clock scheduler failed to seed the clock relation at boot")?;
-    engine.install_clock_scheduler(clock_scheduler);
-
-    // Boot guard: the `clock` day row must be seeded and hold a real (post-1970)
-    // date, proving the scheduler actually ran on this embedder's boot path.
-    assert_clock_seeded(&db_handle).await?;
+    // The production wiring uses the real `SystemClock`; the keystone
+    // `AdvanceDay` transition injects a fake clock (via `InjectedClock`,
+    // resolved in the factory below) instead (§6).
+    if let Err(e) = start_clock(&mut engine, &db_handle, clock, &shutdown).await {
+        tracing::error!("[DI] the clock did not start: {e:#}");
+        conditions.emit(holon_api::Condition {
+            subject: holon_api::condition_bus::CLOCK_SUBJECT.to_string(),
+            reason: holon_api::ConditionKind::ClockNotRunning {
+                error: format!("{e:#}"),
+            },
+        });
+    }
 
     // Preload startup matviews (reuses existing ones from previous sessions).
     preload_startup_views(&engine, None)

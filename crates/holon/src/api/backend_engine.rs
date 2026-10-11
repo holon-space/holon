@@ -443,10 +443,13 @@ impl BackendEngine {
 
     /// Keep `grain`'s `clock` row ticking for the rest of the session.
     pub async fn hold_clock_grain(&self, grain: holon_api::clock::Grain) -> anyhow::Result<()> {
-        let scheduler = self
-            ._clock_scheduler
-            .as_ref()
-            .expect("the clock scheduler is installed during engine initialization");
+        let scheduler = self._clock_scheduler.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "the clock is not running (condition {}), so the {} grain cannot tick",
+                holon_api::ConditionKind::CLOCK_NOT_RUNNING,
+                grain.as_str()
+            )
+        })?;
         let subscription = scheduler.subscribe(grain).await?;
         self.session_clock_grains
             .lock()

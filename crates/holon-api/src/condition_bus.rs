@@ -660,6 +660,13 @@ pub enum ConditionKind {
     ///
     /// All-clear: none in this process.
     SchemaModuleFailed { error: String },
+    /// The clock scheduler did not start (`error`), so the `clock` relation
+    /// does not follow the wall clock: what reads today's date keeps the value
+    /// it had, and a query or connection that needs a finer grain is refused.
+    /// Subject: [`CLOCK_SUBJECT`].
+    ///
+    /// All-clear: none in this process.
+    ClockNotRunning { error: String },
 }
 
 /// Subject of the device-wide conditions on this bus, which have no share to
@@ -670,6 +677,9 @@ pub const WATCH_VIEWS_SUBJECT: &str = "watch-views";
 
 /// Subject of [`ConditionKind::PanicConditionsUnavailable`].
 pub const PANIC_CONDITIONS_SUBJECT: &str = "panic-conditions";
+
+/// Subject of [`ConditionKind::ClockNotRunning`].
+pub const CLOCK_SUBJECT: &str = "clock";
 
 /// Subject of [`ConditionKind::ViewEngineStopped`].
 pub const VIEW_ENGINE_SUBJECT: &str = "view-engine";
@@ -757,6 +767,7 @@ impl ConditionKind {
     pub const TABLE_REBUILT: &'static str = "table-rebuilt";
     pub const TABLE_RESHAPED: &'static str = "table-reshaped";
     pub const SCHEMA_MODULE_FAILED: &'static str = "schema-module-failed";
+    pub const CLOCK_NOT_RUNNING: &'static str = "clock-not-running";
 
     /// The condition's stable identity, paired with the subject to form a
     /// [`ConditionKey`]. Total: every degradation is a sticky
@@ -841,6 +852,7 @@ impl ConditionKind {
             Self::TableRebuilt { .. } => Self::TABLE_REBUILT,
             Self::TableReshaped { .. } => Self::TABLE_RESHAPED,
             Self::SchemaModuleFailed { .. } => Self::SCHEMA_MODULE_FAILED,
+            Self::ClockNotRunning { .. } => Self::CLOCK_NOT_RUNNING,
         }
     }
 }

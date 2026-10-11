@@ -1058,6 +1058,11 @@ impl HeadlessFrontendComponent {
                 .get()
                 .expect("DI injector captured during build"),
         );
+        holon::testing::clock_guard::assert_clock_running_in(
+            injector_slot
+                .get()
+                .expect("DI injector captured during build"),
+        );
 
         if settle > Duration::ZERO {
             // Boot settle: tolerate non-convergence (the result is dropped) — the
