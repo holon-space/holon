@@ -82,6 +82,7 @@ pub use mcp_integration::SyncLoopTuning;
 pub use mcp_integration::assert_no_cross_sidecar_entity_collisions;
 pub use mcp_integration::build_mcp_integration;
 pub use mcp_integration::register_sidecar_entity_types;
+pub use mcp_integration::sidecar_type_definitions;
 pub use mcp_integration::spawn_sync_event_loop;
 pub use mcp_notification_handler::NotifyingClientHandler;
 pub use mcp_notification_handler::ResourceUpdateReceiver;

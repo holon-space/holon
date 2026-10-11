@@ -667,6 +667,18 @@ pub enum ConditionKind {
     ///
     /// All-clear: none in this process.
     ClockNotRunning { error: String },
+    /// An integration's sidecar declares a datatype whose `home` cannot carry
+    /// it (CV-E), so the whole integration is refused at load: nothing of it
+    /// is built, registered or synced. `subject` is the datatype; `field` is
+    /// absent when the refused site is the type's own home.
+    ///
+    /// All-clear: none in this process; the sidecar has to change.
+    IntegrationTypeRefused {
+        integration: String,
+        field: Option<String>,
+        home: String,
+        reason: String,
+    },
 }
 
 /// Subject of the device-wide conditions on this bus, which have no share to
@@ -737,6 +749,7 @@ impl ConditionKind {
     pub const VAULT_BACKLOG_INGESTING: &'static str = "vault-backlog-ingesting";
     pub const PROFILE_REFUSED: &'static str = "profile-refused";
     pub const TYPE_PROFILE_REFUSED: &'static str = "type-profile-refused";
+    pub const INTEGRATION_TYPE_REFUSED: &'static str = "integration-type-refused";
     pub const BLOCK_IN_TWO_FILES: &'static str = "block-in-two-files";
     pub const BLOCK_EDITED_IN_TWO_FILES: &'static str = "block-edited-in-two-files";
     pub const DELETED_BLOCK_KEPT_IN_FILE: &'static str = "deleted-block-kept-in-file";
@@ -821,6 +834,7 @@ impl ConditionKind {
             Self::VaultBacklogIngesting { .. } => Self::VAULT_BACKLOG_INGESTING,
             Self::ProfileRefused { .. } => Self::PROFILE_REFUSED,
             Self::TypeProfileRefused(_) => Self::TYPE_PROFILE_REFUSED,
+            Self::IntegrationTypeRefused { .. } => Self::INTEGRATION_TYPE_REFUSED,
             Self::BlockInTwoFiles { .. } => Self::BLOCK_IN_TWO_FILES,
             Self::BlockEditedInTwoFiles { .. } => Self::BLOCK_EDITED_IN_TWO_FILES,
             Self::DeletedBlockKeptInFile { .. } => Self::DELETED_BLOCK_KEPT_IN_FILE,

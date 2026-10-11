@@ -663,6 +663,14 @@ const TYPE_PROFILE_REFUSED: ConditionProfile = ConditionProfile::new(
     AllClear::UntilRestart,
     &[],
 );
+const INTEGRATION_TYPE_REFUSED: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Error,
+    "Integration refused",
+    icons::BLOCKED,
+    ConditionPlacement::Toast,
+    AllClear::UntilRestart,
+    &[],
+);
 
 const BLOCK_IN_TWO_FILES: ConditionProfile = ConditionProfile::new(
     ConditionSeverity::Warning,
@@ -983,6 +991,7 @@ impl ConditionKind {
             Self::VaultBacklogIngesting { .. } => VAULT_BACKLOG_INGESTING,
             Self::ProfileRefused { .. } => PROFILE_REFUSED,
             Self::TypeProfileRefused(_) => TYPE_PROFILE_REFUSED,
+            Self::IntegrationTypeRefused { .. } => INTEGRATION_TYPE_REFUSED,
             Self::BlockInTwoFiles { .. } => BLOCK_IN_TWO_FILES,
             Self::BlockEditedInTwoFiles { .. } => BLOCK_EDITED_IN_TWO_FILES,
             Self::DeletedBlockKeptInFile { .. } => DELETED_BLOCK_KEPT_IN_FILE,

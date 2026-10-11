@@ -564,6 +564,24 @@ impl IntegrationFileConfig {
             .and_then(|auth| auth.oauth2.as_ref())
     }
 
+    /// The sidecar this connection runs, parsed exactly as the connect parses
+    /// it.
+    pub fn sidecar(&self) -> anyhow::Result<McpSidecar> {
+        McpSidecar::from_yaml(&self.sidecar_yaml())
+    }
+
+    fn sidecar_yaml(&self) -> String {
+        let sidecar = McpSidecar {
+            entity_prefix: self.entity_prefix.clone(),
+            entities: self.entities.clone(),
+            writes: self.writes.clone(),
+            once_only: self.once_only.clone(),
+            tools: self.tools.clone(),
+            views: self.views.clone(),
+        };
+        serde_yaml::to_string(&sidecar).expect("McpSidecar must be serializable")
+    }
+
     /// Convert into the runtime config, expanding `${VAR}` references in
     /// transport and auth string fields from the process environment.
     ///
@@ -598,6 +616,7 @@ impl IntegrationFileConfig {
         // share this one `Redactor`, so a token minted mid-request joins the set
         // that guards every message either of them emits.
         let redactor = Redactor::new();
+        let sidecar_yaml = self.sidecar_yaml();
 
         let auth_mode = match self.auth {
             Some(AuthConfig {
@@ -644,17 +663,6 @@ impl IntegrationFileConfig {
                  `utcp` manual"
             );
         };
-
-        let sidecar = McpSidecar {
-            entity_prefix: self.entity_prefix,
-            entities: self.entities,
-            writes: self.writes,
-            once_only: self.once_only,
-            tools: self.tools,
-            views: self.views,
-        };
-        let sidecar_yaml =
-            serde_yaml::to_string(&sidecar).expect("McpSidecar must be serializable");
 
         Ok(McpIntegrationConfig {
             provider_name,

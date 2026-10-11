@@ -14,6 +14,8 @@
 //! names the field, the home, and the reason
 //! @pbt covers cve-unknown-home — a `home:` no profile answers for is refused
 //! whether or not the type has computed fields
+//! @pbt covers cve-sidecar-door — a field `home:` a sidecar declares reaches
+//! admission and the refusal names the type, the field and the home
 //! @pbt overlaps general_e2e_composed_pbt — kept: the keystone's datatype axis
 //! declares only Text-kinded computed fields against no home, so it cannot
 //! draw a refusable declaration (see lane-report-i3-2-p3.md §Keystone-rung
@@ -479,4 +481,34 @@ fn declare_type_is_reachable_through_the_generic_operation_surface() {
             other => panic!("declare_type must declare itself irreversible, got {other:?}"),
         }
     });
+}
+
+/// A sidecar is a door into the registry too: a field `home:` it declares
+/// reaches admission, and the refusal names the type, the field and the home.
+#[test]
+fn a_sidecar_field_naming_an_unknown_home_is_refused_by_name() {
+    let profiles = holon_capability::registry::shipped_profiles().expect("shipped profiles");
+    let sidecar = holon_mcp_client::McpSidecar::from_yaml(
+        r#"
+entities:
+  gen_items:
+    id_column: id
+    schema:
+      - name: id
+        sql_type: TEXT
+        primary_key: true
+      - name: note
+        sql_type: TEXT
+        home: no-such-home
+"#,
+    )
+    .expect("the sidecar parses: an unknown home is admission's to refuse, not the parser's");
+
+    let refusals = holon_app::type_admission::sidecar_refusals(&profiles, "gen-provider", &sidecar);
+    let [refusal] = refusals.as_slice() else {
+        panic!("the one sidecar type is refused: {refusals:?}");
+    };
+    assert_eq!(refusal.type_name, "gen_items");
+    assert_eq!(refusal.field.as_deref(), Some("note"));
+    assert_eq!(refusal.home, "no-such-home");
 }

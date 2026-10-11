@@ -275,15 +275,8 @@ pub fn register_sidecar_entity_types(
     provider_name: &str,
     type_registry: &holon_profiles::TypeRegistry,
 ) -> anyhow::Result<()> {
-    for (entity_name, entity_config) in &sidecar.entities {
-        let table_name = sidecar.prefixed_name(entity_name).table_name();
-        let Some(td) = entity_config.to_type_definition(
-            &table_name,
-            provider_name,
-            sidecar.write_ownership(entity_name),
-        ) else {
-            continue; // schema-less entity: nothing to register
-        };
+    for (entity_name, td) in sidecar_type_definitions(sidecar, provider_name) {
+        let table_name = td.name.clone();
         if let Some(existing) = type_registry.get(&table_name) {
             // By ORIGIN, not by write authority: a mirror of a feed the
             // connector only reads is still that connector's definition.
@@ -312,6 +305,27 @@ pub fn register_sidecar_entity_types(
             .expect("TypeRegistry::register accepts every definition");
     }
     Ok(())
+}
+
+/// Every entity of `sidecar` that declares a schema, as the type it registers.
+pub fn sidecar_type_definitions<'a>(
+    sidecar: &'a McpSidecar,
+    provider_name: &str,
+) -> Vec<(&'a String, holon_api::TypeDefinition)> {
+    sidecar
+        .entities
+        .iter()
+        .filter_map(|(entity_name, entity_config)| {
+            let table_name = sidecar.prefixed_name(entity_name).table_name();
+            entity_config
+                .to_type_definition(
+                    &table_name,
+                    provider_name,
+                    sidecar.write_ownership(entity_name),
+                )
+                .map(|td| (entity_name, td))
+        })
+        .collect()
 }
 
 /// State parked between `build_mcp_integration` returning `NeedsAuth` and

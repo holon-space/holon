@@ -14,11 +14,13 @@
 //! TWO ways a type becomes real, and BOTH are guarded here. The
 //! `declare_type` op goes through [`declare_type_admitted`]. Registry seeding
 //! at boot — `create_default_registry`,
-//! `holon_kitchen::register_kitchen_types`, an MCP sidecar — does NOT: it
-//! builds the same end state (registry entry, SQL artifacts, write authority)
-//! by a different route. That route is covered by [`sweep_registry`], which
+//! `holon_kitchen::register_kitchen_types` — does NOT: it builds the same end
+//! state (registry entry, SQL artifacts, write authority) by a different
+//! route. That route is covered by [`sweep_registry`], which
 //! `holon_app::new_from_config_with_di` runs over the whole registry and which
-//! refuses startup on any offender.
+//! refuses startup on any offender: a seeded type is compiled in, so a refusal
+//! is a wiring fault. An MCP sidecar is user data and is admitted at load
+//! ([`sidecar_refusals`]), before anything of its integration is built.
 //!
 //! `holon::core::type_declaration::declare_type` is still public, so the op
 //! seat is bypassable the way `move_block` bypasses [`crate::move_guard`]; its
@@ -43,6 +45,24 @@ use holon_core::storage::types::StorageEntity;
 use holon_profiles::TypeRegistry;
 use holon_turso::turso_adapter::TursoArtifacts;
 
+/// Why a declaration's home cannot carry it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeRefusal {
+    pub type_name: String,
+    /// `None` when the refused site is the type's own home.
+    pub field: Option<String>,
+    /// The profile id the refusing site names.
+    pub home: String,
+    /// The full refusal, naming the field and why the home refuses it.
+    pub reason: String,
+}
+
+impl std::fmt::Display for TypeRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.reason)
+    }
+}
+
 /// Why a declaration is refused, or `Ok(())` when the homes it names can carry
 /// what it declares.
 ///
@@ -51,21 +71,31 @@ use holon_turso::turso_adapter::TursoArtifacts;
 pub fn admits(
     profiles: &ProfileRegistry,
     type_def: &TypeDefinition,
-) -> std::result::Result<(), String> {
-    check_declared_homes_exist(profiles, type_def).map_err(|e| e.to_string())?;
-    check_computed_persisted(profiles, type_def, &HomeSeat::Declaration).map_err(|e| e.to_string())
+) -> std::result::Result<(), TypeRefusal> {
+    check_declared_homes_exist(profiles, type_def).map_err(|e| TypeRefusal {
+        type_name: type_def.name.clone(),
+        field: e.field.clone(),
+        home: e.home.to_string(),
+        reason: e.to_string(),
+    })?;
+    check_computed_persisted(profiles, type_def, &HomeSeat::Declaration).map_err(|e| TypeRefusal {
+        type_name: type_def.name.clone(),
+        field: Some(e.field.clone()),
+        home: e.home.to_string(),
+        reason: e.to_string(),
+    })
 }
 
 /// Run [`admits`] over every type a registry holds, refusing boot if any fails.
 ///
 /// THE REGISTRY, not a list of known doors. Types become real two ways — the
 /// `declare_type` op, and registry seeding at boot
-/// (`create_default_registry`, `holon_kitchen::register_kitchen_types`, an MCP
-/// sidecar) — and only the first goes through [`declare_type_admitted`].
-/// Sweeping the registry covers every seeder that shares it, including ones
-/// added later, because they all end up in the same map. A list of call sites
-/// would have to be maintained, and the door it missed is exactly the door that
-/// ships an unchecked type.
+/// (`create_default_registry`, `holon_kitchen::register_kitchen_types`) — and
+/// only the first goes through [`declare_type_admitted`]. Sweeping the
+/// registry covers every seeder that shares it, including ones added later,
+/// because they all end up in the same map. A list of call sites would have to
+/// be maintained, and the door it missed is exactly the door that ships an
+/// unchecked type.
 ///
 /// Reports EVERY offender, not the first: at boot the reader wants the whole
 /// list to fix, not one round trip per bad type.
@@ -73,19 +103,44 @@ pub fn sweep_registry(
     profiles: &ProfileRegistry,
     registry: &TypeRegistry,
 ) -> std::result::Result<(), String> {
-    let refusals: Vec<String> = registry
-        .all()
-        .iter()
-        .filter_map(|type_def| admits(profiles, type_def).err())
-        .collect();
+    let refusals = refusals_among(profiles, &registry.all());
     if refusals.is_empty() {
         return Ok(());
     }
     Err(format!(
         "{} declared type(s) name a home that cannot carry what they declare:\n  - {}",
         refusals.len(),
-        refusals.join("\n  - ")
+        refusals
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n  - ")
     ))
+}
+
+/// Every refusal among `type_defs`.
+pub fn refusals_among(
+    profiles: &ProfileRegistry,
+    type_defs: &[TypeDefinition],
+) -> Vec<TypeRefusal> {
+    type_defs
+        .iter()
+        .filter_map(|type_def| admits(profiles, type_def).err())
+        .collect()
+}
+
+/// Every refusal among the types `sidecar` registers when `provider` goes live.
+pub fn sidecar_refusals(
+    profiles: &ProfileRegistry,
+    provider: &str,
+    sidecar: &holon_mcp_client::McpSidecar,
+) -> Vec<TypeRefusal> {
+    let type_defs: Vec<TypeDefinition> =
+        holon_mcp_client::sidecar_type_definitions(sidecar, provider)
+            .into_iter()
+            .map(|(_, td)| td)
+            .collect();
+    refusals_among(profiles, &type_defs)
 }
 
 /// Declare `type_def` only if [`admits`] says its homes can carry it.

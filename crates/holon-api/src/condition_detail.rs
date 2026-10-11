@@ -381,6 +381,23 @@ impl ConditionKind {
                 vec![refusal.text.clone(), refusal.reason.clone()],
             ),
 
+            Self::IntegrationTypeRefused {
+                integration,
+                field,
+                home,
+                reason,
+            } => ConditionDetail::with_body(
+                format!(
+                    "integration {integration} is not running: its datatype {subject}{} names \
+                     home `{home}`, which cannot carry it. Fix the sidecar and restart:",
+                    field
+                        .as_ref()
+                        .map(|f| format!(" (field `{f}`)"))
+                        .unwrap_or_default()
+                ),
+                vec![reason.clone()],
+            ),
+
             // The paths are BODY lines: the user opens one of them to delete a
             // copy, so they must survive the headline cap.
             Self::BlockInTwoFiles {

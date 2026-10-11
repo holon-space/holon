@@ -474,6 +474,71 @@ fn disclose_inert_integration(i: &InertIntegration, bus: &ConditionBus) {
     });
 }
 
+/// An enabled integration whose sidecar declares a datatype its home cannot
+/// carry. Refused as ONE unit at load: syncing the entities that pass would be
+/// a silent subset, and nothing of it is built, so there is nothing to undo.
+#[derive(Debug, Clone)]
+struct RefusedIntegration {
+    provider: String,
+    refusals: Vec<crate::type_admission::TypeRefusal>,
+}
+
+impl RefusedIntegration {
+    fn cause(&self) -> String {
+        format!(
+            "its sidecar declares {} datatype(s) their home cannot carry: {}",
+            self.refusals.len(),
+            self.refusals
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("; ")
+        )
+    }
+}
+
+/// Admit every enabled sidecar's datatypes; a refused integration leaves
+/// `configs`, so nothing connects, builds or registers for it.
+///
+/// A sidecar that does not parse stays in `configs`: its connect parses it
+/// again and discloses the error as a connect failure.
+fn refuse_inadmissible(
+    configs: &mut Vec<(String, IntegrationFileConfig)>,
+) -> anyhow::Result<Vec<RefusedIntegration>> {
+    let profiles = holon_capability::registry::shipped_profiles()
+        .map_err(|e| anyhow::anyhow!("the shipped capability profiles must parse: {e}"))?;
+    let mut refused = Vec::new();
+    configs.retain(|(provider, config)| {
+        let Ok(sidecar) = config.sidecar() else {
+            return true;
+        };
+        let refusals = crate::type_admission::sidecar_refusals(&profiles, provider, &sidecar);
+        if refusals.is_empty() {
+            return true;
+        }
+        refused.push(RefusedIntegration {
+            provider: provider.clone(),
+            refusals,
+        });
+        false
+    });
+    Ok(refused)
+}
+
+fn disclose_refused_integration(r: &RefusedIntegration, bus: &ConditionBus) {
+    for refusal in &r.refusals {
+        bus.emit(Condition {
+            subject: refusal.type_name.clone(),
+            reason: ConditionKind::IntegrationTypeRefused {
+                integration: r.provider.clone(),
+                field: refusal.field.clone(),
+                home: refusal.home.clone(),
+                reason: refusal.reason.clone(),
+            },
+        });
+    }
+}
+
 /// A `${VAR}` resolution still running after this long is waiting on the
 /// keychain: the environment and the preferences answer at once.
 const KEYCHAIN_SLOW: Duration = Duration::from_secs(2);
@@ -495,6 +560,7 @@ pub struct IntegrationSupervisor {
     superseded: Arc<Vec<SupersededSidecar>>,
     ignored: Arc<Vec<IgnoredSidecar>>,
     inert: Arc<Vec<InertIntegration>>,
+    refused: Arc<Vec<RefusedIntegration>>,
     settings_vm: Arc<IntegrationsSettingsVm>,
     credential_root: CredentialRoot,
     pending_flows: Arc<PendingOAuthFlows>,
@@ -535,6 +601,9 @@ impl IntegrationSupervisor {
         for i in self.inert.iter() {
             disclose_inert_integration(i, &self.bus);
         }
+        for r in self.refused.iter() {
+            disclose_refused_integration(r, &self.bus);
+        }
 
         // The status writes below are refused for a provider with no enabled
         // row, and the session factory's projector runs after this.
@@ -554,6 +623,10 @@ impl IntegrationSupervisor {
 
         for i in self.inert.iter() {
             self.record_status(&i.provider, IntegrationStatus::Unavailable, &i.reason)
+                .await;
+        }
+        for r in self.refused.iter() {
+            self.record_status(&r.provider, IntegrationStatus::Unavailable, &r.cause())
                 .await;
         }
 
@@ -937,7 +1010,14 @@ pub struct McpIntegrationsModule {
     /// does not ship). The error is surfaced in `configure()` so it propagates
     /// through the module-registration `Result` instead of being swallowed
     /// here.
-    loaded: Result<(Arc<IntegrationConfigStore>, LoadedIntegrations), String>,
+    loaded: Result<
+        (
+            Arc<IntegrationConfigStore>,
+            LoadedIntegrations,
+            Vec<RefusedIntegration>,
+        ),
+        String,
+    >,
     /// The active profile's config directory — the only place a sidecar's
     /// credential files may live. Established here, at the one boot site that
     /// knows which profile is running, and passed to every surface that
@@ -962,8 +1042,12 @@ impl McpIntegrationsModule {
         let loaded = IntegrationConfigStore::load(dir)
             .map(Arc::new)
             .and_then(|store| load_integration_configs(dir, &store, &root).map(|l| (store, l)))
+            .and_then(|(store, mut loaded)| {
+                let refused = refuse_inadmissible(&mut loaded.configs)?;
+                Ok((store, loaded, refused))
+            })
             .map_err(|e| format!("{e:#}"));
-        if let Ok((_, loaded)) = &loaded {
+        if let Ok((_, loaded, refused)) = &loaded {
             // Logged here, not at disclosure time: the registry singleton is
             // resolved lazily, so the bus signal may never fire in a container
             // that never touches an integration — the log must not depend on
@@ -985,6 +1069,14 @@ impl McpIntegrationsModule {
             }
             for i in &loaded.inert {
                 log_inert_integration(i);
+            }
+            for r in refused {
+                warn!(
+                    "[McpIntegrationsModule] Provider '{}' is NOT running: {}. Fix its sidecar \
+                     and restart; the rest of the app is unaffected.",
+                    r.provider,
+                    r.cause()
+                );
             }
             info!(
                 "[McpIntegrationsModule] {} integration(s) enabled from '{}' ({} installed \
@@ -1011,7 +1103,7 @@ impl McpIntegrationsModule {
 
 impl Module for McpIntegrationsModule {
     fn configure(&self, injector: &Injector) -> std::result::Result<(), fluxdi::Error> {
-        let (store, loaded) = self.loaded.as_ref().map_err(|msg| {
+        let (store, loaded, refused) = self.loaded.as_ref().map_err(|msg| {
             fluxdi::Error::module_lifecycle_failed("McpIntegrationsModule", "configure", msg)
         })?;
 
@@ -1058,13 +1150,14 @@ impl Module for McpIntegrationsModule {
         let superseded = Arc::new(loaded.superseded.clone());
         let ignored = Arc::new(loaded.ignored.clone());
         let inert = Arc::new(loaded.inert.clone());
+        let refused = Arc::new(refused.clone());
         // Nothing to run AND nothing to say: leave the container untouched, so
         // a build with no integrations directory keeps resolving no MCP
         // services at all. Files that enabled nothing are the opposite
         // case — the registry factory is where the disclosure reaches
         // the bus, so it must be registered even when no integration
         // runs.
-        if configs.is_empty() && ignored.is_empty() && inert.is_empty() {
+        if configs.is_empty() && ignored.is_empty() && inert.is_empty() && refused.is_empty() {
             return Ok(());
         }
 
@@ -1118,6 +1211,7 @@ impl Module for McpIntegrationsModule {
             let superseded = superseded.clone();
             let ignored = ignored.clone();
             let inert = inert.clone();
+            let refused = refused.clone();
             let settings_vm = settings_vm.clone();
             let credential_root = credential_root.clone();
             let pending_flows = pending_flows.clone();
@@ -1128,6 +1222,7 @@ impl Module for McpIntegrationsModule {
                     superseded,
                     ignored,
                     inert,
+                    refused,
                     settings_vm,
                     credential_root,
                     pending_flows,
