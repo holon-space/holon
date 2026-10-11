@@ -1,13 +1,13 @@
 use holon_frontend::ReactiveViewModel;
 use holon_frontend::user_driver::build_drop_intent;
-use holon_frontend::user_driver::drag_drop_operation;
+use holon_frontend::user_driver::node_drag_drop_operation;
 
 use super::prelude::*;
 use crate::render::drag::DraggedBlock;
 
 pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> Div {
     let zone = div().h(px(4.0));
-    let Some(operation) = drag_drop_operation(&node.operations) else {
+    let Some(operation) = node_drag_drop_operation(node) else {
         return zone;
     };
     let operation = operation.descriptor.clone();

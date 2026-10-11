@@ -366,18 +366,23 @@ pub enum ViewKind {
     Selectable {
         child: Box<ViewModel>,
     },
+    /// A drag source. `op` names the operation it binds from the node's
+    /// operations ([`crate::user_driver::drag_drop_operation`]).
     Draggable {
         child: Box<ViewModel>,
+        op: String,
     },
     PieMenu {
         #[serde(default)]
         fields: String,
         child: Box<ViewModel>,
     },
-    /// A drop target. The operation a drop dispatches is the node's one bound
-    /// operation ([`crate::user_driver::drag_drop_operation`]); a zone that
-    /// binds none offers no drop.
-    DropZone {},
+    /// A drop target. A drop dispatches the operation `op` names, bound from
+    /// the node's operations ([`crate::user_driver::drag_drop_operation`]); a
+    /// zone whose node holds none offers no drop.
+    DropZone {
+        op: String,
+    },
     /// View mode switcher: ghost icons for switching collection layout.
     /// `entity_uri` identifies which collection this switcher controls.
     ViewModeSwitcher {
@@ -1409,7 +1414,7 @@ impl ViewModel {
                 let _ = writeln!(out, "{pad}selectable{ops_suffix}");
                 child.fmt_indent(out, indent + 1);
             }
-            ViewKind::Draggable { child } => {
+            ViewKind::Draggable { child, .. } => {
                 let _ = writeln!(out, "{pad}draggable{ops_suffix}");
                 child.fmt_indent(out, indent + 1);
             }
@@ -1587,7 +1592,7 @@ impl ViewModel {
             // Box<ViewModel> wrappers
             ViewKind::Focusable { child }
             | ViewKind::Selectable { child }
-            | ViewKind::Draggable { child }
+            | ViewKind::Draggable { child, .. }
             | ViewKind::Drawer { child, .. }
             | ViewKind::PieMenu { child, .. }
             | ViewKind::ViewModeSwitcher { child, .. }
@@ -1646,7 +1651,7 @@ impl ViewModel {
             // Box<ViewModel> wrappers
             ViewKind::Focusable { child }
             | ViewKind::Selectable { child }
-            | ViewKind::Draggable { child }
+            | ViewKind::Draggable { child, .. }
             | ViewKind::Drawer { child, .. }
             | ViewKind::PieMenu { child, .. }
             | ViewKind::ViewModeSwitcher { child, .. }

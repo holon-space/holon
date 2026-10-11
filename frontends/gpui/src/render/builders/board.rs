@@ -59,11 +59,6 @@ struct BoardCard {
     /// when the row carries no `parent_id` column (non-block entities) —
     /// reorders anchored on such a card are in-memory only.
     parent_id: Option<String>,
-    /// The `move_block` and `set_field` the card's row is offered — the
-    /// operations a drag persists with. A persisted card that lacks either
-    /// is offered no drag ([`BoardCard::offers_drag`]).
-    move_block: Option<holon_api::render_types::OperationDescriptor>,
-    set_field: Option<holon_api::render_types::OperationDescriptor>,
     /// Whether the card's lane lets it be dragged. `Sortable` enables drag per
     /// lane, so one card refused a drag holds its whole lane still.
     draggable: bool,
@@ -71,6 +66,38 @@ struct BoardCard {
     accent_hex: u32,
     lines: Vec<CardLine>,
 }
+
+/// The `move_block` and `set_field` a persisted card's row is offered — the
+/// operations a drag persists with. Read from the CURRENT render, never from a
+/// lane's cached `SortableState` items, which keep the cards of an earlier one.
+#[derive(Clone)]
+struct CardOffer {
+    move_block: Option<holon_api::render_types::OperationDescriptor>,
+    set_field: Option<holon_api::render_types::OperationDescriptor>,
+}
+
+impl CardOffer {
+    fn of(card_vm: &ReactiveViewModel) -> Self {
+        let bound = |name: &str| {
+            card_vm
+                .operations
+                .iter()
+                .find(|w| w.descriptor.name == name)
+                .map(|w| w.descriptor.clone())
+        };
+        Self {
+            move_block: bound("move_block"),
+            set_field: bound("set_field"),
+        }
+    }
+
+    fn offers_drag(&self) -> bool {
+        self.move_block.is_some() && self.set_field.is_some()
+    }
+}
+
+/// The offers of the persisted cards this render shows, by row id.
+type BoardOffers = std::sync::Arc<HashMap<EntityUri, CardOffer>>;
 
 /// The accent a card names, as a theme colour and as its packed form.
 ///
@@ -164,19 +191,10 @@ fn extract_card(
             .get("parent_id")
             .and_then(|v| v.as_string().map(|s| s.to_string()))
     });
-    let bound = |name: &str| {
-        card_vm
-            .operations
-            .iter()
-            .find(|w| w.descriptor.name == name)
-            .map(|w| w.descriptor.clone())
-    };
     Ok(BoardCard {
         id: ((lane_index as u64) << 32) | (card_index as u64),
         row_id: row_id.entity(),
         parent_id,
-        move_block: bound("move_block"),
-        set_field: bound("set_field"),
         draggable: true,
         accent,
         accent_hex,
@@ -199,24 +217,58 @@ impl BoardCard {
     /// A card with no persisted row drags in memory only and dispatches
     /// nothing; a persisted card drags only when its row is offered both
     /// operations a drag dispatches.
-    fn offers_drag(&self) -> bool {
-        self.row_id.is_none() || (self.move_block.is_some() && self.set_field.is_some())
+    fn offers_drag(&self, offers: &BoardOffers) -> bool {
+        self.row_id
+            .as_ref()
+            .is_none_or(|row_id| offers.get(row_id).is_some_and(CardOffer::offers_drag))
     }
 }
 
-/// Dispatch the card's bound `set_field(id=row_id, field=field, value=value)`.
+/// The operation named by `pick` that the dragged card's row is offered in
+/// this render. A card that is no longer offered it (it left the board, or the
+/// write tier now refuses it) is disclosed and its drop not persisted.
+fn offered<'a>(
+    services: &std::sync::Arc<dyn BuilderServices>,
+    offers: &'a BoardOffers,
+    row_id: &EntityUri,
+    op_name: &str,
+    pick: impl Fn(&CardOffer) -> Option<&holon_api::render_types::OperationDescriptor>,
+    context: &str,
+) -> Option<&'a holon_api::render_types::OperationDescriptor> {
+    let operation = offers.get(row_id).and_then(|offer| pick(offer));
+    if operation.is_none() {
+        services.surface_op_failure(
+            holon_core::WRITE_TIER_ENTITY,
+            op_name,
+            &anyhow::anyhow!(
+                "board {context}: row_id={row_id} is not offered {op_name} in the current \
+                 render; the drop is not persisted"
+            ),
+        );
+    }
+    operation
+}
+
+/// Dispatch the card's offered `set_field(id=row_id, field=field,
+/// value=value)`.
 fn dispatch_set_field(
     services: &std::sync::Arc<dyn BuilderServices>,
-    card: &BoardCard,
+    offers: &BoardOffers,
     row_id: &EntityUri,
     field: &str,
     value: String,
     context: &str,
 ) {
-    let operation = card
-        .set_field
-        .as_ref()
-        .expect("a dragged persisted card is offered set_field");
+    let Some(operation) = offered(
+        services,
+        offers,
+        row_id,
+        "set_field",
+        |o| o.set_field.as_ref(),
+        context,
+    ) else {
+        return;
+    };
     match OperationIntent::set_field(
         &operation.entity_name,
         &operation.name,
@@ -238,14 +290,14 @@ fn dispatch_set_field(
 /// `dispatch_move_for_position` after the optimistic state update.
 fn dispatch_lane_change(
     services: &std::sync::Arc<dyn BuilderServices>,
-    card: &BoardCard,
+    offers: &BoardOffers,
     row_id: &EntityUri,
     lane_field: &str,
     new_value: &str,
 ) {
     dispatch_set_field(
         services,
-        card,
+        offers,
         row_id,
         lane_field,
         new_value.to_string(),
@@ -273,6 +325,7 @@ fn dispatch_lane_change(
 /// the drag stays in-memory only, disclosed in the log.
 fn dispatch_move_for_position(
     services: &std::sync::Arc<dyn BuilderServices>,
+    offers: &BoardOffers,
     items: &[BoardCard],
     position: usize,
     context: &str,
@@ -309,10 +362,16 @@ fn dispatch_move_for_position(
         }
         (None, None) => return,
     };
-    let operation = card
-        .move_block
-        .as_ref()
-        .expect("a dragged persisted card is offered move_block");
+    let Some(operation) = offered(
+        services,
+        offers,
+        row_id,
+        "move_block",
+        |o| o.move_block.as_ref(),
+        context,
+    ) else {
+        return;
+    };
     let mut params: HashMap<String, Value> = HashMap::new();
     params.insert("id".into(), Value::String(row_id.to_string()));
     params.insert("parent_id".into(), Value::String(parent_id));
@@ -452,26 +511,34 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
             as f32))
         .p(px(LANE_GAP_PX));
 
+    let mut offers: HashMap<EntityUri, CardOffer> = HashMap::new();
+    let mut lane_cards: Vec<(Vec<BoardCard>, Vec<AnyElement>)> = Vec::with_capacity(lanes.len());
     for (lane_index, lane) in lanes.iter().enumerate() {
-        let title = lane.prop_str("title").unwrap_or_else(|| "Lane".to_string());
-
         let card_vms = extract_lane_cards(lane);
         let mut cards: Vec<BoardCard> = Vec::with_capacity(card_vms.len());
         let mut refusals: Vec<AnyElement> = Vec::new();
         for (card_index, card_vm) in card_vms.iter().enumerate() {
             match extract_card(ctx, lane_index, card_index, card_vm) {
-                Ok(card) => cards.push(card),
+                Ok(card) => {
+                    if let Some(row_id) = &card.row_id {
+                        offers.insert(row_id.clone(), CardOffer::of(card_vm));
+                    }
+                    cards.push(card);
+                }
                 Err(refusal) => refusals.push(error_banner(&refusal.to_string(), ctx)),
             }
         }
+        lane_cards.push((cards, refusals));
+    }
+    let offers: BoardOffers = std::sync::Arc::new(offers);
 
-        let lane_drags = cards.iter().all(BoardCard::offers_drag);
-        if !lane_drags {
-            tracing::debug!(
-                target: "holon.board",
-                "lane {title:?} holds a card whose row is not offered a drag; the lane is held still"
-            );
-        }
+    for (lane_index, (lane, (mut cards, refusals))) in lanes.iter().zip(lane_cards).enumerate() {
+        let title = lane.prop_str("title").unwrap_or_else(|| "Lane".to_string());
+
+        // `Sortable` enables drag per lane, so one card not offered a move
+        // holds its whole lane still; the lane says so.
+        let held = cards.iter().filter(|c| !c.offers_drag(&offers)).count();
+        let lane_drags = held == 0;
         for card in &mut cards {
             card.draggable = lane_drags;
         }
@@ -491,6 +558,8 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
             // post-update state via the cloned Entity handle.
             let services_for_insert = ctx.services.clone();
             let services_for_reorder = ctx.services.clone();
+            let offers_for_insert = offers.clone();
+            let offers_for_reorder = offers.clone();
             let state_for_insert = state.clone();
             let state_for_reorder = state.clone();
             let lane_field_owned = lane_field.clone();
@@ -509,7 +578,13 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
                 // Persist by dispatching a positional move anchored on the
                 // card's new neighbors (the ordering authority mints the key).
                 let items = state_for_reorder.read(cx).items().to_vec();
-                dispatch_move_for_position(&services_for_reorder, &items, to, "on_reorder");
+                dispatch_move_for_position(
+                    &services_for_reorder,
+                    &offers_for_reorder,
+                    &items,
+                    to,
+                    "on_reorder",
+                );
             })
             .on_insert(move |item, insert_idx, _src_state, _w, cx| {
                 let Some(row_id) = item.row_id.as_ref() else {
@@ -519,7 +594,7 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
                 };
                 dispatch_lane_change(
                     &services_for_insert,
-                    &item,
+                    &offers_for_insert,
                     row_id,
                     &lane_field_owned,
                     &target_lane_value,
@@ -530,6 +605,7 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
                 let items = state_for_insert.read(cx).items().to_vec();
                 dispatch_move_for_position(
                     &services_for_insert,
+                    &offers_for_insert,
                     &items,
                     insert_idx,
                     "on_insert (position)",
@@ -554,6 +630,16 @@ pub fn render(node: &ReactiveViewModel, ctx: &GpuiRenderContext) -> AnyElement {
                     .text_color(tc(ctx, |t| t.muted_foreground))
                     .child(title.to_uppercase()),
             )
+            .when(!lane_drags, |lane| {
+                lane.child(
+                    div()
+                        .text_size(px(LANE_HEADER_TEXT_SIZE_PX))
+                        .text_color(tc(ctx, |t| t.muted_foreground))
+                        .child(format!(
+                            "{held} card(s) here are not offered a move, so this lane cannot be dragged"
+                        )),
+                )
+            })
             .child(sortable)
             .children(refusals);
 

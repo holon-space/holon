@@ -1,6 +1,7 @@
 // A drag source. `op` names the row operation the drag dispatches when it is
 // dropped. The source binds it from the row's offered operations, so a row that
-// is not offered it binds none and cannot be dragged.
+// is not offered it binds none and cannot be dragged. `op` is stamped as a prop
+// because `render_entity` may union further row operations onto this node.
 use super::prelude::*;
 
 holon_macros::widget_builder! {
@@ -17,7 +18,10 @@ holon_macros::widget_builder! {
             children: vec![Arc::new(child)],
             data: futures_signals::signal::Mutable::new(ba.ctx.row_arc()).read_only(),
             operations: super::prelude::offered_operation(ba.ctx, op),
-            ..ViewModel::from_widget("draggable", std::collections::HashMap::new())
+            ..ViewModel::from_widget(
+                "draggable",
+                std::collections::HashMap::from([("op".to_string(), Value::String(op.to_string()))]),
+            )
         }
     }
 }

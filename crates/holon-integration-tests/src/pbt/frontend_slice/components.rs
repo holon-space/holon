@@ -8716,6 +8716,13 @@ impl holon_pbt_core::capabilities::SutReadOnlyHomes for HeadlessFrontendComponen
         // `ops_of` (`state_toggle`'s cycle, `editable_text`'s `set_field`, the
         // block chords `render_entity` unions on), so each bound op is an offer
         // of its own — in EVERY region, not only Main.
+        // `describe_ui` and the slice's trees are built through the headless
+        // services, which judge the write tier on their own.
+        let offered_headless = holon_frontend::value_fns::ops_of::ops_rows_for_uri(
+            &uri,
+            &*self.services(),
+            &holon_api::widget_spec::DataRow::new(),
+        );
         let resolved = reactive.snapshot_resolved(&holon_api::root_layout_block_uri());
         let bound = holon_frontend::focus_path::bound_operations_on(&resolved, &uri)
             .into_iter()
@@ -8725,6 +8732,7 @@ impl holon_pbt_core::capabilities::SutReadOnlyHomes for HeadlessFrontendComponen
             .collect::<Vec<_>>();
         offered
             .iter()
+            .chain(offered_headless.iter())
             .filter_map(|row| {
                 let field = |key: &str| {
                     row.get(key)

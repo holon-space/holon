@@ -9,12 +9,12 @@ use super::prelude::*;
 /// id is parked in `crate::dnd`; `drop_zone` builds the intent. A draggable
 /// that binds no operation renders its child undraggable.
 pub fn render(node: &ViewModel, _: &DioxusRenderContext) -> Element {
-    let ViewKind::Draggable { child, .. } = &node.kind else {
+    let ViewKind::Draggable { child, op } = &node.kind else {
         return rsx! {};
     };
     let child_vm = (**child).clone();
 
-    if drag_drop_operation(&node.operations).is_none() {
+    if drag_drop_operation(&node.operations, op).is_none() {
         return rsx! { RenderNode { node: child_vm } };
     }
     let block_id = node

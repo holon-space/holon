@@ -45,21 +45,38 @@ use crate::reactive::ReactiveEngine;
 use crate::reactive_view_model::ReactiveViewModel;
 use crate::row_origin::RowOrigin;
 
-/// The operation a `draggable` or `drop_zone` node offers: the one operation it
-/// binds. `None` means the widget offers no drag or drop — its row is not
-/// offered the operation, so the write tier would refuse it.
-pub fn drag_drop_operation(
-    operations: &[holon_api::render_types::OperationWiring],
-) -> Option<&holon_api::render_types::OperationWiring> {
+/// The operation a `draggable` or `drop_zone` node offers: the one among its
+/// `operations` named `op`, the widget's stamped `op`. `None` means the widget
+/// offers no drag or drop — its row is not offered the operation, so the write
+/// tier would refuse it.
+pub fn drag_drop_operation<'a>(
+    operations: &'a [holon_api::render_types::OperationWiring],
+    op: &str,
+) -> Option<&'a holon_api::render_types::OperationWiring> {
+    let mut named = operations.iter().filter(|w| w.descriptor.name == op);
+    let bound = named.next();
     assert!(
-        operations.len() <= 1,
-        "a drag/drop widget binds at most one operation, got {:?}",
+        named.next().is_none(),
+        "a drag/drop widget binds one `{op}`, got several: {:?}",
         operations
             .iter()
-            .map(|w| w.descriptor.name.as_str())
+            .map(|w| (
+                w.descriptor.entity_name.as_str(),
+                w.descriptor.name.as_str()
+            ))
             .collect::<Vec<_>>()
     );
-    operations.first()
+    bound
+}
+
+/// [`drag_drop_operation`] of a `draggable` / `drop_zone` node.
+pub fn node_drag_drop_operation(
+    node: &ReactiveViewModel,
+) -> Option<&holon_api::render_types::OperationWiring> {
+    let op = node
+        .prop_str("op")
+        .expect("a drag/drop widget stamps the `op` it binds");
+    drag_drop_operation(&node.operations, &op)
 }
 
 /// Param key for the source block id on a drop dispatch.
@@ -1462,7 +1479,7 @@ impl UserDriver for ReactiveEngineDriver {
                             && n.widget_name().as_deref() == Some("draggable")
                             && n.row_id().map(|uri| uri.to_string()).as_deref()
                                 == Some(source_id.as_str())
-                            && drag_drop_operation(&n.operations).is_some()
+                            && node_drag_drop_operation(n).is_some()
                         {
                             found_source = true;
                         }
@@ -1471,8 +1488,7 @@ impl UserDriver for ReactiveEngineDriver {
                             && n.row_id().map(|uri| uri.to_string()).as_deref()
                                 == Some(target_id.as_str())
                         {
-                            target_op =
-                                drag_drop_operation(&n.operations).map(|w| w.descriptor.clone());
+                            target_op = node_drag_drop_operation(n).map(|w| w.descriptor.clone());
                         }
                     });
                     if found_source && target_op.is_some() {

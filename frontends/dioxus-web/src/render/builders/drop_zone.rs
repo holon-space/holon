@@ -16,10 +16,10 @@ use crate::editor::intent_to_wire;
 /// `build_drop_intent(S, T, op)` — params `{id: S, parent_id: T}` — i.e. S
 /// becomes a child of T. A zone that binds no operation offers no drop.
 pub fn render(node: &ViewModel, _: &DioxusRenderContext) -> Element {
-    let ViewKind::DropZone {} = &node.kind else {
+    let ViewKind::DropZone { op } = &node.kind else {
         return rsx! {};
     };
-    let Some(operation) = drag_drop_operation(&node.operations) else {
+    let Some(operation) = drag_drop_operation(&node.operations, op) else {
         return rsx! { div { style: "height: 4px; margin: 1px 0;" } };
     };
     let target_id = node

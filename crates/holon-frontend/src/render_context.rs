@@ -531,6 +531,93 @@ mod tests {
         );
     }
 
+    /// `render_entity` unions every offered row operation onto the root of
+    /// the profile render. A drag/drop widget at that root still offers only
+    /// the operation it binds.
+    #[test]
+    fn a_drag_drop_widget_at_a_profile_root_offers_only_its_own_operation() {
+        for render in [r#"draggable(text("x"))"#, "drop_zone()"] {
+            let subject = holon_api::EntityUri::parse("block:writable").expect("parses");
+            let profile = holon_api::RenderProfile {
+                name: "block".to_string(),
+                render: holon_api::render_dsl::parse_render_dsl(render).expect("parses"),
+                operations: ["move_block", "set_field", "indent"]
+                    .into_iter()
+                    .map(|name| wiring(holon_core::WRITE_TIER_ENTITY, name).descriptor)
+                    .collect(),
+                variants: vec![],
+            };
+            let row: Arc<DataRow> = Arc::new(HashMap::from([(
+                "id".to_string(),
+                holon_api::Value::String(subject.to_string()),
+            )]));
+            let entity =
+                holon_api::render_dsl::parse_render_dsl("render_entity()").expect("parses");
+            let root = |services: crate::reactive::StubBuilderServices| {
+                services.interpret(
+                    &entity,
+                    &RenderContext::default().with_row(Arc::clone(&row)),
+                )
+            };
+
+            let writable =
+                root(crate::reactive::StubBuilderServices::new().with_profile(profile.clone()));
+            assert_eq!(
+                crate::user_driver::node_drag_drop_operation(&writable)
+                    .map(|w| w.descriptor.name.as_str()),
+                Some("move_block"),
+                "{render} on a writable row"
+            );
+            let refused = root(
+                crate::reactive::StubBuilderServices::new()
+                    .with_profile(profile)
+                    .with_write_refused(subject),
+            );
+            assert_eq!(
+                crate::user_driver::node_drag_drop_operation(&refused)
+                    .map(|w| w.descriptor.name.as_str()),
+                None,
+                "{render} on a refused row"
+            );
+        }
+    }
+
+    /// A `card` carries the operations its row is offered, as `render_entity`
+    /// does, so a board over `card(...)` items knows which cards may drag.
+    #[test]
+    fn a_card_carries_the_operations_its_row_is_offered() {
+        let subject = holon_api::EntityUri::parse("block:card-row").expect("parses");
+        let row: Arc<DataRow> = Arc::new(HashMap::from([(
+            "id".to_string(),
+            holon_api::Value::String(subject.to_string()),
+        )]));
+        let ops = vec![
+            wiring(holon_core::WRITE_TIER_ENTITY, "move_block"),
+            wiring(holon_core::WRITE_TIER_ENTITY, "set_field"),
+            wiring("navigation", "focus"),
+        ];
+        let expr = holon_api::render_dsl::parse_render_dsl(r#"card(text("x"))"#).expect("parses");
+        let carried = |services: &crate::reactive::StubBuilderServices| -> Vec<String> {
+            let ctx = RenderContext::default()
+                .with_row(Arc::clone(&row))
+                .with_operations(ops.clone(), services);
+            services
+                .interpret(&expr, &ctx)
+                .operations
+                .iter()
+                .map(|w| w.descriptor.name.clone())
+                .collect()
+        };
+
+        let admitting = crate::reactive::StubBuilderServices::new();
+        let refusing = crate::reactive::StubBuilderServices::new().with_write_refused(subject);
+        assert_eq!(
+            carried(&admitting),
+            vec!["move_block", "set_field", "focus"]
+        );
+        assert_eq!(carried(&refusing), vec!["focus"]);
+    }
+
     fn wiring(entity_name: &str, name: &str) -> OperationWiring {
         OperationWiring {
             modified_param: String::new(),

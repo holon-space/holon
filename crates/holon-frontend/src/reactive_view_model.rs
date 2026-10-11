@@ -1568,12 +1568,15 @@ impl ReactiveViewModel {
             },
             "draggable" => ViewKind::Draggable {
                 child: Box::new(self.children.first().map(|c| snap(c)).unwrap_or_default()),
+                op: self.prop_str("op").expect("draggable stamps its `op`"),
             },
             "pie_menu" => ViewKind::PieMenu {
                 fields: self.prop_str("fields").unwrap_or_default(),
                 child: Box::new(self.children.first().map(|c| snap(c)).unwrap_or_default()),
             },
-            "drop_zone" => ViewKind::DropZone {},
+            "drop_zone" => ViewKind::DropZone {
+                op: self.prop_str("op").expect("drop_zone stamps its `op`"),
+            },
             "view_mode_switcher" => {
                 let entity_uri = self
                     .prop_str("entity_uri")

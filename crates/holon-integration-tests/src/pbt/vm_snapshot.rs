@@ -266,7 +266,7 @@ pub(crate) fn view_model_to_snapshot(
         | ViewKind::Focusable { .. }
         | ViewKind::Selectable { .. }
         | ViewKind::Draggable { .. }
-        | ViewKind::DropZone {}
+        | ViewKind::DropZone { .. }
         | ViewKind::OnHover { .. }
         | ViewKind::BottomDock { .. }
         | ViewKind::LiveBlock { .. }

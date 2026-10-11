@@ -25,8 +25,11 @@ holon_macros::widget_builder! {
 
         let mut __props = std::collections::HashMap::new();
         __props.insert("accent".to_string(), Value::String(accent));
+        // A card stands for its row, so it carries the operations the row is
+        // offered: a board drags a persisted card only with those.
         ViewModel {
             children: children.into_iter().map(Arc::new).collect(),
+            operations: ba.ctx.operations.clone(),
             ..ViewModel::from_widget("card", __props)
         }
     }

@@ -1,7 +1,8 @@
 // A drop target. `op` names the row operation a drag released on this zone
 // dispatches. The zone binds that operation from the row's offered operations,
 // so a row that is not offered it (the write tier refuses the row) binds none
-// and offers no drop.
+// and offers no drop. `op` is stamped as a prop because `render_entity` may
+// union further row operations onto this node.
 use super::prelude::*;
 
 holon_macros::widget_builder! {
@@ -11,7 +12,10 @@ holon_macros::widget_builder! {
         ViewModel {
             data: futures_signals::signal::Mutable::new(ba.ctx.row_arc()).read_only(),
             operations: super::prelude::offered_operation(ba.ctx, &op),
-            ..ViewModel::from_widget("drop_zone", std::collections::HashMap::new())
+            ..ViewModel::from_widget(
+                "drop_zone",
+                std::collections::HashMap::from([("op".to_string(), Value::String(op))]),
+            )
         }
     }
 }
