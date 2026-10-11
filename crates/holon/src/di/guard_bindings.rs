@@ -69,22 +69,42 @@ pub fn complete_guard_composition(injector: &Injector) {
         },
     );
     // Not a no-op: the shape gate reads the pre-write state from SOME
-    // authority, and with no CRDT store the SQL tables are it. Binding it here
-    // makes that choice visible in the container instead of hiding it in the
-    // consumer's `None` branch.
+    // authority, and with no CRDT store the SQL tables are it. The container
+    // binds that choice, so what the gate reads is readable from the wiring
+    // rather than from a default inside the consumer.
     claim::<dyn holon_core::WriteAuthorityReads>(
         injector,
         root_owns_them,
         "the block write authority the shape gate reads",
-        || {
-            Provider::root(|resolver| {
-                let db = resolver.resolve::<dyn super::DbHandleProvider>();
-                Arc::new(crate::core::sql_write_authority::SqlWriteAuthority::new(
-                    db.handle(),
-                )) as Arc<dyn holon_core::WriteAuthorityReads>
-            })
-        },
+        sql_block_write_authority,
     );
+}
+
+/// The SQL tables as the block write authority, for a container with no CRDT
+/// store.
+///
+/// One provider for every such container, because being the authority carries
+/// a duty: the stored `block_type` values nothing else reads are audited here,
+/// and a container that built the authority itself would silently skip that
+/// disclosure.
+pub fn sql_block_write_authority() -> Provider<dyn holon_core::WriteAuthorityReads> {
+    Provider::root_try_async(|resolver| async move {
+        // The audit reads `block_raw`, so the core schema has to be up. Every
+        // boot resolves this marker eagerly long before the shape gate asks
+        // for an authority; resolving it here is a cache hit that also makes
+        // the order a fact rather than an assumption.
+        let _core = resolver
+            .resolve_async::<super::DbReady<super::schema_providers::CoreTables>>()
+            .await;
+        let db = resolver.resolve::<dyn super::DbHandleProvider>();
+        let conditions = resolver.resolve::<Arc<holon_api::ConditionBus>>();
+        let authority = crate::core::sql_write_authority::SqlWriteAuthority::new(db.handle());
+        authority
+            .disclose_unreadable_stored_block_types(&conditions)
+            .await
+            .map_err(|e| format!("the SQL block write authority's boot audit failed: {e}"))?;
+        Ok::<_, String>(Arc::new(authority) as Arc<dyn holon_core::WriteAuthorityReads>)
+    })
 }
 
 /// Bind `default` for `T` unless the container already did.

@@ -28,6 +28,44 @@ impl SqlWriteAuthority {
         Self { db_handle }
     }
 
+    /// Raise a `block_field_unreadable` for every stored `block_type` that is
+    /// no entity name: such a block reads as untyped.
+    ///
+    /// The duty sits on this authority because the rows it reads ARE the
+    /// stored state wherever it is the container's authority; a CRDT authority
+    /// discloses its own store's unreadable values instead.
+    pub async fn disclose_unreadable_stored_block_types(
+        &self,
+        conditions: &holon_api::ConditionBus,
+    ) -> Result<()> {
+        let sql =
+            format!("SELECT id, block_type FROM {BLOCK_WRITE_TABLE} WHERE block_type IS NOT NULL");
+        let rows = self
+            .db_handle
+            .query(&sql, HashMap::new())
+            .await
+            .map_err(|e| format!("boot audit: reading the stored block_type values: {e}"))?;
+        for row in rows {
+            let id = row.get("id").and_then(|v| v.as_string()).ok_or_else(|| {
+                format!("boot audit: {BLOCK_WRITE_TABLE} row without a string id: {row:?}")
+            })?;
+            let stored = match row.get("block_type") {
+                Some(Value::String(s)) => s.clone(),
+                other => format!("{other:?}"),
+            };
+            if let Err(reason) = holon_api::block::parse_stored_block_type(&stored) {
+                tracing::warn!(block_id = %id, %stored, %reason, "stored block_type unreadable; it reads as untyped");
+                conditions.emit(holon_api::Condition::block_field_unreadable(
+                    id,
+                    "block_type",
+                    stored,
+                    reason,
+                ));
+            }
+        }
+        Ok(())
+    }
+
     async fn blocks_where(&self, predicate: &str, bound: &str) -> Result<Vec<Block>> {
         let sql = format!(
             "SELECT {HYDRATED_BLOCK_COLUMNS} FROM {BLOCK_WRITE_TABLE} b WHERE b.{predicate} = \

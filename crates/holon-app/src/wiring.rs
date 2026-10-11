@@ -899,13 +899,12 @@ impl FrontendInjectorExt for Injector {
         }
         if !loro_enabled {
             // No CRDT store, so the SQL tables ARE the pre-write state the
-            // shape gate reads. Saying it here keeps the choice in the wiring.
-            self.provide::<dyn holon_core::WriteAuthorityReads>(Provider::root(|resolver| {
-                let db = resolver.resolve::<dyn holon::di::DbHandleProvider>();
-                Arc::new(holon::core::sql_write_authority::SqlWriteAuthority::new(
-                    db.handle(),
-                )) as Arc<dyn holon_core::WriteAuthorityReads>
-            }));
+            // shape gate reads. Saying it here keeps the choice in the wiring,
+            // and the shared provider carries the authority's boot audit with
+            // it (`block_type` values the tables hold unreadably).
+            self.provide::<dyn holon_core::WriteAuthorityReads>(
+                holon::di::sql_block_write_authority(),
+            );
         }
 
         Ok(())
