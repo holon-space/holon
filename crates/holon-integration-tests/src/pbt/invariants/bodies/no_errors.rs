@@ -1,19 +1,21 @@
 //! `inv-no-errors` — app-runtime error log is empty.
 //!
 //! @pbt oracle internal-consistency
-//! @pbt covers app-error-log-empty — no Flutter/event publish error logged
-//!   since startup (the app-level counter, distinct from widget-tree errors)
-//! @pbt slips-if-removed a DDL/sync race that logs a publish error during
-//!   initial document sync ships silent data-loss on boot; the UI may look
-//!   fine while a document failed to sync and nothing else asserts on it
+//! @pbt covers app-error-log-empty — nothing recorded on the session's
+//!   publish-error tracker since boot (the app-level counter, distinct from
+//!   widget-tree errors)
+//! @pbt slips-if-removed an event publish failure during the initial document
+//!   sync, or any op dispatch failure during the run, ships silently; the UI
+//!   may look fine while a write never landed and nothing else asserts on it
 //!
 //! The general "did the app error during this run" guard, distinct from the
 //! component-specific error invariants (`inv-loro-no-errors`,
 //! `inv-viewmodel-no-error-widgets`, `inv-frontend-no-error-widgets`,
-//! `inv-frontend-root-not-error`). Today its source is the Flutter/event
-//! publish errors logged during the initial document sync — the
-//! `check_inv_no_startup_errors` guard, generalised into a registered
-//! invariant via the [`SutErrorLog`] component cap.
+//! `inv-frontend-root-not-error`). Its source is the session's
+//! `PublishErrorTracker` via the [`SutErrorLog`] component cap, which counts
+//! BOTH boot-time publish failures and every op-dispatch failure since — the
+//! counter holds no message, so the failing ERROR text comes from
+//! `inv-no-observed-errors`.
 
 use holon_pbt_core::capabilities::SutErrorLog;
 use holon_pbt_core::invariant::Invariant;
@@ -42,8 +44,10 @@ where
         }
         let docs = sut.app_error_context().await;
         InvariantResult::Fail(format!(
-            "[inv-no-errors] {count} app publish error(s) during startup. Indicates a DDL/sync \
-             race when {} document(s) were synced.\n  documents: {docs:?}",
+            "[inv-no-errors] {count} app error(s) on the session publish-error tracker: a \
+             publish failure during the initial document sync, or an op dispatch that failed \
+             during the run. The counter carries no message — read the ERROR text from \
+             `inv-no-observed-errors`.\n  {} document(s) synced at boot: {docs:?}",
             docs.len(),
         ))
     }

@@ -955,13 +955,13 @@ impl<T> FrontendSession<T> {
         )
     }
 
-    /// Check if there were any startup errors (DDL/sync races)
-    pub fn has_startup_errors(&self) -> bool {
+    /// Whether any publish or op-dispatch failure was recorded since boot.
+    pub fn has_app_errors(&self) -> bool {
         self.error_tracker.has_errors()
     }
 
-    /// Get the number of startup errors
-    pub fn startup_error_count(&self) -> usize {
+    /// Count of publish and op-dispatch failures recorded since boot.
+    pub fn app_error_count(&self) -> usize {
         self.error_tracker.errors()
     }
 

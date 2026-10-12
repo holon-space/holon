@@ -167,13 +167,13 @@ fn local_vault_fidelity_oracle() {
 
         // (1) Boot clean: no swallowed startup errors ingesting a real vault.
         assert_eq!(
-            env.startup_error_count(),
+            env.app_error_count(),
             0,
             "SUT reported {} startup error(s) ingesting the real vault",
-            env.startup_error_count(),
+            env.app_error_count(),
         );
         assert!(
-            !env.has_startup_errors(),
+            !env.has_app_errors(),
             "SUT has startup errors on real vault"
         );
 

@@ -293,7 +293,7 @@ impl std::fmt::Debug for TestEnvironment {
 ///     .await?;
 ///
 /// // Check for startup errors
-/// assert!(!env.has_startup_errors(), "Startup should not have errors");
+/// assert!(!env.has_app_errors(), "Startup should not have errors");
 /// ```
 pub struct TestEnvironmentBuilder {
     /// Pre-populated org files (filename -> content)
@@ -1499,17 +1499,17 @@ impl TestEnvironment {
             .unwrap_or_else(|_| panic!("loro_org_idle already latched (start_app ran twice?)"));
     }
 
-    /// Check for startup errors (delegates to FrontendSession)
-    pub fn has_startup_errors(&self) -> bool {
-        self.session().has_startup_errors()
+    /// Whether any publish or op-dispatch failure was recorded since boot.
+    pub fn has_app_errors(&self) -> bool {
+        self.session().has_app_errors()
     }
 
-    /// Get the number of publish errors that occurred
-    pub fn startup_error_count(&self) -> usize {
-        self.session().startup_error_count()
+    /// Count of publish and op-dispatch failures recorded since boot.
+    pub fn app_error_count(&self) -> usize {
+        self.session().app_error_count()
     }
 
-    /// Get the publish error tracker for monitoring startup errors
+    /// The session's publish-error tracker.
     pub fn publish_error_tracker(&self) -> &PublishErrorTracker {
         self.session().error_tracker()
     }

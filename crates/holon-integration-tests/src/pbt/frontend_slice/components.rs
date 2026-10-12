@@ -6130,7 +6130,7 @@ impl SutErrorLog for HeadlessFrontendComponent {
     /// the SAME production `FrontendSession` publish-error tracker `E2ESut`
     /// read.
     async fn app_error_count(&self) -> usize {
-        self.session().startup_error_count()
+        self.session().app_error_count()
     }
 
     /// The documents resolved at boot — context for the failure message.
