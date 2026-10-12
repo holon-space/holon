@@ -69,6 +69,7 @@ cp "$LIBCXX" "$BUILD/lib/arm64-v8a/"
 JAVA_SRCS=(
     "$SCRIPT_DIR/java/dev/gpui/mobile/GpuiTextInputView.java"
     "$SCRIPT_DIR/java/dev/gpui/mobile/GpuiNativeActivity.java"
+    "$SCRIPT_DIR/java/dev/gpui/mobile/GpuiClipboard.java"
 )
 mkdir -p "$BUILD/classes" "$BUILD/dex"
 javac -source 8 -target 8 -cp "$PLATFORM" -d "$BUILD/classes" "${JAVA_SRCS[@]}"
