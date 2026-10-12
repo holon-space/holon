@@ -346,6 +346,8 @@ debug = "line-tables-only"
 codegen-units = 4
 # Needed: a shipped build must catch panics, so a failure is shown to the user
 # instead of ending the process with no trace (boot-always ADR, R1).
+# The wasm32 targets still abort: their target spec has no unwind runtime, and
+# cargo passes no `-C panic` for "unwind", so the spec's abort applies there.
 panic = "unwind"
 lto = "thin"
 

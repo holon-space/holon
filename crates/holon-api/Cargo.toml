@@ -20,6 +20,12 @@ slo-fault-injection = []
 # `spelling::another_spelling`, for test generators.
 test-helpers = []
 
+[[bin]]
+name = "panic-unwind-probe"
+path = "src/bin/panic_unwind_probe.rs"
+test = false
+doc = false
+
 [dependencies]
 anyhow.workspace = true
 blake3.workspace = true
