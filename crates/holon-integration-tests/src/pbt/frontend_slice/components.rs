@@ -8878,6 +8878,10 @@ impl holon_pbt_core::capabilities::SutCyclicPlaceAttempt for HeadlessFrontendCom
         id: &holon_api::EntityUri,
         descendant: &holon_api::EntityUri,
     ) {
+        // Both ends may be oracle synthetics (`block::create-N` from a slot
+        // birth); production only knows the minted ids.
+        let id = self.resolve_id(id);
+        let descendant = self.resolve_id(descendant);
         let mut params: holon_api::StorageEntity = std::collections::HashMap::new();
         params.insert("id".into(), holon_api::Value::String(id.to_string()));
         params.insert(
