@@ -3,7 +3,7 @@ id: 2026-10-12-go-home-writes-no-navigation-history-row-in-the-db-the-probes-rea
 date: 2026-10-12
 gap: ENVIRONMENT
 secondary: null
-status: OPEN
+status: FIXED
 summary: >-
   In the headless frontend slice a `navigation.focus`/go-home dispatch returns
   Ok while `navigation_history` in the db handle the probes read receives no
@@ -37,7 +37,37 @@ workspace.
 
 ## Root cause
 
-NOT established. What is established:
+ESTABLISHED (lane `nav-focus`): the probes drive navigation BEFORE the boot
+seed has written the region's first `navigation_history` row, and `go_home`
+against an empty history is a silent no-op.
+
+The headless frontend boots `without_wait()`, so `seed_default_layout` — whose
+last act is `navigation::focus(Main, block:journals)`, the FIRST history row
+(`crates/holon-app/src/seed.rs:176-204`) — runs on a spawned `post_ready_work`
+task (`crates/holon-app/src/wiring.rs:813-817`). The harness only paid a flat
+`settle` budget that tolerates non-convergence, so under load the seed lands
+after the driven interactions.
+
+With the history still empty, `NavigationProvider::focus`'s idempotency guard
+(`crates/holon/src/navigation/provider.rs:398-426`) reads the cursor's current
+row, gets NO row, and compares `None == block_id`: for `go_home`
+(`block_id = None`) that is "already home", so it returns before any write —
+permanently, since nothing else seeds the region.
+
+The decisive evidence is the red log's own row dump: ONE row, `id=1
+block_id=block:journals`, and zero home rows. The seed row is present at
+read time but was written AFTER all three `go_home` calls — had it been there
+first, `go_home×1` would have inserted a home row. That also explains the
+rotating family membership: it is a load-dependent race, not a fixed set.
+
+Hypotheses 1 and 3 below are both REFUTED. The write targets the same handle
+the probes read (the seed's own row arrives in it). `get_current_history_id`'s
+`unwrap_or(0)` is CORRECT and load-bearing: AUTOINCREMENT ids start at 1, so 0
+is a before-the-first-row sentinel that lets `go_forward` out of home (which
+`nullify_cursor` leaves) find row 1 via `id > $current_id`. Making it fail
+loud, as first proposed, would break forward navigation out of home.
+
+What was established by the original triage:
 
 - The BASE TABLE `navigation_history` receives no row, not merely a stale
   matview. So the defect is upstream of IVM maintenance — the usual
@@ -71,13 +101,17 @@ failure stays OPEN in its escape class until root-caused.
 
 ## Missing piece
 
-No test asserts that the handle a frontend-slice probe reads is the same
-handle the navigation provider writes. Each probe asserts the END state and
-infers the wiring, so a store split presents as a rotating cast of focus
-failures instead of one wiring red. That is a prod/test parity gap, not a
+The headless harness had no ORDERING over the boot seed — only a time budget
+that explicitly tolerates non-convergence. Every frontend-slice probe asserted
+its end state and inferred that the boot it depends on had happened, so a
+boot step that had not landed yet presented as a rotating cast of focus
+failures instead of one ordering red. That is a prod/test parity gap, not a
 generation or oracle gap.
 
-Second missing piece, for the gate: the family's MEMBERSHIP rotates run to
+(The original triage guessed a split db handle here; that was wrong — see
+Root cause. The handle was never the issue, the ORDER was.)
+
+Second missing piece, since resolved: the family's MEMBERSHIP rotated run to
 run on the same tree (the final run added `headless_go_home_idempotency_probe`,
 `headless_structural_seed_and_reconcile_probe`,
 `navigate_back_forward_roundtrip_lockstep_stays_green`,
@@ -89,13 +123,28 @@ run on the same tree (the final run added `headless_go_home_idempotency_probe`,
 `navigate_home_lockstep_stays_green`,
 `journal_feed_via_main_panel_focus_shows_feed`,
 `frontend_fresh_drive_org_seed_full_catalog_green`). A per-test known-reds
-row over this family flaps; it needs a family-level row or the cause fixed.
+row over this family would flap — the rotation WAS the race's signature, so
+the ordering fix removes the need for a family-level row.
 
 ## Remedy
 
-Open. Nothing was changed: the lane's fence allowed only failures outside
-org-ingest/boot/effects/supervisor/fluxdi, and this needs an owner with the
-navigation-provider context. Next step for that owner: assert handle identity
-(write through the provider, read through `comp.engine().db_handle()`, compare
-`navigation_history` row counts) BEFORE bisecting — that one assertion
-separates hypothesis 1 from 2 and 3.
+`HeadlessFrontendComponent::boot_session` now BLOCKS until the boot seed has
+ended, through the engine's existing `LayoutSeed` phase watch
+(`await_layout_seed`, `crates/holon-integration-tests/src/pbt/frontend_slice/components.rs`),
+before the boot settle. The phase is `Pending` from inside the session factory,
+so the wait cannot observe the pre-`begin` `Settled`; a failed or skipped seed
+settles too (the guard settles on drop), so nothing can park. A 120 s timeout
+fails loud.
+
+Production is UNCHANGED. The only prod-side edit is a comment on
+`get_current_history_id` naming 0 as the before-the-first-row sentinel, so the
+next triage does not mistake it for a silent default again.
+
+Red → green on `headless_go_home_idempotency_probe`: 0 home rows before,
+1 after (rows `id=1 block:journals`, `id=2 NULL`), test profile.
+
+Still true, and deliberately left: `go_home` on a genuinely empty history
+writes nothing. The display is already home and the reference model agrees
+(`nav_go_home` skips when `current_focus` is `None`), so this is the contract,
+not a defect — it only became visible because the harness let the empty state
+be observed.

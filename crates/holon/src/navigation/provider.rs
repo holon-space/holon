@@ -961,8 +961,14 @@ impl NavigationProvider {
         self.focus(region, None).await
     }
 
-    /// Get the current cursor history_id for a region, returning 0 if none
-    /// exists.
+    /// Get the current cursor history_id for a region, returning 0 when the
+    /// region has no cursor row or its `history_id` is NULL (= home).
+    ///
+    /// 0 is a deliberate BEFORE-THE-FIRST-ROW sentinel, not a silent default:
+    /// AUTOINCREMENT ids start at 1, so `go_forward` from home (which
+    /// `nullify_cursor` leaves) finds row 1 through `id > $current_id` and
+    /// `go_back` from home correctly finds nothing. Failing loud here instead
+    /// would break forward navigation out of home.
     async fn get_current_history_id(&self, params: &mut HashMap<String, Value>) -> Result<i64> {
         let cursor_result = self
             .db_handle

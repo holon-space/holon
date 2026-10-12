@@ -1066,6 +1066,8 @@ impl HeadlessFrontendComponent {
                 .expect("DI injector captured during build"),
         );
 
+        Self::await_layout_seed(&engine).await;
+
         if settle > Duration::ZERO {
             // Boot settle: tolerate non-convergence (the result is dropped) — the
             // sync controller / idle signal resolve on a spawned `post_ready_work`
@@ -1094,6 +1096,30 @@ impl HeadlessFrontendComponent {
                 .expect("DI injector captured during build")
                 .clone(),
         }
+    }
+
+    /// Block until the boot seed of the default layout has ended (succeeded,
+    /// failed or been skipped).
+    ///
+    /// The headless build boots `without_wait()`, so the seed runs on a spawned
+    /// `post_ready_work` task that the flat boot settle only races. The seed's
+    /// last act is `navigation::focus(Main, block:journals)` — the region's
+    /// FIRST `navigation_history` row — and a probe that navigates before it
+    /// lands reads an EMPTY history, where `go_home` cannot tell "no history"
+    /// from "already home" and writes nothing (holon-work#163). The engine's
+    /// `LayoutSeed` is `Pending` from inside the session factory, so this
+    /// cannot observe the pre-`begin` `Settled`.
+    async fn await_layout_seed(engine: &Arc<BackendEngine>) {
+        use holon::api::layout_seed::LayoutSeedPhase;
+
+        let mut phase = engine.layout_seed().subscribe();
+        tokio::time::timeout(
+            Duration::from_secs(120),
+            phase.wait_for(|p| *p == LayoutSeedPhase::Settled),
+        )
+        .await
+        .expect("headless boot: the default-layout seed did not end within 120s")
+        .expect("headless boot: the layout-seed phase sender was dropped");
     }
 
     /// Converge a freshly-booted session's three projection signals
