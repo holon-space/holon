@@ -1461,42 +1461,61 @@ async fn finish_rest_integration(
 pub enum SyncHealth {
     /// No sync batch has finished yet, either way.
     Untried,
-    /// At least one sync batch has completed since boot.
+    /// The latest sync batch completed, or the failures since the last success
+    /// have not yet persisted for [`SYNC_FAILURE_PERSISTS`] — so a briefly
+    /// unreachable peer does not flap the row.
     Healthy,
-    /// Sync batches have been attempted, every one failed, and none has ever
-    /// succeeded since boot. A failure AFTER a success leaves `Healthy` alone,
-    /// so a briefly unreachable peer does not flap the row.
+    /// Every batch has failed since boot, or the failures since the last
+    /// success have persisted for [`SYNC_FAILURE_PERSISTS`].
     Failing,
 }
 
 /// The published [`SyncHealth`] of one integration. A watch channel so a
 /// consumer (the app's status writer) sees every transition without polling.
 #[derive(Debug)]
-pub struct SyncHealthSignal(tokio::sync::watch::Sender<SyncHealth>);
+pub struct SyncHealthSignal {
+    health: tokio::sync::watch::Sender<SyncHealth>,
+    /// When the current run of failed batches began; `None` after a success.
+    failing_since: std::sync::Mutex<Option<tokio::time::Instant>>,
+}
 
 impl Default for SyncHealthSignal {
     fn default() -> Self {
-        Self(tokio::sync::watch::channel(SyncHealth::Untried).0)
+        Self {
+            health: tokio::sync::watch::channel(SyncHealth::Untried).0,
+            failing_since: std::sync::Mutex::new(None),
+        }
     }
 }
 
 impl SyncHealthSignal {
     pub fn subscribe(&self) -> tokio::sync::watch::Receiver<SyncHealth> {
-        self.0.subscribe()
+        self.health.subscribe()
     }
 
     pub fn get(&self) -> SyncHealth {
-        *self.0.borrow()
+        *self.health.borrow()
     }
 
     /// Fold one sync batch's outcome into the published health.
     pub fn record(&self, succeeded: bool) {
-        let next = match (self.get(), succeeded) {
-            (_, true) => SyncHealth::Healthy,
-            (SyncHealth::Healthy, false) => SyncHealth::Healthy,
-            (_, false) => SyncHealth::Failing,
+        let mut failing_since = self
+            .failing_since
+            .lock()
+            .expect("sync failure clock poisoned");
+        let next = if succeeded {
+            *failing_since = None;
+            SyncHealth::Healthy
+        } else {
+            let since = *failing_since.get_or_insert_with(tokio::time::Instant::now);
+            match self.get() {
+                SyncHealth::Healthy if since.elapsed() < SYNC_FAILURE_PERSISTS => {
+                    SyncHealth::Healthy
+                }
+                _ => SyncHealth::Failing,
+            }
         };
-        self.0.send_if_modified(|cur| {
+        self.health.send_if_modified(|cur| {
             let changed = *cur != next;
             *cur = next;
             changed
@@ -1555,11 +1574,16 @@ pub struct SyncLoopTuning {
     pub gate_watchdog: Duration,
 }
 
+/// How long sync failures after a success must persist before the health
+/// reads `Failing`: one [`SyncLoopTuning::max_coalesce`] window, the longest a
+/// pending re-sync waits, so a persisting failure has met at least one retry.
+pub const SYNC_FAILURE_PERSISTS: Duration = Duration::from_secs(10);
+
 impl Default for SyncLoopTuning {
     fn default() -> Self {
         Self {
             debounce: Duration::from_secs(2),
-            max_coalesce: Duration::from_secs(10),
+            max_coalesce: SYNC_FAILURE_PERSISTS,
             gate_warn_every: Duration::from_secs(60),
             gate_watchdog: Duration::from_secs(600),
         }
@@ -2268,10 +2292,10 @@ mod sync_loop_gate_debounce_tests {
     }
 
     /// The other half of the same property: a batch that succeeds is what
-    /// earns `Healthy`, and a later failure does NOT take it away — a briefly
-    /// unreachable peer must not flap the row.
+    /// earns `Healthy`, and one transient failure after it does not take it
+    /// away — the peer may answer the very next batch.
     #[tokio::test(start_paused = true)]
-    async fn one_success_earns_healthy_and_a_later_failure_does_not_flap_it() {
+    async fn one_success_earns_healthy_and_a_single_later_failure_keeps_it() {
         let sink = Arc::new(CountingSink::default());
         let (tx, rx) = mpsc::unbounded_channel();
         let handle = spawn_sync_event_loop(
@@ -2295,7 +2319,36 @@ mod sync_loop_gate_debounce_tests {
         assert_eq!(
             sink.health().get(),
             SyncHealth::Healthy,
-            "a failure after a success is a transient peer, not a connection that never worked"
+            "one failed batch right after a success is transient, so the row must not flap"
+        );
+    }
+
+    /// Failures that outlast one coalescing window after a success are no
+    /// longer transient: they reach `Failing`.
+    #[tokio::test(start_paused = true)]
+    async fn failures_persisting_past_the_coalescing_window_after_a_success_read_failing() {
+        let health = SyncHealthSignal::default();
+        health.record(true);
+        health.record(false);
+        tokio::time::advance(SYNC_FAILURE_PERSISTS - Duration::from_millis(1)).await;
+        health.record(false);
+        assert_eq!(
+            health.get(),
+            SyncHealth::Healthy,
+            "failures within one coalescing window are still transient"
+        );
+        tokio::time::advance(Duration::from_millis(1)).await;
+        health.record(false);
+        assert_eq!(
+            health.get(),
+            SyncHealth::Failing,
+            "failures that persisted for {SYNC_FAILURE_PERSISTS:?} after a success must read Failing"
+        );
+        health.record(true);
+        assert_eq!(
+            health.get(),
+            SyncHealth::Healthy,
+            "one success recovers at once"
         );
     }
 

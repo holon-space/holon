@@ -41,11 +41,9 @@ pub enum IntegrationStatus {
     /// Enabled but not running: connect failed, or a `${VAR}` it needs is set
     /// neither in the environment nor in settings.
     Unavailable,
-    /// Connected, but no sync batch has EVER completed since boot and at least
-    /// one has failed — the peer answers and the rows do not land.
-    ///
-    /// Deliberately narrower than "a sync failed": a connection that has synced
-    /// once and then hits a transient failure keeps reading `Connected`, so a
+    /// Connected, but the rows do not land: no sync batch has succeeded since
+    /// boot, or the failures since the last success have persisted. A single
+    /// transient failure after a success keeps reading `Connected`, so a
     /// briefly unreachable peer does not flap the row.
     SyncFailing,
 }

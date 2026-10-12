@@ -110,6 +110,8 @@ fn spawn_status_from_sync_health(
     shutdown: &holon_api::lifecycle::SessionShutdown,
 ) {
     let cancelled = shutdown.cancelled();
+    // A batch that finished before this receiver existed is already "seen".
+    health.mark_changed();
     let pump = async move {
         while health.changed().await.is_ok() {
             let Some(status) = status_for_sync_health(*health.borrow_and_update()) else {
@@ -117,7 +119,7 @@ fn spawn_status_from_sync_health(
             };
             let cause = match status {
                 crate::integration_projection::IntegrationStatus::SyncFailing => {
-                    "connected, but no sync has succeeded — see the log for the batch error"
+                    "connected, but sync batches keep failing — see the log for the batch error"
                 }
                 _ => "",
             };
@@ -1597,9 +1599,9 @@ for line in sys.stdin:
         )
     }
 
-    /// The mirror with `provider` enabled and already carrying the verdict a
-    /// finished connect writes, which is what a dead leg has to overwrite.
-    async fn mirror_with_connected(provider: &str) -> holon::storage::DbHandle {
+    /// The mirror with `provider` enabled and already carrying `status`, which
+    /// is what the watcher under test has to overwrite.
+    async fn mirror_with(provider: &str, status: IntegrationStatus) -> holon::storage::DbHandle {
         let (backend, db) = holon_turso::turso::TursoBackend::new_in_memory()
             .await
             .expect("an in-memory database");
@@ -1624,7 +1626,7 @@ for line in sys.stdin:
                     provider,
                 )),
                 holon_api::Value::String(provider.to_string()),
-                holon_api::Value::String(IntegrationStatus::Connected.label().to_string()),
+                holon_api::Value::String(status.label().to_string()),
                 holon_api::Value::String(holon::storage::now_utc()),
             ],
         )
@@ -1659,7 +1661,7 @@ for line in sys.stdin:
     #[tokio::test(flavor = "multi_thread")]
     async fn a_bound_that_ends_a_sidecars_leg_marks_the_integration_unavailable() {
         const PROVIDER: &str = "flooder";
-        let db = mirror_with_connected(PROVIDER).await;
+        let db = mirror_with(PROVIDER, IntegrationStatus::Connected).await;
         let home = tempfile::tempdir().expect("a temp dir");
         let trigger = home.path().join("flood-now");
         let (command, args) = flooding_sidecar(&trigger);
@@ -1738,5 +1740,78 @@ for line in sys.stdin:
              so: no condition for '{PROVIDER}', status still {}",
             recorded_status(&db, PROVIDER).await
         );
+    }
+
+    /// Poll the mirror until `provider` reads `want`, returning the last status
+    /// seen. The pump writes on its own task, so a single read would race it.
+    async fn status_reaches(
+        db: &holon::storage::DbHandle,
+        provider: &str,
+        want: IntegrationStatus,
+    ) -> Result<(), String> {
+        for _ in 0..100 {
+            if recorded_status(db, provider).await == want.label() {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        Err(recorded_status(db, provider).await)
+    }
+
+    /// `go_live` writes `Syncing` and only then subscribes to the health. A
+    /// batch that lands in between must still reach the row, or it reads
+    /// `Syncing` for the whole session.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_batch_that_lands_before_the_status_pump_subscribes_still_reaches_the_row() {
+        const PROVIDER: &str = "early-batch";
+        let db = mirror_with(PROVIDER, IntegrationStatus::Syncing).await;
+        let health = holon_mcp_client::SyncHealthSignal::default();
+        health.record(true);
+        let shutdown = SessionShutdown::new();
+
+        spawn_status_from_sync_health(
+            db.clone(),
+            IntegrationAttribution::new(),
+            PROVIDER.to_string(),
+            health.subscribe(),
+            &shutdown,
+        );
+
+        if let Err(seen) = status_reaches(&db, PROVIDER, IntegrationStatus::Connected).await {
+            panic!(
+                "the first sync batch succeeded before the status pump subscribed, so the row must \
+                 read `Connected` — it still reads {seen:?}: the outcome was lost"
+            );
+        }
+    }
+
+    /// The pump follows the health both ways: a connection whose batches fail
+    /// reads `Sync failing`, and its next successful batch reads `Connected`.
+    /// When a failure after a success counts as failing is `SyncHealthSignal`'s
+    /// rule, pinned in holon-mcp-client.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_status_pump_follows_sync_failing_and_its_recovery() {
+        const PROVIDER: &str = "went-bad";
+        let db = mirror_with(PROVIDER, IntegrationStatus::Syncing).await;
+        let health = holon_mcp_client::SyncHealthSignal::default();
+        let shutdown = SessionShutdown::new();
+        spawn_status_from_sync_health(
+            db.clone(),
+            IntegrationAttribution::new(),
+            PROVIDER.to_string(),
+            health.subscribe(),
+            &shutdown,
+        );
+
+        health.record(false);
+        if let Err(seen) = status_reaches(&db, PROVIDER, IntegrationStatus::SyncFailing).await {
+            panic!(
+                "a failed batch with no success before it must read `Sync failing` — got {seen:?}"
+            );
+        }
+        health.record(true);
+        if let Err(seen) = status_reaches(&db, PROVIDER, IntegrationStatus::Connected).await {
+            panic!("a successful batch must recover the row to `Connected` — got {seen:?}");
+        }
     }
 }
