@@ -90,6 +90,11 @@ pub fn broken_shape(
 ) -> Option<(holon_api::EntityUri, String)> {
     use holon_orgmode::OrgBlockExt;
 
+    // The model re-densifies canonical sequences globally whenever it mints an
+    // id, so a step anywhere shifts the sequence VALUES of every subtree. Only
+    // sibling ORDER reaches the decision adapter, so the comparison normalizes
+    // the values away — otherwise an unrelated step is read as a change to a
+    // decision prod's gate never even looks at.
     let subtree = |state: &crate::pbt::block_state::BlockState, root: &holon_api::EntityUri| {
         let mut children: Vec<holon_api::block::Block> = state
             .blocks
@@ -98,7 +103,14 @@ pub fn broken_shape(
             .cloned()
             .collect();
         children.sort_by_key(|b| (b.sequence(), b.id.clone()));
-        (state.blocks.get(root).cloned(), children)
+        for (rank, child) in children.iter_mut().enumerate() {
+            child.set_sequence(rank as i64);
+        }
+        let decision = state.blocks.get(root).cloned().map(|mut d| {
+            d.set_sequence(0);
+            d
+        });
+        (decision, children)
     };
     after
         .blocks
