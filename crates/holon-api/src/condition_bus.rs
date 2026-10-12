@@ -417,9 +417,10 @@ pub enum ConditionKind {
         canonical: String,
         duplicates: Vec<String>,
     },
-    /// An entity profile source block failed to load and is not applied.
-    /// `subject` is the block; `error` names the profile, the variant or
-    /// computed field, the expression and the column.
+    /// An entity profile failed to load and is not applied. `subject` is the
+    /// profile source block, or the path of a file in the vault's type home
+    /// (`holon_profiles::VAULT_PROFILE_HOME`); `error` names the profile, the
+    /// variant or computed field, the expression and the column.
     ///
     /// All-clear: the next successful load of the same block. A deleted block's
     /// condition stands until restart.

@@ -39,6 +39,10 @@ use crate::ParsedProfile;
 use crate::VirtualChildConfig;
 use crate::parse_profile_yaml;
 
+/// The vault's own type home, relative to the vault root: the profile files a
+/// vault carries for itself.
+pub const VAULT_PROFILE_HOME: &str = ".holon/types";
+
 /// Runtime registry of all entity type definitions.
 ///
 /// Thread-safe via interior `RwLock`. Injected as `Arc<TypeRegistry>` via DI.
@@ -55,6 +59,12 @@ pub struct TypeRegistry {
     virtual_children: RwLock<HashMap<String, VirtualChildConfig>>,
     /// Invariants declared in bundled profile YAML, by entity key.
     invariants: Arc<RwLock<HashMap<TableName, Vec<crate::DeclaredInvariant>>>>,
+    /// The vault type home's profile files, by path, as
+    /// [`Self::load_vault_profile_home`] read them. They are vault profile
+    /// rows like the org-embedded profile blocks, so whoever builds the mirror
+    /// seeds it with [`Self::vault_profile_file_rows`] and the one admitter
+    /// judges both sources.
+    vault_profile_files: RwLock<BTreeMap<String, String>>,
 }
 
 /// The types and the vault profiles' claims live under ONE lock: admitting a
@@ -210,7 +220,72 @@ impl TypeRegistry {
             admitted: Arc::default(),
             virtual_children: RwLock::new(HashMap::new()),
             invariants: Arc::default(),
+            vault_profile_files: RwLock::new(BTreeMap::new()),
         }
+    }
+
+    /// Read the vault's own profile files, `<vault_root>/.holon/types/*.yaml`,
+    /// so [`Self::vault_profile_file_rows`] can hand them to the vault profile
+    /// mirror. Nothing is parsed here: admission, refusal and disclosure stay
+    /// with [`Self::vault_profile_admitter`], the one judge of a vault profile.
+    ///
+    /// The files are user data, so a unit that cannot be read — the home
+    /// itself or one file — is disclosed as
+    /// [`holon_api::ConditionKind::ProfileRefused`] and left out whole, and the
+    /// boot continues (directive boot-always). A missing home is no profiles.
+    pub fn load_vault_profile_home(
+        &self,
+        vault_root: &std::path::Path,
+        conditions: &holon_api::ConditionBus,
+    ) {
+        let refuse = |subject: &std::path::Path, error: String| {
+            conditions.emit(holon_api::Condition {
+                subject: subject.display().to_string(),
+                reason: holon_api::ConditionKind::ProfileRefused { error },
+            });
+        };
+        let home = vault_root.join(VAULT_PROFILE_HOME);
+        let entries = match std::fs::read_dir(&home) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+            Err(e) => return refuse(&home, format!("the vault type home cannot be read: {e}")),
+        };
+        let mut files = self
+            .vault_profile_files
+            .write()
+            .expect("TypeRegistry poisoned");
+        for entry in entries {
+            let path = match entry {
+                Ok(entry) => entry.path(),
+                Err(e) => {
+                    refuse(&home, format!("a file of the vault type home is lost: {e}"));
+                    continue;
+                }
+            };
+            if !matches!(
+                path.extension().and_then(std::ffi::OsStr::to_str),
+                Some("yaml" | "yml")
+            ) {
+                continue;
+            }
+            match std::fs::read_to_string(&path) {
+                Ok(content) => {
+                    files.insert(path.display().to_string(), content);
+                }
+                Err(e) => refuse(&path, format!("the profile file cannot be read: {e}")),
+            }
+        }
+    }
+
+    /// The vault type home's files as vault profile rows, to seed the mirror
+    /// with beside the org-embedded profile blocks.
+    pub fn vault_profile_file_rows(&self) -> Vec<holon_api::StorageEntity> {
+        self.vault_profile_files
+            .read()
+            .expect("TypeRegistry poisoned")
+            .iter()
+            .map(|(id, content)| crate::vault_profiles::vault_profile_row(id, content))
+            .collect()
     }
 
     /// Look up creation defaults for an entity type. Used by

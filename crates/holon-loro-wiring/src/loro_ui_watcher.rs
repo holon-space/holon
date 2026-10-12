@@ -70,7 +70,7 @@ pub fn build_turso_free_profile_resolver(
     let type_profiles = holon_profiles::type_profiles_from_registry(&type_registry, &conditions);
 
     let vault_profiles = holon_profiles::vault_profiles::vault_profile_mirror(
-        Vec::new(),
+        type_registry.vault_profile_file_rows(),
         type_registry.vault_profile_admitter(),
         Arc::clone(&conditions),
     );

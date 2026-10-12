@@ -70,6 +70,8 @@ where
     // callers that need a handle — re-resolving it elsewhere (especially
     // synchronously) risks a duplicate engine with its own CDC/matview state
     // and background tasks (see lifecycle.rs TOCTOU note).
+    let vault_root = holon_config.vault.root.clone();
+    let home_conditions = Arc::clone(&conditions);
     let (engine, (session, extra, types)) = holon::di::create_backend_engine_with_extras(
         db_path,
         conditions,
@@ -78,6 +80,13 @@ where
             vault.register(injector);
             injector.add_frontend(holon_config, session_config, config_dir, locked_keys)?;
             extra_setup(injector)?;
+            // Before the engine resolves: the profile resolver seeds its vault
+            // profile mirror from the registry's file rows.
+            if let Some(root) = &vault_root {
+                injector
+                    .resolve::<holon_profiles::TypeRegistry>()
+                    .load_vault_profile_home(root, &home_conditions);
+            }
             Ok(())
         },
         |injector| async move {

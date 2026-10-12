@@ -213,6 +213,7 @@ async fn create_initialized_engine(
         type_profiles,
         type_registry.vault_profile_admitter(),
         type_registry.vault_profile_claims(),
+        type_registry.vault_profile_file_rows(),
         conditions.clone(),
         &shutdown,
     )
@@ -502,6 +503,7 @@ async fn create_profile_resolver(
     + Sync
     + 'static,
     vault_profile_claims: holon_profiles::VaultProfileClaims,
+    vault_profile_file_rows: Vec<holon_api::StorageEntity>,
     conditions: Arc<holon_api::ConditionBus>,
     shutdown: &holon_api::lifecycle::SessionShutdown,
 ) -> Result<Arc<ProfileResolver>> {
@@ -516,45 +518,41 @@ async fn create_profile_resolver(
     let entity_operations = entity_operations(&catalog, &block_synthetic);
     let computed_conditions = Arc::clone(&conditions);
     let stopped_conditions = Arc::clone(&conditions);
-    let resolver = match matview_manager.watch(PROFILE_SQL).await {
-        Ok(result) => {
-            let mirror = holon_profiles::vault_profiles::vault_profile_mirror(
-                result.initial_rows,
-                vault_profile_admitter,
-                conditions,
-            );
-            mirror.rows.subscribe("entity_profile", result.stream);
-            Arc::new(ProfileResolver::with_type_profiles(
-                mirror.profiles,
-                ui_info,
-                live_entities,
-                entity_operations,
-                type_profiles,
-                vault_profile_claims,
-                computed_conditions,
-            ))
-        }
+    // The vault type home's files are vault profile rows beside the
+    // org-embedded blocks the matview carries, so a session without that
+    // matview still holds them.
+    let (mut rows, stream) = match matview_manager.watch(PROFILE_SQL).await {
+        Ok(result) => (result.initial_rows, Some(result.stream)),
         Err(e) => {
             tracing::debug!(
-                "[DI] ⚠️ Failed to set up profile watcher: {e:#}. Using empty profiles."
+                "[DI] ⚠️ Failed to set up profile watcher: {e:#}. Only the vault type home's \
+                 profiles load."
             );
-            tracing::warn!("[DI] Failed to set up profile watcher: {e}. Using empty profiles.");
-            let live_profiles: Arc<LiveData<crate::entity_profile::EntityProfile>> = LiveData::new(
-                vec![],
-                |_| Ok(String::new()),
-                |_| anyhow::bail!("no profiles"),
+            tracing::warn!(
+                "[DI] Failed to set up profile watcher: {e}. Only the vault type home's profiles \
+                 load."
             );
-            Arc::new(ProfileResolver::with_type_profiles(
-                live_profiles,
-                ui_info,
-                live_entities,
-                entity_operations,
-                type_profiles,
-                vault_profile_claims,
-                computed_conditions,
-            ))
+            (Vec::new(), None)
         }
     };
+    rows.extend(vault_profile_file_rows);
+    let mirror = holon_profiles::vault_profiles::vault_profile_mirror(
+        rows,
+        vault_profile_admitter,
+        conditions,
+    );
+    if let Some(stream) = stream {
+        mirror.rows.subscribe("entity_profile", stream);
+    }
+    let resolver = Arc::new(ProfileResolver::with_type_profiles(
+        mirror.profiles,
+        ui_info,
+        live_entities,
+        entity_operations,
+        type_profiles,
+        vault_profile_claims,
+        computed_conditions,
+    ));
     follow_operation_catalog(
         dispatcher,
         catalog,
