@@ -51,6 +51,13 @@ impl ObservedProblems for ComposedObservedErrors {
     }
 }
 
+/// A write the test armed the disk to refuse, on a file whose write-back the
+/// model holds: the refusal IS the scenario, and prod must disclose it loudly.
+fn is_an_armed_write_refusal(problem: &str, held: &std::collections::BTreeSet<String>) -> bool {
+    problem.contains("injected failure between temp write and rename")
+        && held.iter().any(|file| problem.contains(file.as_str()))
+}
+
 /// Fails when any ERROR-level tracing event or panic was captured during the
 /// transition window — the swallowed-error guard the advice panic slipped past.
 pub struct InvNoObservedErrors;
@@ -65,8 +72,16 @@ impl Invariant<CapMap, CapMap> for InvNoObservedErrors {
         Self::ID
     }
 
-    async fn check(&self, _: &CapMap, sut: &CapMap) -> InvariantResult {
-        let problems = sut.observed_problems();
+    async fn check(&self, reference: &CapMap, sut: &CapMap) -> InvariantResult {
+        let held = reference
+            .get::<dyn holon_pbt_core::capabilities::RefCopies>()
+            .map(|r| r.write_held().files)
+            .unwrap_or_default();
+        let problems: Vec<String> = sut
+            .observed_problems()
+            .into_iter()
+            .filter(|p| !is_an_armed_write_refusal(p, &held))
+            .collect();
         if problems.is_empty() {
             InvariantResult::Ok
         } else {

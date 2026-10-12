@@ -96,6 +96,7 @@ pub fn model_chord_click_focus<
 mod advance_day;
 pub mod apply_mutation;
 pub mod arm_write_churn;
+mod arm_write_failure;
 mod arrow_navigate;
 mod attempt_ingest_compound_on_read_only;
 mod attempt_read_only_edit;
@@ -216,6 +217,7 @@ mod toggle_drawer;
 pub use advance_day::AdvanceDay;
 pub use apply_mutation::ApplyMutation;
 pub use arm_write_churn::ArmWriteChurn;
+pub use arm_write_failure::ArmWriteFailure;
 pub use arrow_navigate::ArrowNavigate;
 pub use attempt_ingest_compound_on_read_only::AttemptIngestCompoundOnReadOnly;
 pub use attempt_read_only_edit::AttemptReadOnlyEdit;
@@ -465,6 +467,7 @@ crate::declare_e2e_transitions! {
         DeletePlacementParent(DeletePlacementParent),
         DeletePlacementRecord(DeletePlacementRecord),
         ArmWriteChurn(ArmWriteChurn),
+        ArmWriteFailure(ArmWriteFailure),
         DisarmWriteChurn(DisarmWriteChurn),
         ExternalLineEdit(ExternalLineEdit),
         TouchFile(TouchFile),

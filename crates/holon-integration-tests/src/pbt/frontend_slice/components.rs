@@ -1277,6 +1277,12 @@ impl HeadlessFrontendComponent {
         // closes. Calling it here is what makes this transition a reboot rather
         // than a store yanked out from under a live session.
         let crashed = matches!(between, RebootGap::Crashed { .. });
+        if crashed {
+            // A crash ends the process where it stands: the orderly stop's
+            // hash stamp never runs, so every row the write-back left with
+            // the empty hash is still empty at the next boot.
+            holon_filesystem::crash_injection::arm("skip_written_hash_stamp");
+        }
         if let Err(e) = holon_app::shutdown_session(&old.injector).await {
             // A crash's teardown refuses on the files it could not write — that
             // refusal IS the crash. Any other failure is a bug.
@@ -1285,6 +1291,9 @@ impl HeadlessFrontendComponent {
                 crashed && refusal.contains("refused the org write-back"),
                 "[reboot] session shutdown failed: {refusal}"
             );
+        }
+        if crashed {
+            holon_filesystem::crash_injection::disarm();
         }
         let dead = Arc::downgrade(&old);
         drop(old);
@@ -1310,8 +1319,9 @@ impl HeadlessFrontendComponent {
             RebootGap::Crashed { ref retitle, .. } => {
                 const SEAM: &str = "reboot/crashed";
                 let path = crashed_file.as_ref().expect("resolved before shutdown");
-                // The process that churned the file died with the app.
-                self.store.org_fs.disarm_write_churn(path);
+                // The process that churned the file, and the disk that
+                // refused the write, died with the app.
+                self.store.org_fs.clear_write_faults(path);
                 if let Some(retitle) = retitle {
                     let disk = self.read_vault_file(path, SEAM).await;
                     let edited = headline_retitled(
@@ -5304,9 +5314,14 @@ impl holon_pbt_core::capabilities::SutWriteFaults for HeadlessFrontendComponent 
         self.org_fs().arm_write_churn(&path);
     }
 
+    async fn arm_write_failure(&self, doc: &EntityUri) {
+        let path = self.doc_file(doc, "arm_write_failure").await;
+        self.org_fs().arm_write_failure(&path);
+    }
+
     async fn disarm_write_churn(&self, doc: &EntityUri) {
         let path = self.doc_file(doc, "disarm_write_churn").await;
-        self.org_fs().disarm_write_churn(&path);
+        self.org_fs().clear_write_faults(&path);
     }
 
     async fn touch_file(&self, doc: &EntityUri) {

@@ -3969,6 +3969,11 @@ pub trait SutWriteFaults {
     /// write-back to it stalls until [`SutWriteFaults::disarm_write_churn`].
     async fn arm_write_churn(&self, doc: &holon_api::EntityUri);
     async fn disarm_write_churn(&self, doc: &holon_api::EntityUri);
+    /// Every write to `doc`'s file FAILS at its commit boundary, so the file
+    /// keeps its bytes while the store moves on. Unlike a churn, the
+    /// write-back is attempted and refused, not stalled. Ends with the
+    /// process, like a churn.
+    async fn arm_write_failure(&self, doc: &holon_api::EntityUri);
     /// A new stamp over the same bytes; the ingest of it completes.
     async fn touch_file(&self, doc: &holon_api::EntityUri);
     async fn external_file_edit(

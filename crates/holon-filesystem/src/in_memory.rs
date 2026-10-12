@@ -66,6 +66,9 @@ struct State {
     fail_next_write_commit: bool,
     /// Armed by [`InMemoryFileSystem::arm_write_churn`].
     churning: BTreeSet<PathBuf>,
+    /// Armed by [`InMemoryFileSystem::arm_write_failure`]: every write to
+    /// these paths fails at the commit boundary until it is cleared.
+    failing: BTreeSet<PathBuf>,
     case: PathCase,
     /// [`PathCase::Insensitive`] only: every file and directory, keyed by its
     /// parent's stored spelling and the [`holon_api::caseless_fold`] of its
@@ -172,6 +175,7 @@ impl InMemoryFileSystem {
                 write_targets: Vec::new(),
                 fail_next_write_commit: false,
                 churning: BTreeSet::new(),
+                failing: BTreeSet::new(),
                 case,
                 folded: HashMap::new(),
             }),
@@ -235,6 +239,34 @@ impl InMemoryFileSystem {
             "arm_write_churn: {} is already armed",
             path.display()
         );
+    }
+
+    /// Until [`Self::clear_write_faults`], every write-BACK to `path` fails at
+    /// its commit boundary, so the target keeps its complete previous bytes
+    /// while the store moves on: a disk that refuses the write-back. An
+    /// external editor's save is unaffected, like a churn's.
+    pub fn arm_write_failure(&self, path: &Path) {
+        let mut st = self.lock();
+        let path = st.spelled(&normalize(path));
+        assert!(
+            st.files.contains_key(&path),
+            "arm_write_failure: no file {}",
+            path.display()
+        );
+        assert!(
+            st.failing.insert(path.clone()),
+            "arm_write_failure: {} is already armed",
+            path.display()
+        );
+    }
+
+    /// End every write fault on `path` — a churn, a write failure, or both,
+    /// as the process holding them dying ends them.
+    pub fn clear_write_faults(&self, path: &Path) {
+        let mut st = self.lock();
+        let path = st.spelled(&normalize(path));
+        st.churning.remove(&path);
+        st.failing.remove(&path);
     }
 
     pub fn disarm_write_churn(&self, path: &Path) {
@@ -402,6 +434,7 @@ impl InMemoryFileSystem {
         expected: Option<&FileStamp>,
     ) -> std::io::Result<WriteBack> {
         let (path, kind, tick) = {
+            let write_back = expected.is_some();
             let mut st = self.lock();
             let given = normalize(path);
             st.write_targets.push(given.clone());
@@ -451,7 +484,9 @@ impl InMemoryFileSystem {
                     mtime_tick: tick,
                 },
             );
-            if st.fail_next_write_commit {
+            // Only a write-BACK fails: the fault stands for a refused
+            // write-back, not for a disk the external editor cannot write.
+            if st.fail_next_write_commit || (write_back && st.failing.contains(&path)) {
                 st.fail_next_write_commit = false;
                 st.remove_file_entry(&temp);
                 return Err(std::io::Error::other(format!(
