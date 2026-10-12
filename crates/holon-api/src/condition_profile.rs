@@ -486,7 +486,7 @@ const INTEGRATION_NEEDS_AUTH: ConditionProfile = ConditionProfile::new(
     "Integration needs authorization",
     icons::BLOCKED,
     ConditionPlacement::Toast,
-    AllClear::NextSuccessOf(ClearingEvent::IntegrationConnect),
+    AllClear::UntilRestart,
     &[],
 );
 

@@ -212,7 +212,9 @@ impl ConditionKind {
                 integration,
                 auth_url,
             } => ConditionDetail::with_body(
-                format!("{integration} needs authorizing. Open:"),
+                format!(
+                    "{integration} needs authorizing. Open, then restart Holon after the grant:"
+                ),
                 vec![auth_url.clone()],
             ),
 
@@ -803,5 +805,35 @@ mod tests {
         let site = headline.find("boot.rs:1:1").expect("the site is named");
         let message = headline.find("called").expect("the message is named");
         assert!(site < message, "{headline}");
+    }
+
+    fn needs_auth() -> ConditionKind {
+        ConditionKind::IntegrationNeedsAuth {
+            integration: "linear".to_string(),
+            auth_url: "https://linear.app/oauth".to_string(),
+        }
+    }
+
+    /// The grant does not take effect in-session, so the text must say when it
+    /// does.
+    #[test]
+    fn needs_auth_tells_the_user_to_restart_holon_after_the_grant() {
+        let detail = needs_auth().detail("linear");
+        assert!(
+            detail.headline.contains("restart Holon after the grant"),
+            "{}",
+            detail.headline
+        );
+        assert_eq!(detail.body, vec!["https://linear.app/oauth".to_string()]);
+    }
+
+    /// Keeps the restart text truthful: nothing in this process clears the
+    /// condition.
+    #[test]
+    fn nothing_in_session_clears_needs_auth() {
+        assert_eq!(
+            needs_auth().profile().all_clear(),
+            crate::condition_profile::AllClear::UntilRestart
+        );
     }
 }
