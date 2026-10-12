@@ -1,6 +1,6 @@
 # ADR 0004: Domain / Adapter / Actor split
 
-**Status:** Accepted (2026-05-27; shipped. Note: production binaries still do not consume a `Wiring` — PBT-only, per ADR 0012.)
+**Status:** Accepted (2026-05-27; shipped. Note: production binaries still do not consume a `Wiring` — PBT-only, per ADR 0012.) The per-viewer collapse override row follows FOLD-scope.a (2026-10-12).
 **Deciders:** Martin
 **Context:** Componentization for Turso-optional builds and PBT subset wiring
 
@@ -116,10 +116,10 @@ subscribes to and through which it can get the latest data stream-like.
 | `Document.filename` | **OPEN — see below** | Title-derived has collision / FS-portability / external-rename problems unresolved; needs its own ADR before commit |
 | Pin-set per region | UI actor | Per-viewer bookkeeping, like focus |
 | Initial collapse state | Domain (`Block.default_collapsed`) | Persistent, part of the block |
-| Per-viewer collapse override | UI actor (`UIActorState.collapse_overrides`) | Per-viewer flip on top of the default |
+| Per-viewer collapse override | Device layer of the layered field `collapsed: [base, device]` (FOLD-scope.a, [Overlay §5a](../Proposals/Overlay-2026-09-23.md)) | A per-device value must persist and must merge with the base by one declared rule; UI actor state does neither |
 | Tags | Domain | Knowledge metadata; Turso storage detail does not leak |
 | Render config on blocks (author intent: table layout, default chart type) | Domain | Authored once, shared across viewers |
-| Render config (viewer preference: this column hidden on my screen) | UI actor | Per-viewer flip on top of author intent — same split as default_collapsed vs collapse_overrides |
+| Render config (viewer preference: this column hidden on my screen) | UI actor | Per-viewer flip on top of author intent. Not yet declared as a layered field (Overlay §5a); that choice is open |
 | `current_focus` / `focus_roots` matview | Turso adapter cache of UI actor concept | Only present when both `{Turso, UI}` wired |
 | `block_with_path`, `block_tags`, `block` matview | Turso adapter (cache of pure domain) | Present whenever `{Turso}` is wired |
 | Action engine | Actor | Reads + mutates, like UI and MCP server |

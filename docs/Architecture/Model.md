@@ -226,6 +226,12 @@ for any field is: op-fidelity (store) → base-limited 3-way (transient) → LWW
     `inv-read-only-home-refuses-writes` in the composed keystone, whose fixture
     seeds a `.cook` document, and end-to-end by
     `crates/holon-integration-tests/tests/cook_vault_ingest.rs`.
+    Ruled, not yet built, and not yet pinned (FOLD-scope.a,
+    [Overlay §5a](../Proposals/Overlay-2026-09-23.md)): an overlay-able field
+    (never content or title) declares an ordered layer list in its type's
+    profile YAML (`collapsed: [base, device]`); a write to it whose base has no
+    slot goes, disclosed, to the next layer with a slot, and only a write with
+    no slot in any layer refuses.
     The authority answers from a block→home MEMBERSHIP the file-sync controller
     records at ingest and persists beside `file.content_hash`, not from a walk
     up each block's parents: every editable row asks on every draw, so a walk

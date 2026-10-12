@@ -1,7 +1,8 @@
 # ADR 0033 — Own-device pairing: whole-store replication with a device-local layout
 
 **Status:** Accepted (D68.b, D71.b, D72.a, D73.a, D75.a ratified by Martin
-2026-09-02; D77.b and D78.d ratified 2026-09-03, **implementation in flight**)
+2026-09-02; D77.b and D78.d ratified 2026-09-03, **implementation in flight**; the device-layer consequence follows
+FOLD-scope.a, 2026-10-12)
 **Date:** 2026-09-03
 **Deciders:** Martin (decision-inbox rulings D68–D78)
 **Relates to:**
@@ -150,6 +151,10 @@ security item, not a closed one.
   hold the vault.
 - The layout document is outside `ContainerRegistry`, so any code that enumerates
   replicable containers gets the right answer without knowing about layouts.
+- The device layer of a layered field (FOLD-scope.a,
+  [Overlay §5a](../Proposals/Overlay-2026-09-23.md)) has the same scope as the
+  layout: it stays outside `ContainerRegistry`, so pairing never carries it,
+  and each device's SQL projection differs where it holds device values.
 - The two-instance property tests the production wire, so relay-versus-iroh drift
   fails a gate rather than a dogfood session.
 - Pairing after solo use is an ingest problem, not a pairing special case: the
