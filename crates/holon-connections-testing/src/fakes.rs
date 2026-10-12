@@ -99,7 +99,6 @@ soft_delete:
 
 const KEYED_LIST_SYNC: &str = r#"
 entity: keyed_row
-table: keyed_row_raw
 pull_tool: pull_list
 commit_tool: commit_batch
 list_row_type: keyed_cursor
@@ -209,7 +208,6 @@ soft_delete:
 
 const CONTENT_LIST_SYNC: &str = r#"
 entity: content_row
-table: content_row_raw
 pull_tool: pull_list
 commit_tool: commit_batch
 list_row_type: content_cursor

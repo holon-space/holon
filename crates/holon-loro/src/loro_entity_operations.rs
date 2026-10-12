@@ -557,6 +557,25 @@ impl holon_core::TypeWriteAuthority for LoroTypeWriteAuthority {
             .filter(|stored| stored.live)
             .map(|stored| stored.fields))
     }
+
+    async fn read_all(&self, type_def: &TypeDefinition) -> Result<Vec<StorageEntity>> {
+        if let Some(mirrors) = self.mirror_authority(type_def)? {
+            return mirrors.read_all(type_def).await;
+        }
+        let entity = EntityName::new(type_def.name.clone());
+        let root = entity_root_name(&entity);
+        Ok(self.doc.with_read(|doc| {
+            let mut keys = Vec::new();
+            doc.get_map(root.as_str())
+                .for_each(|key, _| keys.push(key.to_string()));
+            Ok(keys
+                .iter()
+                .filter_map(|key| read_entity(doc, &root, &entity, key))
+                .filter(|stored| stored.live)
+                .map(|stored| stored.fields)
+                .collect())
+        })?)
+    }
 }
 
 /// The `(type root, store key)` pairs a `subscribe_root` event of the Global

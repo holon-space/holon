@@ -8,7 +8,6 @@
 //! socket and a database.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering;
@@ -16,7 +15,7 @@ use std::sync::atomic::Ordering;
 use anyhow::Context as _;
 use anyhow::Result;
 use async_trait::async_trait;
-use holon::storage::DbHandle;
+use holon_api::TypeDefinition;
 use holon_api::Value;
 use holon_connections::CacheBuster;
 use holon_connections::CommitAck;
@@ -27,6 +26,7 @@ use holon_connections::ListSnapshot;
 use holon_connections::LocalRow;
 use holon_connections::LocalRowReader;
 use holon_connections::RemoteListPeer;
+use holon_core::TypeWriteAuthority;
 use holon_mcp_client::McpIntegration;
 use holon_mcp_client::mcp_call_surface::McpCallSurface;
 use holon_mcp_client::mcp_call_surface::extract_tool_response;
@@ -170,48 +170,42 @@ pub fn pull_arguments(
     args
 }
 
-/// The local rows a round decides against, read from the table the sidecar
-/// names. Read-only by design: the writes go back through the dispatcher as
-/// follow-up operations.
-pub struct SqlMirrorRows {
-    db_handle: DbHandle,
-    table: String,
+/// The local rows a round decides against, read from the declared type's write
+/// authority: a projection of it lags the previous round's writes, and a row it
+/// does not show yet would be created a second time. Read-only by design: the
+/// writes go back through the dispatcher as follow-up operations.
+pub struct AuthorityRows {
+    authority: Arc<dyn TypeWriteAuthority>,
+    type_def: TypeDefinition,
 }
 
-impl SqlMirrorRows {
-    pub fn new(db_handle: DbHandle, compiled: &CompiledListSync) -> Self {
+impl AuthorityRows {
+    pub fn new(authority: Arc<dyn TypeWriteAuthority>, type_def: TypeDefinition) -> Self {
         Self {
-            db_handle,
-            table: compiled.spec().table.clone(),
+            authority,
+            type_def,
         }
     }
 }
 
 #[async_trait]
-impl LocalRowReader for SqlMirrorRows {
+impl LocalRowReader for AuthorityRows {
     async fn load(&self) -> Result<Vec<LocalRow>> {
-        // `SELECT *` rather than the declared columns: the table is the mirror
-        // of the declared type and may carry engine columns (the overflow bag,
-        // provenance) that no sidecar names. Which of them a row HAS is the
-        // declared type's business, checked where a row is written.
-        let sql = format!("SELECT * FROM {}", self.table);
+        let name = &self.type_def.name;
         let rows = self
-            .db_handle
-            .query(&sql, HashMap::new())
+            .authority
+            .read_all(&self.type_def)
             .await
-            .map_err(|e| anyhow::anyhow!("reading the local mirror table '{}': {e}", self.table))?;
-        rows.iter()
+            .map_err(|e| anyhow::anyhow!("reading the local '{name}' rows: {e}"))?;
+        rows.into_iter()
             .map(|row| {
-                let columns: std::collections::BTreeMap<String, Value> = row
-                    .iter()
-                    .map(|(k, v)| (k.to_string(), v.clone()))
-                    .collect();
+                let columns: std::collections::BTreeMap<String, Value> =
+                    row.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
                 let id = match columns.get("id") {
                     Some(Value::String(s)) if !s.trim().is_empty() => s.clone(),
                     other => anyhow::bail!(
-                        "a '{}' row carries no usable `id` (got {other:?}); the mirror's primary \
-                         key is what every follow-up operation addresses it by",
-                        self.table
+                        "a '{name}' row carries no usable `id` (got {other:?}); the primary key \
+                         is what every follow-up operation addresses it by"
                     ),
                 };
                 Ok(LocalRow { id, columns })
@@ -232,7 +226,7 @@ pub fn configured_list(
     name: &str,
     spec: holon_connections::ListSyncSpec,
     integration: &McpIntegration,
-    db_handle: &DbHandle,
+    authority: Arc<dyn TypeWriteAuthority>,
     types: &TypeRegistry,
 ) -> std::result::Result<ConfiguredList, String> {
     let entity = spec.entity.clone();
@@ -253,7 +247,7 @@ pub fn configured_list(
             compiled.clone(),
             device_id(),
         )),
-        rows: Arc::new(SqlMirrorRows::new(db_handle.clone(), &compiled)),
+        rows: Arc::new(AuthorityRows::new(authority, declared)),
         device_id: device_id().to_string(),
     })
 }

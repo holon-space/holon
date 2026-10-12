@@ -52,7 +52,6 @@ soft_delete:
 
 const SHOPPING_LIST_SYNC: &str = r#"
 entity: shopping_item
-table: shopping_item_raw
 pull_tool: pull_list
 commit_tool: commit
 list_row_type: shopping_list
@@ -89,7 +88,6 @@ soft_delete:
 
 const TASK_LIST_SYNC: &str = r#"
 entity: todo_task
-table: todo_task_raw
 pull_tool: list_tasks
 commit_tool: sync_commands
 list_row_type: todo_cursor

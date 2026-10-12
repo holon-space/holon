@@ -179,7 +179,7 @@ impl RemoteListPeer for FakePeer {
 }
 
 /// Reads the local rows the reconciler decides against, straight off the raw
-/// write table — the same read `SqlMirrorRows` performs in prod.
+/// write table.
 struct Rows<'a> {
     ctx: &'a E2ETestContext,
 }

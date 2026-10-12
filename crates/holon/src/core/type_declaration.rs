@@ -24,6 +24,7 @@
 //! is refused, before any DDL, and cannot be recovered from. Undeclaring is the
 //! migrate primitive's job (OQ-5) and arrives with it.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use holon_api::ColumnValueKind;
@@ -218,6 +219,15 @@ impl TypeWriteAuthority for SqlTypeWriteAuthority {
             rows.len()
         );
         Ok(rows.pop())
+    }
+
+    async fn read_all(&self, type_def: &TypeDefinition) -> Result<Vec<holon_api::StorageEntity>> {
+        let table = TursoAdapter::raw_table_name(type_def);
+        Ok(self
+            .0
+            .query(&format!("SELECT * FROM {table}"), HashMap::new())
+            .await
+            .map_err(|e| format!("reading {table}: {e}"))?)
     }
 }
 

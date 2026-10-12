@@ -213,7 +213,6 @@ holon:
   # declaring its own block — `key: .id` where the peer issues row ids.
   list_sync:
     entity: shopping_item
-    table: shopping_item_raw
     pull_tool: pull_list
     commit_tool: commit
     # The row carrying the version envelope. Its columns travel verbatim into

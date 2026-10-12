@@ -894,6 +894,14 @@ pub trait TypeWriteAuthority: MaybeSendSync {
         type_def: &holon_api::TypeDefinition,
         id: &str,
     ) -> Result<Option<holon_api::StorageEntity>>;
+
+    /// Every entity of the type this authority holds now, in the shape
+    /// [`Self::read`] returns one. A write decided over a whole table reads
+    /// here, for the same reason.
+    async fn read_all(
+        &self,
+        type_def: &holon_api::TypeDefinition,
+    ) -> Result<Vec<holon_api::StorageEntity>>;
 }
 
 /// The facts a guard may only learn from whatever ACCEPTED a write.

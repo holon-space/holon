@@ -50,7 +50,7 @@ impl RoundClock for FixedRoundClock {
 
 pub struct RemoteListSut {
     app: Arc<FakeListApp>,
-    rows: Arc<holon_app::remote_list::SqlMirrorRows>,
+    rows: Arc<holon_app::remote_list::AuthorityRows>,
     component: Arc<HeadlessFrontendComponent>,
 }
 
@@ -74,9 +74,12 @@ impl RemoteListSut {
             &type_def,
         )
         .expect("the shipped shopping connection compiles");
-        let rows = Arc::new(holon_app::remote_list::SqlMirrorRows::new(
-            component.engine().db_handle().clone(),
-            &compiled,
+        let rows = Arc::new(holon_app::remote_list::AuthorityRows::new(
+            component
+                .injector()
+                .resolve_async::<dyn holon_core::TypeWriteAuthority>()
+                .await,
+            type_def,
         ));
         let app = component.remote_list_app();
         let peer = RestListPeer::new(

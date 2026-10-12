@@ -576,6 +576,7 @@ pub struct IntegrationSupervisor {
     cache_factory: Arc<dyn holon_core::CacheFactory>,
     token_store: Arc<dyn SyncTokenStore>,
     type_registry: Arc<TypeRegistry>,
+    type_write_authority: Arc<dyn holon_core::TypeWriteAuthority>,
     sync_gate: SyncGate,
     keychain: Arc<dyn holon_secrets::KeychainStore>,
     /// Its `preferences` are the last place a `${VAR}` is looked up.
@@ -965,7 +966,7 @@ impl IntegrationSupervisor {
             name,
             spec,
             integration,
-            &self.db,
+            self.type_write_authority.clone(),
             &self.type_registry,
         )
         .map_err(|why| anyhow::anyhow!("its `holon.list_sync` cannot be served: {why}"))?;
@@ -1243,6 +1244,9 @@ impl Module for McpIntegrationsModule {
                         .await,
                     token_store: resolver.resolve_async::<dyn SyncTokenStore>().await,
                     type_registry: resolver.resolve::<TypeRegistry>(),
+                    type_write_authority: resolver
+                        .resolve_async::<dyn holon_core::TypeWriteAuthority>()
+                        .await,
                     sync_gate: (*resolver.resolve::<SyncGate>()).clone(),
                     // The session's ONE secret store: a session on the in-memory
                     // backend must not have this reader talking to the login

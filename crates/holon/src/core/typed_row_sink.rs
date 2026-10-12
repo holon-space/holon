@@ -11,7 +11,6 @@
 //! `OperationProvider`, one of which builds the file-sync controller this sink
 //! is wired into, so eager resolution would close a DI cycle.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Context as _;
@@ -23,14 +22,15 @@ use holon_api::EntityName;
 use holon_api::EntityUri;
 use holon_api::OpOrigin;
 use holon_api::StorageEntity;
+use holon_api::TypeDefinition;
 use holon_api::Value;
+use holon_core::TypeWriteAuthority;
 use holon_core::file_format::TypedRowSet;
 use holon_core::file_format::TypedRowSink;
 use holon_profiles::TypeRegistry;
 
 use crate::api::operation_dispatcher::AuthoredInput;
 use crate::api::operation_dispatcher::OperationDispatcher;
-use crate::storage::turso::DbHandle;
 
 pub struct DispatchingTypedRowSink {
     injector: Injector,
@@ -49,16 +49,15 @@ impl DispatchingTypedRowSink {
         self.injector.resolve_async::<TypeRegistry>().await
     }
 
-    fn db_handle(&self) -> DbHandle {
+    async fn authority(&self) -> Arc<dyn TypeWriteAuthority> {
         self.injector
-            .resolve::<dyn crate::di::DbHandleProvider>()
-            .handle()
+            .resolve_async::<dyn TypeWriteAuthority>()
+            .await
     }
 
     /// Refuse a row set whose type or owner column the registry does not
-    /// declare: both are spliced into SQL below, and an unknown one is a wiring
-    /// bug rather than input to interpret.
-    async fn checked_entity(&self, owned: &TypedRowSet) -> Result<EntityName> {
+    /// declare: an unknown one is a wiring bug rather than input to interpret.
+    async fn checked_type(&self, owned: &TypedRowSet) -> Result<TypeDefinition> {
         let type_def = self.types().await.get(&owned.type_name).ok_or_else(|| {
             anyhow::anyhow!(
                 "no type named {:?} is registered, so its rows have nowhere to land",
@@ -74,23 +73,29 @@ impl DispatchingTypedRowSink {
                 type_def.fields.iter().map(|f| &f.name).collect::<Vec<_>>(),
             );
         }
-        Ok(EntityName::new(owned.type_name.clone()))
+        Ok(type_def)
     }
 
-    /// Ids of the rows `owner_column` currently scopes to this file.
-    async fn ids_in_scope(&self, owned: &TypedRowSet, entity: &EntityName) -> Result<Vec<String>> {
-        let sql = format!(
-            "SELECT id FROM {}_raw WHERE {} = '{}'",
-            entity.table_name(),
-            owned.owner_column,
-            owned.owner_value.replace('\'', "''"),
-        );
+    /// Ids of the rows `owner_column` currently scopes to this file, read from
+    /// the type's write authority: a lagging projection would hide the rows a
+    /// previous ingest just created, and their re-create is refused.
+    async fn ids_in_scope(
+        &self,
+        owned: &TypedRowSet,
+        type_def: &TypeDefinition,
+    ) -> Result<Vec<String>> {
         let rows = self
-            .db_handle()
-            .query(&sql, HashMap::new())
+            .authority()
+            .await
+            .read_all(type_def)
             .await
             .map_err(|e| anyhow::anyhow!("reading the rows already scoped to this file: {e}"))?;
         rows.iter()
+            .filter(|row| {
+                row.get(owned.owner_column.as_str())
+                    .and_then(|v| v.as_string())
+                    == Some(owned.owner_value.as_str())
+            })
             .map(|row| {
                 row.get("id")
                     .and_then(|v| v.as_string())
@@ -127,7 +132,8 @@ impl DispatchingTypedRowSink {
 impl TypedRowSink for DispatchingTypedRowSink {
     async fn replace_typed_rows(&self, sets: &[TypedRowSet]) -> Result<()> {
         for owned in sets {
-            let entity = self.checked_entity(owned).await?;
+            let type_def = self.checked_type(owned).await?;
+            let entity = EntityName::new(type_def.name.clone());
 
             // Every row must carry the id the replacement below keys on, and
             // it must already NAME its entity: the file's keyspace is bare and
@@ -157,7 +163,7 @@ impl TypedRowSink for DispatchingTypedRowSink {
             // the file changed" are one operation — and a create whose id names
             // a LIVE row is refused by the write path's recognition check, so
             // there is no in-place upsert to prefer over this.
-            for stale in self.ids_in_scope(owned, &entity).await? {
+            for stale in self.ids_in_scope(owned, &type_def).await? {
                 let mut params = StorageEntity::new();
                 params.insert("id".into(), Value::String(stale.clone()));
                 self.run(&entity, "delete", params)

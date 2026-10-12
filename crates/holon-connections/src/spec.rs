@@ -22,8 +22,6 @@ pub struct ListSyncSpec {
     /// The declared type whose rows this connection mirrors. Also the row type
     /// the pull mapping emits one item under.
     pub entity: String,
-    /// The SQL table those rows are read back from.
-    pub table: String,
     /// The manual's tool that fetches one complete snapshot.
     pub pull_tool: String,
     /// The manual's tool that commits a batch of commands.
