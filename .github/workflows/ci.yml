@@ -157,8 +157,14 @@ jobs:
       # Tests and the worker rot-guard run BEFORE clippy on purpose: lint debt
       # must never mask test or build signal. Formatting stays first only
       # because it is seconds, not minutes.
-      - name: Run Rust tests
-        run: cargo test --workspace --exclude rust_lib_holon
+      # Integration test binaries (tests/*.rs) are not built here: linking them
+      # all exhausts the runner disk (ENOSPC, #56). `cargo clippy --all-targets`
+      # below still type-checks them.
+      - name: Run Rust tests (lib and bin targets only)
+        run: |
+          echo "::notice title=Integration tests skipped::CI runs only --lib --bins. Integration tests (tests/*.rs) are NOT run here; they run in the local landing gate (just landing-gate)."
+          echo "NOTICE: integration tests are skipped in CI (--lib --bins only); they run in the local landing gate."
+          cargo test --workspace --exclude rust_lib_holon --lib --bins
 
       - name: Install just
         uses: taiki-e/install-action@v2
