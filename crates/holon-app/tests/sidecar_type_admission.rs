@@ -260,7 +260,11 @@ fn refusals_of(sidecars: &[(&str, &[(&str, &str)])]) -> Vec<(String, String)> {
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
-            assert_eq!(status.as_deref(), Some(unavailable), "{provider} must read Unavailable");
+            assert_eq!(
+                status.as_deref(),
+                Some(unavailable),
+                "{provider} must read Unavailable"
+            );
         }
         let refusals = bus
             .subscribe()
@@ -269,7 +273,10 @@ fn refusals_of(sidecars: &[(&str, &[(&str, &str)])]) -> Vec<(String, String)> {
             .filter(|c| c.reason.condition_kind() == "integration-type-refused")
             .map(|c| {
                 let detail = c.reason.detail(&c.subject);
-                (c.subject.clone(), format!("{} {}", detail.headline, detail.body.join(" ")))
+                (
+                    c.subject.clone(),
+                    format!("{} {}", detail.headline, detail.body.join(" ")),
+                )
             })
             .collect();
         drop(session);
@@ -293,7 +300,11 @@ fn two_refused_integrations_sharing_a_datatype_name_raise_one_condition_each() {
 #[test]
 fn one_refused_integration_lists_every_refused_type_in_one_condition() {
     let refusals = refusals_of(&[("gadgets", &[("alpha", "f1"), ("beta", "f2")])]);
-    assert_eq!(refusals.len(), 1, "one condition for the integration; got {refusals:?}");
+    assert_eq!(
+        refusals.len(),
+        1,
+        "one condition for the integration; got {refusals:?}"
+    );
     let (subject, text) = &refusals[0];
     assert_eq!(subject, "gadgets");
     for name in ["alpha", "f1", "beta", "f2"] {

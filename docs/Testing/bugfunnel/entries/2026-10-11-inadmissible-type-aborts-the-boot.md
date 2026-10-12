@@ -48,9 +48,9 @@ which differs between `wait_for_ready` frontends and the others.
   (`IntegrationFileConfig::sidecar`) and admits its types
   (`type_admission::sidecar_refusals`). A refused integration leaves the
   config list, so nothing connects, builds or registers for it. The supervisor
-  raises `ConditionKind::IntegrationTypeRefused` per refused type (integration,
-  field, home, reason; subject = the type) and records the integration
-  `Unavailable`.
+  raises ONE `ConditionKind::IntegrationTypeRefused` per refused integration
+  (subject = the integration); its text lists every refused type with entity,
+  field, home and reason. The integration is recorded `Unavailable`.
 - The registry sweep at session construction is unchanged from main: it aborts.
 - Pinned by
   `sidecar_type_admission::a_sidecar_entity_its_home_cannot_carry_refuses_the_integration_and_builds_nothing`
