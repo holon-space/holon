@@ -8,8 +8,15 @@ publish = false
 # `workspace-hack` is the cargo-hakari feature-unification crate: every
 # member depends on it and no member references it in source, by design.
 [package.metadata.cargo-machete]
-# All four are enabled through `[features]`, not referenced by a bare path in source.
-ignored = ["declarative_enum_dispatch", "futures-signals", "nonempty-collections", "serde_yaml", "workspace-hack"]
+# All enabled through `[features]`, not referenced by a bare path in source.
+# `holon-connections-testing` carries the @c4 "in-process fixture peers" edge
+# (src/lib.rs) and is pulled in by the `di` feature for it.
+ignored = [
+    "declarative_enum_dispatch",
+    "holon-connections-testing",
+    "nonempty-collections",
+    "workspace-hack",
+]
 
 [lib]
 name = "holon_integration_tests"

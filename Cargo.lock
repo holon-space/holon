@@ -5619,7 +5619,6 @@ dependencies = [
  "holon-mcp",
  "holon-mcp-client",
  "holon-oracles",
- "holon-orgmode",
  "holon-pbt-core",
  "holon-secrets",
  "image",

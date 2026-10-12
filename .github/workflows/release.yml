@@ -30,6 +30,10 @@ permissions: {}
 
 env:
   CARGO_TERM_COLOR: always
+  # MUST equal rust-toolchain.toml's `channel`, like ci.yml's pin: every cargo
+  # invocation auto-overrides to that pin, so a floating `nightly` here installs
+  # components onto a toolchain cargo never runs.
+  RUST_VERSION: nightly-2026-08-16
   # Release-CI-only compile-speed lever (Martin 2026-07-27): more parallel
   # codegen units, marginally less cross-unit inlining. Local/dev builds and
   # the workspace profile (codegen-units = 4) are unaffected.
@@ -177,12 +181,12 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v5
 
-      # rust-toolchain.toml pins channel = "nightly"; install it the same way
+      # Pinned to rust-toolchain.toml's channel (see RUST_VERSION); install it the same way
       # ci.yml installs toolchains (dtolnay action).
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: nightly
+          toolchain: ${{ env.RUST_VERSION }}
 
       # A turso snapshot file checks out to a 264-char path, past Windows'
       # 260-char MAX_PATH. Only core.longpaths makes libgit2 (cargo's git-dep
@@ -352,7 +356,7 @@ jobs:
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: nightly
+          toolchain: ${{ env.RUST_VERSION }}
 
       # Per-arch cache key: each runner now builds ONE target dir, so its cache
       # is ~half the size of the old both-arches-in-one entry — smaller, faster
@@ -535,7 +539,7 @@ jobs:
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: nightly
+          toolchain: ${{ env.RUST_VERSION }}
 
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
@@ -674,7 +678,7 @@ jobs:
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: nightly
+          toolchain: ${{ env.RUST_VERSION }}
           targets: aarch64-linux-android
 
       - name: Cache Rust build

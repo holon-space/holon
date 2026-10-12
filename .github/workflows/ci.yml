@@ -93,7 +93,7 @@ jobs:
         run: |
           channel=$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml","rb"))["toolchain"]["channel"])')
           if [ "$channel" != "$RUST_VERSION" ]; then
-            echo "::error::RUST_VERSION ($RUST_VERSION) != rust-toolchain.toml channel ($channel); update the pins in .github/workflows/{ci,devex-gates,web}.yml"
+            echo "::error::RUST_VERSION ($RUST_VERSION) != rust-toolchain.toml channel ($channel); update the pins in .github/workflows/{ci,devex-gates,web,release}.yml"
             exit 1
           fi
 

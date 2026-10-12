@@ -111,13 +111,19 @@ jobs:
             ${{ runner.os }}-cargo-latency-
             ${{ runner.os }}-cargo-
 
+      # Same list as ci.yml's "Install Linux system libraries", which documents
+      # why each package is needed. The keystone's `pbt` graph reaches xcap's
+      # screen-capture stack, so `libpipewire-0.3-dev` is load-bearing here too:
+      # without it libspa-sys' build script panics before a single test runs.
       - name: Install GPUI Linux build deps
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             build-essential cmake pkg-config \
             libfontconfig1-dev libwayland-dev libxkbcommon-dev \
-            libxcb1-dev libx11-dev libasound2-dev libudev-dev libssl-dev
+            libxcb1-dev libx11-dev libasound2-dev libudev-dev libssl-dev \
+            libdrm-dev libgbm-dev libegl1-mesa-dev \
+            libpipewire-0.3-dev libclang-dev
 
       # OTel spans record at their default `info`, matching the local recipes, so
       # a slow CI run carries the same evidence a local one does. Costs ~3% on
@@ -195,8 +201,10 @@ jobs:
             --target wasm32-wasip1-threads --no-js \
             --manifest-path ./Cargo.toml --output-dir . || true
           # napi copyArtifact errors harmlessly (looks for dev/ not debug/); the wasm
-          # lands under target/. Fail loudly if it was NOT produced.
-          if [ -z "$(find ../../target/wasm32-wasip1-threads -name 'holon_worker*.wasm' 2>/dev/null | head -1)" ]; then
+          # lands under THIS crate's own target/ — holon-worker declares its own
+          # empty [workspace], so it never writes into the root target/. That is
+          # also where serve.mjs looks for it. Fail loudly if it was NOT produced.
+          if [ -z "$(find target/wasm32-wasip1-threads -name 'holon_worker*.wasm' 2>/dev/null | head -1)" ]; then
             echo "ERROR: holon-worker wasm not produced"
             exit 1
           fi

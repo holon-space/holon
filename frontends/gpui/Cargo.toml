@@ -125,7 +125,6 @@ holon-api.workspace = true
 holon-core.workspace = true
 chrono.workspace = true
 holon-filesystem.workspace = true
-holon-orgmode.workspace = true
 holon-macros.workspace = true
 holon-mcp = { path = "../mcp" }
 holon-oracles.workspace = true
