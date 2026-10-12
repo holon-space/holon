@@ -62,10 +62,12 @@ rotating family membership: it is a load-dependent race, not a fixed set.
 
 Hypotheses 1 and 3 below are both REFUTED. The write targets the same handle
 the probes read (the seed's own row arrives in it). `get_current_history_id`'s
-`unwrap_or(0)` is CORRECT and load-bearing: AUTOINCREMENT ids start at 1, so 0
-is a before-the-first-row sentinel that lets `go_forward` out of home (which
-`nullify_cursor` leaves) find row 1 via `id > $current_id`. Making it fail
-loud, as first proposed, would break forward navigation out of home.
+0 is load-bearing, not a default: AUTOINCREMENT ids start at 1, so 0 is a
+before-the-first-row sentinel that lets `go_forward` out of home (which
+`nullify_cursor` leaves) find row 1 via `id > $current_id`. Failing loud on an
+absent cursor, as first proposed, would strand the region at home. What WAS
+wrong is that `unwrap_or(0)` also folded a corrupt non-integer `history_id`
+into that sentinel — see Remedy.
 
 What was established by the original triage:
 
@@ -136,9 +138,13 @@ so the wait cannot observe the pre-`begin` `Settled`; a failed or skipped seed
 settles too (the guard settles on drop), so nothing can park. A 120 s timeout
 fails loud.
 
-Production is UNCHANGED. The only prod-side edit is a comment on
-`get_current_history_id` naming 0 as the before-the-first-row sentinel, so the
-next triage does not mistake it for a silent default again.
+Production BEHAVIOR is unchanged, but the sentinel is now explicit rather than
+implied: `get_current_history_id` matches on the stored cursor value, maps "no
+cursor row" and NULL to the named `HOME_HISTORY_ID`, and fails loud on a
+present-but-non-integer `history_id` (previously `unwrap_or(0)` folded all
+three into 0). `headless_go_forward_leaves_home_probe` pins the sentinel: with
+`HOME_HISTORY_ID = 1` it goes red on the right line (`go_forward` from home
+skips history row 1 and lands on row 2).
 
 Red → green on `headless_go_home_idempotency_probe`: 0 home rows before,
 1 after (rows `id=1 block:journals`, `id=2 NULL`), test profile.

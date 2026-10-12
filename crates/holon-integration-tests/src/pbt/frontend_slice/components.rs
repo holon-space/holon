@@ -7740,6 +7740,47 @@ mod tests {
         );
     }
 
+    /// `go_forward` must be able to LEAVE home.
+    ///
+    /// `go_back` past the first history row nullifies the cursor
+    /// (`nullify_cursor`), which `get_current_history_id` reads as
+    /// `HOME_HISTORY_ID` — a position before row 1, not a row id. Only that
+    /// sentinel lets `get_next_entry.sql`'s `id > $current_id` find row 1, so
+    /// a NULL cursor that resolved to anything else (or failed loud) would
+    /// strand the region at home.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn headless_go_forward_leaves_home_probe() {
+        let doc0 = "#+ID: ref-doc-0\n* Doc zero\n";
+        let comp =
+            HeadlessFrontendComponent::new(&[("doc0.org", doc0)], Duration::from_millis(300)).await;
+        let d0 = EntityUri::parse("block:ref-doc-0").expect("d0");
+
+        // History: row 1 = the boot focus (journals), row 2 = d0.
+        SutFocusWrite::apply_navigate_focus(&comp, CapRegion::Main, &d0).await;
+
+        // Back to row 1, then back off the front of the history → NULL cursor.
+        SutNavHistoryDrive::navigate_back(&comp, holon_api::Region::Main).await;
+        SutNavHistoryDrive::navigate_back(&comp, holon_api::Region::Main).await;
+        let at_home = current_focus_main(&comp).await;
+        eprintln!("[fwd-home-probe] current_focus(main) at home = {at_home:?}");
+        assert_eq!(
+            at_home, None,
+            "[fwd-home-probe] precondition: go_back off the front of the history leaves the \
+             region at home (no current_focus row)"
+        );
+
+        SutNavHistoryDrive::navigate_forward(&comp, holon_api::Region::Main).await;
+        let after_fwd = current_focus_main(&comp).await;
+        eprintln!(
+            "[fwd-home-probe] current_focus(main) after go_forward from home = {after_fwd:?}"
+        );
+        assert_eq!(
+            after_fwd.as_deref(),
+            Some("block:journals"),
+            "[fwd-home-probe] go_forward from home must reach history row 1 (the boot focus)"
+        );
+    }
+
     /// C1 UnpinBlock make-or-break PROBE: (a) what `history_id` does the
     /// headless SUT assign to a right-sidebar pin (the
     /// `navigation_history.id` AUTOINCREMENT), and

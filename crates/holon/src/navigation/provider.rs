@@ -25,6 +25,15 @@ use crate::storage::DbHandle;
 pub const ENTITY_NAME: &str = "navigation";
 pub const SHORT_NAME: &str = "nav";
 
+/// The cursor position of a region that is at HOME: no cursor row at all, or a
+/// NULL `history_id` (what `nullify_cursor` leaves).
+///
+/// It is a position BEFORE the first history row, not a row id and not a
+/// default: `navigation_history.id` is AUTOINCREMENT from 1, so `go_forward`
+/// from home finds row 1 through `id > $current_id` while `go_back` from home
+/// correctly finds nothing.
+pub const HOME_HISTORY_ID: i64 = 0;
+
 /// The `region` operation parameter shared by every navigation op.
 fn region_param() -> OperationParam {
     OperationParam {
@@ -961,14 +970,12 @@ impl NavigationProvider {
         self.focus(region, None).await
     }
 
-    /// Get the current cursor history_id for a region, returning 0 when the
-    /// region has no cursor row or its `history_id` is NULL (= home).
+    /// The region's current cursor position: a history row id, or
+    /// [`HOME_HISTORY_ID`] when the region has no cursor row or its
+    /// `history_id` is NULL.
     ///
-    /// 0 is a deliberate BEFORE-THE-FIRST-ROW sentinel, not a silent default:
-    /// AUTOINCREMENT ids start at 1, so `go_forward` from home (which
-    /// `nullify_cursor` leaves) finds row 1 through `id > $current_id` and
-    /// `go_back` from home correctly finds nothing. Failing loud here instead
-    /// would break forward navigation out of home.
+    /// A cursor value that is present but not an integer is a corrupt row, not
+    /// a position, and fails loud.
     async fn get_current_history_id(&self, params: &mut HashMap<String, Value>) -> Result<i64> {
         let cursor_result = self
             .db_handle
@@ -979,11 +986,17 @@ impl NavigationProvider {
             .await
             .map_err(|e| format!("Failed to get cursor position: {}", e))?;
 
-        let current_history_id: i64 = cursor_result
-            .first()
-            .and_then(|row| row.get("history_id"))
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
+        let current_history_id: i64 =
+            match cursor_result.first().and_then(|row| row.get("history_id")) {
+                None | Some(Value::Null) => HOME_HISTORY_ID,
+                Some(stored) => stored.as_i64().ok_or_else(|| {
+                    format!(
+                        "navigation_cursor.history_id is not an integer \
+                         (region={:?}): {stored:?}",
+                        params.get("region")
+                    )
+                })?,
+            };
 
         params.insert("current_id".to_string(), Value::Integer(current_history_id));
         Ok(current_history_id)
