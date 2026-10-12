@@ -64,7 +64,7 @@ pub struct TypeRegistry {
     /// rows like the org-embedded profile blocks, so whoever builds the mirror
     /// seeds it with [`Self::vault_profile_file_rows`] and the one admitter
     /// judges both sources.
-    vault_profile_files: RwLock<BTreeMap<String, String>>,
+    vault_profile_files: Arc<RwLock<BTreeMap<String, String>>>,
 }
 
 /// The types and the vault profiles' claims live under ONE lock: admitting a
@@ -102,7 +102,12 @@ impl Admitted {
 #[derive(Debug, Clone)]
 pub enum VaultProfileAdmission {
     InEffect(EntityProfile),
-    Refused(String),
+    /// `subject` is what the refusal's condition names: the block itself, or
+    /// every declaration of a conflict, which share that one condition.
+    Refused {
+        subject: String,
+        error: String,
+    },
 }
 
 struct LoadedVaultProfile {
@@ -220,7 +225,7 @@ impl TypeRegistry {
             admitted: Arc::default(),
             virtual_children: RwLock::new(HashMap::new()),
             invariants: Arc::default(),
-            vault_profile_files: RwLock::new(BTreeMap::new()),
+            vault_profile_files: Arc::default(),
         }
     }
 
@@ -486,9 +491,9 @@ impl TypeRegistry {
         declared
     }
 
-    /// The admission of the whole current set of org-embedded vault profiles,
-    /// by block id, as one pure function of that set: equal sets admit
-    /// equally, whatever order their rows arrived in.
+    /// The admission of the whole current set of vault profiles (org-embedded
+    /// blocks and type-home files), by id, as one pure function of that set:
+    /// equal sets admit equally, whatever order their rows arrived in.
     ///
     /// Each block is first loaded on its own: its content is parsed and run
     /// through the load-time checks [`Self::apply_parsed_profile`] runs, plus
@@ -496,9 +501,11 @@ impl TypeRegistry {
     /// ([`crate::check_profile_computed_overrides`]), against the types
     /// registered now; a block that fails is refused and absent, whatever
     /// version of it loaded before. Then each invariant name of an entity goes
-    /// to ONE declarer: a bundled profile over any vault profile,
-    /// else the vault profile with the smallest block id. A vault profile that
-    /// loses any of its names is refused whole.
+    /// to ONE declarer: a bundled profile over any vault profile; a name a
+    /// type-home file and a profile block both declare to none, a conflict
+    /// that refuses all its declarers; else the vault profile with the
+    /// smallest block id. A vault profile that loses any of its names is
+    /// refused whole.
     ///
     /// The admitted profiles' invariants and computed-field claims replace the
     /// previous admission's, in the same critical section as the type checks.
@@ -510,6 +517,7 @@ impl TypeRegistry {
     + 'static {
         let admitted = Arc::clone(&self.admitted);
         let bundled = Arc::clone(&self.invariants);
+        let files = Arc::clone(&self.vault_profile_files);
         move |candidates| {
             let bundled = bundled.read().expect("TypeRegistry poisoned");
             let mut admitted = admitted.write().expect("TypeRegistry poisoned");
@@ -526,36 +534,42 @@ impl TypeRegistry {
                     profile: parsed.to_entity_profile()?,
                 })
             };
-            let mut declarers: HashMap<(TableName, String), String> = HashMap::new();
             let mut admissions = BTreeMap::new();
-            let mut in_effect = Vec::new();
+            let refuse = |id: &String, error: String| VaultProfileAdmission::Refused {
+                subject: id.clone(),
+                error,
+            };
+            let mut loaded_set = BTreeMap::new();
             for (id, content) in candidates {
-                let loaded = load(id, content)
-                    .map_err(|e| format!("{e:#}"))
-                    .and_then(|loaded| {
-                        match first_taken_invariant(&loaded, &bundled, &declarers) {
-                            None => Ok(loaded),
-                            Some(lost) => Err(lost),
-                        }
-                    });
-                match loaded {
+                match load(id, content) {
                     Ok(loaded) => {
-                        for invariant in &loaded.invariants {
-                            declarers.insert(
-                                (loaded.key.clone(), invariant.name.to_string()),
-                                id.clone(),
-                            );
-                        }
-                        admissions.insert(
-                            id.clone(),
-                            VaultProfileAdmission::InEffect(loaded.profile.clone()),
-                        );
-                        in_effect.push((id.clone(), loaded));
+                        loaded_set.insert(id.clone(), loaded);
                     }
-                    Err(refusal) => {
-                        admissions.insert(id.clone(), VaultProfileAdmission::Refused(refusal));
+                    Err(e) => {
+                        admissions.insert(id.clone(), refuse(id, format!("{e:#}")));
                     }
                 }
+            }
+            let files = files.read().expect("TypeRegistry poisoned");
+            for (id, conflict) in type_home_conflicts(&loaded_set, &bundled, &files) {
+                loaded_set.remove(&id);
+                admissions.insert(id, conflict);
+            }
+            let mut declarers: HashMap<(TableName, String), String> = HashMap::new();
+            let mut in_effect = Vec::new();
+            for (id, loaded) in loaded_set {
+                if let Some(lost) = first_taken_invariant(&loaded, &bundled, &declarers) {
+                    admissions.insert(id.clone(), refuse(&id, lost));
+                    continue;
+                }
+                for invariant in &loaded.invariants {
+                    declarers.insert((loaded.key.clone(), invariant.name.to_string()), id.clone());
+                }
+                admissions.insert(
+                    id.clone(),
+                    VaultProfileAdmission::InEffect(loaded.profile.clone()),
+                );
+                in_effect.push((id, loaded));
             }
             admitted.vault_invariants.clear();
             admitted.admission_claims.clear();
@@ -664,6 +678,73 @@ fn check_vault_profile(
     Ok(())
 }
 
+fn bundled_declares(
+    bundled: &HashMap<TableName, Vec<crate::DeclaredInvariant>>,
+    key: &TableName,
+    invariant: &crate::DeclaredInvariant,
+) -> bool {
+    bundled
+        .get(key)
+        .is_some_and(|declared| declared.iter().any(|d| d.name == invariant.name))
+}
+
+/// The refusals of every vault profile that declares an invariant name a
+/// type-home file (an id in `files`) and a profile block both declare: such a
+/// conflict refuses all its declarers under ONE condition naming them all, so
+/// neither source silently wins. Names a bundled profile declares are left to
+/// [`first_taken_invariant`].
+fn type_home_conflicts(
+    loaded: &BTreeMap<String, LoadedVaultProfile>,
+    bundled: &HashMap<TableName, Vec<crate::DeclaredInvariant>>,
+    files: &BTreeMap<String, String>,
+) -> BTreeMap<String, VaultProfileAdmission> {
+    let mut declarers: BTreeMap<(TableName, String), Vec<&String>> = BTreeMap::new();
+    for (id, profile) in loaded {
+        for invariant in &profile.invariants {
+            if !bundled_declares(bundled, &profile.key, invariant) {
+                declarers
+                    .entry((profile.key.clone(), invariant.name.to_string()))
+                    .or_default()
+                    .push(id);
+            }
+        }
+    }
+    let quoted = |ids: &[&String]| {
+        ids.iter()
+            .map(|id| format!("'{id}'"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let mut conflicts = BTreeMap::new();
+    for ((key, name), ids) in declarers {
+        let (in_files, in_blocks): (Vec<&String>, Vec<&String>) =
+            ids.iter().partition(|id| files.contains_key(id.as_str()));
+        if in_files.is_empty() || in_blocks.is_empty() {
+            continue;
+        }
+        let subject = ids
+            .iter()
+            .map(|id| id.as_str())
+            .collect::<Vec<_>>()
+            .join(" and ");
+        let error = format!(
+            "invariant '{name}' of '{key}' is declared by the vault type-home file(s) {} and \
+             the profile block(s) {}; none of them is applied until only one declares it",
+            quoted(&in_files),
+            quoted(&in_blocks),
+        );
+        for id in ids {
+            conflicts
+                .entry(id.clone())
+                .or_insert_with(|| VaultProfileAdmission::Refused {
+                    subject: subject.clone(),
+                    error: error.clone(),
+                });
+        }
+    }
+    conflicts
+}
+
 /// The refusal for the first invariant name of `loaded` that a bundled
 /// profile or an earlier vault profile in `declarers` already declares.
 fn first_taken_invariant(
@@ -673,10 +754,7 @@ fn first_taken_invariant(
 ) -> Option<String> {
     loaded.invariants.iter().find_map(|invariant| {
         let name = invariant.name.to_string();
-        let in_bundled = bundled
-            .get(&loaded.key)
-            .is_some_and(|declared| declared.iter().any(|d| d.name == invariant.name));
-        if in_bundled {
+        if bundled_declares(bundled, &loaded.key, invariant) {
             return Some(format!(
                 "invariant '{name}' of '{}' is already declared by a bundled profile",
                 loaded.key

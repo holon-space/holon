@@ -13,6 +13,6 @@ pub fn admit_one(registry: &TypeRegistry, block_id: &str, yaml: &str) -> Result<
         .expect("the admitter answers every candidate")
     {
         VaultProfileAdmission::InEffect(_) => Ok(()),
-        VaultProfileAdmission::Refused(refusal) => Err(refusal.clone()),
+        VaultProfileAdmission::Refused { error, .. } => Err(error.clone()),
     }
 }

@@ -61,6 +61,7 @@ pub use trust::TrustPolicyParseError;
 pub use trust::TrustRule;
 pub use type_registry::TableName;
 pub use type_registry::TypeRegistry;
+pub use type_registry::VAULT_PROFILE_HOME;
 pub use type_registry::VaultProfileAdmission;
 pub use type_registry::VaultProfileClaims;
 pub use type_registry::create_default_registry;

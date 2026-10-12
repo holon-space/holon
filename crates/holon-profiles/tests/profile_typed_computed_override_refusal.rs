@@ -122,8 +122,8 @@ fn a_profile_loaded_after_a_runtime_type_is_checked_against_that_type() {
         "entity_name: person_late\ncomputed:\n  display_name: '\"x\"'\n".to_string(),
     )]));
     match &admissions[PROFILE_ID] {
-        holon_profiles::VaultProfileAdmission::Refused(refusal) => {
-            assert_eq!(*refusal, typed_refusal("person_late"))
+        holon_profiles::VaultProfileAdmission::Refused { error, .. } => {
+            assert_eq!(*error, typed_refusal("person_late"))
         }
         admitted => panic!("typed field declared after the admitter was built, got {admitted:?}"),
     }

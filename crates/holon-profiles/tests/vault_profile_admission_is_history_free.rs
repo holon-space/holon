@@ -183,7 +183,7 @@ fn a_stale_resolver_apply_keeps_the_latest_admissions_invariants() {
             .into_iter()
             .filter_map(|(id, a)| match a {
                 holon_profiles::VaultProfileAdmission::InEffect(p) => Some((id, Arc::new(p))),
-                holon_profiles::VaultProfileAdmission::Refused(_) => None,
+                holon_profiles::VaultProfileAdmission::Refused { .. } => None,
             })
             .collect::<BTreeMap<_, _>>()
     };

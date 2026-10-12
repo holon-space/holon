@@ -90,7 +90,8 @@ pub struct VaultProfileDerivation<A> {
     admit: A,
     conditions: Arc<holon_api::ConditionBus>,
     in_effect: BTreeMap<String, String>,
-    refused: BTreeMap<String, String>,
+    /// The refusal conditions raised, error by subject.
+    conditions_raised: BTreeMap<String, String>,
 }
 
 impl<A> VaultProfileDerivation<A>
@@ -102,7 +103,7 @@ where
             admit,
             conditions,
             in_effect: BTreeMap::new(),
-            refused: BTreeMap::new(),
+            conditions_raised: BTreeMap::new(),
         }
     }
 
@@ -123,34 +124,40 @@ where
             "the admitter answers for exactly the candidates it was given"
         );
 
-        let refused: BTreeMap<String, String> = admissions
-            .iter()
-            .filter_map(|(id, a)| match a {
-                VaultProfileAdmission::Refused(refusal) => Some((id.clone(), refusal.clone())),
+        let conditions: BTreeMap<String, String> = admissions
+            .values()
+            .filter_map(|a| match a {
+                VaultProfileAdmission::Refused { subject, error } => {
+                    Some((subject.clone(), error.clone()))
+                }
                 VaultProfileAdmission::InEffect(_) => None,
             })
             .collect();
-        for (id, error) in &refused {
-            if self.refused.get(id) != Some(error) {
+        for (subject, error) in &conditions {
+            if self.conditions_raised.get(subject) != Some(error) {
                 self.conditions.emit(holon_api::Condition {
-                    subject: id.clone(),
+                    subject: subject.clone(),
                     reason: holon_api::ConditionKind::ProfileRefused {
                         error: error.clone(),
                     },
                 });
             }
         }
-        for id in self.refused.keys().filter(|id| !refused.contains_key(*id)) {
+        for subject in self
+            .conditions_raised
+            .keys()
+            .filter(|subject| !conditions.contains_key(*subject))
+        {
             self.conditions.clear(&holon_api::ConditionKey {
-                subject: id.clone(),
+                subject: subject.clone(),
                 kind: holon_api::ConditionKind::PROFILE_REFUSED,
             });
         }
-        self.refused = refused;
+        self.conditions_raised = conditions;
 
         let in_effect: BTreeMap<String, String> = candidates
             .into_iter()
-            .filter(|(id, _)| !self.refused.contains_key(id))
+            .filter(|(id, _)| matches!(admissions[id], VaultProfileAdmission::InEffect(_)))
             .collect();
         if in_effect == self.in_effect {
             return None;
@@ -161,7 +168,7 @@ where
                 .into_iter()
                 .filter_map(|(id, a)| match a {
                     VaultProfileAdmission::InEffect(p) => Some((id, Arc::new(p))),
-                    VaultProfileAdmission::Refused(_) => None,
+                    VaultProfileAdmission::Refused { .. } => None,
                 })
                 .collect(),
         )

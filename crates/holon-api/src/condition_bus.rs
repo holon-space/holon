@@ -420,7 +420,9 @@ pub enum ConditionKind {
     /// An entity profile failed to load and is not applied. `subject` is the
     /// profile source block, or the path of a file in the vault's type home
     /// (`holon_profiles::VAULT_PROFILE_HOME`); `error` names the profile, the
-    /// variant or computed field, the expression and the column.
+    /// variant or computed field, the expression and the column. A type-home
+    /// file and a block declaring one invariant both stay unapplied under ONE
+    /// condition whose `subject` joins their ids with " and ".
     ///
     /// All-clear: the next successful load of the same block. A deleted block's
     /// condition stands until restart.
