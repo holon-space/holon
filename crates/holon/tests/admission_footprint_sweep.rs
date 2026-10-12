@@ -216,14 +216,14 @@ impl Fixture {
             ("block", "restore_split") => vec![
                 ("target_id", id("a")),
                 ("target_content", s("alpha text restored")),
-                ("block_id", id("c")),
-                ("block_content", s("charlie")),
+                ("block_id", id("n")),
+                ("block_content", s("restored")),
                 ("block_parent", Value::String(self.id("page"))),
             ],
             ("block", "restore_join") => vec![
                 ("target_id", id("a")),
                 ("target_content", s("alpha")),
-                ("deleted_id", id("j")),
+                ("deleted_id", id("c")),
             ],
             ("block", "move_up") => vec![("id", id("b"))],
             ("block", "move_down") => vec![("id", id("a"))],
@@ -605,6 +605,16 @@ fn claim_text(namer: &Namer, claim: &Footprint) -> String {
     }
 }
 
+/// The param naming the row this op's footprint is about. Most ops name it
+/// `id_column`; the restore pair carries no `id` and names the surviving block
+/// `target_id`, with its second block showing up as `outside`.
+fn subject_param(d: &OperationDescriptor) -> &str {
+    match d.name.as_str() {
+        "restore_split" | "restore_join" => "target_id",
+        _ => d.id_column.as_str(),
+    }
+}
+
 fn judge(
     d: &OperationDescriptor,
     params: &StorageEntity,
@@ -681,13 +691,14 @@ fn judge(
                 d.entity_name,
                 d.name
             );
+            let subject_param = subject_param(d);
             let subject = params
-                .get(d.id_column.as_str())
+                .get(subject_param)
                 .and_then(|v| v.as_string())
                 .unwrap_or_else(|| {
                     panic!(
-                        "{}.{} binding lacks `{}`",
-                        d.entity_name, d.name, d.id_column
+                        "{}.{} binding lacks `{subject_param}`",
+                        d.entity_name, d.name
                     )
                 })
                 .to_string();
@@ -727,7 +738,8 @@ fn census(rows: &[Row]) -> String {
          - Fixture: the SqlOnly block wiring (`SqlOperationProvider` + `SqlBlockOperations`), one fresh\n\
            subtree per op (`page` > `a`(tag old), `b` > `b1`, `c`). Observed = before/after diff of every\n\
            base table except {BOOKKEEPING_TABLES:?}, ignoring {BOOKKEEPING_FIELDS:?}.\n\
-         - Footprint = the declared delta's written aspects on ONE subject (the `id_column` param).\n\
+         - Footprint = the declared delta's written aspects on ONE subject (the `id_column` param,\n\
+           `target_id` for the restore pair, which carries no `id`).\n\
          - `inside`: every observed effect is on the subject in a written aspect. `outside`: some is not.\n\
          - `subject claim`: the footprint admission orders the op by, and whether it covers the observed effect.\n\
          - `unreported`: observed effects missing from `result.changes` (what D1 alone would miss).\n\

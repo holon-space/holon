@@ -387,8 +387,10 @@ fn seed(id: &str, parent: Option<&str>, sort_key: &str, content: &str) -> String
     )
 }
 
-/// P, with children A and B. Enough shape for a move, a split, a join and a
-/// delete to have somewhere to go.
+/// P, with children A, B and C, and C's own child C1. A and B stay LEAVES —
+/// the bare `delete` refuses a non-leaf and `restore_join` is leaf-only — so
+/// the ops that need a grandparent (`outdent`) or a child to reparent
+/// (`delete_keep_children`) work on the C branch instead.
 async fn seeded(handle: &DbHandle) {
     handle
         .execute_ddl(
@@ -402,6 +404,8 @@ async fn seeded(handle: &DbHandle) {
         seed("block:P", None, "a1", "parent"),
         seed("block:A", Some("block:P"), "a1", "alpha text"),
         seed("block:B", Some("block:P"), "a2", "beta text"),
+        seed("block:C", Some("block:P"), "a3", "gamma text"),
+        seed("block:C1", Some("block:C"), "a1", "gamma child"),
     ] {
         handle
             .execute_ddl(&statement)
@@ -443,14 +447,25 @@ async fn observe(
          drives a runtime built with `attach_scope_to_runtime`."
     );
     let after = snapshot(&harness.handle).await;
-    Observation {
+    let observation = Observation {
         op: op.to_string(),
         written: written_places(&before, &after),
         read_evidence: places_restored_by_the_inverse(&result.undo, &before)
             .into_iter()
             .chain(places_read_by_sql(&statements))
             .collect(),
-    }
+    };
+    // The observation itself, so a failing run says what the store did and a
+    // passing one is readable evidence for the declaration it checks.
+    eprintln!(
+        "[arc-oracle] {:<22} wrote={:?}",
+        observation.op, observation.written
+    );
+    eprintln!(
+        "[arc-oracle] {:<22} read={:?}",
+        observation.op, observation.read_evidence
+    );
+    observation
 }
 
 fn param(entries: &[(&str, &str)]) -> StorageEntity {
@@ -555,6 +570,51 @@ async fn observations() -> Vec<Observation> {
         )
         .await,
     );
+
+    // The structural ops that reach the store through `move_block`,
+    // `move_to_position`, `delete` or `set_field`. Each is observed on its own
+    // seeded store, in a shape where its own precondition holds: `indent`
+    // needs a previous sibling, `outdent` a non-page parent with a
+    // grandparent, `restore_join` a leaf.
+    for (op, params) in [
+        ("indent", param(&[("id", "block:B")])),
+        ("outdent", param(&[("id", "block:C1")])),
+        ("move_up", param(&[("id", "block:B")])),
+        ("move_down", param(&[("id", "block:A")])),
+        (
+            "move_to_position",
+            param(&[("id", "block:B"), ("parent_id", "block:A")]),
+        ),
+        ("delete_subtree", param(&[("id", "block:P")])),
+        ("delete_keep_children", param(&[("id", "block:C")])),
+        (
+            "embed_entity",
+            param(&[("id", "block:A"), ("target_uri", "block:B")]),
+        ),
+        (
+            "restore_split",
+            param(&[
+                ("target_id", "block:A"),
+                ("target_content", "alpha"),
+                ("block_id", "block:N"),
+                ("block_content", " text"),
+                ("block_parent", "block:P"),
+                ("after_id", "block:A"),
+            ]),
+        ),
+        (
+            "restore_join",
+            param(&[
+                ("target_id", "block:A"),
+                ("target_content", "alpha text beta text"),
+                ("deleted_id", "block:B"),
+            ]),
+        ),
+    ] {
+        let h = harness().await;
+        seeded(&h.handle).await;
+        out.push(observe(&h, h.blocks.as_ref(), op, params).await);
+    }
 
     out
 }

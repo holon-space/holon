@@ -1502,9 +1502,23 @@ where
     /// tree never re-rendered. `outdent` already routes through `move_block`
     /// and works correctly; mirroring that path here yields the same CDC
     /// propagation.
+    ///
+    /// The arcs are `move_block`'s: the move is the only write, and the rows
+    /// this op reads up front (the block, its previous sibling, the new
+    /// parent's children) are full rows.
     #[holon_macros::affects("parent_id", "sort_key")]
     #[holon_macros::menu_exposure(action_bar)]
     #[holon_macros::boundary_behavior(crossing_widens)]
+    #[holon_macros::reads("block.id", "block.parent_id", "block.sort_key")]
+    #[holon_macros::reads("block.content", "block.content_type")]
+    #[holon_macros::reads("block.source_language", "block.source_name")]
+    #[holon_macros::reads("block.marks", "block.collapsed", "block.widget_only")]
+    #[holon_macros::reads("block.block_type", "block.properties")]
+    #[holon_macros::reads("block.tags", "block.task_state")]
+    #[holon_macros::reads("block.requires", "block.advice_suppressed")]
+    #[holon_macros::reads("block.contributes_to")]
+    #[holon_macros::emits("block.parent_id", "block.sort_key")]
+    #[holon_macros::marking_delta(block(structural = relocates, text = untouched, existence = reads))]
     async fn indent(&self, id: &EntityUri) -> Result<OperationResult> {
         let block = self
             .block_authoritative(id)
@@ -1557,6 +1571,17 @@ where
     /// (or first when `None`). Delegates to the impl's `BlockOrdering` —
     /// see `crates/holon-core/src/block_ordering.rs`.
     #[holon_macros::boundary_behavior(crossing_widens)]
+    #[holon_macros::reads("block.id", "block.parent_id", "block.sort_key")]
+    #[holon_macros::reads("block.content", "block.content_type")]
+    #[holon_macros::reads("block.source_language", "block.source_name")]
+    #[holon_macros::reads("block.marks", "block.collapsed", "block.widget_only")]
+    #[holon_macros::reads("block.block_type", "block.properties")]
+    #[holon_macros::reads("block.tags", "block.task_state")]
+    #[holon_macros::reads("block.requires", "block.advice_suppressed")]
+    #[holon_macros::reads("block.contributes_to")]
+    #[holon_macros::emits("block.parent_id", "block.sort_key")]
+    #[holon_macros::emits(excluded("block.after_block_id", "a positional anchor, not a column"))]
+    #[holon_macros::marking_delta(block(structural = relocates, text = untouched, existence = reads))]
     async fn move_to_position(
         &self,
         id: &EntityUri,
@@ -1608,9 +1633,22 @@ where
     }
 
     /// Move block out to parent's level (decrease indentation)
+    ///
+    /// The arcs are `move_block`'s: the move is the only write, and the block,
+    /// its parent and its previous sibling are read as full rows.
     #[holon_macros::affects("parent_id", "sort_key")]
     #[holon_macros::menu_exposure(action_bar)]
     #[holon_macros::boundary_behavior(forbidden_at_page_boundary)]
+    #[holon_macros::reads("block.id", "block.parent_id", "block.sort_key")]
+    #[holon_macros::reads("block.content", "block.content_type")]
+    #[holon_macros::reads("block.source_language", "block.source_name")]
+    #[holon_macros::reads("block.marks", "block.collapsed", "block.widget_only")]
+    #[holon_macros::reads("block.block_type", "block.properties")]
+    #[holon_macros::reads("block.tags", "block.task_state")]
+    #[holon_macros::reads("block.requires", "block.advice_suppressed")]
+    #[holon_macros::reads("block.contributes_to")]
+    #[holon_macros::emits("block.parent_id", "block.sort_key")]
+    #[holon_macros::marking_delta(block(structural = relocates, text = untouched, existence = reads))]
     async fn outdent(&self, id: &EntityUri) -> Result<OperationResult> {
         let maybe_block: Option<T> = self.block_authoritative(id).await?;
         let block: T = maybe_block.ok_or_else(|| anyhow::anyhow!("Block not found"))?;
@@ -2337,8 +2375,28 @@ where
     /// which for a deterministic minter reproduces the original `sort_key`
     /// byte-for-byte between the same neighbours.
     // Undo of a block split has to restore both sides plus their positions;
+    ///
+    /// The arcs are `create`'s plus the target's content: the restored block is
+    /// minted through the same create seam, so its whole column set is
+    /// written, and `set_field` then rewrites the target's text. The create
+    /// carries no edge sets, so the four edge places are not written.
     #[holon_macros::affects("content", "parent_id", "sort_key")]
     #[holon_macros::boundary_behavior(private_only)]
+    #[holon_macros::reads("block.id", "block.parent_id", "block.sort_key")]
+    #[holon_macros::reads("block.content", "block.content_type")]
+    #[holon_macros::reads("block.source_language", "block.source_name")]
+    #[holon_macros::reads("block.marks", "block.collapsed", "block.widget_only")]
+    #[holon_macros::reads("block.block_type", "block.properties")]
+    #[holon_macros::reads("block.tags", "block.task_state")]
+    #[holon_macros::reads("block.requires", "block.advice_suppressed")]
+    #[holon_macros::reads("block.contributes_to")]
+    #[holon_macros::emits("block.id", "block.parent_id", "block.sort_key")]
+    #[holon_macros::emits("block.content", "block.content_type")]
+    #[holon_macros::emits("block.source_language", "block.source_name")]
+    #[holon_macros::emits("block.marks", "block.collapsed", "block.widget_only")]
+    #[holon_macros::emits("block.block_type", "block.properties")]
+    #[holon_macros::emits(excluded("block.after_block_id", "a positional anchor, not a column"))]
+    #[holon_macros::marking_delta(block(structural = produces, text = produces, existence = produces))]
     async fn restore_split(
         &self,
         target_id: &EntityUri,
@@ -2433,8 +2491,29 @@ where
     /// leaf, and `join_block` only chooses this inverse for the leaf case, so
     /// the guard never trips on the sanctioned paths. Refused when `deleted_id`
     /// is a shared page ([`crate::ShareExitRefused`]).
+    ///
+    /// The arcs are `delete`'s plus the target's content: the whole deleted row
+    /// leaves, including its edge sets, and `set_field` then rewrites the
+    /// target's text.
     #[holon_macros::affects("content", "parent_id", "sort_key")]
     #[holon_macros::boundary_behavior(private_only)]
+    #[holon_macros::reads("block.id", "block.parent_id", "block.sort_key")]
+    #[holon_macros::reads("block.content", "block.content_type")]
+    #[holon_macros::reads("block.source_language", "block.source_name")]
+    #[holon_macros::reads("block.marks", "block.collapsed", "block.widget_only")]
+    #[holon_macros::reads("block.block_type", "block.properties")]
+    #[holon_macros::reads("block.tags", "block.task_state")]
+    #[holon_macros::reads("block.requires", "block.advice_suppressed")]
+    #[holon_macros::reads("block.contributes_to")]
+    #[holon_macros::emits("block.id", "block.parent_id", "block.sort_key")]
+    #[holon_macros::emits("block.content", "block.content_type")]
+    #[holon_macros::emits("block.source_language", "block.source_name")]
+    #[holon_macros::emits("block.marks", "block.collapsed", "block.widget_only")]
+    #[holon_macros::emits("block.block_type", "block.properties")]
+    #[holon_macros::emits("block.tags", "block.task_state")]
+    #[holon_macros::emits("block.requires", "block.advice_suppressed")]
+    #[holon_macros::emits("block.contributes_to")]
+    #[holon_macros::marking_delta(block(structural = consumes, text = produces, existence = produces))]
     async fn restore_join(
         &self,
         target_id: &EntityUri,
@@ -2528,9 +2607,22 @@ where
     }
 
     /// Move a block up (swap with previous sibling)
+    ///
+    /// The arcs are `move_block`'s: the move is the only write, and the block
+    /// and the two siblings ahead of it are read as full rows.
     #[holon_macros::affects("parent_id", "sort_key")]
     #[holon_macros::menu_exposure(action_bar)]
     #[holon_macros::boundary_behavior(private_only)]
+    #[holon_macros::reads("block.id", "block.parent_id", "block.sort_key")]
+    #[holon_macros::reads("block.content", "block.content_type")]
+    #[holon_macros::reads("block.source_language", "block.source_name")]
+    #[holon_macros::reads("block.marks", "block.collapsed", "block.widget_only")]
+    #[holon_macros::reads("block.block_type", "block.properties")]
+    #[holon_macros::reads("block.tags", "block.task_state")]
+    #[holon_macros::reads("block.requires", "block.advice_suppressed")]
+    #[holon_macros::reads("block.contributes_to")]
+    #[holon_macros::emits("block.parent_id", "block.sort_key")]
+    #[holon_macros::marking_delta(block(structural = relocates, text = untouched, existence = reads))]
     async fn move_up(&self, id: &EntityUri) -> Result<OperationResult> {
         // Capture old state
         let block = self
@@ -2586,10 +2678,23 @@ where
     /// The `target_uri` is an EntityUri string (e.g. `block:some-id`,
     /// `todoist-task:123`). Inserts `{{transclude:target_uri}}` at the end
     /// of the block's content.
+    ///
+    /// The transclusion marker is appended through `set_field("content")`, so
+    /// text is the one place written; the subject is read as a full row.
     #[holon_macros::affects("content")]
     #[holon_macros::triggered_by(availability_of = "selected_id", providing = ["target_uri"])]
     #[holon_macros::menu_exposure(listed)]
     #[holon_macros::boundary_behavior(private_only)]
+    #[holon_macros::reads("block.id", "block.parent_id", "block.sort_key")]
+    #[holon_macros::reads("block.content", "block.content_type")]
+    #[holon_macros::reads("block.source_language", "block.source_name")]
+    #[holon_macros::reads("block.marks", "block.collapsed", "block.widget_only")]
+    #[holon_macros::reads("block.block_type", "block.properties")]
+    #[holon_macros::reads("block.tags", "block.task_state")]
+    #[holon_macros::reads("block.requires", "block.advice_suppressed")]
+    #[holon_macros::reads("block.contributes_to")]
+    #[holon_macros::emits("block.content")]
+    #[holon_macros::marking_delta(block(structural = untouched, text = produces, existence = reads))]
     async fn embed_entity(
         &self,
         id: &EntityUri,
@@ -2635,9 +2740,22 @@ where
     }
 
     /// Move a block down (swap with next sibling)
+    ///
+    /// The arcs are `move_block`'s: the move is the only write, and the block
+    /// and its two neighbouring siblings are read as full rows.
     #[holon_macros::affects("parent_id", "sort_key")]
     #[holon_macros::menu_exposure(action_bar)]
     #[holon_macros::boundary_behavior(private_only)]
+    #[holon_macros::reads("block.id", "block.parent_id", "block.sort_key")]
+    #[holon_macros::reads("block.content", "block.content_type")]
+    #[holon_macros::reads("block.source_language", "block.source_name")]
+    #[holon_macros::reads("block.marks", "block.collapsed", "block.widget_only")]
+    #[holon_macros::reads("block.block_type", "block.properties")]
+    #[holon_macros::reads("block.tags", "block.task_state")]
+    #[holon_macros::reads("block.requires", "block.advice_suppressed")]
+    #[holon_macros::reads("block.contributes_to")]
+    #[holon_macros::emits("block.parent_id", "block.sort_key")]
+    #[holon_macros::marking_delta(block(structural = relocates, text = untouched, existence = reads))]
     async fn move_down(&self, id: &EntityUri) -> Result<OperationResult> {
         // Capture old state
         let block = self
@@ -2699,8 +2817,28 @@ where
     /// `delete` inverse draws. Every share whose mount is in the subtree goes
     /// through its exit: a share received is left, a share made here is
     /// revoked.
+    ///
+    /// The arcs are `delete`'s, which this op runs once per subtree member: no
+    /// place a single delete leaves untouched survives a cascade of them.
     #[holon_macros::menu_exposure(listed)]
     #[holon_macros::boundary_behavior(private_only)]
+    #[holon_macros::reads("block.id", "block.parent_id", "block.sort_key")]
+    #[holon_macros::reads("block.content", "block.content_type")]
+    #[holon_macros::reads("block.source_language", "block.source_name")]
+    #[holon_macros::reads("block.marks", "block.collapsed", "block.widget_only")]
+    #[holon_macros::reads("block.block_type", "block.properties")]
+    #[holon_macros::reads("block.tags", "block.task_state")]
+    #[holon_macros::reads("block.requires", "block.advice_suppressed")]
+    #[holon_macros::reads("block.contributes_to")]
+    #[holon_macros::emits("block.id", "block.parent_id", "block.sort_key")]
+    #[holon_macros::emits("block.content", "block.content_type")]
+    #[holon_macros::emits("block.source_language", "block.source_name")]
+    #[holon_macros::emits("block.marks", "block.collapsed", "block.widget_only")]
+    #[holon_macros::emits("block.block_type", "block.properties")]
+    #[holon_macros::emits("block.tags", "block.task_state")]
+    #[holon_macros::emits("block.requires", "block.advice_suppressed")]
+    #[holon_macros::emits("block.contributes_to")]
+    #[holon_macros::marking_delta(block(structural = consumes, text = untouched, existence = produces))]
     async fn delete_subtree(&self, id: &EntityUri) -> Result<OperationResult> {
         match delete_exiting_shares_via_cells(self.cells(), id).await? {
             crate::cell_registry::TreeDelete::DeletedExitingShares(exited) => {
@@ -2751,9 +2889,31 @@ where
     /// Declared irreversible: the reparent + delete pair has no exact single
     /// inverse (mirrors `join_block`'s with-children case). Refused on a
     /// shared page ([`crate::ShareExitRefused`]).
+    ///
+    /// The arcs are `delete`'s — the whole subject row leaves — and the
+    /// structural flow is `consumes` for that reason, even though the children
+    /// the op reparents only move: the declared `parent_id` / `sort_key`
+    /// out-arcs carry that half.
     #[holon_macros::affects("parent_id", "sort_key")]
     #[holon_macros::menu_exposure(listed)]
     #[holon_macros::boundary_behavior(crossing_widens)]
+    #[holon_macros::reads("block.id", "block.parent_id", "block.sort_key")]
+    #[holon_macros::reads("block.content", "block.content_type")]
+    #[holon_macros::reads("block.source_language", "block.source_name")]
+    #[holon_macros::reads("block.marks", "block.collapsed", "block.widget_only")]
+    #[holon_macros::reads("block.block_type", "block.properties")]
+    #[holon_macros::reads("block.tags", "block.task_state")]
+    #[holon_macros::reads("block.requires", "block.advice_suppressed")]
+    #[holon_macros::reads("block.contributes_to")]
+    #[holon_macros::emits("block.id", "block.parent_id", "block.sort_key")]
+    #[holon_macros::emits("block.content", "block.content_type")]
+    #[holon_macros::emits("block.source_language", "block.source_name")]
+    #[holon_macros::emits("block.marks", "block.collapsed", "block.widget_only")]
+    #[holon_macros::emits("block.block_type", "block.properties")]
+    #[holon_macros::emits("block.tags", "block.task_state")]
+    #[holon_macros::emits("block.requires", "block.advice_suppressed")]
+    #[holon_macros::emits("block.contributes_to")]
+    #[holon_macros::marking_delta(block(structural = consumes, text = untouched, existence = produces))]
     async fn delete_keep_children(&self, id: &EntityUri) -> Result<OperationResult> {
         refuse_share_exit(
             self.cells(),
