@@ -1,0 +1,67 @@
+Round 8, FOLD-scope.a (holon-work#170): the whole-file own-page invariant of round 7
+compared the parsed page "field for field", but the FIXTURE left 10 of `Block`'s fields
+at their `Default` on both sides, so the equality could not fail on any of them (round-7
+verdict, target/layers-experiment-verify-r7.md, finding 1). `seed_own_page_file()` now
+authors every one of them away from its default:
+
+    * Own page with *bold* text :home:pinned:
+    :PROPERTIES:
+    :ID: layered-own-page
+    :AREA: kitchen
+    :REQUIRES: layered-own-child
+    :ADVICE_SUPPRESSED: layered-own-child
+    :contributes-to: layered-own-child
+    :WIDGET_ONLY: t
+    :END:
+    ** Child
+    :PROPERTIES:
+    :ID: layered-own-child
+    :END:
+    #+name: own-page-query
+    #+begin_src prql :id layered-own-src
+    from blocks
+    #+end_src
+
+`SEED_BLOCKS` asserts the parse actually yields non-default values for `tags`,
+non-`_` `properties`, `requires`, `advice_suppressed`, `contributes_to`, `marks`,
+`widget_only`, `content_type`, `source_language` and `source_name`, so a fixture that
+slides back to the defaults fails loudly instead of silently disarming the invariant.
+
+All runs: PROPTEST_CASES=200 unless stated, `cargo nextest run -p holon-integration-tests
+--test layered_field_model_pbt`, test profile. Each mutant is one statement injected after
+`let mut blocks = parse_own_page(&state.own_page_file);` in `rewrite_own_page_file`
+(crates/holon-integration-tests/src/pbt/layered_field.rs) and restored by `cp`.
+Full log: target/layers-r8/gate.log (`model restored OK` + `shasum -a 256 -c` OK).
+
+Every one of these was GREEN at 2000 cases before this round (the verifier proved V5b,
+V4b and V8; the rest are the same blindness, one field at a time). All are now RED with
+`own page drift on A: the file does not parse back to the page the gestures predict,
+`collapsed` and every other field`:
+
+  V5b  b.tags = Default::default()                        0 passed, 1 failed
+  V8   b.properties.retain(|k, _| k.starts_with('_'))      0 passed, 1 failed
+  R8   b.requires.clear()                                  0 passed, 1 failed
+  R8   b.advice_suppressed.clear()                         0 passed, 1 failed
+  R8   b.contributes_to.clear()                            0 passed, 1 failed
+  R8   b.marks = None                                      0 passed, 1 failed
+  R8   b.widget_only = false                               0 passed, 1 failed
+  R8   b.source_name = None                                0 passed, 1 failed
+  R8   b.source_language = None                            0 passed, 1 failed
+  R8   b.content_type = holon_api::ContentType::Text       0 passed, 1 failed
+  V4b  the verifier's whole-class wipe (properties, requires, contributes_to,
+       advice_suppressed, marks, source_name, widget_only in one mutant)
+                                                           0 passed, 1 failed
+  V3   blocks.truncate(1) (the round-7 tooth)              0 passed, 1 failed
+
+Earlier teeth, still red with the richer fixture (target/layers-r8/gate-older.log):
+  M30 fold never toggles             -> fold did not toggle
+  M16 sync propagates nothing        -> sync did not propagate
+  M20 home stores the field at boot  -> admission drift (IntegrationRow)
+  M8  sync tiebreak drops device id  -> sync did not propagate
+  M1  no same-device clear           -> stale fallback
+  M4  override branch off            -> override lost
+  PLAIN rule                         -> override lost (gate.log)
+
+Green (test profile): 16 cases `1 passed`; 500 cases `Summary [13.472s]`; 2000 cases
+53.4 s; 2000 with overrides off 60.7 s; 5000 cases 128.2 s — the last three via plain
+`cargo test` (the repo nextest cap is 30 s x 4). Clippy exit 0.

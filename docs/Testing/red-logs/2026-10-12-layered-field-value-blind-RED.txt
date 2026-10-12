@@ -1,0 +1,130 @@
+# Round-6 red log: the oracle was VALUE-BLIND — it took the fold's value from the SUT, so a chevron that never toggles was green at 2000 cases (FOLD-scope.a, holon-work#170).
+# M30 is the round-5 verifier's own mutant; M31 and M24 are mine. All three were green before round 6.
+# Full gate: target/layers-r6/gate.log, script target/layers-r6/gate.sh.
+
+=== M30 fold never toggles
+    assertion `left == right` failed: fold did not toggle: the chevron on IntegrationRow on A must flip the displayed false to true, wrote false
+      left: false
+     right: true
+
+    thread 'layered_field_model_pbt' (378641899) panicked at crates/holon-integration-tests/tests/layered_field_model_pbt.rs:212:17:
+    assertion `left == right` failed: fold did not toggle: the chevron on OwnPage on A must flip the displayed false to true, wrote false
+      left: false
+     right: true
+
+    thread 'layered_field_model_pbt' (378641899) panicked at crates/holon-integration-tests/tests/layered_field_model_pbt.rs:412:1:
+    Test failed: assertion `left == right` failed: fold did not toggle: the chevron on OwnPage on A must flip the displayed false to true, wrote false
+      left: false
+     right: true.
+    minimal failing input: (initial_state, transitions, seen_counter) = (
+        Gestures {
+            gained: false,
+            overridden: {},
+            base: {},
+            layer: {},
+            clock: {},
+            last_fold: None,
+        },
+        [
+            Fold(
+                A,
+                OwnPage,
+            ),
+        ],
+        None,
+    )
+    successes: 1
+    local rejects: 0
+    global rejects: 0
+
+
+  Cancelling due to test failure: 
+────────────
+     Summary [   0.026s] 1 test run: 0 passed, 1 failed, 0 skipped
+        FAIL [   0.025s] (1/1) holon-integration-tests::layered_field_model_pbt layered_field_model_pbt
+error: test run failed
+exit=100
+=== M31 fold always collapses
+      left: false
+     right: true
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+    thread 'layered_field_model_pbt' (378642846) panicked at crates/holon-integration-tests/tests/layered_field_model_pbt.rs:212:17:
+    assertion `left == right` failed: fold did not toggle: the chevron on OwnPage on A must flip the displayed false to true, wrote false
+      left: false
+     right: true
+
+    thread 'layered_field_model_pbt' (378642846) panicked at crates/holon-integration-tests/tests/layered_field_model_pbt.rs:412:1:
+    Test failed: assertion `left == right` failed: fold did not toggle: the chevron on OwnPage on A must flip the displayed false to true, wrote false
+      left: false
+     right: true.
+    minimal failing input: (initial_state, transitions, seen_counter) = (
+        Gestures {
+            gained: false,
+            overridden: {},
+            base: {},
+            layer: {},
+            clock: {},
+            last_fold: None,
+        },
+        [
+            Fold(
+                A,
+                OwnPage,
+            ),
+        ],
+        None,
+    )
+    successes: 0
+    local rejects: 0
+    global rejects: 0
+
+
+  Cancelling due to test failure: 
+────────────
+     Summary [   0.021s] 1 test run: 0 passed, 1 failed, 0 skipped
+        FAIL [   0.020s] (1/1) holon-integration-tests::layered_field_model_pbt layered_field_model_pbt
+error: test run failed
+exit=100
+=== M24 sync does not rewrite the own page file
+    Test failed: assertion `left == right` failed: own page on B: file reads collapsed=false, base holds true; file:
+    * Own page
+    :PROPERTIES:
+    :ID: layered-own-page
+    :END:
+    ** Child
+    :PROPERTIES:
+    :ID: layered-own-child
+    :END:
+
+      left: false
+     right: true.
+    minimal failing input: (initial_state, transitions, seen_counter) = (
+        Gestures {
+            gained: false,
+            overridden: {},
+            base: {},
+            layer: {},
+            clock: {},
+            last_fold: None,
+        },
+        [
+            Fold(
+                A,
+                OwnPage,
+            ),
+            Sync,
+        ],
+        None,
+    )
+    successes: 1
+    local rejects: 0
+    global rejects: 0
+
+
+  Cancelling due to test failure: 
+────────────
+     Summary [   0.065s] 1 test run: 0 passed, 1 failed, 0 skipped
+        FAIL [   0.065s] (1/1) holon-integration-tests::layered_field_model_pbt layered_field_model_pbt
+error: test run failed
+exit=100

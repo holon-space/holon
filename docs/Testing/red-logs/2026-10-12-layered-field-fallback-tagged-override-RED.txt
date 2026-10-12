@@ -1,0 +1,89 @@
+# Round 3 (FOLD-scope.a, holon-work#170): the oracle selects the hybrid rule.
+# Mutant M9: crates/holon-integration-tests/src/pbt/layered_field.rs, fallback branch of write(), Intent::Fallback -> Intent::Override.
+# Red because the fold, with no override gesture and a base slot, never reaches base. Mutant reverted after the run (cmp OK).
+# Command: PROPTEST_CASES=16 cargo nextest run -p holon-integration-tests --test layered_field_model_pbt (gate: target/layers-r3/gate.sh)
+=== M9 fallback tagged Override
+      left: None
+     right: Some(false)
+
+    thread 'layered_field_model_pbt' (374464902) panicked at crates/holon-integration-tests/tests/layered_field_model_pbt.rs:133:21:
+    assertion `left == right` failed: fold missed base: fold of IntegrationRow on A without an override must write base, which offers a slot
+      left: None
+     right: Some(false)
+
+    thread 'layered_field_model_pbt' (374464902) panicked at crates/holon-integration-tests/tests/layered_field_model_pbt.rs:187:1:
+    Test failed: assertion `left == right` failed: fold missed base: fold of IntegrationRow on A without an override must write base, which offers a slot
+      left: None
+     right: Some(false).
+    minimal failing input: (initial_state, transitions, seen_counter) = (
+        Gestures {
+            gained: false,
+            overridden: {},
+        },
+        [
+            Fold(
+                A,
+                IntegrationRow,
+            ),
+            HomeGainsField,
+            Fold(
+                A,
+                IntegrationRow,
+            ),
+        ],
+        None,
+    )
+    successes: 0
+    local rejects: 0
+    global rejects: 0
+
+
+  Cancelling due to test failure: 
+────────────
+     Summary [   0.165s] 1 test run: 0 passed, 1 failed, 0 skipped
+        FAIL [   0.164s] (1/1) holon-integration-tests::layered_field_model_pbt layered_field_model_pbt
+error: test run failed
+exit=100
+
+=== M7 sync keeps clocks
+    thread 'layered_field_model_pbt' (374466419) panicked at crates/holon-integration-tests/tests/layered_field_model_pbt.rs:145:21:
+    stale stamp: fold of IntegrationRow on A stamped Some((1, A)), not later than the Some((1, B)) this device had already seen, so the next sync drops it
+
+    thread 'layered_field_model_pbt' (374466419) panicked at crates/holon-integration-tests/tests/layered_field_model_pbt.rs:145:21:
+    stale stamp: fold of IntegrationRow on A stamped Some((1, A)), not later than the Some((1, B)) this device had already seen, so the next sync drops it
+
+    thread 'layered_field_model_pbt' (374466419) panicked at crates/holon-integration-tests/tests/layered_field_model_pbt.rs:145:21:
+    stale stamp: fold of IntegrationRow on A stamped Some((1, A)), not later than the Some((1, B)) this device had already seen, so the next sync drops it
+
+    thread 'layered_field_model_pbt' (374466419) panicked at crates/holon-integration-tests/tests/layered_field_model_pbt.rs:187:1:
+    Test failed: stale stamp: fold of IntegrationRow on A stamped Some((1, A)), not later than the Some((1, B)) this device had already seen, so the next sync drops it.
+    minimal failing input: (initial_state, transitions, seen_counter) = (
+        Gestures {
+            gained: false,
+            overridden: {},
+        },
+        [
+            HomeGainsField,
+            Fold(
+                B,
+                IntegrationRow,
+            ),
+            Sync,
+            Fold(
+                A,
+                IntegrationRow,
+            ),
+        ],
+        None,
+    )
+    successes: 2
+    local rejects: 0
+    global rejects: 0
+
+
+  Cancelling due to test failure: 
+────────────
+     Summary [   0.089s] 1 test run: 0 passed, 1 failed, 0 skipped
+        FAIL [   0.088s] (1/1) holon-integration-tests::layered_field_model_pbt layered_field_model_pbt
+error: test run failed
+exit=100

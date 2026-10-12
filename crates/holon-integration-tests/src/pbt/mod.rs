@@ -22,6 +22,7 @@ pub mod generators;
 pub mod hand_authored;
 pub mod invariant_mode_override;
 pub mod invariants;
+pub mod layered_field;
 pub mod layout_bridge;
 pub mod live_self_check;
 pub mod loro_slice;

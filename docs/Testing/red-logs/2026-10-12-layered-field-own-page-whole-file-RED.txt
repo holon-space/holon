@@ -1,0 +1,70 @@
+Round 7, FOLD-scope.a (holon-work#170): the own page's org file was pinned only on
+`:COLLAPSED:`, so a write-back that destroys the rest of the page was green at 2000
+cases. Invariant 3 is now whole-file: the reference holds the page's full content
+(`Gestures::expected_own_page`) and a parse of the SUT's file must equal it block for
+block, field for field, on every device after every gesture.
+
+All runs: PROPTEST_CASES=16, `cargo nextest run -p holon-integration-tests --test
+layered_field_model_pbt`, test profile. Full log: target/layers-r7/gate.log; the
+content-mutant follow-ups in target/layers-r7/gate-content.log. The model is restored
+by `cp` after every mutant (`model restored OK` plus `shasum -a 256 -c` OK).
+
+Normalized before the comparison, and only this: `created_at`/`updated_at` (the parser
+stamps wall-clock on every parse) and `_`-prefixed private carriers (`_drawer_order`,
+which the write-back adds for the drawer key it writes). Nothing a user can see.
+
+--- V3 (the verifier's own mutant, green at 2000 cases before this round)
+`rewrite_own_page_file`: + blocks.truncate(1);   (the write-back drops every child)
+  0 passed, 1 failed
+  Test failed: assertion `left == right` failed: own page drift on A: the file does not
+  parse back to the page the gestures predict, `collapsed` and every other field; file:
+  * Own page
+  :PROPERTIES:
+  :ID: layered-own-page
+  :COLLAPSED: t
+  :END:
+  left  = [page]            (the child block is gone from the file)
+  right = [page, child]
+  shrink: [Fold(A, OwnPage)]
+
+--- M27 (mine): + blocks.last_mut().unwrap().content = "gone".to_string();
+  0 passed, 1 failed; same assertion; left child content "gone", right "Child".
+  shrink: [Fold(A, OwnPage)]
+
+--- M28 (mine): the write-back collapses every block, not only the page
+  + for b in blocks.iter_mut() { b.collapsed = true; }
+  0 passed, 1 failed; same assertion; left child collapsed=true, right collapsed=false.
+  shrink: [Fold(A, OwnPage)]
+
+--- M24 (round 6, now caught by the whole-file invariant): `sync` no longer rewrites
+the own page file
+  0 passed, 1 failed; "own page drift on B"; the file still reads the pre-sync
+  `collapsed`.
+
+--- M26 (mine): a base write no longer rewrites the own page file
+  0 passed, 1 failed; "own page drift on A".
+
+--- An equivalent mutant, for the record (green, and correctly so)
+`blocks.last_mut().unwrap().properties.clear()` is GREEN: the renderer writes `:ID:`
+from `Block::id` and level/sequence from the tree position, so clearing the properties
+bag of a parsed block changes no rendered byte. Not a tooth; an equivalent mutant.
+
+--- Every earlier tooth, still red at 16 cases, each on its own assertion
+(target/layers-r7/gate.log)
+  M30 fold never toggles            -> fold did not toggle
+  M31 fold always collapses         -> fold did not toggle
+  M20 home stores the field at boot -> admission drift (IntegrationRow)
+  M21 cook leaf admits a base write -> admission drift (CookLeaf)
+  M22 own page admits none          -> admission drift (OwnPage)
+  M23 home_gains_field inert        -> home gained nothing
+  M12 override also writes base     -> override leaked to base
+  M16 sync propagates nothing       -> sync did not propagate
+  M18 sync clears the device layer  -> sync touched the device layer
+  M8  sync tiebreak drops device id -> sync did not propagate (the reference computes
+                                       the merge itself, device id included)
+  M9  fallback tagged Override      -> fallback lost
+  M7  sync keeps clocks             -> stale stamp
+  M1  no same-device clear          -> stale fallback
+  M4  override branch off           -> override lost
+  PLAIN rule                        -> override lost (overrides on) / invisible write
+                                       (overrides off)

@@ -1,0 +1,84 @@
+Red log — holon-work#170 layered-field experiment (FOLD-scope.a)
+Date: 2026-10-12
+Test: crates/holon-integration-tests/tests/layered_field_model_pbt.rs
+Model: crates/holon-integration-tests/src/pbt/layered_field.rs
+Tree: .claude/worktrees/agent-ab05b8be49e6884e7, base main 92ddaddf
+Build profile: test (unoptimized + debuginfo)
+
+Rule under test: PLAIN (write to the first slot; a later layer that holds a
+value wins), selected by LAYERED_FIELD_RULE=plain. The default rule, HYBRID,
+is green on the same test with the same generators.
+
+Red for the right reason:
+  Run 1 (fallback writes only, LAYERED_FIELD_OVERRIDES=off) shrinks to the
+  risk the Fable review named. A fold on an integration row lands in the
+  device layer as a fallback, because base has no slot. Then the home gains
+  the field. The next fold writes base, and the old fallback still wins the
+  read. Invariant 1 (no invisible write) fails.
+  Run 2 (overrides also drawn) shrinks to an explicit device value on an own
+  page, then a fold that writes base under it. Same invariant.
+
+Command 1:
+  LAYERED_FIELD_RULE=plain LAYERED_FIELD_OVERRIDES=off \
+    cargo nextest run -p holon-integration-tests --test layered_field_model_pbt
+
+    Test failed: assertion `left == right` failed: invisible write: fold of IntegrationRow on B wrote false but the device still shows true
+      left: true
+     right: false.
+    minimal failing input: (initial_state, transitions, seen_counter) = (
+        false,
+        [
+            Fold(
+                B,
+                IntegrationRow,
+            ),
+            HomeGainsField,
+            Fold(
+                B,
+                IntegrationRow,
+            ),
+        ],
+        None,
+    )
+    successes: 3
+    local rejects: 0
+    global rejects: 0
+
+     Summary [   0.081s] 1 test run: 0 passed, 1 failed, 0 skipped
+        FAIL [   0.081s] (1/1) holon-integration-tests::layered_field_model_pbt layered_field_model_pbt
+
+Command 2:
+  LAYERED_FIELD_RULE=plain \
+    cargo nextest run -p holon-integration-tests --test layered_field_model_pbt
+
+    Test failed: assertion `left == right` failed: invisible write: fold of OwnPage on A wrote true but the device still shows false
+      left: false
+     right: true.
+    minimal failing input: (initial_state, transitions, seen_counter) = (
+        false,
+        [
+            Override(
+                A,
+                OwnPage,
+                false,
+            ),
+            Fold(
+                A,
+                OwnPage,
+            ),
+        ],
+        None,
+    )
+    successes: 1
+    local rejects: 0
+    global rejects: 0
+
+     Summary [   0.059s] 1 test run: 0 passed, 1 failed, 0 skipped
+        FAIL [   0.059s] (1/1) holon-integration-tests::layered_field_model_pbt layered_field_model_pbt
+
+Invariant 2 (no hidden upstream) on its own: a hybrid variant whose READ
+lets a fallback beat base (same-device deletion kept) passes invariant 1
+but fails invariant 2 across devices:
+    hidden upstream: IntegrationRow on B shows a device-layer value over base
+    false without an override (layer: Some((true, Fallback)))
+    minimal: Fold(A, Row), Fold(B, Row), HomeGainsField, Fold(A, Row), Sync

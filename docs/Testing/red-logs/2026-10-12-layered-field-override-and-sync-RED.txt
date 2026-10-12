@@ -1,0 +1,130 @@
+# Round-4 red log: the override gesture and sync had no postcondition (FOLD-scope.a, holon-work#170).
+# Three mutants of crates/holon-integration-tests/src/pbt/layered_field.rs, each green before round 4, each red now.
+# Full gate: target/layers-r4/gate.log, script target/layers-r4/gate.sh.
+
+=== M12 override also writes base
+     right: None
+
+    thread 'layered_field_model_pbt' (376893344) panicked at crates/holon-integration-tests/tests/layered_field_model_pbt.rs:177:17:
+    assertion `left == right` failed: override leaked to base: the "only on this device" override of OwnPage on A wrote base None -> Some(false), so the next sync carries it to the other device
+      left: Some(false)
+     right: None
+
+    thread 'layered_field_model_pbt' (376893344) panicked at crates/holon-integration-tests/tests/layered_field_model_pbt.rs:177:17:
+    assertion `left == right` failed: override leaked to base: the "only on this device" override of OwnPage on A wrote base None -> Some(false), so the next sync carries it to the other device
+      left: Some(false)
+     right: None
+
+    thread 'layered_field_model_pbt' (376893344) panicked at crates/holon-integration-tests/tests/layered_field_model_pbt.rs:265:1:
+    Test failed: assertion `left == right` failed: override leaked to base: the "only on this device" override of OwnPage on A wrote base None -> Some(false), so the next sync carries it to the other device
+      left: Some(false)
+     right: None.
+    minimal failing input: (initial_state, transitions, seen_counter) = (
+        Gestures {
+            gained: false,
+            overridden: {},
+        },
+        [
+            Override(
+                A,
+                OwnPage,
+                false,
+            ),
+        ],
+        None,
+    )
+    successes: 1
+    local rejects: 0
+    global rejects: 0
+
+
+  Cancelling due to test failure: 
+────────────
+     Summary [   0.030s] 1 test run: 0 passed, 1 failed, 0 skipped
+        FAIL [   0.029s] (1/1) holon-integration-tests::layered_field_model_pbt layered_field_model_pbt
+error: test run failed
+exit=100
+=== M16 sync propagates nothing
+     right: (Some(true), Some((1, A)))
+
+    thread 'layered_field_model_pbt' (376902987) panicked at crates/holon-integration-tests/tests/layered_field_model_pbt.rs:221:25:
+    assertion `left == right` failed: sync did not propagate: OwnPage on B holds None stamped None after sync, not the newest replica Some(true) stamped Some((1, A))
+      left: (None, None)
+     right: (Some(true), Some((1, A)))
+
+    thread 'layered_field_model_pbt' (376902987) panicked at crates/holon-integration-tests/tests/layered_field_model_pbt.rs:221:25:
+    assertion `left == right` failed: sync did not propagate: OwnPage on B holds None stamped None after sync, not the newest replica Some(true) stamped Some((1, A))
+      left: (None, None)
+     right: (Some(true), Some((1, A)))
+
+    thread 'layered_field_model_pbt' (376902987) panicked at crates/holon-integration-tests/tests/layered_field_model_pbt.rs:265:1:
+    Test failed: assertion `left == right` failed: sync did not propagate: OwnPage on B holds None stamped None after sync, not the newest replica Some(true) stamped Some((1, A))
+      left: (None, None)
+     right: (Some(true), Some((1, A))).
+    minimal failing input: (initial_state, transitions, seen_counter) = (
+        Gestures {
+            gained: false,
+            overridden: {},
+        },
+        [
+            Fold(
+                A,
+                OwnPage,
+            ),
+            Sync,
+        ],
+        None,
+    )
+    successes: 0
+    local rejects: 0
+    global rejects: 0
+
+
+  Cancelling due to test failure: 
+────────────
+     Summary [   0.089s] 1 test run: 0 passed, 1 failed, 0 skipped
+        FAIL [   0.088s] (1/1) holon-integration-tests::layered_field_model_pbt layered_field_model_pbt
+error: test run failed
+exit=100
+=== M18 sync clears the device layer
+     right: Some((true, Fallback))
+
+    thread 'layered_field_model_pbt' (376914123) panicked at crates/holon-integration-tests/tests/layered_field_model_pbt.rs:233:21:
+    assertion `left == right` failed: sync touched the device layer: IntegrationRow on A was Some((true, Fallback)), is None; the device layer never syncs
+      left: None
+     right: Some((true, Fallback))
+
+    thread 'layered_field_model_pbt' (376914123) panicked at crates/holon-integration-tests/tests/layered_field_model_pbt.rs:233:21:
+    assertion `left == right` failed: sync touched the device layer: IntegrationRow on A was Some((true, Fallback)), is None; the device layer never syncs
+      left: None
+     right: Some((true, Fallback))
+
+    thread 'layered_field_model_pbt' (376914123) panicked at crates/holon-integration-tests/tests/layered_field_model_pbt.rs:265:1:
+    Test failed: assertion `left == right` failed: sync touched the device layer: IntegrationRow on A was Some((true, Fallback)), is None; the device layer never syncs
+      left: None
+     right: Some((true, Fallback)).
+    minimal failing input: (initial_state, transitions, seen_counter) = (
+        Gestures {
+            gained: false,
+            overridden: {},
+        },
+        [
+            Fold(
+                A,
+                IntegrationRow,
+            ),
+            Sync,
+        ],
+        None,
+    )
+    successes: 0
+    local rejects: 0
+    global rejects: 0
+
+
+  Cancelling due to test failure: 
+────────────
+     Summary [   0.034s] 1 test run: 0 passed, 1 failed, 0 skipped
+        FAIL [   0.034s] (1/1) holon-integration-tests::layered_field_model_pbt layered_field_model_pbt
+error: test run failed
+exit=100

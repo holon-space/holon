@@ -1,0 +1,172 @@
+# Round-5 red log: the oracle read tier admission from the SUT, so three slot mutants and an inert HomeGainsField stayed green (FOLD-scope.a, holon-work#170).
+# M20/M21/M22 are the round-4 verifier's own mutants; M23 is mine. Each was green at 2000 cases before round 5.
+# Full gate: target/layers-r5/gate.log, script target/layers-r5/gate.sh.
+
+=== M20 integration home stores the field from boot
+    running 1 test
+    test layered_field_model_pbt ... FAILED
+
+    failures:
+
+    failures:
+        layered_field_model_pbt
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'layered_field_model_pbt' (377887742) panicked at crates/holon-integration-tests/tests/layered_field_model_pbt.rs:287:13:
+    assertion `left == right` failed: admission drift: the SUT's home of IntegrationRow disagrees with the gestures (home gained the field: false)
+      left: true
+     right: false
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+    thread 'layered_field_model_pbt' (377887742) panicked at crates/holon-integration-tests/tests/layered_field_model_pbt.rs:313:1:
+    Test failed: assertion `left == right` failed: admission drift: the SUT's home of IntegrationRow disagrees with the gestures (home gained the field: false)
+      left: true
+     right: false.
+    minimal failing input: (initial_state, transitions, seen_counter) = (
+        Gestures {
+            gained: false,
+            overridden: {},
+        },
+        [],
+        None,
+    )
+    successes: 0
+    local rejects: 0
+    global rejects: 0
+
+
+  Cancelling due to test failure: 
+────────────
+     Summary [   0.019s] 1 test run: 0 passed, 1 failed, 0 skipped
+        FAIL [   0.018s] (1/1) holon-integration-tests::layered_field_model_pbt layered_field_model_pbt
+error: test run failed
+exit=100
+=== M21 cook leaf admits a base write
+    running 1 test
+    test layered_field_model_pbt ... FAILED
+
+    failures:
+
+    failures:
+        layered_field_model_pbt
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'layered_field_model_pbt' (377888937) panicked at crates/holon-integration-tests/tests/layered_field_model_pbt.rs:287:13:
+    assertion `left == right` failed: admission drift: the SUT's home of CookLeaf disagrees with the gestures (home gained the field: false)
+      left: true
+     right: false
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+    thread 'layered_field_model_pbt' (377888937) panicked at crates/holon-integration-tests/tests/layered_field_model_pbt.rs:313:1:
+    Test failed: assertion `left == right` failed: admission drift: the SUT's home of CookLeaf disagrees with the gestures (home gained the field: false)
+      left: true
+     right: false.
+    minimal failing input: (initial_state, transitions, seen_counter) = (
+        Gestures {
+            gained: false,
+            overridden: {},
+        },
+        [],
+        None,
+    )
+    successes: 0
+    local rejects: 0
+    global rejects: 0
+
+
+  Cancelling due to test failure: 
+────────────
+     Summary [   0.018s] 1 test run: 0 passed, 1 failed, 0 skipped
+        FAIL [   0.017s] (1/1) holon-integration-tests::layered_field_model_pbt layered_field_model_pbt
+error: test run failed
+exit=100
+=== M22 own page admits no base write
+    running 1 test
+    test layered_field_model_pbt ... FAILED
+
+    failures:
+
+    failures:
+        layered_field_model_pbt
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'layered_field_model_pbt' (377890372) panicked at crates/holon-integration-tests/tests/layered_field_model_pbt.rs:287:13:
+    assertion `left == right` failed: admission drift: the SUT's home of OwnPage disagrees with the gestures (home gained the field: false)
+      left: false
+     right: true
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+    thread 'layered_field_model_pbt' (377890372) panicked at crates/holon-integration-tests/tests/layered_field_model_pbt.rs:313:1:
+    Test failed: assertion `left == right` failed: admission drift: the SUT's home of OwnPage disagrees with the gestures (home gained the field: false)
+      left: false
+     right: true.
+    minimal failing input: (initial_state, transitions, seen_counter) = (
+        Gestures {
+            gained: false,
+            overridden: {},
+        },
+        [],
+        None,
+    )
+    successes: 0
+    local rejects: 0
+    global rejects: 0
+
+
+  Cancelling due to test failure: 
+────────────
+     Summary [   0.017s] 1 test run: 0 passed, 1 failed, 0 skipped
+        FAIL [   0.016s] (1/1) holon-integration-tests::layered_field_model_pbt layered_field_model_pbt
+error: test run failed
+exit=100
+=== M23 home_gains_field is inert
+    thread 'layered_field_model_pbt' (377891421) panicked at crates/holon-integration-tests/tests/layered_field_model_pbt.rs:231:17:
+    home gained nothing: the gesture left the integration home refusing a base write
+
+    thread 'layered_field_model_pbt' (377891421) panicked at crates/holon-integration-tests/tests/layered_field_model_pbt.rs:231:17:
+    home gained nothing: the gesture left the integration home refusing a base write
+
+    thread 'layered_field_model_pbt' (377891421) panicked at crates/holon-integration-tests/tests/layered_field_model_pbt.rs:231:17:
+    home gained nothing: the gesture left the integration home refusing a base write
+
+    thread 'layered_field_model_pbt' (377891421) panicked at crates/holon-integration-tests/tests/layered_field_model_pbt.rs:231:17:
+    home gained nothing: the gesture left the integration home refusing a base write
+
+    thread 'layered_field_model_pbt' (377891421) panicked at crates/holon-integration-tests/tests/layered_field_model_pbt.rs:231:17:
+    home gained nothing: the gesture left the integration home refusing a base write
+
+    thread 'layered_field_model_pbt' (377891421) panicked at crates/holon-integration-tests/tests/layered_field_model_pbt.rs:231:17:
+    home gained nothing: the gesture left the integration home refusing a base write
+
+    thread 'layered_field_model_pbt' (377891421) panicked at crates/holon-integration-tests/tests/layered_field_model_pbt.rs:313:1:
+    Test failed: home gained nothing: the gesture left the integration home refusing a base write.
+    minimal failing input: (initial_state, transitions, seen_counter) = (
+        Gestures {
+            gained: false,
+            overridden: {},
+        },
+        [
+            HomeGainsField,
+        ],
+        None,
+    )
+    successes: 0
+    local rejects: 0
+    global rejects: 0
+
+
+  Cancelling due to test failure: 
+────────────
+     Summary [   0.078s] 1 test run: 0 passed, 1 failed, 0 skipped
+        FAIL [   0.078s] (1/1) holon-integration-tests::layered_field_model_pbt layered_field_model_pbt
+error: test run failed
+exit=100
