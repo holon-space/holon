@@ -337,6 +337,7 @@ Declared in the sources, claimed by no row above. A new transition or invariant 
 
 - `advice-dismiss-prod-session-row-missing`
 - `advice-gate-weave-row-missing`
+- `bad-render-quick-open`
 - `blur-rung-vacuous-no-cell-leg`
 - `bulk-add-sibling-order`
 - `catalog-advice-step6-weave-dismiss`
