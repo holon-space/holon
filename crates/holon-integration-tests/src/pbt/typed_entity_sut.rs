@@ -92,33 +92,39 @@ impl SutTypedEntityLoro for LoroTypedEntityReader {
         columns: Vec<String>,
     ) -> Vec<Vec<String>> {
         let scheme = holon_api::EntityName::new(type_name);
-        let doc = self.doc.doc();
-        let root = doc.get_map(format!("entity:{}", scheme.as_str()));
-        let entities = match root.get_deep_value() {
-            LoroValue::Map(m) => m,
-            other => panic!("the type root map read as {other:?}"),
-        };
-        let mut rows: Vec<Vec<String>> = entities
-            .iter()
-            .filter_map(|(key, entity)| {
-                let fields = match entity {
+        let mut rows: Vec<Vec<String>> = self
+            .doc
+            .with_read(|doc| {
+                let root = doc.get_map(format!("entity:{}", scheme.as_str()));
+                let entities = match root.get_deep_value() {
                     LoroValue::Map(m) => m,
-                    other => panic!("entity {key:?} of '{type_name}' holds {other:?}, not a map"),
+                    other => panic!("the type root map read as {other:?}"),
                 };
-                if fields.get(TOMBSTONE).is_some_and(|v| !v.is_null()) {
-                    return None;
-                }
-                Some(
-                    columns
-                        .iter()
-                        .map(|c| match c.as_str() {
-                            "id" => format!("{}:{key}", scheme.as_str()),
-                            c => fields.get(c).map(cell).unwrap_or_default(),
-                        })
-                        .collect(),
-                )
+                Ok(entities
+                    .iter()
+                    .filter_map(|(key, entity)| {
+                        let fields = match entity {
+                            LoroValue::Map(m) => m,
+                            other => {
+                                panic!("entity {key:?} of '{type_name}' holds {other:?}, not a map")
+                            }
+                        };
+                        if fields.get(TOMBSTONE).is_some_and(|v| !v.is_null()) {
+                            return None;
+                        }
+                        Some(
+                            columns
+                                .iter()
+                                .map(|c| match c.as_str() {
+                                    "id" => format!("{}:{key}", scheme.as_str()),
+                                    c => fields.get(c).map(cell).unwrap_or_default(),
+                                })
+                                .collect(),
+                        )
+                    })
+                    .collect())
             })
-            .collect();
+            .unwrap_or_else(|e| panic!("reading the '{type_name}' entity root: {e:#}"));
         rows.sort();
         rows
     }
