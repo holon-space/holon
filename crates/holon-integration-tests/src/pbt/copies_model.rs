@@ -150,6 +150,7 @@ impl ReferenceState {
                 | "DeleteHeadlineWhileOff"
                 | "RebootWithBacklogHeld"
                 | "RebootAfterUpgrade"
+                | "CrashRestart"
         );
         let base_forgotten = self.files.copies.values().any(|copy| !copy.base_known);
         check(

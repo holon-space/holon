@@ -234,6 +234,16 @@ impl CutPasteFinish {
     pub const ALL: [CutPasteFinish; 2] = [Self::SourceSaved, Self::CopyDeletedFromTarget];
 }
 
+/// An external editor retitles `block`'s headline while no session is up —
+/// what a user does to a file after the app died. `disk_text` is the title the
+/// file carries, so the headline is found even in a file without ids.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RetitleWhileDown {
+    pub block: holon_api::EntityUri,
+    pub disk_text: String,
+    pub text: String,
+}
+
 /// One edit an external editor saves into an org file. A block's headline is
 /// found by its `:ID:` drawer, or by its title `disk_text` when the file holds
 /// no id for it.

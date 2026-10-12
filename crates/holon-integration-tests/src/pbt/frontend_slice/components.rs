@@ -240,6 +240,18 @@ pub enum RebootGap {
     /// The database records another scalar-function set, as one an older
     /// binary built does.
     FunctionSetChanged,
+    /// The app dies with `doc`'s write-back still owed: the store holds the
+    /// edit, the file does not, and the churn that stalled the write ends with
+    /// the process. What the next boot meets is the whole point — a file behind
+    /// its store.
+    ///
+    /// The death is modelled by the production teardown REFUSING (it reports
+    /// the unwritten files); the dying process's tasks are still stopped, so a
+    /// crash that leaves an actor mid-write is out of reach here.
+    Crashed {
+        doc: EntityUri,
+        retitle: Option<holon_pbt_core::types::RetitleWhileDown>,
+    },
 }
 
 /// Make `db_path` record a scalar-function set no binary registers.
@@ -1234,7 +1246,14 @@ impl HeadlessFrontendComponent {
             RebootGap::Nothing
             | RebootGap::EpochFlipRejected
             | RebootGap::BacklogHeld
-            | RebootGap::FunctionSetChanged => None,
+            | RebootGap::FunctionSetChanged
+            | RebootGap::Crashed { .. } => None,
+        };
+        // Same reason: the doc's file path is only resolvable while a session
+        // holds the store, and the churn is disarmed after the crash.
+        let crashed_file = match &between {
+            RebootGap::Crashed { doc, .. } => Some(self.doc_file(doc, "reboot/crashed").await),
+            _ => None,
         };
 
         // Drop CDC consumers before the actor goes away (mirrors
@@ -1257,9 +1276,16 @@ impl HeadlessFrontendComponent {
         // The production teardown: the session's watchers stop, THEN the store
         // closes. Calling it here is what makes this transition a reboot rather
         // than a store yanked out from under a live session.
-        holon_app::shutdown_session(&old.injector)
-            .await
-            .unwrap_or_else(|e| panic!("[reboot] session shutdown failed: {e:#}"));
+        let crashed = matches!(between, RebootGap::Crashed { .. });
+        if let Err(e) = holon_app::shutdown_session(&old.injector).await {
+            // A crash's teardown refuses on the files it could not write — that
+            // refusal IS the crash. Any other failure is a bug.
+            let refusal = format!("{e:#}");
+            assert!(
+                crashed && refusal.contains("refused the org write-back"),
+                "[reboot] session shutdown failed: {refusal}"
+            );
+        }
         let dead = Arc::downgrade(&old);
         drop(old);
         assert!(
@@ -1280,6 +1306,22 @@ impl HeadlessFrontendComponent {
                     loro_enabled,
                 )
                 .await;
+            }
+            RebootGap::Crashed { ref retitle, .. } => {
+                const SEAM: &str = "reboot/crashed";
+                let path = crashed_file.as_ref().expect("resolved before shutdown");
+                // The process that churned the file died with the app.
+                self.store.org_fs.disarm_write_churn(path);
+                if let Some(retitle) = retitle {
+                    let disk = self.read_vault_file(path, SEAM).await;
+                    let edited = headline_retitled(
+                        &disk,
+                        &self.resolve_id(&retitle.block),
+                        &retitle.disk_text,
+                        &retitle.text,
+                    );
+                    self.write_org_file(path, &edited, SEAM).await;
+                }
             }
             RebootGap::DeleteHeadline { .. } => {
                 let cut = headline_cut.as_ref().expect("resolved before shutdown");
@@ -1356,6 +1398,14 @@ impl HeadlessFrontendComponent {
         // and every post-reboot oracle would be comparing against a doubled
         // vault while still passing its own shape checks. Assert the identity
         // here, where the two sets are both in hand.
+        //
+        // A crash restart is the exception: the boot legitimately re-ingests a
+        // file that is behind its store, so what the block set becomes is the
+        // CATALOG's question (`inv-blocks-match-ref` against the model), not a
+        // harness assert that would mask the answer.
+        if crashed {
+            return;
+        }
         let removed: std::collections::BTreeSet<String> = match &headline_cut {
             None => Default::default(),
             Some(cut) => {
@@ -5277,18 +5327,21 @@ impl holon_pbt_core::capabilities::SutWriteFaults for HeadlessFrontendComponent 
         const SEAM: &str = "external_file_edit";
         let path = self.doc_file(doc, SEAM).await;
         let disk = self.read_vault_file(&path, SEAM).await;
+        if let ExternalFileEdit::EditLine {
+            block,
+            disk_text,
+            text,
+        } = edit
+        {
+            let edited = headline_retitled(&disk, &self.resolve_id(block), disk_text, text);
+            self.write_org_file_and_await_ingest(&path, &edited, SEAM)
+                .await;
+            self.settle_block_ids_stable(Duration::from_secs(5)).await;
+            return;
+        }
         let mut lines: Vec<&str> = disk.lines().collect();
-        let replaced;
         match edit {
-            ExternalFileEdit::EditLine {
-                block,
-                disk_text,
-                text,
-            } => {
-                let at = headline_of(&lines, &self.resolve_id(block), disk_text, &disk);
-                replaced = format!("{} {text}", "*".repeat(headline_level(lines[at])));
-                lines[at] = &replaced;
-            }
+            ExternalFileEdit::EditLine { .. } => unreachable!("handled above"),
             ExternalFileEdit::DeleteLine { block, disk_text } => {
                 let at = headline_of(&lines, &self.resolve_id(block), disk_text, &disk);
                 let level = headline_level(lines[at]);
@@ -5335,6 +5388,20 @@ impl holon_pbt_core::capabilities::SutWriteFaults for HeadlessFrontendComponent 
             .await;
         self.settle_block_ids_stable(Duration::from_secs(5)).await;
     }
+}
+
+/// `disk`, with the headline of `block` (its `:ID:` drawer, or the title
+/// `disk_text` in a file without ids) retitled to `text`.
+fn headline_retitled(disk: &str, block: &EntityUri, disk_text: &str, text: &str) -> String {
+    let mut lines: Vec<&str> = disk.lines().collect();
+    let at = headline_of(&lines, block, disk_text, disk);
+    let replaced = format!("{} {text}", "*".repeat(headline_level(lines[at])));
+    lines[at] = &replaced;
+    let mut edited = lines.join("\n");
+    if disk.ends_with('\n') {
+        edited.push('\n');
+    }
+    edited
 }
 
 fn is_headline(line: &str) -> bool {
@@ -5908,6 +5975,18 @@ impl SutAppLifecycle for HeadlessFrontendComponent {
 
     async fn reboot_with_backlog_held(&self) {
         self.reboot_through(RebootGap::BacklogHeld).await;
+    }
+
+    async fn crash_restart(
+        &self,
+        doc: &EntityUri,
+        retitle_while_down: Option<&holon_pbt_core::types::RetitleWhileDown>,
+    ) {
+        self.reboot_through(RebootGap::Crashed {
+            doc: doc.clone(),
+            retitle: retitle_while_down.cloned(),
+        })
+        .await;
     }
 
     async fn reboot_after_upgrade(&self) {

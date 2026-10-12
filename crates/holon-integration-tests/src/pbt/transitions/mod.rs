@@ -106,6 +106,7 @@ mod break_ingested_recipe;
 pub mod bulk_external_add;
 pub mod click_block;
 mod concurrent_schema_init;
+mod crash_restart;
 mod create_block_under_focus;
 mod create_directory;
 mod create_document;
@@ -225,6 +226,7 @@ pub use break_ingested_recipe::BreakIngestedRecipe;
 pub use bulk_external_add::BulkExternalAdd;
 pub use click_block::ClickBlock;
 pub use concurrent_schema_init::ConcurrentSchemaInit;
+pub use crash_restart::CrashRestart;
 pub use create_block_under_focus::CreateBlockUnderFocus;
 pub use create_directory::CreateDirectory;
 pub use create_document::CreateDocument;
@@ -389,6 +391,7 @@ crate::declare_e2e_transitions! {
         RebuildViews(RebuildViews),
         EpochFlipRejected(EpochFlipRejected),
         RebootWithBacklogHeld(RebootWithBacklogHeld),
+        CrashRestart(CrashRestart),
         RebootAfterUpgrade(RebootAfterUpgrade),
         ReleaseBacklog(ReleaseBacklog),
         DeleteHeadlineWhileOff(DeleteHeadlineWhileOff),
@@ -769,6 +772,7 @@ mod required_caps_guard {
         one!(DeleteHeadlineWhileOff, lc::SutAppLifecycle);
         one!(SecondWriterRefused, lc::SutAppLifecycle);
         one!(Reboot, lc::SutAppLifecycle);
+        one!(CrashRestart, lc::SutAppLifecycle);
         one!(SimulateRestart, lc::SutAppLifecycle);
         one!(StartApp, lc::SutAppLifecycle);
 

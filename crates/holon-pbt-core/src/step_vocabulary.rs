@@ -706,6 +706,17 @@ step_field_via_json!(
         crate::types::ExternalFileEdit::StripDocId,
     ]
 );
+step_field_via_json!(
+    Option<crate::types::RetitleWhileDown>,
+    vec![
+        None,
+        Some(crate::types::RetitleWhileDown {
+            block: holon_api::EntityUri::block("blk-a"),
+            disk_text: "old".to_string(),
+            text: "new".to_string(),
+        }),
+    ]
+);
 step_field_via_json!(Vec<u64>, vec![Vec::new(), vec![60, 40, 20]]);
 step_field_via_json!(
     holon_api::KeyChord,

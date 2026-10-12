@@ -4122,6 +4122,15 @@ pub trait SutAppLifecycle {
     /// [`Self::reboot`], with every read of a read-only (`.cook`) file held
     /// from the shutdown on, so the boot's read-only backlog cannot move.
     async fn reboot_with_backlog_held(&self);
+    /// The app DIES with `doc`'s write-back still owed — the store holds the
+    /// edit, `doc`'s file does not — and boots again over that behind file,
+    /// optionally with an external editor retitling a headline in the dead
+    /// app's absence.
+    async fn crash_restart(
+        &self,
+        doc: &holon_api::EntityUri,
+        retitle_while_down: Option<&crate::types::RetitleWhileDown>,
+    );
     /// [`Self::reboot`] into a binary whose scalar-function set differs from
     /// the one that built the database: an ordinary upgrade.
     async fn reboot_after_upgrade(&self);

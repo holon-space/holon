@@ -2369,6 +2369,7 @@ impl ComposedSlice for WideE2E {
                 | E2ETransition::DeleteHeadlineWhileOff(_)
                 | E2ETransition::RebootWithBacklogHeld(_)
                 | E2ETransition::RebootAfterUpgrade(_)
+                | E2ETransition::CrashRestart(_)
         )
     }
 
@@ -2386,6 +2387,10 @@ impl ComposedSlice for WideE2E {
             E2ETransition::EpochFlipRejected(_) => RebootGap::EpochFlipRejected,
             E2ETransition::RebootWithBacklogHeld(_) => RebootGap::BacklogHeld,
             E2ETransition::RebootAfterUpgrade(_) => RebootGap::FunctionSetChanged,
+            E2ETransition::CrashRestart(t) => RebootGap::Crashed {
+                doc: t.doc.clone(),
+                retitle: t.retitle_while_down.clone(),
+            },
             E2ETransition::DeleteHeadlineWhileOff(t) => RebootGap::DeleteHeadline {
                 block_id: t.block_id.clone(),
                 doc: t.doc.clone(),
