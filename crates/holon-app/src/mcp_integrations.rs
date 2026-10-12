@@ -685,6 +685,9 @@ impl IntegrationSupervisor {
             let config = config.clone();
             let cancelled = self.shutdown.cancelled();
             let bus = self.bus.clone();
+            let shutdown = self.shutdown.clone();
+            let db = self.db.clone();
+            let attribution = self.attribution.clone();
             let panicked = name.clone();
             self.shutdown.spawn_disclosing_panic(
                 format!("integration-connect:{name}"),
@@ -696,13 +699,24 @@ impl IntegrationSupervisor {
                     }
                 },
                 move |panic| {
+                    let cause = format!("its connect task panicked: {panic}");
                     bus.emit(Condition {
                         subject: panicked.clone(),
                         reason: ConditionKind::IntegrationConnectFailed {
-                            integration: panicked,
-                            error: format!("its connect task panicked: {panic}"),
+                            integration: panicked.clone(),
+                            error: cause.clone(),
                         },
-                    })
+                    });
+                    shutdown.spawn(format!("integration-unavailable:{panicked}"), async move {
+                        record_status(
+                            &db,
+                            &attribution,
+                            &panicked,
+                            IntegrationStatus::Unavailable,
+                            &cause,
+                        )
+                        .await;
+                    });
                 },
             );
         }
@@ -906,9 +920,51 @@ impl IntegrationSupervisor {
         integration
             .register_entity_types(&self.type_registry)
             .with_context(|| format!("registering the entity types of '{name}'"))?;
-        for table in &integration.fdw_backed_tables {
-            engine.register_fdw_table(table).await;
+
+        // Every refusal comes before the first effect: the dispatcher is
+        // append-only, so an operation routed before a failure stays routed.
+        let dispatcher = engine.get_dispatcher();
+        let connector: Arc<dyn OperationProvider> =
+            Arc::new(ConnectedOperations(integration.clone()));
+        dispatcher
+            .check_provider(connector.as_ref())
+            .map_err(|e| anyhow::anyhow!("registering the operations of '{name}': {e}"))?;
+        let connector_serves: std::collections::HashSet<EntityName> = connector
+            .operations()
+            .into_iter()
+            .map(|op| op.entity_name)
+            .collect();
+        let mut derived = Vec::new();
+        for type_def in self.type_registry.all() {
+            if type_def.owning_integration() != Some(name) {
+                continue;
+            }
+            let deriving = |e: Box<dyn std::error::Error + Send + Sync>| {
+                anyhow::anyhow!(
+                    "deriving the write authority of '{}', mirrored by '{name}': {e}",
+                    type_def.name
+                )
+            };
+            let authority = holon::core::type_declaration::derived_write_authority(
+                &type_def,
+                &holon::core::type_declaration::SqlTypeWriteAuthority(self.db.clone()),
+                |entity| {
+                    dispatcher.has_provider(entity)
+                        || connector_serves.contains(&EntityName::new(entity))
+                },
+            )
+            .map_err(deriving)?;
+            if let Some(authority) = authority {
+                dispatcher
+                    .check_provider(authority.as_ref())
+                    .map_err(deriving)?;
+                derived.push((type_def, authority));
+            }
         }
+        anyhow::ensure!(
+            !integration.sync_event_task.is_finished(),
+            "the sync loop of '{name}' has stopped, so it cannot take its initial sync"
+        );
         for grain in &integration.clock_grains {
             engine.hold_clock_grain(*grain).await.with_context(|| {
                 format!(
@@ -917,28 +973,28 @@ impl IntegrationSupervisor {
                 )
             })?;
         }
+
+        for table in &integration.fdw_backed_tables {
+            engine.register_fdw_table(table).await;
+        }
         engine
             .add_matview_hook(integration.sync_engine.clone() as Arc<dyn holon_core::MatviewHook>)
             .await;
-
-        let dispatcher = engine.get_dispatcher();
         dispatcher
-            .register_provider(Arc::new(ConnectedOperations(integration.clone())))
+            .register_provider(connector)
             .map_err(|e| anyhow::anyhow!("registering the operations of '{name}': {e}"))?;
-        for type_def in self.type_registry.all() {
-            if type_def.owning_integration() == Some(name) {
-                holon::core::type_declaration::derive_write_authority(
-                    &type_def,
-                    &holon::core::type_declaration::SqlTypeWriteAuthority(self.db.clone()),
-                    &dispatcher,
+        for (type_def, authority) in derived {
+            holon::core::type_declaration::install_write_authority(
+                &type_def,
+                authority,
+                &dispatcher,
+            )
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "deriving the write authority of '{}', mirrored by '{name}': {e}",
+                    type_def.name
                 )
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "deriving the write authority of '{}', mirrored by '{name}': {e}",
-                        type_def.name
-                    )
-                })?;
-            }
+            })?;
         }
         if let Err(e) = self.register_list(&dispatcher, name, &integration) {
             warn!("[IntegrationSupervisor] Provider '{name}' runs without its remote list: {e:#}");
@@ -1812,6 +1868,237 @@ for line in sys.stdin:
         health.record(true);
         if let Err(seen) = status_reaches(&db, PROVIDER, IntegrationStatus::Connected).await {
             panic!("a successful batch must recover the row to `Connected` — got {seen:?}");
+        }
+    }
+
+    /// A sidecar that answers the connect and lists one tool, `rename-item`.
+    fn one_tool_sidecar() -> (String, Vec<String>) {
+        let script = r#"
+import sys, json
+tool = {"name": "rename-item", "description": "",
+        "inputSchema": {"type": "object",
+                        "properties": {"id": {"type": "string"}, "title": {"type": "string"}}}}
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    msg = json.loads(line)
+    if msg.get("id") is None:
+        continue
+    result = {
+        "initialize": {"protocolVersion": "2025-03-26",
+                       "capabilities": {"tools": {}, "resources": {}},
+                       "serverInfo": {"name": "one-tool", "version": "0"}},
+        "tools/list": {"tools": [tool]},
+        "resources/templates/list": {"resourceTemplates": []},
+    }.get(msg.get("method"), {})
+    sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": result}) + "\n")
+    sys.stdout.flush()
+"#;
+        (
+            "/usr/bin/python3".to_string(),
+            vec!["-c".to_string(), script.to_string()],
+        )
+    }
+
+    /// A connected integration that fails to go live leaves no operation in
+    /// the dispatcher. Its row reads `Unavailable`, and the dispatcher is
+    /// append-only, so an operation routed before the failure stays routed.
+    ///
+    /// The failure is the last fallible step of going live: a sync loop that
+    /// is gone (a panicked batch, in a build that unwinds) refuses the initial
+    /// sync.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_integration_that_cannot_go_live_routes_no_operation() {
+        const PROVIDER: &str = "half-live";
+        const ENTITY: &str = "halflive_items";
+        let home = tempfile::tempdir().expect("a temp dir");
+        let (engine, type_registry) = bare_engine(home.path()).await;
+        let db = engine.db_handle().clone();
+        let (command, args) = one_tool_sidecar();
+        let built = build_mcp_integration(
+            holon_mcp_client::McpIntegrationConfig {
+                provider_name: PROVIDER.to_string(),
+                transport: holon_mcp_client::McpTransport::ChildProcess {
+                    command,
+                    args,
+                    env: HashMap::new(),
+                },
+                sidecar_yaml: format!(
+                    "schema_version: {}\ndisplay_name: \"Half Live\"\nentities:\n  {ENTITY}:\n    \
+                     id_column: id\n    schema:\n      - {{ name: id, sql_type: TEXT, primary_key: \
+                     true }}\n      - {{ name: title, sql_type: TEXT }}\ntools:\n  rename-item:\n    \
+                     entity: {ENTITY}\n    effect: idempotent\n    affected_fields: [title]\n",
+                    holon_mcp_client::SIDECAR_SCHEMA_VERSION
+                ),
+                auth_mode: holon_mcp_client::AuthMode::None,
+            },
+            db.clone(),
+            Arc::new(holon::di::DbHandleCacheFactory::new(db.clone())),
+            Arc::new(NoopTokenStore) as Arc<dyn SyncTokenStore>,
+            &PendingOAuthFlows::new(),
+            SyncGate::opened(),
+        )
+        .await
+        .expect("a sidecar that answers the connect connects");
+        let holon_mcp_client::McpConnectionResult::Connected(integration) = built else {
+            panic!("a sidecar that answers initialize and both enumerations must connect");
+        };
+        assert!(
+            integration
+                .operation_provider
+                .operations()
+                .iter()
+                .any(|op| op.entity_name == EntityName::new(ENTITY)),
+            "the connector must serve '{ENTITY}', or a dispatcher without it proves nothing"
+        );
+        integration.sync_event_task.abort();
+        while !integration.sync_event_task.is_finished() {
+            tokio::task::yield_now().await;
+        }
+
+        let supervisor = bare_supervisor(
+            home.path(),
+            &engine,
+            type_registry,
+            Vec::new(),
+            Arc::new(holon_secrets::InMemoryKeychainStore::new()),
+        );
+
+        let err = supervisor
+            .go_live(&engine, PROVIDER, None, Arc::new(integration))
+            .await
+            .expect_err("an integration whose sync loop is gone cannot take its initial sync");
+        assert!(
+            !engine.get_dispatcher().has_provider(ENTITY),
+            "going live failed ({err:#}), yet the dispatcher routes '{ENTITY}' for an \
+             integration whose row reads Unavailable"
+        );
+    }
+
+    /// An engine with no frontend module, and its type registry.
+    async fn bare_engine(home: &Path) -> (Arc<BackendEngine>, Arc<TypeRegistry>) {
+        holon::di::create_backend_engine_with_extras(
+            home.join("supervisor.db"),
+            Arc::new(ConditionBus::new()),
+            |_| Ok(()),
+            |injector| async move { injector.resolve::<TypeRegistry>() },
+        )
+        .await
+        .expect("the engine builds")
+    }
+
+    /// A supervisor over `engine` for `configs`, with the integrations
+    /// directory `home`.
+    fn bare_supervisor(
+        home: &Path,
+        engine: &BackendEngine,
+        type_registry: Arc<TypeRegistry>,
+        configs: Vec<(String, IntegrationFileConfig)>,
+        keychain: Arc<dyn holon_secrets::KeychainStore>,
+    ) -> IntegrationSupervisor {
+        let db = engine.db_handle().clone();
+        let store = Arc::new(IntegrationConfigStore::load(home).expect("the store loads"));
+        IntegrationSupervisor {
+            configs: Arc::new(configs),
+            superseded: Arc::new(Vec::new()),
+            ignored: Arc::new(Vec::new()),
+            inert: Arc::new(Vec::new()),
+            refused: Arc::new(Vec::new()),
+            settings_vm: Arc::new(IntegrationsSettingsVm::new(
+                store,
+                CredentialRoot::new(home),
+            )),
+            credential_root: CredentialRoot::new(home),
+            pending_flows: Arc::new(PendingOAuthFlows::new()),
+            pending_writes: Arc::new(PendingWriteStore::new()),
+            db: db.clone(),
+            type_write_authority: Arc::new(holon::core::type_declaration::SqlTypeWriteAuthority(
+                db.clone(),
+            )),
+            attribution: IntegrationAttribution::new(),
+            bus: Arc::new(ConditionBus::new()),
+            shutdown: Arc::new(SessionShutdown::new()),
+            cache_factory: Arc::new(holon::di::DbHandleCacheFactory::new(db)),
+            token_store: Arc::new(NoopTokenStore),
+            type_registry,
+            sync_gate: SyncGate::opened(),
+            keychain,
+            holon_config: Arc::new(holon_frontend::config::HolonConfig::default()),
+            started: AtomicBool::new(false),
+            connected: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// A keychain whose backend panics on every read.
+    struct PanickingKeychain;
+
+    impl holon_secrets::KeychainStore for PanickingKeychain {
+        fn store(&self, _: &str, _: &[u8]) -> anyhow::Result<()> {
+            unreachable!("connecting stores no secret")
+        }
+        fn load(&self, account: &str) -> anyhow::Result<Option<Vec<u8>>> {
+            panic!("the keychain backend panicked reading '{account}'")
+        }
+        fn delete(&self, _: &str) -> anyhow::Result<()> {
+            unreachable!("connecting deletes no secret")
+        }
+    }
+
+    /// A connect task that panics serves nothing for the rest of the session,
+    /// so the integration's row must read `Unavailable`, not `Connecting`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_panicked_connect_marks_the_integration_unavailable() {
+        const PROVIDER: &str = "panicky";
+        let home = tempfile::tempdir().expect("a temp dir");
+        std::fs::write(
+            home.path().join(format!("{PROVIDER}.yaml")),
+            format!(
+                "schema_version: {}\ndisplay_name: \"Panicky\"\ntransport:\n  child_process:\n    \
+                 command: /usr/bin/python3\n    args: [\"${{PANICKY_PROBE_ARG}}\"]\n\
+                 entities: {{}}\ntools: {{}}\n",
+                holon_mcp_client::SIDECAR_SCHEMA_VERSION
+            ),
+        )
+        .expect("install the connection");
+        let store = IntegrationConfigStore::load(home.path()).expect("the store loads");
+        store
+            .set(
+                PROVIDER,
+                holon_mcp_client::integration_state::IntegrationState {
+                    enabled: true,
+                    configuration: holon_mcp_client::integration_state::Configuration::Unconfigured,
+                },
+            )
+            .expect("enable the connection");
+        let loaded =
+            load_integration_configs(home.path(), &store, &CredentialRoot::new(home.path()))
+                .expect("the integrations directory loads");
+        assert!(
+            loaded.configs.iter().any(|(name, _)| name == PROVIDER),
+            "'{PROVIDER}' must be enabled with a config, or its connect never runs: {:?}",
+            loaded.ignored
+        );
+
+        let (engine, type_registry) = bare_engine(home.path()).await;
+        let db = engine.db_handle().clone();
+        holon_turso::schema_module::SchemaModule::ensure_schema(
+            &holon_turso::schema_modules::IntegrationStateSchemaModule,
+            &db,
+        )
+        .await
+        .expect("the integration mirror");
+        let supervisor = Arc::new(bare_supervisor(
+            home.path(),
+            &engine,
+            type_registry,
+            loaded.configs,
+            Arc::new(PanickingKeychain),
+        ));
+        supervisor.start(engine.clone()).await;
+
+        if let Err(seen) = status_reaches(&db, PROVIDER, IntegrationStatus::Unavailable).await {
+            panic!("a connect task that panicked serves nothing, yet the row reads {seen:?}");
         }
     }
 }

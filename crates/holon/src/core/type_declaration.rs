@@ -127,20 +127,37 @@ pub fn derive_write_authority(
     authority: &dyn TypeWriteAuthority,
     dispatcher: &OperationDispatcher,
 ) -> Result<()> {
+    match derived_write_authority(type_def, authority, |entity| {
+        dispatcher.has_provider(entity)
+    })? {
+        Some(authority) => install_write_authority(type_def, authority, dispatcher),
+        None => Ok(()),
+    }
+}
+
+/// The write authority [`derive_write_authority`] gives `type_def`, built but
+/// not registered; `None` when it gives none. `served` says whether an entity
+/// already has a writer.
+pub fn derived_write_authority(
+    type_def: &TypeDefinition,
+    authority: &dyn TypeWriteAuthority,
+    served: impl Fn(&str) -> bool,
+) -> Result<Option<Arc<dyn OperationProvider>>> {
     if !crate::di::schema_providers::is_free_standing(type_def) {
-        return Ok(());
+        return Ok(None);
     }
     if let Some(provider) = type_def.owning_integration()
-        && dispatcher.has_provider(&type_def.name)
+        && served(&type_def.name)
     {
         tracing::info!(
             "[derive_write_authority] '{}' mirrors integration '{provider}', which already holds \
              its write authority — deriving none",
             type_def.name
         );
-        return Ok(());
+        return Ok(None);
     }
-    register_write_authority(type_def, authority, dispatcher)
+    require_declarable(type_def)?;
+    Ok(Some(authority.for_type(type_def)?))
 }
 
 /// Give an already-serialized type its write authority.
@@ -231,7 +248,9 @@ impl TypeWriteAuthority for SqlTypeWriteAuthority {
     }
 }
 
-fn install_write_authority(
+/// Register `provider` as `type_def`'s write authority, then check that it
+/// writes it.
+pub fn install_write_authority(
     type_def: &TypeDefinition,
     provider: Arc<dyn OperationProvider>,
     dispatcher: &OperationDispatcher,
