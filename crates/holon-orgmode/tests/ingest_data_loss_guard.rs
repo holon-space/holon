@@ -1071,7 +1071,7 @@ async fn a_vault_that_cannot_store_a_merge_base_still_ingests_and_discloses_the_
     let ingested = controller.on_file_changed(&path).await;
     std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-    ingested.expect("a vault Holon cannot write must still ingest");
+    let _ = ingested.expect("a vault Holon cannot write must still ingest");
     assert!(
         store.holds_block("first-block"),
         "the ingest reported success but nothing of the file reached the store"
@@ -1096,7 +1096,7 @@ async fn a_file_recreated_at_the_same_path_does_not_resurrect_the_old_bases_cont
     std::fs::write(&path, PLAIN_SOURCE).unwrap();
     {
         let mut first = controller_over(&store, &root);
-        first
+        let _ = first
             .on_file_changed(&path)
             .await
             .expect("the file ingests");
@@ -1118,7 +1118,7 @@ async fn a_file_recreated_at_the_same_path_does_not_resurrect_the_old_bases_cont
 
     let mut booted = controller_over(&store, &root);
     booted.initialize().await.expect("cold boot");
-    booted
+    let _ = booted
         .on_file_changed(&path)
         .await
         .expect("the re-created file ingests");
