@@ -8,6 +8,7 @@ use holon::api::types::Traversal;
 use holon::storage::BLOCK_READ_TABLE;
 use holon_api::Block;
 use holon_api::Change;
+use holon_api::ContentType;
 use holon_api::EdgeField;
 use holon_api::EntityName;
 use holon_api::EntityUri;
@@ -905,7 +906,8 @@ async fn read_back(
             let children = service
                 .execute_raw_sql(
                     &format!(
-                        "SELECT id FROM {BLOCK_READ_TABLE} WHERE parent_id = '{}' ORDER BY sort_key",
+                        "SELECT id FROM {BLOCK_READ_TABLE} WHERE parent_id = '{}' \
+                         AND content_type = 'text' ORDER BY sort_key",
                         parent.replace('\'', "''")
                     ),
                     HashMap::new(),
@@ -1582,10 +1584,13 @@ fn held_mismatches(
                 ));
                 continue;
             }
+            // A dense text holds one row per TEXT block, so `after` names a text
+            // sibling; the body/source children an org file renders before the
+            // child headings are not rows and never precede one.
             let siblings: Vec<&str> = held
                 .blocks
                 .iter()
-                .filter(|b| b.parent_id.as_str() == want)
+                .filter(|b| b.parent_id.as_str() == want && b.content_type == ContentType::Text)
                 .map(|b| b.id.as_str())
                 .collect();
             let at = siblings
