@@ -21,6 +21,7 @@ use holon_pbt_core::capabilities::RefBlockTree;
 use holon_pbt_core::capabilities::RefFocus;
 use holon_pbt_core::capabilities::RefFocusRoots;
 use holon_pbt_core::capabilities::RefLayout;
+use holon_pbt_core::capabilities::RefLayoutInteract;
 use holon_pbt_core::capabilities::RefLifecycle;
 use holon_pbt_core::capabilities::RefReadOnlyHomes;
 use holon_pbt_core::capabilities::RefTaskState;
@@ -109,6 +110,7 @@ impl<
         + RefFocusRoots
         + RefBlockTree
         + RefLayout
+        + RefLayoutInteract
         + RefTaskState
         + RefTaskStateToggle
         + RefReadOnlyHomes,
@@ -173,6 +175,7 @@ impl<
         + RefFocusRoots
         + RefBlockTree
         + RefLayout
+        + RefLayoutInteract
         + RefTaskState
         + RefTaskStateToggle
         + RefReadOnlyHomes,
@@ -234,6 +237,15 @@ impl<
             // cycle (D46), so there is nothing to click.
             check(
                 !state.read_only_homed_blocks().contains(&self.block_id),
+                Reason::StateToggleNotApplicable,
+            ),
+            // A `decision` block's task keyword IS its status: rule B4 admits
+            // only `?`, DONE and CANCELLED there, while a click walks the
+            // document's ring ("", TODO, DOING, DONE) — so every target is
+            // refused outright or reachable only through refused clicks.
+            // `EditDecisionSubtree` owns that keyword (holon-work#183).
+            check(
+                !state.block_has_tag(&self.block_id, holon_api::decision_block::DECISION_TAG),
                 Reason::StateToggleNotApplicable,
             ),
             // A shrink can drop the transition that set the current state.
@@ -336,6 +348,49 @@ mod cycle_click_count_tests {
             "same-state click_count is 0 (full cycle would also work); generator excludes this \
              case"
         );
+    }
+
+    /// A `decision` block's task keyword IS its status, and rule B4 admits only
+    /// `?`, `DONE` and `CANCELLED` there — while a `state_toggle` click walks
+    /// the owning document's ring (`""`, TODO, DOING, DONE). So every target is
+    /// either refused outright (B4 at click #1) or reachable only through
+    /// refused intermediate clicks: `ToggleState` can never own this block's
+    /// keyword, `EditDecisionSubtree` writes it. holon-work#183.
+    #[test]
+    fn no_cycle_target_is_offered_on_a_decision_block() {
+        use holon_api::EntityUri;
+        use holon_api::Region;
+        use holon_pbt_core::TransitionRef;
+        use holon_pbt_core::capabilities::RefTaskStateToggle;
+
+        use super::ToggleState;
+        use crate::pbt::composed::wide_e2e::wide_e2e_ref;
+        use crate::pbt::transitions::NavigateFocus;
+
+        let mut state = wide_e2e_ref();
+        let decision = EntityUri::block("kd-1");
+        NavigateFocus {
+            region: Region::Main,
+            block_id: EntityUri::block("decision-page"),
+        }
+        .apply_to_ref(&mut state);
+
+        assert!(
+            state.rendered_state_toggle_ids().contains(&decision),
+            "non-vacuity: production paints a state_toggle on the decision row, so the \
+             generator's candidate pool must offer it (pool: {:?})",
+            state.rendered_state_toggle_ids()
+        );
+        for target in CycleTarget::ALL {
+            let t = ToggleState {
+                block_id: decision.clone(),
+                new_state: target,
+            };
+            assert!(
+                TransitionRef::preconditions(&t, &state).is_fail(),
+                "{target:?} on the decision block must be refused by the preconditions"
+            );
+        }
     }
 
     #[test]
