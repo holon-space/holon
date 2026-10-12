@@ -44,6 +44,7 @@ const EXPECTED_ANALYZABLE: &[&str] = &[
     "op:block.rehome_entity",
     "op:block.set_field",
     "op:block.split_block",
+    "op:type-table.drop_refused_table",
     "op:type.declare_type",
     "rule:block:journals::action::0",
 ];

@@ -1714,6 +1714,10 @@ where
     #[holon_macros::emits("block.collapsed", "block.widget_only")]
     #[holon_macros::emits("block.content_type", "block.properties")]
     #[holon_macros::emits("block.source_language", "block.source_name")]
+    // The minted row is seeded through `create`, so its whole column set is
+    // written — `block_type` included, even though the split never chooses a
+    // value other than the origin's.
+    #[holon_macros::emits("block.block_type")]
     #[holon_macros::emits(excluded("block.after_block_id", "a positional anchor, not a column"))]
     #[holon_macros::marking_delta(block(structural = produces, text = produces, existence = produces))]
     async fn split_block(&self, id: &EntityUri, position: i64) -> Result<OperationResult> {
