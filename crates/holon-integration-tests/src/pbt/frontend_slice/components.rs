@@ -5116,12 +5116,16 @@ impl SutSeamMutate for HeadlessFrontendComponent {
         let bare = self.resolve_id(block_id).id().to_string();
         let path = self.doc_file(copy_doc, SEAM).await;
         let disk = self.read_vault_file(&path, SEAM).await;
-        let keywords: Vec<&str> = holon_pbt_core::types::TASK_STATE_CYCLE
+        // The editor replaces whichever keyword the FILE's vocabulary admits, not
+        // only the three this transition can set: a headline headed by any other
+        // default keyword (CANCELLED, LATER, …) would otherwise keep it, folded
+        // into the title, and every further edit folds one more (issue #186).
+        // `candidates` only offers copies in a page that declares no `#+TODO:`,
+        // so the defaults ARE that vocabulary.
+        let vocabulary = crate::pbt::generators::model_default_vocabulary().all_keywords();
+        let keywords: Vec<&str> = vocabulary
             .iter()
-            .copied()
-            .chain(std::iter::once(
-                holon_org_format::task_keyword::QUESTION_KEYWORD,
-            ))
+            .map(String::as_str)
             .filter(|k| !k.is_empty())
             .collect();
         let edited =
