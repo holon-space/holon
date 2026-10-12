@@ -52,3 +52,25 @@ test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; 
         FAIL [  19.769s] (1/1) holon-gpui::gpui_composed_windowed_loop focused_task_block_shows_its_keyword_surface
 error: test run failed
 EXIT=100
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MUTANT RED (same pin, FIXED oracle, projection read disabled)
+#
+# base:    the fix + `if s.widget_kind == "editable_text" && false` in
+#          crates/holon-integration-tests/src/pbt/invariants/bodies/displayed_text.rs
+#          (the oracle falls back to the content column for the editable surface)
+# profile: test, same command as above
+# verdict: red for the right reason — the pre-fix signature returns, now on the
+#          TODO keyword the pin's first ToggleState sets, so the oracle's strictness
+#          comes from the projection and not from a widened comparison.
+
+reconciled composed sequence diverged from the oracle: [("inv-displayed-text/widget", "[inv-displayed-text/widget] 1 text widget(s) show stale content at the widget/geometry layer. ...\n  editable_text@block=block:parent\n    shown:    \"TODO parent\"\n    expected: \"parent\"")]
+     Summary [  20.834s] 1 test run: 0 passed, 1 failed, 2 skipped
+EXIT=100
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GREEN (the fix, unmutated)
+#      Summary [  35.516s] 1 test run: 1 passed, 2 skipped / EXIT=0
+# Windowed composed loop at its gate budget (4 cases):
+#      PASS-WITH-NOTE — 8 known-red panics (windowed-splitblock-no-editable-surface),
+#      0 novel, 0 collateral; no inv-displayed-text divergence.

@@ -8,7 +8,11 @@
 //!
 //! - `/widget` — the on-screen geometry string (`SutLayout::rendered_elements`,
 //!   the `FrontendBounds` layer). Includes the active editor, whose on-screen
-//!   value is the live `InputState`. GPUI suite only.
+//!   value is the live `InputState`. An `editable_text` widget — which a
+//!   focused row paints whether or not an editor buffer is open on it — shows
+//!   the SOURCE surface, so it is compared against the reference's editor
+//!   surface (task keyword + inline markup), not the content column. GPUI suite
+//!   only.
 //! - `/viewmodel` — the resolved `content` prop in the frontend-agnostic
 //!   ViewModel tree (`SutRenderer::widget_tree_snapshot`, the `ViewModel`
 //!   layer), available headless too.
@@ -46,8 +50,11 @@ pub struct TextMismatch {
 /// Compare each sample's text against the reference and return the divergences.
 ///
 /// Expected text per block: the live editor text for the block currently being
-/// edited, the committed block content otherwise. A sample whose block the
-/// reference doesn't know (e.g. a non-block column binding) is skipped.
+/// edited, else whatever `expected_text` says the layer must show for that
+/// sample — which is per-SAMPLE, not per-block, because the two surfaces of one
+/// block differ (`rendered_text` shows the content column, `editable_text`
+/// shows the source projection). A sample whose block the reference doesn't
+/// know (e.g. a non-block column binding) is skipped.
 ///
 /// `skip_active` excludes the actively-edited block entirely. The ViewModel arm
 /// sets this: the live, uncommitted `InputState` value is a widget/editor-layer
@@ -58,7 +65,7 @@ pub fn compare_text_to_ref(
     samples: &[TextSample],
     active_block: Option<&EntityUri>,
     active_text: Option<&str>,
-    block_content: impl Fn(&EntityUri) -> Option<String>,
+    expected_text: impl Fn(&TextSample) -> Option<String>,
     skip_active: bool,
 ) -> Vec<TextMismatch> {
     let mut out = Vec::new();
@@ -70,7 +77,7 @@ pub fn compare_text_to_ref(
         let expected = if is_active {
             active_text.map(str::to_string)
         } else {
-            block_content(&s.entity_id)
+            expected_text(s)
         };
         let Some(expected) = expected else {
             continue;
@@ -121,7 +128,7 @@ mod tests {
             &samples,
             None,
             None,
-            |id| (id == &uri("block:a")).then(|| "hello".to_string()),
+            |s| (s.entity_id == uri("block:a")).then(|| "hello".to_string()),
             false,
         );
         assert!(m.is_empty());
@@ -173,6 +180,44 @@ mod tests {
             m.is_empty(),
             "viewmodel arm must skip the active editor block"
         );
+    }
+
+    #[test]
+    fn editable_surface_and_rendered_text_of_one_block_expect_different_strings() {
+        // The whole point of the per-SAMPLE expectation: one block shows its
+        // source surface in `editable_text` and its content column everywhere
+        // else, and both are right at the same time.
+        let samples = vec![
+            sample("editable_text", "block:a", "TODO x"),
+            sample("rendered_text", "block:a", "x"),
+        ];
+        let m = compare_text_to_ref(
+            &samples,
+            None,
+            None,
+            |s| {
+                Some(match s.widget_kind.as_str() {
+                    "editable_text" => "TODO x".to_string(),
+                    _ => "x".to_string(),
+                })
+            },
+            false,
+        );
+        assert!(m.is_empty(), "both surfaces of one block must pass");
+    }
+
+    #[test]
+    fn a_keyword_prefix_does_not_excuse_stale_text() {
+        let samples = vec![sample("editable_text", "block:a", "TODO stale")];
+        let m = compare_text_to_ref(
+            &samples,
+            None,
+            None,
+            |_| Some("TODO fresh".to_string()),
+            false,
+        );
+        assert_eq!(m.len(), 1, "the prefix is predicted, not tolerated");
+        assert_eq!(m[0].displayed, "TODO stale");
     }
 
     #[test]

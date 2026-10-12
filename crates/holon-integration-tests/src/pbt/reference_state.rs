@@ -1544,7 +1544,7 @@ impl ReferenceState {
         // content AND task state, the content channel writes one column.
         let id = super::ref_caps::cap_id(&block_id);
         let surface = {
-            use holon_pbt_core::capabilities::RefBlockTreeMut;
+            use holon_pbt_core::capabilities::RefBlockTree;
             self.editor_surface_text(&id)
         };
         if surface == in_memory {
@@ -1619,7 +1619,7 @@ impl ReferenceState {
         // A clean editor re-seeds from the AUTHORITY AS THE SURFACE SHOWS IT —
         // vault syntax — because that is what prod's convergence targets.
         let new_content = {
-            use holon_pbt_core::capabilities::RefBlockTreeMut;
+            use holon_pbt_core::capabilities::RefBlockTree;
             let id = super::ref_caps::cap_id(block_id);
             self.editor_surface_text(&id)
         };

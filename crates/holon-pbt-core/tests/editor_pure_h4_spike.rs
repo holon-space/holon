@@ -136,6 +136,10 @@ impl RefBlockTree for EditorPureRef {
     fn block_content(&self, id: &EntityUri) -> Option<&str> {
         self.blocks.get(id).map(|b| b.content.as_str())
     }
+    /// No task state is modelled here, so the editable surface is the content.
+    fn editor_surface_text(&self, id: &EntityUri) -> String {
+        self.block_content(id).unwrap_or_default().to_string()
+    }
     fn is_text_block(&self, id: &EntityUri) -> bool {
         self.blocks.get(id).is_some_and(|b| b.is_text)
     }

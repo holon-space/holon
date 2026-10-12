@@ -129,6 +129,9 @@ impl RefBlockTree for NullRef {
     fn block_content(&self, id: &EntityUri) -> Option<&str> {
         panic!("class-2: invariant read RefBlockTree::block_content")
     }
+    fn editor_surface_text(&self, id: &EntityUri) -> String {
+        panic!("class-2: invariant read RefBlockTree::editor_surface_text")
+    }
     fn is_text_block(&self, id: &EntityUri) -> bool {
         panic!("class-2: invariant read RefBlockTree::is_text_block")
     }

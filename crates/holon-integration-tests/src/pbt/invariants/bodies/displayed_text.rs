@@ -113,10 +113,21 @@ where
             &samples,
             ref_.active_editor_block().as_ref(),
             ref_.active_editor_text(),
-            |id| {
-                ref_.is_text_block(id)
-                    .then(|| ref_.block_content(id).map(str::to_string))
-                    .flatten()
+            |s| {
+                if !ref_.is_text_block(&s.entity_id) {
+                    return None;
+                }
+                // A focused row paints `editable_text`, whose `InputState` is
+                // the SOURCE surface (`"{keyword} {content}"` plus inline
+                // markup) even with no editor buffer open on it; every other
+                // text widget paints the content column. Both come from the
+                // reference's own projection, so a stale or wrong string still
+                // fails — the keyword prefix is predicted, not tolerated.
+                if s.widget_kind == "editable_text" {
+                    Some(ref_.editor_surface_text(&s.entity_id))
+                } else {
+                    ref_.block_content(&s.entity_id).map(str::to_string)
+                }
             },
             // The geometry layer is the on-screen truth: the active editor's
             // live `InputState` value is checked here, not skipped.
@@ -191,9 +202,9 @@ where
             &samples,
             ref_.active_editor_block().as_ref(),
             ref_.active_editor_text(),
-            |id| {
-                ref_.is_text_block(id)
-                    .then(|| ref_.block_content(id).map(str::to_string))
+            |s| {
+                ref_.is_text_block(&s.entity_id)
+                    .then(|| ref_.block_content(&s.entity_id).map(str::to_string))
                     .flatten()
             },
             // The actively-edited block's uncommitted text lives in InputState,

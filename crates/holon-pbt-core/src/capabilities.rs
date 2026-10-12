@@ -342,6 +342,35 @@ pub trait RefBlockTree {
     /// `SutSqlProjection::all_block_ids()` for set-equality drift
     /// detection at the storage layer.
     fn all_non_seed_block_ids(&self) -> BTreeSet<EntityUri>;
+
+    /// What an EDITABLE surface on `id` shows: the block's vault syntax
+    /// (`TODO ~code~`) — the org SOURCE its `(content, marks)` pair
+    /// reconstructs, under the task-keyword projection.
+    ///
+    /// The editable surface is a projection, not the content column, so every
+    /// modelled editor seed AND the `/widget` text oracle read it here — a
+    /// focused row paints `editable_text`, so the surface is on screen whether
+    /// or not an editor buffer is open on it. A reference that models neither
+    /// task state nor marks answers with the content, which is exactly right
+    /// for it.
+    ///
+    /// REQUIRED, not default-bodied: `#[capmap_adapter]` skips provided
+    /// methods, so a default here would make every composed invariant read the
+    /// content column instead of the real oracle's projection.
+    fn editor_surface_text(&self, id: &EntityUri) -> String;
+
+    /// [`Self::editor_surface_text`] WITHOUT the task keyword — the org source
+    /// alone.
+    ///
+    /// The two differ by exactly the keyword prefix, which is the only part of
+    /// the surface that is not org source and therefore the only part a caret
+    /// crosses by subtraction; the markup delta underneath it is crossed by an
+    /// offset map instead (`surface_caret_to_content`). Deriving that prefix as
+    /// `surface.len() - content.len()` instead swallows the markup delta and
+    /// splits at the wrong byte.
+    fn editor_source_text(&self, id: &EntityUri) -> String {
+        self.block_content(id).unwrap_or_default().to_string()
+    }
 }
 
 /// Steps the visible-outline descent may take before it is treated as a cycle.
@@ -494,30 +523,6 @@ pub trait RefBlockTreeMut: RefBlockTree {
     /// prod's wrong answer and cannot convict it.
     fn block_task_vocabulary(&self, _: &EntityUri) -> holon_org_format::TaskKeywordVocabulary {
         holon_org_format::TaskKeywordVocabulary::default()
-    }
-
-    /// What an editor OPENED on `id` shows: the block's vault syntax
-    /// (`TODO ~code~`) — the org SOURCE its `(content, marks)` pair
-    /// reconstructs, under the task-keyword projection.
-    ///
-    /// The editable surface is a projection, not the content column, so every
-    /// modelled editor seed reads it here. A reference that models neither task
-    /// state nor marks answers with the content, which is exactly right for it.
-    fn editor_surface_text(&self, id: &EntityUri) -> String {
-        self.block_content(id).unwrap_or_default().to_string()
-    }
-
-    /// [`Self::editor_surface_text`] WITHOUT the task keyword — the org source
-    /// alone.
-    ///
-    /// The two differ by exactly the keyword prefix, which is the only part of
-    /// the surface that is not org source and therefore the only part a caret
-    /// crosses by subtraction; the markup delta underneath it is crossed by an
-    /// offset map instead (`surface_caret_to_content`). Deriving that prefix as
-    /// `surface.len() - content.len()` instead swallows the markup delta and
-    /// splits at the wrong byte.
-    fn editor_source_text(&self, id: &EntityUri) -> String {
-        self.block_content(id).unwrap_or_default().to_string()
     }
 
     /// Commit an editor buffer through the SOURCE channel: parse `source` under

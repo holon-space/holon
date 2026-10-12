@@ -29,6 +29,10 @@ impl RefBlockTree for CyclicRef {
     fn block_content(&self, _: &EntityUri) -> Option<&str> {
         Some("")
     }
+    /// No task state is modelled here, so the editable surface is the content.
+    fn editor_surface_text(&self, id: &EntityUri) -> String {
+        self.block_content(id).unwrap_or_default().to_string()
+    }
     fn is_text_block(&self, _: &EntityUri) -> bool {
         true
     }

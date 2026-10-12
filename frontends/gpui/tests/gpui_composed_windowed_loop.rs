@@ -281,25 +281,37 @@ fn general_e2e_composed_pbt_windowed() {
 /// keep `inv-displayed-text/widget` green against that surface — not against
 /// the bare `content` column.
 ///
-/// `kd-1` seeds as `? Which store holds the decision?`; the four
-/// `ToggleState`s walk the whole production cycle (TODO, DOING, DONE, cleared)
-/// with the editor seated on it, so every keyword state is observed on screen.
+/// The four `ToggleState`s walk the whole production cycle (cleared, TODO,
+/// DOING, DONE) on the focused default-page block, so every keyword state is
+/// observed on screen; navigating to `decision-page` then adds the `?` keyword,
+/// which `kd-1` seeds as `? Which store holds the decision?` (the `decision`
+/// type's rule B4 admits only `?`/DONE/CANCELLED there, so the cycle runs on
+/// the plain block).
 #[test]
 fn focused_task_block_shows_its_keyword_surface() {
     let out: RefCell<Option<String>> = RefCell::new(None);
     with_windowed_wide_sut(|sut, _default_oracle, sink| {
         let oracle = wide_e2e_windowed_ref(narrow_to_windowed_alphabet(sut.cap_set()));
-        let kd1 = EntityUri::block("kd-1");
-        let mut transitions = vec![E2ETransition::NavigateFocus(NavigateFocus {
+        // Keyword states first: `Clear` on the already-stateless block would be
+        // a no-op toggle, which the driver refuses.
+        let mut transitions: Vec<E2ETransition> = [
+            CycleTarget::Todo,
+            CycleTarget::Doing,
+            CycleTarget::Done,
+            CycleTarget::Clear,
+        ]
+        .into_iter()
+        .map(|new_state| {
+            E2ETransition::ToggleState(ToggleState {
+                block_id: EntityUri::block("parent"),
+                new_state,
+            })
+        })
+        .collect();
+        transitions.push(E2ETransition::NavigateFocus(NavigateFocus {
             region: Region::Main,
             block_id: EntityUri::block("decision-page"),
-        })];
-        for new_state in CycleTarget::ALL {
-            transitions.push(E2ETransition::ToggleState(ToggleState {
-                block_id: kd1.clone(),
-                new_state,
-            }));
-        }
+        }));
         drive_windowed_case(sut, oracle, transitions, None, &out, sink)
     });
     if let Some(msg) = out.into_inner() {

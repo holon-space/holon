@@ -143,6 +143,9 @@ mod tests {
         fn block_content(&self, _: &EntityUri) -> Option<&str> {
             None
         }
+        fn editor_surface_text(&self, _: &EntityUri) -> String {
+            unreachable!("this stub holds no text blocks")
+        }
         fn is_text_block(&self, _: &EntityUri) -> bool {
             false
         }

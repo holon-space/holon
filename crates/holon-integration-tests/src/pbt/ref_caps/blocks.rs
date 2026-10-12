@@ -245,6 +245,43 @@ impl RefBlockTree for ReferenceState {
             .map(cap_id)
             .collect()
     }
+
+    /// The editable surface is a SOURCE projection (F2-arm=d): it shows the org
+    /// syntax the stored pair reconstructs, `~code~` delimiters and all.
+    /// Seeding the stripped label instead would show markup-free text that is
+    /// still styled, and hand every caret offset to a column that does not have
+    /// those bytes.
+    fn editor_source_text(&self, id: &EntityUri) -> String {
+        let marks = self
+            .domain
+            .block_state
+            .blocks
+            .get(&parse_id_must(id))
+            .and_then(|b| b.marks.clone())
+            .unwrap_or_default();
+        holon_org_format::render_inline_marks(self.block_content(id).unwrap_or_default(), &marks)
+    }
+
+    fn editor_surface_text(&self, id: &EntityUri) -> String {
+        let rendered = self.editor_source_text(id);
+        let content: &str = &rendered;
+        let keyword = self.block_task_state(id);
+        let state = keyword
+            .as_deref()
+            .filter(|k| !k.is_empty())
+            .map(holon_api::TaskState::from_keyword);
+        match holon_org_format::source_projection(
+            state.as_ref(),
+            content,
+            &self.block_task_vocabulary(id),
+        ) {
+            holon_org_format::SourceProjection::Text(text) => text,
+            // The SUT refuses the same projection and shows stored content, so
+            // the model does too — a divergence here would be the model's, not
+            // the SUT's.
+            holon_org_format::SourceProjection::Refused(_) => content.to_string(),
+        }
+    }
 }
 
 // ─── RefBlockTreeMut ──────────────────────────────────────────────────
@@ -368,43 +405,6 @@ impl RefBlockTreeMut for ReferenceState {
     fn refresh_clean_editor_surface(&mut self, id: &EntityUri) {
         let uri = parse_id_must(id);
         self.refresh_clean_active_editor(&uri);
-    }
-
-    /// The editable surface is a SOURCE projection (F2-arm=d): it shows the org
-    /// syntax the stored pair reconstructs, `~code~` delimiters and all.
-    /// Seeding the stripped label instead would show markup-free text that is
-    /// still styled, and hand every caret offset to a column that does not have
-    /// those bytes.
-    fn editor_source_text(&self, id: &EntityUri) -> String {
-        let marks = self
-            .domain
-            .block_state
-            .blocks
-            .get(&parse_id_must(id))
-            .and_then(|b| b.marks.clone())
-            .unwrap_or_default();
-        holon_org_format::render_inline_marks(self.block_content(id).unwrap_or_default(), &marks)
-    }
-
-    fn editor_surface_text(&self, id: &EntityUri) -> String {
-        let rendered = self.editor_source_text(id);
-        let content: &str = &rendered;
-        let keyword = self.block_task_state(id);
-        let state = keyword
-            .as_deref()
-            .filter(|k| !k.is_empty())
-            .map(holon_api::TaskState::from_keyword);
-        match holon_org_format::source_projection(
-            state.as_ref(),
-            content,
-            &self.block_task_vocabulary(id),
-        ) {
-            holon_org_format::SourceProjection::Text(text) => text,
-            // The SUT refuses the same projection and shows stored content, so
-            // the model does too — a divergence here would be the model's, not
-            // the SUT's.
-            holon_org_format::SourceProjection::Refused(_) => content.to_string(),
-        }
     }
 
     fn commit_editor_source(&mut self, id: &EntityUri, source: &str) {
