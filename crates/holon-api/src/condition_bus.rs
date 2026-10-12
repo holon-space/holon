@@ -667,18 +667,13 @@ pub enum ConditionKind {
     ///
     /// All-clear: none in this process.
     ClockNotRunning { error: String },
-    /// An integration's sidecar declares a datatype whose `home` cannot carry
-    /// it (CV-E), so the whole integration is refused at load: nothing of it
-    /// is built, registered or synced. `subject` is the datatype; `field` is
-    /// absent when the refused site is the type's own home.
+    /// An integration's sidecar declares datatypes whose `home` cannot carry
+    /// them (CV-E), so the whole integration is refused at load: nothing of it
+    /// is built, registered or synced. `subject` is the integration; `types`
+    /// lists every refused datatype.
     ///
     /// All-clear: none in this process; the sidecar has to change.
-    IntegrationTypeRefused {
-        integration: String,
-        field: Option<String>,
-        home: String,
-        reason: String,
-    },
+    IntegrationTypeRefused { types: Vec<RefusedType> },
 }
 
 /// Subject of the device-wide conditions on this bus, which have no share to
@@ -869,6 +864,17 @@ impl ConditionKind {
             Self::ClockNotRunning { .. } => Self::CLOCK_NOT_RUNNING,
         }
     }
+}
+
+/// One sidecar datatype a home cannot carry, as
+/// [`ConditionKind::IntegrationTypeRefused`] lists it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RefusedType {
+    pub type_name: String,
+    /// `None` when the refused site is the type's own home.
+    pub field: Option<String>,
+    pub home: String,
+    pub reason: String,
 }
 
 /// One vault file a format adapter refused, and the adapter's error.

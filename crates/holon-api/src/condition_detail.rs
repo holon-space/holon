@@ -381,21 +381,27 @@ impl ConditionKind {
                 vec![refusal.text.clone(), refusal.reason.clone()],
             ),
 
-            Self::IntegrationTypeRefused {
-                integration,
-                field,
-                home,
-                reason,
-            } => ConditionDetail::with_body(
+            Self::IntegrationTypeRefused { types } => ConditionDetail::with_body(
                 format!(
-                    "integration {integration} is not running: its datatype {subject}{} names \
-                     home `{home}`, which cannot carry it. Fix the sidecar and restart:",
-                    field
-                        .as_ref()
-                        .map(|f| format!(" (field `{f}`)"))
-                        .unwrap_or_default()
+                    "integration {subject} is not running: {} of its datatypes name a home that \
+                     cannot carry them. Fix the sidecar and restart:",
+                    types.len()
                 ),
-                vec![reason.clone()],
+                types
+                    .iter()
+                    .map(|t| {
+                        format!(
+                            "{}{} (home `{}`): {}",
+                            t.type_name,
+                            t.field
+                                .as_ref()
+                                .map(|f| format!(" field `{f}`"))
+                                .unwrap_or_default(),
+                            t.home,
+                            t.reason
+                        )
+                    })
+                    .collect(),
             ),
 
             // The paths are BODY lines: the user opens one of them to delete a

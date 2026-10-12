@@ -526,17 +526,21 @@ fn refuse_inadmissible(
 }
 
 fn disclose_refused_integration(r: &RefusedIntegration, bus: &ConditionBus) {
-    for refusal in &r.refusals {
-        bus.emit(Condition {
-            subject: refusal.type_name.clone(),
-            reason: ConditionKind::IntegrationTypeRefused {
-                integration: r.provider.clone(),
-                field: refusal.field.clone(),
-                home: refusal.home.clone(),
-                reason: refusal.reason.clone(),
-            },
-        });
-    }
+    bus.emit(Condition {
+        subject: r.provider.clone(),
+        reason: ConditionKind::IntegrationTypeRefused {
+            types: r
+                .refusals
+                .iter()
+                .map(|t| holon_api::condition_bus::RefusedType {
+                    type_name: t.type_name.clone(),
+                    field: t.field.clone(),
+                    home: t.home.clone(),
+                    reason: t.reason.clone(),
+                })
+                .collect(),
+        },
+    });
 }
 
 /// A `${VAR}` resolution still running after this long is waiting on the
