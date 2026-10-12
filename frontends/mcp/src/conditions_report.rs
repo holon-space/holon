@@ -187,16 +187,16 @@ mod tests {
         let bus = ConditionBus::new();
         bus.emit(Condition {
             subject: "todoist".to_string(),
-            reason: ConditionKind::IntegrationNeedsAuth {
+            reason: ConditionKind::IntegrationConnectionEnded {
                 integration: "todoist".to_string(),
-                auth_url: "https://example.invalid/authorize?token=abcdef".to_string(),
+                reason: "https://example.invalid/authorize?token=abcdef".to_string(),
             },
         });
 
         let text = report(Some(&bus));
         assert!(
             text.contains("| https://example.invalid/authorize?token=abcdef"),
-            "a URL the user must open is never truncated: text={text}"
+            "a body line is never truncated: text={text}"
         );
     }
 

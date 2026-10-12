@@ -208,15 +208,10 @@ impl ConditionKind {
                  keychain prompt to let it connect"
             )),
 
-            Self::IntegrationNeedsAuth {
-                integration,
-                auth_url,
-            } => ConditionDetail::with_body(
-                format!(
-                    "{integration} needs authorizing. Open, then restart Holon after the grant:"
-                ),
-                vec![auth_url.clone()],
-            ),
+            Self::IntegrationNeedsAuth { integration, .. } => ConditionDetail::prose(format!(
+                "{integration} needs a sign-in that this build cannot complete yet. Switch the \
+                 integration off (Settings > Integrations) to remove this message."
+            )),
 
             Self::IntegrationSidecarSuperseded {
                 integration,
@@ -814,26 +809,28 @@ mod tests {
         }
     }
 
-    /// The grant does not take effect in-session, so the text must say when it
-    /// does.
+    /// The in-session grant does not exist yet, so the text must not promise
+    /// one and must name the one thing the user can do.
     #[test]
-    fn needs_auth_tells_the_user_to_restart_holon_after_the_grant() {
+    fn needs_auth_says_the_sign_in_cannot_complete_and_names_the_off_switch() {
         let detail = needs_auth().detail("linear");
-        assert!(
-            detail.headline.contains("restart Holon after the grant"),
-            "{}",
-            detail.headline
+        assert_eq!(
+            detail.headline,
+            "linear needs a sign-in that this build cannot complete yet. Switch the integration \
+             off (Settings > Integrations) to remove this message."
         );
-        assert_eq!(detail.body, vec!["https://linear.app/oauth".to_string()]);
+        assert!(detail.body.is_empty(), "{:?}", detail.body);
     }
 
-    /// Keeps the restart text truthful: nothing in this process clears the
-    /// condition.
+    /// Keeps the text truthful: switching the integration off is the event
+    /// that clears the condition.
     #[test]
-    fn nothing_in_session_clears_needs_auth() {
+    fn switching_the_integration_off_clears_needs_auth() {
         assert_eq!(
             needs_auth().profile().all_clear(),
-            crate::condition_profile::AllClear::UntilRestart
+            crate::condition_profile::AllClear::NextSuccessOf(
+                crate::condition_profile::ClearingEvent::IntegrationSwitchedOff
+            )
         );
     }
 }

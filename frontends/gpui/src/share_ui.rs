@@ -3003,7 +3003,7 @@ mod tests {
             Some(ConditionKind::INTEGRATION_NEEDS_AUTH)
         );
         assert!(s.toasts[0].detail.contains("linear"));
-        assert!(s.toasts[0].detail.contains("https://linear.app/oauth"));
+        assert!(s.toasts[0].detail.contains("Settings > Integrations"));
     }
 
     /// The supersede toast is the ONLY place a user learns that the file they

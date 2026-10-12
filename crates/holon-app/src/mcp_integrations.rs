@@ -367,6 +367,29 @@ fn disclose_needs_auth(name: &str, auth_url: &str, bus: &ConditionBus) {
     });
 }
 
+/// Clear `name`'s needs-authorization condition once `state` reports the
+/// integration switched off: the sign-in cannot complete in this build, so
+/// switching off is the only way the user can resolve it.
+async fn clear_needs_auth_when_switched_off<S>(name: String, state: S, bus: Arc<ConditionBus>)
+where
+    S: futures_signals::signal::Signal<
+            Item = holon_mcp_client::integration_state::IntegrationState,
+        >,
+{
+    use futures::StreamExt;
+    use futures_signals::signal::SignalExt;
+    let mut states = std::pin::pin!(state.to_stream());
+    while let Some(s) = states.next().await {
+        if !s.enabled {
+            break;
+        }
+    }
+    bus.clear(&ConditionKey {
+        subject: name,
+        kind: ConditionKind::INTEGRATION_NEEDS_AUTH,
+    });
+}
+
 /// Disclose that an installed sidecar was ignored in favour of the bundled
 /// one. The integration works, so nothing else in the boot path would ever say
 /// that the file on disk is not what is running.
@@ -762,10 +785,30 @@ impl IntegrationSupervisor {
                      integration's tables would never be marked"
                 );
                 disclose_needs_auth(&name, &auth_url, &self.bus);
+                let (_, state) = self
+                    .settings_vm
+                    .signals()
+                    .into_iter()
+                    .find(|(provider, _)| provider.to_string() == name)
+                    .unwrap_or_else(|| panic!("provider '{name}' has no state cell"));
+                let cancelled = self.shutdown.cancelled();
+                let clear = clear_needs_auth_when_switched_off(
+                    name.clone(),
+                    state.signal_cloned(),
+                    self.bus.clone(),
+                );
+                self.shutdown
+                    .spawn(format!("needs-auth-clear:{name}"), async move {
+                        tokio::select! {
+                            biased;
+                            () = cancelled => {}
+                            () = clear => {}
+                        }
+                    });
                 self.record_status(
                     &name,
                     IntegrationStatus::NeedsAuth,
-                    &format!("sign in at {auth_url}"),
+                    "needs a sign-in that this build cannot complete yet",
                 )
                 .await;
             }
@@ -1452,6 +1495,40 @@ mod tests {
         };
         assert_eq!(integration, "linear");
         assert_eq!(auth_url, "https://linear.app/oauth/authorize");
+    }
+
+    /// The user's only remedy for a sign-in this build cannot complete is to
+    /// switch the integration off; that must remove the message.
+    #[tokio::test(flavor = "current_thread")]
+    async fn switching_a_needs_auth_integration_off_clears_its_condition() {
+        use futures_signals::signal::Mutable;
+        use holon_mcp_client::integration_state::Configuration;
+        use holon_mcp_client::integration_state::IntegrationState;
+
+        let bus = Arc::new(ConditionBus::new());
+        disclose_needs_auth("linear", "https://linear.app/oauth/authorize", &bus);
+        let state = Mutable::new(IntegrationState {
+            enabled: true,
+            configuration: Configuration::Unconfigured,
+        });
+        let watcher = tokio::spawn(clear_needs_auth_when_switched_off(
+            "linear".to_string(),
+            state.signal_cloned(),
+            bus.clone(),
+        ));
+
+        tokio::task::yield_now().await;
+        assert_eq!(bus.subscribe().current.len(), 1, "still enabled: stays");
+
+        state.set(IntegrationState {
+            enabled: false,
+            configuration: Configuration::Unconfigured,
+        });
+        tokio::time::timeout(Duration::from_secs(5), watcher)
+            .await
+            .expect("the watcher ends once the integration is off")
+            .expect("the watcher does not panic");
+        assert!(bus.subscribe().current.is_empty());
     }
 
     struct NoopTokenStore;

@@ -216,8 +216,9 @@ pub enum ConditionKind {
     /// is a user action, so it carries the authorization URL.
     /// `subject` carries the integration name.
     ///
-    /// All-clear: a restart after the grant. The grant does not take effect in
-    /// process, so nothing in a session clears it.
+    /// All-clear: the integration being switched off. No grant can complete in
+    /// this build (no handler for the OAuth callback), so switching off is the
+    /// only remedy.
     IntegrationNeedsAuth {
         integration: String,
         auth_url: String,

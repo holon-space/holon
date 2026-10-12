@@ -119,6 +119,7 @@ pub enum ClearingEvent {
     WritebackRespawn,
     IntegrationConnect,
     IntegrationKeychainRead,
+    IntegrationSwitchedOff,
     PairReimport,
     ProfileLoad,
     WrittenHashRecord,
@@ -486,7 +487,7 @@ const INTEGRATION_NEEDS_AUTH: ConditionProfile = ConditionProfile::new(
     "Integration needs authorization",
     icons::BLOCKED,
     ConditionPlacement::Toast,
-    AllClear::UntilRestart,
+    AllClear::NextSuccessOf(ClearingEvent::IntegrationSwitchedOff),
     &[],
 );
 
