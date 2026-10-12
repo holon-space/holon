@@ -1,0 +1,31 @@
+warning: Cargo.toml: unused manifest key: profile.coverage.package.*.pathfinder_simd
+warning: Cargo.toml: unused manifest key: profile.coverage.package.*.psm
+warning: workspace (manifest) generated 2 warnings
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 20s
+     Running tests/capmap_forwards_provided.rs (target/debug/build/holon-pbt-core/b98a187ab16dea65/out/capmap_forwards_provided-b98a187ab16dea65)
+
+running 2 tests
+test capmap_forwards_a_provided_sync_method_to_the_provider ... FAILED
+test capmap_forwards_a_provided_async_method_to_the_provider ... FAILED
+
+failures:
+
+---- capmap_forwards_a_provided_sync_method_to_the_provider stdout ----
+
+thread 'capmap_forwards_a_provided_sync_method_to_the_provider' (378815765) panicked at crates/holon-pbt-core/tests/capmap_forwards_provided.rs:66:5:
+CapMap answered the trait DEFAULT (false) for a provided method; the registered provider says true — an invariant reading this cap through the map observes a fake
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- capmap_forwards_a_provided_async_method_to_the_provider stdout ----
+
+thread 'capmap_forwards_a_provided_async_method_to_the_provider' (378815764) panicked at crates/holon-pbt-core/tests/capmap_forwards_provided.rs:82:5:
+CapMap answered the trait DEFAULT (false) for a provided async method; the registered provider says true
+
+
+failures:
+    capmap_forwards_a_provided_async_method_to_the_provider
+    capmap_forwards_a_provided_sync_method_to_the_provider
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p holon-pbt-core --test capmap_forwards_provided`
