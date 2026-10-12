@@ -7902,16 +7902,26 @@ impl FileSyncController {
         );
         let hash = self.note_projection_hash(canonical, hash);
         // The base goes to disk BEFORE the row that vouches for its hash.
-        let base_hash = self
+        let stored = self
             .base_sidecars
             .put(&EntityUri::file(&rel_path.to_string_lossy()), projection)
-            .await
-            .with_context(|| {
-                format!(
-                    "store the merge base of {}",
-                    canonical.as_path_buf().display()
-                )
-            })?;
+            .await;
+        let base_hash = match stored {
+            Ok(base_hash) => base_hash,
+            // A vault Holon may read but not write still ingests (the
+            // boot-always directive): the row records NO base, which the
+            // ingest treats as missing, and the risk is disclosed.
+            Err(e) => {
+                if let Some(disclosure) = &self.writeback_disclosure {
+                    disclosure.writeback_degraded(&format!(
+                        "{}: the merge base could not be stored ({e}), so a restart while this \
+                         file is behind may lose an edit",
+                        rel_path.display()
+                    ));
+                }
+                String::new()
+            }
+        };
         self.write_file_row(
             canonical,
             rel_path,

@@ -986,3 +986,150 @@ async fn recorded_base(
         .expect("reading the merge base sidecar")
         .unwrap_or_default()
 }
+
+/// Records the degradation signal; every other signal is irrelevant here.
+#[derive(Default)]
+struct Degradations(Mutex<Vec<String>>);
+
+impl holon_filesystem::WritebackDisclosure for Degradations {
+    fn writeback_degraded(&self, detail: &str) {
+        self.0.lock().unwrap().push(detail.to_string());
+    }
+    fn writeback_stalled(&self, _: &std::path::Path, _: &str) {}
+    fn writeback_resumed(&self, _: &std::path::Path) {}
+    fn ingest_refused(&self, _: &std::path::Path, _: &str, _: &str) {}
+    fn ingest_recovered(&self, _: &std::path::Path) {}
+    fn vault_file_emptied(&self, _: &std::path::Path) {}
+    fn writeback_lossy(&self, _: &std::path::Path, _: &str) {}
+    fn writeback_faithful(&self, _: &std::path::Path) {}
+    fn block_in_two_files(
+        &self,
+        _: &EntityUri,
+        _: &EntityUri,
+        _: Option<&std::path::Path>,
+        _: &[&std::path::Path],
+        _: bool,
+    ) {
+    }
+    fn deleted_block_kept_in_file(&self, _: &EntityUri, _: &std::path::Path) {}
+    fn deletion_undone(&self, _: &EntityUri, _: &std::path::Path, _: &[&std::path::Path]) {}
+    fn undone_deletion_resolved(&self, _: &EntityUri) {}
+    fn deletion_ended_by_edit(&self, _: &EntityUri, _: &std::path::Path) {}
+    fn file_edit_overruled(
+        &self,
+        _: &EntityUri,
+        _: &std::path::Path,
+        _: &str,
+        _: holon_api::HolonChange,
+        _: &std::path::Path,
+    ) {
+    }
+    fn holon_edit_overruled(
+        &self,
+        _: &EntityUri,
+        _: &std::path::Path,
+        _: &str,
+        _: &[String],
+        _: &std::path::Path,
+    ) {
+    }
+    fn vault_sync_not_started(&self, _: &std::path::Path, _: &str) {}
+    fn vault_state_unreadable(&self, _: &std::path::Path, _: &std::path::Path, _: &str) {}
+    fn vault_start_incomplete(&self, _: &std::path::Path, _: &str, _: &str) {}
+    fn vault_backlog_ingesting(&self, _: &std::path::Path, _: usize, _: usize) {}
+    fn vault_backlog_ingested(&self, _: &std::path::Path) {}
+    fn written_files_unrecorded(&self, _: &std::path::Path, _: &[&std::path::Path], _: &str) {}
+    fn written_files_recorded(&self, _: &std::path::Path) {}
+    fn deleted_block_gone_from_file(&self, _: &EntityUri) {}
+    fn block_in_one_file_again(&self, _: &EntityUri) {}
+}
+
+/// A vault Holon may READ but not write must still ingest (DIRECTIVE 10-08):
+/// the merge base cannot be stored there, so the row records none and the risk
+/// is disclosed — never an ingest that fails because a base could not be kept.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_vault_that_cannot_store_a_merge_base_still_ingests_and_discloses_the_risk() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let store = FakeStore::default();
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let path = root.join("Plain.org");
+    std::fs::write(&path, PLAIN_SOURCE).unwrap();
+    let disclosed = Arc::new(Degradations::default());
+    let mut controller = new_org_sync_controller(
+        Arc::new(store.clone()),
+        Arc::new(store.clone()),
+        root.clone(),
+        Arc::new(store.clone()),
+        Arc::new(RealFileSystem),
+    )
+    .with_writeback_disclosure(disclosed.clone());
+
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let ingested = controller.on_file_changed(&path).await;
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    ingested.expect("a vault Holon cannot write must still ingest");
+    assert!(
+        store.holds_block("first-block"),
+        "the ingest reported success but nothing of the file reached the store"
+    );
+    let said = disclosed.0.lock().unwrap().join("\n");
+    assert!(
+        said.contains("Plain.org") && said.contains("may lose an edit"),
+        "an ingest without a merge base must name the file and what is at risk; said:\n{said}"
+    );
+}
+
+/// The base is keyed by the `file` row, and the row is keyed by the PATH: a
+/// file deleted outside Holon and re-created at the same path with other
+/// content keeps a row whose `base_hash` still vouches for the OLD bytes.
+/// Nothing of the old file may come back through that base.
+#[tokio::test]
+async fn a_file_recreated_at_the_same_path_does_not_resurrect_the_old_bases_content() {
+    let store = FakeStore::default();
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let path = root.join("Plain.org");
+    std::fs::write(&path, PLAIN_SOURCE).unwrap();
+    {
+        let mut first = controller_over(&store, &root);
+        first
+            .on_file_changed(&path)
+            .await
+            .expect("the file ingests");
+    }
+    assert!(
+        !recorded_base(&store, &path, &root).await.is_empty(),
+        "precondition: the first session must leave a base the row vouches for"
+    );
+
+    // Outside Holon, with Holon down: the file is deleted and an unrelated one
+    // takes its path.
+    std::fs::remove_file(&path).unwrap();
+    std::fs::write(
+        &path,
+        "#+ID: other-doc\n#+TITLE: Other Doc\n* Other\n:PROPERTIES:\n:ID: other-block\n:END:\n\
+         other body\n",
+    )
+    .unwrap();
+
+    let mut booted = controller_over(&store, &root);
+    booted.initialize().await.expect("cold boot");
+    booted
+        .on_file_changed(&path)
+        .await
+        .expect("the re-created file ingests");
+
+    assert!(
+        store.holds_block("other-block"),
+        "the re-created file's own block never reached the store"
+    );
+    let on_disk = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        !on_disk.contains("first body") && !on_disk.contains("first-block"),
+        "the stale merge base resurrected the deleted file's content on disk:\n{on_disk}"
+    );
+}
