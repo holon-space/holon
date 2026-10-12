@@ -123,8 +123,8 @@ pub enum LayoutError {
     EmptySubnet(SubnetId),
     #[error("the collapse set names the unknown subnet {0:?}")]
     UnknownCollapsedSubnet(SubnetId),
-    #[error("collapsing the subnet {0:?} would mint a node id that already exists")]
-    CollapsedSubnetIdClash(SubnetId),
+    #[error("the subnet {0:?} has the same id as a node")]
+    SubnetIdClash(SubnetId),
     #[error("dugong refused the graph: {0}")]
     Engine(String),
     #[error("dugong left the node {0:?} without coordinates")]
@@ -197,6 +197,11 @@ impl Plan {
             if subnet.members.is_empty() {
                 return Err(LayoutError::EmptySubnet(subnet.id.clone()));
             }
+            // Collapsed, the id would mint a node that already exists;
+            // expanded, cluster and node fuse into one engine node.
+            if kinds.contains_key(&NodeId::new(subnet.id.as_str())) {
+                return Err(LayoutError::SubnetIdClash(subnet.id.clone()));
+            }
             for member in &subnet.members {
                 if !kinds.contains_key(member) {
                     return Err(LayoutError::UnknownSubnetMember {
@@ -216,9 +221,6 @@ impl Plan {
         for subnet in collapsed {
             if !subnet_labels.contains_key(subnet) {
                 return Err(LayoutError::UnknownCollapsedSubnet(subnet.clone()));
-            }
-            if kinds.contains_key(&NodeId::new(subnet.as_str())) {
-                return Err(LayoutError::CollapsedSubnetIdClash(subnet.clone()));
             }
         }
 

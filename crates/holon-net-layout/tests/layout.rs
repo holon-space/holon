@@ -240,6 +240,19 @@ fn collapsing_an_unknown_subnet_is_refused() {
     assert!(error.to_string().contains("nosuch"), "{error}");
 }
 
+/// A subnet whose id is also a node id would make cluster and node ONE engine
+/// node, so the node comes back sized as the cluster box. Refused whether the
+/// subnet is collapsed or expanded.
+#[test]
+fn a_subnet_id_that_is_also_a_node_id_is_refused() {
+    let mut view = chain_net();
+    view.push_node("rel0", NodeKind::Place, "clash");
+    for collapsed in [BTreeSet::new(), BTreeSet::from([SubnetId::new("rel0")])] {
+        let error = layout(&view, &collapsed).expect_err("a clashing subnet id has no layout");
+        assert!(error.to_string().contains("rel0"), "{error}");
+    }
+}
+
 /// The tripwire for the pinned `dugong`: its pipeline API is explicitly not a
 /// supported surface, so a geometry change on upgrade must red here and not
 /// in a frontend.
