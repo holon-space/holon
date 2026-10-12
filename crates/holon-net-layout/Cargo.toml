@@ -1,0 +1,17 @@
+[package]
+name = "holon-net-layout"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+publish = false
+
+[dependencies]
+# Pinned exactly: dugong's README says its low-level graph and pipeline APIs
+# are "not a separately supported product surface", so a minor bump may move
+# geometry or rename a label field. `tests/layout.rs`'s golden is the tripwire.
+dugong = "=0.9.0"
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

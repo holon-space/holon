@@ -944,6 +944,27 @@ guests-verify:
     done
     exit $status
 
+# The layout crate is what a wasm frontend will call, so its dependency set
+# (dugong + serde + thiserror) must stay wasm-clean from the first commit —
+# a native-only dep added later is far more expensive to back out.
+check-net-layout-wasm:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p target/gate-logs
+    if ! rustup target list --installed | grep -qx wasm32-unknown-unknown; then
+        rustup target add wasm32-unknown-unknown
+    fi
+    cargo check -p holon-net-layout --target wasm32-unknown-unknown \
+        2>&1 | tee target/gate-logs/holon-net-layout-wasm-check.log
+
+# Draw the derived Petri net as a standalone SVG. With no second argument it
+# derives production's block catalog; pass a `CompiledNet` JSON to draw a live
+# engine's net instead.
+net-svg-dump out="target/derived-net.svg" net="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo run -p holon-net --example net_svg_dump -- {{out}} {{net}}
+
 # Rot guard for the BROWSER target. `check-worker-wasm` above covers only
 # wasm32-wasip1-threads, so a crate that compiles native and wasi but not
 # wasm32-unknown-unknown was caught by no gate at all — a native-only dep in

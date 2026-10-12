@@ -2,6 +2,7 @@
 //! @c4 layer Engine
 //! Pattern: Projection
 //! @c4 uses holon-api "shared value & operation types" "Rust"
+//! @c4 uses holon-net-layout "viewer geometry & wire contract" "Rust"
 //! @c4 uses holon-pattern "guard AST & parser" "Rust"
 //! @c4 uses holon-rules "holon_rule YAML front-end" "Rust"
 //!
@@ -26,6 +27,7 @@ pub mod enabledness;
 pub mod guards;
 pub mod marking;
 pub mod net;
+pub mod view;
 
 pub use analysis::ConflictReport;
 pub use analysis::CycleReport;
@@ -57,3 +59,4 @@ pub use net::NetTransition;
 pub use net::Refinement;
 pub use net::TransitionMode;
 pub use net::UndeclaredHalf;
+pub use view::net_view_of;

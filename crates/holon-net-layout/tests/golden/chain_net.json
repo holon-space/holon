@@ -1,0 +1,339 @@
+{
+  "width": 500.0,
+  "height": 252.0,
+  "nodes": [
+    {
+      "id": "rel0.f0",
+      "kind": "place",
+      "label": "rel0.f0",
+      "x": 280.0,
+      "y": 60.0,
+      "width": 32.0,
+      "height": 32.0
+    },
+    {
+      "id": "rel0.f1",
+      "kind": "place",
+      "label": "rel0.f1",
+      "x": 116.0,
+      "y": 85.0,
+      "width": 32.0,
+      "height": 32.0
+    },
+    {
+      "id": "rel1.f0",
+      "kind": "place",
+      "label": "rel1.f0",
+      "x": 444.0,
+      "y": 179.0,
+      "width": 32.0,
+      "height": 32.0
+    },
+    {
+      "id": "rel1.f1",
+      "kind": "place",
+      "label": "rel1.f1",
+      "x": 280.0,
+      "y": 198.0,
+      "width": 32.0,
+      "height": 32.0
+    },
+    {
+      "id": "op:rel0.set0",
+      "kind": "transition",
+      "label": "rel0.set0",
+      "x": 46.0,
+      "y": 66.0,
+      "width": 12.0,
+      "height": 40.0
+    },
+    {
+      "id": "op:rel0.set1",
+      "kind": "transition",
+      "label": "rel0.set1",
+      "x": 210.0,
+      "y": 79.0,
+      "width": 12.0,
+      "height": 40.0
+    },
+    {
+      "id": "op:rel1.set0",
+      "kind": "transition",
+      "label": "rel1.set0",
+      "x": 210.0,
+      "y": 179.0,
+      "width": 12.0,
+      "height": 40.0
+    },
+    {
+      "id": "op:rel1.set1",
+      "kind": "transition",
+      "label": "rel1.set1",
+      "x": 374.0,
+      "y": 198.0,
+      "width": 12.0,
+      "height": 40.0
+    }
+  ],
+  "clusters": [
+    {
+      "id": "rel0",
+      "label": "rel0",
+      "x": 168.0,
+      "y": 69.5,
+      "width": 304.0,
+      "height": 107.0
+    },
+    {
+      "id": "rel1",
+      "label": "rel1",
+      "x": 332.0,
+      "y": 185.5,
+      "width": 304.0,
+      "height": 101.0
+    }
+  ],
+  "arcs": [
+    {
+      "from": "op:rel0.set0",
+      "to": "rel0.f1",
+      "kind": "produce",
+      "multiplicity": 1,
+      "is_back_arc": false,
+      "points": [
+        {
+          "x": 52.0,
+          "y": 69.8
+        },
+        {
+          "x": 76.0,
+          "y": 85.0
+        },
+        {
+          "x": 100.0,
+          "y": 85.0
+        }
+      ]
+    },
+    {
+      "from": "op:rel0.set1",
+      "to": "rel0.f0",
+      "kind": "produce",
+      "multiplicity": 1,
+      "is_back_arc": false,
+      "points": [
+        {
+          "x": 216.0,
+          "y": 79.0
+        },
+        {
+          "x": 240.0,
+          "y": 79.0
+        },
+        {
+          "x": 264.0,
+          "y": 67.6
+        }
+      ]
+    },
+    {
+      "from": "op:rel1.set0",
+      "to": "rel1.f1",
+      "kind": "produce",
+      "multiplicity": 1,
+      "is_back_arc": false,
+      "points": [
+        {
+          "x": 216.0,
+          "y": 182.8
+        },
+        {
+          "x": 240.0,
+          "y": 198.0
+        },
+        {
+          "x": 264.0,
+          "y": 198.0
+        }
+      ]
+    },
+    {
+      "from": "op:rel1.set1",
+      "to": "rel1.f0",
+      "kind": "produce",
+      "multiplicity": 1,
+      "is_back_arc": false,
+      "points": [
+        {
+          "x": 380.0,
+          "y": 198.0
+        },
+        {
+          "x": 404.0,
+          "y": 198.0
+        },
+        {
+          "x": 428.0,
+          "y": 186.6
+        }
+      ]
+    },
+    {
+      "from": "rel0.f0",
+      "to": "op:rel0.set0",
+      "kind": "take",
+      "multiplicity": 1,
+      "is_back_arc": true,
+      "points": [
+        {
+          "x": 264.0,
+          "y": 52.4
+        },
+        {
+          "x": 240.0,
+          "y": 41.0
+        },
+        {
+          "x": 210.0,
+          "y": 41.0
+        },
+        {
+          "x": 180.0,
+          "y": 41.0
+        },
+        {
+          "x": 156.0,
+          "y": 41.0
+        },
+        {
+          "x": 116.0,
+          "y": 41.0
+        },
+        {
+          "x": 76.0,
+          "y": 41.0
+        },
+        {
+          "x": 52.0,
+          "y": 61.0
+        }
+      ]
+    },
+    {
+      "from": "rel0.f1",
+      "to": "op:rel0.set1",
+      "kind": "read",
+      "multiplicity": 1,
+      "is_back_arc": false,
+      "points": [
+        {
+          "x": 132.0,
+          "y": 82.6
+        },
+        {
+          "x": 156.0,
+          "y": 79.0
+        },
+        {
+          "x": 180.0,
+          "y": 79.0
+        },
+        {
+          "x": 204.0,
+          "y": 79.0
+        }
+      ]
+    },
+    {
+      "from": "rel0.f1",
+      "to": "op:rel1.set0",
+      "kind": "read",
+      "multiplicity": 1,
+      "is_back_arc": false,
+      "points": [
+        {
+          "x": 132.0,
+          "y": 90.2
+        },
+        {
+          "x": 156.0,
+          "y": 98.0
+        },
+        {
+          "x": 180.0,
+          "y": 98.0
+        },
+        {
+          "x": 204.0,
+          "y": 162.8
+        }
+      ]
+    },
+    {
+      "from": "rel1.f0",
+      "to": "op:rel1.set0",
+      "kind": "take",
+      "multiplicity": 1,
+      "is_back_arc": true,
+      "points": [
+        {
+          "x": 428.0,
+          "y": 171.4
+        },
+        {
+          "x": 404.0,
+          "y": 160.0
+        },
+        {
+          "x": 374.0,
+          "y": 160.0
+        },
+        {
+          "x": 344.0,
+          "y": 160.0
+        },
+        {
+          "x": 320.0,
+          "y": 160.0
+        },
+        {
+          "x": 280.0,
+          "y": 160.0
+        },
+        {
+          "x": 240.0,
+          "y": 160.0
+        },
+        {
+          "x": 216.0,
+          "y": 175.2
+        }
+      ]
+    },
+    {
+      "from": "rel1.f1",
+      "to": "op:rel1.set1",
+      "kind": "read",
+      "multiplicity": 1,
+      "is_back_arc": false,
+      "points": [
+        {
+          "x": 296.0,
+          "y": 198.0
+        },
+        {
+          "x": 320.0,
+          "y": 198.0
+        },
+        {
+          "x": 344.0,
+          "y": 198.0
+        },
+        {
+          "x": 368.0,
+          "y": 198.0
+        }
+      ]
+    }
+  ]
+}

@@ -12,6 +12,7 @@ ignored = ["workspace-hack"]
 
 [dependencies]
 holon-api.workspace = true
+holon-net-layout.workspace = true
 holon-pattern.workspace = true
 holon-rules.workspace = true
 serde.workspace = true
