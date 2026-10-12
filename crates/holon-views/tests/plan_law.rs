@@ -328,7 +328,7 @@ fn law_of(plan: &Rc<Plan>, commits: Vec<Vec<Change>>) -> Result<(), TestCaseErro
     let catalog = catalog();
     let plan = check(plan, &catalog).expect("every tested plan is well typed");
     let mut worker = worker();
-    let mut dd = Dataflow::<DynRow>::build(&mut worker, &catalog, &[plan.clone()]);
+    let mut dd = Dataflow::<DynRow>::build(&mut worker, &catalog, std::slice::from_ref(&plan));
     let mut inputs: Vec<Multiset<DynRow>> = vec![Multiset::new(); 2];
     let mut output = Multiset::new();
     for commit in commits {

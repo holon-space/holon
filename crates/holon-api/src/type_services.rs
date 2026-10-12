@@ -85,16 +85,12 @@ struct DeclaredHierarchy {
 
 /// An optional key: absent, present with no value (a YAML null, which is
 /// what a mis-indented body leaves behind), or given.
+#[derive(Default)]
 enum Slot<T> {
+    #[default]
     Absent,
     Empty,
     Given(T),
-}
-
-impl<T> Default for Slot<T> {
-    fn default() -> Self {
-        Slot::Absent
-    }
 }
 
 impl<'de, T: Deserialize<'de>> Deserialize<'de> for Slot<T> {

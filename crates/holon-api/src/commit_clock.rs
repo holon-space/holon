@@ -221,7 +221,7 @@ mod tests {
                         let cover = model.high() * u64::from(pick) / 100;
                         clock.feed_through(source, Stamp(cover)).unwrap();
                         for (i, (s, fed)) in model.minted.iter_mut().enumerate() {
-                            if *s == source && i as u64 + 1 <= cover {
+                            if *s == source && (i as u64) < cover {
                                 *fed = true;
                             }
                         }

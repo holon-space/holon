@@ -331,10 +331,13 @@ impl Vault {
 
     async fn reingest_text(&mut self, text: &str) -> Vec<String> {
         std::fs::write(&self.path, text).unwrap();
-        self.controller
-            .on_file_changed(&self.path)
-            .await
-            .expect("ingest must succeed");
+        assert_eq!(
+            self.controller
+                .on_file_changed(&self.path)
+                .await
+                .expect("ingest must succeed"),
+            holon_filesystem::IngestOutcome::Ingested,
+        );
         self.store.take_writes()
     }
 }

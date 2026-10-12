@@ -832,8 +832,7 @@ mod tests {
         let err = starved
             .post_message(uri.into(), ping(), None, None)
             .await
-            .err()
-            .expect("a POST with no slot and no time cannot succeed")
+            .expect_err("a POST with no slot and no time cannot succeed")
             .to_string();
         assert!(
             err.contains("MAX_CONCURRENT_POST_STREAMS") && err.contains("REQUEST_TIMEOUT"),

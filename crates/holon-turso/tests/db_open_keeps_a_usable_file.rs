@@ -278,7 +278,7 @@ fn a_damaged_write_ahead_log_is_moved_aside_alone() {
         panic!("the open must report the moved log, got {outcome:?}");
     };
     assert!(
-        std::fs::read(&backup).ok() == Some(wal_bytes),
+        std::fs::read(backup).ok() == Some(wal_bytes),
         "{} must hold the damaged log",
         backup.display()
     );

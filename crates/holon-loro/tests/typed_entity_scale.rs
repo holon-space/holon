@@ -60,7 +60,7 @@ fn id_of(i: usize) -> String {
 /// The eight persisted fields of the measured type: six scalars and two
 /// overflow-bag keys.
 fn fields_of(i: usize) -> [(FieldPath, LoroValue); 8] {
-    let severity = if i % CRITICAL_EVERY == 0 {
+    let severity = if i.is_multiple_of(CRITICAL_EVERY) {
         "critical"
     } else if i.is_multiple_of(2) {
         "high"
@@ -363,10 +363,11 @@ fn measure(shape: Shape, entities: usize, samples: usize, budgets: bool) -> anyh
 #[test]
 #[ignore = "release bench: `cargo test -p holon-loro --release --test typed_entity_scale -- --ignored --nocapture`"]
 fn shape_cost_at_ten_thousand_entities() -> anyhow::Result<()> {
-    assert!(
-        !cfg!(debug_assertions),
-        "the budgets are release numbers; run this with --release"
-    );
+    // The budgets below are release numbers, so a debug run must refuse to
+    // report them rather than fail them.
+    if cfg!(debug_assertions) {
+        panic!("the budgets are release numbers; run this with --release");
+    }
     for shape in CANDIDATES {
         measure(shape, 10_000, 300, true)?;
     }

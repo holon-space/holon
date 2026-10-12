@@ -291,15 +291,14 @@ impl<'a> Clusters<'a> {
     }
 }
 
+/// One diff op: what it does, over which old items, over which new items.
+type DiffSpan = (DiffTag, Range<usize>, Range<usize>);
+
 /// The ops of a diff of `old_len` into `new_len` items, checked to continue
 /// one another and to cover both. They come from the raw Myers hook:
 /// `similar::capture_diff_slices` also compacts them, and its ops' positions
 /// then disagree with their order when items repeat.
-fn walk(
-    ops: &[DiffOp],
-    old_len: usize,
-    new_len: usize,
-) -> Result<Vec<(DiffTag, Range<usize>, Range<usize>)>> {
+fn walk(ops: &[DiffOp], old_len: usize, new_len: usize) -> Result<Vec<DiffSpan>> {
     let (mut old_at, mut new_at) = (0, 0);
     let mut out = Vec::with_capacity(ops.len());
     for op in ops {

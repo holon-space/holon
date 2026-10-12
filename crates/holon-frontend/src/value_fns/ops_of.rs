@@ -390,8 +390,6 @@ mod tests {
 
     #[test]
     fn a_cached_offer_set_follows_a_write_tier_flip() {
-        use holon_api::ReactiveRowProvider;
-
         let mut indent = descriptor("indent", OpGuard::None);
         indent.descriptor.entity_name = holon_core::WRITE_TIER_ENTITY.into();
         let profile = holon_api::RenderProfile {

@@ -368,10 +368,10 @@ impl FakeAppSurface {
         if params.name == self.spec.pull_tool.as_str() {
             // A caching front answers from what it holds unless the pull
             // carries the freshness argument the connection declares.
-            if !args.contains_key("nocache") {
-                if let Some(cached) = &state.cache {
-                    return cached.clone();
-                }
+            if !args.contains_key("nocache")
+                && let Some(cached) = &state.cache
+            {
+                return cached.clone();
             }
             let body = state.list.body(state.version);
             state.cache = Some(body.clone());

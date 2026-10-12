@@ -574,8 +574,8 @@ impl IntegrationFileConfig {
         let sidecar = McpSidecar {
             entity_prefix: self.entity_prefix.clone(),
             entities: self.entities.clone(),
-            writes: self.writes.clone(),
-            once_only: self.once_only.clone(),
+            writes: self.writes,
+            once_only: self.once_only,
             tools: self.tools.clone(),
             views: self.views.clone(),
         };

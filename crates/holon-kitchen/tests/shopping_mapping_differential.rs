@@ -42,15 +42,18 @@ fn response_filter() -> String {
 
 // ---------------------------------------------------------------- observable
 
+/// One item as a consumer sees it: amount text, checked, whether the category
+/// resolved, and how many active entries the list holds under its key.
+type ObservedItem = (Option<String>, bool, bool, usize);
+
 /// What a consumer of a snapshot can see. Both sides are compared as this.
 #[derive(Debug, Clone, PartialEq)]
 struct Observed {
     version: (i64, i64),
     /// code → (icon, color)
     cats: BTreeMap<String, (Option<String>, Option<String>)>,
-    /// (name, cat) → (amount text, checked, the category resolved, how many
-    /// active entries the list holds under the key)
-    items: BTreeMap<(String, String), (Option<String>, bool, bool, usize)>,
+    /// (name, cat) → what the consumer sees for it.
+    items: BTreeMap<(String, String), ObservedItem>,
     /// How many `(name, cat)` keys held more than one active entry.
     refused: usize,
 }
@@ -156,6 +159,7 @@ fn through_the_sidecar(
 mod model {
     use std::collections::BTreeMap;
     use std::collections::BTreeSet;
+    use std::collections::btree_map;
 
     use anyhow::Result;
     use serde_json::Map;
@@ -287,10 +291,13 @@ mod model {
         item: Item,
     ) {
         let key = (item.name.clone(), item.cat.clone());
-        if items.contains_key(&key) {
-            refused.insert(key);
-        } else {
-            items.insert(key, item);
+        match items.entry(key) {
+            btree_map::Entry::Occupied(held) => {
+                refused.insert(held.key().clone());
+            }
+            btree_map::Entry::Vacant(slot) => {
+                slot.insert(item);
+            }
         }
     }
 

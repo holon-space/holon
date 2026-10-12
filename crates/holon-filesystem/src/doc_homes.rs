@@ -103,7 +103,7 @@ mod tests {
     use super::*;
 
     fn home(p: &str) -> CanonicalPath {
-        CanonicalPath::new(&PathBuf::from(p))
+        CanonicalPath::new(PathBuf::from(p))
     }
 
     #[test]

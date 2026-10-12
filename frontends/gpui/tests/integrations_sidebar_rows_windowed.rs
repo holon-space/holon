@@ -455,7 +455,7 @@ fn integration_rows_show_name_icon_aligned_status_and_open_their_view() {
         // column and keeps writing it until the first sync verdict. Status
         // words written over a row that is still moving are overwritten after
         // the oracle is read.
-        wait_for_status(&db, FAKE_MCP, "Connected").await;
+        wait_for_status(db, FAKE_MCP, "Connected").await;
         // Every other provider stays `Pending`, and a rung that saw one status
         // word could not tell a row reading its OWN status from one painting a
         // constant. Spread the four words across the rows nobody else writes.

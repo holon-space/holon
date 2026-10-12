@@ -347,6 +347,7 @@ pub async fn compose_sut_over_existing(
 // The harness holds single-threaded SUT parts in `Arc` because the
 // production trait signatures it feeds require `Arc`, not `Rc`.
 #[allow(clippy::arc_with_non_send_sync)]
+#[allow(clippy::too_many_arguments)] // one arg per composed component axis
 async fn compose_sut_seeded_impl(
     set: &ComponentSet,
     resolver: &IdResolver,

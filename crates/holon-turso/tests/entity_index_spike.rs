@@ -7,7 +7,6 @@
 //! matview) or `B` (one matview per type + one-shot UNION ALL queries).
 //! It prints one `S0RESULT {json}` line.
 
-use std::collections::HashMap;
 use std::time::Duration;
 use std::time::Instant;
 

@@ -649,10 +649,13 @@ async fn an_unsettled_projection_completes_the_ingest_and_raises_the_banner() {
         projection.clone(),
     );
     let path = v.file.clone();
-    v.controller
-        .on_file_changed(&path)
-        .await
-        .expect("an unsettled pass wrote the ingest's rows, so the ingest completes");
+    assert_eq!(
+        v.controller
+            .on_file_changed(&path)
+            .await
+            .expect("an unsettled pass wrote the ingest's rows, so the ingest completes"),
+        holon_filesystem::IngestOutcome::Ingested,
+    );
     v.document();
 
     assert!(

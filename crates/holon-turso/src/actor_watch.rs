@@ -98,6 +98,10 @@ impl ActorSender {
     }
 }
 
+/// A test hook run once after the watchdog has read the watch.
+#[cfg(test)]
+type AfterRead = Box<dyn FnOnce(&ActorWatch) + Send>;
+
 /// What the actor is running now and ran last, read by the watchdog.
 pub(crate) struct ActorWatch {
     /// The condition subject, one per actor in the process.
@@ -112,7 +116,7 @@ pub(crate) struct ActorWatch {
     /// Why the watch failed. Set at most once.
     failed: Mutex<Option<String>>,
     #[cfg(test)]
-    after_read: Mutex<Option<Box<dyn FnOnce(&ActorWatch) + Send>>>,
+    after_read: Mutex<Option<AfterRead>>,
 }
 
 struct Commands {

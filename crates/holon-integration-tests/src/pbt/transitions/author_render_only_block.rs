@@ -37,7 +37,7 @@ pub(crate) fn render_panel_file(filename: &str, block_id: &str, dsl: &str) -> Wr
     let mut heading = Block::new_text(
         heading_uri.clone(),
         EntityUri::block(GEN_PLACEHOLDER),
-        &format!("Panel {block_id}"),
+        format!("Panel {block_id}"),
     );
     heading.set_property("ID", Value::String(block_id.to_string()));
     let render = Block::new_source(

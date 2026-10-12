@@ -62,7 +62,7 @@ mod tests {
 
     #[test]
     fn eq_compares_values() {
-        let layout = DynRow::layout(&Schema(vec![ColType::Id, ColType::Text, ColType::Bool]));
+        DynRow::layout(&Schema(vec![ColType::Id, ColType::Text, ColType::Bool]));
         let same = Expr::Eq(
             Box::new(Expr::Col(Col(1))),
             Box::new(Expr::Lit(Datum::Text("a".into()))),
@@ -71,8 +71,8 @@ mod tests {
             Box::new(Expr::Col(Col(0))),
             Box::new(Expr::Lit(Datum::Id(Id(8)))),
         );
-        assert!(holds(&same, &row(), &layout));
-        assert!(!holds(&other, &row(), &layout));
+        assert!(holds(&same, &row(), &()));
+        assert!(!holds(&other, &row(), &()));
     }
 
     #[test]

@@ -209,6 +209,10 @@ impl ViewEngine {
     }
 }
 
+/// The callback [`ViewEngine::start`] runs once, with the error that stopped
+/// the engine thread.
+type OnStop = Box<dyn FnOnce(&EngineError) + Send>;
+
 /// Raises [`ConditionKind::ViewEngineStopped`] on `conditions`; an `on_stop`
 /// for [`ViewEngine::start`].
 pub fn raise_on(conditions: Arc<ConditionBus>) -> impl FnOnce(&EngineError) + Send + 'static {
@@ -261,7 +265,7 @@ struct Batch<R> {
 
 struct Host<R: Row> {
     clock: Arc<CommitClock>,
-    on_stop: Option<Box<dyn FnOnce(&EngineError) + Send>>,
+    on_stop: Option<OnStop>,
     worker: Worker,
     dataflow: Dataflow<R>,
     /// In the order of [`View::ALL`].
@@ -287,7 +291,7 @@ struct Host<R: Row> {
 impl<R: Row> Host<R> {
     fn new(
         clock: Arc<CommitClock>,
-        on_stop: Box<dyn FnOnce(&EngineError) + Send>,
+        on_stop: OnStop,
         catalog: &Catalog,
         plans: &[Rc<Checked>],
     ) -> Self {

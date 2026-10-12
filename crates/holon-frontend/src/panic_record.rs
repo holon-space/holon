@@ -812,13 +812,12 @@ pub fn seen_on(conditions: &ConditionBus) {
 fn move_to_history(record_dir: &Path, files: &ShownFiles) -> Result<(), (PathBuf, std::io::Error)> {
     let seen_dir = record_dir.join(SEEN_DIR);
     std::fs::create_dir_all(&seen_dir).map_err(|e| (seen_dir.clone(), e))?;
-    let mut next = list_records(&seen_dir)
+    let first = list_records(&seen_dir)
         .map_err(|e| (seen_dir.clone(), e))?
         .next;
-    for path in &files.records {
+    for (next, path) in (first..).zip(&files.records) {
         std::fs::rename(path, seen_dir.join(format!("{next}.json")))
             .map_err(|e| (path.clone(), e))?;
-        next += 1;
     }
     if let Some(summary) = &files.summary {
         let unshown = read_summary(summary)

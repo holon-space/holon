@@ -64,7 +64,7 @@ fn nested_in_a_list_row(table: ReactiveViewModel) -> ReactiveViewModel {
 
 /// The vertical space between each consecutive pair of rows.
 fn row_spacings(root: ReactiveViewModel, cx: &mut TestAppContext) -> Vec<f32> {
-    cx.update(|cx| gpui_component::init(cx));
+    cx.update(gpui_component::init);
     let bounds = BoundsRegistry::new();
     let root = Arc::new(root);
     let (_entity, vcx) = cx.add_window_view({

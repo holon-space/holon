@@ -417,7 +417,7 @@ fn a_sql_row_holding_an_invalid_block_type_boots_reads_untyped_and_discloses() {
             conn.execute(statement)
                 .unwrap_or_else(|e| panic!("creating block_raw: {statement}: {e}"));
         }
-        conn.execute(&format!(
+        conn.execute(format!(
             "INSERT INTO block_raw (id, parent_id, content, block_type) VALUES ('{id}', NULL, \
              'sql invalid', '{INVALID}')"
         ))
@@ -483,7 +483,7 @@ fn a_sql_row_the_block_type_audit_cannot_read_boots_and_discloses() {
              'no id', 'page')",
         )
         .expect("inserting the id-less row must succeed");
-        conn.execute(&format!(
+        conn.execute(format!(
             "INSERT INTO block_raw (id, parent_id, content, block_type) VALUES ('{id}', NULL, \
              'sql invalid', '{INVALID}')"
         ))

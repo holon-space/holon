@@ -165,10 +165,10 @@ fn act_on<W: Write + 'static>(
 }
 
 fn cancel_end(key: &ConditionKey, ends: &mut HashMap<String, Arc<AtomicBool>>) {
-    if key.kind == ConditionKind::DATABASE_STUCK {
-        if let Some(still_stuck) = ends.remove(&key.subject) {
-            still_stuck.store(false, Ordering::SeqCst);
-        }
+    if key.kind == ConditionKind::DATABASE_STUCK
+        && let Some(still_stuck) = ends.remove(&key.subject)
+    {
+        still_stuck.store(false, Ordering::SeqCst);
     }
 }
 

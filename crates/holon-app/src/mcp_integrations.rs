@@ -1420,7 +1420,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn incomplete_discovery_is_disclosed_on_the_degraded_bus() {
         let bus = ConditionBus::new();
-        let mut current = bus.subscribe().current;
+        let current = bus.subscribe().current;
         assert!(current.is_empty());
 
         disclose_discovery_incomplete(
@@ -1478,7 +1478,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn collapsed_change_signals_are_disclosed_on_the_degraded_bus() {
         let bus = ConditionBus::new();
-        let mut current = bus.subscribe().current;
+        let current = bus.subscribe().current;
         assert!(current.is_empty());
 
         disclose_signals_collapsed(

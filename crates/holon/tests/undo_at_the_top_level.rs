@@ -137,9 +137,12 @@ async fn observe(op: &str, pairs: &[(&str, Value)]) -> Result<Expect, String> {
     }
 }
 
+/// One case: the operation's name, the params it takes, and what it must do.
+type Case = (&'static str, Vec<(&'static str, Value)>, Expect);
+
 #[tokio::test(flavor = "multi_thread")]
 async fn every_block_operation_undoes_and_redoes_at_the_top_level() {
-    let cases: Vec<(&str, Vec<(&str, Value)>, Expect)> = vec![
+    let cases: Vec<Case> = vec![
         (
             "indent",
             vec![("id", id("block:b"))],

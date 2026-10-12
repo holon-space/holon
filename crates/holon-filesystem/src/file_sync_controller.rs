@@ -1525,7 +1525,7 @@ impl FileSyncController {
             && !self.doc_home.contains_key(doc)
             && self.formats.extensions().any(|ext| {
                 self.backlog_pending
-                    .contains(&CanonicalPath::new(&path.with_extension(ext)))
+                    .contains(&CanonicalPath::new(path.with_extension(ext)))
             })
     }
 

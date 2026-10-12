@@ -235,7 +235,7 @@ fn offered<'a>(
     pick: impl Fn(&CardOffer) -> Option<&holon_api::render_types::OperationDescriptor>,
     context: &str,
 ) -> Option<&'a holon_api::render_types::OperationDescriptor> {
-    let operation = offers.get(row_id).and_then(|offer| pick(offer));
+    let operation = offers.get(row_id).and_then(pick);
     if operation.is_none() {
         services.surface_op_failure(
             holon_core::WRITE_TIER_ENTITY,

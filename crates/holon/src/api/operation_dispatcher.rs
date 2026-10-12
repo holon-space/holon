@@ -1702,18 +1702,18 @@ impl OperationDispatcher {
                         }
                     }
                 }
-                if resolved_entity_name == "block" && op_name == "update" {
-                    if let Some((field, private)) = holon_api::schema::BLOCK
+                if resolved_entity_name == "block"
+                    && op_name == "update"
+                    && let Some((field, private)) = holon_api::schema::BLOCK
                         .private_fields()
                         .into_iter()
                         .find(|(field, _)| params.contains_key(*field))
-                    {
-                        let refusal = holon_api::BlockWriteFieldError::Private {
-                            field: field.to_string(),
-                            route: private.route,
-                        };
-                        return Err(format!("intent boundary: {refusal}").into());
-                    }
+                {
+                    let refusal = holon_api::BlockWriteFieldError::Private {
+                        field: field.to_string(),
+                        route: private.route,
+                    };
+                    return Err(format!("intent boundary: {refusal}").into());
                 }
 
                 // Adopt inline org markup a human or agent JUST AUTHORED — the one
@@ -3954,7 +3954,7 @@ mod tests {
                 .lock()
                 .expect("no test panics holding it")
                 .push(format!("{}.{op_name}", self.entity));
-            if self.fails.iter().any(|failing| *failing == op_name) {
+            if self.fails.contains(&op_name) {
                 return Err(format!("{}.{op_name}: unreachable in this test", self.entity).into());
             }
             Ok(OperationResult::irreversible(Vec::new()))
@@ -4075,7 +4075,7 @@ mod tests {
             &self,
             op: &crate::api::net_guard::NetGuardOp<'_>,
         ) -> Result<crate::api::net_guard::NetVerdict> {
-            if !self.0.iter().any(|entity| *entity == op.entity_name) {
+            if !self.0.contains(&op.entity_name) {
                 return Ok(crate::api::net_guard::NetVerdict::Confirm);
             }
             Ok(crate::api::net_guard::NetVerdict::Refuse(

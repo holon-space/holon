@@ -60,8 +60,12 @@ struct OverlayState {
     latest_fence: Option<AdmissionSeq>,
 }
 
+/// An admitted claim: its sequence, plus the receiver that fires once every
+/// admission it waits on has finished (`None` when it waits on nothing).
+type Admitted = (AdmissionSeq, Option<oneshot::Receiver<()>>);
+
 impl OverlayState {
-    fn admit(&mut self, footprint: Footprint) -> (AdmissionSeq, Option<oneshot::Receiver<()>>) {
+    fn admit(&mut self, footprint: Footprint) -> Admitted {
         let seq = self.next;
         self.next += 1;
         let mut waits: BTreeSet<AdmissionSeq> = self.latest_fence.into_iter().collect();
@@ -139,7 +143,7 @@ impl OverlayState {
         &mut self,
         parent: AdmissionSeq,
         footprint: Footprint,
-    ) -> Result<Option<(AdmissionSeq, Option<oneshot::Receiver<()>>)>, NestRefused> {
+    ) -> Result<Option<Admitted>, NestRefused> {
         let holder = self
             .inflight
             .get(&parent)

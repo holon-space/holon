@@ -1825,6 +1825,17 @@ fn format_data_inline(data: &HashMap<String, Value>) -> String {
         .join(", ")
 }
 
+/// `message`, led by `widget` unless it already leads with it — the reader of
+/// an error node must learn which builder refused, and most messages already
+/// open with the call (`list(#{wrap: …}) …`).
+pub(crate) fn naming_the_builder(widget: &str, message: String) -> String {
+    if message.starts_with(widget) {
+        message
+    } else {
+        format!("{widget}: {message}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1977,16 +1988,5 @@ mod tests {
     fn lazy_children_fully_materialized() {
         let lc = LazyChildren::fully_materialized(vec![ViewModel::empty(), ViewModel::empty()]);
         assert_eq!(lc.items.len(), 2);
-    }
-}
-
-/// `message`, led by `widget` unless it already leads with it — the reader of
-/// an error node must learn which builder refused, and most messages already
-/// open with the call (`list(#{wrap: …}) …`).
-pub(crate) fn naming_the_builder(widget: &str, message: String) -> String {
-    if message.starts_with(widget) {
-        message
-    } else {
-        format!("{widget}: {message}")
     }
 }

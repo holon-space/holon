@@ -45,7 +45,7 @@ The project uses [`just`](https://github.com/casey/just) as a task runner. Run `
 | --- | --- |
 | `just build` | Builds the full workspace |
 | `just test` | Runs all workspace unit/integration tests |
-| `just clippy` | Runs Clippy across all targets |
+| `just clippy` | Runs Clippy across all targets, deny-on-warning (the CI gate) |
 | `just fmt-check` | Checks formatting without modifying files |
 | `just lint` | Runs all quality checks (fmt, clippy, deny, machete, jscpd) |
 | `just deny` | Audits dependencies for vulnerabilities and license issues |

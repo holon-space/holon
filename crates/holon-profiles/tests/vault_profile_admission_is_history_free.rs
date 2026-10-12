@@ -54,17 +54,16 @@ fn op() -> impl Strategy<Value = Op> {
     ]
 }
 
+/// The registry's admitter, as the derivation holds it: every profile text in,
+/// its admission out.
+type Admitter =
+    dyn Fn(&BTreeMap<String, String>) -> BTreeMap<String, holon_profiles::VaultProfileAdmission>;
+
 /// One registry and its mirror derivation, as a session holds them.
 struct Session {
     registry: Arc<TypeRegistry>,
     bus: Arc<ConditionBus>,
-    derivation: VaultProfileDerivation<
-        Box<
-            dyn Fn(
-                &BTreeMap<String, String>,
-            ) -> BTreeMap<String, holon_profiles::VaultProfileAdmission>,
-        >,
-    >,
+    derivation: VaultProfileDerivation<Box<Admitter>>,
     in_effect: BTreeMap<String, Arc<EntityProfile>>,
 }
 

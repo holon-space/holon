@@ -181,7 +181,7 @@ jobs:
         run: just check-dioxus-web-wasm
 
       - name: Run clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: just clippy
 
   # Feature-gated test suites that the default `cargo test --workspace` does NOT
   # reach. BugFunnel row 78: `holon-orgmode/tests/sync_controller_mutation_pbt.rs`

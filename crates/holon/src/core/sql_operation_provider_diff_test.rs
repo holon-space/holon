@@ -558,8 +558,7 @@ async fn a_non_finite_float_is_refused_by_the_sql_set_field_leg() {
     let err = provider
         .execute_operation(&EntityName::new("block"), "set_field", params)
         .await
-        .err()
-        .expect("a set_field of -inf must be REFUSED, not stored as null");
+        .expect_err("a set_field of -inf must be REFUSED, not stored as null");
     let msg = format!("{err}");
     assert!(
         msg.contains("'score'"),

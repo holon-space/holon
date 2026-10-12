@@ -3174,6 +3174,46 @@ fn flipped_crdt_preferences(
     crdt_preferences(!currently_loro_enabled)
 }
 
+/// The no-Turso harness's default-layout seed: creates each layout block the
+/// vault does not already hold.
+async fn seed_no_turso_layout(backend: &LoroBackend) -> anyhow::Result<()> {
+    use holon::api::repository::CoreOperations;
+    for block in holon_frontend::FrontendSession::<()>::build_default_layout_blocks(true)? {
+        match backend.get_block(block.id.as_str()).await {
+            Ok(_) => continue,
+            Err(holon_api::ApiError::BlockNotFound { .. }) => {}
+            Err(e) => anyhow::bail!("seed get_block({}): {e}", block.id),
+        }
+        backend
+            .create_block(
+                block.parent_id.clone(),
+                block.to_block_content(),
+                Some(block.id.clone()),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("seed create_block({}): {e}", block.id))?;
+        if !block.tags.is_empty() {
+            backend
+                .set_block_tags(block.id.as_str(), &block.tags.to_vec())
+                .await
+                .map_err(|e| anyhow::anyhow!("seed set_block_tags({}): {e}", block.id))?;
+        }
+        if !block.requires.is_empty() {
+            backend
+                .set_block_requires(block.id.as_str(), &block.requires)
+                .await
+                .map_err(|e| anyhow::anyhow!("seed set_block_requires({}): {e}", block.id))?;
+        }
+        if !block.properties.is_empty() {
+            backend
+                .update_block_properties(block.id.as_str(), &block.properties)
+                .await
+                .map_err(|e| anyhow::anyhow!("seed update_block_properties({}): {e}", block.id))?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod crdt_mode_tests {
     use super::*;
@@ -3216,44 +3256,4 @@ mod crdt_mode_tests {
             );
         }
     }
-}
-
-/// The no-Turso harness's default-layout seed: creates each layout block the
-/// vault does not already hold.
-async fn seed_no_turso_layout(backend: &LoroBackend) -> anyhow::Result<()> {
-    use holon::api::repository::CoreOperations;
-    for block in holon_frontend::FrontendSession::<()>::build_default_layout_blocks(true)? {
-        match backend.get_block(block.id.as_str()).await {
-            Ok(_) => continue,
-            Err(holon_api::ApiError::BlockNotFound { .. }) => {}
-            Err(e) => anyhow::bail!("seed get_block({}): {e}", block.id),
-        }
-        backend
-            .create_block(
-                block.parent_id.clone(),
-                block.to_block_content(),
-                Some(block.id.clone()),
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("seed create_block({}): {e}", block.id))?;
-        if !block.tags.is_empty() {
-            backend
-                .set_block_tags(block.id.as_str(), &block.tags.to_vec())
-                .await
-                .map_err(|e| anyhow::anyhow!("seed set_block_tags({}): {e}", block.id))?;
-        }
-        if !block.requires.is_empty() {
-            backend
-                .set_block_requires(block.id.as_str(), &block.requires)
-                .await
-                .map_err(|e| anyhow::anyhow!("seed set_block_requires({}): {e}", block.id))?;
-        }
-        if !block.properties.is_empty() {
-            backend
-                .update_block_properties(block.id.as_str(), &block.properties)
-                .await
-                .map_err(|e| anyhow::anyhow!("seed update_block_properties({}): {e}", block.id))?;
-        }
-    }
-    Ok(())
 }

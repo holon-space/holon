@@ -315,10 +315,7 @@ mod tests {
                         REQUEST_TIMEOUT * 2
                     )
                 });
-        let err = format!(
-            "{:#}",
-            outcome.err().expect("no handshake without an answer")
-        );
+        let err = format!("{:#}", outcome.expect_err("no handshake without an answer"));
         assert!(
             err.contains("REQUEST_TIMEOUT") && err.contains("initialize"),
             "the error must name the deadline and the handshake; got: {err}"

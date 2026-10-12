@@ -868,6 +868,10 @@ fn parse_variant(
 
 /// Build an EntityProfile from a TypeDefinition's profile_variants: `None` when
 /// it has none, a refusal when one of them does not parse.
+// The refusal carries the four strings that name the offending variant; it is
+// built once per malformed profile at load, so boxing it would only add an
+// allocation to a cold path.
+#[allow(clippy::result_large_err)]
 pub fn profile_from_type_def(
     type_def: &holon_api::TypeDefinition,
 ) -> std::result::Result<Option<EntityProfile>, holon_api::MalformedTypeProfile> {

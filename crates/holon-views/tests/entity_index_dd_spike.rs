@@ -334,6 +334,8 @@ fn entity_index_dd_spike() {
     let mut back = vec![];
     for _ in 0..30 {
         let s = Instant::now();
+        // The read of each row is the measured work; `count` only sizes the loop.
+        #[allow(clippy::suspicious_map)]
         let k = host.mirror.backlinks[&HOT]
             .iter()
             .map(|r| text(r, 2))

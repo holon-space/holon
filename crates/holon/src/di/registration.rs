@@ -488,6 +488,7 @@ async fn create_live_entities(
 }
 
 /// Create a CDC-driven ProfileResolver via MatviewManager + LiveData.
+#[allow(clippy::too_many_arguments)] // DI wiring; each arg is a distinct subsystem
 async fn create_profile_resolver(
     matview_manager: &crate::sync::MatviewManager,
     dispatcher: &Arc<OperationDispatcher>,

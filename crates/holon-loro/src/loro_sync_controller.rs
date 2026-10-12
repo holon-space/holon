@@ -842,10 +842,24 @@ pub struct LoroProjection {
     entity_pending: Arc<StdMutex<std::collections::BTreeSet<(String, String)>>>,
     entity_sink: Option<Arc<dyn crate::loro_entity_operations::TypedEntitySink>>,
     #[cfg(any(test, feature = "test-helpers"))]
-    read_seam: StdMutex<Option<Arc<dyn Fn(CommitSource) + Send + Sync>>>,
+    read_seam: StdMutex<Option<ReadSeam>>,
 }
 
+/// A test seam run on every incremental read, before it takes the queue.
+#[cfg(any(test, feature = "test-helpers"))]
+type ReadSeam = Arc<dyn Fn(CommitSource) + Send + Sync>;
+
+/// One incremental read: how many facts it drained, the blocks it changed,
+/// whether the doc settled, and the frontier it read up to.
+type IncrementalRead = (
+    usize,
+    HashMap<String, Option<SnapshotBlock>>,
+    bool,
+    Frontiers,
+);
+
 impl LoroProjection {
+    #[allow(clippy::too_many_arguments)] // DI wiring; each arg is a distinct subsystem
     pub fn new(
         doc_store: Arc<RwLock<LoroDocumentStore>>,
         last_synced: Arc<StdMutex<Frontiers>>,
@@ -1108,6 +1122,7 @@ impl LoroProjection {
     /// persisted snapshot is the startup source of truth, so this watermark
     /// correctly bounds the first `project()` diff to changes made since the
     /// last session (e.g. org-scan `create_in_tree` blocks).
+    #[allow(clippy::too_many_arguments)] // DI wiring; each arg is a distinct subsystem
     pub fn from_storage(
         doc_store: Arc<RwLock<LoroDocumentStore>>,
         command_bus: Arc<dyn OriginTaggedWrites>,
@@ -1684,12 +1699,7 @@ impl LoroProjection {
         doc: &LoroDocument,
         queue: &StdMutex<Vec<crate::loro_backend::PendingChange>>,
         source: CommitSource,
-    ) -> Result<(
-        usize,
-        HashMap<String, Option<SnapshotBlock>>,
-        bool,
-        Frontiers,
-    )> {
+    ) -> Result<IncrementalRead> {
         let mut unreadable = Vec::new();
         let (facts, frontier, cover, (changed, settled)) = doc.with_read(|doc| {
             let facts = std::mem::take(&mut *queue.lock().unwrap());
@@ -3199,7 +3209,7 @@ mod projection_totality_tests {
         block
             .properties
             .insert(PROPERTY.to_string(), Value::Integer(n));
-        block.marks = Some(Vec::new()).filter(|_| n == 1);
+        block.marks = (n == 1).then_some(Vec::new());
         block.collapsed = n == 1;
         block.widget_only = n == 1;
         block.block_type = Some(EntityName::new(format!("kind{n}")));

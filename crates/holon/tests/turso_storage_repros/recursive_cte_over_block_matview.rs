@@ -35,7 +35,7 @@ fn ids(rows: &[holon_api::StorageEntity]) -> BTreeSet<String> {
 #[tokio::test]
 async fn recursive_cte_reaches_every_descendant() {
     let temp = TempDir::new().unwrap();
-    let db = TursoBackend::open_database(&temp.path().join("p.db")).expect("open db");
+    let db = TursoBackend::open_database(temp.path().join("p.db")).expect("open db");
     let (cdc_tx, _cdc_rx) = tokio::sync::broadcast::channel(4096);
     let (_backend, handle) = TursoBackend::new(db, cdc_tx).expect("create backend");
     handle

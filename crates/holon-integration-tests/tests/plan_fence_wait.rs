@@ -30,7 +30,6 @@ use holon_integration_tests::pbt::composed::wide_e2e::wide_e2e_ref;
 use holon_integration_tests::pbt::reference_state::ReferenceState;
 use holon_integration_tests::pbt::transitions::E2ETransition;
 use holon_integration_tests::pbt::transitions::WriteOrgFile;
-use holon_org_format::OrgBlockExt;
 use proptest_state_machine::ReferenceStateMachine;
 use proptest_state_machine::StateMachineTest;
 

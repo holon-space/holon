@@ -975,10 +975,13 @@ async fn a_file_adopting_a_page_of_another_spelling_is_disclosed() {
             .with_max_level(tracing::Level::WARN)
             .finish();
         let _guard = tracing::subscriber::set_default(subscriber);
-        controller
-            .on_file_changed(&file)
-            .await
-            .expect("ingesting the file must not fail the sync loop");
+        assert_eq!(
+            controller
+                .on_file_changed(&file)
+                .await
+                .expect("ingesting the file must not fail the sync loop"),
+            holon_filesystem::IngestOutcome::Ingested,
+        );
     }
     let disclosed = warnings.text();
     assert!(
@@ -1010,10 +1013,13 @@ async fn a_second_file_differing_only_in_spacing_is_refused_for_that_reason() {
             "the host file system folded {first:?} and {second:?} into one file"
         );
         let mut controller = build_controller(&f, &root, None);
-        controller
-            .on_file_changed(&dir.join(first))
-            .await
-            .expect("the first file ingests");
+        assert_eq!(
+            controller
+                .on_file_changed(&dir.join(first))
+                .await
+                .expect("the first file ingests"),
+            holon_filesystem::IngestOutcome::Ingested,
+        );
 
         let errors = CapturedErrors::default();
         let outcome = {

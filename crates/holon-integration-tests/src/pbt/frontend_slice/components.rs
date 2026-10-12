@@ -721,6 +721,7 @@ impl HeadlessFrontendComponent {
 
     /// The composed keystone's boot: the drawn editor leg decides whether the
     /// cell registry is installed, independently of `loro_enabled`.
+    #[allow(clippy::too_many_arguments)] // one arg per wired component axis
     pub async fn new_for_wiring(
         org_files: &[(&str, &str)],
         settle: Duration,
@@ -804,6 +805,7 @@ impl HeadlessFrontendComponent {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)] // one arg per wired component axis
     async fn new_impl_with_leg(
         org_files: &[(&str, &str)],
         settle: Duration,

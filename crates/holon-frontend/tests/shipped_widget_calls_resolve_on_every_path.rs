@@ -144,7 +144,7 @@ fn null_bindings(vm: &ViewModel) -> Vec<String> {
             .filter(|(_, v)| v.is_null())
             .map(|(k, _)| format!("{}.{k}", op.descriptor.name))
     });
-    own.chain(vm.children().into_iter().flat_map(null_bindings))
+    own.chain(vm.children().iter().flat_map(null_bindings))
         .collect()
 }
 
