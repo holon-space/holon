@@ -28,12 +28,16 @@
 //! @pbt covers the-one-composed-convergence-PBT — random valid wiring over
 //! compose_sut, full invariant catalog per tick
 
+use std::cell::RefCell;
+
 use holon_integration_tests::pbt::composed::harness::ComposedSut;
 use holon_integration_tests::pbt::composed::live_mcp::LiveMcpE2E;
 use holon_integration_tests::pbt::composed::live_mcp::WideE2ELiveMcpMachine;
 use holon_integration_tests::pbt::composed::live_mcp::capture_live_cap_set;
 use holon_integration_tests::pbt::composed::wide_e2e::WideE2E;
 use holon_integration_tests::pbt::composed::wide_e2e::WideE2EMachine;
+use holon_integration_tests::pbt::known_reds::KnownReds;
+use holon_integration_tests::pbt::known_reds::SampleTally;
 use holon_integration_tests::pbt::run_result::RunResultGuard;
 use proptest::test_runner::Config;
 use proptest::test_runner::TestRunner;
@@ -73,15 +77,43 @@ fn general_e2e_composed_pbt() {
 
     let strategy = <WideE2EMachine as ReferenceStateMachine>::sequential_strategy(1..40);
     let mut runner = TestRunner::new(config.clone());
+    // A draw that trips an ALREADY-REGISTERED known red is spent, not the end
+    // of the run: without this one catch boundary, the first such draw burns
+    // the shrink budget on a known bug and every later draw is never made, so
+    // the run reports a pass over an almost empty sample. A novel signature
+    // resumes its unwind here and fails the run with its shrink, unchanged.
+    let known_reds = KnownReds::load().expect("known-reds registry");
+    let tally = RefCell::new(SampleTally::default());
     let result = runner.run(&strategy, |(initial_state, transitions, seen_counter)| {
-        <ComposedSut<WideE2E> as StateMachineTest>::test_sequential(
-            config.clone(),
-            initial_state,
-            transitions,
-            seen_counter,
-        );
+        let drawn = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            <ComposedSut<WideE2E> as StateMachineTest>::test_sequential(
+                config.clone(),
+                initial_state,
+                transitions,
+                seen_counter,
+            );
+        }));
+        match drawn {
+            Ok(()) => tally.borrow_mut().note_completed(),
+            Err(payload) => {
+                let message = payload
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_string()))
+                    .unwrap_or_default();
+                match known_reds.classify(&message) {
+                    Some(key) => tally.borrow_mut().note_known_red(key),
+                    None => {
+                        tally.borrow_mut().note_novel();
+                        std::panic::resume_unwind(payload)
+                    }
+                }
+            }
+        }
         Ok(())
     });
+    let tally = tally.into_inner();
+    eprint!("{}", tally.disclose(cases));
     // An ARMED read-model seam that never had a read model to break would pass
     // here having exercised nothing; refuse before the run is called green.
     holon_integration_tests::pbt::invariants::bodies::view_model_matches_store::assert_engaged_if_armed();
@@ -99,6 +131,9 @@ fn general_e2e_composed_pbt() {
         Ok(()) => {
             if let Err(panic) = reach {
                 std::panic::resume_unwind(panic);
+            }
+            if let Err(breach) = tally.check_floor(cases) {
+                panic!("{breach}");
             }
             guard.set_green()
         }

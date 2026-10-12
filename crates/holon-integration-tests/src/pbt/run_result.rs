@@ -126,24 +126,25 @@ fn disabled() -> bool {
         .unwrap_or(false)
 }
 
-/// Resolve the output directory: `HOLON_RESULT_DIR` if set, else walk up from
-/// `CARGO_MANIFEST_DIR` to the repo root (the ancestor containing `.git`) and
-/// use `<repo>/.observability/runs/`. Falls back to two levels up when no
-/// `.git` is present (e.g. a copied tree).
-fn default_dir() -> PathBuf {
+/// The checkout this test binary was built from: walk up from
+/// `CARGO_MANIFEST_DIR` to the ancestor containing `.git`, falling back to two
+/// levels up when none does (e.g. a copied tree).
+pub fn repo_root() -> PathBuf {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut cur = manifest.parent();
     while let Some(dir) = cur {
         if dir.join(".git").exists() {
-            return dir.join(".observability").join("runs");
+            return dir.to_path_buf();
         }
         cur = dir.parent();
     }
-    manifest
-        .join("..")
-        .join("..")
-        .join(".observability")
-        .join("runs")
+    manifest.join("..").join("..")
+}
+
+/// Resolve the output directory: `HOLON_RESULT_DIR` if set, else
+/// `<repo>/.observability/runs/`.
+fn default_dir() -> PathBuf {
+    repo_root().join(".observability").join("runs")
 }
 
 /// RAII guard: writes `<dir>/<run_id>.result.json` on drop (success or unwind).

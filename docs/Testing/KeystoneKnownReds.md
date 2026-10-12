@@ -11,6 +11,21 @@ against this registry rather than against "zero failures".
 
 - A failure whose signature matches a row below is a **pass-with-note**: the
   nightly prints it as a `WARN` line and still exits 0.
+- A `known-red` row **costs its draw, never the run.** The keystone reads this
+  file at run time too (`crates/holon-integration-tests/src/pbt/known_reds.rs`):
+  a draw whose panic matches a row is recorded, its panic stays in the log, and
+  the next case is drawn instead of proptest shrinking that one known bug and
+  ending the sweep. A novel signature still fails the run at once, with its
+  shrink.
+- **A run below the completed-draw floor is a FAILURE, not a pass-with-note.**
+  The floor is half the configured cases, at least one
+  (`known_reds::completed_floor` — the one place it lives). Every run discloses
+  `[keystone-sample] cases=… attempted=… completed=… floor=… known-red-hits=…
+  verdict=OK|FLOOR-BREACH`, and a FAILED keystone log carrying no such line
+  (stopped at its first failure, or truncated) is a FAILURE for the same reason:
+  its sample is unverified. A green log needs no classification at all — the run
+  itself already refused to be green below the floor. See the bug-funnel entry
+  `2026-10-12-keystone-gate-passes-on-three-draw-sample`.
 - **ANY other signature is a regression to triage** — the nightly exits
   non-zero and prints the novel signature verbatim. Do not add a row to silence
   it; triage it first (`bug-gap-triage`), and only register it here if Martin
@@ -37,9 +52,12 @@ against this registry rather than against "zero failures".
 **How the matching works:** `scripts/keystone-known-reds.sh` parses THIS FILE.
 The `Match pattern` column is the single source of truth for classification —
 an extended-regex (`grep -E`) applied to each extracted failure signature line.
-Editing a pattern here changes the nightly's verdict; there is no second copy
-in the script or the justfile. A pattern may not contain `|` — that is the
-markdown table separator; use character classes instead of alternation.
+`crates/holon-integration-tests/src/pbt/known_reds.rs` parses the same columns
+in-process, for the keep-drawing decision. Editing a pattern here changes both
+verdicts; there is no second copy of the patterns anywhere. A pattern may not
+contain `|` — that is the markdown table separator; use character classes
+instead of alternation — and it must be accepted by BOTH `grep -E` and the Rust
+`regex` crate (no backreferences, no lookaround).
 
 ## End-state audit — known-reds fix program, 2026-08-05
 

@@ -296,8 +296,11 @@ cat >"$work/fail-leak-known-panic.log" <<'EOF'
 EOF
 expect_outcome fail-leak-known-panic 0 '^\[known-reds\] PASS-WITH-NOTE: 1 known-red' "$work/fail-leak-known-panic.log"
 # D101.a: the cross-file move re-ingest signature (N+4 per-block reads) is a
-# known red.
+# known red. The run spent that draw and drew its full sample (hence
+# `verdict=OK`); the binary is FAILED on another test, so the log still reaches
+# the classifier.
 cat >"$work/move-between-files-read-repeat.log" <<'EOF'
+[keystone-sample] cases=16 attempted=16 completed=15 floor=8 known-red-hits=1 verdict=OK
 thread 'general_e2e_composed_pbt' (1) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1553:13:
 reconciled composed sequence diverged from the oracle: [("inv-sql-budget", "[inv-sql-budget] 1 budget violation(s):\n  MoveBlockBetweenFiles.sql_read_repeat: one binding-set of `SELECT b.id, b.parent_id, b.sort_key, b.content, b.content_type, b.source_language, b.sour…` re-executed 124x, over the redundancy ratchet 64 — the re-execution defect GREW; find the new consumer, do not raise the ratchet")]
 test general_e2e_composed_pbt ... FAILED
@@ -305,6 +308,37 @@ test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; 
 EOF
 expect_outcome move-between-files-read-repeat 0 '^\[known-reds\] PASS-WITH-NOTE: 1 known-red' \
     "$work/move-between-files-read-repeat.log"
+# The sample rules (`[keystone-sample]`) belong to the HEADLESS keystone, which
+# is the only test that discloses one. The windowed keystone's name contains the
+# headless name as a substring, so these three cases pin which log each rule
+# reaches: a registered windowed red stays a pass-with-note, a headless run that
+# never disclosed its sample is a failure, and so is a disclosed breach.
+cat >"$work/windowed-known-red.log" <<'EOF'
+    FAIL [  31.004s] (1/19) holon-gpui::gpui_composed_windowed_loop general_e2e_composed_pbt_windowed
+  stderr ───
+    thread 'general_e2e_composed_pbt_windowed' (2) panicked at crates/holon-gpui/tests/gpui_composed_windowed_loop.rs:120:9:
+    [SplitBlock/keystroke] cannot place the caret on block:abc — editable surface not projected by this driver
+     Summary [  31.004s] 19 tests run: 18 passed, 1 failed, 0 skipped
+    FAIL [  31.004s] (1/19) holon-gpui::gpui_composed_windowed_loop general_e2e_composed_pbt_windowed
+EOF
+expect_outcome windowed-known-red-discloses-no-sample 0 '^\[known-reds\] PASS-WITH-NOTE: 1 known-red' \
+    "$work/windowed-known-red.log"
+cat >"$work/sample-undisclosed.log" <<'EOF'
+thread 'general_e2e_composed_pbt' (1) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1553:13:
+assertion `left == right` failed: per-tick reconcile: one synthetic per minted real id (syn=[], real=[EntityUri("block:259a9a58-18bb-4559-a589-87aee571c59e")], HeldCreates { parked: 0 })
+test general_e2e_composed_pbt ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.00s
+EOF
+expect_outcome sample-undisclosed 1 '^SAMPLE: UNDISCLOSED' "$work/sample-undisclosed.log"
+cat >"$work/sample-floor-breach.log" <<'EOF'
+[keystone-sample] cases=16 attempted=4 completed=3 floor=8 known-red-hits=1 verdict=FLOOR-BREACH
+thread 'general_e2e_composed_pbt' (1) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1553:13:
+assertion `left == right` failed: per-tick reconcile: one synthetic per minted real id (syn=[], real=[EntityUri("block:259a9a58-18bb-4559-a589-87aee571c59e")], HeldCreates { parked: 0 })
+test general_e2e_composed_pbt ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.00s
+EOF
+expect_outcome sample-floor-breach 1 '^SAMPLE: cases=16 attempted=4 completed=3 floor=8 known-red-hits=1 verdict=FLOOR-BREACH$' \
+    "$work/sample-floor-breach.log"
 # A test that returned `Err` printed no panic: its status line stands in, with
 # the `Error:` it returned, so two root causes in one binary stay apart.
 cat >"$work/fail-leak-no-panic.log" <<'EOF'

@@ -12,10 +12,19 @@
 # harness assertion — and matches each one against the `Match pattern` column of
 # docs/Testing/KeystoneKnownReds.md. A GREEN run has nothing to classify.
 #
+# A keystone run also has to have DRAWN something. The keystone keeps drawing
+# past a registered known red and discloses its sample as one
+# `[keystone-sample] … verdict=OK|FLOOR-BREACH` line (the floor itself lives in
+# ONE place, crates/holon-integration-tests/src/pbt/known_reds.rs). A keystone
+# log without that line stopped at its first known red or was truncated: its
+# sample is unverified, so it is a FAILURE here, not a pass-with-note.
+#
 # Exit 0  — nothing to triage: every extracted signature matched a `known-red`
-#           row (printed as WARN), and/or every log was green.
-# Exit 1  — at least one signature matched nothing, or a FAILED run yielded no
-#           signature at all. Both are regressions to triage, NOT rows to add.
+#           row (printed as WARN), every keystone run disclosed verdict=OK,
+#           and/or every log was green.
+# Exit 1  — at least one signature matched nothing, a FAILED run yielded no
+#           signature at all, or a keystone run's sample is below the floor /
+#           undisclosed. All are regressions to triage, NOT rows to add.
 # Exit 3  — at least one log admits no verdict: INDETERMINATE (empty, or
 #           truncated before the run said anything) or UNREADABLE (no such
 #           file). Never silently a pass — the input is broken, so nothing can
@@ -83,6 +92,31 @@ is_collateral() {
     return 1
 }
 
+# The keystone's own sample-floor panic is this gate speaking, not a bug: it is
+# reported through the sample verdict below, never as a novel signature.
+is_sample_floor() {
+    [[ "$1" == *'[keystone-sample] FLOOR BREACH:'* ]]
+}
+
+# A keystone log must disclose the sample its verdict rests on. Prints the
+# disclosure and returns non-zero when the sample is below the floor or absent.
+check_sample() {
+    local log="$1" line
+    # The HEADLESS keystone only: `general_e2e_composed_pbt_windowed` contains
+    # that name as a substring and discloses no sample, so a substring match
+    # would turn every registered windowed red into a gate failure.
+    grep -qE 'general_e2e_composed_pbt($|[^_[:alnum:]])' "$log" || return 0
+    line=$(grep_selecting -hF '[keystone-sample] cases=' "$log" | tail -1)
+    if [ -z "$line" ]; then
+        echo "SAMPLE: UNDISCLOSED — this keystone run printed no [keystone-sample] line, so"
+        echo "        it stopped at its first failure (or was truncated) instead of drawing on."
+        echo "        Nothing can be said about draws it never made."
+        return 1
+    fi
+    echo "SAMPLE: ${line#*\] }"
+    [ "$line" != "${line%verdict=OK*}" ]
+}
+
 # The keystone's `BootFault::TaskPanic` panics on purpose and asserts the
 # disclosure itself. Only this payload at this site is no failure: it is
 # removed before the outcome is read, so it can neither fail a green run nor
@@ -134,6 +168,7 @@ log_outcome() {
 novel=0
 matched=0
 collateral=0
+sample_bad=0
 green=0
 indeterminate=0
 unreadable=0
@@ -376,7 +411,9 @@ for log in "$@"; do
         line_no=$((line_no + 1))
         norm=$(normalize_sig "$sig")
 
-        if is_collateral "$loc" "$sig"; then
+        if is_sample_floor "$sig"; then
+            class="sample-floor"
+        elif is_collateral "$loc" "$sig"; then
             class="collateral"
             collateral=$((collateral + 1))
         else
@@ -421,12 +458,8 @@ for log in "$@"; do
     fi
     rm -f "$tail_file"
 
-    successes=$(grep -m1 -oE 'successes: [0-9]+' "$log" | grep -oE '[0-9]+' || true)
-    if [ -n "$successes" ]; then
-        echo "successes: $successes"
-        if [ "$successes" -lt 32 ]; then
-            echo "WARN: low-power run ($successes draws)"
-        fi
+    if ! check_sample "$log"; then
+        sample_bad=$((sample_bad + 1))
     fi
 done
 echo ""
@@ -456,6 +489,13 @@ if [ "$novel" -ne 0 ]; then
     echo "[known-reds] FAIL: $novel novel panic(s), $matched known-red panic(s), $collateral collateral (ignored)."
     echo "             A novel signature is a regression to triage (bug-gap-triage),"
     echo "             not a row to add to $registry."
+    exit 1
+fi
+if [ "$sample_bad" -ne 0 ]; then
+    echo "[known-reds] FAIL: $sample_bad keystone run(s) whose sample is below the floor or"
+    echo "             undisclosed — see SAMPLE above. $matched known-red panic(s) matched, but a"
+    echo "             run that drew too few cases is not a pass-with-note: the invariants it"
+    echo "             never reached are untested, not green."
     exit 1
 fi
 if [ "$no_verdict" -ne 0 ]; then
