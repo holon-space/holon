@@ -112,6 +112,22 @@ async fn sql(booted: &Booted, sql: &str) -> Vec<StorageEntity> {
         .unwrap_or_else(|e| panic!("{sql}: {e}"))
 }
 
+/// Waits until the Loro projection has written every Loro change to Turso:
+/// a typed write lands in Loro, its table row only after the projection.
+async fn settled(booted: &Booted) {
+    let projection = booted
+        .injector
+        .resolve::<holon_loro::loro_sync_controller::LoroProjection>();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !projection.is_settled().await.expect("the settle predicate") {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the Loro projection did not settle within 20 s"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
 async fn engine_read(booted: &Booted, prql: &str) -> anyhow::Result<Vec<StorageEntity>> {
     let compiled = booted
         .engine
@@ -561,6 +577,7 @@ async fn a_changed_column_type_refuses_only_that_type_until_the_user_drops_the_t
     )
     .await
     .expect("the operations the type adds beside create come back with it");
+    settled(&later).await;
     let consumed = sql(&later, "SELECT quantity FROM pantry_item").await;
     assert_eq!(
         consumed.first().and_then(|r| r.get("quantity")),

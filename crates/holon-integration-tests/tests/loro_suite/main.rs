@@ -23,6 +23,7 @@ mod loro_restart_unseeded_vault;
 mod loro_root_deliveries_are_guarded;
 mod loro_snapshot_durability;
 mod loro_sync_controller_pbt;
+mod loro_typed_writer_census;
 mod loro_unseeded_vault_split;
 mod loro_writes_on_unheld_blocks;
 mod projection_harness;

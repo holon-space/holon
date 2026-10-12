@@ -2809,8 +2809,9 @@ impl Module for OperationModule {
                 )
                 .and_then(|()| {
                     crate::core::type_declaration::register_companion_operations(
-                        &type_def.name,
-                        &db_handle_provider.handle(),
+                        &type_def,
+                        authority.clone(),
+                        &r,
                         &dispatcher,
                     )
                 })

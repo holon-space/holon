@@ -879,11 +879,21 @@ where
 
 /// The store that accepts the writes of a free-standing type: the composition
 /// root binds the one its mode uses (Loro store on, or SQL).
+#[async_trait]
 pub trait TypeWriteAuthority: MaybeSendSync {
     fn for_type(
         &self,
         type_def: &holon_api::TypeDefinition,
     ) -> Result<std::sync::Arc<dyn OperationProvider>>;
+
+    /// The fields of entity `id` as this authority holds it now, or `None` when
+    /// it holds no such entity. A read-modify-write reads here, never from a
+    /// projection, which lags the write it must build on.
+    async fn read(
+        &self,
+        type_def: &holon_api::TypeDefinition,
+        id: &str,
+    ) -> Result<Option<holon_api::StorageEntity>>;
 }
 
 /// The facts a guard may only learn from whatever ACCEPTED a write.

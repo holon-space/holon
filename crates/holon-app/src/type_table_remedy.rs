@@ -147,7 +147,12 @@ impl OperationProvider for TypeTableRemedyProvider {
             authority.as_ref(),
             &dispatcher,
         )?;
-        holon::core::type_declaration::register_companion_operations(&type_name, &db, &dispatcher)?;
+        holon::core::type_declaration::register_companion_operations(
+            &type_def,
+            authority,
+            &self.injector,
+            &dispatcher,
+        )?;
         unserved.remove(&type_name);
         self.injector
             .resolve_async::<Arc<ConditionBus>>()

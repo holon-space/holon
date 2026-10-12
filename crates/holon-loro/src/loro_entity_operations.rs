@@ -516,22 +516,46 @@ impl LoroTypeWriteAuthority {
     }
 }
 
+impl LoroTypeWriteAuthority {
+    /// The authority of an integration mirror type, or `None` for a type the
+    /// Loro store holds.
+    fn mirror_authority(
+        &self,
+        type_def: &TypeDefinition,
+    ) -> Result<Option<&Arc<dyn holon_core::TypeWriteAuthority>>> {
+        let Some(integration) = type_def.owning_integration() else {
+            return Ok(None);
+        };
+        Ok(Some(self.mirrors.as_ref().ok_or_else(|| {
+            format!(
+                "type '{}' mirrors integration '{integration}', whose table needs Turso; \
+                 this session has none",
+                type_def.name
+            )
+        })?))
+    }
+}
+
+#[async_trait]
 impl holon_core::TypeWriteAuthority for LoroTypeWriteAuthority {
     fn for_type(&self, type_def: &TypeDefinition) -> Result<Arc<dyn OperationProvider>> {
-        if let Some(integration) = type_def.owning_integration() {
-            let mirrors = self.mirrors.as_ref().ok_or_else(|| {
-                format!(
-                    "type '{}' mirrors integration '{integration}', whose table needs Turso; \
-                     this session has none",
-                    type_def.name
-                )
-            })?;
+        if let Some(mirrors) = self.mirror_authority(type_def)? {
             return mirrors.for_type(type_def);
         }
         Ok(Arc::new(LoroEntityOperations::for_type(
             self.doc.clone(),
             type_def,
         )?))
+    }
+
+    async fn read(&self, type_def: &TypeDefinition, id: &str) -> Result<Option<StorageEntity>> {
+        if let Some(mirrors) = self.mirror_authority(type_def)? {
+            return mirrors.read(type_def, id).await;
+        }
+        Ok(LoroEntityOperations::for_type(self.doc.clone(), type_def)?
+            .read(id)?
+            .filter(|stored| stored.live)
+            .map(|stored| stored.fields))
     }
 }
 

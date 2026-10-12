@@ -163,15 +163,20 @@ pub fn register_write_authority(
 /// read-modify-write that refuses to go negative; create/set_field/delete stay
 /// the derived authority's.
 pub fn register_companion_operations(
-    type_name: &str,
-    db_handle: &DbHandle,
+    type_def: &TypeDefinition,
+    authority: Arc<dyn TypeWriteAuthority>,
+    injector: &fluxdi::Injector,
     dispatcher: &OperationDispatcher,
 ) -> Result<()> {
-    if type_name != "pantry_item" || !dispatcher.has_provider(type_name) {
+    if type_def.name != "pantry_item" || !dispatcher.has_provider(&type_def.name) {
         return Ok(());
     }
     dispatcher.register_provider(Arc::new(
-        crate::core::pantry_operations::PantryOperations::new(db_handle.clone()),
+        crate::core::pantry_operations::PantryOperations::new(
+            type_def.clone(),
+            authority,
+            injector.clone(),
+        ),
     ))
 }
 
@@ -184,12 +189,35 @@ fn require_declarable(type_def: &TypeDefinition) -> Result<()> {
 /// container with no Loro store.
 pub struct SqlTypeWriteAuthority(pub DbHandle);
 
+#[async_trait::async_trait]
 impl TypeWriteAuthority for SqlTypeWriteAuthority {
     fn for_type(&self, type_def: &TypeDefinition) -> Result<Arc<dyn OperationProvider>> {
         Ok(Arc::new(SqlOperationProvider::for_type(
             self.0.clone(),
             type_def,
         )?))
+    }
+
+    async fn read(
+        &self,
+        type_def: &TypeDefinition,
+        id: &str,
+    ) -> Result<Option<holon_api::StorageEntity>> {
+        let table = TursoAdapter::raw_table_name(type_def);
+        let mut rows = self
+            .0
+            .query_positional(
+                &format!("SELECT * FROM {table} WHERE id = ?"),
+                vec![turso::Value::Text(id.to_string())],
+            )
+            .await
+            .map_err(|e| format!("reading {id} from {table}: {e}"))?;
+        assert!(
+            rows.len() <= 1,
+            "{table} holds {} rows with id {id}",
+            rows.len()
+        );
+        Ok(rows.pop())
     }
 }
 

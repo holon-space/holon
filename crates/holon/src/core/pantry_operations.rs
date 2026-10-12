@@ -5,46 +5,61 @@
 //! onto the same write with nothing behind it. `consume` earns its own
 //! operation because it is a read-modify-write with two refusals the generic
 //! `set_field` cannot make: consuming past empty, and consuming in a unit we
-//! have no factor for.
+//! have no factor for. It reads the stock from the type's write authority and
+//! writes through the dispatcher's `set_field`, so in a Loro mode the change
+//! lands in Loro and reaches the table only through the projector.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use async_trait::async_trait;
+use fluxdi::Injector;
 use holon_api::EntityName;
+use holon_api::OpOrigin;
 use holon_api::Operation;
 use holon_api::OperationDescriptor;
 use holon_api::OperationParam;
+use holon_api::TypeDefinition;
 use holon_api::TypeHint;
 use holon_api::Value;
 use holon_core::OperationProvider;
 use holon_core::OperationResult;
 use holon_core::Result as DatasourceResult;
+use holon_core::TypeWriteAuthority;
 use holon_core::storage::types::StorageEntity;
 
-use crate::storage::turso::DbHandle;
+use crate::api::operation_dispatcher::AuthoredInput;
+use crate::api::operation_dispatcher::OperationDispatcher;
 
 const ENTITY: &str = "pantry_item";
-const TABLE: &str = "pantry_item_raw";
 
 pub struct PantryOperations {
-    db_handle: DbHandle,
+    type_def: TypeDefinition,
+    authority: Arc<dyn TypeWriteAuthority>,
+    /// Resolves the dispatcher per call: this provider is registered while the
+    /// dispatcher is being built, so holding it would close a DI cycle.
+    injector: Injector,
 }
 
 impl PantryOperations {
-    pub fn new(db_handle: DbHandle) -> Self {
-        Self { db_handle }
+    pub fn new(
+        type_def: TypeDefinition,
+        authority: Arc<dyn TypeWriteAuthority>,
+        injector: Injector,
+    ) -> Self {
+        Self {
+            type_def,
+            authority,
+            injector,
+        }
     }
 
     async fn read_stock(&self, id: &str) -> DatasourceResult<(f64, Option<String>)> {
-        let sql = format!("SELECT quantity, unit FROM {TABLE} WHERE id = ?");
-        let rows = self
-            .db_handle
-            .query_positional(&sql, vec![turso::Value::Text(id.to_string())])
+        let row = self
+            .authority
+            .read(&self.type_def, id)
             .await
-            .map_err(|e| format!("consume: reading pantry item '{id}': {e}"))?;
-        let row = rows
-            .into_iter()
-            .next()
+            .map_err(|e| format!("consume: reading pantry item '{id}': {e}"))?
             .ok_or_else(|| format!("consume: no pantry item with id '{id}'"))?;
         let quantity = row
             .get("quantity")
@@ -172,14 +187,25 @@ impl OperationProvider for PantryOperations {
         }
 
         let remaining = on_hand - asked;
-        let sql = format!("UPDATE {TABLE} SET quantity = ? WHERE id = ?");
-        self.db_handle
-            .execute(
-                &sql,
-                vec![
-                    turso::Value::Real(remaining),
-                    turso::Value::Text(id.clone()),
-                ],
+        let write: StorageEntity = [
+            ("id", Value::String(id.clone())),
+            ("field", Value::String("quantity".to_string())),
+            ("value", Value::Float(remaining)),
+        ]
+        .into_iter()
+        .map(|(k, v)| (Arc::from(k), v))
+        .collect();
+        self.injector
+            .resolve_async::<OperationDispatcher>()
+            .await
+            .execute_operation_with_provenance(
+                entity_name,
+                "set_field",
+                write,
+                AuthoredInput::Verbatim,
+                OpOrigin::Rule {
+                    transition_id: "pantry_item.consume".to_string(),
+                },
             )
             .await
             .map_err(|e| format!("consume: updating pantry item '{id}': {e}"))?;
