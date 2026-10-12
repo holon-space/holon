@@ -88,8 +88,11 @@ const OWN_PAGE_PATH: &str = "/vault/own.org";
 const VAULT_ROOT: &str = "/vault";
 
 /// The page a write-back must not damage. Every `Block` field `PartialEq`
-/// compares is authored away from its default here, so the whole-file
-/// invariant can see a write-back that drops any one of them.
+/// compares is authored away from its default here (except `block_type`,
+/// which the org layer does not carry), so the whole-file invariant can see a
+/// write-back that drops any one of them. The page has TWO children, so
+/// sibling order is observable: with one child per parent the renderer takes
+/// the order from a one-element slice and no reordering can show.
 pub fn seed_own_page_file() -> String {
     format!(
         "* Own page with *bold* text :home:pinned:
@@ -109,6 +112,10 @@ pub fn seed_own_page_file() -> String {
 #+begin_src prql :id layered-own-src
 from blocks
 #+end_src
+** Second child
+:PROPERTIES:
+:ID: layered-own-second
+:END:
 ",
         page = Target::OwnPage.uri().id()
     )

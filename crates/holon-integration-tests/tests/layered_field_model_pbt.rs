@@ -31,6 +31,11 @@ use proptest_state_machine::ReferenceStateMachine;
 use proptest_state_machine::StateMachineTest;
 use proptest_state_machine::prop_state_machine;
 
+/// One device's layer for one target: (value, intent), or unset.
+type Layer = Option<(bool, Intent)>;
+/// The newest write to a target: (time, writer), or none.
+type Stamp = Option<(u64, Device)>;
+
 #[derive(Debug, Clone)]
 enum LayerOp {
     Fold(Device, Target),
@@ -198,7 +203,7 @@ fn snapshot_except(
     field: &LayeredField,
     device: Device,
     target: Target,
-) -> Vec<(Device, Option<(bool, Intent)>, Option<bool>)> {
+) -> Vec<(Device, Layer, Option<bool>)> {
     Device::ALL
         .into_iter()
         .filter(|d| *d != device)
@@ -214,7 +219,10 @@ static SEED_BLOCKS: LazyLock<Vec<Block>> = LazyLock::new(|| {
         .iter()
         .find(|b| b.id == Target::OwnPage.uri())
         .expect("the seed holds the page heading");
-    let src = blocks.last().expect("the seed holds the source block last");
+    let src = blocks
+        .iter()
+        .find(|b| b.id.to_string() == "block:layered-own-src")
+        .expect("the seed holds the named source block");
     // A field left at its default cannot fail the equality below, so the fixture
     // must author every one of them away from it.
     assert!(page.tags.iter().any(|t| t == "home"), "{:?}", page.tags);
@@ -227,6 +235,26 @@ static SEED_BLOCKS: LazyLock<Vec<Block>> = LazyLock::new(|| {
     assert_eq!(src.content_type, holon_api::ContentType::Source);
     assert!(src.source_language.is_some(), "{:?}", src.source_language);
     assert_eq!(src.source_name.as_deref(), Some("own-page-query"));
+    // `block_type` is the one compared field the org layer does not carry
+    // (crates/holon-core/src/block_ordering.rs: only the typed slot speaks for
+    // it, never a `:block_type:` property), so it is `None` on both sides and
+    // the equality has no teeth on it. If a parse ever yields one, this fires
+    // and the field must be authored like the others.
+    assert!(
+        blocks.iter().all(|b| b.block_type.is_none()),
+        "the org layer now carries block_type: arm it in the fixture instead of excluding it"
+    );
+    // Sibling order is only observable where a parent has two children.
+    let mut children_per_parent: BTreeMap<String, usize> = BTreeMap::new();
+    for b in &blocks {
+        *children_per_parent
+            .entry(b.parent_id.to_string())
+            .or_default() += 1;
+    }
+    assert!(
+        children_per_parent.values().any(|n| *n >= 2),
+        "the seed is a chain: no sibling order to compare, {children_per_parent:?}"
+    );
     blocks
 });
 
@@ -367,7 +395,7 @@ impl StateMachineTest for LayeredFieldTest {
                 );
             }
             LayerOp::Sync => {
-                let newest: Vec<(Target, Option<bool>, Option<(u64, Device)>)> = Target::ALL
+                let newest: Vec<(Target, Option<bool>, Stamp)> = Target::ALL
                     .into_iter()
                     .map(|target| {
                         let winner = Device::ALL
@@ -381,7 +409,7 @@ impl StateMachineTest for LayeredFieldTest {
                         )
                     })
                     .collect();
-                let layers_before: Vec<(Device, Target, Option<(bool, Intent)>)> = Device::ALL
+                let layers_before: Vec<(Device, Target, Layer)> = Device::ALL
                     .into_iter()
                     .flat_map(|d| Target::ALL.map(move |t| (d, t)))
                     .map(|(d, t)| (d, t, field.layer(d, t)))

@@ -1,0 +1,59 @@
+Round 9, FOLD-scope.a (holon-work#170): the round-8 fixture was a CHAIN — page > child >
+src, no parent with two children — so sibling ORDER was unarmed. The renderer takes
+sibling order from the input vector per parent (crates/holon-org-format/src/org_renderer.rs
+`render_walk`), and with one child per parent a one-element slice has no order to lose:
+the round-8 verdict (target/layers-experiment-verify-r8.md, finding 2) showed a write-back
+`blocks.swap(1, 2)` GREEN at 200 cases. The seed now gives the page a SECOND child:
+
+    ** Second child
+    :PROPERTIES:
+    :ID: layered-own-second
+    :END:
+
+and `SEED_BLOCKS` asserts some parent has two children, so a fixture that slides back to
+a chain fails loudly instead of silently disarming order.
+
+=== P-NET2: the chain fixture trips the new net (target/layers-r9/gate.log)
+
+Test failed: the seed is a chain: no sibling order to compare,
+{"block:layered-own-child": 1, "block:layered-own-page": 1, "file:own.org": 1}.
+
+=== M-ORDER: the write-back swaps the page's two siblings -> RED (target/layers-r9/gate2.log)
+
+The mutant, in `DeviceState::write_back` before the render:
+
+    let page = Target::OwnPage.uri();
+    let sibs: Vec<usize> = blocks.iter().enumerate()
+        .filter(|(_, b)| b.parent_id == page).map(|(i, _)| i).collect();
+    assert!(sibs.len() >= 2, "M-ORDER needs two siblings, got {sibs:?}");
+    blocks.swap(sibs[0], sibs[1]);
+
+Test failed: assertion `left == right` failed: own page drift on A: the file does not
+parse back to the page the gestures predict, `collapsed` and every other field; file:
+* Own page with *bold* text :home:pinned:
+:PROPERTIES:
+:ID: layered-own-page
+:AREA: kitchen
+
+Red on the own-page-drift assertion (layered_field_model_pbt.rs), not on a renderer panic
+— the oracle itself sees the reordering.
+
+=== C-CONTROL: the same mutant on the round-8 chain fixture -> GREEN (target/layers-r9/gate.log)
+
+With the second child removed (and the new net relaxed), the swap mutant is
+`1 passed` at 200 cases. That is the round-8 state the verdict reported: the teeth come
+from the fixture's branching, not from the mutant.
+
+=== block_type: a third DISCLOSED exclusion, with a net
+
+`Block::block_type` is the 17th compared field and is `None` on both sides. It cannot be
+armed through an org round-trip: `grep -rn block_type crates/holon-org-format/src/`
+returns nothing, and crates/holon-core/src/block_ordering.rs:52 states the rule — only
+the typed slot speaks for the value, a property named `:block_type:` is NOT carried. So
+the write-back cannot damage what the file never held. `SEED_BLOCKS` now asserts it is
+`None` on every seed block, so the exclusion is self-reporting:
+
+P-NET1, the net negated to `is_some()` (target/layers-r9/gate.log):
+
+Test failed: the org layer now carries block_type: arm it in the fixture instead of
+excluding it.
