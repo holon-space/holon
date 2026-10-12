@@ -15,6 +15,8 @@
 // (tokio::fs / tokio::process / notify are rejected on wasm targets). The wasm
 // surface is the port traits + sync base store consumed by holon-loro.
 #[cfg(not(target_arch = "wasm32"))]
+pub mod base_sidecar;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod change_source;
 #[cfg(all(feature = "crash-injection", not(target_arch = "wasm32")))]
 pub mod crash_injection;

@@ -74,7 +74,7 @@ struct FakeStore {
     /// What production stamps through `persist_file_hash`, replayed by
     /// `load_file_projections` so a later controller boots the cold-boot fast
     /// path on the hash an earlier one actually wrote.
-    hashes: Arc<Mutex<Vec<(EntityUri, String)>>>,
+    hashes: Arc<Mutex<Vec<(EntityUri, holon_filesystem::FileProjection)>>>,
     /// The `file` table refuses every projection write.
     refuse_projection: bool,
 }
@@ -324,18 +324,7 @@ impl BlockReader for FakeStore {
             .lock()
             .unwrap()
             .iter()
-            .map(|(uri, hash)| {
-                (
-                    uri.clone(),
-                    holon_filesystem::FileProjection {
-                        content_hash: hash.clone(),
-                        // Org embeds its id, so the skip never reads this.
-                        document_id: None,
-                        // Org is a writable format: it declares no membership.
-                        read_only_blocks: Vec::new(),
-                    },
-                )
-            })
+            .map(|(uri, projection)| (uri.clone(), projection.clone()))
             .collect())
     }
 
@@ -351,7 +340,7 @@ impl BlockReader for FakeStore {
         }
         let mut hashes = self.hashes.lock().unwrap();
         hashes.retain(|(u, _)| u != uri);
-        hashes.push((uri.clone(), projection.content_hash.clone()));
+        hashes.push((uri.clone(), projection.clone()));
         Ok(())
     }
 }
@@ -908,4 +897,92 @@ async fn a_stray_does_not_retitle_the_claimants_document() {
         Some(""),
         "the stray retitled the CLAIMANT's document from its own filename before being refused"
     );
+}
+
+/// The persisted merge base — the bytes Holon last put in the file — must
+/// survive a write-back that does NOT land. The pre-write row deliberately
+/// clears the content HASH (so the next boot arms no skip over bytes that were
+/// never written), and clearing the base along with it is what made a crash
+/// after a failed write diff the disk against the STORE and revert the store's
+/// own unwritten edit.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_write_back_that_does_not_land_keeps_the_persisted_merge_base() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let store = FakeStore::default();
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let path = root.join("Plain.org");
+    std::fs::write(&path, PLAIN_SOURCE).unwrap();
+    let doc_uri = EntityUri::block("lossy-doc");
+
+    let mut controller = controller_over(&store, &root);
+    let _ = controller
+        .on_file_changed(&path)
+        .await
+        .expect("the file ingests");
+    let base_after_ingest = recorded_base(&store, &path, &root).await;
+    assert!(
+        !base_after_ingest.is_empty(),
+        "precondition: the ingest must persist the file's bytes as the merge base"
+    );
+
+    // The vault turns unwritable, so the write-back attempt fails after the
+    // pre-write row is recorded — the crash window this pins.
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o500)).unwrap();
+    store.set_block_content("first-block", "first body, edited");
+    let block = row_to_block(
+        store
+            .blocks
+            .lock()
+            .unwrap()
+            .get(&EntityUri::block("first-block").to_string())
+            .expect("the ingest wrote the block row"),
+    );
+    let wrote = controller
+        .on_block_changed(
+            &doc_uri,
+            &holon_filesystem::BlockDelta::Upsert { block, prev: None },
+        )
+        .await;
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let on_disk = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        !on_disk.contains("first body, edited"),
+        "precondition: the write must NOT have landed, else nothing is being pinned; \
+         outcome {wrote:?}, disk:\n{on_disk}"
+    );
+    assert_eq!(
+        recorded_base(&store, &path, &root).await,
+        base_after_ingest,
+        "the failed write-back cleared the merge base; a boot from this row would diff the \
+         disk against the store and revert the store's unwritten edit"
+    );
+}
+
+/// The merge base of `path` as the next boot would read it: the sidecar bytes,
+/// but only under the hash the `file` row vouches for.
+#[cfg(unix)]
+async fn recorded_base(
+    store: &FakeStore,
+    path: &std::path::Path,
+    root: &std::path::Path,
+) -> String {
+    let rel = path.strip_prefix(root).expect("the file is in the vault");
+    let uri = EntityUri::file(&rel.to_string_lossy());
+    let row_hash = store
+        .hashes
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(u, _)| *u == uri)
+        .map(|(_, p)| p.base_hash.clone())
+        .unwrap_or_default();
+    holon_filesystem::base_sidecar::BaseSidecars::new(root, Arc::new(RealFileSystem))
+        .get(&uri, &row_hash)
+        .await
+        .expect("reading the merge base sidecar")
+        .unwrap_or_default()
 }

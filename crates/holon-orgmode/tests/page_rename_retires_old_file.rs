@@ -47,7 +47,7 @@ struct Store {
     /// `load_file_projections` so a second controller boots the cold-boot fast
     /// path on the hash the first one actually wrote — no reimplementation
     /// of `projection_hash` in the test.
-    file_hashes: Vec<(EntityUri, String)>,
+    file_hashes: Vec<(EntityUri, holon_filesystem::FileProjection)>,
 }
 
 #[derive(Clone, Default)]
@@ -164,18 +164,7 @@ impl BlockReader for Fixtures {
             .unwrap()
             .file_hashes
             .iter()
-            .map(|(uri, hash)| {
-                (
-                    uri.clone(),
-                    holon_filesystem::FileProjection {
-                        content_hash: hash.clone(),
-                        // Org embeds its id, so the skip never reads this.
-                        document_id: None,
-                        // Org is a writable format: it declares no membership.
-                        read_only_blocks: Vec::new(),
-                    },
-                )
-            })
+            .map(|(uri, projection)| (uri.clone(), projection.clone()))
             .collect())
     }
 
@@ -188,9 +177,7 @@ impl BlockReader for Fixtures {
     ) -> anyhow::Result<()> {
         let mut store = self.0.lock().unwrap();
         store.file_hashes.retain(|(u, _)| u != uri);
-        store
-            .file_hashes
-            .push((uri.clone(), projection.content_hash.clone()));
+        store.file_hashes.push((uri.clone(), projection.clone()));
         Ok(())
     }
 }

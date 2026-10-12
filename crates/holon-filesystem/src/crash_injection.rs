@@ -13,6 +13,11 @@ pub fn arm(point: &'static str) {
     *ARMED.lock().expect("crash-injection lock") = Some(point);
 }
 
+/// Forget an armed point the test never expected to be reached.
+pub fn disarm() {
+    *ARMED.lock().expect("crash-injection lock") = None;
+}
+
 /// The point armed and not reached yet.
 pub fn armed() -> Option<&'static str> {
     *ARMED.lock().expect("crash-injection lock")

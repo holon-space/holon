@@ -28,11 +28,18 @@ use holon_api::block::Block;
 /// The statement that records the hash of the bytes a write-back wrote, once
 /// the sync is idle or stops. Its own text, so a per-interaction write budget
 /// can tell this deferred write from the interaction's own.
-pub const RECORD_FILE_HASH_SQL: &str = "UPDATE file SET content_hash = ? WHERE id = ?";
+pub const RECORD_FILE_HASH_SQL: &str =
+    "UPDATE file SET content_hash = ?, base_hash = ? WHERE id = ?";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileProjection {
     pub content_hash: String,
+    /// Hash of the merge base in `.holon/bases/` — the bytes the write-back
+    /// last put in the file. The base itself is device-local and never leaves
+    /// that directory; this hash is what lets a boot tell the base it owns
+    /// from one that belongs to an older state of the row. Empty when Holon
+    /// never wrote the file.
+    pub base_hash: String,
     /// `None` while the provider has created the file row but no document has
     /// been attached to it yet.
     pub document_id: Option<EntityUri>,
@@ -179,12 +186,13 @@ pub trait BlockReader: Send + Sync {
         Ok(())
     }
 
-    /// Set the content hash of the existing `file` row `file_id`, leaving its
-    /// document and membership as they are. A missing row is an error. Its
+    /// Set the content hash and the merge-base hash of the
+    /// existing `file` row `file_id`, leaving its document and membership as
+    /// they are. A missing row is an error. Its
     /// statement is [`RECORD_FILE_HASH_SQL`], which no other write uses.
     /// The default records nothing and fails, so a backend that does not
     /// implement it discloses the written files as unrecorded.
-    async fn record_file_hash(&self, file_id: &EntityUri, _: &str) -> Result<()> {
+    async fn record_file_hash(&self, file_id: &EntityUri, _: &str, _: &str) -> Result<()> {
         anyhow::bail!(
             "{} does not implement record_file_hash, so the hash of {file_id} is not recorded",
             std::any::type_name::<Self>()

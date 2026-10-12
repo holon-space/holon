@@ -196,7 +196,7 @@ impl BlockReader for LoroBlockReader {
 
     /// No SQL `file` table under Loro — no row holds a hash a boot could skip
     /// on, so there is nothing to record.
-    async fn record_file_hash(&self, _: &EntityUri, _: &str) -> AnyhowResult<()> {
+    async fn record_file_hash(&self, _: &EntityUri, _: &str, _: &str) -> AnyhowResult<()> {
         Ok(())
     }
 

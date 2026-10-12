@@ -10,6 +10,15 @@ CREATE TABLE IF NOT EXISTS file (
     -- controller's state, not a field of the `File` entity, and a boot that
     -- skips the ingest reads its read-only membership from here.
     read_only_blocks TEXT,
+    -- Hash of this file's MERGE BASE — the bytes the write-back last put in
+    -- it, kept device-local in `<vault>/.holon/bases/` because the base must
+    -- survive a vault with no DB and must never sync to another device. A
+    -- cold boot diffs the disk against that base; without it the base comes
+    -- from the store, and a file left behind its store reads as an external
+    -- removal of the store's own unwritten edit. The base is used ONLY when
+    -- its bytes hash to this value. Written and read by raw SQL only, like
+    -- `read_only_blocks`. Empty when Holon never wrote the file's bytes.
+    base_hash TEXT NOT NULL DEFAULT '',
     properties TEXT,
     property_kinds TEXT,
     _change_origin TEXT

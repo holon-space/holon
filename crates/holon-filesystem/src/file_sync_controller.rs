@@ -787,6 +787,19 @@ pub struct FileSyncController {
     /// hashes, then compares — no SQL writes when the hash matches).
     last_projection_hash: HashMap<CanonicalPath, String>,
 
+    /// The hash of the base the previous run left in `.holon/bases/`, from
+    /// its `file` row. Read ONLY to seed a cold boot's diff base, and only for
+    /// a file whose bytes changed: without that base the base comes from the
+    /// store, and a file left behind its store then reads as an external
+    /// removal of the store's own unwritten edit. Each entry is superseded by
+    /// `last_projection` as soon as this session writes or reads that file.
+    booted_base_hash: HashMap<CanonicalPath, String>,
+
+    /// The bytes Holon last wrote to each file, device-local beside the
+    /// projection. Loaded lazily — a base is read only when a file's bytes no
+    /// longer hash to what its row recorded.
+    base_sidecars: crate::base_sidecar::BaseSidecars,
+
     /// The files whose `file` row this session wrote with the empty hash and
     /// no read-only members. A write-back records the empty hash before it
     /// writes, so a crash before the real hash is recorded leaves a row that
@@ -1225,6 +1238,8 @@ impl FileSyncController {
         Self {
             last_projection: HashMap::new(),
             last_projection_hash: HashMap::new(),
+            booted_base_hash: HashMap::new(),
+            base_sidecars: crate::base_sidecar::BaseSidecars::new(&root_dir, fs.clone()),
             empty_hash_rows: HashMap::new(),
             last_projection_doc: HashMap::new(),
             persisted_read_only_blocks: HashMap::new(),
@@ -1783,6 +1798,7 @@ impl FileSyncController {
         };
         match loaded {
             Ok(rows) => {
+                let live_rows: Vec<EntityUri> = rows.iter().map(|(uri, _)| uri.clone()).collect();
                 for (uri, projection) in rows {
                     // One unusable persisted row must not stop the boot: skip
                     // it (its file re-ingests) and disclose why.
@@ -1794,6 +1810,10 @@ impl FileSyncController {
                             if !projection.read_only_blocks.is_empty() {
                                 self.persisted_read_only_blocks
                                     .insert(canonical.clone(), projection.read_only_blocks);
+                            }
+                            if !projection.base_hash.is_empty() {
+                                self.booted_base_hash
+                                    .insert(canonical.clone(), projection.base_hash);
                             }
                             self.last_projection_hash
                                 .insert(canonical, projection.content_hash);
@@ -1812,6 +1832,19 @@ impl FileSyncController {
                      ingest when disk_bytes hash matches)",
                     self.last_projection_hash.len()
                 );
+                // A base no row claims can never be read, so one pass here is
+                // the whole lifecycle. A failed sweep leaves the bases alone
+                // and must not stop the boot.
+                match self.base_sidecars.sweep(&live_rows).await {
+                    Ok(0) => {}
+                    Ok(swept) => {
+                        info!("[FileSyncController] swept {swept} merge base(s) no file row claims")
+                    }
+                    Err(e) => tracing::warn!(
+                        error = %e,
+                        "[FileSyncController] could not sweep the merge bases in .holon/bases",
+                    ),
+                }
             }
             Err(e) => {
                 let e = e.context(
@@ -5773,7 +5806,29 @@ impl FileSyncController {
             // consolidated store may already hold blocks (e.g. from
             // seed_default_layout); querying it ensures they are treated as
             // updates. Otherwise parse the last projected content.
-            let seed: HashMap<EntityUri, Block> = if last.is_empty() {
+            let booted = if last.is_empty() {
+                self.booted_base_for(&canonical, rel_path).await
+            } else {
+                String::new()
+            };
+            let base_text = if last.is_empty() {
+                booted.as_str()
+            } else {
+                last
+            };
+            let seed: HashMap<EntityUri, Block> = if base_text.is_empty() {
+                if last.is_empty() {
+                    // ALLOW(fallback): disclosed. The store is the base only
+                    // for a file Holon never wrote (a vault seeded by
+                    // `seed_default_layout`, a file first met now). For a file
+                    // Holon DID write, the store base reverts whatever that
+                    // file is behind by.
+                    tracing::info!(
+                        path = %path.display(),
+                        "[FileSyncController] no merge base for this file, so the cold-boot \
+                         diff base comes from the store",
+                    );
+                }
                 self.block_reader
                     .get_blocks(&document_uri)
                     .await
@@ -5787,7 +5842,8 @@ impl FileSyncController {
                     .map(|b| (b.id.clone(), b))
                     .collect()
             } else {
-                match ingest_adapter.parse(path, last, &EntityUri::no_parent(), &self.root_dir) {
+                match ingest_adapter.parse(path, base_text, &EntityUri::no_parent(), &self.root_dir)
+                {
                     Ok(result) => result
                         .blocks
                         .into_iter()
@@ -7578,6 +7634,7 @@ impl FileSyncController {
                 &canonical,
                 rel_path,
                 &disk_hash,
+                &disk_content,
                 &document_uri,
                 &read_only_members,
             )
@@ -7606,6 +7663,7 @@ impl FileSyncController {
                 &canonical,
                 rel_path,
                 &disk_hash,
+                &disk_content,
                 &document_uri,
                 &read_only_members,
             )
@@ -7627,6 +7685,7 @@ impl FileSyncController {
                 &canonical,
                 rel_path,
                 &disk_hash,
+                &disk_content,
                 &document_uri,
                 &read_only_members,
             )
@@ -7695,6 +7754,7 @@ impl FileSyncController {
                     &canonical,
                     rel_path,
                     &disk_hash,
+                    &disk_content,
                     &document_uri,
                     &read_only_members,
                 )
@@ -7801,6 +7861,7 @@ impl FileSyncController {
             &canonical,
             rel_path,
             &final_hash,
+            &rendered,
             &document_uri,
             &read_only_members,
         )
@@ -7829,12 +7890,37 @@ impl FileSyncController {
         canonical: &CanonicalPath,
         rel_path: &Path,
         hash: &str,
+        projection: &str,
         document_id: &EntityUri,
         read_only_members: &[EntityUri],
     ) -> Result<()> {
+        debug_assert_eq!(
+            self.projection_hash(projection),
+            hash,
+            "the persisted projection of {} must be the bytes its hash names",
+            canonical.as_path_buf().display()
+        );
         let hash = self.note_projection_hash(canonical, hash);
-        self.write_file_row(canonical, rel_path, &hash, document_id, read_only_members)
+        // The base goes to disk BEFORE the row that vouches for its hash.
+        let base_hash = self
+            .base_sidecars
+            .put(&EntityUri::file(&rel_path.to_string_lossy()), projection)
             .await
+            .with_context(|| {
+                format!(
+                    "store the merge base of {}",
+                    canonical.as_path_buf().display()
+                )
+            })?;
+        self.write_file_row(
+            canonical,
+            rel_path,
+            &hash,
+            &base_hash,
+            document_id,
+            read_only_members,
+        )
+        .await
     }
 
     /// Record `hash` in memory as the bytes of `canonical`, and return the
@@ -7855,11 +7941,52 @@ impl FileSyncController {
     /// Write the `file` row of `canonical`. A row this session already wrote
     /// with the empty hash, the same document and no members is not written
     /// again.
+    /// The base the previous run left for `canonical`, read from
+    /// `.holon/bases/` only now, because this file's bytes no longer hash to
+    /// what its row recorded. Empty when there is none to TRUST — no row hash,
+    /// no sidecar, or a sidecar the row does not vouch for — which is
+    /// disclosed, because the ingest then diffs against the store instead.
+    async fn booted_base_for(&self, canonical: &CanonicalPath, rel_path: &Path) -> String {
+        let Some(expected) = self.booted_base_hash.get(canonical) else {
+            return String::new();
+        };
+        let row = EntityUri::file(&rel_path.to_string_lossy());
+        let found = self.base_sidecars.get(&row, expected).await;
+        let why = match found {
+            Ok(Some(base)) => return base,
+            Ok(None) => {
+                "the merge base is missing or does not match the hash its row recorded".to_string()
+            }
+            Err(e) => format!("the merge base could not be read: {e}"),
+        };
+        if let Some(disclosure) = &self.writeback_disclosure {
+            disclosure.writeback_degraded(&format!(
+                "{}: {why}, so this file is merged against the store instead of the bytes Holon \
+                 wrote",
+                rel_path.display()
+            ));
+        }
+        String::new()
+    }
+
+    /// The hash of the base `canonical` currently has: the bytes this session
+    /// wrote, else the ones the previous run recorded. Empty for a file Holon
+    /// never wrote.
+    fn base_hash_for(&self, canonical: &CanonicalPath) -> String {
+        self.last_projection
+            .get(canonical)
+            .filter(|last| !last.is_empty())
+            .map(|last| crate::base_sidecar::BaseSidecars::hash(last))
+            .or_else(|| self.booted_base_hash.get(canonical).cloned())
+            .unwrap_or_default()
+    }
+
     async fn write_file_row(
         &mut self,
         canonical: &CanonicalPath,
         rel_path: &Path,
         hash: &str,
+        base_hash: &str,
         document_id: &EntityUri,
         read_only_members: &[EntityUri],
     ) -> Result<()> {
@@ -7897,6 +8024,7 @@ impl FileSyncController {
         // document) or trusting an empty membership (missing blocks).
         let projection = crate::sync_ports::FileProjection {
             content_hash: hash.to_string(),
+            base_hash: base_hash.to_string(),
             document_id: Some(document_id.clone()),
             read_only_blocks: read_only_members.to_vec(),
         };
@@ -7922,15 +8050,24 @@ impl FileSyncController {
     }
 
     /// The files whose row holds the empty hash while Holon knows the hash of
-    /// the bytes it wrote last. A file holding a copy keeps the empty hash.
-    fn owed_hash_stamps(&self) -> Vec<(CanonicalPath, EmptyHashRow, String)> {
+    /// the bytes it wrote last, each with those bytes (the merge base the next
+    /// boot needs). A file holding a copy keeps the empty hash.
+    fn owed_hash_stamps(&self) -> Vec<(CanonicalPath, EmptyHashRow, String, String)> {
         self.empty_hash_rows
             .iter()
             .filter(|(canonical, _)| !self.holds_copy(canonical))
             .filter_map(|(canonical, row)| {
-                self.last_projection_hash
-                    .get(canonical)
-                    .map(|hash| (canonical.clone(), row.clone(), hash.clone()))
+                self.last_projection_hash.get(canonical).map(|hash| {
+                    (
+                        canonical.clone(),
+                        row.clone(),
+                        hash.clone(),
+                        self.last_projection
+                            .get(canonical)
+                            .cloned()
+                            .unwrap_or_default(),
+                    )
+                })
             })
             .collect()
     }
@@ -7946,25 +8083,38 @@ impl FileSyncController {
     /// while it holds them. A failure is disclosed on the vault, naming every
     /// file still unrecorded; those files are read again at the next boot.
     pub async fn stamp_written_hashes(&mut self) -> Result<()> {
+        // A crash never reaches the stamp: the rows the write-back left with
+        // the empty hash stay that way, and the next boot reads those files.
+        #[cfg(feature = "crash-injection")]
+        if crate::crash_injection::fires("skip_written_hash_stamp") {
+            return Ok(());
+        }
         let owed = self.owed_hash_stamps();
-        for (i, (canonical, row, hash)) in owed.iter().enumerate() {
+        for (i, (canonical, row, hash, projection)) in owed.iter().enumerate() {
             let file_uri = EntityUri::file(&row.rel_path.to_string_lossy());
-            let recorded = self
-                .block_reader
-                .record_file_hash(&file_uri, hash)
-                .await
-                .with_context(|| {
-                    format!(
-                        "record the hash of {} in the file row {file_uri}",
-                        canonical.as_path_buf().display()
-                    )
-                });
+            let recorded = match self.base_sidecars.put(&file_uri, projection).await {
+                // The base goes to disk BEFORE the row that vouches for its
+                // hash: a crash in between leaves a base the row refuses, not
+                // one it wrongly accepts.
+                Ok(base_hash) => {
+                    self.block_reader
+                        .record_file_hash(&file_uri, hash, &base_hash)
+                        .await
+                }
+                Err(e) => Err(anyhow::Error::new(e)),
+            }
+            .with_context(|| {
+                format!(
+                    "record the hash of {} in the file row {file_uri}",
+                    canonical.as_path_buf().display()
+                )
+            });
             if let Err(e) = recorded {
                 let cause = format!("{e:#}");
                 if let Some(disclosure) = &self.writeback_disclosure {
                     let files: Vec<&Path> = owed[i..]
                         .iter()
-                        .map(|(canonical, _, _)| canonical.as_path_buf().as_path())
+                        .map(|(canonical, ..)| canonical.as_path_buf().as_path())
                         .collect();
                     disclosure.written_files_unrecorded(&self.root_dir, &files, &cause);
                 }
@@ -10583,8 +10733,12 @@ impl FileSyncController {
         // The next boot skips a file whose bytes match the stored hash, so the
         // row holds no hash from before this write until the stamp records
         // the bytes written: a crash in between leaves a row that arms no skip.
+        // The merge BASE is kept, though — it still names the bytes the file
+        // holds, and clearing it would make a crash after a write that never
+        // landed diff the disk against the store again.
+        let base = self.base_hash_for(&canonical);
         if let Err(e) = self
-            .write_file_row(&canonical, rel_path, "", doc_id, &[])
+            .write_file_row(&canonical, rel_path, "", &base, doc_id, &[])
             .await
         {
             let cause = format!("{e:#}");

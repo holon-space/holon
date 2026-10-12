@@ -2323,7 +2323,7 @@ mod fast_path_loro_presence_tests {
     /// or consolidator tag).
     struct HashCapturingReader {
         inner: Arc<InMemoryBlockStore>,
-        hashes: Arc<Mutex<HashMap<String, String>>>,
+        hashes: Arc<Mutex<HashMap<String, holon_filesystem::FileProjection>>>,
     }
 
     #[async_trait]
@@ -2351,16 +2351,10 @@ mod fast_path_loro_presence_tests {
                 .lock()
                 .unwrap()
                 .iter()
-                .map(|(k, v)| {
+                .map(|(k, projection)| {
                     (
                         EntityUri::parse(k).expect("stored file uri"),
-                        holon_filesystem::FileProjection {
-                            content_hash: v.clone(),
-                            // Org embeds its id, so the skip never reads this.
-                            document_id: None,
-                            // Org is writable: it declares no membership.
-                            read_only_blocks: Vec::new(),
-                        },
+                        projection.clone(),
                     )
                 })
                 .collect())
@@ -2375,7 +2369,7 @@ mod fast_path_loro_presence_tests {
             self.hashes
                 .lock()
                 .unwrap()
-                .insert(uri.as_str().to_string(), projection.content_hash.clone());
+                .insert(uri.as_str().to_string(), projection.clone());
             Ok(())
         }
     }
@@ -2491,7 +2485,7 @@ mod fast_path_loro_presence_tests {
     async fn boot_once_and_stamp_hash(
         root_dir: &std::path::Path,
     ) -> (
-        Arc<Mutex<HashMap<String, String>>>,
+        Arc<Mutex<HashMap<String, holon_filesystem::FileProjection>>>,
         Arc<MockDocumentManager>,
         PathBuf,
         EntityUri,
@@ -2546,7 +2540,7 @@ mod fast_path_loro_presence_tests {
     /// performed (0 = fast path skipped).
     async fn boot_again_with_loro_presence(
         root_dir: &std::path::Path,
-        hashes: Arc<Mutex<HashMap<String, String>>>,
+        hashes: Arc<Mutex<HashMap<String, holon_filesystem::FileProjection>>>,
         doc_manager: Arc<MockDocumentManager>,
         canonical: &std::path::Path,
         loro_has_root: bool,

@@ -401,7 +401,7 @@ impl BlockReader for CacheBlockReader {
             .cache
             .db_handle()
             .query(
-                "SELECT id, content_hash, document_id, read_only_blocks FROM file",
+                "SELECT id, content_hash, document_id, read_only_blocks, base_hash FROM file",
                 std::collections::HashMap::new(),
             )
             .await
@@ -459,6 +459,10 @@ impl BlockReader for CacheBlockReader {
                 uri,
                 holon_filesystem::FileProjection {
                     content_hash: hash,
+                    base_hash: match row.get("base_hash") {
+                        Some(holon_api::Value::String(s)) => s.clone(),
+                        _ => String::new(),
+                    },
                     document_id,
                     read_only_blocks,
                 },
@@ -522,6 +526,7 @@ impl BlockReader for CacheBlockReader {
             holon_api::Value::String(projection.content_hash.clone()),
             document_id,
             members,
+            holon_api::Value::String(projection.base_hash.clone()),
         ];
         self.cache
             .db_handle()
@@ -534,9 +539,11 @@ impl BlockReader for CacheBlockReader {
                 // — and owns them TOGETHER, because a hash written without its
                 // membership is the silent edits-accepted hole.
                 "INSERT INTO file (id, name, parent_id, content_hash, document_id, \
-                 read_only_blocks) VALUES (?, ?, ?, ?, ?, ?) \
+                 read_only_blocks, base_hash) VALUES (?, ?, ?, ?, ?, ?, ?) \
                  ON CONFLICT(id) DO UPDATE SET content_hash = excluded.content_hash, \
-                 document_id = excluded.document_id, read_only_blocks = excluded.read_only_blocks",
+                 document_id = excluded.document_id, \
+                 read_only_blocks = excluded.read_only_blocks, \
+                 base_hash = excluded.base_hash",
                 params,
             )
             .await
@@ -550,6 +557,7 @@ impl BlockReader for CacheBlockReader {
         &self,
         file_id: &holon_api::EntityUri,
         hash: &str,
+        base_hash: &str,
     ) -> anyhow::Result<()> {
         let updated = self
             .cache
@@ -558,6 +566,7 @@ impl BlockReader for CacheBlockReader {
                 holon_filesystem::RECORD_FILE_HASH_SQL,
                 vec![
                     holon_api::Value::String(hash.to_string()),
+                    holon_api::Value::String(base_hash.to_string()),
                     holon_api::Value::String(file_id.to_string()),
                 ],
             )

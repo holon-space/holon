@@ -45,6 +45,7 @@ async fn a_recorded_document_is_restored_as_the_same_id() {
     for (n, raw) in documents.iter().enumerate() {
         let projection = FileProjection {
             content_hash: format!("hash-{n}"),
+            base_hash: format!("base-hash-{n}"),
             document_id: Some(EntityUri::parse(raw).unwrap()),
             read_only_blocks: Vec::new(),
         };
