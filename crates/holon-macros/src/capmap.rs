@@ -9,6 +9,11 @@
 //!   3. `impl Foo for CapMap`, forwarding every `&self` method to
 //!      `self.expect::<dyn Foo>().method(args)[.await]`.
 //!
+//! A method with a DEFAULT body is forwarded too: this impl is a forwarder, so
+//! inheriting a default would answer from the empty adapter instead of the
+//! registered provider — a silent oracle fake, since cap defaults are the
+//! "substrate without this concept" can't-fail answer.
+//!
 //! `&mut self` methods (drains / apply-phase side effects) can't be forwarded
 //! through the shared `Arc<dyn Cap>`; they get a fail-loud `unimplemented!` so
 //! a composed slice that wrongly routes a drain through the map panics clearly
@@ -35,11 +40,6 @@ pub fn capmap_adapter_impl(trait_def: ItemTrait) -> TokenStream {
         let TraitItem::Fn(method) = item else {
             continue;
         };
-        // Provided (default-bodied) methods are inherited by the impl — skip.
-        if method.default.is_some() {
-            continue;
-        }
-
         let sig = &method.sig;
         let name = &sig.ident;
         let output = &sig.output;
@@ -52,17 +52,32 @@ pub fn capmap_adapter_impl(trait_def: ItemTrait) -> TokenStream {
             match input {
                 FnArg::Receiver(r) => receiver_is_mut = r.mutability.is_some(),
                 FnArg::Typed(pt) => {
-                    typed_args.push(pt.clone());
-                    match &*pt.pat {
-                        Pat::Ident(pi) => arg_idents.push(pi.ident.clone()),
+                    let ident = match &*pt.pat {
+                        Pat::Ident(pi) => pi.ident.clone(),
+                        // A defaulted method ignores an argument as `_: T`; the
+                        // forwarder must still pass it on, so name it.
+                        Pat::Wild(w) => syn::Ident::new(
+                            &format!("arg{}", arg_idents.len()),
+                            w.underscore_token.span,
+                        ),
                         other => {
                             return syn::Error::new_spanned(
                                 other,
-                                "capmap_adapter: only simple identifier arguments are supported",
+                                "capmap_adapter: only identifier and `_` arguments are supported",
                             )
                             .to_compile_error();
                         }
-                    }
+                    };
+                    let mut pt = pt.clone();
+                    pt.pat = Box::new(Pat::Ident(syn::PatIdent {
+                        attrs: Vec::new(),
+                        by_ref: None,
+                        mutability: None,
+                        ident: ident.clone(),
+                        subpat: None,
+                    }));
+                    typed_args.push(pt);
+                    arg_idents.push(ident);
                 }
             }
         }
@@ -101,9 +116,10 @@ pub fn capmap_adapter_impl(trait_def: ItemTrait) -> TokenStream {
     // owned values) is already object-safe — wrapping it would force every
     // existing plain `impl Trait for ConcreteRef` to carry the attribute too.
     // Emit the attribute conditionally so one `#[capmap_adapter]` serves both.
-    let has_async = trait_def.items.iter().any(
-        |item| matches!(item, TraitItem::Fn(m) if m.default.is_none() && m.sig.asyncness.is_some()),
-    );
+    let has_async = trait_def
+        .items
+        .iter()
+        .any(|item| matches!(item, TraitItem::Fn(m) if m.sig.asyncness.is_some()));
     let async_attr = if has_async {
         quote! { #[::async_trait::async_trait(?Send)] }
     } else {

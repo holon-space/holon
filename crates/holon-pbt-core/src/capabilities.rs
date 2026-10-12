@@ -301,10 +301,7 @@ pub trait RefBlockTree {
     /// subtree as a separate data domain rather than as outline content —
     /// `inv-main-panel-rows-match-focus` stops its descent there.
     ///
-    /// Substrates with no source blocks answer `false`. NOT a defaulted method
-    /// on purpose: `#[capmap_adapter]` inherits provided bodies instead of
-    /// forwarding them, so a default here would silently answer `false`
-    /// through `CapMap` no matter what the reference models.
+    /// Substrates with no source blocks answer `false`.
     fn owns_query_source(&self, id: &EntityUri) -> bool;
 
     /// True if `id` is rule machinery — a source block under a heading that

@@ -52,6 +52,6 @@ not to write a default — one trait documented it, the other 108 did not.
 ## Remedy
 The macro forwards provided `&self` methods exactly like required ones, and
 `has_async` counts provided async methods so a trait whose only async method is
-provided still gets `#[async_trait(?Send)]`. Provided `&mut self` methods stay
-skipped: forwarding them through the shared `Arc<dyn Cap>` is unsound (no
-mutable access), and there are none today.
+provided still gets `#[async_trait(?Send)]`. A provided `&mut self` method lands in the
+existing fail-loud `unimplemented!` branch instead: forwarding it through the
+shared `Arc<dyn Cap>` is unsound (no mutable access). There are none today.
