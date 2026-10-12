@@ -572,6 +572,15 @@ const DATABASE_COORDINATION_FILE_MOVED_ASIDE: ConditionProfile = ConditionProfil
     &[],
 );
 
+const DATABASE_VIEWS_DROPPED: ConditionProfile = ConditionProfile::new(
+    ConditionSeverity::Info,
+    "The database's views were built again",
+    icons::INFO,
+    ConditionPlacement::Toast,
+    AllClear::UntilRestart,
+    &[],
+);
+
 const LEFT_SHARED_PAGE: ConditionProfile = ConditionProfile::new(
     ConditionSeverity::Info,
     "You left a shared page",
@@ -980,6 +989,7 @@ impl ConditionKind {
             Self::DatabaseCoordinationFileMovedAside { .. } => {
                 DATABASE_COORDINATION_FILE_MOVED_ASIDE
             }
+            Self::DatabaseViewsDropped { .. } => DATABASE_VIEWS_DROPPED,
             Self::PairingReimportedLocalContent { .. } => PAIRING_REIMPORTED_LOCAL_CONTENT,
             Self::LeftSharedPage { .. } => LEFT_SHARED_PAGE,
             Self::DeletedSharedPage { .. } => DELETED_SHARED_PAGE,

@@ -67,6 +67,67 @@ pub enum OpenChange {
     },
 }
 
+impl std::fmt::Display for OpenChange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ViewsDropped { reason, views } => write!(
+                f,
+                "dropped the materialized views [{}] ({reason})",
+                views.join(", ")
+            ),
+            Self::CoordinationFileMovedAside { reason, backup } => write!(
+                f,
+                "moved the coordination file aside to {} ({reason})",
+                backup.display()
+            ),
+            Self::LogMovedAside { reason, backup } => write!(
+                f,
+                "moved the write-ahead log aside to {} ({reason})",
+                backup.display()
+            ),
+            Self::MovedAside { reason, backup } => write!(
+                f,
+                "moved the database aside to {} ({reason})",
+                backup.display()
+            ),
+        }
+    }
+}
+
+/// An open that failed, and what it did to the files before it failed.
+#[derive(Debug)]
+pub struct OpenFailed {
+    pub changed: OpenOutcome,
+    pub error: StorageError,
+}
+
+impl std::fmt::Display for OpenFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.error)?;
+        for change in &self.changed.0 {
+            write!(f, "; before it failed, the open {change}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for OpenFailed {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
+/// Keeps the class of the error when the open changed nothing; otherwise the
+/// error text names every change.
+impl From<OpenFailed> for StorageError {
+    fn from(failed: OpenFailed) -> Self {
+        match failed.changed.0.is_empty() {
+            true => failed.error,
+            false => StorageError::DatabaseError(failed.to_string()),
+        }
+    }
+}
+
 /// What this process's boot did to its database file. Provided once per
 /// session; a boot that opens no database (`LoroMemory`) records
 /// [`OpenOutcome::KEPT`].
@@ -77,27 +138,63 @@ const FN_SET_TABLE: &str = "holon_db_fn_set";
 /// Values computed with the functions; the derived-field reconciler refills it.
 const DERIVED_CACHE_TABLE: &str = "block_derived";
 
+/// How often an open tries a file another process holds, and how long it
+/// waits between tries. Only a unix file lock can be held by another process.
+const LOCK_TRIES: u32 = if cfg!(target_family = "unix") { 10 } else { 1 };
+const LOCK_RETRY: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// The opened database, and what this open did to the file.
-pub(crate) fn open(db_path: &Path, fns: &[ScalarFn]) -> Result<(Arc<Database>, OpenOutcome)> {
+pub(crate) fn open(
+    db_path: &Path,
+    fns: &[ScalarFn],
+) -> std::result::Result<(Arc<Database>, OpenOutcome), OpenFailed> {
+    let mut changes = Vec::new();
+    match open_recording(db_path, fns, &mut changes) {
+        Ok(db) => Ok((db, OpenOutcome(changes))),
+        Err(error) => Err(OpenFailed {
+            changed: OpenOutcome(changes),
+            error,
+        }),
+    }
+}
+
+/// Opens the database, pushing each change to the files onto `changes` as it
+/// makes it, so a later failure still reports the earlier changes.
+fn open_recording(
+    db_path: &Path,
+    fns: &[ScalarFn],
+    changes: &mut Vec<OpenChange>,
+) -> Result<Arc<Database>> {
     let path = db_path
         .to_str()
         .ok_or_else(|| StorageError::DatabaseError(format!("path {db_path:?} is not UTF-8")))?;
     if path.starts_with(":memory:") {
-        let db = open_with_io(Arc::new(MemoryIO::new()), path, OpenFlags::default(), fns)
-            .map_err(|e| e.classify(path))?;
-        return Ok((db, OpenOutcome::KEPT));
+        return open_with_io(Arc::new(MemoryIO::new()), path, OpenFlags::default(), fns)
+            .map_err(|e| e.classify(path));
     }
-    let mut changes = Vec::new();
     let mut stem = None;
-    // Each failed pass moves one more existing file aside, so the loop ends.
+    let mut tries = 0;
+    // Each failed pass moves one more existing file aside or uses one of the
+    // bounded lock tries, so the loop ends.
     loop {
         let Failed { leg, error, db } = match attempt(path, fns) {
             Ok((db, change)) => {
                 changes.extend(change);
-                return Ok((db, OpenOutcome(changes)));
+                return Ok(db);
             }
             Err(failed) => failed,
         };
+        if error.failure() == Some(DatabaseOpenFailure::Locked) {
+            tries += 1;
+            if tries < LOCK_TRIES {
+                tracing::warn!(
+                    "[open_database] {path}: another process holds it; try {tries} of \
+                     {LOCK_TRIES}, next in {LOCK_RETRY:?}"
+                );
+                std::thread::sleep(LOCK_RETRY);
+                continue;
+            }
+        }
         if !error.is_corrupt() {
             return Err(error.classify(path));
         }
@@ -112,8 +209,7 @@ pub(crate) fn open(db_path: &Path, fns: &[ScalarFn]) -> Result<(Arc<Database>, O
         let stem: &std::path::Path = stem.get_or_insert_with(|| free_backup_stem(db_path, path));
         changes.push(recover_damaged(leg, reason, db_path, path, stem)?);
         if let Some(OpenChange::MovedAside { .. }) = changes.last() {
-            let db = open_fresh(path, fns).map_err(|e| e.classify(path))?;
-            return Ok((db, OpenOutcome(changes)));
+            return open_fresh(path, fns).map_err(|e| e.classify(path));
         }
     }
 }
@@ -152,8 +248,15 @@ impl std::fmt::Display for OpenError {
 }
 
 impl OpenError {
+    fn failure(&self) -> Option<DatabaseOpenFailure> {
+        match self {
+            Self::Engine { error, .. } => Some(open_failure(error)),
+            Self::Other(_) => None,
+        }
+    }
+
     fn is_corrupt(&self) -> bool {
-        matches!(self, Self::Engine { error, .. } if open_failure(error) == DatabaseOpenFailure::Corrupt)
+        self.failure() == Some(DatabaseOpenFailure::Corrupt)
     }
 
     fn classify(self, path: &str) -> StorageError {

@@ -47,7 +47,7 @@ fn build(path: &Path) {
 
 /// Process B: the production open of a file process A holds.
 fn run_as_child(path: &str) -> ! {
-    match TursoBackend::open_database_reporting_outcome(path) {
+    match TursoBackend::open_database_reporting_outcome(path).map_err(StorageError::from) {
         Ok((_, outcome)) => println!("CHILD-OPENED {outcome:?}"),
         Err(StorageError::DatabaseUnopenable { failure, .. }) => {
             println!("CHILD-UNOPENABLE {failure:?}")
@@ -111,7 +111,9 @@ fn a_read_only_database_file_is_not_moved_aside() {
     let bytes = std::fs::read(&path).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
 
-    let opened = TursoBackend::open_database_reporting_outcome(&path).map(|(_, o)| o);
+    let opened = TursoBackend::open_database_reporting_outcome(&path)
+        .map(|(_, o)| o)
+        .map_err(StorageError::from);
     let left = (
         std::fs::read(&path).ok() == Some(bytes),
         backups(dir.path()),
@@ -149,7 +151,9 @@ fn a_database_in_a_read_only_directory_opens_where_it_is() {
     };
     std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
 
-    let opened = TursoBackend::open_database_reporting_outcome(&path).map(|(_, o)| o);
+    let opened = TursoBackend::open_database_reporting_outcome(&path)
+        .map(|(_, o)| o)
+        .map_err(StorageError::from);
     let mut after: Vec<_> = std::fs::read_dir(dir.path())
         .unwrap()
         .map(|e| e.unwrap().path())
@@ -171,7 +175,9 @@ fn a_database_in_a_missing_directory_is_an_io_error() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("gone").join("holon.db");
 
-    let opened = TursoBackend::open_database_reporting_outcome(&path).map(|(_, o)| o);
+    let opened = TursoBackend::open_database_reporting_outcome(&path)
+        .map(|(_, o)| o)
+        .map_err(StorageError::from);
     assert!(
         matches!(
             opened,
@@ -333,7 +339,9 @@ fn a_database_in_another_text_encoding_is_kept_and_refused() {
     bytes[56..60].copy_from_slice(&2u32.to_be_bytes());
     std::fs::write(&path, &bytes).unwrap();
 
-    let opened = TursoBackend::open_database_reporting_outcome(&path).map(|(_, o)| o);
+    let opened = TursoBackend::open_database_reporting_outcome(&path)
+        .map(|(_, o)| o)
+        .map_err(StorageError::from);
     assert_eq!(
         (
             std::fs::read(&path).ok() == Some(bytes),
@@ -520,4 +528,101 @@ fn a_truncated_write_ahead_log_does_not_lose_rows_silently() {
              ({rows:?})"
         );
     }
+}
+
+/// A process that holds the database only briefly does not stop the open: the
+/// open waits for the lock and then opens the file where it is.
+#[test]
+fn a_database_held_briefly_opens_once_released() {
+    if let Ok(path) = std::env::var(CHILD_DB_PATH) {
+        run_as_child(&path);
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("holon.db");
+    let (a, _) = TursoBackend::open_database_reporting_outcome(&path).expect("process A opens");
+    exec(&a, "CREATE TABLE t (id INTEGER PRIMARY KEY)");
+    exec(&a, "INSERT INTO t (id) VALUES (1)");
+
+    let child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "a_database_held_briefly_opens_once_released",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(CHILD_DB_PATH, &path)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn process B");
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    drop(a);
+    let child = child.wait_with_output().expect("wait for process B");
+    let stdout = String::from_utf8_lossy(&child.stdout);
+    let report = stdout
+        .lines()
+        .find_map(|l| l.find("CHILD-").map(|at| &l[at..]))
+        .unwrap_or_else(|| {
+            panic!(
+                "process B printed no result; stdout:\n{stdout}\nstderr:\n{}",
+                String::from_utf8_lossy(&child.stderr)
+            )
+        });
+    assert!(
+        report.starts_with("CHILD-OPENED"),
+        "process B must open the database once A released it, got: {report}"
+    );
+    assert_eq!(backups(dir.path()), Vec::<PathBuf>::new());
+}
+
+/// Sets or clears the immutable flag, which makes a rename of the file fail
+/// while the other files of its directory still move.
+#[cfg(target_os = "macos")]
+fn set_immutable(file: &Path, on: bool) {
+    let status = std::process::Command::new("chflags")
+        .arg(if on { "uchg" } else { "nouchg" })
+        .arg(file)
+        .status()
+        .expect("run chflags");
+    assert!(status.success(), "chflags on {}", file.display());
+}
+
+/// A move that fails after an earlier move of the same open: the failure still
+/// says where the earlier file went.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_failed_move_keeps_the_earlier_moves_disclosed() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("holon.db");
+    build_checkpointed(&path);
+    std::fs::write(dir.path().join("holon.db-tshm"), b"garbage tshm".repeat(33)).unwrap();
+    let wal = dir.path().join("holon.db-wal");
+    std::fs::write(&wal, b"garbage wal".repeat(50)).unwrap();
+    set_immutable(&wal, true);
+
+    let opened = TursoBackend::open_database_reporting_outcome(&path).map(|(_, o)| o);
+    set_immutable(&wal, false);
+
+    let moved = backups(dir.path());
+    let [coordination] = moved.as_slice() else {
+        panic!("only the coordination file can move, found {moved:?}; open: {opened:?}");
+    };
+    let failed = match opened {
+        Ok(outcome) => panic!("the log cannot move, so the open must fail, got {outcome:?}"),
+        Err(failed) => failed,
+    };
+    assert!(
+        matches!(
+            failed.changed.0.as_slice(),
+            [OpenChange::CoordinationFileMovedAside { backup, .. }] if backup == coordination
+        ),
+        "the failure must report the moved coordination file, got {failed:?}"
+    );
+    assert!(
+        StorageError::from(failed)
+            .to_string()
+            .contains(&coordination.display().to_string()),
+        "the error text must name where the coordination file went ({})",
+        coordination.display()
+    );
 }

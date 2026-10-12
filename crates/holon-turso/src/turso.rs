@@ -2204,7 +2204,8 @@ impl TursoBackend {
     /// that discloses it to the user.
     pub fn open_database_reporting_outcome<P: AsRef<Path>>(
         db_path: P,
-    ) -> Result<(Arc<Database>, crate::db_open::OpenOutcome)> {
+    ) -> std::result::Result<(Arc<Database>, crate::db_open::OpenOutcome), crate::db_open::OpenFailed>
+    {
         let opened = crate::db_open::open(db_path.as_ref(), crate::scalar_fns::ALL)?;
         tracing::info!("Turso database opened at: {}", db_path.as_ref().display());
         Ok(opened)

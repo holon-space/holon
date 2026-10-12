@@ -266,6 +266,26 @@ async fn an_upgrade_builds_the_same_views_as_a_fresh_boot() {
             .any(|k| k == "database-moved-aside"),
         "an upgrade must keep the file in place"
     );
+    let current = upgraded
+        .injector
+        .resolve::<Arc<holon_api::ConditionBus>>()
+        .subscribe()
+        .current;
+    let dropped = current
+        .iter()
+        .find(|c| c.condition_key().kind == "database-views-dropped")
+        .unwrap_or_else(|| {
+            panic!(
+                "views dropped at boot were not disclosed: {:?}",
+                raised_kinds(&upgraded)
+            )
+        });
+    let detail = dropped.reason.detail(&dropped.subject);
+    let rendered = format!("{} {}", detail.headline, detail.body.join(" | "));
+    assert!(
+        rendered.contains("older_fn/1/v1") && rendered.contains("every table row is kept"),
+        "the text Martin reads must say why and that no row is lost: {rendered}"
+    );
 }
 
 /// Every table a booted session holds, with every bundled integration's caches

@@ -518,7 +518,7 @@ impl FrontendInjectorExt for Injector {
                     .await;
                 tracing::info!("[FrontendSession] factory: BackendEngine resolved");
 
-                // Say where each damaged database file moved at open.
+                // Say what the open did to the database files.
                 let opened = resolver.resolve::<holon::storage::db_open::BootOpenOutcome>();
                 for change in &opened.0.0 {
                     use holon::storage::db_open::OpenChange;
@@ -541,7 +541,12 @@ impl FrontendInjectorExt for Injector {
                                 backup: backup.display().to_string(),
                             }
                         }
-                        OpenChange::ViewsDropped { .. } => continue,
+                        OpenChange::ViewsDropped { reason, views } => {
+                            holon_api::ConditionKind::DatabaseViewsDropped {
+                                reason: reason.clone(),
+                                views: views.clone(),
+                            }
+                        }
                     };
                     let bus = resolver.resolve::<Arc<holon_api::ConditionBus>>();
                     bus.emit(holon_api::Condition {

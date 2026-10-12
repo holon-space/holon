@@ -306,6 +306,15 @@ impl ConditionKind {
                 )
             }
 
+            // The reason names whole function sets, too long for the headline.
+            Self::DatabaseViewsDropped { reason, views } => ConditionDetail::with_body(
+                "Holon could not use the database's materialized views, so it dropped them and \
+                 built them again from the tables; every table row is kept",
+                std::iter::once(reason.clone())
+                    .chain(views.iter().cloned())
+                    .collect(),
+            ),
+
             Self::UndoHistoryClearedAtBoot { entries } => ConditionDetail::prose(format!(
                 "{entries} step{} from the previous session were discarded",
                 if *entries == 1 { "" } else { "s" }
