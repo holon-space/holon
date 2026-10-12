@@ -33,39 +33,38 @@ fn every_catalog_descriptor_compiles() {
     assert_eq!(net.transitions.len(), ops.len());
 }
 
-/// Catalog analyzability, pinned. The six write ops declare both halves; an
-/// op that declares one and not the other is unanalyzable with exactly the
-/// missing half named — never silently empty.
+/// Catalog analyzability, pinned. Every block write op declares both halves,
+/// so the whole block catalog is analyzable; an op that declares neither is
+/// unanalyzable with exactly the missing halves named — never silently empty.
 #[test]
 fn catalog_analyzability_matches_the_declared_halves() {
     let ops = block_catalog();
     let net = holon_net::derive_net(&ops, &[]).unwrap();
-    let analyzability = |name: &str| {
+    let analyzability = |net: &holon_net::CompiledNet, name: &str| {
         net.transition(&TransitionKey::operation("block", name).expect("dotless entity"))
             .unwrap_or_else(|| panic!("catalog advertises {name}"))
             .analyzability
             .clone()
     };
-    for name in [
-        "set_field",
-        "create",
-        "delete",
-        "move_block",
-        "split_block",
-        "join_block",
-    ] {
+    for op in &ops {
         assert_eq!(
-            analyzability(name),
+            analyzability(&net, &op.name),
             Analyzability::Analyzable,
-            "{name} declares both halves"
+            "{} declares both halves",
+            op.name
         );
     }
+
+    // The negative half of the pin needs an op that still declares neither.
+    let task_ops =
+        holon_core::__operations_task_operations::task_operations("block", "block", "block", "id");
+    let task_net = holon_net::derive_net(&task_ops, &[]).unwrap();
     assert_eq!(
-        analyzability("indent"),
+        analyzability(&task_net, "cycle_task_state"),
         Analyzability::Unanalyzable {
             undeclared: vec![UndeclaredHalf::Arcs, UndeclaredHalf::MarkingDelta]
         },
-        "indent declares neither half, and the census must keep saying so"
+        "cycle_task_state declares neither half, and the census must keep saying so"
     );
 }
 
