@@ -1,0 +1,54 @@
+# RED: inv-displayed-text/widget does not know the task-keyword source surface
+# pin:     holon-gpui::gpui_composed_windowed_loop focused_task_block_shows_its_keyword_surface
+# base:    main 8026acd2 + the pin ONLY (the oracle is unfixed here)
+# profile: test (cargo nextest, --test-threads 1, --no-capture)
+# command: cargo nextest run --features holon-integration-tests/pbt,holon-integration-tests/web-arm,holon-gpui/pbt \
+#            -p holon-gpui --test gpui_composed_windowed_loop \
+#            -E 'test(focused_task_block_shows_its_keyword_surface)'
+#
+# Red for the right reason: the FIRST on-screen frame after NavigateFocus already
+# diverges, and the divergence is exactly the keyword prefix the `editing`
+# template paints through the task_keyword source_projection — the oracle asked
+# for the bare `content` column. The ToggleState steps (TODO/DOING/DONE/cleared)
+# are never reached because the harness stops at the first divergence.
+#
+# (Build output trimmed; the test section follows verbatim.)
+
+[2m2026-10-12T14:15:18.727339Z[0m [33m WARN[0m [2mpbt_invariant[0m[2m:[0m [inv-frontend-bounds-rendered/element-has-content] Element 'column#98' (widget_type='column') has has_content=false
+[2m2026-10-12T14:15:18.727350Z[0m [33m WARN[0m [2mpbt_invariant[0m[2m:[0m [inv-frontend-bounds-rendered/element-has-content] Element 'draggable#83' (widget_type='draggable') has has_content=false
+[2m2026-10-12T14:15:18.727360Z[0m [33m WARN[0m [2mpbt_invariant[0m[2m:[0m [inv-frontend-bounds-rendered/element-has-content] Element 'draggable#101' (widget_type='draggable') has has_content=false
+[2m2026-10-12T14:15:18.727370Z[0m [33m WARN[0m [2mpbt_invariant[0m[2m:[0m [inv-frontend-bounds-rendered/element-has-content] Element 'live_block#0' (widget_type='live_block') has has_content=false
+[2m2026-10-12T14:15:18.727380Z[0m [33m WARN[0m [2mpbt_invariant[0m[2m:[0m [inv-frontend-bounds-rendered/element-has-content] Element 'column#107' (widget_type='column') has has_content=false
+[2m2026-10-12T14:15:18.727392Z[0m [33m WARN[0m [2mpbt_invariant[0m[2m:[0m [inv-frontend-bounds-rendered/element-has-content] Element 'reactive_shell#68' (widget_type='reactive_shell') has has_content=false
+[2m2026-10-12T14:15:18.727403Z[0m [33m WARN[0m [2mpbt_invariant[0m[2m:[0m [inv-frontend-bounds-rendered/element-has-content] Element 'text#71' (widget_type='text') has has_content=false
+[2m2026-10-12T14:15:18.727413Z[0m [33m WARN[0m [2mpbt_invariant[0m[2m:[0m [inv-frontend-bounds-rendered/element-has-content] Element 'live_block#63' (widget_type='live_block') has has_content=false
+
+thread 'focused_task_block_shows_its_keyword_surface' (378233610) panicked at crates/holon-integration-tests/src/pbt/composed/harness.rs:1557:13:
+reconciled composed sequence diverged from the oracle: [("inv-displayed-text/widget", "[inv-displayed-text/widget] 1 text widget(s) show stale content at the widget/geometry layer. The shown string diverged from the reference block content — typical after split_block/join_block when the row's data signal fires but the text (editable_text InputState, text col(...) snapshot, or a stale VM prop) skips the update.\n  editable_text@block=block:kd-1\n    shown:    \"? Which store holds the decision?\"\n    expected: \"Which store holds the decision?\"")]
+authority: block-CRUD=Loro(LoroBlockOperations, via EditorState); projection-sinks=Sql(block_raw,matview); org-writeback=on
+lowest MEASURED failing layer: render (inv-displayed-text/widget) — NOT proven first-divergent: PARTIALLY verified below it (NOT green): store/CRDT (16/21 measured; rest deselected (cap absent)), matview/SQL (22/24 measured; rest deselected (cap absent) + skipped (observed nothing)), viewmodel (23/34 measured; rest deselected (cap absent) + skipped (observed nothing))
+  ↳ wiring: crates/holon-integration-tests/src/pbt/composed/invariants/displayed_text.rs
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'focused_task_block_shows_its_keyword_surface' (378233610) panicked at frontends/gpui/tests/gpui_composed_windowed_loop.rs:306:9:
+[keyword-surface-pin] windowed divergence:
+reconciled composed sequence diverged from the oracle: [("inv-displayed-text/widget", "[inv-displayed-text/widget] 1 text widget(s) show stale content at the widget/geometry layer. The shown string diverged from the reference block content — typical after split_block/join_block when the row's data signal fires but the text (editable_text InputState, text col(...) snapshot, or a stale VM prop) skips the update.\n  editable_text@block=block:kd-1\n    shown:    \"? Which store holds the decision?\"\n    expected: \"Which store holds the decision?\"")]
+authority: block-CRUD=Loro(LoroBlockOperations, via EditorState); projection-sinks=Sql(block_raw,matview); org-writeback=on
+lowest MEASURED failing layer: render (inv-displayed-text/widget) — NOT proven first-divergent: PARTIALLY verified below it (NOT green): store/CRDT (16/21 measured; rest deselected (cap absent)), matview/SQL (22/24 measured; rest deselected (cap absent) + skipped (observed nothing)), viewmodel (23/34 measured; rest deselected (cap absent) + skipped (observed nothing))
+  ↳ wiring: crates/holon-integration-tests/src/pbt/composed/invariants/displayed_text.rs
+test focused_task_block_shows_its_keyword_surface ... FAILED
+
+failures:
+
+failures:
+    focused_task_block_shows_its_keyword_surface
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 19.73s
+
+        FAIL [  19.769s] (1/1) holon-gpui::gpui_composed_windowed_loop focused_task_block_shows_its_keyword_surface
+  Cancelling due to test failure: 
+────────────
+     Summary [  19.769s] 1 test run: 0 passed, 1 failed, 2 skipped
+        FAIL [  19.769s] (1/1) holon-gpui::gpui_composed_windowed_loop focused_task_block_shows_its_keyword_surface
+error: test run failed
+EXIT=100

@@ -31,6 +31,9 @@ use holon_integration_tests::pbt::composed::wide_e2e::wide_e2e_windowed_ref;
 use holon_integration_tests::pbt::run_result::RunResultGuard;
 use holon_integration_tests::pbt::transitions::ClickBlock;
 use holon_integration_tests::pbt::transitions::E2ETransition;
+use holon_integration_tests::pbt::transitions::NavigateFocus;
+use holon_integration_tests::pbt::transitions::ToggleState;
+use holon_pbt_core::types::CycleTarget;
 use proptest::test_runner::Config;
 use proptest::test_runner::TestCaseError;
 use proptest::test_runner::TestRunner;
@@ -268,6 +271,39 @@ fn general_e2e_composed_pbt_windowed() {
             );
         }
         Err(e) => panic!("[4b-loop] windowed PBT failed (shrunk): {e}"),
+    }
+}
+
+/// Deterministic pin for the task-keyword EDITABLE SURFACE at the geometry
+/// layer: focusing a block that carries a task state paints the `editing`
+/// template, whose `editable_text` shows the SOURCE projection
+/// (`"{keyword} {content}"`), and cycling the state through every keyword must
+/// keep `inv-displayed-text/widget` green against that surface — not against
+/// the bare `content` column.
+///
+/// `kd-1` seeds as `? Which store holds the decision?`; the four
+/// `ToggleState`s walk the whole production cycle (TODO, DOING, DONE, cleared)
+/// with the editor seated on it, so every keyword state is observed on screen.
+#[test]
+fn focused_task_block_shows_its_keyword_surface() {
+    let out: RefCell<Option<String>> = RefCell::new(None);
+    with_windowed_wide_sut(|sut, _default_oracle, sink| {
+        let oracle = wide_e2e_windowed_ref(narrow_to_windowed_alphabet(sut.cap_set()));
+        let kd1 = EntityUri::block("kd-1");
+        let mut transitions = vec![E2ETransition::NavigateFocus(NavigateFocus {
+            region: Region::Main,
+            block_id: EntityUri::block("decision-page"),
+        })];
+        for new_state in CycleTarget::ALL {
+            transitions.push(E2ETransition::ToggleState(ToggleState {
+                block_id: kd1.clone(),
+                new_state,
+            }));
+        }
+        drive_windowed_case(sut, oracle, transitions, None, &out, sink)
+    });
+    if let Some(msg) = out.into_inner() {
+        panic!("[keyword-surface-pin] windowed divergence:\n{msg}");
     }
 }
 
