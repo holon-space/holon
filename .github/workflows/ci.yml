@@ -162,8 +162,8 @@ jobs:
       # below still type-checks them.
       - name: Run Rust tests (lib and bin targets only)
         run: |
-          echo "::notice title=Integration tests skipped::CI runs only --lib --bins. Integration tests (tests/*.rs) are NOT run here; they run in the local landing gate (just landing-gate)."
-          echo "NOTICE: integration tests are skipped in CI (--lib --bins only); they run in the local landing gate."
+          echo "::notice title=Integration tests skipped::CI runs only --lib --bins in this job. Integration tests (tests/*.rs) and doctests are NOT run here; clippy --all-targets only type-checks the tests. Other CI jobs run a few named suites (see gated-suites and devex-gates.yml). The steward landing gate runs the integration suites of the crates a landing touches plus their reverse deps. A nightly full-workspace run of all integration suites will post its result on #56 (starts soon, not yet running)."
+          echo "NOTICE: this job runs only --lib --bins; integration tests and doctests are NOT run here; see the landing gate and the nightly run (#56)."
           cargo test --workspace --exclude rust_lib_holon --lib --bins
 
       - name: Install just
@@ -195,8 +195,8 @@ jobs:
   # compiled it to `0 tests` and it rotted invisibly with a real bug inside. This
   # job (1) runs the anti-rot guard that fails loud on any gated binary that lists
   # 0 tests with its feature on, and (2) actually EXECUTES the `di`-gated suites.
-  # (The `pbt`-gated integration suites are already run by `rust-checks` above,
-  # because `pbt` IS a default feature of holon-integration-tests.)
+  # (`rust-checks` above runs only `--lib --bins`, so it does NOT run the
+  # `pbt`-gated integration suites; devex-gates.yml runs the composed keystone.)
   gated-suites:
     name: Feature-gated test suites
     needs: changes
