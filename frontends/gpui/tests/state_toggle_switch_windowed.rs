@@ -56,7 +56,6 @@ fn set_field_wiring() -> OperationWiring {
     OperationWiring {
         modified_param: String::new(),
         descriptor: OperationDescriptor {
-            offer: None,
             entity_name: holon_api::EntityName::new("integration"),
             name: "set_field".into(),
             trigger: Some(Trigger::Click {

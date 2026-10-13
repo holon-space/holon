@@ -62,7 +62,6 @@ impl OperationProvider for SqlOperationProvider {
     fn operations(&self) -> Vec<OperationDescriptor> {
         vec![
             OperationDescriptor {
-                offer: None,
                 entity_name: self.entity_name.clone(),
                 entity_short_name: self.entity_short_name.clone(),
                 name: "set_field".to_string(),
@@ -103,7 +102,6 @@ impl OperationProvider for SqlOperationProvider {
                 arcs: holon_api::arcs::TransitionArcs::Undeclared,
             },
             OperationDescriptor {
-                offer: None,
                 entity_name: self.entity_name.clone(),
                 entity_short_name: self.entity_short_name.clone(),
                 name: "create".to_string(),
@@ -126,7 +124,6 @@ impl OperationProvider for SqlOperationProvider {
                 arcs: holon_api::arcs::TransitionArcs::Undeclared,
             },
             OperationDescriptor {
-                offer: None,
                 entity_name: self.entity_name.clone(),
                 entity_short_name: self.entity_short_name.clone(),
                 name: "delete".to_string(),

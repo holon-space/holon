@@ -3130,7 +3130,6 @@ impl OperationProvider for SqlOperationProvider {
         if self.advertises_content_compounds() {
             ops.extend([
                 OperationDescriptor {
-                    offer: None,
                     entity_name: self.entity_name.clone().into(),
                     entity_short_name: self.entity_short_name.clone(),
                     name: "cycle_task_state".to_string(),
@@ -3162,7 +3161,6 @@ impl OperationProvider for SqlOperationProvider {
                     arcs: holon_api::arcs::TransitionArcs::Undeclared,
                 },
                 OperationDescriptor {
-                    offer: None,
                     entity_name: self.entity_name.clone().into(),
                     entity_short_name: self.entity_short_name.clone(),
                     name: "page_chain_plan".to_string(),
@@ -3190,7 +3188,6 @@ impl OperationProvider for SqlOperationProvider {
                     arcs: holon_api::arcs::TransitionArcs::Undeclared,
                 },
                 OperationDescriptor {
-                    offer: None,
                     entity_name: self.entity_name.clone().into(),
                     entity_short_name: self.entity_short_name.clone(),
                     name: "heal_page_links".to_string(),
@@ -3227,7 +3224,6 @@ impl OperationProvider for SqlOperationProvider {
                     arcs: holon_api::arcs::TransitionArcs::Undeclared,
                 },
                 OperationDescriptor {
-                    offer: None,
                     entity_name: self.entity_name.clone().into(),
                     entity_short_name: self.entity_short_name.clone(),
                     name: "rewrite_link_resolution".to_string(),
@@ -3268,7 +3264,6 @@ impl OperationProvider for SqlOperationProvider {
                     arcs: holon_api::arcs::TransitionArcs::Undeclared,
                 },
                 OperationDescriptor {
-                    offer: None,
                     entity_name: self.entity_name.clone().into(),
                     entity_short_name: self.entity_short_name.clone(),
                     name: "restore_link_resolution".to_string(),
@@ -3297,7 +3292,6 @@ impl OperationProvider for SqlOperationProvider {
                     arcs: holon_api::arcs::TransitionArcs::Undeclared,
                 },
                 OperationDescriptor {
-                    offer: None,
                     entity_name: self.entity_name.clone().into(),
                     entity_short_name: self.entity_short_name.clone(),
                     name: "block_to_page_plan".to_string(),
@@ -3327,7 +3321,6 @@ impl OperationProvider for SqlOperationProvider {
                     arcs: holon_api::arcs::TransitionArcs::Undeclared,
                 },
                 OperationDescriptor {
-                    offer: None,
                     entity_name: self.entity_name.clone().into(),
                     entity_short_name: self.entity_short_name.clone(),
                     name: "merge_blocks_plan".to_string(),

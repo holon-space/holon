@@ -21,7 +21,6 @@ use holon_api::pattern::OpGuard;
 
 fn descriptor_with(arcs: TransitionArcs) -> OperationDescriptor {
     OperationDescriptor {
-        offer: None,
         entity_name: "block".into(),
         entity_short_name: "block".to_string(),
         id_column: "id".to_string(),

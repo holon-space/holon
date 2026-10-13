@@ -10,12 +10,12 @@
 //! bottom of this file, and it is why `sibling(...)` exists.
 
 use holon_api::EntityUri;
+use holon_api::user_transition::Offer;
 use holon_net::Analyzability;
 use holon_net::CompiledNet;
 use holon_net::NetEntity;
 use holon_net::NetTransition;
 use holon_net::TransitionSource;
-use holon_net::enabledness::Offer;
 use holon_net::enabledness::evaluate;
 use holon_net::guards::classify_guard;
 use holon_net::marking::Marking;

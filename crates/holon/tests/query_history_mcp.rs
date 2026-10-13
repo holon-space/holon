@@ -40,7 +40,6 @@ impl OperationProvider for DeltaProvider {
         ["set_field", "create", "delete"]
             .into_iter()
             .map(|name| OperationDescriptor {
-                offer: None,
                 entity_name: self.entity_name.clone(),
                 entity_short_name: "block".to_string(),
                 name: name.to_string(),

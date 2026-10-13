@@ -3716,7 +3716,6 @@ impl DispatchingOperationEngine {
             description: description.to_string(),
         };
         OperationDescriptor {
-            offer: None,
             entity_name: EntityName::new("block"),
             entity_short_name: "block".to_string(),
             id_column: "id".to_string(),
@@ -3755,7 +3754,6 @@ impl DispatchingOperationEngine {
     pub(crate) fn convert_block_to_page_descriptor() -> OperationDescriptor {
         use holon_api::render_types::TypeHint;
         OperationDescriptor {
-            offer: None,
             entity_name: EntityName::new("block"),
             entity_short_name: "block".to_string(),
             id_column: "id".to_string(),
@@ -3804,7 +3802,6 @@ impl DispatchingOperationEngine {
     fn create_page_from_link_descriptor() -> OperationDescriptor {
         use holon_api::render_types::TypeHint;
         OperationDescriptor {
-            offer: None,
             entity_name: EntityName::new("block"),
             entity_short_name: "block".to_string(),
             id_column: "id".to_string(),
@@ -3842,7 +3839,6 @@ impl DispatchingOperationEngine {
             description: description.to_string(),
         };
         OperationDescriptor {
-            offer: None,
             entity_name: EntityName::new("block"),
             entity_short_name: "block".to_string(),
             id_column: "id".to_string(),

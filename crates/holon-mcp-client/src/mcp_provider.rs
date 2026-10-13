@@ -395,7 +395,6 @@ impl McpOperationProvider {
                 .unwrap_or_default();
 
             let descriptor = OperationDescriptor {
-                offer: None,
                 // The CANONICAL name, the same one the entity's type and table
                 // carry. Routing by the raw key would give one entity two
                 // identities: a write aimed at the type's name would find only

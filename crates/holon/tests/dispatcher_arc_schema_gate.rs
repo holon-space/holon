@@ -61,7 +61,6 @@ impl OperationProvider for FixtureProvider {
 
 fn descriptor(entity: &str, op: &str, arcs: TransitionArcs) -> OperationDescriptor {
     OperationDescriptor {
-        offer: None,
         entity_name: entity.into(),
         entity_short_name: entity.to_string(),
         id_column: "id".to_string(),

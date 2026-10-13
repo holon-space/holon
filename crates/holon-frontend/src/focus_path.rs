@@ -1415,7 +1415,6 @@ mod tests {
         vm.operations.push(OperationWiring {
             modified_param: "id".into(),
             descriptor: OperationDescriptor {
-                offer: None,
                 name: "cycle_task_state".into(),
                 entity_name: "block".into(),
                 trigger: Some(Trigger::KeyChord {
@@ -1485,7 +1484,6 @@ mod tests {
             OperationWiring {
                 modified_param: "id".into(),
                 descriptor: OperationDescriptor {
-                    offer: None,
                     name: "set_field".into(),
                     entity_name: "block".into(),
                     trigger: None,
@@ -1511,7 +1509,6 @@ mod tests {
             OperationWiring {
                 modified_param: "id".into(),
                 descriptor: OperationDescriptor {
-                    offer: None,
                     name: "cycle_task_state".into(),
                     entity_name: "block".into(),
                     trigger: Some(Trigger::KeyChord {
@@ -1649,7 +1646,6 @@ mod tests {
         sidebar_item.operations.push(OperationWiring {
             modified_param: String::new(),
             descriptor: OperationDescriptor {
-                offer: None,
                 entity_name: EntityName::new("navigation"),
                 name: "focus".into(),
                 trigger: Some(Trigger::Click {
@@ -1720,7 +1716,6 @@ mod tests {
         sidebar_item.operations.push(OperationWiring {
             modified_param: String::new(),
             descriptor: OperationDescriptor {
-                offer: None,
                 entity_name: EntityName::new("navigation"),
                 name: "focus".into(),
                 trigger: Some(Trigger::Click {

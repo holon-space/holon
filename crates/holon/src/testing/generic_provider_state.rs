@@ -325,7 +325,6 @@ mod tests {
     fn mock_project_task_ops() -> Vec<OperationDescriptor> {
         vec![
             OperationDescriptor {
-                offer: None,
                 entity_name: "project".into(),
                 entity_short_name: "project".to_string(),
                 id_column: "id".to_string(),
@@ -352,7 +351,6 @@ mod tests {
                 arcs: holon_api::arcs::TransitionArcs::Undeclared,
             },
             OperationDescriptor {
-                offer: None,
                 entity_name: "task".into(),
                 entity_short_name: "task".to_string(),
                 id_column: "id".to_string(),

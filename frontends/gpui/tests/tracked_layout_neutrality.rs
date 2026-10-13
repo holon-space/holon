@@ -80,7 +80,6 @@ fn click_wiring() -> OperationWiring {
     OperationWiring {
         modified_param: String::new(),
         descriptor: OperationDescriptor {
-            offer: None,
             entity_name: holon_api::EntityName::new("navigation"),
             name: "focus".into(),
             trigger: Some(Trigger::Click {

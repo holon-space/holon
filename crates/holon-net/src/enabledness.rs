@@ -12,6 +12,7 @@
 //! separate from the arc language, and yields [`Offer::Unknown`].
 
 use holon_api::EntityUri;
+use holon_api::user_transition::Offer;
 use holon_pattern::Value;
 use holon_pattern::arcs::ArcPlace;
 use holon_pattern::arcs::ArcRelation;
@@ -29,25 +30,6 @@ use crate::net::NetArc;
 use crate::net::NetTransition;
 use crate::net::Refinement;
 use crate::net::TransitionMode;
-
-/// What the offer path says about one operation for one subject.
-///
-/// Three-valued where `NetGuard`'s verdict is binary: the dispatcher remains
-/// the authority, so a transition the marking cannot classify is offered and
-/// decided on dispatch. Only [`Offer::Refused`] withholds an operation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Offer {
-    Enabled,
-    Refused { reason: String },
-    Unknown { why: String },
-}
-
-impl Offer {
-    /// Whether a surface should show this operation.
-    pub fn is_offered(&self) -> bool {
-        !matches!(self, Offer::Refused { .. })
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpEnabledness {

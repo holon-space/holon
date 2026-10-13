@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 
 use holon_api::EntityUri;
 use holon_api::Value;
+use holon_api::user_transition::Offer;
 use holon_net::Analyzability;
 use holon_net::ArcOrigin;
 use holon_net::BindingVar;
@@ -21,7 +22,6 @@ use holon_net::Refinement;
 use holon_net::TransitionMode;
 use holon_net::TransitionSource;
 use holon_net::UndeclaredHalf;
-use holon_net::enabledness::Offer;
 use holon_net::enabledness::evaluate;
 use holon_net::marking::Marking;
 use holon_pattern::arcs::ArcPlace;

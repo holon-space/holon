@@ -144,7 +144,6 @@ impl holon_core::OperationProvider for SecondIndentAuthority {
             description: description.to_string(),
         };
         vec![holon_api::OperationDescriptor {
-            offer: None,
             entity_name: "block".into(),
             entity_short_name: "block".to_string(),
             id_column: "id".to_string(),

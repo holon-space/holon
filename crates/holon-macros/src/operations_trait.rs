@@ -326,7 +326,6 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
                     id_column: &str
                 ) -> holon_api::OperationDescriptor {
                     holon_api::OperationDescriptor {
-                        offer: None,
                         entity_name: #entity_name_expr,
                         entity_short_name: entity_short_name.to_string(),
                         id_column: id_column.to_string(),

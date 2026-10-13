@@ -30,7 +30,6 @@ fn build_wiring(
     Ok(OperationWiring {
         modified_param: String::new(),
         descriptor: OperationDescriptor {
-            offer: None,
             entity_name: EntityName::new(entity_name),
             name: op_name,
             trigger: Some(trigger),

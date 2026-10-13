@@ -3578,7 +3578,6 @@ where
 /// to create operation descriptors with the correct entity_name format.
 pub fn generate_sync_operation(provider_name: &str) -> OperationDescriptor {
     OperationDescriptor {
-        offer: None,
         entity_name: format!("{}.sync", provider_name).into(),
         entity_short_name: "all".to_string(), // Sync operations affect all entities
         id_column: String::new(),             // Sync operations don't need an ID column

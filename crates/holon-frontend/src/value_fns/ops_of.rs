@@ -284,7 +284,6 @@ mod tests {
         OperationWiring {
             modified_param: String::new(),
             descriptor: holon_api::OperationDescriptor {
-                offer: None,
                 entity_name: "integration".into(),
                 entity_short_name: "integration".to_string(),
                 id_column: "id".to_string(),

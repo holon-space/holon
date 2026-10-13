@@ -137,7 +137,6 @@ impl OperationProvider for RecordingProvider {
 
 fn descriptor(op_name: &str, behavior: BoundaryBehavior) -> OperationDescriptor {
     OperationDescriptor {
-        offer: None,
         entity_name: "block".into(),
         entity_short_name: "block".to_string(),
         id_column: "id".to_string(),

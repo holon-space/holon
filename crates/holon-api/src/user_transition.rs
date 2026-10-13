@@ -18,6 +18,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::Value;
+use crate::render_types::OperationDescriptor;
 use crate::render_types::TypeHint;
 
 /// The name of a transition, unique in its net.
@@ -216,17 +217,34 @@ pub enum ExpireReason {
     SituationChanged,
 }
 
-/// Whether an operation is offered for one subject now (D151.a). Filled by
-/// the integration (lane I) from the executor's ask and why-not state.
+/// What the offer path says about one operation for one subject at one
+/// marking.
+///
+/// Three-valued where `NetGuard`'s verdict is binary: the dispatcher remains
+/// the authority, so an operation the marking cannot classify is offered and
+/// decided on dispatch. Only [`Offer::Refused`] withholds an operation; D151.a
+/// decides whether a surface hides it or shows it disabled with the reason.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum OfferState {
+pub enum Offer {
     Enabled,
-    Disabled {
-        reason: String,
-    },
-    /// Not shown at all.
-    Absent,
+    Refused { reason: String },
+    Unknown { why: String },
+}
+
+impl Offer {
+    /// Whether a surface should show this operation.
+    pub fn is_offered(&self) -> bool {
+        !matches!(self, Offer::Refused { .. })
+    }
+}
+
+/// One catalog operation evaluated against one subject. The offer is not
+/// catalog data, so it lives here and not on [`OperationDescriptor`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Offered {
+    pub descriptor: OperationDescriptor,
+    pub offer: Offer,
 }
 
 /// The lane that fills a stub.

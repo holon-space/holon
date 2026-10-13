@@ -452,11 +452,6 @@ pub struct OperationDescriptor {
     /// truthfulness oracle is `marking_delta_oracle` in
     /// `crates/holon-core/src/block_operations_tests.rs`.
     pub marking_delta: MarkingDelta,
-
-    /// Whether this op is offered for one subject now (D151.a). `None` in a
-    /// catalog not evaluated against a subject. Filled by lane I (#167).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub offer: Option<crate::user_transition::OfferState>,
 }
 
 // NOTE: `OperationDescriptor` intentionally has NO `Default`. `menu_exposure`

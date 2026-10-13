@@ -75,7 +75,6 @@ pub fn dismiss_advice_descriptor(
     entity_short_name: &str,
 ) -> OperationDescriptor {
     OperationDescriptor {
-        offer: None,
         entity_name: entity_name.clone(),
         entity_short_name: entity_short_name.to_string(),
         id_column: "id".to_string(),
@@ -194,7 +193,6 @@ pub fn update_descriptor(
     references: Vec<OperationParam>,
 ) -> OperationDescriptor {
     OperationDescriptor {
-        offer: None,
         entity_name: entity_name.clone(),
         entity_short_name: entity_short_name.to_string(),
         name: "update".to_string(),
@@ -251,7 +249,6 @@ fn tag_descriptor(
     description: &str,
 ) -> OperationDescriptor {
     OperationDescriptor {
-        offer: None,
         entity_name: entity_name.clone(),
         entity_short_name: entity_short_name.to_string(),
         id_column: "id".to_string(),

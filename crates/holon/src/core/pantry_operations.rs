@@ -90,7 +90,6 @@ fn unit_label(unit: Option<&str>) -> String {
 impl OperationProvider for PantryOperations {
     fn operations(&self) -> Vec<OperationDescriptor> {
         vec![OperationDescriptor {
-            offer: None,
             entity_name: EntityName::new(ENTITY),
             entity_short_name: ENTITY.to_string(),
             name: "consume".to_string(),

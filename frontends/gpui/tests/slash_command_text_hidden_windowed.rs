@@ -42,7 +42,6 @@ fn op(name: &str, display: &str, params: Vec<OperationParam>) -> OperationWiring
     OperationWiring {
         modified_param: String::new(),
         descriptor: OperationDescriptor {
-            offer: None,
             entity_name: EntityName::new("block"),
             entity_short_name: "block".into(),
             name: name.into(),

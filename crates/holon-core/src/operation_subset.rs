@@ -113,7 +113,6 @@ mod tests {
             ["create", "delete", "block_to_page_plan"]
                 .into_iter()
                 .map(|name| OperationDescriptor {
-                    offer: None,
                     entity_name: "block".into(),
                     entity_short_name: "block".to_string(),
                     id_column: "id".to_string(),

@@ -69,7 +69,6 @@ pub fn integration_operation_descriptors() -> Vec<OperationDescriptor> {
 /// click a crash.
 fn open_default_view_descriptor() -> OperationDescriptor {
     OperationDescriptor {
-        offer: None,
         entity_name: ENTITY_NAME.into(),
         entity_short_name: SHORT_NAME.to_string(),
         id_column: "id".to_string(),
@@ -115,7 +114,6 @@ fn open_default_view_descriptor() -> OperationDescriptor {
 
 fn set_field_descriptor() -> OperationDescriptor {
     OperationDescriptor {
-        offer: None,
         entity_name: ENTITY_NAME.into(),
         entity_short_name: SHORT_NAME.to_string(),
         id_column: "id".to_string(),
@@ -189,7 +187,6 @@ fn set_field_descriptor() -> OperationDescriptor {
 /// second required param would turn a click into a crash.
 fn begin_oauth_descriptor() -> OperationDescriptor {
     OperationDescriptor {
-        offer: None,
         entity_name: ENTITY_NAME.into(),
         entity_short_name: SHORT_NAME.to_string(),
         id_column: "id".to_string(),

@@ -308,7 +308,6 @@ fn default_block_operations() -> Vec<holon_api::render_types::OperationDescripto
 
     vec![
         OperationDescriptor {
-            offer: None,
             entity_name: entity_name.clone().into(),
             entity_short_name: entity_short_name.clone(),
             name: "set_field".to_string(),
@@ -343,7 +342,6 @@ fn default_block_operations() -> Vec<holon_api::render_types::OperationDescripto
             arcs: holon_api::arcs::TransitionArcs::Undeclared,
         },
         OperationDescriptor {
-            offer: None,
             entity_name: entity_name.clone().into(),
             entity_short_name: entity_short_name.clone(),
             name: "cycle_task_state".to_string(),

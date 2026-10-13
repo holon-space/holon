@@ -208,7 +208,6 @@ mod tests {
 
     fn descriptor(entity: &str, name: &str, params: Vec<OperationParam>) -> OperationDescriptor {
         OperationDescriptor {
-            offer: None,
             entity_name: holon_api::EntityName::new(entity),
             entity_short_name: entity.into(),
             name: name.into(),

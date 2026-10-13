@@ -35,9 +35,9 @@ use std::time::Instant;
 use holon_api::ArcPlace;
 use holon_api::ArcRelation;
 use holon_api::EntityUri;
+use holon_api::user_transition::Offer;
 use holon_integration_tests::TestEnvironment;
 use holon_integration_tests::TestEnvironmentBuilder;
-use holon_net::enabledness::Offer;
 use holon_net::enabledness::evaluate;
 use holon_net::marking::Marking;
 

@@ -171,7 +171,6 @@ struct StubProvider {
 impl StubProvider {
     fn descriptor(&self, name: &str) -> OperationDescriptor {
         OperationDescriptor {
-            offer: None,
             entity_name: EntityName::new("block"),
             name: name.to_string(),
             entity_short_name: String::new(),

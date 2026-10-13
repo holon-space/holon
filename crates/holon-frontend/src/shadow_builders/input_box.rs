@@ -44,7 +44,6 @@ fn submit_wiring(
     Ok(OperationWiring {
         modified_param,
         descriptor: OperationDescriptor {
-            offer: None,
             entity_name: EntityName::new(entity_name),
             name: op_name,
             trigger: Some(Trigger::KeyChord {
