@@ -105,7 +105,7 @@ fn work_fired_once_with_its_value(sut: &Sut) {
             req.occurrence
         );
         assert_eq!(
-            req.input.get(holon_net::exec::VALUE_FIELD),
+            req.input.get(holon_api::user_transition::ANSWER_INPUT_KEY),
             sut.values.get(answer.as_ref()),
             "the work of {answer} has the wrong value"
         );
@@ -177,6 +177,22 @@ prop_state_machine! {
 
     #[test]
     fn answers_follow_the_model(sequential 1..30 => Test);
+}
+
+/// Main's ruling: an external call returns only after the auto transitions
+/// are quiescent. `exec.rs` does not do this yet: only `step` fires them.
+#[test]
+#[ignore = "known red: external calls do not run the auto transitions (#167 round 2)"]
+fn an_answer_returns_after_quiescence() {
+    let mut d = Driver::new(answer_spec());
+    d.write("Item", "x", content(&[("n", Value::Integer(1))]));
+    d.step().expect("the net quiesces");
+    let c = answer_call(&d, "x", "a0", false, None);
+    d.answer(c).expect("the ask applies");
+    assert!(
+        d.exec().tokens().token("Answered.Accept", "x").is_none(),
+        "the auto work Accept has not taken Answered.Accept/x when answer returns"
+    );
 }
 
 /// A fixed path through the red of each twin: answer, the work fails, the

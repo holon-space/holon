@@ -15,6 +15,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use holon_api::Value;
+use holon_api::user_transition::ANSWER_ID_KEY;
+use holon_api::user_transition::ANSWER_INPUT_KEY;
 use holon_api::user_transition::AnswerCall;
 use holon_api::user_transition::AnswerId;
 use holon_api::user_transition::AnswerSettlement;
@@ -23,7 +25,6 @@ use holon_api::user_transition::ExpireReason;
 use holon_api::user_transition::SubjectName;
 use holon_api::user_transition::TransitionName;
 use holon_api::user_transition::UftError;
-use holon_net::exec::ANSWER_FIELD;
 use holon_net::exec::Accepted;
 use holon_net::exec::AttemptId;
 use holon_net::exec::Body;
@@ -54,7 +55,6 @@ use holon_net::exec::Subject;
 use holon_net::exec::Trigger;
 use holon_net::exec::UndoError;
 use holon_net::exec::Undone;
-use holon_net::exec::VALUE_FIELD;
 use holon_net::exec::WhyNot;
 use holon_net::exec::answer_transition;
 use holon_net::exec::answered_place;
@@ -204,7 +204,9 @@ impl Reads for Reader<'_> {
         let model = self.model;
         match model.place(place) {
             PlaceSpec::Derived(b) => (b.model)(self, &Subject::new(subject))?.remove(field),
-            PlaceSpec::Stored { .. } if field == VALUE_FIELD && model.is_answered(place) => None,
+            PlaceSpec::Stored { .. } if field == ANSWER_INPUT_KEY && model.is_answered(place) => {
+                None
+            }
             PlaceSpec::Stored { .. } => {
                 let value = model
                     .content(place, subject)
@@ -464,9 +466,12 @@ impl Model {
         }
         let id = call.answer.0.clone();
         let value = Content::from([
-            (ANSWER_FIELD.to_string(), Value::String(id.clone())),
+            (ANSWER_ID_KEY.to_string(), Value::String(id.clone())),
             (SEEN_FIELD.to_string(), Value::String(hash_text(&call.seen))),
-            (VALUE_FIELD.to_string(), call.value.unwrap_or(Value::Null)),
+            (
+                ANSWER_INPUT_KEY.to_string(),
+                call.value.unwrap_or(Value::Null),
+            ),
         ]);
         match self.fire(
             &answer_transition(&work),
@@ -603,7 +608,7 @@ impl Model {
         let answered = answered_place(&work);
         let withdrawn = self
             .content(&answered, &subject)
-            .is_some_and(|c| c.get(ANSWER_FIELD) == Some(&Value::String(id.to_string())));
+            .is_some_and(|c| c.get(ANSWER_ID_KEY) == Some(&Value::String(id.to_string())));
         if withdrawn {
             self.remove(&answered, &subject);
         }
@@ -698,10 +703,10 @@ impl Model {
         }
         let answered = self.answered_of(&t.name);
         if let Some(p) = &answered {
-            let answer = self.answered_field(p, s, ANSWER_FIELD);
+            let answer = self.answered_field(p, s, ANSWER_ID_KEY);
             self.row(&mut trace, p, s)
                 .fields
-                .insert(ANSWER_FIELD.to_string(), Some(answer));
+                .insert(ANSWER_ID_KEY.to_string(), Some(answer));
         }
         let mut reader = Reader {
             model: self,
@@ -715,8 +720,8 @@ impl Model {
             return Err(WhyNot::FailedOnThisInput(cause.clone()));
         }
         if let Some(p) = &answered {
-            let value = self.answered_field(p, s, VALUE_FIELD);
-            assert!(input.insert(VALUE_FIELD.to_string(), value).is_none());
+            let value = self.answered_field(p, s, ANSWER_INPUT_KEY);
+            assert!(input.insert(ANSWER_INPUT_KEY.to_string(), value).is_none());
         }
         Ok((trace, input))
     }
@@ -748,7 +753,7 @@ impl Model {
                 for s in subjects {
                     if let Ok((trace, input)) = self.decide(&t, &s) {
                         let occ = match self.answered_of(&t.name) {
-                            Some(p) => match self.answered_field(&p, &s, ANSWER_FIELD) {
+                            Some(p) => match self.answered_field(&p, &s, ANSWER_ID_KEY) {
                                 Value::String(answer) => work_occurrence(&t.name, &answer),
                                 other => panic!("the answer id is {other:?}"),
                             },

@@ -773,8 +773,12 @@ pub fn answer_spec() -> Spec {
                 Trigger::Auto,
                 bind!(|r, s| {
                     assert!(
-                        r.field("Answered.Accept", s, holon_net::exec::VALUE_FIELD)
-                            .is_none(),
+                        r.field(
+                            "Answered.Accept",
+                            s,
+                            holon_api::user_transition::ANSWER_INPUT_KEY
+                        )
+                        .is_none(),
                         "guard read the value"
                     );
                     let n = item_n(r, s)?;
@@ -793,7 +797,11 @@ pub fn answer_spec() -> Spec {
                 "ExpireAnswer.Accept",
                 Trigger::Auto,
                 bind!(|r, s| {
-                    let answer = r.text("Answered.Accept", s, holon_net::exec::ANSWER_FIELD)?;
+                    let answer = r.text(
+                        "Answered.Accept",
+                        s,
+                        holon_api::user_transition::ANSWER_ID_KEY,
+                    )?;
                     let reason = match r.text("Asks.Accept", s, "hash") {
                         None => "ask_gone",
                         Some(hash) if r.text("Answered.Accept", s, "seen")? != hash => {

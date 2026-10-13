@@ -27,6 +27,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use holon_api::TypeHint;
+use holon_api::user_transition::ANSWER_ID_KEY;
+use holon_api::user_transition::ANSWER_INPUT_KEY;
 use holon_api::user_transition::AnswerCall;
 use holon_api::user_transition::AnswerId;
 use holon_api::user_transition::AnswerSettlement;
@@ -135,14 +137,11 @@ pub fn expired_place(work: &str) -> String {
     format!("Expired.{work}")
 }
 
-/// `Answered.T`: the answer id. `T` keys its failure mark by it, so a new
-/// answer is a new mark key.
-pub const ANSWER_FIELD: &str = "@occurrence";
-/// `Answered.T`: the [`hash_text`] of the ask the user saw.
+/// `Answered.T`: the [`hash_text`] of the ask the user saw. The token also
+/// holds [`ANSWER_ID_KEY`], which keys the failure mark of `T` so a new
+/// answer is a new mark key, and [`ANSWER_INPUT_KEY`], which no reader sees:
+/// the executor adds it to the bound input of `T`.
 pub const SEEN_FIELD: &str = "seen";
-/// `Answered.T`: the user value. No reader sees it; the executor adds it to
-/// the bound input of `T` under this name.
-pub const VALUE_FIELD: &str = "@input";
 /// `Expired.T`: the [`expire_reason_text`].
 pub const REASON_FIELD: &str = "reason";
 /// `Asks.T`: the [`hash_text`] of the ask.
@@ -736,7 +735,7 @@ pub struct Reader<'a> {
     net: &'a NetDef,
     tokens: &'a Tokens,
     trace: &'a mut Trace,
-    /// The [`VALUE_FIELD`] of an `Answered` token reads as absent.
+    /// The [`ANSWER_INPUT_KEY`] of an `Answered` token reads as absent.
     hide_value: bool,
 }
 
@@ -746,7 +745,7 @@ impl Reader<'_> {
         match &net.place_def(place).kind {
             PlaceKind::Derived(derive) => derive(self, &Subject::new(subject))?.remove(field),
             PlaceKind::Stored { .. }
-                if self.hide_value && field == VALUE_FIELD && net.is_answered(place) =>
+                if self.hide_value && field == ANSWER_INPUT_KEY && net.is_answered(place) =>
             {
                 None
             }
@@ -1242,9 +1241,12 @@ impl Executor {
         }
         let id = call.answer.0.as_str();
         let value = Content::from([
-            (ANSWER_FIELD.to_string(), Value::String(id.to_string())),
+            (ANSWER_ID_KEY.to_string(), Value::String(id.to_string())),
             (SEEN_FIELD.to_string(), Value::String(hash_text(&call.seen))),
-            (VALUE_FIELD.to_string(), call.value.unwrap_or(Value::Null)),
+            (
+                ANSWER_INPUT_KEY.to_string(),
+                call.value.unwrap_or(Value::Null),
+            ),
         ]);
         match self.fire(
             &answer_transition(work),
@@ -1380,7 +1382,7 @@ impl Executor {
         let withdrawn = self
             .tokens
             .token(&answered, &subject)
-            .is_some_and(|t| t.content.get(ANSWER_FIELD) == Some(&Value::String(id.to_string())));
+            .is_some_and(|t| t.content.get(ANSWER_ID_KEY) == Some(&Value::String(id.to_string())));
         if withdrawn {
             self.tokens.remove(&answered, &subject);
         }
@@ -1447,7 +1449,7 @@ impl Executor {
                     let t = &self.net.transitions[i];
                     if let Ok((trace, input)) = self.decide(t, &s) {
                         let occurrence = match self.net.answered_of(&name) {
-                            Some(p) => match self.answered_field(&p, &s, ANSWER_FIELD) {
+                            Some(p) => match self.answered_field(&p, &s, ANSWER_ID_KEY) {
                                 Value::String(answer) => work_occurrence(&name, &answer),
                                 other => panic!("the {p} answer id of {s} is {other:?}"),
                             },
@@ -1473,7 +1475,7 @@ impl Executor {
     /// `value` is the user input (UFT-adopt.a; empty for none). It joins the
     /// bound input after the bind, so no guard reads it; a field the bind
     /// also produces is an impossible state and panics. A fire of `Answer.T`
-    /// takes a [`OccurrenceId::Caller`] id equal to its [`ANSWER_FIELD`].
+    /// takes a [`OccurrenceId::Caller`] id equal to its [`ANSWER_ID_KEY`].
     ///
     /// [`step`]: Executor::step
     pub fn fire(
@@ -1506,7 +1508,7 @@ impl Executor {
                 panic!("'{transition}' fired with the non-caller occurrence {occurrence}");
             };
             assert_eq!(
-                value.get(ANSWER_FIELD),
+                value.get(ANSWER_ID_KEY),
                 Some(&Value::String(id.to_string())),
                 "'{transition}' fired with an answer id other than its occurrence"
             );
@@ -1828,11 +1830,11 @@ impl Executor {
         if let Some(p) = &answered
             && !self.twin(Twin::OccurrenceNotInTrace)
         {
-            let answer = self.answered_field(p, s, ANSWER_FIELD);
+            let answer = self.answered_field(p, s, ANSWER_ID_KEY);
             trace
                 .row(&self.tokens, p, s)
                 .fields
-                .insert(ANSWER_FIELD.to_string(), Some(answer));
+                .insert(ANSWER_ID_KEY.to_string(), Some(answer));
         }
         let mut input = (t.bind)(&mut self.reader(&mut trace), s).ok_or(WhyNot::Guard)?;
         if t.trigger == Trigger::Auto
@@ -1842,8 +1844,8 @@ impl Executor {
             return Err(WhyNot::FailedOnThisInput(mark.cause.clone()));
         }
         if let Some(p) = &answered {
-            let value = self.answered_field(p, s, VALUE_FIELD);
-            merge_value(&mut input, VALUE_FIELD, value, &t.name);
+            let value = self.answered_field(p, s, ANSWER_INPUT_KEY);
+            merge_value(&mut input, ANSWER_INPUT_KEY, value, &t.name);
         }
         Ok((trace, input))
     }
