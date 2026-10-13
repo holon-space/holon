@@ -2,7 +2,8 @@
 //! executor: model first, then the lowered net must agree after every op.
 //!
 //! Twins (`--features naive-twins`, `UFT_LOWER_TWIN=<name>`), each drops one
-//! lowering rule: `no-ask-hash`, `no-answer-inhibitor`, `no-expire`.
+//! lowering rule: `no-ask-hash`, `no-answer-inhibitor`, `no-expire`,
+//! `ask-during-failure`.
 
 mod uft_lower_support;
 
@@ -13,6 +14,8 @@ use std::time::Duration;
 
 use holon_api::Value;
 use holon_api::render_types::TypeHint;
+use holon_api::user_transition::ANSWER_ID_KEY;
+use holon_api::user_transition::ANSWER_INPUT_KEY;
 use holon_api::user_transition::ArcKind;
 use holon_api::user_transition::AskDecl;
 use holon_api::user_transition::BodyDecl;
@@ -23,7 +26,6 @@ use holon_api::user_transition::TimerDecl;
 use holon_api::user_transition::TimerKind;
 use holon_api::user_transition::TransitionDescriptor;
 use holon_api::user_transition::TransitionName;
-use holon_net::exec::ANSWER_FIELD;
 use holon_net::exec::Body;
 use holon_net::exec::Cause;
 use holon_net::exec::Class;
@@ -45,7 +47,6 @@ use holon_net::exec::SEEN_FIELD;
 use holon_net::exec::Subject;
 use holon_net::exec::TransitionDef;
 use holon_net::exec::Trigger;
-use holon_net::exec::VALUE_FIELD;
 use holon_net::exec::WhyNot;
 use holon_net::exec::answer_transition;
 use holon_net::exec::answered_place;
@@ -168,6 +169,7 @@ fn lowered() -> NetDef {
         Some("no-ask-hash") => LowerTwin::NoAskHash,
         Some("no-answer-inhibitor") => LowerTwin::NoAnswerInhibitor,
         Some("no-expire") => LowerTwin::NoExpire,
+        Some("ask-during-failure") => LowerTwin::AskDuringFailure,
         Some(other) => panic!("UFT_LOWER_TWIN={other} names no twin"),
     };
     lower_twin(base_net(), &descriptor(), Some(parts()), twin).expect("lowers")
@@ -282,6 +284,22 @@ impl StateMachineTest for Test {
                     .complete(req.attempt, result, now)
                     .expect("the attempt is known");
             }
+            Op::Lost(s) => {
+                let req = sut
+                    .requests
+                    .remove(&s)
+                    .expect("precondition: a work request is in flight");
+                sut.exec
+                    .complete(
+                        req.attempt,
+                        EffectResult::Unknown(Cause::definite("lost")),
+                        now,
+                    )
+                    .expect("the attempt is known");
+                sut.exec
+                    .resolve(&req.occurrence, Resolution::Drop, now)
+                    .expect("the occurrence is parked");
+            }
         }
         compare(&mut sut, m);
         sut.model = m.clone();
@@ -302,9 +320,9 @@ fn answer(
     let seen_sit = pre.seen_sit(s, seen).expect("precondition");
     let seen = sut.hashes[&(s, seen_sit)].clone();
     let input = Content::from([
-        (ANSWER_FIELD.to_owned(), text(&tick.to_string())),
+        (ANSWER_ID_KEY.to_owned(), text(&tick.to_string())),
         (SEEN_FIELD.to_owned(), text(&seen)),
-        (VALUE_FIELD.to_owned(), value_of(value)),
+        (ANSWER_INPUT_KEY.to_owned(), value_of(value)),
     ]);
     let got = match sut.exec.fire(
         &answer_transition(T),
@@ -314,6 +332,10 @@ fn answer(
         now,
     ) {
         Ok(_) => Ok(()),
+        Err(FireError::NotEnabled {
+            why: WhyNot::Inhibited(p),
+            ..
+        }) if p.as_str() == Generated::WorkFailed.name(T) => Err(Refusal::NoLongerApplies),
         Err(FireError::NotEnabled {
             why: WhyNot::Inhibited(_),
             ..
@@ -350,7 +372,7 @@ fn step(sut: &mut Sut, pre: &Model, m: &Model, now: Duration) {
             .answered
             .clone()
             .unwrap_or_else(|| panic!("the work fired on {} with no answer", req.subject));
-        let answer = get(&req.input, ANSWER_FIELD);
+        let answer = get(&req.input, ANSWER_ID_KEY);
         assert_eq!(answer, ans.id.to_string(), "the work took another answer");
         let sit = pre.subj[s]
             .sit()
@@ -366,7 +388,7 @@ fn step(sut: &mut Sut, pre: &Model, m: &Model, now: Duration) {
             "P1 the work binds a situation whose hash differs from the one seen"
         );
         assert_eq!(
-            req.input[VALUE_FIELD],
+            req.input[ANSWER_INPUT_KEY],
             value_of(ans.value),
             "the work binds another value than the answer's"
         );
@@ -422,8 +444,8 @@ fn compare(sut: &mut Sut, m: &Model) {
         let answered = sut.exec.tokens().token(&answered_place(T), s);
         row("Answered", answered.is_some(), sj.answered.is_some());
         if let (Some(t), Some(ans)) = (answered, &sj.answered) {
-            assert_eq!(get(&t.content, ANSWER_FIELD), ans.id.to_string());
-            assert_eq!(t.content[VALUE_FIELD], value_of(ans.value));
+            assert_eq!(get(&t.content, ANSWER_ID_KEY), ans.id.to_string());
+            assert_eq!(t.content[ANSWER_INPUT_KEY], value_of(ans.value));
         }
         row(
             "work running",
@@ -442,8 +464,17 @@ fn compare(sut: &mut Sut, m: &Model) {
             sj.mark.is_some(),
         );
         let ask = sut.exec.derive(&asks_place(T), &Subject::new(s));
-        row("ask", ask.is_some(), sj.sit().is_some());
-        if let (Some(ask), Some(sit)) = (ask, sj.sit()) {
+        // A pending Answered refuses a second answer by design (P3); it is no dead
+        // affordance.
+        if ask.is_some() && answered.is_none() {
+            let why = sut.exec.why_not(&answer_transition(T), s);
+            assert!(
+                why.is_none(),
+                "P5 an offered ask on {s} has a dead Answer: {why:?}"
+            );
+        }
+        row("ask", ask.is_some(), sj.offered().is_some());
+        if let (Some(ask), Some(sit)) = (ask, sj.offered()) {
             let hash = get(&ask, HASH_FIELD);
             let known = sut.hashes.entry((i, sit)).or_insert_with(|| hash.clone());
             assert_eq!(
@@ -612,9 +643,9 @@ fn a_pure_work_body_reads_the_answer_value_and_id_under_the_adapter_keys() {
         "a",
         OccurrenceId::caller("1"),
         Content::from([
-            (ANSWER_FIELD.to_owned(), text("1")),
+            (ANSWER_ID_KEY.to_owned(), text("1")),
             (SEEN_FIELD.to_owned(), text(&get(&ask, HASH_FIELD))),
-            (VALUE_FIELD.to_owned(), text("Remove")),
+            (ANSWER_INPUT_KEY.to_owned(), text("Remove")),
         ]),
         Duration::ZERO,
     )
@@ -625,8 +656,8 @@ fn a_pure_work_body_reads_the_answer_value_and_id_under_the_adapter_keys() {
         .token("Removed", "a")
         .expect("the work ran")
         .content;
-    assert_eq!(removed["@input"], text("Remove"));
-    assert_eq!(removed["@occurrence"], text("1"));
+    assert_eq!(removed[ANSWER_INPUT_KEY], text("Remove"));
+    assert_eq!(removed[ANSWER_ID_KEY], text("1"));
 }
 
 fn asked(exec: &Executor) -> String {
@@ -644,9 +675,9 @@ fn answer_as(exec: &mut Executor, id: &str, seen: &str) {
         "a",
         OccurrenceId::caller(id),
         Content::from([
-            (ANSWER_FIELD.to_owned(), text(id)),
+            (ANSWER_ID_KEY.to_owned(), text(id)),
             (SEEN_FIELD.to_owned(), text(seen)),
-            (VALUE_FIELD.to_owned(), text("Remove")),
+            (ANSWER_INPUT_KEY.to_owned(), text("Remove")),
         ]),
         Duration::ZERO,
     )
@@ -680,7 +711,7 @@ fn work_answers(exec: &mut Executor) -> Vec<String> {
     exec.step(Duration::ZERO)
         .expect("steps")
         .iter()
-        .map(|r| get(&r.input, ANSWER_FIELD))
+        .map(|r| get(&r.input, ANSWER_ID_KEY))
         .collect()
 }
 

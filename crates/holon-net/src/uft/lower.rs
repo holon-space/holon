@@ -8,7 +8,7 @@
 //!
 //! | Generated | Kind | Arcs | Fires when |
 //! |---|---|---|---|
-//! | `Asks.<T>` | derived place | — | the work's arcs hold except `Answered.<T>`, `<T>.Running` is empty and the binding holds; row `hash` (ask hash over the trace of exactly this check) and `preview` |
+//! | `Asks.<T>` | derived place | — | the work's arcs hold except `Answered.<T>`, `<T>.Running` and `WorkFailed.<T>` are empty and the binding holds; row `hash` (ask hash over the trace of exactly this check) and `preview` |
 //! | `Answer.<T>` | manual | inhibits `Answered.<T>`, `<T>.Running`, `WorkFailed.<T>` | an `Asks.<T>` row exists; the guard never sees the value; puts `Answered.<T>{answer, seen, value}` |
 //! | `<T>` | auto | takes `Answered.<T>` + the declared arcs; failure port `WorkFailed.<T>` | the situation's ask hash equals `Answered.seen` |
 //! | `ExpireAnswer.<T>` | auto | takes `Answered.<T>`; inhibits `WorkFailed.<T>` | the ask is gone or its hash differs; puts `Expired.<T>` keyed by the answer id |
@@ -22,6 +22,7 @@
 use std::sync::Arc;
 
 use holon_api::Value;
+use holon_api::user_transition::ANSWER_ID_KEY;
 use holon_api::user_transition::ArcKind;
 use holon_api::user_transition::BodyDecl;
 use holon_api::user_transition::ExpireReason;
@@ -31,7 +32,6 @@ use holon_api::user_transition::TransitionDescriptor;
 use super::BindFn;
 use super::NativeBody;
 use super::NativeParts;
-use crate::exec::ANSWER_FIELD;
 use crate::exec::AskMeta;
 use crate::exec::Body;
 use crate::exec::Class;
@@ -125,6 +125,8 @@ pub enum LowerTwin {
     NoAnswerInhibitor,
     /// No `ExpireAnswer`.
     NoExpire,
+    /// `Asks` offers the ask while `WorkFailed` inhibits its `Answer`.
+    AskDuringFailure,
 }
 
 /// Lowers one high-level transition into `net`: the work transition and, for
@@ -239,7 +241,13 @@ fn lower_as(
 
     let derive: BindFn = {
         let (sit, preview) = (situation.clone(), parts.preview.clone());
+        let failed = (twin != Some(LowerTwin::AskDuringFailure)).then(|| failed.clone());
         Arc::new(move |r: &mut Reader<'_>, s: &Subject| {
+            // `Answer` inhibits `WorkFailed`: an ask offered then is a dead affordance
+            // (D151.a).
+            if failed.as_ref().is_some_and(|f| r.present(f, s)) {
+                return None;
+            }
             let (content, hash) = sit.eval(r, s)?;
             let mut row = Content::from([(HASH_FIELD.to_owned(), Value::String(hash))]);
             if let Some(p) = &preview {
@@ -281,8 +289,8 @@ fn lower_as(
             if check_hash && hash != seen {
                 return None;
             }
-            let answer = r.text(&answered, s, ANSWER_FIELD)?;
-            for (field, value) in [(ANSWER_FIELD, answer), (SEEN_FIELD, seen)] {
+            let answer = r.text(&answered, s, ANSWER_ID_KEY)?;
+            for (field, value) in [(ANSWER_ID_KEY, answer), (SEEN_FIELD, seen)] {
                 let clash = content.insert(field.to_owned(), Value::String(value));
                 assert!(
                     clash.is_none(),
@@ -304,7 +312,7 @@ fn lower_as(
         let (sit, answered, preview) = (situation.clone(), answered.to_string(), parts.preview);
         Arc::new(move |r: &mut Reader<'_>, s: &Subject| {
             let seen = r.text(&answered, s, SEEN_FIELD)?;
-            let answer = r.field(&answered, s, ANSWER_FIELD)?;
+            let answer = r.field(&answered, s, ANSWER_ID_KEY)?;
             let (reason, why, preview) = match sit.eval(r, s) {
                 None => (
                     ExpireReason::AskGone,
@@ -321,7 +329,7 @@ fn lower_as(
                 Some(_) => return None,
             };
             Some(Content::from([
-                (ANSWER_FIELD.to_owned(), answer),
+                (ANSWER_ID_KEY.to_owned(), answer),
                 (
                     REASON_FIELD.to_owned(),
                     Value::String(expire_reason_text(reason).to_owned()),
@@ -334,7 +342,7 @@ fn lower_as(
     let expire_body = {
         let expired = expired.to_string();
         Arc::new(move |s: &Subject, input: &Content| {
-            let Some(Value::String(answer)) = input.get(ANSWER_FIELD) else {
+            let Some(Value::String(answer)) = input.get(ANSWER_ID_KEY) else {
                 panic!("an Answered token without a text answer id: {input:?}");
             };
             let mut out = input.clone();

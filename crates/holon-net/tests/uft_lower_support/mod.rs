@@ -55,8 +55,14 @@ impl Subj {
         Some((self.refused?, self.base, self.ondisk))
     }
 
+    /// The situation the ask shows: none while the failure port holds a
+    /// token, so no offered ask has a dead `Answer` (D151.a).
+    pub fn offered(&self) -> Option<Sit> {
+        self.sit().filter(|_| !self.failed_port)
+    }
+
     fn seen_now(&mut self) {
-        if let Some(sit) = self.sit()
+        if let Some(sit) = self.offered()
             && self.history.last() != Some(&sit)
         {
             self.history.push(sit);
@@ -102,6 +108,8 @@ pub enum Op {
         s: usize,
         ok: bool,
     },
+    /// The work's outcome is unknown, then the user drops it.
+    Lost(usize),
 }
 
 pub const EXPIRED_GONE: &str = "the question no longer applies";
@@ -114,7 +122,7 @@ impl Model {
         let sj = &self.subj[s];
         match seen {
             Seen::Stale(i) if !sj.history.is_empty() => Some(sj.history[i % sj.history.len()]),
-            _ => sj.sit(),
+            _ => sj.offered(),
         }
     }
 
@@ -124,7 +132,7 @@ impl Model {
         if sj.answered.is_some() || sj.flight.is_some() {
             return Err(Refusal::AlreadyAnswered);
         }
-        if sj.sit().is_none() {
+        if sj.offered().is_none() {
             return Err(Refusal::NoLongerApplies);
         }
         Ok(())
@@ -136,6 +144,7 @@ impl Model {
         let mut started = Vec::new();
         for sj in &mut self.subj {
             let Some(ans) = sj.answered.clone() else {
+                sj.failed_port = false;
                 continue;
             };
             let sit = sj.sit();
@@ -182,6 +191,16 @@ impl Model {
             sj.last_failed = true;
         }
     }
+
+    /// The outcome stayed unknown and the user dropped it: the take is
+    /// committed and the failure port gets a token without an `Answered`.
+    fn drop_lost(&mut self, s: usize) {
+        let sj = &mut self.subj[s];
+        let f = sj.flight.take().expect("precondition: in flight");
+        sj.mark = Some((f.at, f.ans));
+        sj.failed_port = true;
+        sj.last_failed = true;
+    }
 }
 
 pub struct Ref;
@@ -218,7 +237,8 @@ impl ReferenceStateMachine for Ref {
             5 => (s.clone(), prop::sample::select(VALUES.to_vec()), seen)
                 .prop_map(|(s, value, seen)| Op::Answer { s, value, seen }),
             5 => Just(Op::Step),
-            3 => (s, any::<bool>()).prop_map(|(s, ok)| Op::Complete { s, ok }),
+            3 => (s.clone(), any::<bool>()).prop_map(|(s, ok)| Op::Complete { s, ok }),
+            1 => s.prop_map(Op::Lost),
         ]
         .boxed()
     }
@@ -226,7 +246,7 @@ impl ReferenceStateMachine for Ref {
     fn preconditions(m: &Model, op: &Op) -> bool {
         match op {
             Op::Reappear(s) => m.subj[*s].refused.is_none() && m.subj[*s].flight.is_none(),
-            Op::Complete { s, .. } => m.subj[*s].flight.is_some(),
+            Op::Complete { s, .. } | Op::Lost(s) => m.subj[*s].flight.is_some(),
             Op::Answer { s, seen, .. } => m.seen_sit(*s, *seen).is_some(),
             _ => true,
         }
@@ -263,6 +283,7 @@ impl ReferenceStateMachine for Ref {
                 m.step();
             }
             Op::Complete { s, ok } => m.complete(s, ok),
+            Op::Lost(s) => m.drop_lost(s),
         }
         m.next += 1;
         for sj in &mut m.subj {
