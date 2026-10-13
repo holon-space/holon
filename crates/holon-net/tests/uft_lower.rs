@@ -40,6 +40,7 @@ use holon_net::exec::Place;
 use holon_net::exec::REASON_FIELD;
 use holon_net::exec::Reader;
 use holon_net::exec::Receiver;
+use holon_net::exec::Resolution;
 use holon_net::exec::SEEN_FIELD;
 use holon_net::exec::Subject;
 use holon_net::exec::TransitionDef;
@@ -626,4 +627,151 @@ fn a_pure_work_body_reads_the_answer_value_and_id_under_the_adapter_keys() {
         .content;
     assert_eq!(removed["@input"], text("Remove"));
     assert_eq!(removed["@occurrence"], text("1"));
+}
+
+fn asked(exec: &Executor) -> String {
+    get(
+        &exec
+            .derive(&asks_place(T), &Subject::new("a"))
+            .expect("asks"),
+        HASH_FIELD,
+    )
+}
+
+fn answer_as(exec: &mut Executor, id: &str, seen: &str) {
+    exec.fire(
+        &answer_transition(T),
+        "a",
+        OccurrenceId::caller(id),
+        Content::from([
+            (ANSWER_FIELD.to_owned(), text(id)),
+            (SEEN_FIELD.to_owned(), text(seen)),
+            (VALUE_FIELD.to_owned(), text("Remove")),
+        ]),
+        Duration::ZERO,
+    )
+    .unwrap_or_else(|e| panic!("answer {id} refused: {e:?}"));
+}
+
+/// Subject `a` asked for `AcceptRemoval` lowered from `d`.
+fn asking(d: &TransitionDescriptor) -> Executor {
+    let mut exec =
+        Executor::new(lower(base_net(), d, Some(parts())).expect("lowers")).expect("loads");
+    exec.write(
+        "Refused",
+        "a",
+        Content::from([("why".to_owned(), text("0"))]),
+    );
+    exec.write("Base", "a", counter(0));
+    exec.write("OnDisk", "a", counter(0));
+    exec
+}
+
+/// Answers `id` on the current ask and returns the one work request.
+fn answer_and_start(exec: &mut Executor, id: &str) -> EffectRequest {
+    let seen = asked(exec);
+    answer_as(exec, id, &seen);
+    let [req] = <[_; 1]>::try_from(exec.step(Duration::ZERO).expect("steps"))
+        .unwrap_or_else(|reqs| panic!("the work fires once on answer {id}: {reqs:?}"));
+    req
+}
+
+fn work_answers(exec: &mut Executor) -> Vec<String> {
+    exec.step(Duration::ZERO)
+        .expect("steps")
+        .iter()
+        .map(|r| get(&r.input, ANSWER_FIELD))
+        .collect()
+}
+
+/// A dropped outcome-unknown puts `WorkFailed` after the work consumed its
+/// `Answered`; it must neither swallow a later answer nor hide its expiry.
+#[test]
+fn a_dropped_failure_swallows_no_later_answer() {
+    let mut exec = asking(&descriptor());
+    let req = answer_and_start(&mut exec, "1");
+    exec.complete(
+        req.attempt,
+        EffectResult::Unknown(Cause::definite("lost")),
+        Duration::ZERO,
+    )
+    .expect("the attempt is known");
+    exec.resolve(&req.occurrence, Resolution::Drop, Duration::ZERO)
+        .expect("parked");
+    assert!(exec.step(Duration::ZERO).expect("steps").is_empty());
+
+    exec.write(
+        "Refused",
+        "a",
+        Content::from([("why".to_owned(), text("0"))]),
+    );
+    let stale = asked(&exec);
+    exec.write("OnDisk", "a", counter(1));
+    answer_as(&mut exec, "2", &stale);
+    assert!(exec.step(Duration::ZERO).expect("steps").is_empty());
+    assert!(
+        exec.tokens().token(&expired_place(T), "2").is_some(),
+        "WorkFailed of the dropped answer 1 swallowed the stale answer 2: no Expired; WorkFailed: {:?}",
+        exec.tokens().token(&Generated::WorkFailed.name(T), "a")
+    );
+
+    let fresh = asked(&exec);
+    answer_as(&mut exec, "3", &fresh);
+    assert_eq!(
+        work_answers(&mut exec),
+        ["3"],
+        "answer 3 did not reach the work"
+    );
+}
+
+/// Ruling 2.a: a failed answer is released, never expired, even when the
+/// situation changes before the next step.
+#[test]
+fn a_failed_answer_does_not_expire() {
+    let mut exec = asking(&descriptor());
+    let req = answer_and_start(&mut exec, "1");
+    exec.complete(
+        req.attempt,
+        EffectResult::Failed(Cause::definite("disk full")),
+        Duration::ZERO,
+    )
+    .expect("the attempt is known");
+    exec.write("OnDisk", "a", counter(1));
+    assert!(exec.step(Duration::ZERO).expect("steps").is_empty());
+    assert!(
+        exec.tokens().token(&expired_place(T), "1").is_none(),
+        "the failed answer 1 expired instead of being released"
+    );
+    let fresh = asked(&exec);
+    answer_as(&mut exec, "2", &fresh);
+    assert_eq!(
+        work_answers(&mut exec),
+        ["2"],
+        "answer 2 did not reach the work"
+    );
+}
+
+/// A work that only reads its places leaves the situation intact while it
+/// runs; the ask must still hide until the run ends.
+#[test]
+fn a_read_only_work_in_flight_hides_its_ask() {
+    let mut d = descriptor();
+    for a in &mut d.arcs {
+        if a.kind == ArcKind::Take {
+            a.kind = ArcKind::Read;
+        }
+    }
+    let mut exec = asking(&d);
+    let req = answer_and_start(&mut exec, "1");
+    assert_eq!(
+        exec.derive(&asks_place(T), &Subject::new("a")),
+        None,
+        "the ask shows while answer 1 runs"
+    );
+    exec.complete(req.attempt, EffectResult::Done(vec![]), Duration::ZERO)
+        .expect("the attempt is known");
+    assert!(
+        exec.derive(&asks_place(T), &Subject::new("a")).is_some(),
+        "the ask returns once the run ends"
+    );
 }

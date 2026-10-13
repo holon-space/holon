@@ -9,10 +9,11 @@
 //! | Generated | Kind | Arcs | Fires when |
 //! |---|---|---|---|
 //! | `Asks.<T>` | derived place | — | the work's arcs hold except `Answered.<T>`, `<T>.Running` is empty and the binding holds; row `hash` (ask hash over the trace of exactly this check) and `preview` |
-//! | `Answer.<T>` | manual | inhibits `Answered.<T>`, `<T>.Running` | an `Asks.<T>` row exists; the guard never sees the value; puts `Answered.<T>{answer, seen, value}` |
+//! | `Answer.<T>` | manual | inhibits `Answered.<T>`, `<T>.Running`, `WorkFailed.<T>` | an `Asks.<T>` row exists; the guard never sees the value; puts `Answered.<T>{answer, seen, value}` |
 //! | `<T>` | auto | takes `Answered.<T>` + the declared arcs; failure port `WorkFailed.<T>` | the situation's ask hash equals `Answered.seen` |
 //! | `ExpireAnswer.<T>` | auto | takes `Answered.<T>`; inhibits `WorkFailed.<T>` | the ask is gone or its hash differs; puts `Expired.<T>` keyed by the answer id |
 //! | `ReleaseFailed.<T>` | auto | takes `Answered.<T>` + `WorkFailed.<T>` | always, so a re-answer after a failure is not "already answered" |
+//! | `ClearFailed.<T>` | auto | takes `WorkFailed.<T>`; inhibits `Answered.<T>` | always: a dropped outcome-unknown consumed its `Answered`, and its `WorkFailed` must not pair with a later answer |
 //!
 //! The work and the ask derive their hash from one function, so "ask present
 //! and `Answered` present with an equal hash" implies "work enabled".
@@ -72,10 +73,11 @@ pub enum Generated {
     Answer,
     ExpireAnswer,
     ReleaseFailed,
+    ClearFailed,
 }
 
 impl Generated {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Asks,
         Self::Answered,
         Self::WorkFailed,
@@ -83,6 +85,7 @@ impl Generated {
         Self::Answer,
         Self::ExpireAnswer,
         Self::ReleaseFailed,
+        Self::ClearFailed,
     ];
 
     fn role(self) -> &'static str {
@@ -94,6 +97,7 @@ impl Generated {
             Self::Answer => "Answer",
             Self::ExpireAnswer => "ExpireAnswer",
             Self::ReleaseFailed => "ReleaseFailed",
+            Self::ClearFailed => "ClearFailed",
         }
     }
 
@@ -262,7 +266,10 @@ fn lower_as(
         Body::Pure(answer_body),
     );
     if twin != Some(LowerTwin::NoAnswerInhibitor) {
-        answer = answer.inhibits(&answered).inhibits(&running);
+        answer = answer
+            .inhibits(&answered)
+            .inhibits(&running)
+            .inhibits(&failed);
     }
 
     let work_bind: BindFn = {
@@ -351,17 +358,9 @@ fn lower_as(
             },
         )
         .transition(answer)
-        .transition(work)
-        .transition(
-            TransitionDef::new(
-                &Generated::ReleaseFailed.name(t),
-                Trigger::Auto,
-                release,
-                Body::Pure(Arc::new(|_: &Subject, _: &Content| Ok(vec![]))),
-            )
-            .consumes(&answered)
-            .consumes(&failed),
-        );
+        .transition(work);
+    // ExpireAnswer goes before ReleaseFailed, so only its WorkFailed inhibitor,
+    // not the firing order, keeps a failed answer from expiring.
     if twin != Some(LowerTwin::NoExpire) {
         net = net.transition(
             TransitionDef::new(
@@ -374,6 +373,27 @@ fn lower_as(
             .inhibits(&failed),
         );
     }
+    let net = net
+        .transition(
+            TransitionDef::new(
+                &Generated::ReleaseFailed.name(t),
+                Trigger::Auto,
+                release.clone(),
+                Body::Pure(Arc::new(|_: &Subject, _: &Content| Ok(vec![]))),
+            )
+            .consumes(&answered)
+            .consumes(&failed),
+        )
+        .transition(
+            TransitionDef::new(
+                &Generated::ClearFailed.name(t),
+                Trigger::Auto,
+                release,
+                Body::Pure(Arc::new(|_: &Subject, _: &Content| Ok(vec![]))),
+            )
+            .consumes(&failed)
+            .inhibits(&answered),
+        );
     Ok(net)
 }
 
