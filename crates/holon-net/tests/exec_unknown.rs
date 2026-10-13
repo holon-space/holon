@@ -98,7 +98,7 @@ fn net(candidate: bool) -> Spec {
                 "FillFromTurso",
                 Trigger::Auto,
                 bind!(gen_of),
-                Body::Pure(|s, input| Ok(vec![Output::new("Storage", s, storage("turso", input))])),
+                Body::pure(|s, input| Ok(vec![Output::new("Storage", s, storage("turso", input))])),
             )
             .consumes("TursoReady")
             .consumes("Storage.Open"),
@@ -108,7 +108,7 @@ fn net(candidate: bool) -> Spec {
                 "MakeLoroReady",
                 Trigger::Auto,
                 bind!(gen_of),
-                Body::Pure(|s, input| Ok(vec![Output::new("Storage", s, storage("loro", input))])),
+                Body::pure(|s, input| Ok(vec![Output::new("Storage", s, storage("loro", input))])),
             )
             .consumes("TursoFailed")
             .consumes("Storage.Open"),

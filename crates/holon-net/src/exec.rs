@@ -17,6 +17,17 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
+use holon_api::TypeHint;
+use holon_api::user_transition::AnswerCall;
+use holon_api::user_transition::AnswerId;
+use holon_api::user_transition::AnswerSettlement;
+use holon_api::user_transition::AskHash;
+use holon_api::user_transition::AskRow;
+use holon_api::user_transition::ExpireReason;
+pub use holon_api::user_transition::OccurrenceId;
+use holon_api::user_transition::SubjectName;
+use holon_api::user_transition::TransitionName;
+use holon_api::user_transition::UftError;
 use holon_pattern::Value;
 
 /// A round fires every transition its marking enables. A net still enabled
@@ -67,33 +78,6 @@ macro_rules! name {
 name!(Place);
 name!(Subject);
 
-/// Names one occurrence of a firing. Caller-supplied and minted ids are
-/// different variants, so they never collide.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum OccurrenceId {
-    /// Supplied by the caller of a manual fire (NET-manual.a).
-    Caller(Arc<str>),
-    /// Minted by the executor for an auto firing.
-    Minted { transition: Arc<str>, n: u64 },
-}
-
-impl OccurrenceId {
-    pub fn caller(id: &str) -> Self {
-        Self::Caller(Arc::from(id))
-    }
-}
-
-/// Distinct ids display distinctly: the display is the subject of the
-/// [`OUTCOME_UNKNOWN`] token.
-impl fmt::Display for OccurrenceId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Caller(id) => write!(f, "caller:{id}"),
-            Self::Minted { transition, n } => write!(f, "minted:{transition}#{n}"),
-        }
-    }
-}
-
 impl Place {
     /// `<T>.Running`: where a take moves the inputs of a firing of `T`.
     pub fn running(transition: &str) -> Self {
@@ -116,10 +100,66 @@ pub enum Class {
 }
 
 /// Reads the marking through a [`Reader`], so every read lands in the trace.
-pub type Read = fn(&mut Reader<'_>, &Subject) -> Option<Content>;
+/// A closure (ruling 1.a), so a runtime IR lowers like Rust code.
+pub type Read = Arc<dyn Fn(&mut Reader<'_>, &Subject) -> Option<Content> + Send + Sync>;
 
 /// A pure firing: its outputs from its bound input, or a definite failure.
-pub type PureBody = fn(&Subject, &Content) -> Result<Vec<Output>, Cause>;
+pub type PureBody = Arc<dyn Fn(&Subject, &Content) -> Result<Vec<Output>, Cause> + Send + Sync>;
+
+/// The places and transitions of an ask for the work transition `T`
+/// (UFT-adopt.a): the derived `Asks.T`, the manual `Answer.T` that puts the
+/// `Answered.T` token, and the `Expired.T` token of an answer that no longer
+/// applies, whose subject is the answer id.
+pub fn asks_place(work: &str) -> String {
+    format!("Asks.{work}")
+}
+
+pub fn answered_place(work: &str) -> String {
+    format!("Answered.{work}")
+}
+
+pub fn answer_transition(work: &str) -> String {
+    format!("Answer.{work}")
+}
+
+pub fn expired_place(work: &str) -> String {
+    format!("Expired.{work}")
+}
+
+/// `Answered.T`: the answer id. `T` keys its failure mark by it, so a new
+/// answer is a new mark key.
+pub const ANSWER_FIELD: &str = "answer";
+/// `Answered.T`: the [`hash_text`] of the ask the user saw.
+pub const SEEN_FIELD: &str = "seen";
+/// `Answered.T`: the user value. No reader sees it; the executor adds it to
+/// the bound input of `T` under this name.
+pub const VALUE_FIELD: &str = "value";
+/// `Expired.T`: the [`expire_reason_text`].
+pub const REASON_FIELD: &str = "reason";
+/// `Asks.T`: the [`hash_text`] of the ask.
+pub const HASH_FIELD: &str = "hash";
+
+pub fn expire_reason_text(reason: ExpireReason) -> &'static str {
+    match reason {
+        ExpireReason::AskGone => "ask_gone",
+        ExpireReason::SituationChanged => "situation_changed",
+    }
+}
+
+fn expire_reason(text: &str) -> ExpireReason {
+    [ExpireReason::AskGone, ExpireReason::SituationChanged]
+        .into_iter()
+        .find(|r| expire_reason_text(*r) == text)
+        .unwrap_or_else(|| panic!("'{text}' is no expire reason"))
+}
+
+/// What the `Asks` row of an ask shows besides its hash.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AskMeta {
+    pub input: Option<TypeHint>,
+    pub irreversible: bool,
+    pub has_preview: bool,
+}
 
 pub enum PlaceKind {
     /// `candidate`: the place declares an apply transition, whose input this
@@ -191,10 +231,18 @@ pub enum Receiver {
     None,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub enum Body {
     Pure(PureBody),
     Effectful(Receiver),
+}
+
+impl Body {
+    pub fn pure(
+        body: impl Fn(&Subject, &Content) -> Result<Vec<Output>, Cause> + Send + Sync + 'static,
+    ) -> Self {
+        Self::Pure(Arc::new(body))
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -304,6 +352,8 @@ impl TransitionDef {
 pub struct NetDef {
     places: BTreeMap<Place, PlaceDef>,
     transitions: Vec<TransitionDef>,
+    /// Keyed by the work transition.
+    asks: BTreeMap<Arc<str>, AskMeta>,
 }
 
 impl NetDef {
@@ -346,6 +396,32 @@ impl NetDef {
     pub fn transition(mut self, t: TransitionDef) -> Self {
         self.transitions.push(t);
         self
+    }
+
+    /// Declares `work` an ask: the net must hold its places and transitions
+    /// ([`asks_place`] and the others).
+    pub fn ask(mut self, work: &str, meta: AskMeta) -> Self {
+        self.asks.insert(Arc::from(work), meta);
+        self
+    }
+
+    /// `Answered.T` when `transition` is the work `T` of an ask.
+    fn answered_of(&self, transition: &str) -> Option<Place> {
+        self.asks
+            .contains_key(transition)
+            .then(|| Place::new(&answered_place(transition)))
+    }
+
+    fn is_answered(&self, place: &str) -> bool {
+        self.asks.keys().any(|w| answered_place(w) == place)
+    }
+
+    /// The work `T` when `transition` is `Answer.T`.
+    fn work_of_answer(&self, transition: &str) -> Option<Arc<str>> {
+        self.asks
+            .keys()
+            .find(|w| answer_transition(w) == transition)
+            .cloned()
     }
 
     fn place_def(&self, place: &str) -> &PlaceDef {
@@ -451,6 +527,36 @@ impl NetDef {
                 return Err(LoadError::KeyedWithoutCountBound(t.name.to_string()));
             }
         }
+        for work in self.asks.keys() {
+            let place = |name: String, derived: bool| {
+                self.places
+                    .get(name.as_str())
+                    .is_some_and(|d| matches!(d.kind, PlaceKind::Derived(_)) == derived)
+                    .then_some(())
+                    .ok_or(name)
+            };
+            let transition = |name: String, ok: &dyn Fn(&TransitionDef) -> bool| {
+                self.transitions
+                    .iter()
+                    .any(|t| *t.name == *name && ok(t))
+                    .then_some(())
+                    .ok_or(name)
+            };
+            let answered = Place::new(&answered_place(work));
+            place(asks_place(work), true)
+                .and(place(answered_place(work), false))
+                .and(place(expired_place(work), false))
+                .and(transition(answer_transition(work), &|t| {
+                    t.trigger == Trigger::Manual
+                }))
+                .and(transition(work.to_string(), &|t| {
+                    t.consumes.contains(&answered)
+                }))
+                .map_err(|missing| LoadError::IncompleteAsk {
+                    work: work.to_string(),
+                    missing,
+                })?;
+        }
         Ok(())
     }
 }
@@ -475,6 +581,10 @@ pub enum LoadError {
     NoSubject(String),
     #[error("'{0}' has a Keyed receiver but no retry count bound")]
     KeyedWithoutCountBound(String),
+    #[error(
+        "the ask '{work}' lacks '{missing}': it needs a derived Asks, a stored Answered and Expired, a manual Answer, and a work that consumes Answered"
+    )]
+    IncompleteAsk { work: String, missing: String },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -543,6 +653,16 @@ impl Tokens {
         self.next_id += 1;
     }
 
+    /// Commits the removal of a token: a new version.
+    fn remove(&mut self, place: &Place, subject: &Subject) {
+        let slot = self.slot_mut(place, subject);
+        assert!(
+            slot.token.take().is_some(),
+            "a removal of the empty {place} of {subject}"
+        );
+        slot.version += 1;
+    }
+
     /// Places an executor-owned marker (Running, OutcomeUnknown): a move, not
     /// a commit, so no version changes.
     fn mark_slot(&mut self, place: &Place, subject: &Subject, content: Option<Content>) {
@@ -607,12 +727,20 @@ pub struct Reader<'a> {
     net: &'a NetDef,
     tokens: &'a Tokens,
     trace: &'a mut Trace,
+    /// The [`VALUE_FIELD`] of an `Answered` token reads as absent.
+    hide_value: bool,
 }
 
 impl Reader<'_> {
     pub fn field(&mut self, place: &str, subject: &str, field: &str) -> Option<Value> {
-        match self.net.place_def(place).kind {
+        let net = self.net;
+        match &net.place_def(place).kind {
             PlaceKind::Derived(derive) => derive(self, &Subject::new(subject))?.remove(field),
+            PlaceKind::Stored { .. }
+                if self.hide_value && field == VALUE_FIELD && net.is_answered(place) =>
+            {
+                None
+            }
             PlaceKind::Stored { .. } => {
                 let value = self
                     .tokens
@@ -628,10 +756,35 @@ impl Reader<'_> {
     }
 
     pub fn present(&mut self, place: &str, subject: &str) -> bool {
-        match self.net.place_def(place).kind {
+        let net = self.net;
+        match &net.place_def(place).kind {
             PlaceKind::Derived(derive) => derive(self, &Subject::new(subject)).is_some(),
             PlaceKind::Stored { .. } => self.trace.row(self.tokens, place, subject).present,
         }
+    }
+
+    /// Runs `f` and returns, besides its result, the trace of what `f` read,
+    /// e.g. for an [`ask_hash`] of a binding. The reads stay in this trace too.
+    pub fn traced<R>(&mut self, f: impl FnOnce(&mut Reader<'_>) -> R) -> (R, Trace) {
+        let mut sub = Trace::default();
+        let r = f(&mut Reader {
+            net: self.net,
+            tokens: self.tokens,
+            trace: &mut sub,
+            hide_value: self.hide_value,
+        });
+        for (k, row) in &sub.rows {
+            self.trace
+                .rows
+                .entry(k.clone())
+                .or_insert_with(|| RowRead {
+                    fields: BTreeMap::new(),
+                    ..row.clone()
+                })
+                .fields
+                .extend(row.fields.clone());
+        }
+        (r, sub)
     }
 
     /// A field as a string; `None` when absent or not a string.
@@ -780,6 +933,46 @@ pub enum ExecError {
 #[error("no occurrence '{0}'")]
 pub struct UnknownOccurrence(pub OccurrenceId);
 
+/// What an undo of an answer did (XQ2.a), disclosed in full.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Undone {
+    /// The `Answered` token of the answer was still there and is gone.
+    pub withdrawn: bool,
+    /// One entry per (place, subject) the work's commit touched.
+    pub reversed: Vec<Reversal>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Reversal {
+    pub place: Place,
+    pub subject: Subject,
+    pub outcome: ReversalOutcome,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReversalOutcome {
+    /// The content before the work is back.
+    Restored,
+    /// The work put the token; it is gone.
+    Removed,
+    /// A later commit changed the place: left as it is.
+    Changed,
+    /// Data class has no undo here (inc0): left as it is.
+    NotProcessClass,
+}
+
+#[derive(Debug, thiserror::Error, PartialEq)]
+pub enum UndoError {
+    #[error("no occurrence '{0}'")]
+    UnknownOccurrence(OccurrenceId),
+    #[error("'{0}' is no answer")]
+    NotAnAnswer(OccurrenceId),
+    #[error("the work of '{0}' has not settled")]
+    WorkUnsettled(OccurrenceId),
+    #[error("'{0}' is already undone")]
+    AlreadyUndone(OccurrenceId),
+}
+
 /// A variant of the executor that breaks exactly one rule, so a property
 /// test of that rule shows red for its own reason.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -806,6 +999,15 @@ pub enum Twin {
     /// A `Failed` settles the occurrence failed although another of its
     /// attempts may have taken effect.
     FailedSettlesAlone,
+    /// A reader sees the value of an `Answered` token, so a guard can read it.
+    ValueBeforeBind,
+    /// The answer id stays out of the work's read trace, so a new answer to
+    /// the same situation has the old failure mark key.
+    OccurrenceNotInTrace,
+    /// Undo puts the consumed `Answered` token back, so the work fires again.
+    UndoRestoresAnswered,
+    /// `settled(answer)` is the outcome of the `Answer` firing itself.
+    SettledFromAnswer,
 }
 
 /// What is known about one effect attempt of an occurrence.
@@ -871,12 +1073,49 @@ pub struct Executor {
     // ponytail: settled occurrences are kept forever; add retention with the
     // first long-running user.
     occurrences: BTreeMap<OccurrenceId, Option<Settled>>,
+    /// Answer id → (work transition, subject).
+    answers: BTreeMap<Arc<str>, (Arc<str>, Subject)>,
+    undone: BTreeSet<Arc<str>>,
+    /// What the commit of a work occurrence of an ask changed: the content
+    /// before it and the version after it, per (place, subject).
+    deltas: BTreeMap<OccurrenceId, BTreeMap<(Place, Subject), (Option<Content>, u64)>>,
     requests: Vec<EffectRequest>,
     now: Duration,
     next_attempt: u64,
     next_minted: u64,
     #[cfg(feature = "naive-twins")]
     twin: Option<Twin>,
+}
+
+/// The work occurrence of an answer (ruling 3.b): derived from the answer
+/// id, so a Keyed receiver dedups it and the settled chain finds it.
+pub fn work_occurrence(work: &str, answer: &str) -> OccurrenceId {
+    OccurrenceId::Work {
+        transition: Arc::from(work),
+        answer: Arc::from(answer),
+    }
+}
+
+/// The ask identity: blake3 over the transition, the subject and the
+/// content of `trace` (never its versions), with the encoding of the
+/// failure mark keys (EXEC-inc0 D.a).
+pub fn ask_hash(transition: &str, subject: &Subject, trace: &Trace) -> AskHash {
+    let mut h = blake3::Hasher::new();
+    encode_str(&mut h, transition);
+    encode_str(&mut h, subject);
+    encode_rows(&mut h, trace, false);
+    AskHash(*h.finalize().as_bytes())
+}
+
+/// The hex text of an ask hash, as the `Asks` row and `Answered` carry it.
+pub fn hash_text(hash: &AskHash) -> String {
+    blake3::Hash::from_bytes(hash.0).to_hex().to_string()
+}
+
+pub fn hash_from_text(text: &str) -> AskHash {
+    let hash = blake3::Hash::from_hex(text)
+        .unwrap_or_else(|e| panic!("'{text}' is no ask hash text: {e}"));
+    AskHash(*hash.as_bytes())
 }
 
 impl Executor {
@@ -891,6 +1130,9 @@ impl Executor {
             parked: BTreeMap::new(),
             attempts: BTreeMap::new(),
             occurrences: BTreeMap::new(),
+            answers: BTreeMap::new(),
+            undone: BTreeSet::new(),
+            deltas: BTreeMap::new(),
             requests: Vec::new(),
             now: Duration::ZERO,
             next_attempt: 0,
@@ -943,11 +1185,217 @@ impl Executor {
     }
 
     /// `Ok(None)` while the occurrence runs.
+    ///
+    /// An answer settles through the settled chain (NET-manual.a): the
+    /// outcome of its work occurrence, `Failed(NoLongerApplies)` when the
+    /// answer expired, `Failed` when it was undone before the work ran, and
+    /// `None` while it waits.
     pub fn settled(&self, occurrence: &OccurrenceId) -> Result<Option<Settled>, UnknownOccurrence> {
-        self.occurrences
+        let own = self
+            .occurrences
             .get(occurrence)
             .cloned()
-            .ok_or_else(|| UnknownOccurrence(occurrence.clone()))
+            .ok_or_else(|| UnknownOccurrence(occurrence.clone()))?;
+        let OccurrenceId::Caller(id) = occurrence else {
+            return Ok(own);
+        };
+        let Some((work, _)) = self.answers.get(id) else {
+            return Ok(own);
+        };
+        if own != Some(Settled::Done) || self.twin(Twin::SettledFromAnswer) {
+            return Ok(own);
+        }
+        if let Some(settled) = self.occurrences.get(&work_occurrence(work, id)) {
+            return Ok(settled.clone());
+        }
+        if self.undone.contains(id) {
+            return Ok(Some(Settled::Failed(Cause::definite(
+                "undone before the work ran",
+            ))));
+        }
+        if self.tokens.token(&expired_place(work), id).is_some() {
+            return Ok(Some(Settled::Failed(Cause::definite(
+                UftError::NoLongerApplies.to_string(),
+            ))));
+        }
+        Ok(None)
+    }
+
+    /// Fires `Answer.T` with the user value; the answer id is the occurrence.
+    pub fn answer(&mut self, call: AnswerCall, now: Duration) -> Result<AnswerId, UftError> {
+        let work = call.transition.0.as_str();
+        if !self.net.asks.contains_key(work) {
+            return Err(UftError::UnknownTransition(call.transition));
+        }
+        let id = call.answer.0.as_str();
+        let value = Content::from([
+            (ANSWER_FIELD.to_string(), Value::String(id.to_string())),
+            (SEEN_FIELD.to_string(), Value::String(hash_text(&call.seen))),
+            (VALUE_FIELD.to_string(), call.value.unwrap_or(Value::Null)),
+        ]);
+        match self.fire(
+            &answer_transition(work),
+            &call.subject.0,
+            OccurrenceId::caller(id),
+            value,
+            now,
+        ) {
+            Ok(_) => Ok(call.answer),
+            Err(
+                FireError::DuplicateOccurrence(_)
+                | FireError::NotEnabled {
+                    why: WhyNot::Inhibited(_),
+                    ..
+                },
+            ) => Err(UftError::AlreadyAnswered),
+            Err(FireError::NotEnabled {
+                why: WhyNot::Guard | WhyNot::Needs { .. },
+                ..
+            }) => Err(UftError::NoLongerApplies),
+            Err(e) => panic!("the Answer of '{work}' cannot fail with: {e}"),
+        }
+    }
+
+    /// The state of an answer for the UI and MCP (UFT-adopt.a).
+    pub fn answer_settlement(&self, answer: &AnswerId) -> Result<AnswerSettlement, UftError> {
+        let id = answer.0.as_str();
+        let Some((work, _)) = self.answers.get(id) else {
+            return Err(UftError::UnknownAnswer(answer.clone()));
+        };
+        if self.undone.contains(id) {
+            return Ok(AnswerSettlement::Undone);
+        }
+        let occurrence = work_occurrence(work, id);
+        Ok(match self.occurrences.get(&occurrence) {
+            Some(None | Some(Settled::OutcomeUnknown(_))) => {
+                AnswerSettlement::Working { work: occurrence }
+            }
+            Some(Some(Settled::Done)) => AnswerSettlement::Done { work: occurrence },
+            Some(Some(Settled::Failed(cause) | Settled::OverChangedInputs { cause, .. })) => {
+                AnswerSettlement::Failed {
+                    cause: cause.text.clone(),
+                    work: occurrence,
+                }
+            }
+            None => match self.tokens.token(&expired_place(work), id) {
+                Some(t) => {
+                    let Some(Value::String(reason)) = t.content.get(REASON_FIELD) else {
+                        panic!("the {} token of '{id}' has no reason", expired_place(work));
+                    };
+                    AnswerSettlement::Expired {
+                        reason: expire_reason(reason),
+                    }
+                }
+                None => AnswerSettlement::Waiting,
+            },
+        })
+    }
+
+    /// The rows of every `Asks.T`, in work and subject order.
+    pub fn asks(&self) -> Vec<AskRow> {
+        let mut rows = Vec::new();
+        for (work, meta) in &self.net.asks {
+            for (subject, row) in self.derive_all(&asks_place(work)) {
+                let Some(Value::String(hash)) = row.get(HASH_FIELD) else {
+                    panic!(
+                        "the {} row of {subject} has no '{HASH_FIELD}'",
+                        asks_place(work)
+                    );
+                };
+                rows.push(AskRow {
+                    transition: TransitionName(work.to_string()),
+                    subject: SubjectName(subject.to_string()),
+                    hash: hash_from_text(hash),
+                    input: meta.input.clone(),
+                    irreversible: meta.irreversible,
+                    has_preview: meta.has_preview,
+                });
+            }
+        }
+        rows
+    }
+
+    /// Evaluates the derived `place` for one subject, outside any firing.
+    pub fn derive(&self, place: &str, subject: &Subject) -> Option<Content> {
+        let PlaceKind::Derived(derive) = &self.net.place_def(place).kind else {
+            panic!("'{place}' is no derived place");
+        };
+        derive(&mut self.reader(&mut Trace::default()), subject)
+    }
+
+    /// Evaluates the derived `place` for every subject a stored place holds.
+    pub fn derive_all(&self, place: &str) -> Vec<(Subject, Content)> {
+        let subjects: BTreeSet<Subject> = self
+            .net
+            .places
+            .iter()
+            .filter(|(p, d)| {
+                matches!(d.kind, PlaceKind::Stored { .. }) && p.as_str() != OUTCOME_UNKNOWN
+            })
+            .flat_map(|(p, _)| self.tokens.subjects(p))
+            .collect();
+        subjects
+            .into_iter()
+            .filter_map(|s| self.derive(place, &s).map(|c| (s, c)))
+            .collect()
+    }
+
+    /// Undoes an answer (XQ2.a) in one step: removes its `Answered` token
+    /// when still there and reverses the process-class delta its work
+    /// committed. It never puts `Answered` back, so the work never fires
+    /// again from an undo. A row changed since the work is left as it is.
+    pub fn undo(&mut self, answer: &OccurrenceId, now: Duration) -> Result<Undone, UndoError> {
+        self.advance(now);
+        if !self.occurrences.contains_key(answer) {
+            return Err(UndoError::UnknownOccurrence(answer.clone()));
+        }
+        let OccurrenceId::Caller(id) = answer else {
+            return Err(UndoError::NotAnAnswer(answer.clone()));
+        };
+        let Some((work, subject)) = self.answers.get(id).cloned() else {
+            return Err(UndoError::NotAnAnswer(answer.clone()));
+        };
+        if self.undone.contains(id) {
+            return Err(UndoError::AlreadyUndone(answer.clone()));
+        }
+        let occurrence = work_occurrence(&work, id);
+        if let Some(None | Some(Settled::OutcomeUnknown(_))) = self.occurrences.get(&occurrence) {
+            return Err(UndoError::WorkUnsettled(occurrence));
+        }
+        let answered = Place::new(&answered_place(&work));
+        let withdrawn = self
+            .tokens
+            .token(&answered, &subject)
+            .is_some_and(|t| t.content.get(ANSWER_FIELD) == Some(&Value::String(id.to_string())));
+        if withdrawn {
+            self.tokens.remove(&answered, &subject);
+        }
+        let mut reversed = Vec::new();
+        for ((place, subject), (before, version)) in
+            self.deltas.get(&occurrence).cloned().unwrap_or_default()
+        {
+            let outcome = if self.net.places[&place].class != Class::Process {
+                ReversalOutcome::NotProcessClass
+            } else if self.tokens.version(&place, &subject) != version {
+                ReversalOutcome::Changed
+            } else if let Some(content) = before {
+                self.tokens.put(&place, &subject, content);
+                ReversalOutcome::Restored
+            } else {
+                self.tokens.remove(&place, &subject);
+                ReversalOutcome::Removed
+            };
+            reversed.push(Reversal {
+                place,
+                subject,
+                outcome,
+            });
+        }
+        self.undone.insert(id.clone());
+        Ok(Undone {
+            withdrawn,
+            reversed,
+        })
     }
 
     /// An outside commit (a user edit, an ingest): a new version when the
@@ -982,7 +1430,13 @@ impl Executor {
                 for s in self.subjects(t) {
                     let t = &self.net.transitions[i];
                     if let Ok((trace, input)) = self.decide(t, &s) {
-                        let occurrence = self.mint(&name);
+                        let occurrence = match self.net.answered_of(&name) {
+                            Some(p) => match self.answered_field(&p, &s, ANSWER_FIELD) {
+                                Value::String(answer) => work_occurrence(&name, &answer),
+                                other => panic!("the {p} answer id of {s} is {other:?}"),
+                            },
+                            None => self.mint(&name),
+                        };
                         started.push(self.start(&name, s, occurrence, trace, input, now));
                     }
                 }
@@ -1000,12 +1454,18 @@ impl Executor {
     /// A manual fire: `ACCEPTED(occurrence)` at bind (NET-manual.a). A pure
     /// body runs at once; an effect is returned by the next [`step`].
     ///
+    /// `value` is the user input (UFT-adopt.a; empty for none). It joins the
+    /// bound input after the bind, so no guard reads it; a field the bind
+    /// also produces is an impossible state and panics. A fire of `Answer.T`
+    /// takes a [`OccurrenceId::Caller`] id equal to its [`ANSWER_FIELD`].
+    ///
     /// [`step`]: Executor::step
     pub fn fire(
         &mut self,
         transition: &str,
         subject: &str,
         occurrence: OccurrenceId,
+        value: Content,
         now: Duration,
     ) -> Result<Accepted, FireError> {
         self.advance(now);
@@ -1017,7 +1477,7 @@ impl Executor {
             return Err(FireError::DuplicateOccurrence(occurrence));
         }
         let subject = Subject::new(subject);
-        let (trace, input) = self
+        let (trace, mut input) = self
             .decide(t, &subject)
             .map_err(|why| FireError::NotEnabled {
                 transition: transition.to_string(),
@@ -1025,6 +1485,20 @@ impl Executor {
                 why,
             })?;
         let name = t.name.clone();
+        if let Some(work) = self.net.work_of_answer(transition) {
+            let OccurrenceId::Caller(id) = &occurrence else {
+                panic!("'{transition}' fired with the non-caller occurrence {occurrence}");
+            };
+            assert_eq!(
+                value.get(ANSWER_FIELD),
+                Some(&Value::String(id.to_string())),
+                "'{transition}' fired with an answer id other than its occurrence"
+            );
+            self.answers.insert(id.clone(), (work, subject.clone()));
+        }
+        for (k, v) in value {
+            merge_value(&mut input, &k, v, transition);
+        }
         let id = self.start(&name, subject, occurrence.clone(), trace, input, now);
         self.run_body(id, now);
         Ok(Accepted(occurrence))
@@ -1163,10 +1637,10 @@ impl Executor {
     /// `Some(probe)`, or `None` when the outcome parks.
     fn continuation(&mut self, a: &Attempt) -> Option<bool> {
         let t = self.net.transition_def(&a.transition);
-        let Body::Effectful(receiver) = t.body else {
+        let Body::Effectful(receiver) = &t.body else {
             panic!("a pure firing of '{}' has an unknown outcome", a.transition);
         };
-        let retry = t.retry;
+        let (retry, receiver) = (t.retry, *receiver);
         match receiver {
             Receiver::Keyed if !a.probe => {
                 let unbounded = self.twin(Twin::NoCountBound);
@@ -1334,45 +1808,55 @@ impl Executor {
         for p in t.consumes.iter().chain(&t.reads).chain(&t.inhibits) {
             trace.row(&self.tokens, p, s);
         }
-        let mut reader = Reader {
-            net: &self.net,
-            tokens: &self.tokens,
-            trace: &mut trace,
-        };
-        let input = (t.bind)(&mut reader, s).ok_or(WhyNot::Guard)?;
+        let answered = self.net.answered_of(&t.name);
+        if let Some(p) = &answered
+            && !self.twin(Twin::OccurrenceNotInTrace)
+        {
+            let answer = self.answered_field(p, s, ANSWER_FIELD);
+            trace
+                .row(&self.tokens, p, s)
+                .fields
+                .insert(ANSWER_FIELD.to_string(), Some(answer));
+        }
+        let mut input = (t.bind)(&mut self.reader(&mut trace), s).ok_or(WhyNot::Guard)?;
         if t.trigger == Trigger::Auto
             && let Some(mark) = self.marks.get(&(t.name.clone(), s.clone()))
             && mark.key == self.key(&trace)
         {
             return Err(WhyNot::FailedOnThisInput(mark.cause.clone()));
         }
+        if let Some(p) = &answered {
+            let value = self.answered_field(p, s, VALUE_FIELD);
+            merge_value(&mut input, VALUE_FIELD, value, &t.name);
+        }
         Ok((trace, input))
+    }
+
+    /// A field of the `Answered` token a work firing consumes.
+    fn answered_field(&self, place: &Place, subject: &Subject, field: &str) -> Value {
+        self.tokens
+            .token(place, subject)
+            .expect("decide checked every consumed token")
+            .content
+            .get(field)
+            .cloned()
+            .unwrap_or_else(|| panic!("the {place} token of {subject} has no '{field}'"))
+    }
+
+    fn reader<'a>(&'a self, trace: &'a mut Trace) -> Reader<'a> {
+        Reader {
+            net: &self.net,
+            tokens: &self.tokens,
+            trace,
+            hide_value: !self.twin(Twin::ValueBeforeBind),
+        }
     }
 
     /// The content hash of a read trace: blake3 over a canonical encoding of
     /// what was read, never of versions.
     fn key(&self, trace: &Trace) -> blake3::Hash {
         let mut h = blake3::Hasher::new();
-        for ((p, s), row) in &trace.rows {
-            encode_str(&mut h, p.as_str());
-            encode_str(&mut h, s.as_str());
-            h.update(&[u8::from(row.present)]);
-            if self.twin(Twin::MarkByVersion) {
-                h.update(&row.version.to_le_bytes());
-            }
-            for (field, value) in &row.fields {
-                encode_str(&mut h, field);
-                match value {
-                    None => {
-                        h.update(&[0]);
-                    }
-                    Some(v) => {
-                        h.update(&[1]);
-                        encode_value(&mut h, v);
-                    }
-                }
-            }
-        }
+        encode_rows(&mut h, trace, self.twin(Twin::MarkByVersion));
         h.finalize()
     }
 
@@ -1461,8 +1945,9 @@ impl Executor {
     /// A pure body runs and records now; an effect becomes a request.
     fn run_body(&mut self, id: AttemptId, now: Duration) {
         let a = &self.in_flight[&id];
-        match self.net.transition_def(&a.transition).body {
+        match &self.net.transition_def(&a.transition).body {
             Body::Pure(body) => {
+                let body = body.clone();
                 let a = self.in_flight.remove(&id).expect("just inserted");
                 match body(&a.subject, &a.input) {
                     Ok(outputs) => self.record(a, outputs, now),
@@ -1587,11 +2072,44 @@ impl Executor {
     }
 
     fn commit(&mut self, a: Attempt, rows: Vec<Output>) {
+        let mut before = BTreeMap::new();
+        if let OccurrenceId::Work { .. } = &a.occurrence {
+            let answered = self.net.answered_of(&a.transition);
+            let keep_answered = self.twin(Twin::UndoRestoresAnswered);
+            for (p, token) in &a.taken {
+                let rewritten = self
+                    .tokens
+                    .slot(p, &a.subject)
+                    .is_some_and(|s| s.token.is_some() && !s.reserved);
+                if !rewritten && (keep_answered || Some(p) != answered.as_ref()) {
+                    before.insert((p.clone(), a.subject.clone()), Some(token.content.clone()));
+                }
+            }
+            for o in &rows {
+                before
+                    .entry((o.place.clone(), o.subject.clone()))
+                    .or_insert_with(|| {
+                        self.tokens
+                            .token(&o.place, &o.subject)
+                            .map(|t| t.content.clone())
+                    });
+            }
+        }
         for (p, _) in &a.taken {
             self.commit_consumption(p, &a.subject);
         }
         for o in rows {
             self.tokens.put(&o.place, &o.subject, o.content);
+        }
+        if !before.is_empty() {
+            let delta = before
+                .into_iter()
+                .map(|((p, s), c)| {
+                    let version = self.tokens.version(&p, &s);
+                    ((p, s), (c, version))
+                })
+                .collect();
+            self.deltas.insert(a.occurrence.clone(), delta);
         }
         self.release_running(&a.transition, &a.subject);
         let key = (a.transition.clone(), a.subject.clone());
@@ -1750,6 +2268,37 @@ impl Executor {
 
 fn cause_content(cause: &Cause) -> Content {
     Content::from([("cause".to_string(), Value::String(cause.text.clone()))])
+}
+
+/// Adds the user value to a bound input after the bind, so no guard reads it.
+fn merge_value(input: &mut Content, field: &str, value: Value, transition: &str) {
+    assert!(
+        input.insert(field.to_string(), value).is_none(),
+        "the user input field '{field}' of '{transition}' collides with a bound field"
+    );
+}
+
+fn encode_rows(h: &mut blake3::Hasher, trace: &Trace, with_version: bool) {
+    for ((p, s), row) in &trace.rows {
+        encode_str(h, p.as_str());
+        encode_str(h, s.as_str());
+        h.update(&[u8::from(row.present)]);
+        if with_version {
+            h.update(&row.version.to_le_bytes());
+        }
+        for (field, value) in &row.fields {
+            encode_str(h, field);
+            match value {
+                None => {
+                    h.update(&[0]);
+                }
+                Some(v) => {
+                    h.update(&[1]);
+                    encode_value(h, v);
+                }
+            }
+        }
+    }
 }
 
 fn encode_str(h: &mut blake3::Hasher, s: &str) {

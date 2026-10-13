@@ -46,7 +46,7 @@ fn net() -> Spec {
                     let upper = r.text("Upper", s, "upper")?;
                     (upper != "SKIP").then(|| content(&[("upper", text(&upper))]))
                 }),
-                Body::Pure(|s, input| match &input["upper"] {
+                Body::pure(|s, input| match &input["upper"] {
                     Value::String(u) if u.starts_with("BAD") => {
                         Err(Cause::definite(format!("'{u}' does not pass")))
                     }

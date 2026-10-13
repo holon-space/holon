@@ -243,7 +243,7 @@ fn a_stale_pure_firing_rolls_back_and_refires() {
                     let src = n_of(r, "Src", s)?;
                     (n_of(r, "Mid", s) != Some(src)).then(|| content(&[("n", Value::Integer(src))]))
                 }),
-                Body::Pure(|s, input| Ok(vec![Output::new("Mid", s, input.clone())])),
+                Body::pure(|s, input| Ok(vec![Output::new("Mid", s, input.clone())])),
             )
             .reads("Src"),
         )
@@ -256,7 +256,7 @@ fn a_stale_pure_firing_rolls_back_and_refires() {
                     (n_of(r, "Out", s) != Some(doubled))
                         .then(|| content(&[("n", Value::Integer(doubled))]))
                 }),
-                Body::Pure(|s, input| Ok(vec![Output::new("Out", s, input.clone())])),
+                Body::pure(|s, input| Ok(vec![Output::new("Out", s, input.clone())])),
             )
             .reads("Src"),
         );

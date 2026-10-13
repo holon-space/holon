@@ -15,6 +15,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use holon_api::Value;
+use holon_api::user_transition::AnswerCall;
+use holon_api::user_transition::AnswerId;
+use holon_api::user_transition::AnswerSettlement;
+use holon_api::user_transition::AskRow;
+use holon_api::user_transition::ExpireReason;
+use holon_api::user_transition::SubjectName;
+use holon_api::user_transition::TransitionName;
+use holon_api::user_transition::UftError;
+use holon_net::exec::ANSWER_FIELD;
 use holon_net::exec::Accepted;
 use holon_net::exec::AttemptId;
 use holon_net::exec::Body;
@@ -26,19 +35,35 @@ use holon_net::exec::EffectRequest;
 use holon_net::exec::EffectResult;
 use holon_net::exec::ExecError;
 use holon_net::exec::FireError;
+use holon_net::exec::HASH_FIELD;
 use holon_net::exec::Holder;
 use holon_net::exec::MAX_ROUNDS;
 use holon_net::exec::OccurrenceId;
 use holon_net::exec::Output;
 use holon_net::exec::Place;
+use holon_net::exec::REASON_FIELD;
 use holon_net::exec::Receiver;
 use holon_net::exec::Resolution;
+use holon_net::exec::Reversal;
+use holon_net::exec::ReversalOutcome;
 use holon_net::exec::Route;
 use holon_net::exec::Routed;
+use holon_net::exec::SEEN_FIELD;
 use holon_net::exec::Settled;
 use holon_net::exec::Subject;
 use holon_net::exec::Trigger;
+use holon_net::exec::UndoError;
+use holon_net::exec::Undone;
+use holon_net::exec::VALUE_FIELD;
 use holon_net::exec::WhyNot;
+use holon_net::exec::answer_transition;
+use holon_net::exec::answered_place;
+use holon_net::exec::asks_place;
+use holon_net::exec::expire_reason_text;
+use holon_net::exec::expired_place;
+use holon_net::exec::hash_from_text;
+use holon_net::exec::hash_text;
+use holon_net::exec::work_occurrence;
 
 use super::PlaceSpec;
 use super::Reads;
@@ -161,6 +186,12 @@ pub struct Model {
     now: Duration,
     next_attempt: u64,
     next_minted: u64,
+    /// Answer id → (work, subject).
+    answers: BTreeMap<String, (String, String)>,
+    undone: BTreeSet<String>,
+    /// Per work occurrence: the content before its commit and the version
+    /// after it.
+    deltas: BTreeMap<OccurrenceId, BTreeMap<Key, (Option<Content>, u64)>>,
 }
 
 pub struct Reader<'a> {
@@ -171,8 +202,9 @@ pub struct Reader<'a> {
 impl Reads for Reader<'_> {
     fn field(&mut self, place: &str, subject: &str, field: &str) -> Option<Value> {
         let model = self.model;
-        match *model.place(place) {
+        match model.place(place) {
             PlaceSpec::Derived(b) => (b.model)(self, &Subject::new(subject))?.remove(field),
+            PlaceSpec::Stored { .. } if field == VALUE_FIELD && model.is_answered(place) => None,
             PlaceSpec::Stored { .. } => {
                 let value = model
                     .content(place, subject)
@@ -188,7 +220,7 @@ impl Reads for Reader<'_> {
 
     fn present(&mut self, place: &str, subject: &str) -> bool {
         let model = self.model;
-        match *model.place(place) {
+        match model.place(place) {
             PlaceSpec::Derived(b) => (b.model)(self, &Subject::new(subject)).is_some(),
             PlaceSpec::Stored { .. } => model.row(self.trace, place, subject).present,
         }
@@ -221,7 +253,27 @@ impl Model {
             now: Duration::ZERO,
             next_attempt: 0,
             next_minted: 0,
+            answers: BTreeMap::new(),
+            undone: BTreeSet::new(),
+            deltas: BTreeMap::new(),
         }
+    }
+
+    fn is_answered(&self, place: &str) -> bool {
+        self.spec.asks.keys().any(|w| answered_place(w) == place)
+    }
+
+    fn answered_of(&self, transition: &str) -> Option<String> {
+        self.spec
+            .asks
+            .contains_key(transition)
+            .then(|| answered_place(transition))
+    }
+
+    fn answered_field(&self, place: &str, subject: &str, field: &str) -> Value {
+        self.content(place, subject)
+            .expect("decide checked every consumed token")[field]
+            .clone()
     }
 
     fn place(&self, name: &str) -> &PlaceSpec {
@@ -359,6 +411,246 @@ impl Model {
         self.decide(&self.transition(transition), subject).err()
     }
 
+    // --- answers ---
+
+    pub fn answer_ids(&self) -> Vec<String> {
+        self.answers.keys().cloned().collect()
+    }
+
+    pub fn undone(&self) -> &BTreeSet<String> {
+        &self.undone
+    }
+
+    pub fn asks(&self) -> &BTreeMap<String, holon_net::exec::AskMeta> {
+        &self.spec.asks
+    }
+
+    pub fn settled(
+        &self,
+        occurrence: &OccurrenceId,
+    ) -> Result<Option<Settled>, holon_net::exec::UnknownOccurrence> {
+        let own = self
+            .occs
+            .get(occurrence)
+            .map(|o| o.settled.clone())
+            .ok_or_else(|| holon_net::exec::UnknownOccurrence(occurrence.clone()))?;
+        let OccurrenceId::Caller(id) = occurrence else {
+            return Ok(own);
+        };
+        let Some((work, _)) = self.answers.get(id.as_ref()) else {
+            return Ok(own);
+        };
+        assert_eq!(own, Some(Settled::Done), "an Answer firing is pure");
+        if let Some(o) = self.occs.get(&work_occurrence(work, id)) {
+            return Ok(o.settled.clone());
+        }
+        if self.undone.contains(id.as_ref()) {
+            return Ok(Some(Settled::Failed(Cause::definite(
+                "undone before the work ran",
+            ))));
+        }
+        if self.content(&expired_place(work), id).is_some() {
+            return Ok(Some(Settled::Failed(Cause::definite(
+                UftError::NoLongerApplies.to_string(),
+            ))));
+        }
+        Ok(None)
+    }
+
+    pub fn answer(&mut self, call: AnswerCall, now: Duration) -> Result<AnswerId, UftError> {
+        let work = call.transition.0.clone();
+        if !self.spec.asks.contains_key(&work) {
+            return Err(UftError::UnknownTransition(call.transition));
+        }
+        let id = call.answer.0.clone();
+        let value = Content::from([
+            (ANSWER_FIELD.to_string(), Value::String(id.clone())),
+            (SEEN_FIELD.to_string(), Value::String(hash_text(&call.seen))),
+            (VALUE_FIELD.to_string(), call.value.unwrap_or(Value::Null)),
+        ]);
+        match self.fire(
+            &answer_transition(&work),
+            &call.subject.0,
+            OccurrenceId::caller(&id),
+            value,
+            now,
+        ) {
+            Ok(_) => Ok(call.answer),
+            Err(
+                FireError::DuplicateOccurrence(_)
+                | FireError::NotEnabled {
+                    why: WhyNot::Inhibited(_),
+                    ..
+                },
+            ) => Err(UftError::AlreadyAnswered),
+            Err(FireError::NotEnabled {
+                why: WhyNot::Guard | WhyNot::Needs { .. },
+                ..
+            }) => Err(UftError::NoLongerApplies),
+            Err(e) => panic!("the Answer of '{work}' cannot fail with: {e}"),
+        }
+    }
+
+    pub fn answer_settlement(&self, answer: &AnswerId) -> Result<AnswerSettlement, UftError> {
+        let id = answer.0.as_str();
+        let Some((work, _)) = self.answers.get(id) else {
+            return Err(UftError::UnknownAnswer(answer.clone()));
+        };
+        if self.undone.contains(id) {
+            return Ok(AnswerSettlement::Undone);
+        }
+        let occurrence = work_occurrence(work, id);
+        Ok(match self.occs.get(&occurrence).map(|o| &o.settled) {
+            Some(None | Some(Settled::OutcomeUnknown(_))) => {
+                AnswerSettlement::Working { work: occurrence }
+            }
+            Some(Some(Settled::Done)) => AnswerSettlement::Done { work: occurrence },
+            Some(Some(Settled::Failed(cause) | Settled::OverChangedInputs { cause, .. })) => {
+                AnswerSettlement::Failed {
+                    cause: cause.text.clone(),
+                    work: occurrence,
+                }
+            }
+            None => match self.content(&expired_place(work), id) {
+                Some(c) => {
+                    let Some(Value::String(reason)) = c.get(REASON_FIELD) else {
+                        panic!("the expired token of '{id}' has no reason");
+                    };
+                    AnswerSettlement::Expired {
+                        reason: [ExpireReason::AskGone, ExpireReason::SituationChanged]
+                            .into_iter()
+                            .find(|r| expire_reason_text(*r) == reason)
+                            .unwrap_or_else(|| panic!("'{reason}' is no expire reason")),
+                    }
+                }
+                None => AnswerSettlement::Waiting,
+            },
+        })
+    }
+
+    /// The `Asks.T` rows, in work and subject order.
+    pub fn ask_rows(&self) -> Vec<AskRow> {
+        let mut rows = Vec::new();
+        for (work, meta) in &self.spec.asks {
+            for (subject, row) in self.derive_all(&asks_place(work)) {
+                let Some(Value::String(hash)) = row.get(HASH_FIELD) else {
+                    panic!("the Asks row of {subject} has no hash");
+                };
+                rows.push(AskRow {
+                    transition: TransitionName(work.clone()),
+                    subject: SubjectName(subject.to_string()),
+                    hash: hash_from_text(hash),
+                    input: meta.input.clone(),
+                    irreversible: meta.irreversible,
+                    has_preview: meta.has_preview,
+                });
+            }
+        }
+        rows
+    }
+
+    pub fn derive(&self, place: &str, subject: &str) -> Option<Content> {
+        let PlaceSpec::Derived(b) = self.place(place) else {
+            panic!("'{place}' is no derived place");
+        };
+        let mut trace = Trace::default();
+        let mut reader = Reader {
+            model: self,
+            trace: &mut trace,
+        };
+        (b.model)(&mut reader, &Subject::new(subject))
+    }
+
+    /// Every subject a stored place holds or a running attempt names.
+    pub fn derive_all(&self, place: &str) -> Vec<(Subject, Content)> {
+        let subjects: BTreeSet<String> = self
+            .slots
+            .iter()
+            .filter(|(_, slot)| slot.content.is_some())
+            .map(|((_, s), _)| s.clone())
+            .chain(
+                self.in_flight
+                    .values()
+                    .map(|l| self.occs[&l.occ].subject.clone()),
+            )
+            .collect();
+        subjects
+            .into_iter()
+            .filter_map(|s| self.derive(place, &s).map(|c| (Subject::new(&s), c)))
+            .collect()
+    }
+
+    pub fn undo(&mut self, answer: &OccurrenceId, now: Duration) -> Result<Undone, UndoError> {
+        self.advance(now);
+        if !self.occs.contains_key(answer) {
+            return Err(UndoError::UnknownOccurrence(answer.clone()));
+        }
+        let OccurrenceId::Caller(id) = answer else {
+            return Err(UndoError::NotAnAnswer(answer.clone()));
+        };
+        let Some((work, subject)) = self.answers.get(id.as_ref()).cloned() else {
+            return Err(UndoError::NotAnAnswer(answer.clone()));
+        };
+        if self.undone.contains(id.as_ref()) {
+            return Err(UndoError::AlreadyUndone(answer.clone()));
+        }
+        let occurrence = work_occurrence(&work, id);
+        if let Some(None | Some(Settled::OutcomeUnknown(_))) =
+            self.occs.get(&occurrence).map(|o| &o.settled)
+        {
+            return Err(UndoError::WorkUnsettled(occurrence));
+        }
+        let answered = answered_place(&work);
+        let withdrawn = self
+            .content(&answered, &subject)
+            .is_some_and(|c| c.get(ANSWER_FIELD) == Some(&Value::String(id.to_string())));
+        if withdrawn {
+            self.remove(&answered, &subject);
+        }
+        let mut reversed = Vec::new();
+        for ((place, s), (before, version)) in
+            self.deltas.get(&occurrence).cloned().unwrap_or_default()
+        {
+            let process = matches!(
+                self.place(&place),
+                PlaceSpec::Stored {
+                    class: Class::Process,
+                    ..
+                }
+            );
+            let outcome = if !process {
+                ReversalOutcome::NotProcessClass
+            } else if self.version(&place, &s) != version {
+                ReversalOutcome::Changed
+            } else if let Some(content) = before {
+                self.put(&place, &s, content);
+                ReversalOutcome::Restored
+            } else {
+                self.remove(&place, &s);
+                ReversalOutcome::Removed
+            };
+            reversed.push(Reversal {
+                place: Place::new(&place),
+                subject: Subject::new(&s),
+                outcome,
+            });
+        }
+        self.undone.insert(id.to_string());
+        Ok(Undone {
+            withdrawn,
+            reversed,
+        })
+    }
+
+    fn remove(&mut self, place: &str, subject: &str) {
+        let slot = self.slot_mut(place, subject);
+        assert!(
+            slot.content.take().is_some(),
+            "a removal of the empty {place} of {subject}"
+        );
+        slot.version += 1;
+    }
+
     // --- enabledness ---
 
     fn holder(&self, place: &str, subject: &str) -> Option<Holder> {
@@ -402,16 +694,27 @@ impl Model {
         for p in t.consumes.iter().chain(&t.reads).chain(&t.inhibits) {
             self.row(&mut trace, p, s);
         }
+        let answered = self.answered_of(&t.name);
+        if let Some(p) = &answered {
+            let answer = self.answered_field(p, s, ANSWER_FIELD);
+            self.row(&mut trace, p, s)
+                .fields
+                .insert(ANSWER_FIELD.to_string(), Some(answer));
+        }
         let mut reader = Reader {
             model: self,
             trace: &mut trace,
         };
-        let input = (t.bind.model)(&mut reader, &Subject::new(s)).ok_or(WhyNot::Guard)?;
+        let mut input = (t.bind.model)(&mut reader, &Subject::new(s)).ok_or(WhyNot::Guard)?;
         if t.trigger == Trigger::Auto
             && let Some((seen, cause)) = self.marks.get(&key(&t.name, s))
             && *seen == trace.seen()
         {
             return Err(WhyNot::FailedOnThisInput(cause.clone()));
+        }
+        if let Some(p) = &answered {
+            let value = self.answered_field(p, s, VALUE_FIELD);
+            assert!(input.insert(VALUE_FIELD.to_string(), value).is_none());
         }
         Ok((trace, input))
     }
@@ -442,10 +745,18 @@ impl Model {
                     .collect();
                 for s in subjects {
                     if let Ok((trace, input)) = self.decide(&t, &s) {
-                        self.next_minted += 1;
-                        let occ = OccurrenceId::Minted {
-                            transition: Arc::from(t.name.as_str()),
-                            n: self.next_minted,
+                        let occ = match self.answered_of(&t.name) {
+                            Some(p) => match self.answered_field(&p, &s, ANSWER_FIELD) {
+                                Value::String(answer) => work_occurrence(&t.name, &answer),
+                                other => panic!("the answer id is {other:?}"),
+                            },
+                            None => {
+                                self.next_minted += 1;
+                                OccurrenceId::Minted {
+                                    transition: Arc::from(t.name.as_str()),
+                                    n: self.next_minted,
+                                }
+                            }
                         };
                         started.push(self.start(&t, &s, occ, trace, input, now));
                     }
@@ -466,6 +777,7 @@ impl Model {
         transition: &str,
         subject: &str,
         occurrence: OccurrenceId,
+        value: Content,
         now: Duration,
     ) -> Result<Accepted, FireError> {
         self.advance(now);
@@ -476,13 +788,28 @@ impl Model {
         if self.occs.contains_key(&occurrence) {
             return Err(FireError::DuplicateOccurrence(occurrence));
         }
-        let (trace, input) = self
+        let (trace, mut input) = self
             .decide(&t, subject)
             .map_err(|why| FireError::NotEnabled {
                 transition: transition.to_string(),
                 subject: Subject::new(subject),
                 why,
             })?;
+        if let Some(work) = self
+            .spec
+            .asks
+            .keys()
+            .find(|w| answer_transition(w) == transition)
+        {
+            let OccurrenceId::Caller(id) = &occurrence else {
+                panic!("an answer with the occurrence {occurrence}");
+            };
+            self.answers
+                .insert(id.to_string(), (work.clone(), subject.to_string()));
+        }
+        for (k, v) in value {
+            assert!(input.insert(k, v).is_none());
+        }
         let id = self.start(&t, subject, occurrence.clone(), trace, input, now);
         self.run_body(id, now);
         Ok(Accepted(occurrence))
@@ -587,6 +914,10 @@ impl Model {
                 retry_due: None,
             })
             .attempts += 1;
+        let attempts = self
+            .occs
+            .get(&occ)
+            .map_or_else(BTreeMap::new, |o| o.attempts.clone());
         self.occs.insert(
             occ.clone(),
             Occ {
@@ -597,7 +928,7 @@ impl Model {
                 input,
                 settled: None,
                 parked: None,
-                attempts: BTreeMap::new(),
+                attempts,
             },
         );
         self.launch(occ, now, false)
@@ -620,7 +951,7 @@ impl Model {
     fn run_body(&mut self, id: AttemptId, now: Duration) {
         let occ = self.in_flight[&id].occ.clone();
         let t = self.transition(&self.occs[&occ].transition);
-        match t.body {
+        match &t.body {
             Body::Pure(body) => {
                 self.in_flight.remove(&id);
                 let o = &self.occs[&occ];
@@ -745,10 +1076,10 @@ impl Model {
     /// or `None` when the outcome parks.
     fn continuation(&mut self, occ: &OccurrenceId, live: &Live) -> Option<bool> {
         let t = self.transition(&self.occs[occ].transition);
-        let Body::Effectful(receiver) = t.body else {
+        let Body::Effectful(receiver) = &t.body else {
             panic!("a pure firing of '{}' has an unknown outcome", t.name);
         };
-        match receiver {
+        match *receiver {
             Receiver::Keyed if !live.probe => {
                 let run_key = self.run_key(occ);
                 let run = self.runs.get_mut(&run_key)?;
@@ -803,7 +1134,7 @@ impl Model {
         let trace = &self.occs[occ].trace;
         let (mut kept, mut routes) = (Vec::new(), Vec::new());
         for out in &rows {
-            let route = match *self.place(&out.place) {
+            let route = match self.place(&out.place) {
                 PlaceSpec::Stored {
                     candidate: Some(c), ..
                 } => {
@@ -844,9 +1175,34 @@ impl Model {
     }
 
     fn commit(&mut self, occ: &OccurrenceId, rows: Vec<Output>) {
+        let mut before: BTreeMap<Key, Option<Content>> = BTreeMap::new();
+        if let OccurrenceId::Work { .. } = occ {
+            let o = &self.occs[occ];
+            let answered = self.answered_of(&o.transition);
+            for (p, c) in &o.taken {
+                if self.content(p, &o.subject).is_none() && Some(p) != answered.as_ref() {
+                    before.insert(key(p, &o.subject), Some(c.clone()));
+                }
+            }
+            for out in &rows {
+                before
+                    .entry(key(&out.place, &out.subject))
+                    .or_insert_with(|| self.content(&out.place, &out.subject).cloned());
+            }
+        }
         self.commit_consumption(occ);
         for out in rows {
             self.put(&out.place, &out.subject, out.content);
+        }
+        if !before.is_empty() {
+            let delta = before
+                .into_iter()
+                .map(|(k, c)| {
+                    let version = self.version(&k.0, &k.1);
+                    (k, (c, version))
+                })
+                .collect();
+            self.deltas.insert(occ.clone(), delta);
         }
         let run_key = self.run_key(occ);
         self.marks.remove(&run_key);

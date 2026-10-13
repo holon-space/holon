@@ -77,7 +77,7 @@ fn complement_net() -> Spec {
                 "FillFromTurso",
                 Trigger::Auto,
                 bind!(|r, s| gen_of(r, "Storage.Open", s)),
-                Body::Pure(|s, input| Ok(storage("turso", s, input))),
+                Body::pure(|s, input| Ok(storage("turso", s, input))),
             )
             .consumes("TursoReady")
             .consumes("Storage.Open"),
@@ -87,7 +87,7 @@ fn complement_net() -> Spec {
                 "MakeLoroReady",
                 Trigger::Auto,
                 bind!(|r, s| gen_of(r, "Storage.Open", s)),
-                Body::Pure(|s, input| Ok(storage("loro", s, input))),
+                Body::pure(|s, input| Ok(storage("loro", s, input))),
             )
             .consumes("TursoFailed")
             .consumes("Storage.Open"),
@@ -97,7 +97,7 @@ fn complement_net() -> Spec {
                 "Take",
                 Trigger::Manual,
                 bind!(|_r, _s| Some(Content::new())),
-                Body::Pure(|_, _| Ok(Vec::new())),
+                Body::pure(|_, _| Ok(Vec::new())),
             )
             .consumes("Storage"),
         )
@@ -106,7 +106,7 @@ fn complement_net() -> Spec {
                 "Reopen",
                 Trigger::Manual,
                 bind!(|r, s| gen_of(r, "Storage.Settled", s)),
-                Body::Pure(|s, input| {
+                Body::pure(|s, input| {
                     let next = match input["gen"] {
                         Value::Integer(g) => g + 1,
                         ref other => panic!("gen is {other:?}"),
@@ -135,7 +135,7 @@ fn inhibitor_net() -> Spec {
             Transition::new(
                 "MakeTursoReady",
                 Trigger::Auto,
-                storage_gen,
+                storage_gen.clone(),
                 Body::Effectful(Receiver::None),
             )
             .reads("Config")
@@ -148,8 +148,8 @@ fn inhibitor_net() -> Spec {
             Transition::new(
                 "FillFromTurso",
                 Trigger::Auto,
-                storage_gen,
-                Body::Pure(|s, input| Ok(storage("turso", s, input)[..1].to_vec())),
+                storage_gen.clone(),
+                Body::pure(|s, input| Ok(storage("turso", s, input)[..1].to_vec())),
             )
             .consumes("TursoReady"),
         )
@@ -158,7 +158,7 @@ fn inhibitor_net() -> Spec {
                 "MakeLoroReady",
                 Trigger::Auto,
                 storage_gen,
-                Body::Pure(|s, input| Ok(storage("loro", s, input)[..1].to_vec())),
+                Body::pure(|s, input| Ok(storage("loro", s, input)[..1].to_vec())),
             )
             .consumes("TursoFailed"),
         )
@@ -167,7 +167,7 @@ fn inhibitor_net() -> Spec {
                 "Take",
                 Trigger::Manual,
                 bind!(|_r, _s| Some(Content::new())),
-                Body::Pure(|_, _| Ok(Vec::new())),
+                Body::pure(|_, _| Ok(Vec::new())),
             )
             .consumes("Storage"),
         )
@@ -334,7 +334,7 @@ fn running_net() -> Spec {
         .place("Sent", Class::Process)
         .place("Archived", Class::Process)
         .transition(
-            Transition::new("Send", Trigger::Auto, n, Body::Effectful(Receiver::None))
+            Transition::new("Send", Trigger::Auto, n.clone(), Body::Effectful(Receiver::None))
                 .consumes("Intent"),
         )
         .transition(
@@ -342,7 +342,7 @@ fn running_net() -> Spec {
                 "Archive",
                 Trigger::Auto,
                 n,
-                Body::Pure(|s, input| Ok(vec![Output::new("Archived", s, input.clone())])),
+                Body::pure(|s, input| Ok(vec![Output::new("Archived", s, input.clone())])),
             )
             .reads("Intent")
             .inhibits("Archived"),

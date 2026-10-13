@@ -14,7 +14,11 @@ use std::fmt::Debug;
 use std::time::Duration;
 
 use holon_api::Value;
+use holon_api::user_transition::AnswerCall;
+use holon_api::user_transition::AnswerId;
+use holon_api::user_transition::UftError;
 use holon_net::exec::Accepted;
+use holon_net::exec::AskMeta;
 use holon_net::exec::AttemptId;
 use holon_net::exec::Body;
 use holon_net::exec::Class;
@@ -28,13 +32,19 @@ use holon_net::exec::FireError;
 use holon_net::exec::NetDef;
 use holon_net::exec::OUTCOME_UNKNOWN;
 use holon_net::exec::OccurrenceId;
+use holon_net::exec::Output;
 use holon_net::exec::Place;
 use holon_net::exec::Reader;
+use holon_net::exec::Receiver;
 use holon_net::exec::Resolution;
 use holon_net::exec::Retry;
+use holon_net::exec::Settled;
 use holon_net::exec::Subject;
 use holon_net::exec::TransitionDef;
 use holon_net::exec::Trigger;
+use holon_net::exec::UndoError;
+use holon_net::exec::Undone;
+use holon_net::exec::WhyNot;
 use model::Model;
 
 /// The marking as a guard, a binding or a derived place reads it: the
@@ -64,7 +74,7 @@ impl Reads for Reader<'_> {
 
 /// One binding, compiled once against the executor's reader and once against
 /// the model's. Build it with [`bind!`].
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct Bind {
     pub sut: holon_net::exec::Read,
     pub model: model::Read,
@@ -75,12 +85,14 @@ pub struct Bind {
 macro_rules! bind {
     (|$r:ident, $s:ident| $body:expr) => {
         crate::exec_support::Bind {
-            sut: |$r: &mut ::holon_net::exec::Reader<'_>,
-                  $s: &::holon_net::exec::Subject|
-             -> Option<::holon_net::exec::Content> {
-                let $r: &mut dyn crate::exec_support::Reads = $r;
-                $body
-            },
+            sut: ::std::sync::Arc::new(
+                |$r: &mut ::holon_net::exec::Reader<'_>,
+                 $s: &::holon_net::exec::Subject|
+                 -> Option<::holon_net::exec::Content> {
+                    let $r: &mut dyn crate::exec_support::Reads = $r;
+                    $body
+                },
+            ),
             model: |$r: &mut crate::exec_support::model::Reader<'_>,
                     $s: &::holon_net::exec::Subject|
              -> Option<::holon_net::exec::Content> {
@@ -95,7 +107,7 @@ macro_rules! bind {
 }
 pub(crate) use bind;
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub enum PlaceSpec {
     Stored {
         class: Class,
@@ -110,6 +122,7 @@ pub enum PlaceSpec {
 pub struct Spec {
     pub places: BTreeMap<&'static str, PlaceSpec>,
     pub transitions: Vec<Transition>,
+    pub asks: BTreeMap<String, AskMeta>,
 }
 
 impl Spec {
@@ -145,26 +158,36 @@ impl Spec {
         self
     }
 
+    pub fn ask(mut self, work: &str, meta: AskMeta) -> Self {
+        self.asks.insert(work.to_string(), meta);
+        self
+    }
+
     pub fn netdef(&self) -> NetDef {
         let net = self
             .places
             .iter()
-            .fold(NetDef::default(), |net, (name, def)| match *def {
+            .fold(NetDef::default(), |net, (name, def)| match def {
                 PlaceSpec::Stored {
                     class,
                     candidate: None,
-                } => net.place(name, class),
+                } => net.place(name, *class),
                 PlaceSpec::Stored {
                     class,
                     candidate: Some(c),
                 } => {
-                    assert_eq!(class, Class::Process, "a candidate on a {class:?} place");
+                    assert_eq!(*class, Class::Process, "a candidate on a {class:?} place");
                     net.place_with_candidate(name, c)
                 }
-                PlaceSpec::Derived(b) => net.derived(name, b.sut),
+                PlaceSpec::Derived(b) => net.derived(name, b.sut.clone()),
             });
+        let net = self
+            .asks
+            .iter()
+            .fold(net, |net, (work, meta)| net.ask(work, meta.clone()));
         self.transitions.iter().fold(net, |net, t| {
-            let mut def = TransitionDef::new(&t.name, t.trigger, t.bind.sut, t.body);
+            let mut def =
+                TransitionDef::new(&t.name, t.trigger, t.bind.sut.clone(), t.body.clone());
             for p in &t.consumes {
                 def = def.consumes(p);
             }
@@ -311,6 +334,10 @@ fn with_twin(exec: Executor, name: &str) -> Executor {
         "drop-late-done" => Twin::DropLateDone,
         "drop-late-failed" => Twin::DropLateFailed,
         "failed-settles-alone" => Twin::FailedSettlesAlone,
+        "value-before-bind" => Twin::ValueBeforeBind,
+        "occurrence-not-in-trace" => Twin::OccurrenceNotInTrace,
+        "undo-restores-answered" => Twin::UndoRestoresAnswered,
+        "settled-from-answer" => Twin::SettledFromAnswer,
         other => panic!("HOLON_NET_TWIN={other} names no twin"),
     };
     exec.with_twin(twin)
@@ -373,12 +400,10 @@ impl Driver {
 
     pub fn step(&mut self) -> Result<(), ExecError> {
         let op = format!("step at {:?}", self.now);
-        let new = agree(
-            &op,
-            "effect requests",
-            self.exec.step(self.now),
-            self.model.step(self.now),
-        );
+        let sut = self.exec.step(self.now);
+        let model = self.model.step(self.now);
+        self.properties(&op);
+        let new = agree(&op, "effect requests", sut, model);
         self.check(&op);
         let new = new?;
         self.requests.extend(new.iter().cloned());
@@ -402,11 +427,47 @@ impl Driver {
         let r = agree(
             &op,
             "answer",
-            self.exec
-                .fire(transition, subject, occurrence.clone(), self.now),
-            self.model.fire(transition, subject, occurrence, self.now),
+            self.exec.fire(
+                transition,
+                subject,
+                occurrence.clone(),
+                Content::new(),
+                self.now,
+            ),
+            self.model
+                .fire(transition, subject, occurrence, Content::new(), self.now),
         );
         self.check(&op);
+        r
+    }
+
+    /// An answer, without a step.
+    pub fn answer(&mut self, call: AnswerCall) -> Result<AnswerId, UftError> {
+        let op = format!("answer {call:?}");
+        let r = agree(
+            &op,
+            "answer",
+            self.exec.answer(call.clone(), self.now),
+            self.model.answer(call, self.now),
+        );
+        self.check(&op);
+        r
+    }
+
+    /// An undo, then a step: a re-fire after an undo shows in that step.
+    pub fn undo(&mut self, occurrence: &OccurrenceId) -> Result<Undone, UndoError> {
+        let op = format!("undo {occurrence}");
+        let sut = self.exec.undo(occurrence, self.now);
+        let model = self.model.undo(occurrence, self.now);
+        let sut_new = self.exec.step(self.now);
+        let model_new = self.model.step(self.now);
+        self.properties(&op);
+        let r = agree(&op, "answer", sut, model);
+        let new = agree(&op, "effect requests", sut_new, model_new)
+            .expect("a step after an undo quiesces");
+        self.check(&op);
+        self.requests.extend(new.iter().cloned());
+        self.pending.extend(new);
         r
     }
 
@@ -473,7 +534,42 @@ impl Driver {
     /// versions, the Running and OutcomeUnknown places, the marks, the
     /// occurrences with their outcomes and disclosed conditions, the attempts
     /// in flight, and why each transition is not enabled for each subject.
+    /// The answer properties, with their own messages: they run before the
+    /// generic comparison, so a twin fails here and not as a divergence.
+    fn properties(&self, op: &str) {
+        for (_, _, _, occ) in self.exec.in_flight() {
+            if let OccurrenceId::Work { answer, .. } = occ {
+                assert!(
+                    !self.model.undone().contains(answer.as_ref()),
+                    "work fired again after undo: {occ} after {op}"
+                );
+            }
+        }
+        let subjects: BTreeSet<String> = self.model.slot_keys().map(|(_, s)| s).collect();
+        for work in self.model.asks().keys() {
+            for s in &subjects {
+                let sut = self.exec.why_not(work, s);
+                let model = self.model.why_not(work, s);
+                assert!(
+                    !matches!(sut, Some(WhyNot::FailedOnThisInput(_)))
+                        || matches!(model, Some(WhyNot::FailedOnThisInput(_))),
+                    "re-answer blocked by the old mark: '{work}' for {s} after {op}: {sut:?}, model {model:?}"
+                );
+            }
+        }
+        for id in self.model.answer_ids() {
+            let occ = OccurrenceId::caller(&id);
+            let sut = self.exec.settled(&occ);
+            let model = self.model.settled(&occ);
+            assert!(
+                sut != Ok(Some(Settled::Done)) || model == Ok(Some(Settled::Done)),
+                "settled Done before the work ran: answer {id} after {op}: model {model:?}"
+            );
+        }
+    }
+
     fn check(&self, op: &str) {
+        self.properties(op);
         let tokens = self.exec.tokens();
         let stored: Vec<&str> = self
             .spec
@@ -565,6 +661,36 @@ impl Driver {
             .collect();
         agree(op, "attempts in flight", sut_flight, self.model.in_flight());
 
+        for id in self.model.answer_ids() {
+            let occ = OccurrenceId::caller(&id);
+            agree(
+                op,
+                &format!("settled({occ})"),
+                self.exec.settled(&occ),
+                self.model.settled(&occ),
+            )
+            .expect("the answer occurrence is known");
+            let answer = AnswerId(id.clone());
+            agree(
+                op,
+                &format!("answer_settlement({id})"),
+                self.exec.answer_settlement(&answer),
+                self.model.answer_settlement(&answer),
+            )
+            .expect("the answer is known");
+        }
+        agree(op, "asks", self.exec.asks(), self.model.ask_rows());
+        for (p, d) in &self.spec.places {
+            if let PlaceSpec::Derived(_) = d {
+                agree(
+                    op,
+                    &format!("derive_all({p})"),
+                    self.exec.derive_all(p),
+                    self.model.derive_all(p),
+                );
+            }
+        }
+
         let subjects: BTreeSet<&str> = keys.iter().map(|(_, s)| s.as_str()).collect();
         for t in &self.spec.transitions {
             for s in &subjects {
@@ -606,4 +732,110 @@ pub fn string(content: &Content, field: &str) -> String {
 
 pub fn subject(s: &str) -> Subject {
     Subject::new(s)
+}
+
+/// An ask net for the work `Accept` on `Item.n`. `Asks.Accept` holds while
+/// `n >= 0`; its hash covers the subject and `n`. The work writes the
+/// process place `Accepted` and the data place `Out` from its effect.
+/// `ExpireAnswer.Accept` expires an answer whose ask is gone or changed;
+/// `ReleaseFailed.Accept` clears a failed answer, so the user can answer
+/// again.
+pub fn answer_spec() -> Spec {
+    Spec::default()
+        .place("Item", Class::Process)
+        .place("Accepted", Class::Process)
+        .place("Out", Class::Data)
+        .place("Answered.Accept", Class::Process)
+        .place("WorkFailed.Accept", Class::Process)
+        .place("Expired.Accept", Class::Process)
+        .derived("Asks.Accept", bind!(ask_row))
+        .ask(
+            "Accept",
+            AskMeta {
+                input: None,
+                irreversible: false,
+                has_preview: false,
+            },
+        )
+        .transition(
+            Transition::new(
+                "Answer.Accept",
+                Trigger::Manual,
+                bind!(|r, s| r.present("Asks.Accept", s).then(Content::new)),
+                Body::pure(|s, input| Ok(vec![Output::new("Answered.Accept", s, input.clone())])),
+            )
+            .inhibits("Answered.Accept"),
+        )
+        .transition(
+            Transition::new(
+                "Accept",
+                Trigger::Auto,
+                bind!(|r, s| {
+                    assert!(
+                        r.field("Answered.Accept", s, "value").is_none(),
+                        "guard read the value"
+                    );
+                    let n = item_n(r, s)?;
+                    let seen = r.text("Answered.Accept", s, "seen")?;
+                    let hash = r.text("Asks.Accept", s, "hash")?;
+                    (n >= 0 && seen == hash).then(|| content(&[("n", Value::Integer(n))]))
+                }),
+                Body::Effectful(Receiver::None),
+            )
+            .consumes("Answered.Accept")
+            .consumes("Item")
+            .on_failure("WorkFailed.Accept"),
+        )
+        .transition(
+            Transition::new(
+                "ExpireAnswer.Accept",
+                Trigger::Auto,
+                bind!(|r, s| {
+                    let answer = r.text("Answered.Accept", s, "answer")?;
+                    let reason = match r.text("Asks.Accept", s, "hash") {
+                        None => "ask_gone",
+                        Some(hash) if r.text("Answered.Accept", s, "seen")? != hash => {
+                            "situation_changed"
+                        }
+                        Some(_) => return None,
+                    };
+                    Some(content(&[
+                        ("answer", text(&answer)),
+                        ("reason", text(reason)),
+                    ]))
+                }),
+                Body::pure(|_, input| {
+                    Ok(vec![Output::new(
+                        "Expired.Accept",
+                        &Subject::new(&string(input, "answer")),
+                        content(&[("reason", input["reason"].clone())]),
+                    )])
+                }),
+            )
+            .consumes("Answered.Accept")
+            .inhibits("WorkFailed.Accept"),
+        )
+        .transition(
+            Transition::new(
+                "ReleaseFailed.Accept",
+                Trigger::Auto,
+                bind!(|_r, _s| Some(Content::new())),
+                Body::pure(|_, _| Ok(Vec::new())),
+            )
+            .consumes("Answered.Accept")
+            .consumes("WorkFailed.Accept"),
+        )
+}
+
+fn item_n(r: &mut dyn Reads, s: &Subject) -> Option<i64> {
+    match r.field("Item", s, "n")? {
+        Value::Integer(n) => Some(n),
+        other => panic!("Item.n of {s} is {other:?}"),
+    }
+}
+
+fn ask_row(r: &mut dyn Reads, s: &Subject) -> Option<Content> {
+    let n = item_n(r, s)?;
+    let hash = blake3::hash(format!("Accept\0{s}\0{n}").as_bytes()).to_hex();
+    (n >= 0).then(|| content(&[("hash", text(&hash))]))
 }

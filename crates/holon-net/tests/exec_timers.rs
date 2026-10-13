@@ -60,7 +60,7 @@ fn net() -> Spec {
                 "MakeLoroReady",
                 Trigger::Auto,
                 bind!(|_r, _s| Some(content(&[]))),
-                Body::Pure(|s, _| Ok(vec![Output::new("LoroReady", s, content(&[]))])),
+                Body::pure(|s, _| Ok(vec![Output::new("LoroReady", s, content(&[]))])),
             )
             .consumes("TursoDown"),
         )

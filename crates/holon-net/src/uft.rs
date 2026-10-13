@@ -3,27 +3,18 @@
 //! returns [`NotImplemented`] naming the lane that fills it.
 
 use std::sync::Arc;
-use std::time::Duration;
 
-use holon_api::user_transition::AnswerCall;
-use holon_api::user_transition::AnswerId;
-use holon_api::user_transition::AnswerSettlement;
-use holon_api::user_transition::AskHash;
-use holon_api::user_transition::AskRow;
 use holon_api::user_transition::Lane;
 use holon_api::user_transition::NotImplemented;
 use holon_api::user_transition::TransitionDescriptor;
-use holon_api::user_transition::UftError;
 
 use crate::exec::Cause;
 use crate::exec::Content;
-use crate::exec::Executor;
 use crate::exec::NetDef;
 use crate::exec::Output;
 use crate::exec::Reader;
 use crate::exec::Receiver;
 use crate::exec::Subject;
-use crate::exec::Trace;
 
 /// A binding as a closure (ruling 1.a), so a runtime IR can lower too. `None`
 /// is a false guard; `Some` is the bound situation.
@@ -62,34 +53,4 @@ pub fn lower(
         lane: Lane::Lowering,
         what: "uft::lower",
     })
-}
-
-/// The ask identity over the transition, the subject and the read-trace
-/// content at derivation. Lane X fills it.
-pub fn ask_hash(_: &str, _: &Subject, _: &Trace) -> Result<AskHash, NotImplemented> {
-    Err(executor("uft::ask_hash"))
-}
-
-impl Executor {
-    /// The rows of the derived place `Asks`. Lane X fills it.
-    pub fn asks(&self) -> Result<Vec<AskRow>, NotImplemented> {
-        Err(executor("Executor::asks"))
-    }
-
-    /// Fires `Answer`: puts the `Answered` token. Lane X fills it.
-    pub fn answer(&mut self, _: AnswerCall, _: Duration) -> Result<AnswerId, UftError> {
-        Err(executor("Executor::answer").into())
-    }
-
-    /// The settled chain of one answer. Lane X fills it.
-    pub fn answer_settlement(&self, _: &AnswerId) -> Result<AnswerSettlement, UftError> {
-        Err(executor("Executor::answer_settlement").into())
-    }
-}
-
-fn executor(what: &'static str) -> NotImplemented {
-    NotImplemented {
-        lane: Lane::Executor,
-        what,
-    }
 }

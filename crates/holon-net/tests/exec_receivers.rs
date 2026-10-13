@@ -348,7 +348,7 @@ fn caller_and_minted_occurrence_ids_never_collide() {
                 "M",
                 Trigger::Manual,
                 bind!(|r, s| n_of(r, "In", s)),
-                Body::Pure(|s, input| Ok(vec![Output::new("Seen", s, input.clone())])),
+                Body::pure(|s, input| Ok(vec![Output::new("Seen", s, input.clone())])),
             )
             .reads("In"),
         )
@@ -357,7 +357,7 @@ fn caller_and_minted_occurrence_ids_never_collide() {
                 "A",
                 Trigger::Auto,
                 bind!(|r, s| n_of(r, "In", s)),
-                Body::Pure(|s, input| Ok(vec![Output::new("Out", s, input.clone())])),
+                Body::pure(|s, input| Ok(vec![Output::new("Out", s, input.clone())])),
             )
             .consumes("In"),
         );

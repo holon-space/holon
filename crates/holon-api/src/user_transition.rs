@@ -12,6 +12,7 @@
 //! not depend on `holon-net`.
 
 use std::fmt;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -176,10 +177,38 @@ pub const ANSWER_INPUT_KEY: &str = "@input";
 /// (`exec::work_occurrence(transition, answer)`).
 pub const ANSWER_ID_KEY: &str = "@answer";
 
-/// Names the occurrence of the work firing that consumed an answer.
+/// Names one occurrence of a firing in a runtime net. The variants never
+/// collide, so neither do their displays.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct WorkOccurrenceId(pub String);
+#[serde(rename_all = "snake_case")]
+pub enum OccurrenceId {
+    /// Supplied by the caller of a manual fire; an answer's id.
+    Caller(Arc<str>),
+    /// Minted by the executor for an auto firing.
+    Minted { transition: Arc<str>, n: u64 },
+    /// The work firing that consumed the answer `answer`: derived from the
+    /// answer id, so the settled chain and a Keyed receiver find it.
+    Work {
+        transition: Arc<str>,
+        answer: Arc<str>,
+    },
+}
+
+impl OccurrenceId {
+    pub fn caller(id: &str) -> Self {
+        Self::Caller(Arc::from(id))
+    }
+}
+
+impl fmt::Display for OccurrenceId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Caller(id) => write!(f, "caller:{id}"),
+            Self::Minted { transition, n } => write!(f, "minted:{transition}#{n}"),
+            Self::Work { transition, answer } => write!(f, "work:{transition}@{answer}"),
+        }
+    }
+}
 
 /// The one user-fired call. Built by the UI/MCP (lane U) from a parsed value.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -201,20 +230,24 @@ pub struct AnswerCall {
 pub enum AnswerSettlement {
     /// The `Answered` token waits for its work transition.
     Waiting,
+    /// The work runs, or its outcome is unknown and waits for a resolution.
     Working {
-        work: WorkOccurrenceId,
+        work: OccurrenceId,
     },
     Done {
-        work: WorkOccurrenceId,
+        work: OccurrenceId,
     },
+    /// The work failed, or its effect happened over changed inputs.
     Failed {
-        work: WorkOccurrenceId,
+        work: OccurrenceId,
         cause: String,
     },
     /// `ExpireAnswer` consumed the answer (`Failed(NoLongerApplies)`).
     Expired {
         reason: ExpireReason,
     },
+    /// The user undid the answer.
+    Undone,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -300,6 +333,8 @@ pub enum UftError {
     AlreadyAnswered,
     #[error("no answer '{}'", .0.0)]
     UnknownAnswer(AnswerId),
+    #[error("no user-facing transition '{}'", .0.0)]
+    UnknownTransition(TransitionName),
     #[error(transparent)]
     NotImplemented(#[from] NotImplemented),
 }
