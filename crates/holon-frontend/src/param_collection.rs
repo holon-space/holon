@@ -8,10 +8,12 @@
 //! (`frontends/gpui/src/render/builders/op_button.rs`); the slash-command menu
 //! keeps its own async entity search in [`crate::command_provider`].
 //!
-//! Only param kinds with a FIXED, in-hand choice set are collectable here —
-//! `Bool` and `Enum`. Kinds that need a backend search (`EntityId`) or free
-//! text entry (`String`, `Number`) have no pointer affordance yet and surface a
-//! visible [`CollectStep::Unsupported`] rather than a silent no-op.
+//! Kinds with a fixed choice set (`Bool`, `Enum`) are offered as choices.
+//! Text kinds (`String`, `Number`, `Newtype`, `RowKey`, `EntityId`,
+//! `EntityIdOrRoot`, `PlaceId`) ask for text, which [`ParamCollector::enter`]
+//! parses at the boundary with [`parse_input`]. Structured kinds (`Object`,
+//! `Expr`, `Collection`, `FieldValue`) surface a visible
+//! [`CollectStep::Unsupported`] rather than a silent no-op.
 
 use std::collections::HashMap;
 use std::collections::VecDeque;
@@ -20,6 +22,9 @@ use holon_api::Value;
 use holon_api::render_types::OperationDescriptor;
 use holon_api::render_types::OperationParam;
 use holon_api::render_types::TypeHint;
+use holon_api::user_transition::InputContext;
+use holon_api::user_transition::InputParseError;
+use holon_api::user_transition::parse_input;
 
 use crate::operations::OperationIntent;
 
@@ -45,6 +50,9 @@ pub enum CollectStep {
         param_name: String,
         choices: Vec<ParamChoice>,
     },
+    /// Ask for text for `param_name`; hand it to [`ParamCollector::enter`],
+    /// which parses it against `hint`.
+    Enter { param_name: String, hint: TypeHint },
     /// Every param is resolved — dispatch this and close the overlay.
     Ready(OperationIntent),
     /// The next missing param cannot be collected by pointer here. Fail loud:
@@ -93,12 +101,24 @@ impl ParamCollector {
                 self.resolved.clone(),
             ));
         };
-        match choices_for(param) {
-            Some(choices) => CollectStep::Collect {
+        if let Some(choices) = choices_for(param) {
+            return CollectStep::Collect {
                 param_name: param.name.clone(),
                 choices,
+            };
+        }
+        match &param.type_hint {
+            TypeHint::String
+            | TypeHint::Number
+            | TypeHint::Newtype { .. }
+            | TypeHint::RowKey
+            | TypeHint::EntityId { .. }
+            | TypeHint::EntityIdOrRoot { .. }
+            | TypeHint::PlaceId { .. } => CollectStep::Enter {
+                param_name: param.name.clone(),
+                hint: param.type_hint.clone(),
             },
-            None => CollectStep::Unsupported {
+            _ => CollectStep::Unsupported {
                 param_name: param.name.clone(),
                 reason: format!(
                     "{}.{} needs '{}' ({}), which cannot be picked from a button here",
@@ -109,6 +129,33 @@ impl ParamCollector {
                 ),
             },
         }
+    }
+
+    /// Parse `raw` for the param the collector is awaiting and, when it parses,
+    /// resolve the param to the typed value and advance. A refusal leaves the
+    /// collector where it was, so nothing can fire on unparsed input.
+    pub fn enter(
+        &mut self,
+        param_name: &str,
+        raw: &Value,
+        cx: &dyn InputContext,
+    ) -> Result<(), InputParseError> {
+        let value = parse_input(&self.awaiting(param_name).type_hint, raw, cx)?;
+        self.pick(param_name, value);
+        Ok(())
+    }
+
+    fn awaiting(&self, param_name: &str) -> &OperationParam {
+        let front = self
+            .remaining
+            .front()
+            .unwrap_or_else(|| panic!("'{param_name}' entered with no param awaiting collection"));
+        assert_eq!(
+            front.name, param_name,
+            "'{param_name}' entered but the collector is awaiting '{}'",
+            front.name
+        );
+        front
     }
 
     /// Resolve `param_name` to `value` and advance. The pick must be for the
@@ -321,19 +368,14 @@ mod tests {
             "link",
             vec![
                 param("id", TypeHint::String),
-                param(
-                    "target",
-                    TypeHint::EntityId {
-                        entity_name: "doc".into(),
-                    },
-                ),
+                param("target", TypeHint::Expr),
             ],
         );
         let c = ParamCollector::for_op(&op, &ctx_id("doc:1"));
         match c.current() {
             CollectStep::Unsupported { param_name, reason } => {
                 assert_eq!(param_name, "target");
-                assert!(reason.contains("entity reference"), "reason: {reason}");
+                assert!(reason.contains("expression"), "reason: {reason}");
             }
             other => panic!("expected unsupported, got {other:?}"),
         }

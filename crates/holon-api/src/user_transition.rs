@@ -300,7 +300,6 @@ pub enum Lane {
     Lowering,
     Executor,
     YamlLoader,
-    UiMcp,
     Integration,
 }
 
@@ -310,7 +309,6 @@ impl fmt::Display for Lane {
             Lane::Lowering => "L (lowering)",
             Lane::Executor => "X (executor)",
             Lane::YamlLoader => "Y (YAML loader)",
-            Lane::UiMcp => "U (UI/MCP)",
             Lane::Integration => "I (integration)",
         })
     }
@@ -346,6 +344,12 @@ pub enum UftError {
         transition: TransitionName,
         subject: SubjectName,
         steps: usize,
+    },
+    /// An agent answered an `irreversible` ask; a person approves it in the UI.
+    #[error("'{}' on '{}' is irreversible; an agent's answer needs approval in the UI", .transition.0, .subject.0)]
+    NeedsApproval {
+        transition: TransitionName,
+        subject: SubjectName,
     },
     #[error(transparent)]
     NotImplemented(#[from] NotImplemented),
@@ -429,6 +433,8 @@ pub fn parse_input(
         input: render(raw),
         reason: reason.to_owned(),
     };
+    let unanswerable =
+        |type_name: &str| refused(type_name, "an ask cannot take this type as its answer");
     match (hint, raw) {
         (
             TypeHint::Enum {
@@ -465,17 +471,29 @@ pub fn parse_input(
         (TypeHint::PlaceId { place }, _) => {
             Err(refused(&format!("id of {}", place.0), "expected text"))
         }
+        (TypeHint::Number, Value::String(text)) => text
+            .trim()
+            .parse::<i64>()
+            .map(Value::Integer)
+            .map_err(|_| refused("number", "expected an integer")),
         (TypeHint::Bool, Value::Boolean(_))
         | (TypeHint::String, Value::String(_))
-        | (TypeHint::Number, Value::Integer(_)) => Ok(raw.clone()),
+        | (TypeHint::Number, Value::Integer(_))
+        | (
+            TypeHint::EntityId { .. } | TypeHint::EntityIdOrRoot { .. } | TypeHint::RowKey,
+            Value::String(_),
+        ) => Ok(raw.clone()),
         (TypeHint::Bool, _) => Err(refused("bool", "expected true or false")),
         (TypeHint::String, _) => Err(refused("string", "expected text")),
         (TypeHint::Number, _) => Err(refused("number", "expected an integer")),
-        _ => Err(NotImplemented {
-            lane: Lane::UiMcp,
-            what: "parse_input for this TypeHint",
-        }
-        .into()),
+        (TypeHint::EntityId { entity_name } | TypeHint::EntityIdOrRoot { entity_name }, _) => Err(
+            refused(&format!("id of {}", entity_name.as_str()), "expected text"),
+        ),
+        (TypeHint::RowKey, _) => Err(refused("row key", "expected text")),
+        (TypeHint::FieldValue { .. }, _) => Err(unanswerable("field value")),
+        (TypeHint::Object { .. }, _) => Err(unanswerable("object")),
+        (TypeHint::Expr, _) => Err(unanswerable("expression")),
+        (TypeHint::Collection, _) => Err(unanswerable("collection")),
     }
 }
 

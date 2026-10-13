@@ -16,6 +16,8 @@ use holon_api::render_types::OperationParam;
 use holon_api::render_types::OperationWiring;
 use holon_api::render_types::TypeHint;
 use holon_api::types::EntityName;
+use holon_api::user_transition::Offer;
+use holon_api::user_transition::Offered;
 
 use crate::operation_matcher::MatchedOperation;
 use crate::operation_matcher::{self};
@@ -58,6 +60,31 @@ const TEMPLATE_ITEM_PREFIX: &str = "__template__:";
 /// search errors. Selecting it surfaces the failure instead of embedding a
 /// block whose id is an error message.
 const SEARCH_ERROR_ID: &str = "__search_error__";
+
+/// `PopupItem::id` prefix of a disabled-with-reason entry (D151.a). The suffix
+/// is the operation name; selecting it shows the reason and dispatches nothing.
+pub const REFUSED_ITEM_PREFIX: &str = "__refused__:";
+
+/// How a surface shows one operation given its offer (D151.a).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OfferPresentation {
+    /// A live entry: `Enabled`, or `Unknown` (the dispatcher decides).
+    Live,
+    /// A greyed entry that names the reason and never dispatches.
+    Disabled { reason: String },
+    /// Not shown: the offer path did not offer this operation for the subject.
+    Absent,
+}
+
+pub fn present_offer(offer: Option<&Offer>) -> OfferPresentation {
+    match offer {
+        Some(Offer::Enabled | Offer::Unknown { .. }) => OfferPresentation::Live,
+        Some(Offer::Refused { reason }) => OfferPresentation::Disabled {
+            reason: reason.clone(),
+        },
+        None => OfferPresentation::Absent,
+    }
+}
 
 /// Internal state for param collection sub-phase.
 #[derive(Debug, Clone)]
@@ -107,6 +134,9 @@ pub struct CommandProvider {
     /// current filter it gives the exact span of typed command text, which is
     /// what a picker phase hides.
     trigger_len: usize,
+    /// The offers for the menu's subject. `None` lists every operation as
+    /// live; `Some` presents each one per [`present_offer`].
+    offers: Option<Vec<Offered>>,
 }
 
 impl CommandProvider {
@@ -120,7 +150,38 @@ impl CommandProvider {
             param_state: Arc::new(Mutex::new(None)),
             prefix_start: None,
             trigger_len: 0,
+            offers: None,
         }
+    }
+
+    /// Present each operation by its offer for the menu's subject (D151.a).
+    pub fn with_offers(mut self, offers: Vec<Offered>) -> Self {
+        self.offers = Some(offers);
+        self
+    }
+
+    /// Rewrites command entries by their offers: a live entry stays, a refused
+    /// one becomes a disabled entry carrying the reason, and an operation with
+    /// no offer is dropped.
+    pub fn apply_offers(items: Vec<PopupItem>, offers: &[Offered]) -> Vec<PopupItem> {
+        items
+            .into_iter()
+            .filter_map(|item| {
+                let offer = offers
+                    .iter()
+                    .find(|o| o.descriptor.name == item.id)
+                    .map(|o| &o.offer);
+                match present_offer(offer) {
+                    OfferPresentation::Live => Some(item),
+                    OfferPresentation::Disabled { reason } => Some(PopupItem {
+                        id: format!("{REFUSED_ITEM_PREFIX}{}", item.id),
+                        label: format!("{} — {reason}", item.label),
+                        icon: item.icon,
+                    }),
+                    OfferPresentation::Absent => None,
+                }
+            })
+            .collect()
     }
 
     /// Where the trigger that opened this menu sits on its line, and how long
@@ -338,11 +399,13 @@ impl PopupProvider for CommandProvider {
         let templates = self.templates.clone();
         let param_state = self.param_state.clone();
         let services = self.services.clone();
+        let offers = self.offers.clone();
 
         let signal = filter.map_future(move |f| {
             let operations = operations.clone();
             let context_params = context_params.clone();
             let templates = templates.clone();
+            let offers = offers.clone();
             let param_state = param_state.clone();
             let services = services.clone();
             async move {
@@ -356,6 +419,9 @@ impl PopupProvider for CommandProvider {
 
                 let Some(command_filter) = collecting else {
                     let mut items = Self::build_command_items(&operations, &context_params, &f);
+                    if let Some(offers) = &offers {
+                        items = Self::apply_offers(items, offers);
+                    }
                     items.extend(Self::build_template_items(&templates, &f));
                     return items;
                 };
@@ -435,6 +501,21 @@ impl PopupProvider for CommandProvider {
                 entity_name: ps.operation.entity_name().clone(),
                 op_name: ps.operation.operation_name().to_string(),
                 params,
+                strip_prefix_start: self.prefix_start,
+            };
+        }
+
+        if let Some(op_name) = item.id.strip_prefix(REFUSED_ITEM_PREFIX) {
+            let offer = self
+                .offers
+                .as_ref()
+                .and_then(|offers| offers.iter().find(|o| o.descriptor.name == op_name))
+                .map(|o| &o.offer);
+            let OfferPresentation::Disabled { reason } = present_offer(offer) else {
+                panic!("disabled entry '{op_name}' has no refused offer: {offer:?}");
+            };
+            return PopupResult::Failed {
+                message: reason,
                 strip_prefix_start: self.prefix_start,
             };
         }

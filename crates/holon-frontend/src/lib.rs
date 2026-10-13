@@ -30,6 +30,7 @@
 //! ```
 
 pub mod advice_weaver;
+pub mod answer;
 pub mod bridge_thread;
 pub mod cdc;
 #[cfg(not(target_arch = "wasm32"))]

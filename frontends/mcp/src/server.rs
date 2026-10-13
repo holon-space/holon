@@ -262,6 +262,10 @@ pub struct DebugServices {
     /// between a mark and the press returning; two presses in flight at once
     /// would each claim the other's entries.
     pub key_chord_press: tokio::sync::Mutex<()>,
+    /// The user-transition port `asks_list`, `answer_settled` and an
+    /// `ask.answer` operation use. Unset, they run against
+    /// `Answering::unwired()`, which refuses every call with `NotImplemented`.
+    pub answering: std::sync::OnceLock<holon_frontend::answer::Answering>,
 }
 
 /// Live, swappable [`DebugHandlesCell`] shared across every session's server (a
@@ -344,6 +348,7 @@ impl Default for DebugServices {
             live_debug: Arc::new(std::sync::RwLock::new(DebugHandlesCell::default())),
             self_check_suite: std::sync::OnceLock::new(),
             key_chord_press: tokio::sync::Mutex::new(()),
+            answering: std::sync::OnceLock::new(),
         }
     }
 }

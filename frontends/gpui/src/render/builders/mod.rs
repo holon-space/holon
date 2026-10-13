@@ -11,6 +11,7 @@ pub(crate) mod theme;
 // (shell-less compositions) and the per-block ReactiveShell arm (production,
 // where the main panel is wrapped in a live_block so columns.rs sees no
 // column).
+pub use answer_form::AnswerPort;
 pub(crate) use bottom_dock::KeyboardHeight;
 pub(crate) use column::eager_collection_div;
 pub(crate) use column::has_pinned_child;

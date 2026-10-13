@@ -32,6 +32,119 @@ use crate::server::HolonMcpServer;
 use crate::server::PendingChange;
 use crate::types::*;
 
+/// `answer_settled` input.
+#[derive(serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+pub struct AnswerSettledParams {
+    /// The id `execute_operation(ask, answer, ...)` returned.
+    pub answer_id: String,
+    /// How long to wait for the answer to settle before reporting it pending.
+    pub timeout_ms: u64,
+}
+
+/// One `asks_list` row: the ask plus the exact `execute_operation` call that
+/// answers it (add `value` when `input` is set).
+fn ask_json(ask: &holon_api::user_transition::AskRow) -> serde_json::Value {
+    use holon_frontend::answer as a;
+    serde_json::json!({
+        "transition": ask.transition.0,
+        "subject": ask.subject.0,
+        "seen_hash": a::hash_hex(&ask.hash),
+        "input": ask.input,
+        "irreversible": ask.irreversible,
+        "has_preview": ask.has_preview,
+        "answer": {
+            "entity_name": a::ASK_ENTITY,
+            "operation": a::ANSWER_OP,
+            "params": {
+                a::PARAM_TRANSITION: ask.transition.0,
+                a::PARAM_SUBJECT: ask.subject.0,
+                a::PARAM_SEEN_HASH: a::hash_hex(&ask.hash),
+            },
+        },
+    })
+}
+
+/// Maps an agent's refused answer to an MCP error. `NeedsApproval` has its own
+/// typed code, so an agent can tell "ask a person" from "fix the call".
+fn agent_answer_error(e: holon_frontend::answer::AgentAnswerError) -> rmcp::ErrorData {
+    use holon_api::user_transition::UftError;
+    use holon_frontend::answer::AgentAnswerError;
+    match e {
+        AgentAnswerError::Ask(UftError::NeedsApproval {
+            transition,
+            subject,
+        }) => rmcp::ErrorData::invalid_request(
+            format!(
+                "needs_approval: '{}' on '{}' is irreversible; a person must answer it in the UI",
+                transition.0, subject.0
+            ),
+            Some(serde_json::json!({
+                "code": "needs_approval",
+                "transition": transition.0,
+                "subject": subject.0,
+            })),
+        ),
+        AgentAnswerError::Param(_) | AgentAnswerError::Input(_) => {
+            rmcp::ErrorData::invalid_params(e.to_string(), None)
+        }
+        AgentAnswerError::Ask(_) => rmcp::ErrorData::invalid_request(e.to_string(), None),
+    }
+}
+
+/// `asks_list`'s result text: a JSON array of [`ask_json`] rows.
+pub fn asks_list_text(
+    answering: &holon_frontend::answer::Answering,
+) -> Result<String, rmcp::ErrorData> {
+    let asks = answering
+        .transitions
+        .asks()
+        .map_err(|e| rmcp::ErrorData::internal_error(format!("asks_list: {e}"), None))?;
+    Ok(serde_json::Value::Array(asks.iter().map(ask_json).collect()).to_string())
+}
+
+/// `execute_operation(ask, answer, params)`: `{"answer_id"}` once accepted.
+pub fn answer_ask(
+    answering: &holon_frontend::answer::Answering,
+    params: StorageEntity,
+) -> Result<String, rmcp::ErrorData> {
+    let params: HashMap<String, Value> = params
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
+    let id =
+        holon_frontend::answer::agent_answer(answering, &params).map_err(agent_answer_error)?;
+    Ok(serde_json::json!({ "answer_id": id.0 }).to_string())
+}
+
+/// `answer_settled`'s result text: `pending` past the timeout, else the
+/// settled outcome.
+pub async fn answer_settled_text(
+    answering: &holon_frontend::answer::Answering,
+    params: AnswerSettledParams,
+) -> String {
+    use holon_frontend::answer::AnswerOutcome;
+    use holon_frontend::answer::Progress;
+    let id = holon_api::user_transition::AnswerId(params.answer_id);
+    let deadline =
+        tokio::time::Instant::now() + std::time::Duration::from_millis(params.timeout_ms);
+    let outcome = loop {
+        match holon_frontend::answer::poll(&*answering.transitions, &id) {
+            Progress::Settled(outcome) => break outcome,
+            Progress::Pending(_) if tokio::time::Instant::now() >= deadline => {
+                return serde_json::json!({ "state": "pending" }).to_string();
+            }
+            Progress::Pending(_) => tokio::time::sleep(std::time::Duration::from_millis(50)).await,
+        }
+    };
+    let kind = match &outcome {
+        AnswerOutcome::Done => "done",
+        AnswerOutcome::Failed { .. } => "failed",
+        AnswerOutcome::Expired(_) => "expired",
+        AnswerOutcome::Refused(_) => "refused",
+    };
+    serde_json::json!({ "state": "settled", "outcome": kind, "text": outcome.text() }).to_string()
+}
+
 /// Extract context_id/context_parent_id from a generic params map and build
 /// QueryContext.
 async fn extract_context_from_params(
@@ -2911,13 +3024,33 @@ impl HolonMcpServer {
 
     #[tool(
         description = "Execute an operation on an entity. Use list_operations first to discover \
-                       available operations and their required parameters"
+                       available operations and their required parameters. Entity `ask`, \
+                       operation `answer` answers a question from `asks_list` (params \
+                       `transition`, `subject`, `seen_hash`, plus `value` when the ask has an \
+                       `input`); it returns `{\"answer_id\"}` once ACCEPTED, and \
+                       `answer_settled` reports how it ended. An irreversible ask is refused \
+                       with error code `needs_approval`: a person must answer it in the UI"
     )]
     async fn execute_operation(
         &self,
         Parameters(params): Parameters<ExecuteOperationParams>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let storage_entity = json_map_to_storage_entity(params.params)?;
+        if params.entity_name == holon_frontend::answer::ASK_ENTITY {
+            if params.operation != holon_frontend::answer::ANSWER_OP {
+                return Err(rmcp::ErrorData::invalid_params(
+                    format!(
+                        "entity `ask` has the one operation `answer`, not `{}`",
+                        params.operation
+                    ),
+                    None,
+                ));
+            }
+            return Ok(CallToolResult::success(vec![Content::text(answer_ask(
+                &self.answering(),
+                storage_entity,
+            )?)]));
+        }
 
         let response = self
             .service()
@@ -2951,6 +3084,46 @@ impl HolonMcpServer {
         };
 
         Ok(CallToolResult::success(vec![content]))
+    }
+
+    #[tool(
+        description = "List the open questions (asks) a person or an agent can answer. Each row \
+                       has `transition`, `subject`, `seen_hash`, `input` (the value's type, \
+                       absent when the ask takes no value), `irreversible`, `has_preview`, and \
+                       `answer`: the exact `execute_operation` call that answers it (add `value` \
+                       when `input` is set). Errors with `NotImplemented` while the app has no \
+                       user-transition port wired"
+    )]
+    async fn asks_list(&self) -> Result<CallToolResult, rmcp::ErrorData> {
+        Ok(CallToolResult::success(vec![Content::text(
+            asks_list_text(&self.answering())?,
+        )]))
+    }
+
+    #[tool(
+        description = "Wait up to `timeout_ms` for an accepted answer (`answer_id` from \
+                       `execute_operation(ask, answer, ...)`) to settle. Returns \
+                       `{\"state\":\"pending\"}` while it has not settled, else \
+                       `{\"state\":\"settled\",\"outcome\":\"done\"|\"failed\"|\"expired\"|\"refused\",\"text\"}`. \
+                       `expired` means the question no longer applies"
+    )]
+    async fn answer_settled(
+        &self,
+        Parameters(params): Parameters<AnswerSettledParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        Ok(CallToolResult::success(vec![Content::text(
+            answer_settled_text(&self.answering(), params).await,
+        )]))
+    }
+
+    /// The installed user-transition port, else the unwired one (every call
+    /// refused with `NotImplemented`).
+    fn answering(&self) -> holon_frontend::answer::Answering {
+        self.debug
+            .answering
+            .get()
+            .cloned()
+            .unwrap_or_else(holon_frontend::answer::Answering::unwired)
     }
 
     #[tool(

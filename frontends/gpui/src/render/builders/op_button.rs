@@ -1,7 +1,14 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use gpui_component::input::Input;
+use gpui_component::input::InputState;
+use gpui_component::tooltip::Tooltip;
 use holon_api::Value;
+use holon_api::user_transition::Offer;
+use holon_frontend::answer::Answering;
+use holon_frontend::command_provider::OfferPresentation;
+use holon_frontend::command_provider::present_offer;
 use holon_frontend::param_collection::CollectStep;
 use holon_frontend::param_collection::ParamChoice;
 use holon_frontend::param_collection::ParamCollector;
@@ -20,6 +27,18 @@ struct OpParamPopup {
     /// Created and focused when the popup opens so the wrapper receives key
     /// events — Escape closes it. `None` while closed.
     focus: Option<gpui::FocusHandle>,
+    /// The text box of a `CollectStep::Enter` step, and its last refusal.
+    input: Option<gpui::Entity<InputState>>,
+    error: Option<String>,
+}
+
+impl OpParamPopup {
+    fn close(&mut self) {
+        self.collector = None;
+        self.focus = None;
+        self.input = None;
+        self.error = None;
+    }
 }
 
 /// The widest a button's label may make the button. Wide enough that every
@@ -38,9 +57,13 @@ pub const OP_BUTTON_ICON: &str = "op-icon";
 /// Tap resolves the operation and either dispatches it (all params satisfied by
 /// the row context) or opens a param-collection popup anchored at the button
 /// (params still missing — e.g. `integration.set_field` needs `field` and
-/// `value`). The popup collects `Bool` and `Enum` params by pointer; a param
-/// kind with no pointer affordance surfaces a visible error rather than a
-/// silent no-op.
+/// `value`). The popup collects choice params (`Bool`, `Enum`) by pointer; a
+/// param kind with no pointer affordance surfaces a visible error rather than
+/// a silent no-op. A text kind gets a text box parsed at the boundary.
+///
+/// An optional `offer` prop (an [`Offer`] as JSON) gates the button: refused,
+/// it is greyed, names the reason in its text and tooltip, and never
+/// dispatches. Without the prop the button is live.
 // ALLOW(fallback): names the default-branch label, not error swallowing
 /// The short label under the icon is what a sighted user reads when the op has
 /// no glyph; GPUI has no accessibility surface yet (see V2 in the mobile-bar
@@ -73,6 +96,8 @@ pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext)
                 cx.new(|_cx| OpParamPopup {
                     collector: None,
                     focus: None,
+                    input: None,
+                    error: None,
                 })
             })
         },
@@ -101,7 +126,12 @@ pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext)
             .into_any_element(),
     )
     .with_displayed_text(icon_label);
-    let inner = div()
+    let presentation = node.prop_str("offer").map(|json| {
+        let offer: Offer = serde_json::from_str(&json)
+            .unwrap_or_else(|e| panic!("op_button `offer` prop is not an Offer ({e}): {json}"));
+        present_offer(Some(&offer))
+    });
+    let base = div()
         .id(hashed_id(&element_id))
         .flex_shrink_0()
         .flex()
@@ -127,7 +157,23 @@ pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext)
                 .text_center()
                 .text_color(tc(ctx, |t| t.muted_foreground))
                 .child(display_name.clone()),
+        );
+    if let Some(OfferPresentation::Disabled { reason }) = presentation {
+        let tip = reason.clone();
+        let greyed = base
+            .opacity(0.4)
+            .cursor_default()
+            .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx));
+        return TransparentTracker::new(
+            tracked_id,
+            "op_button",
+            ctx.bounds_registry.clone(),
+            greyed.into_any_element(),
         )
+        .with_displayed_text(format!("{tracked_label} — {reason}"))
+        .into_any_element();
+    }
+    let inner = base
         .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
             open_or_dispatch(
                 &services,
@@ -182,19 +228,13 @@ pub fn render(node: &holon_frontend::ReactiveViewModel, ctx: &GpuiRenderContext)
     wrapper
         .on_key_down(move |ev, window, cx| {
             if ev.keystroke.key.as_str() == "escape" {
-                escape_popup.update(cx, |p, _cx| {
-                    p.collector = None;
-                    p.focus = None;
-                });
+                escape_popup.update(cx, |p, _cx| p.close());
                 window.refresh();
                 cx.stop_propagation();
             }
         })
         .on_mouse_down_out(move |_, window, cx| {
-            outside_popup.update(cx, |p, _cx| {
-                p.collector = None;
-                p.focus = None;
-            });
+            outside_popup.update(cx, |p, _cx| p.close());
             window.refresh();
         })
         .child(trigger)
@@ -303,6 +343,9 @@ fn build_param_popup(
                 menu = menu.child(choice_row(popup, &param_name, choice, fg, accent, ctx));
             }
         }
+        CollectStep::Enter { param_name, .. } => {
+            menu = menu.children(text_entry(popup, &param_name, ctx));
+        }
         CollectStep::Unsupported { reason, .. } => {
             // Fail loud, visible: no pointer affordance for this param kind, so
             // say so rather than silently doing nothing.
@@ -378,13 +421,7 @@ fn choice_row(
                     collector.pick(&param_owned, value.clone());
                     collector.current()
                 };
-                match step {
-                    CollectStep::Ready(intent) => {
-                        p.collector = None;
-                        Some(intent)
-                    }
-                    CollectStep::Collect { .. } | CollectStep::Unsupported { .. } => None,
-                }
+                ready_or_advance(p, step)
             });
             if let Some(intent) = intent {
                 services.dispatch_intent(intent);
@@ -398,6 +435,116 @@ fn choice_row(
         ctx.bounds_registry.clone(),
         row.into_any_element(),
     )
+}
+
+/// Closes the popup on a `Ready` step and hands back its intent.
+fn ready_or_advance(
+    p: &mut OpParamPopup,
+    step: CollectStep,
+) -> Option<holon_frontend::operations::OperationIntent> {
+    match step {
+        CollectStep::Ready(intent) => {
+            p.close();
+            Some(intent)
+        }
+        CollectStep::Collect { .. }
+        | CollectStep::Enter { .. }
+        | CollectStep::Unsupported { .. } => {
+            p.input = None;
+            None
+        }
+    }
+}
+
+/// A text box for a text-kind param plus its OK button
+/// (`op-param-submit-{param}`). OK parses the text at the boundary; a refusal
+/// stays in the popup as `op-param-error-{param}`.
+fn text_entry(
+    popup: &gpui::Entity<OpParamPopup>,
+    param_name: &str,
+    ctx: &GpuiRenderContext,
+) -> Vec<AnyElement> {
+    let (input, error) = ctx.with_gpui(|window, cx| {
+        let input = match popup.read(cx).input.clone() {
+            Some(input) => input,
+            None => {
+                let input = cx.new(|cx| InputState::new(window, cx));
+                popup.update(cx, |p, _cx| p.input = Some(input.clone()));
+                input
+            }
+        };
+        (input, popup.read(cx).error.clone())
+    });
+    let services = ctx.services.clone();
+    let popup_click = popup.clone();
+    let param_owned = param_name.to_string();
+    let submit_input = input.clone();
+    let submit_id = format!("op-param-submit-{param_name}");
+    let submit = div()
+        .id(hashed_id(&submit_id))
+        .px(px(8.0))
+        .py(px(4.0))
+        .cursor_pointer()
+        .child("OK")
+        .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
+            let raw = Value::String(submit_input.read(cx).value().to_string());
+            let input_cx = cx
+                .try_global::<super::answer_form::AnswerPort>()
+                .map(|port| port.0.input.clone())
+                .unwrap_or_else(|| Answering::unwired().input);
+            let intent = popup_click.update(cx, |p, _cx| {
+                let collector = p
+                    .collector
+                    .as_mut()
+                    .expect("OK was clicked while the popup was closed");
+                match collector.enter(&param_owned, &raw, &*input_cx) {
+                    Ok(()) => {
+                        let step = collector.current();
+                        p.error = None;
+                        ready_or_advance(p, step)
+                    }
+                    Err(e) => {
+                        p.error = Some(e.to_string());
+                        None
+                    }
+                }
+            });
+            if let Some(intent) = intent {
+                services.dispatch_intent(intent);
+            }
+            window.refresh();
+        });
+    let mut out = vec![
+        div()
+            .px(px(4.0))
+            .child(Input::new(&input))
+            .into_any_element(),
+        TransparentTracker::new(
+            submit_id,
+            "op_param_submit",
+            ctx.bounds_registry.clone(),
+            submit.into_any_element(),
+        )
+        .into_any_element(),
+    ];
+    if let Some(error) = error {
+        out.push(
+            TransparentTracker::new(
+                format!("op-param-error-{param_name}"),
+                "op_param_error",
+                ctx.bounds_registry.clone(),
+                div()
+                    .px(px(8.0))
+                    .text_size(px(12.0))
+                    .text_color(tc(ctx, |t| t.danger))
+                    .child(error.clone())
+                    .into_any_element(),
+            )
+            .with_displayed_text(error)
+            .into_any_element(),
+        );
+    }
+    out
 }
 
 /// Hardcoded op-name → single-char icon glyph map. The single source of truth
