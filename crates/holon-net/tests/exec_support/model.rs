@@ -444,14 +444,14 @@ impl Model {
         if let Some(o) = self.occs.get(&work_occurrence(work, id)) {
             return Ok(o.settled.clone());
         }
-        if self.undone.contains(id.as_ref()) {
-            return Ok(Some(Settled::Failed(Cause::definite(
-                "undone before the work ran",
-            ))));
-        }
         if self.content(&expired_place(work), id).is_some() {
             return Ok(Some(Settled::Failed(Cause::definite(
                 UftError::NoLongerApplies.to_string(),
+            ))));
+        }
+        if self.undone.contains(id.as_ref()) {
+            return Ok(Some(Settled::Failed(Cause::definite(
+                "undone before the work ran",
             ))));
         }
         Ok(None)
@@ -622,6 +622,8 @@ impl Model {
                 ReversalOutcome::NotProcessClass
             } else if self.version(&place, &s) != version {
                 ReversalOutcome::Changed
+            } else if let Some(holder) = self.holder(&place, &s) {
+                ReversalOutcome::Held(holder)
             } else if let Some(content) = before {
                 self.put(&place, &s, content);
                 ReversalOutcome::Restored

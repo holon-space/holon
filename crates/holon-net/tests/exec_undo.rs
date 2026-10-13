@@ -6,8 +6,10 @@ mod exec_support;
 use std::sync::Arc;
 
 use exec_support::Driver;
+use exec_support::Transition;
 use exec_support::answer_call;
 use exec_support::answer_spec;
+use exec_support::bind;
 use exec_support::content;
 use exec_support::string;
 use exec_support::text;
@@ -16,19 +18,23 @@ use holon_api::user_transition::AnswerId;
 use holon_api::user_transition::AnswerSettlement;
 use holon_api::user_transition::ExpireReason;
 use holon_api::user_transition::UftError;
+use holon_net::exec::Body;
 use holon_net::exec::Cause;
 use holon_net::exec::Class;
 use holon_net::exec::Content;
 use holon_net::exec::EffectResult;
 use holon_net::exec::Executor;
+use holon_net::exec::Holder;
 use holon_net::exec::NetDef;
 use holon_net::exec::OccurrenceId;
 use holon_net::exec::Output;
 use holon_net::exec::Place;
+use holon_net::exec::Receiver;
 use holon_net::exec::Reversal;
 use holon_net::exec::ReversalOutcome;
 use holon_net::exec::Settled;
 use holon_net::exec::Subject;
+use holon_net::exec::Trigger;
 use holon_net::exec::UndoError;
 use holon_net::exec::Undone;
 use holon_net::exec::ask_hash;
@@ -263,4 +269,94 @@ fn ask_hash_covers_content_subject_and_transition_not_version() {
     assert_ne!(string(&first, "accept"), string(&changed, "accept"));
     assert_ne!(string(&first, "accept"), string(&hash(&e, "y"), "accept"));
     assert_ne!(string(&first, "accept"), string(&first, "other"));
+}
+
+/// `answer_spec` with `Consume`, an effectful downstream transition that
+/// consumes `Accepted`. The work of `a0` is done and `Consume` holds
+/// `Accepted/x`.
+fn downstream() -> Driver {
+    let spec = answer_spec().transition(
+        Transition::new(
+            "Consume",
+            Trigger::Auto,
+            bind!(|r, s| r.present("Accepted", s).then(Content::new)),
+            Body::Effectful(Receiver::None),
+        )
+        .consumes("Accepted"),
+    );
+    let mut d = Driver::new(spec);
+    d.write("Item", "x", n(1));
+    d.step().expect("the net quiesces");
+    d.answer(answer_call(&d, "x", "a0", false, None))
+        .expect("the ask applies");
+    d.step().expect("the net quiesces");
+    d.complete_oldest(|req| {
+        EffectResult::Done(vec![
+            Output::new("Accepted", &req.subject, n(1)),
+            Output::new("Out", &req.subject, n(1)),
+        ])
+    })
+    .expect("the net quiesces");
+    assert_eq!(
+        d.requests_of("Consume").count(),
+        1,
+        "Consume holds Accepted/x"
+    );
+    d
+}
+
+#[test]
+fn undo_while_a_downstream_firing_holds_a_row() {
+    let mut d = downstream();
+    let undone = d.undo(&a0()).expect("a done answer undoes");
+    assert_eq!(
+        undone.reversed,
+        vec![
+            reversal(
+                "Accepted",
+                ReversalOutcome::Held(Holder::Running(Arc::from("Consume")))
+            ),
+            reversal("Item", ReversalOutcome::Restored),
+            reversal("Out", ReversalOutcome::NotProcessClass),
+        ]
+    );
+    d.complete_oldest(|_| EffectResult::Done(Vec::new()))
+        .expect("the net quiesces");
+    assert!(d.exec().tokens().token("Accepted", "x").is_none());
+}
+
+#[test]
+fn settled_stays_done_after_an_undo() {
+    let mut d = done();
+    d.undo(&a0()).expect("a done answer undoes");
+    assert_eq!(d.exec().settled(&a0()), Ok(Some(Settled::Done)));
+    assert_eq!(
+        d.exec().answer_settlement(&AnswerId("a0".to_string())),
+        Ok(AnswerSettlement::Undone)
+    );
+}
+
+#[test]
+fn undo_of_an_expired_answer_keeps_no_longer_applies() {
+    let mut d = Driver::new(answer_spec());
+    d.write("Item", "x", n(1));
+    d.step().expect("the net quiesces");
+    d.answer(answer_call(&d, "x", "a0", false, None))
+        .expect("the ask applies");
+    d.write("Item", "x", n(2));
+    d.step().expect("the net quiesces");
+    let undone = d.undo(&a0()).expect("an expired answer undoes");
+    assert_eq!(
+        undone,
+        Undone {
+            withdrawn: false,
+            reversed: Vec::new(),
+        }
+    );
+    assert_eq!(
+        d.exec().settled(&a0()),
+        Ok(Some(Settled::Failed(Cause::definite(
+            UftError::NoLongerApplies.to_string()
+        ))))
+    );
 }

@@ -958,7 +958,7 @@ pub struct Reversal {
     pub outcome: ReversalOutcome,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum ReversalOutcome {
     /// The content before the work is back.
     Restored,
@@ -966,6 +966,8 @@ pub enum ReversalOutcome {
     Removed,
     /// A later commit changed the place: left as it is.
     Changed,
+    /// A later firing holds the token: left as it is, like a commit.
+    Held(Holder),
     /// Data class has no undo here (inc0): left as it is.
     NotProcessClass,
 }
@@ -1219,14 +1221,14 @@ impl Executor {
         if let Some(settled) = self.occurrences.get(&work_occurrence(work, id)) {
             return Ok(settled.clone());
         }
-        if self.undone.contains(id) {
-            return Ok(Some(Settled::Failed(Cause::definite(
-                "undone before the work ran",
-            ))));
-        }
         if self.tokens.token(&expired_place(work), id).is_some() {
             return Ok(Some(Settled::Failed(Cause::definite(
                 UftError::NoLongerApplies.to_string(),
+            ))));
+        }
+        if self.undone.contains(id) {
+            return Ok(Some(Settled::Failed(Cause::definite(
+                "undone before the work ran",
             ))));
         }
         Ok(None)
@@ -1354,7 +1356,8 @@ impl Executor {
     /// Undoes an answer (XQ2.a) in one step: removes its `Answered` token
     /// when still there and reverses the process-class delta its work
     /// committed. It never puts `Answered` back, so the work never fires
-    /// again from an undo. A row changed since the work is left as it is.
+    /// again from an undo. A row changed since the work, or held by a later
+    /// firing, is left as it is.
     pub fn undo(&mut self, answer: &OccurrenceId, now: Duration) -> Result<Undone, UndoError> {
         self.advance(now);
         if !self.occurrences.contains_key(answer) {
@@ -1389,6 +1392,8 @@ impl Executor {
                 ReversalOutcome::NotProcessClass
             } else if self.tokens.version(&place, &subject) != version {
                 ReversalOutcome::Changed
+            } else if let Some(holder) = self.holder(&place, &subject) {
+                ReversalOutcome::Held(holder)
             } else if let Some(content) = before {
                 self.tokens.put(&place, &subject, content);
                 ReversalOutcome::Restored
