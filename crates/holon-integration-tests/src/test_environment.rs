@@ -292,8 +292,8 @@ impl std::fmt::Debug for TestEnvironment {
 ///     .build(runtime)
 ///     .await?;
 ///
-/// // Check for startup errors
-/// assert!(!env.has_app_errors(), "Startup should not have errors");
+/// // Check for app errors
+/// assert!(!env.has_app_errors(), "the run should not have app errors");
 /// ```
 pub struct TestEnvironmentBuilder {
     /// Pre-populated org files (filename -> content)
@@ -547,7 +547,6 @@ impl TestEnvironmentBuilder {
 
         let ctx = E2ETestContext::from_engine(backend_engine);
 
-        let _startup_errors = session.error_tracker().errors();
         holon::testing::database_stuck_guard::assert_guarded_in(&injector);
         holon::testing::clock_guard::assert_clock_running_in(&injector);
 

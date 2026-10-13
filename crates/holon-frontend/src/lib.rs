@@ -329,7 +329,7 @@ pub use view_model::ViewModel;
 /// Ensures consistent initialization:
 /// 1. Registers configured modules
 /// 2. Waits for background tasks to be ready
-/// 3. Tracks startup errors
+/// 3. Tracks app errors (every bump site is a mid-run op failure)
 ///
 /// For tests that need additional services (e.g., LoroDocumentStore), use
 /// `new_with_extras` which allows resolving additional services from DI.

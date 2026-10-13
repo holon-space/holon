@@ -53,11 +53,17 @@ impl KnownReds {
             }
             let key = cols[1].trim().trim_matches('`').trim();
             let status = cols[2].trim();
-            let pattern = cols[3].trim().trim_matches('`').trim();
+            // A cell cannot hold a literal `|`; the registry writes alternation as
+            // `&#124;`.
+            let pattern = cols[3]
+                .trim()
+                .trim_matches('`')
+                .trim()
+                .replace("&#124;", "|");
             if key.is_empty() || pattern.is_empty() || status != "known-red" {
                 continue;
             }
-            let re = Regex::new(pattern).with_context(|| {
+            let re = Regex::new(&pattern).with_context(|| {
                 format!(
                     "compile known-red pattern for `{key}` in {}: {pattern}",
                     registry.display()

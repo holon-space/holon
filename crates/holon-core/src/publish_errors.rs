@@ -6,9 +6,8 @@ use std::sync::atomic::Ordering;
 
 /// Tracks publish errors from event adapters.
 ///
-/// This is useful for detecting "Database schema changed" errors that occur
-/// during startup when DDL operations (like preload_views) race with writes
-/// from sync adapters.
+/// Every `record_error` call site is a mid-run op failure, so a non-zero count
+/// never indicates a boot-time race.
 ///
 /// Register this in DI and share it across adapters to track errors
 /// without relying on log scraping.

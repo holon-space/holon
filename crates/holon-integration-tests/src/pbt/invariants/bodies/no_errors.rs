@@ -4,16 +4,18 @@
 //! @pbt covers app-error-log-empty — nothing recorded on the session's
 //!   publish-error tracker since boot (the app-level counter, distinct from
 //!   widget-tree errors)
-//! @pbt slips-if-removed an event publish failure during the initial document
-//!   sync, or any op dispatch failure during the run, ships silently; the UI
-//!   may look fine while a write never landed and nothing else asserts on it
+//! @pbt slips-if-removed any op dispatch failure during the run ships
+//!   silently; the UI may look fine while a write never landed and nothing
+//!   else asserts on it
 //!
 //! The general "did the app error during this run" guard, distinct from the
 //! component-specific error invariants (`inv-loro-no-errors`,
 //! `inv-viewmodel-no-error-widgets`, `inv-frontend-no-error-widgets`,
 //! `inv-frontend-root-not-error`). Its source is the session's
-//! `PublishErrorTracker` via the [`SutErrorLog`] component cap, which counts
-//! BOTH boot-time publish failures and every op-dispatch failure since — the
+//! `PublishErrorTracker` via the [`SutErrorLog`] component cap. Every one of
+//! that tracker's `record_error` call sites is a mid-run op failure
+//! (`disclose_op_failure`, the fire-and-forget op dispatch, the
+//! `preferences.set` persist), so a non-zero count never means boot. The
 //! counter holds no message, so the failing ERROR text comes from
 //! `inv-no-observed-errors`.
 
@@ -44,10 +46,10 @@ where
         }
         let docs = sut.app_error_context().await;
         InvariantResult::Fail(format!(
-            "[inv-no-errors] {count} app error(s) on the session publish-error tracker: a \
-             publish failure during the initial document sync, or an op dispatch that failed \
-             during the run. The counter carries no message — read the ERROR text from \
-             `inv-no-observed-errors`.\n  {} document(s) synced at boot: {docs:?}",
+            "[inv-no-errors] {count} app error(s) on the session publish-error tracker: an op \
+             dispatch that failed during the run. The counter carries no message — read the \
+             ERROR text from `inv-no-observed-errors`.\n  {} document(s) synced at boot: \
+             {docs:?}",
             docs.len(),
         ))
     }

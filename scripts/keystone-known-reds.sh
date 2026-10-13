@@ -25,6 +25,9 @@
 # Exit 1  — at least one signature matched nothing, a FAILED run yielded no
 #           signature at all, or a keystone run's sample is below the floor /
 #           undisclosed. All are regressions to triage, NOT rows to add.
+#           Also a CROSS-FAMILY match: a row's wording fired from a site the
+#           row does not assert from, which is a new failure wearing a known
+#           red's words, never a re-attribution to that row.
 # Exit 3  — at least one log admits no verdict: INDETERMINATE (empty, or
 #           truncated before the run said anything) or UNREADABLE (no such
 #           file). Never silently a pass — the input is broken, so nothing can
@@ -48,21 +51,37 @@ if [ ! -f "$registry" ]; then
     exit 2
 fi
 
-# Registry rows: | `key` | status | `pattern` | ... — only `known-red` rows
-# classify. A pattern may not contain `|` (the table separator); use character
-# classes instead of alternation.
+# Registry rows: | `key` | status | `pattern` | `site` | ... — only `known-red`
+# rows classify. A cell cannot hold a literal `|` (the table separator), so a
+# pattern writes alternation as `&#124;`, decoded here after the split.
+#
+# `site` is the panic location the row's family asserts from, as an ERE over
+# `<file>:<line>:<col>`. `—` means the row is not pinned yet (no evidence log on
+# this machine to measure it from) and is not site-checked. A pinned row whose
+# wording matches a signature from ANOTHER site is a cross-family match: the
+# run fails loudly rather than re-attributing the signature (Martin, 2026-10-13).
 keys=()
 patterns=()
-while IFS=$'\t' read -r key status pattern; do
+sites=()
+while IFS=$'\t' read -r key status pattern site; do
     [ -z "$key" ] && continue
     [ "$status" = "known-red" ] || continue
     keys+=("$key")
     patterns+=("$pattern")
+    # A site is one whitespace-free ERE. Anything else — `—`, or a table whose
+    # 5th column is prose because it predates this column — is UNPINNED, so a
+    # registry without the column classifies exactly as it did before.
+    case "$site" in
+        "" | "—" | *[[:space:]]*) sites+=("") ;;
+        *) sites+=("$site") ;;
+    esac
 done < <(awk -F'|' '
     /^\| *`/ {
         gsub(/^ *`|` *$/, "", $2); gsub(/^ *| *$/, "", $3)
         gsub(/^ *`|` *$/, "", $4)
-        if ($2 != "" && $4 != "") print $2 "\t" $3 "\t" $4
+        gsub(/^ *| *$/, "", $5); gsub(/^`|`$/, "", $5)
+        gsub(/&#124;/, "|", $4); gsub(/&#124;/, "|", $5)
+        if ($2 != "" && $4 != "") print $2 "\t" $3 "\t" $4 "\t" $5
     }' "$registry")
 
 if [ "${#keys[@]}" -eq 0 ]; then
@@ -167,6 +186,7 @@ log_outcome() {
 
 novel=0
 matched=0
+cross=0
 collateral=0
 sample_bad=0
 green=0
@@ -424,7 +444,15 @@ for log in "$@"; do
                     break
                 fi
             done
-            if [ "$hit" -ge 0 ]; then
+            if [ "$hit" -ge 0 ] && [ -n "${sites[$hit]}" ] \
+                && ! printf '%s\n' "$loc" | grep -qE -- "${sites[$hit]}"; then
+                echo "[known-reds] FAIL: cross-family match: ${keys[$hit]} at $loc"
+                echo "             The row's wording matched, but it asserts from"
+                echo "             ${sites[$hit]} — so this signature belongs to another family."
+                echo "             Triage it (bug-gap-triage); do NOT widen the row's site."
+                class="cross-family:${keys[$hit]}"
+                cross=$((cross + 1))
+            elif [ "$hit" -ge 0 ]; then
                 class="known-red:${keys[$hit]}"
                 counts[$hit]=$(( ${counts[$hit]} + 1 ))
                 [ -z "${examples[$hit]}" ] && examples[$hit]="$base @ $loc: $(printf '%.240s' "$norm")"
@@ -484,6 +512,13 @@ fi
 no_verdict=$((indeterminate + unreadable))
 if [ "$no_verdict" -ne 0 ]; then
     echo "[known-reds] $indeterminate log(s) stated no outcome, $unreadable unreadable — see above."
+fi
+if [ "$cross" -ne 0 ]; then
+    echo "[known-reds] FAIL: $cross cross-family match(es) — see above."
+    echo "             A row's wording fired from a site the row does not assert"
+    echo "             from. That is a new failure wearing a known red's words,"
+    echo "             never a re-attribution."
+    exit 1
 fi
 if [ "$novel" -ne 0 ]; then
     echo "[known-reds] FAIL: $novel novel panic(s), $matched known-red panic(s), $collateral collateral (ignored)."
