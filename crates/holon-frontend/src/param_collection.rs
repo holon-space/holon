@@ -9,7 +9,7 @@
 //! keeps its own async entity search in [`crate::command_provider`].
 //!
 //! Only param kinds with a FIXED, in-hand choice set are collectable here —
-//! `Bool` and `OneOf`. Kinds that need a backend search (`EntityId`) or free
+//! `Bool` and `Enum`. Kinds that need a backend search (`EntityId`) or free
 //! text entry (`String`, `Number`) have no pointer affordance yet and surface a
 //! visible [`CollectStep::Unsupported`] rather than a silent no-op.
 
@@ -149,30 +149,18 @@ fn choices_for(param: &OperationParam) -> Option<Vec<ParamChoice>> {
         ]),
         // One choice per admitted value — including the single-value case, which
         // is shown (not auto-picked) so every popup has a deterministic step.
-        TypeHint::OneOf { values } => Some(
-            values
+        TypeHint::Enum { variants, .. } => Some(
+            variants
                 .iter()
-                .map(|v| {
-                    let label = choice_label(v);
-                    ParamChoice {
-                        slug: label.clone(),
-                        label,
-                        value: v.clone(),
-                    }
+                .map(|v| ParamChoice {
+                    slug: v.clone(),
+                    label: v.clone(),
+                    value: Value::String(v.clone()),
                 })
                 .collect(),
         ),
         _ => None,
     }
-}
-
-/// A value's label on a choice. `OneOf` values are strings in practice; a
-/// non-string value falls back to a debug form rather than vanishing.
-fn choice_label(value: &Value) -> String {
-    value
-        .as_string()
-        .map(str::to_string)
-        .unwrap_or_else(|| format!("{value:?}"))
 }
 
 fn type_hint_label(hint: &TypeHint) -> &'static str {
@@ -183,7 +171,6 @@ fn type_hint_label(hint: &TypeHint) -> &'static str {
         TypeHint::EntityId { .. } => "entity reference",
         TypeHint::EntityIdOrRoot { .. } => "entity reference or root",
         TypeHint::RowKey => "row key",
-        TypeHint::OneOf { .. } => "one-of",
         TypeHint::Object { .. } => "object",
         TypeHint::Expr => "expression",
         TypeHint::Collection => "collection",
@@ -232,7 +219,7 @@ mod tests {
     }
 
     /// `set_field`'s exact shape: id (String, resolved from ctx), field
-    /// (OneOf["enabled"]), value (Bool).
+    /// (Enum["enabled"]), value (Bool).
     fn set_field_descriptor() -> OperationDescriptor {
         descriptor(
             "integration",
@@ -241,8 +228,9 @@ mod tests {
                 param("id", TypeHint::String),
                 param(
                     "field",
-                    TypeHint::OneOf {
-                        values: vec![Value::String("enabled".to_string())],
+                    TypeHint::Enum {
+                        type_name: "IntegrationField".to_string(),
+                        variants: vec!["enabled".to_string()],
                     },
                 ),
                 param("value", TypeHint::Bool),
@@ -263,7 +251,7 @@ mod tests {
                 param_name,
                 choices,
             } => {
-                // field is first-missing, and its single OneOf value is shown.
+                // field is first-missing, and its single Enum variant is shown.
                 assert_eq!(param_name, "field");
                 assert_eq!(choices.len(), 1);
                 assert_eq!(choices[0].slug, "enabled");

@@ -328,7 +328,7 @@ MCP Server (e.g. ai.todoist.net/mcp)
 | `IntegrationSupervisor`    | `holon-app/mcp_integrations.rs`       | Started by the session factory: connects each enabled integration in its own task and installs it into the running engine on connect; holds the connected `McpIntegration` handles (keeps services alive). |
 | `McpSidecar`               | `mcp_sidecar.rs`                      | Entity and tool annotations parsed from the YAML `entities`/`tools` maps: entity mapping, `affected_fields`, `triggered_by`, `precondition` (Rhai), `undo` config.   |
 | `RhaiPrecondition`         | `mcp_sidecar.rs`                      | Parse-don't-validate wrapper: Rhai expressions are validated at YAML deserialization time. Invalid syntax fails immediately, not at operation execution.               |
-| `mcp_schema_mapping`       | `mcp_schema_mapping.rs`               | Converts JSON Schema types to `TypeHint` (String, Bool, Number, OneOf, EntityId via overrides). Walks `inputSchema.properties` to build `Vec<OperationParam>`.        |
+| `mcp_schema_mapping`       | `mcp_schema_mapping.rs`               | Converts JSON Schema types to `TypeHint` (String, Bool, Number, Enum, EntityId via overrides). Walks `inputSchema.properties` to build `Vec<OperationParam>`.        |
 | `connect_mcp()`            | `mcp_provider.rs`                     | Establishes Streamable HTTP connection to an MCP server, returns `Peer<RoleClient>` + `McpRunningService`.                                                             |
 
 #### YAML Sidecar

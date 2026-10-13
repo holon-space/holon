@@ -73,11 +73,11 @@ impl<P: OperationProvider> GenericProviderState<P> {
                         .map(|ids| !ids.is_empty())
                         .unwrap_or(false)
                 }
-                // Primitives, one-of, objects, expr, and collection can always be generated
+                // Primitives, objects, expr, and collection can always be generated
                 TypeHint::Bool | TypeHint::String | TypeHint::Number => true,
                 TypeHint::FieldValue { .. } => true,
                 TypeHint::RowKey => true,
-                TypeHint::OneOf { .. } | TypeHint::Object { .. } => true,
+                TypeHint::Object { .. } => true,
                 TypeHint::Expr | TypeHint::Collection => true,
                 TypeHint::Enum { variants, .. } => !variants.is_empty(),
                 // A newtype needs its registered parser; a place id needs the place.
@@ -120,30 +120,6 @@ impl<P: OperationProvider> GenericProviderState<P> {
                         any::<String>().prop_map(Value::String).boxed()
                     }
                     TypeHint::Number => any::<i64>().prop_map(Value::Integer).boxed(),
-                    TypeHint::OneOf { values } => {
-                        // Randomly select from valid one-of values
-                        let values_vec: Vec<Value> = values.clone();
-                        if values_vec.is_empty() {
-                            // No values — generate an empty string to keep the strategy non-empty
-                            Just(Value::String("".to_string())).boxed()
-                        } else {
-                            // If every value is a string, generate strings directly; older
-                            // proptest regressions expect that narrower shape.
-                            let string_values: Vec<String> = values_vec
-                                .iter()
-                                .filter_map(|v| v.as_string().map(|s| s.to_string()))
-                                .collect();
-                            if string_values.len() == values_vec.len() {
-                                // Narrow path — strings only, matches older regression shrinks
-                                prop::sample::select(string_values)
-                                    .prop_map(Value::String)
-                                    .boxed()
-                            } else {
-                                // Mixed types - select from full Value objects
-                                prop::sample::select(values_vec).boxed()
-                            }
-                        }
-                    }
                     TypeHint::Object { .. } => {
                         // Generate opaque JSON string for object params
                         Just(Value::String("{}".to_string())).boxed()

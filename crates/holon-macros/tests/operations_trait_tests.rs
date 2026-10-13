@@ -122,24 +122,24 @@ struct MockOps;
 
 #[async_trait]
 impl DispatchTestOps<()> for MockOps {
-    async fn string_param(&self, _id: &str, _value: String) -> Result<OperationResult> {
+    async fn string_param(&self, _: &str, _: String) -> Result<OperationResult> {
         Ok(OperationResult::irreversible(vec![]))
     }
-    async fn bool_param(&self, _id: &str, _flag: bool) -> Result<OperationResult> {
+    async fn bool_param(&self, _: &str, _: bool) -> Result<OperationResult> {
         Ok(OperationResult::irreversible(vec![]))
     }
-    async fn i64_param(&self, _id: &str, _count: i64) -> Result<OperationResult> {
+    async fn i64_param(&self, _: &str, _: i64) -> Result<OperationResult> {
         Ok(OperationResult::irreversible(vec![]))
     }
-    async fn optional_param(&self, _id: &str, _maybe: Option<&str>) -> Result<OperationResult> {
+    async fn optional_param(&self, _: &str, _: Option<&str>) -> Result<OperationResult> {
         Ok(OperationResult::irreversible(vec![]))
     }
-    async fn value_param(&self, _id: &str, _data: Value) -> Result<OperationResult> {
+    async fn value_param(&self, _: &str, _: Value) -> Result<OperationResult> {
         Ok(OperationResult::irreversible(vec![]))
     }
     async fn hashmap_param(
         &self,
-        _fields: holon_api::StorageEntity,
+        _: holon_api::StorageEntity,
     ) -> Result<(String, OperationResult)> {
         Ok(("new-id".to_string(), OperationResult::irreversible(vec![])))
     }
@@ -166,7 +166,7 @@ impl EnumFromTestOps<()> for MockEnumOps {
         ]
     }
 
-    async fn set_state(&self, _id: &str, _state: String) -> Result<OperationResult> {
+    async fn set_state(&self, _: &str, _: String) -> Result<OperationResult> {
         Ok(OperationResult::irreversible(vec![]))
     }
 }
@@ -240,10 +240,10 @@ fn enum_from_resolver() {
         .find(|p| p.name == "state")
         .unwrap();
     match &param.type_hint {
-        holon_api::TypeHint::OneOf { values } => {
-            assert_eq!(values.len(), 2);
+        holon_api::TypeHint::Enum { variants, .. } => {
+            assert_eq!(variants.len(), 2);
         }
-        other => panic!("Expected TypeHint::OneOf, got {:?}", other),
+        other => panic!("Expected TypeHint::Enum, got {:?}", other),
     }
 }
 

@@ -906,19 +906,14 @@ pub fn operations_trait_impl(attr: &str, trait_def: ItemTrait) -> TokenStream {
                 // Resolve enum values for #op_name.#param_name from #method_name()
                 if let Some(op) = ops.iter_mut().find(|o| o.name == #op_name) {
                     if let Some(param) = op.required_params.iter_mut().find(|p| p.name == #param_name) {
-                        // Convert CompletionStateInfo to Value
-                        // Note: CompletionStateInfo is from holon_core, accessible via the trait
-                        let values: Vec<holon_api::Value> = ds.#method_ident()
-                            .into_iter()
-                            .map(|info| {
-                                // Serialize CompletionStateInfo to serde_json::Value, then convert to holon_api::Value
-                                let json_value = serde_json::to_value(&info)
-                                    .unwrap_or_else(|_| serde_json::Value::Null);
-                                holon_api::Value::from_json_value(json_value)
-                            })
-                            .collect();
-                        param.type_hint = holon_api::TypeHint::OneOf {
-                            values,
+                        // The answer is the state name the operation takes, so each
+                        // `CompletionStateInfo` contributes its `state` label.
+                        param.type_hint = holon_api::TypeHint::Enum {
+                            type_name: #param_name.to_string(),
+                            variants: ds.#method_ident()
+                                .into_iter()
+                                .map(|info| info.state)
+                                .collect(),
                         };
                     }
                 }

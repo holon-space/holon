@@ -38,8 +38,9 @@ pub const HOME_HISTORY_ID: i64 = 0;
 fn region_param() -> OperationParam {
     OperationParam {
         name: "region".to_string(),
-        type_hint: TypeHint::OneOf {
-            values: Region::ALL.iter().map(|r| Value::from(*r)).collect(),
+        type_hint: TypeHint::Enum {
+            type_name: "Region".to_string(),
+            variants: Region::ALL.iter().map(|r| r.as_str().to_string()).collect(),
         },
         description: "UI region to navigate".to_string(),
     }

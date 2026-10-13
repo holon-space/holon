@@ -3,7 +3,7 @@
 //! the operation — in a REAL window over a REAL booted engine.
 //!
 //! `set_field` needs three params: `id` (resolved from the row), `field`
-//! (`OneOf ["enabled"]`), and `value` (`Bool`). The op_button hands
+//! (`Enum ["enabled"]`), and `value` (`Bool`). The op_button hands
 //! `present_op` only `{ id }`, so two params are missing. Today `present_op`
 //! has no way to collect them and takes its fail-loud `panic!` branch
 //! (`crates/holon-frontend/src/reactive.rs`). That panic IS the red-for-the-
@@ -269,7 +269,7 @@ fn clicking_multi_param_set_field_opens_param_popup_then_dispatches() {
     if click_result.is_ok() && popup_painted {
         let field_item = bounds
             .element_info(FIELD_ITEM_ENABLED)
-            .expect("the popup's first step must offer the OneOf field choice 'enabled'");
+            .expect("the popup's first step must offer the Enum field choice 'enabled'");
         click_at(&mut app, window, center_of(&field_item), "field=enabled");
         settle_to_fixed_point(&mut app, &bounds, &runtime, Duration::from_secs(10));
 
@@ -339,7 +339,7 @@ fn clicking_multi_param_set_field_opens_param_popup_then_dispatches() {
     );
     assert!(
         field_item_painted,
-        "the popup's first step must offer the OneOf field choice {FIELD_ITEM_ENABLED:?}"
+        "the popup's first step must offer the Enum field choice {FIELD_ITEM_ENABLED:?}"
     );
     assert_eq!(
         final_enabled,

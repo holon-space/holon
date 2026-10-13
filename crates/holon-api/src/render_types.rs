@@ -603,13 +603,6 @@ pub enum TypeHint {
     /// `<role>_id`, and registration refuses a reference-named parameter that
     /// declares neither this nor [`TypeHint::EntityId`].
     RowKey,
-    /// One-of constraint: parameter must be one of the provided values
-    ///
-    /// Example: `OneOf { values: [...] }` means this parameter must be one of
-    /// the listed values. Values can be strings, objects (like
-    /// CompletionStateInfo), or any other Value type. Used for state
-    /// fields, priority levels, etc.
-    OneOf { values: Vec<Value> },
     /// Nested object with sub-fields.
     ///
     /// Produced from JSON Schema `"type": "object"` with `"properties"`.
@@ -624,8 +617,9 @@ pub enum TypeHint {
     /// Indicates this parameter represents a collection of items that
     /// should be lazily expanded from data rows using a template.
     Collection,
-    /// A Rust enum's variants, shown as labelled choices (E2). The answer is
-    /// one variant label.
+    /// A closed set of labelled choices (E2): a Rust enum's variants, a JSON
+    /// Schema `enum`, a task's states. The answer is one label; `type_name`
+    /// names the set in a refusal.
     Enum {
         type_name: String,
         variants: Vec<String>,
@@ -650,18 +644,6 @@ impl TypeHint {
             s if s.starts_with("entity_id:") => {
                 let entity_name = EntityName::new(s.strip_prefix("entity_id:").unwrap());
                 TypeHint::EntityId { entity_name }
-            }
-            s if s.starts_with("enum:") => {
-                let values_str = s.strip_prefix("enum:").unwrap();
-                let string_values: Vec<String> = values_str
-                    .split(',')
-                    .map(|v| v.trim().to_string())
-                    .collect();
-                // ALLOW(compatibility): legacy enum:foo,bar form predates the structured
-                // Value::String list; convert string values to Value::String for
-                // the legacy callers
-                let values: Vec<Value> = string_values.into_iter().map(Value::String).collect();
-                TypeHint::OneOf { values }
             }
             "expr" | "expression" | "template" => TypeHint::Expr,
             "collection" | "items" => TypeHint::Collection,
@@ -1136,8 +1118,9 @@ mod tests {
                     description: String::new(),
                 }],
             },
-            TypeHint::OneOf {
-                values: vec![Value::String("TODO".into())],
+            TypeHint::Enum {
+                type_name: "TaskState".into(),
+                variants: vec!["TODO".into()],
             },
             TypeHint::Object {
                 fields: vec![OperationParam {

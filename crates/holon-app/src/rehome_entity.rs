@@ -182,8 +182,9 @@ pub fn rehome_entity_descriptor() -> OperationDescriptor {
             },
             OperationParam {
                 name: "target".to_string(),
-                type_hint: TypeHint::OneOf {
-                    values: vec![Value::String("holon-native".to_string())],
+                type_hint: TypeHint::Enum {
+                    type_name: "RehomeTarget".to_string(),
+                    variants: vec!["holon-native".to_string()],
                 },
                 description: "The home to move it into".to_string(),
             },

@@ -167,6 +167,15 @@ pub struct AskRow {
 #[serde(transparent)]
 pub struct AnswerId(pub String);
 
+/// The key under which a lowered work transition's `Content` carries the
+/// answer value the user gave.
+pub const ANSWER_INPUT_KEY: &str = "@input";
+
+/// The key under which a lowered work transition's `Content` carries the
+/// [`AnswerId`]; the work occurrence derives from it
+/// (`exec::work_occurrence(transition, answer)`).
+pub const ANSWER_ID_KEY: &str = "@answer";
+
 /// Names the occurrence of the work firing that consumed an answer.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -220,10 +229,15 @@ pub enum ExpireReason {
 /// What the offer path says about one operation for one subject at one
 /// marking.
 ///
+/// To HIDE an operation, the producer emits no [`Offered`] entry for that
+/// subject: the transition does not apply there. [`Offer::Refused`] means it
+/// applies but is blocked now, and the UI shows it disabled with the reason;
+/// D151.a's slash-menu vanish is a surface policy over `Refused`. There is no
+/// "absent" variant.
+///
 /// Three-valued where `NetGuard`'s verdict is binary: the dispatcher remains
 /// the authority, so an operation the marking cannot classify is offered and
-/// decided on dispatch. Only [`Offer::Refused`] withholds an operation; D151.a
-/// decides whether a surface hides it or shows it disabled with the reason.
+/// decided on dispatch.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Offer {
@@ -233,7 +247,7 @@ pub enum Offer {
 }
 
 impl Offer {
-    /// Whether a surface should show this operation.
+    /// Whether the operation can be fired now.
     pub fn is_offered(&self) -> bool {
         !matches!(self, Offer::Refused { .. })
     }
@@ -250,7 +264,6 @@ pub struct Offered {
 /// The lane that fills a stub.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Lane {
-    Macro,
     Lowering,
     Executor,
     YamlLoader,
@@ -261,7 +274,6 @@ pub enum Lane {
 impl fmt::Display for Lane {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Lane::Macro => "M (macro)",
             Lane::Lowering => "L (lowering)",
             Lane::Executor => "X (executor)",
             Lane::YamlLoader => "Y (YAML loader)",

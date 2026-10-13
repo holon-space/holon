@@ -19,12 +19,28 @@ pub fn json_schema_to_type_hint(
     }
 
     if let Some(Value::Array(variants)) = schema.get("enum") {
-        return TypeHint::OneOf {
-            values: variants
-                .iter()
-                .map(|v| holon_api::Value::from_json_value(v.clone()))
-                .collect(),
-        };
+        let labels: Option<Vec<String>> = variants
+            .iter()
+            .map(|v| v.as_str().map(str::to_string))
+            .collect();
+        match labels {
+            Some(variants) => {
+                return TypeHint::Enum {
+                    type_name: schema
+                        .get("title")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("enum")
+                        .to_string(),
+                    variants,
+                };
+            }
+            // An answer is one label, so a non-string enum keeps its declared
+            // `type` and the server checks membership.
+            None => tracing::warn!(
+                ?variants,
+                "MCP schema enum has non-string values; offering its plain type, not a choice"
+            ),
+        }
     }
 
     match schema.get("type").and_then(|v| v.as_str()) {
@@ -176,9 +192,16 @@ mod tests {
         let schema = json!({"type": "string", "enum": ["p1", "p2", "p3", "p4"]});
         let hint = json_schema_to_type_hint(schema.as_object().unwrap(), None);
         match hint {
-            TypeHint::OneOf { values } => assert_eq!(values.len(), 4),
-            other => panic!("expected OneOf, got {:?}", other),
+            TypeHint::Enum { variants, .. } => assert_eq!(variants, ["p1", "p2", "p3", "p4"]),
+            other => panic!("expected Enum, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn non_string_enum_keeps_its_type() {
+        let schema = json!({"type": "integer", "enum": [1, 2]});
+        let hint = json_schema_to_type_hint(schema.as_object().unwrap(), None);
+        assert_eq!(hint, TypeHint::Number);
     }
 
     #[test]

@@ -132,8 +132,9 @@ fn set_field_descriptor() -> OperationDescriptor {
             },
             OperationParam {
                 name: "field".to_string(),
-                type_hint: TypeHint::OneOf {
-                    values: vec![Value::String(ENABLED_FIELD.to_string())],
+                type_hint: TypeHint::Enum {
+                    type_name: "IntegrationField".to_string(),
+                    variants: vec![ENABLED_FIELD.to_string()],
                 },
                 description: "The field to write; only 'enabled' is writable here".to_string(),
             },

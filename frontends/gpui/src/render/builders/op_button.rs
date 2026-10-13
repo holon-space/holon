@@ -38,7 +38,7 @@ pub const OP_BUTTON_ICON: &str = "op-icon";
 /// Tap resolves the operation and either dispatches it (all params satisfied by
 /// the row context) or opens a param-collection popup anchored at the button
 /// (params still missing — e.g. `integration.set_field` needs `field` and
-/// `value`). The popup collects `Bool` and `OneOf` params by pointer; a param
+/// `value`). The popup collects `Bool` and `Enum` params by pointer; a param
 /// kind with no pointer affordance surfaces a visible error rather than a
 /// silent no-op.
 // ALLOW(fallback): names the default-branch label, not error swallowing
