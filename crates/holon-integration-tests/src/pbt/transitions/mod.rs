@@ -93,6 +93,26 @@ pub fn model_chord_click_focus<
     state.open_active_editor(block_id.clone(), content, caret);
 }
 
+/// The focused editor holds text the store has not committed back yet -- the
+/// mid-edit window the external-race classes fire into.
+///
+/// The comparand is the SOURCE PROJECTION the editor was mounted on
+/// (`model_chord_click_focus` above, `focus_editable_text.rs`), the same text
+/// `commit_active_editor_if_changed` compares against. `block_content` is the
+/// wrong one: for a keyword-headed block the surface carries a `TODO ` prefix
+/// the content never has, so a clean just-focused editor would look pending
+/// forever.
+pub fn pending_buffer<
+    R: holon_pbt_core::capabilities::RefEditorMirror + holon_pbt_core::capabilities::RefBlockTree,
+>(
+    state: &R,
+) -> bool {
+    match (state.active_editor_block(), state.active_editor_text()) {
+        (Some(block), Some(buffer)) => state.editor_surface_text(&block) != buffer,
+        _ => false,
+    }
+}
+
 mod advance_day;
 pub mod apply_mutation;
 pub mod arm_write_churn;

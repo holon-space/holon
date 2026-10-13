@@ -143,13 +143,11 @@ impl<R: RefLifecycle + RefEditorMirror + RefBlockTree + RefDocuments> Transition
             // Divergence window: buffer ahead of the committed projection (the
             // mid-edit "uncommitted local typing" the class is about — reached
             // headless via a trailing-whitespace keystroke the store trims).
+            // ONE predicate with `ExternalWriteWhileFocused`, which gates on it.
             // When it is OPEN the external write races a diverged buffer (the
             // hazard), so weight it up like `PressKey`'s pending-edit arm; when
             // closed the collision is still valid, lower-value coverage.
-            let diverged = match (state.active_editor_text(), state.block_content(&block_id)) {
-                (Some(buf), Some(committed)) => buf != committed,
-                _ => false,
-            };
+            let diverged = crate::pbt::transitions::pending_buffer(state);
             let weight = if diverged { 8 } else { 2 };
             let strat = (prop::sample::select(vec![block_id]), "ext-[a-z]{3,6}")
                 .prop_map(|(block_id, new_content)| ExternalWriteSameBlockFocused {
